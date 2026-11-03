@@ -10,6 +10,7 @@
 
 pub mod api;
 mod link;
+pub mod sandbox;
 pub mod share;
 pub mod store;
 
@@ -267,7 +268,7 @@ impl Code {
             name: m.name.clone(),
             online: self.agents.online(&m.id),
             info: m.info.clone(),
-            sandbox: None,
+            sandbox: m.sandbox.clone(),
             created_at: m.created_at.max(0) as u64,
             last_seen: m.last_seen.map(|t| t.max(0) as u64),
         }

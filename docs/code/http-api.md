@@ -638,6 +638,47 @@ owner, and it isn't routed by owner in a cluster.
 In a cluster every `/v1/code/agents/{owner}/…` request and every machine link of the owner run on the
 node holding the lease `agents:<owner id>` (docs/code/cluster.md).
 
+### Sandboxes
+
+Machines roll hosts for an owner (docs/code/agents.md, "Sandboxes"): each is a container running
+`roll agent up` with a machine of its own, so it also appears in `/machines`, `/state` and `/events`
+with `Machine.sandbox` set. Every route needs Code::manages (401 anonymous, 403 agent tokens and other
+owners). Requests record what the owner wants; the owner's reconciler makes the backend match (at
+once for start, stop and delete; creates in the background) and every change of what the canvas
+shows is a `machine` event. Times are milliseconds.
+
+```
+GET    /v1/code/agents/{owner}/sandboxes → {sandboxes: [Sandbox] /* oldest first */, sizes: [Size] /* the first is the default */,
+       max /* per owner */, backend: "agent37" | "docker" | null /* null: sandboxes are off */}
+POST   /v1/code/agents/{owner}/sandboxes {name?, size? /* a Size name */, env?: {NAME: "value"}}
+       → 201 {sandbox: Sandbox /* status "creating" */, machine: Machine}
+       env is passed to the sandbox only (e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY): sealed with ROLL_SECRET_KEY
+       until the backend has it, then dropped; never returned. At most 32 names (uppercase, digits, _),
+       values one line of at most 4096 characters, 32 KiB in all; ROLL_*, AGENT37_*, HOME, USER, PATH,
+       SHELL and IS_SANDBOX are reserved. 400 bad name, size or env; 422 at the owner's limit (deleting
+       ones count until gone) or without ROLL_SECRET_KEY on the server; 503 sandboxes are off.
+POST   /v1/code/agents/{owner}/sandboxes/{id}/start → Sandbox   desired "running"; 409 while it's being deleted
+POST   /v1/code/agents/{owner}/sandboxes/{id}/stop  → Sandbox   desired "stopped" (running time stops being billed)
+DELETE /v1/code/agents/{owner}/sandboxes/{id} → 204 the backend deleted it and its data, and its machine is
+       revoked (machine_removed); 202 Sandbox ("deleting") while the backend is still at it (retried).
+       Removing a sandbox's machine (DELETE …/machines/{machine}, or `roll agent logout` in it) deletes the
+       sandbox the same way. 404 for an unknown or deleted sandbox.
+GET    /v1/code/agents/{owner}/sandboxes/usage?month=YYYY-MM (default: this UTC month)
+       → {owner, month, sandboxes: [{sandbox, name, size, monthly_cents, running_ms, running_hours, price_usd}],
+          totals: {running_ms, running_hours, price_usd}}
+       Running time as the reconciler saw it (it looks every 30 s), deleted sandboxes included; a month's
+       price is 730 hours. 400 for a malformed month.
+
+Sandbox = {id /* sbx_… */, name, machine /* mch_… */, backend, size: Size,
+           status: "creating" | "running" | "stopped" | "failed" | "deleting" /* = Machine.sandbox.status */,
+           desired: "running" | "stopped" | "deleted", error?: string /* the backend's last complaint */,
+           created_at, updated_at}
+Size = {name /* "standard" */, cpu, memory_gb, disk_gb, monthly_cents /* always-on price, US cents */}
+```
+
+A `failed` sandbox stays until it's deleted (a refused create isn't tried again). One that stopped on
+its own while it should run is started again.
+
 ## MCP
 
 `/v1/code/mcp` is an MCP server (Streamable HTTP, JSON-RPC 2.0) whose tools call this API on the

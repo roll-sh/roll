@@ -46,6 +46,7 @@ pub fn routes() -> Router<Arc<Code>> {
         .route("/v1/code/agents/{owner}/threads/{thread}/shares", post(share::create))
         .route("/v1/code/agents/{owner}/shares", get(share::list))
         .route("/v1/code/agents/{owner}/shares/{id}", delete(share::revoke))
+        .merge(super::sandbox::api::routes())
 }
 
 // ── who may do what ──
@@ -71,7 +72,7 @@ fn drivable(code: &Code, caller: &Caller, owner: &str) -> Result<Owner> {
 }
 
 /// Adding, renaming and revoking machines: the owner, not its agents.
-pub(super) fn manageable(code: &Code, caller: &Caller, owner: &str) -> Result<Owner> {
+pub(crate) fn manageable(code: &Code, caller: &Caller, owner: &str) -> Result<Owner> {
     let o = code.owner_or_404(owner)?;
     match caller {
         _ if Code::manages(caller, &o.id) => Ok(o),
@@ -82,7 +83,7 @@ pub(super) fn manageable(code: &Code, caller: &Caller, owner: &str) -> Result<Ow
 }
 
 /// A machine name: trimmed, one line, at most 64 characters.
-fn machine_name(v: Option<&Value>, default: &str) -> Result<String> {
+pub(crate) fn machine_name(v: Option<&Value>, default: &str) -> Result<String> {
     let name = match v {
         None | Some(Value::Null) => default.to_string(),
         Some(Value::String(s)) => s.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(64).collect(),
@@ -101,7 +102,7 @@ pub(super) fn random_hex(bytes: usize) -> String {
 }
 
 /// A machine token: `rlm_` and 48 hex characters.
-fn new_machine_token() -> String {
+pub(crate) fn new_machine_token() -> String {
     format!("rlm_{}", random_hex(24))
 }
 
@@ -241,6 +242,8 @@ async fn revoke(code: &Code, owner_id: &str, machine: &str) -> Result<bool> {
     let Some(cursor) = store::revoke_machine(code.db.sql(), owner_id, machine)? else { return Ok(false) };
     code.agents.kick(machine);
     let _ = hub.events.send(Arc::new(StreamEvent::MachineRemoved { cursor, machine: agent_proto::MachineId(machine.into()) }));
+    // A sandbox's machine takes the sandbox with it.
+    code.kick_sandboxes(owner_id);
     Ok(true)
 }
 

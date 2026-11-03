@@ -2,8 +2,10 @@
 //!
 //! `login` runs the device flow and keeps the machine token in `~/.config/roll/agent.json`
 //! (0600; `ROLL_AGENT_CONFIG` names another file). `up` runs the daemon (`agent_host::Host`) with
-//! the providers from its config and keeps the link to the relay up until Ctrl-C. `status` shows
-//! the login and whether roll still accepts it; `logout` revokes the machine and forgets it.
+//! the providers from its config and keeps the link to the relay up until Ctrl-C; without a login
+//! file it takes the machine token from `ROLL_AGENT_TOKEN` (a roll-hosted sandbox, whose machine
+//! roll made). `status` shows the login and whether roll still accepts it; `logout` revokes the
+//! machine and forgets it.
 
 use agent_host::provider::Provider;
 use agent_host::relay::{self, LinkConfig, LinkEvent};
@@ -101,10 +103,42 @@ async fn post(http: &reqwest::Client, url: &str, body: Value) -> anyhow::Result<
 pub async fn run(api: &str, json_out: bool, cmd: Agent) -> anyhow::Result<()> {
     match cmd {
         Agent::Login { name } => login(api, json_out, name).await,
-        Agent::Up => up().await,
+        Agent::Up => up(api).await,
         Agent::Status => status(json_out).await,
         Agent::Logout => logout(json_out).await,
     }
+}
+
+/// Variables a sandbox's machine runs `up` with instead of a login file: roll created the
+/// machine and handed its token to the sandbox.
+const ENV_TOKEN: &str = "ROLL_AGENT_TOKEN";
+const ENV_VARS: [&str; 4] = [ENV_TOKEN, "ROLL_AGENT_MACHINE", "ROLL_AGENT_OWNER", "ROLL_AGENT_NAME"];
+
+/// The login from `ROLL_AGENT_TOKEN` (and `ROLL_API_URL`), when there's no login file. The
+/// variables are taken out of the environment, so the providers and terminals `up` starts don't
+/// inherit the token.
+fn env_login(api: &str) -> anyhow::Result<Option<Saved>> {
+    if saved_path()?.exists() {
+        return Ok(None);
+    }
+    let get = |k: &str| std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let Some(token) = get(ENV_TOKEN) else { return Ok(None) };
+    if !token.starts_with("rlm_") {
+        bail!("{ENV_TOKEN} isn't a machine token (rlm_…)");
+    }
+    let saved = Saved {
+        api: api.trim_end_matches('/').to_string(),
+        machine: get("ROLL_AGENT_MACHINE").unwrap_or_else(|| "machine".into()),
+        owner: get("ROLL_AGENT_OWNER").unwrap_or_else(|| "?".into()),
+        name: get("ROLL_AGENT_NAME").unwrap_or_else(hostname),
+        token,
+    };
+    for k in ENV_VARS {
+        // SAFETY: `up` reads these first thing, before it starts any task, resolver lookup or
+        // child that could read the environment from another thread.
+        unsafe { std::env::remove_var(k) };
+    }
+    Ok(Some(saved))
 }
 
 async fn login(api: &str, json_out: bool, name: Option<String>) -> anyhow::Result<()> {
@@ -152,8 +186,11 @@ fn providers(config: &agent_host::config::Config) -> Vec<Arc<dyn Provider>> {
     all
 }
 
-async fn up() -> anyhow::Result<()> {
-    let saved = load()?;
+async fn up(api: &str) -> anyhow::Result<()> {
+    let saved = match env_login(api)? {
+        Some(s) => s,
+        None => load()?,
+    };
     let config = agent_host::config::Config::load()?;
     let home = config.home.clone();
     let providers = providers(&config);

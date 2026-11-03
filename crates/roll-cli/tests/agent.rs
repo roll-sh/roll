@@ -239,3 +239,63 @@ async fn a_denied_login_fails() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("denied"));
     assert!(!e.login.exists());
 }
+
+/// A sandbox has no login file: `up` takes the machine token roll gave it from the environment
+/// (`ROLL_AGENT_TOKEN` with `ROLL_API_URL`), and what it starts doesn't inherit the token.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn up_takes_a_sandbox_token_from_the_environment() {
+    use base64::Engine;
+    let e = env().await;
+    let (s, minted) = e.req("POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "sandbox" }))).await;
+    assert_eq!(s, 201, "{minted}");
+    let (machine, token) = (minted["machine"]["id"].as_str().unwrap().to_string(), minted["token"].as_str().unwrap().to_string());
+    assert!(!e.login.exists());
+    let mut up = e
+        .cmd(&["agent", "up"])
+        .env("ROLL_AGENT_TOKEN", &token)
+        .env("ROLL_AGENT_MACHINE", &machine)
+        .env("ROLL_AGENT_OWNER", "acme")
+        .env("ROLL_AGENT_NAME", "sandbox")
+        .spawn()
+        .unwrap();
+    let log = lines(&mut up);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !e.machines().await[0]["online"].as_bool().unwrap_or(false) {
+        assert!(Instant::now() < deadline, "never online: {:?}", log.try_iter().collect::<Vec<_>>());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!e.login.exists(), "the token isn't written anywhere");
+
+    // A terminal on the machine doesn't see the token.
+    let open = json!({ "id": "t1", "command": { "type": "terminal.open", "command": "echo \"token=[$ROLL_AGENT_TOKEN] machine=[$ROLL_AGENT_MACHINE]\"; sleep 5", "cols": 80, "rows": 24 } });
+    let (s, reply) = e.req("POST", &format!("/v1/code/agents/acme/machines/{machine}/commands"), Some(open)).await;
+    assert_eq!((s.as_u16(), reply["type"].as_str()), (200, Some("created")), "{reply}");
+    let terminal = reply["id"].as_str().unwrap().to_string();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let seen = loop {
+        let cmd = json!({ "id": format!("s{}", Instant::now().elapsed().as_nanos()), "command": { "type": "terminal.scrollback", "terminal": terminal } });
+        let (_, r) = e.req("POST", &format!("/v1/code/agents/acme/machines/{machine}/commands"), Some(cmd)).await;
+        let text = String::from_utf8_lossy(&base64::engine::general_purpose::STANDARD.decode(r["data"].as_str().unwrap_or("")).unwrap_or_default()).into_owned();
+        if text.contains("token=[") {
+            break text;
+        }
+        assert!(Instant::now() < deadline, "the terminal said nothing: {r}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(seen.contains("token=[] machine=[]"), "{seen}");
+    assert!(!seen.contains(&token));
+
+    // SAFETY: signalling the child this test started.
+    unsafe { libc::kill(up.id() as i32, libc::SIGINT) };
+    let status = tokio::task::spawn_blocking(move || wait_for(&mut up, Duration::from_secs(10))).await.unwrap().expect("stopped on Ctrl-C");
+    assert!(status.success(), "{status:?}");
+
+    // A token that isn't a machine token is refused up front.
+    let out = {
+        let mut c = e.cmd(&["agent", "up"]);
+        c.env("ROLL_AGENT_TOKEN", "rlc_nope");
+        tokio::task::spawn_blocking(move || c.output().unwrap()).await.unwrap()
+    };
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("ROLL_AGENT_TOKEN"), "{}", String::from_utf8_lossy(&out.stderr));
+}

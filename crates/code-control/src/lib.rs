@@ -99,6 +99,9 @@ pub struct Config {
     /// this long (and that has none waiting), so leases don't pile up; the next request takes
     /// it again.
     pub repo_idle_release: std::time::Duration,
+    /// roll-hosted sandboxes for roll code agents: the backend, sizes and limits
+    /// (`agents::sandbox::SandboxConfig::from_env`).
+    pub sandboxes: agents::sandbox::SandboxConfig,
 }
 
 /// roll code's Postgres: both databases in one, as two schemas.
@@ -173,6 +176,7 @@ impl Config {
             git_max_request_memory_bytes: None,
             git_memory_wait: std::time::Duration::from_secs(30),
             repo_idle_release: std::time::Duration::from_secs(30 * 60),
+            sandboxes: agents::sandbox::SandboxConfig::default(),
         }
     }
 }
@@ -412,6 +416,8 @@ pub struct Code {
     pub git_budget: code_git::MemoryBudget,
     /// roll code agents: connected machines, live event channels, commands in flight.
     pub agents: agents::Agents,
+    /// roll-hosted sandboxes: the backend and the owners' reconcilers.
+    pub sandboxes: agents::sandbox::Sandboxes,
 }
 
 /// The databases a [`Code`] runs on: code-store's, code-control's, and the cluster's tables
@@ -482,6 +488,7 @@ impl Code {
             ..code_git::ServerConfig::default()
         }
         .budget();
+        let sandboxes = agents::sandbox::Sandboxes::new(&config.sandboxes)?;
         let code = Arc::new_cyclic(|me| Code {
             config,
             store,
@@ -512,6 +519,7 @@ impl Code {
             duties: cluster::Duties::default(),
             git_budget,
             agents: agents::Agents::default(),
+            sandboxes,
         });
         code.clean_worktrees();
         code.clean_indexes();

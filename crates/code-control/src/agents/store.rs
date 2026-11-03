@@ -81,9 +81,11 @@ pub struct MachineRow {
     pub revoked: bool,
     pub seq: u64,
     pub cursor: u64,
+    /// Set for a roll-hosted sandbox (`sandbox::store` keeps it in step).
+    pub sandbox: Option<agent_proto::SandboxInfo>,
 }
 
-const MACHINE_COLS: &str = "id, owner_id, name, info, created_at, last_seen, revoked_at, seq, cursor";
+const MACHINE_COLS: &str = "id, owner_id, name, info, created_at, last_seen, revoked_at, seq, cursor, sandbox";
 
 fn machine_row(r: &Row<'_>) -> code_sql::Result<MachineRow> {
     Ok(MachineRow {
@@ -96,11 +98,12 @@ fn machine_row(r: &Row<'_>) -> code_sql::Result<MachineRow> {
         revoked: r.get::<_, Option<i64>>(6)?.is_some(),
         seq: r.get::<_, i64>(7)?.max(0) as u64,
         cursor: r.get::<_, i64>(8)?.max(0) as u64,
+        sandbox: r.get::<_, Option<String>>(9)?.and_then(|s| serde_json::from_str(&s).ok()),
     })
 }
 
 /// Take `n` cursors of an owner; returns the first.
-fn take_cursors(c: &Conn<'_>, owner_id: &str, n: u64) -> code_sql::Result<u64> {
+pub(crate) fn take_cursors(c: &Conn<'_>, owner_id: &str, n: u64) -> code_sql::Result<u64> {
     c.execute("INSERT INTO agent_cursors (owner_id, cursor) VALUES (?, 0) ON CONFLICT (owner_id) DO NOTHING", [owner_id])?;
     c.execute("UPDATE agent_cursors SET cursor = cursor + ? WHERE owner_id = ?", params![n as i64, owner_id])?;
     let end: i64 = c.query_row("SELECT cursor FROM agent_cursors WHERE owner_id = ?", [owner_id], |r| r.get(0))?;
@@ -122,6 +125,10 @@ pub fn machine(db: &code_sql::Db, id: &str) -> code_sql::Result<Option<MachineRo
     db.query_row(&format!("SELECT {MACHINE_COLS} FROM agent_machines WHERE id = ?"), [id], machine_row).optional()
 }
 
+pub(crate) fn machine_on(c: &Conn<'_>, id: &str) -> code_sql::Result<Option<MachineRow>> {
+    c.query_row(&format!("SELECT {MACHINE_COLS} FROM agent_machines WHERE id = ?"), [id], machine_row).optional()
+}
+
 /// The live machine a token opens.
 pub fn machine_by_token(db: &code_sql::Db, hash: &str) -> code_sql::Result<Option<MachineRow>> {
     db.query_row(&format!("SELECT {MACHINE_COLS} FROM agent_machines WHERE token_hash = ? AND revoked_at IS NULL"), [hash], machine_row).optional()
@@ -140,7 +147,7 @@ pub fn machines_after(db: &code_sql::Db, owner_id: &str, cursor: u64) -> code_sq
     )
 }
 
-fn insert_machine(c: &Conn<'_>, id: &str, owner_id: &str, name: &str, token_hash: &str, now: i64) -> code_sql::Result<Option<MachineRow>> {
+pub(crate) fn insert_machine(c: &Conn<'_>, id: &str, owner_id: &str, name: &str, token_hash: &str, now: i64) -> code_sql::Result<Option<MachineRow>> {
     let n: i64 = c.query_row("SELECT COUNT(*) FROM agent_machines WHERE owner_id = ? AND revoked_at IS NULL", [owner_id], |r| r.get(0))?;
     if n >= MAX_MACHINES {
         return Ok(None);
@@ -150,7 +157,7 @@ fn insert_machine(c: &Conn<'_>, id: &str, owner_id: &str, name: &str, token_hash
         "INSERT INTO agent_machines (id, owner_id, name, token_hash, created_at, cursor) VALUES (?, ?, ?, ?, ?, ?)",
         params![id, owner_id, name, token_hash, now, cursor as i64],
     )?;
-    let row = MachineRow { id: id.into(), owner_id: owner_id.into(), name: name.into(), info: None, created_at: now, last_seen: None, revoked: false, seq: 0, cursor };
+    let row = MachineRow { id: id.into(), owner_id: owner_id.into(), name: name.into(), info: None, created_at: now, last_seen: None, revoked: false, seq: 0, cursor, sandbox: None };
     Ok(Some(row))
 }
 

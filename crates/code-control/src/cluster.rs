@@ -142,6 +142,8 @@ async fn follow_ownership(code: Weak<Code>, mut rx: mpsc::UnboundedReceiver<Owne
                 tracing::debug!(key = %key, "gave an owner's agents up");
                 code.agents.kick_owner(&key[AGENTS_KEY.len()..]);
             }
+            // Its sandboxes are reconciled here now.
+            Ownership::Acquired { key, .. } if key.starts_with(AGENTS_KEY) => code.kick_sandboxes(&key[AGENTS_KEY.len()..]),
             Ownership::Acquired { key, epoch } if is_repo_key(&key) => {
                 tracing::debug!(repo = %key, epoch, "took a repo");
                 code.acquired(&key);
@@ -209,9 +211,11 @@ impl Code {
     /// jobs, checks queued or running, previews running, promised webhook events, or a GitHub
     /// connection (its mirror). On any doubt (an error), busy.
     pub(crate) fn repo_busy(&self, repo_id: &str) -> bool {
-        // An owner's agents stay while any of its machines is connected here.
+        // An owner's agents stay while any of its machines is connected here, or it has sandboxes
+        // (their reconciler runs here; on any doubt, busy).
         if let Some(owner) = repo_id.strip_prefix(AGENTS_KEY) {
-            return self.agents.connected_owners().iter().any(|o| o == owner);
+            return self.agents.connected_owners().iter().any(|o| o == owner)
+                || !matches!(crate::agents::sandbox::store::live_count(self.db.sql(), owner), Ok(0));
         }
         let r = match self.db.repo_by_id(repo_id) {
             Ok(Some(r)) => r,

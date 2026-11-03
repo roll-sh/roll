@@ -246,12 +246,56 @@ Revoking a share removes it; nothing else does. Routes are in docs/code/http-api
 
 ## Sandboxes
 
-A sandbox is a machine roll hosts: a container running `roll agent up` with a machine token,
-so it appears on the canvas like any other machine. Backends implement `SandboxBackend`:
-**agent37** (gVisor sandboxes through its API; the hosted product) and **docker** (local and
-self-hosted; hardened: no new privileges, all capabilities dropped, pids/memory/cpu limits, a
-writable home volume). The image is `deploy/agent/Dockerfile` (roll CLI, git, node, codex,
-claude).
+A sandbox is a machine roll hosts: a container running `roll agent up` with a machine token, so it
+appears on the canvas like any other machine (`Machine.sandbox`: backend, size, status, price). It's
+the product for people who don't want to connect their own machine: $20 a month for an always-on
+2 vCPU / 4 GB (`standard`; larger sizes are priced in config). Code: `code-control/src/agents/sandbox/`;
+routes: docs/code/http-api.md, "Sandboxes".
+
+- **Backends** implement `SandboxBackend` (create, find by roll's id, status, start, stop, delete;
+  all idempotent):
+  - **agent37** (the hosted product): agent37 instances (gVisor) on their Sandbox API, created from a
+    workspace template made from our image (`ROLL_AGENT37_TEMPLATE`), `auto_sleep` off, the env in
+    the instance's write-only `env`, `metadata.roll_sandbox` = roll's id. The key
+    (`ROLL_AGENT37_API_KEY`) is sent only to agent37 and never logged or returned. Every call has
+    timeouts, follows no redirects and reads a bounded body. Tests use a mock agent37.
+  - **docker** (self-hosted and development): the `docker` CLI; no new privileges, every capability
+    dropped, memory (no swap), CPU and process limits, an init, a named volume for `/home/roll`, the
+    default bridge network (never the host's), no Docker socket, `runsc` (gVisor) when Docker has
+    it (`ROLL_SANDBOX_RUNTIME`). The env goes in through a 0600 env file removed after `docker run`.
+- **The image** is `deploy/agent/Dockerfile`: the non-root user `roll`, the `roll` CLI built from
+  this repository, git, node, ripgrep, and the codex and claude CLIs at pinned versions,
+  `IS_SANDBOX=1`. Its command is `roll agent up`, which, with no login file, takes the machine token
+  from `ROLL_AGENT_TOKEN` (and `ROLL_API_URL`, `ROLL_AGENT_MACHINE`, `ROLL_AGENT_OWNER`,
+  `ROLL_AGENT_NAME`) and removes those variables from its environment, so the providers and
+  terminals it starts don't inherit the token. (They run as the same user, so a sandbox is one
+  trust domain: the token only opens that sandbox's own link.)
+- **Creating** makes the machine and its token at once and records the sandbox as `creating`; the
+  token and the owner's env (provider keys such as `ANTHROPIC_API_KEY`) are sealed with
+  `ROLL_SECRET_KEY`, bound to the sandbox, until the backend has them, then dropped. They go to the
+  backend and nowhere else.
+- **The reconciler** (one per owner, on the node holding `agents:<owner id>`; kicked by the
+  owner's requests, started by taking the lease, on a single node by `Code::start_sandboxes`)
+  looks every 30 s: it creates what isn't created yet (retrying capacity errors, adopting a create
+  whose answer was lost by roll's id, failing one the backend refuses or that takes over 15
+  minutes), starts an always-on sandbox that stopped on its own, records the backend's status into
+  the sandbox and its machine (a `machine` event when it changes), and deletes. A sandbox's machine
+  being removed deletes the sandbox; deleting a sandbox revokes its machine once the backend has
+  deleted it. The lease isn't let go as idle while the owner has sandboxes.
+- **Metering**: at each look, running time is added to `agent_sandbox_usage` per sandbox and UTC
+  month (split at month boundaries), with the size's monthly price at creation; a month is 730
+  hours. `GET …/sandboxes/usage` shows it; there's no payment processor.
+- **Limits** (config): sandboxes per owner (`ROLL_SANDBOX_MAX_PER_OWNER`, 5), sizes
+  (`ROLL_SANDBOX_SIZES`), the URL sandboxes connect to (`ROLL_SANDBOX_API_URL`, default the API URL).
+
+**Logging providers in.** The owner logs the providers in from a terminal on the canvas
+(`terminal.open` with `command: "claude /login"` or `"codex login --device-auth"`): both are
+browserless flows that print a URL and take a code, and the login stays in the sandbox's home
+volume. Provider API keys through the sandbox's env are the alternative. roll never reads, copies or
+pools these credentials. A subscription login on a machine roll hosts is still the owner's own login
+on a machine they rent, but it isn't their own computer: whether Anthropic's (and OpenAI's)
+consumer terms allow a subscription to be used from a hosted sandbox is an open policy question to
+settle with them before this is marketed; API keys have no such question.
 
 ## Canvas
 

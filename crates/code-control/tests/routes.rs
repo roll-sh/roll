@@ -578,3 +578,44 @@ async fn agents_routes_follow_the_auth_matrix() {
         assert_eq!(call(a, "DELETE", "/v1/code/agents/connect", None, who_token).await, denied, "{who_token:?}");
     }
 }
+
+/// The sandbox routes (`agents/sandbox/api.rs`): all of them are the owner's (Code::manages), not
+/// its agents'; 401 for anonymous callers and bad tokens (machine tokens too), 403 for everyone
+/// else. Here no backend is set up: creating is a 503 and an unknown sandbox a 404, after the check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sandbox_routes_follow_the_auth_matrix() {
+    let w = world().await;
+    let a = &w.a;
+    let (s, m) = a.req("POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "box" })), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED, "{m}");
+    let machine = m["token"].as_str().unwrap().to_string();
+    let base = "/v1/code/agents/acme/sandboxes";
+    let routes = [
+        ("GET", base.to_string(), OK),
+        ("GET", format!("{base}/usage"), OK),
+        ("POST", base.to_string(), StatusCode::SERVICE_UNAVAILABLE),
+        ("POST", format!("{base}/sbx_nope/start"), NOT_FOUND),
+        ("POST", format!("{base}/sbx_nope/stop"), NOT_FOUND),
+        ("DELETE", format!("{base}/sbx_nope"), NOT_FOUND),
+    ];
+    let body = json!({ "name": "s" });
+    for (who, token) in [("admin", Some(ADMIN)), ("owner", Some(w.acme.as_str()))] {
+        for (m, p, want) in &routes {
+            assert_eq!(call(a, m, p, Some(&body), token).await, *want, "{who}: {m} {p}");
+        }
+    }
+    let denied = StatusCode::UNAUTHORIZED;
+    for (who, token, want) in [
+        ("agent", Some(w.agent.as_str()), FORBIDDEN),
+        ("review app", Some(w.app_in.as_str()), FORBIDDEN),
+        ("another owner", Some(w.other.as_str()), FORBIDDEN),
+        ("anonymous", None, denied),
+        ("revoked", Some(w.revoked.as_str()), denied),
+        ("machine", Some(machine.as_str()), denied),
+        ("garbage", Some("hunter2"), denied),
+    ] {
+        for (m, p, _) in &routes {
+            assert_eq!(call(a, m, p, Some(&body), token).await, want, "{who}: {m} {p}");
+        }
+    }
+}

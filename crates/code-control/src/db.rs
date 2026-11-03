@@ -404,13 +404,25 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     // Databases from before device logins said which machine asks.
     ("agent_logins", "hostname", "TEXT"),
     ("agent_logins", "os", "TEXT"),
+    // Agents databases from before sandboxes.
+    ("agent_machines", "sandbox", "TEXT"),
 ];
 
 impl Db {
     /// Open control.db in `sql`: create what's missing and bring old databases up to date.
     /// Every node of a cluster may do this at once.
     pub fn open(sql: code_sql::Db) -> Result<Db> {
-        for schema in [SCHEMA, crate::review::store::SCHEMA, crate::ai::store::SCHEMA, crate::webhooks::SCHEMA, crate::broken::SCHEMA, crate::mcp::SCHEMA, crate::agents::SCHEMA, crate::agents::share::SCHEMA] {
+        for schema in [
+            SCHEMA,
+            crate::review::store::SCHEMA,
+            crate::ai::store::SCHEMA,
+            crate::webhooks::SCHEMA,
+            crate::broken::SCHEMA,
+            crate::mcp::SCHEMA,
+            crate::agents::SCHEMA,
+            crate::agents::share::SCHEMA,
+            crate::agents::sandbox::store::SCHEMA,
+        ] {
             sql.ensure_schema(schema)?;
         }
         for (table, column, decl) in COLUMNS {

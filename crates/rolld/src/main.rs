@@ -655,6 +655,8 @@ async fn start_code(
         allow_private_providers: args.code_provider_allow_private,
         // roll's reviewer: ROLL_REVIEW_PROVIDER, ROLL_REVIEW_ANTHROPIC_API_KEY, ROLL_SECRET_KEY, … (docs/code/reviews.md).
         review: code_control::ai::AiConfig::from_env(),
+        // roll code agents' sandboxes: ROLL_SANDBOX_BACKEND, ROLL_AGENT37_API_KEY, … (docs/code/agents.md).
+        sandboxes: code_control::agents::sandbox::SandboxConfig::from_env()?,
         max_streams_per_caller: args.code_max_streams_per_caller,
         max_streams: args.code_max_streams,
         trust_forwarded_for: args.code_trust_forwarded_for,
@@ -670,6 +672,11 @@ async fn start_code(
     code.start_reviewer();
     // Webhook deliveries pick up where they left off (landings while the daemon was down too).
     code.start_webhooks();
+    // Sandboxes' reconcilers (on a cluster each starts where its owner's agents are).
+    if let Some(b) = code.sandboxes.backend_name() {
+        info!(backend = b, "roll code: sandboxes on");
+    }
+    code.start_sandboxes();
     match &code.config.review.hosted {
         Some(h) => info!(provider = %h.provider, "roll code: hosted reviewer configured"),
         None => info!("roll code: no hosted reviewer (owners can bring their own key)"),

@@ -191,7 +191,9 @@ work through any node, and the cursor order the streams rely on is kept by one w
   reconnect (jittered backoff) and land on the new holder, which resumes them from the mirror's
   newest `seq`, and browsers reconnect with `Last-Event-ID`. A command in flight holds the lease's
   guard like any request, so the handoff waits for its reply (30 s at most).
-- The lease isn't released as idle while any of the owner's machines is connected to its holder.
+- The lease isn't released as idle while any of the owner's machines is connected to its holder,
+  or while the owner has sandboxes: their reconciler (docs/code/agents.md, "Sandboxes") runs on
+  the holder, starts when it takes the lease, and stops when the lease is gone.
 - Tested by `cluster.rs::an_owners_agents_follow_their_lease`.
 
 ## Work that isn't per repo
