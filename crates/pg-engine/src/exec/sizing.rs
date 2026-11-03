@@ -4279,10 +4279,17 @@ pub struct CopyLoad {
     db: Arc<Database>,
     key: (u32, u64),
     toast: u32,
+    /// The rows are held until their batch is placed (`Txn::hold_rows`): stored once, with
+    /// their TIDs, as each batch goes in; none wait for the statement's end.
+    held: std::cell::Cell<bool>,
+    /// Storing held rows failed: the load's error.
+    failed: std::cell::RefCell<Option<crate::error::Error>>,
 }
 
 impl CopyLoad {
-    pub fn start(t: &Table, multi: bool, freeze: bool, ctx: &ExecCtx) -> CopyLoad {
+    /// `held`: the caller holds the rows in the transaction (`Txn::hold_rows`) and nothing
+    /// reads them before the load ends.
+    pub fn start(t: &Table, multi: bool, freeze: bool, held: bool, ctx: &ExecCtx) -> CopyLoad {
         let txn = ctx.txn.borrow();
         // A table new in this transaction isn't worth looking up free space in.
         let use_fsm = !txn.storage_new_in_txn(t.oid);
@@ -4291,18 +4298,25 @@ impl CopyLoad {
             frozen: freeze,
             ..InsertMode::bulk()
         };
-        let defer = multi.then(|| Defer {
+        // (Not for a table past the model's size: its rows get no TIDs.)
+        let held = held && multi && !ctx.sess.db.relfiles.of(t.oid).read().untracked.contains(&t.oid);
+        let defer = (multi && !held).then(|| Defer {
             multi: true,
             ..Default::default()
         });
-        Self::register(t, mode, multi.then(Batch::default), defer, txn.id, ctx)
+        let load = Self::register(t, mode, multi.then(Batch::default), defer, txn.id, ctx);
+        load.held.set(held);
+        load
     }
 
     /// An INSERT … SELECT nothing can read the table's model during (`InsertNode`): single
-    /// inserts, those past its first `DEFER_AFTER` rows modelled when it ends.
+    /// inserts, each placed as it goes in, so its row is stored once with its TID. (Those
+    /// past its first `DEFER_AFTER` rows used to wait for its end, for a load that might
+    /// take the table past the model's size; that has no size now, and stamping their TIDs
+    /// afterwards read and wrote every row again.)
     pub fn deferred_inserts(t: &Table, ctx: &ExecCtx) -> CopyLoad {
         let id = ctx.txn.borrow().id;
-        Self::register(t, InsertMode::single(), None, Some(Defer::default()), id, ctx)
+        Self::register(t, InsertMode::single(), None, None, id, ctx)
     }
 
     fn register(
@@ -4320,19 +4334,38 @@ impl CopyLoad {
             db,
             key,
             toast: t.toast,
+            held: Default::default(),
+            failed: Default::default(),
         }
     }
 
     /// Whether the rows stored from now on are left alone until `finish`: past the model's
     /// size, or waiting to be modelled then (their TIDs stamped only then, if at all).
+    /// The rows are held until their batch is placed (`start`'s `held`).
+    pub fn held(&self) -> bool {
+        self.held.get()
+    }
+
+    /// The table went past the model's size: its rows get no TIDs, and aren't held.
+    fn stop_holding(&self, ctx: &ExecCtx) {
+        if self.held.replace(false)
+            && let Err(e) = ctx.txn.borrow_mut().end_hold()
+        {
+            *self.failed.borrow_mut() = Some(e);
+        }
+    }
+
     pub fn rows_wait(&self) -> bool {
+        if self.held.get() {
+            return true;
+        }
         let rf = self.db.relfiles.of(self.key.0).read();
         rf.untracked.contains(&self.key.0)
             || rf.bulk.get(&self.key).and_then(|b| b.defer.as_ref()).is_some_and(|d| d.deferring())
     }
 
     /// A line was read and its row stored (or skipped): the buffer is flushed once full.
-    pub fn row_done(&self, line_len: usize, ctx: &ExecCtx) {
+    pub fn row_done(&self, line_len: usize, ctx: &ExecCtx) -> Result<()> {
         let full = {
             let mut rf = self.db.relfiles.of(self.key.0).write();
             match rf.bulk.get_mut(&self.key).and_then(|b| b.batch.as_mut()) {
@@ -4346,6 +4379,7 @@ impl CopyLoad {
         if full {
             self.flush(ctx);
         }
+        self.failed.take().map_or(Ok(()), Err)
     }
 
     fn flush(&self, ctx: &ExecCtx) {
@@ -4362,6 +4396,8 @@ impl CopyLoad {
         let rows = std::mem::take(&mut batch.rows);
         batch.bytes = 0;
         let Some(heap) = heaps.get_mut(&self.key.0) else {
+            drop(rf);
+            self.stop_holding(ctx);
             return;
         };
         if rows.is_empty() {
@@ -4447,9 +4483,18 @@ impl CopyLoad {
             let big = heaps.get(&table).is_some_and(|h| h.versions() > max_versions());
             drop(rf);
             let Some(ctx) = ctx else { continue };
-            let _ = stamp_tids(&keys, &tids, ctx);
+            if self.held.get() {
+                // (Stored once, now, with them: `Txn::hold_rows`.)
+                if let Err(e) = ctx.txn.borrow_mut().store_held_rows(&keys, &tids) {
+                    *self.failed.borrow_mut() = Some(e);
+                    return;
+                }
+            } else {
+                let _ = stamp_tids(&keys, &tids, ctx);
+            }
             if big && let Some(t) = ctx.catalog().tables.get(&table) {
                 untrack(&self.db, t, None);
+                self.stop_holding(ctx);
                 return;
             }
         }
@@ -4467,11 +4512,12 @@ impl CopyLoad {
     }
 
     /// The statement is done: the buffer goes in, then the rows waiting.
-    pub fn finish(&self, ctx: &ExecCtx) {
+    pub fn finish(&self, ctx: &ExecCtx) -> Result<()> {
         self.flush(ctx);
         if let Some((batches, multi, xid, cid)) = self.take_deferred() {
             self.model(batches, multi, xid, cid, Some(ctx));
         }
+        self.failed.take().map_or(Ok(()), Err)
     }
 }
 

@@ -466,6 +466,7 @@ impl Database {
             sink: None,
             stale_segs: Vec::new(),
             loads: Vec::new(),
+            held: None,
             loading: None,
         }
     }
@@ -1001,6 +1002,9 @@ pub struct Txn {
     /// The load running (`start_load`): its table, the table's column types and virtual
     /// columns (as a measure sizes stored rows), and its measure so far.
     loading: Option<Box<Loading>>,
+    /// A COPY's rows held until its multi-insert batch is placed in the heap's model
+    /// (`hold_rows`): its table and the rows' keys and stored bytes, without their TIDs.
+    held: Option<(u32, Vec<(Vec<u8>, Vec<u8>)>)>,
 }
 
 struct Loading {
@@ -1184,6 +1188,7 @@ impl Txn {
         self.close_sink()?;
         // (A load the statement didn't finish: a failed COPY.)
         self.loading = None;
+        self.held = None;
         if self.catalog.is_none() {
             let c = self.db.catalog();
             self.read_catalog = Some(c.clone());
@@ -1835,6 +1840,13 @@ impl Txn {
                 "cannot execute this statement in a read-only transaction"
             );
         }
+        if let Some((t, rows)) = &mut self.held
+            && key_table(&key) == *t
+            && crate::storage::toast::is_row_key(&key)
+        {
+            rows.push((key, value));
+            return Ok(());
+        }
         if let Some(l) = &mut self.loading
             && key_table(&key) == l.table
         {
@@ -1929,6 +1941,47 @@ impl Txn {
         if self.savepoints.is_empty() {
             self.loads.push((table, Box::new(load)));
         }
+    }
+
+    /// A COPY's new rows of `table` are held (`put_fresh`) until their multi-insert batch
+    /// has its TIDs (`store_held_rows`): each row is stored once, with its TID, instead of
+    /// stored and then stamped (`sizing::stamp_tids`). Nothing reads them meanwhile (COPY's
+    /// multi-insert rule, no unique or exclusion check: the caller sees to it).
+    pub fn hold_rows(&mut self, table: u32) {
+        self.held = Some((table, Vec::new()));
+    }
+
+    /// The held rows stored under `keys` (in the order they were held) go in with `tids`.
+    /// Rows held under other keys (none, when the batch is the one held) stay held.
+    pub fn store_held_rows(&mut self, keys: &[Vec<u8>], tids: &[(u32, u16)]) -> Result<()> {
+        let Some((t, rows)) = self.held.take() else {
+            return Ok(());
+        };
+        let mut rows = rows.into_iter().peekable();
+        let mut r = Ok(());
+        for (k, tid) in keys.iter().zip(tids) {
+            if rows.peek().is_some_and(|(hk, _)| hk == k) {
+                let (hk, bytes) = rows.next().expect("peeked");
+                r = crate::exec::scan::with_tid(&bytes, *tid).and_then(|b| self.put_fresh(hk, b));
+                if r.is_err() {
+                    break;
+                }
+            }
+        }
+        let rest: Vec<_> = rows.collect();
+        self.held = Some((t, rest));
+        r
+    }
+
+    /// Rows are held no longer: those still held go in as they are (without TIDs).
+    pub fn end_hold(&mut self) -> Result<()> {
+        let Some((_, rows)) = self.held.take() else {
+            return Ok(());
+        };
+        for (k, v) in rows {
+            self.put_fresh(k, v)?;
+        }
+        Ok(())
     }
 
     /// A load into `table` begins (COPY into a table it found emptied, `table_emptied`): its

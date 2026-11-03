@@ -3648,25 +3648,27 @@ impl InsertNode {
         }
         let source = super::nodes::open(&plan.source, ctx)?;
         let last_table = plan.rules.table.oid;
-        let copy_load = match &plan.copy {
-            Some(c) if !rules.view && rules.table.partkey.is_none() => {
-                Some(super::sizing::CopyLoad::start(&rules.table, c.multi, c.freeze, ctx))
-            }
-            None if model_deferrable(&plan, ctx) => {
+        let copied = plan.copy.as_ref().filter(|_| !rules.view && rules.table.partkey.is_none());
+        // A COPY whose rows and entries nothing reads before it ends (COPY's multi-insert
+        // rule, no RETURNING, RLS or unique / exclusion check, plain btree indexes; AFTER
+        // triggers fire once the sink is closed) writes them through the sink, each row once
+        // with its TID: held until its multi-insert batch is placed (`Txn::hold_rows`).
+        let bulk = copied.is_some_and(|c| c.multi)
+            && rules.table.has_rowid()
+            && rules.indexes.iter().all(|b| b.index.method == "btree" && !checks_rows(b))
+            && model_deferrable(&plan, ctx)
+            && !ctx.txn.borrow().sink_open();
+        let copy_load = match copied {
+            Some(c) => Some(super::sizing::CopyLoad::start(&rules.table, c.multi, c.freeze, bulk, ctx)),
+            None if plan.copy.is_none() && model_deferrable(&plan, ctx) => {
                 Some(super::sizing::CopyLoad::deferred_inserts(&rules.table, ctx))
             }
             _ => None,
         };
-        // A COPY whose rows and entries nothing reads before it ends (COPY's multi-insert
-        // rule, no RETURNING, RLS or unique / exclusion check, plain btree indexes; AFTER
-        // triggers fire once the sink is closed) writes them through the sink.
-        let sink = (plan.copy.as_ref().is_some_and(|c| c.multi)
-            && copy_load.is_some()
-            && rules.table.has_rowid()
-            && rules.indexes.iter().all(|b| b.index.method == "btree" && !checks_rows(b))
-            && model_deferrable(&plan, ctx)
-            && !ctx.txn.borrow().sink_open())
-        .then_some(false);
+        if copy_load.as_ref().is_some_and(|l| l.held()) {
+            ctx.txn.borrow_mut().hold_rows(rules.table.oid);
+        }
+        let sink = bulk.then_some(false);
         // Such a COPY into a table this transaction emptied (TRUNCATE, then COPY, as pgbench
         // -i and COPY FREEZE do) measures its rows as they go in: VACUUM finds them as it
         // left them without reading them (`txn::unchanged`).
@@ -3841,10 +3843,15 @@ impl InsertNode {
         ctx: &ExecCtx,
     ) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
         // (The sink opens once the rows stored are left alone until the load ends; its writes
-        // go to runs once the table is past the model's size: nothing stamps them then.)
+        // go to runs once the table is past the model's size, or when its rows are held and
+        // so stored with their TIDs: nothing stamps them then.)
         match self.sink {
             Some(false) if self.copy_load.as_ref().is_some_and(|l| l.rows_wait()) => {
-                self.sink = ctx.txn.borrow_mut().open_sink().then_some(true);
+                let mut txn = ctx.txn.borrow_mut();
+                self.sink = txn.open_sink().then_some(true);
+                if self.sink.is_some() && self.copy_load.as_ref().is_some_and(|l| l.held()) {
+                    txn.sink_runs_ok();
+                }
             }
             Some(true)
                 if ctx.processed.get().is_multiple_of(1024)
@@ -3881,7 +3888,10 @@ impl InsertNode {
         });
         frames.borrow_mut().truncate(n);
         if let Some(l) = &self.copy_load {
-            l.row_done(raw_len, ctx);
+            let done = l.row_done(raw_len, ctx);
+            if r.is_ok() {
+                done?;
+            }
         }
         r
     }
@@ -4144,16 +4154,24 @@ impl Node for InsertNode {
                     }
                     None => e,
                 })?;
+                // (Held rows go in with their last batch's TIDs, through the sink while it's
+                // open.)
+                if let Some(l) = self.copy_load.as_ref().filter(|l| l.held()) {
+                    l.finish(ctx)?;
+                    ctx.txn.borrow_mut().end_hold()?;
+                }
                 if self.sink == Some(true) {
                     self.sink = None;
                     let mut txn = ctx.txn.borrow_mut();
-                    if super::sizing::is_estimated(self.plan.rules.table.oid, &ctx.sess.db) {
+                    if super::sizing::is_estimated(self.plan.rules.table.oid, &ctx.sess.db)
+                        || self.copy_load.as_ref().is_some_and(|l| l.held())
+                    {
                         txn.sink_runs_ok();
                     }
                     txn.close_sink()?;
                 }
                 if let Some(l) = self.copy_load.take() {
-                    l.finish(ctx);
+                    l.finish(ctx)?;
                 }
                 ctx.txn.borrow_mut().finish_load();
                 check_statement_rechecks(ctx)?;
