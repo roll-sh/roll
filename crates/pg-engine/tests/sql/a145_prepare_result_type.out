@@ -1,0 +1,49 @@
+> CREATE TABLE r9w (a int, b text)
+-- CREATE TABLE
+
+> INSERT INTO r9w VALUES (1, 'x')
+-- INSERT 0 1
+
+> PREPARE p2 AS SELECT * FROM r9w WHERE a >= $1
+-- PREPARE
+
+> EXECUTE p2(1)
+a:int4 | b:text
+1 | x
+-- SELECT 1
+
+> ALTER TABLE r9w RENAME COLUMN b TO bb
+-- ALTER TABLE
+
+> EXECUTE p2(1)
+ERROR 0A000: cached plan must not change result type
+
+> ALTER TABLE r9w ALTER COLUMN bb TYPE varchar(5)
+-- ALTER TABLE
+
+> EXECUTE p2(1)
+ERROR 0A000: cached plan must not change result type
+
+> ALTER TABLE r9w ALTER COLUMN bb TYPE text
+-- ALTER TABLE
+
+> ALTER TABLE r9w RENAME COLUMN bb TO b
+-- ALTER TABLE
+
+> EXECUTE p2(1)
+a:int4 | b:text
+1 | x
+-- SELECT 1
+
+> DEALLOCATE p2
+-- DEALLOCATE
+
+> PREPARE p3 AS SELECT b AS z FROM (SELECT 1 AS b) s WHERE $1::int > 0
+-- PREPARE
+
+> DEALLOCATE p3
+-- DEALLOCATE
+
+> DROP TABLE r9w
+-- DROP TABLE
+

@@ -81,6 +81,15 @@ impl ParCfg {
     }
 }
 
+/// Whether debug_parallel_query is on (a Gather over any plan that may have one).
+pub fn debug_parallel_query(ctx: &ExecCtx) -> bool {
+    ctx.sess
+        .settings
+        .borrow()
+        .get_raw("debug_parallel_query")
+        .is_some_and(|v| !matches!(v.as_str(), "off" | "false" | "no" | "0"))
+}
+
 /// Whether a plan over these relations (a statement's `Perms::locks`: what it reads, its
 /// appendrel members and their indexes) can show a Gather at all: some relation may get a
 /// partial path. compute_workers gives none to a scan reading fewer pages than
@@ -106,13 +115,7 @@ pub fn may_gather(plan: &Plan, rels: &[(u32, crate::txn::locks::LockMode)], ctx:
         }
         found || crate::sql::explain::plan_inputs(p).into_iter().any(|c| has_append(c))
     }
-    let debug = ctx
-        .sess
-        .settings
-        .borrow()
-        .get_raw("debug_parallel_query")
-        .is_some_and(|v| !matches!(v.as_str(), "off" | "false" | "no" | "0"));
-    if debug {
+    if debug_parallel_query(ctx) {
         return true;
     }
     let cfg = ParCfg::read(ctx);

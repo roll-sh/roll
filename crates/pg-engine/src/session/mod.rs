@@ -160,6 +160,21 @@ fn is_result_change(e: &Error) -> bool {
     e.code == code::FEATURE_NOT_SUPPORTED && e.message == "cached plan must not change result type"
 }
 
+impl Prepared {
+    /// What pg_prepared_statements shows of it besides its name and text: parameter types,
+    /// result types (when known), generic and custom plans made.
+    pub fn listing(&self) -> (Vec<DataType>, Option<Vec<DataType>>, u64, u64) {
+        let plans = self.plans.lock();
+        let result = self
+            .bound
+            .lock()
+            .as_ref()
+            .map(|b| b.3.cols.iter().map(|c| c.ty.clone()).collect())
+            .or_else(|| plans.cols.clone());
+        (self.param_types.clone(), result, plans.generic, plans.custom)
+    }
+}
+
 fn result_row(cols: &[OutCol]) -> Vec<(String, u32, i32)> {
     cols.iter()
         .map(|c| (c.name.clone(), c.type_oid(), c.ty.typmod()))
@@ -300,6 +315,9 @@ pub struct Session {
     pub prepared: HashMap<String, Arc<Prepared>>,
     /// Named prepared statements: (statement text, prepare time, from SQL PREPARE).
     prepared_meta: HashMap<String, (String, i64, bool)>,
+    /// Whether `state.prepared_list` names the statements `prepared` has (`sync_lists`);
+    /// whatever adds or drops one sets it false.
+    prepared_listed: bool,
     /// Plans of simple queries kept by template (`litplan`).
     lit_plans: litplan::LitPlans,
     /// Extended-protocol statements' bindings by text (`litplan::ParamPlans`).
@@ -448,6 +466,7 @@ impl Session {
             txn_time: 0,
             prepared: HashMap::new(),
             prepared_meta: HashMap::new(),
+            prepared_listed: false,
             lit_plans: Default::default(),
             param_plans: Default::default(),
             last_unplanned: None,
@@ -1107,8 +1126,13 @@ impl Session {
             .collect())
     }
 
-    /// Refresh what pg_prepared_statements / pg_cursors show.
-    fn sync_lists(&self) {
+    /// Refresh the prepared statements pg_prepared_statements shows, when the set changed
+    /// (`prepared_listed`): their plan counts and result types are read as the view is
+    /// (`Prepared::listing`), not copied for every statement.
+    fn sync_lists(&mut self) {
+        if std::mem::replace(&mut self.prepared_listed, true) {
+            return;
+        }
         let mut pl = self.state.prepared_list.borrow_mut();
         pl.clear();
         for (name, p) in &self.prepared {
@@ -1120,23 +1144,7 @@ impl Session {
                 .get(name)
                 .cloned()
                 .unwrap_or_else(|| (p.sql.clone(), 0, true));
-            let plans = p.plans.lock();
-            let result = p
-                .bound
-                .lock()
-                .as_ref()
-                .map(|b| b.3.cols.iter().map(|c| c.ty.clone()).collect())
-                .or_else(|| plans.cols.clone());
-            pl.push((
-                name.clone(),
-                text,
-                at,
-                p.param_types.clone(),
-                result,
-                from_sql,
-                plans.generic,
-                plans.custom,
-            ));
+            pl.push((name.clone(), text, at, from_sql, p.clone()));
         }
         // (A stable order: by name.)
         pl.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1922,7 +1930,19 @@ impl Session {
     /// cached_plan_cost (`plan_cost_estimate`).
     fn plan_cost(&mut self, bq: &BoundQuery, params: &[Value], planning: bool) -> f64 {
         self.with_ctx(params, |ctx| {
-            let cost = plan_cost_estimate(ctx, &bq.plan, bq.hidden_rtes, planning);
+            // (One EXPLAIN tree gives the cost and the Gathers the plan runs with: a custom
+            // plan, made for one execution, needs both.)
+            let total = match bq.cost.get() {
+                Some((p, t)) if Arc::ptr_eq(p, &bq.plan) => *t,
+                _ => {
+                    let (t, found) = crate::sql::explain::total_and_gathers(&bq.plan, ctx);
+                    let gathers = crate::exec::parallel_part::of_explain(&bq.plan, found);
+                    let _ = bq.gathers.set((bq.plan.clone(), gathers.into()));
+                    let _ = bq.cost.set((bq.plan.clone(), t));
+                    t
+                }
+            };
+            let cost = if planning { total + planning_charge(&bq.plan, bq.hidden_rtes) } else { total };
             #[cfg(debug_assertions)]
             check_cost_estimate(ctx, bq, params, planning, cost);
             Ok(cost)
@@ -2134,6 +2154,7 @@ impl Session {
             Ok(p) => {
                 p.plans.lock().unnamed = name.is_empty();
                 self.prepared.insert(name.to_string(), p.clone());
+                self.prepared_listed = false;
                 self.prepared_meta
                     .insert(name.to_string(), (sql.to_string(), Self::now(), false));
                 Ok(p)
@@ -2960,6 +2981,7 @@ impl Session {
     pub fn close_statement(&mut self, name: &str) {
         self.prepared.remove(name);
         self.prepared_meta.remove(name);
+        self.prepared_listed = false;
     }
 
     /// Close message on a portal: a bound one, or a cursor.
@@ -3974,11 +3996,13 @@ pub(crate) fn plan_cost_estimate(
     planning: bool,
 ) -> f64 {
     let total = crate::sql::explain::estimate(plan, ctx).total;
-    if planning {
-        total + 2.5 * (range_entries(plan) + hidden_rtes + 1) as f64
-    } else {
-        total
-    }
+    if planning { total + planning_charge(plan, hidden_rtes) } else { total }
+}
+
+/// cached_plan_cost's charge for planning a custom plan (1000 * cpu_operator_cost per range
+/// table entry).
+fn planning_charge(plan: &Plan, hidden_rtes: usize) -> f64 {
+    2.5 * (range_entries(plan) + hidden_rtes + 1) as f64
 }
 
 /// Debug builds: `plan_cost_estimate`'s `cost` is the total EXPLAIN (FORMAT JSON) shows for the

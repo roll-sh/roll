@@ -1351,6 +1351,21 @@ fn range_binary_format() {
 fn domain_array_binary_element_type() {
     let s = server(AuthMethod::Trust);
     runtime().block_on(async {
+        // array_recv's header, a field at a time (checked against PostgreSQL 18.6): too many
+        // dimensions, a negative number of them, bad flags, a header cut short.
+        let c = s.connect("postgres").await;
+        let st = c.prepare("SELECT $1::int4[]").await.unwrap();
+        for (bytes, code) in [
+            ("000000070000000000000017", "54000"),
+            ("ffffffff0000000000000017", "22P03"),
+            ("000000010000000200000017", "22P03"),
+            ("00000001", "08P01"),
+        ] {
+            let e = c.query_one(&st, &[&hex(bytes)]).await.unwrap_err();
+            assert_eq!(e.code().map(|c| c.code()), Some(code), "{bytes}: {e:?}");
+        }
+    });
+    runtime().block_on(async {
         let c = s.connect("postgres").await;
         c.batch_execute("CREATE DOMAIN wire_posint AS int CHECK (VALUE > 0)").await.unwrap();
         let d: u32 = c.query_one("SELECT 'wire_posint'::regtype::oid", &[]).await.unwrap().get(0);

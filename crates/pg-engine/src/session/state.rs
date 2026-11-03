@@ -4,7 +4,6 @@
 use super::settings::Settings;
 use crate::error::Result;
 use crate::txn::Database;
-use crate::types::DataType;
 use crate::types::collation::DbLocale;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -397,18 +396,9 @@ pub struct SessionState {
     pub prepared_sql: RefCell<HashMap<String, Arc<crate::session::Prepared>>>,
     /// pg_stat_statements: the nesting level and prepared statements' query ids.
     pub pgss: RefCell<crate::ext::pg_stat_statements::SessionStats>,
-    pub prepared_list: RefCell<
-        Vec<(
-            String,
-            String,
-            i64,
-            Vec<DataType>,
-            Option<Vec<DataType>>,
-            bool,
-            u64,
-            u64,
-        )>,
-    >,
+    /// pg_prepared_statements' statements, by name: name, text, prepare time, from SQL
+    /// PREPARE, the statement (`Prepared::listing` reads the rest as the view is read).
+    pub prepared_list: RefCell<Vec<(String, String, i64, bool, Arc<super::Prepared>)>>,
     /// Open cursors (portals) by name.
     pub cursors: RefCell<HashMap<String, super::cursor::Cursor>>,
     /// Names given to unnamed PL/pgSQL cursors (`<unnamed portal N>`).

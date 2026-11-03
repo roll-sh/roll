@@ -4691,9 +4691,9 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
             }
         }
         PgPreparedStatements => {
-            for (name, text, at, params, result, from_sql, generic, custom) in
-                ctx.sess.prepared_list.borrow().iter()
-            {
+            for (name, text, at, from_sql, p) in ctx.sess.prepared_list.borrow().iter() {
+                let (params, result, generic, custom) = p.listing();
+                let (params, generic, custom) = (&params, &generic, &custom);
                 let types = |ts: &[DataType]| {
                     arr(
                         DataType::Regtype,

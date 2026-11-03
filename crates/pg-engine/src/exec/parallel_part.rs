@@ -126,7 +126,12 @@ pub fn gathers(plan: &Arc<Plan>, rels: &[(u32, crate::txn::locks::LockMode)], ct
     if !crate::sql::paths::parallel::may_gather(plan, rels, ctx) {
         return Vec::new();
     }
-    crate::sql::explain::gathers(plan, ctx)
+    of_explain(plan, crate::sql::explain::gathers(plan, ctx))
+}
+
+/// The Gathers `explain::gathers` found in `plan`, with the relations each part opens.
+pub fn of_explain(plan: &Arc<Plan>, found: Vec<(Option<usize>, usize)>) -> Vec<Gather> {
+    found
         .into_iter()
         .map(|(part, workers)| {
             let mut rels = Vec::new();

@@ -72,6 +72,9 @@ pub struct BoundQuery {
     /// once, not per execution. With the plan they are of (held, so its address can't be
     /// another plan's).
     pub gathers: std::sync::OnceLock<(Arc<Plan>, Arc<[crate::exec::parallel_part::Gather]>)>,
+    /// Its EXPLAIN total cost, found with the Gathers when a plan choice needs it
+    /// (`Session::plan_cost`), with the plan it is of.
+    pub cost: std::sync::OnceLock<(Arc<Plan>, f64)>,
 }
 
 /// A statement after parse analysis (`Binder::analyze_statement`), its top query level not
@@ -142,6 +145,7 @@ impl Analyzed {
             hidden_rtes,
             param_domains: self.param_domains.clone(),
             gathers: Default::default(),
+            cost: Default::default(),
         })
     }
 
@@ -158,6 +162,7 @@ impl Analyzed {
             hidden_rtes,
             param_domains: self.param_domains,
             gathers: Default::default(),
+            cost: Default::default(),
         })
     }
 
