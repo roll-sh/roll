@@ -1,6 +1,7 @@
 //! `roll agent …`, the real binary against a real relay (code-control's router on a free port):
-//! the device login and the file it writes, `up` connecting a daemon that answers commands,
-//! Ctrl-C stopping it cleanly, `status`, `logout`, and a revoked machine stopping `up`.
+//! the device login and the file it writes, a login with a machine token, `up` connecting a
+//! daemon that answers commands, Ctrl-C stopping it cleanly, `status`, `logout`, and a revoked
+//! machine stopping `up`.
 
 use code_control::{Code, Config};
 use pg_storage::{Objects, StorageConfig};
@@ -51,6 +52,8 @@ impl Env {
             .env("ROLL_AGENT_CONFIG", &self.login)
             .env("ROLL_AGENT_HOME", &self.data)
             .env("NO_COLOR", "1")
+            .env_remove("ROLL_AGENT_TOKEN")
+            .env_remove("ROLL_AGENT_FAKE")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -96,6 +99,11 @@ impl Env {
             }
         };
         assert!(printed.iter().any(|l| l.contains("/dashboard/agents/connect?code=")), "{printed:?}");
+        // It said which machine it is, for the dashboard to show before approving.
+        let (s, p) = self.req("GET", &format!("/v1/code/agents/acme/login/{code}"), None).await;
+        assert_eq!(s, 200, "{p}");
+        assert_eq!((p["name"].as_str(), p["os"].as_str()), (Some(name), Some(std::env::consts::OS)), "{p}");
+        assert!(p["hostname"].as_str().is_some_and(|h| !h.is_empty()), "{p}");
         let (s, v) = self.req("POST", "/v1/code/agents/acme/login/approve", Some(json!({ "user_code": code }))).await;
         assert_eq!(s, 204, "{v}");
         let out = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap()).await.unwrap();
@@ -298,4 +306,43 @@ async fn up_takes_a_sandbox_token_from_the_environment() {
     };
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("ROLL_AGENT_TOKEN"), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_machine_token_logs_in_without_a_code() {
+    let e = env().await;
+    let (s, minted) = e.req("POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "build-box" }))).await;
+    assert_eq!(s, 201, "{minted}");
+    let token = minted["token"].as_str().unwrap().to_string();
+    let machine = minted["machine"]["id"].as_str().unwrap().to_string();
+
+    let out = e.run(&["--json", "agent", "login", "--machine-token", &token]).await;
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let said: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!((said["status"].as_str(), said["machine"].as_str(), said["owner"].as_str(), said["name"].as_str()), (Some("approved"), Some(machine.as_str()), Some("acme"), Some("build-box")));
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&e.login).unwrap()).unwrap();
+    assert_eq!(saved, json!({ "api": e.api, "machine": machine, "owner": "acme", "name": "build-box", "token": token }));
+    assert_eq!(std::fs::metadata(&e.login).unwrap().permissions().mode() & 0o777, 0o600);
+    assert!(e.run(&["agent", "status"]).await.status.success());
+    std::fs::remove_file(&e.login).unwrap();
+
+    // From the environment too (sandboxes and scripts), and the text output.
+    let mut c = e.cmd(&["agent", "login"]);
+    c.env("ROLL_AGENT_TOKEN", &token);
+    let out = tokio::task::spawn_blocking(move || c.output().unwrap()).await.unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Connected build-box to acme"), "{}", String::from_utf8_lossy(&out.stdout));
+
+    // Not a machine token, a revoked one, or with --name: exit 1/2, nothing new written.
+    std::fs::remove_file(&e.login).unwrap();
+    let out = e.run(&["agent", "login", "--machine-token", "rlc_nope"]).await;
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("rlm_"), "{}", String::from_utf8_lossy(&out.stderr));
+    let (s, _) = e.req("DELETE", &format!("/v1/code/agents/acme/machines/{machine}"), None).await;
+    assert_eq!(s, 204);
+    let out = e.run(&["agent", "login", "--machine-token", &token]).await;
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("doesn't accept"), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(!e.run(&["agent", "login", "--machine-token", &token, "--name", "x"]).await.status.success());
+    assert!(!e.login.exists());
 }

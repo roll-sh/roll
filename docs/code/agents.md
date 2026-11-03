@@ -225,10 +225,19 @@ server (`docs/orchestration-v2/orchestrator-mcp-server.md` there), ported in
 
 ## Machines, login and tokens
 
-- `roll agent login` starts a device login: `POST /v1/code/agents/login` returns a `device_code`
-  and a short `user_code`; the user opens `/dashboard/agents/connect?code=…` (signed in) and
-  approves; the CLI's poll then receives a machine token `rlm_…` and stores it in
-  `~/.config/roll/agent.json` (0600). The dashboard can also mint one directly ("Add machine").
+- `roll agent login` starts a device login: `POST /v1/code/agents/login` (with the machine's
+  hostname and OS) returns a `device_code` and a short `user_code`; the user opens
+  `/dashboard/agents/connect?code=…` (signed in), which looks the login up and asks "Approve
+  ada-mbp (macOS)?"; the CLI's poll then receives a machine token `rlm_…` and stores it in
+  `~/.config/roll/agent.json` (0600). The dashboard can also mint one directly ("Add machine"),
+  which `roll agent login --machine-token rlm_…` (or `ROLL_AGENT_TOKEN`) saves the same way after
+  asking roll which machine it is (`GET /v1/code/agents/connect` without an upgrade).
+- Installing: `curl -fsSL https://roll.sh/install.sh | sh` (`apps/dashboard/public/install.sh`)
+  installs the `roll` CLI from the GitHub releases of roll-sh/roll into `~/.local/bin`, checking
+  its SHA-256. Releases are built by `.github/workflows/release-cli.yml` on a `cli-v*` tag (Linux
+  and macOS, x86_64 and aarch64).
+- `ROLL_AGENT_FAKE=1 roll agent up` is for tests only: the daemon offers the scripted providers
+  of `agent_host::provider::fake` instead of the real ones (`pnpm test:agents`).
 - Machine tokens are stored as sha256 only, looked up on every connect (never cached), and only
   open `/v1/code/agents/connect` (`GET` the link; `DELETE` revokes the machine itself, for
   `roll agent logout`). Revoking a machine closes its link at once.

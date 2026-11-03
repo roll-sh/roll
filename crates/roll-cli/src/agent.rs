@@ -1,11 +1,16 @@
 //! `roll agent …`: connect this machine to roll code agents (docs/code/agents.md).
 //!
-//! `login` runs the device flow and keeps the machine token in `~/.config/roll/agent.json`
+//! `login` runs the device flow (or takes a machine token minted in the dashboard,
+//! `--machine-token`) and keeps the machine token in `~/.config/roll/agent.json`
 //! (0600; `ROLL_AGENT_CONFIG` names another file). `up` runs the daemon (`agent_host::Host`) with
 //! the providers from its config and keeps the link to the relay up until Ctrl-C; without a login
 //! file it takes the machine token from `ROLL_AGENT_TOKEN` (a roll-hosted sandbox, whose machine
 //! roll made). `status` shows the login and whether roll still accepts it; `logout` revokes the
 //! machine and forgets it.
+//!
+//! `ROLL_AGENT_FAKE=1` is for tests only (`pnpm test:agents`): `up` offers the fake providers of
+//! `agent_host::provider::fake` (`fake`, which plays a scripted turn with an approval and an edit,
+//! and `echo`) instead of the real ones, so nothing calls a model.
 
 use agent_host::provider::Provider;
 use agent_host::relay::{self, LinkConfig, LinkEvent};
@@ -21,8 +26,11 @@ pub enum Agent {
     /// Connect this machine to roll: shows a code to confirm in the dashboard.
     Login {
         /// What to call this machine (default: its hostname).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "machine_token")]
         name: Option<String>,
+        /// A machine token made in the dashboard ("Add machine"): saved as is, no code to confirm.
+        #[arg(long, env = "ROLL_AGENT_TOKEN", hide_env_values = true, value_name = "rlm_…")]
+        machine_token: Option<String>,
     },
     /// Run the agent daemon here (providers, threads, terminals) and keep it connected to roll.
     /// Logs go to stderr; Ctrl-C stops it.
@@ -102,7 +110,8 @@ async fn post(http: &reqwest::Client, url: &str, body: Value) -> anyhow::Result<
 
 pub async fn run(api: &str, json_out: bool, cmd: Agent) -> anyhow::Result<()> {
     match cmd {
-        Agent::Login { name } => login(api, json_out, name).await,
+        Agent::Login { machine_token: Some(token), .. } => login_with_token(api, json_out, &token).await,
+        Agent::Login { name, machine_token: None } => login(api, json_out, name).await,
         Agent::Up => up(api).await,
         Agent::Status => status(json_out).await,
         Agent::Logout => logout(json_out).await,
@@ -145,7 +154,9 @@ async fn login(api: &str, json_out: bool, name: Option<String>) -> anyhow::Resul
     let api = api.trim_end_matches('/').to_string();
     let http = reqwest::Client::new();
     let name = name.unwrap_or_else(hostname);
-    let start: agent_proto::DeviceLogin = serde_json::from_value(post(&http, &format!("{api}/v1/code/agents/login"), json!({ "name": name })).await?)?;
+    // The dashboard shows hostname and OS before anyone approves ("Approve ada-mbp (macOS)?").
+    let about = json!({ "name": name, "hostname": hostname(), "os": std::env::consts::OS });
+    let start: agent_proto::DeviceLogin = serde_json::from_value(post(&http, &format!("{api}/v1/code/agents/login"), about).await?)?;
     if json_out {
         println!("{}", serde_json::to_string(&start)?);
     } else {
@@ -161,17 +172,45 @@ async fn login(api: &str, json_out: bool, name: Option<String>) -> anyhow::Resul
             agent_proto::LoginPoll::Pending | agent_proto::LoginPoll::Expired => bail!("the code expired before it was confirmed: run `roll agent login` again"),
             agent_proto::LoginPoll::Denied => bail!("the login was denied"),
             agent_proto::LoginPoll::Approved { token, machine, owner } => {
-                let saved = Saved { api: api.clone(), machine: machine.0, owner, name: name.clone(), token };
-                let path = save(&saved)?;
-                if json_out {
-                    println!("{}", json!({ "status": "approved", "machine": saved.machine, "owner": saved.owner, "name": saved.name, "config": path }));
-                } else {
-                    println!("Connected {} to {} as {}. Run `roll agent up` to start it.", saved.name, saved.owner, saved.machine);
-                }
-                return Ok(());
+                return saved_login(json_out, Saved { api: api.clone(), machine: machine.0, owner, name: name.clone(), token });
             }
         }
     }
+}
+
+fn saved_login(json_out: bool, saved: Saved) -> anyhow::Result<()> {
+    let path = save(&saved)?;
+    if json_out {
+        println!("{}", json!({ "status": "approved", "machine": saved.machine, "owner": saved.owner, "name": saved.name, "config": path }));
+    } else {
+        println!("Connected {} to {} as {}. Run `roll agent up` to start it.", saved.name, saved.owner, saved.machine);
+    }
+    Ok(())
+}
+
+/// `login --machine-token rlm_…`: ask roll which machine the token is, then save it.
+async fn login_with_token(api: &str, json_out: bool, token: &str) -> anyhow::Result<()> {
+    let api = api.trim_end_matches('/').to_string();
+    let token = token.trim();
+    if !token.starts_with("rlm_") {
+        bail!("that isn't a machine token (they start with rlm_): make one under Add machine in the dashboard");
+    }
+    let res = reqwest::Client::new()
+        .get(format!("{api}/v1/code/agents/connect"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .with_context(|| format!("can't reach {api}"))?;
+    if res.status() == reqwest::StatusCode::UNAUTHORIZED {
+        bail!("roll doesn't accept this machine token (it was revoked or never existed)");
+    }
+    if !res.status().is_success() {
+        let status = res.status();
+        let v: Value = res.json().await.unwrap_or(Value::Null);
+        bail!("checking the token: {}", v["error"].as_str().map(str::to_string).unwrap_or_else(|| status.to_string()));
+    }
+    let who: agent_proto::MachineLogin = res.json().await.context("checking the token: not a roll agents API")?;
+    saved_login(json_out, Saved { api, machine: who.machine.id.0, owner: who.owner, name: who.machine.name, token: token.to_string() })
 }
 
 /// The providers the daemon's config describes: Codex and Claude Code (ACP agents once their
@@ -186,6 +225,16 @@ fn providers(config: &agent_host::config::Config) -> Vec<Arc<dyn Provider>> {
     all
 }
 
+/// `ROLL_AGENT_FAKE=1` (tests only): scripted providers instead of the real ones.
+fn fake_providers() -> Option<Vec<Arc<dyn Provider>>> {
+    use agent_host::provider::fake::{FakeProvider, Script};
+    if std::env::var("ROLL_AGENT_FAKE").ok().is_none_or(|v| v.is_empty() || v == "0") {
+        return None;
+    }
+    let caps = agent_proto::Capabilities::default();
+    Some(vec![FakeProvider::with("fake", caps, Script::Demo), FakeProvider::with("echo", caps, Script::Echo)])
+}
+
 async fn up(api: &str) -> anyhow::Result<()> {
     let saved = match env_login(api)? {
         Some(s) => s,
@@ -193,7 +242,13 @@ async fn up(api: &str) -> anyhow::Result<()> {
     };
     let config = agent_host::config::Config::load()?;
     let home = config.home.clone();
-    let providers = providers(&config);
+    let providers = match fake_providers() {
+        Some(fake) => {
+            eprintln!("roll agent: ROLL_AGENT_FAKE is set: offering only the test providers (fake, echo)");
+            fake
+        }
+        None => providers(&config),
+    };
     let host = agent_host::Host::open(config, providers).await.with_context(|| format!("opening the agent data in {}", home.display()))?;
     eprintln!("roll agent: {} ({}) for {}, data in {}", saved.name, saved.machine, saved.owner, home.display());
     let (events, mut rx) = tokio::sync::mpsc::unbounded_channel();

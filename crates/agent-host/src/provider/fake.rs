@@ -2,14 +2,16 @@
 //!
 //! [`Script::Echo`] answers every turn on its own (a message item streamed as deltas, usage, a
 //! `TurnRef`, `TurnEnded(Completed)`); [`Script::Manual`] only records what it was sent and lets
-//! the test emit events through the [`FakeSession`] handle. Both answer `interrupt` with
+//! the test emit events through the [`FakeSession`] handle; [`Script::Demo`] plays a whole turn
+//! across processes (`ROLL_AGENT_FAKE=1 roll agent up`, for `pnpm test:agents`): streamed text, a
+//! command that asks for approval, and an edit to a file in the workspace. All answer `interrupt` with
 //! `TurnEnded(Interrupted)` when a turn is running, like the real providers. A session started
 //! with `fork` is a new conversation; the test reads what it was forked from in its `config`.
 
 use super::{Item, Provider, ProviderEvent, Session, SessionConfig, TurnEnd, TurnInput};
 use agent_proto::{
-    AuthStatus, Capabilities, InteractionMode, ModelInfo, NodeBody, NodeStatus, ProviderId, ProviderInfo, Response,
-    RuntimeMode, Usage,
+    Approval, ApprovalAction, AuthStatus, Capabilities, ChangeKind, Decision, FileChange, InteractionMode, ModelInfo, NodeBody,
+    NodeStatus, ProviderId, ProviderInfo, RequestBody, Response, RuntimeMode, ToolCall, ToolKind, Usage,
 };
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,6 +25,19 @@ pub enum Script {
     Echo,
     /// Turns run until the test emits `TurnEnded`.
     Manual,
+    /// Each turn streams a short answer in steps, asks to run a command, and once it's accepted
+    /// writes `ROLL_DEMO.md` (the prompt) in the session's directory, then completes; declined,
+    /// it says so and completes.
+    Demo,
+}
+
+/// The file a [`Script::Demo`] turn writes.
+pub const DEMO_FILE: &str = "ROLL_DEMO.md";
+/// Pause between a [`Script::Demo`] turn's steps, so its records have distinct times.
+const DEMO_STEP: Duration = Duration::from_millis(40);
+
+fn demo_command() -> String {
+    format!("tee {DEMO_FILE}")
 }
 
 /// What the orchestrator asked a session to do, in order.
@@ -132,6 +147,7 @@ impl Provider for FakeProvider {
                 calls: Mutex::new(Vec::new()),
                 running: AtomicBool::new(false),
                 announced: AtomicBool::new(false),
+                demo: Mutex::new(None),
                 items: Mutex::new(0),
                 turns: Default::default(),
                 changed: self.changed.clone(),
@@ -155,6 +171,8 @@ pub struct FakeSession {
 struct Inner {
     script: Script,
     native: String,
+    /// The prompt of the demo turn waiting for its approval.
+    demo: Mutex<Option<String>>,
     tx: mpsc::Sender<ProviderEvent>,
     calls: Mutex<Vec<Call>>,
     running: AtomicBool,
@@ -231,6 +249,107 @@ impl FakeSession {
     }
 }
 
+impl FakeSession {
+    fn message(&self, id: &str, text: &str, status: NodeStatus) -> ProviderEvent {
+        ProviderEvent::Item(Item { id: id.into(), parent: None, status, body: NodeBody::Message { text: text.into() } })
+    }
+
+    /// A [`Script::Demo`] turn up to its approval request.
+    async fn demo_start(self, said: String) {
+        let id = self.next_item();
+        self.emit(self.message(&id, "", NodeStatus::Running));
+        let words = ["Reading ", "the ", "project, ", "then ", "writing ", DEMO_FILE, "."];
+        let mut text = String::new();
+        for w in words {
+            tokio::time::sleep(DEMO_STEP).await;
+            text.push_str(w);
+            self.emit(ProviderEvent::TextDelta { item: id.clone(), text: w.into() });
+        }
+        self.emit(self.message(&id, &text, NodeStatus::Completed));
+        tokio::time::sleep(DEMO_STEP).await;
+        let tool = self.next_item();
+        let command = demo_command();
+        self.emit(ProviderEvent::Item(Item {
+            id: tool.clone(),
+            parent: None,
+            status: NodeStatus::Waiting,
+            body: NodeBody::Tool(ToolCall { name: "Bash".into(), kind: ToolKind::Command, title: command.clone(), input: serde_json::json!({ "command": command }), output: None, exit_code: None, files: Vec::new() }),
+        }));
+        *self.inner.demo.lock().unwrap() = Some(said);
+        self.emit(ProviderEvent::Request {
+            id: format!("{tool}-approval"),
+            item: Some(tool),
+            body: RequestBody::Approval(Approval {
+                action: ApprovalAction::Command,
+                title: format!("Run `{command}`"),
+                command: Some(command),
+                cwd: Some(self.config.cwd.display().to_string()),
+                files: Vec::new(),
+                reason: Some("to write the file".into()),
+                tool: None,
+                input: serde_json::Value::Null,
+                decisions: vec![Decision::Accept, Decision::Decline],
+            }),
+        });
+    }
+
+    /// The rest of a [`Script::Demo`] turn, once its request is answered.
+    async fn demo_finish(self, request: String, accepted: bool) {
+        let Some(said) = self.inner.demo.lock().unwrap().take() else { return };
+        let tool = request.trim_end_matches("-approval").to_string();
+        let command = demo_command();
+        let tool_item = |status, output: Option<String>, exit_code| {
+            ProviderEvent::Item(Item {
+                id: tool.clone(),
+                parent: None,
+                status,
+                body: NodeBody::Tool(ToolCall { name: "Bash".into(), kind: ToolKind::Command, title: command.clone(), input: serde_json::json!({ "command": command }), output, exit_code, files: Vec::new() }),
+            })
+        };
+        let answer = if accepted {
+            self.emit(tool_item(NodeStatus::Running, None, None));
+            let path = self.config.cwd.join(DEMO_FILE);
+            let wrote = std::fs::write(&path, format!("{said}\n"));
+            tokio::time::sleep(DEMO_STEP).await;
+            self.emit(ProviderEvent::OutputDelta { item: tool.clone(), text: format!("wrote {DEMO_FILE}\n") });
+            match wrote {
+                Ok(()) => {
+                    self.emit(tool_item(NodeStatus::Completed, Some(format!("wrote {DEMO_FILE}\n")), Some(0)));
+                    let edit = self.next_item();
+                    let diff = format!("--- /dev/null\n+++ b/{DEMO_FILE}\n@@ -0,0 +1 @@\n+{said}\n");
+                    self.emit(ProviderEvent::Item(Item {
+                        id: edit,
+                        parent: None,
+                        status: NodeStatus::Completed,
+                        body: NodeBody::Tool(ToolCall {
+                            name: "Write".into(),
+                            kind: ToolKind::Edit,
+                            title: DEMO_FILE.into(),
+                            input: serde_json::json!({ "file_path": DEMO_FILE }),
+                            output: None,
+                            exit_code: None,
+                            files: vec![FileChange { path: DEMO_FILE.into(), change: ChangeKind::Add, diff: Some(diff) }],
+                        }),
+                    }));
+                    format!("Wrote {DEMO_FILE}.")
+                }
+                Err(e) => {
+                    self.emit(tool_item(NodeStatus::Failed, Some(e.to_string()), Some(1)));
+                    format!("Couldn't write {DEMO_FILE}: {e}")
+                }
+            }
+        } else {
+            self.emit(tool_item(NodeStatus::Failed, None, None));
+            "Declined: nothing was written.".to_string()
+        };
+        tokio::time::sleep(DEMO_STEP).await;
+        let id = self.next_item();
+        self.emit(self.message(&id, &answer, NodeStatus::Completed));
+        self.emit(ProviderEvent::Usage(Usage { input_tokens: said.len() as u64, output_tokens: answer.len() as u64, cached_tokens: 0, cost_usd: None }));
+        self.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
+    }
+}
+
 #[async_trait]
 impl Session for FakeSession {
     async fn send(&self, input: TurnInput) -> anyhow::Result<()> {
@@ -239,10 +358,14 @@ impl Session for FakeSession {
             self.emit(ProviderEvent::NativeThread { id: self.inner.native.clone() });
         }
         self.inner.running.store(true, Ordering::SeqCst);
-        if self.inner.script == Script::Echo {
-            // Echo what the user said, not the context roll handed over in front of it.
-            let said = input.text.rsplit_once("</roll-context>\n\n").map_or(input.text.as_str(), |(_, said)| said);
-            self.echo(said);
+        // What the user said, not the context roll handed over in front of it.
+        let said = input.text.rsplit_once("</roll-context>\n\n").map_or(input.text.as_str(), |(_, said)| said);
+        match self.inner.script {
+            Script::Echo => self.echo(said),
+            Script::Demo => {
+                tokio::spawn(self.clone().demo_start(said.to_string()));
+            }
+            Script::Manual => {}
         }
         Ok(())
     }
@@ -262,6 +385,10 @@ impl Session for FakeSession {
 
     async fn respond(&self, request: &str, response: &Response) -> anyhow::Result<()> {
         self.record(Call::Respond { request: request.into(), response: response.clone() });
+        if self.inner.script == Script::Demo {
+            let accepted = matches!(response, Response::Decision { decision: Decision::Accept | Decision::AcceptForSession, .. });
+            tokio::spawn(self.clone().demo_finish(request.to_string(), accepted));
+        }
         Ok(())
     }
 
@@ -277,5 +404,63 @@ impl Session for FakeSession {
 
     async fn close(&self) {
         self.record(Call::Close);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn until(rx: &mut mpsc::Receiver<ProviderEvent>, mut done: impl FnMut(&ProviderEvent) -> bool) -> Vec<ProviderEvent> {
+        let mut got = Vec::new();
+        loop {
+            let e = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("an event within 5 s").expect("session open");
+            let stop = done(&e);
+            got.push(e);
+            if stop {
+                return got;
+            }
+        }
+    }
+
+    fn config(cwd: &std::path::Path) -> SessionConfig {
+        SessionConfig {
+            cwd: cwd.into(),
+            model: None,
+            effort: None,
+            runtime_mode: RuntimeMode::Ask,
+            interaction_mode: InteractionMode::Default,
+            resume: None,
+            env: Vec::new(),
+            mcp: Vec::new(),
+            instructions: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn demo_turns_stream_ask_and_write_the_file_once_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = FakeProvider::with("fake", Capabilities::default(), Script::Demo);
+        let (s, mut rx) = p.start(config(dir.path())).await.unwrap();
+        s.send(TurnInput { text: "hello demo".into(), attachments: Vec::new() }).await.unwrap();
+        let before = until(&mut rx, |e| matches!(e, ProviderEvent::Request { .. })).await;
+        assert!(before.iter().filter(|e| matches!(e, ProviderEvent::TextDelta { .. })).count() > 3, "streamed in steps");
+        let Some(ProviderEvent::Request { id, item, body: RequestBody::Approval(a) }) = before.last() else { panic!("{before:?}") };
+        assert_eq!((a.action, item.is_some(), a.decisions.as_slice()), (ApprovalAction::Command, true, &[Decision::Accept, Decision::Decline][..]));
+        assert!(!dir.path().join(DEMO_FILE).exists(), "nothing written before the approval");
+        s.respond(id, &Response::Decision { decision: Decision::Accept, message: None }).await.unwrap();
+        let after = until(&mut rx, |e| matches!(e, ProviderEvent::TurnEnded(_))).await;
+        assert_eq!(std::fs::read_to_string(dir.path().join(DEMO_FILE)).unwrap(), "hello demo\n");
+        assert!(after.iter().any(|e| matches!(e, ProviderEvent::Item(Item { body: NodeBody::Tool(t), .. }) if t.files.len() == 1)), "{after:?}");
+        assert!(matches!(after.last(), Some(ProviderEvent::TurnEnded(TurnEnd::Completed))));
+
+        // Declined: nothing is written.
+        let other = tempfile::tempdir().unwrap();
+        let (s, mut rx) = p.start(config(other.path())).await.unwrap();
+        s.send(TurnInput { text: "no".into(), attachments: Vec::new() }).await.unwrap();
+        let Some(ProviderEvent::Request { id, .. }) = until(&mut rx, |e| matches!(e, ProviderEvent::Request { .. })).await.pop() else { panic!() };
+        s.respond(&id, &Response::Decision { decision: Decision::Decline, message: None }).await.unwrap();
+        until(&mut rx, |e| matches!(e, ProviderEvent::TurnEnded(TurnEnd::Completed))).await;
+        assert!(!other.path().join(DEMO_FILE).exists());
     }
 }
