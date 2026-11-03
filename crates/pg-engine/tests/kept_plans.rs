@@ -240,3 +240,71 @@ fn plpgsql_custom_plans_as_the_generic_plan() {
     // A null value folds the comparison: planned with it.
     assert_eq!(one(&mut s, "SELECT bump(NULL, 1)"), Some(Value::Null));
 }
+
+/// Custom plans made from the Parse's analysis with the values put in
+/// (`Analyzed::bind_values`), as PostgreSQL plans its cached query tree: the range read
+/// whose estimates follow its values, quals ordered by their folded cost, and what binding
+/// the values would fold otherwise (an overflow, a null, two constants for one key) bound
+/// afresh. Debug builds check each against binding the values.
+#[test]
+fn custom_plans_from_the_analysis() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = engine_session(open_store(dir.path()), "values");
+    s.query("CREATE TABLE t (id int PRIMARY KEY, v int NOT NULL, w int)").unwrap();
+    s.query("INSERT INTO t SELECT g, g % 13, g % 5 FROM generate_series(1, 2000) g").unwrap();
+    s.query("ANALYZE t").unwrap();
+    let sum = |lo: i64, hi: i64| (lo..=hi.min(2000)).map(|g| g % 13).sum::<i64>();
+    let used = s.analysis_custom_uses();
+    let range = "SELECT sum(v) FROM t WHERE id BETWEEN $1 AND $2 + 99";
+    for lo in [1, 17, 400, 1950] {
+        let got = ext(&mut s, "", range, &[Some(&lo.to_string()), Some(&lo.to_string())]).unwrap();
+        assert_eq!(got, format!("{:?}", Value::Int8(sum(lo, lo + 99))));
+    }
+    assert!(s.analysis_custom_uses() >= used + 3, "{}", s.analysis_custom_uses() - used);
+    // Written with the folded bound first: the quals ordered by their custom costs.
+    let rev = "SELECT count(*) FROM t WHERE id <= $1 + 9 AND id >= $1 AND w <> $2";
+    for lo in [3, 900] {
+        let want = (lo..=lo + 9).filter(|g| g % 5 != 1).count() as i64;
+        let got = ext(&mut s, "", rev, &[Some(&lo.to_string()), Some("1")]).unwrap();
+        assert_eq!(got, format!("{:?}", Value::Int8(want)));
+    }
+    // An overflow folding the bound: the custom plan's error.
+    let e = ext(&mut s, "", range, &[Some("1"), Some("2147483600")]).unwrap_err();
+    assert!(e.contains("integer out of range"), "{e}");
+    // A null: the comparison folds away.
+    assert_eq!(ext(&mut s, "", range, &[None, Some("5")]).unwrap(), format!("{:?}", Value::Null));
+    // Two constants for one key: no rows (const_conflict).
+    let two = "SELECT count(*) FROM t WHERE id = $1 AND id = $2";
+    assert_eq!(ext(&mut s, "", two, &[Some("4"), Some("5")]).unwrap(), format!("{:?}", Value::Int8(0)));
+    assert_eq!(ext(&mut s, "", two, &[Some("4"), Some("4")]).unwrap(), format!("{:?}", Value::Int8(1)));
+    // The value in the select list too, and a named statement's plans counted as
+    // PostgreSQL counts them.
+    let named = "SELECT $1 + max(v) FROM t WHERE id BETWEEN $2 AND $2 + 30";
+    for i in 1..=8 {
+        let got = ext(&mut s, "r", named, &[Some("1000"), Some(&(i * 100).to_string())]).unwrap();
+        assert_eq!(got, format!("{:?}", Value::Int4(1012)));
+    }
+    let counts = s
+        .query("SELECT generic_plans + custom_plans, custom_plans >= 5 FROM pg_prepared_statements WHERE name = 'r'")
+        .unwrap();
+    let row = &counts.last().unwrap().rows[0];
+    assert_eq!((row[0].clone(), row[1].clone()), (Value::Int8(8), Value::Bool(true)));
+    // DDL since: the next Parse's analysis.
+    s.query("CREATE INDEX ON t (w)").unwrap();
+    let got = ext(&mut s, "", range, &[Some("101"), Some("101")]).unwrap();
+    assert_eq!(got, format!("{:?}", Value::Int8(sum(101, 200))));
+    // Simple queries: their template's analysis with each query's literals put in; a
+    // LIMIT's literal stays a constant, a negative one is its value.
+    let used = s.analysis_query_uses();
+    for lo in [7, 70, 700, 1500, -40] {
+        let q = format!("SELECT sum(v) FROM t WHERE id BETWEEN {lo} AND {lo} + 99");
+        assert_eq!(one(&mut s, &q), Some(Value::Int8(sum(lo.max(1), lo + 99))));
+        let q = format!("SELECT id FROM t WHERE id > {lo} AND w = 2 ORDER BY id LIMIT 3");
+        let want = (lo.max(0) + 1..).find(|g| g % 5 == 2).unwrap() as i32;
+        assert_eq!(one(&mut s, &q), Some(Value::Int4(want)));
+    }
+    assert!(s.analysis_query_uses() >= used + 4, "{}", s.analysis_query_uses() - used);
+    // An overflow folding a bound: the query's own error.
+    let e = s.query("SELECT sum(v) FROM t WHERE id BETWEEN 1 AND 2147483600 + 99").unwrap_err();
+    assert!(e.message.contains("integer out of range"), "{}", e.message);
+}

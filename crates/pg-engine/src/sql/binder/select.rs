@@ -1866,7 +1866,16 @@ impl Binder<'_, '_> {
                 rest
             };
             if let Some(pred) = pred {
+                // (The statement's own level of an analysis kept for custom plans: where
+                // its WHERE goes is decided again with the values, `Analyzed::bind_values`.)
+                let site = (self.keep_site
+                    && matches!(plan, Plan::Scan(_))
+                    && self.defer_top.is_some_and(|t| t.0 == self.levels.len()))
+                .then(|| (plan.clone(), pred.clone()));
                 plan = optimize::add_filter(&self.cat, plan, pred);
+                if let Some((scan, pred)) = site {
+                    self.where_site.note(scan, pred, &plan);
+                }
             }
         }
         // (The GROUP BY's range table entry (RTE_GROUP) comes after the FROM items', the

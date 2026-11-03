@@ -26,6 +26,7 @@
 use super::{Prepared, Session};
 use crate::catalog::Catalog as Cat;
 use crate::sql::binder::{Analyzed, Binder, BoundQuery};
+use crate::sql::binder::custom::Custom;
 use crate::sql::expr::Expr;
 use crate::sql::literals::{LitKind, Scan, SizeRead, Template};
 use crate::types::{DataType, Value};
@@ -138,6 +139,8 @@ pub(crate) struct LitPlans {
     map: HashMap<Box<str>, KeyPlans>,
     /// Queries run with a kept plan (tests).
     uses: u64,
+    /// Queries planned from their template's analysis (tests).
+    from_values: u64,
 }
 
 #[derive(Default)]
@@ -145,6 +148,22 @@ struct KeyPlans {
     /// Times a plan couldn't be kept for the template: it stops trying after a few.
     failures: u32,
     plans: Vec<Kept>,
+    /// When no plan fits every value: the template's analysis its queries are planned from.
+    values: Option<Values>,
+}
+
+/// A template's analysis with its numeric literals (outside LIMIT / OFFSET) as parameters:
+/// each query's plan is it with the query's values put in (`Analyzed::bind_values`), the
+/// plan PostgreSQL makes of the query, without parse analysis.
+struct Values {
+    /// The literals it has as constants, with their texts.
+    fixed: Vec<(u32, Box<str>)>,
+    /// Its parameters: the literal (negated or not) each is, and its type.
+    params: Vec<(u32, bool, DataType)>,
+    analysis: Arc<Analyzed>,
+    env: Env,
+    /// Found to be the plan planning the query gives (None: not checked yet).
+    ok: Option<bool>,
 }
 
 /// Templates a session keeps plans for, and plans per template.
@@ -358,7 +377,15 @@ impl Session {
                 }
                 kp.plans.push(k);
             }
-            None => kp.failures += 1,
+            None => {
+                kp.failures += 1;
+                if kp.values.is_none() {
+                    let v = self.lit_values(l, stmt);
+                    if let Some(kp) = self.lit_plans.map.get_mut(&l.scan.shape) {
+                        kp.values = v;
+                    }
+                }
+            }
         }
     }
 
@@ -405,6 +432,127 @@ impl Session {
             .map(|k| (k, Box::from(l.lit_text(k))))
             .collect();
         Some(Kept { fixed, params, generic, bq: Arc::new(bq), unplanned, env, reads: Watched::new(reads) })
+    }
+
+    /// The analysis of a SELECT template whose plan depends on its values (`Values`).
+    fn lit_values(&mut self, l: &LitStmt, stmt: &Node) -> Option<Values> {
+        let Some(NodeEnum::SelectStmt(s)) = &stmt.node else { return None };
+        // (A LIMIT's or OFFSET's literal stays a constant: `push_limit` decides by it.)
+        let mut limit_locs = Vec::new();
+        for n in [s.limit_count.as_deref(), s.limit_offset.as_deref()].into_iter().flatten() {
+            crate::sql::nodewalk::node(&mut n.clone(), &mut |x| {
+                if let Some(NodeEnum::AConst(c)) = &x.node {
+                    limit_locs.push(c.location);
+                }
+            });
+        }
+        let mut generic = stmt.clone();
+        let (mut j, mut ok) = (0, true);
+        let mut params: Vec<(u32, bool, DataType)> = Vec::new();
+        let mut kept_const = vec![false; l.scan.lits.len()];
+        crate::sql::nodewalk::node(&mut generic, &mut |n| match &n.node {
+            Some(NodeEnum::SubLink(_)) => ok = false,
+            Some(NodeEnum::AConst(c)) => {
+                let slot = l.tpl.consts.get(j).copied().flatten();
+                j += 1;
+                let Some((k, neg)) = slot else { return };
+                let value = (!limit_locs.contains(&c.location)).then(|| l.value(k, neg)).flatten();
+                let Some((_, ty)) = value else {
+                    kept_const[k as usize] = true;
+                    return;
+                };
+                params.push((k, neg, ty));
+                let location = c.location;
+                n.node = Some(NodeEnum::ParamRef(pb::ParamRef { number: params.len() as i32, location }));
+            }
+            _ => {}
+        });
+        if !ok || j != l.tpl.consts.len() {
+            return None;
+        }
+        let env = self.lit_env();
+        let types: Vec<DataType> = params.iter().map(|p| p.2.clone()).collect();
+        // (An analysis that raised a notice, folding a constant, isn't kept: PostgreSQL
+        // raises it each time it plans the query. Its notices were the query's already.)
+        let notices = self.notices.len();
+        let a = crate::exec::collected_notices(|| {
+            self.with_ctx_path(&[], Some(env.path.clone()), |ctx| {
+                let mut b = Binder::new(ctx, types);
+                b.keep_site = true;
+                b.analyze_statement(&generic)
+            })
+        });
+        if self.notices.len() > notices {
+            self.notices.truncate(notices);
+            return None;
+        }
+        let a = a.ok()?;
+        if !a.substitutes() {
+            return None;
+        }
+        let fixed = (0..l.scan.lits.len() as u32)
+            .filter(|&k| kept_const[k as usize] || !params.iter().any(|p| p.0 == k))
+            .map(|k| (k, Box::from(l.lit_text(k))))
+            .collect();
+        Some(Values { fixed, params, analysis: Arc::new(a), env, ok: None })
+    }
+
+    /// A simple query's plan from its template's analysis with its values put in (`Values`):
+    /// the first one checked against planning it the usual way (each one in debug builds).
+    pub(super) fn lit_values_plan(&mut self, p: &Prepared, params: &[Value]) -> Option<Arc<BoundQuery>> {
+        if !params.is_empty() || self.state.settings.borrow().module_loaded("auto_explain") {
+            return None;
+        }
+        let l = p.lit.as_deref()?;
+        let env = self.lit_env();
+        let v = self.lit_plans.map.get(&l.scan.shape)?.values.as_ref()?;
+        if v.env != env || v.ok == Some(false) || !v.fixed.iter().all(|(i, t)| l.lit_text(*i) == &**t) {
+            return None;
+        }
+        let mut vals = Vec::with_capacity(v.params.len());
+        for (i, neg, ty) in &v.params {
+            let (val, t) = l.value(*i, *neg)?;
+            if t != *ty {
+                return None;
+            }
+            vals.push(val);
+        }
+        let (a, checked) = (v.analysis.clone(), v.ok == Some(true));
+        let made = self.with_ctx_path(&[], Some(env.path.clone()), |ctx| Ok(a.bind_values(&vals, ctx))).ok()?;
+        let mut bq = match made {
+            Custom::Plan(Ok(bq)) => bq,
+            Custom::Plan(Err(_)) | Custom::Rebind => return None,
+            Custom::Never => {
+                self.lit_plans.map.get_mut(&l.scan.shape)?.values = None;
+                return None;
+            }
+        };
+        bq.params.clear();
+        if checked && !cfg!(debug_assertions) {
+            self.lit_plans.from_values += 1;
+            return Some(Arc::new(bq));
+        }
+        // (Planned the usual way to check it: the notices folding raises are the plan's
+        // already.)
+        let notices = self.notices.len();
+        let own = crate::exec::collected_notices(|| match p.stmt.as_ref() {
+            Some(stmt) => self.planned(p, stmt, &[]).map(|r| r.0),
+            None => Err(crate::error::internal("a query without a tree")),
+        });
+        self.notices.truncate(notices);
+        let own = own.ok()?;
+        let same = same_plan(&own, &bq, &[], &[]);
+        debug_assert!(same, "plan from the analysis of {:?}:\n{:?}\n{:?}", p.sql, own.plan, bq.plan);
+        if let Some(v) = self.lit_plans.map.get_mut(&l.scan.shape)?.values.as_mut() {
+            v.ok = Some(same);
+        }
+        self.lit_plans.from_values += u64::from(same);
+        Some(own)
+    }
+
+    /// How many simple queries were planned from their template's analysis (`Values`).
+    pub fn analysis_query_uses(&self) -> u64 {
+        self.lit_plans.from_values
     }
 
     /// What a plan kept now may be shared under (`SHARED`): None in a session with
@@ -499,6 +647,8 @@ pub(crate) struct ParamPlans {
     map: HashMap<Box<str>, Vec<ParamEntry>>,
     /// Custom plans run with the generic binding (tests).
     uses: u64,
+    /// Custom plans made from their Parse's analysis with the values put in (tests).
+    from_analysis: u64,
 }
 
 struct ParamEntry {
@@ -512,6 +662,9 @@ struct ParamEntry {
     custom_is_generic: Option<bool>,
     /// A custom plan's cost, planning charged.
     custom_cost: Option<f64>,
+    /// Whether its analysis with a custom plan's values put in (`Analyzed::bind_values`) was
+    /// found to be the custom plan binding them gives (None: not checked yet).
+    values_ok: Option<bool>,
 }
 
 /// What a Parse of a query found.
@@ -531,6 +684,12 @@ impl Session {
     /// How many custom plans ran with their statement's generic binding.
     pub fn generic_custom_uses(&self) -> u64 {
         self.param_plans.uses
+    }
+
+    /// How many custom plans were their Parse's analysis with the values put in
+    /// (`Analyzed::bind_values`).
+    pub fn analysis_custom_uses(&self) -> u64 {
+        self.param_plans.from_analysis
     }
 
     fn param_entry(&mut self, sql: &str, oids: &[u32]) -> Option<&mut ParamEntry> {
@@ -617,6 +776,7 @@ impl Session {
             // (The same catalog and settings: whether custom plans are the binding stands.)
             if e.env != env {
                 e.custom_is_generic = None;
+                e.values_ok = None;
             }
             (e.env, e.reads, e.parsed, e.unplanned, e.custom_cost) = (env, Watched::new(reads), parsed, unplanned, None);
             return e.custom_is_generic == Some(true);
@@ -625,7 +785,7 @@ impl Session {
             self.param_plans.map.clear();
         }
         let reads = Watched::new(reads);
-        let e = ParamEntry { oids: oids.into(), env, reads, parsed, unplanned, custom_is_generic: None, custom_cost: None };
+        let e = ParamEntry { oids: oids.into(), env, reads, parsed, unplanned, custom_is_generic: None, custom_cost: None, values_ok: None };
         self.param_plans.map.entry(sql.into()).or_default().push(e);
         false
     }
@@ -708,6 +868,53 @@ impl Session {
             e.custom_is_generic = Some(ok);
             e.custom_cost = ok.then_some(cost);
         }
+    }
+}
+
+impl Session {
+    /// A custom plan of `p` with `params` made from its Parse's analysis with the values put
+    /// in (`Analyzed::bind_values`), PostgreSQL's custom plan of its cached query tree. The
+    /// first one of an entry is checked against binding the values afresh (and every one in
+    /// debug builds); None: bind afresh.
+    pub(super) fn values_custom(&mut self, p: &Prepared, stmt: &Node, params: &[Value]) -> Option<BoundQuery> {
+        let oids = {
+            let plans = p.plans.lock();
+            if !plans.param_oids.is_empty() {
+                return None;
+            }
+            plans.parse_oids.clone()?
+        };
+        self.param_plans.map.get(&*p.sql)?;
+        let env = self.lit_env();
+        let e = self.param_entry(&p.sql, &oids)?;
+        if e.env != env || e.parsed.param_types != p.param_types || e.values_ok == Some(false) {
+            return None;
+        }
+        let (a, checked) = (e.unplanned.clone()?, e.values_ok == Some(true));
+        let made = self.with_ctx(params, |ctx| Ok(a.bind_values(params, ctx))).ok()?;
+        let bq = match made {
+            Custom::Plan(Ok(bq)) => bq,
+            Custom::Plan(Err(_)) | Custom::Rebind => return None,
+            Custom::Never => {
+                self.param_entry(&p.sql, &oids)?.values_ok = Some(false);
+                return None;
+            }
+        };
+        if checked && !cfg!(debug_assertions) {
+            self.param_plans.from_analysis += 1;
+            return Some(bq);
+        }
+        let notices = self.notices.len();
+        let own = crate::exec::collected_notices(|| self.bound_custom_afresh(p, stmt, params));
+        self.notices.truncate(notices);
+        let own = own.ok()?;
+        let same = same_plan(&own, &bq, &[], &[]);
+        debug_assert!(same, "custom plan from the analysis of {:?} with {params:?}:\n{:?}\n{:?}", p.sql, own.plan, bq.plan);
+        if let Some(e) = self.param_entry(&p.sql, &oids) {
+            e.values_ok = Some(same);
+        }
+        self.param_plans.from_analysis += u64::from(same);
+        Some(own)
     }
 }
 

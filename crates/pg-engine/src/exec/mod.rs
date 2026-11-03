@@ -280,6 +280,20 @@ pub fn streaming_notices<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 
+/// Run `f` with its notices collected, not sent as they are raised (inside
+/// `streaming_notices` too): work whose notices the caller may drop, a plan made a second
+/// time to check one (`session::litplan`).
+pub fn collected_notices<T>(f: impl FnOnce() -> T) -> T {
+    struct Back(bool);
+    impl Drop for Back {
+        fn drop(&mut self) {
+            STREAMING.with(|s| s.set(self.0));
+        }
+    }
+    let _back = Back(STREAMING.with(|s| s.replace(false)));
+    f()
+}
+
 /// Whether notices go to the client as they are raised now.
 pub fn notices_stream() -> bool {
     STREAMING.with(|s| s.get()) && has_notice_sink()
@@ -682,9 +696,10 @@ pub fn arm_statement_waits(t: &mut crate::txn::Txn, settings: &crate::session::s
     let ms = |v: i64| std::time::Duration::from_millis(v as u64);
     let lt = settings.lock_timeout();
     t.lock_timeout = (lt > 0).then(|| ms(lt));
-    t.deadlock_timeout = ms(settings.int("deadlock_timeout").max(1));
+    let hot = settings.hot();
+    t.deadlock_timeout = ms(hot.deadlock_timeout.max(1));
     let st = settings.statement_timeout();
-    let tt = settings.int("transaction_timeout");
+    let tt = hot.transaction_timeout;
     t.deadline = (st > 0 && (tt <= 0 || st < tt)).then(|| Instant::now() + ms(st));
     if tt <= 0 {
         t.txn_deadline = None;

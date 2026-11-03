@@ -184,8 +184,32 @@ impl Hub {
     /// `pid` now waits for its client outside a transaction block: send what's pending and
     /// deliver further notifications directly until `busy`.
     pub fn idle(&self, pid: i32) {
-        let Some(l) = self.get(pid) else { return };
-        let mut l = l.lock();
+        if let Some(l) = self.handle(pid) {
+            l.idle();
+        }
+    }
+
+    /// `pid` is handling a message: hold notifications for it.
+    pub fn busy(&self, pid: i32) {
+        if let Some(l) = self.handle(pid) {
+            l.busy();
+        }
+    }
+
+    /// `pid`'s listener, which its session marks busy and idle around every message without
+    /// the hub's lock (`Session::notifications_busy`).
+    pub fn handle(&self, pid: i32) -> Option<ListenerHandle> {
+        self.get(pid).map(ListenerHandle)
+    }
+}
+
+/// A session's own listener (`Hub::handle`).
+pub struct ListenerHandle(Arc<Mutex<Listener>>);
+
+impl ListenerHandle {
+    /// `Hub::idle`.
+    pub fn idle(&self) {
+        let mut l = self.0.lock();
         if !l.pending.is_empty()
             && let Some(sink) = l.sink.clone()
         {
@@ -195,11 +219,9 @@ impl Hub {
         l.idle = true;
     }
 
-    /// `pid` is handling a message: hold notifications for it.
-    pub fn busy(&self, pid: i32) {
-        if let Some(l) = self.get(pid) {
-            l.lock().idle = false;
-        }
+    /// `Hub::busy`.
+    pub fn busy(&self) {
+        self.0.lock().idle = false;
     }
 }
 
