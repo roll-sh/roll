@@ -93,17 +93,15 @@ impl Code {
     /// One look at every sandbox of the owner: how many aren't deleted yet.
     async fn reconcile_owner(&self, owner_id: &str) -> usize {
         let Some(backend) = self.sandboxes.backend.clone() else { return 0 };
-        let lock = self.sandboxes.lock(owner_id);
-        let _one = lock.lock().await;
-        let rows = match store::live(self.db.sql(), owner_id) {
-            Ok(r) => r,
+        let ids = match store::live(self.db.sql(), owner_id) {
+            Ok(r) => r.into_iter().map(|s| s.id).collect::<Vec<_>>(),
             Err(e) => {
                 tracing::warn!(owner = %owner_id, error = %e, "reading sandboxes");
                 return 1;
             }
         };
-        for s in rows {
-            self.reconcile_sandbox(&*backend, s).await;
+        for id in ids {
+            self.reconcile_locked(&*backend, &id).await;
         }
         store::live_count(self.db.sql(), owner_id).map_or(1, |n| n.max(0) as usize)
     }
@@ -111,14 +109,22 @@ impl Code {
     /// Look at one sandbox now (a request's start, stop or delete): it, after.
     pub(crate) async fn reconcile_now(&self, owner_id: &str, id: &str) -> crate::Result<Option<SandboxRow>> {
         if let Some(backend) = self.sandboxes.backend.clone() {
-            let lock = self.sandboxes.lock(owner_id);
-            let _one = lock.lock().await;
-            if let Some(s) = store::sandbox(self.db.sql(), id)?.filter(|s| s.deleted_at.is_none()) {
-                self.reconcile_sandbox(&*backend, s).await;
-            }
+            self.reconcile_locked(&*backend, id).await;
         }
         self.kick_sandboxes(owner_id);
         Ok(store::sandbox(self.db.sql(), id)?)
+    }
+
+    /// One look at a sandbox at a time (the reconciler's or a request's), on its latest record: a
+    /// slow create holds up only its own sandbox.
+    async fn reconcile_locked(&self, b: &dyn SandboxBackend, id: &str) {
+        let lock = self.sandboxes.lock(id);
+        let _one = lock.lock().await;
+        match store::sandbox(self.db.sql(), id) {
+            Ok(Some(s)) if s.deleted_at.is_none() => self.reconcile_sandbox(b, s).await,
+            Ok(_) => {}
+            Err(e) => tracing::warn!(sandbox = %id, error = %e, "reading a sandbox"),
+        }
     }
 
     async fn reconcile_sandbox(&self, b: &dyn SandboxBackend, mut s: SandboxRow) {

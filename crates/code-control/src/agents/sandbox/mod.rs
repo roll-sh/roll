@@ -258,7 +258,7 @@ pub trait SandboxBackend: Send + Sync {
 pub struct Sandboxes {
     pub(crate) backend: Option<Arc<dyn SandboxBackend>>,
     reconcilers: Mutex<HashMap<String, Arc<Reconciler>>>,
-    /// One look at an owner's sandboxes at a time (the reconciler's, or a request's).
+    /// One look at a sandbox at a time (the reconciler's, or a request's).
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -283,12 +283,12 @@ impl Sandboxes {
         self.backend.as_ref().map(|b| b.name())
     }
 
-    fn lock(&self, owner_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    fn lock(&self, sandbox_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut locks = self.locks.lock();
         if locks.len() > 1024 {
             locks.retain(|_, l| Arc::strong_count(l) > 1);
         }
-        locks.entry(owner_id.to_string()).or_default().clone()
+        locks.entry(sandbox_id.to_string()).or_default().clone()
     }
 }
 
