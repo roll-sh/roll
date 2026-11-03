@@ -59,6 +59,9 @@ pub struct Xids {
     persist: Box<dyn Fn(u64) + Send + Sync>,
     /// This table's own number in the process (`uid`).
     uid: u64,
+    /// `horizon` as of the state's last change (`publish`): readers (pruning, the size
+    /// models' per-row upkeep) load it instead of taking the state's mutex.
+    horizon_now: std::sync::atomic::AtomicU64,
 }
 
 /// A snapshot's xmin, registered (`Xids::register_snapshot`) until this is dropped.
@@ -93,6 +96,7 @@ impl Drop for SnapshotXmin {
                 s.owners.remove(&o);
             }
         }
+        self.xids.publish(&s);
     }
 }
 
@@ -133,7 +137,16 @@ impl Xids {
                 static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
                 NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             },
+            horizon_now: std::sync::atomic::AtomicU64::new(next),
         }
+    }
+
+    /// The horizon the state gives now, for `horizon` (under the state's mutex: every change
+    /// that can move it publishes it before the mutex is let go).
+    fn publish(&self, s: &State) {
+        let run = Self::xmin_now(s);
+        let h = s.snapshots.first_key_value().map_or(run, |(x, _)| run.min(*x));
+        self.horizon_now.store(h, std::sync::atomic::Ordering::Release);
     }
 
     /// A number no other transaction id table of the process has (caches of ended
@@ -165,6 +178,7 @@ impl Xids {
             let x = s.next;
             s.next += 1;
             s.running.insert(x);
+            self.publish(&s);
             let reserve = (s.next > s.reserved).then(|| {
                 s.reserved = s.next + 1024;
                 s.reserved
@@ -196,6 +210,7 @@ impl Xids {
             }
         }
         s.latest_completed = s.latest_completed.max(xid);
+        self.publish(&s);
     }
 
     /// A prepared transaction recovered at startup: its id and its subtransactions' are
@@ -210,6 +225,7 @@ impl Xids {
             }
         }
         s.subs.extend(subs.iter().copied());
+        self.publish(&s);
     }
 
     /// The next id to hand out.
@@ -260,6 +276,7 @@ impl Xids {
         if let Some(o) = owner {
             s.owners.entry(o).or_default().push(xmin);
         }
+        self.publish(&s);
         SnapshotXmin { xids: self.clone(), xmin, owner }
     }
 
@@ -304,9 +321,15 @@ impl Xids {
     /// data_oldest_nonremovable): deletions by transactions before it are dead to everyone.
     /// Every running transaction and every snapshot held counts.
     pub fn horizon(&self) -> u64 {
-        let s = self.state.lock();
-        let run = Self::xmin_now(&s);
-        s.snapshots.first_key_value().map_or(run, |(x, _)| run.min(*x))
+        #[cfg(debug_assertions)]
+        {
+            // (Under the mutex the published horizon is the state's.)
+            let s = self.state.lock();
+            let run = Self::xmin_now(&s);
+            let h = self.horizon_now.load(std::sync::atomic::Ordering::Acquire);
+            debug_assert_eq!(h, s.snapshots.first_key_value().map_or(run, |(x, _)| run.min(*x)), "published horizon");
+        }
+        self.horizon_now.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// The pruning horizon of a session's temporary relations (temp_oldest_nonremovable):
