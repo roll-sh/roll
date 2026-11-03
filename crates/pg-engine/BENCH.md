@@ -108,7 +108,8 @@ cursor's scan takes its connection at DECLARE.
 The workload is `tests/fdw_traffic.rs`'s phases plus one new phase ("locked local join of a
 foreign join": `SELECT loc.id, ft.v, fs.w FROM loc, ft, fs WHERE ft.id = fs.id AND ft.id =
 loc.id AND fs.id < N FOR UPDATE OF loc`, 20 statements). It runs as one psql session against
-a fresh server whose postgres_fdw connects to the same server through a counting TCP proxy:
+a fresh server whose postgres_fdw connects to the same server through a counting TCP proxy
+(`tools/fdwtraffic/`: `run-engine.sh`, the workload `pgtraffic.py`, the proxy `fdwproxy.py`):
 `writes` are the wrapper's message batches (round trips), `out` / `in` the bytes each way. The
 engine is a `--profile dist` build (e73340f4) with WAL fsync on, as PostgreSQL 18.6 (the pinned
 image, default settings, host network) is. Both run on the same 16-core host; the engine runs

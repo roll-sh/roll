@@ -1009,7 +1009,7 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   estimate is used, but with rows from the wider width. So the engine pushes joins
   PostgreSQL doesn't over never-analyzed tables (BENCH.md "postgres_fdw, round 6").
   Traffic against PostgreSQL's postgres_fdw: BENCH.md "postgres_fdw, round 6" (a counting proxy,
-  `pgtraffic.py` in that section's method; fewer round trips and bytes in every phase).
+  `tools/fdwtraffic/`; fewer round trips and bytes in every phase).
 - **file_fdw** (round 19, agent 66): native (`src/ext/file_fdw.rs`), 187 / 187 of its
   contrib test. Foreign scans of a file_fdw table read the file with COPY FROM's parser
   (`session/copy.rs` `parse_copy_data`, shared with COPY) a chunk at a time; the file is a
