@@ -1,6 +1,7 @@
 -- ANALYZE reports the dead versions it finds (acquire_sample_rows' deadrows) as n_dead_tup,
 -- and an INSERT that fails on a unique key still counts its heap tuple (inserted, then dead
--- with the abort).
+-- with the abort). (ANALYZE right after DML whose counts this backend hasn't flushed yet:
+-- PostgreSQL subtracts the pending ones, so the result depends on its flush interval.)
 CREATE TABLE a162_v (id int PRIMARY KEY, v int) WITH (autovacuum_enabled = off);
 INSERT INTO a162_v SELECT i, i FROM generate_series(1, 30) i;
 DELETE FROM a162_v WHERE id > 10;
@@ -11,9 +12,6 @@ ANALYZE a162_v;
 SELECT n_live_tup, n_dead_tup, n_mod_since_analyze, analyze_count FROM pg_stat_user_tables WHERE relname = 'a162_v';
 VACUUM a162_v;
 SELECT n_live_tup, n_dead_tup, vacuum_count FROM pg_stat_user_tables WHERE relname = 'a162_v';
-UPDATE a162_v SET v = 1 WHERE id = 5;
-ANALYZE a162_v;
-SELECT n_live_tup, n_dead_tup FROM pg_stat_user_tables WHERE relname = 'a162_v';
 
 INSERT INTO a162_v VALUES (3, 0);
 INSERT INTO a162_v VALUES (100, 0), (4, 0);

@@ -308,6 +308,96 @@ errors in transactions, recursive CTEs with SEARCH / CYCLE, window frames with E
 | round 5, base (0f9f0609, round 5 generator) | 5256–5355 × 100 | 9,697 | crash 2, wrong_rows 39, wrong_state 7, engine_error 14, missing_error 8, wrong_error 28, eval_error 26, notice 7, tag 1 |
 | round 5, batch 2 | 5256–5355 × 100 | 10,064 | wrong_rows 1, wrong_state 2, engine_error 8, missing_error 12, wrong_error 21, eval_error 13, notice 3, tag 1 (110 above error_message in the base, 52 here; 64 gone; none new but 6 past a base divergence; the wrong_rows / wrong_state are the old grammar's, the base's too: DISTINCT ON's physical order, a failing UPDATE condition, ANALYZE's sample) |
 
+## Round 10 grammar (agent 162)
+
+Seeds from `R10_SEEDS` (10000) on add the `r10*` objects (`round10.rs`) to round 9's; 60% of the
+statements are `round10_stmt`'s, aimed where round 10's optimisers work:
+
+- **Nested loops rescanning parameterized index scans** (agent 160): `r10o` (200-2,500 outer
+  rows, `kn` a third NULL) joined to `r10i` (3,000-9,000 rows, indexed on `k`, `t` and sometimes
+  `(k, v)`) on `k`, a range of `k`, `= ANY (ARRAY[o.k, o.kn, NULL])` and text keys; outer sides
+  empty, NULL-keyed, of every size; LIMIT above, LATERAL with ORDER BY / LIMIT inside, LEFT
+  JOIN LATERAL aggregates, EXISTS / NOT EXISTS / IN / NOT IN / `<> ALL`, correlated
+  sub-selects with OFFSET, a division by zero in the projection; hash and merge joins off, and
+  Memoize, Material, sequential, bitmap or index-only scans off; EXPLAIN ANALYZE without timing
+  and memory lines (`r10an`) counts rows and loops.
+- **Custom against generic plans** (agents 159 and 155): templates whose text parameters are
+  cast by STABLE input functions (`$1::int[]`, `$1::date`, `$1::timestamptz`, `$1::regclass`,
+  `$1::int`, with bad values), untyped parameters (SQL PREPARE without types, untyped Parse:
+  `$1 IS NULL`, `$1 || t`, BETWEEN, coalesce, `= ANY ($1)`, `$1 + $2`), executed 6-12 times
+  with DDL partway (an index made, ANALYZE, a column added and dropped, a table of the same
+  name earlier on the search_path, extended statistics), plan counts read at the end.
+- **Batch execution** (agents 160 and 154) over `r10b` (`a` 70% NULL with int4's limits, `b`
+  near int8's, numeric keys `1.0` / `1.00` / `1e30`, `-0` / `0` / `NaN` floats, text under the
+  database collation, C and ICU): filters whose quals PostgreSQL orders by cost (`a + 1 > 0 AND
+  a < 0`), group keys with NULLs, ROLLUP with GROUPING, overflowing sums, hash joins on
+  duplicate, NULL, float and numeric keys (inner, outer, semi, anti, a join filter that
+  overflows, a collation conflict), under a 64 kB work_mem.
+- **Queue tables** (agents 159 and 148): `DELETE ... WHERE id = (SELECT min(id) ...) RETURNING`,
+  SKIP LOCKED, the UPDATE and CTE forms; session 2 inserting in an open transaction, deleting
+  or updating the same head (a lock wait, then the recheck), skipping locked rows.
+- **Statistics views over 15-60 tables** (agents 146 and 161): pg_stat_user_tables after
+  `pg_stat_force_next_flush()` from this session and session 2, pg_stat_xact_user_tables across
+  a rolled-back savepoint, a snapshot cached for the transaction while another session
+  flushes, VACUUM / ANALYZE counts, `pg_stat_reset_single_table_counters`, TRUNCATE.
+
+## Round 10 (agent 162)
+
+Seeds 10000-10149 (23,363 statements, release, on `31066020` with the grammar): wrong_rows 394,
+plan_variance 2, engine_error 49, missing_error 4, wrong_error 32, eval_error 25,
+error_detail 13. The queue tables agreed throughout, and so did the statistics views but for
+the two counts fixed below. Found:
+
+- **Executor (agent 160): a semi- or anti-join's nested loop reads its whole inner side per
+  outer row** (`NestLoopNode::right_rows` collects every inner row before the join looks at
+  one), where ExecNestLoop stops at the first match. Errors come from inner rows PostgreSQL
+  never reads, and EXPLAIN ANALYZE's rows differ (`Index Scan ... (actual rows=42.90 loops=49)`
+  against `rows=1.00`). Not caused by a recent push (the same on `5386239f`):
+  `CREATE TABLE r10o (id int PRIMARY KEY, k int); INSERT INTO r10o SELECT i, i % 40 FROM
+  generate_series(1, 1000) i; CREATE TABLE r10i (id int PRIMARY KEY, k int, v int); INSERT INTO
+  r10i SELECT i, i % 50, i % 7 FROM generate_series(1, 5000) i; CREATE INDEX r10i_k ON r10i (k);
+  ANALYZE r10o; ANALYZE r10i; SELECT count(*) FROM r10o o WHERE EXISTS (SELECT 1 FROM r10i i
+  WHERE i.k = o.k AND 1 / (i.id - 1601) > -5) AND o.id < 3` fails 22012, PostgreSQL returns 2.
+- **Executor (agent 160): a GroupAggregate under a LIMIT computes every group**: over the same
+  tables, `SET enable_hashjoin = off; SET enable_mergejoin = off; SELECT o.id, count(i.id),
+  sum(i.v / (o.id - 30)) FROM r10o o JOIN r10i i ON i.k = o.k WHERE o.id < 40 GROUP BY o.id
+  ORDER BY o.id LIMIT 5` fails 22012, PostgreSQL returns five rows (its GroupAggregate shows
+  `actual rows=5`, its outer Index Scan 6 rows; the engine's 39 and 39).
+- **Plan cache (agent 159, with agent 155's custom-plan design): STABLE casts of text
+  parameters.** PostgreSQL's custom plan reduces `$1::int[]` (a CoerceViaIO) to the output
+  function's constant and the STABLE input function, shown `('{1}'::cstring)::integer[]`; the
+  engine folds it whole (`'{1}'::integer[]`) or, when folding fails, keeps `('x'::text)::date`.
+  PostgreSQL's selectivity estimates evaluate STABLE functions (estimate_expression_value), so
+  a bad value fails the custom plan while planning: `k = ANY ($1::int[]) AND id < $2` with
+  `'{1,x}'`, 0 is 22P02 in PostgreSQL, 0 rows in the engine; `d > $1::timestamptz` with
+  `'2026-02-30'` 22008 (over the protocol PostgreSQL's 22008 comes before Bind's result-format
+  check, the engine's 08P01); `oid = $1::regclass` with `'r10nope'` 42P01. A failed custom plan
+  isn't counted, so pg_prepared_statements' counts differ after one (48 + 23 cases with the
+  generic plan never chosen, round 9's item). A plain query folds it too: `SELECT relname FROM
+  pg_class WHERE oid = 'pg_class'::text::regclass` shows `Index Cond: (oid = '1259'::oid)`,
+  PostgreSQL `(oid = (('pg_class'::text)::regclass)::oid)`.
+- **Planner (agent 155)**: a group key a custom plan makes constant (`SELECT coalesce($1, k),
+  count(*) FROM r10o WHERE id < 50 GROUP BY 1 ORDER BY 1` with 1000) keeps `Sort Key: (1000)`
+  above the GroupAggregate; PostgreSQL drops the constant pathkey. EXPLAIN of a merge join of
+  `x.tc = y.t` (C against the database collation): the engine `Merge Cond: (x.tc = y.t)` /
+  `Sort Key: y.t`, PostgreSQL `(x.tc = (y.t)::text)` / `y.t COLLATE "C"` (the sort-key COLLATE
+  item of round 9). Plan choices under EXPLAIN ANALYZE (index against sequential and bitmap
+  scans, Memoize) and round 9's partitioned top-N.
+- **Catalog (agent 146)**: `SELECT relname FROM pg_class WHERE oid = $1::regclass` as a generic
+  plan is a Seq Scan with a filter; PostgreSQL's is an Index Scan using pg_class_oid_index
+  (a catalog index qual over a STABLE expression).
+- **Index builds (agent 144)**: which duplicate a failing build names: `CREATE UNIQUE INDEX
+  tc3_u ON tc3 (c)` over a composite with a collated field (round 3's `tc3`) reports `(z,3)`
+  where PostgreSQL reports `(Z,3)`; an exclusion constraint's gist build `Key (r)=([1,2))
+  conflicts with key (r)=([0,5))`, PostgreSQL `([0,2))` (seed 10112 #109).
+- **Fixed (agent 162)**: ANALYZE set n_dead_tup to 0; PostgreSQL reports the dead versions its
+  sample finds (`vacuum.rs`: the heap model's dead and recently dead tuples). An INSERT failing
+  on a unique key didn't count its heap tuple (n_tup_ins, then n_dead_tup with the abort;
+  `dml.rs`). A binary array parameter read flags and the element type before checking the
+  dimension count (08P01 "insufficient data left in message" where array_recv reports 54000;
+  `types/binary.rs`). Golden `a162_stats_dead`. Not fixed: an UPDATE failing on a unique key
+  doesn't count n_tup_upd either (not seen in a seed).
+
 ## Round 9 grammar (agent 156)
 
 Seeds from `R9_SEEDS` (9000) on add the `r9*` objects (`round9.rs`) to round 8's shared engine
@@ -366,6 +456,7 @@ all of it (round 9's seeds too with `GUARD_SEEDS`).
 | 2026-11-03 | `251924c1` / `ed0c85fe` (release) | 70,215 | 0 | 37 lines: round 7's binary domain-array element oid (seeds 7024, 7087-7145, 8032, 8132), Bind's result-format check before the custom plan (7063, 08P01 vs 22003) |
 | 2026-11-03, `tools/difftest-guard.sh`, rounds 6-9 | `847fbdba` / `1f676b8a` | 93,717 | 3 lines, one case (seed 9014 #82: a generic plan's Index Only Scan where PostgreSQL has a Bitmap Heap Scan), not reproducible from its reduced case on either binary: background VACUUM timing (both servers' autovacuum visits a seed's tables at random points), so round 9's tables no longer autovacuum | 6: agent 145's result-type check (0A000, seeds 9060, 9061, 9067, 9090) and binary array dimensions (54000, seed 9073) |
 | 2026-11-03, rounds 6-9 (head with round 9's tables not autovacuuming) | `1f676b8a` / `5386239f` (agent 154's batch execution 86c04b88, agent 148's COPY flush bd7ba755) | 93,717 | 0 | 7: COPY's sequence values after a late duplicate (seeds 9010, 9093, 9119), and plans of seeds 9017, 9046 (the autovacuum change) |
+| 2026-11-03, rounds 6-9 (agent 162) | `5386239f` / `31066020` (agent 149's scan cost round 3, batch 2, 4e89b2ff) | 93,717 | 0 | 0 |
 
 ## Round 9 (agent 156)
 
