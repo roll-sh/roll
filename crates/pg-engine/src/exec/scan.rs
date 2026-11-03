@@ -562,7 +562,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             blocks: Default::default(),
             prune_next: 0,
             nblocks: None,
-            last_block: None,
+            fetcher: None,
             fetched,
             batch: FETCH_BATCH_MIN,
             ios_cols: None,
@@ -652,7 +652,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             blocks: Default::default(),
             prune_next: 0,
             nblocks: None,
-            last_block: None,
+            fetcher: None,
             fetched: rows.into_iter().map(|(k, r)| (Vec::new(), k, Some(r))).collect(),
             batch: FETCH_BATCH_MIN,
             ios_cols: None,
@@ -732,7 +732,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             blocks: Default::default(),
             prune_next: 0,
             nblocks: None,
-            last_block: None,
+            fetcher: None,
             fetched: Default::default(),
             batch: FETCH_BATCH_MIN,
             ios_cols: None,
@@ -961,7 +961,7 @@ fn open_scan_as(
         blocks: Default::default(),
         prune_next: 0,
         nblocks: None,
-        last_block: None,
+        fetcher: None,
         fetched: Default::default(),
         batch: FETCH_BATCH_MIN,
         ios_cols,
@@ -1703,7 +1703,7 @@ fn dense_bitmap_scan(
         blocks: Default::default(),
         prune_next: 0,
         nblocks: None,
-        last_block: None,
+        fetcher: None,
         fetched: Default::default(),
         batch: FETCH_BATCH_MIN,
         ios_cols: None,
@@ -2137,8 +2137,9 @@ struct ScanNode {
     blocks: std::collections::VecDeque<Option<u32>>,
     prune_next: u32,
     nblocks: Option<u32>,
-    /// An index or bitmap heap scan: the heap page it last fetched from.
-    last_block: Option<u32>,
+    /// An index or bitmap heap scan's fetches noted for the heap model (pruning on reaching
+    /// another page), once made; None inside: the heap isn't modelled.
+    fetcher: Option<Option<super::sizing::Fetcher>>,
     /// Index entries (entry key, data key) with their rows, fetched ahead a batch at a
     /// time (`fetch_rows`); a bitmap heap scan's have an empty entry key.
     fetched: std::collections::VecDeque<(Vec<u8>, Vec<u8>, Option<bytes::Bytes>)>,
@@ -4394,7 +4395,10 @@ impl ScanNode {
         }
         if (self.plan.index.is_some() || self.keys.is_some()) && self.only.is_none() {
             // None also clears the cached block when all-visible pages need no fetch.
-            self.last_block = super::sizing::fetched(self.plan.table.oid, key, self.last_block, ctx);
+            let t = self.plan.table.oid;
+            if let Some(f) = self.fetcher.get_or_insert_with(|| super::sizing::Fetcher::new(t, ctx)) {
+                f.fetched_at(key, stored_tid(bytes));
+            }
         }
         if self.ios {
             let counted = match &mut self.ios_entries {
@@ -5153,7 +5157,7 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
         blocks: Default::default(),
         prune_next: 0,
         nblocks: None,
-        last_block: None,
+        fetcher: None,
         fetched: Default::default(),
         batch: FETCH_BATCH_MIN,
         ios_cols: None,
