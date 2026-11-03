@@ -1021,6 +1021,7 @@ login tests drive a fake `roll` process (`apps/desktop/test/fake-roll.mjs`).
 
 | Behaviour | Tests |
 | --- | --- |
+| the relay link sends the records a command wrote before its reply (a `/state` read right after a reply has them) | `roll-cli/tests/agent.rs::login_up_status_and_logout`, `agents_code.rs::repos_clone_onto_machines_and_new_repos_start_as_projects` |
 | store: one record per `(kind, id)` at its newest `seq`, `since` paging, tombstones replay | `agent-host/tests/store.rs::records_appear_once_at_their_newest_seq`, `agent-host/tests/store.rs::tombstones_replace_records_and_replay` |
 | store: seq counter, command receipts and thread state survive a reopen; receipts prune | `agent-host/tests/store.rs::survives_reopen_with_receipts_and_thread_state` |
 | config: `[providers.*]` and `[[acp]]` agents, `[code] clone_dir`, bad names and unknown keys refused | `agent-host/src/config.rs` tests |

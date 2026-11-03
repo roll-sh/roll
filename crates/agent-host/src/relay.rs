@@ -282,6 +282,39 @@ async fn session(daemon: &Arc<dyn Daemon>, mut ws: Ws, events: &mpsc::UnboundedS
                 }
             }
             Some((id, result)) = replies.recv() => {
+                // A command's records were broadcast before its reply: what is queued goes
+                // first, so a client that has the reply finds them on the relay.
+                let mut items = Vec::new();
+                for _ in 0..live.len() {
+                    match live.try_recv() {
+                        Ok(Outbound::Entity(s)) => {
+                            if !replaying && s.seq > out.sent {
+                                items.push(*s);
+                            }
+                        }
+                        Ok(o) => {
+                            if let Err(e) = send_other(&mut ws, o).await {
+                                return retry(e, true);
+                            }
+                        }
+                        Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                            live = daemon.subscribe();
+                            out.replay = Some(acked);
+                            items.clear();
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                items.sort_by_key(|s| s.seq);
+                if let Some(last) = items.last() {
+                    out.sent = last.seq;
+                }
+                for chunk in chunks(items) {
+                    if let Err(e) = ws.send(frame(&DaemonFrame::Entities { items: chunk })).await {
+                        return retry(format!("sending records: {e}"), true);
+                    }
+                }
                 if let Err(e) = ws.send(frame(&DaemonFrame::Reply { id, result })).await {
                     return retry(format!("sending a reply: {e}"), true);
                 }
