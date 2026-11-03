@@ -44,15 +44,23 @@ cmd=$1; shift
 case $cmd in
 pg-start)
   # Plan-affecting settings (work_mem, effective_cache_size, random_page_cost) stay at their
-  # defaults, as the engine has them, so both run the same plans.
+  # defaults, as the engine has them, so both run the same plans. PG_NETWORK=host serves on
+  # the host network (no docker-proxy between client and server: the engine has none);
+  # PG_CPU_SHARES lowers its CPU weight (2 is about nice 19's, for runs at low priority).
+  if [ "${PG_NETWORK:-}" = host ]; then
+    net="--network host"; listen="-c port=$PG_PORT -c listen_addresses=127.0.0.1"; inport=$PG_PORT
+  else
+    net="-p 127.0.0.1:$PG_PORT:5432"; listen=""; inport=5432
+  fi
+  # shellcheck disable=SC2086
   docker run -d --name "$PG_NAME" --cpuset-cpus "$SERVER_CPUS" --shm-size=1g \
-    -p 127.0.0.1:$PG_PORT:5432 -v "$PG_NAME-data":/var/lib/postgresql \
+    ${PG_CPU_SHARES:+--cpu-shares "$PG_CPU_SHARES"} $net -v "$PG_NAME-data":/var/lib/postgresql \
     -e POSTGRES_PASSWORD=pw -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8" \
     "$PG_IMAGE" -c shared_buffers=2GB -c maintenance_work_mem=256MB -c max_wal_size=8GB \
-    -c checkpoint_timeout=30min -c max_connections=300 >/dev/null
-  i=0; until docker exec "$PG_NAME" pg_isready -U postgres -q 2>/dev/null; do sleep 1; i=$((i+1)); [ $i -lt 60 ]; done
+    -c checkpoint_timeout=30min -c max_connections=300 $listen >/dev/null
+  i=0; until docker exec "$PG_NAME" pg_isready -U postgres -h 127.0.0.1 -p "$inport" -q 2>/dev/null; do sleep 1; i=$((i+1)); [ $i -lt 60 ]; done
   sleep 2
-  docker exec "$PG_NAME" psql -U postgres -Atc "select version()"
+  docker exec "$PG_NAME" psql -U postgres -p "$inport" -Atc "select version()"
   ;;
 pg-stop)
   docker rm -f "$PG_NAME" >/dev/null 2>&1 || true
