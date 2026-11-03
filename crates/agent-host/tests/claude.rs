@@ -590,6 +590,7 @@ fn launch_flags_follow_the_session_config() {
         assert!(has_flags(args, &["--settings", r#"{"showThinkingSummaries":true,"ultracode":true}"#]));
         assert!(has_flags(args, &["--append-system-prompt", "Keep the code rolling."]));
         assert!(has_flags(args, &["--mcp-config", r#"{"mcpServers":{"roll":{"headers":{"Authorization":"Bearer t"},"type":"http","url":"http://127.0.0.1:9/mcp"}}}"#]), "{args:?}");
+        assert!(has_flags(args, &["--allowedTools", "mcp__roll__*"]), "{args:?}");
         r.expect_tail(&["turn completed", "exited"]);
     });
 }

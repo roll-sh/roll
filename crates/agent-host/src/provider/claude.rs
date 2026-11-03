@@ -258,6 +258,8 @@ struct Launch {
     model: Option<String>,
     effort: models::Effort,
     mcp: Option<String>,
+    /// roll's own MCP tools never ask (T3 pre-approves its MCP tools the same way).
+    allowed_tools: Vec<String>,
     instructions: Option<String>,
 }
 
@@ -289,6 +291,7 @@ impl Launch {
             model: cfg.model.clone(),
             effort: models::effort(cfg.effort.as_deref()),
             mcp,
+            allowed_tools: cfg.mcp.iter().map(|s| format!("mcp__{}__*", s.name)).collect(),
             instructions: cfg.instructions.clone().filter(|i| !i.trim().is_empty()),
         }
     }
@@ -318,6 +321,9 @@ impl Launch {
         }
         if let Some(mcp) = &self.mcp {
             push(&["--mcp-config", mcp]);
+        }
+        if !self.allowed_tools.is_empty() {
+            push(&["--allowedTools", &self.allowed_tools.join(",")]);
         }
         if let Some(text) = &self.instructions {
             push(&["--append-system-prompt", text]);
