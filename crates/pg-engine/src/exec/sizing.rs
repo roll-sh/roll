@@ -27,10 +27,12 @@ pub mod gistlog;
 pub mod kept;
 
 /// Tables with more row versions than this aren't modelled (their sizes are estimated).
-/// Packed line pointers (`heapsim::lps`) and leaf buffers (`btsim::leaf`) let larger tables
-/// retain the models rather than switching to estimates at 400,000 versions. Tests lower
-/// this limit (`with_max_versions`) to take the estimates' paths.
-const MAX_VERSIONS: usize = 1 << 40;
+/// Packed line pointers (`heapsim::lps`) and leaf buffers (`btsim::leaf`) make a modelled
+/// row cost well under PostgreSQL's page bytes for it, but keeping a big table's model
+/// costs its bulk writes (COPY, DELETE, CREATE INDEX) a model update per row: the limit
+/// stays at 400,000 versions until those are cheaper than the estimates' paths. Tests lower
+/// it (`with_max_versions`) to take the estimates' paths.
+const MAX_VERSIONS: usize = 400_000;
 
 thread_local! {
     /// `MAX_VERSIONS` on this thread (`with_max_versions`).
