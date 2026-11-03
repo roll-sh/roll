@@ -197,6 +197,39 @@ impl Leaf {
         }
     }
 
+    /// VACUUM's bulk delete on this page (_bt_delitems_vacuum): the TIDs `keep` rejects go,
+    /// an item with none left goes, a posting list that loses some is rewritten (its LP_DEAD
+    /// mark cleared: PageIndexTupleOverwrite), other items stay as they are. Packed in place,
+    /// no item unpacked. Returns (TIDs removed, TIDs left, the items' bytes now).
+    pub fn retain_tids(&mut self, keep: impl Fn(Tid) -> bool) -> (usize, usize, usize) {
+        let (mut removed, mut left, mut used) = (0, 0, 0);
+        let mut buf = Vec::with_capacity(self.buf.len() - self.garbage);
+        let mut at = Vec::with_capacity(self.at.len());
+        let mut tids = Vec::new();
+        for i in 0..self.len() {
+            let it = self.get(i);
+            tids.clear();
+            tids.extend(it.tids.iter().filter(|&t| keep(t)));
+            removed += it.tids.len() - tids.len();
+            if tids.is_empty() {
+                continue;
+            }
+            left += tids.len();
+            let dead = it.dead && tids.len() == it.tids.len();
+            used += if tids.len() > 1 { maxalign(it.key.size() + 6 * tids.len()) } else { it.key.size() };
+            at.push(buf.len() as u32);
+            buf.push(dead as u8);
+            buf.extend_from_slice(&(tids.len() as u16).to_le_bytes());
+            for &(b, o) in &tids {
+                buf.extend_from_slice(&b.to_le_bytes());
+                buf.extend_from_slice(&o.to_le_bytes());
+            }
+            buf.extend_from_slice(it.key.as_bytes());
+        }
+        *self = Leaf { buf, at, garbage: 0 };
+        (removed, left, used)
+    }
+
     /// The buffer without the bytes no item holds.
     fn compact(&mut self) {
         let mut buf = Vec::with_capacity(self.buf.len() - self.garbage + 64);
@@ -237,7 +270,7 @@ mod tests {
             let key = Key::new(&[vec![(x >> 8) as u8; len]], &[8 + len]);
             let tids: Vec<Tid> = (0..1 + (x >> 30) as u16 % 3).map(|i| (n, i)).collect();
             match (x >> 50) % 8 {
-                0 | 1 if want.len() > 250 || (!want.is_empty() && (x >> 50) % 8 == 0) => {
+                0 | 1 if want.len() > 250 || (!want.is_empty() && (x >> 50).is_multiple_of(8)) => {
                     l.pop();
                     want.pop();
                 }

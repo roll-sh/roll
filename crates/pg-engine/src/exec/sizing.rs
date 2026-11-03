@@ -3916,7 +3916,7 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
         indexes: Vec::new(),
     };
     if !res.dead.is_empty() {
-        let dead: HashSet<Tid> = res.dead.iter().copied().collect();
+        let dead: crate::exec::fasthash::HashSet<Tid> = res.dead.iter().copied().collect();
         for bix in &indexes {
             if let Some(bt) = btrees.get_mut(&bix.index.oid) {
                 bt.bulk_delete(&dead);
@@ -3938,7 +3938,7 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
         if !r.dead.is_empty()
             && let Some(bt) = btrees.get_mut(&(t.toast + 1))
         {
-            bt.bulk_delete(&r.dead.iter().copied().collect());
+            bt.bulk_delete(&r.dead.iter().copied().collect::<crate::exec::fasthash::HashSet<_>>());
         }
     }
     drop(rf);

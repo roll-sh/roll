@@ -510,6 +510,9 @@ pub struct Btree {
     pub tuples: usize,
     /// Bumped when its pages or height change.
     pub sizes: super::heapsim::SizeGen,
+    /// The leaf the last insertion went to: the next one checks it first (keys added in
+    /// order, a run of equal keys), skipping the descent when the leaf's own bounds hold it.
+    last_leaf: u32,
 }
 
 impl Btree {
@@ -520,6 +523,7 @@ impl Btree {
             root: None,
             tuples: 0,
             sizes: Default::default(),
+            last_leaf: 0,
         }
     }
 
@@ -669,21 +673,15 @@ impl Btree {
             p.items.push(&it);
             return;
         };
-        // Descend, remembering the path.
-        let mut stack: Vec<(u32, usize)> = Vec::new();
-        let mut blk = root;
-        loop {
-            let p = self.pages[blk as usize].as_ref().expect("btree page");
-            if p.leaf {
-                break;
+        // The leaf the last insertion went to, if it holds this entry; else descend.
+        let (mut blk, mut stack) = match self.holding_leaf(&key, tid) {
+            Some(b) => (b, None),
+            None => {
+                let (b, s) = self.descend_for(root, &key, tid);
+                (b, Some(s))
             }
-            let i = p
-                .inner
-                .partition_point(|(pv, _)| self.cmp_pivot(&key, tid, pv) == Ordering::Greater)
-                .saturating_sub(1);
-            stack.push((blk, i));
-            blk = p.inner[i].1;
-        }
+        };
+        self.last_leaf = blk;
         let nkey = self.opts.nkey;
         // (_bt_doinsert bypasses uniqueness for NULLs only when they are distinct.)
         let checking = self.opts.unique
@@ -692,13 +690,7 @@ impl Btree {
             self.kill_dead_duplicates(blk, &key, hint.dead);
         }
         let p = self.pages[blk as usize].as_ref().expect("btree page");
-        let pos = p.items.partition_point(|it| {
-            match it.key.cmp_keys(&key, nkey) {
-                Ordering::Less => true,
-                Ordering::Greater => false,
-                Ordering::Equal => it.tids.first() < tid,
-            }
-        });
+        let pos = Self::insert_pos(&p.items, &key, tid, nkey);
         let new = Item::plain(key, tid);
         let itemsz = new.size();
         let uniquedup = checking
@@ -707,24 +699,77 @@ impl Btree {
                 .flatten()
                 .filter(|&i| i < p.items.len())
                 .any(|i| p.items.get(i).key.keep_natts(&new.key, nkey) > nkey);
+        let mut pos = pos;
         if p.free() < itemsz {
             self.delete_or_dedup(blk, &new.key, itemsz, checking, uniquedup, hint);
+            let p = self.pages[blk as usize].as_ref().expect("btree page");
+            pos = Self::insert_pos(&p.items, &new.key, tid, nkey);
         }
         let p = self.pages[blk as usize].as_ref().expect("btree page");
-        let pos = p.items.partition_point(|it| {
-            match it.key.cmp_keys(&new.key, nkey) {
-                Ordering::Less => true,
-                Ordering::Greater => false,
-                Ordering::Equal => it.tids.first() < tid,
-            }
-        });
         if p.free() >= itemsz {
             let p = self.page(blk);
             p.used += itemsz;
             p.items.insert(pos, &new);
             return;
         }
+        // (A split needs the path down: the descent's, also for a leaf the cache gave.)
+        let stack = match stack.take() {
+            Some(s) => s,
+            None => {
+                let (b, s) = self.descend_for(root, &new.key, tid);
+                debug_assert_eq!(b, blk, "the cached leaf is the descent's");
+                blk = b;
+                s
+            }
+        };
         self.split_leaf(blk, pos, new, stack);
+    }
+
+    /// The descent to the leaf (`key`, `tid`) goes on, with the path: (page, downlink) per
+    /// level.
+    fn descend_for(&self, root: u32, key: &Key, tid: Tid) -> (u32, Vec<(u32, usize)>) {
+        let mut stack: Vec<(u32, usize)> = Vec::new();
+        let mut blk = root;
+        loop {
+            let p = self.pages[blk as usize].as_ref().expect("btree page");
+            if p.leaf {
+                return (blk, stack);
+            }
+            let i = p
+                .inner
+                .partition_point(|(pv, _)| self.cmp_pivot(key, tid, pv) == Ordering::Greater)
+                .saturating_sub(1);
+            stack.push((blk, i));
+            blk = p.inner[i].1;
+        }
+    }
+
+    /// The last insertion's leaf when (`key`, `tid`) belongs on it: past its first entry and
+    /// before its high key (the rightmost leaf has none), so a descent would end there.
+    fn holding_leaf(&self, key: &Key, tid: Tid) -> Option<u32> {
+        let p = self.pages.get(self.last_leaf as usize)?.as_ref()?;
+        if !p.leaf || p.items.is_empty() {
+            return None;
+        }
+        let first = p.items.get(0);
+        let after_first = match first.key.key_bytes(self.opts.nkey).cmp(key.key_bytes(self.opts.nkey)) {
+            Ordering::Less => true,
+            Ordering::Equal => first.tids.first() < tid,
+            Ordering::Greater => false,
+        };
+        let below_high = p.high.as_ref().is_none_or(|h| self.cmp_pivot(key, tid, h) == Ordering::Less);
+        (after_first && below_high).then_some(self.last_leaf)
+    }
+
+    /// Where (`key`, `tid`) goes among a leaf's items: by the key attributes' encodings
+    /// (self-delimiting: they compare as the attributes do), then heap TID.
+    fn insert_pos(items: &Leaf, key: &Key, tid: Tid, nkey: usize) -> usize {
+        let k = key.key_bytes(nkey);
+        items.partition_point(|it| match it.key.key_bytes(nkey).cmp(k) {
+            Ordering::Less => true,
+            Ordering::Greater => false,
+            Ordering::Equal => it.tids.first() < tid,
+        })
     }
 
     /// _bt_check_unique's hints: the entries with the new entry's key whose heap tuples are
@@ -1458,7 +1503,7 @@ impl Btree {
 
     /// VACUUM's bulk delete: entries pointing at removed heap tuples go (pages stay).
     /// `tuples` becomes the heap TIDs left, as btvacuumscan counts them.
-    pub fn bulk_delete(&mut self, dead: &std::collections::HashSet<Tid>) -> usize {
+    pub fn bulk_delete(&mut self, dead: &crate::exec::fasthash::HashSet<Tid>) -> usize {
         let mut removed = 0;
         let mut left = 0;
         for p in self.pages.iter_mut().flatten() {
@@ -1470,18 +1515,10 @@ impl Btree {
                 left += n;
                 continue;
             }
-            let mut kept = Vec::with_capacity(p.items.len());
-            for mut it in p.items.take() {
-                let before = it.tids.len();
-                it.tids.retain(|t| !dead.contains(t));
-                removed += before - it.tids.len();
-                if !it.tids.is_empty() {
-                    kept.push(Item::posting(it.key, it.tids));
-                }
-            }
-            p.used = kept.iter().map(|i| i.size()).sum();
-            p.items.put(&kept);
-            left += kept.iter().map(|i| i.tids.len()).sum::<usize>();
+            let (r, l, used) = p.items.retain_tids(|t| !dead.contains(&t));
+            removed += r;
+            left += l;
+            p.used = used;
         }
         self.tuples = left;
         removed
@@ -2241,7 +2278,7 @@ impl Btree {
             }
             pages.push(Some(p));
         }
-        Some(Btree { opts, pages, root, tuples, sizes: Default::default() })
+        Some(Btree { opts, pages, root, tuples, sizes: Default::default(), last_leaf: 0 })
     }
 }
 
