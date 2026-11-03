@@ -1340,15 +1340,33 @@ pub fn btree_key(t: &Table, bix: &BoundIndex, vals: Vec<Value>, row: &[Value], c
 }
 
 /// The pages a sorted build (CREATE INDEX, REINDEX) of btree index `bix` over these keys
-/// gives, in the rows' order (their TIDs only order equal keys): `Btree::build`'s layout,
-/// with the index's fillfactor and deduplication, as the model has it for the indexes it
-/// holds. None for an index that isn't a btree.
-pub fn btree_build_blocks(bix: &BoundIndex, keys: Vec<Key>) -> Option<u32> {
+/// (each with its row's key) gives, in the rows' order (their TIDs only order equal keys):
+/// `Btree::build`'s layout, with the index's fillfactor and deduplication, as the model has
+/// it for the indexes it holds. None for an index that isn't a btree. On a modelled heap
+/// the build is the index's model from then on (entries at their rows' TIDs, as `ensure`
+/// would build it): the rows aren't read again for it.
+pub fn btree_build_blocks(t: &Table, bix: &BoundIndex, keys: Vec<(Key, Vec<u8>)>, db: &Database) -> Option<u32> {
     let opts = btree_opts(bix)?;
+    let oid = bix.index.oid;
+    let mut rf = db.relfiles.of(t.oid).write();
+    let real: Option<Vec<(Key, Tid)>> = rf.heaps.get(&t.oid).and_then(|h| {
+        let mut out = Vec::with_capacity(keys.len());
+        for (k, row) in &keys {
+            out.push((k.clone(), h.tid_of(row)?));
+        }
+        Some(out)
+    });
+    if let Some(entries) = real {
+        let tree = Btree::build(opts, entries);
+        let n = tree.nblocks();
+        rf.btrees.insert(oid, tree);
+        return Some(n);
+    }
+    drop(rf);
     let entries = keys
         .into_iter()
         .enumerate()
-        .map(|(i, k)| (k, ((i / 291) as u32, (i % 291) as u16 + 1)))
+        .map(|(i, (k, _))| (k, ((i / 291) as u32, (i % 291) as u16 + 1)))
         .collect();
     Some(Btree::build(opts, entries).nblocks())
 }

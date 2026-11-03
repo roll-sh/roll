@@ -1433,7 +1433,7 @@ impl Ddl<'_, '_> {
             keys: Vec<(u128, Vec<u8>, usize)>,
             /// A btree's keys as its model has them, when its pages aren't modelled: sized
             /// by the model's sorted build (`sizing::btree_build_blocks`).
-            btree_keys: Option<Vec<crate::catalog::btsim::Key>>,
+            btree_keys: Option<Vec<(crate::catalog::btsim::Key, Vec<u8>)>>,
         }
         let mut ixs: Vec<Ix> = Vec::new();
         if let Some(only) = indexes {
@@ -1574,7 +1574,7 @@ impl Ddl<'_, '_> {
                 }
                 ix.tuples += 1;
                 if let Some(keys) = &mut ix.btree_keys {
-                    keys.push(crate::exec::sizing::btree_key(t, &ix.bix, vals, &row, self.ctx));
+                    keys.push((crate::exec::sizing::btree_key(t, &ix.bix, vals, &row, self.ctx), dkey.clone()));
                 } else if ix.modelled.is_none() {
                     let mut sort = super::table::key_bytes(&vals);
                     vals.extend(ix.bix.index.include.iter().map(|&i| row[i].clone()));
@@ -1628,7 +1628,7 @@ impl Ddl<'_, '_> {
             let built = ix
                 .btree_keys
                 .take()
-                .and_then(|keys| crate::exec::sizing::btree_build_blocks(&ix.bix, keys));
+                .and_then(|keys| crate::exec::sizing::btree_build_blocks(t, &ix.bix, keys, db));
             let pages = match ix.modelled.or(built) {
                 Some(n) => n as i32,
                 None => btree_pages_of(&ix.bix, &ix.types, std::mem::take(&mut ix.keys)),
