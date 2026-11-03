@@ -57,4 +57,4 @@ jobs:
         run: |
           docker pull -q amazon/dynamodb-local & docker pull -q chrislusf/seaweedfs &
           docker pull -q cgr.dev/chainguard/minio & docker pull -q cgr.dev/chainguard/minio-client & wait
-      - run: scripts/test-tasks.sh --force
+      - run: scripts/test-tasks.sh --force --e2e-only

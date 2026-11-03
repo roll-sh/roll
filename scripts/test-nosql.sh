@@ -10,6 +10,7 @@
 # them and removes them on exit. Set CARGO to wrap cargo (e.g. a
 # memory-limited wrapper). Set ROLL_E2E_S3_BUCKET (+ ROLL_E2E_S3_ENDPOINT, AWS_* credentials) to
 # run the persistence tests against S3 instead of a local directory.
+# `--e2e-only` runs the external suites without repeating the separate CI unit job.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -20,18 +21,24 @@ PATHS=(crates/nosql-types crates/nosql-proto crates/nosql-cql crates/nosql-stora
 STAMP=target/.test-nosql.hash
 CARGO=${CARGO:-cargo}
 
-force=0 unit_only=0 conformance=0
+force=0 unit_only=0 e2e_only=0 conformance=0
 for a in "$@"; do
   case "$a" in
     --force) force=1 ;;
     --unit) unit_only=1 ;;
+    --e2e-only) e2e_only=1 ;;
     --conformance) conformance=1 ;;
     *) echo "unknown argument $a" >&2; exit 2 ;;
   esac
 done
 
+if [[ $unit_only == 1 && $e2e_only == 1 ]]; then
+  echo "--unit and --e2e-only are mutually exclusive" >&2
+  exit 2
+fi
+
 hash=$(find "${PATHS[@]}" -type f -not -path '*/target/*' 2>/dev/null | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256 | cut -d' ' -f1)
-if [[ $force == 0 && -f $STAMP && "$(cat "$STAMP")" == "$hash" ]]; then
+if [[ $force == 0 && $e2e_only == 0 && -f $STAMP && "$(cat "$STAMP")" == "$hash" ]]; then
   echo "nosql: no changes since the last green run; skipping (--force to run anyway)"
   exit 0
 fi
@@ -39,12 +46,15 @@ fi
 CRATES=(-p nosql-types -p nosql-proto -p nosql-cql -p nosql-storage -p nosql-engine -p nosql-alternator
         -p nosql-server -p nosql-control -p nosql-sstable-import)
 $CARGO build "${CRATES[@]}" -p rolld -p roll-cli
-$CARGO clippy "${CRATES[@]}" -p rolld -p roll-cli --all-targets --all-features -- -D warnings
-# Everything that needs no reference server: env-gated reference tests skip themselves. With
-# ROLL_E2E_S3_BUCKET set, every suite on test_objects (and rolld's) runs against S3.
-$CARGO test "${CRATES[@]}" --all-features
-$CARGO test -p roll-cli --features roll-server-tests --test nosql_api --test cqlsh_roll
-$CARGO test -p rolld --test nosql
+# CI runs the unit job separately; keep the default local command comprehensive.
+if [[ $e2e_only == 0 ]]; then
+  $CARGO clippy "${CRATES[@]}" -p rolld -p roll-cli --all-targets --all-features -- -D warnings
+  # Everything that needs no reference server: env-gated reference tests skip themselves. With
+  # ROLL_E2E_S3_BUCKET set, every suite on test_objects (and rolld's) runs against S3.
+  $CARGO test "${CRATES[@]}" --all-features
+  $CARGO test -p roll-cli --features roll-server-tests --test nosql_api --test cqlsh_roll
+  $CARGO test -p rolld --test nosql
+fi
 
 if [[ $unit_only == 0 ]]; then
   if ! docker info >/dev/null 2>&1; then

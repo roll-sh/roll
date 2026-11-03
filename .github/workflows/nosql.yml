@@ -32,6 +32,7 @@ env:
 jobs:
   unit:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -48,7 +49,7 @@ jobs:
     env:
       ROLL_NOSQL_IMAGE_RUNTIME: ubuntu:24.04
     # Includes building the roll/nosql image and its image, tool and driver suites.
-    timeout-minutes: 90
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -58,11 +59,11 @@ jobs:
       - run: sudo sysctl -w fs.aio-max-nr=1048576
       - run: docker pull -q scylladb/scylla:2026.3.3 && docker pull -q cassandra:5.0.9
       - name: Differential, driver and cqlsh tests against ScyllaDB and Cassandra
-        run: scripts/test-nosql.sh --force
+        run: scripts/test-nosql.sh --force --e2e-only
 
   conformance:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 45
     env:
       # The per-row TTL tests poll until rows expire; until roll expires them, each runs into this.
       ROLL_CONFORMANCE_TIMEOUT: 600

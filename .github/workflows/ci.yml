@@ -13,6 +13,7 @@ concurrency:
 jobs:
   changes:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       code: ${{ steps.diff.outputs.code }}
       postgres: ${{ steps.diff.outputs.postgres }}
@@ -93,6 +94,7 @@ jobs:
     needs: [changes, code, nosql, postgres, queues, redis, storage, stream, tasks, web]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - env:
           NEEDS: ${{ toJSON(needs) }}

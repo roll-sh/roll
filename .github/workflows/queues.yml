@@ -31,12 +31,14 @@ env:
 jobs:
   deploy-template:
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - run: pipx run cfn-lint deploy/queues/aws/roll-queues.yaml
 
   unit:
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -49,7 +51,7 @@ jobs:
 
   e2e:
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -58,4 +60,4 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - run: scripts/test-queues.sh --force
+      - run: scripts/test-queues.sh --force --e2e-only
