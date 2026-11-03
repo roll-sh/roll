@@ -1,0 +1,86 @@
+> CREATE TABLE a162_v (id int PRIMARY KEY, v int) WITH (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> INSERT INTO a162_v SELECT i, i FROM generate_series(1, 30) i
+-- INSERT 0 30
+
+> DELETE FROM a162_v WHERE id > 10
+-- DELETE 20
+
+> UPDATE a162_v SET v = 0 WHERE id < 3
+-- UPDATE 2
+
+> SELECT pg_stat_force_next_flush()
+pg_stat_force_next_flush:void
+
+-- SELECT 1
+
+> SELECT n_tup_ins, n_tup_upd, n_tup_del, n_live_tup, n_dead_tup, n_mod_since_analyze FROM pg_stat_user_tables WHERE relname = 'a162_v'
+n_tup_ins:int8 | n_tup_upd:int8 | n_tup_del:int8 | n_live_tup:int8 | n_dead_tup:int8 | n_mod_since_analyze:int8
+30 | 2 | 20 | 10 | 22 | 52
+-- SELECT 1
+
+> ANALYZE a162_v
+-- ANALYZE
+
+> SELECT n_live_tup, n_dead_tup, n_mod_since_analyze, analyze_count FROM pg_stat_user_tables WHERE relname = 'a162_v'
+n_live_tup:int8 | n_dead_tup:int8 | n_mod_since_analyze:int8 | analyze_count:int8
+10 | 22 | 0 | 1
+-- SELECT 1
+
+> VACUUM a162_v
+-- VACUUM
+
+> SELECT n_live_tup, n_dead_tup, vacuum_count FROM pg_stat_user_tables WHERE relname = 'a162_v'
+n_live_tup:int8 | n_dead_tup:int8 | vacuum_count:int8
+10 | 0 | 1
+-- SELECT 1
+
+> INSERT INTO a162_v VALUES (3, 0)
+ERROR 23505: duplicate key value violates unique constraint "a162_v_pkey"
+DETAIL: Key (id)=(3) already exists.
+OBJECTS: schema=public table=a162_v constraint=a162_v_pkey
+
+> INSERT INTO a162_v VALUES (100, 0), (4, 0)
+ERROR 23505: duplicate key value violates unique constraint "a162_v_pkey"
+DETAIL: Key (id)=(4) already exists.
+OBJECTS: schema=public table=a162_v constraint=a162_v_pkey
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO a162_v VALUES (200, 0)
+-- INSERT 0 1
+
+> SAVEPOINT s
+-- SAVEPOINT
+
+> INSERT INTO a162_v VALUES (1, 1)
+ERROR 23505: duplicate key value violates unique constraint "a162_v_pkey"
+DETAIL: Key (id)=(1) already exists.
+OBJECTS: schema=public table=a162_v constraint=a162_v_pkey
+
+> ROLLBACK TO s
+-- ROLLBACK
+
+> SELECT n_tup_ins FROM pg_stat_xact_user_tables WHERE relname = 'a162_v'
+n_tup_ins:int8
+5
+-- SELECT 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT pg_stat_force_next_flush()
+pg_stat_force_next_flush:void
+
+-- SELECT 1
+
+> SELECT n_tup_ins, n_live_tup, n_dead_tup, n_ins_since_vacuum FROM pg_stat_user_tables WHERE relname = 'a162_v'
+n_tup_ins:int8 | n_live_tup:int8 | n_dead_tup:int8 | n_ins_since_vacuum:int8
+35 | 11 | 4 | 5
+-- SELECT 1
+
+> DROP TABLE a162_v
+-- DROP TABLE
+

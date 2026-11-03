@@ -534,11 +534,15 @@ impl Ddl<'_, '_> {
                             Some(n) => n,
                             None => self.count_rows(&r)?,
                         } as i64;
+                        // acquire_sample_rows' deadrows: the dead and recently dead versions
+                        // in the heap model (the whole table, as a full sample reads it).
+                        let dead = crate::exec::sizing::heap_tuple_stats(r.oid, self.ctx)?
+                            .map_or(0, |s| s.2 as i64);
                         crate::exec::pgstat::report_analyze(
                             self.ctx,
                             r.oid,
                             live,
-                            0,
+                            dead,
                             cols.is_empty(),
                             false,
                             ms(started),
