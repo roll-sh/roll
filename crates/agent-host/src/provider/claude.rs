@@ -166,7 +166,7 @@ impl Provider for Claude {
         let mode = permission_mode(cfg.runtime_mode, cfg.interaction_mode);
         let cwd = cfg.cwd.to_string_lossy().into_owned();
         let shared = Arc::new(Shared {
-            launch: Launch::new(self, &cfg),
+            launch: Launch::new(self, &cfg)?,
             events: tx,
             state: Mutex::new(State {
                 tr: Translator::new(cwd, permission_mode(cfg.runtime_mode, InteractionMode::Default)),
@@ -277,7 +277,7 @@ struct Launch {
     cwd: PathBuf,
     model: Option<String>,
     effort: models::Effort,
-    mcp: Option<String>,
+    mcp: Option<McpFile>,
     /// roll's own MCP tools never ask (T3 pre-approves its MCP tools the same way).
     allowed_tools: Vec<String>,
     instructions: Option<String>,
@@ -292,9 +292,42 @@ enum Open {
     Fork { from: String, at: Option<String> },
 }
 
+/// The session's `--mcp-config`: roll's MCP servers with their bearer tokens, in a file only this
+/// user can read (0600, in a 0700 directory of its own), because a command line is visible to
+/// every user on the machine (`ps`). Removed when the session closes or is dropped.
+struct McpFile {
+    dir: PathBuf,
+    path: PathBuf,
+}
+
+impl McpFile {
+    fn write(config: &Value) -> anyhow::Result<McpFile> {
+        use std::io::Write;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        let dir = std::env::temp_dir().join(format!("roll-claude-{:016x}", rand::random::<u64>()));
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let file = McpFile { path: dir.join("mcp.json"), dir };
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&file.path)?;
+        f.write_all(config.to_string().as_bytes())?;
+        Ok(file)
+    }
+
+    fn remove(&self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+impl Drop for McpFile {
+    fn drop(&mut self) {
+        self.remove();
+    }
+}
+
 impl Launch {
-    fn new(claude: &Claude, cfg: &SessionConfig) -> Self {
-        let mcp = (!cfg.mcp.is_empty()).then(|| {
+    fn new(claude: &Claude, cfg: &SessionConfig) -> anyhow::Result<Self> {
+        let mcp = if cfg.mcp.is_empty() {
+            None
+        } else {
             let servers: serde_json::Map<String, Value> = cfg
                 .mcp
                 .iter()
@@ -303,11 +336,11 @@ impl Launch {
                     (s.name.clone(), json!({"type": "http", "url": s.url, "headers": headers}))
                 })
                 .collect();
-            json!({"mcpServers": servers}).to_string()
-        });
+            Some(McpFile::write(&json!({"mcpServers": servers})).context("writing the MCP config for Claude Code")?)
+        };
         let mut env = claude.cfg.env.clone();
         env.extend(cfg.env.iter().cloned());
-        Self {
+        Ok(Self {
             binary: claude.binary(),
             pre_args: claude.cfg.args.clone(),
             env,
@@ -317,7 +350,7 @@ impl Launch {
             mcp,
             allowed_tools: cfg.mcp.iter().map(|s| format!("mcp__{}__*", s.name)).collect(),
             instructions: cfg.instructions.clone().filter(|i| !i.trim().is_empty()),
-        }
+        })
     }
 
     /// The flags the SDKs pass, plus T3's choices: partial messages for streaming, summarized
@@ -344,8 +377,10 @@ impl Launch {
             push(&["--effort", effort]);
         }
         if let Some(mcp) = &self.mcp {
-            push(&["--mcp-config", mcp]);
+            a.push("--mcp-config".into());
+            a.push(mcp.path.to_string_lossy().into_owned());
         }
+        let mut push = |xs: &[&str]| a.extend(xs.iter().map(|x| x.to_string()));
         if !self.allowed_tools.is_empty() {
             push(&["--allowedTools", &self.allowed_tools.join(",")]);
         }
@@ -684,12 +719,18 @@ impl Session for ClaudeSession {
     async fn close(&self) {
         self.shared.closed.store(true, Ordering::SeqCst);
         self.shared.kill().await;
+        if let Some(mcp) = &self.shared.launch.mcp {
+            mcp.remove();
+        }
     }
 }
 
 impl Drop for ClaudeSession {
     fn drop(&mut self) {
         self.shared.closed.store(true, Ordering::SeqCst);
+        if let Some(mcp) = &self.shared.launch.mcp {
+            mcp.remove();
+        }
         if let Ok(mut proc) = self.shared.proc.try_lock()
             && let Some(proc) = proc.take()
         {

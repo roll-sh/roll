@@ -204,6 +204,9 @@ server (`docs/orchestration-v2/orchestrator-mcp-server.md` there), ported in
 - **Server.** `Host::open` starts one Streamable HTTP MCP server on the IPv4 loopback address
   and a free port (`POST /mcp`, JSON responses, no SSE stream). Every provider session gets it
   in `SessionConfig.mcp` as server `roll` with its thread's bearer token (`rlx_…`, memory only).
+  The token never goes on a command line, which every user on the machine can read (`ps`):
+  Claude Code gets its `--mcp-config` as a path to a 0600 file in a 0700 directory of its own
+  under the temp directory, removed when the session closes.
   A token names one thread: it sees and controls only the tasks that thread delegated and their
   descendants (anything else is `task_not_found`), and it stops working when the thread is
   deleted.

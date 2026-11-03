@@ -691,7 +691,7 @@ fn launch_flags_follow_the_session_config() {
     block_on(async {
         let mut o = opts(RuntimeMode::AutoEdit).model("claude-opus-5-5").effort("ultracode");
         o.instructions = Some("Keep the code rolling.".into());
-        o.mcp = vec![McpServer { name: "roll".into(), url: "http://127.0.0.1:9/mcp".into(), headers: vec![("Authorization".into(), "Bearer t".into())] }];
+        o.mcp = vec![McpServer { name: "roll".into(), url: "http://localhost:9/mcp".into(), headers: vec![("Authorization".into(), "Bearer rlx_thread_secret".into())] }];
         o.env = vec![("ROLL_FAKE_SESSION_ENV".into(), "1".into())];
         let mut r = Replay::start("attachments", o).await;
         let image = Attachment { name: "a.png".into(), mime: "image/png".into(), data: "aGk=".into() };
@@ -699,13 +699,24 @@ fn launch_flags_follow_the_session_config() {
         r.turn().await;
         let bad = Attachment { name: "a.zip".into(), mime: "application/zip".into(), data: "aGk=".into() };
         assert!(r.session.send(TurnInput { text: "zip".into(), attachments: vec![bad] }).await.is_err());
+        // roll's MCP server and its bearer token are in a private file, never on the command
+        // line (`ps` shows every user's argv).
+        let args = r.launches().remove(0);
+        assert!(args.iter().all(|a| !a.contains("rlx_thread_secret")), "{args:?}");
+        let at = args.iter().position(|a| a == "--mcp-config").expect("--mcp-config");
+        let file = std::path::PathBuf::from(&args[at + 1]);
+        let mode = |p: &std::path::Path| std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(p).unwrap().permissions()) & 0o777;
+        assert_eq!((mode(&file), mode(file.parent().unwrap())), (0o600, 0o700), "{}", file.display());
+        let config: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let want = json!({"mcpServers": {"roll": {"headers": {"Authorization": "Bearer rlx_thread_secret"}, "type": "http", "url": "http://localhost:9/mcp"}}});
+        assert_eq!(config, want);
         r.close().await;
+        assert!(!file.parent().unwrap().exists(), "the file goes with the session");
         let args = &r.launches()[0];
         assert!(has_flags(args, &["--permission-mode", "acceptEdits"]));
         assert!(has_flags(args, &["--effort", "xhigh"]));
         assert!(has_flags(args, &["--settings", r#"{"showThinkingSummaries":true,"ultracode":true}"#]));
         assert!(has_flags(args, &["--append-system-prompt", "Keep the code rolling."]));
-        assert!(has_flags(args, &["--mcp-config", r#"{"mcpServers":{"roll":{"headers":{"Authorization":"Bearer t"},"type":"http","url":"http://127.0.0.1:9/mcp"}}}"#]), "{args:?}");
         assert!(has_flags(args, &["--allowedTools", "mcp__roll__*"]), "{args:?}");
         r.expect_tail(&["turn completed", "exited"]);
     });
