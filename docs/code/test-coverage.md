@@ -980,6 +980,36 @@ jsdom (`vitest.config.mts` projects `node` and `dom`, setup in `src/test/`).
 | thread terminals run in the thread's directory and are closed and removed with the thread | `agent-host/tests/terminal.rs::thread_terminals_run_in_the_thread_and_go_with_it` |
 | the scrollback ring keeps the newest 256 KiB | `agent-host/src/terminal.rs` tests |
 
+## Agents (providers)
+
+Each adapter runs against a fake provider process that replays recorded protocol transcripts;
+scenario events are compared with golden files (`ROLL_FIXTURES=write` regenerates them).
+
+### Codex (`agent-host/tests/codex.rs`, transcripts in `agent-host/tests/fixtures/codex/`)
+
+T3 Code's Codex replay fixtures (MIT) and sessions recorded from codex-cli 0.164.0.
+
+| Feature | Tests |
+| --- | --- |
+| Handshake, `thread/start`, a turn, streamed text, usage, close | `agent-host/tests/codex.rs::simple`, `agent-host/tests/codex.rs::real_simple`, `agent-host/tests/codex.rs::multi_turn` |
+| Runtime modes → approval policy and sandbox (T3's mapping); plan collaboration mode | `agent-host/tests/codex.rs::simple`, `agent-host/tests/codex.rs::command_approval`, `agent-host/tests/codex.rs::subagent_v2_approval`, `agent-host/tests/codex.rs::proposed_plan` |
+| `thread/resume` from `SessionConfig.resume` | `agent-host/tests/codex.rs::provider_thread_resume` |
+| `turn/steer` | `agent-host/tests/codex.rs::message_steering` |
+| `turn/interrupt`; terminating the interrupted command's PTY | `agent-host/tests/codex.rs::turn_interrupt`, `agent-host/tests/codex.rs::turn_interrupt_mid_tool` |
+| `thread/turns/list` + `thread/revert` rollback | `agent-host/tests/codex.rs::thread_rollback` |
+| Model, effort, MCP servers, instructions (`additionalContext`) and image attachments | `agent-host/tests/codex.rs::mcp_servers_instructions_and_images_reach_codex`, `agent-host/src/provider/codex/session.rs::instructions_split_into_bounded_entries`, `agent-host/src/provider/codex/session.rs::non_image_attachments_are_refused` |
+| Instructions re-injected after a context compaction | `agent-host/tests/codex.rs::compaction_restores_instructions` |
+| Items: messages, reasoning, plans, todos, commands (+ output deltas, exit codes), file changes (+ diffs), web search | `agent-host/tests/codex.rs::simple`, `agent-host/tests/codex.rs::turn_interrupt_mid_tool`, `agent-host/tests/codex.rs::proposed_plan`, `agent-host/tests/codex.rs::todo_list`, `agent-host/tests/codex.rs::command_output_streaming`, `agent-host/tests/codex.rs::tool_call_without_approval`, `agent-host/tests/codex.rs::file_change_approval`, `agent-host/tests/codex.rs::web_search`, `agent-host/src/provider/codex/translate.rs::reasoning_parts_stream_with_separators`, `agent-host/src/provider/codex/translate.rs::output_keeps_head_and_tail`, `agent-host/src/provider/codex/translate.rs::shell_wrappers_come_off` |
+| Subagents (`collabAgentToolCall`, `subAgentActivity`, nested), their items parented to them, their results | `agent-host/tests/codex.rs::subagent_collab_spawn`, `agent-host/tests/codex.rs::subagent_v2`, `agent-host/tests/codex.rs::subagent_v2_nested`, `agent-host/tests/codex.rs::subagent_v2_approval` |
+| Command, file-change and permission approvals; questions; MCP elicitations; exact reply shapes | `agent-host/tests/codex.rs::command_approval`, `agent-host/tests/codex.rs::real_approval`, `agent-host/tests/codex.rs::file_change_approval`, `agent-host/tests/codex.rs::plan_questions`, `agent-host/tests/codex.rs::permission_and_elicitation_replies`, `agent-host/src/provider/codex/translate.rs::elicitation_forms_are_filled_like_t3` |
+| Accept for session answers later requests itself | `agent-host/tests/codex.rs::accept_for_session_answers_later_requests` |
+| Withdrawn requests (`serverRequest/resolved`) and requests a turn ended with → `RequestCancelled`; unknown server requests refused | `agent-host/tests/codex.rs::withdrawn_and_unanswered_requests_are_cancelled` |
+| Model reroutes → `Model` | `agent-host/tests/codex.rs::codex_model_reroute` |
+| Turn-scoped token usage from thread totals | `agent-host/tests/codex.rs::simple`, `agent-host/src/provider/codex/translate.rs::usage_counts_growth_during_the_turn` |
+| Retries and failures: the reason a turn failed | `agent-host/tests/codex.rs::failed_turns_say_why` |
+| `info()`: version, account, models (read-only probe); not installed; not logged in | `agent-host/tests/codex.rs::info_reads_version_account_and_models`, `agent-host/tests/codex.rs::info_without_codex`, `agent-host/tests/codex.rs::info_needs_login`, `agent-host/src/provider/codex.rs::versions_parse` |
+| Robustness: crash → `Exited` with stderr; failed start; bounded lines; kill on close and on drop, reaped | `agent-host/tests/codex.rs::a_crash_reports_stderr`, `agent-host/tests/codex.rs::a_failed_start_reports_why`, `agent-host/src/provider/codex/rpc.rs::lines_are_bounded`, `agent-host/tests/codex.rs::close_kills_a_codex_that_ignores_stdin`, `agent-host/tests/codex.rs::dropping_a_session_kills_codex` |
+
 ## Measurements
 
 | What | Test | Result |

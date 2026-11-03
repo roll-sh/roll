@@ -1,0 +1,22 @@
+{"native_thread":"01a0d5ef-62bd-7c20-861b-0528ff7d86bd"}
+{"model":"gpt-6-luna"}
+{"item":{"body":{"text":"","type":"message"},"id":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","text":"provider"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","text":" thread"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","text":" resume"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","text":" fixture"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","text":" first"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","text":" turn"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","text":" complete"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","text":"\n"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","text":"provider"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","text":" thread"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","text":" resume"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","text":" fixture"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","text":" second"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","text":" turn"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","text":" complete"}}
+{"item":{"body":{"text":"provider thread resume fixture first turn complete\nprovider thread resume fixture second turn complete","type":"message"},"id":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":21248,"input_tokens":21476,"output_tokens":39}}
+{"turn_ended":"completed"}
+{"exited":null}

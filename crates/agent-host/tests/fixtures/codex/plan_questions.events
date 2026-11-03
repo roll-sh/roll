@@ -1,0 +1,13 @@
+{"native_thread":"01a0d5ef-3a6a-75d0-9942-61b29ab82328"}
+{"model":"gpt-6-luna"}
+{"request":{"body":{"questions":[{"header":"Fixture","id":"schema_preference","multi":false,"options":[{"description":"Keep fixture data tightly validated, even if UI variations are harder to represent.","label":"Strict schemas (Recommended)"},{"description":"Allow fixture shapes that better support varied UI states, with looser validation.","label":"UI flexibility"}],"question":"Should this fixture prefer strict schemas or UI flexibility?"}],"type":"questions"},"id":"0","item":"call_wGA02D7XQQj0vzorvK4ZrwKN"}}
+{"usage":{"cached_tokens":6912,"input_tokens":21320,"output_tokens":108}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg_028f9564f7cc52f0016ab5be4c609887d09ffdd45f53ffdc49","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg_028f9564f7cc52f0016ab5be4c609887d09ffdd45f53ffdc49","text":"plan"}}
+{"text_delta":{"item":"msg_028f9564f7cc52f0016ab5be4c609887d09ffdd45f53ffdc49","text":" questions"}}
+{"text_delta":{"item":"msg_028f9564f7cc52f0016ab5be4c609887d09ffdd45f53ffdc49","text":" fixture"}}
+{"text_delta":{"item":"msg_028f9564f7cc52f0016ab5be4c609887d09ffdd45f53ffdc49","text":" complete"}}
+{"item":{"body":{"text":"plan questions fixture complete","type":"message"},"id":"msg_028f9564f7cc52f0016ab5be4c609887d09ffdd45f53ffdc49","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":27136,"input_tokens":42777,"output_tokens":116}}
+{"turn_ended":"completed"}
+{"exited":null}

@@ -1,0 +1,35 @@
+{"native_thread":"01a10004-0a27-7421-852d-0f7f99ace2d6"}
+{"model":"gpt-6-luna"}
+{"item":{"body":{"text":"","type":"message"},"id":"msg_0038d12d01b50ff0016ac08420563087d2af7fb28a3cee1956","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg_0038d12d01b50ff0016ac08420563087d2af7fb28a3cee1956","text":"I"}}
+{"text_delta":{"item":"msg_0038d12d01b50ff0016ac08420563087d2af7fb28a3cee1956","text":"’ll"}}
+{"text_delta":{"item":"msg_0038d12d01b50ff0016ac08420563087d2af7fb28a3cee1956","text":" run"}}
+{"text_delta":{"item":"msg_0038d12d01b50ff0016ac08420563087d2af7fb28a3cee1956","text":" the"}}
+{"text_delta":{"item":"msg_0038d12d01b50ff0016ac08420563087d2af7fb28a3cee1956","text":" command"}}
+{"text_delta":{"item":"msg_0038d12d01b50ff0016ac08420563087d2af7fb28a3cee1956","text":" in"}}
+{"text_delta":{"item":"msg_0038d12d01b50ff0016ac08420563087d2af7fb28a3cee1956","text":" the"}}
+{"text_delta":{"item":"msg_0038d12d01b50ff0016ac08420563087d2af7fb28a3cee1956","text":" foreground"}}
+{"text_delta":{"item":"msg_0038d12d01b50ff0016ac08420563087d2af7fb28a3cee1956","text":" and"}}
+{"text_delta":{"item":"msg_0038d12d01b50ff0016ac08420563087d2af7fb28a3cee1956","text":" wait"}}
+{"text_delta":{"item":"msg_0038d12d01b50ff0016ac08420563087d2af7fb28a3cee1956","text":" for"}}
+{"text_delta":{"item":"msg_0038d12d01b50ff0016ac08420563087d2af7fb28a3cee1956","text":" it"}}
+{"text_delta":{"item":"msg_0038d12d01b50ff0016ac08420563087d2af7fb28a3cee1956","text":" to"}}
+{"text_delta":{"item":"msg_0038d12d01b50ff0016ac08420563087d2af7fb28a3cee1956","text":" finish"}}
+{"text_delta":{"item":"msg_0038d12d01b50ff0016ac08420563087d2af7fb28a3cee1956","text":"."}}
+{"item":{"body":{"text":"I’ll run the command in the foreground and wait for it to finish.","type":"message"},"id":"msg_0038d12d01b50ff0016ac08420563087d2af7fb28a3cee1956","parent":null,"status":"completed"}}
+{"item":{"body":{"input":{"command":"/bin/zsh -lc \"for i in 1 2 3 4; do printf '\\\\033[32mstream line %s\\\\033[0m\\\\n' \"'$i; sleep 1; done; printf '\"'progress 50%%\\\\rprogress 100%%\\\\n'\"","cwd":"/home/replay-user/t3code/apps/server"},"kind":"command","name":"commandExecution","title":"for i in 1 2 3 4; do printf '\\033[32mstream line %s\\033[0m\\n' $i; sleep 1; done; printf 'progress 50%%\\rprogress 100%%\\n'","type":"tool"},"id":"exec-1a2dcd5e-1591-48a8-bb8e-47cb40883d2c","parent":null,"status":"running"}}
+{"output_delta":{"item":"exec-1a2dcd5e-1591-48a8-bb8e-47cb40883d2c","text":"\u001b[32mstream line 2\u001b[0m\n"}}
+{"output_delta":{"item":"exec-1a2dcd5e-1591-48a8-bb8e-47cb40883d2c","text":"\u001b[32mstream line 3\u001b[0m\n"}}
+{"output_delta":{"item":"exec-1a2dcd5e-1591-48a8-bb8e-47cb40883d2c","text":"\u001b[32mstream line 4\u001b[0m\n"}}
+{"output_delta":{"item":"exec-1a2dcd5e-1591-48a8-bb8e-47cb40883d2c","text":"progress 50%\rprogress 100%\n"}}
+{"item":{"body":{"exit_code":0,"input":{"command":"/bin/zsh -lc \"for i in 1 2 3 4; do printf '\\\\033[32mstream line %s\\\\033[0m\\\\n' \"'$i; sleep 1; done; printf '\"'progress 50%%\\\\rprogress 100%%\\\\n'\"","cwd":"/home/replay-user/t3code/apps/server"},"kind":"command","name":"commandExecution","output":"\u001b[32mstream line 2\u001b[0m\n\u001b[32mstream line 3\u001b[0m\n\u001b[32mstream line 4\u001b[0m\nprogress 50%\rprogress 100%\n","title":"for i in 1 2 3 4; do printf '\\033[32mstream line %s\\033[0m\\n' $i; sleep 1; done; printf 'progress 50%%\\rprogress 100%%\\n'","type":"tool"},"id":"exec-1a2dcd5e-1591-48a8-bb8e-47cb40883d2c","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":3840,"input_tokens":17653,"output_tokens":142}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg_0038d12d01b50ff0016ac0842a975c87d2bf566b8ae1f7e5f3","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg_0038d12d01b50ff0016ac0842a975c87d2bf566b8ae1f7e5f3","text":"command"}}
+{"text_delta":{"item":"msg_0038d12d01b50ff0016ac0842a975c87d2bf566b8ae1f7e5f3","text":" output"}}
+{"text_delta":{"item":"msg_0038d12d01b50ff0016ac0842a975c87d2bf566b8ae1f7e5f3","text":" fixture"}}
+{"text_delta":{"item":"msg_0038d12d01b50ff0016ac0842a975c87d2bf566b8ae1f7e5f3","text":" complete"}}
+{"item":{"body":{"text":"command output fixture complete","type":"message"},"id":"msg_0038d12d01b50ff0016ac0842a975c87d2bf566b8ae1f7e5f3","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":20992,"input_tokens":35532,"output_tokens":150}}
+{"turn_ended":"completed"}
+{"exited":null}
