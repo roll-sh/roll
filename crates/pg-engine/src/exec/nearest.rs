@@ -31,6 +31,13 @@ impl Dist {
             Value::Int8(x) => Dist::I(*x),
             Value::Float4(x) => Dist::F(*x as f64),
             Value::Float8(x) => Dist::F(*x),
+            // (btree_gist's timestamp and timestamptz distances: intervals, ordered by their
+            // span in microseconds as interval_cmp orders them, the grid's unit for those keys.)
+            Value::Interval(i) if i.is_infinite() => Dist::F(if i.is_pos_inf() { f64::INFINITY } else { f64::NEG_INFINITY }),
+            Value::Interval(i) => match i64::try_from(i.cmp_key()) {
+                Ok(x) => Dist::I(x),
+                Err(_) => Dist::F(i.cmp_key() as f64),
+            },
             Value::Null => Dist::Null,
             _ => return None,
         })

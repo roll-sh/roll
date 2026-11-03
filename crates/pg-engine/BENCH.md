@@ -5119,6 +5119,45 @@ themselves, at nice 19; tps and the engine's CPU ms per transaction):
 - tpcb-like: before 11,439 / 11,875 (0.54 / 0.51); after 11,784 / 11,794 (0.51 / 0.52).
 - Level. Peak RSS: before 370 / 367 MB, after 374 / 381 MB.
 
+### Batch 2: skip scans' Index Searches, exclusion checks, timestamp KNN
+
+Engine before / after (release, fresh engines with `--cache-mb 2048`, nice 19; median of
+15 after 3, the engine's CPU per statement; before = `5ee62371`):
+
+| case | before ms (cpu) | after ms (cpu) | PostgreSQL ms | engine / PostgreSQL after |
+|---|---:|---:|---:|---:|
+| booking_bulk (3,000 exclusion-constrained rows, one INSERT) | 427 (450) | 32.3 (37) | 97.2 | 0.33 |
+| `ORDER BY ts <-> c LIMIT 5`, timestamptz btree_gist, 100,000 rows | 145 (151) | 0.243 (6) | | |
+| skip scan, `count(*) WHERE ts = k` over (region, ts), 1M rows | 23.1 (25) | 17.0 (19) | 0.331 | 51 |
+
+Peak RSS 452 MB before, 448 after. The skip scan's regression (every table modelled since
+agent 151 raised `MAX_VERSIONS`; LP_DEAD bookkeeping walks the range) isn't solved yet.
+
+Where the access suite stands against PostgreSQL 18.6 on `5ee62371` (release engine on
+the host, PostgreSQL in its container with `shared_buffers=2GB`, both at nice 19; not yet the
+`ENGINE_DOCKER=1` dist method, which favours the engine). Engine / PostgreSQL time, two
+interleaved rounds of 60:
+- Ahead: trgm_gist_knn 0.03, trgm_gist_like 0.05, trgm_gin_sim 0.18, trgm_gin_word 0.60.
+- Within 1.3x: booking2_insert 1.08, que_fetch 1.13, trgm_gin_like 1.17, btree_gist_knn 1.25.
+- 1.5-3x: solid_queue_fetch 1.62, gin_jsonb 1.80, gist_point_knn 1.87, gist_box 1.88,
+  order_desc_limit 2.03, gist_point_box 2.04, brin_range 2.27, cat_limit 2.56,
+  graphile_fetch 2.80, gin_tsvector_and 2.82, char_eq 2.86, max_id 2.97.
+- 3-6x: oban_fetch 3.16, gin_tsvector 3.25, keyset_page_desc 3.38, booking_insert 3.49,
+  keyset_page 3.73, gist_circle_knn 3.85, gin_jsonb_path 4.18, gist_polygon_knn 4.29,
+  gist_box_knn 4.66, any_lookup 4.70, gin_array 4.85, gin_array_overlap 5.12,
+  exists_limit 5.17, gin_jsonb_exists 5.32, nested_loop 5.66.
+- Further behind: gist_point_circle 6.0, booking_loop 7.5 (batch 2's exclusion fix applies),
+  char_correlated 9.1, booking_bulk 53 (fixed in batch 2, 0.33 after), skip_scan 125.
+- The simple btree cases (keyset_page, max_id, any_lookup) spend their time spread across
+  statement handling: allocation 14%, btree model lookups ~5%, SST seeks. No one hot spot.
+
+Index builds over 1M rows (CREATE INDEX, ms, engine / PostgreSQL): btree int 3,882 / 618,
+btree text 8,329 / 1,014, hash 6,002 / 2,716, BRIN 3,184 / 173, GiST box 4,341 / 7,621 (the
+engine ahead), GiST point 3,194 / 1,546, GIN int[] 4,123 / 560, GIN jsonb 6,564 / 1,444, GIN
+tsvector 5,038 / 700. CPU over the nine builds 99 s against 20 s, peak RSS 1.56 GB. Agent 148
+decodes only the index's columns in the build pass now, and agent 151 has the size models'
+first-build cost.
+
 ## XML: the tree, input checks and building (round 21, agent 107)
 
 `tools/bench/xml.sh` measures every XML entry point against the reference on one document

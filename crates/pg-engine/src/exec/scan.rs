@@ -290,7 +290,7 @@ pub(super) fn padded(v: Value, pad: Option<usize>) -> Value {
 
 /// `ranges` of the entries starting with `prefix` (the index's, and the key bytes of its
 /// first `col0` columns), `b` bounding the columns after.
-fn ranges_from(ix: &Index, b: &IndexBounds, mut prefix: Vec<u8>, col0: usize, ctx: &ExecCtx) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+pub(super) fn ranges_from(ix: &Index, b: &IndexBounds, mut prefix: Vec<u8>, col0: usize, ctx: &ExecCtx) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
     for (i, e) in b.eq.iter().enumerate() {
         let v = eval(e, &[], ctx)?;
         if v.is_null() {
@@ -488,8 +488,8 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             }
         },
     };
-    if s.index.is_some() && s.current_of.is_none() {
-        ctx.searched(s as *const ScanPlan as usize, ranges.len());
+    if let (Some((ix, b)), None) = (&s.index, &s.current_of) {
+        ctx.searched(s as *const ScanPlan as usize, super::skipcount::count(&s.table, ix, b, &ranges, ctx));
     }
     // A bitmap heap scan: the rows the bitmap selects, in heap order. A TID scan: the rows
     // at its TIDs, when the heap model says which (`tid_keys`), their conditions checked
@@ -1507,10 +1507,11 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, kept: &mut Option<KeptRows>, ctx: &Exe
             }
             out.sort();
             out.dedup();
+            let searches = super::skipcount::count(t, index, bounds, &ranges, ctx) as u64;
             ctx.count(key, |st| {
                 st.loops += 1;
                 st.rows += out.len() as u64;
-                st.searches += ranges.len() as u64;
+                st.searches += searches;
             });
             if super::pgstat::scan_counts(ctx) {
                 super::pgstat::count_index_scan(ctx, index.oid);
@@ -2622,7 +2623,13 @@ impl ScanNode {
             match step {
                 Ok(SkipStep::Take) => return Some(Ok((k, v))),
                 Ok(SkipStep::Pass) => {}
-                Ok(SkipStep::Seek(a, b)) => self.seek(&a, &b, ctx),
+                Ok(SkipStep::Seek(a, b)) => {
+                    // (The entries sought past weren't read: none of them is marked.)
+                    if let Some(kl) = &mut self.kills {
+                        kl.sought(&k, if self.rev { &b } else { &a });
+                    }
+                    self.seek(&a, &b, ctx)
+                }
                 Err(e) => return Some(Err(e)),
             }
         }
@@ -5097,7 +5104,7 @@ fn nearest_scan(
         || k.nulls_first
         || k.using.is_some()
         || args.len() != 2
-        || !matches!(k.expr.ty(), DataType::Int2 | DataType::Int4 | DataType::Int8 | DataType::Float4 | DataType::Float8)
+        || !matches!(k.expr.ty(), DataType::Int2 | DataType::Int4 | DataType::Int8 | DataType::Float4 | DataType::Float8 | DataType::Interval(_))
         // (A lossy distance in an index-only scan fails: `Reordered`.)
         || (matches!(s.access, Access::Index { only: true, .. }) && matches!(args[0].ty(), DataType::Circle | DataType::Polygon))
     {

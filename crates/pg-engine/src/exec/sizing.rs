@@ -2470,6 +2470,16 @@ impl Kills {
         }
     }
 
+    /// A skip scan read up to entry `at` (a storage key) and goes on at `to`, the entries in
+    /// between unread: the ones read are marked now, and marking resumes at `to`. Without
+    /// it, the next row's marking would walk every entry the scan sought past.
+    pub fn sought(&mut self, at: &[u8], to: &[u8]) {
+        let (Some(a), Some(t)) = (at.strip_prefix(&self.prefix[..]), to.strip_prefix(&self.prefix[..])) else { return };
+        let r = if self.rev { (Some(a.to_vec()), self.from.take()) } else { (self.from.take(), Some(a.to_vec())) };
+        self.mark(r);
+        self.from = Some(t.to_vec());
+    }
+
     fn mark(&self, (lo, hi): (Option<Vec<u8>>, Option<Vec<u8>>)) {
         if let (Some(l), Some(h)) = (&lo, &hi)
             && l >= h
@@ -4014,14 +4024,11 @@ pub fn btree_leaf_pages(
     Some(out)
 }
 
-/// For each storage key in `starts` (with the index's key prefix), the leaf page of btree
-/// `index` a scan starting there reads first (`Btree::scan_leaf`): starts sharing a leaf
-/// are read without a new descent (a skip scan's "Index Searches"). None when the index
-/// isn't modelled.
-pub fn btree_leaf_for(table: u32, index: u32, prefix: &[u8], starts: &[Vec<u8>], db: &Database) -> Option<Vec<Option<u32>>> {
+/// `f` over the size model of btree `index` of `table` (a skip scan's "Index Searches",
+/// `skipcount`), under the models' read lock. None when the index isn't modelled.
+pub fn with_btree<R>(table: u32, index: u32, db: &Database, f: impl FnOnce(&crate::catalog::btsim::Btree) -> R) -> Option<R> {
     let rf = db.relfiles.of(table).read();
-    let bt = rf.btrees.get(&index)?;
-    Some(starts.iter().map(|k| bt.scan_leaf(k.strip_prefix(prefix)?)).collect())
+    rf.btrees.get(&index).map(f)
 }
 
 /// The index pages a row's new entries go to: (index, leaf page; None when the index

@@ -5168,6 +5168,61 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   - After the base comparison, the implementation source was restored and rebuilt
     successfully. All three reused reference containers were stopped with data retained;
     the temporary psql helper was removed. The worktree has one `target/` directory.
+  - Batch 2 (agent 144):
+    - Skip scans regressed once every table was modelled (`sizing::MAX_VERSIONS` raised to
+      `1 << 40`): a skip scan (index or index-only) over a 1M-row table takes 17-48 ms,
+      against 0.8 ms before and PostgreSQL's 0.33; bitmap ones don't. The profile (frame
+      pointers) is LP_DEAD bookkeeping: `sizing::Kills::done` (34%) and `Kills::passed`
+      (16%) walking entries through `btsim::kill_needed` / `heapsim::chain_dead`.
+      `Kills::sought` (called from `scan::iter_next` on each skip seek) marks what was read
+      up to a seek and resumes at its target, as kill_prior_tuple marks only pages a scan
+      read; it took 23 -> 17 ms, so something else still walks most of the range. Not
+      solved in this batch (next: trace the ranges `Kills::mark` gets).
+    - Skip scans' "Index Searches" are PostgreSQL 18's `_bt_first` calls (`exec/skipcount.rs`,
+      only under EXPLAIN ANALYZE). The scan is replayed over the btree's size model
+      (`Btree::leaf_view`, agreed with agent 151) with nbtutils.c's rules:
+      - an entry past the keys advances them (`_bt_advance_array_keys`);
+      - an entry left before the new keys ends the primitive scan when the page's high key
+        is before them too; truncated high-key attributes count as satisfied;
+      - but past its first page, or after more than NSKIPADVANCES_THRESHOLD (3) skip
+        advances on that page, the scan goes on to the next page and starts a new one there
+        only when that page's high key is still before the keys (`_bt_scanbehind_checkkeys`);
+      - skip support (one int2/4/8, date, oid or bool leading column) steps to the next
+        value and, with a lower bound, starts the first primitive scan at it; other types
+        land after the value and search again.
+      - Golden `a144_skip_searches` (22 plans: equalities, ranges, IN lists, a text leading
+        column, matches across leaf pages, many small groups, a bitmap index scan) matches
+        18.6. A backward skip scan is counted as the forward one.
+    - Exclusion checks were quadratic in a statement's own rows. `txn/locks.rs`'s
+      in-progress exclusion entries were one list per constraint, which each check
+      filtered whole (two lock-table lookups per entry). They are kept by backend now
+      (`ExclList`): a check reads the other backends' lists, and a backend's own list
+      drops its ended entries when it doubles. booking_bulk (3,000 rows in one INSERT)
+      took 0.43 s on a fresh database and 5.2 s in the access database, against
+      PostgreSQL's 0.097 s.
+    - btree_gist KNN over timestamp and timestamptz reads nearest-first, like the
+      numeric classes: the grid already placed them, and `nearest::Dist` orders an
+      interval distance by its span in microseconds (interval_cmp's order), infinite ones
+      last. Golden `a144_knn_time`. time and interval columns still read every row (no
+      grid placement for them).
+    - Found, for agents 148 and 151: CREATE INDEX on 1M rows trails PostgreSQL 2-18x
+      (BENCH "Index access, round 5"). The BRIN build's time is the heap model's first
+      build, whole-row decoding and allocation. 148 now decodes only the index's columns in
+      the build pass (`scan_rows_need`). The native-AM path (`build_am_index`) still uses
+      `scan_rows`: switch it once 148's batch lands.
+    - Verified, on `5ee62371`: crate tests in debug and release; clippy (nothing in the
+      files touched); the a144 goldens embedded, wire and shuffled; a full regress run
+      (debug, private reference) 51,148 / 51,150 with 0 units changed against results.tsv;
+      isolation with the roll-* specs 1,805 permutations matching, intra-grant-inplace
+      the only spec differing; pg_dump_tap 14,817 / 14,817; difftest smoke; contrib
+      btree_gist 613 / 616, pg_trgm 261, cube 316, bloom 58, hstore 309, intarray 182,
+      citext 544, pgvector 803 / 915 against `a89-pgvector` (its bench flags' INFO lines;
+      expected output 14 / 14), all unchanged.
+    - Measured (release, fresh engines, nice 19; median of 15, engine CPU per statement;
+      before = `5ee62371`): booking_bulk 427 -> 32 ms (CPU 450 -> 37; PostgreSQL 97, so
+      the engine is now 3x faster); timestamptz KNN `ORDER BY ts <-> c LIMIT 5` over
+      100,000 rows 145 -> 0.24 ms (CPU 151 -> 6); skip scan 23 -> 17 ms (unsolved, above).
+      Peak RSS 452 -> 448 MB.
 
 - **Stored scans** (round 24, agent 149):
   - Recovered `eb44c2c9` and `78f4186f` onto `251924c1`. String comparisons

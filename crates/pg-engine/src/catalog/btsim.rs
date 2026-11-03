@@ -457,6 +457,32 @@ pub struct InsertHint<'a> {
     pub dead: &'a dyn Fn(Tid) -> bool,
 }
 
+/// A leaf page as `Btree::leaf_view` shows it, borrowed.
+pub struct LeafView<'a> {
+    /// The high key's kept key attributes (`key_bytes`); None on the rightmost page.
+    pub high: Option<&'a [u8]>,
+    /// The high key has fewer than the index's key attributes (suffix truncation).
+    pub truncated: bool,
+    pub right: Option<u32>,
+    entries: &'a Leaf,
+    nkey: usize,
+}
+
+impl<'a> LeafView<'a> {
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Entry `i`'s key attributes, as an index entry's storage key has them.
+    pub fn key(&self, i: usize) -> &'a [u8] {
+        self.entries.get(i).key.key_bytes(self.nkey)
+    }
+}
+
 /// What `Btree::page_stats` counts.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BtPageStats {
@@ -1330,6 +1356,18 @@ impl Btree {
     /// The leaf page a scan starting at model key `lo` reads first: the one with its first
     /// entry past `lo` (a following page when the page the descent reaches has none), or
     /// the last leaf the descent reached. None: no leaf.
+    /// Leaf page `blk` as a scan walks it (a skip scan's "Index Searches", agent 144): its
+    /// entries' key attributes, its high key's and its right sibling. None: not a leaf.
+    pub fn leaf_view(&self, blk: u32) -> Option<LeafView<'_>> {
+        let p = self.pages.get(blk as usize)?.as_ref()?;
+        if !p.leaf {
+            return None;
+        }
+        let nkey = self.opts.nkey;
+        let high = p.high.as_ref().and_then(|h| Some((h.key.as_ref()?.key_bytes(h.natts.min(nkey)), h.natts < nkey)));
+        Some(LeafView { high: high.map(|h| h.0), truncated: high.is_some_and(|h| h.1), right: p.right, entries: &p.items, nkey })
+    }
+
     pub fn scan_leaf(&self, lo: &[u8]) -> Option<u32> {
         let nkey = self.opts.nkey;
         let mut blk = self.root?;
