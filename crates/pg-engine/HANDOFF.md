@@ -4460,6 +4460,67 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     "file numbers of relations that are gone" (29e882c9 fixes it); partition_aggregate's
     ANALYZE meeting autovacuum's ("concurrent schema change") is the catalog merge of two
     statistics writes PostgreSQL serializes on ShareUpdateExclusiveLock (agent 146).
+- **OLTP round 5** (round 25, agent 159; BENCH.md "OLTP, round 5"): custom plans from the
+  analysis, simple queries planned from their template's analysis, per-message settings and
+  notification work.
+  - *Round 4 verified in full* on `5973e109` (origin's head with agent 151's size-model
+    commits), release: pg_regress 51,148 / 51,150 with no unit changed against
+    `results.tsv` (private reference); isolation 121 / 122 specs, 1,647 / 1,648
+    permutations; pg_dump_tap 14,817 / 14,817; psycopg 3 (4,924 pass, the 9 known
+    failures), pgx (1,217), node-postgres (146), asyncpg (262), pgjdbc (8,221): no
+    difference from STATUS. Nothing needed fixing.
+  - *Custom plans from the analysis* (`sql/binder/custom.rs`, `Analyzed::bind_values`;
+    step 1 of agent 155's constness design, "Planner round 9"): a kept Parse analysis
+    (`Binder::keep_site`) notes where its SELECT's own level placed the WHERE
+    (`custom::WhereSite`: the scan before `optimize::add_filter`, and the predicate). A
+    custom plan is that analysis with each `$n` its value: the values folded as
+    `Binder::fold_call` folds (an immutable call over constants), the WHERE placed again by
+    `add_filter` (qual order by folded cost, equivalence-class constants, constraint
+    exclusion, `const_conflict`, `choose_index`'s bounds), the rest of the level (projection,
+    aggregation, sorts, a LIMIT without parameters) with the values in, then
+    `Analyzed::plan`. It covers a single-level SELECT over one scan; `Custom::Never` (a
+    cast, NULLIF, IN list or any node but a call, AND / OR / NOT over a parameter; a boolean
+    or collatable fold; a LIMIT parameter; domain or untyped parameters; a sub-select level)
+    and `Custom::Rebind` (a null value, a fold that fails or gives null, a scan the
+    constants empty) bind the values afresh as before (`bound_custom_afresh`). The first
+    custom plan of a Parse entry (`ParamEntry::values_ok`) is checked against binding
+    afresh in release builds too, every one in debug builds (`same_plan`); notices the
+    check's second binding raises are dropped. `bound_custom` (21% of the 8-client range
+    read) becomes substitution plus planning.
+  - *Simple queries from their template's analysis* (`litplan::Values`,
+    `lit_values` / `lit_values_plan`): a SELECT template whose plan depends on its values
+    (no kept plan, `lit_make` failed) keeps its analysis with its numeric literals as
+    parameters (a LIMIT's or OFFSET's literal and string literals stay constants, by text);
+    each later query of the shape is `bind_values` with its literals' values, the plan the
+    query would get (PostgreSQL plans every simple query: this skips parse analysis, not
+    planning). Not kept: an analysis that raised a notice (folding a constant: PostgreSQL
+    raises it each time it plans, golden xml). Checked like the custom plans.
+  - *Per-message settings* (`Settings::hot`, `settings::Hot` in the derived cache):
+    idle_session / idle_in_transaction / transaction / deadlock timeouts,
+    track_activity_query_size, row_security, plan_cache_mode, synchronous_commit,
+    default_transaction_deferrable, application_name, which every message or statement
+    looked up by name (`get_str`, 2-6% of simple-update's session work; `idle_timeout` and
+    the pg_stat_activity updates per message).
+  - *Notification listener per session* (`notify::ListenerHandle`, `Session::listener`):
+    marking a session busy and idle around every message took the hub's global mutex
+    twice per message (all sessions); the session keeps its listener after finding it once.
+  - Tried and left out: a transaction's relation-lock table (`Txn::locks_held`) presized for
+    8, which rehashes two or three times per tpcb-like transaction: with 100 idle sessions
+    the engine's RSS grew 1-2 MB (a 672-byte allocation class every connection thread's
+    mimalloc heap then touches), against the footprint gate, for under 1% of CPU.
+  - Where tpcb-like / simple-update prepared CPU goes (frame-pointer release build, 8
+    clients, BENCH.md): the UPDATEs' row scans 31% of tpcb-like (`next_heap_ordered`,
+    the hot ranges' version chains of tellers / branches, which PostgreSQL seq-scans too;
+    storage, agent 149); send / receive 19-26% (one send per Sync, as PostgreSQL); commit
+    7-12%; `run_query`'s own work 8-16% (relation locks, privilege checks,
+    begin_statement, search_path copies, settings); the allocator 8-10% as leaf.
+  - Left: `SessionState::search_path` hands out a `Vec<String>` copy per call (7-10% of
+    run_query's own work: `ExecCtx::with_search_path`, `bound_as`); `perms::check` per
+    execution (12-15%); pg_stat_activity updates take the engine's backends mutex per
+    message (`Engine::set_activity`); Bind's result-description recheck and copy
+    (`describe_here`, 1.7%); `bind_values` for DML, sub-select levels, partition pruning
+    and the `= ANY` / LIKE rewrites (155's later steps), and removing the serial cost tree
+    once the planner hands over its chosen cost (155's item).
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.
