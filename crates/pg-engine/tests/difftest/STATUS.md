@@ -308,6 +308,117 @@ errors in transactions, recursive CTEs with SEARCH / CYCLE, window frames with E
 | round 5, base (0f9f0609, round 5 generator) | 5256–5355 × 100 | 9,697 | crash 2, wrong_rows 39, wrong_state 7, engine_error 14, missing_error 8, wrong_error 28, eval_error 26, notice 7, tag 1 |
 | round 5, batch 2 | 5256–5355 × 100 | 10,064 | wrong_rows 1, wrong_state 2, engine_error 8, missing_error 12, wrong_error 21, eval_error 13, notice 3, tag 1 (110 above error_message in the base, 52 here; 64 gone; none new but 6 past a base divergence; the wrong_rows / wrong_state are the old grammar's, the base's too: DISTINCT ON's physical order, a failing UPDATE condition, ANALYZE's sample) |
 
+## Round 9 grammar (agent 156)
+
+Seeds from `R9_SEEDS` (9000) on add the `r9*` objects (`round9.rs`) to round 8's shared engine
+and sessions; 55% of the statements are `round9_stmt`'s, aimed where the optimisers work:
+
+- **Prepared statements across the plan switch** (agent 145): a template over `r9s` (skewed:
+  `g` is 1 in 49 of 50 rows; indexes on `(g, v)` and `t`) prepared with SQL on session 1 or over
+  the extended protocol on session 2 or 3 (typed or not, text or binary), executed 6-14 times
+  with other parameters under `plan_cache_mode` auto / force_generic / force_custom, EXPLAIN
+  EXECUTE now and then, ANALYZE, an index made and dropped, DISCARD PLANS or a setting change
+  between executions, then `pg_prepared_statements`' generic_plans / custom_plans. A custom plan
+  folds its parameters (`v > 10 / $2` fails while planning even when no row has `g = $1`), a
+  generic one doesn't: which plan ran is visible. Also PL/pgSQL loops whose statements are
+  re-run with other values, SQL and PL/pgSQL functions, and a result type changed under a
+  prepared statement (0A000).
+- **Batch execution's edges** (agent 154) over `r9n` (2,000-4,000 rows): int2 / int4 / int8
+  overflow, which division by zero comes first (quals in order, `CASE`, projections below a
+  LIMIT or OFFSET), numeric scale of `*`, `/`, `%`, round / trunc, casts to narrower types,
+  NaN and infinities in numeric and float8, NULLs in IN / NOT IN / FILTER / GREATEST,
+  text under C, ICU and the database collation (and their conflicts), `FETCH ... WITH TIES`,
+  DISTINCT ON, OFFSET past ties; under scan and sort settings.
+- **COPY FROM** (agent 148) of 3-12, 900-1,100 or 1,500-2,600 lines (past PostgreSQL's
+  1,000-row buffers) into a table with a primary key and a unique index, a range-partitioned
+  one (with or without a default partition, a unique index), or one with BEFORE row (skipping,
+  changing or failing rows), AFTER row and transition-table statement triggers; a late line
+  that fails (duplicate key, bad integer, duplicate unique value, no partition); session 2
+  reading before and after the commit or rollback, from a REPEATABLE READ snapshot, or
+  inserting a key the uncommitted COPY holds (a lock wait).
+- **Index builds** (agents 144 and 148) of btree, hash, gin, gist, spgist and brin indexes:
+  unique (failing on duplicates), NULLS NOT DISTINCT, partial, expression, INCLUDE, opclasses
+  and options, CONCURRENTLY, in a rolled-back transaction, on a partitioned table, exclusion
+  constraints; `pg_index` and `pg_get_indexdef` after; DML and REINDEX; then the queries they
+  serve with sequential scans off (KNN ordering, containment, jsonpath, text search).
+- **Range reads** (agent 149) over `r9s`: bounds in both directions, row comparisons, `= ANY`
+  with NULLs, cross-type and empty bounds, collations, min / max, after VACUUM (index-only
+  scans), a scrolling cursor fetched backwards, and a range session 2 changes before it
+  commits or rolls back.
+- **Statistics** (agents 146 and 155): a table of 50-6,000 rows that ANALYZE samples whole
+  (statistics targets are never below rows / 300, so there is no randomness): pg_stats
+  (MCVs, histograms, correlation, element statistics), reltuples, per-column targets and
+  n_distinct, extended statistics (pg_stats_ext, pg_stats_ext_exprs), and the planner's row
+  estimates read off EXPLAIN without costs (`r9est`); sometimes EXPLAIN with costs.
+
+## Guarding the optimisers (agent 156)
+
+Each guard run pairs origin's head with the previous verified head: the smoke, then seeds
+6100-6249, 7000-7149 and 8000-8149 (150 statements a seed) in one process per side. Partition
+the seeds the same way on both sides: the runner writes a case file only for a mismatch
+signature's first occurrence, so case file names depend on the seeds run before. Compare the
+logs' `[class] seed N #i` lines instead.
+
+| run | base / head | statements | new on head | gone on head |
+|---|---|---|---|---|
+| 2026-11-03 | `251924c1` / `ed0c85fe` (release) | 70,215 | 0 | 37 lines: round 7's binary domain-array element oid (seeds 7024, 7087-7145, 8032, 8132), Bind's result-format check before the custom plan (7063, 08P01 vs 22003) |
+
+## Round 9 (agent 156)
+
+Seeds 9000-9149 (23,502 statements, release, on `ed0c85fe`): wrong_rows 126, engine_error 38,
+wrong_error 17, missing_error 4, eval_error 1, error_message 3, error_detail 40. Every item
+below reproduces on `251924c1` too: the grammar found them, no recent push caused them.
+Routed through the coordinator 2026-11-03.
+
+- **Plan cache (agent 145).** A generic plan is never chosen:
+  `CREATE TABLE r9s (id int PRIMARY KEY, g int, v int, t text, x numeric)`, 2,885 rows
+  (`SELECT i, 1, NULL, (ARRAY['a', 'a b'])[i % 8 + 1] || 1 FROM generate_series(1, 2885) i`),
+  ANALYZE, `PREPARE r9p (text) AS SELECT id, g FROM r9s WHERE id = ANY ($1::int[]) ORDER BY id`,
+  executed with `'{50,100,NULL}'`, `'{2999,1}'`, `'{}'`, `'{1,2,3}'`, `'{50,100,NULL}'` twice:
+  pg_prepared_statements' generic / custom plans 0 / 6, PostgreSQL 1 / 5 (EXPLAIN EXECUTE shows
+  the literal where PostgreSQL shows `$1`); over SQL and the extended protocol, 12 of 150 seeds.
+- **Parameter types (agent 145).** `PREPARE p AS SELECT id FROM r9s WHERE id BETWEEN $1 AND
+  $1 + $2` fails 42725 "operator is not unique: unknown + unknown"; PostgreSQL types `$1` from
+  BETWEEN first. Also over the protocol (an untyped Parse).
+- **Result type (agent 145).** `PREPARE p AS SELECT * FROM r9w WHERE a >= $1`, executed, then
+  `ALTER TABLE r9w RENAME COLUMN b TO bb`: PostgreSQL's next EXECUTE fails 0A000 "cached plan
+  must not change result type", the engine returns the new column name.
+- **Binary arrays (agent 145).** A binary int4[] parameter whose header is garbage: 08P01 or
+  22P03 where PostgreSQL reports 54000 "number of array dimensions (N) exceeds the maximum
+  allowed (6)".
+- **COPY's buffered rows (agent 148).** PostgreSQL checks unique keys when it flushes 1,000
+  buffered rows; the engine row by row. `CREATE TABLE r9c (id int PRIMARY KEY, a int, b text,
+  s serial)`, a COPY of 1,100 lines whose line 1,050 repeats key 5, then `SELECT
+  nextval('r9c_s_seq')`: 1051, PostgreSQL 1101 (line 900: 901, PostgreSQL 1001). With a BEFORE
+  ROW trigger (no buffering) both say 1051.
+- **Planner (agent 155).** A partitioned table's top-N (`ORDER BY a DESC NULLS FIRST, id LIMIT
+  10`, `ORDER BY p <-> point '(3,3)', id LIMIT n`) is a Merge Append of Sorts where PostgreSQL
+  sorts an Append (15 cases); `SELECT max(id), min(id), max(v) FROM r9s WHERE id < N` uses
+  min / max InitPlans where PostgreSQL aggregates a Seq Scan; with enable_seqscan off,
+  `a = ANY ('{1,2,96}')` over partitions with an index on `a` stays a disabled Seq Scan where
+  PostgreSQL uses bitmap scans.
+- **Estimates (agent 155).** `arr @> '{2}'` over `ARRAY[i % 4, i % 9]` (3,000 rows): 15 rows,
+  PostgreSQL 1,000 (pg_stats' element statistics agree); `SELECT DISTINCT g, u % 10` with
+  `CREATE STATISTICS ... (ndistinct) ON g, (u % 10)`: 1,600, PostgreSQL 19.
+- **Statistics (agent 146).** `ALTER TABLE ... ALTER COLUMN u SET (n_distinct = 50)` then
+  ANALYZE: pg_stats.n_distinct -1, PostgreSQL 50 (and the estimate of `DISTINCT u` 3,231 vs 50);
+  correlation in pg_stats and pg_stats_ext_exprs differs in the second or third digit on fully
+  sampled tables (the grammar compares it to one decimal, and not at all after an UPDATE moved
+  rows); a failed `CREATE UNIQUE INDEX CONCURRENTLY` leaves `indisready` true (PostgreSQL false;
+  later inserts behave alike).
+- **EXPLAIN (planner's deparse, agent 155; more than an hour, not fixed here).** A sort key
+  under a written COLLATE: PostgreSQL's planner turns the CollateExpr into a RelabelType, and a
+  key that matches an output column (relabelling stripped) shows that column, otherwise the
+  RelabelType as a cast. Over `r9e (t text, u text COLLATE "C", n name)`, `SELECT t FROM r9e
+  ORDER BY ...`: `t COLLATE "en-x-icu"` shows `t COLLATE "en-x-icu"` (the engine `(t) COLLATE
+  ...`); `u COLLATE "en-x-icu" NULLS FIRST` `((u)::text) COLLATE "en-x-icu" NULLS FIRST`;
+  `u COLLATE "default"` `((u)::text)` (the engine `u COLLATE "default"`); `lower(t) COLLATE
+  "en-x-icu"` `((lower(t))::text) COLLATE "en-x-icu"`; `(t || 'x') COLLATE "C"` `(((t ||
+  'x'::text))::text) COLLATE "C"` (the engine drops the COLLATE); `n COLLATE "en-x-icu"`
+  `((n)::name) COLLATE ...`; `SELECT DISTINCT t COLLATE "en-x-icu"` groups by `(t)::text`. Also
+  under a join (`a.t`) and over a UNION ALL; with a LIMIT.
+- Round 8's small-work_mem hash-or-sort choice again (r8big, HashSetOp vs SetOp).
+
 ## Round 8 grammar (agent 147)
 
 Seeds from `R8_SEEDS` (8000) on add the `r8*` objects (`round8.rs`) to round 7's shared
@@ -1120,8 +1231,9 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
 
 ## Open
 
-- **Round 8 seeds, found, not fixed** (agent 147; routed, reproducers below):
-  - Planner (agent 140), under a small work_mem (seeds 8018, 8023, 8026, 8035, 8049, 8130):
+- **Round 8 seeds, found, not fixed** (agent 147; re-routed to the current owners by agent 156 on
+  2026-11-03, all re-probed on `ed0c85fe`, reproducers below):
+  - Planner (agent 155), under a small work_mem (seeds 8018, 8023, 8026, 8035, 8049, 8130):
     `SET work_mem = '64kB'` over `r8big (id int PRIMARY KEY, k int, s text)` filled with
     `SELECT i, (i * 7919) % 97, md5(i::text) FROM generate_series(1, 3020) i` and analysed:
     `EXPLAIN (COSTS OFF) SELECT DISTINCT k, length(s) FROM r8big ORDER BY k, length(s)` is a
@@ -1131,7 +1243,7 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
     with an ordered `array_agg`: the choice between hashing (which spills) and sorting under a
     small work_mem. Results agree. The saved seed 8021 bitmap-scan case no
     longer differs on the resumed base or change.
-  - Planner (agent 140): join order decides evaluation (round 7's `width_bucket('NaN', ...)`
+  - Planner (agent 155): join order decides evaluation (round 7's `width_bucket('NaN', ...)`
     case, seed 7041 #130): `WITH w1 AS (SELECT array_length(array_remove(NULL,
     width_bucket(s2.v2, 0, 10, 4)), 1) AS c0, 1 AS c1 FROM (VALUES ('2000-10-28', false, 'NaN'),
     ('infinity', true, 2.50), (NULL, NULL, 3)) s2 (v0, v1, v2)) SELECT 1 FROM (w1 t5 LEFT JOIN
@@ -1141,27 +1253,26 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
     Nested Loop has the t5 join outer (it reads w1 and fails 2201G), the engine's has s7 outer
     (empty: w1 is never read). EXPLAIN also shows `JSON_EXISTS(NULL::text, ...)` where
     PostgreSQL shows `NULL::jsonb`, and PostgreSQL keeps the Subquery Scan on s7.
-  - Planner (agent 140): round 7's FULL JOIN decisions (seed 7051 #66, 8022 #67): a FULL JOIN
+  - Planner (agent 155): round 7's FULL JOIN decisions (seed 7051 #66, 8022 #67): a FULL JOIN
     without mergeable clauses inside a view read by a sub-select under `WHERE false`
     (`CREATE VIEW v1 AS SELECT ... FROM t0 t1 FULL JOIN t2 ON t1.id IN (t1.id, 1)`, then
     `... JOIN (SELECT ... FROM (t0 t7 JOIN v1 t8 ON ...) WHERE ...) s6 WHERE false) s5 ...
     WHERE (jsonb_array_length('{"a": 2.50}') & t2.c1) <> 7`): PostgreSQL fails folding the
     outer WHERE (22023) and never plans the FULL JOIN; the engine plans it first (0A000). The
     level-by-level FULL JOIN check (round 6's item).
-  - Executor (agent 143), round 4's class (seed 8064 #85): a `RETURN QUERY` whose columns don't
+  - Executor (agent 154), round 4's class (seed 8064 #85): a `RETURN QUERY` whose columns don't
     match fails in the engine where PostgreSQL never calls the function.
-  - Protocol (agent 145): binary arrays of a domain carry the base type's oid (round 7's item,
-    seen again at seeds 8032, 8132: `\x2 rf=1` with `SELECT $1::r7pos[]`).
-  - Catalog (agent 146): `pg_control_system()` and the other `pg_control_*` functions are
+  - Fixed by 2026-11-03 (gone from seeds 7024, 7087-7145, 8032, 8132 on `ed0c85fe`): binary
+    arrays of a domain carried the base type's oid (`\x2 rf=1` with `SELECT $1::r7pos[]`).
+  - Catalog (agent 146; still on `ed0c85fe`): `pg_control_system()` and the other `pg_control_*` functions are
     registered as set-returning (they aren't: proretset false), so `VALUES
     (pg_control_system())` fails "set-returning functions are not allowed in VALUES" where
     PostgreSQL accepts it.
-  - Monitoring (agent 128, held commit `40f4554f`): its proposed `pg_stat_get_backend_subxact` reads the backend's live count;
-    PostgreSQL's comes from the backend status snapshot taken at the transaction's first
-    statistics call (after `ROLLBACK TO` a savepoint whose xid was counted, PostgreSQL still
-    reports it). The resumed implementation uses the proc-slot backend ids
-    already used by `pg_stat_get_backend_idset`, not pids. The snapshot mismatch remains;
-    the new function is isolated in its own commit.
+  - Superseded (agent 156, 2026-11-03): held commit `40f4554f`'s live-count
+    `pg_stat_get_backend_subxact` is replaced by bf87a342's shared backend-status snapshot. On
+    `ed0c85fe` a wire session's count after `ROLLBACK TO` stays 1 until
+    `pg_stat_clear_snapshot()` and is then 0, as in PostgreSQL. The held commit needn't land.
+    (Session 1, in-process, has no backend entry, so the same probe there returns no row.)
   - Not emulated: after a row ON_ERROR ignore skipped, PostgreSQL's CONTEXT of a later line's
     DEFAULT-marker error names the skipped row's column and a stale value (`line 2, column b:
     "D"`); the engine's is the line's text.
@@ -1171,7 +1282,8 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
     its element type where array_send writes the domain's (`CREATE DOMAIN d AS int CHECK
     (VALUE > 0)`, then `SELECT '{1,2}'::d[]` with result format 1: PostgreSQL's header has d's
     oid, the engine 23). `put_data_row` / `binary::encode_array` have no catalog to find it.
-  - Protocol (agent 136): Bind checks the result-format count before the custom plan is made,
+  - Fixed by 2026-11-03 (seed 7063 agrees on `ed0c85fe`): Bind checked the result-format count
+    before the custom plan was made,
     PostgreSQL after (GetCachedPlan, then PortalSetResultFormat): `SELECT $1 + $2, $3::int2,
     $4 * 2` bound with `$4` = -9223372036854775808 and two result formats for three columns is
     22003 (bigint out of range, folding the parameter) in PostgreSQL, 08P01 in the engine.
