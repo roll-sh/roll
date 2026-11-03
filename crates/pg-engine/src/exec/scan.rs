@@ -555,6 +555,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             filter_cols: None,
             lazy: None,
             kfilter: None,
+            erb: Default::default(),
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -644,6 +645,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             filter_cols: None,
             lazy: None,
             kfilter: None,
+            erb: Default::default(),
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -723,6 +725,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             filter_cols: None,
             lazy: None,
             kfilter: None,
+            erb: Default::default(),
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -952,6 +955,7 @@ fn open_scan_as(
         filter_cols: None,
         lazy: None,
         kfilter: None,
+        erb: Default::default(),
         run: Default::default(),
         pending: None,
         blocks: Default::default(),
@@ -1691,6 +1695,7 @@ fn dense_bitmap_scan(
         filter_cols: None,
         lazy: None,
         kfilter: None,
+        erb: Default::default(),
         run: Default::default(),
         pending: None,
         one_run: false,
@@ -2113,7 +2118,9 @@ struct ScanNode {
     lazy: Option<Option<Box<LazyScan>>>,
     /// The filter's kernel, run over a row made before `eval` (an index scan's rows: their
     /// conditions checked again), once compiled; None inside: it has none.
-    kfilter: Option<Option<super::kernel::K>>,
+    kfilter: Option<Option<(super::kernel::K, Option<super::kernel::StoredCmps>)>>,
+    /// An index scan's entries read a batch at a time (`next_indexed`).
+    erb: crate::storage::batch::RowBatch,
     /// Such a scan read by worker threads (`parscan`), once decided (`par_tried`).
     par: Option<super::parscan::ParScan>,
     par_tried: bool,
@@ -2810,6 +2817,21 @@ impl ScanNode {
                 if self.iter.is_none() && !self.open_range(ctx) {
                     break;
                 }
+                // (A forward range's entries a batch at a time, by reference: `fill_batch`.)
+                if let Some(StoreIter::Fwd(it)) = self.iter.as_mut()
+                    && self.skip.as_ref().is_none_or(|s| s.plain)
+                {
+                    self.erb.clear();
+                    it.fill_batch(&mut self.erb, want - ents.len())?;
+                    if self.erb.is_empty() {
+                        self.iter = None;
+                    }
+                    for i in 0..self.erb.len() {
+                        let (k, v) = self.erb.get(i);
+                        ents.push((k.to_vec(), v.to_vec()));
+                    }
+                    continue;
+                }
                 match self.iter_next(ctx) {
                     Some(r) => {
                         let (k, v) = r?;
@@ -3341,6 +3363,30 @@ impl ScanNode {
             self.prefilter = Some(mask.map(Rc::from));
         }
         self.prefilter.clone().flatten()
+    }
+
+    /// The scan's filter decided by its kernel (None: left to `eval`) for a row made from
+    /// the stored row `bytes` (an index scan's rows, their conditions checked again): over
+    /// the stored values first (`StoredCmps`), else over the row.
+    fn filter_kernel(&mut self, bytes: &[u8], row: &Row) -> Option<bool> {
+        let stored = self.ios_cols.is_none() && !crate::storage::toast::has_external(bytes);
+        let plan = &self.plan;
+        let (k, cmps) = self
+            .kfilter
+            .get_or_insert_with(|| {
+                plan.filter.as_ref().and_then(super::kernel::compile).map(|k| {
+                    let c = super::kernel::StoredCmps::of(&k);
+                    (k, c)
+                })
+            })
+            .as_ref()?;
+        if stored
+            && let Some(c) = cmps
+            && let Some(pass) = row_data_fast(bytes).and_then(|d| c.passes(d))
+        {
+            return Some(pass);
+        }
+        k.passes(row)
     }
 
     fn full_row(&self, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<Row> {
@@ -4404,10 +4450,10 @@ impl ScanNode {
             ctx.sess.db.ssi.read_row(me, self.plan.table.oid, key)?;
         }
         if !prefiltered
-            && let Some(f) = &self.plan.filter
-            && !match self.kfilter.get_or_insert_with(|| super::kernel::compile(f)).as_ref().and_then(|k| k.passes(&row)) {
+            && self.plan.filter.is_some()
+            && !match self.filter_kernel(bytes, &row) {
                 Some(pass) => pass,
-                None => eval_bool(f, &row, ctx)?,
+                None => eval_bool(self.plan.filter.as_ref().expect("a filter"), &row, ctx)?,
             }
         {
             ctx.filtered(self.key);
@@ -5050,6 +5096,7 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
         filter_cols: None,
         lazy: None,
         kfilter: None,
+        erb: Default::default(),
         run: Default::default(),
         pending: None,
         one_run: false,
