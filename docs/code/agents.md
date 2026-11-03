@@ -288,8 +288,16 @@ server (`docs/orchestration-v2/orchestrator-mcp-server.md` there), ported in
 The owner can share a thread as a read-only link, `https://roll.sh/agents/s/<id>`: "the agent IDE
 people will share". Sharing freezes a copy of the thread's records from the relay's mirror (and,
 optionally, of the subagent threads it delegated to), so the link shows the run as it was, not
-what happens after. Terminals, attachments' bytes and queued messages are left out, and home
-directories are written `~`. The page is the canvas in read-only mode with **replay**: a timeline
+what happens after. Terminals, attachments' bytes, queued messages and a project's repo and git
+state (`Project.repo`, `Project.git`: a private repo's name, a remote's credentials) are left
+out. In every string the machine's home directory (from its `hello`), and anything that looks
+like `/home/<user>`, `/Users/<user>` or `/root`, is written `~` wherever it appears, and
+credentials that look like what they are become `<prefix>[redacted]`: roll's `rlm_`, `rlg_`,
+`rlc_`, `rlx_`, `rla_` and `rld_` tokens, GitHub's (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`,
+`github_pat_`), `sk-` keys, Stripe's `sk_live_`/`sk_test_`/`rk_live_`, Slack's `xox?-`, AWS
+`AKIA`/`ASIA` key ids, whatever follows `Bearer` or `Basic`, and a URL's userinfo
+(`share.rs`, `secrets` and `tilde`). It is a best effort for what a share shows, not a promise
+that no secret can be in it: the owner chooses what to share. The page is the canvas in read-only mode with **replay**: a timeline
 rebuilt from the records' timestamps (threads appear, nodes start, text streams, the accent pulse
 while a run is going), a play button and speed, and the final frame at once with reduced motion.
 Revoking a share removes it; nothing else does. Routes are in docs/code/http-api.md ("Shares").

@@ -2,7 +2,8 @@
 //! thread's records from the mirror (and, with `subtree`, of the subagent threads it delegated
 //! to) and anyone with the link reads it at `/agents/s/<id>`. A share is a copy, not a view:
 //! later work, a revoked machine or a deleted thread don't change it; revoking the share removes
-//! it. Terminals and attachments' bytes are left out, and home directories become `~`.
+//! it. Terminals, attachments' bytes and projects' repos and remotes are left out, home
+//! directories become `~` and credentials `[redacted]`.
 
 use super::api::{manageable, random_hex, readable};
 use crate::api::Body;
@@ -129,7 +130,7 @@ fn copy(code: &Code, owner_id: &str, owner: &str, thread: &str, subtree: bool) -
     let share = Share {
         id: format!("shr_{}", random_hex(12)),
         owner: owner.into(),
-        title: tilde(&root.title, home.as_deref()),
+        title: scrub(&root.title, home.as_deref()),
         thread: root.id.clone(),
         subtree,
         machine: SharedMachine { name: machine.as_ref().map_or_else(|| "machine".into(), |m| m.name.clone()), os: machine.and_then(|m| m.info).map(|i| i.os) },
@@ -151,8 +152,9 @@ fn order(e: &Entity) -> (u8, u64, u32, String) {
     }
 }
 
-/// What a share never holds: attachments' bytes (names and types stay), queued messages, and
-/// what roll code knows about a thread (its change and work item may be in a private repo).
+/// What a share never holds: attachments' bytes (names and types stay), queued messages, what
+/// roll code knows about a thread (its change and work item may be in a private repo), and a
+/// project's repo and git state (a remote names a private repo, and could carry a credential).
 fn strip(e: &mut Entity) {
     match e {
         Entity::Run(r) => r.attachments.iter_mut().for_each(|a| a.data.clear()),
@@ -161,11 +163,15 @@ fn strip(e: &mut Entity) {
             t.change = None;
             t.work = None;
         }
+        Entity::Project(p) => {
+            p.repo = None;
+            p.git = None;
+        }
         _ => {}
     }
 }
 
-/// Home directories in every string of a record become `~`.
+/// Every string of a record: home directories become `~` and secrets `[redacted]`.
 fn redact_entity(e: Entity, home: Option<&str>) -> Entity {
     let mut v = serde_json::to_value(&e).unwrap_or(Value::Null);
     redact(&mut v, home);
@@ -175,7 +181,7 @@ fn redact_entity(e: Entity, home: Option<&str>) -> Entity {
 fn redact(v: &mut Value, home: Option<&str>) {
     match v {
         Value::String(s) => {
-            let t = tilde(s, home);
+            let t = scrub(s, home);
             if t != *s {
                 *s = t;
             }
@@ -186,12 +192,18 @@ fn redact(v: &mut Value, home: Option<&str>) {
     }
 }
 
+/// What a public copy of `s` shows: [`secrets`] redacted, then [`tilde`].
+pub(crate) fn scrub(s: &str, home: Option<&str>) -> String {
+    tilde(&secrets(s), home)
+}
+
 fn path_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | '~' | '$')
 }
 
-/// `s` with the machine's home directory, and any `/home/<user>`, `/Users/<user>` or
-/// `/root` that starts a path, written as `~`.
+/// `s` with the machine's home directory, and any `/home/<user>`, `/Users/<user>` or `/root`,
+/// written as `~` wherever they are (`file:///home/me/…`, `-I/home/me/…`, `HOME=/root`). A public
+/// copy would rather lose a path that only looks like a home than keep a user name.
 pub(crate) fn tilde(s: &str, home: Option<&str>) -> String {
     let mut prefixes: Vec<String> = Vec::new();
     if let Some(h) = home.map(|h| h.trim_end_matches('/')).filter(|h| h.len() > 1) {
@@ -201,8 +213,7 @@ pub(crate) fn tilde(s: &str, home: Option<&str>) -> String {
     let mut i = 0;
     let b = s.as_bytes();
     while i < s.len() {
-        let starts = i == 0 || !path_char(s[..i].chars().next_back().unwrap_or(' '));
-        if b[i] == b'/' && starts
+        if b[i] == b'/'
             && let Some(len) = home_at(&s[i..], &prefixes)
         {
             out.push('~');
@@ -236,6 +247,95 @@ fn home_at(s: &str, known: &[String]) -> Option<usize> {
         return Some(5);
     }
     None
+}
+
+/// Credentials that look like what they are, kept as their prefix and `[redacted]`: roll's
+/// tokens, GitHub's, OpenAI's and Anthropic's keys, Stripe's, Slack's and AWS access key ids,
+/// plus whatever follows `Bearer`/`Basic` and a URL's userinfo. (prefix, characters after it at
+/// least, only upper-case letters and digits after it.)
+const SECRET_PREFIXES: &[(&str, usize, bool)] = &[
+    ("rlm_", 8, false),
+    ("rlg_", 8, false),
+    ("rlc_", 8, false),
+    ("rlx_", 8, false),
+    ("rla_", 8, false),
+    ("rld_", 8, false),
+    ("ghp_", 8, false),
+    ("gho_", 8, false),
+    ("ghu_", 8, false),
+    ("ghs_", 8, false),
+    ("ghr_", 8, false),
+    ("github_pat_", 8, false),
+    ("sk-", 16, false),
+    ("sk_live_", 8, false),
+    ("sk_test_", 8, false),
+    ("rk_live_", 8, false),
+    ("xoxa-", 8, false),
+    ("xoxb-", 8, false),
+    ("xoxp-", 8, false),
+    ("xoxr-", 8, false),
+    ("xoxs-", 8, false),
+    ("xoxe-", 8, false),
+    ("AKIA", 16, true),
+    ("ASIA", 16, true),
+];
+
+fn token_char(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-')
+}
+
+/// `s` with credentials replaced (see [`SECRET_PREFIXES`]).
+pub(crate) fn secrets(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    'scan: while i < b.len() {
+        let starts = i == 0 || !token_char(b[i - 1]);
+        if starts {
+            for &(prefix, min, upper) in SECRET_PREFIXES {
+                if b[i..].starts_with(prefix.as_bytes()) {
+                    let rest = &b[i + prefix.len()..];
+                    let n = rest.iter().take_while(|c| if upper { c.is_ascii_uppercase() || c.is_ascii_digit() } else { token_char(**c) }).count();
+                    if n >= min {
+                        out.push_str(prefix);
+                        out.push_str("[redacted]");
+                        i += prefix.len() + n;
+                        continue 'scan;
+                    }
+                }
+            }
+            // `Bearer <token>`, `Basic <token>` (an Authorization header in a command or log).
+            for scheme in ["bearer", "basic"] {
+                if b.len() > i + scheme.len() && b[i..i + scheme.len()].eq_ignore_ascii_case(scheme.as_bytes()) && matches!(b[i + scheme.len()], b' ' | b'\t') {
+                    let start = i + scheme.len() + 1;
+                    let start = start + b[start..].iter().take_while(|c| **c == b' ').count();
+                    let n = b[start..].iter().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'~' | b'+' | b'/' | b'=' | b'-')).count();
+                    if n >= 8 {
+                        out.push_str(&s[i..start]);
+                        out.push_str("[redacted]");
+                        i = start + n;
+                        continue 'scan;
+                    }
+                }
+            }
+        }
+        // A URL's userinfo: `scheme://user:password@host` → `scheme://[redacted]@host`.
+        if b[i..].starts_with(b"://") {
+            let start = i + 3;
+            let authority = b[start..].iter().take_while(|c| !matches!(c, b'/' | b'?' | b'#' | b' ' | b'\t' | b'\n' | b'"' | b'\'' | b'<' | b'>')).count();
+            if let Some(at) = b[start..start + authority].iter().rposition(|c| *c == b'@')
+                && at > 0
+            {
+                out.push_str("://[redacted]");
+                i = start + at;
+                continue 'scan;
+            }
+        }
+        let c = s[i..].chars().next().unwrap_or(' ');
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
 }
 
 /// The middle of `s` cut out to keep about `max` bytes.
@@ -386,14 +486,47 @@ mod tests {
         assert_eq!(tilde("cd /home/ada && ls /home/ada", home), "cd ~ && ls ~");
         assert_eq!(tilde("\"/Users/bob/x\" and /home/carol", None), "\"~/x\" and ~");
         assert_eq!(tilde("/root/.cargo and /rooted", None), "~/.cargo and /rooted");
-        // Inside another path, a different user name, or no user: left alone.
-        assert_eq!(tilde("/srv/home/ada/x", home), "/srv/home/ada/x");
+        // Wherever they are: after a scheme, a flag, a variable, another path.
+        assert_eq!(tilde("file:///home/ada/x.rs", home), "file://~/x.rs");
+        assert_eq!(tilde("cc -I/home/ada/include -L/Users/bob/lib", home), "cc -I~/include -L~/lib");
+        assert_eq!(tilde("HOME=/root PATH=/x:/home/ada/bin", None), "HOME=~ PATH=/x:~/bin");
+        assert_eq!(tilde("a/home/ada and /srv/home/ada/x", home), "a~ and /srv~/x");
         assert_eq!(tilde("/home/adam/x", Some("/home/ada")), "~/x");
+        // No user: left alone.
         assert_eq!(tilde("/home/ and /Users/", None), "/home/ and /Users/");
-        assert_eq!(tilde("a/home/ada", home), "a/home/ada");
-        // A home outside /home and /Users (a container, a sandbox).
+        // A home outside /home and /Users (a container, a sandbox), anywhere.
         assert_eq!(tilde("/workspace/me/p:/workspace/me", Some("/workspace/me/")), "~/p:~");
+        assert_eq!(tilde("--root=x/workspace/me/y", Some("/workspace/me")), "--root=x~/y");
+        assert_eq!(tilde("/workspace/meh", Some("/workspace/me")), "/workspace/meh");
         assert_eq!(tilde("ünïcode /home/ada/é", home), "ünïcode ~/é");
+    }
+
+    #[test]
+    fn credentials_are_redacted() {
+        let table = [
+            ("git push https://ada:ghp_0123456789abcdefABCDEF@github.com/ada/x.git", "git push https://[redacted]@github.com/ada/x.git"),
+            ("remote: http://tok@example.com/x", "remote: http://[redacted]@example.com/x"),
+            ("ssh://git:pw@host:22/x and https://host/a@b", "ssh://[redacted]@host:22/x and https://host/a@b"),
+            ("export GITHUB_TOKEN=ghp_0123456789abcdef", "export GITHUB_TOKEN=ghp_[redacted]"),
+            ("github_pat_11ABCDEFG0123456789_abc", "github_pat_[redacted]"),
+            ("ANTHROPIC_API_KEY=sk-ant-api03-abcdefghijklmnop", "ANTHROPIC_API_KEY=sk-[redacted]"),
+            ("OPENAI_API_KEY='sk-proj-abcdefghijklmnopqrst'", "OPENAI_API_KEY='sk-[redacted]'"),
+            ("pip install sk-learn", "pip install sk-learn"),
+            ("stripe sk_live_51Habcdefghij and rk_live_0123456789", "stripe sk_live_[redacted] and rk_live_[redacted]"),
+            ("slack xoxb-1234-5678-abcdefgh", "slack xoxb-[redacted]"),
+            ("aws AKIAIOSFODNN7EXAMPLE secret", "aws AKIA[redacted] secret"),
+            ("AKIAlowercase0123456789 ASIAABCDEFGHIJKLMNOP", "AKIAlowercase0123456789 ASIA[redacted]"),
+            ("roll rlm_0123456789abcdef rlg_aaaaaaaabbbb rlc_x rlx_0123456789ab", "roll rlm_[redacted] rlg_[redacted] rlc_x rlx_[redacted]"),
+            ("curl -H 'Authorization: Bearer eyJhbGciOi.J9.abc_def' x", "curl -H 'Authorization: Bearer [redacted]' x"),
+            ("authorization: basic dXNlcjpwYXNzd29yZA==", "authorization: basic [redacted]"),
+            ("a bearer of news, Basic types", "a bearer of news, Basic types"),
+            ("myghp_0123456789abcdef stays", "myghp_0123456789abcdef stays"),
+            ("ünïcode ghp_0123456789abcdef é", "ünïcode ghp_[redacted] é"),
+        ];
+        for (input, want) in table {
+            assert_eq!(secrets(input), want, "{input}");
+        }
+        assert_eq!(scrub("cat /home/ada/.env # rla_0123456789abcdef", Some("/home/ada")), "cat ~/.env # rla_[redacted]");
     }
 
     #[test]

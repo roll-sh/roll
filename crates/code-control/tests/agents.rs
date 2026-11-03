@@ -590,6 +590,8 @@ fn subthread(id: &str, parent: &str, relation: &str, at: u64) -> Entity {
 fn share_world() -> Vec<Stamped> {
     let mut proj = serde_json::to_value(project("prj_1", "x")).unwrap();
     proj["path"] = json!("/home/me/src/x");
+    proj["repo"] = json!({ "owner": "acme", "repo": "secret-repo" });
+    proj["git"] = json!({ "branch": "main", "head": "abc", "dirty": false, "remote": "https://ada:ghp_0123456789abcdefABCD@github.com/acme/secret-repo.git" });
     let mut root = serde_json::to_value(thread("thr_a", "Fix /home/me/src/x")).unwrap();
     root["cwd"] = json!("/home/me/src/x");
     root["queued"] = json!([{ "id": "q1", "text": "later", "at": 5 }]);
@@ -601,6 +603,12 @@ fn share_world() -> Vec<Stamped> {
     let tool = entity(json!({
         "kind": "node", "id": "nod_t", "thread": "thr_a", "run": "run_1", "ordinal": 2, "status": "completed", "started_at": 12, "completed_at": 14,
         "body": { "type": "tool", "name": "Bash", "kind": "command", "title": "ls /home/me", "input": { "command": "ls /home/me/src" }, "output": "/home/me/src/x\n", "exit_code": 0 }
+    }));
+    let leaky = entity(json!({
+        "kind": "node", "id": "nod_u", "thread": "thr_a", "run": "run_1", "ordinal": 3, "status": "completed", "started_at": 13, "completed_at": 14,
+        "body": { "type": "tool", "name": "Bash", "kind": "command", "title": "build",
+            "input": { "command": "cc -I/home/me/inc x.c && curl -H 'Authorization: Bearer rlm_0123456789abcdef0123' https://ada:hunter22@roll.sh" },
+            "output": "see file:///home/me/src/x/a.c\nGITHUB_TOKEN=ghp_0123456789abcdefABCD\nAWS AKIAIOSFODNN7EXAMPLE", "exit_code": 0 }
     }));
     let request = entity(json!({
         "kind": "request", "id": "req_1", "thread": "thr_a", "run": "run_1", "node": "nod_r", "status": "resolved", "created_at": 15, "resolved_at": 16,
@@ -620,6 +628,7 @@ fn share_world() -> Vec<Stamped> {
         run,
         node("nod_m", "thr_a", "edited /home/me/src/x/lib.rs"),
         tool,
+        leaky,
         request,
         checkpoint,
         terminal,
@@ -657,17 +666,27 @@ async fn shares_freeze_a_redacted_copy_for_anyone_with_the_link() {
     assert_eq!(resp.headers()["cache-control"], "no-store");
     let raw = String::from_utf8(axum::body::to_bytes(resp.into_body(), 1 << 24).await.unwrap().to_vec()).unwrap();
     assert!(!raw.contains("/home/me"), "a home directory is in the share: {raw}");
+    for secret in ["ghp_0123", "rlm_0123", "hunter22", "ada:", "AKIAIOSF", "secret-repo"] {
+        assert!(!raw.contains(secret), "{secret} is in the share: {raw}");
+    }
     let share: agent_proto::Share = serde_json::from_str(&raw).unwrap();
     assert_eq!((share.owner.as_str(), share.machine.name.as_str(), share.machine.os.as_deref(), share.thread.as_str()), ("acme", "box", Some("linux"), "thr_a"));
     let ids: Vec<&str> = share.entities.iter().map(|e| e.id()).collect();
-    assert_eq!(ids, ["prj_1", "thr_a", "run_1", "req_1", "chk_1", "nod_m", "nod_t"], "no terminal, no other thread");
+    assert_eq!(ids, ["prj_1", "thr_a", "run_1", "req_1", "chk_1", "nod_m", "nod_t", "nod_u"], "no terminal, no other thread");
     for e in &share.entities {
         match e {
-            Entity::Project(p) => assert_eq!(p.path, "~/src/x"),
+            Entity::Project(p) => assert!(p.path == "~/src/x" && p.repo.is_none() && p.git.is_none(), "{p:?}"),
             Entity::Thread(t) => assert!(t.cwd == "~/src/x" && t.queued.is_empty(), "{t:?}"),
             Entity::Run(r) => assert_eq!((r.attachments[0].name.as_str(), r.attachments[0].data.as_str()), ("shot.png", "")),
             Entity::Node(n) => match &n.body {
                 agent_proto::NodeBody::Message { text } => assert_eq!(text, "edited ~/src/x/lib.rs"),
+                agent_proto::NodeBody::Tool(t) if t.title == "build" => assert_eq!(
+                    (t.input["command"].as_str(), t.output.as_deref()),
+                    (
+                        Some("cc -I~/inc x.c && curl -H 'Authorization: Bearer [redacted]' https://[redacted]@roll.sh"),
+                        Some("see file://~/src/x/a.c\nGITHUB_TOKEN=ghp_[redacted]\nAWS AKIA[redacted]")
+                    )
+                ),
                 agent_proto::NodeBody::Tool(t) => assert_eq!((t.title.as_str(), t.input["command"].as_str(), t.output.as_deref()), ("ls ~", Some("ls ~/src"), Some("~/src/x\n"))),
                 other => panic!("{other:?}"),
             },
