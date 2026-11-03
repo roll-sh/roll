@@ -22,6 +22,7 @@ import { btn, input, primary } from "../ui";
 import { Composer } from "./composer";
 import { Card } from "./nodes";
 import { toFileDiff } from "./request-card";
+import { ShareButton } from "./share";
 import { modelName, providerName, Stat, StatusDot, threadStatusLabel, usageLine } from "./shared";
 import { EmptyTranscript, RunView, type TranscriptActions } from "./transcript";
 import { useAgents } from "./use-agents";
@@ -30,9 +31,12 @@ export const SESSION_W = 880;
 export const SESSION_DIFF_W = 600;
 export const SESSION_H = 760;
 
-/** A thread opened in place: transcript, composer, diff and actions, as one canvas card. */
+/**
+ * A thread opened in place: transcript, composer, diff and actions, as one canvas card. Read-only
+ * (a share's replay), it's the transcript alone.
+ */
 export function ThreadSession({ thread, machine }: { thread: Thread; machine: Machine | undefined }) {
-  const { client, setExpanded, focus } = useAgents();
+  const { client, setExpanded, focus, readOnly = false, now: clock } = useAgents();
   const data = client.data;
   const providers = providersFor(data, machine?.id);
   const runs = runsOf(data, thread.id);
@@ -44,12 +48,13 @@ export function ThreadSession({ thread, machine }: { thread: Thread; machine: Ma
     return m;
   }, [data.requests, thread.id]);
   const busy = thread.status === "starting" || thread.status === "running" || thread.status === "waiting";
-  const [now, setNow] = useState(() => Date.now());
+  const [wall, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!busy) return;
+    if (!busy || clock !== undefined) return;
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
-  }, [busy]);
+  }, [busy, clock]);
+  const now = clock ?? wall;
 
   const [diffFor, setDiffFor] = useState<string | null | undefined>(undefined);
   // The card widens or narrows with the diff: bring all of it back into view.
@@ -72,17 +77,19 @@ export function ThreadSession({ thread, machine }: { thread: Thread; machine: Ma
     }
   };
   const mid = machine?.id;
-  const actions: TranscriptActions = {
-    respond: (request, response) => client.run(mid!, { type: "request.respond", request, response }),
-    showDiff: (r) => setDiffFor(r),
-    rollback: (c: Checkpoint) => run(() => client.run(mid!, { type: "checkpoint.rollback", thread: thread.id, checkpoint: c.id })),
-    fork: (r: Run) =>
-      run(async () => {
-        const res = await client.run<{ type: "created"; id: string }>(mid!, { type: "thread.fork", thread: thread.id, at: r.id }, "created");
-        setExpanded(res.id, true);
-      }),
-    openThread: (id) => setExpanded(id, true),
-  };
+  const actions: TranscriptActions = readOnly
+    ? { openThread: (id) => setExpanded(id, true) }
+    : {
+        respond: (request, response) => client.run(mid!, { type: "request.respond", request, response }),
+        showDiff: (r) => setDiffFor(r),
+        rollback: (c: Checkpoint) => run(() => client.run(mid!, { type: "checkpoint.rollback", thread: thread.id, checkpoint: c.id })),
+        fork: (r: Run) =>
+          run(async () => {
+            const res = await client.run<{ type: "created"; id: string }>(mid!, { type: "thread.fork", thread: thread.id, at: r.id }, "created");
+            setExpanded(res.id, true);
+          }),
+        openThread: (id) => setExpanded(id, true),
+      };
 
   // Stick to the bottom while new work arrives, unless the reader scrolled up.
   const scroller = useRef<HTMLDivElement>(null);
@@ -108,7 +115,15 @@ export function ThreadSession({ thread, machine }: { thread: Thread; machine: Ma
   return (
     <Card width={width} tone={thread.status === "error" ? "error" : busy ? "busy" : undefined} label={`Thread ${thread.title}`} className="flex flex-col overflow-hidden">
       <div style={{ height: SESSION_H }} className="flex min-h-0 flex-col">
-        <Header thread={thread} machine={machine} onClose={() => setExpanded(thread.id, false)} onDiff={() => setDiffFor((d) => (d === undefined ? null : undefined))} diffOpen={diffFor !== undefined} setError={setError}>
+        <Header
+          thread={thread}
+          machine={machine}
+          readOnly={readOnly}
+          onClose={() => setExpanded(thread.id, false)}
+          onDiff={() => setDiffFor((d) => (d === undefined ? null : undefined))}
+          diffOpen={diffFor !== undefined}
+          setError={setError}
+        >
           <span className="truncate">
             {providerName(providers, thread.provider)}
             {model && ` · ${model}`}
@@ -131,7 +146,7 @@ export function ThreadSession({ thread, machine }: { thread: Thread; machine: Ma
                   <span className="shimmer">Loading the transcript…</span>
                 </EmptyTranscript>
               ) : runs.length === 0 ? (
-                <EmptyTranscript>No runs yet. Send the first message below.</EmptyTranscript>
+                <EmptyTranscript>{readOnly ? "No runs yet." : "No runs yet. Send the first message below."}</EmptyTranscript>
               ) : (
                 <div className="space-y-8">
                   {runs.map((r) => (
@@ -152,40 +167,42 @@ export function ThreadSession({ thread, machine }: { thread: Thread; machine: Ma
               </button>
             )}
           </div>
-          {diffFor !== undefined && (
+          {diffFor !== undefined && !readOnly && (
             <DiffPane thread={thread} machine={machine} runs={runs} run={diffFor} onRun={setDiffFor} onClose={() => setDiffFor(undefined)} />
           )}
         </div>
-        <div className="border-t border-line px-4 pt-3 pb-4" data-nodrag>
-          {thread.queued.length > 0 && (
-            <ul className="mb-2 space-y-1" aria-label="Queued messages">
-              {thread.queued.map((q) => (
-                <li key={q.id} className="flex items-center gap-2 rounded-lg border border-dashed border-line-2 px-2.5 py-1.5 text-[12px]">
-                  <span className="font-mono text-[10px] tracking-wide text-subtle uppercase">queued</span>
-                  <span className="min-w-0 flex-1 truncate">{q.text}</span>
-                  <button
-                    onClick={() => run(() => client.run(mid!, { type: "message.unqueue", thread: thread.id, message: q.id }))}
-                    aria-label="Remove from queue"
-                    className="text-subtle hover:text-fg"
-                  >
-                    <X className="size-3.5" />
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-          {thread.archived_at ? (
-            <p className="text-[12px] text-subtle">Archived. Unarchive it to keep going.</p>
-          ) : (
-            <Composer mode={{ kind: "thread", thread, machine }} autoFocus={false} />
-          )}
-          {error && (
-            <p className="mt-2 text-[12px] text-danger" role="alert">
-              {error}
-            </p>
-          )}
-          {project && <span className="sr-only">in {project.name}</span>}
-        </div>
+        {!readOnly && (
+          <div className="border-t border-line px-4 pt-3 pb-4" data-nodrag>
+            {thread.queued.length > 0 && (
+              <ul className="mb-2 space-y-1" aria-label="Queued messages">
+                {thread.queued.map((q) => (
+                  <li key={q.id} className="flex items-center gap-2 rounded-lg border border-dashed border-line-2 px-2.5 py-1.5 text-[12px]">
+                    <span className="font-mono text-[10px] tracking-wide text-subtle uppercase">queued</span>
+                    <span className="min-w-0 flex-1 truncate">{q.text}</span>
+                    <button
+                      onClick={() => run(() => client.run(mid!, { type: "message.unqueue", thread: thread.id, message: q.id }))}
+                      aria-label="Remove from queue"
+                      className="text-subtle hover:text-fg"
+                    >
+                      <X className="size-3.5" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {thread.archived_at ? (
+              <p className="text-[12px] text-subtle">Archived. Unarchive it to keep going.</p>
+            ) : (
+              <Composer mode={{ kind: "thread", thread, machine }} autoFocus={false} />
+            )}
+            {error && (
+              <p className="mt-2 text-[12px] text-danger" role="alert">
+                {error}
+              </p>
+            )}
+            {project && <span className="sr-only">in {project.name}</span>}
+          </div>
+        )}
       </div>
     </Card>
   );
@@ -194,6 +211,7 @@ export function ThreadSession({ thread, machine }: { thread: Thread; machine: Ma
 function Header({
   thread,
   machine,
+  readOnly,
   onClose,
   onDiff,
   diffOpen,
@@ -202,13 +220,14 @@ function Header({
 }: {
   thread: Thread;
   machine: Machine | undefined;
+  readOnly: boolean;
   onClose: () => void;
   onDiff: () => void;
   diffOpen: boolean;
   setError: (e: string | null) => void;
   children: React.ReactNode;
 }) {
-  const { client, setExpanded } = useAgents();
+  const { client, setExpanded, demo } = useAgents();
   const [renaming, setRenaming] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [publishing, setPublishing] = useState(false);
@@ -245,67 +264,72 @@ function Header({
             />
           </form>
         ) : (
-          <h2 className="min-w-0 flex-1 truncate text-[14.5px] font-semibold tracking-[-0.02em]" onDoubleClick={() => setRenaming(thread.title)}>
+          <h2 className="min-w-0 flex-1 truncate text-[14.5px] font-semibold tracking-[-0.02em]" onDoubleClick={readOnly ? undefined : () => setRenaming(thread.title)}>
             {thread.title}
           </h2>
         )}
         <span className="shrink-0 text-[11.5px] text-subtle">{threadStatusLabel[thread.status]}</span>
         <div className="flex shrink-0 items-center gap-0.5 text-subtle">
-          <IconButton label="Rename" onClick={() => setRenaming(thread.title)}>
-            <Pencil className="size-3.5" />
-          </IconButton>
-          <IconButton label={diffOpen ? "Hide the diff" : "Diff"} onClick={onDiff} active={diffOpen}>
-            <DiffIcon className="size-3.5" />
-          </IconButton>
-          <IconButton
-            label="Terminal in this thread's directory"
-            disabled={!machine?.online}
-            onClick={() => act(() => client.run(mid!, { type: "terminal.open", thread: thread.id, cols: 100, rows: 26 }))}
-          >
-            <SquareTerminal className="size-3.5" />
-          </IconButton>
-          <IconButton
-            label="Fork this thread"
-            disabled={!machine?.online}
-            onClick={() =>
-              act(async () => {
-                const r = await client.run<{ type: "created"; id: string }>(mid!, { type: "thread.fork", thread: thread.id }, "created");
-                setExpanded(r.id, true);
-              })
-            }
-          >
-            <Split className="size-3.5" />
-          </IconButton>
-          {project?.repo && (
-            <IconButton label="Publish as a roll code change" disabled={!machine?.online || busy} onClick={() => setPublishing((p) => !p)} active={publishing}>
-              <Upload className="size-3.5" />
-            </IconButton>
-          )}
-          <IconButton
-            label={thread.archived_at ? "Unarchive" : "Archive"}
-            disabled={!machine?.online || busy}
-            onClick={() =>
-              act(async () => {
-                await client.run(mid!, { type: thread.archived_at ? "thread.unarchive" : "thread.archive", thread: thread.id });
-                if (!thread.archived_at) onClose();
-              })
-            }
-          >
-            {thread.archived_at ? <ArchiveRestore className="size-3.5" /> : <Archive className="size-3.5" />}
-          </IconButton>
-          {confirmDelete ? (
-            <span className="flex items-center gap-1 pl-1 text-[11.5px]">
-              <button onClick={() => act(() => client.run(mid!, { type: "thread.delete", thread: thread.id }))} className="rounded px-1.5 py-0.5 text-danger hover:bg-danger/10">
-                Delete thread
-              </button>
-              <button onClick={() => setConfirmDelete(false)} className="p-1 hover:text-fg" aria-label="Keep">
-                <X className="size-3" />
-              </button>
-            </span>
-          ) : (
-            <IconButton label="Delete" disabled={!machine?.online} onClick={() => setConfirmDelete(true)}>
-              <Trash2 className="size-3.5" />
-            </IconButton>
+          {!readOnly && (
+            <>
+              {!demo && <ShareButton thread={thread} />}
+              <IconButton label="Rename" onClick={() => setRenaming(thread.title)}>
+                <Pencil className="size-3.5" />
+              </IconButton>
+              <IconButton label={diffOpen ? "Hide the diff" : "Diff"} onClick={onDiff} active={diffOpen}>
+                <DiffIcon className="size-3.5" />
+              </IconButton>
+              <IconButton
+                label="Terminal in this thread's directory"
+                disabled={!machine?.online}
+                onClick={() => act(() => client.run(mid!, { type: "terminal.open", thread: thread.id, cols: 100, rows: 26 }))}
+              >
+                <SquareTerminal className="size-3.5" />
+              </IconButton>
+              <IconButton
+                label="Fork this thread"
+                disabled={!machine?.online}
+                onClick={() =>
+                  act(async () => {
+                    const r = await client.run<{ type: "created"; id: string }>(mid!, { type: "thread.fork", thread: thread.id }, "created");
+                    setExpanded(r.id, true);
+                  })
+                }
+              >
+                <Split className="size-3.5" />
+              </IconButton>
+              {project?.repo && (
+                <IconButton label="Publish as a roll code change" disabled={!machine?.online || busy} onClick={() => setPublishing((p) => !p)} active={publishing}>
+                  <Upload className="size-3.5" />
+                </IconButton>
+              )}
+              <IconButton
+                label={thread.archived_at ? "Unarchive" : "Archive"}
+                disabled={!machine?.online || busy}
+                onClick={() =>
+                  act(async () => {
+                    await client.run(mid!, { type: thread.archived_at ? "thread.unarchive" : "thread.archive", thread: thread.id });
+                    if (!thread.archived_at) onClose();
+                  })
+                }
+              >
+                {thread.archived_at ? <ArchiveRestore className="size-3.5" /> : <Archive className="size-3.5" />}
+              </IconButton>
+              {confirmDelete ? (
+                <span className="flex items-center gap-1 pl-1 text-[11.5px]">
+                  <button onClick={() => act(() => client.run(mid!, { type: "thread.delete", thread: thread.id }))} className="rounded px-1.5 py-0.5 text-danger hover:bg-danger/10">
+                    Delete thread
+                  </button>
+                  <button onClick={() => setConfirmDelete(false)} className="p-1 hover:text-fg" aria-label="Keep">
+                    <X className="size-3" />
+                  </button>
+                </span>
+              ) : (
+                <IconButton label="Delete" disabled={!machine?.online} onClick={() => setConfirmDelete(true)}>
+                  <Trash2 className="size-3.5" />
+                </IconButton>
+              )}
+            </>
           )}
           <IconButton label="Close (Esc)" onClick={onClose}>
             <Minimize2 className="size-3.5" />

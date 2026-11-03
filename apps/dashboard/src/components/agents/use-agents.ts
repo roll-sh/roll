@@ -32,6 +32,10 @@ export interface AgentsCtx {
   expanded: ReadonlySet<string>;
   /** Pan the canvas to a node (`t:thr_…`, `r:req_…`, …). */
   focus: (key: string) => void;
+  /** A shared thread's replay (`/agents/s/<id>`): nothing can be sent, only looked at. */
+  readOnly?: boolean;
+  /** What time it is on the canvas (a replay's clock), for "working for 12 s". Default: now. */
+  now?: number;
 }
 
 export const AgentsContext = createContext<AgentsCtx | null>(null);

@@ -1,7 +1,7 @@
 "use client";
 
 import { DotField, RollMark } from "@roll/brand";
-import { Archive, Plus } from "lucide-react";
+import { Archive, Plus, Share2 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { codeApi } from "@/lib/code-api";
@@ -249,6 +249,15 @@ function Canvas({ client, demo, focusParam }: { client: AgentsClient; demo: bool
                 {!demo && (
                   <Link href="/dashboard/agents/connect" className={`pointer-events-auto ${btn} bg-panel/90 backdrop-blur`}>
                     <Plus className="size-3.5" /> Add machine
+                  </Link>
+                )}
+                {!demo && (
+                  <Link
+                    href={`/dashboard/agents/shares?owner=${encodeURIComponent(client.owner)}`}
+                    className={`pointer-events-auto ${btn} bg-panel/90 backdrop-blur`}
+                    title="Links to shared threads"
+                  >
+                    <Share2 className="size-3.5" /> Shares
                   </Link>
                 )}
               </div>

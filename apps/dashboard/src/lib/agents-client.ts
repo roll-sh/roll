@@ -116,6 +116,11 @@ export class AgentsClient {
     return this.snap.data;
   }
 
+  /** Show `data` as is, with no connection (a share's replay sets each frame). */
+  show(data: AgentsData) {
+    this.set({ data, conn: "live", error: null });
+  }
+
   // ── lifecycle ──
 
   /** Keep the connection while held; the last release closes it. */

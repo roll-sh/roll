@@ -55,16 +55,41 @@ export function RequestCard({
   compact = false,
 }: {
   request: Request;
-  onRespond: (r: RequestResponse) => Promise<unknown>;
+  /** Unset: read-only (a share's replay), the request shows what it asked and that it waits. */
+  onRespond?: (r: RequestResponse) => Promise<unknown>;
   /** A line above the title (the thread's name, in the popover). */
   context?: ReactNode;
   compact?: boolean;
 }) {
   if (request.status !== "pending") return <Resolved request={request} />;
+  if (!onRespond) return <Waiting request={request} />;
   return request.body.type === "approval" ? (
     <ApprovalForm approval={request.body} onRespond={onRespond} context={context} compact={compact} />
   ) : (
     <QuestionsForm questions={request.body.questions} onRespond={onRespond} context={context} />
+  );
+}
+
+/** A pending request nobody here can answer: what it asks, and that it waits. */
+function Waiting({ request }: { request: Request }) {
+  const b = request.body;
+  const Icon = b.type === "approval" ? actionIcon[b.action] : actionIcon.tool;
+  return (
+    <div className="space-y-2" role="group" aria-label="Waiting for an answer">
+      <div className="flex items-start gap-2">
+        <Icon className="mt-0.5 size-4 shrink-0 text-accent" />
+        <p className="min-w-0 flex-1 text-[13px] leading-snug font-medium">{b.type === "approval" ? b.title : b.questions.map((q) => q.question).join(" · ")}</p>
+      </div>
+      {b.type === "approval" && b.command && (
+        <pre className="max-h-32 overflow-auto rounded-lg border border-line bg-bg px-2.5 py-2 font-mono text-[11.5px] leading-relaxed whitespace-pre-wrap" data-scroll>
+          <span className="text-subtle select-none">$ </span>
+          {b.command}
+        </pre>
+      )}
+      <p className="text-[12px] text-subtle">
+        <span className="shimmer">Waiting for an answer…</span>
+      </p>
+    </div>
   );
 }
 

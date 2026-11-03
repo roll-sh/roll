@@ -496,7 +496,7 @@ export function SubagentNode({ node }: { node: Node }) {
 // ── request beside its thread ──
 
 export function RequestNode({ request }: { request: Request }) {
-  const { client, focus } = useAgents();
+  const { client, focus, readOnly } = useAgents();
   const t = client.data.threads.get(request.thread);
   const machine = t?.machine;
   return (
@@ -511,7 +511,7 @@ export function RequestNode({ request }: { request: Request }) {
       <div className="px-3.5 py-3" data-nodrag>
         <RequestCard
           request={request}
-          onRespond={(response) => client.run(machine!, { type: "request.respond", request: request.id, response })}
+          onRespond={readOnly ? undefined : (response) => client.run(machine!, { type: "request.respond", request: request.id, response })}
         />
       </div>
     </Card>

@@ -26,9 +26,10 @@ import { RequestCard, toFileDiff } from "./request-card";
 import { elapsed, runStatusLabel, Stat, usageLine } from "./shared";
 
 export interface TranscriptActions {
-  respond: (request: string, r: RequestResponse) => Promise<unknown>;
-  /** Show this run's diff (or the whole thread's with `null`). */
-  showDiff: (run: string | null) => void;
+  /** Answer a request (unset when read-only: requests show what they asked). */
+  respond?: (request: string, r: RequestResponse) => Promise<unknown>;
+  /** Show this run's diff (or the whole thread's with `null`); unset when there's none to fetch. */
+  showDiff?: (run: string | null) => void;
   rollback?: (checkpoint: Checkpoint) => Promise<unknown>;
   fork?: (run: Run) => Promise<unknown>;
   openThread: (thread: string) => void;
@@ -73,11 +74,17 @@ export function RunView({
             {run.started_at && run.completed_at ? ` in ${elapsed(run.completed_at - run.started_at)}` : ""}
           </span>
           {usageLine(run.usage) && <span className="font-mono">{usageLine(run.usage)}</span>}
-          {run.stat && (run.stat.additions > 0 || run.stat.deletions > 0) && (
-            <button onClick={() => actions.showDiff(run.id)} className="flex items-center gap-1 hover:text-fg" title="This run's diff">
-              {run.stat.files} file{run.stat.files === 1 ? "" : "s"} <Stat stat={run.stat} />
-            </button>
-          )}
+          {run.stat &&
+            (run.stat.additions > 0 || run.stat.deletions > 0) &&
+            (actions.showDiff ? (
+              <button onClick={() => actions.showDiff!(run.id)} className="flex items-center gap-1 hover:text-fg" title="This run's diff">
+                {run.stat.files} file{run.stat.files === 1 ? "" : "s"} <Stat stat={run.stat} />
+              </button>
+            ) : (
+              <span className="flex items-center gap-1">
+                {run.stat.files} file{run.stat.files === 1 ? "" : "s"} <Stat stat={run.stat} />
+              </span>
+            ))}
           <span className="ml-auto flex items-center gap-2">
             {actions.fork && run.status !== "rolled_back" && (
               <button onClick={() => void actions.fork!(run)} className="flex items-center gap-1 hover:text-fg" title="Start a new thread from this point">
@@ -284,7 +291,7 @@ export function NodeView({ t, requests, actions, live }: { t: NodeTree; requests
       if (!q) return null;
       return (
         <div className={q.status === "pending" ? "rounded-xl border border-accent/45 p-3" : ""}>
-          <RequestCard request={q} onRespond={(r) => actions.respond(q.id, r)} />
+          <RequestCard request={q} onRespond={actions.respond && ((r) => actions.respond!(q.id, r))} />
         </div>
       );
     }

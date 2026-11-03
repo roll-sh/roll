@@ -10,6 +10,7 @@ import type {
   ProviderInfo,
   Request,
   Run,
+  Share,
   StreamEvent,
   Terminal,
   Thread,
@@ -184,4 +185,46 @@ export function ev<K extends Exclude<Entity["kind"], "removed">>(kind: K, value:
 
 export function mirrored(kind: Exclude<Entity["kind"], "removed">, value: object, cursor: number, machine = M1): Mirrored {
   return { cursor, machine, entity: { kind, ...value } as Rec as Entity };
+}
+
+const at = (ms: number) => T0 + ms;
+
+/** A share (`agents-replay.ts`): a thread with one run: text streamed over a second, an approval answered after a long pause,
+ * a command, a checkpoint; and a subagent thread started halfway through. */
+export function share(): Share {
+  const entities: Entity[] = [
+    { kind: "project", ...project({ path: "~/roll", created_at: T0 - 86_400_000 }) },
+    {
+      kind: "thread",
+      ...thread({ status: "idle", run_count: 1, usage: { input_tokens: 10, output_tokens: 20, cached_tokens: 0, cost_usd: null }, created_at: at(0), updated_at: at(9000) }),
+    },
+    {
+      kind: "thread",
+      ...thread({ id: "thr_2", title: "Look at the logs", lineage: { parent: "thr_1", relation: "subagent", root: "thr_1", from_run: "run_1" }, created_at: at(1500) }),
+    },
+    {
+      kind: "run",
+      ...run({
+        status: "completed",
+        requested_at: at(0),
+        started_at: at(100),
+        completed_at: at(9000),
+        checkpoint: "chk_1",
+        stat: { files: 1, additions: 2, deletions: 0 },
+        usage: { input_tokens: 10, output_tokens: 20, cached_tokens: 0, cost_usd: null },
+      }),
+    },
+    { kind: "request", ...approval({ node: "nod_r", status: "resolved", created_at: at(2300), resolved_at: at(8000), resolved_by: "acme", response: { type: "decision", decision: "accept" } }) },
+    { kind: "checkpoint", ...checkpoint({ created_at: at(9000) }) },
+    { kind: "node", ...node({ type: "message", text: "0123456789" }, { id: "nod_m", status: "completed", started_at: at(200), completed_at: at(1200) }) },
+    { kind: "node", ...node({ type: "request", request: "req_1" }, { id: "nod_r", ordinal: 2, status: "completed", started_at: at(2300), completed_at: at(8000) }) },
+    {
+      kind: "node",
+      ...node(
+        { type: "tool", name: "Bash", kind: "command", title: "cargo test", input: null, output: "ok ok ok ok", exit_code: 0, files: [] },
+        { id: "nod_t", ordinal: 3, status: "completed", started_at: at(8100), completed_at: at(8500) },
+      ),
+    },
+  ];
+  return { id: "shr_1", owner: "acme", title: "Fix the flaky queue test", thread: "thr_1", subtree: true, machine: { name: "ada-mbp", os: "macos" }, created_at: at(10_000), entities, trimmed: false };
 }
