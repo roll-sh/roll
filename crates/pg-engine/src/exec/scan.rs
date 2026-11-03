@@ -3230,6 +3230,7 @@ impl ScanNode {
                     need: self.need.as_deref().map(Arc::from),
                     need_raw: None,
                     missing: p.table.columns.iter().map(|c| c.missing.clone()).collect(),
+                    types: p.table.columns.iter().map(|c| c.ty.clone()).collect(),
                     with_key: p.with_key,
                     filter: Some(f),
                     filtered: true,
@@ -3804,6 +3805,7 @@ impl ScanNode {
             need: self.need.as_deref().map(Arc::from),
             need_raw,
             missing: p.table.columns.iter().map(|c| c.missing.clone()).collect(),
+            types: p.table.columns.iter().map(|c| c.ty.clone()).collect(),
             with_key: p.with_key,
             filter,
             filtered: p.filter.is_some(),
@@ -3907,6 +3909,7 @@ impl ScanNode {
         let d = Decode {
             need: self.need.as_deref().map(Arc::from),
             missing: p.table.columns.iter().map(|c| c.missing.clone()).collect(),
+            types: p.table.columns.iter().map(|c| c.ty.clone()).collect(),
             with_key: p.with_key,
             filter: p.filter.as_ref().and_then(super::kernel::compile),
             filtered: p.filter.is_some(),
@@ -3977,6 +3980,7 @@ impl ScanNode {
         let d = Decode {
             need: self.need.as_deref().map(Arc::from),
             missing: p.table.columns.iter().map(|c| c.missing.clone()).collect(),
+            types: p.table.columns.iter().map(|c| c.ty.clone()).collect(),
             with_key: p.with_key,
             filter: p.filter.as_ref().and_then(super::kernel::compile),
             filtered: p.filter.is_some(),

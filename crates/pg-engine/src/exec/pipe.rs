@@ -180,6 +180,16 @@ impl Built {
         }
     }
 
+    /// The candidates of an integer probe key, when every inner key is one (None: the
+    /// table's keys aren't single integers).
+    #[inline]
+    pub fn int_span(&self, x: i64) -> Option<Span> {
+        match &self.map {
+            KeyMap::Int(m) => Some(m.get(&x).copied().unwrap_or((0, 0))),
+            KeyMap::Vals(_) => None,
+        }
+    }
+
     /// The `i`th candidate of `span`.
     #[inline]
     pub fn cand(&self, span: Span, i: u32) -> usize {
@@ -345,6 +355,20 @@ impl super::kernel::Cols for Joined<'_> {
 }
 
 impl Probe {
+    /// Whether an outer row whose key has no candidates gives nothing (inner, semi and right
+    /// joins: an unmatched outer row is dropped), and its one key is an integer column the
+    /// table's integer keys are looked up by: the column, for a batch to look up before
+    /// making the row (`vector`).
+    pub fn int_key_col(&self) -> Option<usize> {
+        if !matches!(self.kind, JoinKind::Inner | JoinKind::Semi | JoinKind::Right) {
+            return None;
+        }
+        match self.keys.as_slice() {
+            [(K::Col(c), Norm::Int)] if self.built.int_span(0).is_some() => Some(*c),
+            _ => None,
+        }
+    }
+
     /// The inner rows outer row `l` joins (keys equal, the condition true), in the serial
     /// join's order, into `matches` (a semi or anti join: the first, if any). False: a
     /// kernel left something to `eval` (the row goes to the executor's thread).

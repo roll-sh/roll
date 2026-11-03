@@ -7,6 +7,7 @@
 
 pub mod batch;
 pub mod cache;
+pub mod cols;
 mod dead;
 pub mod fileio;
 mod hot;

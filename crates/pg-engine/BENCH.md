@@ -2056,6 +2056,113 @@ between rounds (select-only 42.6k / 33.9k base, 34.6k / 39.0k new).
   runs agree, statistics included. `big_tables` `deferred_entry_deletes`: inline over a
   table too big to model.
 
+## Executor, round 8 (round 25, agent 154)
+
+Step 1 of batch execution (HANDOFF "Executor: batch execution, the next step", "What is
+covered"): filters, aggregates and the bottom hash join probe's lookup over column batches,
+against the executor's stub `decode_cols`. **base** is the branch at `847fbdba`; **new** is
+this step on top of it. Both are release builds of their own checkouts.
+
+How it was run:
+- Each server is in a container of its own at nice 19, both pinned to the same four CPUs
+  (20-23), both in system.slice. PostgreSQL 18.6 is the pinned image with the bench
+  settings (shared_buffers 2 GB); the engine has `--cache-mb 2048`.
+- TPC-H data: `bench tpch-load --sf 1` on both.
+- Rounds are interleaved: PostgreSQL, new, base, base, new, PostgreSQL.
+- The machine ran at load 15-45 throughout. User-space instructions (`perf stat`) are the
+  measure; wall times move about ±10% from run to run.
+- Before the rebase onto `847fbdba`, a host-run engine competing in user.slice took 75-100 s
+  for the 22 queries. Those runs aren't comparable, and none of their numbers are used here.
+
+### Instructions per row, in process (`scan_bench sql`, compacted, 1M rows; 3 reps plus a warm-up, minus a run with none, over 4 runs' rows)
+
+| query | base w0 | new w0 | base w2 | new w2 |
+|---|---|---|---|---|
+| `sum(b) FROM n` | 1,199 | **1,038** (-13%) | 1,204 | **1,045** |
+| `count(*) FROM n` | 457 | 457 | 882 | 832 |
+| `sum(h) FROM w` | 1,956 | **1,687** (-14%) | 1,965 | **1,699** |
+| `sum(b) FROM m` (modelled heap) | 1,569 | **1,386** (-12%) | 1,571 | **1,388** |
+
+Per row, the batch path's work is the stub decode (by tag, values copied), the typed
+aggregate loop and the per-batch filter. Agent 149's typed `decode_cols` replaces the stub.
+
+### TPC-H SF1 (all 22 over the wire; a fresh server each, a warm-up run, then the measured one)
+
+| | PostgreSQL | base | new |
+|---|---|---|---|
+| wall, s (sum of the 22) | 13.28, 14.94 | 33.58, 33.61 | 32.39, 36.12 |
+| user CPU, s | 29.5, 32.1 | 62, 63 | 57, 63 |
+| user instructions, 10^9 | | 372.1, 372.6 | **329.4, 330.5 (-11.4%)** |
+| user cycles, 10^9 | | 232.3, 236.0 | 210.6, 223.3 (-6.5%) |
+| peak, MB (engine VmHWM; PostgreSQL's anon + shmem) | 1,710, 1,710 | 2,474, 2,476 | 2,458, 2,467 |
+
+All 22 result hashes equal PostgreSQL's in every run.
+
+**Engine/PostgreSQL ratio (new): wall 2.4x, CPU 1.9x, peak 1.44x.**
+
+Per query, medians of the two runs (seconds):
+
+| | q01 | q06 | q15 | q17 | q20 | q21 |
+|---|---|---|---|---|---|---|
+| PostgreSQL | 2.08 | 0.50 | 0.43 | 0.97 | 0.12 | 0.62 |
+| base | 1.97 | 1.00 | 0.76 | 1.57 | 0.54 | 1.50 |
+| new | **1.37** | 0.95 | 0.71 | **1.21** | 0.49 | **1.14** |
+
+- q01 is now ahead of PostgreSQL (0.66x). It is a lineitem aggregation with bpchar keys, and
+  its six aggregates are taken from the batches.
+- q17 and q21 gain from the probe lookups: lineitem rows whose key misses the hash table are
+  dropped before a row is made.
+- The other queries move ±10% in both directions with the machine.
+- q06 is a Parallel Bitmap Heap Scan. Its rows come one at a time from index chunks, which
+  keep the row path.
+
+### pgbench (scale 10, `-M prepared`, 8 clients, 15 s after a 5 s warm-up, a fresh copy of one database each; base, new, new, base, two rounds)
+
+| | base | new |
+|---|---|---|
+| select-only: user instructions per transaction | 89.7k, 88.9k | 88.7k, 89.0k |
+| select-only: engine CPU ms / 1,000 transactions | 66, 58, 58, 56 | 70, 72, 56, 67 |
+| tpcb-like: user instructions per transaction | 1,149k, 1,146k | 1,122k (one run's perf attach failed) |
+| tpcb-like: engine CPU ms / 1,000 transactions | 702, 704, 586, 541 | 648, 660, 673, 657 |
+| peak RSS | 222-261 MB | 224-254 MB |
+
+The instruction counts are unchanged. Point reads and updates don't take the batch path.
+The CPU-time spread runs in both directions between rounds.
+
+### Footprint gate (a fresh engine in its container; `bench idle --mem-pid`)
+
+| | base | new |
+|---|---|---|
+| fresh data directory | 56 kB | 56 kB |
+| idle CPU over 300 s | 0.01 s | 0.02 s (one 10 ms tick) |
+| 100 idle sessions: memory, `base_mb` | 44.1 MB | 45.5 MB |
+| per session | 325 kB | 328 kB |
+
+The step adds no thread, timer or cache. Its buffers are per chunk and are freed with the
+chunk.
+
+### tpcb allocations, attributed (for agent 145)
+
+The base build (`847fbdba`) with frame pointers (`RUSTFLAGS=-C force-frame-pointers=yes`,
+`CFLAGS=-fno-omit-frame-pointer`). pgbench tpcb-like, 8 clients, `perf record -F 499 -g`
+for 15 s: 39,159 samples. Each sample whose leaf is mimalloc's malloc or free is counted
+against the first two engine frames above the allocator (`perf script`, then a fold).
+
+- The allocator is **8.7%** of the samples (`_mi_page_malloc_zero` alone 5.5%). The rest is
+  a long tail.
+- Rows decoded into `Vec<Value>` by the scans (`scan::scan_row_need`, `scan_row_rest`, from
+  `ScanNode::next`): ~1.4%.
+- Each statement's storage scan setup (`storage::hot::Hot::scan` from `Store::scan_raw`,
+  `Txn::scan_snap`, `Txn::toast_source`, `TxnScan::fill_batch`): ~1.05%.
+- Per statement in the session (`Session::execute_statement`, `run_query`,
+  `server::message_loop` / `handle`, and the search path built twice, by
+  `Settings::session_search_path` and `ExecCtx::with_search_path`): ~1.9%.
+- Heap-order reads of the small modelled tables (`ScanNode::next_heap_ordered`): 0.47%.
+- `UpdateNode::next` 0.27%, `nodes::open_node` 0.14%.
+
+The decode is what batch execution removes for scans. The rest belongs to OLTP: the
+statement path and the scan setup.
+
 ## Executor, round 7 (round 24, agent 143)
 
 Release builds with line tables. **base** is the branch at `7c1f72b3`; **batch 1** is this

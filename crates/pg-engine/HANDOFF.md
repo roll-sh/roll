@@ -2651,6 +2651,36 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     All four containers started for this batch are stopped, with saved data retained.
   - The interrupted baseline benchmark was not resumed. This batch makes no verified
     performance claim. The earlier batch's measurements above remain historical.
+- **Executor, round 8, step 1: batch execution** (round 25, agent 154; BENCH.md "Executor,
+  round 8"; what is covered: "Executor: batch execution, the next step"):
+  - Aggregating and filtering scans read a fill's rows as column batches (`storage/cols.rs`,
+    149's interface with the executor's stub decode). Filters, aggregates and the bottom
+    hash join probe's lookup run as batch kernels compiled from the row kernels
+    (`exec/vector.rs`). A row they can't decide goes through the row path in its place, so
+    row order, NULLs, errors and statistics are the row path's.
+  - In process: `sum(b)` 1,199 -> 1,038 instructions a row. TPC-H SF1: -11.4% user
+    instructions, -6.5% cycles, peak unchanged, all 22 hashes equal. q01 is ahead of
+    PostgreSQL (1.37 s against 2.08 s). Engine/PostgreSQL over the 22 queries, both in
+    containers on the same four CPUs: wall 2.4x, CPU 1.9x, peak 1.44x.
+  - pgbench and the footprint gate are unchanged.
+  - Found and routed:
+    - an index-only `count(*)` over lineitem takes ~50 s on a fresh engine, with per-entry
+      heap-model lookups (`KeyMap::find`, `Heap::locate_for`) and point seeks
+      (index access / storage);
+    - seed 5069 is a planning-time fold of an unused view column under a DML row mark
+      (planner, routed through the coordinator).
+  - Verified on `847fbdba`:
+    - crate tests in release and debug, 432 passed and 0 failed each (`CRASH_SEEDS=1-30`,
+      deep_input);
+    - clippy, with no warning in the files changed;
+    - difftest smoke;
+    - isolation 121 / 122 specs and 1,647 / 1,648 permutations (`intra-grant-inplace`, as on
+      origin);
+    - a full regress run on a private reference (debug): 51,148 / 51,150, 0 units changed
+      against `results.tsv`;
+    - pg_dump_tap 14,817 / 14,817.
+  - Also found: an allocation profile of tpcb, attributed (BENCH.md, "tpcb allocations").
+    Logs are in `~/.cache/a154/v-b1*`.
 - **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
   longer overflows the stack of the thread that runs it, however deep the input nests. A
   host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the
@@ -6589,6 +6619,41 @@ a `Vec<Value>` per row and walks `Expr` per row.
 - Measure each step with `examples/scan_bench.rs` (instructions a row), TPC-H SF1 (all 22
   hashes, user instructions, peak) and pgbench. The footprint lead (idle CPU, idle sessions,
   fresh data directory) must not get worse, and caches stay under `--memory-budget-mb`.
+
+**What is covered (round 25, agent 154, step 1).** Everything else takes the row path, unchanged.
+- `storage/cols.rs` is agent 149's interface (`ColBatch`, `Col`, `ColData`, `decode_cols`,
+  `Col::value` / `bytes`), with the executor's stub body (decodes by declared type, values
+  it can't hold into `Col::odd`). 149's typed decode replaces the body; nothing else changes.
+- `exec/vector.rs`: batch kernels compiled once per chunk from the row kernels (`kernel::K`):
+  - conditions (`VB`): AND / OR / NOT, IS [NOT] NULL of a column, a boolean column, numeric
+    and integer comparisons as exact numbers (`VN`: + − × of columns and constants in i128),
+    byte comparisons of text / varchar / bpchar columns with a constant (`ops::str_cmp`),
+    `col [NOT] IN (strings)`, and any other pure bool call over fixed-width columns and
+    constants (dates against timestamps, floats);
+  - each outcome is false / true / NULL or `Out`, and `Out` sends the row through the row path
+    in its place, so the row kernel's fallback to `eval` and its error happen at that row;
+  - `AggPlan`: an aggregation's group key columns (int2/4/8, date, bool, strings; bpchar
+    trimmed) and arguments (count(*), count(col), sum / avg of int and numeric through
+    `VN`), or, below hash joins, the bottom probe's integer key column (`pipe::Probe::
+    int_key_col`: inner, semi and right joins).
+- `parscan::Pre` runs them over a fill's rows (`Source::Fill`: storage-order scans; modelled
+  heaps read in heap order and index chunks come row by row and keep the row path):
+  - `work_partial`: rows the filter rejects or the probe misses are dropped, rows the batch
+    aggregates go to `Partials::batch_row` (byte-keyed group index `bidx`, falling back to the
+    `Value`-keyed one, so groups are numbered as the row path numbers them), the others to
+    the row path in order;
+  - `run_rows` (rows made): `Reader::next_row_with` passes over the rows the filter rejects or
+    the probe misses, counting them as read (statistics unchanged);
+  - a chunk where the batch does under a quarter of 2,048+ rows stops decoding columns
+    (`Pre::worth`): the rows it keeps would be decoded twice.
+- Tests: `parallel_scan` `vector_batches_match_rows` (column path against the row path and
+  the serial plan: NULLs, int2 / int8 / numeric(20,4) / bpchar / date / bool / float keys and
+  arguments, numerics past i128 and NaN, a column added since rows were stored, sums past
+  i128, filters left to `eval`), `parallel_joins_match_serial` (probe lookups against the
+  row path), `parscan::without_vectors` / `VECTOR_ROWS` to compare and count.
+- Not yet: the serial `ScanNode` (`count_rest`, `lazy_row`), projections into columns,
+  emitting joined rows from batches (only misses are dropped), Sort / Window inputs,
+  out-of-line values (a table that ever stored one is read on the statement's thread).
 
 ## Starting prompt for the next agent
 
