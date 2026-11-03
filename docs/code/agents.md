@@ -129,7 +129,9 @@ relay  → daemon  welcome {machine, owner, resume_from}
 daemon → relay   entities {items: [{seq, entity}]}     batched, ordered by seq
 relay  → daemon  ack {seq}                              relay has persisted up to seq
 daemon → relay   delta {delta}                          ephemeral
-relay  → daemon  command {id, by, command}              by: who sent it (owner / agent name)
+relay  → daemon  command {id, by, command, grant?}      by: who sent it (owner / agent name);
+                                                        grant: git access for this command
+                                                        ("Agents in roll code")
 daemon → relay   reply {id, result}                     exactly one per command id
 relay ↔ daemon   ping / pong                            every 20 s; 60 s silence drops the link
 ```
@@ -243,6 +245,69 @@ directories are written `~`. The page is the canvas in read-only mode with **rep
 rebuilt from the records' timestamps (threads appear, nodes start, text streams, the accent pulse
 while a run is going), a play button and speed, and the final frame at once with reduced motion.
 Revoking a share removes it; nothing else does. Routes are in docs/code/http-api.md ("Shares").
+
+## Agents in roll code
+
+The canvas and the code live in the same place: a project can be a checkout of one of the
+owner's roll code repos, a thread's work is published as a roll code change, and what happens to
+that change (checks, reviews, the merge queue, landing) shows on the thread. The relay side is
+`crates/code-control/src/agents/code.rs`.
+
+- **Machine identity for code: per-command grants.** A machine token (`rlm_…`) only opens the
+  relay link; it never opens git or the API. When a command needs a repo (`project.add` with
+  `clone`, `thread.publish` in a roll code project), the relay mints a **grant** and sends it in
+  that command's frame (`RelayFrame::Command.grant`, `agent_proto::CodeGrant`): a token
+  (`rlg_…`, kept as sha256 in `agent_grants`) for that one repository and that machine, valid ten
+  minutes. It opens git smart HTTP for that repo only (fetch; push only when `write`), acts as
+  `agent:<machine name>` (the pusher of the push), and is refused by every API route (401), even
+  on an open daemon, like review app tokens. It is looked up on every git request (never cached),
+  so revoking the machine ends it at once. The daemon passes it to git in the environment of that
+  one process (`GIT_CONFIG_*` `http.extraHeader`), never in a remote URL, a config file or the
+  command line, and forgets it after.
+  - The repo must be the machine's owner's. A grant never exceeds the command's sender: a clone
+    needs read access, a publish needs `check_write` (`owns`), and nothing in it ever needs
+    `manages`. A machine of an owner can't reach another owner's repos, public or not.
+  - Why not let machine tokens open git as `agent:<machine name>` on all the owner's repos? A
+    machine token is long-lived and sits on disk on a laptop; a grant is scoped to the repo the
+    user just asked about, lives minutes, and is only in memory. The relay already sees every
+    command, so it is the one place that knows which repo is needed and who asked.
+- **Cloning.** `project.add {path, clone: {owner, repo}}` clones into `path` (absolute), into
+  `<clone dir>/<owner>/<repo>` when `path` is empty, or under the clone dir when it is relative
+  (`..` refused). The clone dir is `[code] clone_dir` in the daemon's config, else `~/roll`. An
+  existing checkout of the same repo at the path is kept; any other non-empty directory is
+  refused. The project records `repo`. The command's 30 s reply wait may run out on a big clone;
+  the daemon finishes anyway and a retry with the same id gets its receipt.
+- **Starting a repo from the canvas.** `POST /v1/code/agents/{owner}/machines/{machine}/projects
+  {id, repo: {name, description?, visibility?}, path?, name?}` creates the repo through
+  `POST /v1/code/repos` on the caller's behalf (a 409 means a retry, or a repo of that name: it is
+  cloned as it is) and sends `project.add` with `clone`, answering its `Reply`. MCP:
+  `create_agent_project`.
+- **Publishing.** `thread.publish` commits the thread's worktree on its branch. In a roll code
+  project the daemon pushes the branch to the grant's URL: roll code's git adapter opens the
+  branch's change (or revises it), exactly as for any `git push`. The relay then reads that change
+  (`change_by_branch`) and fills `Published.change` and `url`. With `land: true` the relay calls
+  `POST /v1/code/changes/{id}/land` with the sender's own token: on a `queue` repo that enqueues it
+  (the queue lands it once tested), otherwise it lands through `Code::blockers`. Nothing goes
+  around the rules; the answer is `Published.landing {status: landed | queued | blocked |
+  conflict | failed, message, blockers}`, a result, never an error. A project that isn't a roll
+  code repo pushes to `origin` as before (and refuses `land`).
+- **The change on the thread.** `Thread.change {repo, number, status, url, detail}` and
+  `Thread.work {id, repo, number, title}` are the relay's, not the daemon's: they are kept in
+  `agent_links` and merged over every thread record the daemon sends (daemons leave them unset),
+  so the canvas sees roll code's view even while the machine is offline. `status` is one of
+  `checking`, `failing`, `blocked`, `ready`, `queued`, `landed`, `conflict`, `closed`.
+  - **Following.** The node serving an owner's agents re-reads every unsettled linked change from
+    the changes table, the durable record that checks, statuses, reviews, the merge queue and
+    landings all write: every second, sooner when the event feed mentions a change, check, queue,
+    review or landing (only a hint; a dropped event loses nothing), and before every `/state`
+    snapshot. A changed status re-stamps the thread record under a new cursor, so it reaches
+    streams like any other change. Landed and closed changes stop being followed.
+- **Work items.** `POST /v1/code/agents/{owner}/threads/{thread}/work {work? | repo, labels?,
+  lease_s?, agent?}`: the thread takes `work` (`wi_…` or `owner/repo#N`, read through the API),
+  or claims the next open item of `repo` through `POST …/work/claim` (as `agent`, default the
+  caller's agent or `agent:<machine name>`); 204 when there's none. The item must be in one of the
+  owner's repos. `DELETE` lets go of it (the claim stays the claimant's to release). MCP:
+  `claim_agent_work`.
 
 ## Sandboxes
 

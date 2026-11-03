@@ -508,6 +508,8 @@ impl Host {
             activity: None,
             usage: Usage::default(),
             error: None,
+            change: None,
+            work: None,
             created_at: at,
             updated_at: at,
             archived_at: None,

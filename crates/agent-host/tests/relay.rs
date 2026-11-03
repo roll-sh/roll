@@ -195,8 +195,8 @@ async fn the_link_speaks_the_protocol() {
     assert!(matches!(next(&mut ws).await, DaemonFrame::Hello { info, .. } if info.hostname == "renamed"));
 
     // Commands run at once and answer in the order they finish; a repeated id isn't run again.
-    send(&mut ws, &RelayFrame::Command { id: "c1".into(), by: "acme".into(), command: archive("slow") }).await;
-    send(&mut ws, &RelayFrame::Command { id: "c2".into(), by: "agent:bot".into(), command: archive("fast") }).await;
+    send(&mut ws, &RelayFrame::Command { id: "c1".into(), by: "acme".into(), command: archive("slow"), grant: None }).await;
+    send(&mut ws, &RelayFrame::Command { id: "c2".into(), by: "agent:bot".into(), command: archive("fast"), grant: None }).await;
     let order: Vec<(String, Reply)> = [next(&mut ws).await, next(&mut ws).await]
         .into_iter()
         .map(|f| match f {
@@ -205,7 +205,7 @@ async fn the_link_speaks_the_protocol() {
         })
         .collect();
     assert_eq!(order, [("c2".to_string(), Reply::Created { id: "agent:bot".into() }), ("c1".to_string(), Reply::Created { id: "acme".into() })]);
-    send(&mut ws, &RelayFrame::Command { id: "c1".into(), by: "acme".into(), command: archive("slow") }).await;
+    send(&mut ws, &RelayFrame::Command { id: "c1".into(), by: "acme".into(), command: archive("slow"), grant: None }).await;
     assert!(matches!(next(&mut ws).await, DaemonFrame::Reply { id, .. } if id == "c1"));
     assert_eq!(daemon.runs.load(Ordering::SeqCst), 2);
 

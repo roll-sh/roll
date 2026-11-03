@@ -453,6 +453,9 @@ async fn publish_commits_the_worktree_and_pushes_its_branch() {
     let plain = w.thread("codex", None, false).await;
     let refused = w.run(Command::ThreadPublish { thread: plain, message: "x".into(), land: false }).await;
     assert!(is_err(&refused, ErrorCode::Invalid));
+    // Only a roll code repo lands.
+    let land = w.run(Command::ThreadPublish { thread: thread.clone(), message: "x".into(), land: true }).await;
+    assert!(is_err(&land, ErrorCode::Invalid), "{land:?}");
 }
 
 #[tokio::test]

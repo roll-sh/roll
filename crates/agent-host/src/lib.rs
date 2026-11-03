@@ -4,7 +4,7 @@
 //! owns the files, keeps every record in an SQLite store stamped with a `seq`, and mirrors them
 //! to the relay over one outbound WebSocket.
 
-use agent_proto::{Command, Delta, MachineInfo, Reply, Stamped};
+use agent_proto::{CodeGrant, Command, Delta, MachineInfo, Reply, Stamped};
 use async_trait::async_trait;
 use tokio::sync::broadcast;
 
@@ -47,4 +47,11 @@ pub trait Daemon: Send + Sync + 'static {
     /// Run a command. `id` is the client's idempotency key: a second call with the same id
     /// returns the first call's reply without running anything. `by` is who sent it.
     async fn run(&self, id: String, by: String, command: Command) -> Reply;
+
+    /// [`Daemon::run`] with the roll code access the relay granted for this command (cloning,
+    /// publishing). A daemon that never touches roll code ignores it.
+    async fn run_granted(&self, id: String, by: String, command: Command, grant: Option<CodeGrant>) -> Reply {
+        let _ = grant;
+        self.run(id, by, command).await
+    }
 }

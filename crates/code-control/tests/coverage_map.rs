@@ -78,7 +78,7 @@ fn every_route_tool_and_event_has_tests_in_the_map() {
         }
     }
     let tools: Vec<String> = code_control::mcp::tools().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-    assert_eq!(tools.len(), 28);
+    assert_eq!(tools.len(), 31);
     for t in &tools {
         if !has_row(&rows, t) {
             missing.push(format!("MCP tool {t}"));

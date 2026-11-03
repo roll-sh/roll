@@ -69,6 +69,9 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
 | `send_agent_message` | message a thread: start a run, queue after it, or steer it | `POST …/commands` (`message.send`) |
 | `respond_agent_request` | answer an approval (`decision`) or questions (`answers`) | `POST …/commands` (`request.respond`) |
 | `interrupt_agent_thread` | stop a thread's running turn | `POST …/commands` (`run.interrupt`) |
+| `publish_agent_thread` | commit and push a thread's branch; in a roll code repo it becomes a change, and `land` sends it to landing (the answer's `landing` says landed, queued, blocked or conflict) | `POST …/commands` (`thread.publish`) |
+| `create_agent_project` | create a roll code repo and clone it onto a machine as a project | `POST /agents/{owner}/machines/{m}/projects` |
+| `claim_agent_work` | give a thread a work item: a given one, or the next one claimed from a repo (`work: null` when none) | `POST /agents/{owner}/threads/{t}/work` |
 
 The agents tools (docs/code/agents.md) take `owner`, and a `machine` by id (`mch_…`) or name.
 Commands take an optional `id`, the idempotency key (a fresh one by default). Whatever the

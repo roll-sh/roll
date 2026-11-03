@@ -9,13 +9,17 @@
 //! link of the owner's machines is routed by the lease `agents:<owner id>` (docs/code/cluster.md).
 
 pub mod api;
+mod code;
 mod link;
 pub mod sandbox;
 pub mod share;
 pub mod store;
 
+pub use code::ApiRouter;
+pub(crate) use code::{GRANT_PREFIX, grant};
+
 use crate::Code;
-use agent_proto::{Command, ErrorCode, Machine, MachineId, RelayFrame, Reply, ReplyError, StreamEvent};
+use agent_proto::{CodeGrant, Command, ErrorCode, Machine, MachineId, RelayFrame, Reply, ReplyError, StreamEvent};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,6 +46,10 @@ pub struct Agents {
     next_conn: AtomicU64,
     /// How long a command waits for its reply, in ms (0: [`COMMAND_TIMEOUT`]).
     timeout_ms: AtomicU64,
+    /// The task that follows published changes onto their threads runs (`code.rs`).
+    following: std::sync::atomic::AtomicBool,
+    /// How often it looks, in ms (0: [`code::FOLLOW_EVERY`]).
+    follow_ms: AtomicU64,
 }
 
 struct LinkHandle {
@@ -134,6 +142,23 @@ impl Agents {
         }
     }
 
+    /// How often published changes are looked at again (tests shorten it).
+    pub fn set_follow_every(&self, d: Duration) {
+        self.follow_ms.store(d.as_millis().max(1) as u64, Ordering::Relaxed);
+    }
+
+    pub(crate) fn follow_every(&self) -> Duration {
+        match self.follow_ms.load(Ordering::Relaxed) {
+            0 => code::FOLLOW_EVERY,
+            ms => Duration::from_millis(ms),
+        }
+    }
+
+    /// Owners whose hub lives on this node (their streams or links are here).
+    pub(crate) fn hub_owners(&self) -> Vec<String> {
+        self.owners.lock().keys().cloned().collect()
+    }
+
     /// Owners with a machine connected here (the cluster keeps their leases).
     pub fn connected_owners(&self) -> Vec<String> {
         let mut v: Vec<String> = self.links.lock().values().map(|l| l.owner_id.clone()).collect();
@@ -212,7 +237,7 @@ impl Agents {
     /// Send a command to a connected machine and wait for its reply. A second request with the
     /// same id while the first waits shares its reply rather than sending it again; a link that
     /// drops and comes back within the wait gets the command again (the daemon runs an id once).
-    pub(crate) async fn command(&self, machine_id: &str, id: String, by: String, command: Command, timeout: Duration) -> Reply {
+    pub(crate) async fn command(&self, machine_id: &str, id: String, by: String, command: Command, grant: Option<CodeGrant>, timeout: Duration) -> Reply {
         let tx = match self.links.lock().get(machine_id) {
             Some(l) => l.tx.clone(),
             None => return error(ErrorCode::MachineOffline, "the machine isn't connected"),
@@ -227,7 +252,7 @@ impl Agents {
                     None
                 }
                 None => {
-                    let frame = RelayFrame::Command { id, by, command };
+                    let frame = RelayFrame::Command { id, by, command, grant: grant.map(Box::new) };
                     pending.insert(key.clone(), Pending { frame: frame.clone(), waiters: vec![wtx] });
                     Some(frame)
                 }

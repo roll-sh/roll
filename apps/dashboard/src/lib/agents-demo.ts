@@ -526,6 +526,8 @@ export class DemoOwner implements AgentsTransport {
       activity: null,
       usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
       error: null,
+      change: null,
+      work: null,
       created_at: t0,
       updated_at: t0,
       archived_at: null,
@@ -858,6 +860,8 @@ export class DemoOwner implements AgentsTransport {
             activity: null,
             usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
             error: null,
+            change: null,
+            work: null,
             created_at: now(),
             updated_at: now(),
             archived_at: null,
@@ -927,7 +931,7 @@ export class DemoOwner implements AgentsTransport {
         return { type: "ok" };
       }
       case "thread.publish":
-        return { type: "published", branch: this.thread(c.thread)?.worktree?.branch ?? "roll/demo", commit: "4b825dc6", change: 42, url: "/acme/roll/changes/42" };
+        return { type: "published", branch: this.thread(c.thread)?.worktree?.branch ?? "roll/demo", commit: "4b825dc6", change: 42, url: "/acme/roll/changes/42", landing: null };
       case "diff.get": {
         const runs = c.run ? [c.run] : [...this.records.values()].filter((m) => m.entity.kind === "run" && m.entity.thread === c.thread).map((m) => m.entity.id);
         const files = runs.flatMap((r) => this.filesOf(r));

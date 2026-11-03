@@ -172,6 +172,9 @@ thing but not do it, 404 one who can't see it (docs/code/http-api.md).
 | `PATCH /v1/code/agents/{owner}/machines/{machine}` | 200, 400, 401, 403, 404 | `agents.rs::machines_are_managed_by_the_owner_and_revoking_closes_the_link`, `agents.rs::streams_and_daemons_resume_without_loss_or_duplicates`, `routes.rs::agents_routes_follow_the_auth_matrix` |
 | `DELETE /v1/code/agents/{owner}/machines/{machine}` | 204, 401, 403, 404 | `agents.rs::machines_are_managed_by_the_owner_and_revoking_closes_the_link`, `routes.rs::agents_routes_follow_the_auth_matrix` |
 | `POST /v1/code/agents/{owner}/machines/{machine}/commands` | the daemon's `Reply`: 200; errors 400, 404, 409, 422, 502, 503 (`machine_offline`), 504 (`timeout`); 401, 403 | `agents.rs::commands_go_to_the_daemon_and_come_back`, `routes.rs::agents_routes_follow_the_auth_matrix`, `agent-host/tests/relay.rs::daemon_and_relay_end_to_end` |
+| `POST /v1/code/agents/{owner}/machines/{machine}/projects` | the daemon's `Reply`: 200 (the repo created, or found on a retry); 400, 401, 403, 404, 422 | `agents_code.rs::repos_clone_onto_machines_and_new_repos_start_as_projects`, `routes.rs::agent_grants_follow_the_auth_matrix` |
+| `POST /v1/code/agents/{owner}/threads/{thread}/work` | 200 (the work item), 204 (none to claim), 400, 401, 403, 404 | `agents_code.rs::threads_take_work_items`, `routes.rs::agent_grants_follow_the_auth_matrix` |
+| `DELETE /v1/code/agents/{owner}/threads/{thread}/work` | 204, 401, 403 | `agents_code.rs::threads_take_work_items`, `routes.rs::agent_grants_follow_the_auth_matrix` |
 | `GET /v1/code/agents/{owner}/state` | 200, 400, 401, 404 | `agents.rs::records_are_mirrored_into_state_and_events`, `agents.rs::streams_and_daemons_resume_without_loss_or_duplicates`, `routes.rs::agents_routes_follow_the_auth_matrix`, `agent-host/tests/relay.rs::daemon_and_relay_end_to_end` |
 | `GET /v1/code/agents/{owner}/events` | 200 (SSE; `Last-Event-ID` / `?after=` catch up, after the newer of the two), 400, 401, 404, 429 | `agents.rs::records_are_mirrored_into_state_and_events`, `agents.rs::streams_and_daemons_resume_without_loss_or_duplicates`, `agents.rs::events_resume_after_the_newer_of_after_and_last_event_id`, `routes.rs::agents_routes_follow_the_auth_matrix`, `agent-host/tests/relay.rs::daemon_and_relay_end_to_end` |
 | `POST /v1/code/agents/{owner}/threads/{thread}/shares` | 201 (a frozen copy: no terminals, no attachment bytes or queued messages, home directories `~`; `subtree` adds subagent threads, not forks), 400, 401, 403, 404, 422 (too large after trimming, 500 shares) | `agents.rs::shares_freeze_a_redacted_copy_for_anyone_with_the_link`, `agents.rs::large_shares_are_trimmed_to_fit_or_refused`, `routes.rs::agents_routes_follow_the_auth_matrix`, `code-control/src/agents/share.rs::home_directories_become_tilde`, `code-control/src/agents/share.rs::cutting_keeps_both_ends_on_char_boundaries` |
@@ -196,6 +199,17 @@ thing but not do it, 404 one who can't see it (docs/code/http-api.md).
 | the docker backend (real Docker; skipped without it): no new privileges, all capabilities dropped, pids/memory (no swap)/CPU limits, an init, a named home volume, no host network or Docker socket, env through a file that's removed; idempotent create, stop, start, delete with the volume | `sandboxes.rs::the_docker_backend_runs_hardened_containers`, `code-control/src/agents/sandbox/docker.rs::run_args_are_hardened_and_carry_no_secrets` |
 | the sandbox image (`deploy/agent/Dockerfile`; opt-in with `ROLL_SANDBOX_TEST_IMAGE`): as `roll` without capabilities, `roll agent up` takes the token from its env and comes online with codex and claude installed | `sandboxes.rs::the_sandbox_image_comes_online_with_its_token` |
 | config from the environment (backend, sizes, limit), the agent37 key never in `Debug`; an owner's env is validated (names, reserved `ROLL_*`/`AGENT37_*`, sizes, one line) and the spec's `Debug` shows only names | `code-control/src/agents/sandbox/mod.rs::sizes_and_env_config`, `code-control/src/agents/sandbox/mod.rs::spec_debug_hides_env_values`, `code-control/src/agents/sandbox/api.rs::env_is_checked` |
+
+### Agents in roll code (`agents/code.rs`, docs/code/agents.md "Agents in roll code")
+
+| Behaviour | Tests |
+| --- | --- |
+| grants: minted per command for the machine owner's repo (`project.add` clone: fetch; `thread.publish`: push, needs write), sent in the command frame; git for that repo only, as `agent:<machine>`; 401 on every API route; other owners' repos 400, missing ones 404; expired and revoked grants 401; commands without a repo get none | `routes.rs::agent_grants_follow_the_auth_matrix`, `mcp.rs::agent_tools_work_in_roll_code_like_their_routes` |
+| `project.add` with `clone`: a real daemon clones into `<clone dir>/<owner>/<repo>` (or a relative path under it, `..` refused); the remote and `.git/config` hold no credentials; the project records `repo`; cloning again keeps the checkout | `agents_code.rs::repos_clone_onto_machines_and_new_repos_start_as_projects` |
+| a new repo started on a machine as a project in one step (visibility, description), a retry answers the same, a bad name 422 | `agents_code.rs::repos_clone_onto_machines_and_new_repos_start_as_projects` |
+| `thread.publish` in a roll code project: the branch becomes a change whose head is the commit (`Published.change`, `url`), publishing again revises it; `land` goes through the merge queue (`queued`), and is `blocked` with its blockers while required checks haven't passed | `agents_code.rs::published_threads_become_changes_that_land_through_the_queue` |
+| `Thread.change` follows the change on the stream (blocked → checking → failing → ready → landed) without a `/state` load; the daemon's own updates of the thread keep it | `agents_code.rs::published_threads_become_changes_that_land_through_the_queue` |
+| `Thread.work`: claimed for the thread (as `agent:<machine>`), 204 when none is left, let go, a given `owner/repo#N` taken; kept across the daemon's updates | `agents_code.rs::threads_take_work_items` |
 
 ### Behaviours across routes
 
@@ -312,6 +326,9 @@ envelope `{event, delivery, webhook, repo{id, full_name, default_branch, visibil
 | `send_agent_message` | `message.send` (steer) with a fresh id; an unknown machine name "not found" | `mcp.rs::agent_tools_drive_a_machine_like_their_routes` |
 | `respond_agent_request` | a decision with a message, answers; neither is a failure | `mcp.rs::agent_tools_drive_a_machine_like_their_routes` |
 | `interrupt_agent_thread` | `run.interrupt`; the daemon's `conflict` is a result, not a failure; another owner "not allowed", anonymous "needs a token", nothing sent | `mcp.rs::agent_tools_drive_a_machine_like_their_routes` |
+| `publish_agent_thread` | `thread.publish` with a push grant for the project's repo; the daemon's `published` reply | `mcp.rs::agent_tools_work_in_roll_code_like_their_routes` |
+| `create_agent_project` | the repo is created (visibility) and `project.add` clones it with a fetch grant | `mcp.rs::agent_tools_work_in_roll_code_like_their_routes` |
+| `claim_agent_work` | the next work item claimed as the agent and set on the thread; `work: null` when none is left; an unknown thread "not found" | `mcp.rs::agent_tools_work_in_roll_code_like_their_routes` |
 
 ### Protocol
 
@@ -1006,7 +1023,7 @@ login tests drive a fake `roll` process (`apps/desktop/test/fake-roll.mjs`).
 | --- | --- |
 | store: one record per `(kind, id)` at its newest `seq`, `since` paging, tombstones replay | `agent-host/tests/store.rs::records_appear_once_at_their_newest_seq`, `agent-host/tests/store.rs::tombstones_replace_records_and_replay` |
 | store: seq counter, command receipts and thread state survive a reopen; receipts prune | `agent-host/tests/store.rs::survives_reopen_with_receipts_and_thread_state` |
-| config: `[providers.*]` and `[[acp]]` agents, bad names and unknown keys refused | `agent-host/src/config.rs` tests |
+| config: `[providers.*]` and `[[acp]]` agents, `[code] clone_dir`, bad names and unknown keys refused | `agent-host/src/config.rs` tests |
 | git checkpoints: the whole working tree (untracked in, ignored out) under `refs/roll/checkpoints/…`, parent HEAD; the user's index, staging and HEAD untouched; no private index left | `agent-host/tests/git.rs::checkpoints_include_untracked_files_and_leave_the_users_index_alone` |
 | git diffs: checkpoint → checkpoint and checkpoint → working tree, per-file unified diffs with kinds and stat; the 4 MiB cap drops whole files and sets `truncated` | `agent-host/tests/git.rs::diffs_between_checkpoints_and_to_the_working_tree`, `agent-host/tests/git.rs::big_diffs_are_cut_whole_files_at_a_time` |
 | git rollback: modified and deleted files come back, new files go, ignored files stay, the user's index is untouched | `agent-host/tests/git.rs::rollback_makes_the_files_match_a_checkpoint` |
@@ -1035,11 +1052,11 @@ login tests drive a fake `roll` process (`apps/desktop/test/fake-roll.mjs`).
 | fork point: the run's own ref in the provider's current conversation, else the latest state or minus the later runs' turns when those are known to be in it; other providers' runs, rolled-back, unsent and newer runs aren't native | `agent-host/src/orchestrator/threads.rs` tests |
 | rollback: files restored, later runs `rolled_back`, later checkpoints and refs dropped; without native rollback the provider starts fresh with a summary; with it, `rollback(turns)` on the same session; the next run's diff starts at the restored checkpoint | `agent-host/tests/threads.rs::rollback_restores_files_and_starts_the_provider_fresh_with_a_summary`, `agent-host/tests/threads.rs::rollback_uses_the_providers_own_rollback_when_it_has_one` |
 | busy threads refuse rollback, publish, archive and provider switches (`conflict`) | `agent-host/tests/threads.rs::busy_threads_refuse_rollback_publish_archive_and_provider_switches` |
-| `thread.publish` commits the worktree and pushes its branch to `origin`; threads without a worktree are refused; `git.status` after | `agent-host/tests/threads.rs::publish_commits_the_worktree_and_pushes_its_branch` |
+| `thread.publish` commits the worktree and pushes its branch to `origin`; threads without a worktree are refused; `land` outside a roll code repo is refused; `git.status` after | `agent-host/tests/threads.rs::publish_commits_the_worktree_and_pushes_its_branch` |
 | `diff.get`: a finished run, a running run (live), the whole thread | `agent-host/tests/threads.rs::diffs_of_a_run_and_of_the_whole_thread` |
 | non-git projects: runs work, no checkpoints, diffs/status/worktrees refused | `agent-host/tests/threads.rs::non_git_projects_run_without_checkpoints_or_diffs` |
 | `fs.read`/`fs.list`: text, binary, `..` and symlink escapes refused, missing files, listing order, absolute listing without a project | `agent-host/tests/threads.rs::files_are_read_inside_the_project_only` |
-| projects unique by path, git info, `clone` not yet, removal deletes threads and worktrees | `agent-host/tests/threads.rs::projects_are_unique_by_path_and_removal_deletes_their_threads` |
+| projects unique by path, git info, `clone` without the relay's grant refused, removal deletes threads and worktrees | `agent-host/tests/threads.rs::projects_are_unique_by_path_and_removal_deletes_their_threads` |
 | archive/unarchive; the first message names an untitled thread | `agent-host/tests/threads.rs::archive_and_unarchive` |
 | handoff selection (newest and first items within budget), activity lines, tool output cut in the middle | `agent-host/src/orchestrator/handoff.rs` tests, `agent-host/src/orchestrator/runs.rs` tests |
 | terminals: a real PTY in the project, input round trip, output as base64 deltas, scrollback, size and resize, exit code, input after exit refused, bad base64 refused, close removes the record | `agent-host/tests/terminal.rs::a_terminal_echoes_input_keeps_scrollback_resizes_and_exits` |

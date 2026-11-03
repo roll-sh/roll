@@ -129,9 +129,32 @@ export interface Thread {
   activity: string | null;
   usage: Usage;
   error: string | null;
+  /** The roll code change it was published as, as roll code sees it now (the relay's). */
+  change: ThreadChange | null;
+  /** The roll code work item it took (the relay's). */
+  work: WorkRef | null;
   created_at: Millis;
   updated_at: Millis;
   archived_at: Millis | null;
+}
+
+export type ChangeStatus = "checking" | "failing" | "blocked" | "ready" | "queued" | "landed" | "conflict" | "closed";
+
+export interface ThreadChange {
+  /** `owner/name`. */
+  repo: string;
+  number: number;
+  status: ChangeStatus;
+  url: string;
+  /** One line on why (failing checks, the first blocker, the queue position). */
+  detail: string | null;
+}
+
+export interface WorkRef {
+  id: string;
+  repo: string;
+  number: number;
+  title: string;
 }
 
 export type RunStatus =
@@ -466,6 +489,14 @@ export interface Published {
   commit: string;
   change: number | null;
   url: string | null;
+  /** What sending it to landing did (`land: true`). */
+  landing: Landing | null;
+}
+
+export interface Landing {
+  status: "landed" | "queued" | "blocked" | "conflict" | "failed";
+  message: string;
+  blockers: string[];
 }
 
 export type Reply =
@@ -521,8 +552,17 @@ export type DaemonFrame =
 export type RelayFrame =
   | { type: "welcome"; machine: MachineId; owner: string; resume_from: number }
   | { type: "ack"; seq: number }
-  | { type: "command"; id: string; by: string; command: Command }
+  | { type: "command"; id: string; by: string; command: Command; grant: CodeGrant | null }
   | { type: "ping" };
+
+/** Git access to one roll code repo, for one command (daemons only). */
+export interface CodeGrant {
+  repo: RepoRef;
+  url: string;
+  token: string;
+  write: boolean;
+  expires_at: Millis;
+}
 
 // ── device login ──
 
@@ -639,6 +679,16 @@ const threadD = obj<Thread>({
   activity: opt(str),
   usage: usageD,
   error: opt(str),
+  change: opt(
+    obj<ThreadChange>({
+      repo: str,
+      number: int,
+      status: literal("checking", "failing", "blocked", "ready", "queued", "landed", "conflict", "closed"),
+      url: str,
+      detail: opt(str),
+    }),
+  ),
+  work: opt(obj<WorkRef>({ id: str, repo: str, number: int, title: str })),
   created_at: int,
   updated_at: int,
   archived_at: opt(int),
@@ -886,7 +936,15 @@ export const replyD: Decoder<Reply> = tagged("type", {
   }),
   file: obj<FileContent>({ path: str, text: opt(str), size: int }),
   git_status: obj<GitStatus>({ branch: opt(str), ahead: int, behind: int, files: array(fileChangeD) }),
-  published: obj<Published>({ branch: str, commit: str, change: opt(int), url: opt(str) }),
+  published: obj<Published>({
+    branch: str,
+    commit: str,
+    change: opt(int),
+    url: opt(str),
+    landing: opt(
+      obj<Landing>({ status: literal("landed", "queued", "blocked", "conflict", "failed"), message: str, blockers: vec(str) }),
+    ),
+  }),
   scrollback: obj<{ data: string }>({ data: str }),
   error: obj<{ code: ErrorCode; message: string }>({
     code: literal("not_found", "invalid", "conflict", "provider", "machine_offline", "timeout", "internal"),
@@ -923,7 +981,12 @@ export const daemonFrameD: Decoder<DaemonFrame> = tagged("type", {
 export const relayFrameD: Decoder<RelayFrame> = tagged("type", {
   welcome: obj<{ machine: string; owner: string; resume_from: number }>({ machine: str, owner: str, resume_from: int }),
   ack: obj<{ seq: number }>({ seq: int }),
-  command: obj<{ id: string; by: string; command: Command }>({ id: str, by: str, command: commandD }),
+  command: obj<{ id: string; by: string; command: Command; grant: CodeGrant | null }>({
+    id: str,
+    by: str,
+    command: commandD,
+    grant: opt(obj<CodeGrant>({ repo: repoRefD, url: str, token: str, write: bool, expires_at: int })),
+  }),
   ping: obj<object>({}),
 } satisfies Record<RelayFrame["type"], Decoder<object>>);
 

@@ -20,6 +20,9 @@
 //! [delegation]                           # roll's orchestrator MCP (docs/code/agents.md)
 //! max_depth = 3                          # subagents of subagents, at most this deep
 //! max_children = 6                       # unfinished delegated tasks per thread
+//!
+//! [code]                                 # roll code repos cloned as projects
+//! clone_dir = "~/src"                    # where they go (default ~/roll)
 //! ```
 
 use crate::provider::ProviderConfig;
@@ -38,6 +41,8 @@ pub struct Config {
     /// `[[acp]]`: ACP agents, in file order.
     pub acp: Vec<AcpAgent>,
     pub delegation: Delegation,
+    /// `[code] clone_dir`: where roll code repos are cloned as projects (`None`: `~/roll`).
+    pub clone_dir: Option<PathBuf>,
 }
 
 /// `[delegation]`: limits on what agents may delegate through roll's orchestrator MCP.
@@ -76,6 +81,14 @@ struct File {
     acp: Vec<RawAcp>,
     #[serde(default)]
     delegation: RawDelegation,
+    #[serde(default)]
+    code: RawCode,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawCode {
+    clone_dir: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -172,7 +185,13 @@ impl Config {
                 max_depth: file.delegation.max_depth.unwrap_or(Delegation::default().max_depth),
                 max_children: file.delegation.max_children.unwrap_or(Delegation::default().max_children),
             },
+            clone_dir: file.code.clone_dir.filter(|d| !d.trim().is_empty()).map(|d| expand_tilde(d.trim())),
         })
+    }
+
+    /// Where roll code repos are cloned: `[code] clone_dir`, else `~/roll`.
+    pub fn clone_dir(&self) -> Option<PathBuf> {
+        self.clone_dir.clone().or_else(|| user_home().map(|h| h.join("roll")))
     }
 
     /// The config for a provider id (`acp:<name>` looks in `[[acp]]`); defaults when unlisted.
@@ -247,5 +266,12 @@ mod tests {
         let config = Config::parse("[delegation]\nmax_depth = 1").unwrap();
         assert_eq!(config.delegation, Delegation { max_depth: 1, max_children: Delegation::default().max_children });
         assert!(Config::parse("[delegation]\ndepth = 1").is_err());
+    }
+
+    #[test]
+    fn clone_dir_parses_and_expands() {
+        assert_eq!(Config::parse("").unwrap().clone_dir, None);
+        assert_eq!(Config::parse("[code]\nclone_dir = \"/srv/src\"").unwrap().clone_dir, Some(PathBuf::from("/srv/src")));
+        assert!(Config::parse("[code]\ndir = \"x\"").is_err());
     }
 }

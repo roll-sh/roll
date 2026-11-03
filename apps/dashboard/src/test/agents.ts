@@ -73,6 +73,8 @@ export function thread(over: Partial<Thread> = {}): Thread {
     activity: null,
     usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
     error: null,
+    change: null,
+    work: null,
     created_at: T0,
     updated_at: T0,
     archived_at: null,

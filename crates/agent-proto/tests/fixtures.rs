@@ -79,6 +79,14 @@ fn thread() -> Thread {
         activity: Some("Waiting to run `cargo test`".into()),
         usage: Usage { input_tokens: 12_000, output_tokens: 3_400, cached_tokens: 9_000, cost_usd: Some(0.42) },
         error: None,
+        change: Some(Box::new(ThreadChange {
+            repo: "acme/roll".into(),
+            number: 42,
+            status: ChangeStatus::Checking,
+            url: "https://roll.sh/acme/roll/changes/42".into(),
+            detail: Some("test (running)".into()),
+        })),
+        work: Some(Box::new(WorkRef { id: "wi_7Hq2Zp4Ka9Lm3N".into(), repo: "acme/roll".into(), number: 41, title: "Fix the flaky queue test".into() })),
         created_at: T,
         updated_at: T,
         archived_at: None,
@@ -371,6 +379,11 @@ fn replies() -> Vec<Reply> {
             commit: "9fceb02d".into(),
             change: Some(42),
             url: Some("https://roll.sh/acme/roll/changes/42".into()),
+            landing: Some(Landing {
+                status: LandingStatus::Blocked,
+                message: "change #42 can't land yet".into(),
+                blockers: vec!["needs an approving review".into()],
+            }),
         }),
         Reply::Scrollback { data: "JCBscwo=".into() },
         Reply::Error(ReplyError { code: ErrorCode::MachineOffline, message: "the machine isn't connected".into() }),
@@ -462,7 +475,19 @@ fn relay_frames() -> Vec<RelayFrame> {
     vec![
         RelayFrame::Welcome { machine: mch(), owner: "acme".into(), resume_from: 40 },
         RelayFrame::Ack { seq: 41 },
-        RelayFrame::Command { id: "cmd_1".into(), by: "acme".into(), command: Command::RunInterrupt { thread: thr() } },
+        RelayFrame::Command { id: "cmd_1".into(), by: "acme".into(), command: Command::RunInterrupt { thread: thr() }, grant: None },
+        RelayFrame::Command {
+            id: "cmd_2".into(),
+            by: "agent:bot".into(),
+            command: Command::ThreadPublish { thread: thr(), message: "Fix the flaky queue test".into(), land: true },
+            grant: Some(Box::new(CodeGrant {
+                repo: RepoRef { owner: "acme".into(), repo: "roll".into() },
+                url: "https://roll.sh/acme/roll.git".into(),
+                token: "rlg_0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+                write: true,
+                expires_at: T + 600_000,
+            })),
+        },
         RelayFrame::Ping,
     ]
 }

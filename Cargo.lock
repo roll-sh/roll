@@ -1554,6 +1554,7 @@ dependencies = [
 name = "code-control"
 version = "0.1.0"
 dependencies = [
+ "agent-host",
  "agent-proto",
  "ammonia",
  "anyhow",

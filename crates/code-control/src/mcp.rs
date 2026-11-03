@@ -357,7 +357,8 @@ create_change (files map: {path: {content} | {content_b64} | {delete: true}}), t
 queued (merge queue), blocked (review or checks rules; the blockers say what's missing) or conflict (the paths \
 changed underneath you: re-read them, revise, land again). Changes are \"chg_…\" or \"owner/repo#N\"; work items \
 \"wi_…\" or \"owner/repo#N\". Other coding agents on the owner's machines: list_agent_machines, list_agent_threads, \
-create_agent_thread, send_agent_message, respond_agent_request, interrupt_agent_thread.",
+create_agent_thread, send_agent_message, respond_agent_request, interrupt_agent_thread, publish_agent_thread; \
+create_agent_project starts a repo as a project on a machine, claim_agent_work gives a thread a work item.",
     });
     Ok((result, sid))
 }
@@ -624,8 +625,36 @@ pub fn tools() -> Vec<Value> {
             "interrupt_agent_thread",
             "Interrupt an agent",
             "Stop an agent thread's running turn.",
-            json!({ "owner": owner, "machine": machine, "thread": s("Thread (thr_…)"), "id": command_id }),
+            json!({ "owner": owner.clone(), "machine": machine.clone(), "thread": s("Thread (thr_…)"), "id": command_id.clone() }),
             &["owner", "machine", "thread"],
+            false,
+        ),
+        tool(
+            "publish_agent_thread",
+            "Publish an agent's work",
+            "Commit an agent thread's work on its branch and push it. In a roll code repo the branch becomes a change (returned as change and url); land sends it to landing (the merge queue on queue repos), and landing says what happened: landed, queued, blocked (with blockers) or conflict.",
+            json!({ "owner": owner.clone(), "machine": machine.clone(), "thread": s("Thread (thr_…)"), "message": s("Commit message"), "land": boolean("Land it too"), "id": command_id.clone() }),
+            &["owner", "machine", "thread", "message"],
+            false,
+        ),
+        tool(
+            "create_agent_project",
+            "Start a repo on a machine",
+            "Create a roll code repository for the owner and clone it onto a machine as a project (default path: ~/roll/<owner>/<repo>). Answers the project's id.",
+            json!({
+                "owner": owner.clone(), "machine": machine.clone(), "repo": s("The new repository's name"), "description": s("Description"),
+                "visibility": json!({ "type": "string", "enum": ["public", "private"] }), "path": s("Where to clone it (absolute, or under ~/roll)"),
+                "name": s("The project's name on the canvas"), "id": command_id
+            }),
+            &["owner", "machine", "repo"],
+            false,
+        ),
+        tool(
+            "claim_agent_work",
+            "Give an agent work",
+            "Have an agent thread take a work item: a given one (work), or the next open one claimed from repo (labels narrow it). Returns work: null when there's nothing to claim.",
+            json!({ "owner": owner, "thread": s("Thread (thr_…)"), "work": work, "repo": repo, "labels": json!({ "type": "array", "items": { "type": "string" } }), "lease_s": int("Lease length in seconds (default 900)") }),
+            &["owner", "thread"],
             false,
         ),
     ]
@@ -1020,7 +1049,7 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             }
             ok(agent_threads(&r.body, machine.as_deref()))
         }
-        "create_agent_thread" | "send_agent_message" | "respond_agent_request" | "interrupt_agent_thread" => {
+        "create_agent_thread" | "send_agent_message" | "respond_agent_request" | "interrupt_agent_thread" | "publish_agent_thread" => {
             let owner = c.owner(args)?;
             let m = str_arg(args, "machine").ok_or_else(|| fail("machine is required (mch_… or its name)"))?;
             let machine = c.machine_id(owner, m).await?;
@@ -1028,6 +1057,33 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             let id = str_arg(args, "id").map(str::to_string).unwrap_or_else(|| crate::new_id("cmd"));
             let path = format!("/v1/code/agents/{}/machines/{}/commands", seg(owner), seg(&machine));
             command_outcome(c.post(&path, json!({ "id": id, "command": command })).await)
+        }
+        "create_agent_project" => {
+            let owner = c.owner(args)?;
+            let m = str_arg(args, "machine").ok_or_else(|| fail("machine is required (mch_… or its name)"))?;
+            let machine = c.machine_id(owner, m).await?;
+            let name = str_arg(args, "repo").ok_or_else(|| fail("repo is required (the new repository's name)"))?;
+            let mut repo = json!({ "name": name });
+            for k in ["description", "visibility"] {
+                if let Some(v) = args.get(k).filter(|v| !v.is_null()) {
+                    repo[k] = v.clone();
+                }
+            }
+            let id = str_arg(args, "id").map(str::to_string).unwrap_or_else(|| crate::new_id("cmd"));
+            let body = json!({ "id": id, "repo": repo, "path": args.get("path"), "name": args.get("name") });
+            command_outcome(c.post(&format!("/v1/code/agents/{}/machines/{}/projects", seg(owner), seg(&machine)), body).await)
+        }
+        "claim_agent_work" => {
+            let owner = c.owner(args)?;
+            let thread = str_arg(args, "thread").ok_or_else(|| fail("thread is required (thr_…)"))?;
+            let r = c.post(&format!("/v1/code/agents/{}/threads/{}/work", seg(owner), seg(thread)), body_of(args, &["owner", "thread"])).await;
+            if r.status == StatusCode::NO_CONTENT {
+                ok(json!({ "work": null, "message": "no open work matches" }))
+            } else if r.ok() {
+                ok(json!({ "work": r.body }))
+            } else {
+                r.error()
+            }
         }
         other => fail(format!("unknown tool {other}")),
     })
@@ -1040,6 +1096,7 @@ fn agent_command(tool: &str, args: &Value) -> std::result::Result<Value, Outcome
         "create_agent_thread" => "thread.create",
         "send_agent_message" => "message.send",
         "interrupt_agent_thread" => "run.interrupt",
+        "publish_agent_thread" => "thread.publish",
         _ => {
             let response = match (args.get("decision"), args.get("answers")) {
                 (Some(d), None) => json!({ "type": "decision", "decision": d, "message": args.get("message") }),
@@ -1165,7 +1222,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_closed_schema() {
         let tools = tools();
-        assert_eq!(tools.len(), 28);
+        assert_eq!(tools.len(), 31);
         for t in &tools {
             assert_eq!(t["inputSchema"]["type"], "object", "{}", t["name"]);
             assert_eq!(t["inputSchema"]["additionalProperties"], false, "{}", t["name"]);

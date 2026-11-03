@@ -619,3 +619,118 @@ async fn sandbox_routes_follow_the_auth_matrix() {
         }
     }
 }
+
+/// A command to a connected test daemon, answered `ok`: the grant it came with.
+async fn granted(a: &App, d: &mut common::daemon::Daemon, mid: &str, command: Value, token: &str) -> Option<agent_proto::CodeGrant> {
+    use tower::ServiceExt;
+    let router = a.router.clone();
+    let req = Request::post(format!("/v1/code/agents/acme/machines/{mid}/commands"))
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(json!({ "id": format!("c-{}", rand::random::<u64>()), "command": command }).to_string()))
+        .unwrap();
+    let sent = tokio::spawn(async move { router.oneshot(req).await.unwrap().status() });
+    let Some(agent_proto::RelayFrame::Command { id, grant, .. }) = d.recv().await else { panic!("expected a command") };
+    d.send(&agent_proto::DaemonFrame::Reply { id, result: agent_proto::Reply::Ok }).await;
+    assert_eq!(sent.await.unwrap(), OK);
+    grant.map(|g| *g)
+}
+
+/// `GET /git/acme/{repo}.git/info/refs?service=…` with a bearer token: git's first request.
+async fn git_refs(a: &App, repo: &str, service: &str, token: &str) -> StatusCode {
+    let req = Request::get(format!("/git/acme/{repo}.git/info/refs?service={service}")).header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap();
+    a.send(req).await.status()
+}
+
+/// A machine's grant (minted by the relay for one command) opens git for its one repo, pushes
+/// only when the command's sender may write, never opens the API, and ends when it expires or
+/// the machine is revoked. The routes that start repos and give threads work are the commands'.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_grants_follow_the_auth_matrix() {
+    use agent_proto::{Entity, RepoRef, Stamped};
+    let w = world().await;
+    let a = &w.a;
+    let url = a.serve().await;
+    let (s, m) = a.req("POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "box" })), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED, "{m}");
+    let (mid, machine) = (m["machine"]["id"].as_str().unwrap().to_string(), m["token"].as_str().unwrap().to_string());
+    let (mut d, _) = common::daemon::Daemon::connect(&url, &machine).await;
+    // The daemon's records: a project that is a checkout of acme/priv, and a thread in it.
+    let project: Entity = serde_json::from_value(json!({
+        "kind": "project", "id": "prj_1", "name": "priv", "path": "/src/priv", "repo": { "owner": "acme", "repo": "priv" }, "created_at": 1, "updated_at": 1
+    }))
+    .unwrap();
+    let thread: Entity = serde_json::from_value(json!({
+        "kind": "thread", "id": "thr_1", "project": "prj_1", "title": "t", "provider": "codex", "model": null, "runtime_mode": "full_access",
+        "interaction_mode": "default", "cwd": "/src/priv", "status": "idle", "run_count": 0, "pending_requests": 0, "created_at": 1, "updated_at": 1
+    }))
+    .unwrap();
+    d.upsert(vec![Stamped { seq: 1, entity: project }, Stamped { seq: 2, entity: thread }]).await;
+    let publish = json!({ "type": "thread.publish", "thread": "thr_1", "message": "m" });
+
+    // Publishing, by the owner or its agent: a grant that pushes to acme/priv and nothing else.
+    let mut push = String::new();
+    for who in [&w.acme, &w.agent] {
+        let g = granted(a, &mut d, &mid, publish.clone(), who).await.expect("a grant");
+        assert!(g.write && g.token.starts_with("rlg_") && g.url.ends_with("/acme/priv.git"), "{g:?}");
+        assert_eq!(g.repo, RepoRef { owner: "acme".into(), repo: "priv".into() });
+        assert_eq!(git_refs(a, "priv", "git-upload-pack", &g.token).await, OK);
+        assert_eq!(git_refs(a, "priv", "git-receive-pack", &g.token).await, OK);
+        assert_eq!(git_refs(a, "pub", "git-upload-pack", &g.token).await, NOT_FOUND);
+        for p in ["/v1/code/repos/acme/priv", "/v1/code/agents/acme/state", "/v1/code/repos/acme/priv/changes"] {
+            assert_eq!(call(a, "GET", p, None, Some(&g.token)).await, UNAUTHORIZED, "{p}");
+        }
+        push = g.token;
+    }
+    // Cloning: fetch only.
+    let clone = json!({ "type": "project.add", "path": "", "clone": { "owner": "acme", "repo": "pub" } });
+    let g = granted(a, &mut d, &mid, clone, &w.agent).await.expect("a grant");
+    assert!(!g.write);
+    assert_eq!(git_refs(a, "pub", "git-upload-pack", &g.token).await, OK);
+    assert_eq!(git_refs(a, "pub", "git-receive-pack", &g.token).await, FORBIDDEN);
+    // Commands that touch no repo get none.
+    assert!(granted(a, &mut d, &mid, json!({ "type": "provider.refresh" }), &w.acme).await.is_none());
+    // Only the machine owner's own repos, and ones that exist.
+    let (s, v) = a.req("POST", "/v1/code/repos", Some(json!({ "owner": "other", "name": "theirs" })), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let command = format!("/v1/code/agents/acme/machines/{mid}/commands");
+    for (repo, want) in [("other/theirs", StatusCode::BAD_REQUEST), ("acme/nope", NOT_FOUND)] {
+        let (owner, name) = repo.split_once('/').unwrap();
+        let body = json!({ "id": "c-refused", "command": { "type": "project.add", "path": "", "clone": { "owner": owner, "repo": name } } });
+        assert_eq!(call(a, "POST", &command, Some(&body), Some(&w.acme)).await, want, "{repo}");
+    }
+    // An expired grant, and tokens that look like one.
+    let priv_id = a.req("GET", "/v1/code/repos/acme/priv", None, Some(ADMIN)).await.1["id"].as_str().unwrap().to_string();
+    let expired = "rlg_0000000000000000000000000000000000000000000000ff";
+    let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(expired.as_bytes()));
+    code_control::agents::store::insert_grant(a.code.db.sql(), &hash, &mid, &priv_id, true, 1).unwrap();
+    for t in [expired, "rlg_nope"] {
+        assert_eq!(git_refs(a, "priv", "git-upload-pack", t).await, UNAUTHORIZED, "{t}");
+    }
+
+    // Starting a repo on a machine and giving a thread work: who may drive the agents.
+    let base = "/v1/code/agents/acme";
+    let projects = format!("{base}/machines/{mid}/projects");
+    let work = format!("{base}/threads/thr_1/work");
+    let (start, take) = (json!({ "id": "p1", "repo": { "name": "fresh" } }), json!({ "work": w.ids["priv.work"] }));
+    for (who, token, want) in [
+        ("review app", Some(w.app_in.as_str()), FORBIDDEN),
+        ("another owner", Some(w.other.as_str()), FORBIDDEN),
+        ("anonymous", None, UNAUTHORIZED),
+        ("revoked", Some(w.revoked.as_str()), UNAUTHORIZED),
+        ("a grant", Some(push.as_str()), UNAUTHORIZED),
+    ] {
+        assert_eq!(call(a, "POST", &projects, Some(&start), token).await, want, "{who}: POST {projects}");
+        assert_eq!(call(a, "POST", &work, Some(&take), token).await, want, "{who}: POST {work}");
+        assert_eq!(call(a, "DELETE", &work, None, token).await, want, "{who}: DELETE {work}");
+    }
+    assert_eq!(call(a, "POST", &work, Some(&take), Some(&w.acme)).await, OK);
+    assert_eq!(call(a, "DELETE", &work, None, Some(&w.agent)).await, StatusCode::NO_CONTENT);
+    assert_eq!(call(a, "POST", &format!("{base}/threads/thr_nope/work"), Some(&take), Some(&w.acme)).await, NOT_FOUND);
+    assert_eq!(call(a, "POST", &format!("{base}/machines/mch_nope/projects"), Some(&start), Some(&w.acme)).await, NOT_FOUND);
+    assert_eq!(call(a, "POST", &projects, Some(&json!({ "id": "p2" })), Some(&w.acme)).await, StatusCode::BAD_REQUEST);
+
+    // Revoking the machine ends its grants at once.
+    assert_eq!(call(a, "DELETE", &format!("{base}/machines/{mid}"), None, Some(ADMIN)).await, StatusCode::NO_CONTENT);
+    assert_eq!(git_refs(a, "priv", "git-upload-pack", &push).await, UNAUTHORIZED);
+}

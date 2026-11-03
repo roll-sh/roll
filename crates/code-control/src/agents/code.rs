@@ -1,0 +1,444 @@
+//! Agents in roll code (docs/code/agents.md, "Agents in roll code"): the canvas and the code in
+//! the same place.
+//!
+//! - **Grants.** A daemon gets git access to one of its owner's repos only inside the command
+//!   that needs it (`project.add` with `clone`, `thread.publish`): the relay mints a grant
+//!   (`rlg_…`, stored as sha256) for that repo, that machine and that command's sender's rights
+//!   (`write` only when the sender may write), for ten minutes. It opens git and nothing else,
+//!   as `agent:<machine name>`, and is looked up on every request, so revoking the machine ends
+//!   it at once.
+//! - **Publishing.** The daemon pushes the thread's branch with its grant; roll code's git
+//!   adapter opens or revises the branch's change, as for any push. The relay then reads that
+//!   change, links it to the thread, and with `land` sends it to landing through the API on the
+//!   sender's behalf (`POST /v1/code/changes/{id}/land`): the merge queue on a `queue` repo, the
+//!   landing rules otherwise. Nothing goes around them; a blocked land is an answer.
+//! - **Following.** A linked change's status is merged into the thread's mirrored record
+//!   (`Thread.change`), re-read from the changes table (where checks, reviews, the queue and
+//!   landings all end up, durably) for every unsettled link of the owners whose agents this node
+//!   serves: every second, and sooner when the event feed hints that something changed. The feed
+//!   only wakes the follower; it never says what changed, so a dropped event loses nothing.
+//! - **Work items.** A thread takes a work item (claimed through the API, or one already
+//!   claimed); its link records it (`Thread.work`).
+
+use super::store::{self, LinkUpdate, MachineRow};
+use crate::model::{Change, ChangeState, CheckStatus, Owner, RepoRow};
+use crate::{Caller, Code, Error, Result, hash_token};
+use agent_proto::{ChangeStatus, CodeGrant, Command, EntityKind, Landing, LandingStatus, RepoRef, Reply, StreamEvent, ThreadChange, WorkRef};
+use axum::Router;
+use axum::body::Body as AxumBody;
+use axum::http::{HeaderMap, Method, Request, StatusCode, header};
+use serde_json::{Value, json};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use tower::ServiceExt;
+
+/// Grant tokens start with this.
+pub(crate) const GRANT_PREFIX: &str = "rlg_";
+/// How long a grant works: long enough for a big clone after the command's 30 s reply wait.
+const GRANT_TTL: Duration = Duration::from_secs(10 * 60);
+/// How often linked changes are read again when nothing hints sooner.
+pub(crate) const FOLLOW_EVERY: Duration = Duration::from_secs(1);
+/// The least time between two rounds, however often the feed hints.
+const MIN_GAP: Duration = Duration::from_millis(200);
+/// Largest API answer read on a caller's behalf.
+const MAX_ANSWER: usize = 16 << 20;
+/// Event kinds that may move a change.
+const CHANGE_EVENTS: [&str; 5] = ["change", "check", "landed", "queue", "review"];
+
+/// The API router, so the relay calls roll code's routes on a caller's behalf (with their token,
+/// routed in a cluster) the way MCP tools do. Added as a request extension by `api::router`.
+#[derive(Clone)]
+pub struct ApiRouter(pub Router);
+
+/// Call the API as the request with `headers` (its token and agent headers).
+pub(super) async fn call(api: &ApiRouter, headers: &HeaderMap, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+    let mut b = Request::builder().method(method).uri(path);
+    for name in [header::AUTHORIZATION.as_str(), "x-roll-agent", "x-roll-user"] {
+        if let Some(v) = headers.get(name) {
+            b = b.header(name, v.clone());
+        }
+    }
+    let req = match body {
+        Some(v) => b.header(header::CONTENT_TYPE, "application/json").body(AxumBody::from(v.to_string())),
+        None => b.body(AxumBody::empty()),
+    };
+    let Ok(req) = req else { return (StatusCode::BAD_REQUEST, json!({ "error": "bad request" })) };
+    let resp = match api.0.clone().oneshot(req).await {
+        Ok(r) => r,
+        Err(e) => match e {},
+    };
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), MAX_ANSWER).await.unwrap_or_default();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
+fn api_of(api: Option<&ApiRouter>) -> Result<&ApiRouter> {
+    api.ok_or_else(|| Error::Internal(anyhow::anyhow!("the agents relay has no API router")))
+}
+
+/// Percent-encode a path segment.
+fn seg(s: &str) -> String {
+    percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
+}
+
+/// An API error as this route's error, keeping its status.
+fn passed(status: StatusCode, v: &Value) -> Error {
+    let msg = v["error"].as_str().unwrap_or("roll code refused it").to_string();
+    match status {
+        StatusCode::UNAUTHORIZED => Error::Unauthorized,
+        StatusCode::FORBIDDEN => Error::Forbidden(msg),
+        StatusCode::NOT_FOUND => Error::NotFound(msg.trim_end_matches(" not found").to_string()),
+        StatusCode::CONFLICT => Error::Conflict(msg),
+        StatusCode::UNPROCESSABLE_ENTITY => Error::Unprocessable(msg),
+        StatusCode::SERVICE_UNAVAILABLE => Error::Unavailable(msg),
+        _ => Error::Invalid(msg),
+    }
+}
+
+// ── grants ──
+
+/// The live grant a git password is, if it is one.
+pub(crate) fn grant(code: &Code, token: &str) -> Result<Option<store::GrantRow>> {
+    Ok(store::grant_by_token(code.db.sql(), &hash_token(token))?)
+}
+
+/// A repo by the name a project knows it by, following a rename.
+fn repo_of(code: &Code, r: &RepoRef) -> Result<RepoRow> {
+    match code.find_repo(&r.owner, &r.repo) {
+        Err(Error::Moved(to)) => {
+            let (o, n) = to.split_once('/').unwrap_or((&to, ""));
+            code.find_repo(o, n)
+        }
+        found => found,
+    }
+}
+
+/// The repo a command works on, checked: one of the machine's owner's, and `push` only for a
+/// sender who may write it.
+fn granted_repo(code: &Code, caller: &Caller, m: &MachineRow, asked: &RepoRef, push: bool) -> Result<RepoRow> {
+    let r = repo_of(code, asked).map_err(|_| Error::NotFound(format!("repository {}/{}", asked.owner, asked.repo)))?;
+    if r.owner_id != m.owner_id {
+        return Err(Error::Invalid(format!("{}/{} isn't the machine's owner's: only their own repos open on their machines", asked.owner, asked.repo)));
+    }
+    if !Code::can_read(caller, &r) {
+        return Err(Error::NotFound(format!("repository {}/{}", asked.owner, asked.repo)));
+    }
+    if push {
+        code.check_write(caller, &r)?;
+    }
+    Ok(r)
+}
+
+fn mint(code: &Code, m: &MachineRow, r: &RepoRow, asked: &RepoRef, push: bool) -> Result<CodeGrant> {
+    let mut b = [0u8; 24];
+    getrandom::fill(&mut b).expect("system randomness");
+    let token = format!("{GRANT_PREFIX}{}", hex::encode(b));
+    let expires_at = code_sql::now_ms() + GRANT_TTL.as_millis() as i64;
+    store::insert_grant(code.db.sql(), &hash_token(&token), &m.id, &r.id, push, expires_at)?;
+    Ok(CodeGrant { repo: asked.clone(), url: code.clone_url(r), token, write: push, expires_at: expires_at.max(0) as u64 })
+}
+
+/// The repo a command works on and the grant for it, when it needs one.
+pub(super) fn grant_for(code: &Code, caller: &Caller, m: &MachineRow, command: &Command) -> Result<Option<(CodeGrant, RepoRow)>> {
+    let (asked, push) = match command {
+        Command::ProjectAdd { clone: Some(repo), .. } => (repo.clone(), false),
+        Command::ThreadPublish { thread, .. } => {
+            let Some(agent_proto::Entity::Thread(t)) = store::mirrored(code.db.sql(), &m.id, EntityKind::Thread, thread.as_str())? else { return Ok(None) };
+            match store::mirrored(code.db.sql(), &m.id, EntityKind::Project, t.project.as_str())? {
+                Some(agent_proto::Entity::Project(agent_proto::Project { repo: Some(repo), .. })) => (repo, true),
+                _ => return Ok(None),
+            }
+        }
+        _ => return Ok(None),
+    };
+    let r = granted_repo(code, caller, m, &asked, push)?;
+    Ok(Some((mint(code, m, &r, &asked, push)?, r)))
+}
+
+// ── a thread's change ──
+
+fn cut(s: String) -> String {
+    if s.chars().count() <= 200 { s } else { format!("{}…", s.chars().take(199).collect::<String>()) }
+}
+
+/// A change as the canvas shows it on its thread.
+pub(crate) fn thread_change(code: &Code, r: &RepoRow, c: &Change) -> ThreadChange {
+    let named = |f: fn(CheckStatus) -> bool| c.checks.iter().filter(|k| f(k.status)).map(|k| k.name.as_str()).collect::<Vec<_>>().join(", ");
+    let failing = named(|s| s == CheckStatus::Failure);
+    let running = named(|s| matches!(s, CheckStatus::Queued | CheckStatus::Running));
+    let (status, detail) = match c.state {
+        ChangeState::Landed => (ChangeStatus::Landed, None),
+        ChangeState::Closed => (ChangeStatus::Closed, None),
+        ChangeState::Queued => (ChangeStatus::Queued, c.queue.as_ref().and_then(|q| q.position).map(|p| format!("position {p} in the merge queue"))),
+        ChangeState::Conflict => (ChangeStatus::Conflict, c.conflict.as_ref().map(|k| k.paths.join(", "))),
+        ChangeState::Open if !failing.is_empty() => (ChangeStatus::Failing, Some(failing)),
+        ChangeState::Open if !running.is_empty() => (ChangeStatus::Checking, Some(running)),
+        ChangeState::Open => match c.blockers.first() {
+            Some(b) => (ChangeStatus::Blocked, Some(b.message.clone())),
+            None => (ChangeStatus::Ready, None),
+        },
+    };
+    ThreadChange {
+        repo: r.full_name(),
+        number: c.number,
+        status,
+        url: format!("{}/changes/{}", code.web_url(r), c.number),
+        detail: detail.filter(|d| !d.is_empty()).map(cut),
+    }
+}
+
+/// A change's status now; `None` if it's gone (its repo was deleted).
+fn current(code: &Code, change_id: &str) -> Result<Option<ThreadChange>> {
+    let Some(c) = code.db.change(change_id)? else { return Ok(None) };
+    let c = code.change_view(c)?;
+    let r = code.repo_by_id(&c.repo_id)?;
+    Ok(Some(thread_change(code, &r, &c)))
+}
+
+/// Update a thread's link and publish its record, in cursor order.
+async fn relink(code: &Code, owner_id: &str, machine_id: &str, thread: &str, update: LinkUpdate<'_>) {
+    let hub = code.agents.hub(owner_id);
+    let _order = hub.order.lock().await;
+    match store::update_link(code.db.sql(), owner_id, machine_id, thread, update) {
+        Ok(Some(m)) => {
+            let _ = hub.events.send(Arc::new(StreamEvent::Entity(Box::new(m))));
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!(thread, error = %e, "agents: linking a thread to roll code"),
+    }
+}
+
+/// What the relay adds to the reply of a `thread.publish` in a roll code repo `r`: the branch's
+/// change (linked to the thread), and with `land` what sending it to landing did.
+pub(super) async fn published(code: &Code, api: Option<&ApiRouter>, headers: &HeaderMap, m: &MachineRow, command: &Command, r: &RepoRow, reply: Reply) -> Reply {
+    let (Command::ThreadPublish { thread, land, .. }, Reply::Published(mut p)) = (command, reply.clone()) else { return reply };
+    let (thread, land) = (thread.as_str(), *land);
+    let change = match code.db.change_by_branch(&r.id, &p.branch) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "agents: reading a published branch's change");
+            None
+        }
+    };
+    let Some(c) = change else {
+        if land {
+            p.landing = Some(Landing {
+                status: LandingStatus::Failed,
+                message: format!("{} has no open change in {} (it may have landed already)", p.branch, r.full_name()),
+                blockers: Vec::new(),
+            });
+        }
+        return Reply::Published(p);
+    };
+    p.change = Some(c.number);
+    p.url = Some(format!("{}/changes/{}", code.web_url(r), c.number));
+    if let Ok(c) = code.change_view(c.clone()) {
+        relink(code, &m.owner_id, &m.id, thread, LinkUpdate::Change { id: &c.id, view: &thread_change(code, r, &c) }).await;
+    }
+    if land {
+        p.landing = Some(match api {
+            Some(api) => send_to_land(api, headers, &c.id).await,
+            None => Landing { status: LandingStatus::Failed, message: "the relay can't reach roll code's API".into(), blockers: Vec::new() },
+        });
+        if let Ok(Some(view)) = current(code, &c.id) {
+            relink(code, &m.owner_id, &m.id, thread, LinkUpdate::Change { id: &c.id, view: &view }).await;
+        }
+    }
+    Reply::Published(p)
+}
+
+/// `POST /v1/code/changes/{id}/land` on the sender's behalf, as a [`Landing`].
+async fn send_to_land(api: &ApiRouter, headers: &HeaderMap, change_id: &str) -> Landing {
+    let (status, v) = call(api, headers, Method::POST, &format!("/v1/code/changes/{}/land", seg(change_id)), Some(json!({}))).await;
+    let error = v["error"].as_str().unwrap_or("").to_string();
+    let (status, message, blockers) = match status {
+        StatusCode::OK => (LandingStatus::Landed, format!("landed as {}", v["changeset"].as_str().map(|s| &s[..s.len().min(15)]).unwrap_or("a changeset")), Vec::new()),
+        StatusCode::ACCEPTED => (LandingStatus::Queued, format!("in the merge queue at position {}", v["position"].as_u64().unwrap_or(0)), Vec::new()),
+        StatusCode::UNPROCESSABLE_ENTITY => {
+            let blockers = v["blockers"].as_array().map(|b| b.iter().filter_map(|b| b["message"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+            (LandingStatus::Blocked, if error.is_empty() { "it can't land yet".into() } else { error }, blockers)
+        }
+        StatusCode::CONFLICT if v["status"] == "conflict" => (LandingStatus::Conflict, if error.is_empty() { "it conflicts with the default branch".into() } else { error }, Vec::new()),
+        s => (LandingStatus::Failed, if error.is_empty() { s.to_string() } else { error }, Vec::new()),
+    };
+    Landing { status, message, blockers }
+}
+
+// ── following ──
+
+/// Start following linked changes (idempotent; needs a Tokio runtime).
+pub(crate) fn follow(code: &Arc<Code>) {
+    if tokio::runtime::Handle::try_current().is_err() || code.agents.following.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let weak = Arc::downgrade(code);
+    let mut feed = code.subscribe();
+    tokio::spawn(async move {
+        loop {
+            let every = match weak.upgrade() {
+                Some(code) => code.agents.follow_every(),
+                None => return,
+            };
+            // A hint, never the source: what changed is read from the changes table.
+            let hinted = async {
+                loop {
+                    match feed.recv().await {
+                        Ok(ev) if CHANGE_EVENTS.contains(&ev.kind) => return true,
+                        Ok(_) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => return true,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
+                    }
+                }
+            };
+            if let Ok(false) = tokio::time::timeout(every, hinted).await {
+                return;
+            }
+            let Some(code) = weak.upgrade() else { return };
+            // Owners with something to follow whose agents this node serves: one query a round.
+            let owners = match store::following_owners(code.db.sql()) {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::warn!(error = %e, "agents: reading who has linked changes");
+                    Vec::new()
+                }
+            };
+            let hubs = code.agents.hub_owners();
+            for owner in owners.iter().filter(|o| hubs.contains(o)) {
+                let here = code.cluster().is_none_or(|c| c.owns(&format!("{}{owner}", crate::cluster::AGENTS_KEY)));
+                if here {
+                    follow_owner(&code, owner).await;
+                }
+            }
+            drop(code);
+            // A busy feed hints constantly: rounds stay a little apart.
+            tokio::time::sleep(every.min(MIN_GAP)).await;
+        }
+    });
+}
+
+/// Bring every unsettled change link of an owner up to date.
+pub(super) async fn follow_owner(code: &Code, owner_id: &str) {
+    let links = match store::unsettled_links(code.db.sql(), owner_id) {
+        Ok(l) => l,
+        Err(e) => return tracing::warn!(error = %e, "agents: reading linked changes"),
+    };
+    for l in links {
+        let Some(id) = &l.change_id else { continue };
+        let view = match current(code, id) {
+            Ok(Some(v)) => v,
+            // The change is gone with its repo: it won't move again.
+            Ok(None) => match &l.change {
+                Some(last) => ThreadChange { status: ChangeStatus::Closed, detail: None, ..last.clone() },
+                None => continue,
+            },
+            Err(e) => {
+                tracing::warn!(change = %id, error = %e, "agents: reading a linked change");
+                continue;
+            }
+        };
+        if l.change.as_ref() != Some(&view) || view.status.is_settled() {
+            relink(code, owner_id, &l.machine_id, &l.thread, LinkUpdate::Change { id, view: &view }).await;
+        }
+    }
+}
+
+// ── routes ──
+
+/// `POST /v1/code/agents/{owner}/machines/{machine}/projects`: create a roll code repo (or take
+/// the one of that name) and clone it onto the machine as a project, in one step.
+pub(super) async fn create_project(code: &Arc<Code>, api: Option<&ApiRouter>, caller: &Caller, headers: &HeaderMap, o: &Owner, m: &MachineRow, b: &Value) -> Result<Reply> {
+    let api = api_of(api)?;
+    let id = b.get("id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty() && s.len() <= 128).ok_or_else(|| Error::Invalid("id must be 1 to 128 characters".into()))?;
+    let repo = b.get("repo").filter(|r| r.is_object()).ok_or_else(|| Error::Invalid("repo is required: {name, description?, visibility?}".into()))?;
+    let name = repo.get("name").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty()).ok_or_else(|| Error::Invalid("repo.name is required".into()))?;
+    let mut input = json!({ "owner": o.name, "name": name });
+    for k in ["description", "visibility", "default_branch"] {
+        if let Some(v) = repo.get(k).filter(|v| !v.is_null()) {
+            input[k] = v.clone();
+        }
+    }
+    let (status, v) = call(api, headers, Method::POST, "/v1/code/repos", Some(input)).await;
+    // A retry finds the repo it made: it's cloned like any other.
+    if !status.is_success() && status != StatusCode::CONFLICT {
+        return Err(passed(status, &v));
+    }
+    let path = match b.get("path") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(p)) => p.clone(),
+        Some(_) => return Err(Error::Invalid("path must be a string".into())),
+    };
+    let label = match b.get("name") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(n)) => Some(n.clone()),
+        Some(_) => return Err(Error::Invalid("name must be a string".into())),
+    };
+    let command = Command::ProjectAdd { path, name: label, clone: Some(RepoRef { owner: o.name.clone(), repo: name.to_string() }) };
+    let grant = grant_for(code, caller, m, &command)?.map(|(g, _)| g);
+    let timeout = code.agents.command_timeout();
+    Ok(code.agents.command(&m.id, id.to_string(), super::api::sender(caller), command, grant, timeout).await)
+}
+
+/// A work item from the API (`GET` one, or `claim` the next), as the thread's [`WorkRef`].
+fn work_ref(v: &Value) -> Option<WorkRef> {
+    Some(WorkRef { id: v["id"].as_str()?.into(), repo: v["repo"].as_str()?.into(), number: v["number"].as_u64()?, title: v["title"].as_str().unwrap_or("").into() })
+}
+
+/// `POST /v1/code/agents/{owner}/threads/{thread}/work`: the thread takes a work item: `work`
+/// (`wi_…` or `owner/repo#N`, already claimed or not) or the next one `claim`ed from `repo`.
+/// Answers the work item, or 204 when there's nothing to claim.
+pub(super) async fn take_work(code: &Code, api: Option<&ApiRouter>, caller: &Caller, headers: &HeaderMap, o: &Owner, thread: &str, b: &Value) -> Result<Option<Value>> {
+    let api = api_of(api)?;
+    let (machine_id, _) = store::thread_of(code.db.sql(), &o.id, thread)?.ok_or_else(|| Error::NotFound(format!("thread {thread}")))?;
+    let machine = store::machine(code.db.sql(), &machine_id)?.filter(|m| !m.revoked).ok_or_else(|| Error::NotFound(format!("thread {thread}")))?;
+    let s = |k: &str| b.get(k).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
+    let item = match (s("work"), s("repo")) {
+        (Some(w), _) => {
+            let path = match w.rsplit_once('#') {
+                Some((repo, n)) => {
+                    let (ro, rn) = repo.split_once('/').ok_or_else(|| Error::Invalid("work is \"wi_…\" or \"owner/repo#N\"".into()))?;
+                    format!("/v1/code/repos/{}/{}/work/{}", seg(ro), seg(rn), seg(n))
+                }
+                None => format!("/v1/code/work/{}", seg(w)),
+            };
+            let (status, v) = call(api, headers, Method::GET, &path, None).await;
+            if !status.is_success() {
+                return Err(passed(status, &v));
+            }
+            v
+        }
+        (None, Some(repo)) => {
+            let (ro, rn) = repo.split_once('/').ok_or_else(|| Error::Invalid("repo is \"owner/name\"".into()))?;
+            let agent = s("agent").map(str::to_string).or_else(|| caller.agent().map(|a| format!("agent:{a}"))).unwrap_or_else(|| format!("agent:{}", machine.name));
+            let mut body = json!({ "agent": agent });
+            for k in ["labels", "lease_s"] {
+                if let Some(v) = b.get(k).filter(|v| !v.is_null()) {
+                    body[k] = v.clone();
+                }
+            }
+            let (status, v) = call(api, headers, Method::POST, &format!("/v1/code/repos/{}/{}/work/claim", seg(ro), seg(rn)), Some(body)).await;
+            if status == StatusCode::NO_CONTENT {
+                return Ok(None);
+            }
+            if !status.is_success() {
+                return Err(passed(status, &v));
+            }
+            v
+        }
+        (None, None) => return Err(Error::Invalid("give work (\"wi_…\" or \"owner/repo#N\") or repo to claim from".into())),
+    };
+    let w = work_ref(&item).ok_or_else(|| Error::Internal(anyhow::anyhow!("an unreadable work item")))?;
+    if w.repo.split_once('/').map(|(owner, _)| owner) != Some(o.name.as_str()) {
+        return Err(Error::Invalid(format!("{} isn't {}'s: a thread takes work from its owner's repos", w.repo, o.name)));
+    }
+    relink(code, &o.id, &machine.id, thread, LinkUpdate::Work(Some(&w))).await;
+    Ok(Some(item))
+}
+
+/// `DELETE …/threads/{thread}/work`: the thread lets go of its work item (the claim stays the
+/// claimant's to release).
+pub(super) async fn drop_work(code: &Code, o: &Owner, thread: &str) -> Result<()> {
+    let (machine_id, _) = store::thread_of(code.db.sql(), &o.id, thread)?.ok_or_else(|| Error::NotFound(format!("thread {thread}")))?;
+    relink(code, &o.id, &machine_id, thread, LinkUpdate::Work(None)).await;
+    Ok(())
+}

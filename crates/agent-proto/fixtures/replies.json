@@ -61,7 +61,14 @@
     "branch": "roll/fix",
     "commit": "9fceb02d",
     "change": 42,
-    "url": "https://roll.sh/acme/roll/changes/42"
+    "url": "https://roll.sh/acme/roll/changes/42",
+    "landing": {
+      "status": "blocked",
+      "message": "change #42 can't land yet",
+      "blockers": [
+        "needs an approving review"
+      ]
+    }
   },
   {
     "type": "scrollback",

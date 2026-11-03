@@ -271,10 +271,10 @@ async fn session(daemon: &Arc<dyn Daemon>, mut ws: Ws, events: &mpsc::UnboundedS
                             return retry(format!("answering a ping: {e}"), true);
                         }
                     }
-                    Ok(Some(RelayFrame::Command { id, by, command })) => {
+                    Ok(Some(RelayFrame::Command { id, by, command, grant })) => {
                         let (tx, daemon) = (reply_tx.clone(), daemon.clone());
                         tokio::spawn(async move {
-                            let result = daemon.run(id.clone(), by, command).await;
+                            let result = daemon.run_granted(id.clone(), by, command, grant.map(|g| *g)).await;
                             let _ = tx.send((id, result));
                         });
                     }

@@ -151,11 +151,16 @@ fn order(e: &Entity) -> (u8, u64, u32, String) {
     }
 }
 
-/// What a share never holds: attachments' bytes (names and types stay) and queued messages.
+/// What a share never holds: attachments' bytes (names and types stay), queued messages, and
+/// what roll code knows about a thread (its change and work item may be in a private repo).
 fn strip(e: &mut Entity) {
     match e {
         Entity::Run(r) => r.attachments.iter_mut().for_each(|a| a.data.clear()),
-        Entity::Thread(t) => t.queued.clear(),
+        Entity::Thread(t) => {
+            t.queued.clear();
+            t.change = None;
+            t.work = None;
+        }
         _ => {}
     }
 }

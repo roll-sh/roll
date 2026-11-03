@@ -14,7 +14,7 @@
 //! Projects that aren't git repositories have no checkpoints, diffs or worktrees; everything else
 //! (runs, terminals, files) works the same.
 
-use agent_proto::{ChangeKind, Diff, DiffStat, FileChange, GitInfo, GitStatus, Published};
+use agent_proto::{ChangeKind, CodeGrant, Diff, DiffStat, FileChange, GitInfo, GitStatus, Published};
 use anyhow::{Context, bail};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -74,6 +74,15 @@ impl Git<'_> {
 
     fn index(self, index: &Path) -> Self {
         self.env("GIT_INDEX_FILE", index.as_os_str())
+    }
+
+    /// Sends `Authorization: Bearer <token>` on this invocation's HTTP requests. The token goes
+    /// in this one process's environment (`GIT_CONFIG_*`), never in a config file, a remote URL
+    /// or the command line.
+    fn bearer(self, token: &str) -> Self {
+        self.env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+            .env("GIT_CONFIG_VALUE_0", format!("Authorization: Bearer {token}"))
     }
 
     fn roll_identity(self) -> Self {
@@ -482,8 +491,9 @@ fn parse_status(out: &[u8]) -> GitStatus {
     status
 }
 
-/// Commits everything in `dir` on `branch` (when there is anything) and pushes it to `origin`.
-pub async fn publish(dir: &Path, branch: &str, message: &str) -> anyhow::Result<Published> {
+/// Commits everything in `dir` on `branch` (when there is anything) and pushes the branch: to the
+/// roll code repo of `to` with its token, or to `origin`.
+pub async fn publish(dir: &Path, branch: &str, message: &str, to: Option<&CodeGrant>) -> anyhow::Result<Published> {
     if current_branch(dir).await?.as_deref() != Some(branch) {
         bail!("the checkout isn't on {branch}");
     }
@@ -498,8 +508,34 @@ pub async fn publish(dir: &Path, branch: &str, message: &str) -> anyhow::Result<
         commit.run().await?;
     }
     let commit = head(dir).await?.context("nothing to publish: the branch has no commits")?;
-    git(dir, &["push", "--quiet", "-u", "origin"]).arg(format!("HEAD:refs/heads/{branch}")).run().await?;
-    Ok(Published { branch: branch.to_string(), commit, change: None, url: None })
+    let refspec = format!("HEAD:refs/heads/{branch}");
+    match to {
+        Some(grant) => git(dir, &["push", "--quiet", "--", &grant.url, &refspec]).bearer(&grant.token).run().await?,
+        None => git(dir, &["push", "--quiet", "-u", "origin", &refspec]).run().await?,
+    };
+    Ok(Published { branch: branch.to_string(), commit, change: None, url: None, landing: None })
+}
+
+/// Clones a roll code repository into `dir` (absent or empty) with a grant's token. The remote
+/// is left without credentials. A checkout of the same repository already at `dir` is kept.
+pub async fn clone_into(grant: &CodeGrant, dir: &Path) -> anyhow::Result<()> {
+    match tokio::fs::read_dir(dir).await {
+        Ok(mut entries) => {
+            if entries.next_entry().await?.is_none() {
+                // Empty: clone into it.
+            } else if root(dir).await.is_some() && git(dir, &["remote", "get-url", "origin"]).text().await.ok().as_deref() == Some(grant.url.as_str()) {
+                return Ok(());
+            } else {
+                bail!("{} already exists and isn't a clone of {}/{}", dir.display(), grant.repo.owner, grant.repo.repo);
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    }
+    let parent = dir.parent().context("can't clone into the root directory")?;
+    tokio::fs::create_dir_all(parent).await.with_context(|| format!("creating {}", parent.display()))?;
+    git(parent, &["clone", "--quiet", "--", &grant.url]).arg(dir).bearer(&grant.token).run().await?;
+    Ok(())
 }
 
 #[cfg(test)]

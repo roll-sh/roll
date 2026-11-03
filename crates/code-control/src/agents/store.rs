@@ -57,6 +57,34 @@ CREATE TABLE IF NOT EXISTS agent_cursors (
     owner_id TEXT PRIMARY KEY,
     cursor INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS agent_grants (
+    -- sha256 of a grant token (rlg_…): git access to one repo for one command.
+    token_hash TEXT PRIMARY KEY,
+    machine_id TEXT NOT NULL,
+    repo_id TEXT NOT NULL,
+    -- 1: it may push.
+    can_push INTEGER NOT NULL,
+    -- Unix ms.
+    expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agent_grants_expiry ON agent_grants (expires_at);
+CREATE INDEX IF NOT EXISTS agent_grants_machine ON agent_grants (machine_id);
+CREATE TABLE IF NOT EXISTS agent_links (
+    -- What roll code knows about a thread: the change it was published as and the work item it
+    -- took. Merged into the thread's mirrored record (Thread.change, Thread.work).
+    owner_id TEXT NOT NULL,
+    machine_id TEXT NOT NULL,
+    thread TEXT NOT NULL,
+    change_id TEXT,
+    work_id TEXT,
+    -- ThreadChange / WorkRef JSON, as last merged into the thread's record.
+    change_json TEXT,
+    work_json TEXT,
+    -- 1 once the change landed or closed: nothing more to follow.
+    settled INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (machine_id, thread)
+);
+CREATE INDEX IF NOT EXISTS agent_links_unsettled ON agent_links (settled, owner_id);
 "#;
 
 /// How long a device login's codes live (seconds).
@@ -193,6 +221,8 @@ pub fn revoke_machine(db: &code_sql::Db, owner_id: &str, id: &str) -> code_sql::
         let cursor = take_cursors(c, owner_id, 1)?;
         c.execute("UPDATE agent_machines SET revoked_at = ?, cursor = ? WHERE id = ?", params![now, cursor as i64, id])?;
         c.execute("DELETE FROM agent_entities WHERE machine_id = ?", [id])?;
+        c.execute("DELETE FROM agent_links WHERE machine_id = ?", [id])?;
+        c.execute("DELETE FROM agent_grants WHERE machine_id = ?", [id])?;
         Ok(Some(cursor))
     })
 }
@@ -333,15 +363,7 @@ pub fn login_response(device_code: String, user_code: String, web_url: &str) -> 
 // ── the mirror ──
 
 fn kind_str(e: &Entity) -> &'static str {
-    match e.kind() {
-        agent_proto::EntityKind::Project => "project",
-        agent_proto::EntityKind::Thread => "thread",
-        agent_proto::EntityKind::Run => "run",
-        agent_proto::EntityKind::Node => "node",
-        agent_proto::EntityKind::Request => "request",
-        agent_proto::EntityKind::Checkpoint => "checkpoint",
-        agent_proto::EntityKind::Terminal => "terminal",
-    }
+    kind_str_of(e.kind())
 }
 
 /// What a batch of upserts did.
@@ -367,7 +389,6 @@ pub fn mirror(db: &code_sql::Db, owner_id: &str, machine_id: &str, items: &[Stam
     let mut batch: Vec<&Stamped> = newest.into_values().collect();
     batch.sort_by_key(|s| s.seq);
     let ack = batch.last().map_or(0, |s| s.seq);
-    let jsons: Vec<String> = batch.iter().map(|s| serde_json::to_string(&s.entity).unwrap_or_default()).collect();
     db.write(|c| {
         if !live(c, owner_id, machine_id)? {
             return Ok(None);
@@ -391,13 +412,23 @@ pub fn mirror(db: &code_sql::Db, owner_id: &str, machine_id: &str, items: &[Stam
                     Scope::Shell => "shell",
                     Scope::Detail => "detail",
                 };
+                // What roll code knows about a thread is the relay's: it goes over the daemon's.
+                let mut entity = s.entity.clone();
+                match &mut entity {
+                    Entity::Thread(t) => overlay(c, machine_id, t)?,
+                    Entity::Removed(r) if r.entity == agent_proto::EntityKind::Thread => {
+                        c.execute("DELETE FROM agent_links WHERE machine_id = ? AND thread = ?", [machine_id, r.id.as_str()])?;
+                    }
+                    _ => {}
+                }
+                let json = serde_json::to_string(&entity).unwrap_or_default();
                 c.execute(
                     "INSERT INTO agent_entities (owner_id, machine_id, kind, id, thread, scope, seq, cursor, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
                      ON CONFLICT (machine_id, kind, id) DO UPDATE SET thread = excluded.thread, scope = excluded.scope, seq = excluded.seq, \
                      cursor = excluded.cursor, json = excluded.json",
-                    params![owner_id, machine_id, kind_str(&s.entity), s.entity.id(), s.entity.thread().map(|t| t.as_str()), scope, s.seq as i64, cursor as i64, jsons[i].as_str()],
+                    params![owner_id, machine_id, kind_str(&s.entity), s.entity.id(), s.entity.thread().map(|t| t.as_str()), scope, s.seq as i64, cursor as i64, json],
                 )?;
-                changed.push(Mirrored { cursor, machine: MachineId(machine_id.into()), entity: s.entity.clone() });
+                changed.push(Mirrored { cursor, machine: MachineId(machine_id.into()), entity });
             }
         }
         c.execute("UPDATE agent_machines SET seq = CASE WHEN seq < ? THEN ? ELSE seq END, last_seen = ? WHERE id = ?", params![ack as i64, ack as i64, now, machine_id])?;
@@ -459,4 +490,171 @@ pub fn entities_after(db: &code_sql::Db, owner_id: &str, cursor: u64, filter: &F
     let full = rows.len() as i64 == PAGE;
     let last = rows.last().map(|(c, _)| c.max(&0).to_owned() as u64);
     Ok((rows.into_iter().filter_map(|(_, m)| m).collect(), if full { last } else { None }))
+}
+
+/// One record a machine mirrored, as the daemon last sent it (with the relay's overlay).
+pub fn mirrored(db: &code_sql::Db, machine_id: &str, kind: agent_proto::EntityKind, id: &str) -> code_sql::Result<Option<Entity>> {
+    let kind = kind_str_of(kind);
+    let json: Option<String> =
+        db.query_row("SELECT json FROM agent_entities WHERE machine_id = ? AND kind = ? AND id = ?", [machine_id, kind, id], |r| r.get(0)).optional()?;
+    Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
+}
+
+/// The machine of one of an owner's threads, and the thread.
+pub fn thread_of(db: &code_sql::Db, owner_id: &str, thread: &str) -> code_sql::Result<Option<(String, agent_proto::Thread)>> {
+    let row: Option<(String, String)> = db
+        .query_row("SELECT machine_id, json FROM agent_entities WHERE owner_id = ? AND kind = 'thread' AND id = ?", [owner_id, thread], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    Ok(row.and_then(|(m, j)| match serde_json::from_str(&j) {
+        Ok(Entity::Thread(t)) => Some((m, t)),
+        _ => None,
+    }))
+}
+
+fn kind_str_of(kind: agent_proto::EntityKind) -> &'static str {
+    use agent_proto::EntityKind as K;
+    match kind {
+        K::Project => "project",
+        K::Thread => "thread",
+        K::Run => "run",
+        K::Node => "node",
+        K::Request => "request",
+        K::Checkpoint => "checkpoint",
+        K::Terminal => "terminal",
+    }
+}
+
+// ── grants ──
+
+/// A live grant: which machine it's for (and that machine's name and owner), the repo, push.
+#[derive(Clone, Debug)]
+pub struct GrantRow {
+    pub machine_id: String,
+    pub machine_name: String,
+    pub owner_id: String,
+    pub repo_id: String,
+    pub push: bool,
+}
+
+/// Store a grant (made by the caller); expired ones go here.
+pub fn insert_grant(db: &code_sql::Db, hash: &str, machine_id: &str, repo_id: &str, push: bool, expires_at: i64) -> code_sql::Result<()> {
+    let now = code_sql::now_ms();
+    db.write(|c| {
+        c.execute("DELETE FROM agent_grants WHERE expires_at < ?", [now])?;
+        c.execute(
+            "INSERT INTO agent_grants (token_hash, machine_id, repo_id, can_push, expires_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (token_hash) DO NOTHING",
+            params![hash, machine_id, repo_id, push, expires_at],
+        )?;
+        Ok(())
+    })
+}
+
+/// The grant a token is, while it hasn't expired and its machine isn't revoked.
+pub fn grant_by_token(db: &code_sql::Db, hash: &str) -> code_sql::Result<Option<GrantRow>> {
+    db.query_row(
+        "SELECT g.machine_id, m.name, m.owner_id, g.repo_id, g.can_push FROM agent_grants g JOIN agent_machines m ON m.id = g.machine_id \
+         WHERE g.token_hash = ? AND g.expires_at >= ? AND m.revoked_at IS NULL",
+        params![hash, code_sql::now_ms()],
+        |r| Ok(GrantRow { machine_id: r.get(0)?, machine_name: r.get(1)?, owner_id: r.get(2)?, repo_id: r.get(3)?, push: r.get(4)? }),
+    )
+    .optional()
+}
+
+// ── links: what roll code knows about a thread ──
+
+#[derive(Clone, Debug, Default)]
+pub struct LinkRow {
+    pub machine_id: String,
+    pub thread: String,
+    pub change_id: Option<String>,
+    pub work_id: Option<String>,
+    pub change: Option<agent_proto::ThreadChange>,
+    pub work: Option<agent_proto::WorkRef>,
+}
+
+const LINK_COLS: &str = "machine_id, thread, change_id, work_id, change_json, work_json";
+
+fn link_row(r: &Row<'_>) -> code_sql::Result<LinkRow> {
+    Ok(LinkRow {
+        machine_id: r.get(0)?,
+        thread: r.get(1)?,
+        change_id: r.get(2)?,
+        work_id: r.get(3)?,
+        change: r.get::<_, Option<String>>(4)?.and_then(|s| serde_json::from_str(&s).ok()),
+        work: r.get::<_, Option<String>>(5)?.and_then(|s| serde_json::from_str(&s).ok()),
+    })
+}
+
+/// Put what roll code knows about a thread over the daemon's record.
+fn overlay(c: &Conn<'_>, machine_id: &str, t: &mut agent_proto::Thread) -> code_sql::Result<()> {
+    let link = c.query_row(&format!("SELECT {LINK_COLS} FROM agent_links WHERE machine_id = ? AND thread = ?"), [machine_id, t.id.as_str()], link_row).optional()?;
+    let link = link.unwrap_or_default();
+    t.change = link.change.map(Box::new);
+    t.work = link.work.map(Box::new);
+    Ok(())
+}
+
+/// Links whose change may still move (not landed or closed), oldest first.
+pub fn unsettled_links(db: &code_sql::Db, owner_id: &str) -> code_sql::Result<Vec<LinkRow>> {
+    db.query(
+        &format!("SELECT {LINK_COLS} FROM agent_links WHERE settled = 0 AND owner_id = ? AND change_id IS NOT NULL ORDER BY machine_id, thread LIMIT ?"),
+        params![owner_id, PAGE],
+        link_row,
+    )
+}
+
+/// Owners with a linked change that may still move.
+pub fn following_owners(db: &code_sql::Db) -> code_sql::Result<Vec<String>> {
+    db.query("SELECT DISTINCT owner_id FROM agent_links WHERE settled = 0 AND change_id IS NOT NULL", (), |r| r.get(0))
+}
+
+/// What to change about a thread's link.
+pub enum LinkUpdate<'a> {
+    /// The change it was published as (a new one replaces the old), and how it is now.
+    Change { id: &'a str, view: &'a agent_proto::ThreadChange },
+    /// The work item it took, or none.
+    Work(Option<&'a agent_proto::WorkRef>),
+}
+
+/// Update a thread's link and merge it into the thread's record under a new cursor. The record
+/// as streams should see it, or `None` when it didn't change (or the relay has no record of the
+/// thread yet: the link is merged in when it comes).
+pub fn update_link(db: &code_sql::Db, owner_id: &str, machine_id: &str, thread: &str, update: LinkUpdate<'_>) -> code_sql::Result<Option<Mirrored>> {
+    let (sql, value, extra) = match &update {
+        LinkUpdate::Change { id, view } => (
+            "UPDATE agent_links SET change_id = ?, change_json = ?, settled = ? WHERE machine_id = ? AND thread = ?",
+            Some(id.to_string()),
+            (Some(serde_json::to_string(view).unwrap_or_default()), view.status.is_settled()),
+        ),
+        LinkUpdate::Work(w) => (
+            "UPDATE agent_links SET work_id = ?, work_json = ? WHERE machine_id = ? AND thread = ?",
+            w.map(|w| w.id.clone()),
+            (w.map(|w| serde_json::to_string(w).unwrap_or_default()), false),
+        ),
+    };
+    db.write(|c| {
+        if !live(c, owner_id, machine_id)? {
+            return Ok(None);
+        }
+        c.execute("INSERT INTO agent_links (owner_id, machine_id, thread) VALUES (?, ?, ?) ON CONFLICT (machine_id, thread) DO NOTHING", [owner_id, machine_id, thread])?;
+        match update {
+            LinkUpdate::Change { .. } => c.execute(sql, params![value, extra.0, extra.1, machine_id, thread])?,
+            LinkUpdate::Work(_) => c.execute(sql, params![value, extra.0, machine_id, thread])?,
+        };
+        let json: Option<String> =
+            c.query_row("SELECT json FROM agent_entities WHERE machine_id = ? AND kind = 'thread' AND id = ?", [machine_id, thread], |r| r.get(0)).optional()?;
+        let Some(Ok(Entity::Thread(mut t))) = json.as_deref().map(serde_json::from_str::<Entity>) else { return Ok(None) };
+        overlay(c, machine_id, &mut t)?;
+        let entity = Entity::Thread(t);
+        let merged = serde_json::to_string(&entity).unwrap_or_default();
+        if json.as_deref() == Some(merged.as_str()) {
+            return Ok(None);
+        }
+        let cursor = take_cursors(c, owner_id, 1)?;
+        c.execute(
+            "UPDATE agent_entities SET cursor = ?, json = ? WHERE machine_id = ? AND kind = 'thread' AND id = ?",
+            params![cursor as i64, merged, machine_id, thread],
+        )?;
+        Ok(Some(Mirrored { cursor, machine: MachineId(machine_id.into()), entity }))
+    })
 }

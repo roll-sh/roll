@@ -46,6 +46,7 @@ tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+agent-host.workspace = true
 hyper = { workspace = true, features = ["server", "http1"] }
 hyper-util = { workspace = true, features = ["service", "tokio"] }
 rand = "0.8"

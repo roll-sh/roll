@@ -237,10 +237,70 @@ pub struct Thread {
     pub usage: Usage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The roll code change the thread was published as, as roll code sees it now. The relay
+    /// fills it in; daemons leave it unset (docs/code/agents.md, "Agents in roll code").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<Box<ThreadChange>>,
+    /// The roll code work item the thread took. The relay fills it in, like `change`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<Box<WorkRef>>,
     pub created_at: Millis,
     pub updated_at: Millis,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<Millis>,
+}
+
+/// A thread's roll code change.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadChange {
+    /// `owner/name`.
+    pub repo: String,
+    pub number: u64,
+    pub status: ChangeStatus,
+    /// The change in the web app.
+    pub url: String,
+    /// One line on why: the failing checks, the first blocker, the queue position, the
+    /// conflicting paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Where a change is, in one word for the canvas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeStatus {
+    /// Open, with checks queued or running.
+    Checking,
+    /// Open, with a check that failed.
+    Failing,
+    /// Open; something else keeps it from landing (a review, a draft, required checks not run).
+    Blocked,
+    /// Open, and nothing keeps it from landing.
+    Ready,
+    /// In the merge queue.
+    Queued,
+    Landed,
+    /// It didn't land: the default branch changed the same lines.
+    Conflict,
+    Closed,
+}
+
+impl ChangeStatus {
+    /// Nothing more happens to it on its own.
+    pub fn is_settled(self) -> bool {
+        matches!(self, ChangeStatus::Landed | ChangeStatus::Closed)
+    }
+}
+
+/// A roll code work item.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkRef {
+    /// `wi_…`.
+    pub id: String,
+    /// `owner/name`.
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -771,7 +831,10 @@ pub struct Capabilities {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
-    /// Add a directory as a project. `clone` clones a roll code repo into `path` first.
+    /// Add a directory as a project. `clone` clones one of the owner's roll code repos into
+    /// `path` first: an empty `path` is `<clone dir>/<owner>/<repo>`, a relative one is under the
+    /// clone dir (`~/roll` unless the daemon's config says otherwise). The relay grants the
+    /// access ([`CodeGrant`]).
     #[serde(rename = "project.add")]
     ProjectAdd {
         path: String,
@@ -862,8 +925,9 @@ pub enum Command {
     #[serde(rename = "checkpoint.rollback")]
     CheckpointRollback { thread: ThreadId, checkpoint: CheckpointId },
 
-    /// Commit the thread's changes and push its branch to the project's roll code repo as a
-    /// change (`land: true` also asks roll code to land it).
+    /// Commit the thread's work on its branch and push it: to the project's roll code repo,
+    /// where the branch opens or revises a change (`land: true` then sends it to landing, through
+    /// the merge queue on a `queue` repo), or to `origin` for any other git project.
     #[serde(rename = "thread.publish")]
     ThreadPublish {
         thread: ThreadId,
@@ -1023,11 +1087,39 @@ pub struct GitStatus {
 pub struct Published {
     pub branch: String,
     pub commit: String,
-    /// The roll code change it became.
+    /// The roll code change it became (the relay fills it in).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// What sending it to landing did, when `land` was asked (the relay fills it in). A land
+    /// that is blocked or conflicts is an answer, not an error: the change is there either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<Landing>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Landing {
+    pub status: LandingStatus,
+    /// For people: where it went, or why it didn't.
+    pub message: String,
+    /// What keeps it from landing (`blocked`), one line each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blockers: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LandingStatus {
+    Landed,
+    /// In the merge queue: it lands once its checks pass.
+    Queued,
+    /// A landing rule keeps it out for now (reviews, checks, a draft).
+    Blocked,
+    /// The default branch changed the same lines.
+    Conflict,
+    /// roll code didn't take it (the message says why).
+    Failed,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1084,8 +1176,39 @@ pub enum RelayFrame {
         /// Who sent it: an owner name or `agent:<name>`.
         by: String,
         command: Command,
+        /// Access to the roll code repo the command works on (cloning, publishing), minted for
+        /// this command alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grant: Option<Box<CodeGrant>>,
     },
     Ping,
+}
+
+/// A short-lived credential for one roll code repository, minted by the relay for the command
+/// it comes with (docs/code/agents.md, "Agents in roll code"). It opens git for that repository
+/// alone (fetch, and push with `write`) as `agent:<machine name>`, never the HTTP API, and stops
+/// working when it expires or the machine is revoked. The daemon only keeps it in memory.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeGrant {
+    pub repo: RepoRef,
+    /// The repository's git URL (`{git_url}/{owner}/{repo}.git`), without credentials.
+    pub url: String,
+    /// `rlg_…`, sent as `Authorization: Bearer`.
+    pub token: String,
+    /// It may push, not only fetch.
+    pub write: bool,
+    pub expires_at: Millis,
+}
+
+impl std::fmt::Debug for CodeGrant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodeGrant")
+            .field("repo", &self.repo)
+            .field("url", &self.url)
+            .field("write", &self.write)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

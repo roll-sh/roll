@@ -371,9 +371,9 @@ impl Host {
         self.store.put_thread_state(&rt.thread.id, &rt.private)
     }
 
-    async fn execute(&self, by: &str, command: Command) -> Res<Reply> {
+    async fn execute(&self, by: &str, command: Command, grant: Option<CodeGrant>) -> Res<Reply> {
         match command {
-            Command::ProjectAdd { path, name, clone } => self.project_add(path, name, clone).await,
+            Command::ProjectAdd { path, name, clone } => self.project_add(path, name, clone, grant).await,
             Command::ProjectRemove { project } => self.project_remove(&project).await,
             Command::ThreadCreate {
                 project,
@@ -421,7 +421,7 @@ impl Host {
             }
             Command::RequestRespond { request, response } => self.request_respond(by, &request, response).await,
             Command::CheckpointRollback { thread, checkpoint } => self.checkpoint_rollback(&thread, &checkpoint).await,
-            Command::ThreadPublish { thread, message, land: _ } => self.thread_publish(&thread, &message).await,
+            Command::ThreadPublish { thread, message, land } => self.thread_publish(&thread, &message, land, grant).await,
             Command::TerminalOpen { project, thread, command, cols, rows } => {
                 self.terminal_open(project, thread, command, cols, rows).await
             }
@@ -442,13 +442,23 @@ impl Host {
         }
     }
 
-    async fn project_add(&self, path: String, name: Option<String>, clone: Option<RepoRef>) -> Res<Reply> {
-        if clone.is_some() {
-            return Err(Fail::Invalid("cloning a roll code repo is not yet supported".into()));
-        }
-        let path = crate::config::expand_tilde(path.trim());
+    /// Adds a directory as a project; with `clone`, clones the roll code repo into it first
+    /// (with the relay's `grant`), and the project records which repo it is.
+    async fn project_add(&self, path: String, name: Option<String>, clone: Option<RepoRef>, grant: Option<CodeGrant>) -> Res<Reply> {
+        let path = match &clone {
+            Some(repo) => self.clone_target(&path, repo)?,
+            None => crate::config::expand_tilde(path.trim()),
+        };
         if !path.is_absolute() {
             return Err(Fail::Invalid("the path must be absolute".into()));
+        }
+        // Held across the clone too, so two adds of one directory can't race.
+        let _guard = self.projects.lock().await;
+        if let Some(repo) = &clone {
+            let grant = grant
+                .filter(|g| &g.repo == repo)
+                .ok_or_else(|| Fail::Invalid(format!("cloning {}/{} needs access granted by the relay", repo.owner, repo.repo)))?;
+            crate::git::clone_into(&grant, &path).await.map_err(|e| Fail::Invalid(format!("{e:#}")))?;
         }
         let path = tokio::fs::canonicalize(&path)
             .await
@@ -457,11 +467,19 @@ impl Host {
             return Err(Fail::Invalid(format!("{} is not a directory", path.display())));
         }
         let path_str = path.to_str().ok_or_else(|| Fail::Invalid("the path is not UTF-8".into()))?.to_string();
-        let _guard = self.projects.lock().await;
         for entity in self.store.list(EntityKind::Project)? {
-            if let Entity::Project(p) = entity
+            if let Entity::Project(mut p) = entity
                 && p.path == path_str
             {
+                // Cloned again where a plain project already was: it is that repo now.
+                if clone.is_some() && p.repo != clone {
+                    p.repo = clone;
+                    p.git = crate::git::info(&path).await;
+                    p.updated_at = now();
+                    let id = p.id.0.clone();
+                    self.put(vec![Entity::Project(p)])?;
+                    return Ok(Reply::Created { id });
+                }
                 return Ok(Reply::Created { id: p.id.0 });
             }
         }
@@ -475,7 +493,7 @@ impl Host {
             id: ProjectId::from_suffix(&suffix()),
             name,
             path: path_str,
-            repo: None,
+            repo: clone,
             git: crate::git::info(&path).await,
             created_at: at,
             updated_at: at,
@@ -483,6 +501,27 @@ impl Host {
         let id = project.id.0.clone();
         self.put(vec![Entity::Project(project)])?;
         Ok(Reply::Created { id })
+    }
+
+    /// Where a roll code repo is cloned: an absolute `path` as given; otherwise under the clone
+    /// directory, at `<owner>/<repo>` (an empty `path`) or the relative `path`.
+    fn clone_target(&self, path: &str, repo: &RepoRef) -> Res<PathBuf> {
+        let given = crate::config::expand_tilde(path.trim());
+        if given.is_absolute() {
+            return Ok(given);
+        }
+        let one_part = |s: &str| {
+            let mut parts = Path::new(s).components();
+            matches!((parts.next(), parts.next()), (Some(std::path::Component::Normal(_)), None))
+        };
+        if !one_part(&repo.owner) || !one_part(&repo.repo) {
+            return Err(Fail::Invalid(format!("{}/{} isn't a repository name", repo.owner, repo.repo)));
+        }
+        if given.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+            return Err(Fail::Invalid("a relative path stays inside the clone directory".into()));
+        }
+        let root = self.config.clone_dir().ok_or_else(|| Fail::Invalid("no home directory to clone into: give an absolute path".into()))?;
+        Ok(if path.trim().is_empty() { root.join(&repo.owner).join(&repo.repo) } else { root.join(given) })
     }
 
     async fn project_remove(&self, id: &ProjectId) -> Res<Reply> {
@@ -530,8 +569,12 @@ impl crate::Daemon for Host {
     }
 
     async fn run(&self, id: String, by: String, command: Command) -> Reply {
+        self.run_granted(id, by, command, None).await
+    }
+
+    async fn run_granted(&self, id: String, by: String, command: Command, grant: Option<CodeGrant>) -> Reply {
         if command.is_query() {
-            return self.execute(&by, command).await.unwrap_or_else(Fail::into_reply);
+            return self.execute(&by, command, grant).await.unwrap_or_else(Fail::into_reply);
         }
         let gate = self.gate(&id);
         let reply = {
@@ -539,7 +582,7 @@ impl crate::Daemon for Host {
             match self.store.receipt(&id) {
                 Ok(Some(reply)) => reply,
                 Ok(None) => {
-                    let reply = self.execute(&by, command).await.unwrap_or_else(Fail::into_reply);
+                    let reply = self.execute(&by, command, grant).await.unwrap_or_else(Fail::into_reply);
                     if let Err(e) = self.store.put_receipt(&id, &reply, now()) {
                         tracing::warn!("storing the receipt of command {id}: {e:#}");
                     }

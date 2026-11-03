@@ -437,7 +437,7 @@ async fn commands_go_to_the_daemon_and_come_back() {
         let mut got = Vec::new();
         while got.len() < 2 {
             match d.recv().await {
-                Some(RelayFrame::Command { id, by, command }) => got.push((id, by, command)),
+                Some(RelayFrame::Command { id, by, command, .. }) => got.push((id, by, command)),
                 other => panic!("{other:?}"),
             }
         }

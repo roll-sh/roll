@@ -19,6 +19,27 @@
     }
   },
   {
+    "type": "command",
+    "id": "cmd_2",
+    "by": "agent:bot",
+    "command": {
+      "type": "thread.publish",
+      "thread": "thr_a1b2c3d4e5f60718",
+      "message": "Fix the flaky queue test",
+      "land": true
+    },
+    "grant": {
+      "repo": {
+        "owner": "acme",
+        "repo": "roll"
+      },
+      "url": "https://roll.sh/acme/roll.git",
+      "token": "rlg_0123456789abcdef0123456789abcdef0123456789abcdef",
+      "write": true,
+      "expires_at": 1762000600000
+    }
+  },
+  {
     "type": "ping"
   }
 ]

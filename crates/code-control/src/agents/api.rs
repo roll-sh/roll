@@ -1,16 +1,18 @@
 //! `/v1/code/agents`: device login, machines, the daemon link, the state snapshot, the event
 //! stream and commands (docs/code/http-api.md, "Agents").
 
+use super::ApiRouter;
 use super::share;
 use super::store::{self, Filter};
 use crate::api::{Body, Q, stream_key};
 use crate::model::Owner;
 use crate::{Caller, Code, Error, Result, hash_token};
 use agent_proto::{CommandRequest, ErrorCode, LoginPoll, Mirrored, Reply, State as Snapshot, StreamEvent};
+use axum::Extension;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path, State};
 use axum::http::request::Parts;
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
@@ -41,6 +43,8 @@ pub fn routes() -> Router<Arc<Code>> {
         .route("/v1/code/agents/{owner}/machines", get(list_machines).post(add_machine))
         .route("/v1/code/agents/{owner}/machines/{machine}", patch(rename_machine).delete(revoke_machine))
         .route("/v1/code/agents/{owner}/machines/{machine}/commands", post(command))
+        .route("/v1/code/agents/{owner}/machines/{machine}/projects", post(create_project))
+        .route("/v1/code/agents/{owner}/threads/{thread}/work", post(take_work).delete(drop_work))
         .route("/v1/code/agents/{owner}/state", get(state))
         .route("/v1/code/agents/{owner}/events", get(events))
         .route("/v1/code/agents/{owner}/threads/{thread}/shares", post(share::create))
@@ -276,6 +280,7 @@ async fn connect(
         let owner = store::owner_name(code.db.sql(), &machine.owner_id)?.ok_or_else(|| Error::NotFound("the machine's owner".into()))?;
         return Ok(Json(agent_proto::MachineLogin { machine: code.machine_json(&machine), owner }).into_response());
     };
+    super::code::follow(&code);
     Ok(ws.max_message_size(MAX_FRAME).max_frame_size(MAX_FRAME).on_upgrade(move |socket| super::link::serve(code, machine, socket)).into_response())
 }
 
@@ -306,6 +311,9 @@ fn filter(threads: Option<&str>) -> Result<Filter> {
 async fn state(State(code): S, caller: Caller, Path(owner): Path<String>, Q(q): Q<ThreadsQuery>) -> Result<Json<Snapshot>> {
     let o = readable(&code, &caller, &owner)?;
     let filter = filter(q.threads.as_deref())?;
+    // Published changes as they are now, before the snapshot takes their threads.
+    super::code::follow(&code);
+    super::code::follow_owner(&code, &o.id).await;
     // The cursor first: anything newer that the snapshot also caught comes again on the stream,
     // which is harmless (upserts).
     let cursor = store::owner_cursor(code.db.sql(), &o.id)?;
@@ -428,6 +436,7 @@ impl Stream {
 async fn events(State(code): S, caller: Caller, parts: Parts, Path(owner): Path<String>, Q(q): Q<ThreadsQuery>) -> Result<Response> {
     let o = readable(&code, &caller, &owner)?;
     let filter = filter(q.threads.as_deref())?;
+    super::code::follow(&code);
     // Both carry "the newest cursor this client has": resume after the newer of the two (a
     // reconnecting EventSource sends a fresh Last-Event-ID with the URL it first opened). A
     // Last-Event-ID that isn't a cursor is ignored: browsers may send an empty one.
@@ -458,24 +467,86 @@ async fn events(State(code): S, caller: Caller, parts: Parts, Path(owner): Path<
 
 /// `POST …/machines/{machine}/commands`: forward a command to the daemon and answer its reply.
 /// A daemon's error, the machine being offline or not answering are `Reply::Error`s too, with
-/// a status to match and `error` set.
-async fn command(State(code): S, caller: Caller, Path((owner, machine)): Path<(String, String)>, Body(b): Body) -> Result<Response> {
+/// a status to match and `error` set. Commands that work on a roll code repo get a grant for it
+/// (`code.rs`), and a published branch's change is added to the reply.
+async fn command(
+    State(code): S,
+    caller: Caller,
+    headers: HeaderMap,
+    api: Option<Extension<ApiRouter>>,
+    Path((owner, machine)): Path<(String, String)>,
+    Body(b): Body,
+) -> Result<Response> {
     let o = drivable(&code, &caller, &owner)?;
     let req: CommandRequest = serde_json::from_value(b).map_err(|e| Error::Invalid(format!("invalid command: {e}")))?;
     if req.id.trim().is_empty() || req.id.len() > 128 {
         return Err(Error::Invalid("id must be 1 to 128 characters".into()));
     }
-    match store::machine(code.db.sql(), &machine)? {
-        Some(m) if m.owner_id == o.id && !m.revoked => {}
-        _ => return Err(Error::NotFound(format!("machine {machine}"))),
-    }
-    let by = match caller.agent() {
+    let m = live_machine(&code, &o, &machine)?;
+    super::code::follow(&code);
+    let granted = super::code::grant_for(&code, &caller, &m, &req.command)?;
+    let (grant, repo) = granted.map_or((None, None), |(g, r)| (Some(g), Some(r)));
+    let timeout = code.agents.command_timeout();
+    let reply = code.agents.command(&machine, req.id, sender(&caller), req.command.clone(), grant, timeout).await;
+    let reply = match repo {
+        Some(r) => super::code::published(&code, api.as_ref().map(|e| &e.0), &headers, &m, &req.command, &r, reply).await,
+        None => reply,
+    };
+    Ok(reply_response(reply))
+}
+
+/// Who a command is from, for the daemon: the owner's name, `agent:<name>`, or `admin`.
+pub(super) fn sender(caller: &Caller) -> String {
+    match caller.agent() {
         Some(a) => format!("agent:{a}"),
         None => caller.identity().unwrap_or_else(|| "anonymous".into()),
-    };
-    let timeout = code.agents.command_timeout();
-    let reply = code.agents.command(&machine, req.id, by, req.command, timeout).await;
+    }
+}
+
+/// One of the owner's live machines, else a 404.
+fn live_machine(code: &Code, o: &Owner, machine: &str) -> Result<store::MachineRow> {
+    match store::machine(code.db.sql(), machine)? {
+        Some(m) if m.owner_id == o.id && !m.revoked => Ok(m),
+        _ => Err(Error::NotFound(format!("machine {machine}"))),
+    }
+}
+
+/// `POST …/machines/{machine}/projects {id, repo: {name, description?, visibility?}, path?, name?}`:
+/// a new roll code repo, cloned onto the machine as a project.
+async fn create_project(
+    State(code): S,
+    caller: Caller,
+    headers: HeaderMap,
+    api: Option<Extension<ApiRouter>>,
+    Path((owner, machine)): Path<(String, String)>,
+    Body(b): Body,
+) -> Result<Response> {
+    let o = drivable(&code, &caller, &owner)?;
+    let m = live_machine(&code, &o, &machine)?;
+    let reply = super::code::create_project(&code, api.as_ref().map(|e| &e.0), &caller, &headers, &o, &m, &b).await?;
     Ok(reply_response(reply))
+}
+
+/// `POST …/threads/{thread}/work {work? | repo, labels?, lease_s?, agent?}` → WorkItem | 204.
+async fn take_work(
+    State(code): S,
+    caller: Caller,
+    headers: HeaderMap,
+    api: Option<Extension<ApiRouter>>,
+    Path((owner, thread)): Path<(String, String)>,
+    Body(b): Body,
+) -> Result<Response> {
+    let o = drivable(&code, &caller, &owner)?;
+    Ok(match super::code::take_work(&code, api.as_ref().map(|e| &e.0), &caller, &headers, &o, &thread, &b).await? {
+        Some(w) => Json(w).into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
+    })
+}
+
+async fn drop_work(State(code): S, caller: Caller, Path((owner, thread)): Path<(String, String)>) -> Result<StatusCode> {
+    let o = drivable(&code, &caller, &owner)?;
+    super::code::drop_work(&code, &o, &thread).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) fn reply_status(reply: &Reply) -> StatusCode {

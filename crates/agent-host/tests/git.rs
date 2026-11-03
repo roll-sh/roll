@@ -180,11 +180,11 @@ async fn publish_commits_and_pushes_the_thread_branch() {
     git::worktree_add(p, &wt, "roll/feature", &head).await.unwrap();
     std::fs::write(wt.join("feature.txt"), "done\n").unwrap();
 
-    let published = git::publish(&wt, "roll/feature", "Add the feature").await.unwrap();
+    let published = git::publish(&wt, "roll/feature", "Add the feature", None).await.unwrap();
     assert_eq!(published.branch, "roll/feature");
     assert_eq!(sh(remote.path(), &["rev-parse", "refs/heads/roll/feature"]).trim(), published.commit);
     assert_eq!(sh(remote.path(), &["log", "-1", "--format=%s", "roll/feature"]).trim(), "Add the feature");
-    assert!(git::publish(&wt, "roll/other", "x").await.is_err());
+    assert!(git::publish(&wt, "roll/other", "x", None).await.is_err());
 }
 
 #[tokio::test]

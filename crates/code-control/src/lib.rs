@@ -600,6 +600,10 @@ impl Code {
     /// the app, even on an open local daemon: apps are scoped to the repos they're installed on.
     pub fn caller(&self, token: Option<&str>) -> Result<Caller> {
         let token = token.map(str::trim).filter(|t| !t.is_empty());
+        // An agent machine's grant only opens git, for its one repo (`agents/code.rs`).
+        if token.is_some_and(|t| t.starts_with(agents::GRANT_PREFIX)) {
+            return Err(Error::Unauthorized);
+        }
         if let Some(t) = token
             && let Some(app) = self.app_caller(t)?
         {

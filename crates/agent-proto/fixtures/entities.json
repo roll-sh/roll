@@ -57,6 +57,19 @@
       "cached_tokens": 9000,
       "cost_usd": 0.42
     },
+    "change": {
+      "repo": "acme/roll",
+      "number": 42,
+      "status": "checking",
+      "url": "https://roll.sh/acme/roll/changes/42",
+      "detail": "test (running)"
+    },
+    "work": {
+      "id": "wi_7Hq2Zp4Ka9Lm3N",
+      "repo": "acme/roll",
+      "number": 41,
+      "title": "Fix the flaky queue test"
+    },
     "created_at": 1762000000000,
     "updated_at": 1762000000000
   },

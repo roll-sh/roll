@@ -85,6 +85,19 @@ fn rejected(name: &str, reason: impl Into<String>) -> RefStatus {
 #[async_trait]
 impl GitBackend for GitAdapter {
     async fn authorize(&self, repo: &str, credentials: Option<&Credentials>, access: Access) -> GitResult<Option<String>> {
+        // An agent machine's grant: its one repo, fetch (and push if it may), as the machine's
+        // agent. Always scoped, even on an open daemon; looked up on every request.
+        if let Some(c) = credentials.filter(|c| c.password.starts_with(crate::agents::GRANT_PREFIX)) {
+            let g = crate::agents::grant(&self.code, &c.password).map_err(internal)?.ok_or(GitError::Unauthorized)?;
+            let r = self.repo(repo)?;
+            if r.id != g.repo_id {
+                return Err(GitError::NotFound(repo.into()));
+            }
+            if access == Access::Write && !g.push {
+                return Err(GitError::Forbidden(format!("this machine's grant for {} only fetches", r.full_name())));
+            }
+            return Ok(Some(format!("agent:{}", g.machine_name)));
+        }
         let caller = self.code.caller(credentials.map(|c| c.password.as_str())).map_err(|_| GitError::Unauthorized)?;
         let r = self.repo(repo)?;
         if !Code::can_read(&caller, &r) {

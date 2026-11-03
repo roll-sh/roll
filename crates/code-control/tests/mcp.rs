@@ -12,14 +12,15 @@ use serde_json::{Value, json};
 const MCP: &str = "/v1/code/mcp";
 
 /// The tools docs/code/mcp.md lists.
-const TOOLS: [&str; 28] = [
+const TOOLS: [&str; 31] = [
     "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "create_change", "revise_change", "land", "get_change",
     "list_changes", "claim_work", "heartbeat_work", "release_work", "complete_work", "list_work", "create_work", "comment", "review", "queue_status",
     "request_ai_review", "list_agent_machines", "list_agent_threads", "create_agent_thread", "send_agent_message", "respond_agent_request",
-    "interrupt_agent_thread",
+    "interrupt_agent_thread", "publish_agent_thread", "create_agent_project", "claim_agent_work",
 ];
-/// The agents tools (not repo-scoped: `agent_tools_drive_a_machine_like_their_routes`).
-const AGENT_TOOLS: usize = 6;
+/// The agents tools (not repo-scoped: `agent_tools_drive_a_machine_like_their_routes` and
+/// `agent_tools_work_in_roll_code_like_their_routes`).
+const AGENT_TOOLS: usize = 9;
 /// The ones that only read (`readOnlyHint`).
 const READ_ONLY: [&str; 13] = [
     "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "get_change", "list_changes", "list_work", "queue_status",
@@ -1144,7 +1145,7 @@ async fn agent_tools_drive_a_machine_like_their_routes() {
     let (seen_tx, mut seen) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
         while let Some(f) = d.recv().await {
-            if let RelayFrame::Command { id, by, command } = f {
+            if let RelayFrame::Command { id, by, command, .. } = f {
                 let result = match &command {
                     Command::RunInterrupt { .. } => Reply::Error(ReplyError { code: ErrorCode::Conflict, message: "nothing to interrupt".into() }),
                     _ => Reply::Created { id: "thr_new".into() },
@@ -1197,4 +1198,74 @@ async fn agent_tools_drive_a_machine_like_their_routes() {
     anon.initialize("2025-11-25").await;
     assert!(anon.tool_err("interrupt_agent_thread", json!({ "owner": "acme", "machine": mid, "thread": "thr_a" })).await.contains("this needs a token"));
     assert!(seen.try_recv().is_err(), "refused calls send nothing");
+}
+
+/// The tools that put agents to work in roll code, against a connected test daemon: publishing
+/// sends `thread.publish` with a push grant for the project's repo, starting a repo creates it and
+/// sends `project.add` cloning it, and a thread takes the next work item (then none is left).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_tools_work_in_roll_code_like_their_routes() {
+    use agent_proto::{Command, DaemonFrame, Published, RelayFrame, Reply, Stamped};
+    use common::daemon::Daemon;
+    let a = app(Some("root"));
+    let root = Some("root");
+    a.req("POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" })), root).await;
+    let (_, t) = a.req("POST", "/v1/code/owners/acme/tokens", Some(json!({ "name": "agent:bot" })), root).await;
+    let token = t["token"].as_str().unwrap().to_string();
+    a.req("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "api" })), root).await;
+    let (_, item) = a.req("POST", "/v1/code/repos/acme/api/work", Some(json!({ "title": "Fix it" })), root).await;
+    let (_, m) = a.req("POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "box" })), root).await;
+    let minted = m["token"].as_str().unwrap().to_string();
+    let url = a.serve().await;
+    let (mut d, _) = Daemon::connect(&url, &minted).await;
+    let entity = |v: Value| -> agent_proto::Entity { serde_json::from_value(v).unwrap() };
+    d.upsert(vec![
+        Stamped { seq: 1, entity: entity(json!({ "kind": "project", "id": "prj_1", "name": "api", "path": "/x", "repo": { "owner": "acme", "repo": "api" }, "created_at": 1, "updated_at": 1 })) },
+        Stamped {
+            seq: 2,
+            entity: entity(json!({
+                "kind": "thread", "id": "thr_a", "project": "prj_1", "title": "fix it", "provider": "codex", "model": null,
+                "runtime_mode": "full_access", "interaction_mode": "default", "cwd": "/x", "status": "idle",
+                "run_count": 1, "pending_requests": 0, "created_at": 1, "updated_at": 1
+            })),
+        },
+    ])
+    .await;
+    let (seen_tx, mut seen) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(f) = d.recv().await {
+            if let RelayFrame::Command { id, command, grant, .. } = f {
+                let result = match &command {
+                    Command::ThreadPublish { .. } => Reply::Published(Published { branch: "roll/fix-it".into(), commit: "abc".into(), change: None, url: None, landing: None }),
+                    _ => Reply::Created { id: "prj_new".into() },
+                };
+                let _ = seen_tx.send((command, grant));
+                d.send(&DaemonFrame::Reply { id, result }).await;
+            }
+        }
+    });
+
+    let mut c = Client::new(&a, Some(&token));
+    c.initialize("2025-11-25").await;
+    let published = c.tool("publish_agent_thread", json!({ "owner": "acme", "machine": "box", "thread": "thr_a", "message": "Fix it" })).await;
+    assert_eq!((published["type"].as_str(), published["branch"].as_str()), (Some("published"), Some("roll/fix-it")), "{published}");
+    let (cmd, grant) = seen.recv().await.unwrap();
+    assert!(matches!(cmd, Command::ThreadPublish { ref message, land: false, .. } if message == "Fix it"), "{cmd:?}");
+    let grant = grant.expect("a grant");
+    assert!(grant.write && grant.url.ends_with("/acme/api.git"), "{grant:?}");
+
+    let started = c.tool("create_agent_project", json!({ "owner": "acme", "machine": "box", "repo": "fresh", "visibility": "private" })).await;
+    assert_eq!(started, json!({ "type": "created", "id": "prj_new" }));
+    let (cmd, grant) = seen.recv().await.unwrap();
+    assert!(matches!(cmd, Command::ProjectAdd { clone: Some(ref r), .. } if r.owner == "acme" && r.repo == "fresh"), "{cmd:?}");
+    assert!(grant.is_some_and(|g| !g.write));
+    assert_eq!(a.req("GET", "/v1/code/repos/acme/fresh", None, root).await.1["visibility"], "private");
+
+    let claimed = c.tool("claim_agent_work", json!({ "owner": "acme", "thread": "thr_a", "repo": "acme/api" })).await;
+    assert_eq!((claimed["work"]["id"].as_str(), claimed["work"]["claimed_by"].as_str()), (item["id"].as_str(), Some("agent:bot")), "{claimed}");
+    assert_eq!(c.tool("claim_agent_work", json!({ "owner": "acme", "thread": "thr_a", "repo": "acme/api" })).await["work"], Value::Null);
+    assert!(c.tool_err("claim_agent_work", json!({ "owner": "acme", "thread": "thr_nope", "repo": "acme/api" })).await.starts_with("not found"));
+    let (_, state) = a.req("GET", "/v1/code/agents/acme/state", None, root).await;
+    let thread = state["entities"].as_array().unwrap().iter().find(|m| m["entity"]["id"] == "thr_a").unwrap();
+    assert_eq!(thread["entity"]["work"]["id"], item["id"], "{thread}");
 }

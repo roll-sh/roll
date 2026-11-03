@@ -59,6 +59,8 @@ impl Host {
             activity: None,
             usage: Usage::default(),
             error: None,
+            change: None,
+            work: None,
             created_at: at,
             updated_at: at,
             archived_at: None,
@@ -217,6 +219,8 @@ impl Host {
             activity: None,
             usage: Usage::default(),
             error: None,
+            change: None,
+            work: None,
             created_at: at_ms,
             updated_at: at_ms,
             archived_at: None,
@@ -408,7 +412,9 @@ impl Host {
         Ok(())
     }
 
-    pub(crate) async fn thread_publish(&self, thread: &ThreadId, message: &str) -> Res<Reply> {
+    /// Commits and pushes the thread's branch: to its roll code repo with the relay's grant (the
+    /// relay turns the push into a change and lands it), or to `origin` for any other project.
+    pub(crate) async fn thread_publish(&self, thread: &ThreadId, message: &str, land: bool, grant: Option<CodeGrant>) -> Res<Reply> {
         let rt = self.lock(thread).await?;
         if rt.active.is_some() {
             return Err(Fail::Conflict("the thread is running: wait for it or interrupt it before publishing".into()));
@@ -420,7 +426,15 @@ impl Host {
         if message.is_empty() {
             return Err(Fail::Invalid("the commit message is empty".into()));
         }
-        let published = git::publish(Path::new(&worktree.path), &worktree.branch, message)
+        let project = self.project(&rt.thread.project)?;
+        let to = match &project.repo {
+            Some(repo) => Some(grant.filter(|g| &g.repo == repo && g.write).ok_or_else(|| {
+                Fail::Invalid(format!("publishing to {}/{} needs push access granted by the relay", repo.owner, repo.repo))
+            })?),
+            None if land => return Err(Fail::Invalid("only a roll code repo can land: this project isn't one".into())),
+            None => None,
+        };
+        let published = git::publish(Path::new(&worktree.path), &worktree.branch, message, to.as_ref())
             .await
             .map_err(|e| Fail::Invalid(format!("{e:#}")))?;
         Ok(Reply::Published(published))

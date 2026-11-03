@@ -159,6 +159,10 @@ pub fn router(code: Arc<Code>) -> Router {
     if code.cluster().is_some() {
         all = all.layer(axum::middleware::from_fn_with_state(code.clone(), crate::cluster::route));
     }
+    // The agents relay calls the rest of the API on a caller's behalf, like MCP tools. It's a
+    // request extension on the outer router, so `all` itself never holds it (no cycle).
+    let calls = crate::agents::ApiRouter(all.clone());
+    let all = all.layer(axum::Extension(calls));
     // MCP tools call the rest of the API on the caller's behalf (so they're routed the same way).
     let mcp = crate::mcp::routes(code.clone(), all.clone()).layer(axum::extract::DefaultBodyLimit::max(MAX_BODY));
     let health = Router::new().route("/v1/code/health", get(health)).layer(cors()).with_state(code.clone());

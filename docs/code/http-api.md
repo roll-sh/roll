@@ -598,6 +598,39 @@ POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, com
        200 with the Reply, or Reply.Error {type: "error", code, message, error /* = message */} with
        not_found 404, invalid 400, conflict 409, provider 422, internal 502,
        machine_offline 503 (not connected), timeout 504 (no reply in time).
+       Commands on a roll code repo (docs/code/agents.md, "Agents in roll code"): `project.add` with
+       `clone: {owner, repo}` and `thread.publish` in a project that is a roll code repo carry a grant
+       for that repo to the daemon. The repo must be the machine's owner's (400 otherwise, 404 when it
+       doesn't exist or the caller can't read it); publishing needs write access to it (403).
+       `thread.publish` answers Published {branch, commit, change: number | null /* the branch's open
+       change */, url: string | null, landing?: Landing /* with land: true */};
+       Landing = {status: "landed" | "queued" | "blocked" | "conflict" | "failed", message, blockers: string[]}:
+       the land goes through POST /v1/code/changes/{id}/land with the caller's token (the merge queue on a
+       queue repo, the landing rules otherwise), and a blocked or conflicting land is still a 200.
+
+POST /v1/code/agents/{owner}/machines/{machine}/projects {id /* idempotency key */, repo: {name, description?,
+       visibility?, default_branch?}, path?, name?} → Reply (200, as for commands)
+       Creates the repo (POST /v1/code/repos on the caller's behalf: its 403/422 pass through; a 409, the
+       repo already existing, is a retry and goes on) and clones it onto the machine as a project
+       (`project.add` with `clone`). Owner's tokens, agent tokens too (401 anonymous, 403 others,
+       404 an unknown machine, 400 without id or repo.name).
+POST   /v1/code/agents/{owner}/threads/{thread}/work {work?: "wi_…" | "owner/repo#N", repo?: "owner/name",
+       labels?, lease_s?, agent?} → WorkItem | 204
+       The thread takes a work item: `work` (read as the caller: 404 if it can't), or the next open one
+       claimed from `repo` (POST …/work/claim as `agent`, default the caller's agent or
+       `agent:<machine name>`; 204 when none matches). It must be one of the owner's repos (400), and
+       becomes the thread's `work`. 400 with neither; 404 an unknown thread.
+DELETE /v1/code/agents/{owner}/threads/{thread}/work → 204: the thread lets go of it (the claim stays).
+       Both: owner's tokens, agent tokens too (401 anonymous, 403 others).
+
+Thread.change = {repo /* owner/name */, number, status: "checking" | "failing" | "blocked" | "ready" | "queued"
+       | "landed" | "conflict" | "closed", url, detail: string | null} and Thread.work = {id, repo, number,
+       title} are filled by the relay from roll code (the daemon never sets them) and follow the change
+       as it moves, as new `entity` events on the stream.
+
+Grants (`rlg_…`) only open git, for their one repo: fetch, and push for a publish. Every API route
+answers 401 to one, even on an open daemon. They expire after 10 minutes and stop at once when the
+machine is revoked.
 
 GET /v1/code/agents/connect    the daemon's WebSocket (Authorization: Bearer rlm_…; only machine tokens,
        looked up on every connect: 401 otherwise). Without an upgrade: 200 MachineLogin {machine: Machine,
@@ -748,6 +781,8 @@ The browser calls `/v1/code/*` directly: reads, SSE and raw blob links. Allow an
 - Anonymous requests can read public repos.
 - Review app tokens (`rla_…`) are always the app, even on an open daemon: they read the repos the
   app is installed on (private ones too) and review their changes, nothing else.
+- Agent machine grants (`rlg_…`, minted by the relay inside a command; see Agents) are always
+  scoped too: git for one repo, as `agent:<machine name>`, never the API (401).
 - When `auth.required` is true, the dashboard shows a sign-in button. It keeps the token in
   localStorage, sends it as `Bearer`, and opens the prompt on any 401. The event stream uses
   `fetch`, not `EventSource`, so it can send the header too.
