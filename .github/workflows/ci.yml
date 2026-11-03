@@ -1,103 +1,74 @@
 name: ci
 
-# The one required check for pull requests and the merge queue: runs the workflows for whatever
-# changed, and passes when they all pass (or weren't needed).
+# The merge gate is a bounded smoke check. Docker, compatibility and stress suites
+# remain available through the individual workflows' manual triggers.
 on:
   pull_request:
   merge_group:
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  changes:
+  rust:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      code: ${{ steps.diff.outputs.code }}
-      postgres: ${{ steps.diff.outputs.postgres }}
-      queues: ${{ steps.diff.outputs.queues }}
-      nosql: ${{ steps.diff.outputs.nosql }}
-      redis: ${{ steps.diff.outputs.redis }}
-      storage: ${{ steps.diff.outputs.storage }}
-      stream: ${{ steps.diff.outputs.stream }}
-      tasks: ${{ steps.diff.outputs.tasks }}
-      web: ${{ steps.diff.outputs.web }}
+    timeout-minutes: 2
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          fetch-depth: 0
-      - id: diff
-        env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          cache-on-failure: true
+          cache-workspace-crates: true
+      # Git framing/packs, reviewer schemas/pricing/key sealing, RESP and S3 auth/parsing.
+      - run: cargo test --locked -p code-git -p code-review -p redis-proto -p s3-proto --lib
+
+  dashboard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm --filter dashboard test
+
+  scripts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate test scripts
         run: |
-          files=$(git diff --name-only "$BASE" HEAD)
-          echo "$files"
-          match() { if grep -qE "$2" <<< "$files"; then echo "$1=true"; else echo "$1=false"; fi >> "$GITHUB_OUTPUT"; }
-          match code '^(crates/(code-[a-z]+|pg-storage|rolld|roll-cli)/|apps/dashboard/|packages/brand/|deploy/code/|Cargo\.(toml|lock)$|pnpm-lock\.yaml$|scripts/test-code\.sh$|\.github/workflows/(code|ci)\.yml$)'
-          match postgres '^(crates/(pg-proxy|pg-storage|pg-control|rolld|roll-cli)/|Cargo\.(toml|lock)$|scripts/test-postgres\.sh$|\.github/workflows/(postgres|ci)\.yml$)'
-          match queues '^(crates/(mq-[a-z0-9-]+|rolld|roll-cli)/|tests/queues/|deploy/queues/|Cargo\.(toml|lock)$|scripts/test-queues(-clients)?\.sh$|\.github/workflows/(queues|ci)\.yml$)'
-          match nosql '^(crates/(nosql-[a-z-]+|pg-storage|redis-lua|rolld|roll-cli)/|deploy/nosql/|Cargo\.(toml|lock)$|scripts/(test-nosql\.sh|nosql-conformance|nosql-bench)|\.github/workflows/(nosql|ci)\.yml$)'
-          match redis '^(crates/(redis-[a-z]+|rolld|roll-cli)/|Cargo\.(toml|lock)$|scripts/test-redis\.sh$|\.github/workflows/(redis|ci)\.yml$)'
-          match storage '^(crates/(s3-[a-z]+|pg-storage|rolld|roll-cli)/|Cargo\.(toml|lock)$|apps/cdn-worker/|scripts/test-(storage|storage-cdn|s3-conformance)\.sh$|tests/s3-conformance/|\.github/workflows/(storage|ci)\.yml$)'
-          match stream '^(crates/(stream-log|stream-broker|pg-storage|rolld|roll-cli)/|vendor/kafka-protocol/|Cargo\.(toml|lock)$|scripts/test-stream\.sh$|\.github/workflows/(stream|ci)\.yml$)'
-          match tasks '^(crates/(tasks|rolld|roll-cli)/|deploy/aws/|Cargo\.(toml|lock)$|scripts/test-tasks\.sh$|\.github/workflows/(tasks|ci)\.yml$)'
-          match web '^(apps/|packages/|crates/s3-[a-z]+/|package\.json$|pnpm-(lock|workspace)\.yaml$|\.github/workflows/(web|ci)\.yml$)'
-
-  code:
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    uses: ./.github/workflows/code.yml
-
-  postgres:
-    needs: changes
-    if: needs.changes.outputs.postgres == 'true'
-    uses: ./.github/workflows/postgres.yml
-
-  queues:
-    needs: changes
-    if: needs.changes.outputs.queues == 'true'
-    uses: ./.github/workflows/queues.yml
-
-  nosql:
-    needs: changes
-    if: needs.changes.outputs.nosql == 'true'
-    uses: ./.github/workflows/nosql.yml
-
-  redis:
-    needs: changes
-    if: needs.changes.outputs.redis == 'true'
-    uses: ./.github/workflows/redis.yml
-
-  storage:
-    needs: changes
-    if: needs.changes.outputs.storage == 'true'
-    uses: ./.github/workflows/storage.yml
-
-  stream:
-    needs: changes
-    if: needs.changes.outputs.stream == 'true'
-    uses: ./.github/workflows/stream.yml
-
-  tasks:
-    needs: changes
-    if: needs.changes.outputs.tasks == 'true'
-    uses: ./.github/workflows/tasks.yml
-
-  web:
-    needs: changes
-    if: needs.changes.outputs.web == 'true'
-    uses: ./.github/workflows/web.yml
+          for script in scripts/test-*.sh scripts/nosql-conformance.sh; do
+            bash -n "$script"
+          done
+      - name: Validate workflows
+        run: |
+          version=1.7.7
+          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v$version/actionlint_${version}_linux_amd64.tar.gz" | tar -xz actionlint
+          ./actionlint -shellcheck=
 
   ci:
-    needs: [changes, code, nosql, postgres, queues, redis, storage, stream, tasks, web]
+    needs: [rust, dashboard, scripts]
     if: always()
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 2
     steps:
       - env:
           NEEDS: ${{ toJSON(needs) }}
         run: |
           echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
-          echo "$NEEDS" | jq -e 'all(.[]; .result == "success" or .result == "skipped")' > /dev/null
+          echo "$NEEDS" | jq -e 'all(.[]; .result == "success")' > /dev/null

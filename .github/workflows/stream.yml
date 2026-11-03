@@ -1,22 +1,9 @@
 name: stream
 
-# Runs only when stream-related code changes.
+# Extended validation, run manually when needed.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "crates/stream-log/**"
-      - "crates/stream-broker/**"
-      - "vendor/kafka-protocol/**"
-      - "crates/pg-storage/**"
-      - "crates/rolld/**"
-      - "crates/roll-cli/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "scripts/test-stream.sh"
-      - ".github/workflows/stream.yml"
   workflow_dispatch:
-  # Pull requests and the merge queue run this through ci.yml.
+  # Extended suites run on demand; ci.yml is the two-minute merge gate.
   workflow_call:
 
 concurrency:

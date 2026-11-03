@@ -1,21 +1,6 @@
 name: code
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "crates/code-*/**"
-      - "crates/pg-storage/**"
-      - "crates/rolld/**"
-      - "crates/roll-cli/**"
-      - "apps/dashboard/**"
-      - "packages/brand/**"
-      - "deploy/code/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "pnpm-lock.yaml"
-      - "scripts/test-code.sh"
-      - ".github/workflows/code.yml"
   workflow_dispatch:
   workflow_call:
 

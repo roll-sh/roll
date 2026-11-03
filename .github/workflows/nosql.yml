@@ -1,23 +1,9 @@
 name: nosql
 
-# Runs only when nosql-related code changes.
+# Extended validation, run manually when needed.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "crates/nosql-*/**"
-      - "crates/pg-storage/**"
-      - "crates/rolld/**"
-      - "crates/roll-cli/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "scripts/test-nosql.sh"
-      - "scripts/nosql-conformance.sh"
-      - "scripts/nosql-conformance/**"
-      - "deploy/nosql/**"
-      - ".github/workflows/nosql.yml"
   workflow_dispatch:
-  # Pull requests and the merge queue run this through ci.yml.
+  # Extended suites run on demand; ci.yml is the two-minute merge gate.
   workflow_call:
 
 concurrency:

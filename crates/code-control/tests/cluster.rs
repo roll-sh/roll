@@ -485,6 +485,10 @@ async fn a_dead_owners_repo_moves_and_keeps_every_acknowledged_landing() {
                 let (s, _) = req(&http, &url, "POST", "/v1/code/repos/acme/api/land", Some(land_body(&m, &format!("w{w}/{i}.txt")))).await;
                 if s == StatusCode::OK {
                     acked.lock().push(m);
+                } else if s == StatusCode::SERVICE_UNAVAILABLE {
+                    // During takeover, 503 promises nothing ran and asks the caller to retry.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
                 } else {
                     failed.fetch_add(1, Ordering::SeqCst);
                 }
@@ -508,7 +512,7 @@ async fn a_dead_owners_repo_moves_and_keeps_every_acknowledged_landing() {
     // The lease had to expire first: no early takeover.
     assert!(took >= Duration::from_millis(500 * u64::from(net.env.scale())), "taken after {took:?}");
     let acked = acked.lock().clone();
-    // Only requests in flight on the killed node at the moment it died may fail.
+    // Only requests in flight on the killed node may fail ambiguously; 503s were retried.
     assert!(failed.load(Ordering::SeqCst) <= 4, "{} landings failed", failed.load(Ordering::SeqCst));
     let log = net.log(survivors[0], "api").await;
     assert_exactly_once(&log, &acked);

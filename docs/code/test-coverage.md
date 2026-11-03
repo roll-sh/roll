@@ -6,9 +6,11 @@ queue transition, every review rule and blocker, and every mode, command, error 
 roll's reviewer. `pnpm test:code` runs all of them: about 430 Rust tests across the code crates and
 `roll-cli`, and about 440 vitest tests for the dashboard (node and jsdom).
 
-GitHub Actions runs this suite in `.github/workflows/code.yml`, selected by `ci.yml` for
-pull requests and merge groups that touch code or its shared dependencies. The queue suite
-runs only queue tests; the code cluster test runs here, once per CI run.
+GitHub Actions uses `.github/workflows/ci.yml` for pull requests and merge groups. Its merge
+gate runs Rust smoke tests, dashboard tests, TypeScript checks and script/workflow validation,
+with a two-minute timeout per job. It does not run the full feature map before merging.
+The full code suite remains available manually in `.github/workflows/code.yml`; the other
+service workflows are also manual. Docker matrices, conformance and stress tests run there.
 
 `crates/code-control/tests/coverage_map.rs` keeps this map honest. It fails when a route the
 routers declare, an MCP tool or an event kind has no row here naming a test, or when a test named
