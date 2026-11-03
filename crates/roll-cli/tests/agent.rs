@@ -126,6 +126,18 @@ fn wait_for(child: &mut Child, timeout: Duration) -> Option<std::process::ExitSt
     }
 }
 
+/// The environment process `pid` was started with (Linux's `/proc/<pid>/environ`) holds none of
+/// the sandbox variables and not `secret`.
+fn assert_environ_clean(pid: u32, secret: &str) {
+    let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap();
+    let vars: Vec<String> = environ.split(|b| *b == 0).map(|v| String::from_utf8_lossy(v).into_owned()).collect();
+    assert!(vars.iter().any(|v| v.starts_with("ROLL_AGENT_CONFIG=")), "that's the daemon's environment: {vars:?}");
+    for v in &vars {
+        assert!(!v.contains(secret), "{v}");
+        assert!(!["ROLL_AGENT_TOKEN=", "ROLL_AGENT_NAME="].iter().any(|k| v.starts_with(k)), "{v}");
+    }
+}
+
 /// Stderr lines of a running child, as they come.
 fn lines(child: &mut Child) -> std::sync::mpsc::Receiver<String> {
     let stderr = child.stderr.take().unwrap();
@@ -273,6 +285,9 @@ async fn up_takes_a_sandbox_token_from_the_environment() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(!e.login.exists(), "the token isn't written anywhere");
+    // Not in the daemon's own environment either (`/proc/<pid>/environ` keeps what a process
+    // started with, and the user's other processes can read it).
+    assert_environ_clean(up.id(), &token);
 
     // A terminal on the machine doesn't see the token.
     let open = json!({ "id": "t1", "command": { "type": "terminal.open", "command": "echo \"token=[$ROLL_AGENT_TOKEN] machine=[$ROLL_AGENT_MACHINE]\"; sleep 5", "cols": 80, "rows": 24 } });
@@ -297,6 +312,28 @@ async fn up_takes_a_sandbox_token_from_the_environment() {
     unsafe { libc::kill(up.id() as i32, libc::SIGINT) };
     let status = tokio::task::spawn_blocking(move || wait_for(&mut up, Duration::from_secs(10))).await.unwrap().expect("stopped on Ctrl-C");
     assert!(status.success(), "{status:?}");
+
+    // With a login file the file wins, and the variables are dropped all the same.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while e.machines().await[0]["online"].as_bool().unwrap_or(false) {
+        assert!(Instant::now() < deadline, "still online after Ctrl-C");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let out = e.run(&["agent", "login", "--machine-token", &token]).await;
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let mut up = e.cmd(&["agent", "up"]).env("ROLL_AGENT_TOKEN", "rlm_from_the_environment").env("ROLL_AGENT_NAME", "sandbox").spawn().unwrap();
+    let log = lines(&mut up);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !e.machines().await[0]["online"].as_bool().unwrap_or(false) {
+        assert!(Instant::now() < deadline, "never online: {:?}", log.try_iter().collect::<Vec<_>>());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_environ_clean(up.id(), "rlm_from_the_environment");
+    // SAFETY: signalling the child this test started.
+    unsafe { libc::kill(up.id() as i32, libc::SIGINT) };
+    let status = tokio::task::spawn_blocking(move || wait_for(&mut up, Duration::from_secs(10))).await.unwrap().expect("stopped on Ctrl-C");
+    assert!(status.success(), "{status:?}");
+    std::fs::remove_file(&e.login).unwrap();
 
     // A token that isn't a machine token is refused up front.
     let out = {

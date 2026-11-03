@@ -5,8 +5,8 @@
 //! (0600; `ROLL_AGENT_CONFIG` names another file). `up` runs the daemon (`agent_host::Host`) with
 //! the providers from its config and keeps the link to the relay up until Ctrl-C; without a login
 //! file it takes the machine token from `ROLL_AGENT_TOKEN` (a roll-hosted sandbox, whose machine
-//! roll made). `status` shows the login and whether roll still accepts it; `logout` revokes the
-//! machine and forgets it.
+//! roll made), and either way it runs without that variable (see [`env_login`]). `status` shows
+//! the login and whether roll still accepts it; `logout` revokes the machine and forgets it.
 //!
 //! `ROLL_AGENT_FAKE=1` is for tests only (`pnpm test:agents`): `up` offers the fake providers of
 //! `agent_host::provider::fake` (`fake`, which plays a scripted turn with an approval and an edit,
@@ -122,32 +122,92 @@ pub async fn run(api: &str, json_out: bool, cmd: Agent) -> anyhow::Result<()> {
 /// machine and handed its token to the sandbox.
 const ENV_TOKEN: &str = "ROLL_AGENT_TOKEN";
 const ENV_VARS: [&str; 4] = [ENV_TOKEN, "ROLL_AGENT_MACHINE", "ROLL_AGENT_OWNER", "ROLL_AGENT_NAME"];
+/// The pipe `up` hands the login from [`ENV_VARS`] over on when it starts itself again without
+/// them (`null`: there was no token to take).
+const ENV_FD: &str = "ROLL_AGENT_LOGIN_FD";
 
-/// The login from `ROLL_AGENT_TOKEN` (and `ROLL_API_URL`), when there's no login file. The
-/// variables are taken out of the environment, so the providers and terminals `up` starts don't
-/// inherit the token.
+/// The login from `ROLL_AGENT_TOKEN` (and `ROLL_API_URL`), when there's no login file.
+///
+/// The variables must not stay anywhere the providers and terminals `up` starts can read them:
+/// not in the environment they inherit, and not in this process's own `/proc/<pid>/environ`,
+/// which removing a variable doesn't change and every process of the user can read. So when any
+/// of them is set, `up` writes what it took from them to a pipe and execs itself again without
+/// them (the same pid), and the new process reads the login from the pipe ([`ENV_FD`]). The
+/// token is never written to disk. With a login file, the file wins and the variables are only
+/// dropped.
 fn env_login(api: &str) -> anyhow::Result<Option<Saved>> {
-    if saved_path()?.exists() {
+    if let Some(fd) = std::env::var_os(ENV_FD) {
+        // SAFETY: `up` reads this first thing, before it starts any task, resolver lookup or
+        // child that could read the environment from another thread.
+        unsafe { std::env::remove_var(ENV_FD) };
+        return read_handed_over(&fd.to_string_lossy());
+    }
+    if ENV_VARS.iter().all(|k| std::env::var_os(k).is_none()) {
         return Ok(None);
     }
     let get = |k: &str| std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-    let Some(token) = get(ENV_TOKEN) else { return Ok(None) };
-    if !token.starts_with("rlm_") {
-        bail!("{ENV_TOKEN} isn't a machine token (rlm_…)");
-    }
-    let saved = Saved {
-        api: api.trim_end_matches('/').to_string(),
-        machine: get("ROLL_AGENT_MACHINE").unwrap_or_else(|| "machine".into()),
-        owner: get("ROLL_AGENT_OWNER").unwrap_or_else(|| "?".into()),
-        name: get("ROLL_AGENT_NAME").unwrap_or_else(hostname),
-        token,
+    let saved = match get(ENV_TOKEN) {
+        Some(_) if saved_path()?.exists() => None,
+        Some(token) => {
+            if !token.starts_with("rlm_") {
+                bail!("{ENV_TOKEN} isn't a machine token (rlm_…)");
+            }
+            Some(Saved {
+                api: api.trim_end_matches('/').to_string(),
+                machine: get("ROLL_AGENT_MACHINE").unwrap_or_else(|| "machine".into()),
+                owner: get("ROLL_AGENT_OWNER").unwrap_or_else(|| "?".into()),
+                name: get("ROLL_AGENT_NAME").unwrap_or_else(hostname),
+                token,
+            })
+        }
+        None => None,
     };
-    for k in ENV_VARS {
-        // SAFETY: `up` reads these first thing, before it starts any task, resolver lookup or
-        // child that could read the environment from another thread.
-        unsafe { std::env::remove_var(k) };
+    Err(exec_without_env(&serde_json::to_vec(&saved)?))
+}
+
+/// Starts this program again with the same arguments, without [`ENV_VARS`], and `handed` on a
+/// pipe named by [`ENV_FD`]. Returns only if that fails.
+fn exec_without_env(handed: &[u8]) -> anyhow::Error {
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::process::CommandExt;
+    let mut fds = [0i32; 2];
+    // SAFETY: `fds` has room for the two descriptors pipe(2) writes.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return anyhow::Error::new(std::io::Error::last_os_error()).context("handing the login over");
     }
-    Ok(Some(saved))
+    // SAFETY: pipe(2) just made both and nothing else owns them.
+    let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    // The login is far smaller than a pipe's buffer, so this doesn't block.
+    let mut w = std::fs::File::from(write);
+    if let Err(e) = w.write_all(handed) {
+        return anyhow::Error::new(e).context("handing the login over");
+    }
+    drop(w);
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => return anyhow::Error::new(e).context("finding this program to start it again"),
+    };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(std::env::args_os().skip(1)).env(ENV_FD, read.as_raw_fd().to_string());
+    for k in ENV_VARS {
+        cmd.env_remove(k);
+    }
+    // `read` has no close-on-exec flag (pipe(2) doesn't set one), so the new program inherits it.
+    anyhow::Error::new(cmd.exec()).context("starting `roll agent up` again without ROLL_AGENT_TOKEN")
+}
+
+/// The login a previous exec of `up` handed over on pipe `fd`.
+fn read_handed_over(fd: &str) -> anyhow::Result<Option<Saved>> {
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+    let fd: i32 = fd.parse().ok().filter(|fd| *fd > 2).with_context(|| format!("{ENV_FD} isn't a descriptor"))?;
+    // SAFETY: `exec_without_env` made this descriptor for us alone and passed its number here;
+    // it was open across the exec and nothing else in this process uses it.
+    let pipe = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mut text = Vec::new();
+    pipe.take(64 << 10).read_to_end(&mut text).context("reading the handed-over login")?;
+    serde_json::from_slice(&text).context("reading the handed-over login")
 }
 
 async fn login(api: &str, json_out: bool, name: Option<String>) -> anyhow::Result<()> {

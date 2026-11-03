@@ -383,8 +383,12 @@ routes: docs/code/http-api.md, "Sandboxes".
   this repository, git, node, ripgrep, and the codex and claude CLIs at pinned versions,
   `IS_SANDBOX=1`. Its command is `roll agent up`, which, with no login file, takes the machine token
   from `ROLL_AGENT_TOKEN` (and `ROLL_API_URL`, `ROLL_AGENT_MACHINE`, `ROLL_AGENT_OWNER`,
-  `ROLL_AGENT_NAME`) and removes those variables from its environment, so the providers and
-  terminals it starts don't inherit the token. (They run as the same user, so a sandbox is one
+  `ROLL_AGENT_NAME`) and starts again without those variables, so neither the providers and
+  terminals it starts nor its own `/proc/<pid>/environ` (which unsetting a variable doesn't change,
+  and which the user's other processes can read) hold the token: it writes what it took to a pipe,
+  execs itself (same pid) with `ROLL_AGENT_LOGIN_FD` naming the pipe, and reads the login back
+  from it. The token is never written to disk. With a login file the file wins, and the variables
+  are dropped the same way. (Providers and terminals run as the same user, so a sandbox is one
   trust domain: the token only opens that sandbox's own link.)
 - **Creating** makes the machine and its token at once and records the sandbox as `creating`; the
   token and the owner's env (provider keys such as `ANTHROPIC_API_KEY`) are sealed with
