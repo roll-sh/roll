@@ -5338,6 +5338,15 @@ max_prepared_transactions=5`): use a private container of the pinned image, not 
 `docker exec -i roll-engine-ref psql -U postgres -d <scratch_db> -At < file.sql 2>&1`.
 Prefix scratch objects, and drop scratch databases and roles afterwards.
 
+**Scoreboard** (agent 147): `tools/bench/scoreboard.sh quick` (agents, about half an hour at nice
+19) or `full` (releases) runs every `tools/bench` workload against PostgreSQL 18.6 on the same
+pinned cores in interleaved rounds and prints, per workload, the engine-against-PostgreSQL
+ratios of throughput, CPU per operation, peak memory and bytes written, and the footprint gate
+(idle CPU, memory with 100 idle sessions, fresh data directory; it exits non-zero when a gate
+fails). Build the engine with `--profile dist` for it. `--update` writes the table at the top
+of BENCH.md; BENCH.md's "Scoreboard" section has the method and the knobs (cores, ports,
+container name: pick your own).
+
 ## Machine rules (learned the hard way)
 
 - **Limit concurrent builds, not agents.** Six builds at once (each building, running a debug
