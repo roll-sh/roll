@@ -4542,6 +4542,14 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   head against the last verified head over rounds 6-8 (450 seeds, about 9 minutes a side in
   release). Partition the seeds the same way on both sides and compare the logs' lines, not
   case file names. Findings, routes and the guard log: tests/difftest/STATUS.md.
+  Batch 2 (engine): `pg_control_system()` and the other `pg_control_*` return one composite
+  value (proretset false), not a set, so VALUES, CASE and WHERE take them (`sql/func/admin.rs`);
+  PL/pgSQL's RETURN QUERY mismatch DETAIL names no column when the result is a single OUT column
+  (`in column ""`, as convert_tuples_by_position over a scalar's descriptor). Golden
+  `a156_control_returns`. Verified: crate tests release (431) and debug, clippy (no new
+  warnings), difftest smoke and the 450-seed pair (no line changed), a full release regress run
+  on a private reference 51,148 / 51,150 with 0 units changed, isolation 121 / 122 (1,647 /
+  1,648), pg_dump_tap 14,817 / 14,817. `tools/difftest-guard.sh <base> <head>` runs the guard.
   Those worker checks included the held monitoring commit. The parent integrates the
   round8 fixes without it and runs combined verification in `~/.cache/pg-engine-sol-resume/`.
 - **Backend-status recovery** (2026-11-01, base `f350cef4`):

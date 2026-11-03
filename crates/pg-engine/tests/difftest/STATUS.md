@@ -1260,14 +1260,17 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
     WHERE (jsonb_array_length('{"a": 2.50}') & t2.c1) <> 7`): PostgreSQL fails folding the
     outer WHERE (22023) and never plans the FULL JOIN; the engine plans it first (0A000). The
     level-by-level FULL JOIN check (round 6's item).
-  - Executor (agent 154), round 4's class (seed 8064 #85): a `RETURN QUERY` whose columns don't
-    match fails in the engine where PostgreSQL never calls the function.
+  - Fixed (agent 156, 2026-11-03; agent 154 found the merge-join, semi-join and nested-loop
+    shapes already agree): seed 8064 #85's remaining difference was the DETAIL. With one OUT
+    column (`RETURNS TABLE (x int)`, `OUT x` with `SETOF int`) the result is a scalar, and
+    PostgreSQL's expected descriptor names no column: `in column "" (position 1)`
+    (`plpgsql/mod.rs`; golden `a156_control_returns`).
   - Fixed by 2026-11-03 (gone from seeds 7024, 7087-7145, 8032, 8132 on `ed0c85fe`): binary
     arrays of a domain carried the base type's oid (`\x2 rf=1` with `SELECT $1::r7pos[]`).
-  - Catalog (agent 146; still on `ed0c85fe`): `pg_control_system()` and the other `pg_control_*` functions are
-    registered as set-returning (they aren't: proretset false), so `VALUES
-    (pg_control_system())` fails "set-returning functions are not allowed in VALUES" where
-    PostgreSQL accepts it.
+  - Fixed (agent 156, 2026-11-03): `pg_control_system()` and the other `pg_control_*`
+    functions were set-returning (proretset is false), so `VALUES (pg_control_system())` failed
+    "set-returning functions are not allowed in VALUES". Each now returns one composite value of
+    pg_proc's OUT columns (`sql/func/admin.rs`; golden `a156_control_returns`).
   - Superseded (agent 156, 2026-11-03): held commit `40f4554f`'s live-count
     `pg_stat_get_backend_subxact` is replaced by bf87a342's shared backend-status snapshot. On
     `ed0c85fe` a wire session's count after `ROLLBACK TO` stays 1 until
@@ -1321,6 +1324,10 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
     side's first row first when its startup cost is below the hash's total: an empty outer side
     builds nothing); its statement trigger then never fires (seed 5069). Agent 112's area
     (`exec/nodes.rs` HashJoinNode, whose parallel probe pipeline a first-row peek would bypass).
+    Still on `ed0c85fe`, minimised (agent 156, routed to agent 154): `CREATE TABLE t1 (id int4
+    PRIMARY KEY, g int GENERATED ALWAYS AS (1) STORED); CREATE VIEW v0 AS SELECT concat('B',
+    jsonb_array_length('{"a": 2.50}')) AS c0 FROM generate_series(1, 1) s1 (g); DELETE FROM t1 x
+    USING v0 u` fails 22023 where PostgreSQL deletes nothing.
   - EXPLAIN only (round 5): a comparison of a domain column shows `(d = 1)` where PostgreSQL
     shows the relabel to the base type, `((d)::integer = 1)`.
   - Cursor plans: EXPLAIN's other choices at the final node (a grouping hashed or sorted with

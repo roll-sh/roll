@@ -3793,7 +3793,8 @@ impl<'c, 'a> Interp<'c, 'a> {
                     }
                 };
                 // The query's columns must be the result's (`convert_tuples_by_position`),
-                // checked as it starts returning rows.
+                // checked as it starts returning rows. (One OUT column makes the result a
+                // scalar: its expected descriptor's column has no name.)
                 let want: Vec<(String, DataType, Option<u32>)> =
                     match (&self.ret, self.out_slots.is_empty()) {
                         (_, false) => self
@@ -3801,7 +3802,7 @@ impl<'c, 'a> Interp<'c, 'a> {
                             .iter()
                             .map(|&s| {
                                 (
-                                    self.vars[s].name.clone(),
+                                    if self.out_slots.len() == 1 { String::new() } else { self.vars[s].name.clone() },
                                     self.vars[s].ty.clone(),
                                     self.vars[s].domain.as_ref().map(|d| d.oid),
                                 )

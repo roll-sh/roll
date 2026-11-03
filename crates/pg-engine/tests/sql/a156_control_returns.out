@@ -1,0 +1,121 @@
+> SELECT pg_control_version, catalog_version_no FROM pg_control_system()
+pg_control_version:int4 | catalog_version_no:int4
+1800 | 202506291
+-- SELECT 1
+
+> SELECT (pg_control_system()).pg_control_version
+pg_control_version:int4
+1800
+-- SELECT 1
+
+> SELECT count(*) FROM (VALUES (pg_control_system())) v (c)
+count:int8
+1
+-- SELECT 1
+
+> SELECT (c).catalog_version_no FROM (VALUES (pg_control_system())) v (c)
+ERROR 42809: record type has not been registered
+
+> SELECT CASE WHEN true THEN (pg_control_init()).database_block_size END
+case:int4
+8192
+-- SELECT 1
+
+> SELECT database_block_size, max_identifier_length, max_index_columns, float8_pass_by_value FROM pg_control_init()
+database_block_size:int4 | max_identifier_length:int4 | max_index_columns:int4 | float8_pass_by_value:bool
+8192 | 64 | 32 | t
+-- SELECT 1
+
+> SELECT (pg_control_recovery()).min_recovery_end_timeline, (pg_control_recovery()).end_of_backup_record_required
+min_recovery_end_timeline:int4 | end_of_backup_record_required:bool
+0 | f
+-- SELECT 1
+
+> SELECT timeline_id, full_page_writes FROM pg_control_checkpoint()
+timeline_id:int4 | full_page_writes:bool
+1 | t
+-- SELECT 1
+
+> SELECT pg_typeof(pg_control_system())
+pg_typeof:regtype
+record
+-- SELECT 1
+
+> SELECT 1 WHERE (pg_control_init()).wal_block_size = 8192
+?column?:int4
+1
+-- SELECT 1
+
+> SELECT count(*) FROM pg_control_init() WHERE max_data_alignment = 8
+count:int8
+1
+-- SELECT 1
+
+> SELECT proname, proretset, prorows FROM pg_proc WHERE proname LIKE 'pg\_control\_%' ORDER BY 1
+proname:name | proretset:bool | prorows:float4
+pg_control_checkpoint | f | 0
+pg_control_init | f | 0
+pg_control_recovery | f | 0
+pg_control_system | f | 0
+-- SELECT 4
+
+> CREATE FUNCTION a156_t1() RETURNS TABLE (x int) LANGUAGE plpgsql AS $$ BEGIN RETURN QUERY SELECT 'a'::text; END $$
+-- CREATE FUNCTION
+
+> SELECT * FROM a156_t1()
+ERROR 42804: structure of query does not match function result type
+DETAIL: Returned type text does not match expected type integer in column "" (position 1).
+CONTEXT: SQL statement "SELECT 'a'::text"
+CONTEXT: PL/pgSQL function a156_t1() line 1 at RETURN QUERY
+
+> SELECT a156_t1()
+ERROR 42804: structure of query does not match function result type
+DETAIL: Returned type text does not match expected type integer in column "" (position 1).
+CONTEXT: SQL statement "SELECT 'a'::text"
+CONTEXT: PL/pgSQL function a156_t1() line 1 at RETURN QUERY
+
+> SELECT x FROM a156_t1() r (x)
+ERROR 42804: structure of query does not match function result type
+DETAIL: Returned type text does not match expected type integer in column "" (position 1).
+CONTEXT: SQL statement "SELECT 'a'::text"
+CONTEXT: PL/pgSQL function a156_t1() line 1 at RETURN QUERY
+
+> CREATE FUNCTION a156_t2() RETURNS TABLE (x int, y text) LANGUAGE plpgsql AS $$ BEGIN RETURN QUERY SELECT 1, 2; END $$
+-- CREATE FUNCTION
+
+> SELECT * FROM a156_t2()
+ERROR 42804: structure of query does not match function result type
+DETAIL: Returned type integer does not match expected type text in column "y" (position 2).
+CONTEXT: SQL statement "SELECT 1, 2"
+CONTEXT: PL/pgSQL function a156_t2() line 1 at RETURN QUERY
+
+> CREATE FUNCTION a156_t3(OUT x int) RETURNS SETOF int LANGUAGE plpgsql AS $$ BEGIN RETURN QUERY SELECT 'a'::text; END $$
+-- CREATE FUNCTION
+
+> SELECT * FROM a156_t3()
+ERROR 42804: structure of query does not match function result type
+DETAIL: Returned type text does not match expected type integer in column "" (position 1).
+CONTEXT: SQL statement "SELECT 'a'::text"
+CONTEXT: PL/pgSQL function a156_t3() line 1 at RETURN QUERY
+
+> CREATE FUNCTION a156_t4(OUT x int, OUT y text) RETURNS SETOF record LANGUAGE plpgsql AS $$ BEGIN RETURN QUERY SELECT 1, 2; END $$
+-- CREATE FUNCTION
+
+> SELECT * FROM a156_t4()
+ERROR 42804: structure of query does not match function result type
+DETAIL: Returned type integer does not match expected type text in column "y" (position 2).
+CONTEXT: SQL statement "SELECT 1, 2"
+CONTEXT: PL/pgSQL function a156_t4() line 1 at RETURN QUERY
+
+> CREATE FUNCTION a156_t5() RETURNS SETOF int LANGUAGE plpgsql AS $$ BEGIN RETURN QUERY SELECT 1, 2; END $$
+-- CREATE FUNCTION
+
+> SELECT * FROM a156_t5()
+ERROR 42804: structure of query does not match function result type
+DETAIL: Number of returned columns (2) does not match expected column count (1).
+CONTEXT: SQL statement "SELECT 1, 2"
+CONTEXT: PL/pgSQL function a156_t5() line 1 at RETURN QUERY
+
+> DROP FUNCTION a156_t1(), a156_t2(), a156_t3(), a156_t4(), a156_t5()
+-- DROP FUNCTION
+
