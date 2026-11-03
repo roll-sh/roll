@@ -1081,8 +1081,6 @@ fn decode_array(mut b: &[u8], elem: &DataType, ctx: &FormatCtx) -> Result<Value>
         Ok(b.get_i32())
     };
     let ndim = int(&mut b)?;
-    let flags = int(&mut b)?;
-    let _elem_oid = int(&mut b)?;
     if ndim < 0 {
         bail!(
             INVALID_BINARY_REPRESENTATION,
@@ -1095,9 +1093,11 @@ fn decode_array(mut b: &[u8], elem: &DataType, ctx: &FormatCtx) -> Result<Value>
             "number of array dimensions ({ndim}) exceeds the maximum allowed (6)"
         );
     }
+    let flags = int(&mut b)?;
     if flags != 0 && flags != 1 {
         bail!(INVALID_BINARY_REPRESENTATION, "invalid array flags");
     }
+    let _elem_oid = int(&mut b)?;
     let mut dims = Vec::new();
     for _ in 0..ndim {
         if b.len() < 8 {
