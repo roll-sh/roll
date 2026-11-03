@@ -4326,6 +4326,16 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   isolation 32/32 permutations match. These subsets do not update generated regression counts.
   `pnpm test:pg --unit` passes; Docker e2e remains unrun because its random-port harness has
   no override for the assigned range. Logs and exact commands: `~/.cache/a147-resume/`.
+  Round 25, agent 156 (difftest round 9 and the optimisers' guard): a grammar for seeds from
+  9000 on (`difftest/round9.rs`, on round 8's shared engine) where the optimisers work:
+  prepared statements across the custom-to-generic switch (plan counts, EXPLAIN EXECUTE,
+  parameters a custom plan folds), batch execution's edges (overflow, division-by-zero order,
+  numeric scale, collations, WITH TIES), COPY past 1,000-row buffers into keyed, partitioned and
+  triggered tables with readers in session 2, index builds of every access method, range
+  reads, and fully sampled ANALYZE statistics with row estimates (`r9est`). The guard runs
+  head against the last verified head over rounds 6-8 (450 seeds, about 9 minutes a side in
+  release). Partition the seeds the same way on both sides and compare the logs' lines, not
+  case file names. Findings, routes and the guard log: tests/difftest/STATUS.md.
   Those worker checks included the held monitoring commit. The parent integrates the
   round8 fixes without it and runs combined verification in `~/.cache/pg-engine-sol-resume/`.
 - **Backend-status recovery** (2026-11-01, base `f350cef4`):
@@ -5438,6 +5448,14 @@ container name: pick your own).
 - `/tmp` is tmpfs (RAM): keep large scratch data in `~/.cache/<agent>/`. Create your TMPDIR
   before the first build: pg-icu's build fails (by design, since round 19) when it is missing
   and ICU isn't cached yet.
+- **Compare the engine with PostgreSQL from containers on both sides.** A PostgreSQL reference
+  in docker runs in system.slice with its own CPU weight; an engine started on the host runs in
+  the user slice that every agent's builds share, so on a loaded machine it gets far less CPU
+  and its throughput and latency ratios understate it (CPU per operation less so, not wholly).
+  Run the engine as `tools/bench/run.sh` does with `ENGINE_DOCKER=1` (the dist binary
+  bind-mounted into a pinned glibc image, the same cpuset, `--cpu-shares`, network and slice
+  as PostgreSQL's container) and read both servers' CPU, bytes written and memory from their
+  cgroups; `tools/bench/scoreboard.sh` does both by default.
 
 ## Conventions
 

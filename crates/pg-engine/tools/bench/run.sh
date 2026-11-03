@@ -26,6 +26,12 @@ PG_PORT=${PG_PORT:-55360}
 ENGINE_PORT=${ENGINE_PORT:-55361}
 PG_NAME=${PG_NAME:-a36-pg}
 PG_IMAGE=${PG_IMAGE:-postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873}
+# ENGINE_DOCKER=1 runs the engine in a container as PostgreSQL's runs (system.slice, the same
+# cpuset and CPU weight): a host process sits in the user slice, which every agent's builds
+# share, while a container's slice gets its own weight, so a host engine competes for CPU on
+# worse terms than PostgreSQL. The image only supplies glibc (the binary is bind-mounted).
+ENGINE_NAME=${ENGINE_NAME:-$PG_NAME-engine}
+ENGINE_IMAGE=${ENGINE_IMAGE:-debian@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad}
 BIN=${BENCH_BIN:-$ROOT/target/release}
 BENCH=${BENCH_CLIENT:-$BIN/examples/bench}; [ -x "$BENCH" ] || BENCH=$BIN/bench
 mkdir -p "$DATA/logs"
@@ -34,6 +40,9 @@ port() { if [ "$1" = pg ]; then echo "$PG_PORT"; else echo "$ENGINE_PORT"; fi; }
 memopt() {
   if [ "$1" = pg ]; then
     id=$(docker inspect -f '{{.Id}}' "$PG_NAME")
+    echo "--mem-cgroup /sys/fs/cgroup/system.slice/docker-$id.scope"
+  elif [ -n "${ENGINE_DOCKER:-}" ]; then
+    id=$(docker inspect -f '{{.Id}}' "$ENGINE_NAME")
     echo "--mem-cgroup /sys/fs/cgroup/system.slice/docker-$id.scope"
   else
     echo "--mem-pid $(cat "$DATA/engine.pid")"
@@ -69,14 +78,33 @@ pg-stop)
 engine-start)
   if ss -ltn | grep -q ":$ENGINE_PORT "; then echo "port $ENGINE_PORT busy" >&2; exit 1; fi
   mkdir -p "$DATA/engine"
-  taskset -c "$SERVER_CPUS" "$BIN/roll-engine" --data "$DATA/engine" --listen 127.0.0.1:$ENGINE_PORT \
-    --password pw --cache-mb "${CACHE_MB:-2048}" "$@" >>"$DATA/logs/engine.log" 2>&1 &
-  echo $! >"$DATA/engine.pid"
+  if [ -n "${ENGINE_DOCKER:-}" ]; then
+    docker rm -f "$ENGINE_NAME" >/dev/null 2>&1 || true
+    # shellcheck disable=SC2086
+    docker run -d --name "$ENGINE_NAME" --cpuset-cpus "$SERVER_CPUS" \
+      ${PG_CPU_SHARES:+--cpu-shares "$PG_CPU_SHARES"} --network host --user "$(id -u):$(id -g)" \
+      -v "$BIN:$BIN:ro" -v "$DATA/engine:$DATA/engine" -v /usr/share/zoneinfo:/usr/share/zoneinfo:ro \
+      -e TMPDIR="$DATA/engine" "$ENGINE_IMAGE" "$BIN/roll-engine" --data "$DATA/engine" \
+      --listen 127.0.0.1:$ENGINE_PORT --password pw --cache-mb "${CACHE_MB:-2048}" "$@" >/dev/null
+    # (The container's process, as the host sees it: /proc probes work as for a host engine.)
+    docker inspect -f '{{.State.Pid}}' "$ENGINE_NAME" >"$DATA/engine.pid"
+  else
+    taskset -c "$SERVER_CPUS" "$BIN/roll-engine" --data "$DATA/engine" --listen 127.0.0.1:$ENGINE_PORT \
+      --password pw --cache-mb "${CACHE_MB:-2048}" "$@" >>"$DATA/logs/engine.log" 2>&1 &
+    echo $! >"$DATA/engine.pid"
+  fi
   i=0; until ss -ltn | grep -q ":$ENGINE_PORT "; do sleep 0.2; i=$((i+1)); [ $i -lt 300 ]; done
   echo "engine pid $(cat "$DATA/engine.pid")"
   ;;
 engine-stop)
-  if [ -f "$DATA/engine.pid" ]; then
+  if [ -n "${ENGINE_DOCKER:-}" ]; then
+    if docker inspect "$ENGINE_NAME" >/dev/null 2>&1; then
+      docker logs "$ENGINE_NAME" >>"$DATA/logs/engine.log" 2>&1 || true
+      docker stop -t 60 "$ENGINE_NAME" >/dev/null 2>&1 || true
+      docker rm -f "$ENGINE_NAME" >/dev/null 2>&1 || true
+    fi
+    rm -f "$DATA/engine.pid"
+  elif [ -f "$DATA/engine.pid" ]; then
     kill "$(cat "$DATA/engine.pid")" 2>/dev/null || true
     while kill -0 "$(cat "$DATA/engine.pid")" 2>/dev/null; do sleep 0.2; done
     rm -f "$DATA/engine.pid"

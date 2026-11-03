@@ -26,7 +26,8 @@
 # Knobs (environment): SB_DATA (results and data, default ~/.cache/scoreboard), SERVER_CPUS /
 # CLIENT_CPUS (default 20-23 / 8-11: pick cores no other benchmark pins), PG_PORT /
 # ENGINE_PORT (default 55370 / 55371), PG_NAME (sb-pg), ROUNDS, IDLE_SECS, SB_ONLY (a comma
-# list of workloads: pgbench,oltp,analytic,tpch,bulk,ddl,connect). Everything it starts runs at
+# list of workloads: pgbench,oltp,analytic,tpch,bulk,ddl,connect), SB_COMMIT (the engine's commit
+# in the table, default the checkout's HEAD). Everything it starts runs at
 # nice 19 (PostgreSQL with --cpu-shares 2, about the same weight) and on the host network.
 set -uo pipefail
 if [ -z "${BENCH_SG:-}" ] && ! docker info >/dev/null 2>&1; then
@@ -46,6 +47,9 @@ export BENCH_DATA=${SB_DATA:-$HOME/.cache/scoreboard}
 export SERVER_CPUS=${SERVER_CPUS:-20-23} CLIENT_CPUS=${CLIENT_CPUS:-8-11}
 export PG_PORT=${PG_PORT:-55370} ENGINE_PORT=${ENGINE_PORT:-55371} PG_NAME=${PG_NAME:-sb-pg}
 export PG_NETWORK=host PG_CPU_SHARES=2
+# The engine runs in a container of its own, as PostgreSQL does (run.sh's ENGINE_DOCKER): the
+# same slice, cpuset and CPU weight. ENGINE_DOCKER= (empty) runs it on the host as before.
+export ENGINE_DOCKER=${ENGINE_DOCKER-1} ENGINE_NAME=${ENGINE_NAME:-$PG_NAME-engine}
 RUN=$HERE/run.sh
 OUT=$BENCH_DATA/score-$MODE.tsv
 LOG=$BENCH_DATA/logs/scoreboard-$MODE.log
@@ -64,20 +68,23 @@ for p in "$PG_PORT" "$ENGINE_PORT"; do
 done
 
 # ---- probes: CPU seconds, bytes written, memory bytes of the server `t` (pg | engine)
-PG_CG=
-cg() { echo "/sys/fs/cgroup/system.slice/docker-$(docker inspect -f '{{.Id}}' "$PG_NAME").scope"; }
+PG_CG=; EN_CG=
+cg() { echo "/sys/fs/cgroup/system.slice/docker-$(docker inspect -f '{{.Id}}' "$1").scope"; }
 epid() { cat "$BENCH_DATA/engine.pid"; }
+# (A container's probes are its cgroup's, whichever server it holds: CPU of every process in
+# it, bytes written, anon + shmem memory.)
+cgof() { if [ "$1" = pg ]; then echo "$PG_CG"; else echo "$EN_CG"; fi; }
 cpu() {
-  if [ "$1" = pg ]; then awk '/^usage_usec/ {printf "%.3f", $2 / 1e6}' "$PG_CG/cpu.stat"
+  if [ "$1" = pg ] || [ -n "$ENGINE_DOCKER" ]; then awk '/^usage_usec/ {printf "%.3f", $2 / 1e6}' "$(cgof "$1")/cpu.stat"
   else awk -v hz="$(getconf CLK_TCK)" '{sub(/.*\) /, ""); printf "%.3f", ($12 + $13) / hz}' "/proc/$(epid)/stat"; fi
 }
 wbytes() {
-  if [ "$1" = pg ]; then
-    awk '{for (i = 2; i <= NF; i++) if ($i ~ /^wbytes=/) {sub(/wbytes=/, "", $i); s += $i}} END {print s + 0}' "$PG_CG/io.stat"
+  if [ "$1" = pg ] || [ -n "$ENGINE_DOCKER" ]; then
+    awk '{for (i = 2; i <= NF; i++) if ($i ~ /^wbytes=/) {sub(/wbytes=/, "", $i); s += $i}} END {print s + 0}' "$(cgof "$1")/io.stat"
   else awk '/^write_bytes/ {print $2}' "/proc/$(epid)/io"; fi
 }
 mem() {
-  if [ "$1" = pg ]; then awk '$1 == "anon" || $1 == "shmem" {s += $2} END {print s + 0}' "$PG_CG/memory.stat"
+  if [ "$1" = pg ] || [ -n "$ENGINE_DOCKER" ]; then awk '$1 == "anon" || $1 == "shmem" {s += $2} END {print s + 0}' "$(cgof "$1")/memory.stat"
   else awk '/^VmRSS/ {print $2 * 1024}' "/proc/$(epid)/status"; fi
 }
 sampler() { # sampler <t> <file>: the peak of mem() until <file>.stop exists
@@ -112,8 +119,11 @@ phase() {
 }
 
 start() { # a fresh server
-  if [ "$1" = pg ]; then "$RUN" pg-stop; "$RUN" pg-start >>"$LOG" 2>&1; PG_CG=$(cg)
-  else "$RUN" engine-stop; rm -rf "$BENCH_DATA/engine"; "$RUN" engine-start >>"$LOG" 2>&1; fi
+  if [ "$1" = pg ]; then "$RUN" pg-stop; "$RUN" pg-start >>"$LOG" 2>&1; PG_CG=$(cg "$PG_NAME")
+  else
+    "$RUN" engine-stop; rm -rf "$BENCH_DATA/engine"; "$RUN" engine-start >>"$LOG" 2>&1
+    if [ -n "$ENGINE_DOCKER" ]; then EN_CG=$(cg "$ENGINE_NAME"); fi
+  fi
 }
 stop() { if [ "$1" = pg ]; then "$RUN" pg-stop; else "$RUN" engine-stop; fi; }
 trap 'stop pg; stop engine' EXIT
@@ -146,12 +156,13 @@ start pg; start engine
 for t in pg engine; do "$RUN" bench "$t" --label sb createdb --db bench >>"$LOG" 2>&1; done
 if has tpch; then for t in pg engine; do "$RUN" bench "$t" --label sb createdb --db tpch >>"$LOG" 2>&1; done; fi
 if [ "$MODE" = quick ]; then
-  PGB_SCALES="1"; PGB_CLIENTS="1 8"; OLTP_ROWS=100000; OLTP_SECS=5; OLTP_CLIENTS="8"
-  OLTP_CASES="point_select range_scan_100 insert update_indexed"; AN_ROWS="200000"; AN_REPS=1
+  PGB_SCALES="1"; PGB_CLIENTS="1 8 32"; OLTP_ROWS=100000; OLTP_SECS=5; OLTP_CLIENTS="8"
+  OLTP_CASES="point_select range_scan_100 insert update_indexed"; OLTP_C32="update_indexed"; AN_ROWS="200000"; AN_REPS=1
   SF=0.05; TPCH_REPS=1; BULK_ROWS="100000"; BULK_REPS=1; DDL="--tables 100 --reps 3"
 else
   PGB_SCALES="1 10"; PGB_CLIENTS="1 8 32"; OLTP_ROWS=1000000; OLTP_SECS=8; OLTP_CLIENTS="1 8"
   OLTP_CASES="point_select point_select_simple range_scan_100 secondary_lookup select_1 insert update_indexed upsert short_txn"
+  OLTP_C32="insert update_indexed short_txn"
   AN_ROWS="200000 2000000"; AN_REPS=3; SF=1; TPCH_REPS=3; BULK_ROWS="100000 1000000"; BULK_REPS=2
   DDL="--tables 500 --reps 20"
 fi
@@ -180,6 +191,10 @@ for r in $(seq 1 "$ROUNDS"); do
       for c in $OLTP_CLIENTS; do
         both "$r" "oltp $case c$c" time "$RUN" bench @T@ --label sb oltp --rows "$OLTP_ROWS" --secs "$OLTP_SECS" --clients "$c" --only "$case"
       done
+    done
+    # Write-heavy at 32 clients (pgbench's TPC-B-like at 32 above contends on scale 1's single branch row).
+    for case in $OLTP_C32; do
+      both "$r" "oltp $case c32" time "$RUN" bench @T@ --label sb oltp --rows "$OLTP_ROWS" --secs "$OLTP_SECS" --clients 32 --only "$case"
     done
   fi
   if has analytic; then

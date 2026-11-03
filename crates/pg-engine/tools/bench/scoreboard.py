@@ -3,8 +3,9 @@
 
     scoreboard.py <score.tsv> <mode> <rounds> <idle secs> [--update]
 
-Per workload (the median of the rounds on each side), four ratios, engine against PostgreSQL,
-each written so that above 1x means the engine is ahead:
+Per workload, four ratios, engine against PostgreSQL, each the median of the rounds' own ratios
+(the sides run back to back within a round) and written so that above 1x means the engine is
+ahead:
   - throughput: engine tps / PostgreSQL tps (fixed-time phases), else PostgreSQL's wall time /
     the engine's (fixed work);
   - CPU per operation: PostgreSQL's server CPU per operation / the engine's (fixed work: per
@@ -28,7 +29,11 @@ import sys
 # may drift above it before the gate fails (noise: absolute slack plus a share).
 GATE_BASELINE = {
     'idle_cpu_s_5min': (0.01, 0.05, 0.25),
-    'idle_100_sessions_mb': (63.0, 2.0, 0.10),
+    # Re-recorded from 63 (the host engine's RSS) when the engine moved into a container of its
+    # own (2026-11-03, agent 156): its cgroup's anon + shmem, as PostgreSQL's is measured. RSS
+    # counted the mapped binary's pages; the cgroup's anon doesn't, so the same engine reads
+    # about half and the old baseline would no longer guard anything.
+    'idle_100_sessions_mb': (30.0, 2.0, 0.10),
     # Re-recorded from 2.0 the scoreboard's way: the running server with template0, template1
     # and postgres open, a preallocated 1 MB WAL file each (the 2.0 was a du with fewer open).
     'fresh_data_mb': (3.0, 0.5, 0.10),
@@ -54,6 +59,7 @@ def load(path):
         if f[0] == 'SCORE' and len(f) >= 5:
             _, rnd, t, w = f[:4]
             kv = dict(x.split('=', 1) for x in f[4:] if '=' in x)
+            kv['round'] = rnd
             if w not in order:
                 order.append(w)
             score.setdefault((w, t), []).append(kv)
@@ -74,11 +80,33 @@ def ratio(a, b):
     return a / b
 
 
-def cell(r):
+def cell(r, split=False):
     if r is None:
         return 'n/a'
-    s = f'{r:.2f}x'
+    s = f'{r:.2f}x' + ('~' if split else '')
     return s if r >= 1 else f'**{s}**'
+
+
+def per_round(pg, en, ratio_of):
+    """The ratio within each round: the two sides ran back to back, so load that drifts over
+    the run (other agents' builds take the same cores from servers at nice 19) cancels."""
+    rs = []
+    for rnd in sorted({x['round'] for x in pg} & {x['round'] for x in en}):
+        a = [x for x in pg if x['round'] == rnd]
+        b = [x for x in en if x['round'] == rnd]
+        r = ratio_of(a, b)
+        if r is not None:
+            rs.append(r)
+    return rs
+
+
+def paired(pg, en, ratio_of):
+    """A cell: the median of the rounds' ratios (else the ratio of the medians), and whether the
+    rounds disagree on which side is ahead (a cell within the noise)."""
+    rs = per_round(pg, en, ratio_of)
+    if not rs:
+        return ratio_of(pg, en), False
+    return statistics.median(rs), len(rs) > 1 and min(rs) < 1 <= max(rs)
 
 
 def fmt(v, unit=''):
@@ -94,16 +122,17 @@ def table(score, gate, order, mode, rounds, idle):
     for w in order:
         pg, en = score.get((w, 'pg'), []), score.get((w, 'engine'), [])
         kind = (pg or en)[0].get('kind', 'work')
+        cpu_op = lambda rs: (med(rs, 'cpu_s') / med(rs, 'ops')) if med(rs, 'cpu_s') and med(rs, 'ops') else None
         if kind == 'time':
-            tp = ratio(med(en, 'tps'), med(pg, 'tps'))
+            tp_of = lambda p, e: ratio(med(e, 'tps'), med(p, 'tps'))
+            cp_of = lambda p, e: ratio(cpu_op(p), cpu_op(e))
             shown = f"{fmt(med(en, 'tps'))} / {fmt(med(pg, 'tps'))} tps"
-            cpu_op = lambda rs: (med(rs, 'cpu_s') / med(rs, 'ops')) if med(rs, 'cpu_s') and med(rs, 'ops') else None
-            cp = ratio(cpu_op(pg), cpu_op(en))
         else:
-            tp = ratio(med(pg, 'secs'), med(en, 'secs'))
+            tp_of = lambda p, e: ratio(med(p, 'secs'), med(e, 'secs'))
+            cp_of = lambda p, e: ratio(med(p, 'cpu_s'), med(e, 'cpu_s'))
             shown = f"{fmt(med(en, 'secs'))} / {fmt(med(pg, 'secs'))} s"
-            cp = ratio(med(pg, 'cpu_s'), med(en, 'cpu_s'))
-        mem = ratio(med(pg, 'peak_mb'), med(en, 'peak_mb'))
+        mem_of = lambda p, e: ratio(med(p, 'peak_mb'), med(e, 'peak_mb'))
+        (tp, tps_), (cp, cps_), (mem, mems_) = (paired(pg, en, f) for f in (tp_of, cp_of, mem_of))
         wr_pg, wr_en = med(pg, 'write_mb'), med(en, 'write_mb')
         # (Under 1 MB written on both sides: nothing to compare.)
         wr = None if (wr_pg or 0) < 1 and (wr_en or 0) < 1 else ratio(max(wr_pg or 0, 0.1), max(wr_en or 0, 0.1))
@@ -113,17 +142,19 @@ def table(score, gate, order, mode, rounds, idle):
                 wins += r >= 1
         bad = sum(1 for x in pg + en if x.get('ok') != '1')
         note = f' ({bad} failed runs)' if bad else ''
-        rows.append(f'| {w}{note} | {shown} | {cell(tp)} | {cell(cp)} | {cell(mem)} | {cell(wr)} |')
+        rows.append(f'| {w}{note} | {shown} | {cell(tp, tps_)} | {cell(cp, cps_)} | {cell(mem, mems_)} | {cell(wr)} |')
+    commit = os.environ.get('SB_COMMIT')
     try:
-        commit = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], capture_output=True, text=True,
+        commit = commit or subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], capture_output=True, text=True,
                                 cwd=os.path.dirname(os.path.abspath(__file__))).stdout.strip()
     except OSError:
         commit = '?'
     out = [
-        f'Scoreboard, {mode} mode ({rounds} interleaved rounds, medians), engine at `{commit}`, '
+        f'Scoreboard, {mode} mode ({rounds} interleaved rounds, the median of the rounds\' ratios), '
+        f'engine at `{commit}` (in a container, as PostgreSQL), '
         f'{datetime.date.today().isoformat()}: the engine ahead in **{wins} of {cells}** cells. '
         'Ratios are engine against PostgreSQL 18.6 on the same cores; above 1x the engine is ahead '
-        '(bold: behind). `tools/bench/scoreboard.sh quick|full`.',
+        '(bold: behind; ~: the rounds disagree on which is ahead). `tools/bench/scoreboard.sh quick|full`.',
         '',
         '| workload | engine / PostgreSQL | throughput | CPU per op | peak memory | bytes written |',
         '|---|---|---|---|---|---|',
@@ -142,7 +173,11 @@ def table(score, gate, order, mode, rounds, idle):
         base, slack, share = GATE_BASELINE[k]
         ok = e is not None and p is not None and e <= max(base + slack, base * (1 + share)) and e < p
         failed |= not ok
-        lead = 'n/a' if not e or not p else f'{p / e:.1f}x' if e > 0 else 'inf'
+        # (No idle CPU measured: the lead is at least PostgreSQL's over one 10 ms clock tick,
+        # scaled as the measurement is.)
+        floor = 0.01 * 300 / idle if k == 'idle_cpu_s_5min' else None
+        lead = ('n/a' if e is None or not p else f'{p / e:.1f}x' if e > 0
+                else f'>{p / floor:.1f}x' if floor else 'n/a')
         out.append(f'| {name} | {fmt(e)} | {fmt(p)} | {lead} | {base:g} | {"pass" if ok else "**FAIL**"} |')
     return '\n'.join(out), failed
 
