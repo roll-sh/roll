@@ -70,7 +70,12 @@ Machine            a daemon (hostname, os, providers and their auth state, onlin
   nodes. The canvas draws both.
 - **Runs and steering.** A message to a running thread is queued (`message.send` with
   `mode: queue`) or steers the active run (`mode: steer`): providers that can steer natively get
-  the input; others are interrupted and the run restarts with the new input appended.
+  the input; others are interrupted and the run restarts with the new input appended. The queue
+  drains only after a run completes: an interrupt (or a failure) holds it, as T3's Stop does.
+- **Handoffs.** A provider that joins a conversation it hasn't seen (a provider switch, a fork, a
+  rollback it can't do natively) gets a portable summary of the runs it missed in front of the
+  next prompt (T3's context handoff). Switching back to a provider resumes its native thread and
+  hands over only what happened since. Runs record what the user sent, never the summary.
 - **Runtime modes** (T3's): `full_access` (no approvals), `auto_edit` (edits in the workspace
   allowed, commands ask), `ask` (everything asks). **Interaction modes**: `default`, `plan`.
 - **Checkpoints.** Before the first run the daemon records the base tree; after every run it
