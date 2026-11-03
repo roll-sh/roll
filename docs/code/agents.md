@@ -148,6 +148,56 @@ provider credential. API keys and `ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL` can be 
 in the daemon config. A provider's status (installed, version, logged in) is reported in
 `hello` and refreshed on `provider.refresh`; logging in happens in a terminal on the canvas.
 
+## Delegation (roll's orchestrator MCP)
+
+Agents delegate work to subagents that are ordinary roll threads, so they show up on the canvas
+under their parent and can run on any provider the machine has. It is T3 Code's orchestrator MCP
+server (`docs/orchestration-v2/orchestrator-mcp-server.md` there), ported in
+`crates/agent-host/src/mcp/` (the server and the tools) and
+`crates/agent-host/src/orchestrator/tasks.rs` (what the tools do).
+
+- **Server.** `Host::open` starts one Streamable HTTP MCP server on the IPv4 loopback address
+  and a free port (`POST /mcp`, JSON responses, no SSE stream). Every provider session gets it
+  in `SessionConfig.mcp` as server `roll` with its thread's bearer token (`rlx_…`, memory only).
+  A token names one thread: it sees and controls only the tasks that thread delegated and their
+  descendants (anything else is `task_not_found`), and it stops working when the thread is
+  deleted.
+- **Tools.** `delegate_task`, `task_status`, `task_wait`, `task_cancel`, `task_send` (a follow-up
+  message to the subagent, `queue` or `steer`), `list_tasks` and `orchestrator_capabilities`.
+  Refusals are tool results with `isError` and `{error: {code, message}}` (T3's codes:
+  `parent_not_active`, `provider_unavailable`, `model_unavailable`,
+  `runtime_mode_escalation_denied`, `interaction_mode_escalation_denied`, `task_not_found`, plus
+  roll's `depth_exceeded` and `too_many_tasks`).
+- **A task** is a child thread with lineage `subagent` (parent = the caller, root, `from_run` =
+  the caller's running run) and a `subagent` node in that run with `child` set; the node's id is
+  the task id. The child gets only the task as its first message (no history), the caller's
+  project and checkout (or its own worktree from the caller's HEAD with `worktree: true`), and
+  the caller's provider, model and modes unless the call names others. Modes may only narrow
+  (`ask` < `auto_edit` < `full_access`, `plan` < `default`). Delegating needs a running turn.
+- **The node follows the child**: `running`, `waiting` while the child waits on an approval or
+  question, then `completed`/`failed`/`interrupted` with `result` = the child's final answer (the
+  last top-level message of its newest run, or a failed run's error). Child approvals and
+  questions are ordinary `Request`s on the child thread, answered on the canvas; they never
+  surface on the parent.
+- **Sync** (`mode: "sync"`) waits for the result, at most `timeout_ms` (10 min default, 60 max);
+  a pending request in the child ends the wait (`pending_request`), a timeout returns
+  `wait_timed_out` and leaves the task running, and the wait ends when the caller's run ends.
+  **Async** (the default) returns at once. Each child run's result reaches the parent once: as
+  the answer of a sync call, `task_wait` or `task_status`, or else as a wake (T3's completion
+  delivery). A wake starts a run on an idle parent whose prompt is
+  `Delegated task <id> (<title>) [<status>]:\n<result>`; on a busy parent it is a message queued
+  behind the active run, and results that finish meanwhile join that message (16 KB of results
+  inline, then a pointer to `task_status`). A result the parent reads first is taken out of the
+  queued wake. A parent whose queue is held (it was stopped) keeps the wake queued.
+- **Stopping.** `task_cancel` interrupts the child and everything it delegated; `run.interrupt`
+  on a thread does the same for every task it delegated (T3's Stop). Cancelled tasks report
+  `cancelled` and wake nobody; deleting a thread stops its tasks first.
+- **Limits** (`[delegation]` in the daemon's `config.toml`): `max_depth` (3; a user's thread is
+  depth 0) and `max_children` (6 unfinished tasks per thread). A provider must be installed and
+  logged in, and a model must be one it lists.
+- Tasks survive as records: the node and the child thread. Who is waiting and which results were
+  delivered is memory only; a restart interrupts every run anyway.
+
 ## Machines, login and tokens
 
 - `roll agent login` starts a device login: `POST /v1/code/agents/login` returns a `device_code`

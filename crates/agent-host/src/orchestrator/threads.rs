@@ -76,7 +76,7 @@ impl Host {
 
     /// A worktree for a thread on a new `roll/<slug>` branch at `base` (the project's HEAD when
     /// unset).
-    async fn make_worktree(&self, project: &Project, thread: &ThreadId, title: &str, base: Option<String>) -> Res<Worktree> {
+    pub(crate) async fn make_worktree(&self, project: &Project, thread: &ThreadId, title: &str, base: Option<String>) -> Res<Worktree> {
         let repo = Path::new(&project.path);
         if git::root(repo).await.is_none() {
             return Err(Fail::Invalid(format!("{} is not a git repository, so it can't have worktrees", project.path)));
@@ -272,6 +272,7 @@ impl Host {
         self.store.delete_thread_state(id)?;
         rt.gone = true;
         self.threads.lock().unwrap().remove(id);
+        self.mcp.revoke(id);
         Ok(())
     }
 

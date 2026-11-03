@@ -16,6 +16,10 @@
 //! binary = "gemini"
 //! args = ["--experimental-acp"]
 //! env = { GEMINI_API_KEY = "…" }
+//!
+//! [delegation]                           # roll's orchestrator MCP (docs/code/agents.md)
+//! max_depth = 3                          # subagents of subagents, at most this deep
+//! max_children = 6                       # unfinished delegated tasks per thread
 //! ```
 
 use crate::provider::ProviderConfig;
@@ -33,6 +37,22 @@ pub struct Config {
     pub providers: BTreeMap<String, ProviderConfig>,
     /// `[[acp]]`: ACP agents, in file order.
     pub acp: Vec<AcpAgent>,
+    pub delegation: Delegation,
+}
+
+/// `[delegation]`: limits on what agents may delegate through roll's orchestrator MCP.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Delegation {
+    /// How deep subagents may nest: a thread the user started is depth 0, its subagents 1, …
+    pub max_depth: u32,
+    /// How many unfinished delegated tasks one thread may have at once.
+    pub max_children: u32,
+}
+
+impl Default for Delegation {
+    fn default() -> Self {
+        Delegation { max_depth: 3, max_children: 6 }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +74,15 @@ struct File {
     providers: BTreeMap<String, RawProvider>,
     #[serde(default)]
     acp: Vec<RawAcp>,
+    #[serde(default)]
+    delegation: RawDelegation,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawDelegation {
+    max_depth: Option<u32>,
+    max_children: Option<u32>,
 }
 
 #[derive(Deserialize, Default)]
@@ -139,6 +168,10 @@ impl Config {
             home: PathBuf::new(),
             providers: file.providers.into_iter().map(|(k, v)| (k, v.into())).collect(),
             acp,
+            delegation: Delegation {
+                max_depth: file.delegation.max_depth.unwrap_or(Delegation::default().max_depth),
+                max_children: file.delegation.max_children.unwrap_or(Delegation::default().max_children),
+            },
         })
     }
 
@@ -206,5 +239,13 @@ mod tests {
         assert!(Config::parse("[[acp]]\nname = \"a\"\nbinary = \"x\"\n[[acp]]\nname = \"a\"\nbinary = \"y\"").is_err());
         assert!(Config::parse("colour = 1").is_err());
         assert!(Config::parse("").unwrap().providers.is_empty());
+    }
+
+    #[test]
+    fn delegation_limits_default_and_parse() {
+        assert_eq!(Config::parse("").unwrap().delegation, Delegation::default());
+        let config = Config::parse("[delegation]\nmax_depth = 1").unwrap();
+        assert_eq!(config.delegation, Delegation { max_depth: 1, max_children: Delegation::default().max_children });
+        assert!(Config::parse("[delegation]\ndepth = 1").is_err());
     }
 }

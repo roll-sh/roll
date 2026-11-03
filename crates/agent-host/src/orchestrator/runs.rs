@@ -64,6 +64,12 @@ impl Active {
         }
     }
 
+    /// The next node ordinal of the run, for a node the orchestrator adds itself.
+    pub(crate) fn take_ordinal(&mut self) -> u32 {
+        self.next_ordinal += 1;
+        self.next_ordinal - 1
+    }
+
     fn pending(&self) -> u32 {
         self.requests.values().filter(|(_, r)| r.status == RequestStatus::Pending).count() as u32
     }
@@ -114,7 +120,7 @@ fn one_line(text: &str, max: usize) -> String {
 }
 
 /// Keeps the head and tail of long tool output.
-fn cap_middle(text: &mut String) {
+pub(crate) fn cap_middle(text: &mut String) {
     if text.len() <= OUTPUT_CAP {
         return;
     }
@@ -327,7 +333,7 @@ impl Host {
             interaction_mode: t.interaction_mode,
             resume: rt.private.native.get(t.provider.as_str()).cloned(),
             env: self.config.provider(&t.provider).env,
-            mcp: Vec::new(),
+            mcp: vec![self.mcp.session_server(&t.id)],
             instructions: None,
         };
         let started = match provider.start(cfg.clone()).await {

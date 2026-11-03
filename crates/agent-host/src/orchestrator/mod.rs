@@ -18,8 +18,11 @@
 mod handoff;
 mod queries;
 mod runs;
+mod tasks;
 mod terminals;
 mod threads;
+
+pub(crate) use tasks::{Delegation, TaskError};
 
 use crate::Outbound;
 use crate::config::Config;
@@ -50,6 +53,10 @@ pub struct Host {
     /// Serializes project add/remove (path uniqueness, cascading deletes).
     projects: AsyncMutex<()>,
     terminals: std::sync::Mutex<HashMap<TerminalId, Arc<terminals::LiveTerminal>>>,
+    /// roll's orchestrator MCP server, given to every provider session.
+    pub(crate) mcp: crate::mcp::Server,
+    /// Delegated tasks in flight (`tasks.rs`).
+    tasks: tasks::Tasks,
 }
 
 /// Why a command failed; becomes `Reply::Error`.
@@ -158,6 +165,8 @@ impl Host {
         let providers: BTreeMap<_, _> = providers.into_iter().map(|p| (p.id(), p)).collect();
         let info = machine_info(&providers).await;
         let (out, _) = broadcast::channel(8192);
+        let (mcp, listener) = crate::mcp::Server::bind().await?;
+        let (tasks, task_work) = tasks::Tasks::new();
         let host = Arc::new_cyclic(|me| Host {
             me: me.clone(),
             config,
@@ -169,13 +178,22 @@ impl Host {
             inflight: std::sync::Mutex::new(HashMap::new()),
             projects: AsyncMutex::new(()),
             terminals: std::sync::Mutex::new(HashMap::new()),
+            mcp,
+            tasks,
         });
         host.recover()?;
+        host.mcp.start(Arc::downgrade(&host), listener);
+        tasks::spawn_worker(Arc::downgrade(&host), task_work);
         Ok(host)
     }
 
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// Where roll's orchestrator MCP server listens (`http://<loopback>:<port>/mcp`).
+    pub fn mcp_url(&self) -> String {
+        self.mcp.url()
     }
 
     fn recover(&self) -> anyhow::Result<()> {
@@ -239,6 +257,7 @@ impl Host {
             for s in stamped {
                 let _ = self.out.send(Outbound::Entity(Box::new(s.clone())));
             }
+            self.tasks.observe(stamped);
         })?;
         Ok(())
     }
@@ -356,12 +375,20 @@ impl Host {
             Command::ThreadFork { thread, at, worktree } => self.thread_fork(&thread, at, worktree).await,
             Command::ThreadArchive { thread } => self.thread_archive(&thread, true).await,
             Command::ThreadUnarchive { thread } => self.thread_archive(&thread, false).await,
-            Command::ThreadDelete { thread } => self.thread_delete(&thread).await.map(|()| Reply::Ok),
+            Command::ThreadDelete { thread } => {
+                self.stop_tasks(&thread).await;
+                self.thread_delete(&thread).await.map(|()| Reply::Ok)
+            }
             Command::MessageSend { thread, text, attachments, mode } => {
                 self.message_send(&thread, text, attachments, mode).await
             }
             Command::MessageUnqueue { thread, message } => self.message_unqueue(&thread, &message).await,
-            Command::RunInterrupt { thread } => self.run_interrupt(&thread).await,
+            Command::RunInterrupt { thread } => {
+                // Like T3's Stop: the thread's delegated tasks stop with it.
+                let reply = self.run_interrupt(&thread).await;
+                self.stop_tasks(&thread).await;
+                reply
+            }
             Command::RequestRespond { request, response } => self.request_respond(by, &request, response).await,
             Command::CheckpointRollback { thread, checkpoint } => self.checkpoint_rollback(&thread, &checkpoint).await,
             Command::ThreadPublish { thread, message, land: _ } => self.thread_publish(&thread, &message).await,

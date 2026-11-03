@@ -999,6 +999,16 @@ jsdom (`vitest.config.mts` projects `node` and `dom`, setup in `src/test/`).
 | closing a terminal hangs up its login shell (`SIGHUP` reaches it) and the exit doesn't bring the record back | `agent-host/tests/terminal.rs::closing_hangs_up_a_login_shell` |
 | thread terminals run in the thread's directory and are closed and removed with the thread | `agent-host/tests/terminal.rs::thread_terminals_run_in_the_thread_and_go_with_it` |
 | the scrollback ring keeps the newest 256 KiB | `agent-host/src/terminal.rs` tests |
+| orchestrator MCP server: initialize (version negotiation), ping, tools/list, unknown methods and tools, batches, notifications 202, bad JSON 400, GET 405; a session's `roll` server and bearer token; missing/unknown token 401, foreign `Origin` 403; the token dies with its thread | `agent-host/tests/mcp.rs::the_server_speaks_streamable_http_and_tokens_name_one_live_thread`, `agent-host/src/mcp/mod.rs` tests, `agent-host/src/mcp/tools.rs` tests |
+| `delegate_task` sync: the child's answer returned; child thread lineage (`subagent`, parent, root, `from_run`), checkout, inherited modes, only the task as its prompt, its own token; the `subagent` node's `child`/`result`/status; no wake for a result already returned | `agent-host/tests/mcp.rs::a_sync_task_returns_the_childs_answer_and_the_records_show_the_subagent` |
+| async tasks wake the parent: queued behind a busy parent's turn (results coalesce into one message), a new run on an idle parent; `next` hint, `list_tasks` | `agent-host/tests/mcp.rs::async_results_wake_the_parent_queued_behind_its_turn_or_at_once_when_idle` |
+| a result read with `task_status` first is taken out of the queued wake | `agent-host/tests/mcp.rs::a_result_read_first_is_taken_out_of_the_queued_wake` |
+| nested delegation within `max_depth`, refused beyond it; grandchild lineage and node; ancestors see descendants' tasks; `task_wait` | `agent-host/tests/mcp.rs::subagents_nest_within_the_depth_limit_and_are_refused_beyond_it` |
+| scoping: a task can't read, wait on, cancel or message its own task, a sibling's, or another tree's | `agent-host/tests/mcp.rs::a_task_can_not_reach_its_parent_its_siblings_or_another_tree` |
+| `task_cancel` stops the task and everything under it (three levels), nodes interrupted, status `cancelled`, nobody woken | `agent-host/tests/mcp.rs::cancelling_a_task_stops_everything_under_it_and_wakes_nobody` |
+| interrupting the parent ends its sync wait and stops all its tasks | `agent-host/tests/mcp.rs::interrupting_the_parent_ends_its_sync_wait_and_stops_its_tasks` |
+| child approvals are requests on the child (not the parent), end a sync wait with `pending_request`, the node waits; answered on the canvas the task finishes; a timed-out wait leaves the task running | `agent-host/tests/mcp.rs::child_approvals_are_requests_on_the_child_and_end_a_sync_wait` |
+| delegation limits: unknown provider or model, mode escalation, `max_children`, delegating without a running turn; narrowed modes; worktree children from the caller's HEAD; `task_send` follow-ups run in the same child and wake again | `agent-host/tests/mcp.rs::limits_providers_models_modes_worktrees_and_follow_ups`, `agent-host/src/orchestrator/tasks.rs` tests, `agent-host/src/config.rs` tests |
 
 ## Agents (providers)
 

@@ -10,6 +10,7 @@ use tokio::sync::broadcast;
 
 pub mod config;
 pub mod fs;
+pub mod mcp;
 pub mod git;
 pub mod orchestrator;
 pub mod provider;
