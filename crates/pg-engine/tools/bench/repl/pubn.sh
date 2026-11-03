@@ -59,10 +59,19 @@ while [ $r -lt "$ROUNDS" ]; do
     end=$(q $P_PUB postgres "SELECT pg_current_wal_lsn()")
     want=$(rows_digest "$P_PUB" postgres)
     if [ "$PUB" = engine ]; then pid=$(cat "$WORK/$A-epub.pid"); c0=$(cpu_pid "$pid"); m0=$(rss_pid "$pid"); peak_start "$pid" "$WORK/peak"; fi
+    # PERF=<a privileged container with perf, --pid=host, $WORK mounted>: a profile of the
+    # engine publisher's catch-up in $WORK/perf-<round>-<N>.data (PERF_SECS, default 3).
+    if [ -n "${PERF:-}" ] && [ "$PUB" = engine ]; then
+      docker exec "$PERF" perf record -F 999 --call-graph "${PERF_CALLGRAPH:-fp}" -C "$E_CPUS" -o "$WORK/perf-$r-$n.data" -- sleep "${PERF_SECS:-3}" >/dev/null 2>&1 &
+      sleep 1
+    fi
     t=$(now)
     i=0; while [ $i -lt "$n" ]; do i=$((i + 1)); q $P_SUB "d$i" "ALTER SUBSCRIPTION s$i ENABLE" >/dev/null; done
     m=0
-    until [ "$(q $P_PUB postgres "SELECT bool_and(confirmed_flush_lsn >= '$end') FROM pg_replication_slots")" = t ]; do
+    # (Watched from the subscriber, which the publisher keeps told of its WAL end: a query on
+    # the publisher every 0.1 s, a new connection each, would be counted as its cost. Its
+    # slots' confirmation follows within one feedback.)
+    until [ "$(q $P_SUB postgres "SELECT count(*) = $n AND bool_and(latest_end_lsn >= '$end') FROM pg_stat_subscription WHERE worker_type = 'apply'")" = t ]; do
       if [ "$PUB" = pg ]; then
         s=0; for w in $(walsenders); do x=$(rss_pid "$w" 2>/dev/null || echo 0); s=$((s + x)); done
         [ $s -gt $m ] && m=$s
@@ -70,6 +79,7 @@ while [ $r -lt "$ROUNDS" ]; do
       sleep 0.1
     done
     el=$(since "$t")
+    wait_confirmed_all "$P_PUB" "$end"
     i=0
     while [ "$i" -lt "$n" ]; do
       i=$((i + 1)); got=$(rows_digest "$P_SUB" "d$i")

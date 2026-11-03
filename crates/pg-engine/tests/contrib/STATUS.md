@@ -126,6 +126,12 @@ INSERT VALUES (s.*), and `-c` settings stored normalized (RESET logical_decoding
   the slots take other places in pg_replication_slots.
 - (Fixed, round 21, agent 108: **decoding_into_rel** 3, CREATE TABLE AS's rows weren't logged;
   **twophase** 2, pg_locks' order of one holder's modes and CLUSTER's ShareLock. 1,029 / 1,047.)
+- (Round 6, agent 152: **1,043 / 1,047**. Rolled-back subtransactions are streamed and then
+  aborted as PostgreSQL's reorder buffer does (stream, twophase_stream, decoding_in_xact
+  whole), TOAST chunks count in the memory accounting; the catalog-table cases (rewrite,
+  toast) match since the catalog's rounds. Left: stream 1, COPY's multi-insert queues all its
+  TOAST chunks before its tuples, so PostgreSQL can't stream until the batch's last tuple
+  (one row later than the engine); stats 3, the plan choices above.)
 
 End to end (agent 87, debug build, PostgreSQL 18.6 in a host-network container): a
 PostgreSQL subscriber (`CREATE SUBSCRIPTION ... PUBLICATION p1` against the engine) copies the

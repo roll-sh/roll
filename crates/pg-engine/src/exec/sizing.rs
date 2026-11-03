@@ -1116,6 +1116,33 @@ pub fn external_columns(t: &Table, row: &[Value], ctx: &ExecCtx) -> Option<Vec<b
     Some(st.iter().map(|s| *s == St::External).collect())
 }
 
+/// A row of `t` heap_insert TOASTs, as logical decoding holds it (ReorderBufferChangeSize):
+/// the tuple's length as stored and each out-of-line value's size (its TOAST_MAX_CHUNK_SIZE
+/// chunks are changes of their own). `pinned`: columns already out of line (an UPDATE's
+/// unchanged ones). None without a TOAST table.
+pub fn decoded_toast(
+    t: &Table,
+    types: &[DataType],
+    row: &[Value],
+    pinned: &HashSet<usize>,
+    text: &dyn Fn(&Value, &DataType) -> String,
+) -> Option<(usize, Vec<usize>)> {
+    if t.toast == 0 || row.len() > t.columns.len() {
+        return None;
+    }
+    let (len, exts, _, _) = toast_layout_full(t, types, row, pinned, text, false);
+    Some((len, exts.iter().map(|e| e.bytes).collect()))
+}
+
+/// The t_len of a TOAST table's chunk tuple of `bytes` (chunk_id, chunk_seq, chunk_data).
+pub fn toast_chunk_tuple_len(bytes: usize) -> usize {
+    // (A 23-byte header aligned, oid, int4, then the bytea: a 1-byte header when short.)
+    32 + if bytes < 127 { bytes + 1 } else { bytes + 4 }
+}
+
+/// TOAST_MAX_CHUNK_SIZE.
+pub const TOAST_CHUNK_BYTES: usize = TOAST_CHUNK;
+
 /// How a column's value of `row` is stored in `t` (pg_column_size / pg_column_compression):
 /// None when it is stored as it is, else its stored size (a compressed varlena's, or an
 /// out-of-line value's extsize) and its compression method when compressed.

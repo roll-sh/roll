@@ -76,6 +76,12 @@ while [ $r -lt "$ROUNDS" ]; do
   for s in $order; do
     p=$(port_of "$s")
     if [ "$s" = pg ]; then c0=$(cpu_ctr "$A-rsub"); else pid=$(cat "$WORK/$A-e$s.pid"); c0=$(cpu_pid "$pid"); m0=$(rss_pid "$pid"); peak_start "$pid" "$WORK/peak"; fi
+    # PERF=<a privileged container with perf, --pid=host, $WORK mounted>: a profile of the
+    # head engine's catch-up in $WORK/perf-<round>.data (PERF_SECS seconds, default 4).
+    if [ -n "${PERF:-}" ] && [ "$s" = head ]; then
+      docker exec "$PERF" perf record -F 999 --call-graph "${PERF_CALLGRAPH:-fp}" -C "$E_CPUS" -o "$WORK/perf-$r.data" -- sleep "${PERF_SECS:-4}" >/dev/null 2>&1 &
+      sleep 1
+    fi
     t=$(now)
     q "$p" postgres "ALTER SUBSCRIPTION s_$s ENABLE" >/dev/null
     if [ "$s" = pg ]; then

@@ -145,7 +145,9 @@ pub fn tuples_equal(t: &Table, local: &[Value], search: &[Value]) -> Result<bool
 
 /// The storage key of the latest row of `rules`' table matching `search` (the publisher's key
 /// or old row over the table's columns, NULL where it sends nothing), without locking it.
-fn locate(rules: &TableRules, how: Search, search: &[Value], ctx: &ExecCtx) -> Result<Option<Vec<u8>>> {
+/// The row's key, and its newest version when the search read it (the next read of it,
+/// after its lock, is then saved).
+fn locate(rules: &TableRules, how: Search, search: &[Value], ctx: &ExecCtx) -> Result<Option<(Vec<u8>, Option<bytes::Bytes>)>> {
     let t = &rules.table;
     let latest_row = |dkey: &[u8]| -> Result<Option<Row>> {
         let got = ctx.txn.borrow().get_latest(dkey)?;
@@ -164,7 +166,19 @@ fn locate(rules: &TableRules, how: Search, search: &[Value], ctx: &ExecCtx) -> R
             }
             let nondet = crate::types::collation::index_nondet(&ctx.catalog(), t, &bix.index);
             let nondet = if bix.index.id == 0 { nondet } else { Vec::new() };
-            dml::committed_conflict(t, bix, &vals, None, &nondet, ctx)
+            if bix.index.id == 0 && nondet.is_empty() {
+                // (The primary key is the data key: one read finds the row and its values.)
+                let mut k = index_prefix(t.oid, 0);
+                for v in &vals {
+                    crate::storage::keys::encode_value(&mut k, v, false);
+                }
+                let latest = ctx.txn.borrow().get_latest(&k)?;
+                return Ok(match latest {
+                    Some((_, Some(b))) => Some((k, Some(b))),
+                    _ => None,
+                });
+            }
+            Ok(dml::committed_conflict(t, bix, &vals, None, &nondet, ctx)?.map(|k| (k, None)))
         }
         Search::Index(i, lead) => {
             let bix = &rules.indexes[i];
@@ -192,7 +206,7 @@ fn locate(rules: &TableRules, how: Search, search: &[Value], ctx: &ExecCtx) -> R
                 if let Some(row) = latest_row(&dkey)?
                     && tuples_equal(t, &row, search)?
                 {
-                    return Ok(Some(dkey));
+                    return Ok(Some((dkey, None)));
                 }
             }
             Ok(None)
@@ -204,7 +218,7 @@ fn locate(rules: &TableRules, how: Search, search: &[Value], ctx: &ExecCtx) -> R
             for e in txn.scan_latest(&start, &end) {
                 let (dkey, bytes) = e?;
                 if tuples_equal(t, &decode_table_row(t, &bytes)?, search)? {
-                    return Ok(Some(dkey.to_vec()));
+                    return Ok(Some((dkey.to_vec(), Some(bytes))));
                 }
             }
             Ok(None)
@@ -219,10 +233,16 @@ pub fn find(rules: &TableRules, how: Search, search: &[Value], delete: bool, ctx
     let t = &rules.table;
     loop {
         ctx.check()?;
-        let Some(dkey) = locate(rules, how, search, ctx)? else { return Ok(None) };
+        let Some((dkey, seen)) = locate(rules, how, search, ctx)? else { return Ok(None) };
         let oper = if delete { Xltw::Delete } else { Xltw::Update };
         let (row, xmin) = match lock_row(t, &dkey, RowMark::Update, Wait::Block, oper, ctx)? {
             Locked::Skip => continue,
+            // (Unchanged since the step's snapshot, which the search's newest version can't
+            // predate: that version.)
+            Locked::Same if seen.is_some() => {
+                let b = seen.unwrap_or_default();
+                (decode_table_row(t, &b)?, super::scan::row_xmin(&b)?)
+            }
             Locked::Same => match ctx.txn.borrow().get_latest(&dkey)? {
                 Some((_, Some(b))) => (decode_table_row(t, &b)?, super::scan::row_xmin(&b)?),
                 _ => continue,

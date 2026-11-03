@@ -97,9 +97,18 @@ const RECEIVER_TIMEOUT: Duration = Duration::from_secs(60);
 /// How much copied data goes into one local COPY.
 const COPY_CHUNK: usize = 8 << 20;
 
-/// Whether a running worker serves `s` as it is now (maybe_reread_subscription's fields).
-fn same_sub(a: &Subscription, b: &Subscription) -> bool {
-    Subscription { skiplsn: 0, ..a.clone() } == Subscription { skiplsn: 0, ..b.clone() }
+/// Whether a worker started for `b` must start again to serve `a` (maybe_reread_subscription's
+/// fields; it takes the others, run_as_owner or synchronous_commit, as they change).
+fn needs_restart(a: &Subscription, b: &Subscription) -> bool {
+    a.conninfo != b.conninfo
+        || a.name != b.name
+        || a.slot_name != b.slot_name
+        || a.binary != b.binary
+        || a.stream != b.stream
+        || a.password_required != b.password_required
+        || a.origin != b.origin
+        || a.owner != b.owner
+        || a.publications != b.publications
 }
 
 impl Workers {
@@ -220,7 +229,7 @@ impl Workers {
             let ids: Vec<u32> = st.running.keys().copied().collect();
             for id in ids {
                 let r = &st.running[&id];
-                let keep = !r.thread.is_finished() && want.iter().any(|s| s.oid == id && same_sub(s, &r.sub));
+                let keep = !r.thread.is_finished() && want.iter().any(|s| s.oid == id && !needs_restart(s, &r.sub));
                 if !keep {
                     stop.extend(st.running.remove(&id));
                 }
@@ -269,7 +278,11 @@ fn worker_main(engine: Weak<Engine>, workers: Arc<Workers>, sub: Subscription, s
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&e, &workers, &sub, &stop)));
         drop(e);
         match r {
-            Ok(Ok(())) => return,
+            Ok(Ok(())) => {
+                // (A worker that ended for a changed subscription is started again at once.)
+                workers.wake();
+                return;
+            }
             Ok(Err(None)) => {}
             Ok(Err(Some(msg))) => tracing::error!(subscription = %sub.name, "{msg}"),
             Err(_) => tracing::error!(subscription = %sub.name, "logical replication apply worker panicked"),
@@ -455,6 +468,10 @@ fn open_worker<'a>(
         catchup: None,
         synced_at: None,
         errctx: None,
+        sub_seen: 0,
+        run_as_owner: sub.run_as_owner,
+        synccommit: sub.synccommit.clone(),
+        restart: false,
         lines: std::sync::OnceLock::new(),
         _backend: backend,
     };
@@ -582,7 +599,14 @@ struct Worker<'a> {
     catchup: Option<u64>,
     synced_at: Option<u64>,
     /// The CONTEXT of the message being applied (apply_error_callback).
-    errctx: Option<String>,
+    errctx: Option<parallel::ErrCtx>,
+    /// The catalog version its subscription was last compared at (`changed_sub`), and its
+    /// run_as_owner and synchronous_commit as of then.
+    sub_seen: u64,
+    run_as_owner: bool,
+    synccommit: String,
+    /// It is to stop so the launcher starts it again (`changed_sub` found a change).
+    restart: bool,
     /// The worker's server log line counters.
     lines: std::sync::OnceLock<Arc<crate::log::Lines>>,
     /// (Last: released after everything else.)
@@ -745,7 +769,7 @@ impl Worker<'_> {
             return;
         }
         let (text, detail, hint, context) = split_message(m);
-        let context = context.or_else(|| self.errctx.clone());
+        let context = context.or_else(|| self.errctx.map(|c| c.text()));
         let f = crate::log::Format::from_settings(&self.sess.state.settings.borrow());
         let kind = self.kind();
         let code = match sev {
@@ -836,6 +860,32 @@ impl Worker<'_> {
     }
 
     /// The subscription's tables and states as committed (refreshes add and remove some).
+    /// maybe_reread_subscription: whether the subscription was dropped, disabled or changed
+    /// since the worker started (logged as PostgreSQL's worker logs it). Cheap while the
+    /// catalog is as it was at the last look.
+    fn changed_sub(&mut self) -> bool {
+        let cat = self.sess.state.db.catalog();
+        if cat.version == self.sub_seen {
+            return false;
+        }
+        self.sub_seen = cat.version;
+        let why = match cat.subscriptions.get(&self.sub.oid) {
+            None => "will stop because the subscription was removed",
+            Some(s) if !s.enabled => "will stop because the subscription was disabled",
+            Some(s) if needs_restart(s, self.sub) => "will restart because of a parameter change",
+            Some(s) => {
+                self.run_as_owner = s.run_as_owner;
+                if s.synccommit != self.synccommit {
+                    self.synccommit = s.synccommit.clone();
+                    let _ = self.sess.query(&format!("SET synchronous_commit = {}", walrcv::literal(&self.synccommit)));
+                }
+                return false;
+            }
+        };
+        self.log(Severity::Log, &format!("logical replication worker for subscription \"{}\" {why}", self.sub.name));
+        true
+    }
+
     fn load_states(&mut self) {
         let cat = self.sess.state.db.catalog();
         self.states = cat
@@ -989,7 +1039,7 @@ impl Worker<'_> {
         self.use_origin(&format!("pg_{}_{relid}", self.sub.oid))?;
         self.query("BEGIN")?;
         // (The copy runs as the table's owner unless run_as_owner is set.)
-        let run_as_owner = self.sub.run_as_owner;
+        let run_as_owner = self.run_as_owner;
         let switched = match self.sess.apply_step(|ctx| apply_rows::sync_check(relid, run_as_owner, ctx)) {
             Ok(s) => s,
             Err(e) => {
@@ -1158,6 +1208,14 @@ impl Worker<'_> {
                 if self.txn.take().is_some() {
                     let _ = self.sess.query("ROLLBACK");
                 }
+                // (Stopped by the launcher for ALTER SUBSCRIPTION ... DISABLE: the line the
+                // worker logs when it notices first. DROP SUBSCRIPTION stops it as
+                // logicalrep_worker_stop does, without one.)
+                if self.pa.is_none()
+                    && self.sess.state.db.catalog().subscriptions.get(&self.sub.oid).is_some_and(|s| !s.enabled)
+                {
+                    self.changed_sub();
+                }
                 let _ = c.copy_done();
                 return Ok(false);
             }
@@ -1173,6 +1231,12 @@ impl Worker<'_> {
                     pinged = false;
                     idle = false;
                     reply = self.message(&d)?;
+                    if self.restart {
+                        // (The worker ends; the launcher starts one for the subscription as
+                        // it is now.)
+                        let _ = c.copy_done();
+                        return Ok(false);
+                    }
                 }
                 Some(None) => return Err("data stream from publisher has ended".into()),
                 None => {}
@@ -1199,6 +1263,11 @@ impl Worker<'_> {
             if sync.is_none() && self.txn.is_none() && last_check.elapsed() >= Duration::from_secs(1) {
                 last_check = Instant::now();
                 self.load_states();
+                // (Idle: LogicalRepApplyLoop's maybe_reread_subscription between batches.)
+                if self.stream_block.is_none() && self.changed_sub() {
+                    let _ = c.copy_done();
+                    return Ok(false);
+                }
                 if self.sub.twophase == 'p' && !two_phase && self.states.values().all(|(s, _)| *s == 'r') {
                     self.log(Severity::Log, &format!(
                         "logical replication apply worker for subscription \"{}\" will restart so that two_phase can be enabled",
@@ -1280,6 +1349,17 @@ impl Worker<'_> {
                 self.stat.received_lsn = self.last_received;
                 self.stat.last_send = Some(sent);
                 self.workers.set_stat(&self.stat);
+                // maybe_reread_subscription, as a remote transaction's local one starts: a
+                // changed subscription makes the worker start again before applying it.
+                if matches!(d.get(25), Some(b'B' | b'b' | b'S'))
+                    && self.txn.is_none()
+                    && self.stream_block.is_none()
+                    && self.pa.is_none()
+                    && self.changed_sub()
+                {
+                    self.restart = true;
+                    return Ok(false);
+                }
                 self.apply(&d[25..])?;
                 Ok(false)
             }
@@ -1329,11 +1409,11 @@ impl Worker<'_> {
     /// apply_error_callback's CONTEXT.
     fn apply(&mut self, m: &[u8]) -> Result<(), String> {
         let ctx = self.message_context(m);
-        let prev = std::mem::replace(&mut self.errctx, ctx.clone());
+        let prev = std::mem::replace(&mut self.errctx, ctx);
         let r = self.apply_message(m);
         self.errctx = prev;
         r.map_err(|e| match ctx {
-            Some(c) if !e.contains("\nCONTEXT:  processing remote data") => format!("{e}\nCONTEXT:  {c}"),
+            Some(c) if !e.contains("\nCONTEXT:  processing remote data") => format!("{e}\nCONTEXT:  {}", c.text()),
             _ => e,
         })
     }
@@ -1681,7 +1761,7 @@ impl Worker<'_> {
         }
         let (final_lsn, xid) = (t.final_lsn, t.xid);
         let origin = self.origin;
-        let run_as_owner = self.sub.run_as_owner;
+        let run_as_owner = self.run_as_owner;
         let parallel = self.pa.is_some().then(|| self.sub.name.clone());
         let role = self.role;
         let (states, local) = (&self.states, &mut self.local);

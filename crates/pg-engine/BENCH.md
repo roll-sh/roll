@@ -5842,6 +5842,84 @@ and an engine subscriber of a PostgreSQL publisher (streaming = on) and of an en
 publisher (streaming = parallel): md5 of every row identical on all three, no
 synchronization slot left on the publisher.
 
+## Replication, round 6 (agent 152)
+
+HANDOFF.md "Round 6 (agent 152)" has what changed. Scripts: `tools/bench/repl/` (apply.sh,
+pubn.sh, pgb.sh, e2e.sh; README.md there; `PERF=<container>` records a profile of the
+engine's cores during the catch-up, `stacks.py` attributes it). Release builds, `--cache-mb
+64`, the engine pinned to cores 24-27, PostgreSQL 18.6 (pinned image) on the host network
+with `--cpuset-cpus 20-23`, machine load 16-25 from other agents. The engine ran on the host
+(a `release` build), in user.slice with every agent's builds, PostgreSQL in its container's
+cgroup: the comparisons with PostgreSQL lean against the engine; from 847fbdba on they are
+made with both in containers (`run.sh`, `ENGINE_DOCKER=1`) and a `dist` build. Base: `3052087d`
+(origin when this batch started, with the round's first commits 2eb31f22 / 90ce701d /
+bb338b77); head: this batch.
+
+**Apply** (`apply.sh`, PostgreSQL 18.6 publisher, 60,000 pgbench-like transactions; three
+rounds, the subscribers' order rotating; every subscriber ends with the publisher's md5 of
+every row):
+
+| subscriber | time | CPU | memory | engine / PostgreSQL CPU |
+|---|---|---|---|---|
+| PostgreSQL 18.6 | 2.99-3.03 s | 2.38-2.44 s | apply worker 30 MB | |
+| engine, base | 4.54-4.78 s | 3.94-4.12 s | process +42-43 MB | 1.66 |
+| engine, head | 4.35-4.64 s | 3.84-3.89 s | process +43-49 MB | 1.59 |
+
+Where the engine's apply thread goes (frame-pointer build, `perf record -g`, base): size
+models 22% (`exec::sizing::updated` 11.6%, `inserted_with` 10.5%; `btsim::Btree::insert` alone
+9.2%: sent to agent 151, whose next pushes cache the last leaf and fold the UPDATE's second
+row lookup), commit 17% (memtable inserts 6.5%, WAL append 2.7%, lock release 1.6%), locating
+rows 14% (a primary-key row read three times: now once), the per-change statement wrapper 6%,
+value input 3% (timestamptz text), the background flush 6.6% of the process. The memory
+growth is the store's (memtable and block cache), PostgreSQL's apply worker RSS excludes
+its shared buffers.
+
+**Walsenders** (`pubn.sh`: 20,000 transactions, N PostgreSQL subscriptions enabled at once,
+timed until each has the publisher's WAL end, then until every slot confirmed it; watched
+from the subscriber now, since a query on the engine every 0.1 s, a connection each, was
+counted as the walsender's cost):
+
+| N | PostgreSQL 18.6 | engine, head | engine / PostgreSQL time, CPU, memory |
+|---|---|---|---|
+| 1 | 0.95 s, CPU 0.15 s, 16 MB | 0.80-0.99 s, CPU 0.34-0.41 s, +43-46 MB | 0.95, 2.5, 2.8 |
+| 4 | 1.51-1.84 s, CPU 0.97-0.99 s, 64 MB | 0.92-1.06 s, CPU 0.82-0.93 s, +51-53 MB | 0.6, 0.9, 0.8 |
+| 16 | 4.77-5.05 s, CPU 2.81-3.33 s, 256 MB | 1.66-1.67 s, CPU 2.74-2.77 s, +65-77 MB | 0.34, 0.9, 0.3 |
+
+(Engine CPU is the whole process; PostgreSQL's the walsenders'. Base, same runs at N = 1 / 4:
+0.31-0.56 s / 1.07-1.10 s.) One walsender's own work (profile, engine threads only):
+decoding 48% (two thirds of it the store scan of the records), the change stream's removal
+36% (`log::gc_writes` reads every confirmed record back to write a tombstone for it, once a
+second), output 8%. With `--cache-mb 8` the growth at N = 1 is +28-32 MB: about 15 MB of it is
+the block cache filled by reading the records back.
+
+**Side by side** (`e2e.sh`, all scenarios: streamed transactions with rolled-back nested
+subtransactions, an exception block and DDL in a rolled-back one, streaming = on and
+parallel; row filter with column list; publish_via_partition_root with TRUNCATE; two-phase
+with a streamed prepare; disable_on_error and SKIP; conflict statistics; run_as_owner and its
+change while running; failover slots; origin = none both ways): every check identical on
+the PostgreSQL and engine subscribers of both publishers. Base failed `run_as_owner` (the
+engine subscriber of the engine publisher applied the next transaction with the old
+setting); before the round's first commits, `via_root` (the root's TRUNCATE) and
+`twophase` (engine to engine) differed too.
+
+**test_decoding** 1,043 / 1,047 (base 1,043: the TOAST accounting fixes stream's TOAST case
+and costs its multi-insert case, HANDOFF).
+
+**pgbench check** (`pgb.sh`: scale 10, `-M prepared`, 8 clients, 20 s, `--cache-mb 2048`;
+four rounds interleaved at load 16-25 with other agents' builds; CPU per transaction of the
+engine process, VmHWM): select-only base 0.145-0.181 ms, head 0.148-0.168 ms; tpcb-like base
+0.759-0.931 ms, head 0.736-0.932 ms; VmHWM base 410-440 MB, head 420-450 MB. No change beyond
+the rounds' spread (this batch touches no OLTP path).
+
+**Verified** (this batch): crate tests debug and release (deep_input and logical_apply
+included; `run_as_owner_and_privileges` now changes run_as_owner while the worker runs),
+clippy without new warnings, test_decoding 1,043 / 1,047, the side-by-side scripts above all
+identical, isolation 121 / 122 (intra-grant-inplace, the known L2 difference) and the 17
+roll-* specs 17 / 17 on a private reference; a regress subset (subscription, publication,
+replica_identity, create_view) on a private reference. The full regress and pg_dump_tap
+runs weren't repeated for this batch: it changes the apply worker, the decoder and a
+sizing helper only the decoder calls, none of which those suites run.
+
 ## Size models, round 2 (round 22, agent 126)
 
 HANDOFF.md, "Size models, round 2", has what changed. Release builds with frame pointers, the

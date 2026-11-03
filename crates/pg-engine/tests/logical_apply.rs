@@ -298,6 +298,15 @@ fn run_as_owner_and_privileges() {
     rows(&mut x.p, "INSERT INTO t VALUES (1, 'a')");
     x.same("SELECT * FROM t ORDER BY id");
     assert_eq!(rows(&mut x.s, "SELECT u FROM who"), vec!["[Text(\"app\")]".to_string()]);
+    // A parameter change applies from the next remote transaction on
+    // (maybe_reread_subscription: the worker starts again before applying it).
+    rows(&mut x.s, "ALTER SUBSCRIPTION s SET (run_as_owner = true)");
+    rows(&mut x.p, "INSERT INTO t VALUES (2, 'b')");
+    x.same("SELECT * FROM t ORDER BY id");
+    assert_eq!(
+        rows(&mut x.s, "SELECT u FROM who ORDER BY u"),
+        vec!["[Text(\"app\")]".to_string(), "[Text(\"postgres\")]".to_string()]
+    );
     // Row-level security the owner is subject to: apply refuses the table.
     rows(&mut x.s, "ALTER TABLE r ENABLE ROW LEVEL SECURITY; ALTER TABLE r FORCE ROW LEVEL SECURITY");
     x.subscribe("sr", "pr", "copy_data = false");

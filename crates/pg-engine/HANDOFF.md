@@ -1834,6 +1834,72 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
       it matches. After rebasing onto 46f5e9cb, `deep_input`'s `viewdef 2000` fails in debug
       builds with "stack depth limit exceeded": it does at 46f5e9cb without this round's
       commits too, and passed at ff187f1f; one of the commits in between, not replication.)
+  - **Round 6 (agent 152): the test_decoding tail, subscription changes, apply and
+    walsender costs.** BENCH.md "Replication, round 6" has the numbers; scripts in
+    `tools/bench/repl/` (README.md there).
+    - **Rolled-back subtransactions stay in the change stream** (2eb31f22; `repl/log.rs`
+      `rolled_back_to` / `keep_aborted`, `txn/mod.rs` `rollback_to`): ROLLBACK TO reads the
+      records written since the savepoint (`Savepoint::log_seq`), and after the undo writes
+      them again as the aborted subtransactions' (`'A' subxid record`, each record's writer
+      from `TxnLog::subs`) with an abort record (`'a' time subxids`, DecodeAbort's order) at
+      its position. Nothing changes without a slot (no `TxnLog`).
+    - **The decoder replays ReorderBuffer's accounting** (`repl/plugin.rs` `run`, `Replay`):
+      aborted subtransactions' changes count until their abort record; when streaming and
+      over logical_decoding_work_mem (or debug_logical_replication_streaming = immediate,
+      read now) a block streams what is queued; an aborted subtransaction's change needing
+      the catalog (a relation this decoding session hasn't looked up: `looked_up`, reset per
+      SQL call as InvalidateSystemCaches does, and when a relation's description changes)
+      is a concurrent abort: the block ends, the queue goes, later changes of that
+      subtransaction are dropped; its abort record then sends "stream abort" for each
+      streamed subtransaction. Non-streamed replay leaves them out. Nothing before the
+      slot's confirmed position streams (`start_at`, SnapBuildXactNeedsSkip). A PREPARE not
+      decoded as one (filtered gid, no two-phase) streams what outgrew the limit at once and
+      its COMMIT PREPARED goes on from there (`partly_streamed`); the SQL functions stream the
+      session's own transaction in progress (`own_records`, decoding_in_xact). pgoutput's
+      streamed changes carry the aborted subtransaction's xid (`Ctx::sub_xid`) and Stream
+      Abort its abort time, so PostgreSQL's and the engine's subscribers (spool and
+      parallel apply) drop them.
+    - **TRUNCATE of a partitioned table** lists the table in the change stream
+      (RelationIsLogicallyLogged), and pgoutput publishes a partitioned table's own changes
+      only through publish_via_partition_root (pgoutput.c's rule): a TRUNCATE of the root
+      reached an engine publisher's subscribers as nothing.
+    - **TOAST in the memory accounting** (`plugin.rs` `change_size`,
+      `exec/sizing.rs` `decoded_toast`): a row heap_insert TOASTs counts as stored plus a
+      change per TOAST_MAX_CHUNK_SIZE chunk of each out-of-line value (stream.sql's TOAST
+      case streams where PostgreSQL's does). Not modelled: COPY's multi-insert, whose
+      chunks all come before its tuples (a partial change, rbtxn_has_partial_change, so
+      PostgreSQL spills instead of streaming until the batch's last tuple): stream.sql's
+      multi-insert case streams one row earlier.
+    - **COMMIT / ROLLBACK PREPARED** refuse an implicit block (a multi-statement query
+      string), PreventInTransactionBlock (`session/mod.rs`; golden `a152_commit_prepared_block`).
+    - **maybe_reread_subscription** (`repl/apply.rs` `changed_sub`, `needs_restart`): at
+      each remote transaction's start and while idle the worker compares its subscription
+      with the catalog (only when the catalog version moved): removed or disabled, it stops
+      ("will stop because the subscription was disabled"); a change of conninfo, name,
+      slot, binary, streaming, password_required, origin, owner or publications ends it
+      ("will restart because of a parameter change") and the launcher starts it again at
+      once; run_as_owner and synchronous_commit are taken as they are. Before, the
+      launcher restarted it some time later, so an engine publisher's next transaction was
+      applied with the old run_as_owner (e2e `run_as_owner`).
+    - **Apply**: the error CONTEXT of each message is kept as its parts and formatted only
+      for an error or log line (a `format!` and three allocations per message); a row found
+      by the primary key is read once (`exec/replication.rs` `locate` keeps the version it
+      read; `find` uses it when the row's lock finds it unchanged; it was read three times).
+    - **Profiles** (BENCH.md): the apply thread is 22% size models (sent to agent 151:
+      `btsim::Btree::insert` 9.2%, heap models), 10% commit (memtable inserts 6.5%, WAL
+      append 2.7%), 14% locating rows, 6% the per-change statement wrapper
+      (`Session::with_ctx`: begin_statement, ensure_txn, search path), 3% value input
+      (timestamptz text). A walsender's own work is about a third the change stream's
+      removal (`Repl::gc`: `log::gc_writes` reads every confirmed record back and writes a
+      tombstone for it, once a second), the rest decoding (mostly the store scan).
+    - Left: `gc` without reading the records back (a range deletion over xids below the
+      oldest needed one: the store's range deletions are kept in a list every read checks,
+      so one per GC would need storage's agreement), COPY multi-insert's partial changes
+      (above), the replication layer's per-change wrapper; the walsender's memory growth
+      (+43-49 MB, about 15 MB of it the block cache filled by reading the records back:
+      `--cache-mb 8` gives +28-32 MB); and the size models' share of apply (agent 151's
+      next pushes: a cached last leaf in `btsim` insert, one row lookup per UPDATE).
+    - Verified: see BENCH.md "Replication, round 6".
 - **TPC-H plans and analytic speed** (round 20, agent 64; BENCH.md "Round 20", STATUS.md):
   the engine's plans at SF1 compared with PostgreSQL 18.6's on the same data, both analyzed,
   and the causes of the differences fixed in statistics and estimates: ANALYZE samples pages
