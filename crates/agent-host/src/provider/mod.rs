@@ -17,6 +17,18 @@ pub mod acp;
 pub mod claude;
 pub mod codex;
 
+/// A provider's entry in the daemon config. Every adapter is built from one:
+/// `codex::Codex::new(cfg)`, `claude::Claude::new(cfg)`, `acp::Acp::new(name, cfg)`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProviderConfig {
+    /// The binary to run; found on `PATH` when unset.
+    pub binary: Option<PathBuf>,
+    /// Arguments before the adapter's own (ACP agents: how to start them in ACP mode).
+    pub args: Vec<String>,
+    /// Extra environment (API keys, `ANTHROPIC_BASE_URL`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`).
+    pub env: Vec<(String, String)>,
+}
+
 /// How to start (or resume) a provider session.
 #[derive(Clone, Debug)]
 pub struct SessionConfig {
