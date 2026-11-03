@@ -8,7 +8,7 @@
 //! Every call has timeouts, follows no redirects and reads at most a bounded body. The API key is
 //! sent as a bearer token and never logged, returned or put in an error.
 
-use super::{BackendError, BackendState, SandboxBackend, SandboxSpec};
+use super::{BackendError, BackendState, SandboxBackend, SandboxSpec, Tagged};
 use async_trait::async_trait;
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -193,18 +193,23 @@ impl SandboxBackend for Agent37 {
         Ok(check_id(id)?.to_string())
     }
 
-    async fn find(&self, sandbox_id: &str) -> Result<Option<String>, BackendError> {
+    /// `GET /v1/instances` has no pagination or filters: it is every instance of the workspace,
+    /// newest first, and a workspace holds at most 200 (agent37's instance limits), so one
+    /// bounded read is all of them. roll's are the ones whose `metadata.roll_sandbox` is set.
+    async fn tagged(&self) -> Result<Vec<Tagged>, BackendError> {
         let a = self.call(Method::GET, "/v1/instances", None, self.config.timeout, MAX_LIST_BODY).await?;
         if !a.status.is_success() {
             return Err(a.error());
         }
-        let found = a.body["data"].as_array().into_iter().flatten().find(|i| {
-            i["metadata"]["roll_sandbox"].as_str() == Some(sandbox_id) && !matches!(i["status"].as_str(), Some("deleting" | "deleted"))
-        });
-        match found.and_then(|i| i["id"].as_str()) {
-            Some(id) => Ok(Some(check_id(id)?.to_string())),
-            None => Ok(None),
+        let data = a.body["data"].as_array().ok_or_else(|| BackendError::Transient("agent37's instance list has no data".into()))?;
+        let mut out = Vec::new();
+        for i in data {
+            let (Some(sandbox), Some(id)) = (i["metadata"]["roll_sandbox"].as_str(), i["id"].as_str()) else { continue };
+            if !matches!(i["status"].as_str(), Some("deleting" | "deleted")) {
+                out.push(Tagged { backend_id: check_id(id)?.to_string(), sandbox_id: sandbox.to_string() });
+            }
         }
+        Ok(out)
     }
 
     async fn status(&self, backend_id: &str) -> Result<BackendState, BackendError> {

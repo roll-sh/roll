@@ -417,11 +417,26 @@ routes: docs/code/http-api.md, "Sandboxes".
     workspace template made from our image (`ROLL_AGENT37_TEMPLATE`), `auto_sleep` off, the env in
     the instance's write-only `env`, `metadata.roll_sandbox` = roll's id. The key
     (`ROLL_AGENT37_API_KEY`) is sent only to agent37 and never logged or returned. Every call has
-    timeouts, follows no redirects and reads a bounded body. Tests use a mock agent37.
+    timeouts, follows no redirects and reads a bounded body. Tests use a mock agent37. Finding
+    roll's instances reads `GET /v1/instances` once: it has no pagination or filters and returns
+    every instance of the workspace, and a workspace holds at most 200 (agent37's instance
+    limits), so one read (capped at 16 MiB) is complete.
   - **docker** (self-hosted and development): the `docker` CLI; no new privileges, every capability
-    dropped, memory (no swap), CPU and process limits, an init, a named volume for `/home/roll`, the
-    default bridge network (never the host's), no Docker socket, `runsc` (gVisor) when Docker has
-    it (`ROLL_SANDBOX_RUNTIME`). The env goes in through a 0600 env file removed after `docker run`.
+    dropped, memory (no swap), CPU and process limits, an init, a named volume for `/home/roll`, no
+    Docker socket, `runsc` (gVisor) when Docker has it (`ROLL_SANDBOX_RUNTIME`). The env goes in
+    through a 0600 env file removed after `docker run`.
+    - Network: a bridge of their own, `roll-sandboxes`, made on first use with traffic between
+      its containers off (`enable_icc=false`), so sandboxes can't reach each other; or the
+      operator's `ROLL_SANDBOX_DOCKER_NETWORK` (never `host` or another container's).
+      `host.docker.internal` only with `ROLL_SANDBOX_DOCKER_HOST_GATEWAY=1`. A bridge still routes
+      to the host's addresses and to cloud metadata (`169.254.169.254`), and only a firewall rule
+      stops that; roll never changes the host's firewall, so the operator adds it, e.g.
+      `iptables -I DOCKER-USER -s <the network's subnet> -d 169.254.169.254 -j DROP` and the same
+      for the host's own addresses (allow the roll API's port first if it runs on that host).
+    - Disk: Docker's local volume driver can't cap the home volume, so `disk_gb` isn't enforced
+      there. `ROLL_SANDBOX_DOCKER_DISK_LIMIT=1` caps each container's writable layer
+      (`--storage-opt size=<disk_gb>G`) on storage drivers that support it (overlay2 on xfs with
+      `pquota`, btrfs, zfs). agent37 enforces the size's disk itself.
 - **The image** is `deploy/agent/Dockerfile`: the non-root user `roll`, the `roll` CLI built from
   this repository, git, node, ripgrep, and the codex and claude CLIs at pinned versions,
   `IS_SANDBOX=1`. Its command is `roll agent up`, which, with no login file, takes the machine token
@@ -445,6 +460,14 @@ routes: docs/code/http-api.md, "Sandboxes".
   the sandbox and its machine (a `machine` event when it changes), and deletes. A sandbox's machine
   being removed deletes the sandbox; deleting a sandbox revokes its machine once the backend has
   deleted it. The lease isn't let go as idle while the owner has sandboxes.
+- **The sweep** (`Code::sweep_sandboxes`, every 10 minutes on the node holding the
+  `sandbox-sweep` singleton) lists what the backend holds tagged with roll's ids and deletes
+  strays, so a create whose answer was lost never leaves a paid instance running with a token in
+  it: one whose sandbox was deleted (a delete that came before the create showed up; its machine,
+  and so its token, was revoked then), one whose sandbox failed before it was made, and a second
+  one of a sandbox that has its instance. One tagged with a sandbox this server doesn't know is
+  logged and left alone: another deployment may share the account (roll never removes sandbox
+  rows, so its own are always known).
 - **Metering**: at each look, running time is added to `agent_sandbox_usage` per sandbox and UTC
   month (split at month boundaries), with the size's monthly price at creation; a month is 730
   hours. `GET …/sandboxes/usage` shows it; there's no payment processor.

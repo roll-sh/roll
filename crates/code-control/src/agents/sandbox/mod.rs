@@ -87,6 +87,8 @@ pub struct SandboxConfig {
     pub reconcile_every: Duration,
     /// A sandbox the backend hasn't created by then has failed.
     pub create_timeout: Duration,
+    /// How often what the backend holds for roll is checked for strays ([`Code::sweep_sandboxes`]).
+    pub sweep_every: Duration,
     /// The API URL sandboxes connect to (`ROLL_API_URL` inside them); default `Config::api_url`.
     pub api_url: Option<String>,
 }
@@ -105,6 +107,7 @@ impl Default for SandboxConfig {
             max_per_owner: 5,
             reconcile_every: Duration::from_secs(30),
             create_timeout: Duration::from_secs(15 * 60),
+            sweep_every: Duration::from_secs(10 * 60),
             api_url: None,
         }
     }
@@ -141,7 +144,9 @@ impl SandboxConfig {
     /// - `ROLL_SANDBOX_BACKEND`: `agent37` (the default when `ROLL_AGENT37_API_KEY` is set) or `docker`
     /// - agent37: `ROLL_AGENT37_API_KEY`, `ROLL_AGENT37_URL`, `ROLL_AGENT37_TEMPLATE`, `ROLL_AGENT37_REGION`
     /// - docker: `ROLL_SANDBOX_IMAGE`, `ROLL_SANDBOX_RUNTIME` (`auto`: `runsc` when Docker has it),
-    ///   `ROLL_SANDBOX_DOCKER_NETWORK`, `ROLL_SANDBOX_DOCKER_HOST_GATEWAY` (`1`: `host.docker.internal`)
+    ///   `ROLL_SANDBOX_DOCKER_NETWORK` (default: `roll-sandboxes`, made on first use),
+    ///   `ROLL_SANDBOX_DOCKER_HOST_GATEWAY` (`1`: `host.docker.internal`), `ROLL_SANDBOX_DOCKER_DISK_LIMIT`
+    ///   (`1`: `--storage-opt size=`)
     /// - `ROLL_SANDBOX_SIZES` (`name=cpu:memory_gb:disk_gb:monthly_cents,…`), `ROLL_SANDBOX_MAX_PER_OWNER`,
     ///   `ROLL_SANDBOX_API_URL`
     pub fn from_env() -> anyhow::Result<SandboxConfig> {
@@ -181,6 +186,7 @@ impl SandboxConfig {
                     anyhow::bail!("ROLL_SANDBOX_DOCKER_NETWORK: sandboxes never join the {n} network");
                 }
                 d.host_gateway = get("ROLL_SANDBOX_DOCKER_HOST_GATEWAY").is_some_and(|v| v == "1" || v == "true");
+                d.disk_limit = get("ROLL_SANDBOX_DOCKER_DISK_LIMIT").is_some_and(|v| v == "1" || v == "true");
                 Some(BackendConfig::Docker(d))
             }
             Some(other) => anyhow::bail!("ROLL_SANDBOX_BACKEND is agent37, docker or none, not {other}"),
@@ -237,6 +243,13 @@ pub enum BackendError {
     Permanent(String),
 }
 
+/// A sandbox a backend holds that roll made: its id there, and roll's id it's tagged with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tagged {
+    pub backend_id: String,
+    pub sandbox_id: String,
+}
+
 /// Where sandboxes run. Every call is idempotent: the reconciler repeats them.
 #[async_trait]
 pub trait SandboxBackend: Send + Sync {
@@ -246,7 +259,11 @@ pub trait SandboxBackend: Send + Sync {
     /// create whose answer was lost), its id.
     async fn create(&self, spec: &SandboxSpec) -> Result<String, BackendError>;
     /// The backend's id of roll's sandbox `sandbox_id`, if it has one.
-    async fn find(&self, sandbox_id: &str) -> Result<Option<String>, BackendError>;
+    async fn find(&self, sandbox_id: &str) -> Result<Option<String>, BackendError> {
+        Ok(self.tagged().await?.into_iter().find(|t| t.sandbox_id == sandbox_id).map(|t| t.backend_id))
+    }
+    /// Everything the backend holds that roll made (by its tag), leaving out what's being deleted.
+    async fn tagged(&self) -> Result<Vec<Tagged>, BackendError>;
     async fn status(&self, backend_id: &str) -> Result<BackendState, BackendError>;
     async fn start(&self, backend_id: &str) -> Result<(), BackendError>;
     async fn stop(&self, backend_id: &str) -> Result<(), BackendError>;
@@ -258,8 +275,10 @@ pub trait SandboxBackend: Send + Sync {
 pub struct Sandboxes {
     pub(crate) backend: Option<Arc<dyn SandboxBackend>>,
     reconcilers: Mutex<HashMap<String, Arc<Reconciler>>>,
-    /// One look at a sandbox at a time (the reconciler's, or a request's).
+    /// One look at a sandbox at a time (the reconciler's, the sweep's, or a request's).
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// The sweep runs on this node (it acts only while it holds the singleton).
+    sweeping: AtomicBool,
 }
 
 struct Reconciler {
@@ -275,7 +294,7 @@ impl Sandboxes {
             Some(BackendConfig::Agent37(c)) => Some(Arc::new(agent37::Agent37::new(c.clone())?)),
             Some(BackendConfig::Docker(c)) => Some(Arc::new(docker::Docker::new(c.clone()))),
         };
-        Ok(Sandboxes { backend, reconcilers: Mutex::default(), locks: Mutex::default() })
+        Ok(Sandboxes { backend, reconcilers: Mutex::default(), locks: Mutex::default(), sweeping: AtomicBool::new(false) })
     }
 
     /// `agent37` or `docker`; `None` when sandboxes are off.

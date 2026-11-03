@@ -358,6 +358,53 @@ async fn creates_are_retried_adopted_or_failed_and_limits_hold() {
     }
 }
 
+/// A create whose answer was lost never leaves a paid instance behind: the sweep deletes what
+/// agent37 holds for a sandbox that was deleted meanwhile (its machine already revoked), one that
+/// failed before it was made, and a second instance of a sandbox that has one. Instances roll
+/// didn't make, or tagged with a sandbox this server doesn't know, are left alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_sweep_deletes_instances_no_sandbox_stands_for() {
+    let w = world(|_| {}).await;
+    let stray = |w: &World, id: &str, sandbox: Option<&str>| {
+        let mut m = w.mock.lock();
+        let metadata = sandbox.map_or(json!({}), |s| json!({ "roll_sandbox": s }));
+        m.instances.insert(id.into(), json!({ "id": id, "status": "running", "metadata": metadata }));
+    };
+    let held = |w: &World, id: &str| w.mock.lock().instances.contains_key(id);
+
+    // Deleted before agent37 had made it (no capacity all along), then its create shows up.
+    w.mock.lock().on_create = vec![OnCreate::NoCapacity; 1000];
+    let gone = w.create(json!({ "name": "gone" })).await;
+    let (gone_id, gone_machine) = (gone["sandbox"]["id"].as_str().unwrap().to_string(), gone["machine"]["id"].as_str().unwrap().to_string());
+    assert_eq!(w.req("DELETE", &format!("/v1/code/agents/acme/sandboxes/{gone_id}"), None).await.0, StatusCode::NO_CONTENT);
+    assert!(w.machine(&gone_machine).await.is_none(), "its machine (and token) went with it");
+    stray(&w, "late000001", Some(&gone_id));
+    // Failed before it was made, then its create shows up.
+    w.mock.lock().on_create = vec![OnCreate::Broke];
+    let failed = w.create(json!({ "name": "failed" })).await["sandbox"]["id"].as_str().unwrap().to_string();
+    w.until(&failed, "a failed create", status_is("failed")).await;
+    stray(&w, "late000002", Some(&failed));
+    // Running, plus a second instance of it.
+    w.mock.lock().on_create = vec![];
+    let ok = w.create(json!({ "name": "ok" })).await["sandbox"]["id"].as_str().unwrap().to_string();
+    w.until(&ok, "running", status_is("running")).await;
+    let real = w.mock.lock().instances.iter().find(|(_, i)| i["metadata"]["roll_sandbox"] == ok.as_str()).map(|(k, _)| k.clone()).unwrap();
+    stray(&w, "twin000001", Some(&ok));
+    // Not roll's, and not this server's.
+    stray(&w, "mine000001", None);
+    stray(&w, "else000001", Some("sbx_from_another_deployment"));
+
+    assert_eq!(w.a.code.sweep_sandboxes().await, 3);
+    for id in ["late000001", "late000002", "twin000001"] {
+        assert!(!held(&w, id), "{id} outlived the sweep");
+    }
+    for id in [real.as_str(), "mine000001", "else000001"] {
+        assert!(held(&w, id), "{id} was swept");
+    }
+    assert_eq!(w.a.code.sweep_sandboxes().await, 0, "nothing more to do");
+    assert_eq!(w.sandbox(&ok).await.unwrap()["status"], "running");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sandboxes_need_a_backend_and_a_server_secret() {
     // Off: listing works, creating is a 503.
@@ -428,7 +475,14 @@ async fn the_docker_backend_runs_hardened_containers() {
         eprintln!("skipped: no Docker");
         return;
     }
-    let d = Docker::new(DockerConfig { image: "busybox:1.37".into(), runtime: Runtime::Auto, command: vec!["sleep".into(), "3600".into()], ..Default::default() });
+    let net = format!("roll-sandboxes-test{}", std::process::id());
+    let d = Docker::new(DockerConfig {
+        image: "busybox:1.37".into(),
+        runtime: Runtime::Auto,
+        command: vec!["sleep".into(), "3600".into()],
+        dedicated_network: net.clone(),
+        ..Default::default()
+    });
     let id = format!("sbx_test{}", std::process::id());
     let spec = SandboxSpec {
         id: id.clone(),
@@ -451,7 +505,12 @@ async fn the_docker_backend_runs_hardened_containers() {
     assert_eq!(inspect(&name, "{{.HostConfig.Privileged}}"), "false");
     assert_eq!(inspect(&name, "{{.HostConfig.PidsLimit}}"), "1024");
     assert_eq!(inspect(&name, "{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.NanoCpus}}"), format!("{0} {0} 2000000000", 4u64 << 30));
-    assert_ne!(inspect(&name, "{{.HostConfig.NetworkMode}}"), "host");
+    // Its own network, made on first use, where sandboxes can't reach each other.
+    assert_eq!(inspect(&name, "{{.HostConfig.NetworkMode}}"), net);
+    let icc = std::process::Command::new("docker").args(["network", "inspect", "-f", "{{index .Options \"com.docker.network.bridge.enable_icc\"}}", &net]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&icc.stdout).trim(), "false");
+    let tagged = d.tagged().await.unwrap();
+    assert!(tagged.iter().any(|t| t.backend_id == name && t.sandbox_id == id), "{tagged:?}");
     assert_eq!(inspect(&name, "{{.HostConfig.Init}}"), "true");
     let mounts = inspect(&name, "{{range .Mounts}}{{.Type}}:{{.Name}}:{{.Destination}} {{end}}");
     assert_eq!(mounts, format!("volume:{name}-home:/home/roll"));
@@ -473,6 +532,7 @@ async fn the_docker_backend_runs_hardened_containers() {
     assert!(!vol.status.success(), "the home volume is removed too");
     // Deleting again is fine.
     d.delete(&name).await.unwrap();
+    let _ = std::process::Command::new("docker").args(["network", "rm", &net]).output();
 }
 
 /// The real sandbox image (`deploy/agent/Dockerfile`), started with the env a sandbox gets and the

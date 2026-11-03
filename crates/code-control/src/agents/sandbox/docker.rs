@@ -1,13 +1,15 @@
 //! The docker backend (self-hosted and development): each sandbox is a container of the sandbox
 //! image (`deploy/agent/Dockerfile`) run through the `docker` CLI, like code-preview's checks,
 //! and hardened: no new privileges, every capability dropped, memory (no swap), CPU and process
-//! limits, an init process, a named volume for the home directory, the default bridge network
-//! (never the host's), no Docker socket, and gVisor's `runsc` runtime when Docker has it.
+//! limits, an init process, a named volume for the home directory, a network of their own where
+//! sandboxes can't reach each other (never the host's), no Docker socket, and gVisor's `runsc`
+//! runtime when Docker has it. Blocking the host and cloud metadata addresses from that network
+//! takes a firewall rule, which roll never makes itself (docs/code/agents.md, "Sandboxes").
 //!
 //! The env (the machine token, the owner's provider keys) goes in through an env file only this
 //! user can read, removed once `docker run` returns: never on a command line.
 
-use super::{BackendError, BackendState, SandboxBackend, SandboxSpec};
+use super::{BackendError, BackendState, SandboxBackend, SandboxSpec, Tagged};
 use async_trait::async_trait;
 use std::process::Stdio;
 use std::time::Duration;
@@ -15,6 +17,8 @@ use tokio::process::Command;
 
 /// The label every sandbox container carries: roll's sandbox id.
 pub const LABEL: &str = "sh.roll.agents.sandbox";
+/// The network sandboxes join unless the operator names another.
+pub const NETWORK: &str = "roll-sandboxes";
 /// The home directory of the image's user (`roll`), kept on the sandbox's volume.
 pub const HOME: &str = "/home/roll";
 
@@ -41,8 +45,15 @@ impl Runtime {
 pub struct DockerConfig {
     pub image: String,
     pub runtime: Runtime,
-    /// A Docker network to attach to (default: the default bridge).
+    /// A Docker network the operator made to attach to, instead of [`Self::dedicated_network`].
     pub network: Option<String>,
+    /// The bridge network sandboxes join otherwise: made on first use, with traffic between its
+    /// containers off (`enable_icc=false`).
+    pub dedicated_network: String,
+    /// Cap each container's writable layer at the size's disk (`--storage-opt size=`; only on
+    /// storage drivers that support it, such as overlay2 on xfs with `pquota`). The home volume
+    /// isn't capped by Docker's local volume driver either way.
+    pub disk_limit: bool,
     /// Map `host.docker.internal` to the host (a roll on the same machine, in development).
     pub host_gateway: bool,
     pub pids_limit: u32,
@@ -58,6 +69,8 @@ impl Default for DockerConfig {
             image: "roll-agent-sandbox:latest".into(),
             runtime: Runtime::Auto,
             network: None,
+            dedicated_network: NETWORK.into(),
+            disk_limit: false,
             host_gateway: false,
             pids_limit: 1024,
             cap_add: Vec::new(),
@@ -154,6 +167,27 @@ impl Docker {
         Docker { config, runtime: tokio::sync::OnceCell::new() }
     }
 
+    fn network(&self) -> &str {
+        self.config.network.as_deref().unwrap_or(&self.config.dedicated_network)
+    }
+
+    /// The dedicated network, made if it isn't there (an operator's network must exist).
+    async fn ensure_network(&self) -> Result<(), BackendError> {
+        if self.config.network.is_some() {
+            return Ok(());
+        }
+        let n = self.config.dedicated_network.as_str();
+        if docker(&["network", "inspect", "-f", "{{.Name}}", n], TIMEOUT).await.is_ok() {
+            return Ok(());
+        }
+        let label = format!("{LABEL}.network=1");
+        match docker(&["network", "create", "--driver", "bridge", "--opt", "com.docker.network.bridge.enable_icc=false", "--label", &label, n], TIMEOUT).await {
+            Ok(_) => Ok(()),
+            Err(e) if e.contains("already exists") => Ok(()),
+            Err(e) => Err(BackendError::Transient(e)),
+        }
+    }
+
     async fn runtime(&self) -> Option<String> {
         match &self.config.runtime {
             Runtime::Default => None,
@@ -182,8 +216,9 @@ impl Docker {
         if let Some(r) = self.runtime().await {
             a.extend(["--runtime".into(), r]);
         }
-        if let Some(n) = &self.config.network {
-            a.extend(["--network".into(), n.clone()]);
+        a.extend(["--network".into(), self.network().to_string()]);
+        if self.config.disk_limit {
+            a.extend(["--storage-opt".into(), format!("size={}G", spec.size.disk_gb.max(1))]);
         }
         if self.config.host_gateway {
             a.extend(["--add-host".into(), "host.docker.internal:host-gateway".into()]);
@@ -209,6 +244,10 @@ impl SandboxBackend for Docker {
         if let Some(name) = self.find(&spec.id).await? {
             return Ok(name);
         }
+        if !network_allowed(&self.config.dedicated_network) {
+            return Err(BackendError::Permanent(format!("sandboxes never join the {} network", self.config.dedicated_network)));
+        }
+        self.ensure_network().await?;
         let env = EnvFile::write(&spec.env)?;
         let args = self.run_args(spec, &env.0.to_string_lossy()).await;
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -228,6 +267,18 @@ impl SandboxBackend for Docker {
             Err(e) if missing(&e) => Ok(None),
             Err(e) => Err(BackendError::Transient(e)),
         }
+    }
+
+    async fn tagged(&self) -> Result<Vec<Tagged>, BackendError> {
+        let label = format!("label={LABEL}");
+        let format = format!("{{{{.Names}}}} {{{{.Label \"{LABEL}\"}}}}");
+        let out = docker(&["ps", "-a", "--filter", &label, "--format", &format], TIMEOUT).await.map_err(BackendError::Transient)?;
+        Ok(out
+            .lines()
+            .filter_map(|l| l.trim().split_once(' '))
+            .filter(|(name, _)| check_name(name).is_ok())
+            .map(|(name, id)| Tagged { backend_id: name.to_string(), sandbox_id: id.trim().to_string() })
+            .collect())
     }
 
     async fn status(&self, backend_id: &str) -> Result<BackendState, BackendError> {
@@ -294,12 +345,16 @@ mod tests {
             "--init",
             "-v roll-sbx-abc-home:/home/roll",
             "--env-file /tmp/x.env",
+            "--network roll-sandboxes",
         ] {
             assert!(a.contains(want), "{want}: {a}");
         }
-        for never in ["--privileged", "--network host", "docker.sock", "rlm_secret", "--cap-add"] {
+        for never in ["--privileged", "--network host", "docker.sock", "rlm_secret", "--cap-add", "--storage-opt", "host-gateway"] {
             assert!(!a.contains(never), "{never}: {a}");
         }
+        let capped = Docker::new(DockerConfig { disk_limit: true, network: Some("theirs".into()), ..Default::default() });
+        let a = capped.run_args(&spec, "/tmp/x.env").await.join(" ");
+        assert!(a.contains("--storage-opt size=8G") && a.contains("--network theirs") && !a.contains("roll-sandboxes"), "{a}");
         assert!(check_name("roll-sbx-abc").is_ok());
         for bad in ["other", "roll-sbx-a b", "roll-sbx-a;rm"] {
             assert!(check_name(bad).is_err(), "{bad}");

@@ -952,6 +952,8 @@ Every code-control test runs on SQLite, and on Postgres with `ROLL_CODE_TEST_DAT
 | 10,000 anonymous `POST /v1/code/agents/login`s blocked every login for 15 minutes | `agents.rs::logins_are_capped_per_client_and_a_full_table_never_locks_others_out` |
 | one daemon frame the relay couldn't parse closed the link (4400), and the replies of commands in flight were lost | `agents.rs::unreadable_daemon_frames_are_skipped_not_the_link` |
 | a machine could fill control.db with records without bound | `agents.rs::the_mirror_keeps_a_machine_within_its_quota`, `agent-host/tests/relay.rs::unreadable_frames_are_skipped` (the notice reaches `roll agent up`) |
+| a create whose answer was lost could leave a paid instance (with a machine token in it) that no sandbox stood for | `sandboxes.rs::the_sweep_deletes_instances_no_sandbox_stands_for` |
+| docker sandboxes shared the default bridge (they could reach each other) and `disk_gb` wasn't applied | `sandboxes.rs::the_docker_backend_runs_hardened_containers` (real Docker: the dedicated network, ICC off), `code-control/src/agents/sandbox/docker.rs::run_args_are_hardened_and_carry_no_secrets` |
 
 ## Other regressions
 

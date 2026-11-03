@@ -36,17 +36,97 @@ fn observed(s: &SandboxRow, state: BackendState) -> (SandboxStatus, Option<Strin
     }
 }
 
+/// The cluster-wide worker that sweeps the backend for strays.
+const SWEEP: &str = "sandbox-sweep";
+
 impl Code {
-    /// Resume the reconcilers of owners with sandboxes on a single node. (In a cluster an owner's
-    /// reconciler starts where its agents' lease is taken.)
+    /// Resume the reconcilers of owners with sandboxes on a single node (in a cluster an owner's
+    /// reconciler starts where its agents' lease is taken), and start the sweep for strays (on
+    /// every node; it acts only where the `sandbox-sweep` singleton is).
     pub fn start_sandboxes(&self) {
-        if self.sandboxes.backend.is_none() || self.cluster().is_some() {
+        if self.sandboxes.backend.is_none() {
+            return;
+        }
+        self.start_sweep();
+        if self.cluster().is_some() {
             return;
         }
         match store::owners_with_live(self.db.sql()) {
             Ok(owners) => owners.iter().for_each(|o| self.kick_sandboxes(o)),
             Err(e) => tracing::warn!(error = %e, "resuming sandboxes"),
         }
+    }
+
+    fn start_sweep(&self) {
+        let (Some(me), Ok(rt)) = (self.me.upgrade(), tokio::runtime::Handle::try_current()) else { return };
+        if self.sandboxes.sweeping.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let weak = Arc::downgrade(&me);
+        drop(me);
+        rt.spawn(async move {
+            loop {
+                let Some(code) = weak.upgrade() else { return };
+                let every = code.config.sandboxes.sweep_every;
+                let c = code.clone();
+                if tokio::task::spawn_blocking(move || c.singleton(SWEEP)).await.unwrap_or(false) {
+                    code.sweep_sandboxes().await;
+                }
+                drop(code);
+                tokio::time::sleep(every).await;
+            }
+        });
+    }
+
+    /// Delete what the backend holds for roll that no live sandbox stands for, so a create whose
+    /// answer was lost never leaves a paid instance running with a machine token in it: one whose
+    /// sandbox was deleted (a delete that came before the create showed up; its machine was
+    /// revoked then), one whose sandbox failed before it was made (the create was given up), and
+    /// a second one of a sandbox that has its instance. One tagged with a sandbox this server
+    /// doesn't know is left alone (another deployment may share the account) and logged. How
+    /// many it deleted.
+    pub async fn sweep_sandboxes(&self) -> usize {
+        let Some(b) = self.sandboxes.backend.clone() else { return 0 };
+        let tagged = match b.tagged().await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "sandbox sweep: listing the backend");
+                return 0;
+            }
+        };
+        let mut deleted = 0;
+        for t in tagged {
+            let lock = self.sandboxes.lock(&t.sandbox_id);
+            let _one = lock.lock().await;
+            let s = match store::sandbox(self.db.sql(), &t.sandbox_id) {
+                Ok(Some(s)) => s,
+                Ok(None) => {
+                    tracing::warn!(sandbox = %t.sandbox_id, id = %t.backend_id, "sandbox sweep: not this server's sandbox; left alone");
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(sandbox = %t.sandbox_id, error = %e, "sandbox sweep: reading a sandbox");
+                    continue;
+                }
+            };
+            let why = if s.deleted_at.is_some() {
+                "its sandbox was deleted"
+            } else if s.backend_id.as_deref().is_some_and(|id| id != t.backend_id) {
+                "its sandbox has another one"
+            } else if s.backend_id.is_none() && s.status == SandboxStatus::Failed {
+                "its sandbox failed before it was made"
+            } else {
+                continue;
+            };
+            match b.delete(&t.backend_id).await {
+                Ok(()) => {
+                    tracing::info!(sandbox = %s.id, id = %t.backend_id, why, "sandbox sweep: deleted a stray");
+                    deleted += 1;
+                }
+                Err(e) => tracing::warn!(sandbox = %s.id, id = %t.backend_id, error = %e, "sandbox sweep: deleting a stray"),
+            }
+        }
+        deleted
     }
 
     /// Have the owner's reconciler look now (starting it if it isn't running here).
