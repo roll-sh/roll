@@ -174,6 +174,7 @@ impl Ddl<'_, '_> {
         }
         // The relations, each resolved and checked before any is processed.
         let mut targets: Vec<(Arc<Table>, Vec<String>, bool)> = Vec::new();
+        let mut catalogs_named: Vec<(crate::catalog::system::SysTable, Vec<String>)> = Vec::new();
         for r in &rels {
             let Some(rv) = &r.relation else { continue };
             let t = match self.lookup(rv)? {
@@ -223,8 +224,8 @@ impl Ddl<'_, '_> {
                     self.ctx.notice(crate::session::warning(code::WARNING, msg));
                     continue;
                 }
-                // A system catalog: nothing to do here, but for its owner's (a
-                // superuser's) say.
+                // A system catalog: analyzed from the rows it shows (below), for its owner (a
+                // superuser) or pg_maintain.
                 None if crate::catalog::system::SysTable::lookup(
                     Self::rv_schema(rv),
                     &rv.relname,
@@ -244,6 +245,22 @@ impl Ddl<'_, '_> {
                             code::INSUFFICIENT_PRIVILEGE,
                             format!("permission denied to {verb} \"{}\", skipping it", rv.relname),
                         ));
+                        continue;
+                    }
+                    let st = crate::catalog::system::SysTable::lookup(Self::rv_schema(rv), &rv.relname, self.search_path())
+                        .expect("found above");
+                    let cols: Vec<String> = r.va_cols.iter().filter_map(sval).map(str::to_string).collect();
+                    for (i, c) in cols.iter().enumerate() {
+                        if !st.columns().iter().any(|(n, _)| n == c) || cols[..i].contains(c) {
+                            let what = if cols[..i].contains(c) { "appears more than once" } else { "does not exist" };
+                            return Err(Error::new(
+                                if cols[..i].contains(c) { code::DUPLICATE_COLUMN } else { code::UNDEFINED_COLUMN },
+                                format!("column \"{c}\" of relation \"{}\" {what}", st.name()),
+                            ));
+                        }
+                    }
+                    if analyze && !st.is_view() {
+                        catalogs_named.push((st, cols));
                     }
                     continue;
                 }
@@ -573,6 +590,24 @@ impl Ddl<'_, '_> {
                         },
                     );
                 }
+            }
+        }
+        // The system catalogs named, or every one in a database-wide ANALYZE the role may
+        // run on them: their statistics from the rows they show and their pg_class counts.
+        if analyze {
+            let all = catalogs.0 > 0;
+            let named = std::mem::take(&mut catalogs_named);
+            let list: Vec<(crate::catalog::system::SysTable, Vec<String>)> = if all {
+                crate::catalog::system::SysTable::all()
+                    .filter(|st| !st.is_view() && crate::catalog::system::SysTable::by_oid(st.oid()) == Some(*st))
+                    .map(|st| (st, Vec::new()))
+                    .collect()
+            } else {
+                named
+            };
+            for (st, cols) in list {
+                self.analyze_catalog(st, &cols)?;
+                analyzed.push(st.oid());
             }
         }
         // VACUUM updates pg_class in place, taking no transaction id; so does ANALYZE unless

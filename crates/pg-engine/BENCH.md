@@ -129,6 +129,114 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Planner, round 9 (2026-11-03, agent 155)
+
+HANDOFF.md, "Planner round 9", has what changed. Setup:
+- release builds on the host under `nice -n 19`: base `e73340f4` and batch 1, rebased on
+  `847fbdba`;
+- PostgreSQL 18.6 (`a155-pg`, the pinned image, `shared_buffers=1GB`, host network);
+- clients in a helper container of the pinned image;
+- the machine shared, at load 9-40;
+- not yet the container-on-both-sides method of 847fbdba (`run.sh ENGINE_DOCKER=1`, dist
+  build), so the engine/PostgreSQL ratios below are biased against the engine.
+The schema is `tools/bench/plans/apps.setup.sql`: pgbench scale 10, 200 tables with keys,
+foreign keys and comments in two schemas (1,640 pg_class rows), and the job-queue tables at
+10,000 rows. The statements are `plans/apps.sql`; TPC-H is SF1.
+
+**Liquibase's column check** (Keycloak, Metabase), warm, psql's timing:
+
+| | base | batch 1 | PostgreSQL | batch 1 / PostgreSQL |
+|---|---:|---:|---:|---:|
+| a call | 92-112 ms | 3.2-4.2 ms | 2.0-2.2 ms | 1.6-1.9 |
+
+The plan is PostgreSQL's: a semi join (HashAggregate of pg_namespace ⋈ pg_class, then
+pg_attribute's index), where base ran a SubPlan per pg_attribute row (10,325 loops).
+
+**pg_class estimates at 2,000 tables** (8,415 pg_class rows, 2,068 of kind 'r'):
+
+| `pg_class WHERE relkind = 'r'` | base | batch 1 | PostgreSQL |
+|---|---:|---:|---:|
+| before ANALYZE | 42 | 1,379 (initdb's statistics) | 1,132 |
+| after `ANALYZE pg_class` | 42 | 2,068 | 2,068 |
+
+pgwatch's table_stats_approx over apps now has PostgreSQL's Hash Join, where base had a
+Nested Loop over an estimate of 8.
+
+ANALYZE costs, apps database (two runs each):
+
+| | base | batch 1 | PostgreSQL | batch 1 / PostgreSQL |
+|---|---:|---:|---:|---:|
+| `ANALYZE pg_class` | 1.0-1.3 ms (stored nothing) | 8.1-8.7 ms | 8.6 ms | 0.95-1.0 |
+| database-wide `ANALYZE` | 0.98-2.1 s | 1.2-2.0 s | 0.31-0.65 s | 3.1-3.9 |
+
+The catalogs add about 0.25 s warm.
+
+**Planning per statement.** `tools/bench/plancpu.py` measures it two ways:
+- EXPLAIN CPU: server CPU per `EXPLAIN <statement>` over pgbench `-M simple` / `-M
+  extended`, about 0.6 s of server CPU a cell, two rounds. Geometric mean of the 16 apps
+  statements, engine / PostgreSQL:
+
+  | | base | batch 1 (initdb catalog statistics) | batch 1 (catalogs analyzed) |
+  |---|---:|---:|---:|
+  | simple protocol | 1.78 / 1.81 | 1.77 / 2.12 | 1.90 / 2.00 |
+  | extended protocol | 2.49 / 2.53 | 1.79 / 1.71 | 1.78 / 1.72 |
+
+  The extended protocol gains about 30% because EXPLAIN's query is no longer bound at Parse
+  as well as at Execute. pgjdbc's getColumns went from 12.2 to 6.7-7.0 ms (PostgreSQL 2.0
+  ms), getImportedKeys from 30-32 to 20-21 ms (PostgreSQL 7.7 ms), Kysely's getTables from
+  3.4-3.8 to 1.8-2.2 ms (PostgreSQL 1.2 ms).
+
+  Over the simple protocol, catalog statistics cost the large catalog joins 10-30% more
+  planning than base, because base estimated those columns with defaults. getColumns with
+  the catalogs analyzed takes 8.1-8.7 ms against base's 6.5-6.6 ms. Before the MCV change,
+  with the catalogs analyzed, eqjoinsel's O(n²) MCV matching was half of it (11-12 ms).
+- `--summary`: each server's own `EXPLAIN (SUMMARY)` Planning Time, the median of the last
+  20 of 30 in a session. These are elapsed times, and on this machine their spread between
+  rounds (up to 2x on one cell) is larger than the change between builds. The geometric
+  mean over apps is 2.3-3.5 for every build. TPC-H, batch 1, simple protocol: 2.97,
+  ranging from q03 at 1.07 to q15 at 10.8 (its view).
+- CPU of EXPLAINing plancmp's 89 queries, each engine restarted then warmed once,
+  interleaved:
+
+  | | base | batch 1 | PostgreSQL |
+  |---|---:|---:|---:|
+  | run 1 / run 2, round 1 | 240 / 290 ms | 180 / 190 ms | 144-177 ms |
+  | run 1 / run 2, round 2 | 210 / 210 ms | 220 / 200 ms | 155-171 ms |
+
+  Peak memory was 1,619-1,663 MB for both builds. Without the warm run, a restarted engine's
+  first run pays its heap-model restore (up to 7.7 s once).
+
+**Plan shapes and results.** plancmp is 77 / 89 at the defaults and 81 / 89 serial,
+unchanged. All 22 TPC-H result hashes equal PostgreSQL's.
+
+**pgbench** (scale 10, 4 clients, 20 s, `-M prepared`, base / batch 1 on the same data,
+interleaved twice; engine CPU per transaction from /proc):
+
+| | round 1 | round 2 |
+|---|---|---|
+| select-only | 16,436 / 16,095 tps, 207 / 213 us | 14,916 / 15,327 tps, 238 / 231 us |
+| tpcb-like | 3,164 / 3,006 tps, 1,068 / 1,107 us | 2,863 / 3,049 tps, 1,139 / 1,111 us |
+
+Peak RSS was 253-339 MB, alike for both builds; the differences are within the rounds'
+spread. Prepared pgbench statements are rarely planned, so this batch's planner changes
+barely run on that path.
+
+**Footprint gate** (fresh engines, host-run, `bench idle --mem-pid`), base / batch 1:
+- idle CPU over 5 minutes after one query: 20 / 10 ms;
+- 100 idle sessions: 42.2 + 100 × 325 kB / 42.7 + 100 × 329 kB of RSS;
+- the fresh data directory: 64 / 64 kB before the first database is opened.
+Initdb's catalog statistics are static data, and a catalog's are stored only by an ANALYZE
+of it.
+
+**Where planning goes now** (perf, release with frame pointers, pgjdbc and TPC-H joins).
+The cost is spread thinly:
+- allocation, 10-15%;
+- `Expr` / `JP` / `IClause` / `ColInfo` clones and drops, 10-15%;
+- join search bookkeeping (`enforced_of`, `needed_above_in`, `side_ec`, `var_of`);
+- EXPLAIN's builder re-planning scans for estimates (`estimate_in`, `describe_need`,
+  `partial_scans`).
+No single function takes more than 5%. HANDOFF has the next steps.
+
 ## postgres_fdw, round 6 (2026-11-03, agent 153)
 
 What changed: HANDOFF.md's postgres_fdw "Round 25 (agent 153)". A level locking local relations

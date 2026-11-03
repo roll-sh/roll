@@ -54,6 +54,17 @@ impl Ddl<'_, '_> {
             .int("default_statistics_target") as i32
     }
 
+    /// ANALYZE of system catalog `st` (`only`: just those columns): its columns' statistics
+    /// from the rows it shows, stored as a table's (they replace initdb's,
+    /// `system::initdb_colstats`), and its pg_class counts.
+    pub(super) fn analyze_catalog(&mut self, st: crate::catalog::system::SysTable, only: &[String]) -> Result<()> {
+        let t = crate::sql::paths::sys_table(st);
+        let rows = self.analyze_columns(&t, only, false)?.unwrap_or(0);
+        let pages = crate::sql::paths::sys_size(st, self.ctx).pages as i32;
+        self.cat.relstats.insert(st.oid(), RelStats { pages, tuples: rows as f64, allvisible: 0, allfrozen: 0 });
+        Ok(())
+    }
+
     /// ANALYZE `t`'s columns (just `only`, when listed) and, with no column list, its index
     /// expressions. `inherit`: the statistics of the whole inheritance tree (parent first,
     /// then its children).
@@ -183,6 +194,14 @@ impl Ddl<'_, '_> {
         } else if crate::ext::file_fdw::is_file_table(&self.cat, t) {
             // file_fdw's file_acquire_sample_rows.
             for row in crate::ext::file_fdw::read_all(t, self.ctx)? {
+                let mut row = Some(row);
+                offer(&mut || Ok(row.take().unwrap()));
+            }
+        } else if let Some(st) = crate::sql::paths::stand_in_of(t) {
+            // A system catalog: the rows it shows.
+            let rows = crate::catalog::system::rows(st, self.ctx)?;
+            local = Some(rows.len());
+            for row in rows {
                 let mut row = Some(row);
                 offer(&mut || Ok(row.take().unwrap()));
             }

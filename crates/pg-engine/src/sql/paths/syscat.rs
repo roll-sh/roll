@@ -76,18 +76,21 @@ pub(crate) fn stand_in_of(t: &Table) -> Option<SysTable> {
     SysTable::by_oid(t.oid)
 }
 
-/// Postgres's btree indexes on catalog `t`: (index, unique). (Read from the list once per
-/// catalog: planning asks for each catalog column an estimate looks at.)
-fn sys_indexes(t: SysTable) -> Vec<Arc<Index>> {
-    static BY_TABLE: std::sync::OnceLock<parking_lot::Mutex<HashMap<u32, Vec<Arc<Index>>>>> =
-        std::sync::OnceLock::new();
-    let m = BY_TABLE.get_or_init(Default::default);
-    if let Some(v) = m.lock().get(&t.oid()) {
-        return v.clone();
-    }
-    let v = read_sys_indexes(t);
-    m.lock().insert(t.oid(), v.clone());
-    v
+/// Postgres's btree indexes on catalog `t`: (index, unique). (Read from the list once for
+/// every catalog, no lock after: planning asks for each catalog column an estimate looks at.)
+fn sys_indexes(t: SysTable) -> &'static [Arc<Index>] {
+    static BY_TABLE: std::sync::OnceLock<HashMap<u32, Vec<Arc<Index>>>> = std::sync::OnceLock::new();
+    BY_TABLE
+        .get_or_init(|| {
+            let mut m = HashMap::new();
+            for t in SysTable::all() {
+                // (The first of an oid, as `SysTable::by_oid` finds it.)
+                m.entry(t.oid()).or_insert_with(|| read_sys_indexes(t));
+            }
+            m
+        })
+        .get(&t.oid())
+        .map_or(&[], |v| v.as_slice())
 }
 
 fn read_sys_indexes(t: SysTable) -> Vec<Arc<Index>> {
@@ -165,7 +168,8 @@ pub fn sys_size(t: SysTable, ctx: &ExecCtx) -> RelSize {
 pub(super) fn sys_index_infos(t: SysTable, tuples: f64) -> Vec<IndexInfo> {
     let table = sys_table(t);
     let mut out: Vec<IndexInfo> = sys_indexes(t)
-        .into_iter()
+        .iter()
+        .cloned()
         .map(|ix| {
             let keys: Vec<Expr> = ix
                 .columns
