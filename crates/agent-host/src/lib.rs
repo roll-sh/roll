@@ -13,6 +13,7 @@ pub mod fs;
 pub mod git;
 pub mod orchestrator;
 pub mod provider;
+pub mod relay;
 pub mod store;
 pub mod terminal;
 

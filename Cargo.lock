@@ -50,17 +50,26 @@ dependencies = [
  "agent-proto",
  "anyhow",
  "async-trait",
+ "axum",
  "base64 0.22.1",
+ "code-control",
+ "futures-util",
  "hex",
  "libc",
+ "parking_lot",
+ "pg-storage",
  "rand 0.8.8",
  "rusqlite",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-rustls 0.26.6",
+ "tokio-tungstenite 0.30.0",
  "toml",
+ "tower",
  "tracing",
 ]
 
@@ -7701,7 +7710,11 @@ checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
 dependencies = [
  "futures-util",
  "log",
+ "rustls 0.23.46",
+ "rustls-native-certs",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls 0.26.6",
  "tungstenite 0.30.0",
 ]
 
@@ -7929,6 +7942,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.10.3",
+ "rustls 0.23.46",
+ "rustls-pki-types",
  "sha1 0.11.0",
  "thiserror",
 ]
