@@ -127,18 +127,48 @@ export const AgentsCanvas = forwardRef<
     [positions, sizeOf],
   );
 
-  // Fit once, when the first layout with measured cards is in.
+  // Fit once, when the first layout with measured cards is in; then keep everything in view as
+  // work appears, until the user moves the view themselves.
+  const following = useRef(true);
+  // The stream re-renders constantly; only a change in the overall extent refits.
+  const extent = useMemo(() => {
+    const r = bounds(positions, sizeOf);
+    return r ? [r.x, r.y, r.w, r.h].map(Math.round).join(",") : "";
+  }, [positions, sizeOf]);
   useEffect(() => {
-    if (fitted.current || positions.size === 0 || sizes.size === 0) return;
-    fitted.current = true;
-    fit(false);
-  }, [positions, sizes, fit]);
+    if (!extent) return;
+    if (!fitted.current) {
+      if (sizes.size === 0) return;
+      fitted.current = true;
+      fit(false);
+      return;
+    }
+    if (!following.current) return;
+    const t = setTimeout(() => following.current && fit(true), 250);
+    return () => clearTimeout(t);
+    // `fit` changes with every layout; the extent is what matters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [extent, sizes.size > 0]);
+  useEffect(() => {
+    const c = container.current;
+    if (!c) return;
+    const stop = () => (following.current = false);
+    c.addEventListener("pointerdown", stop);
+    c.addEventListener("wheel", stop, { passive: true });
+    c.addEventListener("keydown", stop);
+    return () => {
+      c.removeEventListener("pointerdown", stop);
+      c.removeEventListener("wheel", stop);
+      c.removeEventListener("keydown", stop);
+    };
+  }, []);
 
   const focus = useCallback(
     (key: string, k?: number) => {
       const e = engine.current;
       const p = positions.get(key);
       if (!e || !p) return;
+      following.current = false;
       const s = sizeOf(key);
       const { w, h } = e.viewport;
       const nk = k ?? Math.max(e.view.k, 0.85);
