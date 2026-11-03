@@ -944,6 +944,19 @@ jsdom (`vitest.config.mts` projects `node` and `dom`, setup in `src/test/`).
 | restart recovery: running runs interrupted, pending requests cancelled, thread idle, the native thread resumed | `agent-host/tests/orchestrator.rs::a_restart_interrupts_runs_cancels_requests_and_resumes_the_native_thread` |
 | a provider that won't start or exits mid-run fails the run and sets the thread's error; the next message recovers | `agent-host/tests/orchestrator.rs::a_provider_that_wont_start_fails_the_run`, `agent-host/tests/orchestrator.rs::a_session_that_exits_mid_run_fails_it` |
 | `since`/`subscribe`: broadcasts in seq order, replay has each record once at its newest broadcast, paging | `agent-host/tests/orchestrator.rs::replay_and_subscribe_agree_and_never_repeat_a_record` |
+| worktree threads on `roll/<slug>` under `<data>/worktrees/<project>/<thread>`; delete: session closed, worktree gone, branch kept, checkpoint refs gone, tombstones for every record (thread last) | `agent-host/tests/threads.rs::worktree_threads_get_a_branch_and_delete_leaves_only_tombstones_and_the_branch` |
+| provider switch: the new provider gets a portable summary of what it hasn't seen; switching back resumes its native thread and gets only the delta; runs keep the user's prompt | `agent-host/tests/threads.rs::switching_providers_hands_over_what_the_new_one_has_not_seen` |
+| mode changes: switched live when the provider can, else the session restarts resuming its native thread | `agent-host/tests/threads.rs::mode_changes_switch_live_or_restart_with_resume` |
+| fork: lineage (root kept for forks of forks), the run's checkpoint files in a new worktree, a summary up to that run, nothing started; unfinished runs refused | `agent-host/tests/threads.rs::forks_carry_a_summary_and_the_files_of_their_run` |
+| rollback: files restored, later runs `rolled_back`, later checkpoints and refs dropped; without native rollback the provider starts fresh with a summary; with it, `rollback(turns)` on the same session; the next run's diff starts at the restored checkpoint | `agent-host/tests/threads.rs::rollback_restores_files_and_starts_the_provider_fresh_with_a_summary`, `agent-host/tests/threads.rs::rollback_uses_the_providers_own_rollback_when_it_has_one` |
+| busy threads refuse rollback, publish, archive and provider switches (`conflict`) | `agent-host/tests/threads.rs::busy_threads_refuse_rollback_publish_archive_and_provider_switches` |
+| `thread.publish` commits the worktree and pushes its branch to `origin`; threads without a worktree are refused; `git.status` after | `agent-host/tests/threads.rs::publish_commits_the_worktree_and_pushes_its_branch` |
+| `diff.get`: a finished run, a running run (live), the whole thread | `agent-host/tests/threads.rs::diffs_of_a_run_and_of_the_whole_thread` |
+| non-git projects: runs work, no checkpoints, diffs/status/worktrees refused | `agent-host/tests/threads.rs::non_git_projects_run_without_checkpoints_or_diffs` |
+| `fs.read`/`fs.list`: text, binary, `..` and symlink escapes refused, missing files, listing order, absolute listing without a project | `agent-host/tests/threads.rs::files_are_read_inside_the_project_only` |
+| projects unique by path, git info, `clone` not yet, removal deletes threads and worktrees | `agent-host/tests/threads.rs::projects_are_unique_by_path_and_removal_deletes_their_threads` |
+| archive/unarchive; the first message names an untitled thread | `agent-host/tests/threads.rs::archive_and_unarchive` |
+| handoff selection (newest and first items within budget), activity lines, tool output cut in the middle | `agent-host/src/orchestrator/handoff.rs` tests, `agent-host/src/orchestrator/runs.rs` tests |
 
 ## Measurements
 

@@ -1,0 +1,441 @@
+//! Thread commands on fake providers against real git repos: worktrees, provider handoffs, forks,
+//! rollback, delete, publish, diffs, files, projects.
+
+mod common;
+
+use agent_host::provider::fake::{Call, FakeProvider, FakeSession, Script};
+use agent_host::provider::{ProviderEvent, TurnEnd};
+use agent_proto::*;
+use common::*;
+use std::path::Path;
+use std::sync::Arc;
+
+fn manual(id: &str, caps: Capabilities) -> Arc<FakeProvider> {
+    FakeProvider::with(id, caps, Script::Manual)
+}
+
+fn sends(calls: &[Call]) -> Vec<String> {
+    calls.iter().filter_map(|c| if let Call::Send(t) = c { Some(t.clone()) } else { None }).collect()
+}
+
+fn is_err(reply: &Reply, code: ErrorCode) -> bool {
+    matches!(reply, Reply::Error(ReplyError { code: c, .. }) if *c == code)
+}
+
+/// Runs one manual turn that writes `files` into the thread's directory.
+async fn turn(w: &World, session: &FakeSession, thread: &ThreadId, files: &[(&str, &str)]) {
+    let cwd = w.wait_thread(thread, |t| t.status == ThreadStatus::Running).await.cwd;
+    for (name, text) in files {
+        std::fs::write(Path::new(&cwd).join(name), text).unwrap();
+    }
+    session.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
+    w.wait_thread(thread, |t| t.status == ThreadStatus::Idle && t.active_run.is_none()).await;
+}
+
+#[tokio::test]
+async fn worktree_threads_get_a_branch_and_delete_leaves_only_tombstones_and_the_branch() {
+    let fake = FakeProvider::new("codex");
+    let w = World::new(vec![fake.clone()]).await;
+    let thread = w.thread("codex", Some("Fix the parser"), true).await;
+    let t = w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle && t.run_count == 1).await;
+    let wt = t.worktree.clone().unwrap();
+    assert_eq!(wt.branch, "roll/fix-the-parser");
+    assert_eq!(t.cwd, wt.path);
+    assert_eq!(wt.path, w.home.join(format!("worktrees/{}/{thread}", w.project)).to_string_lossy());
+    assert!(Path::new(&wt.path).join("README.md").exists());
+    assert_eq!(fake.session(0).await.config.cwd, Path::new(&wt.path));
+
+    assert_eq!(w.run(Command::ThreadDelete { thread: thread.clone() }).await, Reply::Ok);
+    assert!(!Path::new(&wt.path).exists());
+    assert!(sh(&w.repo, &["branch", "--list", "roll/fix-the-parser"]).contains("roll/fix-the-parser"));
+    assert!(sh(&w.repo, &["for-each-ref", "refs/roll/"]).is_empty());
+    let s = w.state().await;
+    assert!(s.live.values().all(|e| e.thread() != Some(&thread)));
+    let removed: Vec<EntityKind> = s
+        .replay
+        .iter()
+        .filter_map(|st| match &st.entity {
+            Entity::Removed(r) if r.thread.as_ref() == Some(&thread) => Some(r.entity),
+            _ => None,
+        })
+        .collect();
+    for kind in [EntityKind::Thread, EntityKind::Run, EntityKind::Node, EntityKind::Checkpoint] {
+        assert!(removed.contains(&kind), "{kind:?} tombstone in {removed:?}");
+    }
+    assert_eq!(removed.last(), Some(&EntityKind::Thread));
+    assert!(fake.session(0).await.calls().contains(&Call::Close));
+    assert!(is_err(&w.send(&thread, "hi", SendMode::Queue).await, ErrorCode::NotFound));
+}
+
+#[tokio::test]
+async fn switching_providers_hands_over_what_the_new_one_has_not_seen() {
+    let codex = FakeProvider::new("codex");
+    let claude = FakeProvider::new("claude");
+    let w = World::new(vec![codex.clone(), claude.clone()]).await;
+    let thread = w.thread("codex", Some("first question"), false).await;
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle).await;
+
+    let busy = w
+        .run(Command::ThreadConfigure {
+            thread: thread.clone(),
+            title: None,
+            provider: Some(ProviderId("nope".into())),
+            model: None,
+            effort: None,
+            runtime_mode: None,
+            interaction_mode: None,
+        })
+        .await;
+    assert!(is_err(&busy, ErrorCode::Invalid));
+    let switch = |p: &str| Command::ThreadConfigure {
+        thread: thread.clone(),
+        title: None,
+        provider: Some(ProviderId(p.into())),
+        model: None,
+        effort: None,
+        runtime_mode: None,
+        interaction_mode: None,
+    };
+    assert_eq!(w.run(switch("claude")).await, Reply::Ok);
+    w.send(&thread, "second question", SendMode::Queue).await;
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle && t.run_count == 2).await;
+    let to_claude = sends(&claude.session(0).await.calls()).remove(0);
+    assert!(to_claude.starts_with("<roll-context>"), "{to_claude}");
+    assert!(to_claude.contains("first question") && to_claude.contains("echo: first question"));
+    assert!(to_claude.ends_with("</roll-context>\n\nsecond question"));
+    assert!(codex.session(0).await.calls().contains(&Call::Close), "the old session ends");
+
+    assert_eq!(w.run(switch("codex")).await, Reply::Ok);
+    w.send(&thread, "third", SendMode::Queue).await;
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle && t.run_count == 3).await;
+    let back = codex.session(1).await;
+    assert_eq!(back.config.resume.as_deref(), Some(codex.session(0).await.native()), "codex resumes its own thread");
+    let to_codex = sends(&back.calls()).remove(0);
+    assert!(to_codex.contains("second question") && to_codex.contains("run=2]"));
+    assert!(!to_codex.contains("run=1]"), "codex already has run 1: {to_codex}");
+    let runs = w.state().await.runs(&thread);
+    assert_eq!(runs.iter().map(|r| r.provider.0.as_str()).collect::<Vec<_>>(), vec!["codex", "claude", "codex"]);
+    assert_eq!(runs[2].prompt, "third", "the run records what the user sent, not the handoff");
+}
+
+#[tokio::test]
+async fn mode_changes_switch_live_or_restart_with_resume() {
+    let switching = manual("codex", Capabilities { mode_switch: true, ..Capabilities::default() });
+    let restarting = manual("claude", Capabilities::default());
+    let w = World::new(vec![switching.clone(), restarting.clone()]).await;
+    for (provider, fake) in [("codex", &switching), ("claude", &restarting)] {
+        let thread = w.thread(provider, Some("one"), false).await;
+        let first = fake.session(0).await;
+        turn(&w, &first, &thread, &[]).await;
+        w.run(Command::ThreadConfigure {
+            thread: thread.clone(),
+            title: None,
+            provider: None,
+            model: None,
+            effort: None,
+            runtime_mode: Some(RuntimeMode::Ask),
+            interaction_mode: Some(InteractionMode::Plan),
+        })
+        .await;
+        w.send(&thread, "two", SendMode::Queue).await;
+        if provider == "codex" {
+            let calls = first.wait_calls(|c| sends(c).len() == 2).await;
+            assert!(calls.contains(&Call::SetModes(RuntimeMode::Ask, InteractionMode::Plan)));
+            assert_eq!(switching.sessions().len(), 1);
+        } else {
+            let second = fake.session(1).await;
+            assert!(first.calls().contains(&Call::Close));
+            assert_eq!(second.config.resume.as_deref(), Some(first.native()));
+            assert_eq!((second.config.runtime_mode, second.config.interaction_mode), (RuntimeMode::Ask, InteractionMode::Plan));
+            assert_eq!(sends(&second.wait_calls(|c| !c.is_empty()).await), vec!["two"]);
+        }
+    }
+}
+
+#[tokio::test]
+async fn forks_carry_a_summary_and_the_files_of_their_run() {
+    let fake = manual("codex", Capabilities::default());
+    let w = World::new(vec![fake.clone()]).await;
+    let thread = w.thread("codex", Some("make one"), false).await;
+    let session = fake.session(0).await;
+    turn(&w, &session, &thread, &[("one.txt", "1\n")]).await;
+    w.send(&thread, "make two", SendMode::Queue).await;
+    turn(&w, &session, &thread, &[("two.txt", "2\n")]).await;
+    let runs = w.state().await.runs(&thread);
+
+    let Reply::Created { id } = w.run(Command::ThreadFork { thread: thread.clone(), at: Some(runs[0].id.clone()), worktree: true }).await else {
+        panic!()
+    };
+    let fork = ThreadId(id);
+    let f = w.state().await.thread(&fork).cloned().unwrap();
+    assert_eq!(f.lineage, Some(Lineage {
+        parent: thread.clone(),
+        relation: Relation::Fork,
+        root: thread.clone(),
+        from_run: Some(runs[0].id.clone())
+    }));
+    let cwd = Path::new(&f.cwd);
+    assert_eq!(std::fs::read_to_string(cwd.join("one.txt")).unwrap(), "1\n");
+    assert!(!cwd.join("two.txt").exists());
+    assert_eq!(f.worktree.as_ref().unwrap().base, sh(&w.repo, &["rev-parse", "HEAD"]).trim());
+    assert_eq!(f.run_count, 0);
+    assert_eq!(fake.sessions().len(), 1, "forking starts nothing");
+
+    w.send(&fork, "continue", SendMode::Queue).await;
+    let forked = fake.session(1).await;
+    assert_eq!(forked.config.resume, None);
+    let text = sends(&forked.wait_calls(|c| !c.is_empty()).await).remove(0);
+    assert!(text.contains("make one") && !text.contains("make two"), "{text}");
+    assert!(text.ends_with("continue"));
+
+    // A fork of a fork keeps the root.
+    let Reply::Created { id } = w.run(Command::ThreadFork { thread: fork.clone(), at: None, worktree: false }).await else { panic!() };
+    let grandchild = w.state().await.thread(&ThreadId(id)).cloned().unwrap();
+    assert_eq!(grandchild.lineage.as_ref().unwrap().root, thread);
+    assert_eq!(grandchild.cwd, f.cwd);
+    // Unfinished runs can't be forked.
+    let active = w.state().await.thread(&fork).unwrap().active_run.clone().unwrap();
+    let refused = w.run(Command::ThreadFork { thread: fork.clone(), at: Some(active), worktree: false }).await;
+    assert!(is_err(&refused, ErrorCode::Conflict));
+}
+
+#[tokio::test]
+async fn rollback_restores_files_and_starts_the_provider_fresh_with_a_summary() {
+    let fake = manual("codex", Capabilities::default());
+    let w = World::new(vec![fake.clone()]).await;
+    let thread = w.thread("codex", Some("add a"), false).await;
+    let session = fake.session(0).await;
+    turn(&w, &session, &thread, &[("a.txt", "a\n")]).await;
+    w.send(&thread, "add b", SendMode::Queue).await;
+    turn(&w, &session, &thread, &[("b.txt", "b\n"), ("a.txt", "a changed\n")]).await;
+    let s = w.state().await;
+    let checkpoints = s.checkpoints(&thread);
+    assert_eq!(checkpoints.iter().map(|c| c.ordinal).collect::<Vec<_>>(), vec![0, 1, 2]);
+    assert_eq!(checkpoints[2].stat, DiffStat { files: 2, additions: 2, deletions: 1 });
+
+    let reply = w.run(Command::CheckpointRollback { thread: thread.clone(), checkpoint: checkpoints[1].id.clone() }).await;
+    assert_eq!(reply, Reply::Ok);
+    assert_eq!(std::fs::read_to_string(w.repo.join("a.txt")).unwrap(), "a\n");
+    assert!(!w.repo.join("b.txt").exists());
+    let s = w.state().await;
+    let runs = s.runs(&thread);
+    assert_eq!(runs.iter().map(|r| r.status).collect::<Vec<_>>(), vec![RunStatus::Completed, RunStatus::RolledBack]);
+    assert_eq!(s.checkpoints(&thread).len(), 2);
+    assert!(sh(&w.repo, &["for-each-ref", &format!("refs/roll/checkpoints/{thread}/2")]).is_empty());
+    assert!(session.calls().contains(&Call::Close), "no native rollback: the session ends");
+
+    w.send(&thread, "add c", SendMode::Queue).await;
+    let fresh = fake.session(1).await;
+    assert_eq!(fresh.config.resume, None);
+    let text = sends(&fresh.wait_calls(|c| !c.is_empty()).await).remove(0);
+    assert!(text.contains("add a") && !text.contains("add b"), "{text}");
+    turn(&w, &fresh, &thread, &[("c.txt", "c\n")]).await;
+    // Run 3's diff is against the checkpoint it rolled back to.
+    let run3 = w.state().await.runs(&thread).pop().unwrap();
+    let Reply::Diff(diff) = w.run(Command::DiffGet { thread: thread.clone(), run: Some(run3.id) }).await else { panic!() };
+    assert_eq!(diff.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), vec!["c.txt"]);
+}
+
+#[tokio::test]
+async fn rollback_uses_the_providers_own_rollback_when_it_has_one() {
+    let fake = manual("codex", Capabilities { rollback: true, ..Capabilities::default() });
+    let w = World::new(vec![fake.clone()]).await;
+    let thread = w.thread("codex", Some("one"), false).await;
+    let session = fake.session(0).await;
+    turn(&w, &session, &thread, &[]).await;
+    w.send(&thread, "two", SendMode::Queue).await;
+    turn(&w, &session, &thread, &[]).await;
+    w.send(&thread, "three", SendMode::Queue).await;
+    turn(&w, &session, &thread, &[]).await;
+    let cp = w.state().await.checkpoints(&thread)[1].clone();
+    assert_eq!(w.run(Command::CheckpointRollback { thread: thread.clone(), checkpoint: cp.id }).await, Reply::Ok);
+    assert!(session.calls().contains(&Call::Rollback(2)));
+    w.send(&thread, "four", SendMode::Queue).await;
+    let calls = session.wait_calls(|c| sends(c).len() == 4).await;
+    assert_eq!(sends(&calls)[3], "four", "same session, nothing handed over");
+    assert_eq!(fake.sessions().len(), 1);
+}
+
+#[tokio::test]
+async fn busy_threads_refuse_rollback_publish_archive_and_provider_switches() {
+    let fake = manual("codex", Capabilities::default());
+    let other = FakeProvider::new("claude");
+    let w = World::new(vec![fake.clone(), other]).await;
+    let thread = w.thread("codex", Some("go"), true).await;
+    fake.session(0).await.wait_calls(|c| !c.is_empty()).await;
+    let cp = w.wait("the base checkpoint", |s| s.checkpoints(&thread).first().cloned()).await;
+    for command in [
+        Command::CheckpointRollback { thread: thread.clone(), checkpoint: cp.id.clone() },
+        Command::ThreadPublish { thread: thread.clone(), message: "x".into(), land: false },
+        Command::ThreadArchive { thread: thread.clone() },
+        Command::ThreadConfigure {
+            thread: thread.clone(),
+            title: None,
+            provider: Some(ProviderId::claude()),
+            model: None,
+            effort: None,
+            runtime_mode: None,
+            interaction_mode: None,
+        },
+    ] {
+        let reply = w.run(command.clone()).await;
+        assert!(is_err(&reply, ErrorCode::Conflict), "{command:?}: {reply:?}");
+    }
+}
+
+#[tokio::test]
+async fn publish_commits_the_worktree_and_pushes_its_branch() {
+    let fake = manual("codex", Capabilities::default());
+    let w = World::new(vec![fake.clone()]).await;
+    let remote = tempfile::tempdir().unwrap();
+    sh(remote.path(), &["init", "-q", "--bare"]);
+    sh(&w.repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    let thread = w.thread("codex", Some("Add docs"), true).await;
+    turn(&w, &fake.session(0).await, &thread, &[("docs.md", "# docs\n")]).await;
+    let reply = w.run(Command::ThreadPublish { thread: thread.clone(), message: "Add docs".into(), land: false }).await;
+    let Reply::Published(published) = reply else { panic!("{reply:?}") };
+    assert_eq!(published.branch, "roll/add-docs");
+    assert_eq!(sh(remote.path(), &["rev-parse", "refs/heads/roll/add-docs"]).trim(), published.commit);
+    assert_eq!((published.change, published.url), (None, None));
+    let Reply::GitStatus(status) = w.run(Command::GitStatus { thread: thread.clone() }).await else { panic!() };
+    assert_eq!(status.branch.as_deref(), Some("roll/add-docs"));
+    assert!(status.files.is_empty());
+
+    let plain = w.thread("codex", None, false).await;
+    let refused = w.run(Command::ThreadPublish { thread: plain, message: "x".into(), land: false }).await;
+    assert!(is_err(&refused, ErrorCode::Invalid));
+}
+
+#[tokio::test]
+async fn diffs_of_a_run_and_of_the_whole_thread() {
+    let fake = manual("codex", Capabilities::default());
+    let w = World::new(vec![fake.clone()]).await;
+    let thread = w.thread("codex", Some("one"), false).await;
+    let session = fake.session(0).await;
+    turn(&w, &session, &thread, &[("one.txt", "1\n")]).await;
+    w.send(&thread, "two", SendMode::Queue).await;
+    session.wait_calls(|c| sends(c).len() == 2).await;
+    std::fs::write(w.repo.join("two.txt"), "2\n").unwrap();
+    let running = w.state().await.thread(&thread).unwrap().active_run.clone().unwrap();
+    // A running run's diff is live.
+    let Reply::Diff(live) = w.run(Command::DiffGet { thread: thread.clone(), run: Some(running) }).await else { panic!() };
+    assert_eq!(live.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), vec!["two.txt"]);
+    let Reply::Diff(all) = w.run(Command::DiffGet { thread: thread.clone(), run: None }).await else { panic!() };
+    assert_eq!(all.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), vec!["one.txt", "two.txt"]);
+    assert_eq!(all.stat.additions, 2);
+    let first = w.state().await.runs(&thread)[0].clone();
+    assert_eq!(first.stat, Some(DiffStat { files: 1, additions: 1, deletions: 0 }));
+    let Reply::Diff(one) = w.run(Command::DiffGet { thread: thread.clone(), run: Some(first.id) }).await else { panic!() };
+    assert_eq!(one.files[0].change, ChangeKind::Add);
+    assert!(one.files[0].diff.as_ref().unwrap().contains("+1"));
+}
+
+#[tokio::test]
+async fn non_git_projects_run_without_checkpoints_or_diffs() {
+    let fake = FakeProvider::new("codex");
+    let w = World::with_repo(vec![fake.clone()], false).await;
+    let thread = w.thread("codex", Some("hi"), false).await;
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle && t.run_count == 1).await;
+    let s = w.state().await;
+    assert!(s.checkpoints(&thread).is_empty());
+    assert_eq!(s.runs(&thread)[0].status, RunStatus::Completed);
+    assert!(is_err(&w.run(Command::DiffGet { thread: thread.clone(), run: None }).await, ErrorCode::Invalid));
+    assert!(is_err(&w.run(Command::GitStatus { thread: thread.clone() }).await, ErrorCode::Invalid));
+    let worktree = w
+        .run(Command::ThreadCreate {
+            project: w.project.clone(),
+            provider: ProviderId::codex(),
+            model: None,
+            effort: None,
+            runtime_mode: RuntimeMode::FullAccess,
+            interaction_mode: InteractionMode::Default,
+            worktree: true,
+            title: None,
+            prompt: None,
+            attachments: Vec::new(),
+        })
+        .await;
+    assert!(is_err(&worktree, ErrorCode::Invalid));
+}
+
+#[tokio::test]
+async fn files_are_read_inside_the_project_only() {
+    let fake = FakeProvider::new("codex");
+    let w = World::new(vec![fake]).await;
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret"), "no").unwrap();
+    std::os::unix::fs::symlink(outside.path().join("secret"), w.repo.join("link")).unwrap();
+    std::fs::create_dir(w.repo.join("src")).unwrap();
+    std::fs::write(w.repo.join("src/lib.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(w.repo.join("blob.bin"), [0u8, 1, 2]).unwrap();
+    let read = |path: &str| Command::FsRead { project: w.project.clone(), path: path.into() };
+
+    let Reply::File(file) = w.run(read("src/lib.rs")).await else { panic!() };
+    assert_eq!((file.text.as_deref(), file.size), (Some("fn main() {}\n"), 13));
+    let Reply::File(bin) = w.run(read("/blob.bin")).await else { panic!() };
+    assert_eq!((bin.text, bin.size), (None, 3));
+    for escape in ["../secret", "src/../../x", "link", "/../etc/passwd"] {
+        let reply = w.run(read(escape)).await;
+        assert!(is_err(&reply, ErrorCode::Invalid) || is_err(&reply, ErrorCode::NotFound), "{escape}: {reply:?}");
+        assert!(!matches!(reply, Reply::File(_)));
+    }
+    assert!(is_err(&w.run(read("link")).await, ErrorCode::Invalid));
+    assert!(is_err(&w.run(read("missing.txt")).await, ErrorCode::NotFound));
+
+    let Reply::Entries { entries } = w.run(Command::FsList { project: Some(w.project.clone()), path: "".into() }).await else { panic!() };
+    let names: Vec<_> = entries.iter().map(|e| (e.name.as_str(), e.dir)).collect();
+    assert_eq!(&names[..2], &[(".git", true), ("src", true)]);
+    assert!(names.contains(&("README.md", false)));
+    let up = w.run(Command::FsList { project: Some(w.project.clone()), path: "..".into() }).await;
+    assert!(is_err(&up, ErrorCode::Invalid));
+    let Reply::Entries { entries } = w
+        .run(Command::FsList { project: None, path: outside.path().to_string_lossy().into() })
+        .await
+    else {
+        panic!()
+    };
+    assert_eq!(entries[0].name, "secret");
+    assert!(is_err(&w.run(Command::FsList { project: None, path: "relative".into() }).await, ErrorCode::Invalid));
+}
+
+#[tokio::test]
+async fn projects_are_unique_by_path_and_removal_deletes_their_threads() {
+    let fake = FakeProvider::new("codex");
+    let w = World::new(vec![fake]).await;
+    let again = w.run(Command::ProjectAdd { path: w.repo.to_string_lossy().into(), name: None, clone: None }).await;
+    assert_eq!(again, Reply::Created { id: w.project.0.clone() });
+    let s = w.state().await;
+    let Some(Entity::Project(p)) = s.live.get(&(EntityKind::Project, w.project.0.clone())) else { panic!() };
+    assert_eq!(p.git.as_ref().unwrap().branch.as_deref(), Some("main"));
+    let clone = w
+        .run(Command::ProjectAdd {
+            path: "/tmp/x".into(),
+            name: None,
+            clone: Some(RepoRef { owner: "a".into(), repo: "b".into() }),
+        })
+        .await;
+    assert!(is_err(&clone, ErrorCode::Invalid));
+    assert!(is_err(&w.run(Command::ProjectAdd { path: "/no/such/dir".into(), name: None, clone: None }).await, ErrorCode::Invalid));
+
+    let thread = w.thread("codex", Some("hi"), true).await;
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle).await;
+    assert_eq!(w.run(Command::ProjectRemove { project: w.project.clone() }).await, Reply::Ok);
+    let s = w.state().await;
+    assert!(s.live.is_empty(), "{:?}", s.live.keys().collect::<Vec<_>>());
+    assert!(!w.home.join("worktrees").join(w.project.as_str()).exists());
+}
+
+#[tokio::test]
+async fn archive_and_unarchive() {
+    let fake = FakeProvider::new("codex");
+    let w = World::new(vec![fake]).await;
+    let thread = w.thread("codex", None, false).await;
+    assert_eq!(w.state().await.thread(&thread).unwrap().title, "New thread");
+    assert_eq!(w.run(Command::ThreadArchive { thread: thread.clone() }).await, Reply::Ok);
+    assert!(w.state().await.thread(&thread).unwrap().archived_at.is_some());
+    assert_eq!(w.run(Command::ThreadUnarchive { thread: thread.clone() }).await, Reply::Ok);
+    assert!(w.state().await.thread(&thread).unwrap().archived_at.is_none());
+    // The first message names an untitled thread.
+    w.send(&thread, "Name me after this", SendMode::Queue).await;
+    w.wait_thread(&thread, |t| t.title == "Name me after this").await;
+}

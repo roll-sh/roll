@@ -234,7 +234,9 @@ impl Session for FakeSession {
         }
         self.inner.running.store(true, Ordering::SeqCst);
         if self.inner.script == Script::Echo {
-            self.echo(&input.text);
+            // Echo what the user said, not the context roll handed over in front of it.
+            let said = input.text.rsplit_once("</roll-context>\n\n").map_or(input.text.as_str(), |(_, said)| said);
+            self.echo(said);
         }
         Ok(())
     }
