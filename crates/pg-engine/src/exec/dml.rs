@@ -1403,11 +1403,18 @@ fn put_index_entries_with(
             continue;
         }
         if let Some(vals) = vals {
-            let k = index_entry_key(t, &bix.index, vals, dkey, &bix.colls);
             let tracked = ctx.txn.borrow().serializable_tracked();
+            let stored = super::scan::stores_entries(&bix.index);
+            if !stored && !tracked {
+                continue;
+            }
+            let k = index_entry_key(t, &bix.index, vals, dkey, &bix.colls);
             if tracked {
                 let me = ctx.txn.borrow().id;
                 ctx.sess.db.ssi.wrote_entry(me, bix.index.oid, &k);
+            }
+            if !stored {
+                continue;
             }
             if fresh {
                 ctx.txn.borrow_mut().put_fresh(k, dkey.to_vec())?;
@@ -1518,7 +1525,7 @@ fn delete_index_entries(
     ctx: &ExecCtx,
 ) -> Result<()> {
     for bix in indexes {
-        if bix.index.id == 0 {
+        if !super::scan::stores_entries(&bix.index) {
             continue;
         }
         if !crate::ext::index_am::builtin_method(&bix.index.method)
@@ -2370,7 +2377,8 @@ fn scan_matching(
     // (The primary key's index is `pkey_index`, not among `indexes`.)
     let pkey = t.pkey_index.and_then(|p| cat.indexes.get(&p).cloned()).filter(|ix| ix.id != 0);
     for ix in pkey.into_iter().chain(cat.table_indexes(t)).filter(|_| nondet.is_none()) {
-        if ix.predicate.is_some() || ix.columns.len() < cols.len() {
+        // (Only an index whose entries are stored has entries to find rows by.)
+        if ix.predicate.is_some() || ix.columns.len() < cols.len() || !super::scan::stores_entries(&ix) {
             continue;
         }
         let lead: Vec<Option<usize>> = ix.columns[..cols.len()]
@@ -3057,7 +3065,7 @@ pub fn update_row_rls(
             continue;
         }
         // (A native method's index: the new version's entry; the old one's stays.)
-        if am_insert(t, bix, nv.as_deref(), &new_key, new_key == dkey, ctx)? {
+        if am_insert(t, bix, nv.as_deref(), &new_key, new_key == dkey, ctx)? || !super::scan::stores_entries(&bix.index) {
             continue;
         }
         if let Some(ov) = ov {

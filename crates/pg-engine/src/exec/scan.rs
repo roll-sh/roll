@@ -257,6 +257,14 @@ pub fn reads_entries(ix: &Index) -> bool {
     ix.id != 0 && matches!(ix.method.as_str(), "btree" | "hash")
 }
 
+/// Whether index `ix` keeps an entry per row in storage (`index_entry_key`): every one with
+/// an id of its own but GIN and BRIN ones, which nothing reads. (Their scans and models read
+/// the rows; a GiST index's entries serve its exclusion constraint's leading `=`, an
+/// SP-GiST one's quad_point_ops' root count, `dml::quad_insert_check`.)
+pub fn stores_entries(ix: &Index) -> bool {
+    ix.id != 0 && !matches!(ix.method.as_str(), "gin" | "brin")
+}
+
 fn ranges(
     t: &Table,
     ix: &Index,
@@ -3552,7 +3560,12 @@ impl ScanNode {
         let mut row = vec![Value::Null; self.plan.table.columns.len()];
         // (Past the table and index ids.)
         let mut pos = 8;
-        for (col, ty, desc) in cols {
+        // (Up to the last column read: a count(*)'s rows decode nothing.)
+        let read = match &self.need {
+            Some(need) => cols.iter().rposition(|c| need.get(c.0).copied().unwrap_or(true)).map_or(0, |i| i + 1),
+            None => cols.len(),
+        };
+        for (col, ty, desc) in &cols[..read] {
             match crate::storage::keys::decode_index_value(entry, &mut pos, ty, *desc) {
                 Some(v) => row[*col] = v,
                 None => {
@@ -4436,11 +4449,7 @@ impl ScanNode {
         match self.stat {
             StatTarget::Off => {}
             StatTarget::Seq(t) => super::pgstat::count_returned(ctx, t, 1),
-            StatTarget::Index(ix) => {
-                super::pgstat::count_returned(ctx, ix, 1);
-                super::pgstat::count_fetched(ctx, ix, 1);
-                super::pgstat::count_blocks(ctx, ix, 1);
-            }
+            StatTarget::Index(ix) => super::pgstat::count_index_tuple(ctx, ix),
             StatTarget::Fetched(t) => super::pgstat::count_fetched(ctx, t, 1),
         }
         if (self.plan.index.is_some() || self.keys.is_some()) && self.only.is_none() {

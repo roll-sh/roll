@@ -3737,7 +3737,7 @@ impl Ddl<'_, '_> {
                     return Err(self.duplicate_key(t, &bix, first.as_deref().unwrap_or(vals), &ix.name));
                 }
             }
-            if ix.id != 0 {
+            if crate::exec::scan::stores_entries(ix) {
                 let k = index_entry_key(t, ix, vals, dkey, &bix.colls);
                 batch_bytes += k.len() + dkey.len() + 64;
                 batch.push((k, dkey.to_vec()));
@@ -3759,7 +3759,7 @@ impl Ddl<'_, '_> {
         let scope = IndexScope::enter(&bix, self);
         progress.scanning();
         // (With workers, as max_parallel_maintenance_workers has it: `parbuild`.)
-        let parallel = match self.measures_in_build(t, ix) && !quad {
+        let parallel = match self.measures_in_build(t, ix) && ix.method == "btree" && !quad {
             true => match super::parbuild::index_workers(self, t, crate::exec::sizing::heap_blocks(t, self.ctx)?.unwrap_or(0)) {
                 0 => None,
                 w => self.build_index_parallel(t, ix, &bix, w, &progress)?,
@@ -3926,7 +3926,7 @@ impl Ddl<'_, '_> {
                     return Err(self.duplicate_key(new, bix, &vals, &bix.index.name));
                 }
                 // (A native method's index is built again after the statement.)
-                if bix.index.id != 0 && !crate::ext::index_am::is_native(&self.cat, &bix.index.method) {
+                if crate::exec::scan::stores_entries(&bix.index) && !crate::ext::index_am::is_native(&self.cat, &bix.index.method) {
                     self.ctx
                         .txn
                         .borrow_mut()
@@ -4016,7 +4016,7 @@ impl Ddl<'_, '_> {
                 }
                 dkey
             };
-            for bix in bixs.iter().filter(|b| b.index.id != 0 && !crate::ext::index_am::is_native(&self.cat, &b.index.method)) {
+            for bix in bixs.iter().filter(|b| crate::exec::scan::stores_entries(&b.index) && !crate::ext::index_am::is_native(&self.cat, &b.index.method)) {
                 if let Some(vals) = index_values(bix, &row, self)? {
                     self.ctx
                         .txn
