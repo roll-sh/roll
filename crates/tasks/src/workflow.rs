@@ -1141,7 +1141,9 @@ pub(crate) async fn invoke(t: &Arc<Tasks>, cell: &Arc<Mutex<Message>>) -> anyhow
             && let Some(m) = t.store.msg_get(other).await?
             && !m.state.is_final()
         {
-            return Ok(Done::Skip("superseded".into()));
+            // The successor is durable before apply_ops publishes its id in the run. A
+            // worker that reaches it during that gap must keep it available for the handoff.
+            return Ok(Done::Deferred(t.config.poll_ms));
         }
         let v = run.version;
         run.invocation = Some(c.id.clone());

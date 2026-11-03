@@ -516,7 +516,9 @@ async fn app_handler(State(s): State<Arc<AppState>>, method: Method, Query(q): Q
         steps: req["steps"].as_object().cloned().unwrap_or_default(),
         app: s.clone(),
     };
-    let reply = match body(&mut ctx) {
+    // SDK callbacks may block; keep the node heartbeats and lease renewal running.
+    let result = tokio::task::spawn_blocking(move || body(&mut ctx)).await.unwrap();
+    let reply = match result {
         Ok(output) => json!({ "status": "done", "output": output }),
         Err(Stop::Ops(ops)) => json!({ "status": "steps", "steps": ops }),
         Err(Stop::Error { message, retriable }) => {
