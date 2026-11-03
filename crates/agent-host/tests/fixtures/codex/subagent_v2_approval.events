@@ -23,5 +23,6 @@
 {"text_delta":{"item":"msg_03696b8961937e5c016ab6d995012487d099704aa73dea56e6","text":"."}}
 {"item":{"body":{"text":"Written.","type":"message"},"id":"msg_03696b8961937e5c016ab6d995012487d099704aa73dea56e6","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":30208,"input_tokens":48351,"output_tokens":147}}
+{"turn_ref":"01a0da41-a31f-7741-bda3-ebc5ad36c38f"}
 {"turn_ended":"completed"}
 {"exited":null}

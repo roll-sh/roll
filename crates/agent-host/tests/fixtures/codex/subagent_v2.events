@@ -14,5 +14,6 @@
 {"text_delta":{"item":"msg_034802ac4db0e789016ab5c26b3d8c87d085ee92cd13fc7288","text":"."}}
 {"item":{"body":{"text":"Hello.","type":"message"},"id":"msg_034802ac4db0e789016ab5c26b3d8c87d085ee92cd13fc7288","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":55552,"input_tokens":68465,"output_tokens":69}}
+{"turn_ref":"01a0d5ff-4b00-7641-bba1-06faa0ef23f1"}
 {"turn_ended":"completed"}
 {"exited":null}

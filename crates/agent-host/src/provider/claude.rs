@@ -14,7 +14,7 @@ mod diff;
 mod models;
 mod translate;
 
-use super::{Provider, ProviderConfig, ProviderEvent, Session, SessionConfig, TurnEnd, TurnInput};
+use super::{ForkAt, Provider, ProviderConfig, ProviderEvent, Session, SessionConfig, TurnEnd, TurnInput};
 use agent_proto::{AuthStatus, Capabilities, InteractionMode, ProviderId, ProviderInfo, Response, RuntimeMode};
 use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
@@ -69,8 +69,9 @@ impl Claude {
     }
 }
 
+/// Forks are `--resume <source> --fork-session`, at a turn with `--resume-session-at`.
 fn capabilities() -> Capabilities {
-    Capabilities { steer: true, fork: false, rollback: true, plan_mode: true, images: true, subagents: true, mode_switch: true }
+    Capabilities { steer: true, fork: true, rollback: true, plan_mode: true, images: true, subagents: true, mode_switch: true }
 }
 
 /// Runtime and interaction modes as Claude permission modes (T3's
@@ -140,7 +141,20 @@ impl Provider for Claude {
 
     async fn start(&self, cfg: SessionConfig) -> anyhow::Result<(Box<dyn Session>, mpsc::Receiver<ProviderEvent>)> {
         let (tx, rx) = mpsc::channel(EVENT_BUFFER);
-        let session_id = cfg.resume.clone().unwrap_or_else(new_session_id);
+        let (session_id, open) = match (&cfg.resume, &cfg.fork) {
+            (Some(id), _) => (id.clone(), Open::Resume { at: None }),
+            // The copy gets an id of ours (`--session-id` with `--fork-session`), so it is
+            // known before the first turn.
+            (None, Some(fork)) => {
+                let at = match &fork.at {
+                    ForkAt::Latest => None,
+                    ForkAt::Turn(at) => Some(at.clone()),
+                    ForkAt::DropLast(_) => bail!("Claude forks at an assistant message, and the fork point names none"),
+                };
+                (new_session_id(), Open::Fork { from: fork.thread.clone(), at })
+            }
+            (None, None) => (new_session_id(), Open::New),
+        };
         let mode = permission_mode(cfg.runtime_mode, cfg.interaction_mode);
         let cwd = cfg.cwd.to_string_lossy().into_owned();
         let shared = Arc::new(Shared {
@@ -150,7 +164,7 @@ impl Provider for Claude {
                 tr: Translator::new(cwd, permission_mode(cfg.runtime_mode, InteractionMode::Default)),
                 runtime: cfg.runtime_mode,
                 interaction: cfg.interaction_mode,
-                fresh: cfg.resume.is_none(),
+                fresh: matches!(open, Open::New),
             }),
             proc: tokio::sync::Mutex::new(None),
             pending: Mutex::new(HashMap::new()),
@@ -158,8 +172,7 @@ impl Provider for Claude {
             generation: AtomicU64::new(0),
             closed: AtomicBool::new(false),
         });
-        let resume = cfg.resume.is_some().then_some(Resume { at: None });
-        Shared::spawn(&shared, mode, &session_id, resume).await?;
+        Shared::spawn(&shared, mode, &session_id, open).await?;
         let first = shared.state.lock().unwrap().tr.session(&session_id);
         shared.emit(first).await;
         Ok((Box::new(ClaudeSession { shared }), rx))
@@ -263,9 +276,13 @@ struct Launch {
     instructions: Option<String>,
 }
 
-struct Resume {
-    /// `--resume-session-at`: the assistant message to continue from (rollback).
-    at: Option<String>,
+/// How a launch opens its conversation.
+enum Open {
+    New,
+    /// `at`: `--resume-session-at`, the assistant message to continue from (rollback).
+    Resume { at: Option<String> },
+    /// A copy of conversation `from` (through message `at`) under the launch's session id.
+    Fork { from: String, at: Option<String> },
 }
 
 impl Launch {
@@ -298,7 +315,7 @@ impl Launch {
 
     /// The flags the SDKs pass, plus T3's choices: partial messages for streaming, summarized
     /// adaptive thinking, the user's own setting sources.
-    fn args(&self, mode: &str, session: &str, resume: Option<&Resume>) -> Vec<String> {
+    fn args(&self, mode: &str, session: &str, open: &Open) -> Vec<String> {
         let mut a: Vec<String> = self.pre_args.clone();
         let mut push = |xs: &[&str]| a.extend(xs.iter().map(|x| x.to_string()));
         push(&["--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--include-partial-messages"]);
@@ -329,14 +346,24 @@ impl Launch {
             push(&["--append-system-prompt", text]);
         }
         // `--flag=value`, so a value can never parse as a flag of its own (the SDKs do the same).
-        match resume {
-            None => a.push(format!("--session-id={session}")),
-            Some(r) => {
-                a.push(format!("--resume={session}"));
-                if let Some(at) = &r.at {
-                    a.push(format!("--resume-session-at={at}"));
-                }
+        let at = match open {
+            Open::New => {
+                a.push(format!("--session-id={session}"));
+                None
             }
+            Open::Resume { at } => {
+                a.push(format!("--resume={session}"));
+                at.as_ref()
+            }
+            Open::Fork { from, at } => {
+                a.push(format!("--resume={from}"));
+                a.push("--fork-session".into());
+                a.push(format!("--session-id={session}"));
+                at.as_ref()
+            }
+        };
+        if let Some(at) = at {
+            a.push(format!("--resume-session-at={at}"));
         }
         a
     }
@@ -371,10 +398,10 @@ struct Proc {
 
 impl Shared {
     /// Launch the CLI and initialize the control protocol.
-    async fn spawn(self: &Arc<Self>, mode: &str, session: &str, resume: Option<Resume>) -> anyhow::Result<()> {
+    async fn spawn(self: &Arc<Self>, mode: &str, session: &str, open: Open) -> anyhow::Result<()> {
         let l = &self.launch;
         let mut cmd = Command::new(&l.binary);
-        cmd.args(l.args(mode, session, resume.as_ref()));
+        cmd.args(l.args(mode, session, &open));
         cmd.env_remove("CLAUDECODE").env("CLAUDE_CODE_ENTRYPOINT", "sdk-ts").envs(l.env.iter().cloned());
         cmd.env("PWD", &l.cwd).current_dir(&l.cwd);
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
@@ -648,7 +675,7 @@ impl Session for ClaudeSession {
     /// `resumeSessionAt`, the last assistant message of the newest turn kept.
     async fn rollback(&self, turns: u32) -> anyhow::Result<()> {
         let turns = turns as usize;
-        let (session, resume, mode) = {
+        let (session, open, mode) = {
             let mut st = self.shared.state.lock().unwrap();
             if st.tr.turn_active() {
                 bail!("a turn is running");
@@ -661,26 +688,26 @@ impl Session for ClaudeSession {
                 bail!("Claude can only roll back turns this session ran ({ran})");
             }
             let keep = ran - turns;
-            let resume = match keep {
-                0 if st.fresh => None,
-                0 => bail!("Claude can't roll back past where this session resumed"),
+            let open = match keep {
+                0 if st.fresh => Open::New,
+                0 => bail!("Claude can't roll back past where this session resumed or forked"),
                 _ => match st.tr.cursors[keep - 1].clone() {
-                    Some(at) => Some(Resume { at: Some(at) }),
+                    Some(at) => Open::Resume { at: Some(at) },
                     None => bail!("turn {keep} has no Claude message to roll back to"),
                 },
             };
             st.tr.cursors.truncate(keep);
-            let session = match &resume {
-                Some(_) => st.tr.session_id().unwrap_or_default().to_string(),
+            let session = match &open {
                 // Back to before the first turn: a new conversation.
-                None => new_session_id(),
+                Open::New => new_session_id(),
+                _ => st.tr.session_id().unwrap_or_default().to_string(),
             };
-            (session, resume, permission_mode(st.runtime, st.interaction))
+            (session, open, permission_mode(st.runtime, st.interaction))
         };
         // The old process's exit isn't the session's.
         self.shared.generation.fetch_add(1, Ordering::SeqCst);
         self.shared.kill().await;
-        Shared::spawn(&self.shared, mode, &session, resume).await?;
+        Shared::spawn(&self.shared, mode, &session, open).await?;
         let event = self.shared.state.lock().unwrap().tr.session(&session);
         self.shared.emit(event).await;
         Ok(())

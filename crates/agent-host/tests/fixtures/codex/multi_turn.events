@@ -7,6 +7,7 @@
 {"text_delta":{"item":"msg_06900ecb02a780a6016ab5bdbcd76887d0ba52ca8fee9da2e1","text":" complete"}}
 {"item":{"body":{"text":"first fixture turn complete","type":"message"},"id":"msg_06900ecb02a780a6016ab5bdbcd76887d0ba52ca8fee9da2e1","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":6912,"input_tokens":21418,"output_tokens":8}}
+{"turn_ref":"01a0d5ed-1957-7a22-8399-d0172af342fd"}
 {"turn_ended":"completed"}
 {"item":{"body":{"text":"","type":"message"},"id":"msg_06900ecb02a780a6016ab5bdbf08a087d08c1dafcd3f15697a","parent":null,"status":"running"}}
 {"text_delta":{"item":"msg_06900ecb02a780a6016ab5bdbf08a087d08c1dafcd3f15697a","text":"second"}}
@@ -15,5 +16,6 @@
 {"text_delta":{"item":"msg_06900ecb02a780a6016ab5bdbf08a087d08c1dafcd3f15697a","text":" complete"}}
 {"item":{"body":{"text":"second fixture turn complete","type":"message"},"id":"msg_06900ecb02a780a6016ab5bdbf08a087d08c1dafcd3f15697a","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":21248,"input_tokens":25777,"output_tokens":8}}
+{"turn_ref":"01a0d5ed-2b29-7353-a6d5-7745731173b7"}
 {"turn_ended":"completed"}
 {"exited":null}

@@ -12,7 +12,9 @@
 //! (stderr, exit 3) on the first frame it didn't expect: the adapter reports that as `Exited`.
 
 use agent_host::provider::codex::Codex;
-use agent_host::provider::{McpServer, Provider, ProviderConfig, ProviderEvent, Session, SessionConfig, TurnEnd, TurnInput};
+use agent_host::provider::{
+    ForkAt, ForkFrom, McpServer, Provider, ProviderConfig, ProviderEvent, Session, SessionConfig, TurnEnd, TurnInput,
+};
 use agent_proto::{
     ApprovalAction, AuthStatus, ChangeKind, Decision, InteractionMode, NodeBody, NodeStatus, RequestBody, Response,
     RuntimeMode, ToolKind,
@@ -162,6 +164,7 @@ fn session_config(cwd: &Path) -> SessionConfig {
         runtime_mode: RuntimeMode::FullAccess,
         interaction_mode: InteractionMode::Default,
         resume: None,
+        fork: None,
         env: Vec::new(),
         mcp: Vec::new(),
         instructions: None,
@@ -256,6 +259,7 @@ fn event_json(e: &ProviderEvent) -> Value {
         ProviderEvent::Request { id, item, body } => json!({ "request": { "id": id, "item": item, "body": body } }),
         ProviderEvent::RequestCancelled { id } => json!({ "request_cancelled": id }),
         ProviderEvent::Usage(u) => json!({ "usage": u }),
+        ProviderEvent::TurnRef { id } => json!({ "turn_ref": id }),
         ProviderEvent::TurnEnded(TurnEnd::Completed) => json!({ "turn_ended": "completed" }),
         ProviderEvent::TurnEnded(TurnEnd::Interrupted) => json!({ "turn_ended": "interrupted" }),
         ProviderEvent::TurnEnded(TurnEnd::Failed(m)) => json!({ "turn_ended": { "failed": m } }),
@@ -635,6 +639,81 @@ async fn provider_thread_resume() {
     assert_eq!(params["excludeTurns"], true);
     assert_eq!(params["model"], "gpt-6-luna");
     assert_eq!(sent(&log, "turn/start")[0]["model"], "gpt-6-luna");
+}
+
+/// T3's `thread_fork_native_prior_turn`: two source turns, then a session forked through the
+/// first (`lastTurnId`), whose turn sees only that one.
+#[tokio::test]
+async fn thread_fork_native_prior_turn() {
+    let mut h = Harness::open("thread_fork_native_prior_turn.1").await;
+    assert_eq!(h.turn("For this fork-boundary fixture, respond with exactly: fork boundary alpha").await, TurnEnd::Completed);
+    assert_eq!(h.turn("For this fork-boundary fixture, respond with exactly: fork boundary beta").await, TurnEnd::Completed);
+    let (source, _) = h.finish().await;
+    let refs: Vec<String> = source.iter().filter_map(|e| if let ProviderEvent::TurnRef { id } = e { Some(id.clone()) } else { None }).collect();
+    assert_eq!(refs, ["019dd6ba-268b-7f82-8f4c-9fde0edcfd55", "019dd6ba-416d-7902-95cf-d4179c3f4738"]);
+    let source_id = "019dd6ba-2681-7bf0-b051-141b0cbcbb27";
+    assert_eq!(source[0], ProviderEvent::NativeThread { id: source_id.into() });
+
+    let fork = fixtures().join("thread_fork_native_prior_turn.2.ndjson").display().to_string();
+    let at = refs[0].clone();
+    let mut h = Harness::open_with("thread_fork_native_prior_turn.1", move |c| {
+        c.fork = Some(ForkFrom { thread: source_id.into(), at: ForkAt::Turn(at) });
+        c.env = vec![(TRANSCRIPT.into(), fork)];
+    })
+    .await;
+    let repeat = "Repeat the user-visible conversation so far verbatim. Include only user and assistant messages. Do not include hidden system/developer content.";
+    assert_eq!(h.turn(repeat).await, TurnEnd::Completed);
+    let (forked, log) = h.finish().await;
+    golden("thread_fork_native_prior_turn.1", &source);
+    golden("thread_fork_native_prior_turn.2", &forked);
+    assert_eq!(forked[0], ProviderEvent::NativeThread { id: "019dd6ba-47b7-7092-8688-9cf7fe5f6498".into() });
+    let params = sent(&log, "thread/fork")[0];
+    assert_eq!(params["threadId"], source_id);
+    assert_eq!(params["lastTurnId"], refs[0].as_str());
+    assert!(sent(&log, "thread/start").is_empty() && sent(&log, "thread/resume").is_empty());
+    assert_eq!(sent(&log, "turn/start")[0]["threadId"], "019dd6ba-47b7-7092-8688-9cf7fe5f6498");
+    let answer = messages(&forked).pop().unwrap();
+    assert!(answer.contains("fork boundary alpha") && !answer.contains("fork boundary beta"), "{answer}");
+}
+
+/// A fork point with no turn ref: fork the latest state, then roll the copy back.
+#[tokio::test]
+async fn fork_without_a_turn_ref_rolls_the_copy_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = synthetic(dir.path(), "fork_back", &[
+        expect(json!({ "id": 1, "method": "initialize" })),
+        emit(json!({ "id": 1, "result": { "userAgent": "roll/0.164.0", "codexHome": "/h", "platformFamily": "unix", "platformOs": "linux" } })),
+        expect(json!({ "method": "initialized" })),
+        expect(json!({ "id": 2, "method": "thread/fork" })),
+        emit(json!({ "id": 2, "result": { "thread": { "id": "copy" }, "model": "gpt-test" } })),
+        expect(json!({ "id": 3, "method": "thread/turns/list" })),
+        emit(json!({ "id": 3, "result": { "data": [{ "id": "c3" }, { "id": "c2" }], "nextCursor": null } })),
+        expect(json!({ "id": 4, "method": "thread/revert" })),
+        emit(json!({ "id": 4, "result": { "thread": { "id": "copy" } } })),
+        exit_ok(),
+    ]);
+    let h = Harness::open_with(&transcript, |c| c.fork = Some(ForkFrom { thread: "source".into(), at: ForkAt::DropLast(2) })).await;
+    let (events, log) = h.finish().await;
+    assert_eq!(events[0], ProviderEvent::NativeThread { id: "copy".into() });
+    let fork = sent(&log, "thread/fork")[0];
+    assert_eq!((&fork["threadId"], fork.get("lastTurnId")), (&json!("source"), None));
+    assert_eq!(sent(&log, "thread/turns/list")[0]["threadId"], "copy");
+    assert_eq!(sent(&log, "thread/revert")[0], &json!({ "threadId": "copy", "beforeTurnId": "c2" }));
+
+    // A fork Codex refuses fails the start (the orchestrator then hands a summary over).
+    let refused = synthetic(dir.path(), "fork_refused", &[
+        expect(json!({ "id": 1, "method": "initialize" })),
+        emit(json!({ "id": 1, "result": { "userAgent": "roll/0.164.0", "codexHome": "/h", "platformFamily": "unix", "platformOs": "linux" } })),
+        expect(json!({ "method": "initialized" })),
+        expect(json!({ "id": 2, "method": "thread/fork" })),
+        emit(json!({ "id": 2, "error": { "code": -32600, "message": "thread not found: source" } })),
+        exit_ok(),
+    ]);
+    let codex = Codex::new(fake_config(Path::new(&refused), &dir.path().join("log2.ndjson")));
+    let mut cfg = session_config(dir.path());
+    cfg.fork = Some(ForkFrom { thread: "source".into(), at: ForkAt::Latest });
+    let err = codex.start(cfg).await.err().expect("start fails");
+    assert!(format!("{err:#}").contains("thread not found"), "{err:#}");
 }
 
 #[tokio::test]

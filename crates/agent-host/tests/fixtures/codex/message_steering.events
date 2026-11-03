@@ -15,5 +15,6 @@
 {"text_delta":{"item":"msg_082e3c417c674aca016ab5bdd2530487d08314cbb7d690f5d2","text":" observed"}}
 {"item":{"body":{"text":"steering fixture observed","type":"message"},"id":"msg_082e3c417c674aca016ab5bdd2530487d08314cbb7d690f5d2","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":28160,"input_tokens":42860,"output_tokens":17}}
+{"turn_ref":"01a0d5ed-670e-7032-9a87-707c736491a6"}
 {"turn_ended":"completed"}
 {"exited":null}

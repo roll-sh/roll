@@ -30,5 +30,6 @@
 {"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1f494887d080c69010f9873eec","text":" complete"}}
 {"item":{"body":{"text":"web search fixture complete","type":"message"},"id":"msg_03bceefdcc0be4af016ab5be1f494887d080c69010f9873eec","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":42496,"input_tokens":46848,"output_tokens":79}}
+{"turn_ref":"01a0d5ee-8888-7d30-8f2b-68fe28f521bc"}
 {"turn_ended":"completed"}
 {"exited":null}

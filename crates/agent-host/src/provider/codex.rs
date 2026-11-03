@@ -4,8 +4,9 @@
 //! Behaviour follows T3 Code's adapter (MIT): `apps/server/src/orchestration-v2/Adapters/
 //! CodexAdapterV2.ts` for sessions, `apps/server/src/provider/CodexProvider.ts` for the status
 //! probe, and `packages/effect-codex-app-server` for the protocol client. One process serves one
-//! session: `initialize`, then `thread/start` (or `thread/resume`), then a `turn/start` per turn
-//! carrying the approval policy, sandbox and collaboration mode for the session's modes.
+//! session: `initialize`, then `thread/start` (or `thread/resume`, or `thread/fork` for a session
+//! that starts as a fork), then a `turn/start` per turn carrying the approval policy, sandbox and
+//! collaboration mode for the session's modes.
 //!
 //! - `rpc`: the process and the JSON-RPC connection.
 //! - `wire`: the slice of Codex's schema the adapter reads.
@@ -17,7 +18,7 @@ mod session;
 mod translate;
 mod wire;
 
-use super::{Provider, ProviderConfig, ProviderEvent, Session, SessionConfig};
+use super::{ForkAt, ForkFrom, Provider, ProviderConfig, ProviderEvent, Session, SessionConfig};
 use agent_proto::{AuthStatus, Capabilities, ModelInfo, ProviderId, ProviderInfo};
 use anyhow::Context;
 use async_trait::async_trait;
@@ -87,6 +88,9 @@ fn thread_params(cfg: &SessionConfig) -> Value {
 
 async fn open_thread(rpc: &rpc::Rpc, cfg: &SessionConfig) -> anyhow::Result<wire::ThreadResponse> {
     let mut params = thread_params(cfg);
+    if let Some(fork) = &cfg.fork {
+        return fork_thread(rpc, params, fork).await;
+    }
     let response = match &cfg.resume {
         None => rpc.request("thread/start", params).await?,
         Some(thread) => {
@@ -104,6 +108,22 @@ async fn open_thread(rpc: &rpc::Rpc, cfg: &SessionConfig) -> anyhow::Result<wire
     };
     let thread: wire::ThreadResponse = serde_json::from_value(response).context("thread answer")?;
     anyhow::ensure!(!thread.thread.id.is_empty(), "codex answered without a thread id");
+    Ok(thread)
+}
+
+/// T3's `forkThread`: `thread/fork` through the fork point's turn (`lastTurnId` is inclusive), or
+/// of the latest state and then the copy rolled back by the turns after the point.
+async fn fork_thread(rpc: &rpc::Rpc, mut params: Value, fork: &ForkFrom) -> anyhow::Result<wire::ThreadResponse> {
+    params["threadId"] = json!(fork.thread);
+    params["excludeTurns"] = json!(true);
+    if let ForkAt::Turn(turn) = &fork.at {
+        params["lastTurnId"] = json!(turn);
+    }
+    let thread: wire::ThreadResponse = serde_json::from_value(rpc.request("thread/fork", params).await?).context("thread/fork answer")?;
+    anyhow::ensure!(!thread.thread.id.is_empty(), "codex forked without a thread id");
+    if let ForkAt::DropLast(turns) = fork.at {
+        session::revert(rpc, &thread.thread.id, turns).await.context("rolling the fork back to its turn")?;
+    }
     Ok(thread)
 }
 
@@ -202,8 +222,8 @@ impl Provider for Codex {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             steer: true,
-            // Codex can fork (`thread/fork`), but the Session contract has no fork call yet.
-            fork: false,
+            // `thread/fork`, at a turn (`lastTurnId`).
+            fork: true,
             rollback: true,
             plan_mode: true,
             images: true,

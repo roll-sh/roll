@@ -534,7 +534,7 @@ impl Translator {
     /// End the turn: close what's still open, withdraw pending requests, report usage.
     pub fn end_turn(&mut self, end: TurnEnd) -> Vec<ProviderEvent> {
         let Some(turn) = self.turn.take() else { return Vec::new() };
-        self.cursors.push(turn.cursor);
+        self.cursors.push(turn.cursor.clone());
         let status = match end {
             TurnEnd::Completed => NodeStatus::Completed,
             TurnEnd::Interrupted => NodeStatus::Interrupted,
@@ -555,6 +555,8 @@ impl Translator {
         self.blocks.clear();
         self.streaming.clear();
         events.push(ProviderEvent::Usage(turn.usage));
+        // Where a fork through this turn resumes (`--resume-session-at`).
+        events.extend(turn.cursor.map(|id| ProviderEvent::TurnRef { id }));
         events.push(ProviderEvent::TurnEnded(end));
         events
     }

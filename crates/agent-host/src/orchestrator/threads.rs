@@ -6,8 +6,9 @@
 //! `CheckpointRollbackService.ts` (restore files, mark later runs rolled back, roll the provider
 //! back natively or start it fresh with a summary).
 
-use super::{Fail, Host, Private, Res, Rt, handoff, now, suffix};
+use super::{Fail, Host, Private, Res, Rt, Transfer, handoff, now, suffix};
 use crate::git;
+use crate::provider::{ForkAt, ForkFrom};
 use agent_proto::*;
 use std::path::Path;
 
@@ -220,10 +221,56 @@ impl Host {
             updated_at: at_ms,
             archived_at: None,
         };
-        self.store.put_thread_state(&id, &Private { preamble, ..Private::default() })?;
+        // Nothing is forked yet: the fork's first session forks the parent's native conversation
+        // when it can, else hands the summary over (T3's lazy fork resolution).
+        let transfer = (upto > 0).then(|| Transfer::Pending { provider: s.provider.0.clone(), upto });
+        self.store.put_thread_state(&id, &Private { preamble, transfer, ..Private::default() })?;
         self.put(vec![Entity::Thread(thread)])?;
         drop(src);
         Ok(Reply::Created { id: id.0 })
+    }
+
+    /// Where a pending fork's provider conversation would start: the parent's native
+    /// conversation at its fork point, read from the parent's stored state (it may have moved on
+    /// since the fork was made). `None` when the fork can't start natively.
+    pub(crate) fn native_fork(&self, rt: &Rt) -> Res<Option<ForkFrom>> {
+        let (Some(Transfer::Pending { provider, upto }), Some(lineage)) = (&rt.private.transfer, &rt.thread.lineage) else {
+            return Ok(None);
+        };
+        if provider != rt.thread.provider.as_str() {
+            return Ok(None);
+        }
+        let Some(parent) = self.store.thread_state::<Private>(&lineage.parent)? else { return Ok(None) };
+        Ok(fork_point(&parent, &self.runs_of(&lineage.parent)?, provider, *upto))
+    }
+
+    /// Records how a fork's first session got its parent's conversation, and says so in the run
+    /// that started it.
+    pub(crate) fn settle_transfer(&self, rt: &mut Rt, native: bool) -> anyhow::Result<()> {
+        let provider = rt.thread.provider.0.clone();
+        let text = if native {
+            // The copy holds the parent's runs through the fork point: nothing to hand over.
+            rt.private.seen.insert(provider.clone(), 0);
+            format!("Forked natively: {provider} goes on from its own conversation in the parent thread")
+        } else {
+            format!("Forked with a summary: {provider} starts fresh with a summary of the parent thread")
+        };
+        rt.private.transfer = Some(if native { Transfer::Native } else { Transfer::Portable });
+        self.save_private(rt)?;
+        let Some(active) = rt.active.as_mut() else { return Ok(()) };
+        let at = now();
+        let node = Node {
+            id: NodeId::from_suffix(&suffix()),
+            thread: rt.thread.id.clone(),
+            run: active.run.id.clone(),
+            parent: None,
+            ordinal: active.take_ordinal(),
+            status: NodeStatus::Completed,
+            started_at: at,
+            completed_at: Some(at),
+            body: NodeBody::System { text },
+        };
+        self.put(vec![Entity::Node(node)])
     }
 
     pub(crate) async fn thread_archive(&self, thread: &ThreadId, archive: bool) -> Res<Reply> {
@@ -309,6 +356,7 @@ impl Host {
             }));
         }
         rt.private.head = Some(target.commit.clone());
+        rt.private.refs.retain(|ordinal, _| *ordinal <= target.ordinal);
         self.rollback_providers(&mut rt, &rolled, target.ordinal).await?;
         rt.thread.updated_at = now();
         batch.push(Entity::Thread(rt.thread.clone()));
@@ -376,5 +424,124 @@ impl Host {
             .await
             .map_err(|e| Fail::Invalid(format!("{e:#}")))?;
         Ok(Reply::Published(published))
+    }
+}
+
+/// Where `provider`'s native conversation of a thread (its private state and runs) holds
+/// exactly the thread's runs through `upto` (T3's `resolveCodexForkBoundary` /
+/// `resolveClaudeForkUpToMessageId`). The run itself must be in that conversation: run by the
+/// provider and sent to it. Then the fork starts at the run's own ref when it has one in this
+/// conversation; else at the latest state when nothing came after it, or that minus the turns of
+/// the later runs, when each of those is known to be in this conversation. Anything less certain
+/// is `None`: a portable fork is better than one at the wrong point.
+fn fork_point(private: &Private, runs: &[Run], provider: &str, upto: u32) -> Option<ForkFrom> {
+    let thread = private.native.get(provider)?;
+    let seen = *private.seen.get(provider)?;
+    let run = runs.iter().find(|r| r.ordinal == upto)?;
+    let sent = private.turns.get(&upto).is_some_and(|t| *t > 0);
+    if run.provider.as_str() != provider || run.status == RunStatus::RolledBack || !sent || seen < upto {
+        return None;
+    }
+    let ours = |ordinal: u32| private.refs.get(&ordinal).filter(|r| &r.thread == thread);
+    if let Some(r) = private.refs.get(&upto) {
+        return (&r.thread == thread).then(|| ForkFrom { thread: thread.clone(), at: ForkAt::Turn(r.turn.clone()) });
+    }
+    let later: Vec<&Run> = runs
+        .iter()
+        .filter(|r| r.ordinal > upto && r.ordinal <= seen && r.provider.as_str() == provider)
+        .filter(|r| r.status != RunStatus::RolledBack && private.turns.get(&r.ordinal).is_some_and(|t| *t > 0))
+        .collect();
+    let at = if later.is_empty() {
+        ForkAt::Latest
+    } else if later.iter().all(|r| ours(r.ordinal).is_some()) {
+        ForkAt::DropLast(later.iter().map(|r| private.turns[&r.ordinal]).sum())
+    } else {
+        return None;
+    };
+    Some(ForkFrom { thread: thread.clone(), at })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::orchestrator::NativeRef;
+
+    fn run(ordinal: u32, provider: &str, status: RunStatus) -> Run {
+        Run {
+            id: RunId::from_suffix(&format!("{ordinal:016x}")),
+            thread: ThreadId::from_suffix("0000000000000001"),
+            ordinal,
+            provider: ProviderId(provider.into()),
+            model: None,
+            status,
+            prompt: String::new(),
+            attachments: Vec::new(),
+            steers: Vec::new(),
+            requested_at: 0,
+            started_at: None,
+            completed_at: None,
+            checkpoint: None,
+            stat: None,
+            usage: Usage::default(),
+            error: None,
+        }
+    }
+
+    /// Runs 1 and 3 on codex (conversation `c`), run 2 on claude; each sent once.
+    fn thread() -> (Private, Vec<Run>) {
+        let mut p = Private::default();
+        p.native.insert("codex".into(), "c".into());
+        p.seen.insert("codex".into(), 3);
+        p.turns.extend([(1, 1), (2, 1), (3, 2)]);
+        let runs = vec![run(1, "codex", RunStatus::Completed), run(2, "claude", RunStatus::Completed), run(3, "codex", RunStatus::Completed)];
+        (p, runs)
+    }
+
+    fn reference(thread: &str, turn: &str) -> NativeRef {
+        NativeRef { thread: thread.into(), turn: turn.into() }
+    }
+
+    fn at(p: &Private, runs: &[Run], upto: u32) -> Option<ForkAt> {
+        fork_point(p, runs, "codex", upto).map(|f| {
+            assert_eq!(f.thread, "c");
+            f.at
+        })
+    }
+
+    #[test]
+    fn a_run_with_a_ref_forks_at_its_turn() {
+        let (mut p, runs) = thread();
+        p.refs.insert(1, reference("c", "t1"));
+        assert_eq!(at(&p, &runs, 1), Some(ForkAt::Turn("t1".into())));
+        // A ref from a conversation the provider no longer has is no use.
+        p.refs.insert(1, reference("old", "t1"));
+        assert_eq!(at(&p, &runs, 1), None);
+    }
+
+    #[test]
+    fn without_a_ref_the_latest_state_or_minus_the_later_turns() {
+        let (mut p, runs) = thread();
+        assert_eq!(at(&p, &runs, 3), Some(ForkAt::Latest));
+        // Run 3 is in this conversation (its ref says so): drop its two turns.
+        p.refs.insert(3, reference("c", "t3"));
+        assert_eq!(at(&p, &runs, 1), Some(ForkAt::DropLast(2)));
+        // Unknown membership of a later run: not native.
+        p.refs.clear();
+        assert_eq!(at(&p, &runs, 1), None);
+    }
+
+    #[test]
+    fn runs_the_conversation_does_not_hold_are_not_native() {
+        let (mut p, mut runs) = thread();
+        assert_eq!(at(&p, &runs, 2), None, "another provider's run");
+        assert_eq!(fork_point(&p, &runs, "claude", 2), None, "a provider with no conversation");
+        assert_eq!(at(&p, &runs, 4), None, "no such run");
+        runs[0].status = RunStatus::RolledBack;
+        assert_eq!(at(&p, &runs, 1), None, "rolled back");
+        runs[0].status = RunStatus::Failed;
+        p.turns.remove(&1);
+        assert_eq!(at(&p, &runs, 1), None, "never reached the provider");
+        p.seen.insert("codex".into(), 0);
+        assert_eq!(at(&p, &runs, 3), None, "newer than the conversation");
     }
 }

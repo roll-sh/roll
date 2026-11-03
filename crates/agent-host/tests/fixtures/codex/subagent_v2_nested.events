@@ -32,5 +32,6 @@
 {"text_delta":{"item":"msg_08ebdfd40cabefd2016ab5c286f50487d09012833b353f7cff","text":"."}}
 {"item":{"body":{"text":"Hello.","type":"message"},"id":"msg_08ebdfd40cabefd2016ab5c286f50487d09012833b353f7cff","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":63744,"input_tokens":64708,"output_tokens":109}}
+{"turn_ref":"01a0d5ff-7c5b-7bf1-a92a-39f93af77a6c"}
 {"turn_ended":"completed"}
 {"exited":null}

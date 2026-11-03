@@ -11,13 +11,18 @@
 //!   `apps/server/src/orchestration-v2/testkit/fixtures/*/claude_transcript.ndjson`), recorded
 //!   at the Agent SDK's `query()` level: `emit_inbound` frames are the CLI's output lines,
 //!   `permission.request`/`permission.response` become `can_use_tool` control messages,
-//!   `query.open` checks the launch flags and `query.interrupt` an interrupt request.
+//!   `query.open` checks the launch flags and `query.interrupt` an interrupt request. Each
+//!   `runtime_exit` ends a launch, and the SDK's `session.fork` becomes the next launch's
+//!   `--resume <source> --fork-session --resume-session-at` (Claude Code 2.1.310 takes these
+//!   with `--session-id`, checked by hand against the real CLI).
 //! - `recorded/`: the raw stdio of the real CLI (2.1.310), both directions
 //!   (`{"dir": "in" | "out" | "stderr" | "exit", "line": …}`), account data and paths scrubbed.
 //! - the rest: hand-written in the raw format, for what no recording covers.
 
 use agent_host::provider::claude::Claude;
-use agent_host::provider::{McpServer, Provider, ProviderConfig, ProviderEvent, Session, SessionConfig, TurnEnd, TurnInput};
+use agent_host::provider::{
+    ForkAt, ForkFrom, McpServer, Provider, ProviderConfig, ProviderEvent, Session, SessionConfig, TurnEnd, TurnInput,
+};
 use agent_proto::{
     Attachment, AuthStatus, Decision, InteractionMode, NodeBody, NodeStatus, RequestBody, Response, RuntimeMode,
 };
@@ -50,6 +55,9 @@ fn main() {
         ("todos_edits_and_notices", todos_edits_and_notices),
         ("crash_fails_the_turn_with_stderr", crash_fails_the_turn_with_stderr),
         ("rollback_resumes_at_the_kept_turn", rollback_resumes_at_the_kept_turn),
+        ("forks_natively_at_a_turn", forks_natively_at_a_turn),
+        ("forks_natively_at_a_prior_turn", forks_natively_at_a_prior_turn),
+        ("rolls_back_inside_a_native_fork", rolls_back_inside_a_native_fork),
         ("launch_flags_follow_the_session_config", launch_flags_follow_the_session_config),
         ("info_reports_version_login_and_models", info_reports_version_login_and_models),
         ("info_without_the_cli", info_without_the_cli),
@@ -571,6 +579,106 @@ fn rollback_resumes_at_the_kept_turn() {
     });
 }
 
+// ---------------------------------------------------------------------------------------------
+// Native forks (T3's `thread_fork_native*` fixtures)
+// ---------------------------------------------------------------------------------------------
+
+const FORK_SOURCE: &str = "8d0dafab-45d3-45eb-abef-41b9e55d5ff9";
+
+fn forks_natively_at_a_turn() {
+    block_on(async {
+        let mut r = Replay::t3("thread_fork_native", RuntimeMode::FullAccess).await;
+        r.send(0).await;
+        r.turn().await;
+        r.close().await;
+        let refs = r.turn_refs();
+        assert_eq!(refs, ["68baa075-b7d4-4689-866b-96bd51e570c3"]);
+
+        // Claude names fork points by message: it can't drop turns it has no message for.
+        let drop = SessionConfig { fork: Some(ForkFrom { thread: FORK_SOURCE.into(), at: ForkAt::DropLast(1) }), ..r.cfg.clone() };
+        assert!(r.claude.start(drop).await.is_err());
+        assert_eq!(r.launches().len(), 1, "refused before launching");
+
+        r.fork(ForkFrom { thread: FORK_SOURCE.into(), at: ForkAt::Turn(refs[0].clone()) }).await;
+        r.send(1).await;
+        r.turn().await;
+        r.close().await;
+        let launches = r.launches();
+        assert_eq!(launches.len(), 2);
+        assert!(has_flags(&launches[1], &[&format!("--resume={FORK_SOURCE}"), "--fork-session"]), "{:?}", launches[1]);
+        assert!(has_flags(&launches[1], &["--resume-session-at=68baa075-b7d4-4689-866b-96bd51e570c3"]));
+        // The copy runs under an id of ours, known before its first turn.
+        assert!(launches[1].iter().any(|a| a.starts_with("--session-id=")) && !launches[1].contains(&format!("--session-id={FORK_SOURCE}")));
+        r.with_refs().expect(&[
+            "thread (new)",
+            &format!("thread {FORK_SOURCE}"),
+            "model claude-sonnet-4-6",
+            "completed msg_01RzC6FfR9RGxxVcrpBK6duZ:0: message source fork seed ok",
+            "usage in=11797 out=7 cached=9455 cost=0.011722",
+            "ref 68baa075-b7d4-4689-866b-96bd51e570c3",
+            "turn completed",
+            "exited",
+            "thread (new)",
+            "model claude-sonnet-4-6",
+            "completed msg_01MvGdK8D9o71fU1raKAbM69:0: message fork native ok",
+            "usage in=11817 out=6 cached=11794 cost=0.003712",
+            "ref b800a4dd-77a5-4e68-acac-1c651a50a02e",
+            "turn completed",
+            "exited",
+        ]);
+    });
+}
+
+fn forks_natively_at_a_prior_turn() {
+    block_on(async {
+        let mut r = Replay::t3("thread_fork_native_prior_turn", RuntimeMode::FullAccess).await;
+        r.send(0).await;
+        r.turn().await;
+        r.send(1).await;
+        r.turn().await;
+        r.close().await;
+        let refs = r.turn_refs();
+        assert_eq!(refs, ["be0e3276-8c27-44bf-8ed0-0b4424e9f902", "c517b74b-9537-4260-afcb-186c4056c0a4"]);
+        r.fork(ForkFrom { thread: "a91391e1-0de3-4107-a7c9-db7b1bbd8b99".into(), at: ForkAt::Turn(refs[0].clone()) }).await;
+        r.send(2).await;
+        r.turn().await;
+        r.close().await;
+        assert!(has_flags(&r.launches()[1], &["--resume-session-at=be0e3276-8c27-44bf-8ed0-0b4424e9f902"]));
+        // The copy only holds the first turn.
+        let last = r.last_message();
+        assert!(last.contains("fork boundary alpha") && !last.contains("beta"), "{last}");
+        r.expect_tail(&["turn completed", "exited"]);
+    });
+}
+
+fn rolls_back_inside_a_native_fork() {
+    block_on(async {
+        let mut r = Replay::t3("thread_fork_native_fork_local_rollback", RuntimeMode::FullAccess).await;
+        r.send(0).await;
+        r.turn().await;
+        r.close().await;
+        let at = r.turn_refs().remove(0);
+        r.fork(ForkFrom { thread: "273fe17b-65fb-451f-ad99-ff19d323852d".into(), at: ForkAt::Turn(at) }).await;
+        r.send(1).await;
+        r.turn().await;
+        r.send(2).await;
+        r.turn().await;
+        assert!(r.session.rollback(2).await.is_err(), "the fork's own history starts after the fork point");
+        r.session.rollback(1).await.unwrap();
+        r.send(3).await;
+        r.turn().await;
+        r.close().await;
+        let launches = r.launches();
+        assert_eq!(launches.len(), 3);
+        // Back to the fork's first turn, in the copy (its id is ours), not the source.
+        let ours = launches[1].iter().find_map(|a| a.strip_prefix("--session-id=")).unwrap();
+        assert!(has_flags(&launches[2], &[&format!("--resume={ours}"), "--resume-session-at=14310fd5-a1aa-448b-8880-de52f86541b1"]), "{:?}", launches[2]);
+        let last = r.last_message();
+        assert!(last.contains("fork local first") && !last.contains("fork local second"), "{last}");
+        r.expect_tail(&["turn completed", "exited"]);
+    });
+}
+
 fn launch_flags_follow_the_session_config() {
     block_on(async {
         let mut o = opts(RuntimeMode::AutoEdit).model("claude-opus-5-5").effort("ultracode");
@@ -614,7 +722,7 @@ fn info_reports_version_login_and_models() {
         assert_eq!(info.detail.as_deref(), Some("Logged in as dev@example.com (max)"));
         // Haiku 5.5 needs Claude Code 2.1.293.
         assert_eq!(info.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"]);
-        assert!(info.capabilities.steer && info.capabilities.mode_switch && info.capabilities.rollback && !info.capabilities.fork);
+        assert!(info.capabilities.steer && info.capabilities.mode_switch && info.capabilities.rollback && info.capabilities.fork);
 
         let signed_out = Claude::new(ProviderConfig {
             binary: Some(std::env::current_exe().unwrap()),
@@ -659,6 +767,7 @@ struct Opts {
     model: Option<String>,
     effort: Option<String>,
     resume: Option<String>,
+    fork: Option<ForkFrom>,
     instructions: Option<String>,
     mcp: Vec<McpServer>,
     env: Vec<(String, String)>,
@@ -690,12 +799,15 @@ impl Opts {
 }
 
 struct Replay {
+    claude: Claude,
+    cfg: SessionConfig,
     session: Box<dyn Session>,
     rx: tokio::sync::mpsc::Receiver<ProviderEvent>,
     events: Vec<ProviderEvent>,
     prompts: Vec<String>,
     argv: PathBuf,
     deltas: bool,
+    refs: bool,
     _dir: tempfile::TempDir,
     cwd: PathBuf,
 }
@@ -732,12 +844,40 @@ impl Replay {
             runtime_mode: o.runtime,
             interaction_mode: o.interaction,
             resume: o.resume,
+            fork: o.fork,
             env: o.env,
             mcp: o.mcp,
             instructions: o.instructions,
         };
-        let (session, rx) = claude.start(cfg).await.unwrap();
-        Self { session, rx, events: Vec::new(), prompts, argv, deltas: false, _dir: dir, cwd }
+        let (session, rx) = claude.start(cfg.clone()).await.unwrap();
+        Self { claude, cfg, session, rx, events: Vec::new(), prompts, argv, deltas: false, refs: false, _dir: dir, cwd }
+    }
+
+    /// A second session of the same Claude (its launches go on through the scripts), forking
+    /// `fork`. The first one must be closed.
+    async fn fork(&mut self, fork: ForkFrom) {
+        let cfg = SessionConfig { fork: Some(fork), ..self.cfg.clone() };
+        (self.session, self.rx) = self.claude.start(cfg).await.unwrap();
+    }
+
+    /// The refs of the turns that ended so far, oldest first.
+    fn turn_refs(&self) -> Vec<String> {
+        self.events.iter().filter_map(|e| if let ProviderEvent::TurnRef { id } = e { Some(id.clone()) } else { None }).collect()
+    }
+
+    /// The text of the newest completed message.
+    fn last_message(&self) -> String {
+        self.events
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                ProviderEvent::Item(i) if i.status == NodeStatus::Completed => match &i.body {
+                    NodeBody::Message { text } => Some(text.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 
     async fn send(&mut self, prompt: usize) {
@@ -801,14 +941,24 @@ impl Replay {
         self
     }
 
+    fn with_refs(&mut self) -> &mut Self {
+        self.refs = true;
+        self
+    }
+
     fn rendered(&self) -> Vec<String> {
-        let mut out: Vec<String> = self.events.iter().filter(|e| self.deltas || !matches!(e, ProviderEvent::TextDelta { .. })).map(render).collect();
-        // The id generated for a new session is random.
-        if let Some(first) = out.first_mut()
-            && first.starts_with("thread ")
-            && self.launches().first().is_some_and(|a| a.iter().any(|x| x.starts_with("--session-id=")))
-        {
-            *first = "thread (new)".into();
+        let shown = |e: &&ProviderEvent| match e {
+            ProviderEvent::TextDelta { .. } => self.deltas,
+            ProviderEvent::TurnRef { .. } => self.refs,
+            _ => true,
+        };
+        let mut out: Vec<String> = self.events.iter().filter(shown).map(render).collect();
+        // The ids the adapter generates for new sessions and forks are random.
+        let ours: Vec<String> = self.launches().iter().flatten().filter_map(|a| a.strip_prefix("--session-id=")).map(|id| format!("thread {id}")).collect();
+        for line in &mut out {
+            if ours.contains(line) {
+                *line = "thread (new)".into();
+            }
         }
         out
     }
@@ -932,6 +1082,7 @@ fn render(e: &ProviderEvent) -> String {
             format!("request {id} for {}: {what}", item.as_deref().unwrap_or("-"))
         }
         ProviderEvent::RequestCancelled { id } => format!("withdrawn {id}"),
+        ProviderEvent::TurnRef { id } => format!("ref {id}"),
         ProviderEvent::Usage(u) => format!(
             "usage in={} out={} cached={} cost={}",
             u.input_tokens,
@@ -984,9 +1135,48 @@ mod fake {
             let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path).unwrap();
             writeln!(f, "{}", serde_json::to_string(&argv).unwrap()).unwrap();
         }
-        let scripts: Vec<&str> = scripts.split(',').collect();
-        let text = std::fs::read_to_string(scripts[launch.min(scripts.len() - 1)]).unwrap();
+        let texts: Vec<String> = scripts.split(',').map(|p| std::fs::read_to_string(p).unwrap()).collect();
+        let launches: Vec<String> = texts.iter().flat_map(|t| launches(t)).collect();
+        let mut text = launches[launch.min(launches.len() - 1)].clone();
+        // A fork runs under the session id the adapter gave it (`--session-id` with
+        // `--fork-session`), as the real CLI does: the transcript's id for the copy becomes it.
+        if let (Some(recorded), Some(ours)) = (texts.iter().find_map(|t| forked_id(t)), our_fork_id()) {
+            text = text.replace(&recorded, &ours);
+        }
         run(load(&text), &argv)
+    }
+
+    /// A transcript split into launches: a T3 transcript ends one at each `runtime_exit`.
+    fn launches(text: &str) -> Vec<String> {
+        let mut out = vec![String::new()];
+        for line in text.lines() {
+            out.last_mut().unwrap().push_str(line);
+            out.last_mut().unwrap().push('\n');
+            if serde_json::from_str::<Value>(line).is_ok_and(|v| v["type"] == "runtime_exit") {
+                out.push(String::new());
+            }
+        }
+        out.retain(|l| !l.trim().is_empty());
+        out
+    }
+
+    /// The session id a T3 transcript's SDK `forkSession` call answered with.
+    fn forked_id(text: &str) -> Option<String> {
+        text.lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|v| v["frame"]["type"] == "session.forked")
+            .and_then(|v| v["frame"]["sessionId"].as_str().map(str::to_string))
+    }
+
+    /// The `--session-id` of the newest launch that forked.
+    fn our_fork_id() -> Option<String> {
+        let launches = std::fs::read_to_string(std::env::var("ROLL_FAKE_ARGV").ok()?).ok()?;
+        launches
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Vec<String>>(l).ok())
+            .rfind(|argv| argv.iter().any(|a| a == "--fork-session"))?
+            .iter()
+            .find_map(|a| a.strip_prefix("--session-id=").map(str::to_string))
     }
 
     /// The account check: answer `initialize` with `ROLL_FAKE_ACCOUNT`.
@@ -1004,6 +1194,7 @@ mod fake {
     fn load(text: &str) -> Vec<Step> {
         let mut steps = Vec::new();
         let mut permissions = 0;
+        let mut forking = false;
         for line in text.lines().filter(|l| !l.trim().is_empty()) {
             let v: Value = serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}"));
             if let Some(env) = v.get("env").and_then(Value::as_object) {
@@ -1013,7 +1204,7 @@ mod fake {
             } else if let Some(dir) = v.get("dir").and_then(Value::as_str) {
                 raw(&mut steps, dir, v["line"].clone());
             } else {
-                t3(&mut steps, &v, &mut permissions);
+                t3(&mut steps, &v, &mut permissions, &mut forking);
             }
         }
         steps
@@ -1039,8 +1230,10 @@ mod fake {
         }
     }
 
-    /// A line of a T3 Agent SDK transcript.
-    fn t3(steps: &mut Vec<Step>, v: &Value, permissions: &mut u32) {
+    /// A line of a T3 Agent SDK transcript. The SDK forks a session itself (`session.fork`, then
+    /// a query resuming the copy); the CLI does it in the launch, so the fork becomes the flags
+    /// of the next `query.open`.
+    fn t3(steps: &mut Vec<Step>, v: &Value, permissions: &mut u32, forking: &mut bool) {
         let frame = &v["frame"];
         match (v["type"].as_str(), frame["type"].as_str()) {
             (Some("transcript_start"), _) => {}
@@ -1053,12 +1246,24 @@ mod fake {
                 if let Some(mode) = o["permissionMode"].as_str().filter(|m| ["bypassPermissions", "acceptEdits", "default", "plan"].contains(m)) {
                     steps.push(Step::Args(vec!["--permission-mode".into(), mode.into()]));
                 }
-                if let Some(resume) = o["resume"].as_str() {
+                if let Some(resume) = o["resume"].as_str().filter(|_| !std::mem::take(forking)) {
                     steps.push(Step::Args(vec![format!("--resume={resume}")]));
+                }
+                if let Some(at) = o["resumeSessionAt"].as_str() {
+                    steps.push(Step::Args(vec![format!("--resume-session-at={at}")]));
                 }
                 let pattern = json!({"type": "control_request", "request": {"subtype": "initialize"}});
                 steps.push(Step::Expect { pattern, alias: None, respond: Some(json!({})) });
             }
+            (Some("expect_outbound"), Some("session.fork")) => {
+                *forking = true;
+                let from = frame["sessionId"].as_str().unwrap();
+                steps.push(Step::Args(vec![format!("--resume={from}"), "--fork-session".into()]));
+                if let Some(at) = frame.pointer("/options/upToMessageId").and_then(Value::as_str) {
+                    steps.push(Step::Args(vec![format!("--resume-session-at={at}")]));
+                }
+            }
+            (Some("emit_inbound"), Some("session.forked")) => {}
             (Some("expect_outbound"), Some("prompt.offer")) => {
                 let mut pattern = frame["message"].clone();
                 // T3 stamps its prompts with a uuid of its own; the adapter doesn't.

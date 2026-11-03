@@ -78,6 +78,16 @@ Machine            a daemon (hostname, os, providers and their auth state, onlin
   rollback it can't do natively) gets a portable summary of the runs it missed in front of the
   next prompt (T3's context handoff). Switching back to a provider resumes its native thread and
   hands over only what happened since. Runs record what the user sent, never the summary.
+- **Forks.** `thread.fork` copies the files of the fork point's checkpoint and starts nothing
+  (T3's lazy fork). The fork's first session settles how it gets the parent's conversation: when
+  it runs on the parent's provider, that provider forks natively, and the fork point (the end of
+  the chosen run) is in its native conversation, the session starts as a native copy through
+  that run (`SessionConfig.fork`; Codex `thread/fork` with `lastTurnId`, Claude
+  `--resume --fork-session --resume-session-at`); otherwise, or if the provider refuses, it
+  starts fresh with the portable summary. Fork points are the native turn refs adapters report
+  per turn (`ProviderEvent::TurnRef`), kept in the parent's private state, so forking at an
+  earlier run works after a restart too. A `system` node in the fork's first run says which way
+  it went (T3's `resolved_native` / `resolved_portable`).
 - **Runtime modes** (T3's): `full_access` (no approvals), `auto_edit` (edits in the workspace
   allowed, commands ask), `ask` (everything asks). **Interaction modes**: `default`, `plan`.
 - **Checkpoints.** Before the first run the daemon records the base tree; after every run it
@@ -138,8 +148,8 @@ protocol into `ProviderEvent`s (item started/updated/completed, text deltas, req
 completed, native thread ref). The orchestrator owns ids and turns those events into entities.
 
 - **Codex**: `codex app-server` over stdio JSON-RPC (`thread/start`, `thread/resume`,
-  `turn/start`, `turn/interrupt`, `turn/steer`; approvals arrive as server requests
-  `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`, …).
+  `thread/fork`, `turn/start`, `turn/interrupt`, `turn/steer`; approvals arrive as server
+  requests `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`, …).
 - **Claude**: the `claude` CLI with `--input-format stream-json --output-format stream-json`
   and the SDK control protocol on stdio (`initialize`, `can_use_tool` requests answered with
   allow/deny, `interrupt`, `set_permission_mode`), the same protocol Anthropic's Agent SDKs

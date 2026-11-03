@@ -44,5 +44,6 @@
 {"text_delta":{"item":"msg_0158c37667c5446c016ab5bddd677887d083f28a9559bf7626","text":".`"}}
 {"item":{"body":{"text":"Created `.codex-probe-write-action.txt` with exactly `codex app-server approval fixture.`","type":"message"},"id":"msg_0158c37667c5446c016ab5bddd677887d083f28a9559bf7626","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":28160,"input_tokens":43627,"output_tokens":153}}
+{"turn_ref":"01a0d5ed-8a2a-7002-b65d-fe5885c9f4e0"}
 {"turn_ended":"completed"}
 {"exited":null}

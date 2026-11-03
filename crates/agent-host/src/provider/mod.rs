@@ -4,6 +4,12 @@
 //! owns no roll ids: items, requests and threads are named by the provider's own ids, and the
 //! orchestrator maps them onto `Node`s, `Request`s and `Run`s. That keeps adapters small and
 //! replayable: a recorded transcript in, a list of events out.
+//!
+//! Forking is a way to start a session, not a method on one (T3's `forkThread` makes a new
+//! provider thread too): `SessionConfig.fork` names the source conversation and a point in it,
+//! and the session that starts is the copy. Points are the refs adapters report in
+//! [`ProviderEvent::TurnRef`], which the orchestrator keeps per run, so a fork works from any
+//! process, after a restart too.
 
 use agent_proto::{
     Attachment, Capabilities, InteractionMode, NodeBody, NodeStatus, ProviderId, ProviderInfo, RequestBody, Response,
@@ -40,12 +46,39 @@ pub struct SessionConfig {
     pub interaction_mode: InteractionMode,
     /// The provider's own conversation id to resume (from an earlier `NativeThread` event).
     pub resume: Option<String>,
+    /// Start a new conversation as a copy of another one, up to a point (T3's native fork).
+    /// Never set together with `resume`, and only when `capabilities().fork`. The copy is a
+    /// conversation of its own (its own `NativeThread`); the source is left as it was. An
+    /// adapter that can't reach the point fails `start`, and the orchestrator falls back to a
+    /// fresh conversation with a portable summary.
+    pub fork: Option<ForkFrom>,
     /// Extra environment for the provider process (API keys, base URLs from the daemon config).
     pub env: Vec<(String, String)>,
     /// MCP servers to give the agent (roll's orchestrator MCP, for delegating to subagents).
     pub mcp: Vec<McpServer>,
     /// Instructions appended to the provider's system prompt, if it takes them.
     pub instructions: Option<String>,
+}
+
+/// Where a forked session's conversation comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForkFrom {
+    /// The source's native conversation id (from its `NativeThread` event).
+    pub thread: String,
+    pub at: ForkAt,
+}
+
+/// How much of the source conversation the fork keeps.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ForkAt {
+    /// Everything it holds now.
+    Latest,
+    /// Everything through this turn, inclusive: a ref from one of its `TurnRef` events (Codex:
+    /// `thread/fork` `lastTurnId`; Claude: `--resume-session-at`).
+    Turn(String),
+    /// All but its newest `n` turns, for a fork point whose turn has no ref (Codex forks the
+    /// latest state and rolls the copy back; Claude can't, and fails).
+    DropLast(u32),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,6 +135,11 @@ pub enum ProviderEvent {
     RequestCancelled { id: String },
     /// Token use and cost so far for the current turn (replaces earlier reports for the turn).
     Usage(Usage),
+    /// The native ref of the turn that is ending, sent before its `TurnEnded` when the provider
+    /// names the turn (Codex: the turn id; Claude: the uuid of the turn's last main-agent
+    /// assistant message). Store it to fork the conversation at this turn later
+    /// ([`ForkAt::Turn`]), also from another process.
+    TurnRef { id: String },
     /// The current turn finished.
     TurnEnded(TurnEnd),
     /// The session ended (process exited). No more events follow.
@@ -119,8 +157,8 @@ pub trait Provider: Send + Sync {
     /// (T3: "setup must not happen as a health-check side effect").
     async fn info(&self) -> ProviderInfo;
 
-    /// Start a session (or resume `cfg.resume`). Events come on the returned receiver until
-    /// `Exited`.
+    /// Start a session (or resume `cfg.resume`, or fork `cfg.fork`). Events come on the
+    /// returned receiver until `Exited`.
     async fn start(&self, cfg: SessionConfig) -> anyhow::Result<(Box<dyn Session>, mpsc::Receiver<ProviderEvent>)>;
 }
 

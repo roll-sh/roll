@@ -1,9 +1,10 @@
 //! A scriptable fake [`Provider`] for tests: this crate's and the relay lane's end-to-end tests.
 //!
-//! [`Script::Echo`] answers every turn on its own (a message item streamed as deltas, usage,
-//! `TurnEnded(Completed)`); [`Script::Manual`] only records what it was sent and lets the test
-//! emit events through the [`FakeSession`] handle. Both answer `interrupt` with
-//! `TurnEnded(Interrupted)` when a turn is running, like the real providers.
+//! [`Script::Echo`] answers every turn on its own (a message item streamed as deltas, usage, a
+//! `TurnRef`, `TurnEnded(Completed)`); [`Script::Manual`] only records what it was sent and lets
+//! the test emit events through the [`FakeSession`] handle. Both answer `interrupt` with
+//! `TurnEnded(Interrupted)` when a turn is running, like the real providers. A session started
+//! with `fork` is a new conversation; the test reads what it was forked from in its `config`.
 
 use super::{Item, Provider, ProviderEvent, Session, SessionConfig, TurnEnd, TurnInput};
 use agent_proto::{
@@ -132,6 +133,7 @@ impl Provider for FakeProvider {
                 running: AtomicBool::new(false),
                 announced: AtomicBool::new(false),
                 items: Mutex::new(0),
+                turns: Default::default(),
                 changed: self.changed.clone(),
             }),
         };
@@ -158,6 +160,7 @@ struct Inner {
     running: AtomicBool,
     announced: AtomicBool,
     items: Mutex<u32>,
+    turns: std::sync::atomic::AtomicU32,
     changed: Arc<Notify>,
 }
 
@@ -221,6 +224,9 @@ impl FakeSession {
             cached_tokens: 0,
             cost_usd: None,
         }));
+        // Every echoed turn is named, so it can be forked at (`<native>:turn-<n>`).
+        let turn = format!("{}:turn-{}", self.inner.native, self.inner.turns.fetch_add(1, Ordering::SeqCst) + 1);
+        self.emit(ProviderEvent::TurnRef { id: turn });
         self.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
     }
 }

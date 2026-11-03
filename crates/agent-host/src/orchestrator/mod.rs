@@ -106,6 +106,13 @@ pub(crate) struct Private {
     /// How many native turns each run (by ordinal) took: one, plus one per steering restart.
     #[serde(default)]
     turns: BTreeMap<u32, u32>,
+    /// Where each run (by ordinal) ended in its provider's native conversation (`TurnRef`): a
+    /// fork at that run starts there.
+    #[serde(default)]
+    refs: BTreeMap<u32, NativeRef>,
+    /// How a fork gets its parent's conversation; its first session settles it.
+    #[serde(default)]
+    transfer: Option<Transfer>,
     /// Context inherited from a parent thread (a fork's summary of its parent).
     #[serde(default)]
     preamble: Option<String>,
@@ -118,6 +125,29 @@ pub(crate) struct Private {
     /// Each checkpoint's base commit (the checkpoint it is diffed against).
     #[serde(default)]
     from: BTreeMap<String, String>,
+}
+
+/// A turn in a provider's native conversation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct NativeRef {
+    /// The conversation (`NativeThread`).
+    thread: String,
+    /// The turn's ref (`TurnRef`).
+    turn: String,
+}
+
+/// A fork's context transfer from its parent (T3's `ContextTransfer` of type `fork`): pending
+/// until the fork's first session, then resolved natively or portably.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub(crate) enum Transfer {
+    /// Fork the parent's native conversation with `provider` at the end of its run `upto`, if
+    /// the fork's first session is on that provider and the point is reachable.
+    Pending { provider: String, upto: u32 },
+    /// The fork's conversation is a native copy of the parent's (`resolved_native`).
+    Native,
+    /// The fork's provider starts fresh with the summary in `preamble` (`resolved_portable`).
+    Portable,
 }
 
 /// A thread's live state.

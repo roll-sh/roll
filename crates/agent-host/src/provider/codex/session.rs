@@ -241,6 +241,43 @@ impl State {
     }
 }
 
+/// T3's `revertCodexThread`: find the oldest of the last `turns` turns, then replace the history
+/// with everything before it.
+pub(super) async fn revert(rpc: &Rpc, thread: &str, turns: u32) -> anyhow::Result<()> {
+    let mut remaining = turns;
+    let mut before: Option<String> = None;
+    let mut cursor: Option<String> = None;
+    let mut seen = std::collections::HashSet::new();
+    while remaining > 0 {
+        if !seen.insert(cursor.clone()) {
+            bail!("codex repeated a cursor listing thread turns");
+        }
+        let params = json!({
+            "threadId": thread,
+            "cursor": cursor,
+            "limit": remaining.min(100),
+            "sortDirection": "desc",
+            "itemsView": "summary",
+        });
+        let page: wire::TurnsPage = serde_json::from_value(rpc.request("thread/turns/list", params).await?)?;
+        for turn in page.data {
+            before = Some(turn.id);
+            remaining -= 1;
+            if remaining == 0 {
+                break;
+            }
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    if let Some(before) = before {
+        rpc.request("thread/revert", json!({ "threadId": thread, "beforeTurnId": before })).await?;
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl Session for CodexSession {
     async fn send(&self, input: TurnInput) -> anyhow::Result<()> {
@@ -314,42 +351,9 @@ impl Session for CodexSession {
         Ok(())
     }
 
-    /// T3's `revertCodexThread`: find the oldest of the last `turns` turns, then replace the
-    /// history with everything before it.
     async fn rollback(&self, turns: u32) -> anyhow::Result<()> {
         let thread = self.inner.state.lock().unwrap().tr.root().to_string();
-        let mut remaining = turns;
-        let mut before: Option<String> = None;
-        let mut cursor: Option<String> = None;
-        let mut seen = std::collections::HashSet::new();
-        while remaining > 0 {
-            if !seen.insert(cursor.clone()) {
-                bail!("codex repeated a cursor listing thread turns");
-            }
-            let params = json!({
-                "threadId": thread,
-                "cursor": cursor,
-                "limit": remaining.min(100),
-                "sortDirection": "desc",
-                "itemsView": "summary",
-            });
-            let page: wire::TurnsPage = serde_json::from_value(self.inner.rpc.request("thread/turns/list", params).await?)?;
-            for turn in page.data {
-                before = Some(turn.id);
-                remaining -= 1;
-                if remaining == 0 {
-                    break;
-                }
-            }
-            cursor = page.next_cursor;
-            if cursor.is_none() {
-                break;
-            }
-        }
-        if let Some(before) = before {
-            self.inner.rpc.request("thread/revert", json!({ "threadId": thread, "beforeTurnId": before })).await?;
-        }
-        Ok(())
+        revert(&self.inner.rpc, &thread, turns).await
     }
 
     async fn close(&self) {

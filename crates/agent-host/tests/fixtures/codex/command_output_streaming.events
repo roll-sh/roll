@@ -31,5 +31,6 @@
 {"text_delta":{"item":"msg_0038d12d01b50ff0016ac0842a975c87d2bf566b8ae1f7e5f3","text":" complete"}}
 {"item":{"body":{"text":"command output fixture complete","type":"message"},"id":"msg_0038d12d01b50ff0016ac0842a975c87d2bf566b8ae1f7e5f3","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":20992,"input_tokens":35532,"output_tokens":150}}
+{"turn_ref":"01a10004-0b1b-78f0-a41c-b253bded078e"}
 {"turn_ended":"completed"}
 {"exited":null}

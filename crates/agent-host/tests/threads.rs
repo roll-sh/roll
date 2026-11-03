@@ -4,7 +4,7 @@
 mod common;
 
 use agent_host::provider::fake::{Call, FakeProvider, FakeSession, Script};
-use agent_host::provider::{ProviderEvent, TurnEnd};
+use agent_host::provider::{ForkAt, ForkFrom, ProviderEvent, TurnEnd};
 use agent_proto::*;
 use common::*;
 use std::path::Path;
@@ -197,6 +197,155 @@ async fn forks_carry_a_summary_and_the_files_of_their_run() {
     let active = w.state().await.thread(&fork).unwrap().active_run.clone().unwrap();
     let refused = w.run(Command::ThreadFork { thread: fork.clone(), at: Some(active), worktree: false }).await;
     assert!(is_err(&refused, ErrorCode::Conflict));
+}
+
+/// The `system` notes of a thread's nodes, in order.
+fn notes(s: &Records, thread: &ThreadId) -> Vec<String> {
+    s.nodes(thread).into_iter().filter_map(|n| if let NodeBody::System { text } = n.body { Some(text) } else { None }).collect()
+}
+
+fn forking(id: &str) -> Arc<FakeProvider> {
+    FakeProvider::with(id, Capabilities { fork: true, ..Capabilities::default() }, Script::Echo)
+}
+
+async fn fork(w: &World, thread: &ThreadId, at: Option<RunId>) -> ThreadId {
+    let reply = w.run(Command::ThreadFork { thread: thread.clone(), at, worktree: false }).await;
+    let Reply::Created { id } = reply else { panic!("thread.fork: {reply:?}") };
+    ThreadId(id)
+}
+
+/// Sends a message and waits for its run to finish.
+async fn exchange(w: &World, thread: &ThreadId, text: &str) {
+    let before = w.state().await.thread(thread).unwrap().run_count;
+    w.send(thread, text, SendMode::Queue).await;
+    w.wait_thread(thread, |t| t.run_count == before + 1 && t.status == ThreadStatus::Idle).await;
+}
+
+#[tokio::test]
+async fn forks_fork_the_native_conversation_when_the_provider_can() {
+    let codex = forking("codex");
+    let w = World::new(vec![codex.clone()]).await;
+    let thread = w.thread("codex", None, false).await;
+    exchange(&w, &thread, "one").await;
+    exchange(&w, &thread, "two").await;
+    let source = codex.session(0).await;
+    let runs = w.state().await.runs(&thread);
+
+    // Forking still starts nothing: the first message on the fork settles it.
+    let at_one = fork(&w, &thread, Some(runs[0].id.clone())).await;
+    assert_eq!(codex.sessions().len(), 1);
+    exchange(&w, &at_one, "three").await;
+    let forked = codex.session(1).await;
+    assert_eq!(forked.config.fork, Some(ForkFrom { thread: source.native().into(), at: ForkAt::Turn("codex-native-0:turn-1".into()) }));
+    assert_eq!(forked.config.resume, None);
+    assert_eq!(sends(&forked.calls()), vec!["three"], "the copy holds run 1: nothing is handed over");
+    let s = w.state().await;
+    assert_eq!(notes(&s, &at_one), vec!["Forked natively: codex goes on from its own conversation in the parent thread"]);
+    assert_eq!(s.nodes(&at_one)[0].run, s.runs(&at_one)[0].id, "noted in the run that settled it");
+
+    // The fork goes on in its copy; the parent in its own conversation.
+    exchange(&w, &at_one, "four").await;
+    assert_eq!(sends(&forked.calls()), vec!["three", "four"]);
+    exchange(&w, &thread, "five").await;
+    assert_eq!(sends(&source.calls()), vec!["one", "two", "five"]);
+    assert_eq!(codex.sessions().len(), 2);
+
+    // The latest run, the default fork point.
+    let latest = fork(&w, &thread, None).await;
+    exchange(&w, &latest, "six").await;
+    assert_eq!(codex.session(2).await.config.fork.unwrap().at, ForkAt::Turn("codex-native-0:turn-3".into()));
+    assert_eq!(notes(&w.state().await, &latest).len(), 1);
+}
+
+#[tokio::test]
+async fn forks_hand_a_summary_over_when_a_native_fork_cant_be_had() {
+    let codex = forking("codex");
+    let claude = FakeProvider::new("claude");
+    let w = World::new(vec![codex.clone(), claude.clone()]).await;
+    let thread = w.thread("codex", None, false).await;
+    exchange(&w, &thread, "one").await;
+    let summary = "Forked with a summary: codex starts fresh with a summary of the parent thread";
+
+    // The provider refuses the fork: the same run starts fresh with the summary.
+    let refused = fork(&w, &thread, None).await;
+    codex.fail_next_start("no such thread");
+    exchange(&w, &refused, "two").await;
+    let fresh = codex.session(1).await;
+    assert_eq!((fresh.config.fork.clone(), fresh.config.resume.clone()), (None, None));
+    let text = sends(&fresh.calls()).remove(0);
+    assert!(text.starts_with("<roll-context>") && text.contains("one") && text.ends_with("two"), "{text}");
+    assert_eq!(notes(&w.state().await, &refused), vec![summary]);
+    assert_eq!(w.state().await.runs(&refused)[0].status, RunStatus::Completed);
+    // Settled once: later sessions resume the fork's own conversation.
+    exchange(&w, &refused, "three").await;
+    assert_eq!(sends(&fresh.calls()), vec![text, "three".to_string()]);
+    assert_eq!(notes(&w.state().await, &refused).len(), 1);
+
+    // Another provider runs the fork's first message: it can't continue codex's conversation.
+    let switched = fork(&w, &thread, None).await;
+    let to_claude = Command::ThreadConfigure {
+        thread: switched.clone(),
+        title: None,
+        provider: Some(ProviderId("claude".into())),
+        model: None,
+        effort: None,
+        runtime_mode: None,
+        interaction_mode: None,
+    };
+    assert_eq!(w.run(to_claude).await, Reply::Ok);
+    exchange(&w, &switched, "four").await;
+    assert!(sends(&claude.session(0).await.calls())[0].contains("<roll-context>"));
+    assert_eq!(notes(&w.state().await, &switched), vec!["Forked with a summary: claude starts fresh with a summary of the parent thread"]);
+
+    // A provider without native forks.
+    let plain = FakeProvider::new("codex");
+    let w = World::new(vec![plain.clone()]).await;
+    let thread = w.thread("codex", None, false).await;
+    exchange(&w, &thread, "one").await;
+    let portable = fork(&w, &thread, None).await;
+    exchange(&w, &portable, "two").await;
+    assert_eq!(plain.session(1).await.config.fork, None);
+    assert_eq!(notes(&w.state().await, &portable), vec![summary]);
+}
+
+#[tokio::test]
+async fn forks_at_a_turn_work_after_a_restart() {
+    let codex = forking("codex");
+    let w = World::new(vec![codex.clone()]).await;
+    let thread = w.thread("codex", None, false).await;
+    exchange(&w, &thread, "one").await;
+    exchange(&w, &thread, "two").await;
+    let native = codex.session(0).await.native().to_string();
+    let runs = w.state().await.runs(&thread);
+    // A fork made before the restart and used after it.
+    let early = fork(&w, &thread, Some(runs[1].id.clone())).await;
+    let home = w.home.clone();
+    let World { host, dirs, .. } = w;
+    drop(host);
+
+    let codex = forking("codex");
+    let host = open(&home, vec![codex.clone()]).await;
+    let send = |thread: &ThreadId, text: &str| Command::MessageSend {
+        thread: thread.clone(),
+        text: text.into(),
+        attachments: Vec::new(),
+        mode: SendMode::Queue,
+    };
+    let Reply::Created { id } = run(&host, Command::ThreadFork { thread: thread.clone(), at: Some(runs[0].id.clone()), worktree: false }).await else {
+        panic!()
+    };
+    let late = ThreadId(id);
+    assert!(matches!(run(&host, send(&late, "three")).await, Reply::Created { .. }));
+    let forked = codex.session(0).await;
+    // The turn refs were kept with the parent's state: run 1's turn is still known.
+    assert_eq!(forked.config.fork, Some(ForkFrom { thread: native.clone(), at: ForkAt::Turn(format!("{native}:turn-1")) }));
+    assert_eq!(sends(&forked.wait_calls(|c| !c.is_empty()).await), vec!["three"]);
+
+    assert!(matches!(run(&host, send(&early, "four")).await, Reply::Created { .. }));
+    let forked = codex.session(1).await;
+    assert_eq!(forked.config.fork, Some(ForkFrom { thread: native.clone(), at: ForkAt::Turn(format!("{native}:turn-2")) }));
+    assert_eq!(sends(&forked.wait_calls(|c| !c.is_empty()).await), vec!["four"]);
+    drop(dirs);
 }
 
 #[tokio::test]

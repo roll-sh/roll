@@ -14,5 +14,6 @@
 {"item":{"body":{"text":"todo list fixture complete","type":"message"},"id":"msg_05ada939d0eb95f2016ab5e7d040ac87d0b3189e7502ca7c6a","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":46336,"input_tokens":69685,"output_tokens":161}}
 {"item":{"body":{"items":[{"status":"completed","text":"Inspect package.json"},{"status":"completed","text":"Inspect tsconfig.json"},{"status":"completed","text":"Report completion"}],"type":"todos"},"id":"turn-plan:01a0d691-5c9c-7873-a191-5a599fd58099","parent":null,"status":"completed"}}
+{"turn_ref":"01a0d691-5c9c-7873-a191-5a599fd58099"}
 {"turn_ended":"completed"}
 {"exited":null}

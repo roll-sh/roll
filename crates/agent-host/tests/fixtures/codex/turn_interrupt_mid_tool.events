@@ -5,5 +5,6 @@
 {"item":{"body":{"input":{"command":"/bin/bash -lc \"node -e \\\"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\\\"\"","cwd":"/home/replay-user/t3code/packages/effect-codex-app-server"},"kind":"command","name":"commandExecution","title":"node -e \"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\"","type":"tool"},"id":"exec-0ce96e49-aa1c-4bae-b4f8-687a7473017c","parent":null,"status":"running"}}
 {"usage":{"cached_tokens":11008,"input_tokens":17855,"output_tokens":98}}
 {"item":{"body":{"input":{"command":"/bin/bash -lc \"node -e \\\"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\\\"\"","cwd":"/home/replay-user/t3code/packages/effect-codex-app-server"},"kind":"command","name":"commandExecution","title":"node -e \"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\"","type":"tool"},"id":"exec-0ce96e49-aa1c-4bae-b4f8-687a7473017c","parent":null,"status":"interrupted"}}
+{"turn_ref":"01a0d60e-f90f-7f23-b6ba-9ca7ee20b5cd"}
 {"turn_ended":"interrupted"}
 {"exited":null}

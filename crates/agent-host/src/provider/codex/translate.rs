@@ -687,6 +687,7 @@ impl Translator {
         if self.ended.len() > 16 {
             self.ended.pop_front();
         }
+        out.push(Action::Event(ProviderEvent::TurnRef { id: turn.to_string() }));
         out.push(Action::Event(ProviderEvent::TurnEnded(end)));
     }
 

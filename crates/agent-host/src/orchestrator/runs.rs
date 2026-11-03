@@ -332,10 +332,17 @@ impl Host {
             runtime_mode: t.runtime_mode,
             interaction_mode: t.interaction_mode,
             resume: rt.private.native.get(t.provider.as_str()).cloned(),
+            fork: None,
             env: self.config.provider(&t.provider).env,
             mcp: vec![self.mcp.session_server(&t.id)],
             instructions: None,
         };
+        // A fork's first session settles how it gets its parent's conversation.
+        let settling = cfg.resume.is_none() && matches!(rt.private.transfer, Some(super::Transfer::Pending { .. }));
+        if settling && caps.fork {
+            cfg.fork = self.native_fork(rt)?;
+        }
+        let t = &rt.thread;
         let started = match provider.start(cfg.clone()).await {
             Ok(started) => started,
             Err(e) if cfg.resume.is_some() => {
@@ -347,8 +354,16 @@ impl Host {
                 cfg.resume = None;
                 provider.start(cfg.clone()).await.map_err(|e| Fail::Provider(format!("{e:#}")))?
             }
+            Err(e) if cfg.fork.is_some() => {
+                tracing::warn!("forking {} natively for {} failed, handing a summary over: {e:#}", t.provider.0, t.id);
+                cfg.fork = None;
+                provider.start(cfg.clone()).await.map_err(|e| Fail::Provider(format!("{e:#}")))?
+            }
             Err(e) => return Err(Fail::Provider(format!("{e:#}"))),
         };
+        if settling {
+            self.settle_transfer(rt, cfg.fork.is_some())?;
+        }
         let (session, events) = started;
         rt.generation += 1;
         rt.live = Some(Live {
@@ -502,6 +517,14 @@ impl Host {
                 }
             }
             ProviderEvent::TurnEnded(end) => self.on_turn_ended(rt, end).await?,
+            ProviderEvent::TurnRef { id } => {
+                // The run's newest turn: where a fork at this run starts.
+                let thread = rt.private.native.get(rt.thread.provider.as_str()).cloned();
+                if let (Some(active), Some(thread)) = (&rt.active, thread) {
+                    rt.private.refs.insert(active.run.ordinal, super::NativeRef { thread, turn: id });
+                    self.save_private(rt)?;
+                }
+            }
             ProviderEvent::Exited { error } => {
                 rt.live = None;
                 rt.generation += 1;

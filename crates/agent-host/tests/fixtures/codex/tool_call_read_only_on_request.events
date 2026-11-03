@@ -52,5 +52,6 @@
 {"text_delta":{"item":"msg_0cdfbd98c0a84c4d016ab5c3ac835087d08df330990ac01d5d","text":"`."}}
 {"item":{"body":{"text":"Created or overwrote `.codex-probe-write-action.txt` with exactly `codex app-server approval fixture`.","type":"message"},"id":"msg_0cdfbd98c0a84c4d016ab5c3ac835087d08df330990ac01d5d","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":44544,"input_tokens":45221,"output_tokens":315}}
+{"turn_ref":"01a0d604-2095-7fb0-a7e6-3f63d1949bbe"}
 {"turn_ended":"completed"}
 {"exited":null}

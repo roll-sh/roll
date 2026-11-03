@@ -9,5 +9,6 @@
 {"text_delta":{"item":"msg_028f9564f7cc52f0016ab5be4c609887d09ffdd45f53ffdc49","text":" complete"}}
 {"item":{"body":{"text":"plan questions fixture complete","type":"message"},"id":"msg_028f9564f7cc52f0016ab5be4c609887d09ffdd45f53ffdc49","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":27136,"input_tokens":42777,"output_tokens":116}}
+{"turn_ref":"01a0d5ef-3b5a-7bb2-9cd2-da112b6b158f"}
 {"turn_ended":"completed"}
 {"exited":null}
