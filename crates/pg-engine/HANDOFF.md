@@ -3247,6 +3247,51 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     `btsim::Key::wrap`'s length check (u16 attribute ends): a debug build panics, a release
     build mis-sizes the key. test_decoding's toast test inserts such a key (a 100 kB text
     with EXTENDED storage in its primary key).
+- **Catalog round 9, second batch** (round 24, agent 146; BENCH.md "Catalog round 9, second
+  batch"): catalog format 4, a database's open reads none of its objects.
+  - `PMap` groups (4,096 oids) can be stored (`PMap::stored`): a group not read yet reads its
+    records from the store on first use (`pmap::GroupData`, through the `pmap::Reader`
+    `Database::open` gives the catalog: the store at its latest commit), and keeps them raw
+    until a chunk (64 oids) is first used and parsed (`pmap::ChunkData`, the raw bytes
+    dropped then). A group is read before anything changes it (`group_mut`), so a commit that
+    writes a group's records has read it first, and what any copy of the catalog reads later
+    is what it had at the open. A whole iteration reads every unread group in one scan of the
+    map's records (`read_unread`); `read_all` parses them on up to 8 threads, before a system
+    catalog's whole generation (`Catalog::read_relations`). `PHash` buckets the same way, by
+    a stable hash of the key's bytes (`pmap::Key`: FNV-1a; std's hasher isn't stable across
+    builds) so a bucket's records are a key range.
+  - Stored that way (`catalog/stored_ix.rs`, `LAZY_TAGS`): tables, indexes, views,
+    sequences, functions, relstats, rel_am, rel_tablespace, frozen_xids, filenodes,
+    class_order and comments; maps under 256 entries are read whole at the open (one scan).
+    The other maps (BTreeMaps: schemas, roles, triggers, colstats, ...) are read at the open
+    as before. The indexes over the relation maps (`relindex`'s TableIx / ViewIx / IndexIx /
+    SeqIx / FuncIx), the relation name index and the inheritance children are records too
+    (tags 128-151, never reuse one), written by each commit as the maps' are
+    (`stored_ix::diff_ix`, comparing groups and buckets by pointer); their small parts
+    (`RelRows` counts, `Counts` sets) and every stored map's shape (entry count, last key) are
+    in the header (`stored`, `ix`). `Catalog::reindex` (names, children, the upgrades of
+    catalogs from before row-type and pg_attrdef oids) runs only when an older format is
+    upgraded; every open runs `open_upgrades` (information_schema's oid and domains).
+  - Upgrade: a database in format 0-3 is read whole as before, reindexed and rewritten in
+    format 4 in one commit at its first open (100,000 tables: 1.8 s and 1.1 GB once).
+    `--downgrade-catalog` deletes the index records too. Test `catalog_format.rs`
+    `a_format_3_data_directory_opens_and_upgrades` opens `tests/data/catalog_format3.tar.gz`,
+    a data directory a format-3 build made (`tests/data/catalog_format3.sql`), DDL and reopens
+    included.
+  - Racing VACUUM / ANALYZE statistics (`txn/catmerge.rs`, `persist::STATS_TAGS`: relstats,
+    colstats, frozen_xids): both changed, the current catalog's stays. VACUUM and ANALYZE
+    process each relation in its own transaction and let its lock go before the next, so
+    another session's (an autovacuum worker's) commit for it came later in PostgreSQL and
+    overwrote it; the merge failed the commit as a concurrent schema change
+    (partition_aggregate, agent 145).
+  - Left: on the current branch the database's first transaction still parses every table
+    on the connection's thread after the open (100,000 tables: 0.6 s and 470 MB; the open
+    itself is 25-35 ms), being located; entries' size (`Column` 240 bytes, `Table` 440) isn't
+    shrunk; a first query that
+    reads every relation pays what the open used to (psql's `\dt` first 150-190 ms against
+    78-95 at 10,000 tables; the store scans and parses, now on first use); colstats and
+    triggers are still read at the open (BTreeMaps); a closed database's catalog read after
+    its store's files are gone would panic (no such reader is known).
 - **Client libraries** (round 17, agent 38; round 18, agent 51): drivers' and ORMs' own test
   suites against the engine and against PostgreSQL 18.6, test by test: `tests/clients/`
   (runner, per-suite scripts, `STATUS.md` with the per-suite counts and every difference
@@ -5617,12 +5662,17 @@ container name: pick your own).
   `Catalog::catalog_format` (`catalog/persist.rs`: a database's catalog is a header and a
   record per object; `Database::open` rewrites a catalog stored in an older format; format 2,
   round 20 agent 76, moved comments into records of their own; format 3, round 21 agent 92,
-  leaves fields at their defaults out, `catalog::compact`; `roll-engine --downgrade-catalog`
+  leaves fields at their defaults out, `catalog::compact`; format 4, round 24 agent 146, stores
+  the relation maps' indexes as records and reads large maps on demand, `catalog::stored_ix`;
+  `roll-engine --downgrade-catalog`
   stores format 1 again for an older build). A field given `skip_serializing_if` must have
   `#[serde(default)]` and use a `compact::` predicate (a downgrade writes it again). A field added to
   `Catalog` must be listed in `persist.rs`'s `stored_fields!` (as a map, a set or in the header;
   the macro's exhaustive destructuring doesn't compile otherwise), with a record tag never used
-  before.
+  before. A sub-index added to a `relindex` index must be listed in `stored_ix.rs`'s
+  `stored_ix!` (a map with a new tag from 152 on, or a small part in the header; its
+  destructuring is exhaustive, so an unlisted field doesn't compile); a `PMap` map added to
+  `Catalog` that grows with the catalog belongs in `lazy_maps!` with its tag in `LAZY_TAGS`.
 - A per-object catalog map that can grow with the catalog is a `pmap::PMap` (or an
   `IndexedMap` when DDL or lookups need it by something other than its oid: add the index to
   `catalog/relindex.rs`, kept in `MapIndex::add` / `remove`, never by scanning). DDL passes

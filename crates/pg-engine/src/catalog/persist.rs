@@ -24,8 +24,10 @@ use std::sync::Arc;
 /// The catalog format this build writes (`Catalog::catalog_format`). Format 3 leaves a
 /// stored object's fields at their default values out of its record (`catalog::compact`:
 /// a table's record was 1.9 kB of JSON, most of it defaults, read and parsed at every open);
-/// a database stored in an older format is rewritten when first opened.
-pub const CATALOG_FORMAT: u32 = 3;
+/// format 4 stores the indexes over the relation maps as records too, and the header the
+/// stored maps' shapes, so an open reads neither (`stored_ix`). A database stored in an
+/// older format is rewritten when first opened.
+pub const CATALOG_FORMAT: u32 = 4;
 
 /// Where the per-object records lie: after `CATALOG_KEY` and the sequences' keys, in the
 /// reserved keyspace of table oid 0.
@@ -33,7 +35,7 @@ pub const RECORD_PREFIX: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 3];
 const RECORD_END: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 4];
 
 /// A record's key: the prefix, the map's tag, the entry's oid.
-fn record_key(tag: u8, oid: u32) -> Vec<u8> {
+pub(super) fn record_key(tag: u8, oid: u32) -> Vec<u8> {
     let mut k = Vec::with_capacity(RECORD_PREFIX.len() + 5);
     k.extend_from_slice(RECORD_PREFIX);
     k.push(tag);
@@ -51,9 +53,9 @@ pub fn record_range() -> (&'static [u8], &'static [u8]) {
     (RECORD_PREFIX, RECORD_END)
 }
 
-type Writes = Vec<(Vec<u8>, Option<Bytes>)>;
+pub(super) type Writes = Vec<(Vec<u8>, Option<Bytes>)>;
 
-fn json<T: Serialize + ?Sized>(v: &T) -> Result<Bytes> {
+pub(super) fn json<T: Serialize + ?Sized>(v: &T) -> Result<Bytes> {
     serde_json::to_vec(v)
         .map(Bytes::from)
         .map_err(|e| internal(e.to_string()))
@@ -115,7 +117,7 @@ fn put_set(tag: u8, s: &BTreeSet<u32>, out: &mut Writes) {
     }
 }
 
-fn parse<V: DeserializeOwned>(v: &[u8]) -> Result<V> {
+pub(super) fn parse<V: DeserializeOwned>(v: &[u8]) -> Result<V> {
     serde_json::from_slice(v).map_err(|e| internal(format!("corrupt catalog: {e}")))
 }
 
@@ -297,7 +299,11 @@ macro_rules! stored_fields {
         }
 
         fn header(c: &Catalog) -> Result<Bytes> {
-            json(&header_map(c)?)
+            let mut m = header_map(c)?;
+            let (shapes, ix) = super::stored_ix::header_extras(c)?;
+            m.insert("stored".into(), serde_json::to_value(&shapes).map_err(|e| internal(e.to_string()))?);
+            m.insert("ix".into(), ix);
+            json(&m)
         }
 
         /// The (tag, oid) of the records that differ between `a` and `b`, without making
@@ -553,8 +559,10 @@ pub fn writes(old: &Catalog, new: &Catalog) -> Result<Writes> {
     if old.catalog_format < CATALOG_FORMAT {
         // (The stored catalog is one value: every record is new.)
         all_records(new, &mut out)?;
+        super::stored_ix::put_ix(new, false, &mut out)?;
     } else {
         diff_records(old, new, &mut out)?;
+        super::stored_ix::diff_ix(old, new, &mut out)?;
     }
     let n: usize = out
         .iter()
@@ -568,11 +576,12 @@ pub fn writes(old: &Catalog, new: &Catalog) -> Result<Writes> {
 pub fn changed(old: &Catalog, new: &Catalog) -> Result<Writes> {
     let mut out = Vec::new();
     diff_records(old, new, &mut out)?;
-    let head = header(new)?;
-    if out.is_empty() && head == header(old)? {
+    super::stored_ix::diff_ix(old, new, &mut out)?;
+    // (The header's fields first: its stored maps' shapes read their last groups.)
+    if out.is_empty() && header_map(new)? == header_map(old)? {
         return Ok(out);
     }
-    out.insert(0, (crate::txn::CATALOG_KEY.to_vec(), Some(head)));
+    out.insert(0, (crate::txn::CATALOG_KEY.to_vec(), Some(header(new)?)));
     Ok(out)
 }
 
@@ -646,23 +655,36 @@ pub const CLASS_ORDER_TAG: u8 = 46;
 /// The record tag of `comments` (merged apart, `txn::catmerge`).
 pub const COMMENTS_TAG: u8 = 50;
 
+/// The tags of what VACUUM and ANALYZE write (`relstats`, `colstats`, `frozen_xids`): each
+/// relation in a transaction of its own, so two of them racing over one relation keep the
+/// last commit's (`txn::catmerge`).
+pub const STATS_TAGS: [u8; 3] = [18, 38, 44];
+
 /// The writes that store `c` in a store holding no records yet.
 pub fn writes_new(c: &Catalog) -> Result<Writes> {
     let mut out = vec![(crate::txn::CATALOG_KEY.to_vec(), Some(header(c)?))];
     all_records(c, &mut out)?;
+    super::stored_ix::put_ix(c, false, &mut out)?;
     Ok(out)
 }
 
-/// The catalog whose header is `head`, its records read through `scan` (a key range's, in
-/// key order). A header of format 0 is a whole catalog, and no record is read.
+/// The catalog whose header is `head`, its records read through `read` (a key range's, in
+/// key order). A header of format 0 is a whole catalog, and no record is read. From format
+/// 4 on, the maps of `stored_ix::LAZY_TAGS` and their indexes are read as they are used
+/// (`stored_ix::open`): `read` stays with the catalog.
 ///
-/// (A database's first open reads every record. Each map's records are scanned and parsed
-/// on threads of their own, the tags spread over up to 8, and inserted in tag order: the
-/// tables', indexes', pg_class order's ... scans and parses ran one after the other.)
-pub fn load(
-    head: &[u8],
-    scan: impl Fn(&[u8], &[u8]) -> Result<Vec<(Vec<u8>, Bytes)>> + Sync,
-) -> Result<Catalog> {
+/// (Before format 4 a database's first open read every record. Each map's records are
+/// scanned and parsed on threads of their own, the tags spread over up to 8, and inserted
+/// in tag order: the tables', indexes', pg_class order's ... scans and parses ran one after
+/// the other.)
+pub fn load(head: &[u8], read: super::pmap::Reader) -> Result<Catalog> {
+    #[derive(serde::Deserialize, Default)]
+    struct Extras {
+        #[serde(default)]
+        stored: Option<super::stored_ix::Shapes>,
+        #[serde(default)]
+        ix: serde_json::Value,
+    }
     let mut c: Catalog =
         serde_json::from_slice(head).map_err(|e| internal(format!("corrupt catalog: {e}")))?;
     if c.catalog_format > CATALOG_FORMAT {
@@ -671,11 +693,14 @@ pub fn load(
             c.catalog_format
         )));
     }
+    let lazy = c.catalog_format >= 4;
     if c.catalog_format != 0 {
-        let tags = all_tags();
-        let workers = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 8);
+        let tags: Vec<u8> = (all_tags().into_iter())
+            .filter(|t| !lazy || !super::stored_ix::LAZY_TAGS.contains(t))
+            .collect();
+        let workers = if lazy { 1 } else { std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 8) };
         let cat = &c;
-        let scan = &scan;
+        let scan = &read;
         let one = |tag: u8| -> Result<Option<Parsed>> {
             let mut from = RECORD_PREFIX.to_vec();
             from.push(tag);
@@ -716,6 +741,12 @@ pub fn load(
             }
         }
     }
+    if lazy {
+        let x: Extras = serde_json::from_slice(head).map_err(|e| internal(format!("corrupt catalog: {e}")))?;
+        let shapes = x.stored.ok_or_else(|| internal("corrupt catalog: no stored maps' shapes"))?;
+        super::stored_ix::open(&mut c, &shapes, &x.ix, &read)?;
+        return Ok(c);
+    }
     // (Comments read from a header of before format 2 are ticked from 1.)
     let top = (c.comments.values()).flat_map(|x| x.0.iter().map(|e| e.1)).max().unwrap_or(0);
     c.comment_tick = c.comment_tick.max(top);
@@ -739,6 +770,8 @@ pub fn downgrade_writes(c: &Catalog) -> Result<Writes> {
     for oid in c.comments.keys() {
         out.push((record_key(COMMENTS_TAG, *oid), None));
     }
+    // (Format 4's index records: an older build refuses a tag it doesn't know.)
+    super::stored_ix::put_ix(c, true, &mut out)?;
     Ok(out)
 }
 

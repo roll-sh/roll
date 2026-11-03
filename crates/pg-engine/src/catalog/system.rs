@@ -2106,6 +2106,8 @@ fn rows_generated_chunked(
     part: &dyn Fn(&Row) -> super::sysrows::PartKey,
 ) -> Result<Vec<Arc<RowChunk>>> {
     GENERATED.with(|c| c.set(c.get() + 1));
+    // (Every relation is read: the stored maps' groups at once, on several threads.)
+    ctx.catalog().read_relations();
     let mut out = Out::chunked(part);
     generate(table, ctx, None, &mut out)?;
     Ok(out.into_chunks())

@@ -1628,20 +1628,48 @@ fn catalog_tools(cx: &Ctx) {
     }
 }
 
+/// This process's CPU time (user + system, seconds) and peak / current RSS (MB), from /proc.
+fn self_usage() -> (f64, f64, f64) {
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+    let f: Vec<&str> = stat.rsplit(')').next().unwrap_or("").split_whitespace().collect();
+    let ticks = |i: usize| f.get(i).and_then(|x| x.parse::<f64>().ok()).unwrap_or(0.0);
+    let cpu = (ticks(11) + ticks(12)) / 100.0;
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let kb = |k: &str| {
+        (status.lines())
+            .find(|l| l.starts_with(k))
+            .and_then(|l| l.split_whitespace().nth(1)?.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            / 1024.0
+    };
+    (cpu, kb("VmHWM:"), kb("VmRSS:"))
+}
+
 /// In-process, after `Engine::open` (reported at startup): the first connection to the
-/// database and its first catalog query, then a second connection's.
+/// database and its first catalog query, then a second connection's (with the process's CPU
+/// time and RSS after each: `--query` replaces `SELECT 1`).
 fn startup_catalog(cx: &Ctx) {
+    let query: String = cx.opt("query", "SELECT 1".to_string());
     for what in ["first", "second"] {
+        let (cpu0, _, _) = self_usage();
         let (mut c, s) = timed(|| cx.conn());
+        let (cpu1, hwm1, rss1) = self_usage();
+        let (_, q2) = timed(|| must(c.simple(&query), "query"));
         let (_, q) = timed(|| must(c.simple("SELECT count(*) FROM pg_class"), "pg_class"));
-        let (_, q2) = timed(|| must(c.simple("SELECT 1"), "select 1"));
+        let (cpu2, hwm2, rss2) = self_usage();
         cx.report(
             "startup",
             what,
             &[
                 ("connect_s", format!("{s:.4}")),
+                ("connect_cpu_s", format!("{:.3}", cpu1 - cpu0)),
+                ("connect_hwm_mb", format!("{hwm1:.1}")),
+                ("connect_rss_mb", format!("{rss1:.1}")),
+                ("query_s", format!("{q2:.5}")),
                 ("pg_class_count_s", format!("{q:.4}")),
-                ("select1_s", format!("{q2:.5}")),
+                ("end_cpu_s", format!("{:.3}", cpu2 - cpu0)),
+                ("end_hwm_mb", format!("{hwm2:.1}")),
+                ("end_rss_mb", format!("{rss2:.1}")),
             ],
         );
     }
@@ -1749,7 +1777,10 @@ fn main() {
                 .expect("open engine")
             });
             mem = MemProbe::Pid(std::process::id());
-            println!("RESULT\t{label}\tstartup\tengine_open\tsecs={open_s:.4}");
+            let (cpu, hwm, rss) = self_usage();
+            println!(
+                "RESULT\t{label}\tstartup\tengine_open\tsecs={open_s:.4}\tcpu_s={cpu:.3}\thwm_mb={hwm:.1}\trss_mb={rss:.1}"
+            );
             Target::InProc { engine }
         }
         _ => Target::Wire {

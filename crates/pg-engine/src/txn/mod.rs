@@ -169,19 +169,28 @@ impl Database {
         let ts = store.visible_ts();
         let catalog = match store.get(CATALOG_KEY, ts)? {
             Some(b) => {
-                let stored = persist::load(&b, |from, to| {
-                    store.scan(from, to, ts).collect::<Result<Vec<_>>>()
-                })?;
+                // (Records of the maps read on demand are read at the latest commit: a
+                // group or bucket is read before a commit changes it, `pmap::GroupData`.)
+                let read: crate::catalog::pmap::Reader = {
+                    let store = store.clone();
+                    Arc::new(move |from: &[u8], to: &[u8]| {
+                        let ts = store.visible_ts();
+                        store.scan(from, to, ts).collect::<Result<Vec<_>>>()
+                    })
+                };
+                let stored = persist::load(&b, read)?;
                 let mut c = stored.clone();
-                c.reindex();
                 if c.catalog_format < persist::CATALOG_FORMAT {
-                    // Stored as one value (before catalog format 1): rewritten as records,
-                    // in one commit.
+                    // Stored in an older format (a single value before format 1; before
+                    // format 4 without its indexes): every record rewritten, in one commit,
+                    // after the upgrades of objects stored before their oids.
+                    c.reindex();
                     c.catalog_format = persist::CATALOG_FORMAT;
                     store.commit(persist::writes_new(&c)?, |_| Ok(()))?;
                 } else {
-                    // What `reindex` brought up to date (oids a catalog from before them
-                    // lacked) is stored now: later commits write only what they change.
+                    // What `open_upgrades` brought up to date is stored now: later commits
+                    // write only what they change.
+                    c.open_upgrades();
                     let w = persist::changed(&stored, &c)?;
                     if !w.is_empty() {
                         store.commit(w, |_| Ok(()))?;

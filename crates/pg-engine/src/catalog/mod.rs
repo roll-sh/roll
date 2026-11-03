@@ -15,6 +15,7 @@ pub mod keymap;
 pub mod jsonbin;
 pub mod lz4;
 pub mod persist;
+pub mod stored_ix;
 pub mod pmap;
 pub mod relindex;
 pub mod pglz;
@@ -2084,7 +2085,7 @@ pub struct Catalog {
     names: pmap::PHash<(u32, String), (RelKind, u32)>,
     /// Parent oid → its direct children, in oid order.
     #[serde(skip)]
-    children: Arc<HashMap<u32, Vec<u32>>>,
+    children: pmap::PMap<Vec<u32>>,
     /// Where tables' and materialized views' pg_class rows lie in pg_class's heap, as a
     /// sequence: a new row goes last, and so does a row updated other than in place (an
     /// in-place update, of relpages or relhasindex say, leaves it). REINDEX DATABASE /
@@ -2404,8 +2405,14 @@ impl Catalog {
         }
     }
 
-    /// Rebuild name lookups (after deserialising).
-    pub fn reindex(&mut self) {
+    /// The stored maps and indexes read whole now, in parallel (`stored_ix::read_all`),
+    /// before a system catalog is generated whole.
+    pub fn read_relations(&self) {
+        stored_ix::read_all(self);
+    }
+
+    /// What every open brings up to date (none of it visits the relations).
+    pub fn open_upgrades(&mut self) {
         // Catalogs from before information_schema had Postgres's oid.
         if let Some(mut s) = self
             .schemas
@@ -2418,6 +2425,12 @@ impl Catalog {
         if self.schemas.contains_key(&INFORMATION_SCHEMA_OID) {
             self.add_information_schema_domains();
         }
+    }
+
+    /// Rebuild name lookups (after deserialising a catalog stored before format 4, which
+    /// stores them: `stored_ix`), with the upgrades of objects stored before their oids.
+    pub fn reindex(&mut self) {
+        self.open_upgrades();
         // Catalogs from before row types had oids.
         for oid in self
             .tables
@@ -2462,12 +2475,12 @@ impl Catalog {
             self.tables.insert(oid, Arc::new(t));
         }
         self.names.clear();
-        Arc::make_mut(&mut self.children).clear();
+        self.children.clear();
         for t in self.tables.values() {
             self.names
                 .insert((t.schema, t.name.clone()), (RelKind::Table, t.oid));
             for p in &t.inherits {
-                Arc::make_mut(&mut self.children).entry(*p).or_default().push(t.oid);
+                child_list(&mut self.children, *p).push(t.oid);
             }
         }
         for v in self.views.values() {
@@ -2542,7 +2555,7 @@ impl Catalog {
             }
             if let Some(t) = before.tables.get(&o).filter(|t| !t.inherits.is_empty()) {
                 for p in &t.inherits {
-                    if let Some(v) = Arc::make_mut(&mut self.children).get_mut(p) {
+                    if let Some(v) = self.children.get_mut(p) {
                         v.retain(|c| *c != o);
                     }
                 }
@@ -2564,7 +2577,7 @@ impl Catalog {
             }
             if let Some(t) = self.tables.get(&o).cloned() {
                 for p in &t.inherits {
-                    let v = Arc::make_mut(&mut self.children).entry(*p).or_default();
+                    let v = child_list(&mut self.children, *p);
                     // (In table oid order, as `reindex` lists them.)
                     if !v.contains(&o) {
                         let at = v.partition_point(|c| *c < o);
@@ -3703,7 +3716,7 @@ impl Catalog {
         if old != t.inherits {
             self.unlink_children(t.oid, &old);
             for p in &t.inherits {
-                let v = Arc::make_mut(&mut self.children).entry(*p).or_default();
+                let v = child_list(&mut self.children, *p);
                 if let Err(i) = v.binary_search(&t.oid) {
                     v.insert(i, t.oid);
                 }
@@ -4014,7 +4027,7 @@ impl Catalog {
     pub fn detach_view(self: &Arc<Self>, omitted: Vec<(u32, u32)>, routing_full: bool) -> Catalog {
         let mut c = (**self).clone();
         for (p, child) in &omitted {
-            if let Some(v) = Arc::make_mut(&mut c.children).get_mut(p) {
+            if let Some(v) = c.children.get_mut(p) {
                 v.retain(|x| x != child);
             }
         }
@@ -4035,7 +4048,7 @@ impl Catalog {
         };
         for (p, child) in &v.omitted {
             if self.tables.get(child).is_some_and(|t| t.inherits.contains(p)) {
-                let list = Arc::make_mut(&mut self.children).entry(*p).or_default();
+                let list = child_list(&mut self.children, *p);
                 if let Err(i) = list.binary_search(child) {
                     list.insert(i, *child);
                 }
@@ -4193,10 +4206,10 @@ impl Catalog {
 
     fn unlink_children(&mut self, child: u32, parents: &[u32]) {
         for p in parents {
-            if let Some(v) = Arc::make_mut(&mut self.children).get_mut(p) {
+            if let Some(v) = self.children.get_mut(p) {
                 v.retain(|c| *c != child);
                 if v.is_empty() {
-                    Arc::make_mut(&mut self.children).remove(p);
+                    self.children.remove(p);
                 }
             }
         }
@@ -5077,6 +5090,14 @@ pub fn ensure(cond: bool, e: impl FnOnce() -> Error) -> Result<()> {
 
 pub fn not_supported(what: &str) -> Result<()> {
     bail!(FEATURE_NOT_SUPPORTED, "{what} is not supported yet")
+}
+
+/// Parent `p`'s list in the children index (made when it has none).
+fn child_list(children: &mut pmap::PMap<Vec<u32>>, p: u32) -> &mut Vec<u32> {
+    if !children.contains_key(&p) {
+        children.insert(p, Vec::new());
+    }
+    children.get_mut(&p).expect("a parent's children list")
 }
 
 /// Whether storing `new` over `old` updates the table's pg_class row other than in place:

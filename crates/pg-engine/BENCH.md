@@ -6196,6 +6196,65 @@ btree-key assertion. `pnpm test:pg --unit` passes; its Docker e2e phase remains 
 it uses random published ports outside the batch's assigned range. Full commands and evidence
 are in `~/.cache/a146-resume-t3-35e763e4/`.
 
+### Second batch: catalog format 4, a database opens without reading its objects
+
+HANDOFF.md "Catalog round 9, second batch" has what changed. Release builds at nice 19 on a
+loaded machine (load 10-40), interleaved rounds; the engine's CPU time from `/proc/<pid>/stat`
+and its peak RSS (`VmHWM`) after the connection; over the wire with the bench client's
+`startup` (connect, SCRAM, `SELECT 1`). Data directories made by `bench scale` (tables of
+three columns, a primary key, a default, 10 schemas), stopped cleanly.
+
+**The open, on the base the work was measured on** (`aa8218a2` against format 4 on
+`15a77038`, 3 rounds; the format-4 directories upgraded once before):
+
+| tables | base: connect, engine CPU, RSS | format 4 | PostgreSQL 18.6 (after a restart) |
+|---|---|---|---|
+| 100 | 16-24 ms, 0.03 s, 43-48 MB | 13-19 ms, 0.02 s, 42-44 MB | 21 ms |
+| 10,000 | 96-117 ms, 0.27 s, 98 MB | 13-28 ms, 0.03-0.04 s, 45 MB | 11 ms |
+| 100,000 | 537-607 ms, 1.4 s, 561-583 MB | 25-37 ms, 0.04 s, 52-55 MB | 21-24 ms |
+
+The format-4 open is near-constant: engine/PostgreSQL 0.6-2.5x at 10,000 tables (was 8-10x),
+1.0-1.8x at 100,000 (was 25x), at a tenth of the memory. The first read of a table after it
+costs 3-5 ms against 2-4 (its group read from the store, its chunk parsed); a first `count(*)`
+of pg_class 10-21 ms, as before.
+
+**On the current branch** (`5ee62371`, base built from it, 3 rounds): the open is the same, but
+the database's first transaction parses every table on the connection's thread afterwards
+(not the catalog's code: being located, the next batch), so the first connection is
+73-89 ms against 76-128 at 10,000 tables (engine CPU 0.08-0.10 s against 0.19-0.23, RSS 80
+against 102 MB) and 0.62-0.74 s against 0.60-0.84 at 100,000 (CPU 0.62-0.73 s against
+1.35-1.75, RSS 470 against 562-582 MB).
+
+The upgrade from format 3 is one commit at the first open: 10,000 tables 0.20-0.22 s, 100,000
+tables 1.8-2.5 s and 1.1 GB peak, once.
+
+| | base | format 4 |
+|---|---|---|
+| pgbench `-S` tps (2 rounds) | 9,425 / 8,174 | 8,646 / 8,628 |
+| `-S` engine CPU per 1,000 transactions | 291 / 321 ms | 312 / 315 ms |
+| pgbench `-N` tps | 5,500 / 4,801 | 4,831 / 5,048 |
+| `-N` engine CPU per 1,000 transactions | 589 / 649 ms | 666 / 646 ms |
+| pgbench peak RSS | 409-495 MB | 485-488 MB |
+| `catalog-tools` at 10,000 tables (2 rounds, reversed order): engine CPU, peak RSS | 1.15 / 1.16 s, 174-179 MB | 1.19 / 1.06 s, 174-175 MB |
+| `pg_restore -j 4` of the regression database (3 rounds each): wall, engine CPU, RSS | 2.2-2.5 s, 5.7-6.5 s, 245-265 MB | 2.4-2.5 s, 6.2-6.4 s, 245-259 MB |
+
+(pgbench: scale 10, 4 clients, 5,000 transactions each, `--no-sync`.) `catalog-tools` per query
+is unchanged within the noise but for psql's `\dt` first in a session, 78-120 ms against
+132-138 ms: it is the first query to read every relation, and pays the store reads and parses
+the open no longer does.
+
+### Verification (round 24, agent 146, second batch)
+
+On `5ee62371`: `cargo test -p pg-engine` debug and release (every binary), clippy (nothing
+new), the regression suite in full twice (debug, private reference): 51,148 / 51,150, no unit
+changed against `results.tsv`; isolation 121 / 122 specs (intra-grant-inplace) and the 17
+roll-* specs; `pg_dump_tap` 14,817 / 14,817; `pg_dump_roundtrip` over the second run's
+database: dumps 2,721 / 2,733 entries alike, 0 errors restoring either side's dump into the
+other, every way; `pg_restore -j 4` of that database into a fresh engine 23 times, 0 failing.
+After `PMap::contains_key` stopped parsing: lib tests, catalog_format, catalog_storage,
+goldens, ddl_scaling, and the regression suite in full once more (51,148 / 51,150, no unit
+changed).
+
 ## OLTP round 3 (round 23, agent 136)
 
 HANDOFF.md, "OLTP round 3", has what changed: extended-protocol statements bound once per
