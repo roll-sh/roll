@@ -97,6 +97,11 @@ impl Container {
         let container = Container { network: opts.stable_ip.then(|| format!("{name}-net")), name };
         if let Some(network) = &container.network {
             docker_ok(&["network", "create", "--label", &label, network]);
+            // Let Docker select a free subnet, then declare it explicitly: older daemons
+            // reject static container addresses on automatically configured subnets.
+            let subnet = docker_ok(&["network", "inspect", "-f", "{{(index .IPAM.Config 0).Subnet}}", network]);
+            docker_ok(&["network", "rm", network]);
+            docker_ok(&["network", "create", "--label", &label, "--subnet", &subnet, network]);
             let gateway = docker_ok(&["network", "inspect", "-f", "{{(index .IPAM.Config 0).Gateway}}", network]);
             let ip = std::net::Ipv4Addr::from(u32::from(gateway.parse::<std::net::Ipv4Addr>().unwrap()) + 1);
             a.extend(["--network".into(), network.clone(), "--ip".into(), ip.to_string()]);

@@ -119,7 +119,7 @@ if [[ $unit_only == 0 ]]; then
 fi
 
 # Only a full run counts as green.
-if [[ $unit_only == 0 && -z "${ROLL_COMPAT_FILTER:-}" ]]; then
+if [[ $unit_only == 0 && $e2e_only == 0 && -z "${ROLL_COMPAT_FILTER:-}" ]]; then
   mkdir -p target && echo "$hash" > "$STAMP"
 fi
 echo "nosql: all green"
