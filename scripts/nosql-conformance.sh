@@ -312,12 +312,14 @@ fi
 
 run_pytest() { # <name> <pytest args...>
   local name=$1; shift
+  local server_timestamps=0
+  [[ ${roll:-$reference} == cassandra ]] && server_timestamps=1
   runner_name=nosql-conformance-run-$$
   rm -f "$RUN/out/results-$name.txt"
   wait_memory
   docker run --rm --name "$runner_name" --memory "$RUNNER_MEMORY" "${runner_net[@]}" "${env_args[@]}" "${mounts[@]}" \
     -v "$PWD/$src:/scylladb:ro" -v "$RUN/out:/out" -w /scylladb/test \
-    -e ROLL_CONFORMANCE_RESULTS="/out/results-$name.txt" -e PYTHONPATH=/runner:/scylladb \
+    -e ROLL_CONFORMANCE_RESULTS="/out/results-$name.txt" -e ROLL_CONFORMANCE_SERVER_TIMESTAMPS="$server_timestamps" -e PYTHONPATH=/runner:/scylladb \
     "$RUNNER_IMAGE" python -m pytest "$@" > "$RUN/out/pytest-$name.log" 2>&1
 }
 run_late() { # each disruptive test in its own process, so one that kills the server can't hide another
