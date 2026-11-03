@@ -38,7 +38,7 @@ pub struct Conns {
     /// Connections scans of a declared cursor got when it was declared (BeginForeignScan
     /// runs at DECLARE), by the scan's plan node address: its first FETCH uses them as
     /// they are. Forgotten at the transaction's end.
-    pub begun: std::collections::HashMap<usize, u32>,
+    pub begun: std::collections::HashMap<usize, (u32, u32)>,
 }
 
 /// What a connection is for: its server, user mapping and the user it maps.
@@ -282,18 +282,21 @@ fn begin_remote_xact(e: &mut Entry, ctx: &ExecCtx) -> Result<()> {
 }
 
 /// The connection of a scan starting (BeginForeignScan): the one its cursor got at DECLARE
-/// (`Conns::begun`, by the scan's plan node address `at`), else GetConnection's.
-pub fn scan_connection(ctx: &ExecCtx, at: usize, m: &Mapping) -> Result<u32> {
+/// (`Conns::begun`, by the scan's plan node address `at`) with the cursor number it took
+/// then, else GetConnection's.
+pub fn scan_connection(ctx: &ExecCtx, at: usize, m: &Mapping) -> Result<(u32, Option<u32>)> {
     let got = ctx.sess.remote.borrow_mut().fdw.begun.remove(&at);
     match got {
-        Some(k) if k == m.mapping.oid => Ok(k),
-        _ => get_connection(ctx, m, false),
+        Some((k, n)) if k == m.mapping.oid => Ok((k, Some(n))),
+        _ => Ok((get_connection(ctx, m, false)?, None)),
     }
 }
 
-/// Note the connection a declared cursor's scan got (`scan_connection` takes it).
+/// Note the connection a declared cursor's scan got, and its cursor number (GetCursorNumber
+/// runs in BeginForeignScan): `scan_connection` takes them.
 pub fn note_begun(ctx: &ExecCtx, at: usize, key: u32) {
-    ctx.sess.remote.borrow_mut().fdw.begun.insert(at, key);
+    let n = next_cursor(ctx);
+    ctx.sess.remote.borrow_mut().fdw.begun.insert(at, (key, n));
 }
 
 /// GetConnection: the cached connection of mapping `m` (made if needed), in a remote

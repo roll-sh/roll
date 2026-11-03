@@ -233,6 +233,8 @@ fn fetch_size(cat: &Catalog, t: &Table) -> usize {
 /// A remote query read through a cursor, `fetch` rows at a time (create_cursor,
 /// fetch_more_data, close_cursor).
 pub struct Cursor {
+    /// Its number when its scan began at DECLARE (`connection::note_begun`).
+    number: Option<u32>,
     pub key: u32,
     name: String,
     fetch: usize,
@@ -247,7 +249,13 @@ pub struct Cursor {
 
 impl Cursor {
     pub fn new(key: u32, fetch: usize, sql: String, params: Vec<Expr>) -> Cursor {
-        Cursor { key, name: String::new(), fetch, batch: VecDeque::new(), eof: false, sql, params, inflight: false }
+        Cursor { key, name: String::new(), fetch, batch: VecDeque::new(), eof: false, sql, params, inflight: false, number: None }
+    }
+
+    /// The cursor number its scan took when it began (a declared cursor's: at DECLARE).
+    pub fn numbered(mut self, n: Option<u32>) -> Cursor {
+        self.number = n;
+        self
     }
 
     /// fetch_more_data_begin: declare the cursor and send its first FETCH without waiting.
@@ -379,10 +387,10 @@ pub fn open(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNod
     let cat = ctx.catalog();
     let spec = spec(s, need, &cat, ctx.fmt());
     let m = mapping_for(&s.table, s.check_as, ctx)?;
-    let key = connection::scan_connection(ctx, s as *const ScanPlan as usize, &m)?;
+    let (key, number) = connection::scan_connection(ctx, s as *const ScanPlan as usize, &m)?;
     Ok(Box::new(ScanNode {
         table: s.table.clone(),
-        cur: Cursor::new(key, fetch_size(&cat, &s.table), spec.sql, spec.params),
+        cur: Cursor::new(key, fetch_size(&cat, &s.table), spec.sql, spec.params).numbered(number),
         retrieved: spec.retrieved,
         ctid: spec.ctid,
         with_key: s.with_key,
@@ -408,7 +416,7 @@ impl Cursor {
                 Ok((!v.is_null()).then(|| crate::types::text::format_value(&v, &p.ty(), &fmt)))
             })
             .collect::<Result<_>>()?;
-        self.name = format!("c{}", connection::next_cursor(ctx));
+        self.name = format!("c{}", self.number.take().unwrap_or_else(|| connection::next_cursor(ctx)));
         // (The parameters' values go in as literals of the parameters' types: `$n::type`
         // becomes `'value'::type`, highest numbers first.)
         let mut text = self.sql.clone();
@@ -433,8 +441,11 @@ impl Cursor {
 impl Cursor {
     /// fetch_more_data.
     fn fetch_more(&mut self, ctx: &ExecCtx) -> Result<()> {
+        let declaring = self.name.is_empty();
         let sql = self.fetch_sql(ctx)?;
         let query = &self.sql;
+        // (create_cursor: a connection already lost fails the DECLARE, reported with it.)
+        let declare = declaring.then(|| sql.rsplit_once(";\nFETCH ").map_or(sql.as_str(), |(d, _)| d).to_string());
         let intr = crate::remote::interrupts(ctx);
         let inflight = std::mem::take(&mut self.inflight);
         let stashed = if inflight { connection::take_pending_result(self.key) } else { None };
@@ -446,9 +457,11 @@ impl Cursor {
             if inflight && !c.is_busy() {
                 return c.exec(&sql, &intr);
             }
+            let lost = c.bad;
             let r = if inflight { collect(c, &intr)? } else { c.exec(&sql, &intr)? };
             if r.status != Status::TuplesOk {
-                return Err(connection::report(&r, c, Some(query)));
+                let what = declare.as_deref().filter(|_| lost).unwrap_or(query);
+                return Err(connection::report(&r, c, Some(what)));
             }
             Ok(r)
         };

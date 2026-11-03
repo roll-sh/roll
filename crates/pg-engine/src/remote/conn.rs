@@ -595,8 +595,9 @@ impl Conn {
     }
 
     fn begin_send(&mut self) -> Result<(), String> {
+        // (PQsendQueryStart on a connection that isn't CONNECTION_OK.)
         if self.bad {
-            self.error_message = "connection to server was lost\n".into();
+            self.error_message = "no connection to the server\n".into();
             return Err(self.error_message.clone());
         }
         if self.busy {

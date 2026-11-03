@@ -99,6 +99,56 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## postgres_fdw, round 6 (2026-11-03, agent 153)
+
+What changed: HANDOFF.md's postgres_fdw "Round 25 (agent 153)". A level locking local relations
+joins its foreign ones remotely (with the local join as the EvalPlanQual outer plan); a declared
+cursor's scan takes its connection at DECLARE.
+
+The workload is `tests/fdw_traffic.rs`'s phases plus one new phase ("locked local join of a
+foreign join": `SELECT loc.id, ft.v, fs.w FROM loc, ft, fs WHERE ft.id = fs.id AND ft.id =
+loc.id AND fs.id < N FOR UPDATE OF loc`, 20 statements). It runs as one psql session against
+a fresh server whose postgres_fdw connects to the same server through a counting TCP proxy:
+`writes` are the wrapper's message batches (round trips), `out` / `in` the bytes each way. The
+engine is a `--profile dist` build (e73340f4) with WAL fsync on, as PostgreSQL 18.6 (the pinned
+image, default settings, host network) is. Both run on the same 16-core host; the engine runs
+under `nice -n 19`. One run each, back to back, on a loaded machine (load 9-15).
+
+| phase (statements) | PG writes / stmt | engine | PG in | engine in | PG ms | engine ms | engine / PG time |
+|---|---|---|---|---|---|---|---|
+| point lookups (500) | 5.00 | **2.00** | 120 kB | **94 kB** | 989 | **819** | 0.83 |
+| lookups in one txn (302) | 2.99 | **1.00** | 40 kB | **31 kB** | 517 | **256** | 0.49 |
+| full scans, 20k rows (10) | 205 | **202** | 8.28 MB | 8.28 MB | **1,454** | 1,777 | 1.22 |
+| range scans, ~31 rows (200) | 5.00 | **2.00** | 282 kB | **272 kB** | 466 | **442** | 0.95 |
+| foreign joins (100) | 208 | **2.09** | 61.3 MB | **0.16 MB** | 11,281 | **1,060** | 0.09 |
+| remote aggregates (100) | 5.00 | **2.00** | 22 kB | **16 kB** | **592** | 702 | 1.19 |
+| local join foreign (5) | 205 | **202** | 1.59 MB | 1.59 MB | **634** | 890 | 1.40 |
+| single-row inserts (300) | 5.00 | **2.00** | 34 kB | **25 kB** | 677 | **462** | 0.68 |
+| direct updates (100) | 3.00 | **2.00** | 8 kB | **6 kB** | 178 | **154** | 0.86 |
+| inherited updates, row trigger (20 x 50 rows) | 56.95 | **51.95** | 74 kB | 78 kB | **458** | 1,043 | 2.28 |
+| inherited updates, sent whole (20 x 50 rows) | 3.00 | **2.00** | 1.7 kB | **1.2 kB** | **45** | 105 | 2.35 |
+| locked local join foreign (20) | 208 | **205** | 16.7 MB | 16.7 MB | **2,837** | 3,171 | 1.12 |
+| locked local join of a foreign join (20) | 214 | **4.95** | 16.9 MB | **0.51 MB** | 3,108 | **427** | 0.14 |
+
+Whole run: engine 12.0 s wall, 6.6 s CPU for both sides of every connection (one process),
+peak RSS 95 MB. PostgreSQL's two backends per phase run in separate processes (its CPU isn't
+summed here). The engine sends fewer round trips and bytes in every phase. Two of its time
+leads come from plans PostgreSQL doesn't choose: its foreign joins and the locked join of
+foreign tables aren't pushed down on PostgreSQL here, because the tables were never analyzed
+and PostgreSQL estimates a never-analyzed foreign table by its reltarget's width, the engine by
+all of the table's columns (`costs::rel_size`; HANDOFF's round 25 note). That gap is a plan
+difference to close, not a lead to keep. Where the engine is slower: whole-table remote scans
+(1.22x, 1.40x joined locally: the remote side's scan and the text conversion of 20,000 rows a
+statement), remote aggregates (1.19x), and the inherited updates (2.3x: per-statement planning
+of an inheritance tree with a foreign member, both with and without the trigger).
+
+Before and after this round (debug engines, same harness, in-process counters agreeing with
+the proxy's): every phase's writes and bytes are unchanged but the new one, 208.95 -> 4.95 writes
+per statement, 16.9 -> 0.51 MB in, 22.4 -> 1.5 s; peak RSS 147.6 -> 140.9 MB for the whole run.
+The non-direct foreign UPDATE phase (rows fetched by remote ctid, agent 135's Tid Scan,
+08fef0f0) takes 4.3-5.2 s in debug where round 23 measured 24 s: no extra round trips (51.95 per
+statement, one per row's UPDATE, as before).
+
 ## Build profile: dist (2026-11-03)
 
 `--profile dist` (root `Cargo.toml`: `release` with `lto = "fat"` and `codegen-units = 1`)

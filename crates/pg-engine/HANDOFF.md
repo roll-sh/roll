@@ -972,6 +972,44 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   levels (198, 266, 268, 272, 275) is the item that remains: `JNode::Foreign` would keep
   GetExistingLocalJoinPath's local path, the Foreign Scan return each base's copy as a
   mark key (its remote whole rows) and run the outer plan in a recheck.
+  Round 25 (agent 153, postgres_fdw round 6): that sketch, built. A locking level with local
+  relations joins its foreign ones remotely again: `foreign_join_path` keeps the relation's
+  first unparameterized local join path (`local_join_path`, GetExistingLocalJoinPath, a
+  pushed side replaced by its own) in `JNode::Foreign::epq`, and none means no remote join;
+  `build_foreign` plans it as `ForeignRel::outer` returning the scan's `out`. The hoist keys
+  the Foreign Scan (`rowmarks::key_foreign`): the wrapper places every base's whole row as its
+  mark's copy (`ForeignRelOps::with_copy_marks`; postgres_fdw's `JoinScan::marks`, a
+  `CASE WHEN (rN.*)::text IS NOT NULL THEN ROW(...) END` in the remote SELECT list, made into
+  `exec::scan::copy_key` by `Field::Mark`), base k's as out column `plan::FDW_MARK_COL + k`,
+  each base's columns as its reltarget has them (read above, the whole row, then join-clause
+  columns); the outer plan returns the same columns with its scans' keys. `level_scans` gives
+  a recheck the outer plan's scans in the bases' order, and `fdw::open` in a recheck runs the
+  outer plan over the copies (RecheckForeignScan): nothing is sent (traced; `fdw_loopback`
+  `pushed_join_rechecks_with_outer_plan`). EXPLAIN shows the outer plan under the Foreign
+  Scan, its scans named as the join's, its columns pruned like any (the needed-columns walk
+  goes into `ForeignRel::outer`). Not with relations deparsed as subqueries (the bases'
+  `rN` aliases; 198 needs ROW columns inside the subqueries) nor under a pushed ORDER BY /
+  LIMIT. What 266 / 268 / 272 / 275 still differ in is the join search: PostgreSQL's
+  merge join puts the foreign join outer (inner unique), sorts a foreign join's output for
+  a merge join (sorted foreign join paths, add_paths_with_pathkeys_for_rel, and the Sort /
+  Result over a sorted epq path), and its first join pair's order picks another epq path.
+  A declared cursor's scans begin at DECLARE (36b7a6c6: `scan::begin_scans` from
+  `cursor::Lazy::for_cursor`, `connection::scan_connection`) and take their cursor number
+  then too (`Conns::begun`, GetCursorNumber in BeginForeignScan: 2024 names `c1`); a send on a
+  connection already lost fails as libpq's PQsendQueryStart does, "no connection to the
+  server" (`remote::conn` `begin_send`; it said "connection to server was lost", psql's own
+  text for a lost engine, which the harness reads as a crash), reported with the cursor's
+  DECLARE when that was being sent. Still open there: 2037 (`CLOSE c` sends CLOSE, an
+  EndForeignScan the engine's nodes don't have: the remote cursor is closed with the next
+  command or the transaction).
+  Found and left: a never-analyzed foreign table's size (postgresGetForeignRelSize: 10 pages of
+  rows of the reltarget's width) uses all its columns' widths in `costs::rel_size`, and a lone
+  foreign table's scan is costed as a 10-page seq scan (`SELECT * FROM ft`: engine
+  `0.00..18.53 rows=853`, PostgreSQL `100.00..305.80 rows=890`); in joins the wrapper's
+  estimate is used, but with rows from the wider width. So the engine pushes joins
+  PostgreSQL doesn't over never-analyzed tables (BENCH.md "postgres_fdw, round 6").
+  Traffic against PostgreSQL's postgres_fdw: BENCH.md "postgres_fdw, round 6" (a counting proxy,
+  `pgtraffic.py` in that section's method; fewer round trips and bytes in every phase).
 - **file_fdw** (round 19, agent 66): native (`src/ext/file_fdw.rs`), 187 / 187 of its
   contrib test. Foreign scans of a file_fdw table read the file with COPY FROM's parser
   (`session/copy.rs` `parse_copy_data`, shared with COPY) a chunk at a time; the file is a

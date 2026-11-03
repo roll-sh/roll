@@ -1922,6 +1922,12 @@ fn needed_masks_of(root: &Plan) -> HashMap<usize, Vec<bool>> {
         {
             go(alt, needed.clone(), whole, out);
         }
+        // (A foreign join's outer plan returns its scan's columns, all read.)
+        if let Plan::Foreign(f) = p
+            && let Some(o) = &f.outer
+        {
+            go(o, vec![true; super::binder::plan_width(o)], whole, out);
+        }
         out.insert(addr(p), needed);
         let mut es = Vec::new();
         node_exprs(p, &mut es);
@@ -12159,7 +12165,7 @@ impl Builder<'_, '_> {
                 .iter()
                 .map(|&c| match c.checked_sub(super::plan::FDW_MARK_COL).filter(|&k| k < refs.len()) {
                     // (A base's whole row, its row mark's copy.)
-                    Some(k) => Name::same(&format!("{}.*", refs[k])),
+                    Some(k) => Name::same(format!("{}.*", refs[k])),
                     None => names.get(c).cloned().unwrap_or_else(|| Name::same("?")),
                 })
                 .collect(),

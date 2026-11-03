@@ -31,6 +31,9 @@ pub struct JoinScan {
     /// as its row mark's copy (`exec::scan::copy_key`), as (position in `tlist` it goes
     /// before, base), in base order; the node returns base k's as `FDW_MARK_COL + k`.
     pub marks: Vec<(usize, usize)>,
+    /// The join row columns its level's target list reads (needed above the level's whole
+    /// join): a base's reltarget has them first, its row mark's junk after them.
+    pub top: Vec<usize>,
 }
 
 impl JoinScan {
@@ -168,7 +171,7 @@ impl crate::ext::fdw::ForeignRelOps for JoinScan {
         let (sql, params) = self.sql(ctx);
         let first = &self.bases[0].scan;
         let m = super::scan::mapping_for(&first.table, first.check_as, ctx)?;
-        let key = super::connection::scan_connection(ctx, fr as *const ForeignRel as usize, &m)?;
+        let (key, number) = super::connection::scan_connection(ctx, fr as *const ForeignRel as usize, &m)?;
         // (The row the remote columns go into: one slot per column fetched, then those
         // the node returns that aren't.)
         let mut slots: Vec<usize> = self.tlist.clone();
@@ -201,7 +204,7 @@ impl crate::ext::fdw::ForeignRelOps for JoinScan {
             types.insert(at.min(types.len()), field);
         }
         Ok(Box::new(JoinNode {
-            cur: super::scan::Cursor::new(key, self.info.opts.fetch_size, sql, params),
+            cur: super::scan::Cursor::new(key, self.info.opts.fetch_size, sql, params).numbered(number),
             types,
             width: slots.len(),
             local: self.info.local_conds.iter().map(|e| e.clone().remap_cols(&slot)).collect(),
@@ -232,26 +235,50 @@ impl crate::ext::fdw::ForeignRelOps for JoinScan {
         if !self.order.is_empty() || self.limit.is_some() || !self.marks.is_empty() || self.info.lower_subquery != 0 {
             return None;
         }
-        // (Each base's after its last column, as its reltarget has its junk last; after the
-        // base before's.)
+        // (Each base's columns as its reltarget has them: those the target list reads, its
+        // junk (the whole row), then those only its join clauses read
+        // (add_vars_to_targetlist), in their order; with whole-row references fetched, the
+        // mark after the base's last.)
         let base_of = |g: usize| self.bases.iter().position(|b| b.cols.contains(&Some(g)));
-        let place = |list: &[usize]| -> Vec<usize> {
-            let mut lo = 0;
-            (0..self.bases.len())
-                .map(|k| {
-                    lo = list.iter().rposition(|&g| base_of(g) == Some(k)).map_or(lo, |i| (i + 1).max(lo));
-                    lo
-                })
-                .collect()
+        let regroup = |list: &[usize]| -> (Vec<usize>, Vec<usize>) {
+            if !self.whole.is_empty() {
+                let mut lo = 0;
+                let at = (0..self.bases.len())
+                    .map(|k| {
+                        lo = list.iter().rposition(|&g| base_of(g) == Some(k)).map_or(lo, |i| (i + 1).max(lo));
+                        lo
+                    })
+                    .collect();
+                return (list.to_vec(), at);
+            }
+            let mut res = Vec::with_capacity(list.len());
+            let mut at = Vec::with_capacity(self.bases.len());
+            for (k, b) in self.bases.iter().enumerate() {
+                let clause_rank = |g: usize| {
+                    let i = b.cols.iter().position(|c| *c == Some(g))?;
+                    b.scan.reltarget.0.iter().position(|&x| x == i)
+                };
+                let mine: Vec<usize> = list.iter().copied().filter(|&g| base_of(g) == Some(k)).collect();
+                let read = |g: usize| self.top.contains(&g) || clause_rank(g).is_none();
+                res.extend(mine.iter().copied().filter(|&g| read(g)));
+                at.push(res.len());
+                let mut clause: Vec<usize> = mine.into_iter().filter(|&g| !read(g)).collect();
+                clause.sort_by_key(|&g| clause_rank(g));
+                res.extend(clause);
+            }
+            res.extend(list.iter().copied().filter(|&g| base_of(g).is_none()));
+            (res, at)
         };
-        let at = place(&fr.out);
-        let mut out = Vec::with_capacity(fr.out.len() + at.len());
-        for i in 0..=fr.out.len() {
+        let (cols, at) = regroup(&fr.out);
+        let mut out = Vec::with_capacity(cols.len() + at.len());
+        for i in 0..=cols.len() {
             out.extend((0..at.len()).filter(|&k| at[k] == i).map(|k| crate::sql::plan::FDW_MARK_COL + k));
-            out.extend(fr.out.get(i));
+            out.extend(cols.get(i));
         }
         let mut js = self.clone();
-        js.marks = place(&self.tlist).into_iter().enumerate().map(|(k, p)| (p, k)).collect();
+        let (tlist, at) = regroup(&self.tlist);
+        js.tlist = tlist;
+        js.marks = at.into_iter().enumerate().map(|(k, p)| (p, k)).collect();
         Some((Arc::new(js), out))
     }
 
