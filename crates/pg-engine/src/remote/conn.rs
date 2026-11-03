@@ -540,7 +540,7 @@ impl Conn {
             }
             backend::Message::DataRow(d) => {
                 let buf = d.buffer();
-                let mut row = Vec::new();
+                let mut row = Vec::with_capacity(self.cur.as_ref().map_or(0, |c| c.fields.len()));
                 let mut it = d.ranges();
                 while let Ok(Some(r)) = fallible_iterator::FallibleIterator::next(&mut it) {
                     row.push(r.map(|r| String::from_utf8_lossy(&buf[r]).into_owned()));

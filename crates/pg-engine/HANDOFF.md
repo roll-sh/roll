@@ -1002,14 +1002,50 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   DECLARE when that was being sent. Still open there: 2037 (`CLOSE c` sends CLOSE, an
   EndForeignScan the engine's nodes don't have: the remote cursor is closed with the next
   command or the transaction).
-  Found and left: a never-analyzed foreign table's size (postgresGetForeignRelSize: 10 pages of
-  rows of the reltarget's width) uses all its columns' widths in `costs::rel_size`, and a lone
+  Found and left (fixed in round 26): a never-analyzed foreign table's size
+  (postgresGetForeignRelSize: 10 pages of rows of the reltarget's width) used all its
+  columns' widths in `costs::rel_size`, and a lone
   foreign table's scan is costed as a 10-page seq scan (`SELECT * FROM ft`: engine
   `0.00..18.53 rows=853`, PostgreSQL `100.00..305.80 rows=890`); in joins the wrapper's
   estimate is used, but with rows from the wider width. So the engine pushes joins
   PostgreSQL doesn't over never-analyzed tables (BENCH.md "postgres_fdw, round 6").
   Traffic against PostgreSQL's postgres_fdw: BENCH.md "postgres_fdw, round 6" (a counting proxy,
   `tools/fdwtraffic/`; fewer round trips and bytes in every phase).
+  Round 26 (agent 157, postgres_fdw round 7): estimates and per-row costs. A never-analyzed
+  postgres_fdw table is sized as postgresGetForeignRelSize does, 10 pages of rows as wide as
+  the columns the scan returns plus a 24-byte header, not maxaligned and not all its columns
+  (`costs::fdw_unanalyzed_size`, from `Planner::rel`'s reltarget mask; not with
+  use_remote_estimate, whose remote EXPLAIN sizes it); a lone foreign scan is costed by
+  estimate_path_cost_size (`ext::postgres_fdw::join::base_path_cost`, `Rel::fdw`: the seq-scan
+  cost plus fdw_startup_cost and (fdw_tuple_cost + cpu_tuple_cost) per retrieved row, the
+  local conditions' selectivity taken out; with use_remote_estimate still the seq-scan cost
+  outside the join search, whose `fdw_base` asks the server), and enable_seqscan doesn't
+  disable a foreign scan. `SELECT *
+  FROM ft` is `100.00..305.80 rows=890` as PostgreSQL's (was `0.00..18.53 rows=853`), and the
+  engine no longer pushes the joins PostgreSQL doesn't (fdw_traffic's foreign joins and locked
+  join of a foreign join now run as PostgreSQL runs them). A one-group aggregation sent whole
+  is costed as estimate_path_cost_size's upper relation (`upperpath::upper_estimate`: its
+  input's bare cost, `agg_clause_costs`, a tuple, the transfer costs): `SELECT count(*) FROM
+  ft` `108.53..152.88 rows=1` (was `0.00..0.00 rows=0`); grouped ones keep their input's.
+  Per row: a cursor's scan decodes only the columns its target list and qual read when they run
+  apart over a plain scan (`session/cursor.rs` `Exec::scan_need`; every remote cursor of
+  postgres_fdw's is such a query: the remote side decoded whole rows); numeric output and input
+  without allocations (`DecInt::magnitude_digits`, `numeric::plain_decimal`); int, numeric and
+  UTF-8 text values written into DataRow messages directly (`server::put_text_fast`);
+  `make_row` and the client's DataRow vectors sized once. Still open (left as found):
+  whole-row and row-identity widths in the reltarget (PostgreSQL adds `24 + data width` for a
+  ROW_MARK_COPY or an UPDATE target's whole row, 6 for its ctid: `FOR UPDATE OF loc` over
+  `ft` is `rows=538 width=128` there, `rows=1365` here, and one 3-way locked join picks
+  another join order); `UPDATE ... FROM` / `DELETE ... USING` sent whole (598-636) first needs
+  the join search to join the result relation remotely (`fdw_base` refuses a `with_key` scan:
+  the join must fetch `r1.ctid` as the row's key, as a `Field::Key` beside `Field::Mark`), then
+  deparseDirectUpdateSql's FROM list without the target (deparseFromExprForRel with an
+  ignore_rel: the inner joins' clauses into the WHERE, `ON (TRUE)`); the remote server's
+  cursor keeps every row it returned (backward FETCH), about 15% of the CPU of a 20k-row scan
+  (`Cursor::visit`'s re-evaluation, the rows dropped at commit) and its memory. Numbers:
+  BENCH.md "postgres_fdw, round 7" (`tools/fdwtraffic/compare.sh`: both servers in
+  containers, each one's CPU and peak memory from its cgroup, phases picked by `PGT_PHASES`
+  for profiles).
 - **file_fdw** (round 19, agent 66): native (`src/ext/file_fdw.rs`), 187 / 187 of its
   contrib test. Foreign scans of a file_fdw table read the file with COPY FROM's parser
   (`session/copy.rs` `parse_copy_data`, shared with COPY) a chunk at a time; the file is a

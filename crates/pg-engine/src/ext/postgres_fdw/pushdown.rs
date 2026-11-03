@@ -225,7 +225,7 @@ pub fn push_level(ctx: &crate::exec::ExecCtx, p: &mut Plan) {
     }
     absorb_filters(&cat, ctx.fmt(), p);
     top_tlist(p);
-    super::upperpath::push_grouped(&cat, ctx.fmt(), p);
+    super::upperpath::push_grouped(ctx, &cat, ctx.fmt(), p);
     push(&cat, ctx.fmt(), p);
     // (Again: a LIMIT over a sort the first pass sent.)
     push(&cat, ctx.fmt(), p);

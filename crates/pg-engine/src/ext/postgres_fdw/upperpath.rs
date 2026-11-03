@@ -84,7 +84,7 @@ fn agg_refs(e: &Expr) -> Vec<usize> {
 
 /// `p` (a projection, a HAVING filter, an Agg, over a foreign relation) as a projection
 /// over a Foreign Scan of the grouped relation, when the aggregation can run remotely.
-pub fn grouped(cat: &Catalog, fmt: &FormatCtx, p: &Plan) -> Option<Plan> {
+pub fn grouped(ctx: &crate::exec::ExecCtx, cat: &Catalog, fmt: &FormatCtx, p: &Plan) -> Option<Plan> {
     let (proj, below) = match p {
         Plan::Project { input, exprs } => (Some(exprs), &**input),
         p => (None, p),
@@ -175,13 +175,14 @@ pub fn grouped(cat: &Catalog, fmt: &FormatCtx, p: &Plan) -> Option<Plan> {
             gpos[k] = Some(tlist.len());
         }
     }
-    finish(cat, fmt, &js, a, tlist, gpos.into_iter().flatten().collect(), having, pexprs, &sub)
+    finish(ctx, cat, fmt, &js, a, tlist, gpos.into_iter().flatten().collect(), having, pexprs, &sub)
 }
 
 /// The HAVING clauses split into sent and checked here, the projection over the grouped
 /// relation's row, and the plan.
 #[allow(clippy::too_many_arguments)]
 fn finish(
+    ctx: &crate::exec::ExecCtx,
     cat: &Catalog,
     fmt: &FormatCtx,
     js: &JoinScan,
@@ -224,15 +225,55 @@ fn finish(
     let cols = js.bases.iter().map(|b| b.cols.clone()).collect();
     let n = tlist.len();
     let up = UpperScan { input: js.clone(), aggs: a, tlist, group_by, having: remote, local, order: Vec::new(), limit: None };
+    let est = match upper_estimate(ctx, js, &up.aggs, up.group_by.len(), up.having.len() + up.local.len()) {
+        Some((rows, startup, total)) => (rows, startup, total, js.info.width),
+        None => (js.info.rows, js.info.startup, js.info.total, js.info.width),
+    };
     let fr = crate::sql::plan::ForeignRel {
         scans,
         cols,
         out: (0..n).collect(),
         private: crate::sql::plan::FdwPrivate(Arc::new(up)),
-        est: (js.info.rows, js.info.startup, js.info.total, js.info.width),
+        est,
         outer: None,
     };
     Some(Plan::Project { input: Arc::new(Plan::Foreign(Box::new(fr))), exprs })
+}
+
+/// estimate_path_cost_size of a grouped relation without remote estimates, for one group
+/// (no GROUP BY, no HAVING): its input's bare cost, the aggregates' transition costs per
+/// input row and final costs, a tuple, then the transfer costs. (rows, startup, total);
+/// None: not that case.
+fn upper_estimate(ctx: &crate::exec::ExecCtx, js: &JoinScan, aggs: &[AggCall], ngroups: usize, nhaving: usize) -> Option<(f64, f64, f64)> {
+    use crate::sql::costs::CPU_TUPLE_COST;
+    if ngroups > 0 || nhaving > 0 || js.info.opts.use_remote_estimate {
+        return None;
+    }
+    let info = &js.info;
+    let o = &info.opts;
+    let (rows, rel_startup, rel_total) = match info.kind {
+        super::join::Kind::Base(_) => {
+            // (The base relation's own estimate, as wide as the columns aggregated.)
+            let s = &js.bases.first()?.scan;
+            let n = s.table.columns.len();
+            let mut need = vec![false; n];
+            for a in aggs {
+                for c in a.args.iter().chain(a.filter.iter()).flat_map(|e| e.columns()) {
+                    if c < n {
+                        need[c] = true;
+                    }
+                }
+            }
+            let d = crate::sql::paths::describe_foreign(ctx, s, &need)?;
+            (d.rows, d.startup - o.startup_cost, d.total - o.startup_cost - (o.tuple_cost + CPU_TUPLE_COST) * d.rows)
+        }
+        _ if info.rel_total >= 0.0 => (info.rows, info.rel_startup, info.rel_total),
+        _ => return None,
+    };
+    let (per_row, per_group) = crate::sql::paths::parallel::agg_clause_costs(aggs, crate::sql::paths::parallel::AggSplit::Simple);
+    let startup = rel_startup + per_row * rows;
+    let total = startup + (rel_total - rel_startup) + per_group + CPU_TUPLE_COST;
+    Some((1.0, startup + o.startup_cost, total + o.startup_cost + o.tuple_cost + CPU_TUPLE_COST))
 }
 
 /// An expression over the Agg's row as one over the grouped relation's (its target
@@ -264,9 +305,9 @@ fn conjuncts(e: &Expr, out: &mut Vec<Expr>) {
 }
 
 /// Rewrite the query level's aggregations over foreign relations that can run remotely.
-pub fn push_grouped(cat: &Catalog, fmt: &FormatCtx, p: &mut Plan) {
+pub fn push_grouped(ctx: &crate::exec::ExecCtx, cat: &Catalog, fmt: &FormatCtx, p: &mut Plan) {
     if matches!(p, Plan::Project { .. } | Plan::Filter { .. } | Plan::Agg { .. })
-        && let Some(np) = grouped(cat, fmt, p)
+        && let Some(np) = grouped(ctx, cat, fmt, p)
     {
         *p = np;
         return;
@@ -276,6 +317,6 @@ pub fn push_grouped(cat: &Catalog, fmt: &FormatCtx, p: &mut Plan) {
         return;
     }
     for c in crate::sql::explain::plan_inputs_mut(p) {
-        push_grouped(cat, fmt, Arc::make_mut(c));
+        push_grouped(ctx, cat, fmt, Arc::make_mut(c));
     }
 }
