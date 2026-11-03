@@ -1817,7 +1817,7 @@ fn put_data_row(b: &mut BytesMut, row: &[crate::types::Value], cols: &[OutCol], 
                 {
                     b[at + 12..at + 16].copy_from_slice(&elem.to_be_bytes());
                 }
-            } else {
+            } else if !put_text_fast(b, v, ty) {
                 b.put_slice(&to_client(&format_value(v, ty, fmt))?);
             }
             let n = (b.len() - at - 4) as i32;
@@ -1829,6 +1829,48 @@ fn put_data_row(b: &mut BytesMut, row: &[crate::types::Value], cols: &[OutCol], 
         b.truncate(start);
     }
     r
+}
+
+/// The text output of the commonest values written straight into the message (what
+/// `format_value` would make, without a String per value): text, integers, booleans and
+/// plain oids, for a UTF-8 client. False: not one of those.
+fn put_text_fast(b: &mut BytesMut, v: &crate::types::Value, ty: &crate::types::DataType) -> bool {
+    use crate::types::{DataType as T, Value as V};
+    let n = match (v, ty) {
+        (V::Text(s), T::Text | T::Varchar(_) | T::Bpchar(_) | T::Name) => {
+            if !plain_utf8() {
+                return false;
+            }
+            b.put_slice(s.as_bytes());
+            return true;
+        }
+        (V::Bool(x), T::Bool) => {
+            b.put_u8(if *x { b't' } else { b'f' });
+            return true;
+        }
+        (V::Int2(i), T::Int2) => *i as i64,
+        (V::Int4(i), T::Int4) => *i as i64,
+        (V::Int8(i), T::Int8) => *i,
+        (V::Oid(o), T::Oid) => *o as i64,
+        _ => return false,
+    };
+    // (Digits into a stack buffer from the end; the client's encoding keeps ASCII as is.)
+    let mut buf = [0u8; 20];
+    let mut at = buf.len();
+    let mut u = n.unsigned_abs();
+    loop {
+        at -= 1;
+        buf[at] = b'0' + (u % 10) as u8;
+        u /= 10;
+        if u == 0 {
+            break;
+        }
+    }
+    if n < 0 {
+        b.put_u8(b'-');
+    }
+    b.put_slice(&buf[at..]);
+    true
 }
 
 /// The rows a statement collected (none, when they streamed: `WireSink`).

@@ -37,6 +37,9 @@ thread_local! {
     static DEPTH: Cell<u32> = const { Cell::new(0) };
     static PARSED: RefCell<HashMap<String, Rc<Block>>> = RefCell::new(HashMap::new());
     static PLANS: RefCell<HashMap<String, Rc<Compiled>>> = RefCell::new(HashMap::new());
+    /// `Interp::compile_generic`'s plans of functions' expressions: by (database instance,
+    /// function, expression), with their `plan_fingerprint`.
+    static FN_PLANS: RefCell<HashMap<(u64, u32, usize), (u64, Rc<Compiled>)>> = RefCell::new(HashMap::new());
 }
 
 /// The first use of PL/pgSQL in a session loads it, which reserves the `plpgsql.` prefix:
@@ -1912,6 +1915,10 @@ struct Interp<'c, 'a> {
     body_key: String,
     /// A DO block's statements' plan counters (its plans live for its run).
     do_plans: RefCell<HashMap<(u32, u64, usize), crate::session::state::PlPlans>>,
+    /// This call's generic plans by expression, with the fingerprint of what they were
+    /// planned under (`plan_fingerprint`): a loop's statements look theirs up here, not by
+    /// formatting `compile_generic`'s key each time.
+    memo: RefCell<HashMap<usize, (u64, Rc<Compiled>)>>,
     fn_name: String,
     /// The routine's OID (PG_ROUTINE_OID); 0 for a DO block.
     fn_oid: u32,
@@ -2082,6 +2089,7 @@ impl<'c, 'a> Interp<'c, 'a> {
             synced: Cell::new(None),
             body_key,
             do_plans: RefCell::new(HashMap::new()),
+            memo: RefCell::new(HashMap::new()),
             fn_name: fn_name.to_string(),
             fn_oid: 0,
             fn_coll: None,
@@ -2405,6 +2413,62 @@ impl<'c, 'a> Interp<'c, 'a> {
         targets: Option<&[DataType]>,
     ) -> Result<Rc<Compiled>> {
         self.resync();
+        // (The parts of `key` below that can change during a call; the others are the call's
+        // or fixed by where the expression is in the body.)
+        let fp = self.plan_fingerprint(e.id, stmt, targets);
+        // (A function's expressions by its oid across calls: its body and options are the
+        // catalog version's, which the fingerprint has. A DO block's for its run.)
+        let shared = (self.fn_oid != 0).then(|| (self.cx().sess.db.instance, self.fn_oid, e.id));
+        let hit = match shared {
+            Some(k) => FN_PLANS.with(|m| m.borrow().get(&k).filter(|(f, _)| *f == fp).map(|(_, c)| c.clone())),
+            None => self.memo.borrow().get(&e.id).filter(|(f, _)| *f == fp).map(|(_, c)| c.clone()),
+        };
+        if let Some(c) = hit {
+            return Ok(c);
+        }
+        let c = self.compile_generic_keyed(e, stmt, targets)?;
+        match shared {
+            Some(k) => FN_PLANS.with(|m| {
+                let mut m = m.borrow_mut();
+                if m.len() > 4096 {
+                    m.clear();
+                }
+                m.insert(k, (fp, c.clone()));
+            }),
+            None => {
+                self.memo.borrow_mut().insert(e.id, (fp, c.clone()));
+            }
+        }
+        Ok(c)
+    }
+
+    /// What `compile_generic`'s plan for expression `id` depends on that may change while a
+    /// call runs: the settings, catalog and role (`sync_key`), the search path, the
+    /// variables' types and collations, transition tables, the scanner's setting.
+    fn plan_fingerprint(&self, id: usize, stmt: bool, targets: Option<&[DataType]>) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        sync_key(self.ctx).hash(&mut h);
+        self.cx().search_path.hash(&mut h);
+        (id, stmt, targets).hash(&mut h);
+        for v in &self.vars {
+            (&v.ty, &v.coll).hash(&mut h);
+        }
+        for e in self.ctx.enrs.borrow().iter() {
+            (&e.name, &e.cols).hash(&mut h);
+        }
+        if self.fn_name == "inline_code_block" {
+            crate::sql::scs::opts().standard_strings.hash(&mut h);
+        }
+        h.finish()
+    }
+
+    fn compile_generic_keyed(
+        &self,
+        e: &PlExpr,
+        stmt: bool,
+        targets: Option<&[DataType]>,
+    ) -> Result<Rc<Compiled>> {
         let (sig, quals, aliases) = self.signature();
         let cat = self.cx().catalog();
         // Row-level security binds policies for the current role into plans.

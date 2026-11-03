@@ -3990,6 +3990,30 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     Evidence: `~/.cache/a150-correction-t3-abba384a/HANDOFF.md` and `verification.md`.
     They retain the fixed duplicate-function-frame failure, an idle-stop-interrupted
     reference run, and contrib's invalid query-ID-disabled run alongside the valid retries.
+  - *CPU per operation in the burst* (BENCH.md "Query memory, round 2"): the Gathers EXPLAIN
+    places cost the whole plan at every execution (27% of a prepared ORM join); agent 145's
+    e8663d91 keeps them with the bound plan, which this batch's per-thread cache of them
+    (measured: 1,308-1,423 -> 879-939 µs) gave way to.
+    PL/pgSQL finds a function's expression plans by (database, function, expression) and
+    a hash of what can change (`Interp::plan_fingerprint`: `sync_key`, search path, the
+    variables' types and collations, transition tables), not by formatting
+    `compile_generic`'s key per evaluation; a DO block keeps them for its run. The wire
+    writes text, integer, boolean and oid results without a String each
+    (`server::put_text_fast`).
+  - Left for the burst (with their owners): size-model upkeep on reads (151), planning of
+    simple-protocol statements kept plans don't cover and the EXPLAIN estimates of plans
+    seen once (145, 140), a SQL function's plan opened per call, cores left idle at 200
+    sessions (3.2-3.4 of 4 busy).
+  - Verified (on `8115f5af` with these changes, then rebased onto `18bb3d49`, sizing only):
+    full debug `cargo test -p pg-engine` (430 passed), clippy (no warning in the changed
+    files), regress subsets on a private reference against `results.tsv`: plpgsql,
+    select_parallel, write_parallel, explain, rangefuncs, with, subselect, prepare,
+    portals, polymorphism, triggers, domain, rowsecurity, create_function_sql, copy2,
+    aggregates, union all as before; join with create_index / create_misc 0 units changed
+    (without them, ten plan units differ from the full run's for want of the indexes);
+    contrib pg_stat_statements + auto_explain 1,025 / 1,025; pgbench select-only and
+    tpcb-like alternated twice within this machine's noise (65-76 / 72-74 µs, 589-667 /
+    572-577 µs per transaction).
 - **OLTP round 1** (round 22, agent 105; BENCH.md "OLTP round 1"): pgbench and web-app
   transactions.
   - *Hot relation ranges* (`storage/hot.rs`): a relation's key range (8-byte table / index

@@ -6562,6 +6562,83 @@ noise of a machine at load 50.
 Left: pg_stat_user_tables is still 15x PostgreSQL's per row (25 pg_stat_get_* calls per
 row through the evaluator, each cloning the table's entry); pgwatch's table_stats_approx plan.
 
+## Query memory, round 2 (round 24, agent 150)
+
+HANDOFF.md, "Query memory, round 2", has what changed. Release builds with frame pointers
+(`--profile release`, `-C force-frame-pointers=yes`, line tables), engine and PostgreSQL
+18.6 each pinned to the same four cores (12-15) and both at nice 19 (PostgreSQL started as
+`nice -n 19 docker-entrypoint.sh postgres -c max_connections=300`, its other settings the
+defaults), on a machine other agents' builds kept 60-95% busy: absolute numbers vary by
+10-20% between runs, so engine binaries are compared alternated (A, B, A, B). Engine
+memory is its RSS, PostgreSQL's the container's anon + shmem. Logs:
+`~/.cache/a150/logs` (copied numbers below).
+
+### The 200-session burst (`bench burst --sessions 200 --secs 20`, scale 2)
+
+| | ops/s | CPU µs / op | peak MB | engine / PostgreSQL |
+|---|---:|---:|---:|---|
+| PostgreSQL 18.6 | 2,727 | 1,419 | 695 | |
+| engine at `8115f5af` | 1,683 | 1,921 | 590 | 0.62x ops, 1.35x CPU, 0.85x memory |
+| engine at `8115f5af` with the three changes below | 1,863 | 1,866 | 600 | 0.68x ops, 1.31x CPU, 0.86x memory |
+
+The engine leads on memory and trails on CPU per operation and on how many of the four
+cores it keeps busy (3.2-3.4 under `perf stat`, 12-14k context switches a second). Each
+operation of the mix alone (200 sessions, 10 s, origin; CPU µs / op, engine against
+PostgreSQL): `pl` (PL/pgSQL loop of ten key lookups) 654 / 320, `fn` (100 calls of a SQL
+function) 2,980 / 2,116, `orm` (four-table nested loop join) 3,797 / 1,102, `cat` (psql's
+and information_schema's column queries) 3,161 / 4,737 (the engine ahead), `tpcb` 1,647 /
+1,586.
+
+What this batch takes out (profiles of the engine under `pgbench -M prepared -c 8`):
+
+- `parallel_part::gathers` ran the EXPLAIN builder's costing of the whole plan at every
+  execution, to place PostgreSQL's Gathers: 27% of the ORM join's CPU. A per-thread cache
+  of them by plan (while the catalog version, the settings and the relation sizes the
+  costing read held) took the ORM join from 1,308-1,423 to 879-939 µs per execution,
+  alternated three times (PostgreSQL 355-445); agent 145's e8663d91, which keeps them with
+  the bound plan, landed first and replaces it.
+- PL/pgSQL formatted a cache key of the routine's body, signature and environment for every
+  expression it evaluated (12.5% of the `pl` operation, `compile` 21% in all): plans are now
+  found by function, expression and a hash of what can change during or between calls
+  (`compile` 4% of the operation).
+- Text results of text, integer, boolean and oid columns go into the DataRow without a
+  String each (`server::put_text_fast`).
+
+Where the rest goes (shares of the engine's CPU in the profiles):
+
+- size-model upkeep on reads (`sizing::fetched`, `Kills::mark` / `done`, `row_roots`,
+  `heapsim::locate_for`, `keymap::find`, `btsim::kill_needed`): about 20% of the ORM join,
+  8% of the `fn` operation (agent 151);
+- planning of simple-protocol statements the kept plans don't cover (`fn`'s and `orm`'s
+  literals, the catalog queries): 22% of the burst, with the EXPLAIN builder's estimates
+  for `presorted_keys` (5.6%) and the Gathers of plans seen once (2.8%) (agents 145, 140);
+- opening a SQL function's plan per call (19% of `fn`), allocation (`_mi_page_malloc_zero`
+  7-15%, mostly decoded values and output text), the wire's text output (8-12%).
+
+### TPC-H SF1 and the analytic set (2M rows) against PostgreSQL, before and after hash join batches
+
+Measured 2026-11-01 (servers on cores 24-27, nice 19 for the engine): `base` 7dab0879 (round
+1), `new` the hash join batches (c4746101's code), PostgreSQL with `shared_buffers=2GB`
+(`BENCH.md` "Results" settings), the engine with `--cache-mb 2048`, sums of the medians of 2
+runs, rows hashed equal on all three:
+
+| | time (s) | CPU (s) | peak MB | temp files / bytes |
+|---|---:|---:|---:|---:|
+| PostgreSQL | 10.6 | 28.6 | 1,704 | 94 / 227 MB |
+| base | 24.3 | 65.7 | 1,928 | 0 / 0 |
+| new | 21.7 | 58.8 | 1,765 | 38 / 75 MB |
+
+Analytic (2M rows, median of 2): PostgreSQL / base: seq_filter 0.12 / 0.19 s, sort_text
+0.95 / 2.12, hash_agg 0.19 / 0.46, hash_join 0.39 / 0.69, window 1.76 / 3.37 (window's peak
+1,321 MB: the engine's WindowAgg holds its whole input), PostgreSQL's temp 405 MB, base's
+253 MB.
+
+On 2026-11-03 the engine at `8115f5af` spent 44-53 s on its first q01 after a start, with a
+3.3-3.5 GB peak: lineitem's size model was built from every row (`heapsim::restored`,
+`KeyMap::insert`), 1,572 MB of RSS after planning `count(*)` of lineitem alone (125 MB at
+round 1). `18bb3d49` (agent 151) restored the 400,000-version model limit that keeps
+big tables estimated.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:
