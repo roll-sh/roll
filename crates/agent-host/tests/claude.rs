@@ -21,7 +21,8 @@
 
 use agent_host::provider::claude::Claude;
 use agent_host::provider::{
-    ForkAt, ForkFrom, McpServer, Provider, ProviderConfig, ProviderEvent, Session, SessionConfig, TurnEnd, TurnInput,
+    ForkAt, ForkFrom, McpServer, Provider, ProviderConfig, ProviderEvent, RollbackStyle, Session, SessionConfig, TurnEnd,
+    TurnInput,
 };
 use agent_proto::{
     Attachment, AuthStatus, Decision, InteractionMode, NodeBody, NodeStatus, RequestBody, Response, RuntimeMode,
@@ -559,12 +560,17 @@ fn crash_fails_the_turn_with_stderr() {
 fn rollback_resumes_at_the_kept_turn() {
     block_on(async {
         let mut r = Replay::start("rollback_1.ndjson,rollback_2", opts(RuntimeMode::FullAccess)).await;
+        assert_eq!(r.claude.rollback_style(), RollbackStyle::ResumeAt);
         r.send_text("one").await;
         r.turn().await;
         r.send_text("two").await;
         r.turn().await;
-        assert!(r.session.rollback(3).await.is_err(), "only turns this session ran");
-        r.session.rollback(1).await.unwrap();
+        assert!(r.session.rollback(1).await.is_err(), "Claude rolls back by resuming, not in a session");
+        r.close().await;
+        assert_eq!(r.turn_refs(), ["a-1", "a-2"]);
+
+        // Another session (another process, after a restart too) resumes at the kept turn's ref.
+        r.resume_at("11111111-2222-4333-8444-555555555555", "a-1").await;
         r.session.set_modes(RuntimeMode::Ask, InteractionMode::Default).await.unwrap();
         r.send_text("three").await;
         r.turn().await;
@@ -573,9 +579,9 @@ fn rollback_resumes_at_the_kept_turn() {
         assert_eq!(launches.len(), 2);
         assert!(has_flags(&launches[1], &["--permission-mode", "bypassPermissions"]));
         assert!(has_flags(&launches[1], &["--resume=11111111-2222-4333-8444-555555555555", "--resume-session-at=a-1"]), "{:?}", launches[1]);
+        assert!(!launches[1].iter().any(|a| a.starts_with("--session-id") || a == "--fork-session"), "{:?}", launches[1]);
         r.expect_tail(&["completed msg_3:0: message three", "usage in=1 out=1 cached=0 cost=-", "turn completed", "exited"]);
-        // The first process's exit isn't the session's.
-        assert_eq!(r.events.iter().filter(|e| matches!(e, ProviderEvent::Exited { .. })).count(), 1);
+        assert_eq!(r.turn_refs(), ["a-1", "a-2", "a-3"], "the new turn goes past the kept one");
     });
 }
 
@@ -663,15 +669,17 @@ fn rolls_back_inside_a_native_fork() {
         r.turn().await;
         r.send(2).await;
         r.turn().await;
-        assert!(r.session.rollback(2).await.is_err(), "the fork's own history starts after the fork point");
-        r.session.rollback(1).await.unwrap();
+        r.close().await;
+        // Back to the fork's first turn, in the copy (its id is ours), not the source.
+        let ours = r.launches()[1].iter().find_map(|a| a.strip_prefix("--session-id=")).unwrap().to_string();
+        let first = r.turn_refs()[1].clone();
+        assert_eq!(first, "14310fd5-a1aa-448b-8880-de52f86541b1");
+        r.resume_at(&ours, &first).await;
         r.send(3).await;
         r.turn().await;
         r.close().await;
         let launches = r.launches();
         assert_eq!(launches.len(), 3);
-        // Back to the fork's first turn, in the copy (its id is ours), not the source.
-        let ours = launches[1].iter().find_map(|a| a.strip_prefix("--session-id=")).unwrap();
         assert!(has_flags(&launches[2], &[&format!("--resume={ours}"), "--resume-session-at=14310fd5-a1aa-448b-8880-de52f86541b1"]), "{:?}", launches[2]);
         let last = r.last_message();
         assert!(last.contains("fork local first") && !last.contains("fork local second"), "{last}");
@@ -844,6 +852,7 @@ impl Replay {
             runtime_mode: o.runtime,
             interaction_mode: o.interaction,
             resume: o.resume,
+            resume_at: None,
             fork: o.fork,
             env: o.env,
             mcp: o.mcp,
@@ -857,6 +866,13 @@ impl Replay {
     /// `fork`. The first one must be closed.
     async fn fork(&mut self, fork: ForkFrom) {
         let cfg = SessionConfig { fork: Some(fork), ..self.cfg.clone() };
+        (self.session, self.rx) = self.claude.start(cfg).await.unwrap();
+    }
+
+    /// A new session of the same Claude, resuming `session` at turn `at` (a rollback). The one
+    /// before must be closed.
+    async fn resume_at(&mut self, session: &str, at: &str) {
+        let cfg = SessionConfig { resume: Some(session.into()), resume_at: Some(at.into()), fork: None, ..self.cfg.clone() };
         (self.session, self.rx) = self.claude.start(cfg).await.unwrap();
     }
 

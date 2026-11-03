@@ -11,7 +11,7 @@
 //! after it.
 
 use super::{Fail, Host, Live, Res, Rt, handoff, now, suffix};
-use crate::provider::{Item, ProviderEvent, SessionConfig, TurnEnd, TurnInput};
+use crate::provider::{ForkAt, ForkFrom, Item, ProviderEvent, SessionConfig, TurnEnd, TurnInput};
 use agent_proto::*;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -325,13 +325,18 @@ impl Host {
             return Err(Fail::Invalid(format!("the thread's directory {} is gone", rt.thread.cwd)));
         }
         let t = &rt.thread;
+        let p = t.provider.as_str();
+        let resume = rt.private.native.get(p).cloned();
+        // After a rollback, a conversation that keeps every turn goes on from the kept one.
+        let resume_at = rt.private.heads.get(p).filter(|h| resume.as_ref() == Some(&h.thread)).map(|h| h.turn.clone());
         let mut cfg = SessionConfig {
             cwd: cwd.to_path_buf(),
             model: t.model.clone(),
             effort: t.effort.clone(),
             runtime_mode: t.runtime_mode,
             interaction_mode: t.interaction_mode,
-            resume: rt.private.native.get(t.provider.as_str()).cloned(),
+            resume,
+            resume_at,
             fork: None,
             env: self.config.provider(&t.provider).env,
             mcp: vec![self.mcp.session_server(&t.id)],
@@ -341,6 +346,13 @@ impl Host {
         let settling = cfg.resume.is_none() && matches!(rt.private.transfer, Some(super::Transfer::Pending { .. }));
         if settling && caps.fork {
             cfg.fork = self.native_fork(rt)?;
+        } else if cfg.resume.is_none()
+            && caps.fork
+            && let Some(super::Transfer::Native { provider, from: Some(from) }) = &rt.private.transfer
+            && provider == rt.thread.provider.as_str()
+        {
+            // A fork rolled back to before its own runs: a new copy of the parent's conversation.
+            cfg.fork = Some(ForkFrom { thread: from.thread.clone(), at: ForkAt::Turn(from.turn.clone()) });
         }
         let t = &rt.thread;
         let started = match provider.start(cfg.clone()).await {
@@ -348,21 +360,27 @@ impl Host {
             Err(e) if cfg.resume.is_some() => {
                 // The native conversation is gone: start fresh and hand the whole thread over.
                 tracing::warn!("resuming {} for {} failed, starting fresh: {e:#}", t.provider.0, t.id);
-                rt.private.native.remove(t.provider.as_str());
-                rt.private.seen.remove(t.provider.as_str());
+                let p = t.provider.0.clone();
+                super::threads::drop_conversation(&mut rt.private, &p);
                 self.save_private(rt)?;
                 cfg.resume = None;
+                cfg.resume_at = None;
                 provider.start(cfg.clone()).await.map_err(|e| Fail::Provider(format!("{e:#}")))?
             }
             Err(e) if cfg.fork.is_some() => {
                 tracing::warn!("forking {} natively for {} failed, handing a summary over: {e:#}", t.provider.0, t.id);
+                if !settling {
+                    let p = t.provider.0.clone();
+                    super::threads::drop_conversation(&mut rt.private, &p);
+                    self.save_private(rt)?;
+                }
                 cfg.fork = None;
                 provider.start(cfg.clone()).await.map_err(|e| Fail::Provider(format!("{e:#}")))?
             }
             Err(e) => return Err(Fail::Provider(format!("{e:#}"))),
         };
         if settling {
-            self.settle_transfer(rt, cfg.fork.is_some())?;
+            self.settle_transfer(rt, cfg.fork.as_ref())?;
         }
         let (session, events) = started;
         rt.generation += 1;
@@ -516,12 +534,20 @@ impl Host {
                     active.run_dirty = true;
                 }
             }
-            ProviderEvent::TurnEnded(end) => self.on_turn_ended(rt, end).await?,
+            ProviderEvent::TurnEnded(end) => {
+                // A completed turn went past a rollback's head: sessions resume at the latest again.
+                if end == TurnEnd::Completed && rt.private.heads.remove(rt.thread.provider.as_str()).is_some() {
+                    self.save_private(rt)?;
+                }
+                self.on_turn_ended(rt, end).await?
+            }
             ProviderEvent::TurnRef { id } => {
-                // The run's newest turn: where a fork at this run starts.
+                // The run's newest turn: where a fork at this run (or a rollback to it) starts.
+                // The conversation went past any rollback's head.
                 let thread = rt.private.native.get(rt.thread.provider.as_str()).cloned();
                 if let (Some(active), Some(thread)) = (&rt.active, thread) {
                     rt.private.refs.insert(active.run.ordinal, super::NativeRef { thread, turn: id });
+                    rt.private.heads.remove(rt.thread.provider.as_str());
                     self.save_private(rt)?;
                 }
             }

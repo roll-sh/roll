@@ -3,16 +3,18 @@
 //! and real roll code repos served over git smart HTTP. Cloning repos as projects, starting a
 //! repo as a project, publishing a thread as a change, landing it through the merge queue (a
 //! blocked land is an answer), the change's status following onto the thread record, and a
-//! thread taking a work item.
+//! thread taking a work item: its claim kept alive while the thread works, and done when the
+//! published change lands.
 
 mod common;
 
 use agent_host::Host;
 use agent_host::config::Config as HostConfig;
 use agent_host::provider::Provider;
-use agent_host::provider::fake::FakeProvider;
+use agent_host::provider::fake::{FakeProvider, Script};
+use agent_host::provider::{ProviderEvent, TurnEnd};
 use agent_host::relay::{LinkConfig, LinkEvent};
-use agent_proto::{ChangeStatus, Entity, LandingStatus, Project, Reply, Thread};
+use agent_proto::{Capabilities, ChangeStatus, Entity, LandingStatus, Project, Reply, Thread, ThreadStatus};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{App, app_with, git};
@@ -32,12 +34,16 @@ struct World {
     machine: String,
     git_url: String,
     clones: tempfile::TempDir,
+    /// Provider `claude`: its turns run until the test ends them.
+    manual: Arc<FakeProvider>,
     _home: tempfile::TempDir,
-    _stop: oneshot::Sender<()>,
+    /// Dropping it stops the daemon's link.
+    stop: Option<oneshot::Sender<()>>,
 }
 
 /// acme with an owner token and `acme/app` (a README on main; the merge queue, requiring `ci`),
-/// served on a port; a daemon whose clone directory is a temp dir, connected as machine `box`.
+/// served on a port; a daemon whose clone directory is a temp dir, connected as machine `box`,
+/// with an echoing `codex` and a `claude` whose turns the test ends.
 async fn world() -> World {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -71,7 +77,8 @@ async fn world() -> World {
     let home = tempfile::tempdir().unwrap();
     let clones = tempfile::tempdir().unwrap();
     let config = HostConfig { home: home.path().to_path_buf(), clone_dir: Some(clones.path().to_path_buf()), ..HostConfig::default() };
-    let providers: Vec<Arc<dyn Provider>> = vec![FakeProvider::new("codex")];
+    let manual = FakeProvider::with("claude", Capabilities::default(), Script::Manual);
+    let providers: Vec<Arc<dyn Provider>> = vec![FakeProvider::new("codex"), manual.clone()];
     let host = Host::open(config, providers).await.unwrap();
     let (tx, mut events) = mpsc::unbounded_channel();
     let (stop, stopped) = oneshot::channel::<()>();
@@ -86,7 +93,7 @@ async fn world() -> World {
             None => panic!("the link stopped"),
         }
     }
-    World { a, owner, machine, git_url, clones, _home: home, _stop: stop }
+    World { a, owner, machine, git_url, clones, manual, _home: home, stop: Some(stop) }
 }
 
 static IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -338,4 +345,115 @@ async fn threads_take_work_items() {
     assert_eq!(s, StatusCode::OK, "{v}");
     let t = stream.until(&thread, "renamed", |t| t.title == "Login").await;
     assert!(t.work.is_some());
+}
+
+/// A work item as the API shows it now.
+async fn work_item(w: &World, id: &str) -> Value {
+    let (s, v) = w.req("GET", &format!("/v1/code/work/{id}"), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    v
+}
+
+/// Waits (`secs` at most) until the work item satisfies `f`.
+async fn work_until(w: &World, id: &str, secs: u64, what: &str, f: impl Fn(&Value) -> bool) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        let v = work_item(w, id).await;
+        if f(&v) {
+            return v;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{what}: {v}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_working_threads_claim_stays_alive_and_lapses_when_it_stops() {
+    let mut w = world().await;
+    w.a.code.agents.set_work_idle(Duration::from_millis(300));
+    let project = w.clone_app().await;
+    let mut stream = Threads::open(&w).await;
+    let thread = w.created(json!({ "type": "thread.create", "project": project, "provider": "claude", "prompt": "Fix the login bug" })).await;
+    stream.until(&thread, "running", |t| t.status == ThreadStatus::Running).await;
+    let path = format!("/v1/code/agents/acme/threads/{thread}/work");
+    let claim = || json!({ "repo": "acme/app", "lease_s": 2 });
+
+    // Claimed with a 2 s lease while the thread runs: it outlives its lease, renewed.
+    let (_, item) = w.req("POST", &format!("{APP}/work"), Some(json!({ "title": "Fix the login bug" }))).await;
+    let id = item["id"].as_str().unwrap().to_string();
+    let (s, v) = w.req("POST", &path, Some(claim())).await;
+    assert_eq!((s, v["state"].as_str()), (StatusCode::OK, Some("claimed")), "{v}");
+    let first = v["lease_until"].as_i64().unwrap();
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    let v = work_item(&w, &id).await;
+    assert_eq!((v["state"].as_str(), v["claimed_by"].as_str()), (Some("claimed"), Some("agent:box")), "{v}");
+    assert!(v["lease_until"].as_i64().unwrap() > first + 1, "renewed: {v}");
+
+    // The run ends and the thread sits idle past the grace: the lease runs out as any other.
+    w.manual.session(0).await.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
+    stream.until(&thread, "idle", |t| t.status == ThreadStatus::Idle).await;
+    work_until(&w, &id, 8, "lapsed once idle", |v| v["state"] == "open").await;
+
+    // Claimed again by a working thread whose machine goes offline: it lapses too.
+    let (s, v) = w.cmd(json!({ "type": "message.send", "thread": thread, "text": "Once more", "mode": "queue" })).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    stream.until(&thread, "running again", |t| t.status == ThreadStatus::Running).await;
+    let (s, v) = w.req("POST", &path, Some(claim())).await;
+    assert_eq!((s, v["state"].as_str()), (StatusCode::OK, Some("claimed")), "{v}");
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(work_item(&w, &id).await["state"], "claimed", "still kept alive");
+    drop(w.stop.take());
+    for _ in 0..500 {
+        if !w.a.code.agents.online(&w.machine) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!w.a.code.agents.online(&w.machine));
+    work_until(&w, &id, 8, "lapsed once offline", |v| v["state"] == "open").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn publishing_does_the_threads_work_item() {
+    let w = world().await;
+    let project = w.clone_app().await;
+    let thread = w.created(json!({ "type": "thread.create", "project": project, "provider": "codex", "worktree": true, "title": "Fix the login bug" })).await;
+    let worktree = w.thread(&thread).await.worktree.expect("a worktree");
+    let (_, item) = w.req("POST", &format!("{APP}/work"), Some(json!({ "title": "Fix the login bug" }))).await;
+    let id = item["id"].as_str().unwrap().to_string();
+    let mut stream = Threads::open(&w).await;
+    let (s, v) = w.req("POST", &format!("/v1/code/agents/acme/threads/{thread}/work"), Some(json!({ "repo": "acme/app" }))).await;
+    assert_eq!((s, v["state"].as_str()), (StatusCode::OK, Some("claimed")), "{v}");
+    stream.until(&thread, "work", |t| t.work.is_some()).await;
+
+    // Published: the change does the item, which goes to review.
+    std::fs::write(Path::new(&worktree.path).join("login.txt"), "fixed\n").unwrap();
+    let n = w.publish(&thread, "Fix the login bug", false).await.change.expect("a change");
+    let (_, c) = w.req("GET", &format!("{APP}/changes/{n}"), None).await;
+    assert_eq!(c["work_item"].as_str(), Some(id.as_str()), "{c}");
+    let change = c["id"].as_str().unwrap().to_string();
+    let v = work_item(&w, &id).await;
+    assert_eq!(v["state"], "review", "{v}");
+    assert_eq!(v["changes"], json!([change]), "{v}");
+
+    // The link is roll code's own: another item, or one that doesn't exist, is refused.
+    let (_, other) = w.req("POST", &format!("{APP}/work"), Some(json!({ "title": "Something else" }))).await;
+    let (s, v) = w.req("PATCH", &format!("/v1/code/changes/{change}"), Some(json!({ "work_item": other["id"] }))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    let (s, v) = w.req("PATCH", &format!("/v1/code/changes/{change}"), Some(json!({ "work_item": "wi_nope" }))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
+    let (s, v) = w.req("PATCH", &format!("/v1/code/changes/{change}"), Some(json!({ "work_item": 7 }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    let (s, v) = w.req("PATCH", &format!("/v1/code/changes/{change}"), Some(json!({ "work_item": id }))).await;
+    assert_eq!((s, v["work_item"].as_str()), (StatusCode::OK, Some(id.as_str())), "the same item again: {v}");
+
+    // Landing the change (through the queue, once ci passes) completes the item.
+    w.req("POST", &format!("/v1/code/changes/{change}/checks"), Some(json!({ "name": "ci", "status": "success" }))).await;
+    stream.until(&thread, "ready", |t| t.change.as_ref().is_some_and(|c| c.status == ChangeStatus::Ready)).await;
+    let landing = w.publish(&thread, "Fix the login bug", true).await.landing.expect("landing");
+    assert_eq!(landing.status, LandingStatus::Queued, "{landing:?}");
+    stream.until(&thread, "landed", |t| t.change.as_ref().is_some_and(|c| c.status == ChangeStatus::Landed)).await;
+    work_until(&w, &id, 10, "done once landed", |v| v["state"] == "done").await;
+    let (s, v) = w.req("PATCH", &format!("/v1/code/changes/{change}"), Some(json!({ "work_item": other["id"] }))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "a landed change: {v}");
 }

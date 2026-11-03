@@ -18,10 +18,15 @@
 //!   serves: every second, and sooner when the event feed hints that something changed. The feed
 //!   only wakes the follower; it never says what changed, so a dropped event loses nothing.
 //! - **Work items.** A thread takes a work item (claimed through the API, or one already
-//!   claimed); its link records it (`Thread.work`).
+//!   claimed); its link records it (`Thread.work`) and who holds the claim. While the thread
+//!   works (running, or idle for less than [`WORK_IDLE`], not archived, its machine connected),
+//!   the follower keeps that claim's lease alive on its behalf; otherwise the lease runs out as
+//!   any other. Publishing links the branch's change to the item (`PATCH
+//!   /v1/code/changes/{id}` with `work_item`, as if the change had been opened with it), so the
+//!   item goes to `review` and is done when the change lands.
 
 use super::store::{self, LinkUpdate, MachineRow};
-use crate::model::{Change, ChangeState, CheckStatus, Owner, RepoRow};
+use crate::model::{Change, ChangeState, CheckStatus, Owner, RepoRow, WorkState};
 use crate::{Caller, Code, Error, Result, hash_token};
 use agent_proto::{ChangeStatus, CodeGrant, Command, EntityKind, Landing, LandingStatus, RepoRef, Reply, StreamEvent, ThreadChange, WorkRef};
 use axum::Router;
@@ -43,6 +48,8 @@ pub(crate) const FOLLOW_EVERY: Duration = Duration::from_secs(1);
 const MIN_GAP: Duration = Duration::from_millis(200);
 /// Largest API answer read on a caller's behalf.
 const MAX_ANSWER: usize = 16 << 20;
+/// How long a thread may sit idle and still have its work item's claim kept alive.
+pub(crate) const WORK_IDLE: Duration = Duration::from_secs(10 * 60);
 /// Event kinds that may move a change.
 const CHANGE_EVENTS: [&str; 5] = ["change", "check", "landed", "queue", "review"];
 
@@ -233,6 +240,9 @@ pub(super) async fn published(code: &Code, api: Option<&ApiRouter>, headers: &He
     };
     p.change = Some(c.number);
     p.url = Some(format!("{}/changes/{}", code.web_url(r), c.number));
+    if let Some(api) = api {
+        link_work(code, api, headers, m, thread, r, &c).await;
+    }
     if let Ok(c) = code.change_view(c.clone()) {
         relink(code, &m.owner_id, &m.id, thread, LinkUpdate::Change { id: &c.id, view: &thread_change(code, r, &c) }).await;
     }
@@ -246,6 +256,24 @@ pub(super) async fn published(code: &Code, api: Option<&ApiRouter>, headers: &He
         }
     }
     Reply::Published(p)
+}
+
+/// The thread's work item is what its change does: linked on the sender's behalf (`PATCH
+/// /v1/code/changes/{id}` with `work_item`), so landing the change completes it. Only an item
+/// of the change's repo; a change already doing it is left as it is.
+async fn link_work(code: &Code, api: &ApiRouter, headers: &HeaderMap, m: &MachineRow, thread: &str, r: &RepoRow, c: &Change) {
+    let work = match store::mirrored(code.db.sql(), &m.id, EntityKind::Thread, thread) {
+        Ok(Some(agent_proto::Entity::Thread(t))) => t.work,
+        _ => None,
+    };
+    let Some(work) = work.filter(|w| w.repo == r.full_name()) else { return };
+    if c.work_item.as_deref() == Some(work.id.as_str()) {
+        return;
+    }
+    let (status, v) = call(api, headers, Method::PATCH, &format!("/v1/code/changes/{}", seg(&c.id)), Some(json!({ "work_item": work.id }))).await;
+    if !status.is_success() {
+        tracing::warn!(change = %c.id, work = %work.id, %status, error = %v["error"], "agents: linking a published change to its thread's work item");
+    }
 }
 
 /// `POST /v1/code/changes/{id}/land` on the sender's behalf, as a [`Landing`].
@@ -308,6 +336,7 @@ pub(crate) fn follow(code: &Arc<Code>) {
                 let here = code.cluster().is_none_or(|c| c.owns(&format!("{}{owner}", crate::cluster::AGENTS_KEY)));
                 if here {
                     follow_owner(&code, owner).await;
+                    keep_claims(&code, owner);
                 }
             }
             drop(code);
@@ -341,6 +370,54 @@ pub(super) async fn follow_owner(code: &Code, owner_id: &str) {
             relink(code, owner_id, &l.machine_id, &l.thread, LinkUpdate::Change { id, view: &view }).await;
         }
     }
+}
+
+/// Keep the claims of an owner's working threads alive; stop following a claim once it isn't
+/// the claimant's any more (it lapsed, was released, taken over, or went to review or done).
+pub(super) fn keep_claims(code: &Code, owner_id: &str) {
+    let links = match store::claimed_links(code.db.sql(), owner_id) {
+        Ok(l) => l,
+        Err(e) => return tracing::warn!(error = %e, "agents: reading kept claims"),
+    };
+    for l in links {
+        let (Some(work_id), Some(claimant)) = (&l.work_id, &l.claimant) else { continue };
+        let key = (l.machine_id.clone(), l.thread.clone());
+        let held = match code.db.work(work_id) {
+            Ok(Some(w)) if working(code, &l) => code.keep_claim(&w, claimant),
+            Ok(Some(w)) => Ok(w.state == WorkState::Claimed && w.claimed_by.as_deref() == Some(claimant.as_str()) && w.lease_until.is_some_and(|u| u >= crate::db::now())),
+            Ok(None) => Ok(false),
+            Err(e) => Err(e.into()),
+        };
+        match held {
+            Ok(true) => {}
+            Ok(false) => {
+                code.agents.working.lock().remove(&key);
+                if let Err(e) = store::forget_claimant(code.db.sql(), &l.machine_id, &l.thread, claimant) {
+                    tracing::warn!(thread = %l.thread, error = %e, "agents: letting go of a kept claim");
+                }
+            }
+            Err(e) => tracing::warn!(work = %work_id, error = %e, "agents: keeping a thread's claim alive"),
+        }
+    }
+}
+
+/// Whether a thread still works on its item: its machine is connected here, it isn't archived,
+/// and it is busy or was last seen busy less than [`WORK_IDLE`] ago (by this node's clock).
+fn working(code: &Code, l: &store::LinkRow) -> bool {
+    if !code.agents.online(&l.machine_id) {
+        return false;
+    }
+    let Ok(Some(agent_proto::Entity::Thread(t))) = store::mirrored(code.db.sql(), &l.machine_id, EntityKind::Thread, &l.thread) else { return false };
+    if t.archived_at.is_some() {
+        return false;
+    }
+    let now = std::time::Instant::now();
+    let mut seen = code.agents.working.lock();
+    let last = seen.entry((l.machine_id.clone(), l.thread.clone())).or_insert(now);
+    if t.status.is_busy() || t.active_run.is_some() {
+        *last = now;
+    }
+    now.duration_since(*last) < code.agents.work_idle()
 }
 
 // ── routes ──
@@ -431,7 +508,9 @@ pub(super) async fn take_work(code: &Code, api: Option<&ApiRouter>, caller: &Cal
     if w.repo.split_once('/').map(|(owner, _)| owner) != Some(o.name.as_str()) {
         return Err(Error::Invalid(format!("{} isn't {}'s: a thread takes work from its owner's repos", w.repo, o.name)));
     }
-    relink(code, &o.id, &machine.id, thread, LinkUpdate::Work(Some(&w))).await;
+    // A claim held when the thread takes the item is kept alive while the thread works.
+    let claimant = (item["state"] == "claimed").then(|| item["claimed_by"].as_str()).flatten();
+    relink(code, &o.id, &machine.id, thread, LinkUpdate::Work { item: Some(&w), claimant }).await;
     Ok(Some(item))
 }
 
@@ -439,6 +518,6 @@ pub(super) async fn take_work(code: &Code, api: Option<&ApiRouter>, caller: &Cal
 /// claimant's to release).
 pub(super) async fn drop_work(code: &Code, o: &Owner, thread: &str) -> Result<()> {
     let (machine_id, _) = store::thread_of(code.db.sql(), &o.id, thread)?.ok_or_else(|| Error::NotFound(format!("thread {thread}")))?;
-    relink(code, &o.id, &machine_id, thread, LinkUpdate::Work(None)).await;
+    relink(code, &o.id, &machine_id, thread, LinkUpdate::Work { item: None, claimant: None }).await;
     Ok(())
 }

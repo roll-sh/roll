@@ -167,7 +167,7 @@ GET  /v1/code/repos/{owner}/{repo}/changes?state= → Change[]
 POST /v1/code/repos/{owner}/{repo}/changes {title, body?, changeset | (base + message + files), work_item?, author?, draft?} → Change
 GET  /v1/code/repos/{owner}/{repo}/changes/{number} → Change
 GET  /v1/code/changes/{id} → Change (404 when missing)
-PATCH /v1/code/changes/{id} {title?, body?, draft?} → Change          marking a queued change draft dequeues it
+PATCH /v1/code/changes/{id} {title?, body?, draft?, work_item?} → Change    marking a queued change draft dequeues it; work_item (wi_…, of the change's repo) links it as if it had been opened with it: 409 if it does another item or is landed/closed
 POST /v1/code/changes/{id}/approve-run → Change                       writers; recorded in the audit log
 POST /v1/code/changes/{id}/revise {changeset | (base + message + files)} → Change
 POST /v1/code/changes/{id}/land {bypass?, lane?} → same bodies as /land (409 if landed or closed)
@@ -619,8 +619,13 @@ POST   /v1/code/agents/{owner}/threads/{thread}/work {work?: "wi_…" | "owner/r
        The thread takes a work item: `work` (read as the caller: 404 if it can't), or the next open one
        claimed from `repo` (POST …/work/claim as `agent`, default the caller's agent or
        `agent:<machine name>`; 204 when none matches). It must be one of the owner's repos (400), and
-       becomes the thread's `work`. 400 with neither; 404 an unknown thread.
-DELETE /v1/code/agents/{owner}/threads/{thread}/work → 204: the thread lets go of it (the claim stays).
+       becomes the thread's `work`. 400 with neither; 404 an unknown thread. A claim the item has when
+       the thread takes it is kept alive (renewed by its lease length once half is left) while the
+       thread works: running, or idle under 10 minutes, not archived, its machine connected. Then
+       it runs out like any other. A `thread.publish` links the branch's change to the item
+       (PATCH /v1/code/changes/{id} {work_item} as the sender), so landing it completes the item.
+DELETE /v1/code/agents/{owner}/threads/{thread}/work → 204: the thread lets go of it (the claim stays,
+       no longer kept alive).
        Both: owner's tokens, agent tokens too (401 anonymous, 403 others).
 
 Thread.change = {repo /* owner/name */, number, status: "checking" | "failing" | "blocked" | "ready" | "queued"

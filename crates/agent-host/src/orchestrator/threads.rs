@@ -6,9 +6,9 @@
 //! `CheckpointRollbackService.ts` (restore files, mark later runs rolled back, roll the provider
 //! back natively or start it fresh with a summary).
 
-use super::{Fail, Host, Private, Res, Rt, Transfer, handoff, now, suffix};
+use super::{Fail, Host, NativeRef, Private, Res, Rt, Transfer, handoff, now, suffix};
 use crate::git;
-use crate::provider::{ForkAt, ForkFrom};
+use crate::provider::{ForkAt, ForkFrom, RollbackStyle};
 use agent_proto::*;
 use std::path::Path;
 
@@ -248,10 +248,11 @@ impl Host {
         Ok(fork_point(&parent, &self.runs_of(&lineage.parent)?, provider, *upto))
     }
 
-    /// Records how a fork's first session got its parent's conversation, and says so in the run
-    /// that started it.
-    pub(crate) fn settle_transfer(&self, rt: &mut Rt, native: bool) -> anyhow::Result<()> {
+    /// Records how a fork's first session got its parent's conversation (`fork`, when natively),
+    /// and says so in the run that started it.
+    pub(crate) fn settle_transfer(&self, rt: &mut Rt, fork: Option<&ForkFrom>) -> anyhow::Result<()> {
         let provider = rt.thread.provider.0.clone();
+        let native = fork.is_some();
         let text = if native {
             // The copy holds the parent's runs through the fork point: nothing to hand over.
             rt.private.seen.insert(provider.clone(), 0);
@@ -259,7 +260,16 @@ impl Host {
         } else {
             format!("Forked with a summary: {provider} starts fresh with a summary of the parent thread")
         };
-        rt.private.transfer = Some(if native { Transfer::Native } else { Transfer::Portable });
+        rt.private.transfer = Some(match fork {
+            Some(f) => Transfer::Native {
+                provider,
+                from: match &f.at {
+                    ForkAt::Turn(turn) => Some(NativeRef { thread: f.thread.clone(), turn: turn.clone() }),
+                    _ => None,
+                },
+            },
+            None => Transfer::Portable,
+        });
         self.save_private(rt)?;
         let Some(active) = rt.active.as_mut() else { return Ok(()) };
         let at = now();
@@ -369,46 +379,86 @@ impl Host {
         Ok(Reply::Ok)
     }
 
-    /// Makes the providers forget rolled-back runs: the thread's provider drops them natively
-    /// when it can; otherwise (and for every other provider that saw them) its native
-    /// conversation is dropped, so the next run starts fresh with a summary of what's left.
+    /// Makes the providers forget rolled-back runs (T3's `CheckpointRollbackService`). The
+    /// thread's provider rolls its conversation back natively when it can: it drops the turns
+    /// (`Session::rollback`), or the next session resumes at the newest kept run's turn
+    /// (`resume_at`), or, for a fork rolled back to before its own runs, copies the parent's
+    /// conversation at the fork point again. Otherwise (and for every other provider that saw
+    /// them) its conversation is dropped, so the next run starts fresh with a summary of what's
+    /// left. Kept runs the conversation no longer holds are handed over at the next run.
     async fn rollback_providers(&self, rt: &mut Rt, rolled: &[Run], to: u32) -> Res<()> {
         let current = rt.thread.provider.clone();
+        let p = current.as_str();
         let seen = rt.private.seen.clone();
         for (provider, ordinal) in &seen {
-            if *ordinal > to && provider != current.as_str() {
-                rt.private.native.remove(provider);
-                rt.private.seen.remove(provider);
+            if *ordinal > to && provider != p {
+                drop_conversation(&mut rt.private, provider);
             }
         }
-        let Some(&seen_current) = seen.get(current.as_str()) else { return Ok(()) };
-        let turns: u32 = rolled
-            .iter()
-            .filter(|r| r.provider == current && r.ordinal <= seen_current)
-            .map(|r| rt.private.turns.get(&r.ordinal).copied().unwrap_or(1))
-            .sum();
+        let Some(&seen_current) = seen.get(p) else { return Ok(()) };
+        let turns_of = |private: &Private, r: &Run| private.turns.get(&r.ordinal).copied().unwrap_or(0);
+        let turns: u32 = rolled.iter().filter(|r| r.provider == current && r.ordinal <= seen_current).map(|r| turns_of(&rt.private, r)).sum();
         if turns == 0 {
             return Ok(());
         }
-        let capable = self.provider(&current)?.capabilities().rollback && rt.private.native.contains_key(current.as_str());
-        if capable {
-            let native = async {
-                self.ensure_session(rt).await?;
-                let live = rt.live.as_ref().expect("ensure_session started one");
-                live.session.rollback(turns).await.map_err(|e| Fail::Provider(format!("{e:#}")))
+        // The runs the conversation keeps of its own, oldest first.
+        let kept: Vec<Run> = self
+            .runs_of(&rt.thread.id)?
+            .into_iter()
+            .filter(|r| r.ordinal <= to.min(seen_current) && r.provider == current && r.status != RunStatus::RolledBack)
+            .filter(|r| turns_of(&rt.private, r) > 0)
+            .collect();
+        let provider = self.provider(&current)?;
+        let (Some(native), true) = (rt.private.native.get(p).cloned(), provider.capabilities().rollback) else {
+            self.close_session(rt).await;
+            drop_conversation(&mut rt.private, p);
+            return Ok(());
+        };
+        let copy = match &rt.private.transfer {
+            Some(Transfer::Native { provider, from }) if provider == p => Some(from.clone()),
+            _ => None,
+        };
+        match provider.rollback_style() {
+            RollbackStyle::DropTurns if !kept.is_empty() || copy.is_some() => {
+                let native = async {
+                    self.ensure_session(rt).await?;
+                    let live = rt.live.as_ref().expect("ensure_session started one");
+                    live.session.rollback(turns).await.map_err(|e| Fail::Provider(format!("{e:#}")))
+                }
+                .await;
+                match native {
+                    Ok(()) => {
+                        rt.private.seen.insert(p.to_string(), kept.last().map_or(0, |r| r.ordinal));
+                        return Ok(());
+                    }
+                    Err(e) => tracing::warn!("native rollback of {}: {e:?}; starting it fresh instead", rt.thread.id),
+                }
             }
-            .await;
-            match native {
-                Ok(()) => {
-                    rt.private.seen.insert(current.0.clone(), seen_current.min(to));
+            RollbackStyle::DropTurns => {}
+            RollbackStyle::ResumeAt => {
+                // The newest kept run with a turn in this conversation; runs after it are handed over.
+                let cut = kept
+                    .iter()
+                    .rev()
+                    .find_map(|r| rt.private.refs.get(&r.ordinal).filter(|x| x.thread == native).map(|x| (r.ordinal, x.clone())));
+                if let Some((ordinal, head)) = cut {
+                    self.close_session(rt).await;
+                    rt.private.heads.insert(p.to_string(), head);
+                    rt.private.seen.insert(p.to_string(), ordinal);
                     return Ok(());
                 }
-                Err(e) => tracing::warn!("native rollback of {}: {e:?}; starting it fresh instead", rt.thread.id),
+                if let Some(Some(_)) = copy {
+                    // Back to the fork point: the next session copies the parent's conversation there.
+                    self.close_session(rt).await;
+                    rt.private.native.remove(p);
+                    rt.private.heads.remove(p);
+                    rt.private.seen.insert(p.to_string(), 0);
+                    return Ok(());
+                }
             }
         }
         self.close_session(rt).await;
-        rt.private.native.remove(current.as_str());
-        rt.private.seen.remove(current.as_str());
+        drop_conversation(&mut rt.private, p);
         Ok(())
     }
 
@@ -438,6 +488,18 @@ impl Host {
             .await
             .map_err(|e| Fail::Invalid(format!("{e:#}")))?;
         Ok(Reply::Published(published))
+    }
+}
+
+/// Forgets `provider`'s native conversation of a thread: its next session starts fresh, and the
+/// thread (with what it inherited) is handed over to it.
+pub(crate) fn drop_conversation(private: &mut Private, provider: &str) {
+    private.native.remove(provider);
+    private.seen.remove(provider);
+    private.heads.remove(provider);
+    if matches!(&private.transfer, Some(Transfer::Native { provider: p, .. }) if p == provider) {
+        // The copy is gone: the fork has its parent as a summary now, like a portable one.
+        private.transfer = Some(Transfer::Portable);
     }
 }
 

@@ -4,7 +4,7 @@
 mod common;
 
 use agent_host::provider::fake::{Call, FakeProvider, FakeSession, Script};
-use agent_host::provider::{ForkAt, ForkFrom, ProviderEvent, TurnEnd};
+use agent_host::provider::{ForkAt, ForkFrom, ProviderEvent, RollbackStyle, TurnEnd};
 use agent_proto::*;
 use common::*;
 use std::path::Path;
@@ -403,6 +403,123 @@ async fn rollback_uses_the_providers_own_rollback_when_it_has_one() {
     let calls = session.wait_calls(|c| sends(c).len() == 4).await;
     assert_eq!(sends(&calls)[3], "four", "same session, nothing handed over");
     assert_eq!(fake.sessions().len(), 1);
+}
+
+/// A provider that rolls back by resuming at a kept turn, as Claude does.
+fn resuming(id: &str) -> Arc<FakeProvider> {
+    let fake = FakeProvider::with(id, Capabilities { rollback: true, fork: true, ..Capabilities::default() }, Script::Echo);
+    fake.set_rollback_style(RollbackStyle::ResumeAt);
+    fake
+}
+
+/// The world again, on a new daemon process over the same home (the old one is dropped).
+async fn restart(w: World, providers: Vec<Arc<FakeProvider>>) -> World {
+    let World { host, home, repo, project, dirs } = w;
+    drop(host);
+    World { host: open(&home, providers).await, home, repo, project, dirs }
+}
+
+#[tokio::test]
+async fn rollback_resumes_at_the_kept_turn_after_a_restart() {
+    let claude = resuming("claude");
+    let w = World::new(vec![claude.clone()]).await;
+    let thread = w.thread("claude", None, false).await;
+    for text in ["one", "two", "three"] {
+        exchange(&w, &thread, text).await;
+    }
+    let native = claude.session(0).await.native().to_string();
+
+    // A new daemon: no live session, and nothing in memory about the conversation.
+    let claude = resuming("claude");
+    let w = restart(w, vec![claude.clone()]).await;
+    let cp = w.state().await.checkpoints(&thread)[1].clone();
+    assert_eq!(w.run(Command::CheckpointRollback { thread: thread.clone(), checkpoint: cp.id }).await, Reply::Ok);
+    assert!(claude.sessions().is_empty(), "nothing to do in a session: the next one resumes at the turn");
+    exchange(&w, &thread, "four").await;
+    let resumed = claude.session(0).await;
+    assert_eq!((resumed.config.resume.as_deref(), resumed.config.resume_at.as_deref()), (Some(native.as_str()), Some(format!("{native}:turn-1").as_str())));
+    assert_eq!(sends(&resumed.calls()), vec!["four"], "the conversation holds run 1: nothing is handed over");
+
+    // Sessions keep resuming at the kept turn until one goes past it, across restarts too.
+    let claude = resuming("claude");
+    let w = restart(w, vec![claude.clone()]).await;
+    exchange(&w, &thread, "five").await;
+    let s = claude.session(0).await;
+    assert_eq!((s.config.resume.as_deref(), s.config.resume_at.as_deref()), (Some(native.as_str()), None), "run 4 went past it");
+    assert_eq!(sends(&s.calls()), vec!["five"]);
+}
+
+#[tokio::test]
+async fn rollback_without_a_kept_turn_ref_hands_the_later_runs_over() {
+    let claude = resuming("claude");
+    let codex = FakeProvider::new("codex");
+    let w = World::new(vec![claude.clone(), codex.clone()]).await;
+    let thread = w.thread("claude", None, false).await;
+    exchange(&w, &thread, "one").await;
+    let switch = |provider: &str| Command::ThreadConfigure {
+        thread: thread.clone(),
+        title: None,
+        provider: Some(ProviderId(provider.into())),
+        model: None,
+        effort: None,
+        runtime_mode: None,
+        interaction_mode: None,
+    };
+    // Run 2 on codex, run 3 back on claude (with run 2 handed over in its prompt).
+    assert_eq!(w.run(switch("codex")).await, Reply::Ok);
+    exchange(&w, &thread, "two").await;
+    assert_eq!(w.run(switch("claude")).await, Reply::Ok);
+    exchange(&w, &thread, "three").await;
+    let native = claude.session(0).await.native().to_string();
+
+    // Back to run 2: claude's conversation goes on from its run 1, and gets run 2 handed over.
+    let cp = w.state().await.checkpoints(&thread)[2].clone();
+    assert_eq!(w.run(Command::CheckpointRollback { thread: thread.clone(), checkpoint: cp.id }).await, Reply::Ok);
+    exchange(&w, &thread, "four").await;
+    // Session 1 ran run 3; session 2 is the one after the rollback.
+    let s = claude.session(2).await;
+    assert_eq!(s.config.resume_at, Some(format!("{native}:turn-1")));
+    let text = sends(&s.calls()).remove(0);
+    assert!(text.starts_with("<roll-context>") && text.contains("two") && !text.contains("three") && text.ends_with("four"), "{text}");
+}
+
+#[tokio::test]
+async fn rolling_a_native_fork_back_before_its_runs_copies_the_parent_again() {
+    let claude = resuming("claude");
+    let w = World::new(vec![claude.clone()]).await;
+    let thread = w.thread("claude", None, false).await;
+    exchange(&w, &thread, "one").await;
+    exchange(&w, &thread, "two").await;
+    let parent = claude.session(0).await.native().to_string();
+    let runs = w.state().await.runs(&thread);
+    let forked = fork(&w, &thread, Some(runs[0].id.clone())).await;
+    exchange(&w, &forked, "three").await;
+    let at = ForkFrom { thread: parent.clone(), at: ForkAt::Turn(format!("{parent}:turn-1")) };
+    assert_eq!(claude.session(1).await.config.fork, Some(at.clone()));
+
+    // Back to before the fork's own first run, after a restart: a new copy at the fork point.
+    let claude = resuming("claude");
+    let w = restart(w, vec![claude.clone()]).await;
+    let base = w.state().await.checkpoints(&forked)[0].clone();
+    assert_eq!(base.ordinal, 0);
+    assert_eq!(w.run(Command::CheckpointRollback { thread: forked.clone(), checkpoint: base.id }).await, Reply::Ok);
+    exchange(&w, &forked, "four").await;
+    let copy = claude.session(0).await;
+    assert_eq!((copy.config.fork.clone(), copy.config.resume.clone()), (Some(at), None));
+    assert_eq!(sends(&copy.calls()), vec!["four"], "the copy holds the parent through run 1");
+    // The new copy is the fork's conversation from now on.
+    exchange(&w, &forked, "five").await;
+    assert_eq!(sends(&copy.calls()), vec!["four", "five"]);
+
+    // If the parent's conversation can't be copied, the fork starts fresh with its summary.
+    let cp = w.state().await.checkpoints(&forked)[0].clone();
+    assert_eq!(w.run(Command::CheckpointRollback { thread: forked.clone(), checkpoint: cp.id }).await, Reply::Ok);
+    claude.fail_next_start("no such session");
+    exchange(&w, &forked, "six").await;
+    let fresh = claude.session(1).await;
+    assert_eq!((fresh.config.fork.clone(), fresh.config.resume.clone()), (None, None));
+    let text = sends(&fresh.calls()).remove(0);
+    assert!(text.starts_with("<roll-context>") && text.contains("one") && !text.contains("two") && text.ends_with("six"), "{text}");
 }
 
 #[tokio::test]

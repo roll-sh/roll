@@ -82,6 +82,9 @@ CREATE TABLE IF NOT EXISTS agent_links (
     work_json TEXT,
     -- 1 once the change landed or closed: nothing more to follow.
     settled INTEGER NOT NULL DEFAULT 0,
+    -- Who holds the claim on the work item that the relay keeps alive while the thread works
+    -- (work_items.claimed_by); NULL once there's nothing to keep.
+    claimant TEXT,
     PRIMARY KEY (machine_id, thread)
 );
 CREATE INDEX IF NOT EXISTS agent_links_unsettled ON agent_links (settled, owner_id);
@@ -570,9 +573,10 @@ pub struct LinkRow {
     pub work_id: Option<String>,
     pub change: Option<agent_proto::ThreadChange>,
     pub work: Option<agent_proto::WorkRef>,
+    pub claimant: Option<String>,
 }
 
-const LINK_COLS: &str = "machine_id, thread, change_id, work_id, change_json, work_json";
+const LINK_COLS: &str = "machine_id, thread, change_id, work_id, change_json, work_json, claimant";
 
 fn link_row(r: &Row<'_>) -> code_sql::Result<LinkRow> {
     Ok(LinkRow {
@@ -582,6 +586,7 @@ fn link_row(r: &Row<'_>) -> code_sql::Result<LinkRow> {
         work_id: r.get(3)?,
         change: r.get::<_, Option<String>>(4)?.and_then(|s| serde_json::from_str(&s).ok()),
         work: r.get::<_, Option<String>>(5)?.and_then(|s| serde_json::from_str(&s).ok()),
+        claimant: r.get(6)?,
     })
 }
 
@@ -603,17 +608,36 @@ pub fn unsettled_links(db: &code_sql::Db, owner_id: &str) -> code_sql::Result<Ve
     )
 }
 
-/// Owners with a linked change that may still move.
+/// Links whose work item claim the relay keeps alive while their thread works.
+pub fn claimed_links(db: &code_sql::Db, owner_id: &str) -> code_sql::Result<Vec<LinkRow>> {
+    db.query(
+        &format!("SELECT {LINK_COLS} FROM agent_links WHERE owner_id = ? AND claimant IS NOT NULL AND work_id IS NOT NULL ORDER BY machine_id, thread LIMIT ?"),
+        params![owner_id, PAGE],
+        link_row,
+    )
+}
+
+/// Stop keeping a link's claim alive (the claim isn't `claimant`'s any more).
+pub fn forget_claimant(db: &code_sql::Db, machine_id: &str, thread: &str, claimant: &str) -> code_sql::Result<()> {
+    db.execute("UPDATE agent_links SET claimant = NULL WHERE machine_id = ? AND thread = ? AND claimant = ?", [machine_id, thread, claimant])?;
+    Ok(())
+}
+
+/// Owners with a linked change that may still move, or a claim to keep alive.
 pub fn following_owners(db: &code_sql::Db) -> code_sql::Result<Vec<String>> {
-    db.query("SELECT DISTINCT owner_id FROM agent_links WHERE settled = 0 AND change_id IS NOT NULL", (), |r| r.get(0))
+    db.query(
+        "SELECT owner_id FROM agent_links WHERE settled = 0 AND change_id IS NOT NULL UNION SELECT owner_id FROM agent_links WHERE claimant IS NOT NULL",
+        (),
+        |r| r.get(0),
+    )
 }
 
 /// What to change about a thread's link.
 pub enum LinkUpdate<'a> {
     /// The change it was published as (a new one replaces the old), and how it is now.
     Change { id: &'a str, view: &'a agent_proto::ThreadChange },
-    /// The work item it took, or none.
-    Work(Option<&'a agent_proto::WorkRef>),
+    /// The work item it took (and who holds the claim the relay keeps alive), or none.
+    Work { item: Option<&'a agent_proto::WorkRef>, claimant: Option<&'a str> },
 }
 
 /// Update a thread's link and merge it into the thread's record under a new cursor. The record
@@ -626,10 +650,10 @@ pub fn update_link(db: &code_sql::Db, owner_id: &str, machine_id: &str, thread: 
             Some(id.to_string()),
             (Some(serde_json::to_string(view).unwrap_or_default()), view.status.is_settled()),
         ),
-        LinkUpdate::Work(w) => (
-            "UPDATE agent_links SET work_id = ?, work_json = ? WHERE machine_id = ? AND thread = ?",
-            w.map(|w| w.id.clone()),
-            (w.map(|w| serde_json::to_string(w).unwrap_or_default()), false),
+        LinkUpdate::Work { item, .. } => (
+            "UPDATE agent_links SET work_id = ?, work_json = ?, claimant = ? WHERE machine_id = ? AND thread = ?",
+            item.map(|w| w.id.clone()),
+            (item.map(|w| serde_json::to_string(w).unwrap_or_default()), false),
         ),
     };
     db.write(|c| {
@@ -639,7 +663,7 @@ pub fn update_link(db: &code_sql::Db, owner_id: &str, machine_id: &str, thread: 
         c.execute("INSERT INTO agent_links (owner_id, machine_id, thread) VALUES (?, ?, ?) ON CONFLICT (machine_id, thread) DO NOTHING", [owner_id, machine_id, thread])?;
         match update {
             LinkUpdate::Change { .. } => c.execute(sql, params![value, extra.0, extra.1, machine_id, thread])?,
-            LinkUpdate::Work(_) => c.execute(sql, params![value, extra.0, machine_id, thread])?,
+            LinkUpdate::Work { claimant, .. } => c.execute(sql, params![value, extra.0, claimant, machine_id, thread])?,
         };
         let json: Option<String> =
             c.query_row("SELECT json FROM agent_entities WHERE machine_id = ? AND kind = 'thread' AND id = ?", [machine_id, thread], |r| r.get(0)).optional()?;

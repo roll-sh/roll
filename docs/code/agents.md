@@ -95,6 +95,19 @@ Machine            a daemon (hostname, os, providers and their auth state, onlin
   private index (`GIT_INDEX_FILE`), never touching the user's index or HEAD. The diff of run N is
   checkpoint N-1 → N. `checkpoint.rollback` restores the tree of a checkpoint and marks later
   runs `rolled_back` (and rolls back the provider thread where the provider can).
+- **Native rollback** (T3's `CheckpointRollbackService`), in one of two ways a provider declares
+  (`Provider::rollback_style`). Codex drops the turns in its live thread (`thread/rollback`) and
+  keeps it that way. Claude's session file keeps every turn, so the conversation is resumed at
+  the newest kept run's turn ref (`SessionConfig.resume_at`, `--resume --resume-session-at`).
+  That works from the refs kept in the thread's private state, after a daemon restart too, and
+  every session resumes there (the thread's `heads`, T3's `nativeConversationHeadRef`) until a
+  turn goes past it. A kept run with no ref moves the cut back to an earlier one, and the runs
+  after the cut are handed over at the next run. A native fork rolled back to before its own
+  first run copies the parent's conversation at the fork point again (T3 resumes the copy at its
+  fork-head message id instead, which it reads from Claude's transcript; copying again yields
+  the same conversation without reading provider files). Only with no native way left (no ref,
+  a portable fork, a provider without rollback, or a resume that fails) does the provider start
+  fresh with a summary of what's left.
 - **Worktrees.** A thread may run in its own git worktree
   (`<data>/worktrees/<project>/<thread>`, branch `roll/<slug>`), so parallel threads never touch
   each other's files.
@@ -318,6 +331,15 @@ that change (checks, reviews, the merge queue, landing) shows on the thread. The
   caller's agent or `agent:<machine name>`); 204 when there's none. The item must be in one of the
   owner's repos. `DELETE` lets go of it (the claim stays the claimant's to release). MCP:
   `claim_agent_work`.
+  - **The claim stays alive while the thread works.** The node serving the owner's agents renews
+    the claim the item had when the thread took it (by its lease length, once half of it is left)
+    while the thread works: busy, or idle for under ten minutes by the relay's clock, not
+    archived, and its machine connected. A renewal only extends a claim its claimant still holds
+    (one conditional update), so it never revives a lapsed, released or taken-over claim. When
+    the thread stops working the lease runs out like any other, and the item goes back to `open`.
+  - **Publishing does the item.** `thread.publish` links the branch's change to the thread's item
+    (`PATCH /v1/code/changes/{id} {work_item}` as the sender), as if the change had been opened
+    with it: the item moves to `review`, and landing the change marks it `done`.
 
 ## Sandboxes
 

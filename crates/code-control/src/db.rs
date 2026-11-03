@@ -406,6 +406,8 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     ("agent_logins", "os", "TEXT"),
     // Agents databases from before sandboxes.
     ("agent_machines", "sandbox", "TEXT"),
+    // Agents databases from before work item claims were kept alive.
+    ("agent_links", "claimant", "TEXT"),
 ];
 
 impl Db {
@@ -995,6 +997,18 @@ impl Db {
         Ok(self.sql.query_row("SELECT lease_s FROM work_items WHERE id = ?", [id], |r| r.get(0)).optional()?.flatten())
     }
 
+    /// Renew `claimant`'s lease on a work item to `until`, only while they still hold it (claimed
+    /// by them, lease not run out). One statement, so it never revives or overwrites a claim
+    /// that moved meanwhile. True if renewed.
+    pub fn renew_lease(&self, id: &str, claimant: &str, until: i64) -> Result<bool> {
+        let t = now();
+        let n = self.sql.execute(
+            "UPDATE work_items SET lease_until = ?, updated_at = ? WHERE id = ? AND state = 'claimed' AND claimed_by = ? AND lease_until >= ?",
+            params![until, t, id, claimant, t],
+        )?;
+        Ok(n == 1)
+    }
+
     pub fn set_lease_len(&self, id: &str, lease_s: i64) -> Result<()> {
         self.sql.execute("UPDATE work_items SET lease_s = ? WHERE id = ?", params![lease_s, id])?;
         Ok(())
@@ -1022,6 +1036,27 @@ impl Db {
             params![title, body, draft, now(), id],
         )?;
         Ok(())
+    }
+
+    /// The change does work item `work_id` (as if it had been opened with it): it links the
+    /// change unless it does another one already, and the item moves to `review` if it was open
+    /// or claimed. False when the change does another item.
+    pub fn link_work(&self, change_id: &str, work_id: &str) -> Result<bool> {
+        let t = now();
+        self.write(|c| {
+            let linked = c.execute(
+                "UPDATE changes SET work_item = ?1, updated_at = ?2 WHERE id = ?3 AND (work_item IS NULL OR work_item = ?1)",
+                params![work_id, t, change_id],
+            )?;
+            if linked == 0 {
+                return Ok(false);
+            }
+            c.execute(
+                "UPDATE work_items SET state = 'review', lease_until = NULL, updated_at = ? WHERE id = ? AND state IN ('open', 'claimed')",
+                params![t, work_id],
+            )?;
+            Ok(true)
+        })
     }
 
     /// A writer approved running `head` of an untrusted change.

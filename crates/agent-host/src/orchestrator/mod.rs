@@ -110,6 +110,13 @@ pub(crate) struct Private {
     /// fork at that run starts there.
     #[serde(default)]
     refs: BTreeMap<u32, NativeRef>,
+    /// Per provider whose rollbacks resume at a turn ([`RollbackStyle::ResumeAt`]): the turn of
+    /// its native conversation that the thread goes on from after a rollback (T3's
+    /// `nativeConversationHeadRef`). Every session resumes there until a turn goes past it.
+    ///
+    /// [`RollbackStyle::ResumeAt`]: crate::provider::RollbackStyle::ResumeAt
+    #[serde(default)]
+    heads: BTreeMap<String, NativeRef>,
     /// How a fork gets its parent's conversation; its first session settles it.
     #[serde(default)]
     transfer: Option<Transfer>,
@@ -144,8 +151,16 @@ pub(crate) enum Transfer {
     /// Fork the parent's native conversation with `provider` at the end of its run `upto`, if
     /// the fork's first session is on that provider and the point is reachable.
     Pending { provider: String, upto: u32 },
-    /// The fork's conversation is a native copy of the parent's (`resolved_native`).
-    Native,
+    /// The fork's conversation with `provider` is a native copy of the parent's
+    /// (`resolved_native`), made at turn `from` of the parent's conversation when the fork point
+    /// was one (T3 keeps the copy's head message id). Rolling the fork back to before its own
+    /// first run copies the parent's conversation there again.
+    Native {
+        #[serde(default)]
+        provider: String,
+        #[serde(default)]
+        from: Option<NativeRef>,
+    },
     /// The fork's provider starts fresh with the summary in `preamble` (`resolved_portable`).
     Portable,
 }

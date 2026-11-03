@@ -6,15 +6,17 @@
 //! across processes (`ROLL_AGENT_FAKE=1 roll agent up`, for `pnpm test:agents`): streamed text, a
 //! command that asks for approval, and an edit to a file in the workspace. All answer `interrupt` with
 //! `TurnEnded(Interrupted)` when a turn is running, like the real providers. A session started
-//! with `fork` is a new conversation; the test reads what it was forked from in its `config`.
+//! with `fork` is a new conversation; the test reads what it was forked from (or the turn it
+//! resumed at) in its `config`. Turn refs are numbered per conversation, across its sessions.
 
-use super::{Item, Provider, ProviderEvent, Session, SessionConfig, TurnEnd, TurnInput};
+use super::{Item, Provider, ProviderEvent, RollbackStyle, Session, SessionConfig, TurnEnd, TurnInput};
 use agent_proto::{
     Approval, ApprovalAction, AuthStatus, Capabilities, ChangeKind, Decision, FileChange, InteractionMode, ModelInfo, NodeBody,
     NodeStatus, ProviderId, ProviderInfo, RequestBody, Response, RuntimeMode, ToolCall, ToolKind, Usage,
 };
 use async_trait::async_trait;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{Notify, mpsc};
@@ -58,6 +60,9 @@ pub struct FakeProvider {
     script: Script,
     sessions: Mutex<Vec<FakeSession>>,
     fail_start: Mutex<Option<String>>,
+    rollback_style: Mutex<RollbackStyle>,
+    /// Turns per native conversation, so a resumed one goes on numbering them.
+    turns: Mutex<HashMap<String, Arc<AtomicU32>>>,
     changed: Arc<Notify>,
 }
 
@@ -74,8 +79,15 @@ impl FakeProvider {
             script,
             sessions: Mutex::new(Vec::new()),
             fail_start: Mutex::new(None),
+            rollback_style: Mutex::new(RollbackStyle::DropTurns),
+            turns: Mutex::new(HashMap::new()),
             changed: Arc::new(Notify::new()),
         })
+    }
+
+    /// How it says it rolls back (`DropTurns` unless set).
+    pub fn set_rollback_style(&self, style: RollbackStyle) {
+        *self.rollback_style.lock().unwrap() = style;
     }
 
     /// Every session started so far, oldest first.
@@ -117,6 +129,10 @@ impl Provider for FakeProvider {
         self.capabilities
     }
 
+    fn rollback_style(&self) -> RollbackStyle {
+        *self.rollback_style.lock().unwrap()
+    }
+
     async fn info(&self) -> ProviderInfo {
         ProviderInfo {
             id: self.id.clone(),
@@ -137,6 +153,7 @@ impl Provider for FakeProvider {
         let (tx, rx) = mpsc::channel(4096);
         let mut sessions = self.sessions.lock().unwrap();
         let native = cfg.resume.clone().unwrap_or_else(|| format!("{}-native-{}", self.id.0, sessions.len()));
+        let turns = self.turns.lock().unwrap().entry(native.clone()).or_default().clone();
         let session = FakeSession {
             index: sessions.len(),
             config: cfg,
@@ -149,7 +166,7 @@ impl Provider for FakeProvider {
                 announced: AtomicBool::new(false),
                 demo: Mutex::new(None),
                 items: Mutex::new(0),
-                turns: Default::default(),
+                turns,
                 changed: self.changed.clone(),
             }),
         };
@@ -178,7 +195,7 @@ struct Inner {
     running: AtomicBool,
     announced: AtomicBool,
     items: Mutex<u32>,
-    turns: std::sync::atomic::AtomicU32,
+    turns: Arc<AtomicU32>,
     changed: Arc<Notify>,
 }
 
@@ -431,6 +448,7 @@ mod tests {
             runtime_mode: RuntimeMode::Ask,
             interaction_mode: InteractionMode::Default,
             resume: None,
+            resume_at: None,
             fork: None,
             env: Vec::new(),
             mcp: Vec::new(),

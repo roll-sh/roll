@@ -50,6 +50,11 @@ pub struct Agents {
     following: std::sync::atomic::AtomicBool,
     /// How often it looks, in ms (0: [`code::FOLLOW_EVERY`]).
     follow_ms: AtomicU64,
+    /// When each thread whose claim is kept alive was last seen working, by (machine, thread):
+    /// this node's clock, never the daemon's.
+    working: Mutex<HashMap<(String, String), std::time::Instant>>,
+    /// How long an idle thread's claim is still kept alive, in ms (0: [`code::WORK_IDLE`]).
+    work_idle_ms: AtomicU64,
 }
 
 struct LinkHandle {
@@ -150,6 +155,19 @@ impl Agents {
     pub(crate) fn follow_every(&self) -> Duration {
         match self.follow_ms.load(Ordering::Relaxed) {
             0 => code::FOLLOW_EVERY,
+            ms => Duration::from_millis(ms),
+        }
+    }
+
+    /// How long a thread may sit idle and still have its work item's claim kept alive (tests
+    /// shorten it).
+    pub fn set_work_idle(&self, d: Duration) {
+        self.work_idle_ms.store(d.as_millis().max(1) as u64, Ordering::Relaxed);
+    }
+
+    pub(crate) fn work_idle(&self) -> Duration {
+        match self.work_idle_ms.load(Ordering::Relaxed) {
+            0 => code::WORK_IDLE,
             ms => Duration::from_millis(ms),
         }
     }

@@ -46,9 +46,6 @@ pub(super) struct Translator {
     last_total_cost: Option<f64>,
     /// The permission mode to switch to when the user approves a plan.
     after_plan: &'static str,
-    /// Per finished turn of this process, the uuid of its last main-agent assistant message: where
-    /// `--resume-session-at` rolls the conversation back to.
-    pub cursors: Vec<Option<String>>,
     /// Turns started so far (names the running turn for the interrupt fallback).
     turns: u64,
     seq: u64,
@@ -87,7 +84,6 @@ impl Translator {
             compacting: None,
             last_total_cost: None,
             after_plan,
-            cursors: Vec::new(),
             turns: 0,
             seq: 0,
         }
@@ -104,10 +100,6 @@ impl Translator {
         }
         self.session = Some(id.to_string());
         Some(ProviderEvent::NativeThread { id: id.to_string() })
-    }
-
-    pub fn session_id(&self) -> Option<&str> {
-        self.session.as_deref()
     }
 
     pub fn turn_active(&self) -> bool {
@@ -534,7 +526,6 @@ impl Translator {
     /// End the turn: close what's still open, withdraw pending requests, report usage.
     pub fn end_turn(&mut self, end: TurnEnd) -> Vec<ProviderEvent> {
         let Some(turn) = self.turn.take() else { return Vec::new() };
-        self.cursors.push(turn.cursor.clone());
         let status = match end {
             TurnEnd::Completed => NodeStatus::Completed,
             TurnEnd::Interrupted => NodeStatus::Interrupted,
@@ -555,7 +546,7 @@ impl Translator {
         self.blocks.clear();
         self.streaming.clear();
         events.push(ProviderEvent::Usage(turn.usage));
-        // Where a fork through this turn resumes (`--resume-session-at`).
+        // Where a fork through this turn, or a rollback to it, resumes (`--resume-session-at`).
         events.extend(turn.cursor.map(|id| ProviderEvent::TurnRef { id }));
         events.push(ProviderEvent::TurnEnded(end));
         events

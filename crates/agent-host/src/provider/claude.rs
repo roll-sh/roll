@@ -14,7 +14,7 @@ mod diff;
 mod models;
 mod translate;
 
-use super::{ForkAt, Provider, ProviderConfig, ProviderEvent, Session, SessionConfig, TurnEnd, TurnInput};
+use super::{ForkAt, Provider, ProviderConfig, ProviderEvent, RollbackStyle, Session, SessionConfig, TurnEnd, TurnInput};
 use agent_proto::{AuthStatus, Capabilities, InteractionMode, ProviderId, ProviderInfo, Response, RuntimeMode};
 use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
@@ -69,7 +69,8 @@ impl Claude {
     }
 }
 
-/// Forks are `--resume <source> --fork-session`, at a turn with `--resume-session-at`.
+/// Forks are `--resume <source> --fork-session`, at a turn with `--resume-session-at`; rollbacks
+/// resume the conversation at the kept turn (`SessionConfig.resume_at`, [`RollbackStyle::ResumeAt`]).
 fn capabilities() -> Capabilities {
     Capabilities { steer: true, fork: true, rollback: true, plan_mode: true, images: true, subagents: true, mode_switch: true }
 }
@@ -93,6 +94,13 @@ impl Provider for Claude {
 
     fn capabilities(&self) -> Capabilities {
         capabilities()
+    }
+
+    /// T3 rolls Claude back by resuming at the newest kept turn's last assistant message
+    /// (`resumeSessionAt`); the session file keeps the dropped turns, so later sessions must
+    /// resume there too until a new turn goes past it.
+    fn rollback_style(&self) -> RollbackStyle {
+        RollbackStyle::ResumeAt
     }
 
     async fn info(&self) -> ProviderInfo {
@@ -142,7 +150,7 @@ impl Provider for Claude {
     async fn start(&self, cfg: SessionConfig) -> anyhow::Result<(Box<dyn Session>, mpsc::Receiver<ProviderEvent>)> {
         let (tx, rx) = mpsc::channel(EVENT_BUFFER);
         let (session_id, open) = match (&cfg.resume, &cfg.fork) {
-            (Some(id), _) => (id.clone(), Open::Resume { at: None }),
+            (Some(id), _) => (id.clone(), Open::Resume { at: cfg.resume_at.clone() }),
             // The copy gets an id of ours (`--session-id` with `--fork-session`), so it is
             // known before the first turn.
             (None, Some(fork)) => {
@@ -164,7 +172,6 @@ impl Provider for Claude {
                 tr: Translator::new(cwd, permission_mode(cfg.runtime_mode, InteractionMode::Default)),
                 runtime: cfg.runtime_mode,
                 interaction: cfg.interaction_mode,
-                fresh: matches!(open, Open::New),
             }),
             proc: tokio::sync::Mutex::new(None),
             pending: Mutex::new(HashMap::new()),
@@ -279,7 +286,7 @@ struct Launch {
 /// How a launch opens its conversation.
 enum Open {
     New,
-    /// `at`: `--resume-session-at`, the assistant message to continue from (rollback).
+    /// `at`: `--resume-session-at`, the assistant message to go on from (a rollback).
     Resume { at: Option<String> },
     /// A copy of conversation `from` (through message `at`) under the launch's session id.
     Fork { from: String, at: Option<String> },
@@ -386,8 +393,6 @@ struct State {
     tr: Translator,
     runtime: RuntimeMode,
     interaction: InteractionMode,
-    /// The conversation started in this session (nothing comes before its first turn).
-    fresh: bool,
 }
 
 struct Proc {
@@ -671,46 +676,9 @@ impl Session for ClaudeSession {
         Ok(())
     }
 
-    /// Restart the CLI on the conversation as it was `turns` turns ago: T3 resumes with
-    /// `resumeSessionAt`, the last assistant message of the newest turn kept.
-    async fn rollback(&self, turns: u32) -> anyhow::Result<()> {
-        let turns = turns as usize;
-        let (session, open, mode) = {
-            let mut st = self.shared.state.lock().unwrap();
-            if st.tr.turn_active() {
-                bail!("a turn is running");
-            }
-            let ran = st.tr.cursors.len();
-            if turns == 0 {
-                return Ok(());
-            }
-            if turns > ran {
-                bail!("Claude can only roll back turns this session ran ({ran})");
-            }
-            let keep = ran - turns;
-            let open = match keep {
-                0 if st.fresh => Open::New,
-                0 => bail!("Claude can't roll back past where this session resumed or forked"),
-                _ => match st.tr.cursors[keep - 1].clone() {
-                    Some(at) => Open::Resume { at: Some(at) },
-                    None => bail!("turn {keep} has no Claude message to roll back to"),
-                },
-            };
-            st.tr.cursors.truncate(keep);
-            let session = match &open {
-                // Back to before the first turn: a new conversation.
-                Open::New => new_session_id(),
-                _ => st.tr.session_id().unwrap_or_default().to_string(),
-            };
-            (session, open, permission_mode(st.runtime, st.interaction))
-        };
-        // The old process's exit isn't the session's.
-        self.shared.generation.fetch_add(1, Ordering::SeqCst);
-        self.shared.kill().await;
-        Shared::spawn(&self.shared, mode, &session, open).await?;
-        let event = self.shared.state.lock().unwrap().tr.session(&session);
-        self.shared.emit(event).await;
-        Ok(())
+    /// Claude rolls back by resuming at a turn ([`RollbackStyle::ResumeAt`]), not in a session.
+    async fn rollback(&self, _turns: u32) -> anyhow::Result<()> {
+        bail!("Claude rolls back by resuming its conversation at the kept turn")
     }
 
     async fn close(&self) {

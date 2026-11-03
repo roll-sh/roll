@@ -10,6 +10,10 @@
 //! and the session that starts is the copy. Points are the refs adapters report in
 //! [`ProviderEvent::TurnRef`], which the orchestrator keeps per run, so a fork works from any
 //! process, after a restart too.
+//!
+//! Rolling back is either a method on a live session ([`Session::rollback`], dropping turns) or,
+//! for a provider whose conversations keep every turn, a way to resume one
+//! ([`SessionConfig::resume_at`]); [`Provider::rollback_style`] says which.
 
 use agent_proto::{
     Attachment, Capabilities, InteractionMode, NodeBody, NodeStatus, ProviderId, ProviderInfo, RequestBody, Response,
@@ -46,6 +50,10 @@ pub struct SessionConfig {
     pub interaction_mode: InteractionMode,
     /// The provider's own conversation id to resume (from an earlier `NativeThread` event).
     pub resume: Option<String>,
+    /// With `resume`: go on from this turn of it (a ref from one of its `TurnRef` events), as if
+    /// nothing after it had happened (Claude: `--resume-session-at`). Only for a provider whose
+    /// [`RollbackStyle`] is `ResumeAt`.
+    pub resume_at: Option<String>,
     /// Start a new conversation as a copy of another one, up to a point (T3's native fork).
     /// Never set together with `resume`, and only when `capabilities().fork`. The copy is a
     /// conversation of its own (its own `NativeThread`); the source is left as it was. An
@@ -79,6 +87,20 @@ pub enum ForkAt {
     /// All but its newest `n` turns, for a fork point whose turn has no ref (Codex forks the
     /// latest state and rolls the copy back; Claude can't, and fails).
     DropLast(u32),
+}
+
+/// How a provider rolls its native conversation back (with `capabilities().rollback`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RollbackStyle {
+    /// [`Session::rollback`] drops the newest turns, and the conversation stays that way (Codex's
+    /// `thread/rollback`).
+    #[default]
+    DropTurns,
+    /// The conversation keeps every turn; a session that resumes it at a kept turn
+    /// ([`SessionConfig::resume_at`]) goes on from there. Until a turn goes past that point, every
+    /// session must resume there, or the dropped turns come back (Claude's
+    /// `--resume-session-at`; T3's `nativeConversationHeadRef`).
+    ResumeAt,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,6 +175,11 @@ pub trait Provider: Send + Sync {
 
     fn capabilities(&self) -> Capabilities;
 
+    /// How a native rollback is done; only asked when `capabilities().rollback`.
+    fn rollback_style(&self) -> RollbackStyle {
+        RollbackStyle::DropTurns
+    }
+
     /// Installed? Logged in? Which models? Must not start a session or change anything
     /// (T3: "setup must not happen as a health-check side effect").
     async fn info(&self) -> ProviderInfo;
@@ -183,7 +210,7 @@ pub trait Session: Send + Sync {
     async fn set_modes(&self, runtime: RuntimeMode, interaction: InteractionMode) -> anyhow::Result<()>;
 
     /// Drop the last `turns` turns from the native conversation. Only called when
-    /// `capabilities().rollback`.
+    /// `capabilities().rollback` and the provider's style is [`RollbackStyle::DropTurns`].
     async fn rollback(&self, turns: u32) -> anyhow::Result<()>;
 
     /// End the session and its process.

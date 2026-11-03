@@ -228,6 +228,7 @@ fn session_config(cwd: &Path, runtime: RuntimeMode) -> SessionConfig {
         runtime_mode: runtime,
         interaction_mode: InteractionMode::Default,
         resume: None,
+        resume_at: None,
         fork: None,
         env: Vec::new(),
         mcp: Vec::new(),
