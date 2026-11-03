@@ -2238,9 +2238,10 @@ impl<'c, 'a> Interp<'c, 'a> {
             && slots.iter().all(|&i| self.vars.get(i).is_some_and(|v| !v.value.is_null()))
         {
             let cost = self.plan_cost(plan, true);
-            // (Debug builds: the custom plan is that plan.)
+            // (Debug builds: the first custom plan run so is that plan. Not every one: a
+            // session's first calls would bind each twice.)
             #[cfg(debug_assertions)]
-            {
+            if self.with_plans(e.id, |p| p.custom) == 1 {
                 let text = self.lexed(e.id, &e.text)?;
                 if let Compiled::Query { plan: own, .. } = self.bind_text_as(&text, targets, true, true)? {
                     assert!(self.same_as_generic(&own, plan), "custom plan of {:?}", e.text);
