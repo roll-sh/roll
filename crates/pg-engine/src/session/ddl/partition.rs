@@ -1667,6 +1667,7 @@ impl Ddl<'_, '_> {
                 valid: true,
                 clustered: false,
                 replident: false,
+                not_ready: false,
                 ..(*six).clone()
             };
             if primary {
@@ -2248,6 +2249,7 @@ impl Ddl<'_, '_> {
             }
             let mut p = (*ix).clone();
             p.valid = true;
+            p.not_ready = false;
             self.cat.put_index(p);
             if ix.parent == 0 {
                 break;

@@ -3230,7 +3230,7 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                     b(ix.clustered),
                     b(ix.valid),
                     b(false),
-                    b(true),
+                    b(!ix.not_ready),
                     b(true),
                     b(ix.replident),
                     vector(DataType::Int2, cols.iter().map(|c| i2(*c)).collect()),

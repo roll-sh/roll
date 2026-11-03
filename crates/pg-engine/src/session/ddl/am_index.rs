@@ -152,7 +152,12 @@ impl Ddl<'_, '_> {
         am.store.write(old)?;
         let keys = self.heap_ordered_keys(t)?;
         let blocks = crate::exec::sizing::fork_blocks(t.oid, crate::exec::sizing::Fork::Main, self.ctx)?.unwrap_or(0) as u32;
-        let mut heap = DdlHeap { d: self, t, bix, keys, blocks };
+        // (Only the columns its keys, predicate and INCLUDE columns read are decoded, as the
+        // built-in methods' build pass decodes them.)
+        let mut cols = std::collections::HashSet::new();
+        crate::exec::sizing::index_columns(bix, &mut cols);
+        let need = (0..t.columns.len()).map(|i| cols.contains(&i)).collect();
+        let mut heap = DdlHeap { d: self, t, bix, keys, blocks, need };
         let stats = r.am.build(&am, &mut heap, self.ctx)?;
         self.index_built(t, ix)?;
         // index_update_stats: the index's pages and the tuples ambuild made.
@@ -208,6 +213,8 @@ struct DdlHeap<'a, 'b, 'c> {
     bix: &'a BoundIndex,
     keys: Vec<(Vec<u8>, Option<u32>)>,
     blocks: u32,
+    /// The table's columns the index reads (`sizing::index_columns`), the rest left NULL.
+    need: Vec<bool>,
 }
 
 impl crate::ext::index_am::BuildHeap for DdlHeap<'_, '_, '_> {
@@ -218,14 +225,14 @@ impl crate::ext::index_am::BuildHeap for DdlHeap<'_, '_, '_> {
     fn scan(&mut self) -> Box<dyn Iterator<Item = Result<AmRow>> + '_> {
         let n = self.keys.len().max(1) as u64;
         let blocks = self.blocks as u64;
-        let (d, t, bix) = (self.d, self.t, self.bix);
+        let (d, t, bix, need) = (self.d, self.t, self.bix, &self.need);
         Box::new(self.keys.iter().enumerate().filter_map(move |(i, (k, block))| {
             let r = (|| -> Result<Option<AmRow>> {
                 d.ctx.check()?;
                 let Some(bytes) = d.ctx.txn.borrow().get(k)? else {
                     return Ok(None);
                 };
-                let row: Row = crate::exec::scan::decode_table_row(t, &bytes)?;
+                let row: Row = crate::exec::scan::decode_table_row_need(t, &bytes, need)?;
                 let Some(values) = super::table::index_values(bix, &row, d)? else {
                     return Ok(None);
                 };

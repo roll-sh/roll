@@ -5397,6 +5397,42 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
       the engine is now 3x faster); timestamptz KNN `ORDER BY ts <-> c LIMIT 5` over
       100,000 rows 145 -> 0.24 ms (CPU 151 -> 6); skip scan 23 -> 17 ms (unsolved, above).
       Peak RSS 452 -> 448 MB.
+  - Batch 3 (agent 144):
+    - pg_index.indisready after a failed concurrent build (agent 156's difftest finding): a
+      CREATE INDEX CONCURRENTLY or REINDEX CONCURRENTLY whose build fails leaves its index
+      INVALID and not ready, as index_concurrently_build's failure does in PostgreSQL
+      (`Index::not_ready`, stored only when set; a REINDEX that succeeds clears it). The
+      engine never kept invalid indexes up for inserts; only the flag pg_index shows was
+      wrong. Golden `a144_cic_ready`.
+    - Native index access methods' builds (`build_am_index`: pgvector's hnsw / ivfflat,
+      bloom) decode only the columns the index reads (`sizing::index_columns`), as agent
+      148's serial build pass does for the built-in ones.
+    - Verified, on `fbe8f7a1`: crate tests in debug and release; clippy (nothing in the
+      files touched); the a144 goldens; a full regress run (debug, private reference)
+      51,148 / 51,150 with 0 units changed; isolation with the roll-* specs 1,805
+      permutations matching (intra-grant-inplace, as before); pg_dump_tap 14,817 / 14,817;
+      difftest smoke; contrib btree_gist 613 / 616, pg_trgm 261, cube 316, bloom 58, hstore
+      309, intarray 182, citext 544, pgvector 803 / 915 against `a89-pgvector` (expected
+      output 14 / 14), all unchanged.
+  - Left after round 5 (agent 144):
+    - Skip scans over modelled tables (under 400,000 versions since 18bb3d49) still pay
+      LP_DEAD bookkeeping in `Kills::done` / `Kills::passed` beyond what `Kills::sought`
+      removed. Re-measure after agent 151's all-visible shortcut in `chain_dead` / `Kills`
+      (5973e109), then trace the ranges `Kills::mark` gets (a gated eprintln is the
+      quickest way; the patch is in `~/.cache/a144/trace.patch` while it exists).
+    - Agent 154's finding: an index-only `count(*)` over TPC-H's lineitem (6M rows) takes
+      about 50 s on a fresh engine, a heap-model lookup and a point read per entry. Index-only
+      scans of a big settled table should skip the per-entry heap check, through 151's
+      `VisWatch` / all-visible fast path or an all-visible answer per range from the store.
+    - CREATE INDEX trails PostgreSQL 2-18x (BENCH round 5); re-measure on top of agent 148's
+      build pass that decodes only the index's columns (1f676b8a) and 151's model work.
+    - The access suite's GIN (gin_array 4.9x, gin_jsonb_exists 5.3x) and GiST KNN (box
+      4.7x, polygon 4.3x, circle 3.9x) cases. Profile with a frame-pointer build
+      (`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only RUSTFLAGS="-C force-frame-pointers=yes"`
+      in a target directory of its own); flat profiles of release builds can't unwind.
+    - btree_gist KNN over time and interval columns (not placed by the grid), the GiST size
+      model for classes without sort support (agent 103's box case, 610 pages against
+      1,011), and the SP-GiST quad NaN after a later split.
 
 - **Stored scans** (round 24, agent 149):
   - Recovered `eb44c2c9` and `78f4186f` onto `251924c1`. String comparisons
