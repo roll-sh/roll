@@ -2001,6 +2001,9 @@ pub fn class_rows_named(ctx: &ExecCtx, bounds: &NameBounds) -> Result<Option<Vec
 pub fn is_rel_columns(table: SysTable) -> Option<(usize, usize)> {
     match table {
         SysTable::IsColumns | SysTable::IsTables => Some((1, 2)),
+        // (schemaname, relname: `stat_views`.)
+        t if super::stat_views::generated_here(t) => Some((1, 2)),
+        t if super::stat_views::indexes_here(t) => Some((2, 3)),
         _ => None,
     }
 }
@@ -2021,6 +2024,12 @@ pub fn is_rows_named(
     name: Option<&str>,
 ) -> Result<Option<Vec<Row>>> {
     let Some((sk, nk)) = is_rel_columns(table) else { return Ok(None) };
+    if super::stat_views::generated_here(table) {
+        return super::stat_views::stat_tables(table, ctx, schema, name).map(Some);
+    }
+    if super::stat_views::indexes_here(table) {
+        return super::stat_views::stat_indexes(table, ctx, schema, name).map(Some);
+    }
     let cat = ctx.catalog();
     let in_schema = |s: u32| schema.is_none_or(|n| cat.schema_name(s) == n);
     let mut rels: Vec<(u8, u64, u32)> = Vec::new();
@@ -2268,7 +2277,11 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
         ));
     }
     if super::stat_views::generated_here(table) {
-        out.set(super::stat_views::stat_tables(table, ctx)?);
+        out.set(super::stat_views::stat_tables(table, ctx, None, None)?);
+        return Ok(());
+    }
+    if super::stat_views::indexes_here(table) {
+        out.set(super::stat_views::stat_indexes(table, ctx, None, None)?);
         return Ok(());
     }
     if let Some(sql) = sql_views().get(&(schema, table.name())) {

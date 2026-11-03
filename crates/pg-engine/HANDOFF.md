@@ -3339,6 +3339,20 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     statistics) set by ALTER COLUMN ... SET in place of the sample's, as do_analyze_rel does
     (`analyze.rs`; agent 156: DISTINCT estimated at 3,231 against 50). Golden
     `a146_n_distinct`.
+- **Catalog round 9, fourth batch** (round 24, agent 146; BENCH.md "Fourth batch"):
+  pg_stat_all_indexes / user_indexes / sys_indexes generated in one pass as the tables views
+  are (`stat_views::stat_indexes`: each index of a table, TOAST table or materialized view, by
+  (relid, indexrelid), its name from pg_class's kept rows); and a filter naming the table
+  (`relname = ...`, `schemaname = ...`, also `= ANY` of one value) makes only that table's rows
+  of any of the six views (`system::is_rel_columns` / `is_rows_named`, the path
+  information_schema's columns and tables take: `exec/nodes.rs` `is_named_rows`). Golden
+  `a146_stat_views`. Left: a `relid = ...` filter isn't pinned yet (only names are); the
+  statio views run their SQL definitions; the named lookups still visit every pg_class row
+  (3 ms against PostgreSQL's 0.8 at 10,000 tables). Measured, not this batch's: the pg_class ×
+  pg_attribute join of one schema (scale-ops) plans a nested loop over pg_attribute's index
+  where PostgreSQL hashes (the engine estimates 203 pg_class rows for `relnamespace = x`
+  against PostgreSQL's 1,949: catalog column statistics, agent 155's ANALYZE of system
+  catalogs); its execution is 33 ms against 35 with EXPLAIN ANALYZE's timing on both sides.
 - **Client libraries** (round 17, agent 38; round 18, agent 51): drivers' and ORMs' own test
   suites against the engine and against PostgreSQL 18.6, test by test: `tests/clients/`
   (runner, per-suite scripts, `STATUS.md` with the per-suite counts and every difference

@@ -6548,6 +6548,33 @@ reference): 51,148 / 51,150, no unit changed against `results.tsv` (the stats fi
 generated views); isolation 121 / 122 specs (intra-grant-inplace) and the 17 roll-* specs;
 `pg_dump_tap` 14,817 / 14,817; the difftest smoke.
 
+### Fourth batch: pg_stat_*_indexes, one table's statistics
+
+pg_stat_all_indexes / user_indexes / sys_indexes are generated in one pass too, and a query
+naming the table (`relname = ...`, `schemaname = ...`) makes that table's rows alone (HANDOFF).
+At 10,000 tables (psql `\timing`, ms; fresh engine; release builds at nice 19; PostgreSQL 18.6
+on the host network with the same tables):
+
+| | batch 3 (or its base where the view ran its SQL) | batch 4 | PostgreSQL | engine / PostgreSQL |
+|---|---|---|---|---|
+| `count(*)` of pg_stat_user_tables, first (pg_class's rows made too) | 186 | 188 | 39 | 4.8x |
+| the same again | 26 | 13 | 17 | 0.78x |
+| pg_stat_user_tables `WHERE relname = 't5005'`, again | 33 | 3.0 | 0.8 | 3.7x |
+| `count(*)` of pg_stat_user_indexes | 470 | 14-39 | 23-25 | 0.6-1.6x |
+| pg_stat_user_indexes `WHERE relname = 't5005'` | 10 | 3.4 | 1.1 | 3.1x |
+| engine CPU over the file, peak RSS | 0.42 s, 150 MB | 0.39 s, 153 MB | | |
+
+What is left in the lookups is reading pg_class's kept rows for the name (every relation's
+row is visited; PostgreSQL reads one through pg_class_relname_nsp_index); a query's first
+read of pg_class still makes its rows (188 ms against 39).
+
+### Verification (round 24, agent 146, fourth batch)
+
+On `d18d6f84`: `cargo test -p pg-engine` debug (golden `a146_stat_views` new), clippy (nothing
+new), the regression suite in full (debug, private reference): 51,148 / 51,150, no unit changed
+against `results.tsv`; isolation 121 / 122 specs (intra-grant-inplace) and the 17 roll-* specs;
+`pg_dump_tap` 14,817 / 14,817; the difftest smoke.
+
 ## OLTP round 3 (round 23, agent 136)
 
 HANDOFF.md, "OLTP round 3", has what changed: extended-protocol statements bound once per
