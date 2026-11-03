@@ -191,7 +191,16 @@ impl Database {
                     // What `open_upgrades` brought up to date is stored now: later commits
                     // write only what they change.
                     c.open_upgrades();
-                    let w = persist::changed(&stored, &c)?;
+                    let mut w = persist::changed(&stored, &c)?;
+                    // (A header stored before the tables index counted temporary tables:
+                    // counted once, and the header stored with the count.)
+                    if c.tables.ix().rows.temporary < 0 {
+                        let n = c.tables.values().filter(|t| t.temporary).count() as i64;
+                        c.tables.parts_mut().1.rows.temporary = n;
+                        if w.is_empty() {
+                            w = persist::header_writes(&c)?;
+                        }
+                    }
                     if !w.is_empty() {
                         store.commit(w, |_| Ok(()))?;
                     }
@@ -213,7 +222,14 @@ impl Database {
         )));
         catalog.freeze();
         let version = catalog.version;
-        let temp_leftovers = catalog.tables.values().any(|t| t.temporary);
+        // (Counted by the tables map's index, `RelRows::temporary`: a scan of every table
+        // parsed them all at the open, 0.6 s and 470 MB at 100,000 tables, which catalog
+        // format 4 reads on demand.)
+        debug_assert!(
+            catalog.tables.len() > 2_000
+                || (catalog.tables.ix().rows.temporary > 0) == catalog.tables.values().any(|t| t.temporary)
+        );
+        let temp_leftovers = catalog.tables.ix().rows.temporary > 0;
         static INSTANCES: AtomicU64 = AtomicU64::new(1);
         Ok(Arc::new(Database {
             name: name.to_string(),

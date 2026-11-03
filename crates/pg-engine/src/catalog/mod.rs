@@ -16,6 +16,7 @@ pub mod jsonbin;
 pub mod lz4;
 pub mod persist;
 pub mod stored_ix;
+pub mod stat_views;
 pub mod pmap;
 pub mod relindex;
 pub mod pglz;

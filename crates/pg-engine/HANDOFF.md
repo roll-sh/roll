@@ -3314,14 +3314,31 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     another session's (an autovacuum worker's) commit for it came later in PostgreSQL and
     overwrote it; the merge failed the commit as a concurrent schema change
     (partition_aggregate, agent 145).
-  - Left: on the current branch the database's first transaction still parses every table
-    on the connection's thread after the open (100,000 tables: 0.6 s and 470 MB; the open
-    itself is 25-35 ms), being located; entries' size (`Column` 240 bytes, `Table` 440) isn't
-    shrunk; a first query that
+  - Left: entries' size (`Column` 240 bytes, `Table` 440) isn't shrunk; a first query that
     reads every relation pays what the open used to (psql's `\dt` first 150-190 ms against
     78-95 at 10,000 tables; the store scans and parses, now on first use); colstats and
     triggers are still read at the open (BTreeMaps); a closed database's catalog read after
     its store's files are gone would panic (no such reader is known).
+- **Catalog round 9, third batch** (round 24, agent 146; BENCH.md "Catalog round 9, third
+  batch"):
+  - The first connection's parse of every table at 100,000 tables was `Database::open`'s
+    `temp_leftovers` (d22006b9), a scan of every table for a temporary one. The tables
+    map's index counts them now (`RelRows::temporary`, in the header; a header from before
+    it reads -1 and is counted once at the open and stored again, `persist::header_writes`).
+    `PMap::contains_key` doesn't parse a chunk (pgstat's first prune after an open asks it of
+    every relation with statistics). First connection at 100,000 tables 0.60 s / 1.4 s CPU /
+    573 MB → 31-36 ms / 0.04 s / 56 MB (PostgreSQL 21-24 ms).
+  - pg_stat_all_tables, pg_stat_user_tables and pg_stat_sys_tables are generated in one pass
+    (`catalog/stat_views.rs`): each relation's statistics entry read once (`pgstat::fetch_table`,
+    as the functions read it, every stats_fetch_consistency), its indexes' from pg_index's
+    sources (the built-in rows, `Catalog::indexes`, TOAST indexes), pg_class's columns read in
+    place from its kept rows; in relation oid order, as the definition's grouping sorted them.
+    Their SQL definitions ran 25 functions a row through a grouped join of pg_class and
+    pg_index. pg_stat_all_indexes and the statio views still run their definitions.
+  - ANALYZE stores a column's n_distinct (n_distinct_inherited for the inheritance tree's
+    statistics) set by ALTER COLUMN ... SET in place of the sample's, as do_analyze_rel does
+    (`analyze.rs`; agent 156: DISTINCT estimated at 3,231 against 50). Golden
+    `a146_n_distinct`.
 - **Client libraries** (round 17, agent 38; round 18, agent 51): drivers' and ORMs' own test
   suites against the engine and against PostgreSQL 18.6, test by test: `tests/clients/`
   (runner, per-suite scripts, `STATUS.md` with the per-suite counts and every difference

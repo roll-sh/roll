@@ -585,6 +585,12 @@ pub fn changed(old: &Catalog, new: &Catalog) -> Result<Writes> {
     Ok(out)
 }
 
+/// The write storing `c`'s header alone (what an open counted that the stored header
+/// lacked: `RelRows::temporary`).
+pub fn header_writes(c: &Catalog) -> Result<Writes> {
+    Ok(vec![(crate::txn::CATALOG_KEY.to_vec(), Some(header(c)?))])
+}
+
 /// For a merge of concurrent DDL (`txn::catmerge`): the per-object records that differ
 /// between `a` and `b`, as (tag, oid, `b`'s record or None where `b` has none), found by
 /// comparing the maps as a commit does (cost follows what changed).

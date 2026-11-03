@@ -6506,6 +6506,48 @@ After `PMap::contains_key` stopped parsing: lib tests, catalog_format, catalog_s
 goldens, ddl_scaling, and the regression suite in full once more (51,148 / 51,150, no unit
 changed).
 
+### Third batch: the first connection, pg_stat_*_tables
+
+HANDOFF.md "Catalog round 9, third batch" has what changed. Release builds at nice 19,
+interleaved, as in the second batch; base `5ee62371` (format 3, the parse of every table at the
+first connection), batch 3 on `452eca77` with batch 2.
+
+First connection (connect, SCRAM, `SELECT 1`; 2 rounds):
+
+| tables | base: connect, engine CPU, RSS | batch 3 | PostgreSQL 18.6 (after a restart) | engine / PostgreSQL |
+|---|---|---|---|---|
+| 100 | 20-25 ms, 0.03 s, 48-49 MB | 22-31 ms, 0.02-0.03 s, 46 MB | 21 ms | 1.0-1.5x |
+| 10,000 | 80-121 ms, 0.19-0.26 s, 102-104 MB | 25-26 ms, 0.03 s, 50 MB | 11 ms | 2.3x (was 7-11x) |
+| 100,000 | 0.58-0.60 s, 1.3-1.4 s, 568-590 MB | 31-36 ms, 0.04 s, 56 MB | 21-24 ms | 1.3-1.7x (was 25x) |
+
+pg_stat_user_tables at 10,000 tables (psql `\timing`, ms; fresh engine; PostgreSQL 18.6 on the
+host network, the same 10,000 tables):
+
+| | base | batch 3 | PostgreSQL | engine / PostgreSQL |
+|---|---|---|---|---|
+| first `count(*)` (pg_class's rows made too) | 449 | 186 | 26 | 7.2x |
+| `count(*)` again | 218 | 26 | 17 | 1.5x |
+| one table's row (`WHERE relname = ...`) | 182 | 33 | 1.2 | 28x (PostgreSQL reads one pg_class row by its index) |
+| engine CPU over the file, peak RSS | 1.44 s, 174 MB | 0.86 s, 169 MB | | |
+
+Left there: the generator still makes every row (no filter or column list reaches it), and a
+first read makes pg_class's rows; pg_stat_all_indexes / user_indexes (470 ms against 20) and
+the statio views run their SQL definitions.
+
+pgbench (scale 10, 4 clients, 5,000 transactions each, `--no-sync`, 2 rounds): `-S` 10,406 /
+10,849 tps (base) against 29,126 / 28,221, CPU per 1,000 transactions 244-249 against 121-132
+ms; `-N` 5,836-5,973 against 8,376-8,785 tps, 514-535 against 326-347 ms; peak RSS 402-503
+against 468-503 MB. (The bases differ by other agents' commits between `5ee62371` and
+`452eca77`; nothing batch 3 changes is on these paths.)
+
+### Verification (round 24, agent 146, third batch)
+
+On `452eca77` with batch 2: `cargo test -p pg-engine` debug (every binary; golden
+`a146_n_distinct` new), clippy (nothing new), the regression suite in full (debug, private
+reference): 51,148 / 51,150, no unit changed against `results.tsv` (the stats files read the
+generated views); isolation 121 / 122 specs (intra-grant-inplace) and the 17 roll-* specs;
+`pg_dump_tap` 14,817 / 14,817; the difftest smoke.
+
 ## OLTP round 3 (round 23, agent 136)
 
 HANDOFF.md, "OLTP round 3", has what changed: extended-protocol statements bound once per

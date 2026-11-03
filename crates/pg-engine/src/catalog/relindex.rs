@@ -26,6 +26,14 @@ pub struct RelRows {
     pub live: i64,
     /// information_schema.tables: tables and (not materialized) views.
     pub listed: i64,
+    /// Temporary tables (a crashed server's sessions' left: `Database::temp_leftovers`).
+    /// -1: not counted (a header stored before the count), counted again at the open.
+    #[serde(default = "uncounted")]
+    pub temporary: i64,
+}
+
+fn uncounted() -> i64 {
+    -1
 }
 
 impl RelRows {
@@ -37,6 +45,7 @@ impl RelRows {
         self.index += k * d.index;
         self.live += k * d.live;
         self.listed += k * d.listed;
+        self.temporary += k * d.temporary;
     }
 }
 
@@ -56,6 +65,7 @@ fn toast_rows(t: &Table) -> RelRows {
         index: 1,
         live: 0,
         listed: 0,
+        temporary: 0,
     }
 }
 
@@ -71,6 +81,7 @@ fn table_rows(t: &Table) -> RelRows {
         index: toast.index,
         live: t.live_columns().count() as i64,
         listed: 1,
+        temporary: t.temporary as i64,
     }
 }
 
@@ -528,6 +539,7 @@ impl ViewIx {
                 index: toast.index,
                 live: v.storage.as_ref().map_or(v.columns.len(), |st| st.live_columns().count()) as i64,
                 listed: !v.materialized as i64,
+                temporary: 0,
             },
             up,
         );
@@ -586,6 +598,7 @@ impl IndexIx {
             index: 1,
             live: 0,
             listed: 0,
+            temporary: 0,
         };
         self.rows.apply(rows, up);
     }
@@ -615,6 +628,7 @@ const SEQUENCE_ROWS: RelRows = RelRows {
     index: 0,
     live: 0,
     listed: 0,
+    temporary: 0,
 };
 
 impl MapIndex<Arc<Sequence>> for SeqIx {
