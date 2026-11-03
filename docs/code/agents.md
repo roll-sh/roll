@@ -124,7 +124,10 @@ relay ↔ daemon   ping / pong                            every 20 s; 60 s silen
 
 A command id is the client's idempotency key: a daemon that already ran a command id replies
 with the stored result instead of running it again (T3's command receipts). The daemon
-reconnects with jittered backoff (1 s doubling to 30 s).
+reconnects with jittered backoff (1 s doubling to 30 s). The relay's close codes say what to do:
+4401 the token was revoked and 4400 the protocol isn't spoken (stop, with a clear error), 4409
+another daemon took the machine's link over (stop), 1012 the owner's agents moved to another
+cluster node (reconnect; docs/code/cluster.md, "An owner's agents").
 
 ## Providers
 
@@ -205,7 +208,8 @@ server (`docs/orchestration-v2/orchestrator-mcp-server.md` there), ported in
   approves; the CLI's poll then receives a machine token `rlm_…` and stores it in
   `~/.config/roll/agent.json` (0600). The dashboard can also mint one directly ("Add machine").
 - Machine tokens are stored as sha256 only, looked up on every connect (never cached), and only
-  open `/v1/code/agents/connect`. Revoking a machine closes its link at once.
+  open `/v1/code/agents/connect` (`GET` the link; `DELETE` revokes the machine itself, for
+  `roll agent logout`). Revoking a machine closes its link at once.
 - Commands need `Code::owns` on the owner (agent tokens may drive threads, so agents can
   orchestrate agents); adding, renaming or revoking machines, sandboxes and shares need
   `Code::manages`.
