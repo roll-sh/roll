@@ -431,6 +431,7 @@ mod tests {
             runtime_mode: RuntimeMode::Ask,
             interaction_mode: InteractionMode::Default,
             resume: None,
+            fork: None,
             env: Vec::new(),
             mcp: Vec::new(),
             instructions: None,

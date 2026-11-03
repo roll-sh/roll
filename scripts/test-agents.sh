@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # roll code agents test suite (docs/code/agents.md): build, clippy and the tests of agent-proto,
 # agent-host (orchestrator, providers against recorded transcripts, worktrees, terminals, the MCP
-# server, the relay link), the relay's tests in code-control (agents, the auth matrix, MCP agent
-# tools, the coverage map), `roll agent` against a live relay, and the dashboard's tests; then the
-# install script against a local release, and an end to end run of the real binaries
+# server, the relay link), the relay's tests in code-control (agents, code access, the auth
+# matrix, MCP agent tools, the coverage map), `roll agent` against a live relay, and the
+# dashboard's and desktop app's tests; then the install script against a local release, and an
+# end to end run of the real binaries
 # (scripts/agents-e2e.mjs): rolld --code-only, `roll agent login` approved through the API,
 # `ROLL_AGENT_FAKE=1 roll agent up`, a streamed run with an approval, its checkpoint and diff, a
 # share read anonymously, the dashboard in a production build serving the canvas and the share
@@ -14,10 +15,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PATHS=(crates/agent-proto crates/agent-host crates/code-control/src/agents crates/code-control/tests/agents.rs
+PATHS=(crates/agent-proto crates/agent-host crates/code-control/src/agents crates/code-control/tests/agents.rs crates/code-control/tests/agents_code.rs
        crates/code-control/tests/common crates/code-control/tests/mcp.rs crates/code-control/tests/routes.rs
        crates/roll-cli/src/agent.rs crates/roll-cli/tests/agent.rs crates/roll-cli/Cargo.toml crates/rolld/src
-       apps/dashboard/src apps/dashboard/public/install.sh apps/dashboard/package.json apps/dashboard/next.config.ts
+       apps/dashboard/src apps/dashboard/public/install.sh apps/desktop/src apps/desktop/test apps/dashboard/package.json apps/dashboard/next.config.ts
        Cargo.toml Cargo.lock scripts/test-agents.sh scripts/agents-e2e.mjs)
 TARGET=${CARGO_TARGET_DIR:-target}
 STAMP=$TARGET/.test-agents.hash
@@ -49,12 +50,13 @@ cargo test -p agent-proto
 cargo test -p agent-host
 # The relay: its own tests, the agents rows of the auth matrix, the MCP agent tools, the coverage map.
 cargo test -p code-control --lib -- agents cluster::
-cargo test -p code-control --test agents --test coverage_map
+cargo test -p code-control --test agents --test agents_code --test coverage_map
 cargo test -p code-control --test routes agents
 cargo test -p code-control --test mcp agent
 cargo test -p roll-cli --test agent
 cargo test -p roll-cli --bin roll coverage
 pnpm --filter dashboard test
+pnpm --filter @roll/desktop test
 
 if [[ $unit_only == 0 ]]; then
   # The install script, against a release served from a local directory: the right asset for this
