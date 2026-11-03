@@ -6655,6 +6655,36 @@ a `Vec<Value>` per row and walks `Expr` per row.
   emitting joined rows from batches (only misses are dropped), Sort / Window inputs,
   out-of-line values (a table that ever stored one is read on the statement's thread).
 
+**Next: nested loops rescan their inner side (agreed with agent 149, measured, not built).**
+`NestLoopNode::right_rows` reopens the inner plan for every outer row: `collect_right` ->
+`exec::collect_need` -> `nodes::open_need`, a fresh node tree and `ScanNode` each time.
+- Measured: `SELECT sum(t.v) FROM generate_series(1, 200000) g JOIN nl_t t ON t.id = g`
+  (1M-row `nl_t`, hash and merge joins off, serial). The engine takes 860-920 ms, PostgreSQL
+  270-290 ms (3.2x).
+- Profile (frame pointers, `847fbdba`), inclusive:
+  - the inner `ScanNode::next` 72%: `next_indexed` 56%, the row fetch
+    (`fetch_stored` / `get_versions_with`) 19%, `TxnScan` / `Merge::min` / `Cursor::fill` ~17%;
+  - `open_range` 10% (`Txn::scan_snap` 8.8%, `Txn::lower` 7.5%, `Store::scan_raw` 6.9%);
+  - opening the inner tree (`open_need` -> `open_scan`) 13%;
+  - the index conditions' `eval_here` 4.2%;
+  - allocation ~11%.
+- The storage part is 149's single-equality point-lookup path, behind `next`. The executor
+  part is a rescan.
+- Agreed shape: `ScanNode::rescan(&mut self, params, ctx)`.
+  - It keeps `erb`, `rb`, the compiled `kfilter`, `fetcher` (151's `sizing::Fetcher`),
+    `toast` and `need`.
+  - It resets `iter`, `ranges` / `cur_range`, `fetched` / `run` / `pending`, `batch` (back
+    to FETCH_BATCH_MIN), `emitted` and the per-scan counters.
+  - It rebinds the ranges as `open_scan` binds them (`ranges` / `ranges_from` over the outer
+    parameters), and counts an index scan per rescan as `open` does (pg_stat).
+- `Node` gets a `rescan` that defaults to "can't" (the caller reopens), so only ScanNode has
+  to implement it at first.
+- `NestLoopNode` keeps the inner node open across outer rows. It doesn't do so under
+  EXPLAIN ANALYZE, with a memo (Memoize), or for `fixed` inner sides. Rows still stream into
+  the join, as now.
+- Check that `ctx.temp_cleanup.run` / `ctx.statement`, which `collect_need` wraps around each
+  inner run, still hold per rescan.
+
 ## Starting prompt for the next agent
 
 Paste this into the new agent, from the repository root on branch
