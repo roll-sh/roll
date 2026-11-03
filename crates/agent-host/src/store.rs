@@ -37,7 +37,22 @@ const MIGRATIONS: &[&str] = &[
      INSERT INTO counters (name, value) VALUES ('seq', 0);
      CREATE TABLE receipts (id TEXT PRIMARY KEY, reply TEXT NOT NULL, at INTEGER NOT NULL);
      CREATE TABLE thread_state (thread TEXT PRIMARY KEY, json TEXT NOT NULL);",
+    // Receipts are per sender (two clients may pick the same id), and a command's receipt is
+    // written before it runs (`reply` NULL until it is done), so a crash can't run it twice.
+    "DROP TABLE receipts;
+     CREATE TABLE receipts (sender TEXT NOT NULL, id TEXT NOT NULL, reply TEXT, at INTEGER NOT NULL, PRIMARY KEY (sender, id));",
 ];
+
+/// What the store knows about a command id ([`Store::begin_command`]).
+#[derive(Debug, PartialEq)]
+pub enum Receipt {
+    /// Never seen: it is recorded as started now, and runs.
+    New,
+    /// It ran: its reply.
+    Done(Reply),
+    /// It started and never finished: the daemon stopped while it ran. It doesn't run again.
+    Interrupted,
+}
 
 pub struct Store {
     db: Mutex<Connection>,
@@ -164,18 +179,38 @@ impl Store {
         Ok(out)
     }
 
-    pub fn receipt(&self, id: &str) -> anyhow::Result<Option<Reply>> {
-        let db = self.db();
-        let json: Option<String> =
-            db.query_row("SELECT reply FROM receipts WHERE id = ?1", [id], |r| r.get(0)).optional()?;
-        Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
+    /// Looks a command up by who sent it and its id, and records it as started when it is new,
+    /// in one transaction.
+    pub fn begin_command(&self, sender: &str, id: &str, at: u64) -> anyhow::Result<Receipt> {
+        let mut db = self.db();
+        let tx = db.transaction()?;
+        let found: Option<Option<String>> = tx
+            .query_row("SELECT reply FROM receipts WHERE sender = ?1 AND id = ?2", params![sender, id], |r| r.get(0))
+            .optional()?;
+        let receipt = match found {
+            Some(Some(json)) => Receipt::Done(serde_json::from_str(&json)?),
+            Some(None) => Receipt::Interrupted,
+            None => {
+                tx.execute("INSERT INTO receipts (sender, id, reply, at) VALUES (?1, ?2, NULL, ?3)", params![sender, id, at as i64])?;
+                Receipt::New
+            }
+        };
+        tx.commit()?;
+        Ok(receipt)
     }
 
-    pub fn put_receipt(&self, id: &str, reply: &Reply, at: u64) -> anyhow::Result<()> {
+    /// A started command's reply: returned for its id from now on.
+    pub fn finish_command(&self, sender: &str, id: &str, reply: &Reply) -> anyhow::Result<()> {
         self.db().execute(
-            "INSERT INTO receipts (id, reply, at) VALUES (?1, ?2, ?3) ON CONFLICT (id) DO NOTHING",
-            params![id, serde_json::to_string(reply)?, at as i64],
+            "UPDATE receipts SET reply = ?3 WHERE sender = ?1 AND id = ?2",
+            params![sender, id, serde_json::to_string(reply)?],
         )?;
+        Ok(())
+    }
+
+    /// Forgets a started command that changed nothing, so its id can run again.
+    pub fn forget_command(&self, sender: &str, id: &str) -> anyhow::Result<()> {
+        self.db().execute("DELETE FROM receipts WHERE sender = ?1 AND id = ?2", params![sender, id])?;
         Ok(())
     }
 

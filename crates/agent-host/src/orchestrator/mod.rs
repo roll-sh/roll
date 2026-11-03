@@ -12,8 +12,9 @@
 //!   events take it in turn, so a thread's records change one step at a time. Provider events are
 //!   drained into an unbounded queue as they arrive, so a provider waiting on its event channel
 //!   can never deadlock a command that is waiting on the provider.
-//! - Command ids are idempotency keys (T3's command receipts): the first reply is stored and
-//!   returned again for the same id, also after a restart.
+//! - Command ids are idempotency keys per sender (T3's command receipts): a command is recorded
+//!   as started before it runs and its reply is stored after, so the same sender and id get that
+//!   reply again (also after a restart), and a command a crash cut short never runs twice.
 
 mod handoff;
 mod queries;
@@ -27,7 +28,7 @@ pub(crate) use tasks::{Delegation, TaskError};
 use crate::Outbound;
 use crate::config::Config;
 use crate::provider::{Provider, Session};
-use crate::store::Store;
+use crate::store::{Receipt, Store};
 use agent_proto::*;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -48,7 +49,8 @@ pub struct Host {
     out: broadcast::Sender<Outbound>,
     info: std::sync::Mutex<MachineInfo>,
     threads: std::sync::Mutex<HashMap<ThreadId, Arc<AsyncMutex<Rt>>>>,
-    /// Commands in flight by id, so a retry that races the first call waits for its receipt.
+    /// Commands in flight by sender and id, so a retry that races the first call waits for its
+    /// receipt.
     inflight: std::sync::Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     /// Serializes project add/remove (path uniqueness, cascading deletes).
     projects: AsyncMutex<()>,
@@ -603,20 +605,40 @@ impl crate::Daemon for Host {
         self.run_granted(id, by, command, None).await
     }
 
+    /// A command runs at most once per (sender, id): its receipt is recorded as started before it
+    /// runs and gets its reply after, so a retry gets the reply, and one after a crash mid-way
+    /// gets `conflict` instead of a second run. A network failure that kept nothing forgets the
+    /// receipt, so the same id can run again.
     async fn run_granted(&self, id: String, by: String, command: Command, grant: Option<CodeGrant>) -> Reply {
         if command.is_query() {
             return self.execute(&by, command, grant).await.unwrap_or_else(Fail::into_reply);
         }
-        let gate = self.gate(&id);
+        let key = format!("{by}\n{id}");
+        let gate = self.gate(&key);
         let reply = {
             let _held = gate.lock().await;
-            match self.store.receipt(&id) {
-                Ok(Some(reply)) => reply,
-                Ok(None) => match self.execute(&by, command, grant).await {
-                    Err(fail) if fail.is_transient() => fail.into_reply(),
+            match self.store.begin_command(&by, &id, now()) {
+                Ok(Receipt::Done(reply)) => reply,
+                Ok(Receipt::Interrupted) => {
+                    let reply = Fail::Conflict(format!(
+                        "command {id} was running when this machine's daemon stopped, so it may have partly run: look at the state, and send it again with a new id if it's still needed"
+                    ))
+                    .into_reply();
+                    if let Err(e) = self.store.finish_command(&by, &id, &reply) {
+                        tracing::warn!("storing the receipt of command {id}: {e:#}");
+                    }
+                    reply
+                }
+                Ok(Receipt::New) => match self.execute(&by, command, grant).await {
+                    Err(fail) if fail.is_transient() => {
+                        if let Err(e) = self.store.forget_command(&by, &id) {
+                            tracing::warn!("forgetting command {id}: {e:#}");
+                        }
+                        fail.into_reply()
+                    }
                     done => {
                         let reply = done.unwrap_or_else(Fail::into_reply);
-                        if let Err(e) = self.store.put_receipt(&id, &reply, now()) {
+                        if let Err(e) = self.store.finish_command(&by, &id, &reply) {
                             tracing::warn!("storing the receipt of command {id}: {e:#}");
                         }
                         reply
@@ -625,7 +647,7 @@ impl crate::Daemon for Host {
                 Err(e) => Fail::Internal(e).into_reply(),
             }
         };
-        self.ungate(&id, &gate);
+        self.ungate(&key, &gate);
         reply
     }
 }

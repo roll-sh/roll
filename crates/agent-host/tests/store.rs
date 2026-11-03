@@ -1,6 +1,6 @@
 //! The entity store: newest seq per record, tombstones, receipts, reopening.
 
-use agent_host::store::Store;
+use agent_host::store::{Receipt, Store};
 use agent_proto::*;
 
 fn project(id: &str, name: &str) -> Entity {
@@ -59,17 +59,25 @@ fn survives_reopen_with_receipts_and_thread_state() {
     {
         let store = Store::open(&path).unwrap();
         store.put(vec![project("prj_a", "a")], |_| {}).unwrap();
-        store.put_receipt("cmd-1", &Reply::Created { id: "prj_a".into() }, 10).unwrap();
+        assert_eq!(store.begin_command("owner", "cmd-1", 10).unwrap(), Receipt::New);
+        store.finish_command("owner", "cmd-1", &Reply::Created { id: "prj_a".into() }).unwrap();
+        // Started, and the daemon stops before it finishes.
+        assert_eq!(store.begin_command("owner", "cmd-cut", 10).unwrap(), Receipt::New);
         store.put_thread_state(&thread, &serde_json::json!({"native": "abc"})).unwrap();
     }
     let store = Store::open(&path).unwrap();
     assert_eq!(store.last_seq().unwrap(), 1);
     store.put(vec![project("prj_b", "b")], |_| {}).unwrap();
     assert_eq!(store.last_seq().unwrap(), 2);
-    assert_eq!(store.receipt("cmd-1").unwrap(), Some(Reply::Created { id: "prj_a".into() }));
-    assert_eq!(store.receipt("cmd-2").unwrap(), None);
+    assert_eq!(store.begin_command("owner", "cmd-1", 12).unwrap(), Receipt::Done(Reply::Created { id: "prj_a".into() }));
+    assert_eq!(store.begin_command("owner", "cmd-cut", 12).unwrap(), Receipt::Interrupted);
+    // Ids are per sender: another sender's cmd-1 is its own.
+    assert_eq!(store.begin_command("agent:bot", "cmd-1", 12).unwrap(), Receipt::New);
+    store.forget_command("agent:bot", "cmd-1").unwrap();
+    assert_eq!(store.begin_command("agent:bot", "cmd-1", 12).unwrap(), Receipt::New, "forgotten: it runs again");
+
     let state: serde_json::Value = store.thread_state(&thread).unwrap().unwrap();
     assert_eq!(state["native"], "abc");
-    assert_eq!(store.prune_receipts(11).unwrap(), 1);
-    assert_eq!(store.receipt("cmd-1").unwrap(), None);
+    assert_eq!(store.prune_receipts(11).unwrap(), 2);
+    assert_eq!(store.begin_command("owner", "cmd-1", 13).unwrap(), Receipt::New);
 }

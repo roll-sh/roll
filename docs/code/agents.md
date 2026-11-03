@@ -152,8 +152,11 @@ daemon → relay   reply {id, result}                     exactly one per comman
 relay ↔ daemon   ping / pong                            every 20 s; 60 s silence drops the link
 ```
 
-A command id is the client's idempotency key: a daemon that already ran a command id replies
-with the stored result instead of running it again (T3's command receipts). A reply comes after
+A command id is the client's idempotency key, per sender (`by`: two senders may pick the same id
+for different commands): a daemon that already ran a command id replies with the stored result
+instead of running it again (T3's command receipts). The receipt is written as started before the
+command runs, so a command a crash or restart cut short never runs twice: its id answers
+`conflict` ("it may have partly run") from then on. A reply comes after
 the records its command wrote, so a client that has the reply finds them in `/state`: the daemon
 holds it until it has sent every record up to its newest `seq` as of the command's end, also while
 a replay is still catching up. A frame the daemon can't read (a newer relay's frame type or

@@ -330,12 +330,28 @@ async fn command_ids_are_idempotent() {
         w.host.run("same".into(), "owner".into(), create.clone())
     );
     assert_eq!(a, b);
-    let c = w.host.run("same".into(), "owner".into(), create).await;
+    let c = w.host.run("same".into(), "owner".into(), create.clone()).await;
     assert_eq!(a, c);
     let threads = w.state().await.live.keys().filter(|(k, _)| *k == EntityKind::Thread).count();
     assert_eq!(threads, 1);
     assert_eq!(fake.sessions().len(), 1);
     assert_eq!(sends(&fake.session(0).await.calls()).len(), 1);
+    // Ids are per sender: another client's "same" is its own command.
+    let other = w.host.run("same".into(), "agent:bot".into(), create.clone()).await;
+    assert!(matches!(other, Reply::Created { .. }) && other != a, "{other:?}");
+    assert_eq!(w.host.run("same".into(), "agent:bot".into(), create.clone()).await, other);
+    let threads = w.state().await.live.keys().filter(|(k, _)| *k == EntityKind::Thread).count();
+    assert_eq!(threads, 2);
+
+    // A command the daemon was running when it stopped (started, never finished) doesn't run
+    // again: its id answers `conflict`, for good.
+    let store = agent_host::store::Store::open(&w.home.join("agent.db")).unwrap();
+    assert_eq!(store.begin_command("owner", "cut", 1).unwrap(), agent_host::store::Receipt::New);
+    let cut = w.host.run("cut".into(), "owner".into(), create.clone()).await;
+    assert!(matches!(&cut, Reply::Error(ReplyError { code: ErrorCode::Conflict, message }) if message.contains("stopped")), "{cut:?}");
+    assert_eq!(w.host.run("cut".into(), "owner".into(), create).await, cut);
+    let threads = w.state().await.live.keys().filter(|(k, _)| *k == EntityKind::Thread).count();
+    assert_eq!(threads, 2);
     // Errors are receipts too.
     let missing = Command::ProjectRemove { project: ProjectId("prj_missing".into()) };
     let first = w.host.run("err".into(), "owner".into(), missing.clone()).await;

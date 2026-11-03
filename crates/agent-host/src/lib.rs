@@ -49,8 +49,9 @@ pub trait Daemon: Send + Sync + 'static {
     /// the command finished.
     async fn last_seq(&self) -> anyhow::Result<u64>;
 
-    /// Run a command. `id` is the client's idempotency key: a second call with the same id
-    /// returns the first call's reply without running anything. `by` is who sent it.
+    /// Run a command. `id` is the client's idempotency key, per sender: a second call with the
+    /// same `by` and `id` returns the first call's reply without running anything (another sender
+    /// may use the same id for its own command). `by` is who sent it.
     async fn run(&self, id: String, by: String, command: Command) -> Reply;
 
     /// [`Daemon::run`] with the roll code access the relay granted for this command (cloning,
