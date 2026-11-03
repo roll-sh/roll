@@ -669,19 +669,36 @@ impl Ddl<'_, '_> {
         let (mut new, mut new_toast) = (oldest, oldest);
         let measured = self.measured_xmin.take().filter(|m| m.0 == t.oid && m.1 == old);
         let measured_toast = measured.and_then(|m| m.3).filter(|m| m.0 == old_toast).map(|m| m.1);
+        // (The xmins kept of a table nothing changed in since: `txn::unchanged`.)
+        let db = self.ctx.sess.db.clone();
+        let kept = db
+            .unchanged
+            .valid(&db.store, t.oid)
+            .filter(|m| m.ts <= self.ctx.txn.borrow().snapshot_ts() && !(toast && m.may_toast))
+            .and_then(|m| m.oldest_xmin(old));
         if !freeze && let Some((_, _, m, _)) = measured && (!toast || measured_toast.is_some()) {
             // (Seen by the measure's pass over the rows.)
             new = new.min(m);
             new_toast = new_toast.min(measured_toast.unwrap_or(u64::MAX));
+        } else if !freeze && let Some(m) = kept {
+            // (No row has values out of line: the TOAST table has no xmin to hold back.)
+            new = new.min(m);
+            crate::txn::unchanged::XMIN_SKIPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         } else if !freeze {
             let start = crate::storage::keys::index_prefix(t.oid, 0);
             let end = crate::storage::keys::prefix_end(&start);
+            let snap = self.ctx.txn.borrow().snapshot_ts();
             // (Read as it goes: a big table's rows aren't held.)
             let scan = self.ctx.txn.borrow().scan(&start, &end);
             let none = std::collections::HashSet::new();
+            let (mut rows, mut xmins, mut external) = (0usize, (u64::MAX, 0u64), false);
             for r in scan {
                 let (_, v) = r?;
                 let x = crate::exec::scan::row_xmin(&v)?;
+                rows += 1;
+                xmins = (xmins.0.min(x), xmins.1.max(x));
+                // (Values out of line, or a row big enough that its values could be.)
+                external |= crate::storage::toast::has_external(&v) || v.len() > crate::exec::sizing::TOAST_THRESHOLD;
                 if main && x >= old && x < new {
                     new = x;
                 }
@@ -692,6 +709,10 @@ impl Ddl<'_, '_> {
                     }
                 }
             }
+            // (The xmins kept for the next VACUUM while nothing changes; not its heap's
+            // numbers: a layout no measure has, so `unchanged_measure` doesn't take them.)
+            let m = crate::txn::unchanged::Measured { ts: snap, armed: 0, layout: 0, rows, live: 0, xmin: xmins, may_toast: external };
+            db.unchanged.keep(&db.store, t.oid, m);
         }
         if main {
             self.cat.frozen_xids.insert(t.oid, new.max(old));

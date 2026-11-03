@@ -19,6 +19,9 @@ use std::sync::atomic::AtomicUsize;
 /// VACUUMs that took a kept measure instead of reading the table, for tests.
 pub static SKIPS: AtomicUsize = AtomicUsize::new(0);
 
+/// VACUUMs that took kept xmins instead of reading the table for its frozen xid, for tests.
+pub static XMIN_SKIPS: AtomicUsize = AtomicUsize::new(0);
+
 /// A table's measure, as of commit ts `ts`.
 #[derive(Clone, Debug)]
 pub struct Measured {
