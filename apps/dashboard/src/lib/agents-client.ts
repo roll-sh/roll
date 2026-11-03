@@ -196,6 +196,11 @@ export class AgentsClient {
 
   private refollow() {
     if (this.followTimer) clearTimeout(this.followTimer);
+    // Not connected: nothing to fetch, just keep what's followed.
+    if (this.holds === 0) {
+      this.set({ data: follow(this.snap.data, this.followed()) });
+      return;
+    }
     this.followTimer = setTimeout(() => {
       this.followTimer = null;
       const want = this.followed();
@@ -203,10 +208,6 @@ export class AgentsClient {
       const added = [...want].some((t) => !have.has(t));
       const removed = [...have].some((t) => !want.has(t));
       if (!added && !removed) return;
-      if (this.holds === 0) {
-        this.set({ data: follow(this.snap.data, want) });
-        return;
-      }
       if (added) {
         // New detail needs a snapshot; then the stream resumes from it with the new set.
         void this.connect();
@@ -268,6 +269,16 @@ export class AgentsClient {
 }
 
 export { CommandError };
+
+/** The demo's owner name (`/dashboard/agents?demo`). */
+export const DEMO_OWNER = "demo";
+
+/** Ask the canvas on this page to show a node (`t:thr_…`, `r:req_…`). */
+export const FOCUS_EVENT = "roll:agents:focus";
+
+export function focusOnCanvas(key: string) {
+  window.dispatchEvent(new CustomEvent(FOCUS_EVENT, { detail: key }));
+}
 
 // ── one client per owner, shared by the canvas and the header popover ──
 

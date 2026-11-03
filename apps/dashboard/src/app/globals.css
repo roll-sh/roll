@@ -338,3 +338,21 @@ body {
     color: var(--muted);
   }
 }
+
+/* agents: a busy status dot breathes (calm, 1.6 s, no flashing). */
+@keyframes pulse-dot {
+  50% {
+    opacity: 0.45;
+    transform: scale(0.8);
+  }
+}
+
+.pulse-dot {
+  animation: pulse-dot 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-dot {
+    animation: none;
+  }
+}

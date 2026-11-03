@@ -19,7 +19,7 @@ pub const RESERVED: &[&str] = &[
     "trending", "gist", "gists", "sponsors",
     // Products and dashboard sections.
     "databases", "postgres", "redis", "queues", "tasks", "streams", "kafka", "functions", "deployments", "edge", "logs",
-    "observability", "previews",
+    "observability", "previews", "agents",
     // roll itself.
     "roll", "rollsh", "roll-sh", "www", "mail", "app", "apps", "cdn", "v1", "health", "root", "system",
 ];
