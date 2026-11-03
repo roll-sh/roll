@@ -1325,6 +1325,8 @@ impl Heap {
         mode: &mut InsertMode,
     ) -> Vec<Tid> {
         let lens: Vec<usize> = rows.iter().map(|r| r.1).collect();
+        // (Room for the batch's keys at once: a load's map grows a batch at a time.)
+        self.keys.reserve(rows.len(), rows.iter().map(|r| r.0.len()).sum());
         let out = self.multi_place(&lens, xmin, mode);
         for ((k, _), tid) in rows.into_iter().zip(&out) {
             self.placed(&k, *tid);
