@@ -4101,6 +4101,21 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     `compile_generic`'s key per evaluation; a DO block keeps them for its run. The wire
     writes text, integer, boolean and oid results without a String each
     (`server::put_text_fast`).
+  - *Window partitions streamed* (`exec/window.rs` `streamed_partitions`, `sort_keys_for`;
+    nodes.rs `Plan::Window`): calls with one window that has partition keys (compared
+    bytewise) read their input a partition at a time when it is sorted on the partition
+    and order keys (a Sort below, or one the executor puts there: over a table scan, the
+    Sort PostgreSQL has under its WindowAgg runs as a SortNode, within work_mem and spilling
+    as tuplesort does); each partition is computed alone, as nothing is sorted. The analytic
+    set's `window` (2M rows, 1,000 partitions): 1,290 -> 283 MB peak, 4.0-8.6 -> 3.2 s
+    (PostgreSQL 1.76 s), rows hashed equal. Several windows, partitions under a
+    nondeterministic collation and other inputs (joins, index scans) still go whole.
+    Verified: regress subset create_index, window, groupingsets, partition_aggregate,
+    select_distinct, aggregates, memoize 2,271 / 2,271 with 0 units changed against
+    `results.tsv`; lib, golden (in-process, wire, shuffled), wire, kept_plans,
+    session_state tests; clippy (no warning in the changed files). The WindowAgg's
+    `Storage` line is still the old estimate from rows and width (PostgreSQL trims its
+    tuplestore: 17 kB where the estimate says Disk 46,875 kB): left.
   - Left for the burst (with their owners): size-model upkeep on reads (151), planning of
     simple-protocol statements kept plans don't cover and the EXPLAIN estimates of plans
     seen once (145, 140), a SQL function's plan opened per call, cores left idle at 200

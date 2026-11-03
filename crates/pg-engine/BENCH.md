@@ -7030,6 +7030,20 @@ On 2026-11-03 the engine at `8115f5af` spent 44-53 s on its first q01 after a st
 round 1). `18bb3d49` (agent 151) restored the 400,000-version model limit that keeps
 big tables estimated.
 
+### Window partitions streamed (the analytic `window`, 2M rows, 1,000 partitions)
+
+`base` 452eca77, `new` with the window's Sort run as a SortNode and its input read a
+partition at a time; fresh engine per run (data and block cache warm on disk, `--cache-mb
+2048`), cores 12-15, median of 3, alternated twice; rows hashed equal to PostgreSQL's:
+
+| | time (s) | CPU (s) | peak MB |
+|---|---:|---:|---:|
+| PostgreSQL | 1.76 | 1.74 | 1,840 (its shared buffers) |
+| base | 4.05, 8.60 | 4.10, 6.43 | 1,290, 1,276 |
+| new | 3.17, 3.15 | 3.20, 3.70 | 285, 281 |
+
+Engine / PostgreSQL: 1.8x the time, 0.15x the memory (it was 2.3x / 0.70x).
+
 ## Size models, round 4 (round 24, agent 151)
 
 HANDOFF.md, "Size models, round 4", has what changed. Release builds unless stated, scale 10
