@@ -77,7 +77,9 @@ The agents tools (docs/code/agents.md) take `owner`, and a `machine` by id (`mch
 Commands take an optional `id`, the idempotency key (a fresh one by default). Whatever the
 daemon answers is a result, its errors too (`{type: "error", code, message}`: the thread is busy,
 the machine is offline or didn't answer in 30 s); only the route refusing is a tool failure.
-Agent tokens may use them all: agents can orchestrate agents.
+Agent tokens may use them to orchestrate agents, within what an agent's commands may do
+(docs/code/agents.md, "Machines, login and tokens"): `create_agent_thread` in `ask` or
+`auto_edit` only, and `respond_agent_request` and `create_agent_project` are the owner's.
 
 `tools/list` returns each tool's JSON Schema. Every schema is closed (`additionalProperties: false`).
 

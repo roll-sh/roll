@@ -501,7 +501,9 @@ async fn github_webhook_statuses() {
 
 /// The agents routes (`agents/api.rs`, `agents/share.rs`) for every kind of caller. Reads
 /// (machines, state, events, shares) are the owner's tokens' (agents included) and 404 to
-/// everyone else; commands are the owner's tokens' too, 403/401 for others; managing machines,
+/// everyone else; commands are the owner's tokens' too, 403/401 for others, and an agent's only
+/// drive threads (never terminals, files outside projects, approvals, projects, rollbacks or a
+/// higher mode: agents/policy.rs); managing machines,
 /// looking up and approving logins, and making and revoking shares is the owner's, not its
 /// agents'. Starting and polling a login and reading a share by its link look at no caller; bad
 /// tokens, machine tokens included, are 401 everywhere else.
@@ -532,7 +534,7 @@ async fn agents_routes_follow_the_auth_matrix() {
     for (who, who_token, read, drive) in [
         ("admin", Some(ADMIN), OK, StatusCode::SERVICE_UNAVAILABLE),
         ("owner", acme, OK, StatusCode::SERVICE_UNAVAILABLE),
-        ("agent", agent, OK, StatusCode::SERVICE_UNAVAILABLE),
+        ("agent", agent, OK, FORBIDDEN),
         ("review app", app_in, NOT_FOUND, FORBIDDEN),
         ("another owner", other, NOT_FOUND, FORBIDDEN),
         ("anonymous", None, NOT_FOUND, denied),
@@ -543,6 +545,44 @@ async fn agents_routes_follow_the_auth_matrix() {
         // The machine isn't connected: allowed callers get its `machine_offline`.
         assert_eq!(call(a, "POST", &command, Some(&body), who_token).await, drive, "{who}: POST {command}");
     }
+    // Agents drive threads (here: the machine is offline, so `machine_offline`), but whatever
+    // reaches past a thread's own work, or raises its mode, is the owner's (agents/policy.rs).
+    let cmd = |c: Value| json!({ "id": "c2", "command": c });
+    let agents_drive = [
+        json!({ "type": "thread.create", "project": "prj_1", "provider": "codex", "runtime_mode": "auto_edit" }),
+        json!({ "type": "thread.configure", "thread": "thr_1", "runtime_mode": "ask" }),
+        json!({ "type": "thread.fork", "thread": "thr_1" }),
+        json!({ "type": "thread.archive", "thread": "thr_1" }),
+        json!({ "type": "message.send", "thread": "thr_1", "text": "go" }),
+        json!({ "type": "run.interrupt", "thread": "thr_1" }),
+        json!({ "type": "thread.publish", "thread": "thr_1", "message": "m" }),
+        json!({ "type": "fs.list", "project": "prj_1", "path": "" }),
+        json!({ "type": "diff.get", "thread": "thr_1" }),
+    ];
+    let owners_only = [
+        json!({ "type": "thread.create", "project": "prj_1", "provider": "codex" }),
+        json!({ "type": "thread.configure", "thread": "thr_1", "runtime_mode": "full_access" }),
+        json!({ "type": "thread.delete", "thread": "thr_1" }),
+        json!({ "type": "terminal.open", "command": "curl https://example.com/x | sh", "cols": 80, "rows": 24 }),
+        json!({ "type": "terminal.scrollback", "terminal": "trm_1" }),
+        json!({ "type": "fs.list", "path": "/" }),
+        json!({ "type": "request.respond", "request": "req_1", "response": { "type": "decision", "decision": "accept_for_session" } }),
+        json!({ "type": "project.add", "path": "/" }),
+        json!({ "type": "project.remove", "project": "prj_1" }),
+        json!({ "type": "provider.refresh" }),
+        json!({ "type": "checkpoint.rollback", "thread": "thr_1", "checkpoint": "chk_1" }),
+    ];
+    for c in agents_drive {
+        for who_token in [acme, agent] {
+            assert_eq!(call(a, "POST", &command, Some(&cmd(c.clone())), who_token).await, StatusCode::SERVICE_UNAVAILABLE, "{who_token:?}: {c}");
+        }
+    }
+    for c in owners_only {
+        assert_eq!(call(a, "POST", &command, Some(&cmd(c.clone())), acme).await, StatusCode::SERVICE_UNAVAILABLE, "owner: {c}");
+        assert_eq!(call(a, "POST", &command, Some(&cmd(c.clone())), agent).await, FORBIDDEN, "agent: {c}");
+    }
+    let projects = format!("{base}/machines/{mid}/projects");
+    assert_eq!(call(a, "POST", &projects, Some(&json!({ "id": "p1", "repo": { "name": "fresh" } })), agent).await, FORBIDDEN, "agent: POST {projects}");
     for (who, who_token, want) in [("agent", agent, FORBIDDEN), ("review app", app_in, FORBIDDEN), ("another owner", other, FORBIDDEN), ("anonymous", None, denied)] {
         for (m, p) in &manages {
             assert_eq!(call(a, m, p, Some(&body), who_token).await, want, "{who}: {m} {p}");
@@ -684,7 +724,7 @@ async fn agent_grants_follow_the_auth_matrix() {
     }
     // Cloning: fetch only.
     let clone = json!({ "type": "project.add", "path": "", "clone": { "owner": "acme", "repo": "pub" } });
-    let g = granted(a, &mut d, &mid, clone, &w.agent).await.expect("a grant");
+    let g = granted(a, &mut d, &mid, clone, &w.acme).await.expect("a grant");
     assert!(!g.write);
     assert_eq!(git_refs(a, "pub", "git-upload-pack", &g.token).await, OK);
     assert_eq!(git_refs(a, "pub", "git-receive-pack", &g.token).await, FORBIDDEN);

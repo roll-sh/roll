@@ -267,9 +267,21 @@ server (`docs/orchestration-v2/orchestrator-mcp-server.md` there), ported in
 - Machine tokens are stored as sha256 only, looked up on every connect (never cached), and only
   open `/v1/code/agents/connect` (`GET` the link; `DELETE` revokes the machine itself, for
   `roll agent logout`). Revoking a machine closes its link at once.
-- Commands need `Code::owns` on the owner (agent tokens may drive threads, so agents can
-  orchestrate agents); adding, renaming or revoking machines, sandboxes and shares need
-  `Code::manages`.
+- Commands need `Code::owns` on the owner, and an agent token (`agent:<name>`) only drives
+  threads, so agents can orchestrate agents without being able to reach past a thread's work
+  (`code-control/src/agents/policy.rs`, one function for the routes and the MCP tools that
+  replay them):
+  - Agents may start threads (`ask` or `auto_edit` only, never `full_access`), configure them
+    (modes only go down: `ask` < `auto_edit` < `full_access`, `plan` < `default`, against the
+    thread as the relay mirrors it), fork, message, interrupt, archive and publish them, and read
+    their state, diffs, status and files inside a project.
+  - Terminals, files outside a project (`fs.list` without one), answering a thread's approvals
+    and questions (an agent could approve itself), adding or removing projects (also `POST
+    …/projects`), deleting threads, rollbacks and `provider.refresh` need `Code::manages`, as
+    do adding, renaming or revoking machines, sandboxes and shares.
+  - Why the relay and not the daemon: agent tokens are the relay's idea (the daemon sees only a
+    `by`), and the relay is the one place every command passes. Delegated subagents (the
+    daemon's orchestrator MCP) already only narrow modes.
 
 ## Shares
 

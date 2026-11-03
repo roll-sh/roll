@@ -592,7 +592,7 @@ pub fn tools() -> Vec<Value> {
                 "owner": owner.clone(), "machine": machine.clone(), "project": s("Project (prj_…)"), "provider": s("codex, claude or acp:<name>"),
                 "model": s("Model"), "effort": s("Reasoning effort"), "prompt": s("First message"), "title": s("Title"),
                 "worktree": boolean("Run in its own git worktree on a new branch"),
-                "runtime_mode": json!({ "type": "string", "enum": ["full_access", "auto_edit", "ask"] }),
+                "runtime_mode": json!({ "type": "string", "enum": ["full_access", "auto_edit", "ask"], "description": "Default full_access; agent tokens may only start ask or auto_edit threads" }),
                 "interaction_mode": json!({ "type": "string", "enum": ["default", "plan"] }),
                 "id": command_id.clone()
             }),
@@ -610,7 +610,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "respond_agent_request",
             "Answer an agent",
-            "Answer an approval (decision) or questions (answers by question id) an agent is waiting on.",
+            "Answer an approval (decision) or questions (answers by question id) an agent is waiting on. The owner's: agent tokens can't answer requests.",
             json!({
                 "owner": owner.clone(), "machine": machine.clone(), "request": s("Request (req_…)"),
                 "decision": json!({ "type": "string", "enum": ["accept", "accept_for_session", "decline", "cancel"] }),
@@ -640,7 +640,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "create_agent_project",
             "Start a repo on a machine",
-            "Create a roll code repository for the owner and clone it onto a machine as a project (default path: ~/roll/<owner>/<repo>). Answers the project's id.",
+            "Create a roll code repository for the owner and clone it onto a machine as a project (default path: ~/roll/<owner>/<repo>). Answers the project's id. The owner's: agent tokens can't add projects.",
             json!({
                 "owner": owner.clone(), "machine": machine.clone(), "repo": s("The new repository's name"), "description": s("Description"),
                 "visibility": json!({ "type": "string", "enum": ["public", "private"] }), "path": s("Where to clone it (absolute, or under ~/roll)"),

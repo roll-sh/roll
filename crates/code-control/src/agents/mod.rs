@@ -11,6 +11,7 @@
 pub mod api;
 mod code;
 mod link;
+mod policy;
 pub mod sandbox;
 pub mod share;
 pub mod store;
@@ -252,8 +253,9 @@ impl Agents {
         }
     }
 
-    /// Send a command to a connected machine and wait for its reply. A second request with the
-    /// same id while the first waits shares its reply rather than sending it again; a link that
+    /// Send a command to a connected machine and wait for its reply. A second request from the
+    /// same sender with the same id while the first waits shares its reply rather than sending
+    /// it again (another sender's is a conflict); a link that
     /// drops and comes back within the wait gets the command again (the daemon runs an id once).
     pub(crate) async fn command(&self, machine_id: &str, id: String, by: String, command: Command, grant: Option<CodeGrant>, timeout: Duration) -> Reply {
         let tx = match self.links.lock().get(machine_id) {
@@ -265,6 +267,11 @@ impl Agents {
         let send = {
             let mut pending = self.pending.lock();
             match pending.get_mut(&key) {
+                // Ids are per sender (the daemon keeps a receipt per sender and id), but a reply
+                // names only its id: one sender's id at a time per machine.
+                Some(Pending { frame: RelayFrame::Command { by: first, .. }, .. }) if *first != by => {
+                    return error(ErrorCode::Conflict, "another sender's command with this id is waiting for its reply; use another id");
+                }
                 Some(p) => {
                     p.waiters.push(wtx);
                     None

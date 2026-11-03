@@ -590,11 +590,19 @@ GET /v1/code/agents/{owner}/events?threads=…&after=<cursor> → SSE, events na
 
 POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, command: Command} → Reply
        Forwarded to the machine's daemon; waits up to 30 s for its reply. `id` (1–128 characters) is
-       the idempotency key: retrying with the same id never runs the command twice (the daemon keeps
-       receipts), a retry while the first waits shares its reply, and a link that drops and comes back
+       the idempotency key, per sender: retrying with the same id never runs the command twice (the
+       daemon keeps receipts by sender and id), a retry while the first waits shares its reply (another
+       sender's command with that id waiting is a 409 conflict), and a link that drops and comes back
        within the wait gets the command again. Owner's tokens, agent tokens too (401 anonymous, 403
        others; 404 an unknown or revoked machine). The daemon is told who sent it: the owner's name,
        `agent:<name>`, or `admin`.
+       Agent tokens drive threads only (403 otherwise, docs/code/agents.md "Machines, login and
+       tokens"): `thread.create` in `ask` or `auto_edit` (not `full_access`, the default),
+       `thread.configure` only lowering the thread's modes, `thread.fork`, `thread.archive`,
+       `thread.unarchive`, `message.send`, `message.unqueue`, `run.interrupt`, `thread.publish`,
+       `diff.get`, `git.status`, and `fs.list`/`fs.read` in a project. The rest (`terminal.*`,
+       `fs.list` without a project, `request.respond`, `project.add`, `project.remove`,
+       `thread.delete`, `checkpoint.rollback`, `provider.refresh`) needs Code::manages.
        200 with the Reply, or Reply.Error {type: "error", code, message, error /* = message */} with
        not_found 404, invalid 400, conflict 409, provider 422, internal 502,
        machine_offline 503 (not connected), timeout 504 (no reply in time).
@@ -612,7 +620,7 @@ POST /v1/code/agents/{owner}/machines/{machine}/projects {id /* idempotency key 
        visibility?, default_branch?}, path?, name?} → Reply (200, as for commands)
        Creates the repo (POST /v1/code/repos on the caller's behalf: its 403/422 pass through; a 409, the
        repo already existing, is a retry and goes on) and clones it onto the machine as a project
-       (`project.add` with `clone`). Owner's tokens, agent tokens too (401 anonymous, 403 others,
+       (`project.add` with `clone`). Code::manages (401 anonymous, 403 agent tokens and others,
        404 an unknown machine, 400 without id or repo.name).
 POST   /v1/code/agents/{owner}/threads/{thread}/work {work?: "wi_…" | "owner/repo#N", repo?: "owner/name",
        labels?, lease_s?, agent?} → WorkItem | 204

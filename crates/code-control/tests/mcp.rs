@@ -1107,7 +1107,7 @@ async fn sessions_work_through_any_node() {
 
 /// The agents tools against a connected test daemon: an agent token lists machines and threads
 /// (with the requests waiting) and drives threads, each tool sending the command its route
-/// takes, with the agent as `by`. A daemon's error is a result, not a failure; the routes'
+/// takes, with the agent as `by`; answering requests and full_access threads are the owner's. A daemon's error is a result, not a failure; the routes'
 /// refusals (another owner, no token, an unknown machine) are failures with their words.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agent_tools_drive_a_machine_like_their_routes() {
@@ -1164,7 +1164,12 @@ async fn agent_tools_drive_a_machine_like_their_routes() {
     assert_eq!((listed["threads"][0]["id"].as_str(), listed["threads"][0]["project_name"].as_str()), (Some("thr_a"), Some("api")), "{listed}");
     assert_eq!((listed["threads"][0]["machine"].as_str(), listed["requests"][0]["id"].as_str()), (Some(mid.as_str()), Some("req_1")), "{listed}");
 
-    let created = c.tool("create_agent_thread", json!({ "owner": "acme", "machine": mid, "project": "prj_1", "provider": "claude", "prompt": "hi", "worktree": true, "id": "k1" })).await;
+    // An agent starts threads in ask or auto_edit only (the default is full_access).
+    let err = c.tool_err("create_agent_thread", json!({ "owner": "acme", "machine": mid, "project": "prj_1", "provider": "claude", "id": "k0" })).await;
+    assert!(err.contains("ask or auto_edit"), "{err}");
+    let created = c
+        .tool("create_agent_thread", json!({ "owner": "acme", "machine": mid, "project": "prj_1", "provider": "claude", "prompt": "hi", "worktree": true, "runtime_mode": "auto_edit", "id": "k1" }))
+        .await;
     assert_eq!(created, json!({ "type": "created", "id": "thr_new" }));
     let (id, by, cmd) = seen.recv().await.unwrap();
     assert_eq!((id.as_str(), by.as_str()), ("k1", "agent:bot"));
@@ -1175,12 +1180,18 @@ async fn agent_tools_drive_a_machine_like_their_routes() {
     assert!(id.starts_with("cmd_"), "a fresh id: {id}");
     assert!(matches!(cmd, Command::MessageSend { ref text, mode: agent_proto::SendMode::Steer, .. } if text == "go on"), "{cmd:?}");
 
-    c.tool("respond_agent_request", json!({ "owner": "acme", "machine": "box", "request": "req_1", "decision": "decline", "message": "not now" })).await;
-    let (_, _, cmd) = seen.recv().await.unwrap();
+    // Answering a thread's approvals is the owner's: an agent can't approve its own requests.
+    let err = c.tool_err("respond_agent_request", json!({ "owner": "acme", "machine": "box", "request": "req_1", "decision": "accept_for_session" })).await;
+    assert!(err.contains("agent tokens can't answer"), "{err}");
+    let mut owner = Client::new(&a, root);
+    owner.initialize("2025-11-25").await;
+    owner.tool("respond_agent_request", json!({ "owner": "acme", "machine": "box", "request": "req_1", "decision": "decline", "message": "not now" })).await;
+    let (_, by, cmd) = seen.recv().await.unwrap();
+    assert_eq!(by, "admin");
     assert_eq!(cmd, Command::RequestRespond { request: agent_proto::RequestId("req_1".into()), response: Response::Decision { decision: Decision::Decline, message: Some("not now".into()) } });
-    c.tool("respond_agent_request", json!({ "owner": "acme", "machine": "box", "request": "req_2", "answers": { "q1": "yes" } })).await;
+    owner.tool("respond_agent_request", json!({ "owner": "acme", "machine": "box", "request": "req_2", "answers": { "q1": "yes" } })).await;
     assert!(matches!(seen.recv().await.unwrap().2, Command::RequestRespond { response: Response::Answers { .. }, .. }));
-    assert!(c.tool_err("respond_agent_request", json!({ "owner": "acme", "machine": "box", "request": "req_1" })).await.contains("decision"));
+    assert!(owner.tool_err("respond_agent_request", json!({ "owner": "acme", "machine": "box", "request": "req_1" })).await.contains("decision"));
 
     // The daemon's error is a result.
     let interrupted = c.tool("interrupt_agent_thread", json!({ "owner": "acme", "machine": "box", "thread": "thr_a" })).await;
@@ -1254,7 +1265,13 @@ async fn agent_tools_work_in_roll_code_like_their_routes() {
     let grant = grant.expect("a grant");
     assert!(grant.write && grant.url.ends_with("/acme/api.git"), "{grant:?}");
 
-    let started = c.tool("create_agent_project", json!({ "owner": "acme", "machine": "box", "repo": "fresh", "visibility": "private" })).await;
+    // Adding projects is the owner's, not its agents': nothing is created or sent.
+    let err = c.tool_err("create_agent_project", json!({ "owner": "acme", "machine": "box", "repo": "fresh", "visibility": "private" })).await;
+    assert!(err.contains("agent tokens can't add projects"), "{err}");
+    assert_eq!(a.req("GET", "/v1/code/repos/acme/fresh", None, root).await.0, StatusCode::NOT_FOUND);
+    let mut owner = Client::new(&a, root);
+    owner.initialize("2025-11-25").await;
+    let started = owner.tool("create_agent_project", json!({ "owner": "acme", "machine": "box", "repo": "fresh", "visibility": "private" })).await;
     assert_eq!(started, json!({ "type": "created", "id": "prj_new" }));
     let (cmd, grant) = seen.recv().await.unwrap();
     assert!(matches!(cmd, Command::ProjectAdd { clone: Some(ref r), .. } if r.owner == "acme" && r.repo == "fresh"), "{cmd:?}");

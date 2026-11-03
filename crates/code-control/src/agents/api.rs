@@ -65,7 +65,8 @@ pub(super) fn readable(code: &Code, caller: &Caller, owner: &str) -> Result<Owne
     Ok(o)
 }
 
-/// Driving an owner's agents (commands): the owner's tokens, agents included.
+/// Driving an owner's agents (commands): the owner's tokens, agents included. What an agent's
+/// command may do is narrowed by `policy::agent_may`.
 fn drivable(code: &Code, caller: &Caller, owner: &str) -> Result<Owner> {
     let o = code.owner_or_404(owner)?;
     match caller {
@@ -483,6 +484,15 @@ async fn command(
         return Err(Error::Invalid("id must be 1 to 128 characters".into()));
     }
     let m = live_machine(&code, &o, &machine)?;
+    if caller.agent().is_some() {
+        let current = match &req.command {
+            agent_proto::Command::ThreadConfigure { thread, .. } => {
+                store::thread_of(code.db.sql(), &o.id, &thread.0)?.filter(|(mid, _)| *mid == m.id).map(|(_, t)| (t.runtime_mode, t.interaction_mode))
+            }
+            _ => None,
+        };
+        super::policy::agent_may(&req.command, current).map_err(Error::Forbidden)?;
+    }
     super::code::follow(&code);
     let granted = super::code::grant_for(&code, &caller, &m, &req.command)?;
     let (grant, repo) = granted.map_or((None, None), |(g, r)| (Some(g), Some(r)));
@@ -522,6 +532,10 @@ async fn create_project(
     Body(b): Body,
 ) -> Result<Response> {
     let o = drivable(&code, &caller, &owner)?;
+    if caller.agent().is_some() {
+        let add = agent_proto::Command::ProjectAdd { path: String::new(), name: None, clone: None };
+        super::policy::agent_may(&add, None).map_err(Error::Forbidden)?;
+    }
     let m = live_machine(&code, &o, &machine)?;
     let reply = super::code::create_project(&code, api.as_ref().map(|e| &e.0), &caller, &headers, &o, &m, &b).await?;
     Ok(reply_response(reply))

@@ -171,7 +171,7 @@ thing but not do it, 404 one who can't see it (docs/code/http-api.md).
 | `POST /v1/code/agents/{owner}/machines` | 201, 400, 401, 403, 404, 422 | `agents.rs::machines_are_managed_by_the_owner_and_revoking_closes_the_link`, `routes.rs::agents_routes_follow_the_auth_matrix` |
 | `PATCH /v1/code/agents/{owner}/machines/{machine}` | 200, 400, 401, 403, 404 | `agents.rs::machines_are_managed_by_the_owner_and_revoking_closes_the_link`, `agents.rs::streams_and_daemons_resume_without_loss_or_duplicates`, `routes.rs::agents_routes_follow_the_auth_matrix` |
 | `DELETE /v1/code/agents/{owner}/machines/{machine}` | 204, 401, 403, 404 | `agents.rs::machines_are_managed_by_the_owner_and_revoking_closes_the_link`, `routes.rs::agents_routes_follow_the_auth_matrix` |
-| `POST /v1/code/agents/{owner}/machines/{machine}/commands` | the daemon's `Reply`: 200; errors 400, 404, 409, 422, 502, 503 (`machine_offline`), 504 (`timeout`); 401, 403 | `agents.rs::commands_go_to_the_daemon_and_come_back`, `routes.rs::agents_routes_follow_the_auth_matrix`, `agent-host/tests/relay.rs::daemon_and_relay_end_to_end` |
+| `POST /v1/code/agents/{owner}/machines/{machine}/commands` | the daemon's `Reply`: 200; errors 400, 404, 409 (also another sender's id in flight), 422, 502, 503 (`machine_offline`), 504 (`timeout`); 401, 403 (agent tokens past what `agents/policy.rs` allows) | `agents.rs::commands_go_to_the_daemon_and_come_back`, `routes.rs::agents_routes_follow_the_auth_matrix`, `agent-host/tests/relay.rs::daemon_and_relay_end_to_end` |
 | `POST /v1/code/agents/{owner}/machines/{machine}/projects` | the daemon's `Reply`: 200 (the repo created, or found on a retry); 400, 401, 403, 404, 422 | `agents_code.rs::repos_clone_onto_machines_and_new_repos_start_as_projects`, `routes.rs::agent_grants_follow_the_auth_matrix` |
 | `POST /v1/code/agents/{owner}/threads/{thread}/work` | 200 (the work item), 204 (none to claim), 400, 401, 403, 404 | `agents_code.rs::threads_take_work_items`, `routes.rs::agent_grants_follow_the_auth_matrix` |
 | `DELETE /v1/code/agents/{owner}/threads/{thread}/work` | 204, 401, 403 | `agents_code.rs::threads_take_work_items`, `routes.rs::agent_grants_follow_the_auth_matrix` |
@@ -946,6 +946,7 @@ Every code-control test runs on SQLite, and on Postgres with `ROLL_CODE_TEST_DAT
 | last 4 characters of very short keys | `code-review` unit `secret::round_trip_and_binding` |
 | review apps approving or requesting changes on other owners' public repos | `review.rs::review_apps_events_scopes_requests_and_failed_deliveries` |
 | a secret shown once (owner token, review-app credentials, webhook secret) shown again after navigating back to a page Next kept in `<Activity>` | `connect-agent.test.tsx`, `owner.test.tsx`, `webhooks.test.tsx` (dashboard) |
+| agent tokens drove everything on a machine: terminals running any command, `fs.list /`, approving their own requests (`accept_for_session`), adding projects, full_access threads | `code-control/src/agents/policy.rs::agents_drive_threads_but_never_reach_past_them`, `routes.rs::agents_routes_follow_the_auth_matrix`, `mcp.rs::agent_tools_drive_a_machine_like_their_routes`, `mcp.rs::agent_tools_work_in_roll_code_like_their_routes` |
 
 ## Other regressions
 

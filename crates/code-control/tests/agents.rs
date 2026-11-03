@@ -478,6 +478,19 @@ async fn commands_go_to_the_daemon_and_come_back() {
     d.send(&DaemonFrame::Reply { id: "c5".into(), result: Reply::Ok }).await;
     assert_eq!(pending.await.unwrap(), (StatusCode::OK, json!({ "type": "ok" })));
 
+    // Ids are per sender: another sender's command with an id that is waiting is a conflict (a
+    // reply names only its id), not a share in the first one's reply.
+    let pending = {
+        let (w2, path) = (w2.clone(), path.clone());
+        tokio::spawn(async move { w2.req("POST", &path, Some(cmd("c9")), &w2.owner).await })
+    };
+    assert!(matches!(d.recv().await, Some(RelayFrame::Command { id, .. }) if id == "c9"));
+    let (s, r) = w2.req("POST", &path, Some(cmd("c9")), &w2.agent).await;
+    assert_eq!((s, r["code"].as_str()), (StatusCode::CONFLICT, Some("conflict")), "{r}");
+    d.send(&DaemonFrame::Reply { id: "c9".into(), result: Reply::Ok }).await;
+    assert_eq!(pending.await.unwrap(), (StatusCode::OK, json!({ "type": "ok" })));
+    tokio::time::timeout(Duration::from_millis(200), d.recv()).await.expect_err("the agent's c9 never went out");
+
     // Who may: the owner's tokens; bad bodies and unknown machines.
     let w = &*w2;
     assert_eq!(w.req("POST", &path, Some(cmd("c6")), &w.other).await.0, StatusCode::FORBIDDEN);
