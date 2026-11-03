@@ -365,6 +365,7 @@ all of it (round 9's seeds too with `GUARD_SEEDS`).
 |---|---|---|---|---|
 | 2026-11-03 | `251924c1` / `ed0c85fe` (release) | 70,215 | 0 | 37 lines: round 7's binary domain-array element oid (seeds 7024, 7087-7145, 8032, 8132), Bind's result-format check before the custom plan (7063, 08P01 vs 22003) |
 | 2026-11-03, `tools/difftest-guard.sh`, rounds 6-9 | `847fbdba` / `1f676b8a` | 93,717 | 3 lines, one case (seed 9014 #82: a generic plan's Index Only Scan where PostgreSQL has a Bitmap Heap Scan), not reproducible from its reduced case on either binary: background VACUUM timing (both servers' autovacuum visits a seed's tables at random points), so round 9's tables no longer autovacuum | 6: agent 145's result-type check (0A000, seeds 9060, 9061, 9067, 9090) and binary array dimensions (54000, seed 9073) |
+| 2026-11-03, rounds 6-9 (head with round 9's tables not autovacuuming) | `1f676b8a` / `5386239f` (agent 154's batch execution 86c04b88, agent 148's COPY flush bd7ba755) | 93,717 | 0 | 7: COPY's sequence values after a late duplicate (seeds 9010, 9093, 9119), and plans of seeds 9017, 9046 (the autovacuum change) |
 
 ## Round 9 (agent 156)
 
@@ -390,8 +391,9 @@ Routed through the coordinator 2026-11-03.
 - **Binary arrays (agent 145; fixed by `1f676b8a`, gone from seed 9073).** A binary int4[]
   parameter whose header is garbage: 08P01 or 22P03 where PostgreSQL reports 54000 "number of array dimensions (N) exceeds the maximum
   allowed (6)".
-- **COPY's buffered rows (agent 148).** PostgreSQL checks unique keys when it flushes 1,000
-  buffered rows; the engine row by row. `CREATE TABLE r9c (id int PRIMARY KEY, a int, b text,
+- **COPY's buffered rows (agent 148; fixed by bd7ba755, re-probed on `5386239f`: 1101, 1001
+  and, with the trigger, 1051, as PostgreSQL).** PostgreSQL checks unique keys when it flushes
+  1,000 buffered rows; the engine checked row by row. `CREATE TABLE r9c (id int PRIMARY KEY, a int, b text,
   s serial)`, a COPY of 1,100 lines whose line 1,050 repeats key 5, then `SELECT
   nextval('r9c_s_seq')`: 1051, PostgreSQL 1101 (line 900: 901, PostgreSQL 1001). With a BEFORE
   ROW trigger (no buffering) both say 1051.
