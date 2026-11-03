@@ -2680,7 +2680,7 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
       against `results.tsv`;
     - pg_dump_tap 14,817 / 14,817.
   - Also found: an allocation profile of tpcb, attributed (BENCH.md, "tpcb allocations").
-    Logs are in `~/.cache/a154/v-b1*`.
+    The run logs were removed with the agent's cache.
 - **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
   longer overflows the stack of the thread that runs it, however deep the input nests. A
   host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the
