@@ -452,6 +452,25 @@ pub(super) async fn create_project(code: &Arc<Code>, api: Option<&ApiRouter>, ca
     if !status.is_success() && status != StatusCode::CONFLICT {
         return Err(passed(status, &v));
     }
+    // A repo with no history gets a first commit (a README), so the clone has a branch to put
+    // worktrees on and threads can publish from the start.
+    let path = format!("/v1/code/repos/{}/{}", seg(&o.name), seg(name));
+    let (status, r) = call(api, headers, Method::GET, &path, None).await;
+    if !status.is_success() {
+        return Err(passed(status, &r));
+    }
+    if r["head"].is_null() {
+        let mut readme = format!("# {name}\n");
+        if let Some(d) = r["description"].as_str().filter(|d| !d.trim().is_empty()) {
+            readme.push_str(&format!("\n{}\n", d.trim()));
+        }
+        let first = json!({ "base": null, "message": format!("Start {name}"), "files": { "README.md": { "content": readme } } });
+        let (status, v) = call(api, headers, Method::POST, &format!("{path}/land"), Some(first)).await;
+        // Another request may have started it a moment ago: that's as good.
+        if !status.is_success() && status != StatusCode::CONFLICT {
+            return Err(passed(status, &v));
+        }
+    }
     let path = match b.get("path") {
         None | Some(Value::Null) => String::new(),
         Some(Value::String(p)) => p.clone(),

@@ -238,6 +238,12 @@ async fn repos_clone_onto_machines_and_new_repos_start_as_projects() {
     let p = w.project(&fresh).await;
     assert_eq!(p.repo, Some(agent_proto::RepoRef { owner: "acme".into(), repo: "fresh".into() }));
     assert_eq!(origin(Path::new(&p.path)), format!("{}/acme/fresh.git", w.git_url));
+    // It starts with one commit (a README), so a thread can work in a worktree and publish.
+    assert_eq!(std::fs::read_to_string(Path::new(&p.path).join("README.md")).unwrap(), "# fresh\n\nFrom the canvas\n");
+    let thread = w.created(json!({ "type": "thread.create", "project": fresh, "provider": "codex", "worktree": true, "title": "First feature" })).await;
+    let worktree = w.thread(&thread).await.worktree.expect("a worktree");
+    std::fs::write(Path::new(&worktree.path).join("hello.txt"), "hi\n").unwrap();
+    assert!(w.publish(&thread, "First feature", false).await.change.is_some());
     // A retry (the repo exists now) answers the same.
     let (s, again) = w.req("POST", &path, Some(body)).await;
     assert_eq!((s, again["id"].as_str()), (StatusCode::OK, Some(fresh.as_str())), "{again}");

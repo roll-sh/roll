@@ -624,7 +624,8 @@ POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, com
 POST /v1/code/agents/{owner}/machines/{machine}/projects {id /* idempotency key */, repo: {name, description?,
        visibility?, default_branch?}, path?, name?} → Reply (200, as for commands)
        Creates the repo (POST /v1/code/repos on the caller's behalf: its 403/422 pass through; a 409, the
-       repo already existing, is a retry and goes on) and clones it onto the machine as a project
+       repo already existing, is a retry and goes on), lands a README as the first commit if the repo has
+       no history, and clones it onto the machine as a project
        (`project.add` with `clone`). Code::manages (401 anonymous, 403 agent tokens and others,
        404 an unknown machine, 400 without id or repo.name).
 POST   /v1/code/agents/{owner}/threads/{thread}/work {work?: "wi_…" | "owner/repo#N", repo?: "owner/name",

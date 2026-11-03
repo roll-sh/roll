@@ -365,7 +365,8 @@ that change (checks, reviews, the merge queue, landing) shows on the thread. The
 - **Starting a repo from the canvas.** `POST /v1/code/agents/{owner}/machines/{machine}/projects
   {id, repo: {name, description?, visibility?}, path?, name?}` creates the repo through
   `POST /v1/code/repos` on the caller's behalf (a 409 means a retry, or a repo of that name: it is
-  cloned as it is) and sends `project.add` with `clone`, answering its `Reply`. MCP:
+  cloned as it is), lands a first commit (a README) when the repo has no history, so worktrees and
+  publishing work at once, and sends `project.add` with `clone`, answering its `Reply`. MCP:
   `create_agent_project`.
 - **Publishing.** `thread.publish` commits the thread's worktree on its branch. In a roll code
   project the daemon pushes the branch to the grant's URL: roll code's git adapter opens the
