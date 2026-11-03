@@ -5797,6 +5797,11 @@ container name: pick your own).
 
 ## Machine rules (learned the hard way)
 
+- **Start long heavy jobs detached with `tools/heavy-bg.sh <log> <command...>`.** With the slots
+  full, a job can wait hours for one, and a session's background command stops at 2 hours queue
+  wait included, killing jobs that never ran. heavy-bg.sh runs the job through heavy.sh outside
+  the session and ends its log with `HEAVY-EXIT <status>`; wait for that line (and restart the
+  wait if it times out) instead of wrapping heavy.sh in `timeout`.
 - **Never hold unpushed work.** Sessions end without warning and worktrees get cleaned up.
   Push each verified batch to the shared branch right away, and in between back up work in
   progress with `tools/wip-push.sh <agent>` (for example `a148`) after every meaningful step.
