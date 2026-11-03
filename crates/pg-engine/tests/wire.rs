@@ -4023,6 +4023,14 @@ fn parallel_workers_seen_by_others() {
         a.batch_execute("SELECT pg_stat_force_next_flush()").await.unwrap();
         let counts = "SELECT parallel_workers_to_launch, parallel_workers_launched FROM pg_stat_database WHERE datname = 'postgres'";
         assert_eq!(lines(&o, counts).await.unwrap(), ["2|2"]);
+        // A prepared statement's plan launches its workers at every execution (its Gathers
+        // found once: `BoundQuery::gathers`).
+        let st = a.prepare(q).await.unwrap();
+        for _ in 0..2 {
+            assert_eq!(a.query_one(&st, &[]).await.unwrap().get::<_, i64>(0), 3000);
+        }
+        a.batch_execute("SELECT pg_stat_force_next_flush()").await.unwrap();
+        assert_eq!(lines(&o, counts).await.unwrap(), ["6|6"]);
     });
     s.engine.shutdown();
 }

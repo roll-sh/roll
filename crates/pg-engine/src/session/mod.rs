@@ -2003,7 +2003,7 @@ impl Session {
             // The Gathers' workers (other backends see them while the statement runs); the
             // part below each Gather that only the workers would run (its locks end with
             // them).
-            let _launched = crate::exec::parallel_part::start(&bq.plan, &bq.perms.locks, ctx, count_workers, parallel_workers_alone, &mut workers);
+            let _launched = crate::exec::parallel_part::start(&bq.plan, &bq.perms.locks, ctx, count_workers, parallel_workers_alone, &mut workers, &bq.gathers);
             // ExecutorRun begins (past ExecutorStart's permission checks): the RowDescription
             // goes out, so an error from here on follows it.
             let mut feed = sink.as_deref_mut().map(|k| sink::Feed::new(k, &bq.cols));

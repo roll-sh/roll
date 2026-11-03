@@ -113,6 +113,7 @@ pub fn worker_parts(gathers: &[Gather], launched: Option<&Launched>, ctx: &ExecC
 
 /// A Gather of the running statement, as EXPLAIN places it: the part its workers run (the
 /// plan node under it), the workers it plans and the relations the part opens.
+#[derive(Debug)]
 pub struct Gather {
     pub part: Option<usize>,
     pub workers: usize,
@@ -191,14 +192,23 @@ pub fn start(
     count: bool,
     alone: bool,
     counted: &mut i64,
+    found: &std::sync::OnceLock<(Arc<Plan>, Arc<[Gather]>)>,
 ) -> Option<Launched> {
-    let gathers = gathers(plan, rels, ctx);
+    // (Found once per plan: `BoundQuery::gathers`.)
+    let own;
+    let gathers: &[Gather] = match found.get_or_init(|| (plan.clone(), gathers(plan, rels, ctx).into())) {
+        (p, g) if Arc::ptr_eq(p, plan) => g,
+        _ => {
+            own = gathers(plan, rels, ctx);
+            &own
+        }
+    };
     if count {
         *counted = gathers.iter().map(|g| g.workers as i64).sum();
     }
-    let launched = launch(&gathers, ctx);
+    let launched = launch(gathers, ctx);
     if alone && !plan.writes() {
-        *ctx.worker_parts.borrow_mut() = worker_parts(&gathers, launched.as_ref(), ctx);
+        *ctx.worker_parts.borrow_mut() = worker_parts(gathers, launched.as_ref(), ctx);
     }
     launched
 }
