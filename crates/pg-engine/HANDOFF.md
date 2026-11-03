@@ -6693,6 +6693,101 @@ a `Vec<Value>` per row and walks `Expr` per row.
 - Check that `ctx.temp_cleanup.run` / `ctx.statement`, which `collect_need` wraps around each
   inner run, still hold per rescan.
 
+## Size models, round 4 (round 24, agent 151)
+
+BENCH.md "Size models, round 4" has the numbers. The compact models (above) came first;
+then the limit went back to 400,000 (18bb3d49) and six commits made the per-row model work
+cheaper and its read side lock-free.
+
+- **The 400,000-version limit stays** (18bb3d49). Lifting it to `1 << 40` modelled every big
+  table and every bulk write paid a model update per row: COPY of 1M rows 8.5 s of CPU
+  (0.9 s PostgreSQL), DELETE of 10% 2.4-3.4 s, the first statement after a restart 1.4 s.
+  Measured again on this round's tree with only the limit lifted (BENCH.md's table): COPY
+  1.8 -> 2.7 s, primary key 0.8 -> 1.7 s, CREATE INDEX 0.9 -> 1.7 s, DELETE 1.0 -> 1.4 s,
+  first statement 0.02 -> 0.31 s, simple-update +27% CPU, tpcb-like +15%, pgbench's peak
+  memory 250-290 -> 470 MB. Before any future lift, re-run that whole table (its scripts:
+  `bulk.sh`, `ddl2.sh`, `liftcmp.sh`, in `~/.cache/a151/scripts` while it lasts; describe
+  them in BENCH.md when you re-create them) with peak memory, and lift only when every row
+  is at or below the 400k column. What a big model still costs: the per-row upkeep of
+  writes to it (`sizing::updated` / `inserted_with` / `deleted`: locate, update, settle,
+  btree insert), the kept record's layout at open (`kept::lay_out`, `heapsim::restored`:
+  a `Vec<u8>` per key, KeyMap inserts), index builds (`btree_build_blocks` and `ensure`'s
+  build: a `Key` allocation and a heap lookup per row; `Btree::build` takes `Vec<(Key, Tid)>`),
+  COPY's placement (`Heap::multi_insert`, KeyMap), and the model's memory (~93 bytes a row
+  with a primary key, and the record's decode at open).
+  Stored estimates carry the limit they were made under (12-byte value): one made under a
+  higher limit than the current one is modelled again, one with no limit (older builds) is
+  taken as made under 400,000.
+- **KeyMap** (5ac043e9, `catalog/keymap.rs`): a cursor on the last row found answers lookups
+  in key order (scans, DELETE / UPDATE over them, restores in TID order) without the hash
+  table; rows added in key order form an ascending prefix (`asc`) searched forward from the
+  cursor by galloping (lookups skipping rows stay local); a key past every key added
+  (`max_key`) goes in without a probe; `Heap::multi_insert` reserves the batch; rows carry a
+  present bit (`PRESENT` in `Row::part`) so the cursor never answers a removed key's row.
+- **The xid horizon is an atomic** (1da55e59, `txn/xids.rs`): every change that can move it
+  publishes it under the state mutex (`Xids::publish`), `horizon()` loads it; debug builds
+  check it against the state under the mutex. Every `vis_for` (each fetched row, each model
+  write) took the global mutex before.
+- **btsim** (18e6c82b): `Btree::insert` tries the last insertion's leaf first
+  (`holding_leaf`: past its first entry and below its high key, so a descent would end
+  there; a split still descends for its path, checked in debug builds), finds the insert
+  position once comparing key-attribute encodings as bytes (`insert_pos`), and
+  `bulk_delete` rewrites only pages with a dead TID, in place (`Leaf::retain_tids`), keeping
+  LP_DEAD marks on untouched items (a rewritten posting list's is cleared, as
+  PageIndexTupleOverwrite does); the dead set is a fasthash set.
+- **An index build's measured btree is its model** (1e649aaf): `btree_build_blocks` (the
+  measure of a btree the model doesn't hold yet: CREATE INDEX, ADD PRIMARY KEY) builds with
+  the rows' TIDs from the heap model and keeps the tree, instead of throwing it away and
+  rebuilding it from every row at the next statement (and after every restart: the record
+  had no image of it). `session/ddl/vacuum.rs` passes each row's key with its btree key.
+- **`ensure` without a lock** (186e48b4): `MODELLED`, a thread-local map (database
+  instance, table) -> watches on the heap's and btrees' models (`SizeWatch::alive`: false
+  once a model is dropped, replaced or detached); `known_modelled` answers the per-statement
+  check from it. And `Heap::update_cid`: an UPDATE locates the old version once (the new
+  version's cid set as placed, the old one's cmax through the caller's closure: what
+  `mark_cmax` did).
+- **Fetches and LP_DEAD marks without the lock** (5973e109):
+  - `sizing::Fetcher` (one per index / bitmap heap scan; `exec/scan.rs` is 149's to switch):
+    `Fetcher::new(table, ctx) -> Option<Fetcher>` (None: not modelled),
+    `fetched_at(key, stored_tid)` (the page from the row's stored TID when the heap is
+    stamped), `fetched(key)`, `fetched_run(keys)`.
+  - `heapsim::PruneHints`: per page an atomic the heap's writers publish under the lock
+    (`Heap::publish_page`, from put / delete / update / prune / vacuum / read_shape /
+    restore_pending): the page's prune xid when it is full enough for heap_page_prune_opt,
+    else 0. A reader takes the write lock only for a page whose hint is below its horizon.
+    Hints are replaced as the heap grows and retired with it (`HintsHandle`'s Drop):
+    readers holding retired ones take the heap's again.
+  - `heapsim::VisWatch`: every page all-visible as found; holds while no tuple is added and
+    no page's bit is cleared (`VisPages::changed`, bumped from `put` and every
+    `set_all_visible(false)`) and the model lives. Fetcher and `Kills` skip everything while
+    it holds. `Heap::chain_dead` answers false at once on an all-visible page.
+  - Unit test `heapsim::tests::prune_hints_and_visibility_watch_follow_the_model`.
+- **Item 2, split points**: the differences were bottom-up deletion, not nbtsplitloc.
+  `Btree::bottomup_pass` is PostgreSQL's `_bt_bottomupdel_pass` with heapam's
+  `bottomup_sort_and_shrink` and `heap_index_delete_tuples` (promising TIDs, block groups,
+  at most six blocks, the favorable-block and target rules, the BLCKSZ/24 return check);
+  unique inserts mark dead duplicates LP_DEAD as `_bt_check_unique` does
+  (`kill_dead_duplicates`); index deletion's dead test is the HOT chain's (`chain_dead`).
+  These landed with the compact models. The mixed workload now matches PostgreSQL at
+  60,000 and 300,000 rows everywhere it checks.
+- **Left**:
+  - The first statement after a database opens still waits for its table's kept-record
+    layout (0.16-0.18 s at 300,000 rows). A lazy layout would need the record's page
+    counts in a header and reads during the layout to be deferred and replayed; see round
+    2's note on why reads can't skip the models.
+  - pgbench tpcb-like at 32 clients (agent 145's sched_switch profile at e8663d91): the size
+    models' locks were 26% of the connection threads' switches. Since then `ensure`, the
+    horizon and (once 149 switches) `fetched` are lock-free. Still locked: `Kills::mark` /
+    `mark_passed` on heaps that aren't all-visible (tellers, branches),
+    `modelled_blocks` / `scanned_pages` (1.5%), the writes themselves.
+  - Agent 152 (now 158) asked for heap model updates once per transaction instead of per
+    row. Not done: TIDs must be known as rows are stored.
+  - btree page deletion and recycling in VACUUM (pgstatindex's deleted pages; a later
+    split reusing a recyclable page instead of extending the file).
+  - Item 5 (simple-update memory at 64 clients) is agent 150's measurement. `model_bytes(db)`
+    is the size models' share for its budget: about 93 bytes a modelled row with a primary
+    key.
+
 ## Starting prompt for the next agent
 
 Paste this into the new agent, from the repository root on branch

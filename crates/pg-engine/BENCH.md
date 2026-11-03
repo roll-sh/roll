@@ -6886,6 +6886,87 @@ On 2026-11-03 the engine at `8115f5af` spent 44-53 s on its first q01 after a st
 round 1). `18bb3d49` (agent 151) restored the 400,000-version model limit that keeps
 big tables estimated.
 
+## Size models, round 4 (round 24, agent 151)
+
+HANDOFF.md, "Size models, round 4", has what changed. Release builds unless stated, scale 10
+(1M accounts), the engine on cores 24-27 under `nice -n 19`, pgbench in a container on
+28-31, interleaved rounds; CPU is the engine's (utime + stime) per transaction.
+
+**pgbench, base 18bb3d49 (the 400k limit restored) against this round's six commits**
+(host-run engine, PostgreSQL 18.6 on the same cores in the reference container):
+
+| workload | clients | base CPU ms | new CPU ms | base tps | new tps | PostgreSQL CPU ms |
+|---|---|---|---|---|---|---|
+| tpcb-like | 8 | 0.66 / 0.71 | 0.54 / 0.54 | 4,911 / 4,880 | 4,977 / 5,959 | 0.23 |
+| tpcb-like | 32 | 0.74 / 0.84 | 0.59 / 0.62 | 4,801 / 4,338 | 6,036 / 5,727 | |
+| simple-update | 8 | 0.40 / 0.41 | 0.24 / 0.23 | 9,037 / 8,064 | 14,743 / 15,973 | 0.15 |
+
+VmHWM moved within 210-251 MB on both (simple-update's history model grows with the
+transactions run: 300,000 against 170,000).
+
+**Against PostgreSQL, both servers in containers** (dist build bind-mounted in the pinned
+debian image, `--cpu-shares 2`, host network, CPU and anon+shmem from each cgroup; 8 clients,
+3 interleaved rounds; ratio = PostgreSQL / engine CPU per transaction, above 1x the engine
+is ahead):
+
+| workload | engine CPU ms | PostgreSQL CPU ms | CPU ratio | engine tps | PostgreSQL tps | engine peak | PostgreSQL peak |
+|---|---|---|---|---|---|---|---|
+| select-only | 0.040-0.045 | 0.038-0.039 | 0.86-0.95x | 81-90k | 90-93k | 168-231 MB | 245-270 MB |
+| simple-update | 0.214-0.225 | 0.180-0.185 | 0.82-0.86x | 13.1-15.0k | 15.6-16.0k | 281-307 MB | 266-271 MB |
+| tpcb-like | 0.361-0.380 | 0.293-0.312 | 0.81-0.83x | 7.8-8.4k | 9.0-9.9k | 269-290 MB | 272-276 MB |
+
+(tpcb's third round had a PostgreSQL outlier, 0.48 ms at 2,484 tps; left out of the ratio.)
+
+**Bulk paths at 1M rows** (s of engine CPU; `pgbench -i` phases, then CREATE INDEX on bid,
+a DELETE of every tenth row, VACUUM; the first statement after a clean restart):
+
+| | 8115f5af (limit lifted) | old 400k build (15a77038 line) | 18bb3d49 | this round | PostgreSQL |
+|---|---|---|---|---|---|
+| COPY (g) | 8.46 | 2.54 | 1.77 | 1.73 | 0.89 |
+| VACUUM (v) | 0.57 | 2.37 | 0.71 | 0.60 | 0.22 |
+| primary key (p) | 1.62 | 1.42 | 0.77 | 0.85 | 0.59 |
+| first statement after restart | 1.43 | 0.02 | 0.01 | 0.02 | |
+| CREATE INDEX (bid) | 1.11-3.44 | 1.26 | 0.94 | 0.90 | 1.15 |
+| DELETE 10% | 2.42-3.35 | 1.12 | 1.16 | 0.96 | 0.29 |
+
+(148's held COPY rows landed in between: the COPY column after it is 148's.)
+
+**The limit lifted again, measured on this round's tree** (only the limit differs):
+
+| check | limit 400k | lifted |
+|---|---|---|
+| COPY 1M, s CPU | 1.77 | 2.66 |
+| primary key, s CPU | 0.77 | 1.66 |
+| first statement after restart, s | 0.02 | 0.31 |
+| CREATE INDEX (bid), s CPU | 0.91 | 1.68 |
+| DELETE 10%, s CPU | 0.98 | 1.44 |
+| VACUUM, s CPU | 0.67 | 0.76 |
+| skip scan `count(*) WHERE ts = K` (1M rows, index (g, ts)), warm | 1.2 ms | 2.0 ms |
+| apply-like pgbench (152's statements, 8 clients), ms CPU per txn | 3.80 | 4.11 |
+| tpcb-like / simple-update, ms CPU per txn | 0.49 / 0.24 | 0.56 / 0.30 |
+| pgbench peak RSS | 248-287 MB | 466-474 MB |
+
+So the limit stays at 400,000: a modelled million-row table still costs its writes a
+model update per row, its first statement after a restart the record's layout, and its
+index builds a key object per row.
+
+**Model memory** (`tests/restart_cost.rs`, 300,000 rows of pgbench_accounts' shape with its
+primary key, live allocations after the first statement): 46.9 MB (round 3) -> 30.7 MB, about
+93 bytes per row against PostgreSQL's 170 bytes of pages; first statement 0.16-0.18 s
+(round 3: 0.29-0.35 s).
+
+**Page counts against PostgreSQL 18.6** (round 2's mixed workload with mw1's row count as a
+parameter, script `~/.cache/a151/scripts/mw.py` as described in round 2: pages per fork and
+four EXPLAINs before and after a clean restart, 300 inserts into each table with their
+ctids, VACUUM of both, the same report, 500 more inserts and an UPDATE of every 97th row with
+their ctids, the report again): at 60,000 and at 300,000 rows everything matches PostgreSQL,
+every relation's main / fsm / vm pages, every ctid and every EXPLAIN cost, after the VACUUM
+too. Round 3 left `mw1_k` 485 / 487 and `mw1_v` 3,696 / 3,706 at 300,000 rows and `mw1_v`
+721 / 725 at 60,000 (bottom-up deletion, round 4's first batch), and the round's new
+after-VACUUM checks found `mw1_pkey` 1,785 / 1,784 and mw2's index reltuples (now equal).
+Still different, outside these checks: pgstatindex's empty / deleted leaf pages after a
+VACUUM empties btree pages (the model doesn't delete or recycle them).
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:
