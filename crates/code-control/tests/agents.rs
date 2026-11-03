@@ -394,6 +394,48 @@ async fn unreadable_daemon_frames_are_skipped_not_the_link() {
     assert!(state["entities"].as_array().unwrap().iter().any(|m| m["entity"]["id"] == "prj_1"), "{state}");
 }
 
+/// A machine's mirror is bounded: past its quota of records or size, new and growing records
+/// aren't kept (updates that don't grow and tombstones are), the batch is still acked, and the
+/// daemon gets a notice saying so. The counts survive a reconnect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_mirror_keeps_a_machine_within_its_quota() {
+    let w = world().await;
+    w.a.code.agents.set_quota(code_control::agents::store::Quota { records: 3, size: 2_000, owner_size: 1 << 20 });
+    let (_, minted) = w.machine("box").await;
+    let (mut d, _) = Daemon::connect(&w.url, &minted).await;
+    let ids = |state: &Value| -> Vec<String> {
+        let mut v: Vec<String> = state["entities"].as_array().unwrap().iter().map(|m| m["entity"]["id"].as_str().unwrap().to_string()).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(d.upsert(vec![stamped(1, project("prj_1", "a")), stamped(2, project("prj_2", "b")), stamped(3, project("prj_3", "c"))]).await, 3);
+    assert_eq!(d.upsert(vec![stamped(4, project("prj_4", "d"))]).await, 4, "acked, though not kept");
+    match d.recv().await {
+        Some(RelayFrame::Notice { message }) => assert!(message.contains("didn't keep 1 of this machine's records"), "{message}"),
+        other => panic!("expected a notice, got {other:?}"),
+    }
+    let (_, state) = w.req("GET", "/v1/code/agents/acme/state", None, &w.owner).await;
+    assert_eq!(ids(&state), ["prj_1", "prj_2", "prj_3"]);
+    // Updates that don't grow are kept; a tombstone too, and it frees nothing it didn't hold.
+    let removed = entity(json!({ "kind": "removed", "entity": "project", "id": "prj_2" }));
+    assert_eq!(d.upsert(vec![stamped(5, project("prj_1", "z")), stamped(6, removed)]).await, 6);
+    // Size: a record that grows past it isn't kept (no second notice within the minute).
+    assert_eq!(d.upsert(vec![stamped(7, project("prj_3", &"x".repeat(3_000)))]).await, 7);
+    let (_, state) = w.req("GET", "/v1/code/agents/acme/state", None, &w.owner).await;
+    assert_eq!(ids(&state), ["prj_1", "prj_3"]);
+    let names: Vec<&str> = state["entities"].as_array().unwrap().iter().map(|m| m["entity"]["name"].as_str().unwrap()).collect();
+    assert_eq!(names.iter().filter(|n| n.len() > 100).count(), 0, "{names:?}");
+    assert!(names.contains(&"z"), "{names:?}");
+    // Reconnected, the counts come from the records again: still full.
+    drop(d);
+    let (mut d, resume) = Daemon::connect(&w.url, &minted).await;
+    assert_eq!(resume, 7);
+    assert_eq!(d.upsert(vec![stamped(8, project("prj_5", "e"))]).await, 8);
+    assert!(matches!(d.recv().await, Some(RelayFrame::Notice { .. })), "a new link says so again");
+    let (_, state) = w.req("GET", "/v1/code/agents/acme/state", None, &w.owner).await;
+    assert_eq!(ids(&state), ["prj_1", "prj_3"]);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn records_are_mirrored_into_state_and_events() {
     let w = world().await;

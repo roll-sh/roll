@@ -318,6 +318,7 @@ async fn up(api: &str) -> anyhow::Result<()> {
                 LinkEvent::Connecting => {}
                 LinkEvent::Connected { owner, machine, .. } => eprintln!("roll agent: connected to roll as {owner}/{machine}"),
                 LinkEvent::Disconnected { error, retry } => eprintln!("roll agent: {error}; retrying in {:.1} s", retry.as_secs_f64()),
+                LinkEvent::Notice { message } => eprintln!("roll agent: {message}"),
             }
         }
     });

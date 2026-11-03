@@ -144,6 +144,8 @@ daemon → relay   hello {protocol, info}                 first frame
 relay  → daemon  welcome {machine, owner, resume_from}
 daemon → relay   entities {items: [{seq, entity}]}     batched, ordered by seq
 relay  → daemon  ack {seq}                              relay has persisted up to seq
+relay  → daemon  notice {message}                       for the user (records over the quota);
+                                                        `roll agent up` prints it
 daemon → relay   delta {delta}                          ephemeral
 relay  → daemon  command {id, by, command, grant?}      by: who sent it (owner / agent name);
                                                         grant: git access for this command
@@ -151,6 +153,13 @@ relay  → daemon  command {id, by, command, grant?}      by: who sent it (owner
 daemon → relay   reply {id, result}                     exactly one per command id
 relay ↔ daemon   ping / pong                            every 20 s; 60 s silence drops the link
 ```
+
+**The mirror's quota.** The relay keeps at most 250,000 records and 512 MB of record JSON per
+machine, and 2 GB over all of an owner's machines (`store::QUOTA`; counted from the records
+again at every `hello`). A batch that would go past it is still acked, but its new and growing
+records aren't kept (updates that don't grow and tombstones always are), and the link sends a
+`notice` saying so, at most once a minute. The relay's copy of that machine is then incomplete
+until threads are deleted and their records sent again; the daemon's own store is untouched.
 
 A command id is the client's idempotency key, per sender (`by`: two senders may pick the same id
 for different commands): a daemon that already ran a command id replies with the stored result

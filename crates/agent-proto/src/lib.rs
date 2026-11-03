@@ -1171,6 +1171,9 @@ pub enum RelayFrame {
         resume_from: u64,
     },
     Ack { seq: u64 },
+    /// Something the daemon's user should know about the link (the relay didn't keep records
+    /// over the machine's quota). The daemon shows it; nothing else changes.
+    Notice { message: String },
     Command {
         id: String,
         /// Who sent it: an owner name or `agent:<name>`.

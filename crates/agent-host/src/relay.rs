@@ -73,6 +73,8 @@ pub enum LinkEvent {
     Connected { machine: String, owner: String, resume_from: u64 },
     /// The link dropped; the next attempt is in `retry`.
     Disconnected { error: String, retry: Duration },
+    /// The relay says something the user should know (records over the machine's quota).
+    Notice { message: String },
 }
 
 /// The relay's WebSocket URL for an API base.
@@ -338,6 +340,10 @@ async fn session(daemon: &Arc<dyn Daemon>, mut ws: Ws, events: &mpsc::UnboundedS
                         });
                     }
                     Ok(In::Frame(RelayFrame::Welcome { .. })) => {}
+                    Ok(In::Frame(RelayFrame::Notice { message })) => {
+                        tracing::warn!("{message}");
+                        let _ = events.send(LinkEvent::Notice { message });
+                    }
                 }
             }
             Some((id, result, upto)) = replies.recv() => {

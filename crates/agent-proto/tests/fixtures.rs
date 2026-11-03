@@ -475,6 +475,7 @@ fn relay_frames() -> Vec<RelayFrame> {
     vec![
         RelayFrame::Welcome { machine: mch(), owner: "acme".into(), resume_from: 40 },
         RelayFrame::Ack { seq: 41 },
+        RelayFrame::Notice { message: "roll didn't keep 3 of this machine's records".into() },
         RelayFrame::Command { id: "cmd_1".into(), by: "acme".into(), command: Command::RunInterrupt { thread: thr() }, grant: None },
         RelayFrame::Command {
             id: "cmd_2".into(),
@@ -494,7 +495,7 @@ fn relay_frames() -> Vec<RelayFrame> {
 
 fn covered_relay(f: &RelayFrame) {
     match f {
-        RelayFrame::Welcome { .. } | RelayFrame::Ack { .. } | RelayFrame::Command { .. } | RelayFrame::Ping => {}
+        RelayFrame::Welcome { .. } | RelayFrame::Ack { .. } | RelayFrame::Notice { .. } | RelayFrame::Command { .. } | RelayFrame::Ping => {}
     }
 }
 

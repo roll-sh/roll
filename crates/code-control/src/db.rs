@@ -412,6 +412,9 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     ("agent_grants", "push_ref", "TEXT"),
     // Agents databases from before logins were capped per client.
     ("agent_logins", "client", "TEXT"),
+    // Agents databases from before the mirror's quota.
+    ("agent_machines", "records", "INTEGER NOT NULL DEFAULT 0"),
+    ("agent_machines", "size", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 impl Db {

@@ -56,6 +56,8 @@ pub struct Agents {
     working: Mutex<HashMap<(String, String), std::time::Instant>>,
     /// How long an idle thread's claim is still kept alive, in ms (0: [`code::WORK_IDLE`]).
     work_idle_ms: AtomicU64,
+    /// The mirror's quota, when not [`store::QUOTA`] (tests).
+    quota: Mutex<Option<store::Quota>>,
 }
 
 struct LinkHandle {
@@ -171,6 +173,15 @@ impl Agents {
             0 => code::WORK_IDLE,
             ms => Duration::from_millis(ms),
         }
+    }
+
+    /// How much of each machine's records the relay keeps (tests shrink it).
+    pub fn set_quota(&self, q: store::Quota) {
+        *self.quota.lock() = Some(q);
+    }
+
+    pub(crate) fn quota(&self) -> store::Quota {
+        self.quota.lock().unwrap_or(store::QUOTA)
     }
 
     /// Owners whose hub lives on this node (their streams or links are here).

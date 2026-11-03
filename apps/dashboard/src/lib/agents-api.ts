@@ -552,6 +552,7 @@ export type DaemonFrame =
 export type RelayFrame =
   | { type: "welcome"; machine: MachineId; owner: string; resume_from: number }
   | { type: "ack"; seq: number }
+  | { type: "notice"; message: string }
   | { type: "command"; id: string; by: string; command: Command; grant: CodeGrant | null }
   | { type: "ping" };
 
@@ -981,6 +982,7 @@ export const daemonFrameD: Decoder<DaemonFrame> = tagged("type", {
 export const relayFrameD: Decoder<RelayFrame> = tagged("type", {
   welcome: obj<{ machine: string; owner: string; resume_from: number }>({ machine: str, owner: str, resume_from: int }),
   ack: obj<{ seq: number }>({ seq: int }),
+  notice: obj<{ message: string }>({ message: str }),
   command: obj<{ id: string; by: string; command: Command; grant: CodeGrant | null }>({
     id: str,
     by: str,

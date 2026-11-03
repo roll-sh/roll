@@ -289,9 +289,16 @@ async fn unreadable_frames_are_skipped() {
     assert!(matches!(next(&mut ws).await, DaemonFrame::Reply { id, .. } if id == "c1"));
     send(&mut ws, &RelayFrame::Ping).await;
     assert_eq!(next(&mut ws).await, DaemonFrame::Pong);
+    // A notice (records over the machine's quota) reaches the user, and the link goes on.
+    send(&mut ws, &RelayFrame::Notice { message: "roll didn't keep 2 of this machine's records".into() }).await;
+    send(&mut ws, &RelayFrame::Ping).await;
+    assert_eq!(next(&mut ws).await, DaemonFrame::Pong);
+    let mut noticed = false;
     while let Ok(e) = events.try_recv() {
         assert!(!matches!(e, LinkEvent::Disconnected { .. }), "{e:?}");
+        noticed |= matches!(e, LinkEvent::Notice { ref message } if message.contains("didn't keep 2"));
     }
+    assert!(noticed, "the notice is a link event");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

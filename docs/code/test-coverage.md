@@ -951,6 +951,7 @@ Every code-control test runs on SQLite, and on Postgres with `ROLL_CODE_TEST_DAT
 | a publish grant pushed anything in its repo: `main`, a tag `v9`, another branch | `routes.rs::agent_grants_follow_the_auth_matrix` (real git: main, another branch, a tag, an atomic push and a delete refused; the thread's branch pushed; on main a 400) |
 | 10,000 anonymous `POST /v1/code/agents/login`s blocked every login for 15 minutes | `agents.rs::logins_are_capped_per_client_and_a_full_table_never_locks_others_out` |
 | one daemon frame the relay couldn't parse closed the link (4400), and the replies of commands in flight were lost | `agents.rs::unreadable_daemon_frames_are_skipped_not_the_link` |
+| a machine could fill control.db with records without bound | `agents.rs::the_mirror_keeps_a_machine_within_its_quota`, `agent-host/tests/relay.rs::unreadable_frames_are_skipped` (the notice reaches `roll agent up`) |
 
 ## Other regressions
 

@@ -21,7 +21,11 @@ CREATE TABLE IF NOT EXISTS agent_machines (
     -- The newest daemon seq mirrored (welcome.resume_from).
     seq INTEGER NOT NULL DEFAULT 0,
     -- The owner cursor of the machine's last change (added, renamed, online, offline, revoked).
-    cursor INTEGER NOT NULL DEFAULT 0
+    cursor INTEGER NOT NULL DEFAULT 0,
+    -- The machine's mirrored records and their size (characters of JSON), against the quota;
+    -- counted again from agent_entities at every hello.
+    records INTEGER NOT NULL DEFAULT 0,
+    size INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS agent_machines_owner ON agent_machines (owner_id, cursor);
 CREATE TABLE IF NOT EXISTS agent_logins (
@@ -247,6 +251,14 @@ pub fn touch_machine(db: &code_sql::Db, id: &str, info: Option<&MachineInfo>) ->
             return Ok(None);
         };
         let cursor = take_cursors(c, &owner_id, 1)?;
+        if info.is_some() {
+            // A hello: the quota's counts from the records themselves.
+            c.execute(
+                "UPDATE agent_machines SET records = (SELECT COUNT(*) FROM agent_entities WHERE machine_id = ?), \
+                 size = (SELECT COALESCE(SUM(LENGTH(json)), 0) FROM agent_entities WHERE machine_id = ?) WHERE id = ?",
+                [id, id, id],
+            )?;
+        }
         match &info {
             Some(i) => c.execute("UPDATE agent_machines SET info = ?, last_seen = ?, cursor = ? WHERE id = ?", params![i, now, cursor as i64, id])?,
             None => c.execute("UPDATE agent_machines SET last_seen = ?, cursor = ? WHERE id = ?", params![now, cursor as i64, id])?,
@@ -417,11 +429,25 @@ pub struct Mirroring {
     pub ack: u64,
     /// The records that were newer than what the relay held, with their cursors.
     pub changed: Vec<Mirrored>,
+    /// Records not kept because the machine (or its owner) is over [`Quota`].
+    pub refused: u32,
 }
 
-/// Store a batch of a machine's records, keeping the newest `seq` of each. `None` if the
-/// machine was revoked meanwhile.
-pub fn mirror(db: &code_sql::Db, owner_id: &str, machine_id: &str, items: &[Stamped]) -> code_sql::Result<Option<Mirroring>> {
+/// How much of a machine's records the relay keeps: records and their size (characters of
+/// JSON) per machine, and the size over all of an owner's machines. A record that would go past
+/// any of them isn't kept (updates that don't grow and tombstones always are); the link says so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Quota {
+    pub records: i64,
+    pub size: i64,
+    pub owner_size: i64,
+}
+
+pub const QUOTA: Quota = Quota { records: 250_000, size: 512 << 20, owner_size: 2 << 30 };
+
+/// Store a batch of a machine's records, keeping the newest `seq` of each, within `quota`.
+/// `None` if the machine was revoked meanwhile.
+pub fn mirror(db: &code_sql::Db, owner_id: &str, machine_id: &str, items: &[Stamped], quota: Quota) -> code_sql::Result<Option<Mirroring>> {
     let now = code_sql::now_ms();
     // The newest of each record within the batch.
     let mut newest: HashMap<(&'static str, &str), &Stamped> = HashMap::new();
@@ -438,35 +464,54 @@ pub fn mirror(db: &code_sql::Db, owner_id: &str, machine_id: &str, items: &[Stam
         if !live(c, owner_id, machine_id)? {
             return Ok(None);
         }
-        let mut fresh = Vec::new();
-        for (i, s) in batch.iter().enumerate() {
-            let held: Option<i64> = c
-                .query_row("SELECT seq FROM agent_entities WHERE machine_id = ? AND kind = ? AND id = ?", [machine_id, kind_str(&s.entity), s.entity.id()], |r| r.get(0))
+        let (mut records, mut size): (i64, i64) = c.query_row("SELECT records, size FROM agent_machines WHERE id = ?", [machine_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let mut owner_size: i64 = c.query_row("SELECT COALESCE(SUM(size), 0) FROM agent_machines WHERE owner_id = ? AND revoked_at IS NULL", [owner_id], |r| r.get(0))?;
+        // What goes in: (record, the record to store, its JSON).
+        let mut keep: Vec<(&Stamped, Entity, String)> = Vec::new();
+        let mut refused = 0;
+        for s in &batch {
+            let held: Option<(i64, i64)> = c
+                .query_row(
+                    "SELECT seq, LENGTH(json) FROM agent_entities WHERE machine_id = ? AND kind = ? AND id = ?",
+                    [machine_id, kind_str(&s.entity), s.entity.id()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
                 .optional()?;
-            if held.is_none_or(|h| (h.max(0) as u64) < s.seq) {
-                fresh.push(i);
+            if held.is_some_and(|(h, _)| (h.max(0) as u64) >= s.seq) {
+                continue;
             }
+            // What roll code knows about a thread is the relay's: it goes over the daemon's.
+            let mut entity = s.entity.clone();
+            if let Entity::Thread(t) = &mut entity {
+                overlay(c, machine_id, t)?;
+            }
+            let json = serde_json::to_string(&entity).unwrap_or_default();
+            let (more, grows) = match held {
+                None => (1, json.chars().count() as i64),
+                Some((_, len)) => (0, json.chars().count() as i64 - len),
+            };
+            let over = records + more > quota.records || size + grows > quota.size || owner_size + grows > quota.owner_size;
+            if (more > 0 || grows > 0) && over && !matches!(entity, Entity::Removed(_)) {
+                refused += 1;
+                continue;
+            }
+            (records, size, owner_size) = (records + more, size + grows, owner_size + grows);
+            keep.push((s, entity, json));
         }
-        let mut changed = Vec::with_capacity(fresh.len());
-        if !fresh.is_empty() {
-            let first = take_cursors(c, owner_id, fresh.len() as u64)?;
-            for (n, &i) in fresh.iter().enumerate() {
-                let s = batch[i];
+        let mut changed = Vec::with_capacity(keep.len());
+        if !keep.is_empty() {
+            let first = take_cursors(c, owner_id, keep.len() as u64)?;
+            for (n, (s, entity, json)) in keep.into_iter().enumerate() {
                 let cursor = first + n as u64;
                 let scope = match s.entity.scope() {
                     Scope::Shell => "shell",
                     Scope::Detail => "detail",
                 };
-                // What roll code knows about a thread is the relay's: it goes over the daemon's.
-                let mut entity = s.entity.clone();
-                match &mut entity {
-                    Entity::Thread(t) => overlay(c, machine_id, t)?,
-                    Entity::Removed(r) if r.entity == agent_proto::EntityKind::Thread => {
-                        c.execute("DELETE FROM agent_links WHERE machine_id = ? AND thread = ?", [machine_id, r.id.as_str()])?;
-                    }
-                    _ => {}
+                if let Entity::Removed(r) = &entity
+                    && r.entity == agent_proto::EntityKind::Thread
+                {
+                    c.execute("DELETE FROM agent_links WHERE machine_id = ? AND thread = ?", [machine_id, r.id.as_str()])?;
                 }
-                let json = serde_json::to_string(&entity).unwrap_or_default();
                 c.execute(
                     "INSERT INTO agent_entities (owner_id, machine_id, kind, id, thread, scope, seq, cursor, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
                      ON CONFLICT (machine_id, kind, id) DO UPDATE SET thread = excluded.thread, scope = excluded.scope, seq = excluded.seq, \
@@ -476,8 +521,11 @@ pub fn mirror(db: &code_sql::Db, owner_id: &str, machine_id: &str, items: &[Stam
                 changed.push(Mirrored { cursor, machine: MachineId(machine_id.into()), entity });
             }
         }
-        c.execute("UPDATE agent_machines SET seq = CASE WHEN seq < ? THEN ? ELSE seq END, last_seen = ? WHERE id = ?", params![ack as i64, ack as i64, now, machine_id])?;
-        Ok(Some(Mirroring { ack, changed }))
+        c.execute(
+            "UPDATE agent_machines SET seq = CASE WHEN seq < ? THEN ? ELSE seq END, last_seen = ?, records = ?, size = ? WHERE id = ?",
+            params![ack as i64, ack as i64, now, records.max(0), size.max(0), machine_id],
+        )?;
+        Ok(Some(Mirroring { ack, changed, refused }))
     })
 }
 

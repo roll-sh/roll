@@ -10,6 +10,10 @@
     "seq": 41
   },
   {
+    "type": "notice",
+    "message": "roll didn't keep 3 of this machine's records"
+  },
+  {
     "type": "command",
     "id": "cmd_1",
     "by": "acme",

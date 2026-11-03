@@ -15,6 +15,8 @@ use std::time::Duration;
 const HELLO_WAIT: Duration = Duration::from_secs(10);
 const PING_EVERY: Duration = Duration::from_secs(20);
 const SILENCE: Duration = Duration::from_secs(60);
+/// How often a link tells its daemon that records are over the quota.
+const NOTICE_EVERY: Duration = Duration::from_secs(60);
 
 /// Close codes the daemon acts on: 4401 means the token no longer works (stop, don't retry).
 pub const CLOSE_REVOKED: u16 = 4401;
@@ -143,6 +145,7 @@ async fn run(code: &Arc<Code>, machine: &MachineRow, socket: &mut WebSocket, mut
     let hub = code.agents.hub(&machine.owner_id);
     let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + PING_EVERY, PING_EVERY);
     let mut heard = tokio::time::Instant::now();
+    let mut noticed: Option<tokio::time::Instant> = None;
     loop {
         tokio::select! {
             frame = recv(socket) => {
@@ -164,7 +167,8 @@ async fn run(code: &Arc<Code>, machine: &MachineRow, socket: &mut WebSocket, mut
                             continue;
                         }
                         let _order = hub.order.lock().await;
-                        match store::mirror(code.db.sql(), &machine.owner_id, &machine.id, &items) {
+                        let quota = code.agents.quota();
+                        match store::mirror(code.db.sql(), &machine.owner_id, &machine.id, &items, quota) {
                             Ok(Some(m)) => {
                                 for e in m.changed {
                                     let _ = hub.events.send(Arc::new(StreamEvent::Entity(Box::new(e))));
@@ -172,6 +176,21 @@ async fn run(code: &Arc<Code>, machine: &MachineRow, socket: &mut WebSocket, mut
                                 drop(_order);
                                 if socket.send(text(&RelayFrame::Ack { seq: m.ack })).await.is_err() {
                                     return End::Gone;
+                                }
+                                // Over the quota: say so (once a minute at most), and go on.
+                                if m.refused > 0 && noticed.is_none_or(|t: tokio::time::Instant| t.elapsed() >= NOTICE_EVERY) {
+                                    noticed = Some(tokio::time::Instant::now());
+                                    tracing::warn!(machine = %machine.id, refused = m.refused, "agent link: records over the quota");
+                                    let message = format!(
+                                        "roll didn't keep {} of this machine's records: it keeps {} records and {} MB per machine and {} MB per owner; delete threads you don't need",
+                                        m.refused,
+                                        quota.records,
+                                        quota.size >> 20,
+                                        quota.owner_size >> 20
+                                    );
+                                    if socket.send(text(&RelayFrame::Notice { message })).await.is_err() {
+                                        return End::Gone;
+                                    }
                                 }
                             }
                             Ok(None) => return End::Revoked,
