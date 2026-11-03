@@ -5,7 +5,8 @@
 //!
 //! Containers run on Docker's default bridge and are reached by their IP (the host routes to it
 //! on Linux), so every port is the container's own: ScyllaDB drivers connect to the shard-aware
-//! port the server advertises, as they would in production. The shared reference containers
+//! port the server advertises, as they would in production. Restarting driver suites use a
+//! private bridge and a reserved address, so unrelated containers cannot take it during a restart. The shared reference containers
 //! (`nosql-ref-*`) are reached the same way; they are never started, stopped or restarted here.
 
 use std::collections::BTreeMap;
@@ -61,11 +62,15 @@ pub fn unique(prefix: &str) -> String {
 /// A container this test started; removed (with its anonymous volumes) on drop.
 pub struct Container {
     pub name: String,
+    network: Option<String>,
 }
 
 impl Drop for Container {
     fn drop(&mut self) {
         let _ = docker(&["rm", "-f", "-v", &self.name]);
+        if let Some(network) = &self.network {
+            let _ = docker(&["network", "rm", network]);
+        }
     }
 }
 
@@ -77,6 +82,8 @@ pub struct RunOpts<'a> {
     /// `host_path:container_path[:ro]` bind mounts.
     pub mounts: Vec<String>,
     pub volume: Option<String>,
+    /// Drivers reconnect to the same IP across restarts; isolate and reserve that address.
+    pub stable_ip: bool,
 }
 
 impl Container {
@@ -85,6 +92,15 @@ impl Container {
         wait_mem(6);
         let name = unique("roll-nosql-test");
         let mut a: Vec<String> = vec!["run".into(), "-d".into(), "--memory".into(), "1g".into(), "--name".into(), name.clone()];
+        let label = format!("agent.worktree={}", env!("CARGO_MANIFEST_DIR"));
+        a.extend(["--label".into(), label.clone()]);
+        let container = Container { network: opts.stable_ip.then(|| format!("{name}-net")), name };
+        if let Some(network) = &container.network {
+            docker_ok(&["network", "create", "--label", &label, network]);
+            let gateway = docker_ok(&["network", "inspect", "-f", "{{(index .IPAM.Config 0).Gateway}}", network]);
+            let ip = std::net::Ipv4Addr::from(u32::from(gateway.parse::<std::net::Ipv4Addr>().unwrap()) + 1);
+            a.extend(["--network".into(), network.clone(), "--ip".into(), ip.to_string()]);
+        }
         for (k, v) in &opts.env {
             a.push("-e".into());
             a.push(format!("{k}={v}"));
@@ -101,7 +117,7 @@ impl Container {
         a.extend(opts.args.iter().cloned());
         let refs: Vec<&str> = a.iter().map(String::as_str).collect();
         docker_ok(&refs);
-        Container { name }
+        container
     }
 
     pub fn ip(&self) -> String {
@@ -210,6 +226,9 @@ pub fn run_suite(image: &str, env: &[(String, String)], restart: Option<&Contain
     wait_mem(6);
     let name = unique("roll-nosql-suite");
     let mut a: Vec<String> = vec!["run".into(), "--rm".into(), "-i".into(), "--memory".into(), "1g".into(), "--name".into(), name.clone()];
+    if let Some(network) = restart.and_then(|c| c.network.as_ref()) {
+        a.extend(["--network".into(), network.clone()]);
+    }
     for (k, v) in env {
         a.push("-e".into());
         a.push(format!("{k}={v}"));

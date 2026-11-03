@@ -393,7 +393,7 @@ fn picked(var: &str, name: &str) -> bool {
 /// A roll container configured the way the target's reference is, through the reference
 /// images' own knobs (ScyllaDB flags; Cassandra environment and cassandra.yaml).
 fn roll_target(image: &str, t: &DriverTarget, conf: &std::path::Path) -> docker::Container {
-    let mut o = docker::RunOpts::default();
+    let mut o = docker::RunOpts { stable_ip: true, ..Default::default() };
     match (t.dialect, t.features) {
         ("scylla", false) => o.args = ["--smp", "2", "--memory", "1G", "--overprovisioned", "1", "--developer-mode", "1"].map(String::from).to_vec(),
         ("scylla", true) => {

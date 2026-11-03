@@ -2201,8 +2201,9 @@ async fn concurrent_public_reviews_on_two_nodes_never_share_the_last_free_one() 
     t.m.delay_ms.store(0, Ordering::SeqCst);
     prices.sort_by(f64::total_cmp);
     assert_eq!((prices, paused), (vec![0.0, 0.25], 1), "one free, one paid, one over the cap");
+    // Reviews become visible before their usage is committed; the reservation ends with metering.
+    eventually("reservations released", || (b.code.reserved_usd(&owner), t.a.code.reserved_free(&owner)) == (0.0, 0)).await;
     let u = ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await;
     assert_eq!(u["totals"]["price_usd"], 0.25, "never over the cap: {u}");
     assert_eq!(u["totals"]["free_reviews"], 1, "the free review was used once");
-    eventually("reservations released", || (b.code.reserved_usd(&owner), t.a.code.reserved_free(&owner)) == (0.0, 0)).await;
 }
