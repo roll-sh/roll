@@ -15,6 +15,7 @@ cd "$(dirname "$0")/.."
 
 PATHS=(crates/code-sql crates/code-cluster crates/code-store crates/code-git crates/code-github crates/code-index crates/code-review crates/code-control crates/code-preview crates/rolld crates/roll-cli
        apps/dashboard/src apps/dashboard/package.json apps/dashboard/vitest.config.mts
+       apps/desktop/src apps/desktop/test apps/desktop/package.json
        deploy/code Cargo.toml Cargo.lock scripts/test-code.sh)
 STAMP=target/.test-code.hash
 
@@ -51,6 +52,9 @@ cargo test -p roll-cli
 # The dashboard: pure logic (API client, event stream, diffs, git proxy, 404 proxy) in node, and
 # components (diff review, markdown, queue, blame, tokens) in jsdom.
 pnpm --filter dashboard test
+# The desktop app's main-process logic (navigation policy, deep links, settings, the daemon
+# supervisor against a fake `roll`).
+pnpm --filter @roll/desktop test
 
 if [[ $unit_only == 0 ]]; then
   if ! docker info >/dev/null 2>&1; then

@@ -37,6 +37,8 @@ sidebar app.
   machine tokens, device login, sandboxes and shares.
 - **`apps/dashboard`**: the canvas at `/dashboard/agents`, the "rolling" popover in the header,
   public shares at `/agents/s/<id>`.
+- **`apps/desktop`**: the desktop app (Electron): the canvas in a window, plus this machine's
+  daemon, a tray and notifications (see "Desktop app").
 
 ## Why the daemon owns the truth
 
@@ -233,3 +235,69 @@ into the full session (transcript, composer, diff, terminal); approvals are answ
 the node. Positions are laid out automatically and remembered when dragged. One canvas engine
 (canvas 2D + `requestAnimationFrame`, paused offscreen) draws edges, pulses and the dot field;
 node cards are DOM, positioned by the same world transform.
+
+## Desktop app
+
+`apps/desktop` (`@roll/desktop`) is a thin Electron shell, like T3 Code's desktop app around its
+web app: the backend stays the Rust daemon, and the UI stays the dashboard. It does three things:
+
+- **A window on the canvas.** It loads `https://roll.sh/dashboard/agents` (the `url` in
+  `settings.json` in the app's data directory, or `ROLL_DESKTOP_URL` for development against a
+  local dashboard). The renderer is sandboxed and context-isolated, with no Node and no webviews.
+  Only the app's origin (plus `extraOrigins`, for a sign-in provider) loads in the window. Other
+  web links open in the system browser, new windows are never opened, and every web permission
+  is denied except notifications, clipboard writes and fullscreen for the app's own top frame.
+  Window bounds are remembered.
+- **This machine.** It ships the `roll` CLI (`<resources>/bin/roll`; in development
+  `target/release/roll` or `ROLL_BIN`) and supervises `roll agent up`, which takes the API and
+  token from `agent.json`. If the daemon exits, the app restarts it after 1 s, doubling up to
+  30 s, and the delay resets after a minute of uptime. Output goes to `agent.log` in the app's
+  logs directory, rotated at 10 MiB. On quit the app sends SIGTERM and then SIGKILL after 5 s. The
+  child gets the login shell's PATH, so `codex`, `claude` and `git` are found when the app is
+  started from a launcher.
+  **First run:** with no `agent.json` (where the CLI keeps it: `ROLL_AGENT_CONFIG`, else
+  `~/.config/roll/agent.json`), the app runs `roll agent login --json --api <api>`. It reads the
+  `verification_uri` (`/dashboard/agents/connect?code=…`) from the output and opens it in the
+  same window, where the user is already signed in, so approving is one click. When the CLI exits
+  with the token saved, the daemon starts. The API is `api` in settings (`ROLL_DESKTOP_API`).
+  Unset, it is api.roll.sh for roll.sh and the web origin anywhere else. If `agent.json`
+  disappears (`roll agent logout`, a revoked machine), the app stops retrying and offers
+  "Connect this machine…" again. "Pause agents" stops the daemon and stays paused across
+  restarts. With `daemon: false` in settings, the app leaves the daemon to something else.
+- **Tray, badge and notifications.** The tray shows the machine's state: connected, connecting,
+  offline and reconnecting, "offline · retrying in N s" while the daemon is down, paused, not
+  signed in, or waiting for approval (with the code). The daemon's own "connected to roll as …"
+  and "…; retrying in N s" lines tell it whether the link is up. The tray also shows how many
+  agents are running and how many requests are waiting, with "Open roll", "Pause agents" and
+  "Quit". The dock or taskbar badge counts the waiting requests. Each new approval or question
+  posts one native notification, except while the window is focused. Requests already waiting at
+  launch don't notify. Clicking a notification focuses the thread.
+
+**The bridge.** The preload exposes `window.rollDesktop`. The main process only accepts its
+messages from the app's own top frame in its window, so the bridge does nothing on any other
+origin. The page reports its state; the shell never talks to the relay itself:
+
+```ts
+rollDesktop.setStatus({ running, pending: [{ thread, title, request, kind, summary? }], machines? })
+rollDesktop.notify({ title, body?, thread? })
+rollDesktop.onDeepLink((link) => …)   // { kind: "agents" | "thread" | "connect", … }; returns unsubscribe
+```
+
+`apps/dashboard/src/lib/desktop.ts` has the same types (a test keeps them identical). Its
+`useDesktop(data, focus)` is the canvas's one call: it sends the status from the agents store
+whenever the status changes, and opens thread links with `focus("t:<id>")`. In a browser it does
+nothing.
+
+**Deep links.** `roll://agents`, `roll://agents/thread/<id>` and
+`roll://agents/connect?code=<user code>` are registered at install (macOS `Info.plist`, Linux
+`x-scheme-handler/roll`, Windows NSIS) and at runtime. They reach the running instance (one
+instance at a time). A page that listens through `onDeepLink` gets agents and thread links
+without a reload. Otherwise the window loads `/dashboard/agents?focus=t:<id>` or the connect page.
+
+**Packaging.** electron-builder (`apps/desktop/electron-builder.yml`) builds a dmg and zip for
+macOS, NSIS for Windows, and an AppImage and deb for Linux, with the CLI as an extra resource.
+`pnpm --filter @roll/desktop build` bundles main and preload with esbuild and renders the icons
+from `@roll/brand` (`horizonSvg`) to PNG, ICNS and ICO. `pnpm --filter @roll/desktop dist`
+packages for the host platform; it stages `ROLL_BIN` or `target/release/roll` and fails without
+one. Auto-update (electron-updater, generic feed) is off unless `autoUpdate.enabled` and
+`autoUpdate.url` are set. There is no update server yet.
