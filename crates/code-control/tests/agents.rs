@@ -351,6 +351,49 @@ async fn the_link_refuses_other_tokens_and_protocols() {
     assert_eq!(first.recv_or_close().await.unwrap_err(), Some(4409));
 }
 
+/// After `hello`, a daemon frame the relay can't read costs only itself: it's skipped, a
+/// reply's waiters get an error at once (not the timeout), an entities batch keeps the records
+/// that do parse, and the link stays up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unreadable_daemon_frames_are_skipped_not_the_link() {
+    let w = std::sync::Arc::new(world().await);
+    let (id, minted) = w.machine("box").await;
+    let (mut d, _) = Daemon::connect(&w.url, &minted).await;
+    d.send_text("not json").await;
+    d.send_text(r#"{"type":"from_the_future","x":1}"#).await;
+    d.send_binary(b"\x00\x01").await;
+    let good = serde_json::to_value(stamped(1, project("prj_1", "api"))).unwrap();
+    let future = json!({ "seq": 2, "entity": { "kind": "hologram", "id": "hol_1" } });
+    d.send_text(&json!({ "type": "entities", "items": [good, future] }).to_string()).await;
+    assert_eq!(d.recv().await, Some(RelayFrame::Ack { seq: 1 }), "the records that parse are kept");
+
+    let path = format!("/v1/code/agents/acme/machines/{id}/commands");
+    let cmd = |cid: &str| json!({ "id": cid, "command": { "type": "run.interrupt", "thread": "thr_a" } });
+    w.a.code.agents.set_command_timeout(Duration::from_secs(20));
+    let pending = {
+        let (w, path, body) = (w.clone(), path.clone(), cmd("c1"));
+        tokio::spawn(async move { w.req("POST", &path, Some(body), &w.owner).await })
+    };
+    assert!(matches!(d.recv().await, Some(RelayFrame::Command { id, .. }) if id == "c1"));
+    let started = std::time::Instant::now();
+    d.send_text(r#"{"type":"reply","id":"c1","result":{"type":"from_the_future"}}"#).await;
+    let (s, r) = pending.await.unwrap();
+    assert_eq!((s, r["code"].as_str()), (StatusCode::BAD_GATEWAY, Some("internal")), "{r}");
+    assert!(started.elapsed() < Duration::from_secs(5), "answered at once, not at the timeout");
+
+    // Still the machine's link: commands go and come back.
+    let pending = {
+        let (w, path, body) = (w.clone(), path.clone(), cmd("c2"));
+        tokio::spawn(async move { w.req("POST", &path, Some(body), &w.owner).await })
+    };
+    assert!(matches!(d.recv().await, Some(RelayFrame::Command { id, .. }) if id == "c2"));
+    d.send(&DaemonFrame::Reply { id: "c2".into(), result: Reply::Ok }).await;
+    assert_eq!(pending.await.unwrap(), (StatusCode::OK, json!({ "type": "ok" })));
+    let (_, state) = w.req("GET", "/v1/code/agents/acme/state", None, &w.owner).await;
+    assert_eq!(state["machines"][0]["online"], true, "{state}");
+    assert!(state["entities"].as_array().unwrap().iter().any(|m| m["entity"]["id"] == "prj_1"), "{state}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn records_are_mirrored_into_state_and_events() {
     let w = world().await;

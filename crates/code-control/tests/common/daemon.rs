@@ -41,6 +41,15 @@ impl Daemon {
         self.ws.send(Message::text(serde_json::to_string(f).unwrap())).await.unwrap();
     }
 
+    /// Any text, as a daemon that speaks something else would send it.
+    pub async fn send_text(&mut self, t: &str) {
+        self.ws.send(Message::text(t.to_string())).await.unwrap();
+    }
+
+    pub async fn send_binary(&mut self, b: &[u8]) {
+        self.ws.send(Message::binary(b.to_vec())).await.unwrap();
+    }
+
     /// The next relay frame (pings answered), or `None` once closed.
     pub async fn recv(&mut self) -> Option<RelayFrame> {
         self.recv_or_close().await.ok()

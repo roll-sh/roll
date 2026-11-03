@@ -1,6 +1,8 @@
 //! One daemon's WebSocket (docs/code/agents.md, "The relay protocol"): `hello` → `welcome`, then
 //! entity batches (persisted, then acked and published), deltas (published only), replies to
-//! commands, and pings both ways. 60 s without a frame from the daemon drops the link.
+//! commands, and pings both ways. 60 s without a frame from the daemon drops the link. After
+//! `hello`, a frame that doesn't parse is skipped (what can be read of it is kept), never the end
+//! of the link.
 
 use super::store::{self, MachineRow};
 use super::{Closer, Kick};
@@ -27,14 +29,39 @@ fn text(f: &RelayFrame) -> Message {
     Message::Text(Utf8Bytes::from(serde_json::to_string(f).unwrap_or_default()))
 }
 
+/// A frame that isn't a [`DaemonFrame`] this relay reads: why, and its text if it was text.
+struct Bad {
+    why: String,
+    text: Option<Utf8Bytes>,
+}
+
 /// Receive the next daemon frame. A transport ping or pong counts as a `pong` (the daemon is
 /// alive). `None`: the socket ended.
-async fn recv(socket: &mut WebSocket) -> Option<Result<DaemonFrame, String>> {
+async fn recv(socket: &mut WebSocket) -> Option<Result<DaemonFrame, Bad>> {
     match socket.recv().await? {
-        Ok(Message::Text(t)) => Some(serde_json::from_str(t.as_str()).map_err(|e| format!("bad frame: {e}"))),
-        Ok(Message::Binary(_)) => Some(Err("binary frames aren't part of the protocol".into())),
+        Ok(Message::Text(t)) => Some(serde_json::from_str(t.as_str()).map_err(|e| Bad { why: format!("bad frame: {e}"), text: Some(t) })),
+        Ok(Message::Binary(_)) => Some(Err(Bad { why: "binary frames aren't part of the protocol".into(), text: None })),
         Ok(Message::Close(_)) | Err(_) => None,
         Ok(Message::Ping(_) | Message::Pong(_)) => Some(Ok(DaemonFrame::Pong)),
+    }
+}
+
+/// What can still be read of a frame that didn't parse, so one bad frame (a newer daemon's, a
+/// record of a kind this relay doesn't know) costs only itself, never the link: a reply's id
+/// (its waiters get an error instead of waiting out the timeout), or an entities batch's
+/// records that do parse. Anything else is skipped.
+fn salvage(bad: Bad) -> Option<DaemonFrame> {
+    let v: serde_json::Value = bad.text.as_ref().and_then(|t| serde_json::from_str(t.as_str()).ok())?;
+    match v.get("type").and_then(|t| t.as_str()) {
+        Some("reply") => {
+            let id = v.get("id").and_then(|i| i.as_str())?.to_string();
+            Some(DaemonFrame::Reply { id, result: super::error(agent_proto::ErrorCode::Internal, &format!("the daemon's reply couldn't be read ({})", bad.why)) })
+        }
+        Some("entities") => {
+            let items = v.get("items").and_then(|i| i.as_array())?;
+            Some(DaemonFrame::Entities { items: items.iter().filter_map(|i| serde_json::from_value(i.clone()).ok()).collect() })
+        }
+        _ => None,
     }
 }
 
@@ -45,7 +72,7 @@ pub(crate) async fn serve(code: Arc<Code>, machine: MachineRow, mut socket: WebS
             return close(socket, CLOSE_PROTOCOL, &format!("protocol {protocol} isn't supported; this relay speaks {PROTOCOL}: update roll")).await;
         }
         Ok(Some(Ok(_))) => return close(socket, CLOSE_PROTOCOL, "the first frame must be hello").await,
-        Ok(Some(Err(e))) => return close(socket, CLOSE_PROTOCOL, &e).await,
+        Ok(Some(Err(e))) => return close(socket, CLOSE_PROTOCOL, &e.why).await,
         Ok(None) => return,
         Err(_) => return close(socket, CLOSE_PROTOCOL, "no hello").await,
     };
@@ -122,7 +149,13 @@ async fn run(code: &Arc<Code>, machine: &MachineRow, socket: &mut WebSocket, mut
                 heard = tokio::time::Instant::now();
                 let frame = match frame {
                     None => return End::Gone,
-                    Some(Err(e)) => return End::Protocol(e),
+                    Some(Err(bad)) => {
+                        tracing::warn!(machine = %machine.id, error = %bad.why, "agent link: a frame that doesn't parse");
+                        match salvage(bad) {
+                            Some(f) => f,
+                            None => continue,
+                        }
+                    }
                     Some(Ok(f)) => f,
                 };
                 match frame {

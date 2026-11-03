@@ -950,6 +950,7 @@ Every code-control test runs on SQLite, and on Postgres with `ROLL_CODE_TEST_DAT
 | public shares kept a project's remote with its credentials and its private repo, homes after a scheme or a flag (`file:///home/me`, `-I/home/me`), and tokens in tool inputs and outputs | `agents.rs::shares_freeze_a_redacted_copy_for_anyone_with_the_link`, `code-control/src/agents/share.rs::credentials_are_redacted`, `code-control/src/agents/share.rs::home_directories_become_tilde` |
 | a publish grant pushed anything in its repo: `main`, a tag `v9`, another branch | `routes.rs::agent_grants_follow_the_auth_matrix` (real git: main, another branch, a tag, an atomic push and a delete refused; the thread's branch pushed; on main a 400) |
 | 10,000 anonymous `POST /v1/code/agents/login`s blocked every login for 15 minutes | `agents.rs::logins_are_capped_per_client_and_a_full_table_never_locks_others_out` |
+| one daemon frame the relay couldn't parse closed the link (4400), and the replies of commands in flight were lost | `agents.rs::unreadable_daemon_frames_are_skipped_not_the_link` |
 
 ## Other regressions
 

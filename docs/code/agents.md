@@ -161,8 +161,9 @@ the records its command wrote, so a client that has the reply finds them in `/st
 holds it until it has sent every record up to its newest `seq` as of the command's end, also while
 a replay is still catching up. A frame the daemon can't read (a newer relay's frame type or
 command, or garbage) is skipped and the link stays up; a command among them gets an `invalid`
-reply. The daemon
-reconnects with jittered backoff (1 s doubling to 30 s). The relay's close codes say what to do:
+reply. The relay does the same after `hello`: a daemon frame it can't read is skipped, a reply
+among them gives its waiters an `internal` error at once (not the timeout), and an entities batch
+keeps the records that parse. The daemon reconnects with jittered backoff (1 s doubling to 30 s). The relay's close codes say what to do:
 4401 the token was revoked and 4400 the protocol isn't spoken (stop, with a clear error), 4409
 another daemon took the machine's link over (stop), 1012 the owner's agents moved to another
 cluster node (reconnect; docs/code/cluster.md, "An owner's agents").
