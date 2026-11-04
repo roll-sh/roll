@@ -1,0 +1,16 @@
+{
+  "state": "in progress, source acceptance pending final checks",
+  "source_head": "c7575fadbe9e060dbd24156c34449038941ad47b",
+  "source_diff": "Only crash_random.rs and crash_async_commit.rs; no engine source, Cargo or runtime options changed",
+  "sync_coverage": "10 runs x 30 seeds x 4 crash rounds = 1200 crashes; all passed",
+  "async_coverage": "1 run x 30 seeds x4 rounds =120 crashes; passed",
+  "targeted_recovery": "debug and release crash_ctids/crash_unlogged/crash_async_commit/models_kept passed; debug also crash_random",
+  "root_cause": "Original saved s3-r3 steps log has 855 complete lines plus torn suffix 855[space]; old read_log counted torn line as aborted, and settle append joined onto it",
+  "pending": [
+    "Clippy",
+    "pnpm test:pg",
+    "Reopen saved torn-log state with current oracle",
+    "Negative controls for partial and lost acknowledged recovered state"
+  ],
+  "performance": "Engine/runtime source unchanged; no new PG comparison or global speed claim"
+}

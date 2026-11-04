@@ -1,0 +1,54 @@
+   Compiling pg-icu v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-ae7cd3533d1c88d16/crates/pg-icu)
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-ae7cd3533d1c88d16/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 25.05s
+     Running tests/crash_async_commit.rs (/home/meszmate/.cache/a168/target/debug/deps/crash_async_commit-cf5b0948cb014b56)
+
+running 2 tests
+test crash_async_child ... ok
+test kill_during_async_commits ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.29s
+
+     Running tests/crash_ctids.rs (/home/meszmate/.cache/a168/target/debug/deps/crash_ctids-65f67bf47b61824f)
+
+running 6 tests
+test crash_ctids_child ... ok
+test ctids_survive_a_restart ... ok
+test old_duplicate_ctids_repaired_once ... ok
+test prepared_ctids_survive_a_restart ... ok
+test vacuum_full_after_rolled_back_updates ... ok
+test ctids_survive_a_crash ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.75s
+
+     Running tests/crash_random.rs (/home/meszmate/.cache/a168/target/debug/deps/crash_random-2f8e33a4d2beaf3b)
+
+running 4 tests
+test crash_inspect ... ok
+test crash_random_child ... ok
+test torn_acknowledgement_is_still_in_flight ... ok
+test random_crashes ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.55s
+
+     Running tests/crash_unlogged.rs (/home/meszmate/.cache/a168/target/debug/deps/crash_unlogged-b14f10fb53ef3393)
+
+running 4 tests
+test crash_unlogged_prepared_child ... ok
+test crash_unlogged_child ... ok
+test prepared_writes_to_unlogged_tables_lost_in_a_crash ... ok
+test unlogged_relations_reset_after_a_crash ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+     Running tests/models_kept.rs (/home/meszmate/.cache/a168/target/debug/deps/models_kept-2041fcc3b27be8d1)
+
+running 5 tests
+test kept_models_not_used_when_stale ... ok
+test kept_models_match_models_never_restarted ... ok
+test models_after_a_crash_keep_the_rows_in_place ... ok
+test vacuum_freeze_keeps_page_state_across_restart ... ok
+test nulls_not_distinct_cleanup_survives_restart ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.27s
+
