@@ -9545,6 +9545,21 @@ impl Ddl<'_, '_> {
                 }
                 // The valid ones are rebuilt too: their expressions are computed.
                 self.evaluate_index_exprs(&t, Some(&valid))?;
+                // (In new files, laid out by a sorted build: the size models start them afresh
+                // and their statistics are the build's, as index_build's index_update_stats.
+                // A concurrent REINDEX builds its copies below. Only indexes of plain columns:
+                // laying a model out evaluates expressions and predicates again, outside the
+                // security-restricted context the rebuild ran them in.)
+                if !concurrently || t.temporary {
+                    for &i in &valid {
+                        let Some(ix) = self.cat.indexes.get(&i).map(|x| (**x).clone()) else { continue };
+                        if ix.predicate.is_none()
+                            && ix.columns.iter().all(|c| matches!(c.key, crate::catalog::IndexKey::Column(_)))
+                        {
+                            self.index_built(&t, &ix)?;
+                        }
+                    }
+                }
             }
             // A temporary table's indexes are rebuilt in place even CONCURRENTLY.
             let temp = self.cat.index_table(table).is_some_and(|t| t.temporary);
