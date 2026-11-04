@@ -591,3 +591,89 @@ fn decode(v: &[u8], node: u32, token: u64, ff: usize) -> Option<Restore> {
     }
     r.0.is_empty().then_some(Restore { rows, exts, shape, btrees })
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{Engine, EngineOptions};
+    use crate::session::Session;
+
+    fn prepared() -> (tempfile::TempDir, Arc<Engine>, Session, Arc<Table>) {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::open(EngineOptions { data_dir: dir.path().into(), sync: false, ..Default::default() }).unwrap();
+        let mut s = eng.connect(1, "postgres", "postgres", "kept-test").unwrap();
+        s.query("CREATE TABLE ks (id int PRIMARY KEY, a text); CREATE INDEX ks_a ON ks(a);
+            INSERT INTO ks SELECT g, repeat('p', 80) || g FROM generate_series(1, 3000) g;
+            DELETE FROM ks WHERE id % 2 = 0").unwrap();
+        s.query("VACUUM ANALYZE ks").unwrap();
+        let t = s.state.db.catalog().tables.values().find(|t| t.name == "ks").unwrap().clone();
+        (dir, eng, s, t)
+    }
+
+    // Persist and reopen just the model state. No background builder is started, so the
+    // first planner read deterministically uses the kept header.
+    fn reopen_models(db: &Database) {
+        persist_inner(db).unwrap();
+        for shard in db.relfiles.all() {
+            let mut rf = shard.write();
+            rf.heaps.clear();
+            rf.btrees.clear();
+            rf.toast.clear();
+        }
+        open(db, &[]).unwrap();
+    }
+
+    #[test]
+    fn header_pages_are_available_before_layout() {
+        let (_dir, _eng, mut s, t) = prepared();
+        let ix = t.pkey_index.unwrap();
+        let pages = btree_blocks(t.oid, ix, &s.state.db).unwrap();
+        assert!(pages > 1);
+        let query = "EXPLAIN SELECT a FROM ks WHERE id = 123";
+        let before = s.query(query).unwrap().pop().unwrap().rows;
+        reopen_models(&s.state.db);
+        s.apply_step(|ctx| {
+            assert!(planned_heap_blocks(&t, ctx)?.is_some());
+            let rf = ctx.sess.db.relfiles.of(t.oid).read();
+            assert!(!rf.heaps.contains_key(&t.oid));
+            assert!(sizes_read(&rf, t.oid).is_some());
+            drop(rf);
+            assert_eq!(btree_blocks(t.oid, ix, &ctx.sess.db), Some(pages));
+            Ok(())
+        }).unwrap();
+        assert_eq!(s.query(query).unwrap().pop().unwrap().rows, before);
+        assert!(!s.state.db.relfiles.of(t.oid).read().heaps.contains_key(&t.oid));
+        s.apply_step(|ctx| {
+            assert!(heap_blocks(&t, ctx)?.is_some());
+            assert!(ctx.sess.db.relfiles.of(t.oid).read().kept_sizes.get(&t.oid).is_none());
+            assert_eq!(btree_blocks(t.oid, ix, &ctx.sess.db), Some(pages));
+            Ok(())
+        }).unwrap();
+        assert_eq!(s.query(query).unwrap().pop().unwrap().rows, before);
+    }
+
+    #[test]
+    fn missing_tree_discards_header_before_row_rebuild() {
+        let (_dir, _eng, mut s, t) = prepared();
+        // A valid kept heap may omit an index whose model was not present at close.
+        let missing = t.indexes[0];
+        s.state.db.relfiles.of(t.oid).write().btrees.remove(&missing);
+        reopen_models(&s.state.db);
+        s.apply_step(|ctx| {
+            assert!(planned_heap_blocks(&t, ctx)?.is_some());
+            assert!(ctx.sess.db.relfiles.of(t.oid).read().kept_sizes.get(&t.oid).is_some());
+            let indexes = crate::sql::binder::bound_indexes(&t, ctx)?;
+            let need: Vec<_> = indexes.iter().collect();
+            assert!(matches!(take(&t, &need, ctx), Take::None));
+            assert!(sizes_read(&ctx.sess.db.relfiles.of(t.oid).read(), t.oid).is_none());
+            assert!(ensure(&t, &indexes, ctx)?);
+            let rf = ctx.sess.db.relfiles.of(t.oid).read();
+            assert!(rf.kept_sizes.get(&t.oid).is_none());
+            assert!(rf.btrees.contains_key(&missing));
+            Ok(())
+        }).unwrap();
+        let r = s.query("SELECT count(*) FROM ks").unwrap();
+        assert_eq!(r.last().unwrap().rows, vec![vec![Value::Int8(1500)]]);
+    }
+}
