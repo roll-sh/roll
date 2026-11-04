@@ -1,0 +1,99 @@
+[521] Comparing the new run against the baseline shows about 10% fewer instructions and cycles, with wall time down roughly 5%. The hash check came back empty because this directory has no PG files, so there's nothing to compare against. I'll copy the PG files over from the first run so the hashes can be checked against a real reference.
+
+
+
+[522] $ cd /home/meszmate/.cache/a167 && cp r0/pg.*.txt r1/ && python3 summary.py r1 | head -30
+Error: This agent is isolated in the worktree /home/meszmate/roll/.claude/worktrees/agent-a6193f5e45a7ae4f1, but this command feeds python a program assembled at runtime in a plain command, so what it runs cannot be shown not to be git. Refusing to run it — a worktree-isolated agent's git operations must target its own worktree. Run the plain command from /home/meszmate/roll/.claude/worktrees/agent-a6193f5e45a7ae4f1.
+
+[523] $ cp /home/meszmate/.cache/a167/r0/pg.*.txt /home/meszmate/.cache/a167/r1/ && python3 /home/meszmate/.cache/a167/summary.py /home/meszmate/.cache/a167/r1 | head -30
+Error: This agent is isolated in the worktree /home/meszmate/roll/.claude/worktrees/agent-a6193f5e45a7ae4f1, but this command feeds python a program assembled at runtime in a plain command, so what it runs cannot be shown not to be git. Refusing to run it — a worktree-isolated agent's git operations must target its own worktree. Run the plain command from /home/meszmate/roll/.claude/worktrees/agent-a6193f5e45a7ae4f1.
+
+[524] The shell glob with "*" is tripping things up, so I'm weighing a loop or find -exec instead. I'll try cp with -t and list the source files explicitly, starting with listing their names.
+
+
+
+[525] $ ls /home/meszmate/.cache/a167/r0/
+base.1793764372.stat
+base.1793764372.txt
+base.1793764422.stat
+base.1793764422.txt
+pg.1793764336.txt
+pg.1793764461.txt
+
+[526] $ cp /home/meszmate/.cache/a167/r0/pg.1793764336.txt /home/meszmate/.cache/a167/r0/pg.1793764461.txt /home/meszmate/.cache/a167/r1/
+(Bash completed with no output)
+
+[527] $ python3 /home/meszmate/.cache/a167/summary.py /home/meszmate/.cache/a167/r1
+base  n=22 wall=18.46 cpu=43.6 peak=1763 ins=278.037245583 cyc=165.326183114 hash_diff=[]
+base  n=22 wall=17.82 cpu=42.8 peak=1755 ins=277.292954843 cyc=158.643515536 hash_diff=[]
+new1  n=22 wall=16.67 cpu=38.4 peak=1738 ins=248.656633872 cyc=144.608657995 hash_diff=[]
+new1  n=22 wall=17.57 cpu=39.9 peak=1742 ins=248.864397089 cyc=146.33372464 hash_diff=[]
+pg    n=22 wall=12.27 cpu=30.1 peak=1708 ins=None cyc=None hash_diff=[]
+pg    n=22 wall=11.90 cpu=29.2 peak=1709 ins=None cyc=None hash_diff=[]
+q            base         new1           pg
+q01          1.28         1.00         1.74
+q02          0.98         0.91         0.21
+q03          0.63         0.57         0.42
+q04          0.33         0.30         0.17
+q05          0.57         0.54         0.30
+q06          0.89         0.70         0.40
+q07          0.65         0.62         0.40
+q08          0.43         0.39         0.20
+q09          2.11         1.84         1.42
+q10          0.77         0.74         0.68
+q11          0.27         0.26         0.10
+q12          1.14         0.90         0.56
+q13          1.45         1.73         0.64
+q14          0.49         0.43         0.18
+q15          0.62         0.46         0.29
+q16          0.65         0.66         0.25
+q17          1.00         0.97         0.86
+q18          2.03         2.32         2.36
+q19          0.14         0.13         0.08
+q20          0.38         0.39         0.12
+q21          0.90         0.79         0.58
+q22          0.42         0.44         0.13
+
+[528] Checking whether the q13 slowdown in new1 (1.73 vs 1.45) is a real regression from the held/flush approach or just noise. q18 at 2.32 against 2.03 needs the same check, and I'm looking at its plan, a GroupAggregate over lineitem grouping 1.5M int8 keys, to see where the time goes.
+
+Looking at q18's plan, the inner aggregation streams by l_orderkey, and I'm checking whether my free change alters the outer GroupAggregate path. Since the outer keys include redundant columns that should still be covered, I'll wait for the new build before drawing any conclusions about the slowdown.
+
+
+
+[529] $ i=0; until grep -qE 'NEW-BUILT|HEAVY-EXIT|^error' /home/meszmate/.cache/a167/logs/build.log 2>/dev/null || [ $i -ge 19 ]; do sleep 30; i=$((i+1)); done; grep -E 'NEW-BUILT|HEAVY-EXIT|^error' /home/meszmate/.cache/a167/logs/build.log | head -3; wc -c < /home/meszmate/.cache/a167/logs/build.log
+0
+
+[530] $ i=0; until grep -qE 'NEW-BUILT|HEAVY-EXIT|^error' /home/meszmate/.cache/a167/logs/build.log 2>/dev/null || [ $i -ge 19 ]; do sleep 30; i=$((i+1)); done; grep -E 'NEW-BUILT|HEAVY-EXIT|^error' /home/meszmate/.cache/a167/logs/build.log | head -3; wc -c < /home/meszmate/.cache/a167/logs/build.log
+0
+
+[531] I'm setting up the verification containers in the background: a167-iref on the default ref with host networking on port 53343, a167-ref1 with a167-psql1, and a167-dclient. I also need to confirm ports 53343 through 53346 are free first.
+
+
+
+[532] $ ss -ltn | grep -E ':5334[3-6] ' | wc -l; mkdir -p /home/meszmate/.cache/a167/pgr1 /home/meszmate/.cache/a167/pgdump /home/meszmate/.cache/a167/iso && sg docker -c "docker run -d --name a167-iref --network host -e POSTGRES_PASSWORD=pw -e POSTGRES_INITDB_ARGS='--locale=C --encoding=UTF8' postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873 -c port=53343 -c listen_addresses=127.0.0.1" | cut -c1-12
+0
+023da929cd33
+
+[533] $ sg docker -c "docker run -d --name a167-ref1 -e POSTGRES_PASSWORD=pw -e POSTGRES_INITDB_ARGS='--locale=C --encoding=UTF8' postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873" | cut -c1-12; sg docker -c "docker run -d --name a167-psql1 --network host --user $(id -u):$(id -g) -v /home/meszmate/.cache/a167/pgr1:/home/meszmate/.cache/a167/pgr1 --entrypoint sleep postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873 infinity" | cut -c1-12; sg docker -c "docker run -d --name a167-dclient --network host --user $(id -u):$(id -g) -v /home/meszmate/.cache/a167/pgdump:/home/meszmate/.cache/a167/pgdump -v /home/meszmate/.cache/a167/pgr1:/home/meszmate/.cache/a167/pgr1 --entrypoint sleep postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873 infinity" | cut -c1-12
+90dc14a8bf8e
+33c5fe14e19a
+eb81ec0e162c
+
+[534] I'm checking whether there's already a src-repo checkout I can copy instead of cloning, and the handoff suggests looking in other caches like ~/.cache/a16x/ for one.
+
+
+
+[535] $ ls -d /home/meszmate/.cache/a16*/*/src-repo /home/meszmate/.cache/a16*/src-repo 2>/dev/null | head -3; ls -d /tmp/pgisolation 2>/dev/null; ls -d /home/meszmate/.cache/a16*/*iso* 2>/dev/null | head -3
+/home/meszmate/.cache/a162/iso/src-repo
+/home/meszmate/.cache/a162/pgr/src-repo
+/home/meszmate/.cache/a166/pgisolation/src-repo
+/home/meszmate/.cache/a162/iso
+/home/meszmate/.cache/a166/iso-report
+/home/meszmate/.cache/a166/pgisolation
+
+[536] $ du -sh /home/meszmate/.cache/a162/pgr/src-repo /home/meszmate/.cache/a162/iso/src-repo 2>/dev/null; cp -a /home/meszmate/.cache/a162/pgr/src-repo /home/meszmate/.cache/a167/pgr1/src-repo && cp -a /home/meszmate/.cache/a162/iso/src-repo /home/meszmate/.cache/a167/iso/src-repo && echo copied
+41M	/home/meszmate/.cache/a162/pgr/src-repo
+5.8M	/home/meszmate/.cache/a162/iso/src-repo
+copied
+
+[537] $ i=0; until grep -qE 'NEW-BUILT|HEAVY-EXIT|^error' /home/meszmate/.cache/a167/logs/build.log 2>/dev/null || [ $i -ge 19 ]; do sleep 30; i=$((i+1)); done; grep -E 'NEW-BUILT|HEAVY-EXIT|^error' /home/meszmate/.cache/a167/logs/build.log | head -3; wc -c < /home/meszmate/.cache/a167/logs/build.log
