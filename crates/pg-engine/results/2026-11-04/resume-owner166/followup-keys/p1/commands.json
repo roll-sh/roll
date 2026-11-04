@@ -1,0 +1,222 @@
+[
+  {
+    "name": "source-head",
+    "argv": [
+      "git",
+      "-C",
+      "/home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2",
+      "rev-parse",
+      "HEAD"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "source-status",
+    "argv": [
+      "git",
+      "-C",
+      "/home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2",
+      "status",
+      "--porcelain=v1"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "mounts",
+    "argv": [
+      "docker",
+      "inspect",
+      "a166-pgh",
+      "a166-psql1"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "reference-version",
+    "argv": [
+      "docker",
+      "exec",
+      "-i",
+      "-e",
+      "PGPASSWORD=pw",
+      "a166-psql1",
+      "psql",
+      "-XAt",
+      "-h",
+      "127.0.0.1",
+      "-U",
+      "postgres",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-p",
+      "53320",
+      "-d",
+      "postgres"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "reference-db-absent",
+    "argv": [
+      "docker",
+      "exec",
+      "-i",
+      "-e",
+      "PGPASSWORD=pw",
+      "a166-psql1",
+      "psql",
+      "-XAt",
+      "-h",
+      "127.0.0.1",
+      "-U",
+      "postgres",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-p",
+      "53320",
+      "-d",
+      "postgres"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "create-reference-db",
+    "argv": [
+      "docker",
+      "exec",
+      "-i",
+      "-e",
+      "PGPASSWORD=pw",
+      "a166-psql1",
+      "psql",
+      "-XAt",
+      "-h",
+      "127.0.0.1",
+      "-U",
+      "postgres",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-p",
+      "53320",
+      "-d",
+      "postgres"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "engine-start",
+    "pid": 1116672,
+    "nice": 19
+  },
+  {
+    "name": "create-engine-db",
+    "argv": [
+      "docker",
+      "exec",
+      "-i",
+      "-e",
+      "PGPASSWORD=pw",
+      "a166-psql1",
+      "psql",
+      "-XAt",
+      "-h",
+      "127.0.0.1",
+      "-U",
+      "postgres",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-p",
+      "53329",
+      "-d",
+      "postgres"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "reference",
+    "argv": [
+      "docker",
+      "exec",
+      "-i",
+      "-e",
+      "PGPASSWORD=pw",
+      "a166-psql1",
+      "psql",
+      "-XAt",
+      "-h",
+      "127.0.0.1",
+      "-U",
+      "postgres",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-p",
+      "53320",
+      "-d",
+      "a166_snapshot_keys_p1"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "engine",
+    "argv": [
+      "docker",
+      "exec",
+      "-i",
+      "-e",
+      "PGPASSWORD=pw",
+      "a166-psql1",
+      "psql",
+      "-XAt",
+      "-h",
+      "127.0.0.1",
+      "-U",
+      "postgres",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-p",
+      "53329",
+      "-d",
+      "a166_snapshot_keys_p1"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "source-head-after",
+    "argv": [
+      "git",
+      "-C",
+      "/home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2",
+      "rev-parse",
+      "HEAD"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "engine-exit",
+    "exit": 0
+  },
+  {
+    "name": "drop-reference-db",
+    "argv": [
+      "docker",
+      "exec",
+      "-i",
+      "-e",
+      "PGPASSWORD=pw",
+      "a166-psql1",
+      "psql",
+      "-XAt",
+      "-h",
+      "127.0.0.1",
+      "-U",
+      "postgres",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-p",
+      "53320",
+      "-d",
+      "postgres"
+    ],
+    "exit": 0
+  }
+]

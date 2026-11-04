@@ -1,0 +1,7 @@
+{
+  "source_head": "0f077b8d01577f92085494a7c3c23f2c62e3fb09",
+  "binary": "/home/meszmate/.cache/a166/target-debug/debug/roll-engine",
+  "binary_sha256": "9855eab97a666dacdbc719c930cdc0184fec04c0b29d9605c9e68bfc5a548915",
+  "runner_sha256": "453bd8e7149b8f8d6e7b1d6830eab1edfc35c27d350c391ca8a911b9d0a95d9f",
+  "sql_sha256": "82e22585ff29e4bdc90ba02272c9ff92d608d330cae21fa66080b7d596b41f5e"
+}

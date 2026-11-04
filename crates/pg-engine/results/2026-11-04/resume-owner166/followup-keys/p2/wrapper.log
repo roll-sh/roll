@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_followup/p2/probe.py", line 37, in <module>
+    assert 'Hash Join' in transcript and 'Hash Semi Join' in transcript,(name,'missing plans')
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ('engine', 'missing plans')
+HEAVY-EXIT 1
