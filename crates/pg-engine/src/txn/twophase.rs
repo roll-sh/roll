@@ -454,6 +454,7 @@ impl Txn {
     pub fn detach_prepared(&mut self) {
         self.prepared = true;
         self.db.locks.transfer(self.id, self.id);
+        self.fast_slot = std::sync::OnceLock::from(None);
         self.lock_peer = None;
         if self.sxact {
             self.db.ssi.detach(self.id);

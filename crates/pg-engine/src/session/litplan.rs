@@ -329,9 +329,9 @@ impl Session {
 
     /// Bind `generic` (a template with parameters of `types`), and what the planner read
     /// (None when it failed, or read a column's data).
-    fn lit_bind(&mut self, generic: &Node, types: Vec<DataType>, path: &[String]) -> (Option<Bound>, Vec<SizeRead>) {
+    fn lit_bind(&mut self, generic: &Node, types: Vec<DataType>, path: &crate::catalog::names::SearchPath) -> (Option<Bound>, Vec<SizeRead>) {
         let (bound, reads) = crate::sql::literals::recording(|| {
-            self.with_ctx_path(&[], Some(path.into()), |ctx| {
+            self.with_ctx_path(&[], Some(path.clone()), |ctx| {
                 let (bq, unplanned) = analyzed_bound(Binder::new(ctx, types).analyze_statement(generic)?, ctx)?;
                 Ok(Bound { bq, unplanned })
             })
@@ -340,9 +340,9 @@ impl Session {
     }
 
     /// `u`'s statement planned again, and what the planner read.
-    fn lit_replan(&mut self, u: &Analyzed, path: &[String]) -> (Option<BoundQuery>, Vec<SizeRead>) {
+    fn lit_replan(&mut self, u: &Analyzed, path: &crate::catalog::names::SearchPath) -> (Option<BoundQuery>, Vec<SizeRead>) {
         let (bound, reads) =
-            crate::sql::literals::recording(|| self.with_ctx_path(&[], Some(path.into()), |ctx| u.plan(ctx)));
+            crate::sql::literals::recording(|| self.with_ctx_path(&[], Some(path.clone()), |ctx| u.plan(ctx)));
         (bound.ok().filter(|_| !reads.contains(&SizeRead::Data)), reads)
     }
 

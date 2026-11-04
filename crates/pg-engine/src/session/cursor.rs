@@ -26,16 +26,19 @@ pub struct Cursor {
     pub rows: Vec<Row>,
     /// How many of the query's first rows `rows` no longer has (`streams`).
     base: usize,
-    /// Running its query again reaches any earlier row as PostgreSQL's executor scanning
-    /// backward or rewinding does (a scrollable plan, nothing volatile, no row locks, rows as
-    /// returned): a SCROLL cursor streams too, and moving back runs the query again
-    /// (ExecutorRewind) up to the row.
+    /// An immutable plain scan may restart once to reach discarded rows. After that
+    /// restart it keeps rows, so backward fetches never rescan each prefix.
     rerun: bool,
     /// Its rows are the query's as returned, not under a target list or qual evaluated as
     /// rows are passed, and it runs no writing query to completion: it may stream.
     plain: bool,
     /// A simply updatable cursor: its table and each row's storage key (`WHERE CURRENT OF`).
     pub keys: Option<(u32, Vec<Arc<[u8]>>)>,
+    /// A streamed cursor keeps only the key at its current position.
+    current_key: Option<Arc<[u8]>>,
+    /// The first multi-scan key identifies duplicate locking references independently
+    /// of whether earlier rows have been discarded.
+    multi_reference: Option<Arc<[u8]>>,
     /// The executor's position: 0 = before the first row, k = on row k, rows.len()+1 = after
     /// the last (once the query is known to be done).
     pub pos: usize,
@@ -597,6 +600,8 @@ impl Cursor {
             rerun: false,
             plain: false,
             keys: key_table.map(|t| (t, Vec::new())),
+            current_key: None,
+            multi_reference: None,
             pos: 0,
             portal_pos: 0,
             at_start: true,
@@ -636,7 +641,7 @@ impl Cursor {
         let mut c = Cursor::new(cols, Vec::new(), key_table, hold, scroll, text, created);
         c.projected = lazy.project.is_some();
         c.plain = lazy.project.is_none() && lazy.qual.is_none() && !lazy.fill;
-        c.rerun = scroll && c.plain && scrollable(&lazy.plan) && !crate::sql::explain::plan_volatile_deep(&lazy.plan);
+        c.rerun = scroll && c.plain && replayable(&lazy.plan);
         c.lazy = Some(lazy);
         c
     }
@@ -647,7 +652,7 @@ impl Cursor {
         let projected = self.projected;
         if let Some((_, keys)) = &mut self.keys {
             let key = if projected { None } else { r.pop() };
-            keys.push(match key {
+            let key = match key {
                 Some(Value::Bytea(k)) => k,
                 Some(Value::Array(a)) if a.elem == DataType::Bytea => multi_key(&a.items),
                 Some(v) => {
@@ -655,7 +660,11 @@ impl Cursor {
                     Arc::from(&[][..])
                 }
                 None => Arc::from(&[][..]),
-            });
+            };
+            if self.multi_reference.is_none() && key.starts_with(&MULTI_KEY) {
+                self.multi_reference = Some(key.clone());
+            }
+            keys.push(key);
         }
         self.rows.push(r);
     }
@@ -694,8 +703,9 @@ impl Cursor {
             let r = ex.coerce(r, ctx)?;
             self.push_row(r);
         }
-        self.rows.drain(..i);
-        self.base = i;
+        // Retain this prefix and every later row: only the first backward fetch
+        // restarts the query, including FETCH BACKWARD ALL and repeated rewinds.
+        self.rerun = false;
         Ok(())
     }
 
@@ -723,11 +733,19 @@ impl Cursor {
             if i < self.base {
                 self.rerun_to(ex.as_deref_mut(), ctx, i)?;
             }
-            // (The row goes out as it is; those before it go.)
-            let r = std::mem::take(&mut self.rows[i - self.base]);
-            self.rows.drain(..=i - self.base);
-            self.base = i + 1;
-            return Ok(r);
+            if self.streams() {
+                // Rows and keys use the same base; retain just the current key for
+                // WHERE CURRENT OF after the fetched row has left the portal.
+                let offset = i - self.base;
+                let r = std::mem::take(&mut self.rows[offset]);
+                self.rows.drain(..=offset);
+                if let Some((_, keys)) = &mut self.keys {
+                    self.current_key = Some(keys[offset].clone());
+                    keys.drain(..=offset);
+                }
+                self.base = i + 1;
+                return Ok(r);
+            }
         }
         let Some(ex) = ex.filter(|e| e.project.is_some() || e.qual.is_some()) else {
             return Ok(self.rows[i].clone());
@@ -746,6 +764,9 @@ impl Cursor {
                     keys[i] = multi_key(&a.items)
                 }
                 _ => {}
+            }
+            if self.multi_reference.is_none() && keys[i].starts_with(&MULTI_KEY) {
+                self.multi_reference = Some(keys[i].clone());
             }
         }
         let r = ex.coerce(r, ctx)?;
@@ -1124,7 +1145,12 @@ impl Cursor {
             while let Some(r) = c.step(ex.as_deref_mut(), ctx, true)? {
                 rows.push(r);
                 if let Some((_, k)) = &c.keys {
-                    keys.push(k[c.pos - 1].clone());
+                    let key = if c.pos <= c.base {
+                        c.current_key.as_ref().expect("streamed current key")
+                    } else {
+                        &k[c.pos - 1 - c.base]
+                    };
+                    keys.push(key.clone());
                 }
             }
             Ok((rows, keys))
@@ -1134,6 +1160,7 @@ impl Cursor {
         }
         self.projected = false;
         self.last = None;
+        self.current_key = None;
         self.rows = rows;
         self.base = 0;
         self.plain = false;
@@ -1201,8 +1228,7 @@ impl Cursor {
         };
         if *t == 0 {
             let marked = |k: &[u8]| split_multi_key(k).into_iter().filter(|x| of_table(x)).count();
-            let any = keys.iter().find(|k| k.starts_with(&MULTI_KEY));
-            match any.map(|k| marked(k)) {
+            match self.multi_reference.as_ref().map(|k| marked(k)) {
                 Some(0) => return Err(not_simple()),
                 None | Some(1) => {}
                 Some(_) => {
@@ -1218,13 +1244,17 @@ impl Cursor {
         } else if self.simple.is_none() && *t != table && !cat.inheritors(*t).contains(&table) {
             return Err(not_simple());
         }
-        if self.pos == 0 || self.pos > keys.len() {
+        if self.pos == 0 || self.pos > self.produced() {
             return Err(Error::new(
                 code::INVALID_CURSOR_STATE,
                 format!("cursor \"{name}\" is not positioned on a row"),
             ));
         }
-        let key = keys[self.pos - 1].clone();
+        let key = if self.pos <= self.base {
+            self.current_key.clone().ok_or_else(|| crate::error::internal("missing cursor current key"))?
+        } else {
+            keys[self.pos - 1 - self.base].clone()
+        };
         let key: Arc<[u8]> = if key.starts_with(&MULTI_KEY) {
             match split_multi_key(&key).into_iter().find(|k| of_table(k)) {
                 Some(k) => Arc::from(k),
@@ -1238,6 +1268,47 @@ impl Cursor {
             .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
         Ok((of.is_none_or(|o| o == table)).then_some(key))
     }
+}
+
+/// Restarting is safe only for immutable expressions over ordinary stored rows.
+/// Function/CTE scans and sorts keep executor state even when their functions are STABLE.
+fn replayable(plan: &Plan) -> bool {
+    let shape = match plan {
+        Plan::Scan(s) => s.mark.is_none() && s.sample.is_none() && !s.table.is_foreign(),
+        Plan::Filter { input, .. } | Plan::Project { input, .. } | Plan::Limit { input, .. } => replayable(input),
+        Plan::Append { inputs, .. } => inputs.iter().all(|p| replayable(p)),
+        _ => false,
+    };
+    if !shape {
+        return false;
+    }
+    let mut exprs = Vec::new();
+    crate::sql::explain::node_exprs(plan, &mut exprs);
+    if let Plan::Scan(s) = plan {
+        fn bounds<'a>(b: &'a crate::sql::plan::IndexBounds, out: &mut Vec<&'a Expr>) {
+            out.extend(&b.eq);
+            out.extend(b.any.as_ref());
+            out.extend(b.lower.iter().map(|(e, _)| e));
+            out.extend(b.upper.iter().map(|(e, _)| e));
+            out.extend(b.order.iter().map(|k| &k.expr));
+            if let Some(skip) = &b.skip {
+                bounds(&skip.bounds, out);
+            }
+        }
+        if let Some((_, b)) = &s.index {
+            bounds(b, &mut exprs);
+        }
+        exprs.extend(s.current_of.as_ref());
+    }
+    exprs.into_iter().all(|e| {
+        let mut safe = e.is_immutable();
+        e.walk(&mut |x| match x {
+            Expr::Subquery(_) => safe = false,
+            Expr::Call(f, ..) if f.oid >= 16384 => safe = false,
+            _ => {}
+        });
+        safe
+    })
 }
 
 /// Whether a cursor over `plan` is scrollable when declared without [NO] SCROLL: PostgreSQL's
@@ -1258,6 +1329,11 @@ pub fn scrollable(plan: &Plan) -> bool {
                         _ => true,
                     }
             }
+            // The binder represents a non-inlined FROM call as a Join carrying
+            // FromCall; EXPLAIN exposes the same node as Function Scan.
+            Plan::Join { meta, .. } if meta.from_call.is_some() => true,
+            Plan::Join { left, right, cond: None, hash: None, nleft: 0, .. }
+                if matches!(&**left, Plan::One) => go(right),
             Plan::SysScan { .. }
             | Plan::FunctionScan { .. }
             | Plan::PlCall { .. }

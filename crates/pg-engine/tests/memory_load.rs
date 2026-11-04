@@ -300,3 +300,48 @@ fn hash_join_spilling_bounds_the_build_heap() {
     assert!(spilled < 16 << 20, "spilled build used {spilled} bytes");
     assert!(memory > spilled * 2, "spilling did not bound the build: {spilled} vs {memory}");
 }
+
+#[test]
+fn streaming_cursor_bounds_keys_and_backward_work() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = common::engine_session(common::open_store(dir.path()), "cursor_memory");
+    for sql in [
+        "CREATE TABLE cm (id int primary key)",
+        "INSERT INTO cm SELECT g FROM generate_series(1, 100000) g",
+        "SET max_parallel_workers_per_gather = 0",
+        "SELECT sum(id) FROM cm",
+        "BEGIN",
+        "DECLARE warm NO SCROLL CURSOR FOR SELECT id FROM cm",
+        "MOVE ALL FROM warm",
+        "CLOSE warm",
+        "DECLARE c NO SCROLL CURSOR FOR SELECT id FROM cm",
+        "MOVE 1000 FROM c",
+    ] {
+        s.query(sql).unwrap();
+    }
+    let before = MINE.with(|m| m.get());
+    for _ in 0..98 {
+        s.query("MOVE 1000 FROM c").unwrap();
+    }
+    let retained = MINE.with(|m| m.get()) - before;
+    eprintln!("streamed cursor retained {retained} bytes after 98000 additional rows");
+    assert!(retained < 1 << 20, "cursor retained row keys: {retained} bytes");
+    // The current key must survive pruning and still target the last fetched row.
+    s.query("UPDATE cm SET id = -id WHERE CURRENT OF c").unwrap();
+    assert_eq!(s.query("SELECT id FROM cm WHERE id < 0").unwrap().pop().unwrap().rows,
+        vec![vec![pg_engine::types::Value::Int4(-99000)]]);
+    s.query("ROLLBACK").unwrap();
+    s.query("BEGIN").unwrap();
+    s.query("DECLARE b SCROLL CURSOR FOR SELECT id FROM cm LIMIT 20000").unwrap();
+    s.query("MOVE ALL FROM b").unwrap();
+    let start = std::time::Instant::now();
+    let r = s.query("FETCH BACKWARD ALL FROM b").unwrap().pop().unwrap();
+    assert_eq!(r.rows.len(), 20000);
+    assert_eq!(r.rows[0], vec![pg_engine::types::Value::Int4(20000)]);
+    assert_eq!(r.rows[19999], vec![pg_engine::types::Value::Int4(1)]);
+    let elapsed = start.elapsed();
+    eprintln!("backward fetch of 20000 rows took {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(10), "backward fetch rescanned prefixes: {elapsed:?}");
+    s.query("ROLLBACK").unwrap();
+}

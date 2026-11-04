@@ -1,7 +1,7 @@
 -- Cursors stream their rows (a165): a NO SCROLL cursor keeps none it passed and can't go back;
--- a scrollable one over a plan without volatile functions reaches earlier rows by running its
--- query again (as PostgreSQL's executor scans backward or rewinds); holdable cursors keep
--- their rows at commit.
+-- a scrollable immutable scan may restart once for a backward fetch, then keeps its rows;
+-- materialized function/sort/CTE nodes keep rows from their first execution. Holdable cursors
+-- keep their rows at commit.
 create table a165_cs (a int primary key, b text);
 insert into a165_cs select g, 'r' || g from generate_series(1, 50) g;
 begin;
