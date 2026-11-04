@@ -1,0 +1,32 @@
+{
+  "recorded_utc": "2026-11-04T15:53:26.255516+00:00",
+  "shared_head": "fe7b0023c9df19a6dae1e6067ba8454998db48c5",
+  "shared_clean": true,
+  "independent165": {
+    "source": "ab3f64b8dd92203123f6777ae4a6028d3a3aae67",
+    "restored_receipt": "ab3f64b8dd92203123f6777ae4a6028d3a3aae67",
+    "mixed_focus_wire": "FAILED101 retained: 66 pass / 1 fail, 28.455601813 s against unchanged 20 s gate",
+    "isolated_comparison": "owner reported candidate/shared/candidate PASS; no causal attribution",
+    "expected_counts": [
+      453,
+      0,
+      18,
+      60
+    ],
+    "count_manifest_sha256": "a8f76370c874a10b7c62f85e3c62d15ab9fc2400710373407ba159a7e7e23b15",
+    "full_gate": "RUNNING owner-reported PID593206; no terminal conclusion",
+    "service_acceptance": false,
+    "pg_engine_execution_by_pnpm_unit": false,
+    "evidence_backup_owner_report": "12848cfa6da08d402193fb4d368816982bb8de65"
+  },
+  "index163": {
+    "source": "483b4d6e5d41e9025aaa518d5774abd7971f4204",
+    "review": "completed static R3; no new HIGH/MEDIUM; concurrent N1 fixed",
+    "review_file": "index-source-review-r3-result.json",
+    "combined163_170": "HIGH remains held",
+    "vacuum_post_toast": "separate correctness gap remains held; no baseline attribution"
+  },
+  "owner_payloads_parent_audit": "final-owner-payloads-parent-audit.json",
+  "overall_acceptance": "HELD",
+  "new_builds_services_or_benchmarks_by_parent": false
+}

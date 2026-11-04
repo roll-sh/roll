@@ -1,0 +1,40 @@
+{
+  "status": "PASS",
+  "bundles": [
+    {
+      "commit": "76480426493b24ef0de97f6d43c3cd6db2cd30d3",
+      "ref": "wip/resume-20261104-a163-review-cic-final2",
+      "manifest": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-final2/manifest.json",
+      "manifest_sha256": "1a98fc9628a768542101c281feb2c5ec74c3f2caef18f1c4c81dabf81dcbf617",
+      "payloads": 113,
+      "bytes": 1096302,
+      "closed_membership": true,
+      "remote_exact": true
+    },
+    {
+      "commit": "915b51b561f57a865c52e19f3aebf4fdab2d5706",
+      "ref": "wip/resume-20261104-a166",
+      "manifest": "crates/pg-engine/results/2026-11-04/resume-owner166/followup-keys/manifest.json",
+      "manifest_sha256": "3cef7e83df213c321e534e3b85e1b9665bd85683bc7783402872c97f148d01e5",
+      "payloads": 86,
+      "bytes": 675026,
+      "closed_membership": true,
+      "remote_exact": true
+    },
+    {
+      "commit": "915b51b561f57a865c52e19f3aebf4fdab2d5706",
+      "ref": "wip/resume-20261104-a166",
+      "manifest": "crates/pg-engine/results/2026-11-04/resume-owner166/review-repro/manifest.json",
+      "manifest_sha256": "b8aaf4206f46540a44a274e8381a0892e62163704444e30c1dcadd6ee87dca41",
+      "payloads": 152,
+      "bytes": 408350,
+      "closed_membership": true,
+      "remote_exact": true
+    }
+  ],
+  "payloads": 351,
+  "missing": 0,
+  "mismatch": 0,
+  "shared_head": "fe7b0023c9df19a6dae1e6067ba8454998db48c5",
+  "shared_status_unchanged": true
+}
