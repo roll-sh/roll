@@ -1,0 +1,54 @@
+{
+  "time": "2026-11-04T19:21:07.225256+00:00",
+  "shared_source": "fe7b0023c9df19a6dae1e6067ba8454998db48c5",
+  "integration": "HELD; no owner sources integrated in this turn",
+  "performance": "NO broad performance acceptance",
+  "lanes": {
+    "165": {
+      "source": "c8618834",
+      "owner_report": "debug/release455pass18ignored61summaries each; Clippy0 with historical14diagnostic multiset; dist active last report/unitpending",
+      "limits": "Earlier wire101 and R2 LOWs retained; source/fullterminal acceptance pending"
+    },
+    "167": {
+      "source": "d9e2279c",
+      "focused": "PASS golden3modes/reordered1/libClippy0 ownerseal7eff5c45",
+      "new_review": "R4 N1 static plausible MEDIUM nested InitPlan undercount; owner cache-only preparation assigned; reviewer stale runtime paragraphs corrected",
+      "full": "UNRUN on d9e; original278crash101/pgunitNOTRUN remain independent"
+    },
+    "170": {
+      "source": "1b6a80b9",
+      "focused": "PASS5+2+25/libClippy ownerseal a313c23a",
+      "review": "No newHIGH/MEDIUM in range; measured-parbuild rawheap sizing staticMEDIUM outside range now parent-owned; historicalphysicalfidelity held",
+      "full": "UNRUN on successor"
+    },
+    "163_combined": {
+      "candidate": "e25c258e verified38blobs/remote; encoding fix successor in preparation",
+      "corrected_red": "b43e47a5 compile FAILED101 E0283; ZERO TESTS; all2501sourcehashes unchanged",
+      "runtime_HIGH": "OPEN; actualworker proof not obtained",
+      "active_tasks": [
+        "encoding boundary fix + tuple compile annotation",
+        "fresh proof/stats incremental review"
+      ],
+      "target": "a170 existing target parent-reserved; no compile currently active"
+    },
+    "166": {
+      "bounded": "PASS",
+      "acceptance": "coverage/perf/finalintegration pending"
+    },
+    "169": {
+      "correctness": "PASS",
+      "performance": "HOLD/INCONCLUSIVE memory/indexoutlier/close topology"
+    },
+    "148": {
+      "performance": "HOLD/INCONCLUSIVE invalidfalsezero"
+    },
+    "149": {
+      "correctness": "focused endpointPASS",
+      "performance": "originalDDL101 unresolved; isolatedtargetNOTRUN/DEFERRED"
+    },
+    "171": "Queued after165",
+    "172": "Baseline/research closure queued"
+  },
+  "crash_diagnostic": "Preparation ONLY; independent staticreview launched, no compile/parsercontrols/probes/rerun",
+  "latest_parent_backup": "0d92fb1c1e9183a29eb6740d6057946c6fdee007 (first combined compile failure and revised successor evidence)"
+}

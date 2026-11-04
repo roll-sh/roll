@@ -1,0 +1,14 @@
+{
+  "time": "2026-11-04T19:19:06.569839+00:00",
+  "source": "d9e2279c",
+  "review": "executor-source-review-r4-result.json",
+  "runtime_erratum": "Review runtime paragraphs predate owner seal7eff5c45; d9e focused golden3modes/reordered1/libClippy PASS remain valid. Full gates UNRUN. No need to rerun already-passed focused checks without new change.",
+  "new_finding": "N1 MEDIUM nested InitPlan undercount is static and plausible; independent of stale runtime status. Cache-only owner hypothesis/fixture requested; no heavy probes.",
+  "other_holds": [
+    "N2 local WITH rewind semantics",
+    "N3 expression omissions",
+    "Materialize mismatch",
+    "278 crash101 and pgunit NOT RUN"
+  ],
+  "parent_target": "a170 target reserved for combined proof; b43 compile101 zero tests preserved; new corrected-red definition pending"
+}
