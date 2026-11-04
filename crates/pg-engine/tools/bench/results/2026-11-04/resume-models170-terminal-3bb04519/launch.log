@@ -1,0 +1,12 @@
+{"name": "index-progress-current", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "maintenance-current", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "golden-current", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "models-current", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "build", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "debug", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "release", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "clippy", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "crash30", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "postgres-unit", "exit": 0, "expected_summary": true, "pass": true}
+BATCH_CHECKS_PASSED
+HEAVY-EXIT 0

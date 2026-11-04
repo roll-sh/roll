@@ -1,0 +1,26 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a0718617fe2ff9006/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 52.10s
+     Running unittests src/lib.rs (/home/meszmate/.cache/a170/target/debug/deps/pg_engine-357a2b04731fc140)
+
+running 2 tests
+
+thread 'exec::sizing::kept::tests::missing_tree_discards_header_before_row_rebuild' (3083564) panicked at crates/pg-engine/src/exec/sizing/kept.rs:669:13:
+assertion failed: sizes_read(&ctx.sess.db.relfiles.of(t.oid).read(), t.oid).is_none()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test exec::sizing::kept::tests::missing_tree_discards_header_before_row_rebuild ... FAILED
+
+thread 'exec::sizing::kept::tests::header_pages_are_available_before_layout' (3083563) panicked at crates/pg-engine/src/exec/sizing/kept.rs:642:13:
+assertion `left == right` failed
+  left: None
+ right: Some(11)
+test exec::sizing::kept::tests::header_pages_are_available_before_layout ... FAILED
+
+failures:
+
+failures:
+    exec::sizing::kept::tests::header_pages_are_available_before_layout
+    exec::sizing::kept::tests::missing_tree_discards_header_before_row_rebuild
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 189 filtered out; finished in 0.46s
+
+error: test failed, to rerun pass `-p pg-engine --lib`
