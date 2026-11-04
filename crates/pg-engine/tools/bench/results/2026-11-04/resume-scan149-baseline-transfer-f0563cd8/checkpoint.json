@@ -1,0 +1,7 @@
+{
+  "head": "2a854a48074dbd3317807f634a773f29540b2673",
+  "tree": "7b41c62e7ca291f3f349ec68838dff1ab5f3b34d",
+  "status": "",
+  "time_utc": "2026-11-04T12:34:23.663070+00:00",
+  "note": "LIMITED COMPARISON ONLY. Prior pinned sourcef0563cd8 passed ONE transfer trial,1pass/0fail. This does NOT clear or weaken candidate2a854a48 real sum6003 correctness failure. Baseline job terminal and work-a149 restored unchanged2a854a48 before publication. No duplicated SSI probes; attribution remains unresolved."
+}

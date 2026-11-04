@@ -1,0 +1,17 @@
+{
+  "source": {
+    "head": "f0563cd8687f155ec8d31cf47d8fa891a11d0c72",
+    "tree": "099752e3ba57f5bda27083ae33489f3453ceb734",
+    "status": "",
+    "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "artifacts": {
+    "/home/meszmate/.cache/a149/target/debug/deps/app_concurrency-92d70bfa5da59eb5": {
+      "sha256": "be1f28e5d2c1f24d135b5774942bb9e07e1b4344ff8553e2c4131b8206984f9c",
+      "bytes": 329677648,
+      "mtime_ns": 1793795537661826376,
+      "stage": "transfer"
+    }
+  },
+  "limitation": "Hashes captured after completed stages; original execution logs retain source pin and binary paths."
+}
