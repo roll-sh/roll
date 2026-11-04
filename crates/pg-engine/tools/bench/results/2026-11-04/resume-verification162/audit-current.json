@@ -1,0 +1,23 @@
+{
+  "tested_head": "3997cf00a2a301fed65f00469625ff14f223f227",
+  "production_candidate": "6493cf49a1e29a1914270c530956504faa6bb0e4",
+  "source_gates": {
+    "build": "0",
+    "release": "0",
+    "debug": "START"
+  },
+  "parity_gates": {},
+  "summaries": {
+    "release": {
+      "passed": 451,
+      "failed": 0,
+      "ignored": 18,
+      "summaries": 60
+    }
+  },
+  "source_complete": false,
+  "parity_complete": false,
+  "full_service_complete": false,
+  "fdw_performance": "INCONCLUSIVE: no accepted new timing",
+  "global_postgres_superiority": false
+}

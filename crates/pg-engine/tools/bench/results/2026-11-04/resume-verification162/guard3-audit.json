@@ -1,0 +1,76 @@
+{
+  "status": "PASS: successful test summaries and complete 600-seed work; mismatches remain",
+  "base_commit": "31066020",
+  "head_commit": "63f7c0b4",
+  "new_lines": [],
+  "gone_lines": [
+    "  [wrong_rows] seed 9008 #149: 2 vs 2 rows",
+    "  [wrong_rows] seed 9010 #6: 4 vs 4 rows",
+    "  [wrong_rows] seed 9015 #58: 3 vs 3 rows",
+    "  [wrong_rows] seed 9019 #33: 4 vs 4 rows",
+    "  [wrong_rows] seed 9019 #36: 3 vs 3 rows",
+    "  [wrong_rows] seed 9023 #125: 4 vs 4 rows",
+    "  [wrong_rows] seed 9057 #97: 4 vs 4 rows",
+    "  [wrong_rows] seed 9059 #111: 1 vs 1 rows",
+    "  [wrong_rows] seed 9060 #53: 5 vs 5 rows",
+    "  [wrong_rows] seed 9066 #147: 4 vs 4 rows",
+    "  [wrong_rows] seed 9066 #149: 3 vs 3 rows",
+    "  [wrong_rows] seed 9068 #150: 3 vs 3 rows",
+    "  [wrong_rows] seed 9072 #155: 1 vs 1 rows",
+    "  [wrong_rows] seed 9075 #144: 3 vs 3 rows",
+    "  [wrong_rows] seed 9086 #152: 2 vs 2 rows",
+    "  [wrong_rows] seed 9090 #7: 3 vs 3 rows",
+    "  [wrong_rows] seed 9091 #138: 3 vs 3 rows",
+    "  [wrong_rows] seed 9092 #140: 2 vs 2 rows",
+    "  [wrong_rows] seed 9097 #12: 2 vs 2 rows",
+    "  [wrong_rows] seed 9099 #111: 3 vs 3 rows",
+    "  [wrong_rows] seed 9104 #105: 4 vs 4 rows",
+    "  [wrong_rows] seed 9105 #126: 2 vs 2 rows",
+    "  [wrong_rows] seed 9126 #148: 3 vs 3 rows",
+    "  [wrong_rows] seed 9131 #112: 1 vs 1 rows",
+    "  [wrong_rows] seed 9134 #100: 5 vs 5 rows",
+    "  [wrong_rows] seed 9137 #155: 3 vs 3 rows",
+    "  [wrong_rows] seed 9141 #121: 2 vs 2 rows"
+  ],
+  "runs": [
+    {
+      "label": "base",
+      "log": "/home/meszmate/.cache/a162/guard3/out/base/run.log",
+      "sha256": "af36d05f471bb7128dbf7148745051e8c20814c21efb3cbd1a1e94f826ed2a55",
+      "summary": [
+        "difftest: seeds=600 statements=93717 queries=25640 both_error=17248 plan_runs=5421 oracle_runs=4996 secs=817 wrong_rows=132 wrong_order=1 engine_error=41 missing_error=21 wrong_error=24 eval_error=12 error_message=30 tag=1 error_detail=155"
+      ],
+      "test_result": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 816.57s"
+      ]
+    },
+    {
+      "label": "head",
+      "log": "/home/meszmate/.cache/a162/guard3/out/head/run.log",
+      "sha256": "b6c527930383606310247bb5719e182a1c32a59d2b280884d5d1a46a54bdac6d",
+      "summary": [
+        "difftest: seeds=600 statements=93717 queries=25640 both_error=17248 plan_runs=5421 oracle_runs=4996 secs=1108 wrong_rows=103 wrong_order=1 engine_error=41 missing_error=21 wrong_error=24 eval_error=12 error_message=30 tag=1 error_detail=155"
+      ],
+      "test_result": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 1108.15s"
+      ]
+    },
+    {
+      "label": "head_smoke",
+      "log": "/home/meszmate/.cache/a162/guard3/out/head_smoke/run.log",
+      "sha256": "1b935057854da990ed9ba8a090bfaae676c31b7e348b652b6ae985eb329bbda6",
+      "summary": [
+        "difftest: seeds=25 statements=2000 queries=1691 both_error=502 plan_runs=309 oracle_runs=347 secs=21 missing_error=2 wrong_error=2 eval_error=6 error_message=10 error_detail=35",
+        "difftest: seeds=1 statements=74 queries=58 both_error=23 plan_runs=6 oracle_runs=15 secs=1 eval_error=1 error_detail=3",
+        "difftest: seeds=1 statements=35 queries=28 both_error=9 plan_runs=4 oracle_runs=6 secs=0 error_detail=1",
+        "difftest: seeds=1 statements=40 queries=32 both_error=12 plan_runs=6 oracle_runs=6 secs=1 eval_error=2 error_detail=2",
+        "difftest: seeds=1 statements=98 queries=61 both_error=13 plan_runs=14 oracle_runs=20 secs=2 eval_error=1 error_detail=2",
+        "difftest: seeds=1 statements=10 queries=8 both_error=1 plan_runs=1 oracle_runs=0 secs=1",
+        "difftest: seeds=1 statements=5 queries=2 both_error=2 plan_runs=1 oracle_runs=0 secs=0"
+      ],
+      "test_result": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 26.14s"
+      ]
+    }
+  ]
+}
