@@ -1,0 +1,15 @@
+{
+  "argv": [
+    "cargo",
+    "test",
+    "-p",
+    "pg-engine",
+    "--lib",
+    "combined_index_build_validation",
+    "--",
+    "--nocapture",
+    "--test-threads=1"
+  ],
+  "cwd": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-proof-r2/red-src",
+  "started": "2026-11-04T19:33:42.392985+00:00"
+}

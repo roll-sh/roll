@@ -1,0 +1,1 @@
+Parent attempted descendant affinity sample after red terminal. Assertion children nonempty failed; no child affinity values were asserted or saved. Startup assertions remain valid. No resource violation inferred.

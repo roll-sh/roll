@@ -1,0 +1,33 @@
+{
+  "time": "2026-11-04T19:38:21.109893+00:00",
+  "source": "b56ed0fb4c9a6113cfef09504e2b695a1cf17b70",
+  "command_exit": 101,
+  "actual_test_result": "0passed1failed",
+  "behavioral_red_observed": true,
+  "reason": "Parallel modeled oversized INCLUDE incorrectly accepted after serial54000; expected error panic",
+  "requested_reserved_spawned": [
+    2,
+    2,
+    2
+  ],
+  "participant_rows": [
+    1999,
+    2000,
+    2001
+  ],
+  "participant_validated": [
+    0,
+    0,
+    0
+  ],
+  "participant_model_returns": [
+    1999,
+    2000,
+    2001
+  ],
+  "gate_error": null,
+  "raw_sha256": "72d067e008adc4988a0211fbbb69da7890be4c6c4c8e245cc871c901267c9210",
+  "binary_sha256": "366b058ab4d004de4ad1bdc33bb5874a56bcfd3ac2701731d383c7cb60974476",
+  "scope": "Actual original-HIGH red only; no encoding/stats/minimum parity proof or source acceptance",
+  "resource_evidence": "Runner startup assertions8cpus/nice19/jobs2; attempted later descendant sample occurred after terminal and failed emptychildren assertion, so no descendant-lifetime affinity claim"
+}

@@ -1,0 +1,31 @@
+{
+  "time": "2026-11-04T19:33:42.249912+00:00",
+  "source": {
+    "commit": "b56ed0fb4c9a6113cfef09504e2b695a1cf17b70",
+    "files": 2501,
+    "all_match": true,
+    "manifest_sha256": "cfb151503793400b5c7c5d42762fc81a0fab9b52eea8b0de7f7947f85ae6d9b8"
+  },
+  "pid": 3073098,
+  "affinity": [
+    4,
+    5,
+    6,
+    7,
+    22,
+    23,
+    24,
+    25
+  ],
+  "nice": 19,
+  "environment": {
+    "CARGO_TARGET_DIR": "/home/meszmate/.cache/a170/target",
+    "CARGO_BUILD_JOBS": "2",
+    "RUST_TEST_THREADS": "2",
+    "CARGO_PROFILE_DEV_DEBUG": "line-tables-only",
+    "CARGO_PROFILE_TEST_DEBUG": null,
+    "RUSTFLAGS": null,
+    "TMPDIR": "/home/meszmate/.cache/a170/tmp"
+  },
+  "scope": "Test-only red reference; command failure will not be represented as source pass. No other gate launched."
+}
