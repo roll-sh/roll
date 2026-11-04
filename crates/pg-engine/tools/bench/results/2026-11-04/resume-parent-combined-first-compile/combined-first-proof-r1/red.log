@@ -1,0 +1,20 @@
+   Compiling pg-icu v0.1.0 (/home/meszmate/.cache/pg-engine-resume-20261104/combined-first-proof-r1/red-src/crates/pg-icu)
+   Compiling pg-snowball v0.1.0 (/home/meszmate/.cache/pg-engine-resume-20261104/combined-first-proof-r1/red-src/crates/pg-snowball)
+   Compiling pg-engine v0.1.0 (/home/meszmate/.cache/pg-engine-resume-20261104/combined-first-proof-r1/red-src/crates/pg-engine)
+error[E0283]: type annotations needed for `(_, std::string::String, &str, &str)`
+   --> crates/pg-engine/src/exec/sizing/kept.rs:708:17
+    |
+708 |             let (key, payload, unique, direction) = match case {
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+709 |                 BuildCase::Include(n) => ("g".into(), format!("CASE WHEN g=6000 THEN ci_text({n}) ELSE 'small' END"), "", ""),
+    |                                               ---- type must be known at this point
+    |
+    = note: the type must implement `std::convert::From<&str>`
+    = note: required for `&str` to implement `std::convert::Into<_>`
+help: consider giving this pattern a type, where the type for type parameter `T` is specified
+    |
+708 |             let (key, payload, unique, direction): (_, _, &_, &_) = match case {
+    |                                                  ++++++++++++++++
+
+For more information about this error, try `rustc --explain E0283`.
+error: could not compile `pg-engine` (lib test) due to 1 previous error

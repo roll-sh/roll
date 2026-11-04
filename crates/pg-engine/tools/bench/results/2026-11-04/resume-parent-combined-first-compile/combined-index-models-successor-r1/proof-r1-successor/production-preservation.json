@@ -1,0 +1,72 @@
+{
+  "status": "Static byte verification only; never compiled or run",
+  "checks": [
+    {
+      "label": "candidate",
+      "before": "4e588363d065aa9f12dc1b987d22dbf6742dcb9f",
+      "after": "ca45637beccaf8d4183ae1eb2bafc7227b9dd355",
+      "changed_source_paths": [
+        {
+          "path": "crates/pg-engine/src/exec/rowsize/observe.rs",
+          "before_blob": "bc32e40fb38b67c50acc08dda072e83e03e2376c",
+          "after_blob": "5208dc16113d6d712f315a2a78a329ba118e763d",
+          "production_projection_before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "production_projection_after_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "production_bytes_equal": true
+        },
+        {
+          "path": "crates/pg-engine/src/exec/sizing/kept.rs",
+          "before_blob": "d40874aac0150213267c563e20984899a601acac",
+          "after_blob": "cdb34e8491d2d0e0f67f960589648347d31d3608",
+          "production_projection_before_sha256": "b5238f33a13adf49b9046dad45395223b8ee145235a5e88624958f0408afb4f8",
+          "production_projection_after_sha256": "b5238f33a13adf49b9046dad45395223b8ee145235a5e88624958f0408afb4f8",
+          "production_bytes_equal": true
+        },
+        {
+          "path": "crates/pg-engine/src/session/ddl/parbuild.rs",
+          "before_blob": "ae9c24d7cb4875e35089818ed4bb7ed52f67d46b",
+          "after_blob": "868d35b75d8b7713434f6495ee946ba01ff8421c",
+          "production_projection_before_sha256": "4016e2cad0795c0d967514ba101ae1f8a99da369addb8b35b9c6efa1a6b5d77f",
+          "production_projection_after_sha256": "4016e2cad0795c0d967514ba101ae1f8a99da369addb8b35b9c6efa1a6b5d77f",
+          "production_bytes_equal": true
+        }
+      ],
+      "all_other_paths_have_identical_blobs": true,
+      "projection": "Exclude the wholly cfg(test) observer module, existing kept::tests tail, and outer cfg(test) if-first block only. Remaining bytes compare exactly."
+    },
+    {
+      "label": "red",
+      "before": "b4dfee71aafd1c291ebccaf5e44173ada3474029",
+      "after": "b43e47a5ba581ac72254d15f39bf7ae4389f35b3",
+      "changed_source_paths": [
+        {
+          "path": "crates/pg-engine/src/exec/rowsize/observe.rs",
+          "before_blob": "3c15db106f40919a139adac0b572d4b822c11813",
+          "after_blob": "be0c5ac6493c700678c74838046e1e67cda6e2a5",
+          "production_projection_before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "production_projection_after_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "production_bytes_equal": true
+        },
+        {
+          "path": "crates/pg-engine/src/exec/sizing/kept.rs",
+          "before_blob": "f6c53e9ec7068f9f525a86063f11ef673da271f5",
+          "after_blob": "c44e5e3fd815367a1f9df87aa69549c64d347d77",
+          "production_projection_before_sha256": "b5238f33a13adf49b9046dad45395223b8ee145235a5e88624958f0408afb4f8",
+          "production_projection_after_sha256": "b5238f33a13adf49b9046dad45395223b8ee145235a5e88624958f0408afb4f8",
+          "production_bytes_equal": true
+        },
+        {
+          "path": "crates/pg-engine/src/session/ddl/parbuild.rs",
+          "before_blob": "b8d26f376f13b5ac7f73471bdce35d6b0659cab7",
+          "after_blob": "edc896ea654965a967f5ba1c7be25f46ae62214c",
+          "production_projection_before_sha256": "2fa071a47a806617bb2fdbbd7cd4c793538fa754982584123fdc4441a4391c87",
+          "production_projection_after_sha256": "2fa071a47a806617bb2fdbbd7cd4c793538fa754982584123fdc4441a4391c87",
+          "production_bytes_equal": true
+        }
+      ],
+      "all_other_paths_have_identical_blobs": true,
+      "projection": "Exclude the wholly cfg(test) observer module, existing kept::tests tail, and outer cfg(test) if-first block only. Remaining bytes compare exactly."
+    }
+  ],
+  "red_Plan_row_matches_b4_sha256": "afddf22c43ba9ed829b115eb4aae87b68c2500e209cf6c4b69c5f441f3adc6c2"
+}

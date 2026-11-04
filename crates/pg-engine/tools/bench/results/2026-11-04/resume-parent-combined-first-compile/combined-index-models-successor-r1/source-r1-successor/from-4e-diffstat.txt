@@ -1,0 +1,6 @@
+ crates/pg-engine/src/exec/dml.rs             |  6 +-
+ crates/pg-engine/src/exec/rowsize.rs         |  6 ++
+ crates/pg-engine/src/exec/rowsize/observe.rs | 26 +++++---
+ crates/pg-engine/src/exec/sizing/kept.rs     | 93 ++++++++++++++++++++++++++--
+ crates/pg-engine/src/session/ddl/parbuild.rs |  6 +-
+ 5 files changed, 118 insertions(+), 19 deletions(-)

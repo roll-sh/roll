@@ -1,0 +1,14 @@
+{
+  "finished": "2026-11-04T19:14:42.963121+00:00",
+  "command_exit": 101,
+  "source_after": {
+    "commit": "b43e47a5ba581ac72254d15f39bf7ae4389f35b3",
+    "files": 2501,
+    "all_match": true,
+    "manifest_sha256": "d694a95892042a9de1fb87e2cf4c6938f634a19db8309d6a2f3c3a545711e6c6"
+  },
+  "raw_sha256": "44554d503591ca80a16c80b87ff3fc99a6c95785090cf8a399b0b673ac06a002",
+  "binary": [],
+  "test_summaries": [],
+  "assessment": "UNASSESSED; raw compile/test result must be inspected; expected-red is not source pass"
+}

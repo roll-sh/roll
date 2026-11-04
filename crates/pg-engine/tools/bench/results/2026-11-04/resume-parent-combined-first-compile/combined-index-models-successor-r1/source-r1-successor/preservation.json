@@ -1,0 +1,195 @@
+{
+  "base": "fe7b0023c9df19a6dae1e6067ba8454998db48c5",
+  "checks": [
+    {
+      "check": "untouched full blob",
+      "path": "crates/pg-engine/src/storage/sst.rs",
+      "before_sha256": "03f3db697d03d416e89bbd737eb89c175086f2c2724e99eef1b9060021e5b84e",
+      "after_sha256": "03f3db697d03d416e89bbd737eb89c175086f2c2724e99eef1b9060021e5b84e",
+      "equal": true
+    },
+    {
+      "check": "untouched full blob",
+      "path": "crates/pg-engine/src/repl/decode.rs",
+      "before_sha256": "47cedaf5f0108992e7ba1442a5c12f2b6a86eba5d829dc7ab2739be7e53ea105",
+      "after_sha256": "47cedaf5f0108992e7ba1442a5c12f2b6a86eba5d829dc7ab2739be7e53ea105",
+      "equal": true
+    },
+    {
+      "check": "untouched full blob",
+      "path": "crates/pg-engine/src/types/binary.rs",
+      "before_sha256": "68dab9dd0be11a91543f49f10455953fc9fb85ab3171b120805e7ae53f4a07c1",
+      "after_sha256": "68dab9dd0be11a91543f49f10455953fc9fb85ab3171b120805e7ae53f4a07c1",
+      "equal": true
+    },
+    {
+      "check": "untouched full blob",
+      "path": "crates/pg-engine/tests/sql/a162_stats_dead.sql",
+      "before_sha256": "e58df0ee85f51d791dd9308e31d458e5a280972643e458a37eb0b097d7ff4c1b",
+      "after_sha256": "e58df0ee85f51d791dd9308e31d458e5a280972643e458a37eb0b097d7ff4c1b",
+      "equal": true
+    },
+    {
+      "check": "untouched full blob",
+      "path": "crates/pg-engine/tests/sql/a162_stats_dead.out",
+      "before_sha256": "79c6eec2e25796fb55c04c3f1a88846522e7079d8855c70e93aa4b8691243827",
+      "after_sha256": "79c6eec2e25796fb55c04c3f1a88846522e7079d8855c70e93aa4b8691243827",
+      "equal": true
+    },
+    {
+      "check": "COPY loads/loading fields",
+      "path": "crates/pg-engine/src/txn/mod.rs",
+      "before_sha256": "5747a5bfb4724f26d760547c0df7fba0bed5e9c44a8b4a3cd87c2a3f790e5eb0",
+      "after_sha256": "5747a5bfb4724f26d760547c0df7fba0bed5e9c44a8b4a3cd87c2a3f790e5eb0",
+      "equal": true
+    },
+    {
+      "check": "COPY Loading type",
+      "path": "crates/pg-engine/src/txn/mod.rs",
+      "before_sha256": "c545b88f3e4d46965ccd5f92925020757bf75399a06765a9d225c488bf528c15",
+      "after_sha256": "c545b88f3e4d46965ccd5f92925020757bf75399a06765a9d225c488bf528c15",
+      "equal": true
+    },
+    {
+      "check": "COPY put_fresh whole function",
+      "path": "crates/pg-engine/src/txn/mod.rs",
+      "before_sha256": "d1a823384b77e2d7e67809656cbc45577995f59b1ef5b5ce36f33dcb59ace729",
+      "after_sha256": "d1a823384b77e2d7e67809656cbc45577995f59b1ef5b5ce36f33dcb59ace729",
+      "equal": true
+    },
+    {
+      "check": "COPY note_load whole function",
+      "path": "crates/pg-engine/src/txn/mod.rs",
+      "before_sha256": "bc59f2ab40a69731062df8075d642426d63faea4d1c55d80452ddcf5668be3b7",
+      "after_sha256": "bc59f2ab40a69731062df8075d642426d63faea4d1c55d80452ddcf5668be3b7",
+      "equal": true
+    },
+    {
+      "check": "COPY start_load whole function",
+      "path": "crates/pg-engine/src/txn/mod.rs",
+      "before_sha256": "700deaaa3e0bb7b926c9043501c4db30431271f95edfc32d891579278baa3951",
+      "after_sha256": "700deaaa3e0bb7b926c9043501c4db30431271f95edfc32d891579278baa3951",
+      "equal": true
+    },
+    {
+      "check": "read-once read_once function",
+      "path": "crates/pg-engine/src/storage/mod.rs",
+      "before_sha256": "ceb985dff337cf3fb2bfa9aa044fd85f8ef659e3774ff4135f0d731d98c9f265",
+      "after_sha256": "ceb985dff337cf3fb2bfa9aa044fd85f8ef659e3774ff4135f0d731d98c9f265",
+      "equal": true
+    },
+    {
+      "check": "read-once in_read_once function",
+      "path": "crates/pg-engine/src/storage/mod.rs",
+      "before_sha256": "25d03b911e9d126547ac7c0ad0ed89b908ff35f512889f9672e4388e7eb496e2",
+      "after_sha256": "25d03b911e9d126547ac7c0ad0ed89b908ff35f512889f9672e4388e7eb496e2",
+      "equal": true
+    },
+    {
+      "check": "ANALYZE accepted dead-row correction",
+      "path": "crates/pg-engine/src/session/ddl/vacuum.rs",
+      "before_sha256": "9f1c7d3223b73937798ac96ad27eafdc4142a4c9bf088ad08a6c7301e12e9f3f",
+      "after_sha256": "9f1c7d3223b73937798ac96ad27eafdc4142a4c9bf088ad08a6c7301e12e9f3f",
+      "equal": true
+    },
+    {
+      "check": "DML accepted failed-insert correction",
+      "path": "crates/pg-engine/src/exec/dml.rs",
+      "before_sha256": "e00bb31733156b95005ea3db5bd7d86d703f48dd4daf825e6c6da6654bf98110",
+      "after_sha256": "e00bb31733156b95005ea3db5bd7d86d703f48dd4daf825e6c6da6654bf98110",
+      "equal": true
+    },
+    {
+      "check": "ported golden exact owner blob",
+      "path": "crates/pg-engine/tests/sql/a163_excl_truncate.out",
+      "before_sha256": "bffacbb932ad00ca1764f0f238cf838fdea776b8b722bedbf6d04f121baa9c5f",
+      "after_sha256": "bffacbb932ad00ca1764f0f238cf838fdea776b8b722bedbf6d04f121baa9c5f",
+      "equal": true
+    },
+    {
+      "check": "ported golden exact owner blob",
+      "path": "crates/pg-engine/tests/sql/a163_excl_truncate.sql",
+      "before_sha256": "8bbec53ae7aec90f05b2f3ad6b0e499771c2fcb9058e05c59e1c03190da85621",
+      "after_sha256": "8bbec53ae7aec90f05b2f3ad6b0e499771c2fcb9058e05c59e1c03190da85621",
+      "equal": true
+    },
+    {
+      "check": "ported golden exact owner blob",
+      "path": "crates/pg-engine/tests/sql/a163_index_row_size.out",
+      "before_sha256": "89a8841a82c6fc12b0e40179263dd031b9600375a314eaece60539a61a81cf4e",
+      "after_sha256": "89a8841a82c6fc12b0e40179263dd031b9600375a314eaece60539a61a81cf4e",
+      "equal": true
+    },
+    {
+      "check": "ported golden exact owner blob",
+      "path": "crates/pg-engine/tests/sql/a163_index_row_size.sql",
+      "before_sha256": "9fdcac0e04bfb8ce0ae355c88fbdb206c542b6ee7a344a9096d1fe165b0d9f3d",
+      "after_sha256": "9fdcac0e04bfb8ce0ae355c88fbdb206c542b6ee7a344a9096d1fe165b0d9f3d",
+      "equal": true
+    },
+    {
+      "check": "ported golden exact owner blob",
+      "path": "crates/pg-engine/tests/sql/a163_knn_time_interval.out",
+      "before_sha256": "25f39166e88b7d8964dc4c70f44963a4d3a7c64a80123b926e463b6d2df2f5d0",
+      "after_sha256": "25f39166e88b7d8964dc4c70f44963a4d3a7c64a80123b926e463b6d2df2f5d0",
+      "equal": true
+    },
+    {
+      "check": "ported golden exact owner blob",
+      "path": "crates/pg-engine/tests/sql/a163_knn_time_interval.sql",
+      "before_sha256": "162c8c5d3cb9f71df9cd27f8a33368204041a51be3be8f6b195e1ef95fc0c2e4",
+      "after_sha256": "162c8c5d3cb9f71df9cd27f8a33368204041a51be3be8f6b195e1ef95fc0c2e4",
+      "equal": true
+    },
+    {
+      "check": "ported golden exact owner blob",
+      "path": "crates/pg-engine/tests/sql/a163_review_concurrent.out",
+      "before_sha256": "07c264a11c99c9ec70e5eb2e4931b8040ed8924045dcb744de6326d3a0372e34",
+      "after_sha256": "07c264a11c99c9ec70e5eb2e4931b8040ed8924045dcb744de6326d3a0372e34",
+      "equal": true
+    },
+    {
+      "check": "ported golden exact owner blob",
+      "path": "crates/pg-engine/tests/sql/a163_review_concurrent.sql",
+      "before_sha256": "741452e540aca412a4effa588002fefbe8fe9447487ed1f11a01933c0540ae65",
+      "after_sha256": "741452e540aca412a4effa588002fefbe8fe9447487ed1f11a01933c0540ae65",
+      "equal": true
+    },
+    {
+      "check": "ported golden exact owner blob",
+      "path": "crates/pg-engine/tests/sql/a163_review_sizes.out",
+      "before_sha256": "8465075fb6aeb86486ebbb36ac72ba29c0ee5c56e629895082e5a84e88d53ace",
+      "after_sha256": "8465075fb6aeb86486ebbb36ac72ba29c0ee5c56e629895082e5a84e88d53ace",
+      "equal": true
+    },
+    {
+      "check": "ported golden exact owner blob",
+      "path": "crates/pg-engine/tests/sql/a163_review_sizes.sql",
+      "before_sha256": "2415bfa4a31439e917713222c0bd33b9fdbf523c7bc7d11bb741f89d7b4c9104",
+      "after_sha256": "2415bfa4a31439e917713222c0bd33b9fdbf523c7bc7d11bb741f89d7b4c9104",
+      "equal": true
+    },
+    {
+      "check": "ported golden exact owner blob",
+      "path": "crates/pg-engine/tests/sql/a170_btree_empty_leaf.out",
+      "before_sha256": "8dc91760f38a7bdd262f902f39b5bff4ce49c197e8a84a8a237247e3ccf9c1cc",
+      "after_sha256": "8dc91760f38a7bdd262f902f39b5bff4ce49c197e8a84a8a237247e3ccf9c1cc",
+      "equal": true
+    },
+    {
+      "check": "ported golden exact owner blob",
+      "path": "crates/pg-engine/tests/sql/a170_btree_empty_leaf.sql",
+      "before_sha256": "2a976fb4541af889f3fc29693d03291c6b539c155eb1c6790be07a12bd1cc0e1",
+      "after_sha256": "2a976fb4541af889f3fc29693d03291c6b539c155eb1c6790be07a12bd1cc0e1",
+      "equal": true
+    },
+    {
+      "check": "ported isolation exact owner blob",
+      "path": "crates/pg-engine/tests/isolation/specs/roll-bitmap-recheck.spec",
+      "before_sha256": "0a31c66efb9d976b921bb083b4c210d505167a208557bb4134e2d5899f3375bc",
+      "after_sha256": "0a31c66efb9d976b921bb083b4c210d505167a208557bb4134e2d5899f3375bc",
+      "equal": true
+    }
+  ],
+  "scope": "Static byte comparison only; no build, tests, services or performance execution."
+}

@@ -1,0 +1,172 @@
+diff --git a/crates/pg-engine/src/exec/rowsize/observe.rs b/crates/pg-engine/src/exec/rowsize/observe.rs
+index 3c15db10..be0c5ac6 100644
+--- a/crates/pg-engine/src/exec/rowsize/observe.rs
++++ b/crates/pg-engine/src/exec/rowsize/observe.rs
+@@ -18,6 +18,7 @@ pub(crate) struct Participant {
+     pub expanded_text: usize,
+     pub minimum: Option<Candidate>,
+     pub error: Option<Error>,
++    pub coordinator_aborted: bool,
+ }
+ 
+ #[derive(Clone, Debug, Default)]
+@@ -101,7 +102,7 @@ impl Observer {
+         }
+     }
+ 
+-    fn wait<'a>(&self, mut s: std::sync::MutexGuard<'a, State>, ready: impl Fn(&State) -> bool) -> Result<std::sync::MutexGuard<'a, State>> {
++    fn wait<'a>(&self, mut s: std::sync::MutexGuard<'a, State>, id: usize, ready: impl Fn(&State) -> bool) -> Result<Option<std::sync::MutexGuard<'a, State>>> {
+         let deadline = Instant::now() + Duration::from_secs(5);
+         while !ready(&s) && s.trace.gate_error.is_none() && s.aborted.is_none() {
+             let left = deadline.saturating_duration_since(Instant::now());
+@@ -112,13 +113,14 @@ impl Observer {
+             }
+             s = self.changed.wait_timeout(s, left).unwrap().0;
+         }
+-        if let Some(e) = &s.aborted {
+-            return Err(e.clone());
+-        }
+         if let Some(e) = &s.trace.gate_error {
+             return Err(crate::error::internal(e));
+         }
+-        Ok(s)
++        if s.aborted.is_some() {
++            s.trace.participants.entry(id).or_default().coordinator_aborted = true;
++            return Ok(None);
++        }
++        Ok(Some(s))
+     }
+ 
+     // Reserve the first three chunks in participant order. Nobody can consume another
+@@ -128,25 +130,26 @@ impl Observer {
+             return Ok(chunks.lock().unwrap().pop_front());
+         }
+         let s = self.state.lock().unwrap();
+-        let mut s = self.wait(s, |s| s.claimed == id)?;
++        let Some(mut s) = self.wait(s, id, |s| s.claimed == id)? else { return Ok(None) };
+         let next = chunks.lock().unwrap().pop_front();
+         if next.is_none() {
+             s.trace.gate_error = Some("fewer than three chunks".into());
+         }
+         s.claimed += 1;
+         self.changed.notify_all();
+-        drop(self.wait(s, |s| s.claimed == 3)?);
++        let Some(s) = self.wait(s, id, |s| s.claimed == 3)? else { return Ok(None) };
++        drop(s);
+         Ok(next)
+     }
+ 
+-    pub(crate) fn completed_first(&self, id: usize) -> Result<()> {
++    pub(crate) fn completed_first(&self, id: usize) -> Result<bool> {
+         if self.coordinate {
+             let mut s = self.state.lock().unwrap();
+             s.completed.insert(id);
+             self.changed.notify_all();
+-            drop(self.wait(s, |s| s.completed.len() == 3)?);
++            return Ok(self.wait(s, id, |s| s.completed.len() == 3)?.is_some());
+         }
+-        Ok(())
++        Ok(true)
+     }
+ 
+     pub(crate) fn chunk(&self, id: usize, chunk: usize) {
+@@ -174,6 +177,9 @@ impl Observer {
+ 
+     pub(crate) fn error(&self, id: usize, error: &Error) {
+         let mut s = self.state.lock().unwrap();
++        if s.trace.gate_error.is_some() {
++            return;
++        }
+         s.trace.participants.entry(id).or_default().error = Some(error.clone());
+         // Release every waiter if a participant fails in its first chunk.
+         s.aborted = Some(error.clone());
+diff --git a/crates/pg-engine/src/exec/sizing/kept.rs b/crates/pg-engine/src/exec/sizing/kept.rs
+index f6c53e9e..c44e5e3f 100644
+--- a/crates/pg-engine/src/exec/sizing/kept.rs
++++ b/crates/pg-engine/src/exec/sizing/kept.rs
+@@ -699,7 +699,7 @@ mod tests {
+             let eng = Engine::open(EngineOptions { data_dir: dir.path().into(), sync: false, ..Default::default() }).unwrap();
+             let mut s = eng.connect(1, "postgres", "postgres", "combined-build-test").unwrap();
+             s.query(&format!("SET max_parallel_maintenance_workers={workers};
+-                SET max_parallel_workers=2; SET min_parallel_table_scan_size=0;
++                SET max_parallel_workers=1024; SET min_parallel_table_scan_size=0;
+                 SET maintenance_work_mem='128MB'")).unwrap();
+             s.query("CREATE FUNCTION ci_text(n int) RETURNS text LANGUAGE sql IMMUTABLE AS $$
+                 SELECT left(string_agg(md5(g::text), '' ORDER BY g), n)
+@@ -710,10 +710,14 @@ mod tests {
+                 BuildCase::Duplicate(n) => ("CASE WHEN g=2 THEN 1 ELSE g END".into(),
+                     format!("CASE WHEN g=6000 THEN ci_text({n}) ELSE 'small' END"), "UNIQUE ", ""),
+                 BuildCase::Minimum(desc) => {
+-                    let key = "CASE WHEN g=1 THEN 9000 WHEN g=300 THEN -10 WHEN g=600 THEN -20 ELSE g END";
+-                    (if desc { format!("-({key})") } else { key.into() },
+-                        "CASE WHEN g=1 THEN ci_text(2800) WHEN g=300 THEN ci_text(3000) WHEN g=600 THEN ci_text(2880) ELSE 'small' END".into(),
+-                        "", if desc { " DESC" } else { "" })
++                    let (key, payload) = if desc {
++                        ("CASE WHEN g=1 THEN -9000 WHEN g=300 THEN 20 WHEN g=600 THEN 10 ELSE -g END",
++                         "CASE WHEN g=1 THEN ci_text(2800) WHEN g=300 THEN ci_text(2880) WHEN g=600 THEN ci_text(3000) ELSE 'small' END")
++                    } else {
++                        ("CASE WHEN g=1 THEN 9000 WHEN g=300 THEN -10 WHEN g=600 THEN -20 ELSE g END",
++                         "CASE WHEN g=1 THEN ci_text(2800) WHEN g=300 THEN ci_text(3000) WHEN g=600 THEN ci_text(2880) ELSE 'small' END")
++                    };
++                    (key.into(), payload.into(), "", if desc { " DESC" } else { "" })
+                 }
+             };
+             s.query(&format!("INSERT INTO ci SELECT {key}, {payload} FROM generate_series(1,6000) g")).unwrap();
+@@ -722,8 +726,11 @@ mod tests {
+             assert_eq!(heap_writes(t.oid, &s.state.db).is_some(), !estimated);
+             let sql = format!("CREATE {unique}INDEX ci_i ON ci(k{direction}) INCLUDE(payload)");
+             let (result, trace) = observe::capture(workers == 2, || s.query(&sql));
+-            let error = result.unwrap_err();
+             eprintln!("combined_index_build_validation {case:?} workers={workers} estimated={estimated}: {trace:#?}");
++            let error = match result {
++                Err(error) => error,
++                Ok(rows) => panic!("expected an index build error for {case:?}, workers={workers}, estimated={estimated}; got {rows:#?}; trace: {trace:#?}"),
++            };
+             assert_eq!(trace.identity.as_ref().map(|i| i.2.as_str()), Some("ci_i"));
+             assert_eq!(trace.outcome.as_ref(), Some(&error));
+             assert!(trace.gate_error.is_none(), "{trace:#?}");
+@@ -742,6 +749,7 @@ mod tests {
+                 assert_eq!(first_chunks.len(), 3);
+                 for id in 0..=2 {
+                     let p = &trace.participants[&id];
++                    assert!(!p.coordinator_aborted, "unexpected coordinator abort: {trace:#?}");
+                     assert!(p.rows > 0 && p.validated > 0, "participant {id}: {p:#?}");
+                     if id > 0 {
+                         assert!(p.thread.contains("roll-build-"), "{p:#?}");
+@@ -794,7 +802,19 @@ mod tests {
+                 assert!(serial.message.starts_with("index row size 2896 exceeds btree version 4 maximum 2704"), "{serial:?}");
+                 let candidates: Vec<_> = trace.fold.iter().filter_map(|(id, c)| c.as_ref().map(|c| (*id, c))).collect();
+                 assert_eq!(candidates.len(), 3, "all reserved first chunks must own a different candidate: {trace:#?}");
++                assert_eq!(candidates.iter().map(|c| c.0).collect::<Vec<_>>(), vec![0, 1, 2], "actual fold must include leader, worker1, worker2 in order: {trace:#?}");
++                let owners: std::collections::BTreeSet<_> = candidates.iter().map(|c| &c.1.2).collect();
++                assert_eq!(owners.len(), 3, "candidate data keys must be distinct: {trace:#?}");
++                let keys: std::collections::BTreeSet<_> = candidates.iter().map(|c| &c.1.0).collect();
++                assert_eq!(keys.len(), 3, "full encoded candidate keys must be distinct: {trace:#?}");
++                let winner_id = if desc { 1 } else { 2 };
++                for (id, candidate) in &candidates {
++                    assert_eq!(trace.participants[id].minimum.as_ref(), Some(*candidate));
++                    let expected = if *id == 0 { 2816 } else if *id == winner_id { 2896 } else { 3016 };
++                    assert_eq!(candidate.1, expected, "participant {id} must retain its own size: {trace:#?}");
++                }
+                 let winner = candidates.iter().min_by(|a, b| a.1.0.cmp(&b.1.0)).unwrap();
++                assert_eq!(winner.0, winner_id, "DESC must select the middle participant; ASC the last: {trace:#?}");
+                 assert_ne!(winner.0, candidates[0].0, "winner must not be first folded");
+                 assert_ne!(winner.0, 0, "leader must be included without overriding a worker winner");
+                 assert_eq!(trace.minimum.as_ref(), Some(winner.1));
+diff --git a/crates/pg-engine/src/session/ddl/parbuild.rs b/crates/pg-engine/src/session/ddl/parbuild.rs
+index b8d26f37..edc896ea 100644
+--- a/crates/pg-engine/src/session/ddl/parbuild.rs
++++ b/crates/pg-engine/src/session/ddl/parbuild.rs
+@@ -222,8 +222,10 @@ impl Plan<'_> {
+             #[cfg(test)]
+             if first {
+                 first = false;
+-                if let Some(o) = &self.observed {
+-                    o.completed_first(_participant)?;
++                if let Some(o) = &self.observed
++                    && !o.completed_first(_participant)?
++                {
++                    return Ok(g);
+                 }
+             }
+         }

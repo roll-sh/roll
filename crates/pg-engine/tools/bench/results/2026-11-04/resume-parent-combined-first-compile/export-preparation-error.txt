@@ -1,0 +1,1 @@
+Initial cache-only export configuration preparation failed before Git: NameError json not defined. Following exporter invocation failed because configuration file absent. No Git export/push ran. Corrected by importing json in configuration generator; original proof outputs untouched.

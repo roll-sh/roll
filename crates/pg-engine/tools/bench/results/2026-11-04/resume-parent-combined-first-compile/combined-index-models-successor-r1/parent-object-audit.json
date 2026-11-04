@@ -1,0 +1,19 @@
+{
+  "time": "2026-11-04T19:11:07.560878+00:00",
+  "objects": [
+    {
+      "commit": "e25c258e759feb28ccb247fa8b10cc25bc7e5810",
+      "files": 38,
+      "all_hashes_match": true
+    },
+    {
+      "commit": "b43e47a5ba581ac72254d15f39bf7ae4389f35b3",
+      "files": 38,
+      "all_hashes_match": true
+    }
+  ],
+  "remote": "b43e47a5ba581ac72254d15f39bf7ae4389f35b3\trefs/heads/wip/combined-index-models-red-proof-r1-d62e3d3b\ne25c258e759feb28ccb247fa8b10cc25bc7e5810\trefs/heads/wip/combined-index-models-source-r1-d62e3d3b\n",
+  "shared_head": "fe7b0023c9df19a6dae1e6067ba8454998db48c5",
+  "shared_status": "",
+  "runtime": "UNRUN"
+}

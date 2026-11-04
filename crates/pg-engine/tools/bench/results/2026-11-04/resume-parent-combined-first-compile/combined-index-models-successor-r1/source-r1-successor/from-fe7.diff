@@ -1,0 +1,4101 @@
+diff --git a/crates/pg-engine/src/catalog/btsim.rs b/crates/pg-engine/src/catalog/btsim.rs
+index 3964e478..572e9090 100644
+--- a/crates/pg-engine/src/catalog/btsim.rs
++++ b/crates/pg-engine/src/catalog/btsim.rs
+@@ -518,6 +518,7 @@ pub struct BtPageStats {
+     pub root: u32,
+     pub internal: u64,
+     pub leaf: u64,
++    /// Half-dead pages (none in the model).
+     pub empty: u64,
+     pub leaf_free: u64,
+     pub fragments: u64,
+@@ -639,7 +640,7 @@ impl Btree {
+     }
+ 
+     /// pgstatindex's walk over the pages after the metapage: (root block, internal pages,
+-    /// leaf pages, empty leaf pages, leaf free bytes (PageGetExactFreeSpace), leaf
++    /// leaf pages, half-dead pages, leaf free bytes (PageGetExactFreeSpace), leaf
+     /// fragments: leaves whose right sibling comes before them) and pgstattuple's over all
+     /// of them: (items, their bytes, free bytes).
+     pub fn page_stats(&self) -> BtPageStats {
+@@ -655,10 +656,11 @@ impl Btree {
+             s.free += free as u64;
+             s.items += p.nitems() as u64;
+             s.item_bytes += (p.used + ITEM_ID * p.nitems()) as u64;
++            // (A leaf without items is a leaf page to pgstatindex too: its empty_pages are the
++            // half-dead pages, P_IGNORE and not deleted, which a VACUUM of the model never
++            // leaves, deleting a page in one step.)
+             if !p.leaf {
+                 s.internal += 1;
+-            } else if p.items.is_empty() {
+-                s.empty += 1;
+             } else {
+                 s.leaf += 1;
+                 s.leaf_free += free as u64;
+diff --git a/crates/pg-engine/src/catalog/ginsim.rs b/crates/pg-engine/src/catalog/ginsim.rs
+index 50c82e89..1c7b609a 100644
+--- a/crates/pg-engine/src/catalog/ginsim.rs
++++ b/crates/pg-engine/src/catalog/ginsim.rs
+@@ -427,6 +427,13 @@ impl GinIndex {
+             }
+             lsize += t.size + ITEM_ID;
+         }
++        // (Both pages get an item: a last item bigger than the rest together, which a key
++        // near GinMaxItemSize with its posting list can be, would leave the right one empty.)
++        if all.len() < 2 {
++            self.nodes[page].items = all;
++            return;
++        }
++        let split = split.clamp(1, all.len() - 1);
+         let mut left = all;
+         let right = left.split_off(split);
+         let leaf = self.nodes[page].leaf;
+diff --git a/crates/pg-engine/src/error.rs b/crates/pg-engine/src/error.rs
+index 35117134..da8fdf28 100644
+--- a/crates/pg-engine/src/error.rs
++++ b/crates/pg-engine/src/error.rs
+@@ -124,7 +124,18 @@ impl Frame {
+                 table,
+                 line,
+                 raw: Some(raw),
+-            } => format!("COPY {table}, line {line}: \"{raw}\""),
++            } => {
++                // (limit_printout_length: at most MAX_COPY_DATA_DISPLAY (100) bytes, cut at a
++                // character, then "...".)
++                let shown = match raw.len() > 100 {
++                    true => {
++                        let cut = (0..=100).rev().find(|&i| raw.is_char_boundary(i)).unwrap_or(0);
++                        format!("{}...", &raw[..cut])
++                    }
++                    false => raw.to_string(),
++                };
++                format!("COPY {table}, line {line}: \"{shown}\"")
++            }
+             Frame::Copy { table, line, raw: None } => format!("COPY {table}, line {line}"),
+         }
+     }
+diff --git a/crates/pg-engine/src/exec/dml.rs b/crates/pg-engine/src/exec/dml.rs
+index adb0df2e..1e427e58 100644
+--- a/crates/pg-engine/src/exec/dml.rs
++++ b/crates/pg-engine/src/exec/dml.rs
+@@ -903,7 +903,7 @@ fn unique_wait_context(
+ /// A row version's heap TID as its ctid shows it: the one stored with it, else where the heap
+ /// model put it (another transaction's version in progress), else the key's stand-in (a row
+ /// not written yet: the unique checks run before the heap write).
+-fn row_tid(t: &Table, key: &[u8], ctx: &ExecCtx) -> (u32, u16) {
++pub(crate) fn row_tid(t: &Table, key: &[u8], ctx: &ExecCtx) -> (u32, u16) {
+     let stored = ctx.txn.try_borrow().ok().and_then(|x| x.get(key).ok().flatten());
+     if let Some(tid) = stored.as_deref().and_then(super::scan::stored_tid) {
+         return tid;
+@@ -1403,12 +1403,19 @@ fn put_index_entries_with(
+             continue;
+         }
+         if let Some(vals) = vals {
+-            let k = index_entry_key(t, &bix.index, vals, dkey, &bix.colls);
+             let tracked = ctx.txn.borrow().serializable_tracked();
++            let stored = super::scan::stores_entries(bix);
++            if !stored && !tracked {
++                continue;
++            }
++            let k = index_entry_key(t, &bix.index, vals, dkey, &bix.colls);
+             if tracked {
+                 let me = ctx.txn.borrow().id;
+                 ctx.sess.db.ssi.wrote_entry(me, bix.index.oid, &k);
+             }
++            if !stored {
++                continue;
++            }
+             if fresh {
+                 ctx.txn.borrow_mut().put_fresh(k, dkey.to_vec())?;
+             } else {
+@@ -1518,7 +1525,7 @@ fn delete_index_entries(
+     ctx: &ExecCtx,
+ ) -> Result<()> {
+     for bix in indexes {
+-        if bix.index.id == 0 {
++        if !super::scan::stores_entries(bix) {
+             continue;
+         }
+         if !crate::ext::index_am::builtin_method(&bix.index.method)
+@@ -2370,7 +2377,8 @@ fn scan_matching(
+     // (The primary key's index is `pkey_index`, not among `indexes`.)
+     let pkey = t.pkey_index.and_then(|p| cat.indexes.get(&p).cloned()).filter(|ix| ix.id != 0);
+     for ix in pkey.into_iter().chain(cat.table_indexes(t)).filter(|_| nondet.is_none()) {
+-        if ix.predicate.is_some() || ix.columns.len() < cols.len() {
++        // (Only an index whose entries are stored has entries to find rows by.)
++        if ix.predicate.is_some() || ix.columns.len() < cols.len() || !matches!(ix.method.as_str(), "btree" | "hash") {
+             continue;
+         }
+         let lead: Vec<Option<usize>> = ix.columns[..cols.len()]
+@@ -2998,40 +3006,54 @@ pub fn update_row_rls(
+         .collect();
+     let mut new_vals: Vec<Option<Option<Vec<Value>>>> = vec![None; rules.indexes.len()];
+     let mut old_vals: Vec<Option<Option<Vec<Value>>>> = vec![None; rules.indexes.len()];
+-    // Unique and exclusion indexes whose key changed.
++    // The new version went into the heap before its index entries found a clash or an
++    // entry too big (`rowsize`): it stays, dead, where it was put (its TID the error's).
++    let dead = || match new_key == dkey {
++        true => super::sizing::updated(t, &rules.indexes, dkey, old, &new_key, &new, ctx).ok().flatten().map(|u| u.0),
++        false => None,
++    };
++    // Indexes whose key changed: an entry's size as it is formed, a unique or exclusion
++    // index's check, then a btree entry's size again (ExecInsertIndexTuples, index by index).
+     for (i, bix) in rules.indexes.iter().enumerate() {
+-        if !checks_rows(bix) || !changed[i] {
++        if !changed[i] {
+             continue;
+         }
+         let nv = index_values(bix, &new, ctx)?;
+         new_vals[i] = Some(nv.clone());
+-        let ov = index_values(bix, old, ctx)?;
+-        old_vals[i] = Some(ov.clone());
+-        let Some(nv) = nv else {
+-            continue;
+-        };
+-        check_without_overlaps(t, bix, &nv)?;
+-        if ov
+-            .as_ref()
+-            .is_some_and(|o| super::agg::cmp_rows(o, &nv) == std::cmp::Ordering::Equal)
+-        {
+-            continue;
+-        }
+-        if defer_recheck(t, bix, &nv, &new_key, Some(dkey), ctx)? {
+-            continue;
++        if let Err(e) = super::rowsize::on_form(t, bix, nv.as_deref(), &new, ctx) {
++            dead();
++            return Err(e);
+         }
+-        let entering = Entering { token: None, row: None, key: Some(new_key.as_slice()) };
+-        if let Some((_, other)) =
+-            index_conflict(t, bix, &nv, Some(dkey), Some(&entering), Dirty::Wait, false, ctx)?
+-        {
+-            ssi_change(t, &rules.indexes, dkey, old, Some(&new), ctx)?;
+-            // The new version went into the heap before its index entries found the
+-            // clash: it stays, dead, where it was put.
+-            if new_key == dkey {
+-                let _ = super::sizing::updated(t, &rules.indexes, dkey, old, &new_key, &new, ctx);
++        'unique: {
++            if !checks_rows(bix) {
++                break 'unique;
++            }
++            let ov = index_values(bix, old, ctx)?;
++            old_vals[i] = Some(ov.clone());
++            let Some(nv) = nv.as_deref() else {
++                break 'unique;
++            };
++            check_without_overlaps(t, bix, nv)?;
++            if ov
++                .as_ref()
++                .is_some_and(|o| super::agg::cmp_rows(o, nv) == std::cmp::Ordering::Equal)
++            {
++                break 'unique;
++            }
++            if defer_recheck(t, bix, nv, &new_key, Some(dkey), ctx)? {
++                break 'unique;
++            }
++            let entering = Entering { token: None, row: None, key: Some(new_key.as_slice()) };
++            if let Some((_, other)) =
++                index_conflict(t, bix, nv, Some(dkey), Some(&entering), Dirty::Wait, false, ctx)?
++            {
++                ssi_change(t, &rules.indexes, dkey, old, Some(&new), ctx)?;
++                dead();
++                return Err(index_violation(t, bix, nv, other.as_deref(), ctx));
+             }
+-            return Err(index_violation(t, bix, &nv, other.as_deref(), ctx));
+         }
++        let tid = || dead().unwrap_or_else(|| row_tid(t, &new_key, ctx));
++        super::rowsize::on_insert(t, bix, nv.as_deref(), &new, tid, ctx)?;
+     }
+     let upd = super::sizing::updated(t, &rules.indexes, dkey, old, &new_key, &new, ctx)?;
+     let tid = upd.map(|u| u.0);
+@@ -3057,7 +3079,7 @@ pub fn update_row_rls(
+             continue;
+         }
+         // (A native method's index: the new version's entry; the old one's stays.)
+-        if am_insert(t, bix, nv.as_deref(), &new_key, new_key == dkey, ctx)? {
++        if am_insert(t, bix, nv.as_deref(), &new_key, new_key == dkey, ctx)? || !super::scan::stores_entries(bix) {
+             continue;
+         }
+         if let Some(ov) = ov {
+@@ -3380,8 +3402,21 @@ fn index_entries_checked(
+         entered: Vec::new(),
+         excl: Vec::new(),
+     };
++    // (An entry too big for its index fails as it is formed, and a btree's past a third of
++    // a page after its unique check: `rowsize`. The heap tuple stays, dead, as for a
++    // unique violation.)
++    let dead = |out: &CheckedEntries| {
++        if t.has_rowid() {
++            let _ = super::sizing::inserted_with(t, &rules.indexes, &p.dkey, &p.row, Some(&out.vals), ctx);
++        }
++    };
+     for bix in &rules.indexes {
+         let vals = index_values(bix, &p.row, ctx)?;
++        if let Err(e) = super::rowsize::on_form(t, bix, vals.as_deref(), &p.row, ctx) {
++            dead(&out);
++            super::pgstat::count_insert(ctx, t.oid, 1);
++            return Err(e);
++        }
+         if let Some(v) = &vals
+             && checks_rows(bix)
+         {
+@@ -3447,6 +3482,18 @@ fn index_entries_checked(
+                 }
+             }
+         }
++        // (The dead tuple's TID is the error's.)
++        let tid = || {
++            let placed = t.has_rowid().then(|| super::sizing::inserted_with(t, &rules.indexes, &p.dkey, &p.row, Some(&out.vals), ctx));
++            match placed {
++                Some(Ok(Some(tid))) => tid,
++                _ => row_tid(t, &p.dkey, ctx),
++            }
++        };
++        if let Err(e) = super::rowsize::on_insert(t, bix, vals.as_deref(), &p.row, tid, ctx) {
++            super::pgstat::count_insert(ctx, t.oid, 1);
++            return Err(e);
++        }
+         out.vals.push(vals);
+     }
+     Ok(out)
+@@ -3903,9 +3950,10 @@ impl InsertNode {
+         };
+         let mut at_flush = false;
+         let r = self.insert(src, ctx).map_err(|e| {
++            // (And an index entry too big, `rowsize`: its index insertion is the flush's too.)
+             if c.multi
+                 && !e.stacked
+-                && (e.code == code::UNIQUE_VIOLATION || e.code == code::EXCLUSION_VIOLATION)
++                && (e.code == code::UNIQUE_VIOLATION || e.code == code::EXCLUSION_VIOLATION || e.code == code::PROGRAM_LIMIT_EXCEEDED)
+             {
+                 at_flush = true;
+                 frames.borrow_mut()[n] = Frame::Copy {
+diff --git a/crates/pg-engine/src/exec/mod.rs b/crates/pg-engine/src/exec/mod.rs
+index 58894151..1b0d265a 100644
+--- a/crates/pg-engine/src/exec/mod.rs
++++ b/crates/pg-engine/src/exec/mod.rs
+@@ -28,6 +28,7 @@ pub mod sizing;
+ pub mod skipcount;
+ pub mod spill;
+ pub mod replication;
++pub mod rowsize;
+ pub mod toast;
+ pub mod trigger;
+ pub mod tuplestore;
+diff --git a/crates/pg-engine/src/exec/pgstat.rs b/crates/pg-engine/src/exec/pgstat.rs
+index 91c08824..8bc98a5a 100644
+--- a/crates/pg-engine/src/exec/pgstat.rs
++++ b/crates/pg-engine/src/exec/pgstat.rs
+@@ -491,9 +491,10 @@ pub struct Pending {
+     /// The backend's own WAL (pg_stat_get_backend_wal): records and bytes.
+     pub wal: (i64, i64),
+     pub tabs: super::fasthash::HashMap<u32, TabCounts>,
+-    /// Tuples returned by scans of one relation in a row (`count_returned`, a row at a
+-    /// time), not yet in `tabs` (`flush_returned`).
+-    returned_run: Option<(u32, i64)>,
++    /// Tuples returned and fetched and blocks read by scans of one relation in a row
++    /// (`count_returned`, `count_fetched`, `count_blocks`: a row at a time), not yet in
++    /// `tabs` (`flush_returned`).
++    returned_run: Option<(u32, [i64; 3])>,
+     pub funcs: HashMap<u32, FuncCounts>,
+     /// New sessions to count in the database's entry.
+     pub sessions: i64,
+@@ -537,8 +538,12 @@ impl Pending {
+ 
+     /// `returned_run` into `tabs`: before anything reads them.
+     pub fn flush_returned(&mut self) {
+-        if let Some((rel, n)) = self.returned_run.take() {
+-            self.tabs.entry(rel).or_default().tuples_returned += n;
++        if let Some((rel, [returned, fetched, blocks])) = self.returned_run.take() {
++            let t = self.tabs.entry(rel).or_default();
++            t.tuples_returned += returned;
++            t.tuples_fetched += fetched;
++            t.blocks_fetched += blocks;
++            t.blocks_hit += blocks;
+         }
+     }
+ 
+@@ -770,10 +775,19 @@ pub fn scan_counts(ctx: &ExecCtx) -> bool {
+ /// Tuples a scan of `rel` returned (pgstat_count_heap_getnext /
+ /// pgstat_count_index_tuples).
+ pub fn count_returned(ctx: &ExecCtx, rel: u32, n: i64) {
+-    if n > 0 {
++    count_run(ctx, rel, [n, 0, 0]);
++}
++
++/// `n` added to `rel`'s counts in a row (`Pending::returned_run`).
++fn count_run(ctx: &ExecCtx, rel: u32, n: [i64; 3]) {
++    if n.iter().any(|&c| c > 0) {
+         let mut p = ctx.sess.pgstat.borrow_mut();
+         match &mut p.returned_run {
+-            Some((r, c)) if *r == rel => *c += n,
++            Some((r, c)) if *r == rel => {
++                for (c, n) in c.iter_mut().zip(n) {
++                    *c += n;
++                }
++            }
+             _ => {
+                 p.flush_returned();
+                 p.returned_run = Some((rel, n));
+@@ -782,22 +796,20 @@ pub fn count_returned(ctx: &ExecCtx, rel: u32, n: i64) {
+     }
+ }
+ 
++/// An index scan's tuple: returned and fetched through `rel`, and a block of it read.
++pub fn count_index_tuple(ctx: &ExecCtx, rel: u32) {
++    count_run(ctx, rel, [1, 1, 1]);
++}
++
+ /// Heap tuples fetched through `rel` (an index, or a table by a bitmap scan)
+ /// (pgstat_count_heap_fetch).
+ pub fn count_fetched(ctx: &ExecCtx, rel: u32, n: i64) {
+-    if n > 0 {
+-        ctx.sess.pgstat.borrow_mut().tab(rel).tuples_fetched += n;
+-    }
++    count_run(ctx, rel, [0, n, 0]);
+ }
+ 
+ /// Blocks of `rel` read (all hits here: everything is in memory).
+ pub fn count_blocks(ctx: &ExecCtx, rel: u32, n: i64) {
+-    if n > 0 {
+-        let mut p = ctx.sess.pgstat.borrow_mut();
+-        let t = p.tab(rel);
+-        t.blocks_fetched += n;
+-        t.blocks_hit += n;
+-    }
++    count_run(ctx, rel, [0, 0, n]);
+ }
+ 
+ fn nest(ctx: &ExecCtx) -> usize {
+diff --git a/crates/pg-engine/src/exec/replication.rs b/crates/pg-engine/src/exec/replication.rs
+index ca4ba272..72ed22a6 100644
+--- a/crates/pg-engine/src/exec/replication.rs
++++ b/crates/pg-engine/src/exec/replication.rs
+@@ -234,6 +234,9 @@ pub fn find(rules: &TableRules, how: Search, search: &[Value], delete: bool, ctx
+     loop {
+         ctx.check()?;
+         let Some((dkey, seen)) = locate(rules, how, search, ctx)? else { return Ok(None) };
++        if let Search::Identity(i) = how {
++            super::sizing::identity_fetched(t, &rules.indexes[i], &dkey, ctx);
++        }
+         let oper = if delete { Xltw::Delete } else { Xltw::Update };
+         let (row, xmin) = match lock_row(t, &dkey, RowMark::Update, Wait::Block, oper, ctx)? {
+             Locked::Skip => continue,
+diff --git a/crates/pg-engine/src/exec/rowsize.rs b/crates/pg-engine/src/exec/rowsize.rs
+new file mode 100644
+index 00000000..2f8b8efd
+--- /dev/null
++++ b/crates/pg-engine/src/exec/rowsize.rs
+@@ -0,0 +1,249 @@
++//! Index entries too big for their pages: the errors PostgreSQL's access methods raise as
++//! they form an entry (index_form_tuple's INDEX_SIZE_MASK, `_bt_check_third_page`,
++//! GinFormTuple). The engine's entries have no page limit; these checks size each entry as
++//! PostgreSQL forms it (`relsize::index_tuple`: its header, alignment and pglz compression of
++//! a value over TOAST_INDEX_TARGET) and fail where it fails.
++//!
++//! Not checked (accepted differences until modelled): a GiST entry's size (its opclass's
++//! compressed key: btree_gist's text key fails with "failed to add item to index page" past
++//! about 4 kB), a BRIN summary's (its range's min and max values together: a build fails when
++//! one passes 8,152 bytes). Hash entries hold a hash code and SP-GiST's text_ops splits long
++//! values into prefixes: neither fails.
++
++#[cfg(test)]
++pub(crate) mod observe;
++
++use super::ExecCtx;
++use crate::catalog::Table;
++use crate::catalog::relsize::{index_tuple, type_layout};
++use crate::error::{Error, Result, code};
++use crate::sql::plan::BoundIndex;
++use crate::types::{DataType, Value};
++
++/// INDEX_SIZE_MASK: the largest index tuple index_form_tuple makes.
++pub const INDEX_SIZE_MASK: usize = 0x1FFF;
++/// BTMaxItemSize (btree version 4, 8 kB pages).
++pub const BT_MAX_ITEM: usize = 2704;
++/// GinMaxItemSize.
++const GIN_MAX_ITEM: usize = 2712;
++/// pg_opclass of GIN's array_ops.
++const GIN_ARRAY_OPS: u32 = 10064;
++
++/// An upper bound on unpadded values under which no limit can be reached. Non-ASCII
++/// text uses the full sizing path because database encoding can change its byte length.
++fn surely_small(vals: &[Value]) -> bool {
++    let mut n = 16usize;
++    for v in vals {
++        n += match v {
++            Value::Text(s) if s.is_ascii() => s.len() + 8,
++            Value::Bytea(b) => b.len() + 8,
++            Value::Null | Value::Bool(_) | Value::Int2(_) | Value::Int4(_) | Value::Int8(_) | Value::Float4(_) | Value::Float8(_) => 8,
++            Value::Date(_) | Value::Timestamp(_) | Value::Timestamptz(_) | Value::Uuid(_) | Value::Oid(_) => 16,
++            _ => return false,
++        };
++    }
++    n < BT_MAX_ITEM
++}
++
++pub fn form_error(size: usize) -> Error {
++    Error::new(
++        code::PROGRAM_LIMIT_EXCEEDED,
++        format!("index row requires {size} bytes, maximum size is {INDEX_SIZE_MASK}"),
++    )
++}
++
++/// The expanded key and INCLUDE values, in attribute order. None means the conservative
++/// bound proves this tuple smaller than every btree limit.
++pub(crate) fn btree_size(types: &[DataType], all: &[Value], fmt: &crate::types::text::FormatCtx) -> Option<usize> {
++    if surely_small(all) && !types.iter().any(|ty| matches!(ty, DataType::Bpchar(_))) {
++        return None;
++    }
++    let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, fmt);
++    Some(index_tuple(types, all, &text))
++}
++
++fn btree_size_of(t: &Table, bix: &BoundIndex, vals: &[Value], row: &[Value], ctx: &ExecCtx) -> Option<usize> {
++    let include = bix.index.include.iter().map(|&i| row.get(i).cloned().unwrap_or(Value::Null));
++    let all: Vec<Value> = vals.iter().cloned().chain(include).collect();
++    if surely_small(&all)
++        && !bix.keys.iter().any(|k| matches!(k.ty(), DataType::Bpchar(_)))
++        && !bix.index.include.iter().any(|&i| matches!(t.columns[i].ty, DataType::Bpchar(_)))
++    {
++        return None;
++    }
++    let mut types: Vec<DataType> = bix.keys.iter().map(|k| k.ty()).collect();
++    types.extend(bix.index.include.iter().map(|&i| t.columns[i].ty.clone()));
++    btree_size(&types, &all, ctx.fmt())
++}
++
++/// The checks as an entry of `vals` is formed (index_form_tuple, GinFormTuple), before its
++/// index's unique check: `vals` are the index's values of `row` (None: a partial index's
++/// predicate left the row out).
++pub fn on_form(t: &Table, bix: &BoundIndex, vals: Option<&[Value]>, row: &[Value], ctx: &ExecCtx) -> Result<()> {
++    let Some(vals) = vals else { return Ok(()) };
++    match bix.index.method.as_str() {
++        "btree" => match btree_size_of(t, bix, vals, row, ctx) {
++            Some(n) if n > INDEX_SIZE_MASK => Err(form_error(n)),
++            _ => Ok(()),
++        },
++        "gin" => gin_form_error(bix, vals, ctx).map_or(Ok(()), |e| Err(e.error)),
++        _ => Ok(()),
++    }
++}
++
++/// `_bt_check_third_page`, after a btree's unique check: the entry of `vals` (a row stored
++/// at `tid`) past BTMaxItemSize.
++pub fn on_insert(t: &Table, bix: &BoundIndex, vals: Option<&[Value]>, row: &[Value], tid: impl FnOnce() -> (u32, u16), ctx: &ExecCtx) -> Result<()> {
++    let Some(vals) = vals else { return Ok(()) };
++    if bix.index.method != "btree" {
++        return Ok(());
++    }
++    match btree_size_of(t, bix, vals, row, ctx) {
++        Some(n) if n > BT_MAX_ITEM => Err(btree_error(t, bix, n, tid(), ctx)),
++        _ => Ok(()),
++    }
++}
++
++pub fn btree_error(t: &Table, bix: &BoundIndex, size: usize, (b, o): (u32, u16), ctx: &ExecCtx) -> Error {
++    let name = &bix.index.name;
++    Error::new(
++        code::PROGRAM_LIMIT_EXCEEDED,
++        format!("index row size {size} exceeds btree version 4 maximum {BT_MAX_ITEM} for index \"{name}\""),
++    )
++    .detail(format!("Index row references tuple ({b},{o}) in relation \"{}\".", t.name))
++    .hint("Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.")
++    .table(ctx.catalog().schema_name(t.schema), &t.name)
++    .constraint(name)
++}
++
++/// The first oversized GIN key, retained across a build's heap rows without retaining
++/// all extracted keys. INSERT reports it immediately; a build reports it in key order.
++struct GinFormError {
++    column: usize,
++    key: Value,
++    pub error: Error,
++}
++
++impl GinFormError {
++    pub fn precedes(&self, other: &Self) -> bool {
++        self.column.cmp(&other.column).then_with(|| self.key.cmp_total(&other.key)).is_lt()
++    }
++}
++
++/// GinFormTuple of each key array_ops extracts from `vals` (in the keys' order, as
++/// ginExtractEntries sorts them), without a posting list (a build's posting tree's case).
++fn gin_form_error(bix: &BoundIndex, vals: &[Value], ctx: &ExecCtx) -> Option<GinFormError> {
++    let one = bix.keys.len() == 1;
++    for (i, v) in vals.iter().enumerate() {
++        let (Value::Array(a), Some(c)) = (v, bix.index.columns.get(i)) else { continue };
++        // (0: the type's default, array_ops for an array.)
++        if !matches!(c.opclass, 0 | GIN_ARRAY_OPS) || type_layout(&a.elem).0 > 0 {
++            continue;
++        }
++        let mut big: Vec<&Value> = a.items.iter().filter(|e| {
++            !e.is_null() && (matches!(a.elem, DataType::Bpchar(_)) || !surely_small(std::slice::from_ref(*e)))
++        }).collect();
++        if big.is_empty() {
++            continue;
++        }
++        big.sort_by(|x, y| x.cmp_total(y));
++        let fmt = ctx.fmt();
++        let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, fmt);
++        for e in big {
++            let n = match one {
++                true => index_tuple(std::slice::from_ref(&a.elem), std::slice::from_ref(e), &text),
++                false => index_tuple(&[DataType::Int2, a.elem.clone()], &[Value::Int2(i as i16 + 1), e.clone()], &text),
++            };
++            if n > INDEX_SIZE_MASK {
++                return Some(GinFormError { column: i, key: e.clone(), error: form_error(n) });
++            }
++            if n > GIN_MAX_ITEM {
++                return Some(GinFormError {
++                    column: i,
++                    key: e.clone(),
++                    error: Error::new(
++                        code::PROGRAM_LIMIT_EXCEEDED,
++                        format!("index row size {n} exceeds maximum {GIN_MAX_ITEM} for index \"{}\"", bix.index.name),
++                    ),
++                });
++            }
++        }
++    }
++    None
++}
++
++
++/// Size validation shared by serial construction, parallel participants and concurrent
++/// preflight. Formation runs for every heap row; page limits follow global uniqueness.
++#[derive(Default)]
++pub struct BuildSizes {
++    btree: Option<(Vec<u8>, usize, Vec<u8>)>,
++    gin: Option<GinFormError>,
++}
++
++impl BuildSizes {
++    pub fn row(&mut self, t: &Table, bix: &BoundIndex, vals: &[Value], row: &[Value], dkey: &[u8], ctx: &ExecCtx) -> Result<()> {
++        match bix.index.method.as_str() {
++            "btree" => self.btree_row(
++                btree_size_of(t, bix, vals, row, ctx),
++                || crate::exec::scan::index_entry_key(t, &bix.index, vals, dkey, &bix.colls),
++                dkey,
++            ),
++            "gin" => {
++                self.keep_gin(gin_form_error(bix, vals, ctx));
++                Ok(())
++            }
++            _ => on_form(t, bix, Some(vals), row, ctx),
++        }
++    }
++
++    pub(crate) fn btree_row(&mut self, size: Option<usize>, entry_key: impl FnOnce() -> Vec<u8>, dkey: &[u8]) -> Result<()> {
++        match size {
++            Some(n) if n > INDEX_SIZE_MASK => Err(form_error(n)),
++            Some(n) if n > BT_MAX_ITEM => {
++                self.keep_btree(Some((entry_key(), n, dkey.to_vec())));
++                Ok(())
++            }
++            _ => Ok(()),
++        }
++    }
++
++    fn keep_btree(&mut self, candidate: Option<(Vec<u8>, usize, Vec<u8>)>) {
++        if let Some(candidate) = candidate
++            && self.btree.as_ref().is_none_or(|first| candidate.0 < first.0)
++        {
++            self.btree = Some(candidate);
++        }
++    }
++
++    fn keep_gin(&mut self, candidate: Option<GinFormError>) {
++        if let Some(candidate) = candidate
++            && self.gin.as_ref().is_none_or(|first| candidate.precedes(first))
++        {
++            self.gin = Some(candidate);
++        }
++    }
++
++    /// Reduce every participant, including the leader, without formatting an error or
++    /// finishing before the global unique check.
++    pub(crate) fn merge(&mut self, other: Self) {
++        self.keep_btree(other.btree);
++        self.keep_gin(other.gin);
++    }
++
++    #[cfg(test)]
++    pub(crate) fn candidate(&self) -> &Option<observe::Candidate> {
++        &self.btree
++    }
++
++    pub fn finish(self, t: &Table, bix: &BoundIndex, ctx: &ExecCtx) -> Result<()> {
++        if let Some(e) = self.gin {
++            return Err(e.error);
++        }
++        if let Some((_, n, dkey)) = self.btree {
++            let tid = crate::exec::dml::row_tid(t, &dkey, ctx);
++            return Err(btree_error(t, bix, n, tid, ctx));
++        }
++        Ok(())
++    }
++}
+diff --git a/crates/pg-engine/src/exec/rowsize/observe.rs b/crates/pg-engine/src/exec/rowsize/observe.rs
+new file mode 100644
+index 00000000..5208dc16
+--- /dev/null
++++ b/crates/pg-engine/src/exec/rowsize/observe.rs
+@@ -0,0 +1,206 @@
++//! Scoped library-test evidence for the actual index-build participants.
++
++use crate::error::{Error, Result};
++use std::cell::RefCell;
++use std::collections::{BTreeMap, BTreeSet, VecDeque};
++use std::sync::{Arc, Condvar, Mutex};
++use std::time::{Duration, Instant};
++
++pub(crate) type Candidate = (Vec<u8>, usize, Vec<u8>);
++
++#[derive(Clone, Debug, Default)]
++pub(crate) struct Participant {
++    pub thread: String,
++    pub chunks: Vec<usize>,
++    pub rows: usize,
++    pub validated: usize,
++    pub model_returns: usize,
++    pub expanded_text: usize,
++    pub minimum: Option<Candidate>,
++    pub error: Option<Error>,
++    pub coordinator_aborted: bool,
++}
++
++#[derive(Clone, Debug, Default)]
++pub(crate) struct Trace {
++    pub identity: Option<(u32, u32, String)>,
++    pub model: bool,
++    pub requested: usize,
++    pub reserved: usize,
++    pub spawned: usize,
++    pub participants: BTreeMap<usize, Participant>,
++    pub serial_rows: usize,
++    pub serial_validated: usize,
++    pub fold: Vec<(usize, Option<Candidate>)>,
++    pub minimum: Option<Candidate>,
++    pub outcome: Option<Error>,
++    pub gate_error: Option<String>,
++}
++
++#[derive(Default)]
++struct State {
++    trace: Trace,
++    claimed: usize,
++    completed: BTreeSet<usize>,
++    aborted: Option<Error>,
++}
++
++pub(crate) struct Observer {
++    state: Mutex<State>,
++    changed: Condvar,
++    coordinate: bool,
++}
++
++thread_local! {
++    static CURRENT: RefCell<Option<Arc<Observer>>> = const { RefCell::new(None) };
++}
++
++pub(crate) fn current() -> Option<Arc<Observer>> {
++    CURRENT.with(|c| c.borrow().clone())
++}
++
++pub(crate) fn capture<T>(coordinate: bool, f: impl FnOnce() -> Result<T>) -> (Result<T>, Trace) {
++    let observer = Arc::new(Observer { state: Mutex::new(State::default()), changed: Condvar::new(), coordinate });
++    struct Reset(Option<Arc<Observer>>);
++    impl Drop for Reset {
++        fn drop(&mut self) {
++            CURRENT.with(|c| *c.borrow_mut() = self.0.take());
++        }
++    }
++    let _reset = Reset(CURRENT.with(|c| c.replace(Some(observer.clone()))));
++    let result = f();
++    let mut state = observer.state.lock().unwrap();
++    state.trace.outcome = result.as_ref().err().cloned();
++    (result, state.trace.clone())
++}
++
++impl Observer {
++    pub(crate) fn identify(&self, table: u32, index: u32, name: &str) {
++        let mut s = self.state.lock().unwrap();
++        assert!(s.trace.identity.is_none(), "capture must contain one build");
++        s.trace.identity = Some((table, index, name.into()));
++    }
++
++    pub(crate) fn reserve(&self, model: bool, requested: usize, reserved: usize) {
++        let mut s = self.state.lock().unwrap();
++        s.trace.model = model;
++        s.trace.requested = requested;
++        s.trace.reserved = reserved;
++        if self.coordinate && (requested != 2 || reserved != 2) {
++            s.trace.gate_error = Some("two workers were not reserved".into());
++            self.changed.notify_all();
++        }
++    }
++
++    pub(crate) fn spawned(&self, ok: bool) {
++        let mut s = self.state.lock().unwrap();
++        if ok {
++            s.trace.spawned += 1;
++        } else {
++            s.trace.gate_error = Some("worker spawn failed".into());
++            self.changed.notify_all();
++        }
++    }
++
++    fn wait<'a>(&self, mut s: std::sync::MutexGuard<'a, State>, id: usize, ready: impl Fn(&State) -> bool) -> Result<Option<std::sync::MutexGuard<'a, State>>> {
++        let deadline = Instant::now() + Duration::from_secs(5);
++        while !ready(&s) && s.trace.gate_error.is_none() && s.aborted.is_none() {
++            let left = deadline.saturating_duration_since(Instant::now());
++            if left.is_zero() {
++                s.trace.gate_error = Some("first-chunk coordination timed out".into());
++                self.changed.notify_all();
++                break;
++            }
++            s = self.changed.wait_timeout(s, left).unwrap().0;
++        }
++        if let Some(e) = &s.trace.gate_error {
++            return Err(crate::error::internal(e));
++        }
++        if s.aborted.is_some() {
++            s.trace.participants.entry(id).or_default().coordinator_aborted = true;
++            return Ok(None);
++        }
++        Ok(Some(s))
++    }
++
++    // Reserve the first three chunks in participant order. Nobody can consume another
++    // chunk until all three participants have finished their reserved chunk.
++    pub(crate) fn first<T>(&self, id: usize, chunks: &Mutex<VecDeque<(usize, T)>>) -> Result<Option<(usize, T)>> {
++        if !self.coordinate {
++            return Ok(chunks.lock().unwrap().pop_front());
++        }
++        let s = self.state.lock().unwrap();
++        let Some(mut s) = self.wait(s, id, |s| s.claimed == id)? else { return Ok(None) };
++        let next = chunks.lock().unwrap().pop_front();
++        if next.is_none() {
++            s.trace.gate_error = Some("fewer than three chunks".into());
++        }
++        s.claimed += 1;
++        self.changed.notify_all();
++        let Some(s) = self.wait(s, id, |s| s.claimed == 3)? else { return Ok(None) };
++        drop(s);
++        Ok(next)
++    }
++
++    pub(crate) fn completed_first(&self, id: usize) -> Result<bool> {
++        if self.coordinate {
++            let mut s = self.state.lock().unwrap();
++            s.completed.insert(id);
++            self.changed.notify_all();
++            return Ok(self.wait(s, id, |s| s.completed.len() == 3)?.is_some());
++        }
++        Ok(true)
++    }
++
++    pub(crate) fn chunk(&self, id: usize, chunk: usize) {
++        let mut s = self.state.lock().unwrap();
++        let p = s.trace.participants.entry(id).or_default();
++        p.thread = format!("{:?}/{}", std::thread::current().id(), std::thread::current().name().unwrap_or("unnamed"));
++        p.chunks.push(chunk);
++    }
++
++    pub(crate) fn row(&self, id: usize) {
++        self.state.lock().unwrap().trace.participants.entry(id).or_default().rows += 1;
++    }
++
++    pub(crate) fn expanded(&self, id: usize, bytes: usize) {
++        let mut s = self.state.lock().unwrap();
++        let p = s.trace.participants.entry(id).or_default();
++        p.expanded_text = p.expanded_text.max(bytes);
++    }
++
++    pub(crate) fn validated(&self, id: usize, minimum: &Option<Candidate>, expanded_text: usize) {
++        let mut s = self.state.lock().unwrap();
++        let p = s.trace.participants.entry(id).or_default();
++        p.validated += 1;
++        p.minimum = minimum.clone();
++        p.expanded_text = p.expanded_text.max(expanded_text);
++    }
++
++    pub(crate) fn model_return(&self, id: usize) {
++        self.state.lock().unwrap().trace.participants.entry(id).or_default().model_returns += 1;
++    }
++
++    pub(crate) fn error(&self, id: usize, error: &Error) {
++        let mut s = self.state.lock().unwrap();
++        if s.trace.gate_error.is_some() {
++            return;
++        }
++        s.trace.participants.entry(id).or_default().error = Some(error.clone());
++        // Release every waiter if a participant fails in its first chunk.
++        s.aborted = Some(error.clone());
++        self.changed.notify_all();
++    }
++
++    pub(crate) fn serial(&self, validated: bool) {
++        let mut s = self.state.lock().unwrap();
++        s.trace.serial_rows += 1;
++        s.trace.serial_validated += usize::from(validated);
++    }
++
++    pub(crate) fn folded(&self, id: usize, candidate: &Option<Candidate>, minimum: &Option<Candidate>) {
++        let mut s = self.state.lock().unwrap();
++        s.trace.fold.push((id, candidate.clone()));
++        s.trace.minimum = minimum.clone();
++    }
++}
+diff --git a/crates/pg-engine/src/exec/scan.rs b/crates/pg-engine/src/exec/scan.rs
+index 40bc0e53..4ff92712 100644
+--- a/crates/pg-engine/src/exec/scan.rs
++++ b/crates/pg-engine/src/exec/scan.rs
+@@ -3,7 +3,7 @@
+ use super::{BoxNode, ExecCtx, Node, Row};
+ use crate::catalog::{Index, Table};
+ use crate::error::{Error, Result, code};
+-use crate::sql::expr::{eval, eval_bool};
++use crate::sql::expr::{Expr, eval, eval_bool};
+ use crate::sql::plan::{Access, BitmapQual, IndexBounds, RowMark, ScanPlan, Wait};
+ use crate::storage::keys::{KeyColl, encode_index_value, encode_value, index_prefix, prefix_end};
+ use crate::storage::row::{ROW_HEADER, ROW_HEADER_EXT, ROW_HEADER_TID, ROW_HEADER_TID_EXT, decode_row};
+@@ -257,6 +257,22 @@ pub fn reads_entries(ix: &Index) -> bool {
+     ix.id != 0 && matches!(ix.method.as_str(), "btree" | "hash")
+ }
+ 
++/// Whether index `bix` keeps an entry per row in storage (`index_entry_key`): a btree or
++/// hash index with an id of its own, an SP-GiST index of one point column (quad_point_ops'
++/// root count reads them, `dml::quad_insert_check`), and a GiST index whose exclusion
++/// constraint's first operator is `=` (its check reads the rows sharing that value by their
++/// entries). Nothing reads other SP-GiST, GiST, GIN or BRIN entries: their scans and size
++/// models read the rows.
++pub fn stores_entries(bix: &crate::sql::plan::BoundIndex) -> bool {
++    bix.index.id != 0
++        && match bix.index.method.as_str() {
++            "btree" | "hash" => true,
++            "spgist" => bix.index.columns.len() == 1 && matches!(bix.keys.first().map(|k| k.ty()), Some(crate::types::DataType::Point)),
++            "gist" => bix.constraint.as_ref().is_some_and(|c| c.exclusion.is_some() && c.leading_eq),
++            _ => false,
++        }
++}
++
+ fn ranges(
+     t: &Table,
+     ix: &Index,
+@@ -518,6 +534,29 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
+     if let Some((keys, fetched, stat)) = keyed {
+         let mut plan = s.clone();
+         plan.access = Access::Seq;
++        // (The conditions the bitmap's index scans checked on each row they kept, read at the
++        // statement's snapshot as the heap side reads it, aren't checked again: the rest of
++        // the filter is, and only its columns are decoded.)
++        let mut need = need;
++        // (Not under a row mark: a newer version a lock finds is checked against them all.)
++        if let (Access::Bitmap(q, _), Some(f)) = (&s.access, &s.filter)
++            && ctx.snapshot().is_some()
++            && s.mark.is_none()
++        {
++            let mut checked = Vec::new();
++            bitmap_checked(q, &mut checked);
++            let conj: Vec<&Expr> = match f {
++                Expr::And(a) => a.iter().collect(),
++                e => vec![e],
++            };
++            let rest: Vec<Expr> = conj.into_iter().filter(|c| !checked.iter().any(|x| x.same_as(c))).cloned().collect();
++            plan.filter = match rest.len() {
++                0 => None,
++                1 => rest.into_iter().next(),
++                _ => Some(Expr::And(rest)),
++            };
++            need = scan_need(&plan, raw_need, ctx);
++        }
+         return Ok(Box::new(ScanNode {
+             stat,
+             sample: None,
+@@ -984,6 +1023,8 @@ fn bind_scan(s: &ScanPlan, mut ranges: Vec<(Vec<u8>, Vec<u8>)>, only: bool, rev:
+             }
+             Some((ix, _)) if ix.id != 0 => {
+                 let prefix = index_prefix(s.table.oid, ix.id);
++                // (The pages need the models: a kept table's planned from its record's sizes.)
++                super::sizing::heap_blocks(&s.table, ctx)?;
+                 let pages = match ix.method.as_str() {
+                     "btree" => super::sizing::btree_leaf_pages(s.table.oid, ix.oid, &prefix, &ranges, &ctx.sess.db),
+                     "hash" => hash_scan_buckets(s, ix, ctx)?,
+@@ -1042,6 +1083,7 @@ fn ssi_bitmap_index(
+ ) -> Result<()> {
+     let table = Arc::new(t.clone());
+     let prefix = index_prefix(t.oid, ix.id);
++    super::sizing::heap_blocks(t, ctx)?;
+     let pages = match ix.method.as_str() {
+         "btree" => super::sizing::btree_leaf_pages(t.oid, ix.oid, &prefix, ranges, &ctx.sess.db),
+         "hash" => hash_buckets(&table, ix, b, ctx)?,
+@@ -1845,6 +1887,20 @@ impl KeptRows {
+     }
+ }
+ 
++/// The conditions every row a bitmap selects passed (`bitmap_keys` checks an index's quals
++/// on each row it keeps; an AND's rows pass each child's, an OR's only one's).
++fn bitmap_checked<'a>(q: &'a BitmapQual, out: &mut Vec<&'a Expr>) {
++    match q {
++        BitmapQual::Index { quals, .. } => out.extend(quals.iter().map(|c| &c.orig)),
++        BitmapQual::And(qs) => {
++            for q in qs {
++                bitmap_checked(q, out);
++            }
++        }
++        BitmapQual::Or(_) => {}
++    }
++}
++
+ /// A bitmap heap scan's rows: the bitmap's keys in heap order (TID order when the heap
+ /// is modelled), the pages they are on counted; with their rows when the bitmap
+ /// index scans read each of them (`KeptRows`; only under a snapshot, which the rows read
+@@ -3552,7 +3608,12 @@ impl ScanNode {
+         let mut row = vec![Value::Null; self.plan.table.columns.len()];
+         // (Past the table and index ids.)
+         let mut pos = 8;
+-        for (col, ty, desc) in cols {
++        // (Up to the last column read: a count(*)'s rows decode nothing.)
++        let read = match &self.need {
++            Some(need) => cols.iter().rposition(|c| need.get(c.0).copied().unwrap_or(true)).map_or(0, |i| i + 1),
++            None => cols.len(),
++        };
++        for (col, ty, desc) in &cols[..read] {
+             match crate::storage::keys::decode_index_value(entry, &mut pos, ty, *desc) {
+                 Some(v) => row[*col] = v,
+                 None => {
+@@ -4436,11 +4497,7 @@ impl ScanNode {
+         match self.stat {
+             StatTarget::Off => {}
+             StatTarget::Seq(t) => super::pgstat::count_returned(ctx, t, 1),
+-            StatTarget::Index(ix) => {
+-                super::pgstat::count_returned(ctx, ix, 1);
+-                super::pgstat::count_fetched(ctx, ix, 1);
+-                super::pgstat::count_blocks(ctx, ix, 1);
+-            }
++            StatTarget::Index(ix) => super::pgstat::count_index_tuple(ctx, ix),
+             StatTarget::Fetched(t) => super::pgstat::count_fetched(ctx, t, 1),
+         }
+         if (self.plan.index.is_some() || self.keys.is_some()) && self.only.is_none() {
+diff --git a/crates/pg-engine/src/exec/search.rs b/crates/pg-engine/src/exec/search.rs
+index dc52e28b..28e5e385 100644
+--- a/crates/pg-engine/src/exec/search.rs
++++ b/crates/pg-engine/src/exec/search.rs
+@@ -161,7 +161,7 @@ fn ordered_scalar(ty: &DataType) -> bool {
+     matches!(
+         ty,
+         DataType::Int2 | DataType::Int4 | DataType::Int8 | DataType::Date | DataType::Timestamp(_) | DataType::Timestamptz(_)
+-            | DataType::Float4 | DataType::Float8
++            | DataType::Float4 | DataType::Float8 | DataType::Time(_) | DataType::Interval(_)
+     )
+ }
+ 
+@@ -175,6 +175,8 @@ fn fits(ty: &DataType, v: &Value) -> bool {
+             | (DataType::Date, Value::Date(_))
+             | (DataType::Timestamp(_), Value::Timestamp(_))
+             | (DataType::Timestamptz(_), Value::Timestamptz(_))
++            | (DataType::Time(_), Value::Time(_))
++            | (DataType::Interval(_), Value::Interval(_))
+             | (DataType::Bool, Value::Bool(_))
+             | (DataType::Uuid, Value::Uuid(_))
+             | (DataType::Oid, Value::Oid(_))
+@@ -224,9 +226,11 @@ fn ord_key(v: &Value) -> Option<u64> {
+     match v {
+         Value::Int2(x) => Some(i(*x as i64)),
+         Value::Int4(x) | Value::Date(x) => Some(i(*x as i64)),
+-        Value::Int8(x) | Value::Timestamp(x) | Value::Timestamptz(x) => Some(i(*x)),
++        Value::Int8(x) | Value::Timestamp(x) | Value::Timestamptz(x) | Value::Time(x) => Some(i(*x)),
+         Value::Float4(x) => f(*x as f64),
+         Value::Float8(x) => f(*x),
++        // (By its span, as interval_cmp orders intervals: a float's key, as near as an f64 is.)
++        Value::Interval(iv) => f(iv.cmp_key() as f64),
+         _ => None,
+     }
+ }
+@@ -1122,7 +1126,9 @@ pub fn nearest(
+             (Kind::Scalar, v) if fits(&sh.tys[i], v) => match v {
+                 Value::Int2(x) => ((*x as f64, 0.0), false),
+                 Value::Int4(x) | Value::Date(x) => ((*x as f64, 0.0), false),
+-                Value::Int8(x) | Value::Timestamp(x) | Value::Timestamptz(x) => ((*x as f64, 0.0), false),
++                Value::Int8(x) | Value::Timestamp(x) | Value::Timestamptz(x) | Value::Time(x) => ((*x as f64, 0.0), false),
++                // (An interval's distance is an interval: its span in microseconds.)
++                Value::Interval(iv) => ((iv.cmp_key() as f64, 0.0), true),
+                 Value::Float4(x) => ((*x as f64, 0.0), true),
+                 Value::Float8(x) => ((*x, 0.0), true),
+                 _ => return Ok(None),
+diff --git a/crates/pg-engine/src/exec/sizing.rs b/crates/pg-engine/src/exec/sizing.rs
+index 867e5a05..719422c9 100644
+--- a/crates/pg-engine/src/exec/sizing.rs
++++ b/crates/pg-engine/src/exec/sizing.rs
+@@ -20,6 +20,7 @@ use crate::storage::keys::{encode_value, index_prefix, prefix_end};
+ use crate::txn::Database;
+ use crate::txn::xids::Xids;
+ use crate::types::{DataType, Value};
++use crate::exec::fasthash::{HashMap as FastMap, HashSet as FastSet};
+ use std::collections::{HashMap, HashSet};
+ use std::sync::Arc;
+ 
+@@ -169,19 +170,20 @@ impl Models {
+ /// One shard of a database's models (`Models`): the tables whose oids fall in it.
+ #[derive(Default)]
+ pub struct RelFiles {
+-    heaps: HashMap<u32, Heap>,
+-    btrees: HashMap<u32, Btree>,
++    // (The maps every model read and write looks a table up in: the fast hasher.)
++    heaps: FastMap<u32, Heap>,
++    btrees: FastMap<u32, Btree>,
+     /// Out-of-line values of each table's rows, by table.
+-    toast: HashMap<u32, Toast>,
++    toast: FastMap<u32, Toast>,
+     /// Tables too big to model.
+-    untracked: HashSet<u32>,
++    untracked: FastSet<u32>,
+     /// Tables whose models this process dropped (a model built for one of the others is
+     /// the first since the database was opened).
+     dropped: HashSet<u32>,
+     /// Their heaps' estimated sizes.
+     estimated: HashMap<u32, EstHeap>,
+     /// Bulk loads (COPY) in progress, by (table, transaction).
+-    bulk: HashMap<(u32, u64), Bulk>,
++    bulk: FastMap<(u32, u64), Bulk>,
+     /// Hash indexes: the heap's estimated tuples when each was built (its initial
+     /// buckets).
+     hash_est: HashMap<u32, f64>,
+@@ -189,7 +191,7 @@ pub struct RelFiles {
+     /// pending list.
+     gin_built: HashMap<u32, Vec<HashSet<Vec<u8>>>>,
+     /// GiST point_ops / range_ops indexes' histories (`gistlog`), by index.
+-    gist_logs: HashMap<u32, Arc<gistlog::GistLog>>,
++    gist_logs: FastMap<u32, Arc<gistlog::GistLog>>,
+     /// BRIN indexes: which page ranges have a summary.
+     brin: HashMap<u32, BrinRanges>,
+     /// The dead tuples the last VACUUM of each table had to keep (what it reports as the
+@@ -203,6 +205,9 @@ pub struct RelFiles {
+     kept_stored: HashSet<u32>,
+     /// The kept records loaded, by table (a hash: what the close needn't write again).
+     kept_hash: HashMap<u32, u64>,
++    /// Kept tables' sizes as their records' headers have them (`kept::sizes`; None: the
++    /// record has none), read before their models are laid out.
++    kept_sizes: HashMap<u32, Option<kept::Sizes>>,
+ }
+ 
+ /// A BRIN index's summarized page ranges: those its build covered (the heap's pages then,
+@@ -375,7 +380,7 @@ impl Ext {
+ #[derive(Default)]
+ struct Toast {
+     next_id: u64,
+-    rows: HashMap<Vec<u8>, Vec<Ext>>,
++    rows: FastMap<Vec<u8>, Vec<Ext>>,
+ }
+ 
+ /// TOAST_TUPLE_THRESHOLD and TOAST_TUPLE_TARGET.
+@@ -1219,8 +1224,8 @@ pub fn stored_datum(
+ 
+ /// toast_save_datum: a value's chunks go into the TOAST table and its index.
+ fn save_toast(
+-    heaps: &mut HashMap<u32, Heap>,
+-    btrees: &mut HashMap<u32, Btree>,
++    heaps: &mut FastMap<u32, Heap>,
++    btrees: &mut FastMap<u32, Btree>,
+     toast: &mut Toast,
+     v: &Vis,
+     toast_oid: u32,
+@@ -1263,7 +1268,7 @@ fn save_toast(
+ }
+ 
+ /// toast_delete_datum: a value's chunks are deleted.
+-fn delete_toast(heaps: &mut HashMap<u32, Heap>, toast_oid: u32, exts: &[Ext], xid: u64, v: &Vis) {
++fn delete_toast(heaps: &mut FastMap<u32, Heap>, toast_oid: u32, exts: &[Ext], xid: u64, v: &Vis) {
+     let Some(heap) = heaps.get_mut(&toast_oid) else {
+         return;
+     };
+@@ -1321,32 +1326,46 @@ fn index_key(
+     vals: Vec<Value>,
+     row: &[Value],
+     ctx: &ExecCtx,
++) -> Key {
++    let ty = |n: usize| bix.keys.get(n).map(|k| k.ty());
++    index_key_of(t, &bix.index, &ty, &bix.colls, vals, row, ctx.fmt())
++}
++
++/// `index_key` from the index's parts: its key columns' types (`key_ty`), collations, and
++/// the session's formatting (a parallel build's workers, which have no `ExecCtx`).
++pub fn index_key_of(
++    t: &Table,
++    index: &crate::catalog::Index,
++    key_ty: &dyn Fn(usize) -> Option<DataType>,
++    colls: &[Option<crate::storage::keys::KeyColl>],
++    vals: Vec<Value>,
++    row: &[Value],
++    fmt: &crate::types::text::FormatCtx,
+ ) -> Key {
+     thread_local! {
+         static BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+     }
+     let nkey = vals.len();
+-    let natts = nkey + bix.index.include.len();
+-    let fmt = ctx.fmt();
++    let natts = nkey + index.include.len();
+     let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, fmt);
+     let mut size = relsize::IndexTupleSize::default();
+     let null = Value::Null;
+     let mut att = |n: usize, out: &mut Vec<u8>| {
+         // (name_ops keeps a name key as a cstring: opckeytype.)
+         let (v, ty) = match n.checked_sub(nkey) {
+-            None => (&vals[n], match bix.keys.get(n).map(|k| k.ty()) {
++            None => (&vals[n], match key_ty(n) {
+                 Some(DataType::Name) => DataType::Cstring,
+                 Some(t) => t,
+                 None => DataType::Text,
+             }),
+             Some(i) => {
+-                let c = bix.index.include[i];
++                let c = index.include[i];
+                 (row.get(c).unwrap_or(&null), t.columns.get(c).map_or(DataType::Text, |c| c.ty.clone()))
+             }
+         };
+-        let desc = bix.index.columns.get(n).is_some_and(|c| c.desc);
+-        let nulls_first = bix.index.columns.get(n).is_some_and(|c| c.nulls_first);
+-        crate::storage::keys::encode_index_value(out, v, desc, nulls_first, bix.colls.get(n).and_then(Option::as_ref));
++        let desc = index.columns.get(n).is_some_and(|c| c.desc);
++        let nulls_first = index.columns.get(n).is_some_and(|c| c.nulls_first);
++        crate::storage::keys::encode_index_value(out, v, desc, nulls_first, colls.get(n).and_then(Option::as_ref));
+         size.push(v, &ty, &text);
+         size.size()
+     };
+@@ -1679,6 +1698,7 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
+     }
+     // Each row's TID in the heap laid out here (None: modelled already, by keys).
+     let mut placed: Option<Vec<Tid>> = None;
++    let mut restored_shape = false;
+     if heap_missing && !rf.heaps.contains_key(&t.oid) {
+         // (Every row where its stored TID says: rows never move when a database reopens, nor
+         // when a rolled-back TRUNCATE or rewrite gives the table its old storage back.)
+@@ -1707,6 +1727,7 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
+         // Otherwise, the first model of the table since the database was opened: the pages
+         // its last VACUUM left all-visible stay so, as Postgres's visibility map keeps them.)
+         if shape.as_ref().is_some_and(|s| h.read_shape(s).is_some()) {
++            restored_shape = true;
+         } else if !rf.dropped.contains(&t.oid)
+             && let Some(st) = ctx.catalog().relstats.get(&t.oid)
+         {
+@@ -1736,6 +1757,7 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
+             .collect();
+         rf.btrees.insert(oid, Btree::build(opts, ents));
+     }
++    kept::laid_out(rf, t.oid, restored_shape);
+     Ok(true)
+ }
+ 
+@@ -1866,7 +1888,7 @@ fn vis_for<'a>(xids: &'a Xids, table: u32, ctx: &ExecCtx) -> Vis<'a> {
+ 
+ /// Add a btree entry for a new heap tuple at `tid`.
+ fn index_insert(
+-    btrees: &mut HashMap<u32, Btree>,
++    btrees: &mut FastMap<u32, Btree>,
+     heap: &Heap,
+     v: &Vis,
+     entries: Vec<(u32, Key, bool)>,
+@@ -1983,7 +2005,7 @@ fn gist_entries(
+ }
+ 
+ /// `entries` (`gist_entries`) went into their indexes for the heap tuple at `tid`.
+-fn gist_log(logs: &mut HashMap<u32, Arc<gistlog::GistLog>>, entries: &[(u32, Option<crate::catalog::gistsim::Key>)], tid: Tid) {
++fn gist_log(logs: &mut FastMap<u32, Arc<gistlog::GistLog>>, entries: &[(u32, Option<crate::catalog::gistsim::Key>)], tid: Tid) {
+     for (ix, k) in entries {
+         if let Some(l) = logs.get_mut(ix)
+             && !Arc::make_mut(l).insert(tid, *k)
+@@ -2159,6 +2181,20 @@ fn columns_unchanged(bix: &BoundIndex, old: &[Value], new: &[Value]) -> bool {
+ }
+ 
+ fn same(a: Option<&Value>, b: Option<&Value>) -> bool {
++    // (The common kinds compared as they are: their encodings are equal exactly when they are.)
++    let null = &Value::Null;
++    match (a.unwrap_or(null), b.unwrap_or(null)) {
++        (Value::Null, Value::Null) => return true,
++        (Value::Bool(x), Value::Bool(y)) => return x == y,
++        (Value::Int2(x), Value::Int2(y)) => return x == y,
++        (Value::Int4(x), Value::Int4(y)) => return x == y,
++        (Value::Int8(x), Value::Int8(y)) => return x == y,
++        (Value::Oid(x), Value::Oid(y)) => return x == y,
++        (Value::Date(x), Value::Date(y)) => return x == y,
++        (Value::Timestamp(x), Value::Timestamp(y)) | (Value::Timestamptz(x), Value::Timestamptz(y)) => return x == y,
++        (Value::Text(x), Value::Text(y)) => return x == y,
++        _ => {}
++    }
+     let enc = |v: Option<&Value>| {
+         let mut out = Vec::new();
+         encode_value(&mut out, v.unwrap_or(&Value::Null), false);
+@@ -2283,7 +2319,9 @@ pub fn updated(
+             let Some(nv) = index_values(bix, new, ctx)? else {
+                 continue;
+             };
+-            let unchanged = index_values(bix, old, ctx)?.is_some_and(|ov| same_vals(&ov, &nv));
++            // (Columns unchanged: values unchanged, without computing the old ones.)
++            let unchanged = columns_unchanged(bix, old, new)
++                || index_values(bix, old, ctx)?.is_some_and(|ov| same_vals(&ov, &nv));
+             ents.push((bix.index.oid, index_key(t, bix, nv, new, ctx), unchanged));
+         }
+         let gist = gist_entries(t.oid, indexes, new, None, ctx)?;
+@@ -2516,6 +2554,23 @@ impl Fetcher {
+     }
+ }
+ 
++/// Logical apply found the row stored under `key` through its replica identity index `bix`
++/// (RelationFindReplTupleByIndex): that index scan's upkeep, as an executor's point lookup
++/// has it. The dead entries passed before the row's are marked (_bt_killitems at
++/// index_endscan; the primary key's, whose entries the data key names) and the row's page
++/// is pruned (heap_page_prune_opt at the heap fetch). Without it a subscriber's updated
++/// pages were never pruned: every update past a page's free space went to another page,
++/// non-HOT, with new index entries PostgreSQL's subscriber doesn't make.
++pub fn identity_fetched(t: &Table, bix: &BoundIndex, key: &[u8], ctx: &ExecCtx) {
++    if bix.index.id == 0 && bix.index.method == "btree" {
++        let prefix = index_prefix(t.oid, 0);
++        if let Some(mut k) = Kills::new(t.oid, bix.index.oid, &prefix, &[(key.to_vec(), prefix_end(key))], false, ctx) {
++            k.passed(key);
++        }
++    }
++    fetched(t.oid, key, None, ctx);
++}
++
+ /// An index or bitmap heap fetch: prune when reaching a different heap page.
+ /// All-visible heaps need no lookup. None means no block was visited. (A scan fetching many
+ /// rows holds a `Fetcher`.)
+@@ -2917,7 +2972,9 @@ pub fn toast_chunks(t: &Table, ctx: &ExecCtx) -> Result<Vec<(u32, i32, Vec<u8>)>
+ 
+ /// The table's size in pages as modelled (None: not modelled).
+ pub fn modelled_blocks(table: u32, ctx: &ExecCtx) -> Option<u32> {
+-    ctx.sess.db.relfiles.of(table).read().heaps.get(&table).map(Heap::nblocks)
++    let rf = ctx.sess.db.relfiles.of(table).read();
++    // (A kept table planned from its record's sizes: those, until it is laid out.)
++    rf.heaps.get(&table).map(Heap::nblocks).or_else(|| kept::sizes_read(&rf, table).map(|s| s.heap))
+ }
+ 
+ /// The table was emptied (TRUNCATE): new, empty files.
+@@ -3595,6 +3652,10 @@ pub fn gin_vacuumed(t: &Table, ctx: &ExecCtx) -> Result<()> {
+ 
+ /// The pending lists of `t`'s GIN indexes (or just `only`) were cleaned up.
+ fn gin_cleaned(t: &Table, only: Option<u32>, ctx: &ExecCtx) -> Result<()> {
++    // (A table too big to model keeps no record of them: `index_built`.)
++    if is_estimated(t.oid, &ctx.sess.db) {
++        return Ok(());
++    }
+     let has = {
+         let rf = ctx.sess.db.relfiles.of(t.oid).read();
+         t.indexes
+@@ -3958,7 +4019,7 @@ pub fn reattach(t: &Table, d: Detached, rekey: &[(Vec<u8>, Vec<u8>)], db: &Datab
+         }
+     }
+     if let Some(mut tt) = d.toast {
+-        let mut rows = HashMap::with_capacity(tt.rows.len());
++        let mut rows = FastMap::with_capacity_and_hasher(tt.rows.len(), Default::default());
+         for (old, new) in rekey {
+             if let Some(e) = tt.rows.remove(old) {
+                 rows.insert(new.clone(), e);
+@@ -4013,8 +4074,10 @@ pub fn index_built(t: &Table, index: u32, build: bool, prebuilt: Option<(Btree,
+     // A hash index's buckets come from estimate_rel_size's tuples at build time (kept
+     // for any index: the new one may not be in the catalog yet).
+     let est = crate::sql::costs::rel_size(t, ctx).tuples;
+-    // A GIN or GiST index's build reads the rows there now.
+-    if build {
++    // A GIN or GiST index's build reads the rows there now. (Only a modelled table's models
++    // ask which: a table too big to model is laid out afresh, `forget`, before it is
++    // modelled again.)
++    if build && !is_estimated(t.oid, &ctx.sess.db) {
+         let start = index_prefix(t.oid, 0);
+         let end = prefix_end(&start);
+         let keys: HashSet<Vec<u8>> = ctx
+@@ -4027,7 +4090,11 @@ pub fn index_built(t: &Table, index: u32, build: bool, prebuilt: Option<(Btree,
+         rf.gin_built.insert(index, vec![keys]);
+         rf.gist_logs.remove(&index);
+     } else {
+-        ctx.sess.db.relfiles.of(t.oid).write().gin_built.remove(&index);
++        let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
++        rf.gin_built.remove(&index);
++        if build {
++            rf.gist_logs.remove(&index);
++        }
+     }
+     {
+         let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
+@@ -4316,8 +4383,15 @@ pub fn btree_height(table: u32, index: u32, db: &Database) -> Option<u32> {
+ /// index too big to model, the levels a sorted build stacks over its `pages` (inner pages
+ /// 70% full of downlinks to keys `key_width` bytes wide: TPC-H's lineitem_pkey has 2).
+ pub fn btree_level(table: u32, index: u32, pages: f64, key_width: u32, db: &Database) -> u32 {
+-    if let Some(h) = btree_height(table, index, db) {
+-        return h;
++    {
++        let rf = db.relfiles.of(table).read();
++        if let Some(bt) = rf.btrees.get(&index) {
++            return bt.height();
++        }
++        // (A kept table not laid out yet: its record's, as its pages were read: `main_blocks_known`.)
++        if let Some(b) = kept::sizes_read(&rf, table).and_then(|s| s.btrees.iter().find(|b| b.0 == index)) {
++            return b.2;
++        }
+     }
+     let downlink = (8 + key_width as usize).div_ceil(8) * 8 + heapsim::ITEM_ID;
+     let fanout = ((heapsim::BLCKSZ - 24 - 16) * 70 / 100 / downlink).max(2) as f64;
+@@ -4433,7 +4507,10 @@ pub fn model_bytes(db: &Database) -> usize {
+ }
+ 
+ pub fn btree_blocks(table: u32, index: u32, db: &Database) -> Option<u32> {
+-    db.relfiles.of(table).read().btrees.get(&index).map(Btree::nblocks)
++    let rf = db.relfiles.of(table).read();
++    rf.btrees.get(&index).map(Btree::nblocks).or_else(|| {
++        kept::sizes_read(&rf, table).and_then(|s| s.btrees.iter().find(|b| b.0 == index).map(|b| b.1))
++    })
+ }
+ 
+ /// Where each row (by data key) is in the table's heap, and whether the visibility map
+@@ -4555,6 +4632,17 @@ fn modelled(rf: &RelFiles, cat: &Catalog, t: &Table) -> bool {
+         && t.pkey_index.as_ref().is_none_or(index_done)
+ }
+ 
++/// `heap_blocks` for the planner (estimate_rel_size's RelationGetNumberOfBlocks): a kept
++/// table's pages as its record has them while its models aren't laid out yet (`kept::sizes`),
++/// so planning doesn't wait for the layout. (Readers that need the model itself, its rows'
++/// places or pruning, still lay it out or wait for it: `heap_blocks`.)
++pub fn planned_heap_blocks(t: &Table, ctx: &ExecCtx) -> Result<Option<u32>> {
++    if let Some(n) = main_blocks_known(t.oid, &ctx.catalog(), &ctx.sess.db) {
++        return Ok(Some(n as u32));
++    }
++    heap_blocks(t, ctx)
++}
++
+ /// The table's current size in pages (None: not modelled).
+ pub fn heap_blocks(t: &Table, ctx: &ExecCtx) -> Result<Option<u32>> {
+     if let Some(n) = heap_blocks_known(t, &ctx.catalog(), &ctx.sess.db) {
+@@ -5026,7 +5114,8 @@ pub fn main_blocks_known(oid: u32, cat: &Catalog, db: &Database) -> Option<u64>
+             } else if modelled(&rf, cat, &t) {
+                 rf.heaps.get(&t.oid).map(|h| h.nblocks() as u64)
+             } else {
+-                None
++                drop(rf);
++                kept::sizes(db, cat, &t).map(|s| s.heap as u64)
+             }
+         }
+         Rel::Index(t, _) => {
+@@ -5040,7 +5129,9 @@ pub fn main_blocks_known(oid: u32, cat: &Catalog, db: &Database) -> Option<u64>
+             } else if modelled(&rf, cat, &t) {
+                 rf.btrees.get(&oid).map(|b| b.nblocks() as u64)
+             } else {
+-                None
++                drop(rf);
++                let s = kept::sizes(db, cat, &t)?;
++                s.btrees.iter().find(|b| b.0 == oid).map(|b| b.1 as u64)
+             }
+         }
+         _ => None,
+diff --git a/crates/pg-engine/src/exec/sizing/kept.rs b/crates/pg-engine/src/exec/sizing/kept.rs
+index 16248cc5..e8f3bc05 100644
+--- a/crates/pg-engine/src/exec/sizing/kept.rs
++++ b/crates/pg-engine/src/exec/sizing/kept.rs
+@@ -125,6 +125,7 @@ pub fn open(db: &Database, reset: &[u32]) -> Result<()> {
+         let mut rf = shard.write();
+         rf.kept.clear();
+         rf.kept_stored.clear();
++        rf.kept_sizes.clear();
+     }
+     for oid in kept {
+         db.relfiles.of(oid).write().kept.insert(oid);
+@@ -140,6 +141,7 @@ pub(super) fn forget(rf: &mut RelFiles, oid: u32) {
+     rf.kept.remove(&oid);
+     rf.building.remove(&oid);
+     rf.kept_hash.remove(&oid);
++    rf.kept_sizes.remove(&oid);
+ }
+ 
+ /// What `take` found for a table.
+@@ -161,7 +163,12 @@ pub(super) struct Building<'a> {
+ 
+ impl Drop for Building<'_> {
+     fn drop(&mut self) {
+-        self.db.relfiles.of(self.oid).write().building.remove(&self.oid);
++        let mut rf = self.db.relfiles.of(self.oid).write();
++        rf.building.remove(&self.oid);
++        if !rf.heaps.contains_key(&self.oid) {
++            rf.kept_sizes.remove(&self.oid);
++        }
++        drop(rf);
+         self.db.relfiles.notify_built();
+     }
+ }
+@@ -209,6 +216,54 @@ pub(super) fn take<'a>(t: &Table, need: &[&BoundIndex], ctx: &'a ExecCtx) -> Tak
+     Take::Restore(r, building)
+ }
+ 
++/// Kept table `t`'s sizes from its record's header (`Sizes`), while its models aren't laid
++/// out: what the planner reads of it without waiting for the layout (a big table's takes
++/// a quarter of a second). Read once, from the store; None once its models are there, or
++/// when the record has no sizes or isn't valid for `t` any more.
++pub(super) fn sizes(db: &Database, cat: &Catalog, t: &Table) -> Option<Sizes> {
++    let pending = |rf: &RelFiles| !rf.heaps.contains_key(&t.oid) && (rf.kept.contains(&t.oid) || rf.building.contains(&t.oid));
++    {
++        let rf = db.relfiles.of(t.oid).read();
++        if !pending(&rf) {
++            return None;
++        }
++        if let Some(s) = rf.kept_sizes.get(&t.oid) {
++            return s.clone();
++        }
++    }
++    let v = db.store.get(&key(t.oid), db.store.visible_ts()).ok()??;
++    let s = read_sizes(&v, cat.relfilenode(t.oid)?, token(cat, t)).0;
++    let mut rf = db.relfiles.of(t.oid).write();
++    if !pending(&rf) {
++        return None;
++    }
++    rf.kept_sizes.insert(t.oid, s.clone());
++    s
++}
++
++/// The sizes `sizes` found for table `oid`, without reading anything (None: none read).
++pub(super) fn sizes_read(rf: &RelFiles, oid: u32) -> Option<&Sizes> {
++    if rf.heaps.contains_key(&oid) || !(rf.kept.contains(&oid) || rf.building.contains(&oid)) {
++        return None;
++    }
++    rf.kept_sizes.get(&oid)?.as_ref()
++}
++
++/// The models of kept table `oid` are laid out (`rf` has them): its header's sizes go, and
++/// (debug builds) must match when their saved shape was restored. A rebuild from rows
++/// may pack pages differently.
++pub(super) fn laid_out(rf: &mut RelFiles, oid: u32, restored: bool) {
++    let Some(s) = rf.kept_sizes.remove(&oid).flatten() else { return };
++    if cfg!(debug_assertions) && restored {
++        let heap = rf.heaps.get(&oid).map(Heap::nblocks);
++        debug_assert_eq!(heap, Some(s.heap), "kept heap pages of {oid}");
++        for &(ix, pages, level) in &s.btrees {
++            let bt = rf.btrees.get(&ix).map(|b| (b.nblocks(), b.height()));
++            debug_assert!(bt.is_none_or(|b| b == (pages, level)), "kept btree sizes of {ix}");
++        }
++    }
++}
++
+ /// Lay every kept table's models out in the background as the database opens, so a
+ /// table's first statement usually finds them: one the builder hasn't reached yet is laid
+ /// out by its first user (`ensure`), who waits only while the builder is laying out that
+@@ -255,6 +310,7 @@ fn lay_out(db: &Database, oid: u32, building: Building<'_>) {
+         rf.btrees.insert(ix, tree);
+     }
+     rf.kept_hash.insert(oid, h);
++    laid_out(&mut rf, oid, true);
+     drop(rf);
+     drop(building);
+ }
+@@ -375,20 +431,80 @@ fn encode(rf: &RelFiles, cat: &Catalog, t: &Table, h: &Heap, node: u32, v: &Vis,
+     out.extend_from_slice(&shape);
+     let ixs: Vec<u32> = index_oids(t).into_iter().filter(|o| rf.btrees.contains_key(o)).collect();
+     put(&mut out, ixs.len() as u64);
++    let mut ixs_sizes = Vec::with_capacity(ixs.len());
+     for oid in ixs {
+         out.extend_from_slice(&oid.to_le_bytes());
+-        rf.btrees[&oid].write_image(&mut out);
++        let bt = &rf.btrees[&oid];
++        bt.write_image(&mut out);
++        ixs_sizes.push((oid, bt.nblocks(), bt.height()));
+     }
+     // (A small record as it is, a bigger one compressed: a tag says which.)
++    let mut z = sized_header(t, h, node, cat, &ixs_sizes);
+     if out.len() < 1024 {
+-        out.insert(0, RAW);
+-        return Some(out);
++        z.push(RAW);
++        z.extend_from_slice(&out);
++        return Some(z);
+     }
+-    let mut z = vec![ZSTD];
++    z.push(ZSTD);
+     z.extend_from_slice(&zc.compress(&out).ok()?);
+     Some(z)
+ }
+ 
++/// The sizes a planner reads of a kept table before its models are laid out (`sizes`): its
++/// heap's pages, and each btree's pages and root level. Kept only for a heap whose pages are
++/// all visible with none prunable: reads of it then change nothing in its models (no page
++/// to prune, no index entry to mark dead), so they needn't wait for the layout.
++#[derive(Clone, Debug, PartialEq)]
++pub(crate) struct Sizes {
++    pub heap: u32,
++    /// (index, pages, root level)
++    pub btrees: Vec<(u32, u32, u32)>,
++}
++
++/// A record's first byte when the sizes come first (`SIZED`, the relfilenode, the
++/// definition's token, then the sizes), before the record as it was (`RAW` / `ZSTD`): the
++/// sizes read without decompressing the rows. (Older builds don't know the tag: they lay
++/// the table out from its rows.)
++const SIZED: u8 = 0xf2;
++
++fn sized_header(t: &Table, h: &Heap, node: u32, cat: &Catalog, btrees: &[(u32, u32, u32)]) -> Vec<u8> {
++    let mut out = Vec::new();
++    if h.visibility_watch().is_none() || h.any_prunable() {
++        return out;
++    }
++    out.push(SIZED);
++    out.extend_from_slice(&node.to_le_bytes());
++    out.extend_from_slice(&token(cat, t).to_le_bytes());
++    put(&mut out, h.nblocks() as u64);
++    put(&mut out, btrees.len() as u64);
++    for &(oid, pages, level) in btrees {
++        out.extend_from_slice(&oid.to_le_bytes());
++        put(&mut out, pages as u64);
++        put(&mut out, level as u64);
++    }
++    out
++}
++
++/// A record's sizes (`Sizes`), when it has them for relfilenode `node` and definition
++/// `token`; and the record after them.
++fn read_sizes(v: &[u8], node: u32, token: u64) -> (Option<Sizes>, &[u8]) {
++    let Some((&SIZED, rest)) = v.split_first() else { return (None, v) };
++    let mut r = Rd(rest);
++    let mut read = || -> Option<Sizes> {
++        let same = u32::from_le_bytes(r.take(4)?.try_into().ok()?) == node
++            && u64::from_le_bytes(r.take(8)?.try_into().ok()?) == token;
++        let heap = u32::try_from(r.get()?).ok()?;
++        let mut btrees = Vec::new();
++        for _ in 0..r.get()? {
++            let oid = u32::from_le_bytes(r.take(4)?.try_into().ok()?);
++            btrees.push((oid, u32::try_from(r.get()?).ok()?, u32::try_from(r.get()?).ok()?));
++        }
++        same.then_some(Sizes { heap, btrees })
++    };
++    let s = read();
++    (s, r.0)
++}
++
+ struct Rd<'a>(&'a [u8]);
+ 
+ impl<'a> Rd<'a> {
+@@ -432,6 +548,7 @@ impl<'a> Rd<'a> {
+ /// fillfactor `ff`. (The definition's hash covers the btrees' options kept with them.)
+ fn decode(v: &[u8], node: u32, token: u64, ff: usize) -> Option<Restore> {
+     let raw;
++    let (_, v) = read_sizes(v, node, token);
+     let body = match v.split_first()? {
+         (&RAW, b) => b,
+         (&ZSTD, b) => {
+@@ -480,3 +597,306 @@ fn decode(v: &[u8], node: u32, token: u64, ff: usize) -> Option<Restore> {
+     }
+     r.0.is_empty().then_some(Restore { rows, exts, shape, btrees })
+ }
++
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::engine::{Engine, EngineOptions};
++    use crate::session::Session;
++
++    fn prepared() -> (tempfile::TempDir, Arc<Engine>, Session, Arc<Table>) {
++        let dir = tempfile::tempdir().unwrap();
++        let eng = Engine::open(EngineOptions { data_dir: dir.path().into(), sync: false, ..Default::default() }).unwrap();
++        let mut s = eng.connect(1, "postgres", "postgres", "kept-test").unwrap();
++        s.query("CREATE TABLE ks (id int PRIMARY KEY, a text); CREATE INDEX ks_a ON ks(a);
++            INSERT INTO ks SELECT g, repeat('p', 80) || g FROM generate_series(1, 3000) g;
++            DELETE FROM ks WHERE id % 2 = 0").unwrap();
++        s.query("VACUUM ANALYZE ks").unwrap();
++        let t = s.state.db.catalog().tables.values().find(|t| t.name == "ks").unwrap().clone();
++        (dir, eng, s, t)
++    }
++
++    // Persist and reopen just the model state. No background builder is started, so the
++    // first planner read deterministically uses the kept header.
++    fn reopen_models(db: &Database) {
++        persist_inner(db).unwrap();
++        for shard in db.relfiles.all() {
++            let mut rf = shard.write();
++            rf.heaps.clear();
++            rf.btrees.clear();
++            rf.toast.clear();
++        }
++        open(db, &[]).unwrap();
++    }
++
++    #[test]
++    fn header_pages_are_available_before_layout() {
++        let (_dir, _eng, mut s, t) = prepared();
++        let ix = t.pkey_index.unwrap();
++        let pages = btree_blocks(t.oid, ix, &s.state.db).unwrap();
++        assert!(pages > 1);
++        s.query("SET enable_seqscan = off; SET enable_bitmapscan = off").unwrap();
++        let query = "EXPLAIN SELECT a FROM ks WHERE id < 1000";
++        let before = s.query(query).unwrap().pop().unwrap().rows;
++        reopen_models(&s.state.db);
++        s.apply_step(|ctx| {
++            assert!(planned_heap_blocks(&t, ctx)?.is_some());
++            let rf = ctx.sess.db.relfiles.of(t.oid).read();
++            assert!(!rf.heaps.contains_key(&t.oid));
++            assert!(sizes_read(&rf, t.oid).is_some());
++            drop(rf);
++            assert_eq!(btree_blocks(t.oid, ix, &ctx.sess.db), Some(pages));
++            Ok(())
++        }).unwrap();
++        assert_eq!(s.query(query).unwrap().pop().unwrap().rows, before);
++        assert!(!s.state.db.relfiles.of(t.oid).read().heaps.contains_key(&t.oid));
++        s.apply_step(|ctx| {
++            assert!(heap_blocks(&t, ctx)?.is_some());
++            assert!(ctx.sess.db.relfiles.of(t.oid).read().kept_sizes.get(&t.oid).is_none());
++            assert_eq!(btree_blocks(t.oid, ix, &ctx.sess.db), Some(pages));
++            Ok(())
++        }).unwrap();
++        assert_eq!(s.query(query).unwrap().pop().unwrap().rows, before);
++    }
++
++    #[test]
++    fn missing_tree_discards_header_before_row_rebuild() {
++        let (_dir, _eng, mut s, t) = prepared();
++        // A valid kept heap may omit an index whose model was not present at close.
++        let missing = t.indexes[0];
++        s.state.db.relfiles.of(t.oid).write().btrees.remove(&missing);
++        reopen_models(&s.state.db);
++        s.apply_step(|ctx| {
++            assert!(planned_heap_blocks(&t, ctx)?.is_some());
++            assert!(ctx.sess.db.relfiles.of(t.oid).read().kept_sizes.get(&t.oid).is_some());
++            let indexes = crate::sql::binder::bound_indexes(&t, ctx)?;
++            let need: Vec<_> = indexes.iter().collect();
++            assert!(matches!(take(&t, &need, ctx), Take::None));
++            assert!(!ctx.sess.db.relfiles.of(t.oid).read().kept_sizes.contains_key(&t.oid));
++            assert!(sizes_read(&ctx.sess.db.relfiles.of(t.oid).read(), t.oid).is_none());
++            assert!(ensure(&t, &indexes, ctx)?);
++            let rf = ctx.sess.db.relfiles.of(t.oid).read();
++            assert!(rf.kept_sizes.get(&t.oid).is_none());
++            assert!(rf.btrees.contains_key(&missing));
++            Ok(())
++        }).unwrap();
++        let r = s.query("SELECT count(*) FROM ks").unwrap();
++        assert_eq!(r.last().unwrap().rows, vec![vec![Value::Int8(1500)]]);
++    }
++
++    #[derive(Clone, Copy, Debug)]
++    enum BuildCase {
++        Include(usize),
++        Duplicate(usize),
++        Minimum(bool),
++    }
++
++    fn combined_build_case(case: BuildCase, workers: usize, estimated: bool) -> (crate::error::Error, crate::exec::rowsize::observe::Trace) {
++        use crate::exec::rowsize::observe;
++        with_max_versions(if estimated { 500 } else { 20000 }, || {
++            let dir = tempfile::tempdir().unwrap();
++            let eng = Engine::open(EngineOptions { data_dir: dir.path().into(), sync: false, ..Default::default() }).unwrap();
++            let mut s = eng.connect(1, "postgres", "postgres", "combined-build-test").unwrap();
++            s.query(&format!("SET max_parallel_maintenance_workers={workers};
++                SET max_parallel_workers=1024; SET min_parallel_table_scan_size=0;
++                SET maintenance_work_mem='128MB'")).unwrap();
++            s.query("CREATE FUNCTION ci_text(n int) RETURNS text LANGUAGE sql IMMUTABLE AS $$
++                SELECT left(string_agg(md5(g::text), '' ORDER BY g), n)
++                FROM generate_series(1, (n+31)/32) g $$").unwrap();
++            s.query("CREATE TABLE ci(k int, payload text) WITH (parallel_workers=2)").unwrap();
++            let (key, payload, unique, direction) = match case {
++                BuildCase::Include(n) => ("g".into(), format!("CASE WHEN g=6000 THEN ci_text({n}) ELSE 'small' END"), "", ""),
++                BuildCase::Duplicate(n) => ("CASE WHEN g=2 THEN 1 ELSE g END".into(),
++                    format!("CASE WHEN g=6000 THEN ci_text({n}) ELSE 'small' END"), "UNIQUE ", ""),
++                BuildCase::Minimum(desc) => {
++                    let (key, payload) = if desc {
++                        ("CASE WHEN g=1 THEN -9000 WHEN g=300 THEN 20 WHEN g=600 THEN 10 ELSE -g END",
++                         "CASE WHEN g=1 THEN ci_text(2800) WHEN g=300 THEN ci_text(2880) WHEN g=600 THEN ci_text(3000) ELSE 'small' END")
++                    } else {
++                        ("CASE WHEN g=1 THEN 9000 WHEN g=300 THEN -10 WHEN g=600 THEN -20 ELSE g END",
++                         "CASE WHEN g=1 THEN ci_text(2800) WHEN g=300 THEN ci_text(3000) WHEN g=600 THEN ci_text(2880) ELSE 'small' END")
++                    };
++                    (key.into(), payload.into(), "", if desc { " DESC" } else { "" })
++                }
++            };
++            s.query(&format!("INSERT INTO ci SELECT {key}, {payload} FROM generate_series(1,6000) g")).unwrap();
++            let t = s.state.db.catalog().tables.values().find(|t| t.name == "ci").unwrap().clone();
++            assert_eq!(is_estimated(t.oid, &s.state.db), estimated);
++            assert_eq!(heap_writes(t.oid, &s.state.db).is_some(), !estimated);
++            let sql = format!("CREATE {unique}INDEX ci_i ON ci(k{direction}) INCLUDE(payload)");
++            let (result, trace) = observe::capture(workers == 2, || s.query(&sql));
++            eprintln!("combined_index_build_validation {case:?} workers={workers} estimated={estimated}: {trace:#?}");
++            let error = match result {
++                Err(error) => error,
++                Ok(rows) => panic!("expected an index build error for {case:?}, workers={workers}, estimated={estimated}; got {rows:#?}; trace: {trace:#?}"),
++            };
++            assert_eq!(trace.identity.as_ref().map(|i| i.2.as_str()), Some("ci_i"));
++            assert_eq!(trace.outcome.as_ref(), Some(&error));
++            assert!(trace.gate_error.is_none(), "{trace:#?}");
++            if workers == 0 {
++                assert_eq!(trace.spawned, 0);
++                assert!(trace.participants.is_empty());
++                assert!(trace.serial_validated > 0);
++            } else {
++                assert_eq!((trace.requested, trace.reserved, trace.spawned), (2, 2, 2));
++                assert_eq!(trace.model, !estimated);
++                assert_eq!(trace.serial_rows, 0, "parallel build fell back");
++                assert_eq!(trace.participants.len(), 3);
++                let threads: std::collections::BTreeSet<_> = trace.participants.values().map(|p| &p.thread).collect();
++                assert_eq!(threads.len(), 3, "participants must run on distinct threads");
++                let first_chunks: std::collections::BTreeSet<_> = trace.participants.values().map(|p| p.chunks[0]).collect();
++                assert_eq!(first_chunks.len(), 3);
++                for id in 0..=2 {
++                    let p = &trace.participants[&id];
++                    assert!(!p.coordinator_aborted, "unexpected coordinator abort: {trace:#?}");
++                    assert!(p.rows > 0 && p.validated > 0, "participant {id}: {p:#?}");
++                    if id > 0 {
++                        assert!(p.thread.contains("roll-build-"), "{p:#?}");
++                    }
++                    if !estimated {
++                        assert!(p.model_returns > 0, "modeled early-return path was not used: {p:#?}");
++                    } else {
++                        assert_eq!(p.model_returns, 0);
++                    }
++                }
++                if error.message.contains("maximum size is 8191") {
++                    assert!(trace.participants.values().any(|p| p.error.as_ref().is_some_and(|e| e.code == error.code && e.message == error.message)
++                        && p.expanded_text >= 8300), "formation failure lost its participant or expanded INCLUDE: {trace:#?}");
++                } else {
++                    assert_eq!(trace.participants.values().map(|p| p.validated).sum::<usize>(), 6000);
++                }
++            }
++            (error, trace)
++        })
++    }
++
++    // Definitions only until the parent runs this existing library-test target.
++    #[test]
++    fn combined_index_build_validation() {
++        for estimated in [false, true] {
++            for (case, code, message) in [
++                (BuildCase::Include(2800), "54000", "index row size 2816 exceeds btree version 4 maximum 2704"),
++                (BuildCase::Include(8300), "54000", "index row requires 8320 bytes, maximum size is 8191"),
++                (BuildCase::Duplicate(8300), "54000", "index row requires 8320 bytes, maximum size is 8191"),
++                (BuildCase::Duplicate(2800), "23505", "could not create unique index"),
++                (BuildCase::Duplicate(0), "23505", "could not create unique index"),
++            ] {
++                let (serial, _) = combined_build_case(case, 0, estimated);
++                let (parallel, trace) = combined_build_case(case, 2, estimated);
++                assert_eq!(serial.code, code);
++                assert!(serial.message.starts_with(message), "{serial:?}");
++                assert_eq!(parallel, serial, "full error fields differ: {case:?}, estimated={estimated}");
++                if matches!(case, BuildCase::Duplicate(2800)) {
++                    assert!(trace.participants.values().any(|p| p.minimum.is_some()), "duplicate must win over a real deferred candidate");
++                }
++                if matches!(case, BuildCase::Include(2800)) {
++                    assert!(trace.participants.values().any(|p| p.expanded_text >= 2800));
++                }
++            }
++            for desc in [false, true] {
++                let case = BuildCase::Minimum(desc);
++                let (serial, _) = combined_build_case(case, 0, estimated);
++                let (parallel, trace) = combined_build_case(case, 2, estimated);
++                assert_eq!(parallel, serial, "full error fields and selected TID differ: {case:?}");
++                assert!(serial.message.starts_with("index row size 2896 exceeds btree version 4 maximum 2704"), "{serial:?}");
++                let candidates: Vec<_> = trace.fold.iter().filter_map(|(id, c)| c.as_ref().map(|c| (*id, c))).collect();
++                assert_eq!(candidates.len(), 3, "all reserved first chunks must own a different candidate: {trace:#?}");
++                assert_eq!(candidates.iter().map(|c| c.0).collect::<Vec<_>>(), vec![0, 1, 2], "actual fold must include leader, worker1, worker2 in order: {trace:#?}");
++                let owners: std::collections::BTreeSet<_> = candidates.iter().map(|c| &c.1.2).collect();
++                assert_eq!(owners.len(), 3, "candidate data keys must be distinct: {trace:#?}");
++                let keys: std::collections::BTreeSet<_> = candidates.iter().map(|c| &c.1.0).collect();
++                assert_eq!(keys.len(), 3, "full encoded candidate keys must be distinct: {trace:#?}");
++                let winner_id = if desc { 1 } else { 2 };
++                for (id, candidate) in &candidates {
++                    assert_eq!(trace.participants[id].minimum.as_ref(), Some(*candidate));
++                    let expected = if *id == 0 { 2816 } else if *id == winner_id { 2896 } else { 3016 };
++                    assert_eq!(candidate.1, expected, "participant {id} must retain its own size: {trace:#?}");
++                }
++                let winner = candidates.iter().min_by(|a, b| a.1.0.cmp(&b.1.0)).unwrap();
++                assert_eq!(winner.0, winner_id, "DESC must select the middle participant; ASC the last: {trace:#?}");
++                assert_ne!(winner.0, candidates[0].0, "winner must not be first folded");
++                assert_ne!(winner.0, 0, "leader must be included without overriding a worker winner");
++                assert_eq!(trace.minimum.as_ref(), Some(winner.1));
++                assert_eq!(winner.1.1, 2896);
++                // Use the actual participants' full encoded keys, sizes and data keys.
++                // Both reduction orders must retain the same candidate's own fields.
++                for reverse in [false, true] {
++                    let mut order = candidates.clone();
++                    if reverse {
++                        order.reverse();
++                    }
++                    let mut reduced = crate::exec::rowsize::BuildSizes::default();
++                    for (_, c) in order {
++                        let mut part = crate::exec::rowsize::BuildSizes::default();
++                        part.btree_row(Some(c.1), || c.0.clone(), &c.2).unwrap();
++                        reduced.merge(part);
++                    }
++                    assert_eq!(reduced.candidate().as_ref(), Some(winner.1));
++                }
++                assert_eq!(trace.participants[&winner.0].minimum.as_ref(), Some(winner.1));
++            }
++        }
++    }
++
++    fn size_failure_stats(s: &mut Session) -> Vec<i64> {
++        s.query("SELECT pg_stat_force_next_flush()").unwrap();
++        s.query("SELECT pg_stat_clear_snapshot()").unwrap();
++        let result = s.query("SELECT n_tup_ins, n_tup_upd, n_tup_del, n_live_tup, n_dead_tup, n_ins_since_vacuum
++            FROM pg_stat_user_tables WHERE relname='cs'").unwrap();
++        assert_eq!(result[0].rows.len(), 1);
++        result[0].rows[0].iter().map(|v| match v {
++            Value::Int8(n) => *n,
++            _ => panic!("expected int8 stats, got {v:?}"),
++        }).collect()
++    }
++
++    // Expectations follow the accepted failed-INSERT accounting contract. These new
++    // size-failure cases are unrun and need a separate PG18 capture before parity claims.
++    #[test]
++    fn combined_index_size_error_stats_unoracled() {
++        for (len, message) in [(2800, "index row size 2816 exceeds"), (8300, "index row requires 8320 bytes")] {
++            let dir = tempfile::tempdir().unwrap();
++            let eng = Engine::open(EngineOptions { data_dir: dir.path().into(), sync: false, ..Default::default() }).unwrap();
++            let mut s = eng.connect(1, "postgres", "postgres", "size-error-stats-test").unwrap();
++            s.query("CREATE FUNCTION cs_text(n int) RETURNS text LANGUAGE sql IMMUTABLE AS $$
++                SELECT left(string_agg(md5(g::text), '' ORDER BY g), n)
++                FROM generate_series(1, (n+31)/32) g $$").unwrap();
++            s.query("CREATE TABLE cs(id int PRIMARY KEY, payload text) WITH (autovacuum_enabled=off);
++                CREATE INDEX cs_i ON cs(id) INCLUDE(payload);
++                INSERT INTO cs VALUES (1, 'small')").unwrap();
++            let before = size_failure_stats(&mut s);
++            let error = s.query(&format!("INSERT INTO cs VALUES (2, cs_text({len}))")).unwrap_err();
++            assert_eq!(error.code, "54000");
++            assert!(error.message.starts_with(message), "{error:?}");
++            let failed = size_failure_stats(&mut s);
++            let delta: Vec<_> = failed.iter().zip(&before).map(|(a, b)| a - b).collect();
++            eprintln!("PG oracle pending: size stats len={len}, single failed INSERT observed delta={delta:?}, error={error:?}");
++            assert_eq!(delta, vec![1, 0, 0, 0, 1, 1], "one failed heap insertion counts once");
++            assert_eq!(s.query("SELECT count(*) FROM cs").unwrap()[0].rows, vec![vec![Value::Int8(1)]]);
++
++            let error = s.query(&format!("INSERT INTO cs VALUES (2, 'small'), (3, cs_text({len}))")).unwrap_err();
++            assert_eq!(error.code, "54000");
++            assert!(error.message.starts_with(message), "{error:?}");
++            let multi = size_failure_stats(&mut s);
++            let delta: Vec<_> = multi.iter().zip(&failed).map(|(a, b)| a - b).collect();
++            assert_eq!(delta, vec![2, 0, 0, 0, 2, 2], "earlier row and failed row each count once after statement rollback");
++            assert_eq!(s.query("SELECT count(*) FROM cs").unwrap()[0].rows, vec![vec![Value::Int8(1)]]);
++
++            s.query("INSERT INTO cs VALUES (2, 'small')").unwrap();
++            let success = size_failure_stats(&mut s);
++            let delta: Vec<_> = success.iter().zip(&multi).map(|(a, b)| a - b).collect();
++            assert_eq!(delta, vec![1, 0, 0, 1, 0, 1], "successful insertion is not counted twice");
++            for sql in [format!("UPDATE cs SET payload=cs_text({len}) WHERE id=1"),
++                format!("INSERT INTO cs VALUES (1, cs_text({len})) ON CONFLICT(id) DO UPDATE SET payload=EXCLUDED.payload")] {
++                let before_update = size_failure_stats(&mut s);
++                let error = s.query(&sql).unwrap_err();
++                assert_eq!(error.code, "54000");
++                assert!(error.message.starts_with(message), "{error:?}");
++                let after_update = size_failure_stats(&mut s);
++                assert_eq!(after_update[0], before_update[0], "UPDATE must not add an INSERT count: {sql}");
++                assert_eq!(after_update[5], before_update[5], "UPDATE must not add ins_since_vacuum: {sql}");
++            }
++        }
++    }
++}
+diff --git a/crates/pg-engine/src/session/ddl/objects.rs b/crates/pg-engine/src/session/ddl/objects.rs
+index 441688e3..3ae4bb09 100644
+--- a/crates/pg-engine/src/session/ddl/objects.rs
++++ b/crates/pg-engine/src/session/ddl/objects.rs
+@@ -505,7 +505,7 @@ impl Ddl<'_, '_> {
+             // before the phase that marks it ready) not ready for inserts.
+             if s.concurrent
+                 && !t.temporary
+-                && let Some(e) = self.index_duplicate(&t, &ix)?
++                && let Some(e) = self.index_build_error(&t, &ix)?
+             {
+                 self.cat.put_index(Index {
+                     valid: false,
+diff --git a/crates/pg-engine/src/session/ddl/parbuild.rs b/crates/pg-engine/src/session/ddl/parbuild.rs
+index aeaaee45..868d35b7 100644
+--- a/crates/pg-engine/src/session/ddl/parbuild.rs
++++ b/crates/pg-engine/src/session/ddl/parbuild.rs
+@@ -4,10 +4,11 @@
+ //! entries; the sorted entries go in as linked runs (`Txn::put_index_runs`), and a unique
+ //! index's duplicates are found merging them, the one reported the serial build's (the key
+ //! whose second row comes first in the table's order). Only for an index of plain columns
+-//! without a predicate on a table too big to model (`Ddl::measures_in_build`).
++//! without a predicate, using either measured tuple sizes or model keys.
+ 
+ use super::Ddl;
+ use super::vacuum::RowMeasure;
++use crate::catalog::btsim::Key;
+ use crate::catalog::{Index, Table, relsize};
+ use crate::error::Result;
+ use crate::sql::expr::Expr;
+@@ -79,6 +80,9 @@ struct Gathered {
+     /// The measure's (sort key, key bytes, index tuple size) of each entry.
+     keys: Vec<(u128, Vec<u8>, usize)>,
+     parts: Vec<(usize, Part)>,
++    /// A modelled table's keys with their data keys.
++    model: Vec<(Key, Vec<u8>)>,
++    sizes: crate::exec::rowsize::BuildSizes,
+ }
+ 
+ /// What every participant needs, shared.
+@@ -94,29 +98,66 @@ struct Plan<'a> {
+     need: Vec<bool>,
+     fmt: crate::types::text::FormatCtx,
+     check_nulls: bool,
++    /// The table is modelled: each row's key in the index's model is taken (`sizing::
++    /// btree_from_build` lays the model out from them) in place of the measure.
++    model: bool,
++    #[cfg(test)]
++    observed: Option<std::sync::Arc<crate::exec::rowsize::observe::Observer>>,
+ }
+ 
+ impl Plan<'_> {
+     /// A row: its entry, and its measure as `measure_rows_with` takes it.
+-    fn row(&self, g: &mut Gathered, part: &mut Part, dkey: &[u8], bytes: &[u8]) -> Result<()> {
++    fn row(&self, g: &mut Gathered, part: &mut Part, dkey: &[u8], bytes: &[u8], _participant: usize) -> Result<()> {
+         let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, &self.fmt);
+         part.rows += 1;
+-        let stored = crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(bytes)?, &self.types, &self.virt_mask);
+-        let mut row = match stored {
+-            Some(_) => crate::exec::scan::decode_table_row_need(self.t, bytes, &self.need)?,
+-            None => crate::exec::scan::decode_table_row(self.t, bytes)?,
++        #[cfg(test)]
++        if let Some(o) = &self.observed {
++            o.row(_participant);
++        }
++        let stored = if self.model {
++            None
++        } else {
++            crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(bytes)?, &self.types, &self.virt_mask)
++        };
++        let mut row = if self.model || stored.is_some() {
++            crate::exec::scan::decode_table_row_need(self.t, bytes, &self.need)?
++        } else {
++            crate::exec::scan::decode_table_row(self.t, bytes)?
+         };
+-        let mut vals: Vec<Value> = self.cols.iter().map(|&i| row[i].clone()).collect();
++        let vals: Vec<Value> = self.cols.iter().map(|&i| row[i].clone()).collect();
+         let k = crate::exec::scan::index_entry_key(self.t, self.ix, &vals, dkey, self.colls);
+         let checked = !self.check_nulls || !vals.iter().any(Value::is_null);
++        let all: Vec<Value> = vals.iter().cloned().chain(self.ix.include.iter().map(|&i| row[i].clone())).collect();
++        #[cfg(test)]
++        let expanded = all.iter().filter_map(|v| if let Value::Text(s) = v { Some(s.len()) } else { None }).max().unwrap_or(0);
++        #[cfg(test)]
++        if let Some(o) = &self.observed {
++            o.expanded(_participant, expanded);
++        }
++        let size = crate::exec::rowsize::btree_size(&self.ix_types, &all, &self.fmt);
++        g.sizes.btree_row(size, || k.clone(), dkey)?;
++        #[cfg(test)]
++        if let Some(o) = &self.observed {
++            o.validated(_participant, g.sizes.candidate(), expanded);
++        }
+         g.entries.push(&k, dkey.len().saturating_sub(8), checked);
++        if self.model {
++            let ty = |n: usize| self.ix_types.get(n).cloned();
++            let key = crate::exec::sizing::index_key_of(self.t, self.ix, &ty, self.colls, vals, &row, &self.fmt);
++            g.model.push((key, dkey.to_vec()));
++            #[cfg(test)]
++            if let Some(o) = &self.observed {
++                o.model_return(_participant);
++            }
++            return Ok(());
++        }
+         let mut sort = super::table::key_bytes(&vals);
+-        vals.extend(self.ix.include.iter().map(|&i| row[i].clone()));
+         let prefix = super::vacuum::key_prefix(&sort);
+         if sort.len() <= 16 {
+             sort = Vec::new();
+         }
+-        g.keys.push((prefix, sort, relsize::index_tuple(&self.ix_types, &vals, &text)));
++        let exact = size.unwrap_or_else(|| relsize::index_tuple(&self.ix_types, &all, &text));
++        g.keys.push((prefix, sort, exact));
+         match stored {
+             Some(len) => part.sizes.push(relsize::heap_tuple_of_len(len)),
+             None => {
+@@ -139,11 +180,24 @@ impl Plan<'_> {
+         stop: &AtomicBool,
+         check: &dyn Fn() -> Result<()>,
+         progress: (&IndexProgress, &AtomicU64),
++        _participant: usize,
+     ) -> Result<Gathered> {
+         let mut g = Gathered::default();
++        #[cfg(test)]
++        let mut first = true;
+         loop {
++            #[cfg(test)]
++            let next = match &self.observed {
++                Some(o) if first => o.first(_participant, chunks)?,
++                _ => chunks.lock().unwrap().pop_front(),
++            };
++            #[cfg(not(test))]
+             let next = chunks.lock().unwrap().pop_front();
+             let Some((n, chunk)) = next else { break };
++            #[cfg(test)]
++            if let Some(o) = &self.observed {
++                o.chunk(_participant, n);
++            }
+             let mut part = Part::default();
+             for (i, r) in chunk.enumerate() {
+                 if i % 1024 == 0 {
+@@ -156,9 +210,18 @@ impl Plan<'_> {
+                     }
+                 }
+                 let (dkey, bytes) = r?;
+-                self.row(&mut g, &mut part, &dkey, &bytes)?;
++                self.row(&mut g, &mut part, &dkey, &bytes, _participant)?;
+             }
+             g.parts.push((n, part));
++            #[cfg(test)]
++            if first {
++                first = false;
++                if let Some(o) = &self.observed
++                    && !o.completed_first(_participant)?
++                {
++                    return Ok(g);
++                }
++            }
+         }
+         g.entries.sort();
+         // (Each participant's keys sorted here, merged by the leader: `btree_pages_sorted`.)
+@@ -220,6 +283,14 @@ pub(super) fn index_workers(d: &Ddl, t: &Table, pages: u32) -> usize {
+     workers
+ }
+ 
++/// What a parallel build gives: its measure (a table too big to model), or a modelled
++/// table's rows and entries counted with each row's key in the index's model and its data key
++/// (`sizing::btree_from_build`).
++pub(super) enum ParBuilt {
++    Measured(RowMeasure),
++    Modelled { rows: usize, tuples: usize, keys: Vec<(Key, Vec<u8>)> },
++}
++
+ /// Gives the reserved workers back to the pool when the build ends.
+ struct Release(usize);
+ 
+@@ -231,7 +302,8 @@ impl Drop for Release {
+ 
+ impl Ddl<'_, '_> {
+     /// The parallel build of `ix` over `t` (see the module), with up to `workers` workers:
+-    /// its measure. None: not for this index (the serial build runs).
++    /// its measure, or (`model`: a modelled table) the rows' keys in the index's model.
++    /// None: not for this index (the serial build runs).
+     pub(super) fn build_index_parallel(
+         &self,
+         t: &Table,
+@@ -239,7 +311,8 @@ impl Ddl<'_, '_> {
+         bix: &BoundIndex,
+         workers: usize,
+         progress: &IndexProgress,
+-    ) -> Result<Option<RowMeasure>> {
++        model: bool,
++    ) -> Result<Option<ParBuilt>> {
+         let cols: Option<Vec<usize>> = bix.keys.iter().map(|k| if let Expr::Col(i, _) = k { Some(*i) } else { None }).collect();
+         let (Some(cols), None) = (cols, &bix.predicate) else {
+             return Ok(None);
+@@ -255,6 +328,12 @@ impl Ddl<'_, '_> {
+         let release = Release(crate::exec::parscan::reserve_workers(workers, pool));
+         crate::exec::parscan::count_index_build();
+         let got = release.0;
++        #[cfg(test)]
++        let observed = crate::exec::rowsize::observe::current();
++        #[cfg(test)]
++        if let Some(o) = &observed {
++            o.reserve(model, workers, got);
++        }
+         let chunks = {
+             let txn = self.ctx.txn.borrow();
+             let snap = txn.snap();
+@@ -293,6 +372,9 @@ impl Ddl<'_, '_> {
+             need: (0..t.columns.len()).map(|i| needed.contains(&i)).collect(),
+             fmt: self.ctx.fmt().clone(),
+             check_nulls: ix.unique && !ix.nulls_not_distinct,
++            model,
++            #[cfg(test)]
++            observed,
+         };
+         let chunks = Mutex::new(chunks);
+         let stop = AtomicBool::new(false);
+@@ -301,19 +383,32 @@ impl Ddl<'_, '_> {
+             let (plan, chunks, stop, report) = (&plan, &chunks, &stop, (progress, &done));
+             let handles: Vec<_> = (0..got)
+                 .filter_map(|i| {
+-                    std::thread::Builder::new()
++                    let handle = std::thread::Builder::new()
+                         .name(format!("roll-build-{i}"))
+                         .spawn_scoped(s, move || {
+-                            let r = plan.run(chunks, stop, &|| Ok(()), report);
++                            let r = plan.run(chunks, stop, &|| Ok(()), report, i + 1);
++                            #[cfg(test)]
++                            if let (Some(o), Err(e)) = (&plan.observed, &r) {
++                                o.error(i + 1, e);
++                            }
+                             if r.is_err() {
+                                 stop.store(true, Ordering::Relaxed);
+                             }
+                             r
+                         })
+-                        .ok()
++                        .ok();
++                    #[cfg(test)]
++                    if let Some(o) = &plan.observed {
++                        o.spawned(handle.is_some());
++                    }
++                    handle
+                 })
+                 .collect();
+-            let lead = plan.run(chunks, stop, &|| self.ctx.check(), report);
++            let lead = plan.run(chunks, stop, &|| self.ctx.check(), report, 0);
++            #[cfg(test)]
++            if let (Some(o), Err(e)) = (&plan.observed, &lead) {
++                o.error(0, e);
++            }
+             if lead.is_err() {
+                 stop.store(true, Ordering::Relaxed);
+             }
+@@ -325,28 +420,51 @@ impl Ddl<'_, '_> {
+         let mut parts: Vec<(usize, Part)> = Vec::new();
+         let mut keys = Vec::new();
+         let mut sorted = Vec::new();
+-        for g in gathered {
++        let mut model_keys = Vec::new();
++        let mut sizes = crate::exec::rowsize::BuildSizes::default();
++        for (_participant, g) in gathered.into_iter().enumerate() {
+             let g = g?;
++            #[cfg(test)]
++            let candidate = g.sizes.candidate().clone();
++            sizes.merge(g.sizes);
++            #[cfg(test)]
++            if let Some(o) = &plan.observed {
++                o.folded(_participant, &candidate, sizes.candidate());
++            }
+             parts.extend(g.parts);
+             keys.push(g.keys);
+             sorted.push(g.entries);
++            model_keys.extend(g.model);
+         }
+         if ix.unique {
+             self.unique_check(t, bix, ix, &sorted)?;
+         }
++        sizes.finish(t, bix, self.ctx)?;
+         parts.sort_by_key(|p| p.0);
+         let rows = parts.iter().map(|p| p.1.rows).sum();
++        if model {
++            let tuples = model_keys.len();
++            crate::exec::pgstat::count_returned(self.ctx, t.oid, tuples as i64);
++            progress.scanned_all(tuples as u64);
++            self.put_runs(&start, sorted)?;
++            progress.loaded(tuples as u64);
++            return Ok(Some(ParBuilt::Modelled { rows, tuples, keys: model_keys }));
++        }
+         let live = relsize::heap_pages(parts.into_iter().flat_map(|p| p.1.sizes));
+         let tuples = keys.iter().map(Vec::len).sum::<usize>();
+         progress.scanned_all(tuples as u64);
+         let pages = super::vacuum::btree_pages_sorted(bix, &plan.ix_types, merge_sorted(keys), tuples);
++        self.put_runs(&start, sorted)?;
++        progress.loaded(tuples as u64);
++        Ok(Some(ParBuilt::Measured(RowMeasure::new(rows, live, vec![(ix.oid, pages, tuples as f64)]))))
++    }
++
++    fn put_runs(&self, start: &[u8], sorted: Vec<Entries>) -> Result<()> {
+         let runs: Vec<(Vec<u8>, Vec<(u32, u32, u32)>)> = sorted
+             .into_iter()
+             .map(|e| (e.data, e.ents.into_iter().map(|(_, o, l)| (o, l & 0xffff, (l & !CHECKED) >> 16)).collect()))
+             .collect();
+-        self.ctx.txn.borrow_mut().put_index_runs(&start, runs)?;
+-        progress.loaded(tuples as u64);
+-        Ok(Some(RowMeasure::new(rows, live, vec![(ix.oid, pages, tuples as f64)])))
++        self.ctx.txn.borrow_mut().put_index_runs(start, runs)
+     }
+ 
+     /// A unique index's duplicates, merging the participants' sorted entries (entries of
+diff --git a/crates/pg-engine/src/session/ddl/table.rs b/crates/pg-engine/src/session/ddl/table.rs
+index 30d5818b..7d36569c 100644
+--- a/crates/pg-engine/src/session/ddl/table.rs
++++ b/crates/pg-engine/src/session/ddl/table.rs
+@@ -3602,19 +3602,23 @@ impl Ddl<'_, '_> {
+         Ok(())
+     }
+ 
+-    /// The error building index `ix` would stop at (computing a key, or a unique index's
+-    /// duplicate; None: none), found without building it.
+-    pub(super) fn index_duplicate(&mut self, t: &Table, ix: &Index) -> Result<Option<Error>> {
++    /// The error building index `ix` would stop at, found without writing entries.
++    /// Concurrent builds commit their INVALID catalog row when this preflight fails.
++    pub(super) fn index_build_error(&mut self, t: &Table, ix: &Index) -> Result<Option<Error>> {
+         let ta = Arc::new(t.clone());
+         let mut b = self.binder();
+         b.cat = Arc::new(self.cat.clone());
+-        let Some(bix) = b
++        let Some(mut bix) = b
+             .bound_indexes_all(&ta)?
+             .into_iter()
+             .find(|b| b.index.oid == ix.oid)
+         else {
+             return Ok(None);
+         };
++        // A concurrent REINDEX copy has its own name before it is in the catalog.
++        bix.index = Arc::new(ix.clone());
++        let mut sizes = crate::exec::rowsize::BuildSizes::default();
++        let mut duplicate = None;
+         let blocks = crate::exec::sizing::heap_blocks_for_build(t, self.ctx)?;
+         let progress = super::idxprogress::IndexProgress::start(self, t, ix, blocks);
+         progress.scanning();
+@@ -3642,17 +3646,23 @@ impl Ddl<'_, '_> {
+                 Ok(None) => continue,
+                 Err(e) => return Ok(Some(e)),
+             };
+-            if ix.unique && (ix.nulls_not_distinct || !vals.iter().any(Value::is_null)) {
++            if let Err(e) = sizes.row(t, &bix, &vals, &row, &dkey, self.ctx) {
++                return Ok(Some(e));
++            }
++            if duplicate.is_none() && ix.unique && (ix.nulls_not_distinct || !vals.iter().any(Value::is_null)) {
+                 let first = seen.insert(unique_key(&vals), &dkey, |d| {
+                     Ok(stored_values(d)?.map(|v| unique_key(&v)))
+                 })?;
+                 if let Some(first) = first {
+                     let first = stored_values(&first)?;
+-                    return Ok(Some(self.duplicate_key(t, &bix, first.as_deref().unwrap_or(&vals), &ix.name)));
++                    duplicate = Some(self.duplicate_key(t, &bix, first.as_deref().unwrap_or(&vals), &ix.name));
+                 }
+             }
+         }
+-        Ok(None)
++        if duplicate.is_some() {
++            return Ok(duplicate);
++        }
++        Ok(sizes.finish(t, &bix, self.ctx).err())
+     }
+ 
+     /// Remove an index's entries (before it is built again).
+@@ -3662,6 +3672,12 @@ impl Ddl<'_, '_> {
+ 
+     /// Fill a new index from the table's rows, checking uniqueness.
+     pub(super) fn build_index(&mut self, t: &Table, ix: &Index) -> Result<()> {
++        #[cfg(test)]
++        let observed = crate::exec::rowsize::observe::current();
++        #[cfg(test)]
++        if let Some(o) = &observed {
++            o.identify(t.oid, ix.oid, &ix.name);
++        }
+         // (The build reads the table with a sequential scan: pg_stat_*_tables' seq_scan,
+         // last_seq_scan and seq_tup_read count it, as heapam_index_build_range_scan's.)
+         crate::exec::pgstat::count_seqscan(self.ctx, t.oid);
+@@ -3717,10 +3733,18 @@ impl Ddl<'_, '_> {
+         let quad = crate::exec::dml::quad_point_index(&bix, self.ctx);
+         let (mut points, mut nan) = (0usize, false);
+         let counts = self.ctx;
+-        let mut step = |dkey: &[u8], vals: &[Value]| -> Result<()> {
++        let mut sizes = crate::exec::rowsize::BuildSizes::default();
++        let mut duplicate = None;
++        let mut step = |dkey: &[u8], vals: &[Value], row: &[Value]| -> Result<()> {
+             crate::exec::pgstat::count_returned(counts, t.oid, 1);
+             entries += 1;
+             progress.scanned(entries);
++            let validation = sizes.row(t, &bix, vals, row, dkey, counts);
++            #[cfg(test)]
++            if let Some(o) = &observed {
++                o.serial(validation.is_ok());
++            }
++            validation?;
+             if quad && let Some(v) = vals.first().filter(|v| !v.is_null()) {
+                 points += 1;
+                 nan |= crate::exec::dml::nan_point(v);
+@@ -3728,16 +3752,18 @@ impl Ddl<'_, '_> {
+                     return Err(crate::exec::dml::quadrant_error());
+                 }
+             }
+-            if ix.unique && (ix.nulls_not_distinct || !vals.iter().any(Value::is_null)) {
++            if duplicate.is_none() && ix.unique && (ix.nulls_not_distinct || !vals.iter().any(Value::is_null)) {
+                 let first = seen.insert(unique_key(vals), dkey, |d| {
+                     Ok(stored_values(d)?.map(|v| unique_key(&v)))
+                 })?;
+                 if let Some(first) = first {
+                     let first = stored_values(&first)?;
+-                    return Err(self.duplicate_key(t, &bix, first.as_deref().unwrap_or(vals), &ix.name));
++                    // PostgreSQL forms every heap row before its unique sort. A later
++                    // unformable tuple must still win over this duplicate.
++                    duplicate = Some(self.duplicate_key(t, &bix, first.as_deref().unwrap_or(vals), &ix.name));
+                 }
+             }
+-            if ix.id != 0 {
++            if crate::exec::scan::stores_entries(&bix) {
+                 let k = index_entry_key(t, ix, vals, dkey, &bix.colls);
+                 batch_bytes += k.len() + dkey.len() + 64;
+                 batch.push((k, dkey.to_vec()));
+@@ -3759,31 +3785,36 @@ impl Ddl<'_, '_> {
+         let scope = IndexScope::enter(&bix, self);
+         progress.scanning();
+         // (With workers, as max_parallel_maintenance_workers has it: `parbuild`.)
+-        let parallel = match self.measures_in_build(t, ix) && !quad {
+-            true => match super::parbuild::index_workers(self, t, crate::exec::sizing::heap_blocks(t, self.ctx)?.unwrap_or(0)) {
++        let ctx = self.ctx;
++        let measures = self.measures_in_build(t, ix);
++        let writes = (ix.method == "btree").then(|| crate::exec::sizing::heap_writes(t.oid, &ctx.sess.db)).flatten();
++        let eligible = ((measures && ix.method == "btree")
++            || (writes.is_some() && crate::exec::scan::stores_entries(&bix))) && !quad;
++        let parallel = match eligible {
++            true => match super::parbuild::index_workers(self, t, blocks.unwrap_or(0)) {
+                 0 => None,
+-                w => self.build_index_parallel(t, ix, &bix, w, &progress)?,
++                w => self.build_index_parallel(t, ix, &bix, w, &progress, !measures)?,
+             },
+             false => None,
+         };
+-        // (A parallel build reports its own scan's end and its load.)
+         let serial = parallel.is_none();
+-        let measured = if parallel.is_some() {
+-            parallel
+-        } else if self.measures_in_build(t, ix) {
+-            self.measure_rows_with(t, Some(Some(ix.oid)), Some(&mut step))?
+-        } else {
+-            None
++        let mut model_keys = writes.map(|w| (w, Vec::new()));
++        let mut par_counted = None;
++        let measured = match parallel {
++            Some(super::parbuild::ParBuilt::Measured(m)) => Some(m),
++            Some(super::parbuild::ParBuilt::Modelled { rows, tuples, keys }) => {
++                par_counted = Some((rows, tuples));
++                model_keys = model_keys.map(|(w, _)| (w, keys));
++                None
++            }
++            None if measures => self.measure_rows_with(t, Some(Some(ix.oid)), Some(&mut step))?,
++            None => None,
+         };
+         let mut rows = 0usize;
+-        // (A modelled table's btree: its model from this pass's keys, not from a second read
+-        // of the rows: `sizing::btree_from_build`.)
+-        let ctx = self.ctx;
+-        let mut model_keys = (measured.is_none() && ix.method == "btree")
+-            .then(|| crate::exec::sizing::heap_writes(t.oid, &ctx.sess.db))
+-            .flatten()
+-            .map(|w| (w, Vec::new()));
+-        if measured.is_none() {
++        if measured.is_some() {
++            model_keys = None;
++        }
++        if measured.is_none() && par_counted.is_none() {
+             // (Only the columns its keys, predicate and INCLUDE columns read are decoded.)
+             let mut cols = std::collections::HashSet::new();
+             crate::exec::sizing::index_columns(&bix, &mut cols);
+@@ -3793,7 +3824,7 @@ impl Ddl<'_, '_> {
+                 let (dkey, row) = r?;
+                 rows += 1;
+                 if let Some(vals) = index_values(&bix, &row, self)? {
+-                    step(&dkey, &vals)?;
++                    step(&dkey, &vals, &row)?;
+                     if let Some((_, keys)) = &mut model_keys {
+                         keys.push((crate::exec::sizing::btree_key(t, &bix, vals, &row, ctx), dkey));
+                     }
+@@ -3816,10 +3847,14 @@ impl Ddl<'_, '_> {
+             }
+         }
+         drop(seen);
++        if let Some(e) = duplicate {
++            return Err(e);
++        }
++        sizes.finish(t, &bix, self.ctx)?;
+         if serial {
+             progress.loaded(entries);
+         }
+-        let counted = measured.is_none().then_some((rows, entries as usize));
++        let counted = par_counted.or_else(|| measured.is_none().then_some((rows, entries as usize)));
+         let prebuilt = model_keys.and_then(|(w, keys)| crate::exec::sizing::btree_from_build(t, &bix, keys, w, &ctx.sess.db));
+         self.index_built_from(t, ix, measured, counted, prebuilt)
+     }
+@@ -3926,7 +3961,7 @@ impl Ddl<'_, '_> {
+                     return Err(self.duplicate_key(new, bix, &vals, &bix.index.name));
+                 }
+                 // (A native method's index is built again after the statement.)
+-                if bix.index.id != 0 && !crate::ext::index_am::is_native(&self.cat, &bix.index.method) {
++                if crate::exec::scan::stores_entries(bix) && !crate::ext::index_am::is_native(&self.cat, &bix.index.method) {
+                     self.ctx
+                         .txn
+                         .borrow_mut()
+@@ -4016,7 +4051,7 @@ impl Ddl<'_, '_> {
+                 }
+                 dkey
+             };
+-            for bix in bixs.iter().filter(|b| b.index.id != 0 && !crate::ext::index_am::is_native(&self.cat, &b.index.method)) {
++            for bix in bixs.iter().filter(|b| crate::exec::scan::stores_entries(b) && !crate::ext::index_am::is_native(&self.cat, &b.index.method)) {
+                 if let Some(vals) = index_values(bix, &row, self)? {
+                     self.ctx
+                         .txn
+@@ -9516,8 +9551,8 @@ impl Ddl<'_, '_> {
+                     if concurrently {
+                         // (The copy it builds is committed first: left INVALID when its
+                         // build fails.)
+-                        let copy_name = format!("{}_ccnew", ix.name);
+-                        if let Some(e) = self.index_duplicate(&t, &Index {
++                        let copy_name = self.cat.choose_name(t.schema, &Catalog::object_name(&ix.name, &[], "ccnew"));
++                        if let Some(e) = self.index_build_error(&t, &Index {
+                             name: copy_name.clone(),
+                             ..ix.clone()
+                         })? {
+diff --git a/crates/pg-engine/src/session/ddl/vacuum.rs b/crates/pg-engine/src/session/ddl/vacuum.rs
+index 8c3e962a..afd713dd 100644
+--- a/crates/pg-engine/src/session/ddl/vacuum.rs
++++ b/crates/pg-engine/src/session/ddl/vacuum.rs
+@@ -1427,25 +1427,26 @@ impl Ddl<'_, '_> {
+     }
+ 
+     /// Whether building index `ix` of `t` measures them in the build's own pass over the
+-    /// rows (`measure_rows_with`): a btree of a table too big to model, whose measure is the
+-    /// rows' stored sizes and the index's keys sorted, none of which the build changes.
++    /// rows (`measure_rows_with`): an index of a built-in method on a table too big to
++    /// model, whose measure is the rows' stored sizes and the index's keys sorted
++    /// (`btree_pages_of`, for every method), none of which the build changes.
+     pub(super) fn measures_in_build(&self, t: &Table, ix: &crate::catalog::Index) -> bool {
+         let db = &self.ctx.sess.db;
+         ix.id != 0
+-            && ix.method == "btree"
++            && crate::ext::index_am::builtin_method(&ix.method)
+             && crate::exec::sizing::is_estimated(t.oid, db)
+             && crate::exec::sizing::btree_blocks(t.oid, ix.oid, db).is_none()
+     }
+ 
+-    /// `measure_rows`, handing `each` (when given) each row's data key and key values of
+-    /// the one index measured, as its measure computes them: an index build's own pass
++    /// `measure_rows`, handing `each` (when given) the data key, index values and decoded
++    /// row of the one index measured, as its measure computes them: a build's own pass
+     /// (`measures_in_build`), so the rows are read and the keys computed once. None (nothing
+     /// read): the index isn't measured by its keys alone after all.
+     pub(super) fn measure_rows_with(
+         &self,
+         t: &Table,
+         indexes: Option<Option<u32>>,
+-        mut each: Option<&mut dyn FnMut(&[u8], &[Value]) -> Result<()>>,
++        mut each: Option<&mut dyn FnMut(&[u8], &[Value], &[Value]) -> Result<()>>,
+     ) -> Result<Option<RowMeasure>> {
+         let db = &self.ctx.sess.db;
+         let blocks = crate::exec::sizing::heap_blocks(t, self.ctx);
+@@ -1562,6 +1563,12 @@ impl Ddl<'_, '_> {
+         }
+         let (mut xmins, mut may_toast) = ((u64::MAX, 0u64), false);
+         let snap = self.ctx.txn.borrow().snapshot_ts();
++        // (An index's measure of a table nothing changed in since its last measure: the
++        // heap's live pages are the kept ones, so only the index's columns are decoded.
++        // Sizing a row's tuple decodes all of it: a jsonb or tsvector is parsed for it.)
++        let kept_live = (frozen.is_none() && modelled.is_none() && !ixs.is_empty())
++            .then(|| self.kept_live(t, layout, snap))
++            .flatten();
+         let unpinned = std::collections::HashSet::new();
+         let scan = self.ctx.txn.borrow().scan(&start, &crate::storage::keys::prefix_end(&start));
+         for r in scan {
+@@ -1584,8 +1591,10 @@ impl Ddl<'_, '_> {
+                 self.vacuum_delay_point(1)?;
+             }
+             let stored = match modelled {
+-                None => crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(&bytes)?, &types, &virt_mask),
+-                Some(_) => None,
++                None if kept_live.is_none() => {
++                    crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(&bytes)?, &types, &virt_mask)
++                }
++                _ => None,
+             };
+             may_toast |= stored.is_none_or(|len| len > crate::exec::sizing::TOAST_THRESHOLD);
+             if let Some(floor) = toast_frozen {
+@@ -1601,7 +1610,7 @@ impl Ddl<'_, '_> {
+                 }
+             }
+             let mut row = match &need {
+-                Some(need) if modelled.is_some() || stored.is_some() => {
++                Some(need) if modelled.is_some() || stored.is_some() || kept_live.is_some() => {
+                     crate::exec::scan::decode_table_row_need(t, &bytes, need)?
+                 }
+                 _ => crate::exec::scan::decode_table_row(t, &bytes)?,
+@@ -1611,7 +1620,7 @@ impl Ddl<'_, '_> {
+                     continue;
+                 };
+                 if let Some(f) = each.as_mut() {
+-                    f(&dkey, &vals)?;
++                    f(&dkey, &vals, &row)?;
+                 }
+                 ix.tuples += 1;
+                 if let Some(keys) = &mut ix.btree_keys {
+@@ -1628,7 +1637,7 @@ impl Ddl<'_, '_> {
+                     ix.keys.push((prefix, sort, relsize::index_tuple(&ix.types, &vals, &text)));
+                 }
+             }
+-            if modelled.is_none() {
++            if modelled.is_none() && kept_live.is_none() {
+                 if let Some(len) = stored {
+                     // (Debug builds check it against the size of the row decoded.)
+                     #[cfg(debug_assertions)]
+@@ -1657,7 +1666,7 @@ impl Ddl<'_, '_> {
+         }
+         let (modelled, live) = match modelled {
+             Some(n) => (Some(n), n),
+-            None => (None, relsize::heap_pages(sizes.into_iter())),
++            None => (None, kept_live.unwrap_or_else(|| relsize::heap_pages(sizes.into_iter()))),
+         };
+         if whole {
+             let m = crate::txn::unchanged::Measured { ts: snap, armed: 0, layout, rows, live, xmin: xmins, may_toast };
+@@ -1698,10 +1707,27 @@ impl Ddl<'_, '_> {
+         let old = frozen?;
+         let oldest = m.oldest_xmin(old)?;
+         self.measured_xmin.set(Some((t.oid, old, oldest, toast_frozen.map(|f| (f, u64::MAX)))));
+-        crate::txn::unchanged::SKIPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++        crate::txn::unchanged::note_skip();
+         Some(RowMeasure::new(m.rows, m.live, Vec::new()))
+     }
+ 
++    /// The live heap pages of `t`'s measure kept from its last (`txn::unchanged`), while
++    /// nothing changed in it since, its rows are sized alike, the snapshot `snap` sees what
++    /// the measure did and the transaction wrote none of its rows.
++    fn kept_live(&self, t: &Table, layout: u64, snap: u64) -> Option<i32> {
++        let db = &self.ctx.sess.db;
++        let m = db.unchanged.valid(&db.store, t.oid)?;
++        if m.layout != layout || snap < m.ts {
++            return None;
++        }
++        let start = crate::storage::keys::index_prefix(t.oid, 0);
++        let end = crate::storage::keys::prefix_end(&start);
++        if !self.ctx.txn.borrow().writes_in(&start, &end).ok()?.is_empty() {
++            return None;
++        }
++        Some(m.live)
++    }
++
+     /// pg_class stats of indexes measured (`measure_rows`).
+     fn store_index_measures(&mut self, indexes: Vec<(u32, i32, f64)>) {
+         for (oid, pages, tuples) in indexes {
+diff --git a/crates/pg-engine/src/sql/costs.rs b/crates/pg-engine/src/sql/costs.rs
+index b1acaf95..ba767452 100644
+--- a/crates/pg-engine/src/sql/costs.rs
++++ b/crates/pg-engine/src/sql/costs.rs
+@@ -216,7 +216,7 @@ pub fn rel_size(t: &Table, ctx: &ExecCtx) -> RelSize {
+         }
+         return unanalyzed_size(width);
+     }
+-    let curpages = crate::exec::sizing::heap_blocks(t, ctx)
++    let curpages = crate::exec::sizing::planned_heap_blocks(t, ctx)
+         .ok()
+         .flatten()
+         .unwrap_or(0);
+diff --git a/crates/pg-engine/src/sql/literals.rs b/crates/pg-engine/src/sql/literals.rs
+index 201c9f5e..a3daf234 100644
+--- a/crates/pg-engine/src/sql/literals.rs
++++ b/crates/pg-engine/src/sql/literals.rs
+@@ -424,7 +424,7 @@ impl SizeRead {
+         use crate::exec::sizing;
+         match self {
+             SizeRead::Heap(oid, n) => ctx.catalog().table(*oid).is_some_and(|t| {
+-                sizing::heap_blocks(t, ctx).ok().flatten().unwrap_or(0) == *n
++                sizing::planned_heap_blocks(t, ctx).ok().flatten().unwrap_or(0) == *n
+             }),
+             SizeRead::Fork(oid, n) => {
+                 sizing::fork_blocks(*oid, sizing::Fork::Main, ctx).ok().flatten().unwrap_or(1) == *n
+diff --git a/crates/pg-engine/src/storage/mod.rs b/crates/pg-engine/src/storage/mod.rs
+index 6249030d..fd84c1e3 100644
+--- a/crates/pg-engine/src/storage/mod.rs
++++ b/crates/pg-engine/src/storage/mod.rs
+@@ -1317,6 +1317,12 @@ impl Store {
+         if let Some(u) = untouched.as_mut() {
+             for f in &linked {
+                 let (lo, hi) = (key_table(&f.meta.first_key), key_table(&f.meta.last_key));
++                // (A run of one table's index entries, an index build's, leaves its rows and
++                // out-of-line values alone.)
++                let (first, last) = (&f.meta.first_key[..], &f.meta.last_key[..]);
++                if lo == hi && first >= &keys::index_prefix(lo, 1)[..] && last < &toast::prefix(lo)[..] {
++                    continue;
++                }
+                 u.retain(|t, _| *t < lo || *t > hi);
+             }
+         }
+diff --git a/crates/pg-engine/src/storage/row.rs b/crates/pg-engine/src/storage/row.rs
+index b0443e9f..89353d38 100644
+--- a/crates/pg-engine/src/storage/row.rs
++++ b/crates/pg-engine/src/storage/row.rs
+@@ -649,6 +649,27 @@ pub fn skip_value(b: &[u8], pos: &mut usize) -> Result<()> {
+             }
+             return Ok(());
+         }
++        // (Its kind, then its floats.)
++        tag::GEO => {
++            *pos += 2;
++            let n = get_varint(b, pos)? as usize;
++            take(b, pos, 8 * n)?;
++            return Ok(());
++        }
++        // (Its element type, dimensions, then its items.)
++        tag::ARRAY => {
++            *pos += 1;
++            take(b, pos, 8)?;
++            let nd = get_varint(b, pos)? as usize;
++            for _ in 0..nd {
++                get_varint(b, pos)?;
++                take(b, pos, 4)?;
++            }
++            for _ in 0..get_varint(b, pos)? {
++                skip_value_fast(b, pos)?;
++            }
++            return Ok(());
++        }
+         // (The rest: decoded and dropped.)
+         _ => {
+             decode_value(b, pos)?;
+@@ -702,8 +723,8 @@ pub fn external_at(b: &[u8], col: usize) -> bool {
+ /// What `relsize::heap_tuple_len` gives the stored row `b` (its encoded values) taken as
+ /// `types`, the columns `null` stored as nulls (virtual generated ones), without decoding it.
+ /// None when a value's size needs it decoded: anything but nulls, booleans, fixed-size numbers,
+-/// dates and timestamps of the column's own type and ASCII text in a text, varchar or char(n)
+-/// column;
++/// dates and timestamps of the column's own type, ASCII text in a text, varchar or char(n)
++/// column, jsonb, tsvectors, fixed-size geometric values and arrays of fixed-size elements;
+ /// and rows shorter than `types` (they get columns added since).
+ pub fn stored_tuple_len(b: &[u8], types: &[DataType], null: &[bool]) -> Option<usize> {
+     use crate::catalog::relsize::{datum_len_at, tuple_header};
+@@ -743,6 +764,33 @@ pub fn stored_tuple_len(b: &[u8], types: &[DataType], null: &[bool]) -> Option<u
+                 vals.push((!null.get(i).copied().unwrap_or(false)).then_some(Some(payload)));
+                 continue;
+             }
++            // (Varlenas sized from their stored form: jsonb's text, tsvector's send format,
++            // an array of fixed-size elements.)
++            DataType::Jsonb | DataType::TsVector | DataType::Array(_) if matches!(t, tag::JSONB | tag::TSVECTOR | tag::ARRAY) => {
++                let payload = match (ty, t) {
++                    (DataType::Jsonb, tag::JSONB) => {
++                        let len = get_varint(b, &mut pos).ok()? as usize;
++                        let s = std::str::from_utf8(b.get(pos..pos + len)?).ok()?;
++                        pos += len;
++                        crate::catalog::relsize::jsonb_size(s) - 4
++                    }
++                    (DataType::TsVector, tag::TSVECTOR) => {
++                        let len = get_varint(b, &mut pos).ok()? as usize;
++                        let v = b.get(pos..pos + len)?;
++                        pos += len;
++                        tsvector_payload(v)?
++                    }
++                    (DataType::Array(e), tag::ARRAY) => stored_array_payload(b, &mut pos, e)?,
++                    _ => return None,
++                };
++                vals.push((!null.get(i).copied().unwrap_or(false)).then_some(Some(payload)));
++                continue;
++            }
++            // (A fixed-size geometric value: its kind, then its floats.)
++            DataType::Point | DataType::Lseg | DataType::GBox | DataType::Line | DataType::Circle if t == tag::GEO => {
++                pos += 1;
++                8 * get_varint(b, &mut pos).ok()? as usize
++            }
+             _ => return None,
+         };
+         pos += skip;
+@@ -762,6 +810,73 @@ pub fn stored_tuple_len(b: &[u8], types: &[DataType], null: &[bool]) -> Option<u
+ /// Rows `stored_tuple_len` sized (tests read it).
+ pub static STORED_SIZES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+ 
++/// The stored bytes of a fixed-size value tagged `t` in a column of type `ty`, when the tag
++/// is that type's own (None: anything else).
++fn fixed_stored(ty: &DataType, t: u8) -> Option<usize> {
++    match (ty, t) {
++        (DataType::Bool, tag::TRUE | tag::FALSE) => Some(0),
++        (DataType::Int2, tag::INT2) => Some(2),
++        (DataType::Int4, tag::INT4) | (DataType::Date, tag::DATE) | (DataType::Float4, tag::FLOAT4) => Some(4),
++        (DataType::Int8, tag::INT8)
++        | (DataType::Float8, tag::FLOAT8)
++        | (DataType::Timestamp(_), tag::TIMESTAMP)
++        | (DataType::Timestamptz(_), tag::TIMESTAMPTZ) => Some(8),
++        _ => None,
++    }
++}
++
++/// `relsize::varlena_payload` of a tsvector stored in its send format `v`.
++fn tsvector_payload(v: &[u8]) -> Option<usize> {
++    let n = u32::from_be_bytes(v.get(..4)?.try_into().ok()?) as usize;
++    let (mut pos, mut strlen) = (4, 0usize);
++    for _ in 0..n {
++        let word = v.get(pos..)?.iter().position(|&c| c == 0)?;
++        strlen += word;
++        pos += word + 1;
++        let npos = u16::from_be_bytes(v.get(pos..pos + 2)?.try_into().ok()?) as usize;
++        pos += 2 + 2 * npos;
++        if npos > 0 {
++            strlen = (strlen + 1) & !1;
++            strlen += 2 + 2 * npos;
++        }
++    }
++    Some(8 + 4 * n + strlen - 4)
++}
++
++/// `relsize::varlena_payload` of an array of `elem` stored at `pos` (past its tag), when its
++/// elements are of a fixed size (None: anything else).
++fn stored_array_payload(b: &[u8], pos: &mut usize, elem: &DataType) -> Option<usize> {
++    use crate::catalog::relsize::type_layout;
++    let (len, al) = type_layout(elem);
++    if len <= 0 {
++        return None;
++    }
++    // (The elements' own type: their tags are checked against the column's below.)
++    decode_type(b, pos).ok()?;
++    let nd = get_varint(b, pos).ok()? as usize;
++    for _ in 0..nd {
++        get_varint(b, pos).ok()?;
++        *pos += 4;
++    }
++    let items = get_varint(b, pos).ok()? as usize;
++    let mut present = 0usize;
++    for _ in 0..items {
++        let t = *b.get(*pos)?;
++        *pos += 1;
++        if t != tag::NULL {
++            *pos += fixed_stored(elem, t)?;
++            present += 1;
++        }
++    }
++    let align = |n: usize, a: usize| n.div_ceil(a) * a;
++    let nulls = if present < items { items.div_ceil(8) } else { 0 };
++    let mut n = align(16 + 8 * nd + nulls, 8);
++    for _ in 0..present {
++        n = align(n, al) + len as usize;
++    }
++    Some(n - 4)
++}
++
+ /// `decode_row` building only the values `need` marks (the others NULL; a value past the
+ /// mask's end isn't needed).
+ pub fn decode_row_need(b: &[u8], need: &[bool]) -> Result<Vec<Value>> {
+@@ -791,6 +906,39 @@ pub fn decode_row_need_spare(b: &[u8], need: &[bool], spare: usize) -> Result<Ve
+ mod tests {
+     use super::*;
+ 
++    /// A row of jsonb, tsvector, array and point values is sized from its stored bytes as
++    /// its decoded values size it.
++    #[test]
++    fn stored_sizes_of_varlenas() {
++        use crate::types::geo::{Geo, parse_point};
++        let types = [DataType::Jsonb, DataType::TsVector, DataType::Array(Box::new(DataType::Int4)), DataType::Point, DataType::Array(Box::new(DataType::Int8))];
++        let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, &Default::default());
++        let rows = [
++            (r#"{"user": 7, "kind": "k3", "p12": true}"#, "'w12' 'x3' 'common'", vec![Some(1), Some(2), Some(1003)], "(3.5,7)"),
++            ("[1, \"a\", {\"b\": null}]", "a:1,3 bb:2A cc", vec![None, Some(-4)], "(0,0)"),
++            ("{}", "", vec![], "(-1e10,2)"),
++        ];
++        for (j, tsv, arr, p) in rows {
++            let ints: Vec<Value> = arr.iter().map(|v| v.map_or(Value::Null, Value::Int4)).collect();
++            let row = vec![
++                Value::Jsonb(Arc::new(parse_jsonb(j).unwrap())),
++                Value::TsVector(Arc::new(crate::types::tsearch::parse_tsvector(tsv).unwrap())),
++                Value::Array(Arc::new(ArrayValue::from_vec(DataType::Int4, ints))),
++                Value::Geo(Arc::new(Geo::Point(parse_point(p).unwrap()))),
++                Value::Array(Arc::new(ArrayValue::from_vec(DataType::Int8, (0..40).map(Value::Int8).collect()))),
++            ];
++            let enc = encode_row(&row);
++            let got = stored_tuple_len(&enc, &types, &[false; 5]);
++            let want = crate::catalog::relsize::heap_tuple(&types, &row, &text);
++            assert_eq!(got.map(crate::catalog::relsize::heap_tuple_of_len), Some(want), "{j} / {tsv} / {arr:?} / {p}");
++            // (Each value stepped over: `skip_value`.)
++            for i in 0..row.len() {
++                let need: Vec<bool> = (0..row.len()).map(|c| c == i).collect();
++                assert_eq!(decode_row_need(&enc, &need).unwrap()[i], row[i]);
++            }
++        }
++    }
++
+     #[test]
+     fn roundtrip() {
+         let row = vec![
+diff --git a/crates/pg-engine/src/txn/mod.rs b/crates/pg-engine/src/txn/mod.rs
+index 5016a918..5b7b4b81 100644
+--- a/crates/pg-engine/src/txn/mod.rs
++++ b/crates/pg-engine/src/txn/mod.rs
+@@ -2442,10 +2442,8 @@ impl Txn {
+         if from < self.journal_base || self.runs.is_some() {
+             return None;
+         }
+-        // (A range it deleted since doesn't list the rows it took: `delete_range`.)
+-        if self.rdels.iter().any(|r| r.ts as usize > from && r.overlaps(start, end)) {
+-            return None;
+-        }
++        // (A range it deleted since lists the writes of ours it took, `delete_range`; the
++        // committed rows it hid aren't writes of ours.)
+         let at = (from - self.journal_base).min(self.journal.len());
+         Some(
+             self.journal[at..]
+diff --git a/crates/pg-engine/src/txn/unchanged.rs b/crates/pg-engine/src/txn/unchanged.rs
+index b9e211ca..177f0b20 100644
+--- a/crates/pg-engine/src/txn/unchanged.rs
++++ b/crates/pg-engine/src/txn/unchanged.rs
+@@ -16,8 +16,20 @@ use std::collections::HashMap;
+ use std::sync::Arc;
+ use std::sync::atomic::AtomicUsize;
+ 
+-/// VACUUMs that took a kept measure instead of reading the table, for tests.
+-pub static SKIPS: AtomicUsize = AtomicUsize::new(0);
++thread_local! {
++    /// VACUUMs on this thread that took a kept measure instead of reading the table.
++    static SKIPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
++}
++
++/// VACUUMs on this thread that took a kept measure instead of reading the table, for tests
++/// (other tests' VACUUMs, on threads of their own, don't count).
++pub fn skips() -> usize {
++    SKIPS.with(std::cell::Cell::get)
++}
++
++pub(crate) fn note_skip() {
++    SKIPS.with(|c| c.set(c.get() + 1));
++}
+ 
+ /// VACUUMs that took kept xmins instead of reading the table for its frozen xid, for tests.
+ pub static XMIN_SKIPS: AtomicUsize = AtomicUsize::new(0);
+diff --git a/crates/pg-engine/tests/big_tables.rs b/crates/pg-engine/tests/big_tables.rs
+index 6c5bc764..83438bb5 100644
+--- a/crates/pg-engine/tests/big_tables.rs
++++ b/crates/pg-engine/tests/big_tables.rs
+@@ -465,7 +465,7 @@ fn deferred_entry_deletes() {
+ /// table loaded the same way without the TRUNCATE is read, and gives the same.
+ #[test]
+ fn vacuum_skips_unchanged_tables() {
+-    use pg_engine::txn::unchanged::SKIPS;
++    use pg_engine::txn::unchanged::skips as skipped;
+     let dir = tempfile::tempdir().unwrap();
+     let eng = open(dir.path());
+     with_max_versions(500, || {
+@@ -483,8 +483,8 @@ fn vacuum_skips_unchanged_tables() {
+         let stats = |s: &mut Session, t: &str, x: &str| {
+             rows(s, &format!("SELECT relpages, reltuples, relallvisible, relfrozenxid::text = '{x}' FROM pg_class WHERE relname = '{t}'"))
+         };
+-        let skips = |n| assert_eq!(SKIPS.load(Ordering::Relaxed), n);
+-        let base = SKIPS.load(Ordering::Relaxed);
++        let skips = |n| assert_eq!(skipped(), n);
++        let base = skipped();
+         run(&mut s, "VACUUM vu_a");
+         skips(base + 1);
+         run(&mut s, "VACUUM vu_b");
+@@ -660,3 +660,32 @@ fn analyze_samples_pages_of_big_tables() {
+         assert_eq!(rows(&mut s, "SELECT n_distinct FROM pg_stats WHERE tablename = 'sa' AND attname = 'a'"), ["[Float4(10.0)]"]);
+     });
+ }
++
++/// INCLUDE size checks on the measured serial callback, with its actual unmodelled
++/// heap state asserted. Error sizes are the PG18.6 a163_review_sizes fixture's.
++#[test]
++fn measured_serial_include_size() {
++    let dir = tempfile::tempdir().unwrap();
++    let eng = open(dir.path());
++    with_max_versions(500, || {
++        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
++        s.query("SET max_parallel_maintenance_workers=0").unwrap();
++        s.query("CREATE FUNCTION mi_text(n int) RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT left(string_agg(md5(g::text), ''), n) FROM generate_series(1, (n+31)/32) g $$").unwrap();
++        for (len, expected) in [(2800, "index row size 2816 exceeds btree version 4 maximum 2704"), (8300, "index row requires 8320 bytes, maximum size is 8191")] {
++            s.query("CREATE TABLE mi (k int, payload text)").unwrap();
++            s.query(&format!("INSERT INTO mi SELECT g, CASE WHEN g=6000 THEN mi_text({len}) ELSE 'small' END FROM generate_series(1,6000) g")).unwrap();
++            // The bulk insert already leaves this heap unmodelled. VACUUM of the
++            // 8300-byte raw row hits a separately recorded HeapPacker overflow before
++            // CREATE INDEX; it is not needed to enter the measured build callback.
++            let result = s.query("SELECT oid FROM pg_class WHERE relname='mi'").unwrap();
++            let pg_engine::types::Value::Oid(oid) = result[0].rows[0][0] else { panic!("table oid") };
++            assert!(pg_engine::exec::sizing::is_estimated(oid, &s.state.db));
++            assert!(pg_engine::exec::sizing::heap_writes(oid, &s.state.db).is_none());
++            let e = s.query("CREATE INDEX mi_i ON mi(k) INCLUDE(payload)").unwrap_err();
++            assert_eq!(e.code, "54000");
++            assert!(e.message.starts_with(expected), "{e:?}");
++            eprintln!("measured serial INCLUDE: estimated=true heap_model=false workers=0: {}", e.message);
++            s.query("DROP TABLE mi").unwrap();
++        }
++    });
++}
+diff --git a/crates/pg-engine/tests/isolation/specs/roll-bitmap-recheck.spec b/crates/pg-engine/tests/isolation/specs/roll-bitmap-recheck.spec
+new file mode 100644
+index 00000000..bd782888
+--- /dev/null
++++ b/crates/pg-engine/tests/isolation/specs/roll-bitmap-recheck.spec
+@@ -0,0 +1,41 @@
++# Actual PG18.6 interleavings: bitmap candidates must be rechecked after a lock finds a
++# changed row version, including BitmapOr and non-index filter columns.
++setup
++{
++  CREATE TABLE rb (id int, v int, w int);
++  INSERT INTO rb SELECT i, i % 100, i % 200 FROM generate_series(1,1000) i;
++  CREATE INDEX rb_v ON rb(v);
++  CREATE INDEX rb_w ON rb(w);
++  ANALYZE rb;
++}
++teardown { DROP TABLE rb; }
++
++session s1
++step begin { BEGIN; }
++step change { UPDATE rb SET v=99, w=99 WHERE id=1; }
++step qualifying { UPDATE rb SET v=101, w=1 WHERE id=1; }
++step filteronly { UPDATE rb SET id=2 WHERE id=1; }
++step commit { COMMIT; }
++
++session s2
++setup { SET enable_seqscan=off; SET enable_indexscan=off; }
++step planlock { EXPLAIN (COSTS OFF) SELECT id FROM rb WHERE v=1 AND id<5 FOR UPDATE; }
++step planor { EXPLAIN (COSTS OFF) SELECT id FROM rb WHERE (v=1 OR w=1) AND id<5 FOR UPDATE; }
++step planupdate { EXPLAIN (COSTS OFF) UPDATE rb SET id=id+1000 WHERE v=1 AND id<5 RETURNING id; }
++step lock { SELECT id FROM rb WHERE v=1 AND id<5 FOR UPDATE; }
++step lockor { SELECT id FROM rb WHERE (v=1 OR w=1) AND id<5 FOR UPDATE; }
++step update { UPDATE rb SET id=id+1000 WHERE v=1 AND id<5 RETURNING id; }
++step plainor { SELECT id FROM rb WHERE (v=1 OR w=1) AND id<5 ORDER BY id,v,w; }
++step filterlock { SELECT id FROM rb WHERE v=1 AND id<5 FOR UPDATE; }
++step final { SELECT id,v,w FROM rb WHERE id IN (1,2,1001,1002) ORDER BY id,v,w; }
++
++permutation planlock begin change lock commit final
++permutation planor plainor begin change lockor commit plainor final
++permutation planupdate begin change update commit final
++
++# Still qualifies through the other OR arm after an indexed-column update.
++permutation planor begin qualifying lockor commit final
++# Index key is unchanged; the row returned must contain the new filter-only value.
++permutation planlock begin filteronly filterlock commit final
++# A qualifying UPDATE must act on the new version, not drop the candidate.
++permutation planupdate begin filteronly update commit final
+diff --git a/crates/pg-engine/tests/models_kept.rs b/crates/pg-engine/tests/models_kept.rs
+index 004900a6..898e9527 100644
+--- a/crates/pg-engine/tests/models_kept.rs
++++ b/crates/pg-engine/tests/models_kept.rs
+@@ -236,3 +236,36 @@ fn kept_models_not_used_when_stale() {
+     s.query("TRUNCATE km2; INSERT INTO km2 VALUES (1, 'a')").unwrap();
+     assert_eq!(rows(&mut s, "SELECT ctid FROM km2"), ["[Tid(0, 1)]"]);
+ }
++
++/// A kept table whose pages were all visible is planned from its record's sizes while its
++/// models are still being laid out (`kept::sizes`): the plans, costs and sizes its first
++/// statements see are those of its models once laid out, and of before the restart.
++#[test]
++fn kept_sizes_plan_as_the_models_do() {
++    let dir = tempfile::tempdir().unwrap();
++    let checks = [
++        "EXPLAIN SELECT pad FROM ks WHERE id = 12345",
++        "EXPLAIN SELECT * FROM ks WHERE a = 7",
++        "SELECT pg_relation_size('ks'), pg_relation_size('ks_pkey'), pg_relation_size('ks_a')",
++        "SELECT pad FROM ks WHERE id = 12345",
++    ];
++    let before: Vec<Vec<String>> = {
++        let eng = open(dir.path());
++        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
++        exec(&mut s, "CREATE TABLE ks (id int PRIMARY KEY, a int, pad text); CREATE INDEX ks_a ON ks (a);
++            INSERT INTO ks SELECT g, g % 101, repeat('p', 60) FROM generate_series(1, 150000) g;
++            DELETE FROM ks WHERE id % 10 = 0; VACUUM ks");
++        let out = checks.iter().map(|q| rows(&mut s, q)).collect();
++        drop(s);
++        eng.shutdown();
++        out
++    };
++    let eng = open(dir.path());
++    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
++    let first: Vec<Vec<String>> = checks.iter().map(|q| rows(&mut s, q)).collect();
++    // (A ctid lays the models out, if the background builder hasn't yet.)
++    rows(&mut s, "SELECT ctid FROM ks WHERE id = 1");
++    let laid: Vec<Vec<String>> = checks.iter().map(|q| rows(&mut s, q)).collect();
++    assert_eq!(first, before);
++    assert_eq!(laid, before);
++}
+diff --git a/crates/pg-engine/tests/sql/a163_excl_truncate.out b/crates/pg-engine/tests/sql/a163_excl_truncate.out
+new file mode 100644
+index 00000000..41f22ab9
+--- /dev/null
++++ b/crates/pg-engine/tests/sql/a163_excl_truncate.out
+@@ -0,0 +1,128 @@
++> CREATE EXTENSION IF NOT EXISTS btree_gist
++-- CREATE EXTENSION
++
++> CREATE TABLE a163_bk (id serial, room int, during tsrange, EXCLUDE USING gist (during WITH &&))
++-- CREATE TABLE
++
++> CREATE TABLE a163_rm (id serial, room int, during tsrange, EXCLUDE USING gist (room WITH =, during WITH &&))
++-- CREATE TABLE
++
++> INSERT INTO a163_bk (during) VALUES (tsrange('2026-01-01 00:00', '2026-01-01 10:00'))
++-- INSERT 0 1
++
++> INSERT INTO a163_rm (room, during) VALUES (1, tsrange('2026-01-01 00:00', '2026-01-01 10:00'))
++-- INSERT 0 1
++
++> BEGIN
++-- BEGIN
++
++> TRUNCATE a163_bk
++-- TRUNCATE TABLE
++
++> INSERT INTO a163_bk (during) SELECT tsrange(timestamp '2026-01-01' + g * interval '1 hour',
++>   timestamp '2026-01-01' + (g + 1) * interval '1 hour') FROM generate_series(1, 300) g
++-- INSERT 0 300
++
++> SELECT count(*) FROM a163_bk
++count:int8
++300
++-- SELECT 1
++
++> INSERT INTO a163_bk (during) VALUES (tsrange('2026-01-01 03:30', '2026-01-01 04:30'))
++ERROR 23P01: conflicting key value violates exclusion constraint "a163_bk_during_excl"
++DETAIL: Key (during)=(["2026-01-01 03:30:00","2026-01-01 04:30:00")) conflicts with existing key (during)=(["2026-01-01 03:00:00","2026-01-01 04:00:00")).
++OBJECTS: schema=public table=a163_bk constraint=a163_bk_during_excl
++
++> ROLLBACK
++-- ROLLBACK
++
++> BEGIN
++-- BEGIN
++
++> INSERT INTO a163_bk (during) VALUES (tsrange('2026-02-01 00:00', '2026-02-01 01:00'))
++-- INSERT 0 1
++
++> TRUNCATE a163_bk
++-- TRUNCATE TABLE
++
++> INSERT INTO a163_bk (during) VALUES (tsrange('2026-02-01 00:30', '2026-02-01 00:45'))
++-- INSERT 0 1
++
++> INSERT INTO a163_bk (during) SELECT tsrange(timestamp '2026-03-01' + g * interval '1 hour',
++>   timestamp '2026-03-01' + (g + 1) * interval '1 hour') FROM generate_series(1, 200) g
++-- INSERT 0 200
++
++> DELETE FROM a163_bk WHERE during && tsrange(timestamp '2026-03-01' + interval '50 hours', timestamp '2026-03-01' + interval '52 hours')
++-- DELETE 2
++
++> INSERT INTO a163_bk (during) VALUES (tsrange('2026-03-03 02:30', '2026-03-03 03:30'))
++-- INSERT 0 1
++
++> SAVEPOINT s
++-- SAVEPOINT
++
++> INSERT INTO a163_bk (during) VALUES (tsrange('2026-03-01 10:30', '2026-03-01 11:30'))
++ERROR 23P01: conflicting key value violates exclusion constraint "a163_bk_during_excl"
++DETAIL: Key (during)=(["2026-03-01 10:30:00","2026-03-01 11:30:00")) conflicts with existing key (during)=(["2026-03-01 10:00:00","2026-03-01 11:00:00")).
++OBJECTS: schema=public table=a163_bk constraint=a163_bk_during_excl
++
++> ROLLBACK TO s
++-- ROLLBACK
++
++> INSERT INTO a163_bk (during) VALUES (tsrange('2026-04-01 00:00', '2026-04-01 02:00')),
++>   (tsrange('2026-04-01 01:00', '2026-04-01 03:00'))
++ERROR 23P01: conflicting key value violates exclusion constraint "a163_bk_during_excl"
++DETAIL: Key (during)=(["2026-04-01 01:00:00","2026-04-01 03:00:00")) conflicts with existing key (during)=(["2026-04-01 00:00:00","2026-04-01 02:00:00")).
++OBJECTS: schema=public table=a163_bk constraint=a163_bk_during_excl
++
++> ROLLBACK TO s
++-- ROLLBACK
++
++> COMMIT
++-- COMMIT
++
++> SELECT count(*), min(lower(during)), max(upper(during)) FROM a163_bk
++count:int8 | min:timestamp | max:timestamp
++200 | 2026-02-01 00:30:00 | 2026-03-09 09:00:00
++-- SELECT 1
++
++> BEGIN
++-- BEGIN
++
++> TRUNCATE a163_rm
++-- TRUNCATE TABLE
++
++> INSERT INTO a163_rm (room, during) SELECT g % 5, tsrange(timestamp '2026-01-01' + g * interval '1 hour',
++>   timestamp '2026-01-01' + (g + 1) * interval '1 hour') FROM generate_series(1, 200) g
++-- INSERT 0 200
++
++> INSERT INTO a163_rm (room, during) VALUES (7, tsrange('2026-01-01 00:00', '2026-01-01 10:00'))
++-- INSERT 0 1
++
++> SAVEPOINT s
++-- SAVEPOINT
++
++> INSERT INTO a163_rm (room, during) VALUES (2, tsrange('2026-01-01 06:30', '2026-01-01 07:30'))
++ERROR 23P01: conflicting key value violates exclusion constraint "a163_rm_room_during_excl"
++DETAIL: Key (room, during)=(2, ["2026-01-01 06:30:00","2026-01-01 07:30:00")) conflicts with existing key (room, during)=(2, ["2026-01-01 07:00:00","2026-01-01 08:00:00")).
++OBJECTS: schema=public table=a163_rm constraint=a163_rm_room_during_excl
++
++> ROLLBACK TO s
++-- ROLLBACK
++
++> COMMIT
++-- COMMIT
++
++> SELECT room, count(*) FROM a163_rm GROUP BY room ORDER BY room
++room:int4 | count:int8
++0 | 40
++1 | 40
++2 | 40
++3 | 40
++4 | 40
++7 | 1
++-- SELECT 6
++
++> DROP TABLE a163_bk, a163_rm
++-- DROP TABLE
++
+diff --git a/crates/pg-engine/tests/sql/a163_excl_truncate.sql b/crates/pg-engine/tests/sql/a163_excl_truncate.sql
+new file mode 100644
+index 00000000..2a7c4e9b
+--- /dev/null
++++ b/crates/pg-engine/tests/sql/a163_excl_truncate.sql
+@@ -0,0 +1,47 @@
++-- Exclusion constraints checked against a transaction's own rows after a TRUNCATE in that
++-- transaction (agent 163): the rows it inserted after the TRUNCATE conflict, the ones the
++-- TRUNCATE removed (committed or its own) don't, and rows it deleted again don't either.
++CREATE EXTENSION IF NOT EXISTS btree_gist;
++CREATE TABLE a163_bk (id serial, room int, during tsrange, EXCLUDE USING gist (during WITH &&));
++CREATE TABLE a163_rm (id serial, room int, during tsrange, EXCLUDE USING gist (room WITH =, during WITH &&));
++INSERT INTO a163_bk (during) VALUES (tsrange('2026-01-01 00:00', '2026-01-01 10:00'));
++INSERT INTO a163_rm (room, during) VALUES (1, tsrange('2026-01-01 00:00', '2026-01-01 10:00'));
++BEGIN;
++TRUNCATE a163_bk;
++-- (The committed row is gone for this transaction: no conflict with it.)
++INSERT INTO a163_bk (during) SELECT tsrange(timestamp '2026-01-01' + g * interval '1 hour',
++  timestamp '2026-01-01' + (g + 1) * interval '1 hour') FROM generate_series(1, 300) g;
++SELECT count(*) FROM a163_bk;
++-- A row of its own after the TRUNCATE.
++INSERT INTO a163_bk (during) VALUES (tsrange('2026-01-01 03:30', '2026-01-01 04:30'));
++ROLLBACK;
++BEGIN;
++INSERT INTO a163_bk (during) VALUES (tsrange('2026-02-01 00:00', '2026-02-01 01:00'));
++TRUNCATE a163_bk;
++-- (Its own row from before the TRUNCATE is gone too.)
++INSERT INTO a163_bk (during) VALUES (tsrange('2026-02-01 00:30', '2026-02-01 00:45'));
++INSERT INTO a163_bk (during) SELECT tsrange(timestamp '2026-03-01' + g * interval '1 hour',
++  timestamp '2026-03-01' + (g + 1) * interval '1 hour') FROM generate_series(1, 200) g;
++DELETE FROM a163_bk WHERE during && tsrange(timestamp '2026-03-01' + interval '50 hours', timestamp '2026-03-01' + interval '52 hours');
++INSERT INTO a163_bk (during) VALUES (tsrange('2026-03-03 02:30', '2026-03-03 03:30'));
++SAVEPOINT s;
++INSERT INTO a163_bk (during) VALUES (tsrange('2026-03-01 10:30', '2026-03-01 11:30'));
++ROLLBACK TO s;
++-- One statement's rows conflicting among themselves.
++INSERT INTO a163_bk (during) VALUES (tsrange('2026-04-01 00:00', '2026-04-01 02:00')),
++  (tsrange('2026-04-01 01:00', '2026-04-01 03:00'));
++ROLLBACK TO s;
++COMMIT;
++SELECT count(*), min(lower(during)), max(upper(during)) FROM a163_bk;
++-- With a leading equality.
++BEGIN;
++TRUNCATE a163_rm;
++INSERT INTO a163_rm (room, during) SELECT g % 5, tsrange(timestamp '2026-01-01' + g * interval '1 hour',
++  timestamp '2026-01-01' + (g + 1) * interval '1 hour') FROM generate_series(1, 200) g;
++INSERT INTO a163_rm (room, during) VALUES (7, tsrange('2026-01-01 00:00', '2026-01-01 10:00'));
++SAVEPOINT s;
++INSERT INTO a163_rm (room, during) VALUES (2, tsrange('2026-01-01 06:30', '2026-01-01 07:30'));
++ROLLBACK TO s;
++COMMIT;
++SELECT room, count(*) FROM a163_rm GROUP BY room ORDER BY room;
++DROP TABLE a163_bk, a163_rm;
+diff --git a/crates/pg-engine/tests/sql/a163_index_row_size.out b/crates/pg-engine/tests/sql/a163_index_row_size.out
+new file mode 100644
+index 00000000..d2b29b82
+--- /dev/null
++++ b/crates/pg-engine/tests/sql/a163_index_row_size.out
+@@ -0,0 +1,237 @@
++> CREATE FUNCTION a163_long(n int, s int DEFAULT 0) RETURNS text LANGUAGE sql IMMUTABLE
++>   AS $$ SELECT string_agg(md5((g + s)::text), '') FROM generate_series(1, n) g $$
++-- CREATE FUNCTION
++
++> CREATE TABLE a163_rs (id int, t text, a text[])
++-- CREATE TABLE
++
++> INSERT INTO a163_rs VALUES (1, 'a', '{a}')
++-- INSERT 0 1
++
++> CREATE INDEX a163_rs_t ON a163_rs (t)
++-- CREATE INDEX
++
++> INSERT INTO a163_rs (id, t) VALUES (2, a163_long(84))
++-- INSERT 0 1
++
++> INSERT INTO a163_rs (id, t) VALUES (3, a163_long(85))
++ERROR 54000: index row size 2736 exceeds btree version 4 maximum 2704 for index "a163_rs_t"
++DETAIL: Index row references tuple (0,3) in relation "a163_rs".
++HINT: Values larger than 1/3 of a buffer page cannot be indexed.
++Consider a function index of an MD5 hash of the value, or use full text indexing.
++OBJECTS: schema=public table=a163_rs constraint=a163_rs_t
++
++> INSERT INTO a163_rs (id, t) VALUES (4, a163_long(256))
++ERROR 54000: index row requires 8208 bytes, maximum size is 8191
++
++> INSERT INTO a163_rs (id, t) VALUES (40, a163_long(300))
++ERROR 54000: index row requires 9616 bytes, maximum size is 8191
++
++> UPDATE a163_rs SET t = a163_long(85, 1) WHERE id = 1
++ERROR 54000: index row size 2736 exceeds btree version 4 maximum 2704 for index "a163_rs_t"
++DETAIL: Index row references tuple (0,6) in relation "a163_rs".
++HINT: Values larger than 1/3 of a buffer page cannot be indexed.
++Consider a function index of an MD5 hash of the value, or use full text indexing.
++OBJECTS: schema=public table=a163_rs constraint=a163_rs_t
++
++> UPDATE a163_rs SET id = 10 WHERE id = 2
++-- UPDATE 1
++
++> SELECT id, length(t) FROM a163_rs ORDER BY id
++id:int4 | length:int4
++1 | 1
++10 | 2688
++-- SELECT 2
++
++> CREATE TABLE a163_rc (id int, t text)
++-- CREATE TABLE
++
++> CREATE INDEX a163_rc_t ON a163_rc (t)
++-- CREATE INDEX
++
++> CREATE FUNCTION a163_rc_f() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$
++-- CREATE FUNCTION
++
++> CREATE TRIGGER a163_rc_tr BEFORE INSERT ON a163_rc FOR EACH ROW EXECUTE FUNCTION a163_rc_f()
++-- CREATE TRIGGER
++
++> COPY a163_rc (id, t) FROM STDIN
++>> 5	short
++>> 6	eccbc87e4b5ce2fe28308fd9f2a7baf3a87ff679a2f3e71d9181a67b7542122ce4da3b7fbbce2345d7772b0674a318d51679091c5a880faf6fb5e6087eb1b2dc8f14e45fceea167a5a36dedd4bea2543c9f0f895fb98ab9159f51fd0297e236d45c48cce2e2d7fbdea1afc51c7c6ad26d3d9446802a44259755d38e6d163e8206512bd43d9caa6e02c990b0a82652dcac20ad4d76fe97759aa27a0c99bff6710c51ce410c124a10e0db5e4b97fc2af39aab3238922bcc25a6f606eb525ffdc569bf31c7ff062936a96d3c8bd1f8f2ff3c74d97b01eae257e44aa9d5bade97baf70efdf2ec9b086079795c442636b55fb6f4922f45568161a8cdf4ad2299f6d231f0e3dad99908345f7439f8ffabdffc498f13708210194c475687be6106a3b843c59dc048e8850243be8079a5c74d079b6d767d2f8ed5d21a44b0e5886680cb937693cfc748049e45d87b8c7d8b9aacd1ff1de774005f8da13f42943881c655f8e296a067a37563370ded05f5a3bf3ec4e732ced3463d06de0ca9a15b615367702e74f10e0327ad868d138f2b4fdd6f033e75ff09dd601bbe69f3510391521896ea9ab1baa0efb9e19094440c317e21b34173cb38f07f89ddbebc2ac9128303fc16a5320fa475530d9583c34fd356ef56364d3f0f495b6ab9dcf8d3b5c6e0b01182be0c5cdcd5072bb1864cdee4d3d6ee369853df766fa44e1ed0ff613f563bd1c383cd30b7c298ab50293adfecb7b1819ca14e7ea6328a42e0eb13d585e4c22a5bfc9e07964f8dddeb95fc584cd965da5771bce93e200c36f7cd9dfd0e5deaad67d8ab4f4c10bf22aa353e27879133cd645920e395fedad7bbbed0eca3fe2e03416a75f4cea9109507cacd8e2f2aefca1d0c6e83f027327d8461063f4ac58a617e62166fc8586dfa4d1bc0e1742c08bf7177163c833dff4b38fc8d2872f1ec66c8349cc7260ae62e3b1396831a8398fd9d4f495e875a2e075a1a4a6e1b9770f67c6a1e7ce56d3d6fa748ab6d9af3fd7642e92efb79421734881b53e1e1b18b6f457c545a9ded88f18ecee47145a72c0c0c7c76d30bd3dcaefc96f40275bdc0a2838023a778dfaecdc212708f721b7889a1158154dfa42caddbd0694a4e9bdc8d82c8d1619ad8176d665453cfb2e55f0a684eceee76fc522773286a895bc8436b53b3a3d6ab90ce0268229151c9bde119f61408e3afb633e50cdf1b20de6f46672b32a1f754ba1c09b3695e0cb6cde7f66f041e16a60928b05a7e228a89c3799093f65e080a295f8076b1c5722a46aa2072b030ba126b2f4b2374f342be9ed447f39f8317fbdb1988ef4c628eba0259144f683a84163b3523afe57c2e008bc8c03afdbd66e7929b125f8597834fa83a4ea5d2f1c4608232e07d3aa3d998e5135fc490ca45c00b1249bbe3554a4fdf6fb3295c76acbf4caaed33c36b1b5fc2cb1735b90b4568125ed6c3f678819b6e058a3f390d88e4c41f2747bfa2f1b5f87db14bfa6bb14875e45bba028a21ed380467cbbc409ec990f19c78c75bd1e06f215e2c420d928d4bf8ce0ff2ec19b37151432bb90e8976aab5298d5da10fe66f21dd2ddea18f00665ce8623e36bd4e3c7c5ad61ab143223efbc24c7d2583be69251d09bf41544a3365a46c9077ebb5e35c3fbd7939d674997cdb4692d34de8633c428dd2c7955ce926456240b2ff0100bde35f4a8d465e6e1edc05f3d8ab658c551d1fe173d08e959397adf34b1d77e88d7f033ab37c30201f73f142449d037028d43ec517d68b6edd3015b3edc9a11367b9778d5d219c5080b9a6a17bef029331cfe9fc289c3ff0af142b6d3bead98a92368d30a9594728bc39aa24be94b319d213ef815416f775098fe977004015c619393db85ed909c13838ff95ccfa94cebd9c7e1249ffc03eb9ded908c236bd1996d
++>> 7	short too
++ERROR 54000: index row size 2736 exceeds btree version 4 maximum 2704 for index "a163_rc_t"
++DETAIL: Index row references tuple (0,2) in relation "a163_rc".
++HINT: Values larger than 1/3 of a buffer page cannot be indexed.
++Consider a function index of an MD5 hash of the value, or use full text indexing.
++CONTEXT: COPY a163_rc, line 2: "6	eccbc87e4b5ce2fe28308fd9f2a7baf3a87ff679a2f3e71d9181a67b7542122ce4da3b7fbbce2345d7772b0674a318d516..."
++OBJECTS: schema=public table=a163_rc constraint=a163_rc_t
++
++> SELECT count(*) FROM a163_rc
++count:int8
++0
++-- SELECT 1
++
++> DROP TABLE a163_rc
++-- DROP TABLE
++
++> DROP FUNCTION a163_rc_f
++-- DROP FUNCTION
++
++> CREATE UNIQUE INDEX a163_rs_u ON a163_rs (t)
++-- CREATE INDEX
++
++> INSERT INTO a163_rs (id, t) VALUES (8, a163_long(84))
++ERROR 23505: duplicate key value violates unique constraint "a163_rs_u"
++DETAIL: Key (t)=(c4ca4238a0b923820dcc509a6f75849bc81e728d9d4c2f636f067f89cc14862ceccbc87e4b5ce2fe28308fd9f2a7baf3a87ff679a2f3e71d9181a67b7542122ce4da3b7fbbce2345d7772b0674a318d51679091c5a880faf6fb5e6087eb1b2dc8f14e45fceea167a5a36dedd4bea2543c9f0f895fb98ab9159f51fd0297e236d45c48cce2e2d7fbdea1afc51c7c6ad26d3d9446802a44259755d38e6d163e8206512bd43d9caa6e02c990b0a82652dcac20ad4d76fe97759aa27a0c99bff6710c51ce410c124a10e0db5e4b97fc2af39aab3238922bcc25a6f606eb525ffdc569bf31c7ff062936a96d3c8bd1f8f2ff3c74d97b01eae257e44aa9d5bade97baf70efdf2ec9b086079795c442636b55fb6f4922f45568161a8cdf4ad2299f6d231f0e3dad99908345f7439f8ffabdffc498f13708210194c475687be6106a3b843c59dc048e8850243be8079a5c74d079b6d767d2f8ed5d21a44b0e5886680cb937693cfc748049e45d87b8c7d8b9aacd1ff1de774005f8da13f42943881c655f8e296a067a37563370ded05f5a3bf3ec4e732ced3463d06de0ca9a15b615367702e74f10e0327ad868d138f2b4fdd6f033e75ff09dd601bbe69f3510391521896ea9ab1baa0efb9e19094440c317e21b34173cb38f07f89ddbebc2ac9128303fc16a5320fa475530d9583c34fd356ef56364d3f0f495b6ab9dcf8d3b5c6e0b01182be0c5cdcd5072bb1864cdee4d3d6ee369853df766fa44e1ed0ff613f563bd1c383cd30b7c298ab50293adfecb7b1819ca14e7ea6328a42e0eb13d585e4c22a5bfc9e07964f8dddeb95fc584cd965da5771bce93e200c36f7cd9dfd0e5deaad67d8ab4f4c10bf22aa353e27879133cd645920e395fedad7bbbed0eca3fe2e03416a75f4cea9109507cacd8e2f2aefca1d0c6e83f027327d8461063f4ac58a617e62166fc8586dfa4d1bc0e1742c08bf7177163c833dff4b38fc8d2872f1ec66c8349cc7260ae62e3b1396831a8398fd9d4f495e875a2e075a1a4a6e1b9770f67c6a1e7ce56d3d6fa748ab6d9af3fd7642e92efb79421734881b53e1e1b18b6f457c545a9ded88f18ecee47145a72c0c0c7c76d30bd3dcaefc96f40275bdc0a2838023a778dfaecdc212708f721b7889a1158154dfa42caddbd0694a4e9bdc8d82c8d1619ad8176d665453cfb2e55f0a684eceee76fc522773286a895bc8436b53b3a3d6ab90ce0268229151c9bde119f61408e3afb633e50cdf1b20de6f46672b32a1f754ba1c09b3695e0cb6cde7f66f041e16a60928b05a7e228a89c3799093f65e080a295f8076b1c5722a46aa2072b030ba126b2f4b2374f342be9ed447f39f8317fbdb1988ef4c628eba0259144f683a84163b3523afe57c2e008bc8c03afdbd66e7929b125f8597834fa83a4ea5d2f1c4608232e07d3aa3d998e5135fc490ca45c00b1249bbe3554a4fdf6fb3295c76acbf4caaed33c36b1b5fc2cb1735b90b4568125ed6c3f678819b6e058a3f390d88e4c41f2747bfa2f1b5f87db14bfa6bb14875e45bba028a21ed380467cbbc409ec990f19c78c75bd1e06f215e2c420d928d4bf8ce0ff2ec19b37151432bb90e8976aab5298d5da10fe66f21dd2ddea18f00665ce8623e36bd4e3c7c5ad61ab143223efbc24c7d2583be69251d09bf41544a3365a46c9077ebb5e35c3fbd7939d674997cdb4692d34de8633c428dd2c7955ce926456240b2ff0100bde35f4a8d465e6e1edc05f3d8ab658c551d1fe173d08e959397adf34b1d77e88d7f033ab37c30201f73f142449d037028d43ec517d68b6edd3015b3edc9a11367b9778d5d219c5080b9a6a17bef029331cfe9fc289c3ff0af142b6d3bead98a92368d30a9594728bc39aa24be94b319d21) already exists.
++OBJECTS: schema=public table=a163_rs constraint=a163_rs_u
++
++> DROP INDEX a163_rs_u
++-- DROP INDEX
++
++> DROP INDEX a163_rs_t
++-- DROP INDEX
++
++> INSERT INTO a163_rs (id, t) VALUES (11, a163_long(85, 7)), (12, a163_long(86, 3)), (13, 'f' || a163_long(90))
++-- INSERT 0 3
++
++> CREATE INDEX a163_rs_t ON a163_rs (t)
++ERROR 54000: index row size 2768 exceeds btree version 4 maximum 2704 for index "a163_rs_t"
++DETAIL: Index row references tuple (0,10) in relation "a163_rs".
++HINT: Values larger than 1/3 of a buffer page cannot be indexed.
++Consider a function index of an MD5 hash of the value, or use full text indexing.
++OBJECTS: schema=public table=a163_rs constraint=a163_rs_t
++
++> CREATE INDEX a163_rs_t ON a163_rs (t DESC)
++ERROR 54000: index row size 2896 exceeds btree version 4 maximum 2704 for index "a163_rs_t"
++DETAIL: Index row references tuple (0,11) in relation "a163_rs".
++HINT: Values larger than 1/3 of a buffer page cannot be indexed.
++Consider a function index of an MD5 hash of the value, or use full text indexing.
++OBJECTS: schema=public table=a163_rs constraint=a163_rs_t
++
++> CREATE UNIQUE INDEX a163_rs_t ON a163_rs (t)
++ERROR 54000: index row size 2768 exceeds btree version 4 maximum 2704 for index "a163_rs_t"
++DETAIL: Index row references tuple (0,10) in relation "a163_rs".
++HINT: Values larger than 1/3 of a buffer page cannot be indexed.
++Consider a function index of an MD5 hash of the value, or use full text indexing.
++OBJECTS: schema=public table=a163_rs constraint=a163_rs_t
++
++> CREATE INDEX a163_rs_it ON a163_rs (id, t)
++ERROR 54000: index row size 2736 exceeds btree version 4 maximum 2704 for index "a163_rs_it"
++DETAIL: Index row references tuple (0,9) in relation "a163_rs".
++HINT: Values larger than 1/3 of a buffer page cannot be indexed.
++Consider a function index of an MD5 hash of the value, or use full text indexing.
++OBJECTS: schema=public table=a163_rs constraint=a163_rs_it
++
++> CREATE INDEX a163_rs_e ON a163_rs (left(t, 2000))
++-- CREATE INDEX
++
++> CREATE INDEX a163_rs_p ON a163_rs (t) WHERE id > 12
++ERROR 54000: index row size 2896 exceeds btree version 4 maximum 2704 for index "a163_rs_p"
++DETAIL: Index row references tuple (0,11) in relation "a163_rs".
++HINT: Values larger than 1/3 of a buffer page cannot be indexed.
++Consider a function index of an MD5 hash of the value, or use full text indexing.
++OBJECTS: schema=public table=a163_rs constraint=a163_rs_p
++
++> INSERT INTO a163_rs (id, t) VALUES (14, a163_long(300, 3))
++-- INSERT 0 1
++
++> CREATE INDEX a163_rs_t ON a163_rs (t)
++ERROR 54000: index row requires 9616 bytes, maximum size is 8191
++
++> SELECT indexrelid::regclass FROM pg_index WHERE indrelid = 'a163_rs'::regclass ORDER BY 1
++indexrelid:regclass
++a163_rs_e
++-- SELECT 1
++
++> DELETE FROM a163_rs WHERE id >= 11
++-- DELETE 4
++
++> CREATE INDEX a163_rs_two ON a163_rs (t, id)
++-- CREATE INDEX
++
++> INSERT INTO a163_rs (id, t) VALUES (NULL, a163_long(84, 5))
++ERROR 54000: index row size 2712 exceeds btree version 4 maximum 2704 for index "a163_rs_two"
++DETAIL: Index row references tuple (0,13) in relation "a163_rs".
++HINT: Values larger than 1/3 of a buffer page cannot be indexed.
++Consider a function index of an MD5 hash of the value, or use full text indexing.
++OBJECTS: schema=public table=a163_rs constraint=a163_rs_two
++
++> INSERT INTO a163_rs (id, t) VALUES (15, repeat('ab', 2000))
++-- INSERT 0 1
++
++> SELECT id, length(t) FROM a163_rs WHERE id >= 15 OR id IS NULL ORDER BY id
++id:int4 | length:int4
++15 | 4000
++-- SELECT 1
++
++> DROP INDEX a163_rs_two
++-- DROP INDEX
++
++> CREATE INDEX a163_rs_h ON a163_rs USING hash (t)
++-- CREATE INDEX
++
++> CREATE INDEX a163_rs_sp ON a163_rs USING spgist (t)
++-- CREATE INDEX
++
++> INSERT INTO a163_rs (id, t) VALUES (16, a163_long(300, 9))
++-- INSERT 0 1
++
++> SELECT count(*) FROM a163_rs WHERE t = a163_long(300, 9)
++count:int8
++1
++-- SELECT 1
++
++> DROP INDEX a163_rs_h, a163_rs_sp
++-- DROP INDEX
++
++> CREATE INDEX a163_rs_a ON a163_rs USING gin (a)
++-- CREATE INDEX
++
++> INSERT INTO a163_rs (id, a) VALUES (17, ARRAY['x', a163_long(84)])
++-- INSERT 0 1
++
++> INSERT INTO a163_rs (id, a) VALUES (18, ARRAY['x', a163_long(85)])
++ERROR 54000: index row size 2736 exceeds maximum 2712 for index "a163_rs_a"
++
++> INSERT INTO a163_rs (id, a) VALUES (19, ARRAY[a163_long(85, 1), a163_long(86, 2)])
++ERROR 54000: index row size 2736 exceeds maximum 2712 for index "a163_rs_a"
++
++> INSERT INTO a163_rs (id, a) VALUES (20, ARRAY[a163_long(256)])
++ERROR 54000: index row requires 8208 bytes, maximum size is 8191
++
++> UPDATE a163_rs SET a = ARRAY[a163_long(85, 3)] WHERE id = 17
++ERROR 54000: index row size 2736 exceeds maximum 2712 for index "a163_rs_a"
++
++> DROP INDEX a163_rs_a
++-- DROP INDEX
++
++> INSERT INTO a163_rs (id, a) VALUES (21, ARRAY[NULL, a163_long(85, 4)])
++-- INSERT 0 1
++
++> CREATE INDEX a163_rs_a ON a163_rs USING gin (a)
++ERROR 54000: index row size 2736 exceeds maximum 2712 for index "a163_rs_a"
++
++> CREATE INDEX a163_rs_a ON a163_rs USING gin (a) WITH (fastupdate = off)
++ERROR 54000: index row size 2736 exceeds maximum 2712 for index "a163_rs_a"
++
++> DELETE FROM a163_rs WHERE id = 21
++-- DELETE 1
++
++> CREATE INDEX a163_rs_a ON a163_rs USING gin (a) WITH (fastupdate = off)
++-- CREATE INDEX
++
++> INSERT INTO a163_rs (id, a) VALUES (22, ARRAY[a163_long(85, 5)])
++ERROR 54000: index row size 2736 exceeds maximum 2712 for index "a163_rs_a"
++
++> SELECT id, cardinality(a) FROM a163_rs WHERE a IS NOT NULL ORDER BY id
++id:int4 | cardinality:int4
++1 | 1
++17 | 2
++-- SELECT 2
++
++> DROP TABLE a163_rs
++-- DROP TABLE
++
++> DROP FUNCTION a163_long
++-- DROP FUNCTION
++
+diff --git a/crates/pg-engine/tests/sql/a163_index_row_size.sql b/crates/pg-engine/tests/sql/a163_index_row_size.sql
+new file mode 100644
+index 00000000..fb05bcca
+--- /dev/null
++++ b/crates/pg-engine/tests/sql/a163_index_row_size.sql
+@@ -0,0 +1,75 @@
++-- Index entries too big for their pages (agent 163; agent 146's finding): btree's
++-- index_form_tuple limit (8191) and third-of-a-page limit (2704) on INSERT, UPDATE, COPY,
++-- CREATE INDEX (unique, multi-column, expression), GIN array_ops' 2712; hash and SP-GiST
++-- entries never fail. md5 hex text doesn't compress, so each value is stored as it is.
++CREATE FUNCTION a163_long(n int, s int DEFAULT 0) RETURNS text LANGUAGE sql IMMUTABLE
++  AS $$ SELECT string_agg(md5((g + s)::text), '') FROM generate_series(1, n) g $$;
++CREATE TABLE a163_rs (id int, t text, a text[]);
++INSERT INTO a163_rs VALUES (1, 'a', '{a}');
++CREATE INDEX a163_rs_t ON a163_rs (t);
++INSERT INTO a163_rs (id, t) VALUES (2, a163_long(84));
++INSERT INTO a163_rs (id, t) VALUES (3, a163_long(85));
++INSERT INTO a163_rs (id, t) VALUES (4, a163_long(256));
++INSERT INTO a163_rs (id, t) VALUES (40, a163_long(300));
++UPDATE a163_rs SET t = a163_long(85, 1) WHERE id = 1;
++UPDATE a163_rs SET id = 10 WHERE id = 2;
++SELECT id, length(t) FROM a163_rs ORDER BY id;
++-- COPY one row at a time (a BEFORE ROW trigger): the line in the CONTEXT.
++CREATE TABLE a163_rc (id int, t text);
++CREATE INDEX a163_rc_t ON a163_rc (t);
++CREATE FUNCTION a163_rc_f() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
++CREATE TRIGGER a163_rc_tr BEFORE INSERT ON a163_rc FOR EACH ROW EXECUTE FUNCTION a163_rc_f();
++COPY a163_rc (id, t) FROM STDIN;
++5	short
++6	eccbc87e4b5ce2fe28308fd9f2a7baf3a87ff679a2f3e71d9181a67b7542122ce4da3b7fbbce2345d7772b0674a318d51679091c5a880faf6fb5e6087eb1b2dc8f14e45fceea167a5a36dedd4bea2543c9f0f895fb98ab9159f51fd0297e236d45c48cce2e2d7fbdea1afc51c7c6ad26d3d9446802a44259755d38e6d163e8206512bd43d9caa6e02c990b0a82652dcac20ad4d76fe97759aa27a0c99bff6710c51ce410c124a10e0db5e4b97fc2af39aab3238922bcc25a6f606eb525ffdc569bf31c7ff062936a96d3c8bd1f8f2ff3c74d97b01eae257e44aa9d5bade97baf70efdf2ec9b086079795c442636b55fb6f4922f45568161a8cdf4ad2299f6d231f0e3dad99908345f7439f8ffabdffc498f13708210194c475687be6106a3b843c59dc048e8850243be8079a5c74d079b6d767d2f8ed5d21a44b0e5886680cb937693cfc748049e45d87b8c7d8b9aacd1ff1de774005f8da13f42943881c655f8e296a067a37563370ded05f5a3bf3ec4e732ced3463d06de0ca9a15b615367702e74f10e0327ad868d138f2b4fdd6f033e75ff09dd601bbe69f3510391521896ea9ab1baa0efb9e19094440c317e21b34173cb38f07f89ddbebc2ac9128303fc16a5320fa475530d9583c34fd356ef56364d3f0f495b6ab9dcf8d3b5c6e0b01182be0c5cdcd5072bb1864cdee4d3d6ee369853df766fa44e1ed0ff613f563bd1c383cd30b7c298ab50293adfecb7b1819ca14e7ea6328a42e0eb13d585e4c22a5bfc9e07964f8dddeb95fc584cd965da5771bce93e200c36f7cd9dfd0e5deaad67d8ab4f4c10bf22aa353e27879133cd645920e395fedad7bbbed0eca3fe2e03416a75f4cea9109507cacd8e2f2aefca1d0c6e83f027327d8461063f4ac58a617e62166fc8586dfa4d1bc0e1742c08bf7177163c833dff4b38fc8d2872f1ec66c8349cc7260ae62e3b1396831a8398fd9d4f495e875a2e075a1a4a6e1b9770f67c6a1e7ce56d3d6fa748ab6d9af3fd7642e92efb79421734881b53e1e1b18b6f457c545a9ded88f18ecee47145a72c0c0c7c76d30bd3dcaefc96f40275bdc0a2838023a778dfaecdc212708f721b7889a1158154dfa42caddbd0694a4e9bdc8d82c8d1619ad8176d665453cfb2e55f0a684eceee76fc522773286a895bc8436b53b3a3d6ab90ce0268229151c9bde119f61408e3afb633e50cdf1b20de6f46672b32a1f754ba1c09b3695e0cb6cde7f66f041e16a60928b05a7e228a89c3799093f65e080a295f8076b1c5722a46aa2072b030ba126b2f4b2374f342be9ed447f39f8317fbdb1988ef4c628eba0259144f683a84163b3523afe57c2e008bc8c03afdbd66e7929b125f8597834fa83a4ea5d2f1c4608232e07d3aa3d998e5135fc490ca45c00b1249bbe3554a4fdf6fb3295c76acbf4caaed33c36b1b5fc2cb1735b90b4568125ed6c3f678819b6e058a3f390d88e4c41f2747bfa2f1b5f87db14bfa6bb14875e45bba028a21ed380467cbbc409ec990f19c78c75bd1e06f215e2c420d928d4bf8ce0ff2ec19b37151432bb90e8976aab5298d5da10fe66f21dd2ddea18f00665ce8623e36bd4e3c7c5ad61ab143223efbc24c7d2583be69251d09bf41544a3365a46c9077ebb5e35c3fbd7939d674997cdb4692d34de8633c428dd2c7955ce926456240b2ff0100bde35f4a8d465e6e1edc05f3d8ab658c551d1fe173d08e959397adf34b1d77e88d7f033ab37c30201f73f142449d037028d43ec517d68b6edd3015b3edc9a11367b9778d5d219c5080b9a6a17bef029331cfe9fc289c3ff0af142b6d3bead98a92368d30a9594728bc39aa24be94b319d213ef815416f775098fe977004015c619393db85ed909c13838ff95ccfa94cebd9c7e1249ffc03eb9ded908c236bd1996d
++7	short too
++\.
++SELECT count(*) FROM a163_rc;
++DROP TABLE a163_rc;
++DROP FUNCTION a163_rc_f;
++-- Its unique check first.
++CREATE UNIQUE INDEX a163_rs_u ON a163_rs (t);
++INSERT INTO a163_rs (id, t) VALUES (8, a163_long(84));
++DROP INDEX a163_rs_u;
++DROP INDEX a163_rs_t;
++-- Builds: the first entry in index order past the limit.
++INSERT INTO a163_rs (id, t) VALUES (11, a163_long(85, 7)), (12, a163_long(86, 3)), (13, 'f' || a163_long(90));
++CREATE INDEX a163_rs_t ON a163_rs (t);
++CREATE INDEX a163_rs_t ON a163_rs (t DESC);
++CREATE UNIQUE INDEX a163_rs_t ON a163_rs (t);
++CREATE INDEX a163_rs_it ON a163_rs (id, t);
++CREATE INDEX a163_rs_e ON a163_rs (left(t, 2000));
++CREATE INDEX a163_rs_p ON a163_rs (t) WHERE id > 12;
++INSERT INTO a163_rs (id, t) VALUES (14, a163_long(300, 3));
++CREATE INDEX a163_rs_t ON a163_rs (t);
++SELECT indexrelid::regclass FROM pg_index WHERE indrelid = 'a163_rs'::regclass ORDER BY 1;
++DELETE FROM a163_rs WHERE id >= 11;
++-- NULLs and two columns.
++CREATE INDEX a163_rs_two ON a163_rs (t, id);
++INSERT INTO a163_rs (id, t) VALUES (NULL, a163_long(84, 5));
++INSERT INTO a163_rs (id, t) VALUES (15, repeat('ab', 2000));
++SELECT id, length(t) FROM a163_rs WHERE id >= 15 OR id IS NULL ORDER BY id;
++DROP INDEX a163_rs_two;
++-- Hash and SP-GiST: no limit.
++CREATE INDEX a163_rs_h ON a163_rs USING hash (t);
++CREATE INDEX a163_rs_sp ON a163_rs USING spgist (t);
++INSERT INTO a163_rs (id, t) VALUES (16, a163_long(300, 9));
++SELECT count(*) FROM a163_rs WHERE t = a163_long(300, 9);
++DROP INDEX a163_rs_h, a163_rs_sp;
++-- GIN array_ops: 2712 for an element.
++CREATE INDEX a163_rs_a ON a163_rs USING gin (a);
++INSERT INTO a163_rs (id, a) VALUES (17, ARRAY['x', a163_long(84)]);
++INSERT INTO a163_rs (id, a) VALUES (18, ARRAY['x', a163_long(85)]);
++INSERT INTO a163_rs (id, a) VALUES (19, ARRAY[a163_long(85, 1), a163_long(86, 2)]);
++INSERT INTO a163_rs (id, a) VALUES (20, ARRAY[a163_long(256)]);
++UPDATE a163_rs SET a = ARRAY[a163_long(85, 3)] WHERE id = 17;
++DROP INDEX a163_rs_a;
++INSERT INTO a163_rs (id, a) VALUES (21, ARRAY[NULL, a163_long(85, 4)]);
++CREATE INDEX a163_rs_a ON a163_rs USING gin (a);
++CREATE INDEX a163_rs_a ON a163_rs USING gin (a) WITH (fastupdate = off);
++DELETE FROM a163_rs WHERE id = 21;
++CREATE INDEX a163_rs_a ON a163_rs USING gin (a) WITH (fastupdate = off);
++INSERT INTO a163_rs (id, a) VALUES (22, ARRAY[a163_long(85, 5)]);
++SELECT id, cardinality(a) FROM a163_rs WHERE a IS NOT NULL ORDER BY id;
++DROP TABLE a163_rs;
++DROP FUNCTION a163_long;
+diff --git a/crates/pg-engine/tests/sql/a163_knn_time_interval.out b/crates/pg-engine/tests/sql/a163_knn_time_interval.out
+new file mode 100644
+index 00000000..4a6cd920
+--- /dev/null
++++ b/crates/pg-engine/tests/sql/a163_knn_time_interval.out
+@@ -0,0 +1,197 @@
++> CREATE EXTENSION IF NOT EXISTS btree_gist
++-- CREATE EXTENSION
++
++> CREATE TABLE a163_kt (id int, t time, iv interval)
++-- CREATE TABLE
++
++> INSERT INTO a163_kt SELECT g, time '00:00' + (g * 37 % 1440) * interval '1 minute' + (g % 7) * interval '1 second',
++>   (g % 50) * interval '1 day' + (g % 13) * interval '1 hour' + (g % 3) * interval '1 month'
++>   FROM generate_series(1, 3000) g
++-- INSERT 0 3000
++
++> INSERT INTO a163_kt VALUES (3001, NULL, NULL), (3002, '12:00', 'infinity'), (3003, '12:00', '-infinity'),
++>   (3004, '23:59:59.999999', '30 days'), (3005, '00:00', '1 mon'), (3006, '24:00', '720 hours')
++-- INSERT 0 6
++
++> CREATE INDEX a163_kt_t ON a163_kt USING gist (t)
++-- CREATE INDEX
++
++> CREATE INDEX a163_kt_iv ON a163_kt USING gist (iv)
++-- CREATE INDEX
++
++> ANALYZE a163_kt
++-- ANALYZE
++
++> SET enable_seqscan = off
++-- SET
++
++> SET enable_bitmapscan = off
++-- SET
++
++> EXPLAIN (COSTS OFF) SELECT id FROM a163_kt ORDER BY t <-> '12:34:56' LIMIT 5
++QUERY PLAN:text
++Limit
++  ->  Index Scan using a163_kt_t on a163_kt
++        Order By: (t <-> '12:34:56'::time without time zone)
++-- EXPLAIN
++
++> SELECT id, t, t <-> '12:34:56' AS d FROM a163_kt ORDER BY t <-> '12:34:56', id LIMIT 7
++id:int4 | t:time | d:interval
++1655 | 12:35:03 | 00:00:07
++215 | 12:35:05 | 00:00:09
++682 | 12:34:03 | 00:00:53
++2122 | 12:34:01 | 00:00:55
++2628 | 12:36:03 | 00:01:07
++1188 | 12:36:05 | 00:01:09
++2589 | 12:33:06 | 00:01:50
++-- SELECT 7
++
++> SELECT id, t FROM a163_kt ORDER BY t <-> '00:00:01' LIMIT 6
++id:int4 | t:time
++3005 | 00:00:00
++2880 | 00:00:03
++1440 | 00:00:05
++973 | 00:01:00
++2413 | 00:01:05
++1946 | 00:02:00
++-- SELECT 6
++
++> SELECT id, t FROM a163_kt ORDER BY t <-> '23:59:59' LIMIT 6
++id:int4 | t:time
++3004 | 23:59:59.999999
++3006 | 24:00:00
++467 | 23:59:05
++1907 | 23:59:03
++934 | 23:58:03
++2374 | 23:58:01
++-- SELECT 6
++
++> SELECT id FROM a163_kt WHERE id % 2 = 0 ORDER BY t <-> '06:00' LIMIT 4
++id:int4
++1800
++360
++1294
++2734
++-- SELECT 4
++
++> EXPLAIN (COSTS OFF) SELECT id FROM a163_kt ORDER BY iv <-> '10 days' LIMIT 5
++QUERY PLAN:text
++Limit
++  ->  Index Scan using a163_kt_iv on a163_kt
++        Order By: (iv <-> '10 days'::interval)
++-- EXPLAIN
++
++> SELECT id, iv, iv <-> '10 days' AS d FROM a163_kt ORDER BY iv <-> '10 days', id LIMIT 8
++id:int4 | iv:interval | d:interval
++1560 | 10 days | 00:00:00
++1860 | 10 days 01:00:00 | 01:00:00
++210 | 10 days 02:00:00 | 02:00:00
++2160 | 10 days 02:00:00 | 02:00:00
++510 | 10 days 03:00:00 | 03:00:00
++2460 | 10 days 03:00:00 | 03:00:00
++810 | 10 days 04:00:00 | 04:00:00
++2760 | 10 days 04:00:00 | 04:00:00
++-- SELECT 8
++
++> SELECT id, iv FROM a163_kt ORDER BY iv <-> '1 mon', id LIMIT 6
++id:int4 | iv:interval
++780 | 30 days
++1300 | 1 mon
++2730 | 30 days
++3004 | 30 days
++3005 | 1 mon
++3006 | 720:00:00
++-- SELECT 6
++
++> SELECT id, iv FROM a163_kt ORDER BY iv <-> '30 days 00:00:01', id LIMIT 6
++id:int4 | iv:interval
++780 | 30 days
++1300 | 1 mon
++2730 | 30 days
++3004 | 30 days
++3005 | 1 mon
++3006 | 720:00:00
++-- SELECT 6
++
++> SELECT id, iv FROM a163_kt ORDER BY iv <-> '-5 days', id LIMIT 5
++id:int4 | iv:interval
++1950 | 00:00:00
++300 | 01:00:00
++2250 | 01:00:00
++600 | 02:00:00
++2550 | 02:00:00
++-- SELECT 5
++
++> SELECT id, iv FROM a163_kt ORDER BY iv <-> '1000 years', id LIMIT 4
++id:int4 | iv:interval
++1949 | 2 mons 49 days 12:00:00
++1649 | 2 mons 49 days 11:00:00
++1349 | 2 mons 49 days 10:00:00
++1049 | 2 mons 49 days 09:00:00
++-- SELECT 4
++
++> SELECT count(*) FROM (SELECT id FROM a163_kt ORDER BY iv <-> '2 days' LIMIT 5000) s
++count:int8
++3006
++-- SELECT 1
++
++> SELECT id FROM a163_kt WHERE iv < '3 days' ORDER BY iv <-> '1 day', id LIMIT 5
++id:int4
++351
++2301
++651
++2601
++951
++-- SELECT 5
++
++> SELECT id FROM a163_kt WHERE t >= '10:00' AND t < '10:30' ORDER BY id LIMIT 5
++id:int4
++17
++133
++172
++211
++250
++-- SELECT 5
++
++> BEGIN
++-- BEGIN
++
++> INSERT INTO a163_kt VALUES (4000, '12:34:56', '10 days')
++-- INSERT 0 1
++
++> DELETE FROM a163_kt WHERE id = 3004
++-- DELETE 1
++
++> SELECT id FROM a163_kt ORDER BY t <-> '12:34:56' LIMIT 3
++id:int4
++4000
++1655
++215
++-- SELECT 3
++
++> SELECT id FROM a163_kt ORDER BY iv <-> '30 days', id LIMIT 3
++id:int4
++780
++1300
++2730
++-- SELECT 3
++
++> ROLLBACK
++-- ROLLBACK
++
++> SELECT id FROM a163_kt ORDER BY iv <-> '30 days', id LIMIT 3
++id:int4
++780
++1300
++2730
++-- SELECT 3
++
++> RESET enable_seqscan
++-- RESET
++
++> RESET enable_bitmapscan
++-- RESET
++
++> DROP TABLE a163_kt
++-- DROP TABLE
++
+diff --git a/crates/pg-engine/tests/sql/a163_knn_time_interval.sql b/crates/pg-engine/tests/sql/a163_knn_time_interval.sql
+new file mode 100644
+index 00000000..1e02e653
+--- /dev/null
++++ b/crates/pg-engine/tests/sql/a163_knn_time_interval.sql
+@@ -0,0 +1,40 @@
++-- btree_gist KNN over time and interval columns reads nearest-first (agent 163): the grid
++-- places them (intervals by their span, as interval_cmp orders them), so `ORDER BY col <->
++-- value LIMIT n` reads only the nearest rows. Ties in distance, equal spans of different
++-- forms, infinite intervals, NULLs, own writes, a filter and a LIMIT past the rows.
++CREATE EXTENSION IF NOT EXISTS btree_gist;
++CREATE TABLE a163_kt (id int, t time, iv interval);
++INSERT INTO a163_kt SELECT g, time '00:00' + (g * 37 % 1440) * interval '1 minute' + (g % 7) * interval '1 second',
++  (g % 50) * interval '1 day' + (g % 13) * interval '1 hour' + (g % 3) * interval '1 month'
++  FROM generate_series(1, 3000) g;
++INSERT INTO a163_kt VALUES (3001, NULL, NULL), (3002, '12:00', 'infinity'), (3003, '12:00', '-infinity'),
++  (3004, '23:59:59.999999', '30 days'), (3005, '00:00', '1 mon'), (3006, '24:00', '720 hours');
++CREATE INDEX a163_kt_t ON a163_kt USING gist (t);
++CREATE INDEX a163_kt_iv ON a163_kt USING gist (iv);
++ANALYZE a163_kt;
++SET enable_seqscan = off;
++SET enable_bitmapscan = off;
++EXPLAIN (COSTS OFF) SELECT id FROM a163_kt ORDER BY t <-> '12:34:56' LIMIT 5;
++SELECT id, t, t <-> '12:34:56' AS d FROM a163_kt ORDER BY t <-> '12:34:56', id LIMIT 7;
++SELECT id, t FROM a163_kt ORDER BY t <-> '00:00:01' LIMIT 6;
++SELECT id, t FROM a163_kt ORDER BY t <-> '23:59:59' LIMIT 6;
++SELECT id FROM a163_kt WHERE id % 2 = 0 ORDER BY t <-> '06:00' LIMIT 4;
++EXPLAIN (COSTS OFF) SELECT id FROM a163_kt ORDER BY iv <-> '10 days' LIMIT 5;
++SELECT id, iv, iv <-> '10 days' AS d FROM a163_kt ORDER BY iv <-> '10 days', id LIMIT 8;
++SELECT id, iv FROM a163_kt ORDER BY iv <-> '1 mon', id LIMIT 6;
++SELECT id, iv FROM a163_kt ORDER BY iv <-> '30 days 00:00:01', id LIMIT 6;
++SELECT id, iv FROM a163_kt ORDER BY iv <-> '-5 days', id LIMIT 5;
++SELECT id, iv FROM a163_kt ORDER BY iv <-> '1000 years', id LIMIT 4;
++SELECT count(*) FROM (SELECT id FROM a163_kt ORDER BY iv <-> '2 days' LIMIT 5000) s;
++SELECT id FROM a163_kt WHERE iv < '3 days' ORDER BY iv <-> '1 day', id LIMIT 5;
++SELECT id FROM a163_kt WHERE t >= '10:00' AND t < '10:30' ORDER BY id LIMIT 5;
++BEGIN;
++INSERT INTO a163_kt VALUES (4000, '12:34:56', '10 days');
++DELETE FROM a163_kt WHERE id = 3004;
++SELECT id FROM a163_kt ORDER BY t <-> '12:34:56' LIMIT 3;
++SELECT id FROM a163_kt ORDER BY iv <-> '30 days', id LIMIT 3;
++ROLLBACK;
++SELECT id FROM a163_kt ORDER BY iv <-> '30 days', id LIMIT 3;
++RESET enable_seqscan;
++RESET enable_bitmapscan;
++DROP TABLE a163_kt;
+diff --git a/crates/pg-engine/tests/sql/a163_review_concurrent.out b/crates/pg-engine/tests/sql/a163_review_concurrent.out
+new file mode 100644
+index 00000000..c9b82316
+--- /dev/null
++++ b/crates/pg-engine/tests/sql/a163_review_concurrent.out
+@@ -0,0 +1,105 @@
++> SET max_parallel_maintenance_workers = 0
++-- SET
++
++> CREATE FUNCTION a163_cic_text(n int) RETURNS text LANGUAGE sql IMMUTABLE
++> AS $$ SELECT left(string_agg(md5(g::text), ''), n) FROM generate_series(1, (n+31)/32) g $$
++-- CREATE FUNCTION
++
++> CREATE TABLE a163_cic (k int, payload text)
++-- CREATE TABLE
++
++> INSERT INTO a163_cic VALUES (1, a163_cic_text(8300))
++-- INSERT 0 1
++
++> CREATE INDEX CONCURRENTLY a163_cic_i ON a163_cic(k) INCLUDE(payload)
++ERROR 54000: index row requires 8320 bytes, maximum size is 8191
++
++> SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname
++relname:name | indisvalid:bool | indisready:bool
++a163_cic_i | f | f
++-- SELECT 1
++
++> REINDEX INDEX CONCURRENTLY a163_cic_i
++ERROR 54000: index row requires 8320 bytes, maximum size is 8191
++
++> SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname
++relname:name | indisvalid:bool | indisready:bool
++a163_cic_i | f | f
++a163_cic_i_ccnew | f | f
++-- SELECT 2
++
++> UPDATE a163_cic SET payload='small'
++-- UPDATE 1
++
++> REINDEX INDEX CONCURRENTLY a163_cic_i
++-- REINDEX
++
++> SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname
++relname:name | indisvalid:bool | indisready:bool
++a163_cic_i | t | t
++a163_cic_i_ccnew | f | f
++-- SELECT 2
++
++> DROP TABLE a163_cic
++-- DROP TABLE
++
++> CREATE TABLE a163_cic (k int, payload text)
++-- CREATE TABLE
++
++> INSERT INTO a163_cic VALUES (1,'first'), (1,'second'), (2,a163_cic_text(8300))
++-- INSERT 0 3
++
++> CREATE UNIQUE INDEX CONCURRENTLY a163_cic_u ON a163_cic(k) INCLUDE(payload)
++ERROR 54000: index row requires 8320 bytes, maximum size is 8191
++
++> SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname
++relname:name | indisvalid:bool | indisready:bool
++a163_cic_u | f | f
++-- SELECT 1
++
++> REINDEX INDEX CONCURRENTLY a163_cic_u
++ERROR 54000: index row requires 8320 bytes, maximum size is 8191
++
++> SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname
++relname:name | indisvalid:bool | indisready:bool
++a163_cic_u | f | f
++a163_cic_u_ccnew | f | f
++-- SELECT 2
++
++> DELETE FROM a163_cic WHERE k=2
++-- DELETE 1
++
++> REINDEX INDEX CONCURRENTLY a163_cic_u
++ERROR 23505: could not create unique index "a163_cic_u_ccnew1"
++DETAIL: Key (k)=(1) is duplicated.
++OBJECTS: schema=public table=a163_cic constraint=a163_cic_u_ccnew1
++
++> SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname
++relname:name | indisvalid:bool | indisready:bool
++a163_cic_u | f | f
++a163_cic_u_ccnew | f | f
++a163_cic_u_ccnew1 | f | f
++-- SELECT 3
++
++> DELETE FROM a163_cic WHERE payload='second'
++-- DELETE 1
++
++> REINDEX INDEX CONCURRENTLY a163_cic_u
++-- REINDEX
++
++> SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname
++relname:name | indisvalid:bool | indisready:bool
++a163_cic_u | t | t
++a163_cic_u_ccnew | f | f
++a163_cic_u_ccnew1 | f | f
++-- SELECT 3
++
++> DROP TABLE a163_cic
++-- DROP TABLE
++
++> DROP FUNCTION a163_cic_text
++-- DROP FUNCTION
++
++> RESET max_parallel_maintenance_workers
++-- RESET
++
+diff --git a/crates/pg-engine/tests/sql/a163_review_concurrent.sql b/crates/pg-engine/tests/sql/a163_review_concurrent.sql
+new file mode 100644
+index 00000000..5e44dd7a
+--- /dev/null
++++ b/crates/pg-engine/tests/sql/a163_review_concurrent.sql
+@@ -0,0 +1,31 @@
++-- Concurrent build formation errors leave a not-ready INVALID index, including retries.
++SET max_parallel_maintenance_workers = 0;
++CREATE FUNCTION a163_cic_text(n int) RETURNS text LANGUAGE sql IMMUTABLE
++AS $$ SELECT left(string_agg(md5(g::text), ''), n) FROM generate_series(1, (n+31)/32) g $$;
++CREATE TABLE a163_cic (k int, payload text);
++INSERT INTO a163_cic VALUES (1, a163_cic_text(8300));
++CREATE INDEX CONCURRENTLY a163_cic_i ON a163_cic(k) INCLUDE(payload);
++SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname;
++-- Retrying an invalid index also leaves its failed replacement behind.
++REINDEX INDEX CONCURRENTLY a163_cic_i;
++SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname;
++UPDATE a163_cic SET payload='small';
++REINDEX INDEX CONCURRENTLY a163_cic_i;
++SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname;
++DROP TABLE a163_cic;
++-- Formation wins over an earlier duplicate, then uniqueness fails after removing it.
++CREATE TABLE a163_cic (k int, payload text);
++INSERT INTO a163_cic VALUES (1,'first'), (1,'second'), (2,a163_cic_text(8300));
++CREATE UNIQUE INDEX CONCURRENTLY a163_cic_u ON a163_cic(k) INCLUDE(payload);
++SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname;
++REINDEX INDEX CONCURRENTLY a163_cic_u;
++SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname;
++DELETE FROM a163_cic WHERE k=2;
++REINDEX INDEX CONCURRENTLY a163_cic_u;
++SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname;
++DELETE FROM a163_cic WHERE payload='second';
++REINDEX INDEX CONCURRENTLY a163_cic_u;
++SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname;
++DROP TABLE a163_cic;
++DROP FUNCTION a163_cic_text;
++RESET max_parallel_maintenance_workers;
+diff --git a/crates/pg-engine/tests/sql/a163_review_sizes.out b/crates/pg-engine/tests/sql/a163_review_sizes.out
+new file mode 100644
+index 00000000..fea1bf46
+--- /dev/null
++++ b/crates/pg-engine/tests/sql/a163_review_sizes.out
+@@ -0,0 +1,102 @@
++> SET max_parallel_maintenance_workers = 0
++-- SET
++
++> CREATE FUNCTION a163_review_text(n int) RETURNS text LANGUAGE sql IMMUTABLE
++> AS $$ SELECT left(string_agg(md5(g::text), ''), n) FROM generate_series(1, (n + 31) / 32) g $$
++-- CREATE FUNCTION
++
++> CREATE TABLE a163_review_include (k int, payload text)
++-- CREATE TABLE
++
++> INSERT INTO a163_review_include VALUES (1, a163_review_text(2800))
++-- INSERT 0 1
++
++> CREATE INDEX a163_review_i ON a163_review_include (k) INCLUDE (payload)
++ERROR 54000: index row size 2816 exceeds btree version 4 maximum 2704 for index "a163_review_i"
++DETAIL: Index row references tuple (0,1) in relation "a163_review_include".
++HINT: Values larger than 1/3 of a buffer page cannot be indexed.
++Consider a function index of an MD5 hash of the value, or use full text indexing.
++OBJECTS: schema=public table=a163_review_include constraint=a163_review_i
++
++> DROP TABLE a163_review_include
++-- DROP TABLE
++
++> CREATE TABLE a163_review_include (k int, payload text)
++-- CREATE TABLE
++
++> INSERT INTO a163_review_include VALUES (1, a163_review_text(8300))
++-- INSERT 0 1
++
++> CREATE INDEX a163_review_i ON a163_review_include (k) INCLUDE (payload)
++ERROR 54000: index row requires 8320 bytes, maximum size is 8191
++
++> DROP TABLE a163_review_include
++-- DROP TABLE
++
++> CREATE TABLE a163_review_include (k int, payload text)
++-- CREATE TABLE
++
++> INSERT INTO a163_review_include VALUES (1, 'first'), (1, 'second'), (2, a163_review_text(8300))
++-- INSERT 0 3
++
++> CREATE UNIQUE INDEX a163_review_i ON a163_review_include (k) INCLUDE (payload)
++ERROR 54000: index row requires 8320 bytes, maximum size is 8191
++
++> DELETE FROM a163_review_include WHERE k = 2
++-- DELETE 1
++
++> CREATE UNIQUE INDEX a163_review_i ON a163_review_include (k) INCLUDE (payload)
++ERROR 23505: could not create unique index "a163_review_i"
++DETAIL: Key (k)=(1) is duplicated.
++OBJECTS: schema=public table=a163_review_include constraint=a163_review_i
++
++> DROP TABLE a163_review_include
++-- DROP TABLE
++
++> CREATE TABLE a163_review_char (c char(2800))
++-- CREATE TABLE
++
++> INSERT INTO a163_review_char VALUES (a163_review_text(2650))
++-- INSERT 0 1
++
++> CREATE INDEX a163_review_c ON a163_review_char (c)
++ERROR 54000: index row size 2816 exceeds btree version 4 maximum 2704 for index "a163_review_c"
++DETAIL: Index row references tuple (0,1) in relation "a163_review_char".
++HINT: Values larger than 1/3 of a buffer page cannot be indexed.
++Consider a function index of an MD5 hash of the value, or use full text indexing.
++OBJECTS: schema=public table=a163_review_char constraint=a163_review_c
++
++> TRUNCATE a163_review_char
++-- TRUNCATE TABLE
++
++> CREATE INDEX a163_review_c ON a163_review_char (c)
++-- CREATE INDEX
++
++> INSERT INTO a163_review_char VALUES (a163_review_text(2650))
++ERROR 54000: index row size 2816 exceeds btree version 4 maximum 2704 for index "a163_review_c"
++DETAIL: Index row references tuple (0,1) in relation "a163_review_char".
++HINT: Values larger than 1/3 of a buffer page cannot be indexed.
++Consider a function index of an MD5 hash of the value, or use full text indexing.
++OBJECTS: schema=public table=a163_review_char constraint=a163_review_c
++
++> DROP TABLE a163_review_char
++-- DROP TABLE
++
++> CREATE TABLE a163_review_gin (a text[])
++-- CREATE TABLE
++
++> INSERT INTO a163_review_gin VALUES (ARRAY['z' || a163_review_text(2900)]), (ARRAY['a' || a163_review_text(2800)])
++-- INSERT 0 2
++
++> CREATE INDEX a163_review_g ON a163_review_gin USING gin (a)
++ERROR 54000: index row size 2816 exceeds maximum 2712 for index "a163_review_g"
++
++> DROP TABLE a163_review_gin
++-- DROP TABLE
++
++> DROP FUNCTION a163_review_text
++-- DROP FUNCTION
++
++> RESET max_parallel_maintenance_workers
++-- RESET
++
+diff --git a/crates/pg-engine/tests/sql/a163_review_sizes.sql b/crates/pg-engine/tests/sql/a163_review_sizes.sql
+new file mode 100644
+index 00000000..5f2a8ac1
+--- /dev/null
++++ b/crates/pg-engine/tests/sql/a163_review_sizes.sql
+@@ -0,0 +1,34 @@
++-- Serial builds must form INCLUDE values too, before sorting/checking uniqueness.
++SET max_parallel_maintenance_workers = 0;
++CREATE FUNCTION a163_review_text(n int) RETURNS text LANGUAGE sql IMMUTABLE
++AS $$ SELECT left(string_agg(md5(g::text), ''), n) FROM generate_series(1, (n + 31) / 32) g $$;
++CREATE TABLE a163_review_include (k int, payload text);
++INSERT INTO a163_review_include VALUES (1, a163_review_text(2800));
++CREATE INDEX a163_review_i ON a163_review_include (k) INCLUDE (payload);
++DROP TABLE a163_review_include;
++CREATE TABLE a163_review_include (k int, payload text);
++INSERT INTO a163_review_include VALUES (1, a163_review_text(8300));
++CREATE INDEX a163_review_i ON a163_review_include (k) INCLUDE (payload);
++-- A duplicate precedes an unformable heap row: formation wins over uniqueness.
++DROP TABLE a163_review_include;
++CREATE TABLE a163_review_include (k int, payload text);
++INSERT INTO a163_review_include VALUES (1, 'first'), (1, 'second'), (2, a163_review_text(8300));
++CREATE UNIQUE INDEX a163_review_i ON a163_review_include (k) INCLUDE (payload);
++DELETE FROM a163_review_include WHERE k = 2;
++CREATE UNIQUE INDEX a163_review_i ON a163_review_include (k) INCLUDE (payload);
++DROP TABLE a163_review_include;
++-- bpchar storage omits trailing blanks internally; sizing must include declared padding.
++CREATE TABLE a163_review_char (c char(2800));
++INSERT INTO a163_review_char VALUES (a163_review_text(2650));
++CREATE INDEX a163_review_c ON a163_review_char (c);
++TRUNCATE a163_review_char;
++CREATE INDEX a163_review_c ON a163_review_char (c);
++INSERT INTO a163_review_char VALUES (a163_review_text(2650));
++DROP TABLE a163_review_char;
++-- Probe GIN build error order: the first heap row has the larger sorted key.
++CREATE TABLE a163_review_gin (a text[]);
++INSERT INTO a163_review_gin VALUES (ARRAY['z' || a163_review_text(2900)]), (ARRAY['a' || a163_review_text(2800)]);
++CREATE INDEX a163_review_g ON a163_review_gin USING gin (a);
++DROP TABLE a163_review_gin;
++DROP FUNCTION a163_review_text;
++RESET max_parallel_maintenance_workers;
+diff --git a/crates/pg-engine/tests/sql/a170_btree_empty_leaf.out b/crates/pg-engine/tests/sql/a170_btree_empty_leaf.out
+new file mode 100644
+index 00000000..e5734ad5
+--- /dev/null
++++ b/crates/pg-engine/tests/sql/a170_btree_empty_leaf.out
+@@ -0,0 +1,41 @@
++> CREATE EXTENSION IF NOT EXISTS pgstattuple
++-- CREATE EXTENSION
++
++> CREATE TABLE pe (id int PRIMARY KEY) WITH (autovacuum_enabled = false)
++-- CREATE TABLE
++
++> INSERT INTO pe SELECT generate_series(1, 200000)
++-- INSERT 0 200000
++
++> DELETE FROM pe WHERE id BETWEEN 103945 AND 104310
++-- DELETE 366
++
++> VACUUM pe
++-- VACUUM
++
++> SELECT tree_level, internal_pages, leaf_pages, empty_pages, deleted_pages, avg_leaf_density, leaf_fragmentation
++>   FROM pgstatindex('pe_pkey')
++tree_level:int4 | internal_pages:int8 | leaf_pages:int8 | empty_pages:int8 | deleted_pages:int8 | avg_leaf_density:float8 | leaf_fragmentation:float8
++2 | 3 | 547 | 0 | 0 | 89.95 | 0
++-- SELECT 1
++
++> DELETE FROM pe WHERE id BETWEEN 100000 AND 103944
++-- DELETE 3945
++
++> VACUUM pe
++-- VACUUM
++
++> SELECT tree_level, internal_pages, leaf_pages, empty_pages, deleted_pages, avg_leaf_density, leaf_fragmentation
++>   FROM pgstatindex('pe_pkey')
++tree_level:int4 | internal_pages:int8 | leaf_pages:int8 | empty_pages:int8 | deleted_pages:int8 | avg_leaf_density:float8 | leaf_fragmentation:float8
++2 | 3 | 537 | 0 | 10 | 89.65 | 0
++-- SELECT 1
++
++> SELECT pg_relation_size('pe_pkey') / 8192 AS pages
++pages:int8
++551
++-- SELECT 1
++
++> DROP TABLE pe
++-- DROP TABLE
++
+diff --git a/crates/pg-engine/tests/sql/a170_btree_empty_leaf.sql b/crates/pg-engine/tests/sql/a170_btree_empty_leaf.sql
+new file mode 100644
+index 00000000..4d314cc3
+--- /dev/null
++++ b/crates/pg-engine/tests/sql/a170_btree_empty_leaf.sql
+@@ -0,0 +1,18 @@
++-- A leaf VACUUM empties but can't delete (the rightmost child of a parent with other
++-- children, _bt_lock_subtree_parent) is a leaf page to pgstatindex: its empty_pages are the
++-- half-dead pages.
++CREATE EXTENSION IF NOT EXISTS pgstattuple;
++CREATE TABLE pe (id int PRIMARY KEY) WITH (autovacuum_enabled = false);
++INSERT INTO pe SELECT generate_series(1, 200000);
++-- The last leaf under the root's first child.
++DELETE FROM pe WHERE id BETWEEN 103945 AND 104310;
++VACUUM pe;
++SELECT tree_level, internal_pages, leaf_pages, empty_pages, deleted_pages, avg_leaf_density, leaf_fragmentation
++  FROM pgstatindex('pe_pkey');
++-- Its left siblings emptied too: they go, it stays.
++DELETE FROM pe WHERE id BETWEEN 100000 AND 103944;
++VACUUM pe;
++SELECT tree_level, internal_pages, leaf_pages, empty_pages, deleted_pages, avg_leaf_density, leaf_fragmentation
++  FROM pgstatindex('pe_pkey');
++SELECT pg_relation_size('pe_pkey') / 8192 AS pages;
++DROP TABLE pe;
