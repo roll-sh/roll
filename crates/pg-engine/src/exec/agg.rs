@@ -2832,15 +2832,20 @@ impl AggNode {
             aggs.push((arg, a.def.skip_nulls, empty));
         }
         // (Groups that come out sorted on all their keys, which only equal values make
-        // equal, of aggregates that don't see their rows' order: the rows can come in any.)
+        // equal, of aggregates that don't see their rows' order: the rows can come in any.
+        // A redundant key's value is its group's row's, whichever row comes first.)
+        let red = self.redundant_keys(ctx);
         let free = !seq
-            && colls.iter().all(Option::is_none)
-            && self.groups.iter().all(|g| !equal_apart(&g.ty()))
             && self.aggs.iter().all(order_insensitive)
+            && self
+                .groups
+                .iter()
+                .enumerate()
+                .all(|(i, g)| red[i] || (colls.get(i).is_none_or(Option::is_none) && !equal_apart(&g.ty())))
             && (self.groups.is_empty()
                 || self.plan.as_ref().is_some_and(|p| {
                     let sorted = super::pghash::agg_estimate(p, ctx).sorted;
-                    sorted.is_some_and(|s| (0..self.groups.len()).all(|i| s.iter().any(|k| k.0 == i)))
+                    sorted.is_some_and(|s| (0..self.groups.len()).all(|i| red[i] || s.iter().any(|k| k.0 == i)))
                 }));
         let spec = Arc::new(super::partial::Spec { keys, trim, aggs, seq, free });
         Ok(match proj {
