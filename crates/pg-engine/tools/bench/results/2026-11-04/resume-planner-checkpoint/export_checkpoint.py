@@ -62,8 +62,8 @@ A follow-up trace identified a Join-with-FromCall representation of Function Sca
 trace was removed, default scrollability corrected, and green165v2 completed: lock3/3, cursor3/3 (twofiles), memory1/1 all exit0.
 Streaming retained0additional bytes after98krows; backward20k completed below10s.
 Corrected source is committed as caabeb196e268f5a0fb822e30565e633344058d1,
-remote-confirmed on owner wip/a165-resume-20261104. The exact-source full check165fixed
-job is active; no source acceptance or old-candidate timing is inferred.
+remote-confirmed on owner wip/a165-resume-20261104. The exact-source full check165fixed debug stage passed448tests,0failed,18ignored across60summaries.
+Release stage is active; no source acceptance or old-candidate timing is inferred.
 Completed outputs only are included; no source acceptance is inferred.
 Parent review holds caab on a replay predicate coverage gap: embedded domain checks and
 operator FuncDefs are not inspected by Expr::walk. A bounded actualPG probe is prepared
@@ -75,6 +75,11 @@ or resource gate has run on caab and no frozen measurement threshold was changed
 '''
 files = {'README.md': readme.encode(), 'export_checkpoint.py': Path(__file__).read_bytes()}
 sources = {
+    'check165fixed/source.txt': str(D / 'check165fixed/source.txt'),
+    'check165fixed/tree.txt': str(D / 'check165fixed/tree.txt'),
+    'check165fixed/debug-test.command': str(D / 'check165fixed/debug-test.command'),
+    'check165fixed/debug-test.log': str(D / 'check165fixed/debug-test.log'),
+    'check165fixed/debug-test-summary.json': str(D / 'check165fixed/debug-test-summary.json'),
     'runners/cursor-embedded-functions-probe.sql': str(D / 'cursor-embedded-functions-probe.sql'),
     'runners/wrapper-selftest.py': str(D / 'wrapper-selftest.py'),
     'runners/prof.sh': '/home/meszmate/.cache/a165/scripts/prof.sh',

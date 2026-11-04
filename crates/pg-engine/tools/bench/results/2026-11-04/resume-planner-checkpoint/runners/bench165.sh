@@ -20,6 +20,16 @@ run() {
 test ! -s "$ev/exits.tsv"
 run wrapper-selftest python3 /home/meszmate/.cache/pg-engine-resume-20261104/session_planner/wrapper-selftest.py
 test -x /home/meszmate/.cache/a165/bin/resume/roll-engine
+checks=${CHECK_EVIDENCE_DIR:-/home/meszmate/.cache/pg-engine-resume-20261104/session_planner/check165fixed}
+test "$(cat "$checks/source.txt")" = "$(git -C "$W" rev-parse HEAD)"
+test ! -s "$ev/source.patch"
+sha256sum --check "$checks/engine.sha256"
+python3 - "$checks/exits.tsv" <<'CHECK'
+from pathlib import Path
+import sys
+rows = [line.split('\t') for line in Path(sys.argv[1]).read_text().splitlines()]
+assert rows == [[name, '0'] for name in ['debug-test', 'release-test', 'clippy', 'build', 'postgres']], rows
+CHECK
 sha256sum /home/meszmate/.cache/a165/bin/base/roll-engine > "$ev/baseline-before.sha256"
 run baseline-build env CARGO_TARGET_DIR=/home/meszmate/.cache/a165/target-base cargo build --manifest-path /home/meszmate/.cache/a165/base-src/Cargo.toml --profile dist -p pg-engine --bin roll-engine
 cmp /home/meszmate/.cache/a165/target-base/dist/roll-engine /home/meszmate/.cache/a165/bin/base/roll-engine
