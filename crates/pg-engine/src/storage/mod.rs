@@ -40,8 +40,6 @@ const SPILL_DIR: &str = "spill";
 
 /// Spilled runs linked into their commits as they were (`Store::link_run`; tests check).
 pub static LINKED_RUNS: AtomicU64 = AtomicU64::new(0);
-/// Linked runs that went straight to L1 (`Store::alone_at_bottom`; tests check).
-pub static LINKED_TO_L1: AtomicU64 = AtomicU64::new(0);
 
 /// The table a key is of, for `Store::untouched`: its first 4 bytes, a range deletion's
 /// marker's those of the range's start.
@@ -410,10 +408,12 @@ impl Store {
         let mut barriers: Vec<u64> = manifest
             .l0
             .iter()
+            .chain(manifest.l1.iter().filter(|m| m.commit_ts.is_some()))
             .map(|m| m.max_ts)
             .filter(|&t| t > manifest.flushed_ts)
             .collect();
         barriers.sort_unstable();
+        barriers.dedup();
         let groups: Vec<Memtable> = (0..=barriers.len()).map(|_| Memtable::new(replay_seq)).collect();
         let mut last_ts = manifest.last_ts.max(manifest.flushed_ts);
         last_ts = last_ts.max(barriers.last().copied().unwrap_or(0));
@@ -494,6 +494,11 @@ impl Store {
     /// what a crash left there belongs to transactions that are gone.
     pub fn spill_dir(&self) -> PathBuf {
         self.dir.join(SPILL_DIR)
+    }
+
+    /// Compression policy for fresh runs that may become store files unchanged.
+    pub(crate) fn compress(&self) -> bool {
+        self.opts.compress
     }
 
     /// `StoreOptions::txn_spill_bytes`.
@@ -1343,7 +1348,6 @@ impl Store {
                 if b {
                     let at = l1.partition_point(|s| s.meta.last_key < f.meta.first_key);
                     l1.insert(at, f);
-                    LINKED_TO_L1.fetch_add(1, Ordering::Relaxed);
                 } else {
                     imm.push(Frozen::Sst(f));
                 }
@@ -1364,14 +1368,14 @@ impl Store {
         Ok(())
     }
 
-    /// Whether `files[i]`, a commit's linked run, can go to L1 as it is: compressed, not
-    /// much bigger than compaction's files, and no other source of `view` nor other file
+    /// Whether `files[i]`, a commit's linked run, can go to L1 as it is: meeting the store's compression
+    /// policy, not much bigger than compaction's files, and no other source of `view` nor other file
     /// of the commit holds a key in its range (so every older version of its keys, none,
     /// is below it, and a key's versions in L1 stay in one file). Under the commit lock and
     /// `bg`.
     fn alone_at_bottom(&self, view: &View, files: &[Arc<SstReader>], i: usize) -> Result<bool> {
         let f = &files[i];
-        if f.meta.commit_ts.is_none() || f.meta.size > 2 * self.opts.target_file_bytes || !f.first_block_compressed()? {
+        if f.meta.commit_ts.is_none() || f.meta.size > 2 * self.opts.target_file_bytes || (self.opts.compress && !f.first_block_compressed()?) {
             return Ok(false);
         }
         let (lo, hi) = (user_key(&f.meta.first_key), user_key(&f.meta.last_key));
@@ -1823,6 +1827,37 @@ impl Store {
         Ok(())
     }
 
+    /// During clean close only, put linked L1 files among the inputs the normal
+    /// compactor rewrites. Persist the move before publishing it: a crash at either
+    /// stage leaves the same linked files recoverable, never unlisted.
+    fn stage_linked_l1_for_close(&self) -> Result<()> {
+        let _bg = self.bg.lock();
+        let mut m = self.manifest.lock();
+        let mut v = self.view.write();
+        let mut next = m.clone();
+        let mut l0 = v.l0.clone();
+        let mut l1 = Vec::with_capacity(v.l1.len());
+        for s in &v.l1 {
+            if s.meta.commit_ts.is_some() {
+                let at = l0_place(&next.l0, &s.meta);
+                next.l0.insert(at, s.meta.clone());
+                l0.insert(at, s.clone());
+            } else {
+                l1.push(s.clone());
+            }
+        }
+        if l1.len() == v.l1.len() {
+            return Ok(());
+        }
+        next.l1.retain(|s| s.commit_ts.is_none());
+        write_manifest(&self.dir, &next)?;
+        *m = next;
+        *v = Arc::new(View {
+            mem: v.mem.clone(), imm: v.imm.clone(), l0, l1, rdels: v.rdels.clone(),
+        });
+        Ok(())
+    }
+
     /// Flush everything to SSTs and stop accepting commits. After this the store holds no
     /// memory beyond what the caller keeps alive.
     pub fn close(self: &Arc<Self>) -> Result<()> {
@@ -1830,10 +1865,11 @@ impl Store {
         // markers retired), and runs linked into commits rewritten (compacted): a build from
         // before them reading the files after a clean shutdown would see deleted rows again,
         // or misread a linked run's versions.
-        let linked = |v: &View| v.l0.iter().any(|s| s.meta.commit_ts.is_some()) || v.imm.iter().any(|f| matches!(f, Frozen::Sst(s) if s.meta.commit_ts.is_some()));
+        let linked = |v: &View| v.l0.iter().chain(&v.l1).any(|s| s.meta.commit_ts.is_some()) || v.imm.iter().any(|f| matches!(f, Frozen::Sst(s) if s.meta.commit_ts.is_some()));
         if !self.closed.load(Ordering::Acquire) && (!self.view().rdels.is_empty() || linked(&self.view())) {
             self.rotate()?;
             self.flush_all()?;
+            self.stage_linked_l1_for_close()?;
             self.compact()?;
             self.collect_ranges()?;
         }
@@ -3182,7 +3218,7 @@ mod tests {
         let mut id = 1000;
         let mut run = |p: &str, n: u32, compress: bool| -> Arc<SstReader> {
             id += 1;
-            let mut w = if compress { SstWriter::create_run(&spill, id) } else { SstWriter::create_temp(&spill, id) }.unwrap();
+            let mut w = if compress { SstWriter::create_run(&spill, id, true) } else { SstWriter::create_temp(&spill, id) }.unwrap();
             for i in 0..n {
                 // (A run's value: tag 1, present; every 9th a deletion, tag 0.)
                 let v: Vec<u8> = if i % 9 == 4 { vec![0] } else { [&[1u8][..], val(p, i).as_bytes()].concat() };
@@ -3192,11 +3228,10 @@ mod tests {
         };
         // b: alone; a: overlaps a file; d: overlaps the memtable; e: not compressed.
         let linked = vec![run("b", 3000, true), run("a", 50, true), run("d", 50, true), run("e", 50, false)];
-        let to_l1 = LINKED_TO_L1.load(Ordering::Relaxed);
         let ts = s
             .commit_sorted(0, &mut std::iter::empty::<Result<(Vec<u8>, Option<Bytes>)>>(), |_, _| Ok(()), &|_, _| Ok(()), |_| {}, linked)
             .unwrap();
-        assert_eq!(LINKED_TO_L1.load(Ordering::Relaxed) - to_l1, 1);
+        assert_eq!(s.view().l1.iter().filter(|f| f.meta.commit_ts == Some(ts)).count(), 1);
         let check = |s: &Store, compacted: bool| {
             for (p, n) in [("b", 3000u32), ("a", 50), ("d", 50), ("e", 50)] {
                 for i in (0..n).filter(|i| i % 7 == 0 || *i < 6) {

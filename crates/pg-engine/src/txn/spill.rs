@@ -43,6 +43,7 @@ const LINKED_MERGE_FAN: usize = 16;
 pub(crate) struct Runs {
     dir: PathBuf,
     next_id: u64,
+    compress: bool,
     cache: Arc<BlockCache>,
     /// Oldest first, each with its tier and whether it can be linked into the store as it
     /// is at commit (`take_linkable`): every key in it written once in the whole
@@ -83,10 +84,11 @@ pub(super) fn decode_entry(b: Bytes) -> (Option<Bytes>, Option<u32>) {
 }
 
 impl Runs {
-    pub fn new(dir: PathBuf) -> Runs {
+    pub fn new(dir: PathBuf, compress: bool) -> Runs {
         Runs {
             dir,
             next_id: 1,
+            compress,
             cache: BlockCache::new(8 << 20),
             files: Vec::new(),
             view: View::of_files(Vec::new()),
@@ -125,8 +127,8 @@ impl Runs {
         std::fs::create_dir_all(&self.dir)?;
         let id = self.next_id;
         self.next_id += 1;
-        // (Compressed: a run its commit links goes to L1 as it is when it is alone there.)
-        let mut w = SstWriter::create_run(&self.dir, id)?;
+        // (The store's compression policy: a linked run may go straight to L1.)
+        let mut w = SstWriter::create_run(&self.dir, id, self.compress)?;
         let mut val = Vec::new();
         let mut segs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         let mut seg: Option<(&[u8], &[u8])> = None;

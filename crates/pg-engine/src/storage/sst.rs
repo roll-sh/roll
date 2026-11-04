@@ -201,8 +201,8 @@ impl SstWriter {
     /// A linkable run (`Store::commit_sorted`'s `linked`): compressed as the store's files
     /// are, not fsynced (linking does). One that no other source holds keys of goes to L1
     /// as it is when its commit links it, so its entries are written once.
-    pub fn create_run(dir: &Path, id: u64) -> Result<Self> {
-        let mut w = Self::create(dir, id, true)?;
+    pub fn create_run(dir: &Path, id: u64, compress: bool) -> Result<Self> {
+        let mut w = Self::create(dir, id, compress)?;
         w.sync = false;
         Ok(w)
     }

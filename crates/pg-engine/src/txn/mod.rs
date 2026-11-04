@@ -1531,7 +1531,7 @@ impl Txn {
         older.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.ts.cmp(&a.1.ts)));
         let no_older = older.is_empty();
         let dir = self.db.store.spill_dir().join(self.id.to_string());
-        let runs = Self::runs_in(&mut self.runs, dir, &self.rdels);
+        let runs = Self::runs_in(&mut self.runs, dir, &self.rdels, self.db.store.compress());
         // Each key's newest version (the buffer's) before its older ones (the journal's).
         let mut cur = self.writes.iter().peekable();
         let mut old = older.into_iter().peekable();
@@ -1572,9 +1572,10 @@ impl Txn {
         runs: &'a mut Option<Box<Runs>>,
         dir: std::path::PathBuf,
         rdels: &[crate::storage::rdel::RangeDel],
+        compress: bool,
     ) -> &'a mut Runs {
         runs.get_or_insert_with(|| {
-            let mut r = Box::new(Runs::new(dir));
+            let mut r = Box::new(Runs::new(dir, compress));
             r.set_rdels(rdels);
             r
         })
@@ -2092,7 +2093,7 @@ impl Txn {
                 self.journal.push((Vec::new(), None));
                 self.derived.clear();
                 let dir = self.db.store.spill_dir().join(self.id.to_string());
-                let runs = Self::runs_in(&mut self.runs, dir, &self.rdels);
+                let runs = Self::runs_in(&mut self.runs, dir, &self.rdels, self.db.store.compress());
                 let mut items = order.iter().map(|&(_, i)| {
                     let e = s.ents[i as usize];
                     let k = (e.0 + e.1) as usize;
@@ -2213,7 +2214,7 @@ impl Txn {
         sort_by_key_after(&mut entries, start.len(), |e| e.0.as_slice());
         let (cid, ts) = (Some(self.write_cid), self.position() as u64);
         let dir = self.db.store.spill_dir().join(self.id.to_string());
-        let runs = Self::runs_in(&mut self.runs, dir, &self.rdels);
+        let runs = Self::runs_in(&mut self.runs, dir, &self.rdels, self.db.store.compress());
         // (Keys of a new index, none written before: linked at commit as they are.)
         runs.write(&mut entries.into_iter().map(|(k, v)| {
             let v = Some(Bytes::from(v));
@@ -2246,7 +2247,7 @@ impl Txn {
     pub fn put_index_runs(&mut self, table: &[u8], runs: Vec<(Vec<u8>, Vec<(u32, u32, u32)>)>) -> Result<()> {
         let (cid, ts) = (self.write_cid, self.position() as u64);
         let dir = self.db.store.spill_dir().join(self.id.to_string());
-        let r = Self::runs_in(&mut self.runs, dir, &self.rdels);
+        let r = Self::runs_in(&mut self.runs, dir, &self.rdels, self.db.store.compress());
         for (data, ents) in &runs {
             let mut items = ents.iter().map(|e| {
                 let k = &data[e.0 as usize..(e.0 + e.1) as usize];
@@ -2332,7 +2333,7 @@ impl Txn {
         self.journal.push((Vec::new(), None));
         self.derived.clear();
         let dir = self.db.store.spill_dir().join(self.id.to_string());
-        let runs = Self::runs_in(&mut self.runs, dir, &self.rdels);
+        let runs = Self::runs_in(&mut self.runs, dir, &self.rdels, self.db.store.compress());
         runs.write(&mut keys.into_iter().map(|k| (k, Ent { v: None, cid, ts })), true)?;
         DELETE_RUNS.fetch_add(1, Ordering::Relaxed);
         self.wrote = true;
@@ -2721,30 +2722,6 @@ impl Txn {
             Some(v) => self.resolve_own(key, v, Some(&st), st.ts),
             None => self.db.store.get(key, st.ts),
         }
-    }
-
-    /// `get_snap` through `r`, a point reader (`storage::point::PointReader`) the caller
-    /// keeps between calls: a key falling in a block the reader holds is read there, with no
-    /// lookup in the block cache (a nested loop's inner side by a unique key, keys
-    /// ascending). `r` is made again when it is of another snapshot than `s`'s now (None:
-    /// none yet). `bloom_last`: keys that may not exist.
-    pub fn get_snap_with(
-        &self,
-        key: &[u8],
-        s: &Snap,
-        r: &mut Option<crate::storage::point::PointReader>,
-        bloom_last: bool,
-    ) -> Result<Option<Bytes>> {
-        self.catch_up(s);
-        let st = s.st.borrow();
-        if let Some(v) = self.snap_get(key, &st)? {
-            return self.resolve_own(key, v, Some(&st), st.ts);
-        }
-        let r = match r {
-            Some(r) if r.ts() == st.ts => r,
-            _ => r.insert(self.db.store.point_reader(st.ts, bloom_last)),
-        };
-        Ok(self.db.store.get_with(r, key, true)?.and_then(|(_, v)| v))
     }
 
     /// `get_snap` of each of `keys` (any order), the store's reads made together
