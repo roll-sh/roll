@@ -2841,7 +2841,7 @@ impl AggNode {
                 .groups
                 .iter()
                 .enumerate()
-                .all(|(i, g)| red[i] || (colls.get(i).is_none_or(Option::is_none) && !key_equal_apart(g, proj.as_deref())))
+                .all(|(i, g)| red[i] || shows_alike(g, colls.get(i).and_then(Option::as_ref), proj.as_deref()))
             && (self.groups.is_empty()
                 || self.plan.as_ref().is_some_and(|p| {
                     let e = super::pghash::agg_estimate(p, ctx);
@@ -2986,7 +2986,11 @@ impl AggNode {
             // 0, under a nondeterministic collation) show.
             let presort = presort.or_else(|| {
                 // (Estimated only when it can matter: a plain aggregate has one group.)
-                let shown = colls.iter().any(Option::is_some) || self.groups.iter().any(|g| key_equal_apart(g, input.projection()));
+                let shown = self
+                    .groups
+                    .iter()
+                    .zip(&colls)
+                    .any(|(g, c)| !shows_alike(g, c.as_ref(), input.projection()));
                 if self.groups.is_empty() || (!shown && self.aggs.iter().all(order_insensitive)) {
                     return None;
                 }
@@ -3698,6 +3702,17 @@ fn through_projection(e: &crate::sql::expr::Expr, proj: &[crate::sql::expr::Expr
 /// exact sums and averages, min / max of types whose equal values are the same).
 /// Whether two equal values of type `t` can look different (interval_eq, numeric_eq,
 /// float8eq over -0 / 0, jsonb's numbers, arrays and ranges of them).
+/// Whether equal values of group key `g` (compared as `coll` has them) always look alike, so
+/// that its group shows the same value whichever of its rows comes first.
+fn shows_alike(g: &crate::sql::expr::Expr, coll: Option<&KeyNorm>, proj: Option<&[crate::sql::expr::Expr]>) -> bool {
+    match coll {
+        None => !key_equal_apart(g, proj),
+        // (A char(n) value is always padded to n: equal ones are the same string.)
+        Some(KeyNorm::Bpchar(None)) => matches!(g.ty(), crate::types::DataType::Bpchar(n) if n > 0),
+        Some(_) => false,
+    }
+}
+
 /// Whether a group key's values may be equal and look different (`equal_apart` of its type,
 /// unless the expression only makes whole numbers: EXTRACT of a date's field; a column of
 /// the projection `proj` below, its expression).

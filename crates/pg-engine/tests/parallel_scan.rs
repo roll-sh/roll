@@ -263,6 +263,8 @@ const JOIN_QUERIES: &[&str] = &[
     "SELECT c, count(*) FROM (SELECT b.id % 150000 AS k, count(d.k) AS c FROM big b LEFT JOIN dim d ON b.g = d.k GROUP BY 1) t GROUP BY c ORDER BY 2 DESC, 1",
     "SELECT k, n, s FROM (SELECT d.k, count(b.id) AS n, sum(b.g) AS s FROM big b RIGHT JOIN dim d ON b.g = d.k + 30 AND b.id % 7 = 0 GROUP BY d.k) t ORDER BY n DESC, k LIMIT 15",
     "SELECT n, count(*) FROM (SELECT CASE WHEN b.id % 9 = 0 THEN NULL ELSE b.id % 120000 END AS k, count(*) AS n FROM big b JOIN dim d ON b.g = d.k GROUP BY 1) t GROUP BY n ORDER BY n",
+    // A char(n) key (padded alike: no presort) among many groups.
+    "SELECT c, count(*), sum(n), sum(s) FROM (SELECT b.c, b.id % 60000 AS k, count(*) AS n, sum(b.x) AS s FROM big b JOIN dim d ON b.g = d.k GROUP BY 1, 2) t GROUP BY c ORDER BY c",
 ];
 
 #[test]
