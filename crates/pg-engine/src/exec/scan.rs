@@ -1023,6 +1023,8 @@ fn bind_scan(s: &ScanPlan, mut ranges: Vec<(Vec<u8>, Vec<u8>)>, only: bool, rev:
             }
             Some((ix, _)) if ix.id != 0 => {
                 let prefix = index_prefix(s.table.oid, ix.id);
+                // (The pages need the models: a kept table's planned from its record's sizes.)
+                super::sizing::heap_blocks(&s.table, ctx)?;
                 let pages = match ix.method.as_str() {
                     "btree" => super::sizing::btree_leaf_pages(s.table.oid, ix.oid, &prefix, &ranges, &ctx.sess.db),
                     "hash" => hash_scan_buckets(s, ix, ctx)?,
@@ -1081,6 +1083,7 @@ fn ssi_bitmap_index(
 ) -> Result<()> {
     let table = Arc::new(t.clone());
     let prefix = index_prefix(t.oid, ix.id);
+    super::sizing::heap_blocks(t, ctx)?;
     let pages = match ix.method.as_str() {
         "btree" => super::sizing::btree_leaf_pages(t.oid, ix.oid, &prefix, ranges, &ctx.sess.db),
         "hash" => hash_buckets(&table, ix, b, ctx)?,

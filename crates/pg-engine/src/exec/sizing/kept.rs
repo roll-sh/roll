@@ -125,6 +125,7 @@ pub fn open(db: &Database, reset: &[u32]) -> Result<()> {
         let mut rf = shard.write();
         rf.kept.clear();
         rf.kept_stored.clear();
+        rf.kept_sizes.clear();
     }
     for oid in kept {
         db.relfiles.of(oid).write().kept.insert(oid);
@@ -140,6 +141,7 @@ pub(super) fn forget(rf: &mut RelFiles, oid: u32) {
     rf.kept.remove(&oid);
     rf.building.remove(&oid);
     rf.kept_hash.remove(&oid);
+    rf.kept_sizes.remove(&oid);
 }
 
 /// What `take` found for a table.
@@ -209,6 +211,53 @@ pub(super) fn take<'a>(t: &Table, need: &[&BoundIndex], ctx: &'a ExecCtx) -> Tak
     Take::Restore(r, building)
 }
 
+/// Kept table `t`'s sizes from its record's header (`Sizes`), while its models aren't laid
+/// out: what the planner reads of it without waiting for the layout (a big table's takes
+/// a quarter of a second). Read once, from the store; None once its models are there, or
+/// when the record has no sizes or isn't valid for `t` any more.
+pub(super) fn sizes(db: &Database, cat: &Catalog, t: &Table) -> Option<Sizes> {
+    let pending = |rf: &RelFiles| !rf.heaps.contains_key(&t.oid) && (rf.kept.contains(&t.oid) || rf.building.contains(&t.oid));
+    {
+        let rf = db.relfiles.of(t.oid).read();
+        if !pending(&rf) {
+            return None;
+        }
+        if let Some(s) = rf.kept_sizes.get(&t.oid) {
+            return s.clone();
+        }
+    }
+    let v = db.store.get(&key(t.oid), db.store.visible_ts()).ok()??;
+    let s = read_sizes(&v, cat.relfilenode(t.oid)?, token(cat, t)).0;
+    let mut rf = db.relfiles.of(t.oid).write();
+    if !pending(&rf) {
+        return None;
+    }
+    rf.kept_sizes.insert(t.oid, s.clone());
+    s
+}
+
+/// The sizes `sizes` found for table `oid`, without reading anything (None: none read).
+pub(super) fn sizes_read(rf: &RelFiles, oid: u32) -> Option<&Sizes> {
+    if rf.heaps.contains_key(&oid) {
+        return None;
+    }
+    rf.kept_sizes.get(&oid)?.as_ref()
+}
+
+/// The models of kept table `oid` are laid out (`rf` has them): its header's sizes go, and
+/// (debug builds) must be the models'.
+pub(super) fn laid_out(rf: &mut RelFiles, oid: u32) {
+    let Some(s) = rf.kept_sizes.remove(&oid).flatten() else { return };
+    if cfg!(debug_assertions) {
+        let heap = rf.heaps.get(&oid).map(Heap::nblocks);
+        debug_assert_eq!(heap, Some(s.heap), "kept heap pages of {oid}");
+        for &(ix, pages, level) in &s.btrees {
+            let bt = rf.btrees.get(&ix).map(|b| (b.nblocks(), b.height()));
+            debug_assert!(bt.is_none_or(|b| b == (pages, level)), "kept btree sizes of {ix}");
+        }
+    }
+}
+
 /// Lay every kept table's models out in the background as the database opens, so a
 /// table's first statement usually finds them: one the builder hasn't reached yet is laid
 /// out by its first user (`ensure`), who waits only while the builder is laying out that
@@ -255,6 +304,7 @@ fn lay_out(db: &Database, oid: u32, building: Building<'_>) {
         rf.btrees.insert(ix, tree);
     }
     rf.kept_hash.insert(oid, h);
+    laid_out(&mut rf, oid);
     drop(rf);
     drop(building);
 }
@@ -375,18 +425,78 @@ fn encode(rf: &RelFiles, cat: &Catalog, t: &Table, h: &Heap, node: u32, v: &Vis,
     out.extend_from_slice(&shape);
     let ixs: Vec<u32> = index_oids(t).into_iter().filter(|o| rf.btrees.contains_key(o)).collect();
     put(&mut out, ixs.len() as u64);
+    let mut ixs_sizes = Vec::with_capacity(ixs.len());
     for oid in ixs {
         out.extend_from_slice(&oid.to_le_bytes());
-        rf.btrees[&oid].write_image(&mut out);
+        let bt = &rf.btrees[&oid];
+        bt.write_image(&mut out);
+        ixs_sizes.push((oid, bt.nblocks(), bt.height()));
     }
     // (A small record as it is, a bigger one compressed: a tag says which.)
+    let mut z = sized_header(t, h, node, cat, &ixs_sizes);
     if out.len() < 1024 {
-        out.insert(0, RAW);
-        return Some(out);
+        z.push(RAW);
+        z.extend_from_slice(&out);
+        return Some(z);
     }
-    let mut z = vec![ZSTD];
+    z.push(ZSTD);
     z.extend_from_slice(&zc.compress(&out).ok()?);
     Some(z)
+}
+
+/// The sizes a planner reads of a kept table before its models are laid out (`sizes`): its
+/// heap's pages, and each btree's pages and root level. Kept only for a heap whose pages are
+/// all visible with none prunable: reads of it then change nothing in its models (no page
+/// to prune, no index entry to mark dead), so they needn't wait for the layout.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Sizes {
+    pub heap: u32,
+    /// (index, pages, root level)
+    pub btrees: Vec<(u32, u32, u32)>,
+}
+
+/// A record's first byte when the sizes come first (`SIZED`, the relfilenode, the
+/// definition's token, then the sizes), before the record as it was (`RAW` / `ZSTD`): the
+/// sizes read without decompressing the rows. (Older builds don't know the tag: they lay
+/// the table out from its rows.)
+const SIZED: u8 = 0xf2;
+
+fn sized_header(t: &Table, h: &Heap, node: u32, cat: &Catalog, btrees: &[(u32, u32, u32)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    if h.visibility_watch().is_none() || h.any_prunable() {
+        return out;
+    }
+    out.push(SIZED);
+    out.extend_from_slice(&node.to_le_bytes());
+    out.extend_from_slice(&token(cat, t).to_le_bytes());
+    put(&mut out, h.nblocks() as u64);
+    put(&mut out, btrees.len() as u64);
+    for &(oid, pages, level) in btrees {
+        out.extend_from_slice(&oid.to_le_bytes());
+        put(&mut out, pages as u64);
+        put(&mut out, level as u64);
+    }
+    out
+}
+
+/// A record's sizes (`Sizes`), when it has them for relfilenode `node` and definition
+/// `token`; and the record after them.
+fn read_sizes(v: &[u8], node: u32, token: u64) -> (Option<Sizes>, &[u8]) {
+    let Some((&SIZED, rest)) = v.split_first() else { return (None, v) };
+    let mut r = Rd(rest);
+    let mut read = || -> Option<Sizes> {
+        let same = u32::from_le_bytes(r.take(4)?.try_into().ok()?) == node
+            && u64::from_le_bytes(r.take(8)?.try_into().ok()?) == token;
+        let heap = u32::try_from(r.get()?).ok()?;
+        let mut btrees = Vec::new();
+        for _ in 0..r.get()? {
+            let oid = u32::from_le_bytes(r.take(4)?.try_into().ok()?);
+            btrees.push((oid, u32::try_from(r.get()?).ok()?, u32::try_from(r.get()?).ok()?));
+        }
+        same.then_some(Sizes { heap, btrees })
+    };
+    let s = read();
+    (s, r.0)
 }
 
 struct Rd<'a>(&'a [u8]);
@@ -432,6 +542,7 @@ impl<'a> Rd<'a> {
 /// fillfactor `ff`. (The definition's hash covers the btrees' options kept with them.)
 fn decode(v: &[u8], node: u32, token: u64, ff: usize) -> Option<Restore> {
     let raw;
+    let (_, v) = read_sizes(v, node, token);
     let body = match v.split_first()? {
         (&RAW, b) => b,
         (&ZSTD, b) => {
