@@ -21,8 +21,19 @@ const FETCH_ALL: i64 = i64::MAX;
 pub struct Cursor {
     pub cols: Vec<OutCol>,
     /// The rows the query produced so far: as returned, or (when its target list is
-    /// evaluated each time a row is passed: `Lazy::project`) the rows under it.
+    /// evaluated each time a row is passed: `Lazy::project`) the rows under it. A cursor that
+    /// streams (`streams`) keeps none it has passed: `rows[0]` is row `base` + 1.
     pub rows: Vec<Row>,
+    /// How many of the query's first rows `rows` no longer has (`streams`).
+    base: usize,
+    /// Running its query again reaches any earlier row as PostgreSQL's executor scanning
+    /// backward or rewinding does (a scrollable plan, nothing volatile, no row locks, rows as
+    /// returned): a SCROLL cursor streams too, and moving back runs the query again
+    /// (ExecutorRewind) up to the row.
+    rerun: bool,
+    /// Its rows are the query's as returned, not under a target list or qual evaluated as
+    /// rows are passed, and it runs no writing query to completion: it may stream.
+    plain: bool,
     /// A simply updatable cursor: its table and each row's storage key (`WHERE CURRENT OF`).
     pub keys: Option<(u32, Vec<Arc<[u8]>>)>,
     /// The executor's position: 0 = before the first row, k = on row k, rows.len()+1 = after
@@ -582,6 +593,9 @@ impl Cursor {
         let mut c = Cursor {
             cols,
             rows: Vec::new(),
+            base: 0,
+            rerun: false,
+            plain: false,
             keys: key_table.map(|t| (t, Vec::new())),
             pos: 0,
             portal_pos: 0,
@@ -621,6 +635,8 @@ impl Cursor {
     ) -> Cursor {
         let mut c = Cursor::new(cols, Vec::new(), key_table, hold, scroll, text, created);
         c.projected = lazy.project.is_some();
+        c.plain = lazy.project.is_none() && lazy.qual.is_none() && !lazy.fill;
+        c.rerun = scroll && c.plain && scrollable(&lazy.plan) && !crate::sql::explain::plan_volatile_deep(&lazy.plan);
         c.lazy = Some(lazy);
         c
     }
@@ -644,6 +660,45 @@ impl Cursor {
         self.rows.push(r);
     }
 
+    /// The rows the query has produced so far.
+    fn produced(&self) -> usize {
+        self.base + self.rows.len()
+    }
+
+    /// Whether it keeps no row it has passed: PostgreSQL's portal keeps none (a NO SCROLL
+    /// cursor can't go back; a scrollable plan runs backward), only a holdable cursor's
+    /// store at commit and the Material node a SCROLL cursor's plan gets when it can't run
+    /// backward. A query whose target list or qual is evaluated as rows are passed keeps the
+    /// rows under it.
+    fn streams(&self) -> bool {
+        self.plain && (!self.scroll || (self.rerun && !self.row_marks))
+    }
+
+    /// Row `i` (from 0) after the rows passed were let go: the query runs again from its
+    /// start (ExecutorRewind) up to it, as only a `rerun` cursor does.
+    fn rerun_to(&mut self, ex: Option<&mut Exec<'_>>, ctx: &ExecCtx, i: usize) -> Result<()> {
+        let Some(ex) = ex.filter(|_| self.rerun) else {
+            return Err(crate::error::internal("cursor row no longer kept"));
+        };
+        *ex.node = None;
+        *ex.done = false;
+        self.rows.clear();
+        self.base = 0;
+        if let Some((_, keys)) = &mut self.keys {
+            keys.clear();
+        }
+        while self.produced() <= i {
+            let Some(r) = ex.pull(ctx)? else {
+                return Err(crate::error::internal("cursor query gave fewer rows run again"));
+            };
+            let r = ex.coerce(r, ctx)?;
+            self.push_row(r);
+        }
+        self.rows.drain(..i);
+        self.base = i;
+        Ok(())
+    }
+
     /// Run `f` with the query's executor (and in its context), if it has one.
     fn with_executor<T>(
         &mut self,
@@ -662,8 +717,18 @@ impl Cursor {
 
     /// The executor's row at its position, as returned: its target list evaluated again
     /// when that runs apart.
-    fn visit(&mut self, ex: Option<&mut Exec<'_>>, ctx: &ExecCtx) -> Result<Row> {
+    fn visit(&mut self, mut ex: Option<&mut Exec<'_>>, ctx: &ExecCtx) -> Result<Row> {
         let i = self.pos - 1;
+        if self.streams() {
+            if i < self.base {
+                self.rerun_to(ex.as_deref_mut(), ctx, i)?;
+            }
+            // (The row goes out as it is; those before it go.)
+            let r = std::mem::take(&mut self.rows[i - self.base]);
+            self.rows.drain(..=i - self.base);
+            self.base = i + 1;
+            return Ok(r);
+        }
         let Some(ex) = ex.filter(|e| e.project.is_some() || e.qual.is_some()) else {
             return Ok(self.rows[i].clone());
         };
@@ -693,7 +758,7 @@ impl Cursor {
         let Some(e) = ex.window else {
             return Ok(false);
         };
-        let n = self.rows.len();
+        let n = self.produced();
         if n == 0 || self.pos != n + 1 || self.last.is_none() {
             return Ok(false);
         }
@@ -850,7 +915,7 @@ impl Cursor {
         if ex.as_deref().is_some_and(|e| e.qual.is_some()) {
             return self.step_qual(ex, ctx, forward);
         }
-        let n = self.rows.len();
+        let n = self.produced();
         if forward {
             if self.pos > n {
                 return Ok(None);
@@ -1052,7 +1117,7 @@ impl Cursor {
                 c.lim_pos = 0;
                 c.lim_state = LimState::Initial;
             } else if c.at_end {
-                c.pos = c.rows.len() + 1;
+                c.pos = c.produced() + 1;
             }
             let mut rows = Vec::new();
             let mut keys = Vec::new();
@@ -1070,6 +1135,9 @@ impl Cursor {
         self.projected = false;
         self.last = None;
         self.rows = rows;
+        self.base = 0;
+        self.plain = false;
+        self.rerun = false;
         if let Some((_, k)) = &mut self.keys {
             *k = keys;
         }
