@@ -518,6 +518,7 @@ pub struct BtPageStats {
     pub root: u32,
     pub internal: u64,
     pub leaf: u64,
+    /// Half-dead pages (none in the model).
     pub empty: u64,
     pub leaf_free: u64,
     pub fragments: u64,
@@ -639,7 +640,7 @@ impl Btree {
     }
 
     /// pgstatindex's walk over the pages after the metapage: (root block, internal pages,
-    /// leaf pages, empty leaf pages, leaf free bytes (PageGetExactFreeSpace), leaf
+    /// leaf pages, half-dead pages, leaf free bytes (PageGetExactFreeSpace), leaf
     /// fragments: leaves whose right sibling comes before them) and pgstattuple's over all
     /// of them: (items, their bytes, free bytes).
     pub fn page_stats(&self) -> BtPageStats {
@@ -655,10 +656,11 @@ impl Btree {
             s.free += free as u64;
             s.items += p.nitems() as u64;
             s.item_bytes += (p.used + ITEM_ID * p.nitems()) as u64;
+            // (A leaf without items is a leaf page to pgstatindex too: its empty_pages are the
+            // half-dead pages, P_IGNORE and not deleted, which a VACUUM of the model never
+            // leaves, deleting a page in one step.)
             if !p.leaf {
                 s.internal += 1;
-            } else if p.items.is_empty() {
-                s.empty += 1;
             } else {
                 s.leaf += 1;
                 s.leaf_free += free as u64;
