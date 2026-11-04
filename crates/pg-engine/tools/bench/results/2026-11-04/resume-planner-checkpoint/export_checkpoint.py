@@ -65,9 +65,22 @@ Corrected source is committed as caabeb196e268f5a0fb822e30565e633344058d1,
 remote-confirmed on owner wip/a165-resume-20261104. The exact-source full check165fixed
 job is active; no source acceptance or old-candidate timing is inferred.
 Completed outputs only are included; no source acceptance is inferred.
+Parent review holds caab on a replay predicate coverage gap: embedded domain checks and
+operator FuncDefs are not inspected by Expr::walk. A bounded actualPG probe is prepared
+but explicitly NOT RUN until the pinned full job terminates. No global Expr walker redesign.
+Benchmark cache runners now refuse replacing existing resources and clean only recorded
+created container IDs; old data and original scripts are retained. Profiler wrapper records
+perf and pgbench exits separately. FakeDocker selftests are prepared, NOT RUN. No timing
+or resource gate has run on caab and no frozen measurement threshold was changed.
 '''
 files = {'README.md': readme.encode(), 'export_checkpoint.py': Path(__file__).read_bytes()}
 sources = {
+    'runners/cursor-embedded-functions-probe.sql': str(D / 'cursor-embedded-functions-probe.sql'),
+    'runners/wrapper-selftest.py': str(D / 'wrapper-selftest.py'),
+    'runners/prof.sh': '/home/meszmate/.cache/a165/scripts/prof.sh',
+    'runners/prof-original-false-success.sh': str(D / 'prof-original-false-success.sh'),
+    'runners/matrix-before-resource-repair.sh': str(D / 'matrix-before-resource-repair.sh'),
+    'runners/conn1000-before-resource-repair.sh': str(D / 'conn1000-before-resource-repair.sh'),
     'runners/check165fixed.sh': str(D / 'check165fixed.sh'),
     'green165v2/head.txt': str(D / 'green165v2/head.txt'),
     'green165v2/source.patch': str(D / 'green165v2/source.patch'),

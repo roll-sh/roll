@@ -9,6 +9,9 @@ out=$1; rounds=$2; shift 2; servers=("$@")
 E=/home/meszmate/roll/.claude/worktrees/agent-a640c14a8f76f8ea4/crates/pg-engine
 D=${MATRIX_DATA:-$HOME/.cache/a165/bench}; mkdir -p "$D"
 RAW=${out}.raw; mkdir -p "$RAW"
+CP=${MATRIX_PREFIX:-a165-resume-matrix}
+declare -A created=() volumes=()
+container() { echo "$CP-$1"; }
 IMG=postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
 EIMG=debian@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 SC=${SERVER_CPUS:-8-11}; CC=${CLIENT_CPUS:-12-13,18-19}; SECS=${SECS:-10}; SCALE=${SCALE:-10}
@@ -16,34 +19,53 @@ WORKLOADS=${WORKLOADS:-select-only simple-update tpcb-like range}
 MODES=${MODES:-simple extended prepared}; CLIENTS=${CLIENTS:-1 8 32}
 printf '\\set aid random(1, 100000 * :scale - 99)\nSELECT sum(abalance) FROM pgbench_accounts WHERE aid BETWEEN :aid AND :aid + 99;\n' >"$D/range.sql"
 port_of() { local i=0; for s in "${servers[@]}"; do [ "$s" = "$1" ] && { echo $((53300 + i)); return; }; i=$((i+1)); done; }
-cg_of() { echo "/sys/fs/cgroup/system.slice/docker-$(docker inspect -f '{{.Id}}' "a165-$1").scope"; }
+cg_of() { echo "/sys/fs/cgroup/system.slice/docker-$(docker inspect -f '{{.Id}}' "$(container "$1")").scope"; }
 cpu() { awk '/^usage_usec/ {print $2}' "$(cg_of "$1")/cpu.stat"; }
 mem() { awk '$1 == "anon" || $1 == "shmem" {s += $2} END {print s + 0}' "$(cg_of "$1")/memory.stat"; }
-psqlc() { docker run --rm --network host -e PGPASSWORD=pw "$IMG" psql -h 127.0.0.1 -p "$(port_of "$1")" -U postgres -d postgres -Atc "$2"; }
+psqlc() { docker run --rm --network host -e PGPASSWORD=pw "$IMG" psql -h 127.0.0.1 -p "$(port_of "$1")" -U postgres -d postgres -v ON_ERROR_STOP=1 -Atc "$2"; }
 start() {
   local s=$1 p; p=$(port_of "$s")
-  docker rm -f "a165-$s" >/dev/null 2>&1; docker volume rm "a165-$s-data" >/dev/null 2>&1
+  if docker inspect "$(container "$s")" >/dev/null 2>&1; then echo "existing container: $(container "$s")" >&2; return 1; fi
   if ss -ltn | grep -q ":$p "; then echo "port $p busy" >&2; exit 1; fi
   if [ "$s" = pg ]; then
-    docker run -d --memory 4g --label agent.worktree=agent-a640c14a8f76f8ea4 --name a165-pg --cpuset-cpus "$SC" --cpu-shares 2 --shm-size=1g --network host \
-      -v a165-pg-data:/var/lib/postgresql -e POSTGRES_PASSWORD=pw -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8" \
+    local volume="$CP-pg-${r:-setup}-data"
+    if docker volume inspect "$volume" >/dev/null 2>&1; then echo "existing volume: $volume" >&2; return 1; fi
+    docker volume create --label agent.worktree=agent-a640c14a8f76f8ea4 "$volume" >"$RAW/volume-${r:-setup}.txt"
+    volumes[$s]=$volume
+    created[$s]=$(docker run -d --memory 4g --label agent.worktree=agent-a640c14a8f76f8ea4 --name "$(container "$s")" --cpuset-cpus "$SC" --cpu-shares 2 --shm-size=1g --network host \
+      -v "$volume:/var/lib/postgresql" -e POSTGRES_PASSWORD=pw -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8" \
       "$IMG" -c shared_buffers=2GB -c maintenance_work_mem=256MB -c max_wal_size=8GB -c checkpoint_timeout=30min \
-      -c max_connections=300 -c port="$p" -c listen_addresses=127.0.0.1 >/dev/null
+      -c max_connections=300 -c port="$p" -c listen_addresses=127.0.0.1)
   else
-    rm -rf "$D/data-$s"; mkdir -p "$D/data-$s"
+    local data="$D/round-${r:-setup}/data-$s"
+    test ! -e "$data"
+    mkdir -p "$data"
     local bin=$HOME/.cache/a165/bin/$s
-    docker run -d --memory 4g --label agent.worktree=agent-a640c14a8f76f8ea4 --name "a165-$s" --cpuset-cpus "$SC" --cpu-shares 2 --network host --user "$(id -u):$(id -g)" \
-      -v "$bin:$bin:ro" -v "$D/data-$s:$D/data-$s" -v /usr/share/zoneinfo:/usr/share/zoneinfo:ro -e TMPDIR="$D/data-$s" \
-      "$EIMG" "$bin/roll-engine" --data "$D/data-$s" --listen 127.0.0.1:"$p" --password pw --cache-mb 2048 >/dev/null
+    created[$s]=$(docker run -d --memory 4g --label agent.worktree=agent-a640c14a8f76f8ea4 --name "$(container "$s")" --cpuset-cpus "$SC" --cpu-shares 2 --network host --user "$(id -u):$(id -g)" \
+      -v "$bin:$bin:ro" -v "$data:$data" -v /usr/share/zoneinfo:/usr/share/zoneinfo:ro -e TMPDIR="$data" \
+      "$EIMG" "$bin/roll-engine" --data "$data" --listen 127.0.0.1:"$p" --password pw --cache-mb 2048)
   fi
+  printf '%s\t%s\t%s\n' "${r:-setup}" "$s" "${created[$s]}" >> "$RAW/containers.tsv"
   local i=0; until psqlc "$s" "select 1" >/dev/null 2>&1; do sleep 1; i=$((i+1)); [ $i -lt 90 ] || { echo "$s did not start" >&2; exit 1; }; done
+  test "$(docker inspect -f '{{.State.Running}}' "${created[$s]}")" = true
   docker run --rm --network host --cpuset-cpus "$CC" -e PGPASSWORD=pw "$IMG" pgbench -h 127.0.0.1 -p "$p" -U postgres -i -q -s "$SCALE" postgres >"$RAW/init-$s-${r:-setup}.log" 2>&1
   psqlc "$s" "vacuum analyze" >/dev/null 2>&1
 }
-stop() { docker logs "a165-$1" >"$RAW/server-$1-${r:-setup}.log" 2>&1 || true; docker rm -f "a165-$1" >/dev/null 2>&1; docker volume rm "a165-$1-data" >/dev/null 2>&1; rm -rf "$D/data-$1"; }
+stop() {
+  local s=$1 id=${created[$1]:-}
+  if [[ -n "$id" ]]; then
+    docker logs "$id" >"$RAW/server-$s-${r:-setup}.log" 2>&1 || true
+    docker rm -f "$id" >/dev/null
+    unset 'created[$s]'
+  fi
+  if [[ -n "${volumes[$s]:-}" ]]; then
+    docker volume rm "${volumes[$s]}" >/dev/null
+    unset 'volumes[$s]'
+  fi
+}
 # (0 rounds: start the servers with fresh pgbench data and leave them up; "stop" rounds: stop them.)
 if [ "$rounds" = 0 ]; then for s in "${servers[@]}"; do start "$s"; done; exit 0; fi
-if [ "$rounds" = stop ]; then for s in "${servers[@]}"; do stop "$s"; done; exit 0; fi
+if [ "$rounds" = stop ]; then echo "stop requires recorded container IDs from the creating process" >&2; exit 1; fi
 trap 'for s in "${servers[@]}"; do stop "$s"; done' EXIT
 run() { # run <server> <round> <workload> <mode> <clients>
   local s=$1 r=$2 w=$3 m=$4 c=$5 p c0 c1 o tps n args status=0

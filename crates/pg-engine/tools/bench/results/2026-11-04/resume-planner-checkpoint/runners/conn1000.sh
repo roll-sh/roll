@@ -4,16 +4,18 @@
 # its cgroup memory and pgbench's outcome.
 set -euo pipefail
 l=$1; n=${2:-1000}
-D=$HOME/.cache/a165/conn-$l; bin=$HOME/.cache/a165/bin/$l; port=53306
+D=${CONN_DATA:-$HOME/.cache/a165/conn-$l}; bin=$HOME/.cache/a165/bin/$l; port=53306
 IMG=postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
 EIMG=debian@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 if ss -ltn | grep -q ":$port "; then echo "port $port busy"; exit 1; fi
-docker rm -f a165-conn >/dev/null 2>&1 || true
+if docker inspect a165-conn >/dev/null 2>&1; then echo "existing a165-conn; refusing to replace" >&2; exit 1; fi
+test ! -e "$D/data"
 mkdir -p "$D/data"
-trap 'docker rm -f a165-conn >/dev/null 2>&1 || true' EXIT
-docker run -d --memory 4g --label agent.worktree=agent-a640c14a8f76f8ea4 --name a165-conn --cpuset-cpus 8-11 --cpu-shares 2 --network host --ulimit nofile=1024:1024 \
+created_id=
+trap 'if [[ -n "$created_id" ]]; then docker logs "$created_id" >"$D/engine.log" 2>&1 || true; docker rm -f "$created_id" >/dev/null; fi' EXIT
+created_id=$(docker run -d --memory 4g --label agent.worktree=agent-a640c14a8f76f8ea4 --name a165-conn --cpuset-cpus 8-11 --cpu-shares 2 --network host --ulimit nofile=1024:1024 \
   --user "$(id -u):$(id -g)" -v "$bin:$bin:ro" -v "$D:$D" -v /usr/share/zoneinfo:/usr/share/zoneinfo:ro -e TMPDIR="$D/data" \
-  "$EIMG" "$bin/roll-engine" --data "$D/data" --listen 127.0.0.1:$port --password pw -c max_connections=1100 >/dev/null
+  "$EIMG" "$bin/roll-engine" --data "$D/data" --listen 127.0.0.1:$port --password pw -c max_connections=1100)
 i=0; until ss -ltn | grep -q ":$port "; do sleep 0.5; i=$((i+1)); [ $i -lt 120 ] || { echo "no start"; exit 1; }; done
 pid=$(docker inspect -f '{{.State.Pid}}' a165-conn)
 cg=/sys/fs/cgroup/system.slice/docker-$(docker inspect -f '{{.Id}}' a165-conn).scope
@@ -33,5 +35,6 @@ grep -q "number of failed transactions: 0 " "$D/pgbench.log"
 grep -E 'processed|failed|error|tps' "$D/pgbench.log" | head -5
 docker logs a165-conn >"$D/engine.log" 2>&1
 if grep -qi 'too many open files' "$D/engine.log"; then cat "$D/engine.log"; exit 1; fi
-docker rm -f a165-conn >/dev/null 2>&1
+docker rm -f "$created_id" >/dev/null
+created_id=
 # Preserve measured client and server logs for audit.

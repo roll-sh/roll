@@ -48,3 +48,10 @@ Corrected source is committed as caabeb196e268f5a0fb822e30565e633344058d1,
 remote-confirmed on owner wip/a165-resume-20261104. The exact-source full check165fixed
 job is active; no source acceptance or old-candidate timing is inferred.
 Completed outputs only are included; no source acceptance is inferred.
+Parent review holds caab on a replay predicate coverage gap: embedded domain checks and
+operator FuncDefs are not inspected by Expr::walk. A bounded actualPG probe is prepared
+but explicitly NOT RUN until the pinned full job terminates. No global Expr walker redesign.
+Benchmark cache runners now refuse replacing existing resources and clean only recorded
+created container IDs; old data and original scripts are retained. Profiler wrapper records
+perf and pgbench exits separately. FakeDocker selftests are prepared, NOT RUN. No timing
+or resource gate has run on caab and no frozen measurement threshold was changed.
