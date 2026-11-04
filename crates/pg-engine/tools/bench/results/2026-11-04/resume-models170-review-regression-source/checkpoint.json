@@ -1,0 +1,7 @@
+{
+  "head": "ea4093f7128ddf79544fb790cfc63996ffc424a7",
+  "tree": "f3d4e72473cbe194070d8d27e158a69acb260995",
+  "status": "",
+  "time_utc": "2026-11-04T14:59:53.669978+00:00",
+  "note": "Tests only. Model state reopened explicitly without background builder. Pending red proof for btree header fallback and missing-tree Take::None header invalidation. Parent alone owns combined163parbuild integration."
+}

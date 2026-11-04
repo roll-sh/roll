@@ -1,0 +1,7 @@
+{
+  "head": "b9e2786a1445770577a986b28861141d006f2d6b",
+  "tree": "3a54115b9155b8a6f79e578a29cbc3d504e28833",
+  "status": "",
+  "time_utc": "2026-11-04T12:45:21.250373+00:00",
+  "note": "PARTIAL gate checkpoint. Exactb9e2786a engine golden3/3, models-kept4/big-tables6, build passed. Full debug still running and has reported golden_shuffled FAILED; no acceptance. Release/clippy/crash30/unit not run yet. Cap400000 unchanged."
+}
