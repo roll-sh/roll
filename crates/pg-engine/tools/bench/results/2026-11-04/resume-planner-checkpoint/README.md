@@ -162,6 +162,12 @@ frozenexpected455/0/18/61 matchesactualcompletec861map;no test/Cargodelta. Exist
 targeta171,taskset8-13,18-19/nice19/jobs2/testthreads<=2;partialfulloutputsexcluded;
 no newtiming/service. Earliercargo check stillhasinsufficient sourceidentity. Chosen-cost
 current-source acceptance andcustomANY/IN correctness handoff remainpending;scope171only.
+IndependentstaticR1 a6fe vs c861 found noHIGH/TWOintroducedMEDIUM: eagerParsecost/gathers
+becomestale beforeBind/firstgeneric-choice context. Thesearestaticcounterexamples,not
+runtimeattribution;sourceacceptance HELD regardless ofpinned fullpasses. Fullrunner/source/
+map unchangedthroughterminal/export. Cache-onlylazycurrentdescribeproposal andParse/Bind
+parallel/genericfixtures preserved NOTRUN/NOTAPPLIED;movingstoredScanEstreadlater alone
+wouldnotfixstaleestimates. No newexecution/source/timing/service whilepinruns.
 
 FDW172 recovered clean at63f7c0b4, remote wip/a172-resume-20261104, with no interrupted
 round8 implementation. Completed baseline dist/contrib evidence reports

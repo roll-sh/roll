@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "a854fc1489ae9027c9a9a9657845b4dcd552c57eebfddbca4dba00d921d672f8",
-    "bytes": 13856
+    "sha256": "788386c85f2e894be12b7ca11825c0549bdf2e90d9603f3c340fa2389e824ef7",
+    "bytes": 14380
   },
   "bytea165compare/RESTORED": {
     "sha256": "cfeb0d7a74ac20eb1d46d347c00db409be5f9c5b47ca77e388b2e494a65d91c3",
@@ -636,8 +636,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "bde900f5142c0e8175beac1782b728432280ed33ef21e27bb330ae9d937d3dc9",
-    "bytes": 29078
+    "sha256": "118e49a31e506f411aba668400a6a8a23df1facc314d8d35b2aa442db5300e1d",
+    "bytes": 29794
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -1291,6 +1291,18 @@
     "sha256": "8803e21fb4a4afe7a6aa24c03dd16ad5f73b3a7ff460cb0e1b8b4cd21ace0a8f",
     "bytes": 178
   },
+  "runners/171-LAZY-COST-DESIGN.md": {
+    "sha256": "7cb5519ef9c4ed0c6b0f3195d84a75888506b121f0053e84db23131171fe7d58",
+    "bytes": 4551
+  },
+  "runners/171-parse-bind-generic.sql": {
+    "sha256": "95f51126182f5dbd95750b09b77e664f73cf9089d9cd7e793ae3fc99c5584fcd",
+    "bytes": 627
+  },
+  "runners/171-parse-bind-parallel.sql": {
+    "sha256": "5c6cad4a10c8b59420038ca15b12d7a713364c037ac32336d53ccf84f7220220",
+    "bytes": 1534
+  },
   "runners/BENCH-PLAN.md": {
     "sha256": "d6b9bc53b55af8be29c09ffbcbab84fedbaf093334579e25e702600b3d9bf5ef",
     "bytes": 2467
@@ -1550,6 +1562,10 @@
   "runners/oltp-independent-source-review-r2-result.json": {
     "sha256": "0c8013be5e31eb18f1ff3b699ea440a2b906855bfc403d6308b349841773b2c0",
     "bytes": 8367
+  },
+  "runners/planner171-source-review-r1-result.json": {
+    "sha256": "b72299ebcc9f5c7e1fce5ea068038b2a6a6900f98f78fb850d857986e26a6c89",
+    "bytes": 8019
   },
   "runners/probe165-low.sh": {
     "sha256": "f2947f7831a9cbc3c4b2b6af3317993e4bbc7cabe17fbda9932bbde10eca451f",

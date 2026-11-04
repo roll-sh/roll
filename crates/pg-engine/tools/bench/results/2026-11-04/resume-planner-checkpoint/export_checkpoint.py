@@ -179,6 +179,12 @@ frozenexpected455/0/18/61 matchesactualcompletec861map;no test/Cargodelta. Exist
 targeta171,taskset8-13,18-19/nice19/jobs2/testthreads<=2;partialfulloutputsexcluded;
 no newtiming/service. Earliercargo check stillhasinsufficient sourceidentity. Chosen-cost
 current-source acceptance andcustomANY/IN correctness handoff remainpending;scope171only.
+IndependentstaticR1 a6fe vs c861 found noHIGH/TWOintroducedMEDIUM: eagerParsecost/gathers
+becomestale beforeBind/firstgeneric-choice context. Thesearestaticcounterexamples,not
+runtimeattribution;sourceacceptance HELD regardless ofpinned fullpasses. Fullrunner/source/
+map unchangedthroughterminal/export. Cache-onlylazycurrentdescribeproposal andParse/Bind
+parallel/genericfixtures preserved NOTRUN/NOTAPPLIED;movingstoredScanEstreadlater alone
+wouldnotfixstaleestimates. No newexecution/source/timing/service whilepinruns.
 
 FDW172 recovered clean at63f7c0b4, remote wip/a172-resume-20261104, with no interrupted
 round8 implementation. Completed baseline dist/contrib evidence reports
@@ -328,6 +334,8 @@ sources['runners/INDEPENDENT165-HANDOFF.md'] = str(D / 'INDEPENDENT165-HANDOFF.m
 for name in ('chosen171-candidate.patch', 'chosen171-transfer-audit.json', 'focus171-v1.sh'):
     sources['runners/' + name] = str(D / name)
 for name in ('check171-chosen-v1.sh', 'chosen171-expected-per-binary.json', 'chosen171-count-reconciliation.json', 'chosen171-frozen-runner.sha256'):
+    sources['runners/' + name] = str(D / name)
+for name in ('planner171-source-review-r1-result.json', '171-LAZY-COST-DESIGN.md', '171-parse-bind-parallel.sql', '171-parse-bind-generic.sql'):
     sources['runners/' + name] = str(D / name)
 sources['focus171-v1/wrapper.log'] = str(D / 'focus171-v1-wrapper.log')
 for name in ('release-test.command', 'release-test.log', 'release-test-summary.json', 'clippy.command', 'clippy.log', 'clippy-completed-exits.tsv', 'clippy-warning-audit.json'):
