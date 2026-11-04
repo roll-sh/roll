@@ -636,7 +636,8 @@ mod tests {
         let ix = t.pkey_index.unwrap();
         let pages = btree_blocks(t.oid, ix, &s.state.db).unwrap();
         assert!(pages > 1);
-        let query = "EXPLAIN SELECT a FROM ks WHERE id = 123";
+        s.query("SET enable_seqscan = off; SET enable_bitmapscan = off").unwrap();
+        let query = "EXPLAIN SELECT a FROM ks WHERE id < 1000";
         let before = s.query(query).unwrap().pop().unwrap().rows;
         reopen_models(&s.state.db);
         s.apply_step(|ctx| {
@@ -672,6 +673,7 @@ mod tests {
             let indexes = crate::sql::binder::bound_indexes(&t, ctx)?;
             let need: Vec<_> = indexes.iter().collect();
             assert!(matches!(take(&t, &need, ctx), Take::None));
+            assert!(!ctx.sess.db.relfiles.of(t.oid).read().kept_sizes.contains_key(&t.oid));
             assert!(sizes_read(&ctx.sess.db.relfiles.of(t.oid).read(), t.oid).is_none());
             assert!(ensure(&t, &indexes, ctx)?);
             let rf = ctx.sess.db.relfiles.of(t.oid).read();

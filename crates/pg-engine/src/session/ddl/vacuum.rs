@@ -1610,7 +1610,7 @@ impl Ddl<'_, '_> {
                 }
             }
             let mut row = match &need {
-                Some(need) if modelled.is_some() || stored.is_some() || kept_live.is_some() => {
+                Some(need) if modelled.is_some() || stored.is_some_and(|len| len <= crate::exec::sizing::TOAST_THRESHOLD) || kept_live.is_some() => {
                     crate::exec::scan::decode_table_row_need(t, &bytes, need)?
                 }
                 _ => crate::exec::scan::decode_table_row(t, &bytes)?,
@@ -1638,7 +1638,7 @@ impl Ddl<'_, '_> {
                 }
             }
             if modelled.is_none() && kept_live.is_none() {
-                if let Some(len) = stored {
+                if let Some(len) = stored.filter(|&len| len <= crate::exec::sizing::TOAST_THRESHOLD) {
                     // (Debug builds check it against the size of the row decoded.)
                     #[cfg(debug_assertions)]
                     {
@@ -1653,12 +1653,10 @@ impl Ddl<'_, '_> {
                     sizes.push(relsize::heap_tuple_of_len(len));
                     continue;
                 }
-                for &i in &virt {
-                    if i < row.len() {
-                        row[i] = Value::Null;
-                    }
-                }
-                sizes.push(relsize::heap_tuple(&types, &row, &text));
+                // The scan expands TOAST values. Measure their on-page representation,
+                // including storage/compression policy and virtual or dropped columns.
+                let len = crate::exec::sizing::layout(t, &row, self.ctx, &unpinned).0;
+                sizes.push(relsize::heap_tuple_of_len(len));
             }
         }
         if let Some(old) = frozen {
