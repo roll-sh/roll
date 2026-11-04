@@ -1,0 +1,755 @@
+{
+  "source": {
+    "head": "3bb04519be5a02bc6a041395a3a122a644a994d8",
+    "tree": "60958310c764b51ea572371fe2dea82902f85df9",
+    "status": "",
+    "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "artifacts": {
+    "/home/meszmate/.cache/a170/target/release/deps/golden-09a38f0445a85626": {
+      "sha256": "aed289c32526c369100fac9e330f2c3b175381614c092c337a6a720b8c59c083",
+      "bytes": 85842632,
+      "mtime_ns": 1793798034842610112,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/big_tables-e6d66b06b95b54b5": {
+      "sha256": "a40fc483fe1abcdb4ae54eef670a81031b6a5e4b474182f6678c34558f142b07",
+      "bytes": 85474376,
+      "mtime_ns": 1793798047334473780,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/models_kept-93c836dcaab9ad5a": {
+      "sha256": "a12df49b2bc29e82c2356953e13f3240701acad3526c5d484185eefcf3685397",
+      "bytes": 85155336,
+      "mtime_ns": 1793798045730491285,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/pg_engine-357a2b04731fc140": {
+      "sha256": "c908609f0171872dbff0337673c24d9bab79a2d5c8c09f26373234968701a84b",
+      "bytes": 317946264,
+      "mtime_ns": 1793798088666022699,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/roll_engine-36c942a045390944": {
+      "sha256": "a7d18cd6b32cc81ecc419ce34f8fa3e2a825bc4cf787c111460c8cad9264b1b3",
+      "bytes": 8103040,
+      "mtime_ns": 1793798090666000872,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/app_concurrency-92d70bfa5da59eb5": {
+      "sha256": "8274c224f0ead7e29415705608ecf7bad91fd67e4ee4fca2a98036dd380f21af",
+      "bytes": 330389256,
+      "mtime_ns": 1793798092705978608,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/autovacuum-e5cfc41f3a9d1a2f": {
+      "sha256": "cbf2fc58c51ef74314c4e3bb1a85304520bee9832162dd2a98711c41082adfb4",
+      "bytes": 320267144,
+      "mtime_ns": 1793798092985975552,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/autovacuum_log-cc88b057ec3995ac": {
+      "sha256": "651facfd635ae621af23a665c46c1e8f90059eb8885847123a0a469af494c209",
+      "bytes": 319862112,
+      "mtime_ns": 1793798093861965992,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/backend_status-8ca40d8b9f8e324a": {
+      "sha256": "120f0b7f1ffa79170b12e6668647189f70dbd4023a6d543bb866c9dd1f1b215f",
+      "bytes": 320093072,
+      "mtime_ns": 1793798094137962980,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/big_tables-b522deff6cca6663": {
+      "sha256": "d1ef414fe18c47e5cc0489dc33d6e28fd781177b31f294a6e6e4fe13bc70b066",
+      "bytes": 320159688,
+      "mtime_ns": 1793798095017953376,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/catalog_format-677fddf080a1845a": {
+      "sha256": "358e8e574a6f75158b696c48681d4f6f19016af3f57301e7744078bd817099c9",
+      "bytes": 320059944,
+      "mtime_ns": 1793798095221951149,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/catalog_storage-fe341eddda31412b": {
+      "sha256": "e969d3f04dfdf1f2949b9edc0807c4217214c5d8adf013dba2d492895d130afd",
+      "bytes": 320602240,
+      "mtime_ns": 1793798096133941196,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/compact_locks-d64bfc280149aa29": {
+      "sha256": "e6398765beb78c6f582c74cd4bc0272af4422760d8be5f0d4e6f72661ed2792f",
+      "bytes": 319960480,
+      "mtime_ns": 1793798096321939143,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/connection_log-5e1350e087426c7c": {
+      "sha256": "44a0bf0a696688bc715b2392a0de6551e2ea283b6ab72b60514a87992c9ddc1f",
+      "bytes": 327006640,
+      "mtime_ns": 1793798097361927794,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/crash_async_commit-f7cc2171a2cd7b31": {
+      "sha256": "4fe6ec84479eff4428560ce45a7c692b0c486003b79c609cdbb04677ce93494b",
+      "bytes": 319880504,
+      "mtime_ns": 1793798097401927358,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/crash_bulk-a829d410e1e83ca6": {
+      "sha256": "7c8c5711faebc073cb718c1c31195b77489a2a7e09796bd916a23d8ae11b6dcc",
+      "bytes": 319887496,
+      "mtime_ns": 1793798098605914217,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/crash_ctids-b6ce3d36a5b496ca": {
+      "sha256": "b244b93d40268868ad1fe5ff6fb1306be6d8909802e04f7c214217d13879efce",
+      "bytes": 320002776,
+      "mtime_ns": 1793798099645902867,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/crash_random-77fbe592a79c9577": {
+      "sha256": "59ed901fb510c071f84d981b5e3cfcb011bce0eb5dacac8811bdde87cf90d881",
+      "bytes": 320795344,
+      "mtime_ns": 1793798100001898982,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/crash_unlogged-afddc046dc91acf4": {
+      "sha256": "842d4478b9f09daf8ede98a0afa88fae9ee341363073f037964dc33dbfc29088",
+      "bytes": 319849496,
+      "mtime_ns": 1793798100673891648,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/ddl_scaling-6e4f0e25cd2adb62": {
+      "sha256": "cf8800aa1db1c80cc31f556e445bce30c9a181f9efe35f540094fb34c33059ad",
+      "bytes": 319894464,
+      "mtime_ns": 1793798101133886628,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/deep_input-715ba7970e52e240": {
+      "sha256": "6ac4add7a966d89f8585f31360ab9c1f78722d360a516c0e2f276e9a3f0dbf41",
+      "bytes": 316145784,
+      "mtime_ns": 1793798101849878814,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/deparse_identity-ec592439253f2820": {
+      "sha256": "ce55f1d830b84f6ff615ca7a2758f600ec61dcc7b31c6d1b61b3ef9c09b7d763",
+      "bytes": 316100904,
+      "mtime_ns": 1793798102345873400,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/difftest-9d25e24cdcf0d517": {
+      "sha256": "99829f8c7e2d277b40ed0c17ac353f0e07d71b8b6df7c6f6405b539c7ae0e9e8",
+      "bytes": 325433888,
+      "mtime_ns": 1793798103441861440,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/drop_storage-1eaa9ef8720fbe64": {
+      "sha256": "628638f693b9708478be62126eff7c2e327987ac06ff0a5e02fa2c805a4df47e",
+      "bytes": 315629296,
+      "mtime_ns": 1793798103433861528,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/fdw_loopback-c725df32c306d6f5": {
+      "sha256": "ddf63becc32c67b1a113b7561ea89eb152e2abb3a853fbea2b71964441e52c1f",
+      "bytes": 321207568,
+      "mtime_ns": 1793798104541849435,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/fdw_traffic-823f8a870c2656f7": {
+      "sha256": "9c212a6f44eaae7e0aa21d2570eb14dfc2bc6dd4507edd3e9530f676821abfc1",
+      "bytes": 321204192,
+      "mtime_ns": 1793798104525849610,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/golden-9749ad749af5ca1c": {
+      "sha256": "62d3b5d51fa202b292d3f591b506ad2d12018b4315ca8220886f365e87614e45",
+      "bytes": 322020048,
+      "mtime_ns": 1793798105881834810,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/hba-ddffc139b48b77fc": {
+      "sha256": "854d6c655cf441711d25045f2d7fbbe4433557fcbc8795c5288a803fa918fd57",
+      "bytes": 326996072,
+      "mtime_ns": 1793798105869834942,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/heap_order_scan-7484a82692fadb18": {
+      "sha256": "6e32bedf745cca778a2ed12a2c91101b88049e9737b8c5d862c5362a67f45100",
+      "bytes": 319821448,
+      "mtime_ns": 1793798107025822325,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/index_key_format-07bae0d48900490f": {
+      "sha256": "0540b0bc61d5bb44e5b1b88fc281382d332dc041a99ff1e1554c6398cfd64b10",
+      "bytes": 319890120,
+      "mtime_ns": 1793798107009822500,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/kept_plans-b343836d3bffe0ca": {
+      "sha256": "1bef0ba482263e8501fe5a44ab6f39d30e036ef08bb5c6372bd0a89d4a53e246",
+      "bytes": 316126744,
+      "mtime_ns": 1793798108185809664,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/lifecycle_log-bb0a564abda43801": {
+      "sha256": "fb9789b05382410cfc1de8f5de3c09917276758c84e2b6c1ed10a1558fcc9337",
+      "bytes": 16559088,
+      "mtime_ns": 1793798107449817698,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/locale-401e777ae16dae7e": {
+      "sha256": "3fc933ad4ac88e7980668105608870660a6f16438fbdf7264b57b2338add39e8",
+      "bytes": 321512336,
+      "mtime_ns": 1793798108589805257,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/log_collector-418c0eb0abd24880": {
+      "sha256": "09758da0cea54ca098d239db470ed52a6bfbee38a6ce88f12d1634368a89d90e",
+      "bytes": 327227168,
+      "mtime_ns": 1793798109601794212,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/logical_apply-d31cbaf3a1aa102e": {
+      "sha256": "4b3bef8c78d07f087f5a1681abdf8f06dc92944bfffbb366900c0448e82471c3",
+      "bytes": 321257728,
+      "mtime_ns": 1793798109861791375,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/memory_load-69b55974dfbde33f": {
+      "sha256": "78df1c0f4852c5f0897c10edb56a0575ba05797200426316510394c1b8673a18",
+      "bytes": 321376552,
+      "mtime_ns": 1793798110965779326,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/models_kept-81be20026cb60eb7": {
+      "sha256": "8747f59762363d61b9f3115ea38e87e46a44affa4fad9c1b963f6b81407f4fa9",
+      "bytes": 320031920,
+      "mtime_ns": 1793798111109777754,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/outbound-526bfbdd9f7153f1": {
+      "sha256": "456207ed0486ee6f97b1aa5078d8881e94a07e6dcc9ca005b7a6d706dbef391e",
+      "bytes": 321055376,
+      "mtime_ns": 1793798112117766753,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/parallel_scan-e11614aaa9489d66": {
+      "sha256": "ce4bb7be85cc8f06fde3304266da08a3d8662392a873de4a7bd4f5f86e3b044f",
+      "bytes": 320320552,
+      "mtime_ns": 1793798112361764090,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/pg_contrib-258b3453af5dc7a7": {
+      "sha256": "226184d2b41aaaca9e57438bba01e705670ce9c1fe0f3a90beeafc91dca4a884",
+      "bytes": 10885056,
+      "mtime_ns": 1793798112497762606,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/pg_dump-24d780157db7d64b": {
+      "sha256": "f55ab0774a6dc2109c3a777c4746d45d8cb78c652d84d796ec89259c20f4301c",
+      "bytes": 8775896,
+      "mtime_ns": 1793798112665760773,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/pg_isolation-6eb8985d6cd7998d": {
+      "sha256": "2c8e93526beedcec64c88e71d70cdb9a2bdc05e3c529a1d36765f4a5c7ff3c2f",
+      "bytes": 11094256,
+      "mtime_ns": 1793798112797759332,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/pg_regress-a2d5c2d38c8848c2": {
+      "sha256": "070555dc6c33705ada0eb5dd50136c19914f5ea4bc9fcccd5ec2ae699d2b9326",
+      "bytes": 10856224,
+      "mtime_ns": 1793798112965757499,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/pgvector_equality-fbc0827d80a3826b": {
+      "sha256": "7aa39c2ca3aeab9900820b0c02c79cce1194bc8e5d059e300b825c5d500a677d",
+      "bytes": 316049144,
+      "mtime_ns": 1793798113857747764,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/pgvector_hnsw-baa546f9cc95da0d": {
+      "sha256": "dd45641e68980721db5c0e803dae2e706eb6f18c93efd6b8d6b189a544e4eb8a",
+      "bytes": 316080688,
+      "mtime_ns": 1793798114081745319,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/pgvector_ivfflat-7523b0d1291ce8d7": {
+      "sha256": "d449b1830730b018e4c5803a4f775950a6ce6f3602d0638a2b93537cdefc12d0",
+      "bytes": 316019600,
+      "mtime_ns": 1793798115045734798,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/pk_clustered-a19059d2741cd824": {
+      "sha256": "6d5aa8087bf43332bc294000a43be35c707d88ec2953367389bd2444e8372e2f",
+      "bytes": 320108672,
+      "mtime_ns": 1793798115249732572,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/poisoned_caches-683250a12b5050a7": {
+      "sha256": "a62eb3457a3cc4cb5fc359bd2f62ad408c66d5804fe775922f4f6e60315e7c3f",
+      "bytes": 320516376,
+      "mtime_ns": 1793798116217722007,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/query_spill-f6f3219b0226d2e4": {
+      "sha256": "367a94ff1d6ada71db2a749d3a87b38673c2969ffae8f9892dbe96a9acd57fb3",
+      "bytes": 320258456,
+      "mtime_ns": 1793798116441719562,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/restart_cost-8d0a529dce76c0e2": {
+      "sha256": "f85dd59f810ef170ff2decdcfdacbbbcde3239c8ec833e7866cd85442b72dc93",
+      "bytes": 319908472,
+      "mtime_ns": 1793798117317710002,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/server_files-fdab4093a1a4ea45": {
+      "sha256": "464cc9b7e122c4201b274fd5af7848a196dd7bd06731bd38f75aea9a2d15ecaf",
+      "bytes": 319959112,
+      "mtime_ns": 1793798117581707121,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/server_log-393b3c665f66d16d": {
+      "sha256": "362896b6e06a4fee260c6f9289469f7c40241033e8d733a0879bb7ffbfd72cda",
+      "bytes": 327287736,
+      "mtime_ns": 1793798118561696426,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/session_state-6844c0d430d70639": {
+      "sha256": "8f5199d047a96c63f32b59f5ac72185e5335ed4f9e9bdefb7096491966bb3552",
+      "bytes": 320586296,
+      "mtime_ns": 1793798118765694200,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/storage_format-9cce57647af4823f": {
+      "sha256": "50933e564b93c65d1300f101054cac9e9e23a7cf637f8279aa73ee3efd9b0d29",
+      "bytes": 319978056,
+      "mtime_ns": 1793798119697684028,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/storage_upgrade_batches-d174698264542c69": {
+      "sha256": "aa4750f3a1cafb06892c40dab70cd6e7e98f00247ff52bed01c8985f0ed0499f",
+      "bytes": 319902416,
+      "mtime_ns": 1793798119949681277,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/stored_filters-1d17c69fc53a16b2": {
+      "sha256": "836b6e9d2db394e8aaf62c191f0377eab42cd473841ec9f3149dd3ebe5f56720",
+      "bytes": 315643712,
+      "mtime_ns": 1793798120877671150,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/toast_storage-d0a39e8219b8a0b1": {
+      "sha256": "4b0f022cb0ff5a2d05ec1665e9f06b4fd68a07c1f6fb7a1b5778573896255352",
+      "bytes": 319828616,
+      "mtime_ns": 1793798121125668443,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/twophase-18d9b42732dd9092": {
+      "sha256": "b9ed6c326c2c6e7ad3108d48e98e53a3364b1bc5eea0dd94122d311dac8c1671",
+      "bytes": 320193568,
+      "mtime_ns": 1793798122049658359,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/txn_spill-93e1f591ebaf5956": {
+      "sha256": "e4e41cbedf414c8353d547dd7f7e02cb2cf6b05fd8fffe0a00e8e8d5c10216b5",
+      "bytes": 319874112,
+      "mtime_ns": 1793798122261656045,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/wire-1216b25cfa9dada3": {
+      "sha256": "50808fc818d115f6097b2197b79dfefaed693e28448e57119b9c6d3ead720385",
+      "bytes": 343700128,
+      "mtime_ns": 1793798124017636880,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/wire_waits-8e56495ecf7aa70b": {
+      "sha256": "f42403388f23797e4081df595180831736cbfae8aba31b742f8f791f56acabf3",
+      "bytes": 328482288,
+      "mtime_ns": 1793798123677640592,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/xml_memory-dd9dd504153e13db": {
+      "sha256": "33762390fd5e353c143424668ca4980ecb28745f750dd5523eb1bd8c5a8ad26c",
+      "bytes": 315797240,
+      "mtime_ns": 1793798124897627276,
+      "stage": "debug"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/pg_engine-2ee33b49d98c4a1b": {
+      "sha256": "d9e85dda3c4e651eadb5523c385c7d5c3b0004de0d7c31793ebb3f20c0bfc1da",
+      "bytes": 87250304,
+      "mtime_ns": 1793801014013788404,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/roll_engine-64b94b764774ccc8": {
+      "sha256": "374a28eae6d19aab1a164a63d28b45ec363ae9cad069e0df77e696b1c12959af",
+      "bytes": 1234856,
+      "mtime_ns": 1793800423480607665,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/app_concurrency-53af60900559ec05": {
+      "sha256": "823285c14e8cb06407097c226239389e51e87c994d7dd6656eb1e528f3738a4f",
+      "bytes": 87115976,
+      "mtime_ns": 1793800449240301432,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/autovacuum-e0ba51a8f7fb7dbb": {
+      "sha256": "a91d9914da39694a5e265d7c78bd83a010d256f66f2ee076c8680c95f1193bbb",
+      "bytes": 85404888,
+      "mtime_ns": 1793800457888198875,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/autovacuum_log-9907570e8f2fce8b": {
+      "sha256": "40214b156e7a6a823beec85ef520490a121919bc0626c45a8854d8100a876f25",
+      "bytes": 85122616,
+      "mtime_ns": 1793800463412133430,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/backend_status-f0bb0419a08447cc": {
+      "sha256": "3dd416abec529fe28da926ab66517abe3cf0706abab70aa3b63f2603cb6cd8ec",
+      "bytes": 85154800,
+      "mtime_ns": 1793800469736058567,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/catalog_format-49f681677072a893": {
+      "sha256": "dbed38c1f6e6422e9f15ae1a45a5228d8f4d95d3c1a3fe6178987808abee5e13",
+      "bytes": 85176672,
+      "mtime_ns": 1793800475543989868,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/catalog_storage-d7cee0c555119146": {
+      "sha256": "3fa2098bb821cd492986d9ef2321a2fbc54dbba42867729c0ae28babd2701e6c",
+      "bytes": 85569672,
+      "mtime_ns": 1793800483475896132,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/compact_locks-0388519ef0875fab": {
+      "sha256": "6ec5f7552d7d1a784a349f8e7b7818637790e835dddf04af28eba484875da7a3",
+      "bytes": 85375488,
+      "mtime_ns": 1793800491219804711,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/connection_log-34a05550fd9cd072": {
+      "sha256": "027de1c2a46c45f6409283cededcb6a09362454bfd953980dbe4c0c0b596ce84",
+      "bytes": 86171888,
+      "mtime_ns": 1793800497307732903,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/crash_async_commit-1656f7eef470ea3d": {
+      "sha256": "4e357816da662ea16976ca5a11de7ceb0ce9a1e69551c549db8fc1418b497e17",
+      "bytes": 85133800,
+      "mtime_ns": 1793800502811668033,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/crash_bulk-f8c32848ea6d22fa": {
+      "sha256": "92542bd7aee62f328b90ce2b7415fb1a28f6e9c6c0b3890dda1dac6f18159600",
+      "bytes": 85133672,
+      "mtime_ns": 1793800508199604573,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/crash_ctids-8633898123c109e8": {
+      "sha256": "9f9fc6d10dd5f8e7bc50eeb4dcc6a8d35271d48d1628ef285ef34acb5ec8f0f7",
+      "bytes": 85181224,
+      "mtime_ns": 1793800514127534803,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/crash_random-4b8f70c02654e372": {
+      "sha256": "ad0372fbbb6274bb664c6b129910cde92ac00df1fb3d1d0c5b2e73cb37cc449a",
+      "bytes": 85294360,
+      "mtime_ns": 1793800522107440962,
+      "stage": "crash30"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/crash_unlogged-4648ef1578b760e4": {
+      "sha256": "6a9e07cc4126804bb76e37cd990f578f5b949cdf059a47c9bdbd550660e42e51",
+      "bytes": 85129288,
+      "mtime_ns": 1793800552319086502,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/ddl_scaling-08d9955ccbbf776c": {
+      "sha256": "cac34d1aa0c1ea74e2349cea54d8a05fcba0a45c6e2bc11a20d371568c6df1ee",
+      "bytes": 85074512,
+      "mtime_ns": 1793800557655024028,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/deep_input-f76cb83b0e76d1d3": {
+      "sha256": "e98113372e59269792253d843d49f7fe2ba6ecc14efccddd2e79714d3ea06bae",
+      "bytes": 83862440,
+      "mtime_ns": 1793800571190865719,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/deparse_identity-86ae2f5fd5b20531": {
+      "sha256": "d3c850b1ef2cd7d5ea43d886cfcb3f0ccd003f6d64dd2220a95424b608735a7a",
+      "bytes": 86041344,
+      "mtime_ns": 1793800593370606829,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/difftest-ecc26c36fb8a8eb6": {
+      "sha256": "8c8259da24b2f5fe6d561e7bfbc213c9e64c5fcf04b1a8188f55b4741038cf26",
+      "bytes": 87904624,
+      "mtime_ns": 1793800620634289437,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/drop_storage-71a16f8b632fb24d": {
+      "sha256": "525a4b7be26fc8b82e5991dcf6b4b4d58622967b1de842f9562beb99d337ed3f",
+      "bytes": 83777840,
+      "mtime_ns": 1793800528115370372,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/fdw_loopback-161faac2361b2cf8": {
+      "sha256": "4d046c2a544d23f4d4d382df766e51b76119210ccd73993fff89103d8d8ceabe",
+      "bytes": 85881536,
+      "mtime_ns": 1793800535915278802,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/fdw_traffic-b7629c3d3e7969da": {
+      "sha256": "765adf5f710e3d2d851ef8fa62615be13959239e2922f9c7d1f4b8513df1da5c",
+      "bytes": 85562720,
+      "mtime_ns": 1793800541383214662,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/hba-0645a73224719fff": {
+      "sha256": "650bb3d37f547323eb65ead8b4f51bcd965f5e4ab6fc56757573993c48a8c64d",
+      "bytes": 86139720,
+      "mtime_ns": 1793800626750218359,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/heap_order_scan-f32435ca402ff7a4": {
+      "sha256": "a2780c5108f7c88e532a929ff6cc970b7d9872f042312fa57fba842a8b619e1f",
+      "bytes": 85107968,
+      "mtime_ns": 1793800546895150045,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/index_key_format-2eb648260c8f266b": {
+      "sha256": "fac7be8a82ec8c810a30ab7d9e05d972b3947c4f84ef2bb5db8eebff117f239d",
+      "bytes": 85156160,
+      "mtime_ns": 1793800563450956211,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/kept_plans-4146d41c7a80568a": {
+      "sha256": "28733fbd9b5d168971c8767a05f135916c9642e14690ff5a4c073384198dafa5",
+      "bytes": 83959872,
+      "mtime_ns": 1793800633666138039,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/lifecycle_log-1386c15adbb8a552": {
+      "sha256": "e7d12795c277f01d66172b5992224f0ae903faae676394ddb2d71f0d6b6864c5",
+      "bytes": 2560912,
+      "mtime_ns": 1793800639778067101,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/locale-ab4bc19d54ea38ec": {
+      "sha256": "0b91c1ab67902d396db70561dfb8b50d27fc0f6415ef4be239857f0f17e0a0dc",
+      "bytes": 85233608,
+      "mtime_ns": 1793800642498035546,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/log_collector-4b90bcd8e23be475": {
+      "sha256": "b5b7d528d21a5b23fb2b573cd8146de01b01e55c268f656538e31583cbae7e92",
+      "bytes": 86256440,
+      "mtime_ns": 1793800648517965736,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/logical_apply-5cabca0daf9cddc0": {
+      "sha256": "adf7a7a5245e063388f0deb67538744a4deec098ab1790781fef0efc0705f9eb",
+      "bytes": 85704784,
+      "mtime_ns": 1793800654613895088,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/memory_load-107f75494ef8e80e": {
+      "sha256": "30d9b4dfcce1207464d69069ee872c5a67d00a3199012eea95449177983e6fab",
+      "bytes": 85760488,
+      "mtime_ns": 1793800661629813827,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/outbound-80d76e6aae901f6d": {
+      "sha256": "f623c417217c69518a4dfbd8c78096de6d02a11903e425f389795de791a6734a",
+      "bytes": 85598720,
+      "mtime_ns": 1793800666789754100,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/parallel_scan-8d4ffc131bf0eb77": {
+      "sha256": "3af3a056fb3196d01b6f949477f233368c46f6d67af6ec48202964289f4b1d04",
+      "bytes": 85300400,
+      "mtime_ns": 1793800673917671637,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/pg_contrib-d9ad018b247f290b": {
+      "sha256": "ede2ac1171f5e407c9c84f97c5416db42bef2f842e50019325554506a32cd342",
+      "bytes": 1682424,
+      "mtime_ns": 1793800682449573002,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/pg_dump-c1170fa358fd9edf": {
+      "sha256": "6a98fb2ccd79fba317f12bf1b6eaad8fe378a040c23dcfc432247a1ed25622c0",
+      "bytes": 1331456,
+      "mtime_ns": 1793800686033531592,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/pg_isolation-69f281102b93bd89": {
+      "sha256": "b8199942e16d0f1ec69901f7c59348135e956cf5fa52748afc9902dc8b884ba3",
+      "bytes": 1670208,
+      "mtime_ns": 1793800696021416260,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/pg_regress-08878ac11afed4ba": {
+      "sha256": "934cc3acc10741394ead1df195dd7ee2af077a0926fc33d507e54458b491defa",
+      "bytes": 1665736,
+      "mtime_ns": 1793800714469203505,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/pgvector_equality-15365b2531ddba27": {
+      "sha256": "7c29a788af85bf740a0a425bbb8cc87e2ee0da0df1f1f588c890b326de067017",
+      "bytes": 83838344,
+      "mtime_ns": 1793800727421054335,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/pgvector_hnsw-c4cdb3b72e440cbc": {
+      "sha256": "7b569d59d311c30a14ea390ab01395e79d1e3728745e96c19e0ca50bca8702e0",
+      "bytes": 84048016,
+      "mtime_ns": 1793800736008955515,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/pgvector_ivfflat-85e7eb7839701e9a": {
+      "sha256": "7b69165df94a34d79aa5ef50dbbf4876a055d2833d49d037b3a772eccb0589d5",
+      "bytes": 83817256,
+      "mtime_ns": 1793800748608810655,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/pk_clustered-15995acb38b18db7": {
+      "sha256": "2df18231a0ede3ee541259390b4ca84d233d3b721b61fb772e14bf999d79264c",
+      "bytes": 85204272,
+      "mtime_ns": 1793800754632741452,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/poisoned_caches-9ab57f2261545bea": {
+      "sha256": "3ae6d40504ac86185ac3991fa42462afd15daef9a5ca4a7550db330588d7dc02",
+      "bytes": 85499128,
+      "mtime_ns": 1793800762948645971,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/query_spill-49c62054fec0bfa7": {
+      "sha256": "5e7d76f5b1c4096b8b6980b3983ba217e94de0b4e742a8a88f510c5bcbcfeb07",
+      "bytes": 85292528,
+      "mtime_ns": 1793800775116506374,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/restart_cost-c120f9de6c1ed2a6": {
+      "sha256": "0b20ff723966ddc97b19ffca3b135ce0e1d0210f5fe4e6c364bf47bc25c77796",
+      "bytes": 85273008,
+      "mtime_ns": 1793800780604443456,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/server_files-8217e649e5d81038": {
+      "sha256": "c255a2ac80a9ff9a902ddfc43035fe2273263c51e1c9a4532430ea296773bf80",
+      "bytes": 85184984,
+      "mtime_ns": 1793800691837464560,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/server_log-c6a0d069afb1dbfa": {
+      "sha256": "6a2faca6ee2eeef5a1431dc2e9f6d6ae71dc8f0699c87ac786e2934cbf29c75c",
+      "bytes": 86215640,
+      "mtime_ns": 1793800786900371306,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/session_state-fa65ba5373f7e25a": {
+      "sha256": "0cc167de8e2fee30c91aba8059a0e72ef118326c00a583b1af48f5b8c36f882e",
+      "bytes": 85607264,
+      "mtime_ns": 1793800705869302643,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/storage_format-4a5a4ef9a4977d21": {
+      "sha256": "4931f975143eb9938e0b73ff0f75c8e1216410481321645d5fc0586f1de6787e",
+      "bytes": 85178144,
+      "mtime_ns": 1793800720409135073,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/storage_upgrade_batches-a2081f91e660900b": {
+      "sha256": "80657d765521b31c0f65fecea05b4567347d00e6477ad6ae9dbe21df862ba3b2",
+      "bytes": 85139664,
+      "mtime_ns": 1793800792328309131,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/stored_filters-8114e540fa7e3777": {
+      "sha256": "4f497870f2023c6b85d106074b2c9fe7eaf1f08bfba2b41328638b0ca3bd6551",
+      "bytes": 83780240,
+      "mtime_ns": 1793800741976886883,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/toast_storage-6a7996ef22ef00b7": {
+      "sha256": "d982b6d5102b58b995edd61a8104d8d65bee91184a570126da6fc03e41faab49",
+      "bytes": 85117168,
+      "mtime_ns": 1793800797872245652,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/twophase-25ba6b6f50cc8dea": {
+      "sha256": "4b92ceff9fbd53f209327cef346cef58f05c3e285d5c01e9a52ecc87a3855884",
+      "bytes": 85162504,
+      "mtime_ns": 1793800769396571980,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/txn_spill-cf6b8ac933a4e2c5": {
+      "sha256": "7423c0f3c83a483595303f9709eef63b36422576840109dca82f055dee821515",
+      "bytes": 85129224,
+      "mtime_ns": 1793800803336183115,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/wire-1083b7004b76e622": {
+      "sha256": "1f5d70aa67937fe00a66bef7ce805217b05383c9a83d1719cd02bfce7e883004",
+      "bytes": 90884352,
+      "mtime_ns": 1793800848491667214,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/wire_waits-a17b69befa44a3ae": {
+      "sha256": "716d2d5f36f136c1b7973e85e564f3e462eb6ad69823b500de313613fc67aab6",
+      "bytes": 86981096,
+      "mtime_ns": 1793800860471530609,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/xml_memory-92e2b19217d5a160": {
+      "sha256": "95097d50473cafab204e30ec55c561dec0544176646549b09c802f5777c7ae05",
+      "bytes": 83739768,
+      "mtime_ns": 1793800866439462598,
+      "stage": "release"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/pg_control-a16c6e00e254d8b1": {
+      "sha256": "15a57d1a51ec081c61e4b32c3101466a2c6e8985567e401bee89826aa170a676",
+      "bytes": 34883360,
+      "mtime_ns": 1793802022878547811,
+      "stage": "postgres-unit"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/pg_proxy-1a9a43652799ec3d": {
+      "sha256": "48a687f26b5f001e7d0d8e6bcbc5a80a2f91f7910ab3e5c84311129b5042415a",
+      "bytes": 11384336,
+      "mtime_ns": 1793802022886547723,
+      "stage": "postgres-unit"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/pg_storage-13e93ab534b12e61": {
+      "sha256": "57d8c3afc72714065af1155230619725099f3c33a3d163d910da9095c77c4449",
+      "bytes": 55876080,
+      "mtime_ns": 1793802022082556613,
+      "stage": "postgres-unit"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/roll-4dddcc6a3633d7cd": {
+      "sha256": "01a338b9549e39935ad02ad172a81c52ff9f2bbf4fb0e2eeb21c07db986d9c5b",
+      "bytes": 7217416,
+      "mtime_ns": 1793802019518584967,
+      "stage": "postgres-unit"
+    },
+    "/home/meszmate/.cache/a170/target/debug/deps/rolld-a6f5c88189841da0": {
+      "sha256": "40043cf830a286fe6952b2a46791b89e645fa3173fe99b8a9356e0624dac375e",
+      "bytes": 9497544,
+      "mtime_ns": 1793802018974590983,
+      "stage": "postgres-unit"
+    },
+    "/home/meszmate/.cache/a170/target/debug/roll-engine": {
+      "sha256": "aaaa06522cc1685c78ca4980b3c15cce6b99b6c5fd9d7e266e752636a6d03df3",
+      "bytes": 333678688,
+      "mtime_ns": 1793798098861911422,
+      "stage": "build"
+    }
+  },
+  "limitation": "Hashes captured after completed stages; original execution logs retain source pin and binary paths."
+}
