@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "18a1799851018087cc55a52457b6a16f9b140cdd0e2ba2ae96af9b68a7b22de4",
-    "bytes": 10258
+    "sha256": "78bc0df9ee37d221a58499e2dcd96a65432405a086e300ee9781b65f40ae3ad2",
+    "bytes": 10396
   },
   "bytea165compare/RESTORED": {
     "sha256": "cfeb0d7a74ac20eb1d46d347c00db409be5f9c5b47ca77e388b2e494a65d91c3",
@@ -106,6 +106,22 @@
   "check165ind-v2/affinity-observation-release.json": {
     "sha256": "26ffd3d1345877066ea87ac78cc255dfb3877fd54205978453b8e599033ce842",
     "bytes": 14628
+  },
+  "check165ind-v2/clippy-completed-exits.tsv": {
+    "sha256": "093461a98ae1f8ded9992f808e72edd8c2741280c6a2ff8df17ab35a9ba76627",
+    "bytes": 37
+  },
+  "check165ind-v2/clippy-warning-audit.json": {
+    "sha256": "8ddd24b39d0fde6a64ab3f76ee5e819469327559294ac1fb44be6aa20aca293f",
+    "bytes": 2040
+  },
+  "check165ind-v2/clippy.command": {
+    "sha256": "1b86d70e59e973e8d8af181830282fc52041d009cee30d84e2d7169430dd0de1",
+    "bytes": 51
+  },
+  "check165ind-v2/clippy.log": {
+    "sha256": "0b91d766534add86d2066b2411b75a9740363795017ba463b50ec689b8052d53",
+    "bytes": 10548
   },
   "check165ind-v2/debug-completed-exits.tsv": {
     "sha256": "f08abcdc322c626e258456ce735cd82410657a770f20177d70bae93cba340fc1",
@@ -412,8 +428,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "abc8cecf3467be13f1bd94e33ee73e691444227fdce046386220e09349c0120b",
-    "bytes": 22168
+    "sha256": "3d560ed72f81eb906fd35e391c946bc00d471b2aeb721c5e6833f1806def6240",
+    "bytes": 22484
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",

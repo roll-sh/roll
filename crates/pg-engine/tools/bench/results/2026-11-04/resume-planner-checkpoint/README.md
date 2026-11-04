@@ -97,9 +97,11 @@ frozen453/0/18/60. Successorcheck165ind-v2 uses exact perbinary map/auditor, sel
 against oldcaab448summary, frozenrunnerhashes preserved. Per-candidate stack check scoped
 pnpm test:pg --unit; stamp skip explicitlySKIP/noexecution; no service-stack orpgengine
 acceptance. One final forced service gate held. Exactab3 fullgate nowactive,partialcurrent
-Clippy/build/unit-stack outputs excluded while active. Exactab3 DEBUG and RELEASE passed453/
+Build/unit-stack outputs excluded while active. Exactab3 DEBUG and RELEASE passed453/
 0/18/60;every perbinary summary matches frozen map. Wire67/67 passed in this fullrun;
-earlier fullwire101 remains preserved, no causal/performance inference. Release all-target Clippy active.
+earlier fullwire101 remains preserved, no causal/performance inference. Release all-target Clippy
+completed0:14diagnostics,message/path sequence equalhistoricalcaab,no candidate-changedpath.
+No freshbaselineClippycomparison claimed. Distbuild active.
 Observed debugcargo593561/parallel_scan1489244 effectiveaffinity0-35,overlapping149reserved
 4-7,22-25;nice19/jobs2/threads2 enforced, NO CPUisolation claim. No affinity/runnerchange;
 Release cargo1812146/rustc1812721,1812723 also observed nice19 and effectiveaffinity0-35;
