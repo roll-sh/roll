@@ -198,7 +198,7 @@ function runAt(r: Run, t: number, waiting: boolean): Run | null {
   if (r.completed_at != null && r.completed_at <= t) return r;
   if (isRunTerminal(r.status) && r.completed_at == null) return r;
   const status = waiting ? "waiting" : r.started_at != null && r.started_at <= t ? "running" : "starting";
-  return { ...r, status, completed_at: null, checkpoint: null, stat: null, usage: { ...ZERO_USAGE }, error: null };
+  return { ...r, status, completed_at: null, checkpoint: null, stat: null, usage: { ...ZERO_USAGE }, context: null, error: null };
 }
 
 function threadAt(th: Thread, runs: Run[], pending: number, activity: string | null, root: boolean, t: number): Thread | null {
@@ -216,6 +216,8 @@ function threadAt(th: Thread, runs: Run[], pending: number, activity: string | n
     pending_requests: pending,
     activity: active ? activity : null,
     usage,
+    // The newest report so far; a run reports its context as it finishes on the replay clock.
+    context: [...runs].sort((a, b) => b.ordinal - a.ordinal).find((r) => r.context)?.context ?? null,
     error: status === "error" ? (last?.error ?? th.error) : null,
     queued: [],
   };

@@ -292,15 +292,17 @@ pub struct TokenUsageUpdated {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(rename_all = "camelCase", default)]
 pub struct ThreadTokenUsage {
     pub total: TokenUsage,
     pub last: TokenUsage,
+    pub model_context_window: Option<u64>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TokenUsage {
+    pub total_tokens: u64,
     pub input_tokens: u64,
     pub cached_input_tokens: u64,
     pub output_tokens: u64,

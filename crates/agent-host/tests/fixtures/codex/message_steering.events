@@ -8,6 +8,7 @@
 {"text_delta":{"item":"msg_082e3c417c674aca016ab5bdd0a78c87d0bfa0eb88fa813e1c","text":" response"}}
 {"item":{"body":{"text":"steering fixture initial response","type":"message"},"id":"msg_082e3c417c674aca016ab5bdd0a78c87d0bfa0eb88fa813e1c","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":6912,"input_tokens":21418,"output_tokens":9}}
+{"context":{"max_tokens":258400,"total_processed_tokens":21427,"used_tokens":21427}}
 {"item":{"body":{"text":"","type":"message"},"id":"msg_082e3c417c674aca016ab5bdd2530487d08314cbb7d690f5d2","parent":null,"status":"running"}}
 {"text_delta":{"item":"msg_082e3c417c674aca016ab5bdd2530487d08314cbb7d690f5d2","text":"ste"}}
 {"text_delta":{"item":"msg_082e3c417c674aca016ab5bdd2530487d08314cbb7d690f5d2","text":"ering"}}
@@ -15,6 +16,7 @@
 {"text_delta":{"item":"msg_082e3c417c674aca016ab5bdd2530487d08314cbb7d690f5d2","text":" observed"}}
 {"item":{"body":{"text":"steering fixture observed","type":"message"},"id":"msg_082e3c417c674aca016ab5bdd2530487d08314cbb7d690f5d2","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":28160,"input_tokens":42860,"output_tokens":17}}
+{"context":{"max_tokens":258400,"total_processed_tokens":42877,"used_tokens":21450}}
 {"turn_ref":"01a0d5ed-670e-7032-9a87-707c736491a6"}
 {"turn_ended":"completed"}
 {"exited":null}

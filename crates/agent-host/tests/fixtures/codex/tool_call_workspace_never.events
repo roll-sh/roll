@@ -21,6 +21,7 @@
 {"item":{"body":{"input":{"command":"/bin/bash -lc \"printf '%s' 'codex app-server approval fixture.' > .codex-probe-write-action.txt\"","cwd":"/home/replay-user/t3code/packages/effect-codex-app-server"},"kind":"command","name":"commandExecution","title":"printf '%s' 'codex app-server approval fixture.' > .codex-probe-write-action.txt","type":"tool"},"id":"exec-0aedac8d-7d1e-4a69-8d3e-14fa41449e6e","parent":null,"status":"running"}}
 {"item":{"body":{"exit_code":0,"input":{"command":"/bin/bash -lc \"printf '%s' 'codex app-server approval fixture.' > .codex-probe-write-action.txt\"","cwd":"/home/replay-user/t3code/packages/effect-codex-app-server"},"kind":"command","name":"commandExecution","title":"printf '%s' 'codex app-server approval fixture.' > .codex-probe-write-action.txt","type":"tool"},"id":"exec-0aedac8d-7d1e-4a69-8d3e-14fa41449e6e","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":6912,"input_tokens":21736,"output_tokens":129}}
+{"context":{"max_tokens":258400,"total_processed_tokens":21865,"used_tokens":21865}}
 {"item":{"body":{"text":"","type":"message"},"id":"msg_0158c37667c5446c016ab5bddd677887d083f28a9559bf7626","parent":null,"status":"running"}}
 {"text_delta":{"item":"msg_0158c37667c5446c016ab5bddd677887d083f28a9559bf7626","text":"Created"}}
 {"text_delta":{"item":"msg_0158c37667c5446c016ab5bddd677887d083f28a9559bf7626","text":" `."}}
@@ -44,6 +45,7 @@
 {"text_delta":{"item":"msg_0158c37667c5446c016ab5bddd677887d083f28a9559bf7626","text":".`"}}
 {"item":{"body":{"text":"Created `.codex-probe-write-action.txt` with exactly `codex app-server approval fixture.`","type":"message"},"id":"msg_0158c37667c5446c016ab5bddd677887d083f28a9559bf7626","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":28160,"input_tokens":43627,"output_tokens":153}}
+{"context":{"max_tokens":258400,"total_processed_tokens":43780,"used_tokens":21915}}
 {"turn_ref":"01a0d5ed-8a2a-7002-b65d-fe5885c9f4e0"}
 {"turn_ended":"completed"}
 {"exited":null}

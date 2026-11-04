@@ -235,6 +235,11 @@ pub struct Thread {
     pub activity: Option<String>,
     #[serde(default)]
     pub usage: Usage,
+    /// How full the conversation's context window is, as its provider last reported it (T3's
+    /// `contextUsage`). Unset until the provider reports, and again after a switch to a provider
+    /// whose conversation has no report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// The roll code change the thread was published as, as roll code sees it now. The relay
@@ -407,6 +412,31 @@ impl Usage {
     }
 }
 
+/// A conversation's context window (T3's `ThreadTokenUsageSnapshot`). `used_tokens` is what the
+/// next request carries: the last model call's input and output (Codex: `last.totalTokens`;
+/// Claude: input, cache reads and writes, and output of the main agent's last message; ACP:
+/// `used`). After a compaction it is what's left (Claude's `post_tokens`), so it drops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ContextUsage {
+    pub used_tokens: u64,
+    /// The model's window. Unset when the provider doesn't say and the model isn't known: show
+    /// the tokens alone, never a percentage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    /// Every token the conversation's model calls processed, where the provider reports it
+    /// (Codex's `total.totalTokens`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_processed_tokens: Option<u64>,
+}
+
+impl ContextUsage {
+    /// Percent of the window used, 0–100; `None` when the window is unknown.
+    pub fn used_percent(&self) -> Option<f64> {
+        let max = self.max_tokens.filter(|m| *m > 0)?;
+        Some((self.used_tokens as f64 / max as f64 * 100.0).min(100.0))
+    }
+}
+
 /// One user turn (T3's Run).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Run {
@@ -435,6 +465,10 @@ pub struct Run {
     pub stat: Option<DiffStat>,
     #[serde(default)]
     pub usage: Usage,
+    /// The context window as the run left it: its provider's newest report during the run
+    /// (T3's provider turn `tokenUsage`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }

@@ -109,6 +109,18 @@ export interface Usage {
   cost_usd: number | null;
 }
 
+/**
+ * How full a conversation's context window is (T3's `ThreadTokenUsageSnapshot`). `used_tokens`
+ * is what the next request carries; it drops after a compaction. No `max_tokens`: the window is
+ * unknown, so show the tokens and never a percentage.
+ */
+export interface ContextUsage {
+  used_tokens: number;
+  max_tokens: number | null;
+  /** Every token the conversation's model calls processed (Codex reports it). */
+  total_processed_tokens: number | null;
+}
+
 export interface Thread {
   id: ThreadId;
   project: ProjectId;
@@ -129,6 +141,8 @@ export interface Thread {
   /** One line about what the agent is doing right now. */
   activity: string | null;
   usage: Usage;
+  /** The conversation's context window as its provider last reported it. */
+  context: ContextUsage | null;
   error: string | null;
   /** The roll code change it was published as, as roll code sees it now (the relay's). */
   change: ThreadChange | null;
@@ -191,6 +205,8 @@ export interface Run {
   checkpoint: CheckpointId | null;
   stat: DiffStat | null;
   usage: Usage;
+  /** The context window as the run left it. */
+  context: ContextUsage | null;
   error: string | null;
 }
 
@@ -715,6 +731,8 @@ const usageFields = {
 };
 const usageD = withDefault(obj<Usage>(usageFields), () => ({ ...ZERO_USAGE }));
 
+const contextD = obj<ContextUsage>({ used_tokens: int, max_tokens: opt(int), total_processed_tokens: opt(int) });
+
 export const ZERO_USAGE: Usage = { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null };
 
 const threadD = obj<Thread>({
@@ -736,6 +754,7 @@ const threadD = obj<Thread>({
   pending_requests: int,
   activity: opt(str),
   usage: usageD,
+  context: opt(contextD),
   error: opt(str),
   change: opt(
     obj<ThreadChange>({
@@ -768,6 +787,7 @@ const runD = obj<Run>({
   checkpoint: opt(str),
   stat: opt(diffStatD),
   usage: usageD,
+  context: opt(contextD),
   error: opt(str),
 });
 const changeKindD = literal("add", "modify", "delete", "rename");

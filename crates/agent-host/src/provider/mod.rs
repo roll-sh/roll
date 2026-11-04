@@ -16,8 +16,8 @@
 //! ([`SessionConfig::resume_at`]); [`Provider::rollback_style`] says which.
 
 use agent_proto::{
-    Attachment, Capabilities, InteractionMode, NodeBody, NodeStatus, ProviderId, ProviderInfo, RequestBody, Response,
-    RuntimeMode, Usage,
+    Attachment, Capabilities, ContextUsage, InteractionMode, NodeBody, NodeStatus, ProviderId, ProviderInfo, RequestBody,
+    Response, RuntimeMode, Usage,
 };
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -157,6 +157,9 @@ pub enum ProviderEvent {
     RequestCancelled { id: String },
     /// Token use and cost so far for the current turn (replaces earlier reports for the turn).
     Usage(Usage),
+    /// How full the conversation's context window is now (replaces earlier reports). It may come
+    /// between turns too (ACP reports it per session; a compaction shrinks it).
+    Context(ContextUsage),
     /// The native ref of the turn that is ending, sent before its `TurnEnded` when the provider
     /// names the turn (Codex: the turn id; Claude: the uuid of the turn's last main-agent
     /// assistant message). Store it to fork the conversation at this turn later

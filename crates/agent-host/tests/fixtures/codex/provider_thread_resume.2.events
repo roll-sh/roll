@@ -1,5 +1,6 @@
 {"native_thread":"01a0d5ef-62bd-7c20-861b-0528ff7d86bd"}
 {"model":"gpt-6-luna"}
+{"context":{"max_tokens":258400,"total_processed_tokens":21432,"used_tokens":21432}}
 {"item":{"body":{"text":"","type":"message"},"id":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","parent":null,"status":"running"}}
 {"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","text":"provider"}}
 {"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","text":" thread"}}
@@ -18,6 +19,7 @@
 {"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","text":" complete"}}
 {"item":{"body":{"text":"provider thread resume fixture first turn complete\nprovider thread resume fixture second turn complete","type":"message"},"id":"msg_0b6c69e800b2ec4c016ab5be59d99087d0ae72c7dc026e0be4","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":21248,"input_tokens":21476,"output_tokens":39}}
+{"context":{"max_tokens":258400,"total_processed_tokens":42947,"used_tokens":21515}}
 {"turn_ref":"01a0d5ef-77e2-7e22-a198-4864f687b8b5"}
 {"turn_ended":"completed"}
 {"exited":null}

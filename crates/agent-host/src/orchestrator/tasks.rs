@@ -507,6 +507,7 @@ impl Host {
             pending_requests: 0,
             activity: None,
             usage: Usage::default(),
+            context: None,
             error: None,
             change: None,
             work: None,

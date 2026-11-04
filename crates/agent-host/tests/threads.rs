@@ -742,3 +742,60 @@ async fn archive_and_unarchive() {
     w.send(&thread, "Name me after this", SendMode::Queue).await;
     w.wait_thread(&thread, |t| t.title == "Name me after this").await;
 }
+
+#[tokio::test]
+async fn the_context_window_follows_the_conversation() {
+    let codex = manual("codex", Capabilities { rollback: true, ..Capabilities::default() });
+    let claude = FakeProvider::new("claude");
+    let w = World::new(vec![codex.clone(), claude.clone()]).await;
+    let ctx = |used| ContextUsage { used_tokens: used, max_tokens: Some(258_400), total_processed_tokens: Some(used * 2) };
+    let thread = w.thread("codex", Some("one"), false).await;
+    let session = codex.session(0).await;
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Running).await;
+    session.emit(ProviderEvent::Context(ctx(20_000)));
+    turn(&w, &session, &thread, &[]).await;
+    w.send(&thread, "two", SendMode::Queue).await;
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Running).await;
+    session.emit(ProviderEvent::Context(ctx(60_000)));
+    turn(&w, &session, &thread, &[]).await;
+    let s = w.state().await;
+    assert_eq!(s.thread(&thread).unwrap().context, Some(ctx(60_000)));
+    let runs = s.runs(&thread);
+    assert_eq!(runs.iter().map(|r| r.context).collect::<Vec<_>>(), vec![Some(ctx(20_000)), Some(ctx(60_000))]);
+
+    // A report between runs (an ACP session's) goes on the thread alone.
+    session.emit(ProviderEvent::Context(ctx(61_000)));
+    w.wait_thread(&thread, |t| t.context == Some(ctx(61_000))).await;
+    assert_eq!(w.state().await.runs(&thread)[1].context, Some(ctx(60_000)));
+
+    // A fork shows its parent's context at the fork point until its own conversation exists.
+    let forked = fork(&w, &thread, Some(runs[0].id.clone())).await;
+    assert_eq!(w.state().await.thread(&forked).unwrap().context, Some(ctx(20_000)));
+
+    // Rolled back natively: the conversation is what it was after run 1.
+    let cp = w.state().await.checkpoints(&thread)[1].clone();
+    assert_eq!(w.run(Command::CheckpointRollback { thread: thread.clone(), checkpoint: cp.id }).await, Reply::Ok);
+    assert!(session.calls().contains(&Call::Rollback(1)));
+    assert_eq!(w.state().await.thread(&thread).unwrap().context, Some(ctx(20_000)));
+
+    // Another provider's conversation hasn't reported; switching back shows codex's again.
+    let switch = |p: &str| Command::ThreadConfigure {
+        thread: thread.clone(),
+        title: None,
+        provider: Some(ProviderId(p.into())),
+        model: None,
+        effort: None,
+        runtime_mode: None,
+        interaction_mode: None,
+    };
+    assert_eq!(w.run(switch("claude")).await, Reply::Ok);
+    assert_eq!(w.state().await.thread(&thread).unwrap().context, None);
+    assert_eq!(w.run(switch("codex")).await, Reply::Ok);
+    assert_eq!(w.state().await.thread(&thread).unwrap().context, Some(ctx(20_000)));
+
+    // This codex can't fork natively: the fork starts fresh with a summary, and no context.
+    w.send(&forked, "three", SendMode::Queue).await;
+    let fork_session = codex.session(1).await;
+    turn(&w, &fork_session, &forked, &[]).await;
+    assert_eq!(w.state().await.thread(&forked).unwrap().context, None);
+}

@@ -58,8 +58,10 @@ need. Every entity is a full record keyed by its id; a change re-sends the whole
 ```
 Machine            a daemon (hostname, os, providers and their auth state, online)
   Project          a directory on that machine, optionally a roll code repo
-    Thread         one agent conversation: provider, model, modes, worktree, lineage
-      Run          one user turn (prompt → completion), with its checkpoint and usage
+    Thread         one agent conversation: provider, model, modes, worktree, lineage,
+                   its context window
+      Run          one user turn (prompt → completion), with its checkpoint, usage and
+                   the context window it left
         Node       the execution tree of a run: assistant text, reasoning, plan, todos,
                    tool calls, subagents, approval and question requests
       Request      a pending approval or question, answered from the canvas
@@ -89,6 +91,17 @@ Machine            a daemon (hostname, os, providers and their auth state, onlin
   per turn (`ProviderEvent::TurnRef`), kept in the parent's private state, so forking at an
   earlier run works after a restart too. A `system` node in the fork's first run says which way
   it went (T3's `resolved_native` / `resolved_portable`).
+- **Context window** (T3's `ThreadTokenUsageSnapshot`, shown like its `ContextWindowMeter`).
+  `Thread.context` and `Run.context` are a `ContextUsage`: `used_tokens` (what the next request
+  carries), `max_tokens` (the model's window, unset when unknown: the dashboard then shows tokens
+  and never a percentage) and `total_processed_tokens` where the provider reports it. Adapters
+  send `ProviderEvent::Context` as the provider reports (each replaces the last); the run keeps
+  the newest one of its own, the thread the newest one of its conversation. After a compaction
+  `used_tokens` is what's left, so it drops. The thread's context belongs to its provider's
+  native conversation (T3 keeps it on the provider thread): a provider switch shows the new
+  provider's newest kept run's (none if that provider has no conversation yet), a rollback the
+  newest kept run's, and a fork its parent's at the fork point until its first session, which
+  keeps it when the fork is native and clears it when it starts fresh with a summary.
 - **Runtime modes** (T3's): `full_access` (no approvals), `auto_edit` (edits in the workspace
   allowed, commands ask), `ask` (everything asks). **Interaction modes**: `default`, `plan`.
 - **Checkpoints.** Before the first run the daemon records the base tree; after every run it
@@ -224,6 +237,14 @@ completed, native thread ref). The orchestrator owns ids and turns those events 
   `auto_edit`, everything in `full_access`) and asks otherwise. The agent may call roll's
   `fs/*` and `terminal/*`, confined to the thread's directory; writes and terminals need the
   mode or an approval of the same kind in that turn.
+
+**Context usage** comes from each protocol's own report, as in T3's adapters: Codex's
+`thread/tokenUsage/updated` (`last.totalTokens` against `modelContextWindow`, `total.totalTokens`
+processed); Claude's main-agent message usage (input, cache writes and reads, plus output, from
+`message_start`, `message_delta` and the assistant snapshot; `<synthetic>` messages and reports
+without input are skipped), with the window from T3's model manifest (`claude/models.rs`) and
+`compact_metadata.post_tokens` after a compaction; ACP's `usage_update` (`used`, and `size`
+unless it is 0).
 
 **Auth is the user's own.** The daemon runs the provider CLIs installed on the machine with the
 logins already there, exactly as T3 Code and Conductor do; roll never reads, copies or relays a
@@ -577,7 +598,10 @@ The surface has three views:
   on you, keep still. Cards stay small: a thread's card is its status, title, what it's doing and
   what it cost; a project's card sums it up like T3's project view (threads, running and
   waiting, the PRs its threads made, the agents working in it); actions on machine and project
-  cards show on hover (always on touch screens). Approvals are answered right on their card;
+  cards show on hover (always on touch screens). The end of a thread card's footer and the
+  conversation's composer footer show its context window as a small ring (T3's
+  `ContextWindowMeter`; "62% of 200k" on hover, tokens only when the window is unknown),
+  monochrome until it's more than 90 % full, then accent. Approvals are answered right on their card;
   questions say what they ask and open the conversation. The layout is a tidy tree in columns
   (one per depth, as wide as its widest card), so cards never overlap. Dragging a card moves it
   among its siblings (they make room as it passes; ⌥↑/⌥↓ do the same from the keyboard); that

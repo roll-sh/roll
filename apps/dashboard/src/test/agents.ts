@@ -73,6 +73,7 @@ export function thread(over: Partial<Thread> = {}): Thread {
     pending_requests: 0,
     activity: null,
     usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
+    context: null,
     error: null,
     change: null,
     work: null,
@@ -100,6 +101,7 @@ export function run(over: Partial<Run> = {}): Run {
     checkpoint: null,
     stat: null,
     usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
+    context: null,
     error: null,
     ...over,
   };

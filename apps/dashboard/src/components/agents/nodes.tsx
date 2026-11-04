@@ -7,6 +7,7 @@ import { projectStats, type ProjectStats } from "@/lib/agents-graph";
 import { providersFor } from "@/lib/agents-store";
 import { primary } from "../ui";
 import { ChangeChip, changeStatusLabel, WorkChip } from "./change";
+import { ContextMeter } from "./context-meter";
 import { Menu } from "./menu";
 import { NewProject } from "./project-new";
 import { RequestCard } from "./request-card";
@@ -391,6 +392,7 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
           <span className="ml-auto flex shrink-0 items-center gap-1.5 font-mono text-[10.5px]">
             {usage}
             <Stat stat={lastRun?.status === "rolled_back" ? null : lastRun?.stat} />
+            {thread.context && <ContextMeter context={thread.context} size={12} label />}
           </span>
         </p>
       </div>

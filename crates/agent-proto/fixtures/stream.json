@@ -43,6 +43,11 @@
         "cached_tokens": 9000,
         "cost_usd": 0.42
       },
+      "context": {
+        "used_tokens": 124000,
+        "max_tokens": 200000,
+        "total_processed_tokens": 410000
+      },
       "change": {
         "repo": "acme/roll",
         "number": 42,

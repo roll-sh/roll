@@ -68,6 +68,17 @@ describe("replaying a share", () => {
     expect(d.nodes.get("thr_1")!.get("nod_m")!.value.body).toEqual({ type: "message", text: "0123456789" });
   });
 
+  it("shows a run's context window once the run has finished", () => {
+    const context = { used_tokens: 48_000, max_tokens: 200_000, total_processed_tokens: null };
+    const withContext: Share = { ...s, entities: s.entities.map((e) => (e.kind === "run" || (e.kind === "thread" && e.id === "thr_1") ? { ...e, context } : e)) };
+    const t2 = timeline(withContext);
+    let d = frameAt(withContext, t2, at(700));
+    expect(d.runs.get("run_1")!.value.context).toBeNull();
+    expect(d.threads.get("thr_1")!.value.context).toBeNull();
+    d = frameAt(withContext, t2, at(9000));
+    expect(d.threads.get("thr_1")!.value.context).toEqual(context);
+  });
+
   it("shows text whole without streaming (reduced motion), but still steps through states", () => {
     const d = frameAt(s, tl, at(700), { stream: false });
     expect(d.nodes.get("thr_1")!.get("nod_m")!.value.body).toEqual({ type: "message", text: "0123456789" });

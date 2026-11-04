@@ -250,6 +250,7 @@ impl Host {
             checkpoint: None,
             stat: None,
             usage: Usage::default(),
+            context: None,
             error: None,
         };
         let run_id = run.id.clone();
@@ -612,6 +613,20 @@ impl Host {
                     thread_total.add(&total);
                     rt.thread.usage = thread_total;
                     active.run_dirty = true;
+                }
+            }
+            ProviderEvent::Context(context) => {
+                let fresh = rt.thread.context != Some(context);
+                rt.thread.context = Some(context);
+                match rt.active.as_mut() {
+                    Some(active) if active.run.context != Some(context) => {
+                        active.run.context = Some(context);
+                        active.run_dirty = true;
+                    }
+                    Some(_) => {}
+                    // Between runs (an ACP agent reporting its session): the thread alone.
+                    None if fresh => self.put_thread(rt)?,
+                    None => {}
                 }
             }
             ProviderEvent::TurnEnded(end) => {

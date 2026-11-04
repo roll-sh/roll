@@ -260,6 +260,7 @@ fn event_json(e: &ProviderEvent) -> Value {
         ProviderEvent::Request { id, item, body } => json!({ "request": { "id": id, "item": item, "body": body } }),
         ProviderEvent::RequestCancelled { id } => json!({ "request_cancelled": id }),
         ProviderEvent::Usage(u) => json!({ "usage": u }),
+        ProviderEvent::Context(c) => json!({ "context": c }),
         ProviderEvent::TurnRef { id } => json!({ "turn_ref": id }),
         ProviderEvent::TurnEnded(TurnEnd::Completed) => json!({ "turn_ended": "completed" }),
         ProviderEvent::TurnEnded(TurnEnd::Interrupted) => json!({ "turn_ended": "interrupted" }),

@@ -8,6 +8,7 @@
 {"text_delta":{"item":"msg_044082e5a0068297016ab5be60f20c87d0aed9858a5d1f00b2","text":" complete"}}
 {"item":{"body":{"text":"rollback fixture first turn complete","type":"message"},"id":"msg_044082e5a0068297016ab5be60f20c87d0aed9858a5d1f00b2","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":21248,"input_tokens":21419,"output_tokens":9}}
+{"context":{"max_tokens":258400,"total_processed_tokens":21428,"used_tokens":21428}}
 {"turn_ref":"01a0d5ef-9b58-7980-9e7a-2463dd068a8e"}
 {"turn_ended":"completed"}
 {"item":{"body":{"text":"","type":"message"},"id":"msg_044082e5a0068297016ab5be62fefc87d0bbf3fdbed6561ac8","parent":null,"status":"running"}}
@@ -18,6 +19,7 @@
 {"text_delta":{"item":"msg_044082e5a0068297016ab5be62fefc87d0bbf3fdbed6561ac8","text":" complete"}}
 {"item":{"body":{"text":"rollback fixture second turn complete","type":"message"},"id":"msg_044082e5a0068297016ab5be62fefc87d0bbf3fdbed6561ac8","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":21248,"input_tokens":25780,"output_tokens":9}}
+{"context":{"max_tokens":258400,"total_processed_tokens":47217,"used_tokens":25789}}
 {"turn_ref":"01a0d5ef-ac4e-7471-a4a8-6776e39e6d29"}
 {"turn_ended":"completed"}
 {"item":{"body":{"text":"","type":"message"},"id":"msg_044082e5a0068297016ab5be6663e487d0b7a5dcf749ae239e","parent":null,"status":"running"}}
@@ -51,6 +53,7 @@
 {"text_delta":{"item":"msg_044082e5a0068297016ab5be6663e487d0b7a5dcf749ae239e","text":"."}}
 {"item":{"body":{"text":"User: Respond with exactly: rollback fixture first turn complete  \nAssistant: rollback fixture first turn complete  \nUser: Repeat the conversation verbatim.","type":"message"},"id":"msg_044082e5a0068297016ab5be6663e487d0b7a5dcf749ae239e","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":25344,"input_tokens":25777,"output_tokens":32}}
+{"context":{"max_tokens":258400,"total_processed_tokens":47237,"used_tokens":25809}}
 {"turn_ref":"01a0d5ef-b4f4-7aa2-b4c2-f5f494881401"}
 {"turn_ended":"completed"}
 {"exited":null}

@@ -394,6 +394,11 @@ fn real_cli_streams_text_and_reasoning() {
             "turn completed",
             "exited",
         ]);
+        // One report per main-agent message as it streams in, none repeated.
+        assert_eq!(
+            r.with_context().rendered().into_iter().filter(|l| l.starts_with("context")).collect::<Vec<_>>(),
+            ["context 25629/1000000", "context 25696/1000000", "context 25830/1000000", "context 25873/1000000"]
+        );
         let args = r.launches().remove(0);
         for flags in [
             &["--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--include-partial-messages"][..],
@@ -527,6 +532,12 @@ fn todos_edits_and_notices() {
             "turn completed",
             "exited",
         ]);
+        // The context is the main agent's last message (input, cache writes and reads, output)
+        // against Opus 5.5's 1M window; a compaction drops it to what's left.
+        assert_eq!(
+            r.with_context().rendered().into_iter().filter(|l| l.starts_with("context")).collect::<Vec<_>>(),
+            ["context 142123/1000000", "context 149805/1000000", "context 38000/1000000", "context 38209/1000000"]
+        );
         // The CLI's own patch replaces the input's: real line numbers.
         let diff = r.events.iter().rev().find_map(|e| match e {
             ProviderEvent::Item(i) if i.id == "toolu_e" => match &i.body {
@@ -826,6 +837,7 @@ struct Replay {
     prompts: Vec<String>,
     argv: PathBuf,
     deltas: bool,
+    context: bool,
     refs: bool,
     _dir: tempfile::TempDir,
     cwd: PathBuf,
@@ -870,7 +882,7 @@ impl Replay {
             instructions: o.instructions,
         };
         let (session, rx) = claude.start(cfg.clone()).await.unwrap();
-        Self { claude, cfg, session, rx, events: Vec::new(), prompts, argv, deltas: false, refs: false, _dir: dir, cwd }
+        Self { claude, cfg, session, rx, events: Vec::new(), prompts, argv, deltas: false, refs: false, context: false, _dir: dir, cwd }
     }
 
     /// A second session of the same Claude (its launches go on through the scripts), forking
@@ -968,6 +980,11 @@ impl Replay {
         self
     }
 
+    fn with_context(&mut self) -> &mut Self {
+        self.context = true;
+        self
+    }
+
     fn with_refs(&mut self) -> &mut Self {
         self.refs = true;
         self
@@ -977,6 +994,7 @@ impl Replay {
         let shown = |e: &&ProviderEvent| match e {
             ProviderEvent::TextDelta { .. } => self.deltas,
             ProviderEvent::TurnRef { .. } => self.refs,
+            ProviderEvent::Context(_) => self.context,
             _ => true,
         };
         let mut out: Vec<String> = self.events.iter().filter(shown).map(render).collect();
@@ -1116,6 +1134,11 @@ fn render(e: &ProviderEvent) -> String {
             u.output_tokens,
             u.cached_tokens,
             u.cost_usd.map(|c| format!("{c:.6}")).unwrap_or_else(|| "-".into())
+        ),
+        ProviderEvent::Context(c) => format!(
+            "context {}/{}",
+            c.used_tokens,
+            c.max_tokens.map(|m| m.to_string()).unwrap_or_else(|| "?".into())
         ),
         ProviderEvent::TurnEnded(TurnEnd::Completed) => "turn completed".into(),
         ProviderEvent::TurnEnded(TurnEnd::Interrupted) => "turn interrupted".into(),

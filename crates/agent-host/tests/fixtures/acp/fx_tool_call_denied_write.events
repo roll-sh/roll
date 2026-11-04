@@ -7,6 +7,7 @@
 {"item":{"body":{"text":"","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
 {"text_delta":{"item":"msg:1:1","text":"write permission denied"}}
 {"item":{"body":{"text":"write permission denied","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"context":{"max_tokens":1000000,"used_tokens":19817}}
 {"item":{"body":{"text":"write permission denied","type":"message"},"id":"msg:1:1","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":0,"input_tokens":39437,"output_tokens":89}}
 {"turn_ended":"completed"}

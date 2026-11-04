@@ -4,14 +4,14 @@
 //! Ported from T3 Code's `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts` (MIT):
 //! the item mapping, root-turn tracking, subagent threads (`collabAgentToolCall` and
 //! `subAgentActivity`, whose child threads' items hang off the subagent's item), turn-scoped
-//! token usage (`provider/CodexTurnTokenUsage.ts`), the approval reply shapes, session
+//! token usage (`provider/CodexTurnTokenUsage.ts`), the context window (`codexProviderTurnTokenUsage`), the approval reply shapes, session
 //! allowances ("accept for session" answers later requests of the same kind itself) and MCP
 //! elicitation replies (`provider/CodexMcpElicitation.ts`).
 
 use super::wire::{self, ThreadItem};
 use crate::provider::{Item, ProviderEvent, TurnEnd};
 use agent_proto::{
-    Approval, ApprovalAction, ChangeKind, Decision, FileChange, NodeBody, NodeStatus, Question, QuestionOption,
+    Approval, ApprovalAction, ChangeKind, ContextUsage, Decision, FileChange, NodeBody, NodeStatus, Question, QuestionOption,
     RequestBody, Response, Todo, TodoStatus, ToolCall, ToolKind, Usage,
 };
 use anyhow::{anyhow, bail};
@@ -107,6 +107,7 @@ impl TurnUsage {
                     && total.reasoning_output_tokens >= p.reasoning_output_tokens =>
             {
                 wire::TokenUsage {
+                    total_tokens: total.total_tokens.saturating_sub(p.total_tokens),
                     input_tokens: total.input_tokens - p.input_tokens,
                     cached_input_tokens: total.cached_input_tokens - p.cached_input_tokens,
                     output_tokens: total.output_tokens - p.output_tokens,
@@ -126,6 +127,18 @@ impl TurnUsage {
             cached_tokens: self.sum.cached_input_tokens.min(self.sum.input_tokens),
             cost_usd: None,
         })
+    }
+}
+
+/// The conversation's context window (T3's `codexProviderTurnTokenUsage`): the last request's
+/// tokens are what the conversation holds now, so a compaction shows as a drop.
+fn context_usage(usage: &wire::ThreadTokenUsage) -> ContextUsage {
+    let last = usage.last;
+    let used = if last.total_tokens > 0 { last.total_tokens } else { last.input_tokens + last.output_tokens };
+    ContextUsage {
+        used_tokens: used,
+        max_tokens: usage.model_context_window.filter(|w| *w > 0),
+        total_processed_tokens: Some(usage.total.total_tokens).filter(|t| *t > 0),
     }
 }
 
@@ -240,11 +253,13 @@ impl Translator {
             "item/fileChange/patchUpdated" => parse(params).map(|p: wire::PatchUpdated| self.on_patch(p, &mut out)),
             "turn/plan/updated" => parse(params).map(|p: wire::PlanUpdated| self.on_plan(p, &mut out)),
             "thread/tokenUsage/updated" => parse(params).map(|p: wire::TokenUsageUpdated| {
-                if p.thread_id == self.root
-                    && let Some(usage) = self.usage.update(&p.turn_id, &p.token_usage)
-                {
+                if p.thread_id != self.root {
+                    return;
+                }
+                if let Some(usage) = self.usage.update(&p.turn_id, &p.token_usage) {
                     out.push(Action::Event(ProviderEvent::Usage(usage)));
                 }
+                out.push(Action::Event(ProviderEvent::Context(context_usage(&p.token_usage))));
             }),
             "model/rerouted" => parse(params).map(|p: wire::ModelRerouted| {
                 if p.thread_id == self.root && !p.to_model.is_empty() {
@@ -1422,6 +1437,7 @@ mod tests {
         let usage = |total: u64, last: u64| wire::ThreadTokenUsage {
             total: wire::TokenUsage { input_tokens: total, output_tokens: 1, ..Default::default() },
             last: wire::TokenUsage { input_tokens: last, output_tokens: 1, ..Default::default() },
+            model_context_window: None,
         };
         assert_eq!(u.update("t0", &usage(100, 100)), None);
         u.start("t1");
@@ -1429,6 +1445,24 @@ mod tests {
         assert_eq!(u.update("t1", &usage(230, 80)).unwrap().input_tokens, 130);
         // A total that went backwards (a compaction) counts the last response only.
         assert_eq!(u.update("t1", &usage(40, 40)).unwrap().input_tokens, 170);
+    }
+
+    #[test]
+    fn context_is_the_last_request_against_the_model_window() {
+        let mut t = tr();
+        let report = |total: u64, last: u64, window: Option<u64>| {
+            let n = |t: u64| json!({"totalTokens": t, "inputTokens": t - 10, "cachedInputTokens": 0, "outputTokens": 10, "reasoningOutputTokens": 0});
+            json!({"threadId": "thr", "turnId": "t1", "tokenUsage": {"total": n(total), "last": n(last), "modelContextWindow": window}})
+        };
+        let context = |ev: Vec<ProviderEvent>| ev.into_iter().find_map(|e| if let ProviderEvent::Context(c) = e { Some(c) } else { None });
+        let c = context(events(t.on_notification("thread/tokenUsage/updated", report(46_397, 23_417, Some(258_400))))).unwrap();
+        assert_eq!(c, ContextUsage { used_tokens: 23_417, max_tokens: Some(258_400), total_processed_tokens: Some(46_397) });
+        // An unknown window stays unknown; another thread's report isn't this conversation's.
+        let c = context(events(t.on_notification("thread/tokenUsage/updated", report(50_000, 20, None)))).unwrap();
+        assert_eq!(c.max_tokens, None);
+        let mut other = report(1_000, 1_000, Some(1));
+        other["threadId"] = json!("child");
+        assert_eq!(context(events(t.on_notification("thread/tokenUsage/updated", other))), None);
     }
 
     #[test]

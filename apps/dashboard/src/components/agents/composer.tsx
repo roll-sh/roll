@@ -14,6 +14,7 @@ import type {
 } from "@/lib/agents-api";
 import { coming, machineState, reachable } from "@/lib/agents-api";
 import { btn, input } from "../ui";
+import { ContextMeter } from "./context-meter";
 import { useAgents } from "./use-agents";
 
 /** What a new thread starts with (the `thread.create` fields the composer picks). */
@@ -369,6 +370,11 @@ export function Composer({
           </>
         )}
         <span className="ml-auto flex items-center gap-1">
+          {thread?.context && (
+            <span className="grid size-7 place-items-center">
+              <ContextMeter context={thread.context} size={18} />
+            </span>
+          )}
           {running && (
             <span className="flex rounded-md border border-line p-px text-[11px]" role="radiogroup" aria-label="While running">
               {(["queue", "steer"] as const).map((m) => (

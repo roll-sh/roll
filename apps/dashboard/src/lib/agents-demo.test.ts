@@ -41,6 +41,25 @@ describe("agents demo", () => {
     release();
   });
 
+  it("reports each thread's context window, growing while it runs", async () => {
+    demo = new DemoOwner(0.01, false);
+    const client = new AgentsClient("demo", demo, (fn) => queueMicrotask(fn));
+    const release = client.hold();
+    const ctx = (id: string) => client.data.threads.get(id)?.value.context ?? null;
+    await until("the finished thread", () => ctx("thr_demo_json") !== null);
+    expect(ctx("thr_demo_json")).toEqual({ used_tokens: 31_800, max_tokens: 258_400, total_processed_tokens: 45_100 });
+    await until("a first report", () => ctx("thr_demo_ci") !== null);
+    const first = ctx("thr_demo_ci")!.used_tokens;
+    await until("the context to grow", () => (ctx("thr_demo_ci")?.used_tokens ?? 0) > first);
+    expect(ctx("thr_demo_ci")).toMatchObject({ max_tokens: 258_400 });
+    expect(ctx("thr_demo_ci")!.total_processed_tokens).toBeGreaterThan(ctx("thr_demo_ci")!.used_tokens);
+    await until("claude's report", () => ctx("thr_demo_flaky") !== null);
+    expect(ctx("thr_demo_flaky")).toMatchObject({ max_tokens: 1_000_000, total_processed_tokens: null });
+    const run = runsOf(client.data, "thr_demo_ci").at(-1)!;
+    expect(run.context).toEqual(ctx("thr_demo_ci"));
+    release();
+  });
+
   it("answers commands: queue while running, fork, offline machines", async () => {
     demo = new DemoOwner(0.01, false);
     const client = new AgentsClient("demo", demo, (fn) => queueMicrotask(fn));

@@ -25,6 +25,7 @@
 {"item":{"body":{"files":[{"change":"add","diff":"@@ -0,0 +1,1 @@\n+codex app-server approval fixture.\n","path":"/home/replay-user/t3code/packages/effect-codex-app-server/.codex-probe-write-action.txt"}],"input":null,"kind":"edit","name":"fileChange","title":"/home/replay-user/t3code/packages/effect-codex-app-server/.codex-probe-write-action.txt","type":"tool"},"id":"exec-114e8eef-018a-444d-8542-aa0232ff1f38","parent":null,"status":"running"}}
 {"item":{"body":{"files":[{"change":"add","diff":"@@ -0,0 +1,1 @@\n+codex app-server approval fixture.\n","path":"/home/replay-user/t3code/packages/effect-codex-app-server/.codex-probe-write-action.txt"}],"input":null,"kind":"edit","name":"fileChange","title":"/home/replay-user/t3code/packages/effect-codex-app-server/.codex-probe-write-action.txt","type":"tool"},"id":"exec-114e8eef-018a-444d-8542-aa0232ff1f38","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":6912,"input_tokens":21328,"output_tokens":124}}
+{"context":{"max_tokens":258400,"total_processed_tokens":21452,"used_tokens":21452}}
 {"item":{"body":{"text":"","type":"message"},"id":"msg_08bfce1a588b6283016ab5c3b7ef0c87d096aba0299c914020","parent":null,"status":"running"}}
 {"text_delta":{"item":"msg_08bfce1a588b6283016ab5c3b7ef0c87d096aba0299c914020","text":"Created"}}
 {"text_delta":{"item":"msg_08bfce1a588b6283016ab5c3b7ef0c87d096aba0299c914020","text":" `."}}
@@ -52,6 +53,7 @@
 {"text_delta":{"item":"msg_08bfce1a588b6283016ab5c3b7ef0c87d096aba0299c914020","text":"```"}}
 {"item":{"body":{"text":"Created `.codex-probe-write-action.txt` with exactly:\n\n```text\ncodex app-server approval fixture.\n```","type":"message"},"id":"msg_08bfce1a588b6283016ab5c3b7ef0c87d096aba0299c914020","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":27136,"input_tokens":42807,"output_tokens":152}}
+{"context":{"max_tokens":258400,"total_processed_tokens":42959,"used_tokens":21507}}
 {"turn_ref":"01a0d604-6358-72f1-bb89-7361cce0045c"}
 {"turn_ended":"completed"}
 {"exited":null}

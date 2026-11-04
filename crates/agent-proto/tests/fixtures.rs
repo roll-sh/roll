@@ -78,6 +78,7 @@ fn thread() -> Thread {
         pending_requests: 1,
         activity: Some("Waiting to run `cargo test`".into()),
         usage: Usage { input_tokens: 12_000, output_tokens: 3_400, cached_tokens: 9_000, cost_usd: Some(0.42) },
+        context: Some(ContextUsage { used_tokens: 124_000, max_tokens: Some(200_000), total_processed_tokens: Some(410_000) }),
         error: None,
         change: Some(Box::new(ThreadChange {
             repo: "acme/roll".into(),
@@ -110,6 +111,7 @@ fn run_rec() -> Run {
         checkpoint: None,
         stat: None,
         usage: Usage::default(),
+        context: Some(ContextUsage { used_tokens: 18_500, max_tokens: None, total_processed_tokens: None }),
         error: None,
     }
 }
@@ -676,4 +678,23 @@ fn scopes_and_threads() {
             assert_eq!(e.thread(), Some(&thr()), "{:?}", e.kind());
         }
     }
+}
+
+#[test]
+fn records_from_before_context_usage_parse() {
+    let mut thread = serde_json::to_value(thread()).unwrap();
+    thread.as_object_mut().unwrap().remove("context");
+    assert_eq!(serde_json::from_value::<Thread>(thread).unwrap().context, None);
+    let mut run = serde_json::to_value(run_rec()).unwrap();
+    run.as_object_mut().unwrap().remove("context");
+    assert_eq!(serde_json::from_value::<Run>(run).unwrap().context, None);
+}
+
+#[test]
+fn context_percent_needs_a_window() {
+    let c = |used, max| ContextUsage { used_tokens: used, max_tokens: max, total_processed_tokens: None };
+    assert_eq!(c(50_000, Some(200_000)).used_percent(), Some(25.0));
+    assert_eq!(c(250_000, Some(200_000)).used_percent(), Some(100.0));
+    assert_eq!(c(50_000, None).used_percent(), None);
+    assert_eq!(c(50_000, Some(0)).used_percent(), None);
 }

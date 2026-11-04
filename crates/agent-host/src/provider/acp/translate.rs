@@ -11,7 +11,7 @@ use super::policy::{self, Disposition, Grants, Kind};
 use super::wire::{self, ConfigOption, Generation, Models, Modes, PermissionOption};
 use crate::provider::{Item, ProviderEvent, TurnEnd};
 use agent_proto::{
-    Approval, ApprovalAction, ChangeKind, Decision, FileChange, InteractionMode, NodeBody, NodeStatus, Question,
+    Approval, ApprovalAction, ChangeKind, ContextUsage, Decision, FileChange, InteractionMode, NodeBody, NodeStatus, Question,
     QuestionOption, RequestBody, Response, RuntimeMode, Todo, TodoStatus, ToolCall, ToolKind, Usage,
 };
 use anyhow::{anyhow, bail};
@@ -548,6 +548,11 @@ impl Translator {
             tracing::debug!(target: "agent_host::acp", "a malformed usage_update");
             return;
         }
+        // The session's context window (T3's `UsageUpdated`: a size of 0 is an unknown window).
+        let tokens = |k: &str| update[k].as_f64().filter(|n| n.is_finite()).map_or(0, |n| n.max(0.0).round() as u64);
+        let size = tokens("size");
+        let context = ContextUsage { used_tokens: tokens("used"), max_tokens: (size > 0).then_some(size), total_processed_tokens: None };
+        out.push(Action::Event(ProviderEvent::Context(context)));
         let cost = &update["cost"];
         let Some(amount) = cost["amount"].as_f64().filter(|_| cost["currency"].as_str().map(str::trim) == Some("USD")) else {
             return;
@@ -1267,7 +1272,11 @@ mod tests {
         tr.on_prompt_result(1, Ok(json!({ "stopReason": "end_turn" })));
         tr.start_turn(2);
         let ev = events(tr.on_notification("session/update", &cost(0.75)));
-        assert_eq!(ev, [ProviderEvent::Usage(Usage { cost_usd: Some(0.5), ..Default::default() })]);
+        let context = ProviderEvent::Context(ContextUsage { used_tokens: 10, max_tokens: Some(100), total_processed_tokens: None });
+        assert_eq!(ev, [context, ProviderEvent::Usage(Usage { cost_usd: Some(0.5), ..Default::default() })]);
+        // A size of 0 is an unknown window (T3 leaves `maxTokens` out).
+        let ev = events(tr.on_notification("session/update", &update(json!({ "sessionUpdate": "usage_update", "used": 7, "size": 0 }))));
+        assert_eq!(ev, [ProviderEvent::Context(ContextUsage { used_tokens: 7, max_tokens: None, total_processed_tokens: None })]);
         let ev = events(tr.on_prompt_result(2, Ok(json!({ "stopReason": "end_turn", "usage": { "inputTokens": 5, "outputTokens": 2, "cachedReadTokens": 1, "totalTokens": 7 } }))));
         assert_eq!(ev[0], ProviderEvent::Usage(Usage { input_tokens: 5, output_tokens: 2, cached_tokens: 1, cost_usd: Some(0.5) }));
     }

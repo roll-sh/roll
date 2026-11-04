@@ -11,6 +11,7 @@ import type {
   Landing,
   Checkpoint,
   Command,
+  ContextUsage,
   DiffStat,
   Entity,
   FileChange,
@@ -42,6 +43,17 @@ import { ApiError } from "./code-api";
 import type { Sandbox, SandboxSize } from "./sandboxes-api";
 
 // ── the cast ──
+
+/** Codex reports this window for its GPT-5.5 models (`modelContextWindow`). */
+const CODEX_WINDOW = 258_400;
+
+/** The demo models' windows, as the daemon's adapters report them (T3's model manifest for Claude). */
+function contextWindow(model: string | null): number | null {
+  if (!model) return null;
+  if (model.startsWith("gpt-")) return CODEX_WINDOW;
+  if (model.startsWith("claude-")) return /-4-5\b/.test(model) ? 200_000 : 1_000_000;
+  return null;
+}
 
 const claude = (auth: ProviderInfo["auth"] = "ready"): ProviderInfo => ({
   id: "claude",
@@ -732,6 +744,7 @@ export class DemoOwner implements AgentsTransport {
       pending_requests: 0,
       activity: null,
       usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
+      context: null,
       error: null,
       change: null,
       work: null,
@@ -795,7 +808,8 @@ export class DemoOwner implements AgentsTransport {
     const s = stat(files);
     const cid = `chk_demo_json${ordinal}`;
     const usage = { input_tokens: 41_200, output_tokens: 3_900, cached_tokens: 30_100, cost_usd: null };
-    this.put("run", { id: rid, thread: tid, ordinal, provider: "codex", model: "gpt-5.5-codex", status: "completed", prompt, attachments: [], steers: [], requested_at: at, started_at: at, completed_at: at + 52_000, checkpoint: cid, stat: s, usage, error: null }, MBP);
+    const context: ContextUsage = { used_tokens: 31_800, max_tokens: CODEX_WINDOW, total_processed_tokens: 45_100 };
+    this.put("run", { id: rid, thread: tid, ordinal, provider: "codex", model: "gpt-5.5-codex", status: "completed", prompt, attachments: [], steers: [], requested_at: at, started_at: at, completed_at: at + 52_000, checkpoint: cid, stat: s, usage, context, error: null }, MBP);
     let o = 0;
     const node = (body: NodeBody) => this.putNode({ id: id("nod_"), thread: tid, run: rid, parent: null, ordinal: ++o, status: "completed", started_at: at, completed_at: at + 1000, body });
     node({ type: "reasoning", text: "The status command builds a `Status` struct and prints a table; serde is already a dependency." });
@@ -805,7 +819,7 @@ export class DemoOwner implements AgentsTransport {
     node({ type: "message", text: answer });
     this.put("checkpoint", { id: `chk_demo_json0`, thread: tid, run: null, ordinal: 0, commit: "f35f34cf", stat: { files: 0, additions: 0, deletions: 0 }, created_at: at }, MBP);
     this.put("checkpoint", { id: cid, thread: tid, run: rid, ordinal, commit: "9fceb02d0ae598e9", stat: s, created_at: at + 52_000 }, MBP);
-    this.patchThread(tid, { run_count: ordinal, usage, activity: null, updated_at: at + 52_000 });
+    this.patchThread(tid, { run_count: ordinal, usage, context, activity: null, updated_at: at + 52_000 });
   }
 
   // ── running a script ──
@@ -820,7 +834,7 @@ export class DemoOwner implements AgentsTransport {
     this.sims.set(tid, sim);
     this.put(
       "run",
-      { id: rid, thread: tid, ordinal, provider: t.provider, model: t.model, status: "running", prompt, attachments, steers: [], requested_at: now(), started_at: now(), completed_at: null, checkpoint: null, stat: null, usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null }, error: null },
+      { id: rid, thread: tid, ordinal, provider: t.provider, model: t.model, status: "running", prompt, attachments, steers: [], requested_at: now(), started_at: now(), completed_at: null, checkpoint: null, stat: null, usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null }, context: null, error: null },
       this.machineOf(tid),
     );
     this.patchThread(tid, { status: "running", active_run: rid, run_count: ordinal, activity: "Thinking", error: null });
@@ -831,8 +845,28 @@ export class DemoOwner implements AgentsTransport {
     for (const step of steps) {
       if (sim.stopped) return;
       await this.step(sim, step, ctx, parent);
+      // Subagents work in their own context; the thread's grows with its own steps.
+      if (parent === null && !sim.stopped) this.growContext(sim);
       await this.sleep(350);
     }
+  }
+
+  /**
+   * Each model call carries the whole conversation, so the context grows a few thousand tokens a
+   * step (the first call starts with the system prompt and tools); past 92 % the provider compacts
+   * it down to what's left, as Claude and Codex do.
+   */
+  private growContext(sim: Sim) {
+    const t = this.thread(sim.thread);
+    if (!t) return;
+    const max = contextWindow(t.model);
+    const before = t.context?.used_tokens ?? (t.provider === "claude" ? 21_400 : 13_800);
+    let used = before + 1_500 + Math.floor(Math.random() * 6_000);
+    if (max !== null && used > max * 0.92) used = Math.round(max * 0.24);
+    const processed = t.provider === "codex" ? (t.context?.total_processed_tokens ?? 0) + used : null;
+    const context: ContextUsage = { used_tokens: used, max_tokens: max, total_processed_tokens: processed };
+    this.patchRun(sim.run, { context });
+    this.patchThread(sim.thread, { context });
   }
 
   private node(sim: Sim, ctx: { ordinal: number }, body: NodeBody, parent: string | null, status: Node["status"] = "running"): Node {
@@ -1068,6 +1102,7 @@ export class DemoOwner implements AgentsTransport {
             pending_requests: 0,
             activity: null,
             usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
+            context: null,
             error: null,
             change: null,
             work: null,
@@ -1104,6 +1139,8 @@ export class DemoOwner implements AgentsTransport {
             activity: null,
             run_count: 0,
             usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
+            // The parent's context at the fork point, until the fork's own conversation reports.
+            context: (c.at ? this.get<Run>("run", c.at)?.context : t.context) ?? null,
             lineage: { parent: t.id, relation: "fork", root: t.lineage?.root ?? t.id, from_run: c.at ?? t.active_run ?? null },
             created_at: now(),
             updated_at: now(),

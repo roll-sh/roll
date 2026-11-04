@@ -4,6 +4,7 @@
 {"item":{"body":{"text":"","type":"message"},"id":"msg:2:1","parent":null,"status":"running"}}
 {"text_delta":{"item":"msg:2:1","text":"fixture simple ok"}}
 {"item":{"body":{"text":"fixture simple ok","type":"message"},"id":"msg:2:1","parent":null,"status":"running"}}
+{"context":{"max_tokens":1000000,"used_tokens":20133}}
 {"item":{"body":{"text":"fixture simple ok","type":"message"},"id":"msg:2:1","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":0,"input_tokens":20124,"output_tokens":9}}
 {"turn_ended":"completed"}

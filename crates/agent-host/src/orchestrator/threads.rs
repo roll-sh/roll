@@ -58,6 +58,7 @@ impl Host {
             pending_requests: 0,
             activity: None,
             usage: Usage::default(),
+            context: None,
             error: None,
             change: None,
             work: None,
@@ -123,6 +124,7 @@ impl Host {
             rt.thread.provider = provider;
             rt.thread.model = None;
             rt.thread.effort = None;
+            rt.thread.context = self.conversation_context(&rt, u32::MAX)?;
         }
         if model.is_some() {
             rt.thread.model = model;
@@ -218,6 +220,9 @@ impl Host {
             pending_requests: 0,
             activity: None,
             usage: Usage::default(),
+            // The parent's context at the fork point, until the fork's own conversation reports
+            // (T3 shows the source's usage while a fork is pending or forked natively).
+            context: from.and_then(|r| r.context),
             error: None,
             change: None,
             work: None,
@@ -248,6 +253,22 @@ impl Host {
         Ok(fork_point(&parent, &self.runs_of(&lineage.parent)?, provider, *upto))
     }
 
+    /// The context window of the conversation the thread's provider goes on with: its newest
+    /// kept run's report through run `upto`, while the provider still has that conversation (T3
+    /// keeps it on the provider thread, so a switch back shows it again).
+    fn conversation_context(&self, rt: &Rt, upto: u32) -> anyhow::Result<Option<ContextUsage>> {
+        let provider = &rt.thread.provider;
+        if !rt.private.native.contains_key(provider.as_str()) {
+            return Ok(None);
+        }
+        Ok(self
+            .runs_of(&rt.thread.id)?
+            .iter()
+            .rev()
+            .filter(|r| r.ordinal <= upto && &r.provider == provider && r.status != RunStatus::RolledBack)
+            .find_map(|r| r.context))
+    }
+
     /// Records how a fork's first session got its parent's conversation (`fork`, when natively),
     /// and says so in the run that started it.
     pub(crate) fn settle_transfer(&self, rt: &mut Rt, fork: Option<&ForkFrom>) -> anyhow::Result<()> {
@@ -271,6 +292,10 @@ impl Host {
             None => Transfer::Portable,
         });
         self.save_private(rt)?;
+        if !native && rt.thread.context.take().is_some() {
+            // A fresh conversation with a summary: the parent's context isn't this one's.
+            self.put(vec![Entity::Thread(rt.thread.clone())])?;
+        }
         let Some(active) = rt.active.as_mut() else { return Ok(()) };
         let at = now();
         let node = Node {
@@ -372,6 +397,7 @@ impl Host {
         rt.private.head = Some(target.commit.clone());
         rt.private.refs.retain(|ordinal, _| *ordinal <= target.ordinal);
         self.rollback_providers(&mut rt, &rolled, target.ordinal).await?;
+        rt.thread.context = self.conversation_context(&rt, target.ordinal)?;
         rt.thread.updated_at = now();
         batch.push(Entity::Thread(rt.thread.clone()));
         self.put(batch)?;
@@ -559,6 +585,7 @@ mod tests {
             checkpoint: None,
             stat: None,
             usage: Usage::default(),
+            context: None,
             error: None,
         }
     }

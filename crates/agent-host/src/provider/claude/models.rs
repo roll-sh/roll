@@ -1,6 +1,8 @@
 //! Claude models and efforts, matching T3 Code's model manifest for its `claudeAgent` driver
 //! (`apps/server/src/provider/model-manifest.json`, the "current" models) and how
-//! `claudeModelOptions.ts` compiles an effort into CLI flags.
+//! `claudeModelOptions.ts` compiles an effort into CLI flags, and each model's context window
+//! (the manifest's `fixedContextWindowTokens` / `contextWindowTokens`, as
+//! `resolveClaudeCatalogContextWindowTokens` reads them).
 
 use agent_proto::ModelInfo;
 
@@ -47,6 +49,36 @@ pub(super) fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
     Some((parts.next()??, parts.next()??, parts.next()??))
 }
 
+/// The context window of a model id as Claude Code names it (`claude-opus-5-5`,
+/// `claude-sonnet-4-6[1m]`, `claude-haiku-4-5-20251001`); `None` for one T3's manifest doesn't
+/// know (the meter then shows tokens without a percentage).
+pub(super) fn context_window(model: &str) -> Option<u64> {
+    const M: u64 = 1_000_000;
+    const K200: u64 = 200_000;
+    let (model, one_m) = match model.strip_suffix("[1m]") {
+        Some(base) => (base, true),
+        None => (model, false),
+    };
+    let mut parts = model.strip_prefix("claude-").unwrap_or(model).split('-');
+    let family = parts.next()?;
+    if !matches!(family, "opus" | "sonnet" | "haiku" | "fable") {
+        return None;
+    }
+    let major: u32 = parts.next()?.parse().ok()?;
+    // A date suffix (`-20251001`) is not a minor version.
+    let minor: u32 = parts.next().and_then(|p| p.parse().ok()).filter(|m| *m < 100).unwrap_or(0);
+    Some(match (family, major, minor) {
+        _ if one_m => M,
+        // Fable and every 5.x model run with a fixed 1M window.
+        (_, 5.., _) | ("fable", ..) => M,
+        ("opus", 4, 7..) => M,
+        // Opus 4.6 selects 1M by default; Sonnet 4.6 selects 200k.
+        ("opus", 4, 6) => M,
+        (_, 3 | 4, _) => K200,
+        _ => return None,
+    })
+}
+
 /// What an effort turns into.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct Effort {
@@ -90,6 +122,21 @@ mod tests {
         assert_eq!(all[2].efforts.first().map(String::as_str), Some("low"));
         let old = models(Some("2.1.281 (Claude Code)"));
         assert_eq!(old.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["claude-opus-5-5", "claude-fable-5-1"]);
+    }
+
+    #[test]
+    fn context_windows_follow_t3s_manifest() {
+        assert_eq!(context_window("claude-opus-5-5"), Some(1_000_000));
+        assert_eq!(context_window("claude-haiku-5-5"), Some(1_000_000));
+        assert_eq!(context_window("claude-fable-5-1"), Some(1_000_000));
+        assert_eq!(context_window("claude-opus-4-6"), Some(1_000_000));
+        assert_eq!(context_window("claude-sonnet-4-6"), Some(200_000));
+        assert_eq!(context_window("claude-sonnet-4-6[1m]"), Some(1_000_000));
+        assert_eq!(context_window("claude-haiku-4-5-20251001"), Some(200_000));
+        assert_eq!(context_window("claude-opus-4-5"), Some(200_000));
+        assert_eq!(context_window("<synthetic>"), None);
+        assert_eq!(context_window("gpt-5"), None);
+        assert_eq!(context_window("opus"), None);
     }
 
     #[test]

@@ -6,14 +6,15 @@
 //! classification, approvals and their permission results (`permissionResultFromDecision`,
 //! `toSessionPermissionUpdates`), AskUserQuestion questions and answers
 //! (`claudeUserInputQuestions`, `claudeSdkUserInputAnswers`), TodoWrite steps, command and
-//! subagent output text, turn statuses from `result` (`terminalStatusFromResult`), and steering
-//! aborts that don't end the turn. The permission-result wire shape is the one
+//! subagent output text, turn statuses from `result` (`terminalStatusFromResult`), steering
+//! aborts that don't end the turn, and the context window (`emitContextUsage`,
+//! `claudeProviderTurnTokenUsage`: the main agent's last message, `post_tokens` after a compaction). The permission-result wire shape is the one
 //! `claude-agent-sdk-python/_internal/query.py` writes.
 
-use super::diff;
+use super::{diff, models};
 use crate::provider::{Item, ProviderEvent, TurnEnd};
 use agent_proto::{
-    Approval, ApprovalAction, ChangeKind, Decision, FileChange, NodeBody, NodeStatus, Question, QuestionOption, RequestBody,
+    Approval, ApprovalAction, ChangeKind, ContextUsage, Decision, FileChange, NodeBody, NodeStatus, Question, QuestionOption, RequestBody,
     Response, Todo, TodoStatus, ToolCall, ToolKind, Usage,
 };
 use serde_json::{Value, json};
@@ -42,6 +43,12 @@ pub(super) struct Translator {
     tools: BTreeMap<String, Item>,
     requests: BTreeMap<String, Pending>,
     compacting: Option<String>,
+    /// The main agent's newest message and its usage so far: what the conversation holds.
+    message_usage: Option<(String, MessageUsage)>,
+    /// The model the main agent's messages name (init's may be an alias or carry `[1m]`).
+    message_model: Option<String>,
+    /// The context last reported, so an unchanged one isn't sent again.
+    context: Option<ContextUsage>,
     /// `total_cost_usd` of the last result: older CLIs only report the session's running total.
     last_total_cost: Option<f64>,
     /// The permission mode to switch to when the user approves a plan.
@@ -60,6 +67,37 @@ struct Turn {
     /// The main agent said something (else the result text becomes the message, as in T3).
     said: bool,
     cursor: Option<String>,
+}
+
+/// One API message's `usage`, as Claude Code streams it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MessageUsage {
+    input: u64,
+    cache_creation: u64,
+    cache_read: u64,
+    output: u64,
+}
+
+impl MessageUsage {
+    /// Takes the counts `usage` has, keeping the others (a `message_delta` may carry only some).
+    fn merge(&mut self, usage: &Value) {
+        let n = |k: &str| usage.get(k).and_then(Value::as_u64);
+        self.input = n("input_tokens").unwrap_or(self.input);
+        self.cache_creation = n("cache_creation_input_tokens").unwrap_or(self.cache_creation);
+        self.cache_read = n("cache_read_input_tokens").unwrap_or(self.cache_read);
+        self.output = n("output_tokens").unwrap_or(self.output);
+    }
+
+    fn of(usage: &Value) -> Self {
+        let mut u = Self::default();
+        u.merge(usage);
+        u
+    }
+
+    /// Everything the request sent, cached or not (T3's `claudeMessageInputTokens`).
+    fn input_total(&self) -> u64 {
+        self.input + self.cache_creation + self.cache_read
+    }
 }
 
 struct Pending {
@@ -82,6 +120,9 @@ impl Translator {
             tools: BTreeMap::new(),
             requests: BTreeMap::new(),
             compacting: None,
+            message_usage: None,
+            message_model: None,
+            context: None,
             last_total_cost: None,
             after_plan,
             turns: 0,
@@ -191,6 +232,11 @@ impl Translator {
                     None => "Compacted the conversation".to_string(),
                 };
                 events.push(item(&id, None, NodeStatus::Completed, system_text(&text)));
+                // What's left after the compaction is the context now.
+                self.message_usage = None;
+                if let Some(post) = msg.pointer("/compact_metadata/post_tokens").and_then(Value::as_u64).filter(|n| *n > 0) {
+                    events.extend(self.emit_context(post));
+                }
             }
             Some("api_retry") => {
                 let id = format!("retry:{}", str_at(msg, "uuid").map(str::to_string).unwrap_or_else(|| self.next_seq().to_string()));
@@ -265,6 +311,24 @@ impl Translator {
             turn.cursor = str_at(msg, "uuid").map(str::to_string).or(turn.cursor.take());
         }
         let mut events = Vec::new();
+        // CLI-made `<synthetic>` messages report no usage of the context.
+        let model = str_at(message, "model");
+        if parent.is_none()
+            && model != Some("<synthetic>")
+            && let Some(usage) = message.get("usage")
+        {
+            let snapshot = MessageUsage::of(usage);
+            match &mut self.message_usage {
+                // Streamed already: the snapshot only fills in input a stream left out.
+                Some((current, u)) if *current == mid => {
+                    if u.input_total() == 0 && snapshot.input_total() > 0 {
+                        *u = MessageUsage { output: u.output.max(snapshot.output), ..snapshot };
+                    }
+                }
+                _ => self.message_usage = Some((mid.clone(), snapshot)),
+            }
+            events.extend(self.report_context(model));
+        }
         for (j, block) in content.iter().enumerate() {
             let id = format!("{mid}:{}", base + j);
             match str_at(block, "type") {
@@ -327,10 +391,25 @@ impl Translator {
         let Some(event) = msg.get("event") else { return Vec::new() };
         match str_at(event, "type") {
             Some("message_start") => {
+                let mut events = Vec::new();
                 if let Some(mid) = event.pointer("/message/id").and_then(Value::as_str) {
+                    if parent.is_none()
+                        && let Some(usage) = event.pointer("/message/usage")
+                    {
+                        self.message_usage = Some((mid.to_string(), MessageUsage::of(usage)));
+                        events.extend(self.report_context(str_at(&event["message"], "model")));
+                    }
                     self.streaming.insert(key, mid.to_string());
                 }
-                Vec::new()
+                events
+            }
+            Some("message_delta") => {
+                let (None, Some(usage), Some(mid)) = (parent, event.get("usage"), self.streaming.get(&key)) else { return Vec::new() };
+                match &mut self.message_usage {
+                    Some((current, u)) if current == mid => u.merge(usage),
+                    _ => return Vec::new(),
+                }
+                self.report_context(None).into_iter().collect()
             }
             Some("message_stop") => {
                 self.streaming.remove(&key);
@@ -711,6 +790,30 @@ impl Translator {
     /// `path` relative to the session's directory when it's inside it.
     fn rel(&self, path: &str) -> String {
         Path::new(path).strip_prefix(&self.cwd).ok().and_then(|p| p.to_str()).filter(|p| !p.is_empty()).unwrap_or(path).to_string()
+    }
+
+    /// The context the main agent's newest message shows. A report without input is a
+    /// placeholder, not a measurement (T3 drops it).
+    fn report_context(&mut self, model: Option<&str>) -> Option<ProviderEvent> {
+        let (_, u) = self.message_usage.as_ref()?;
+        if u.input_total() == 0 {
+            return None;
+        }
+        if let Some(model) = model {
+            self.message_model = Some(model.to_string());
+        }
+        let used = u.input_total() + u.output;
+        self.emit_context(used)
+    }
+
+    fn emit_context(&mut self, used: u64) -> Option<ProviderEvent> {
+        let context = ContextUsage { used_tokens: used, max_tokens: self.window(), total_processed_tokens: None };
+        (self.context.replace(context) != Some(context)).then_some(ProviderEvent::Context(context))
+    }
+
+    /// The session's model's window (init names `[1m]`), else the one its messages name.
+    fn window(&self) -> Option<u64> {
+        [&self.model, &self.message_model].into_iter().find_map(|m| m.as_deref().and_then(models::context_window))
     }
 
     fn next_seq(&mut self) -> u64 {

@@ -2,6 +2,7 @@
 {"model":"gpt-6-luna"}
 {"item":{"body":{"agent":"fixture_writer","prompt":"","type":"subagent"},"id":"call_KrtWrCMa1IBTJ4JEr5CvdJMs:01a0da41-bc86-72e1-a30c-e59a4079f55a","parent":null,"status":"running"}}
 {"usage":{"cached_tokens":0,"input_tokens":15998,"output_tokens":109}}
+{"context":{"max_tokens":258400,"total_processed_tokens":16107,"used_tokens":16107}}
 {"item":{"body":{"text":"**Waiting for agent**","type":"reasoning"},"id":"rs_03696b8961937e5c016ab6d989e28087d0ba611ea28e22e961","parent":null,"status":"running"}}
 {"item":{"body":{"text":"**Waiting for agent**","type":"reasoning"},"id":"rs_03696b8961937e5c016ab6d989e28087d0ba611ea28e22e961","parent":null,"status":"completed"}}
 {"item":{"body":{"text":"**Preparing fixture creation**","type":"reasoning"},"id":"rs_0ea6a125bc4e7661016ab6d98afc1c87d08fca86b24dc3e360","parent":"call_KrtWrCMa1IBTJ4JEr5CvdJMs:01a0da41-bc86-72e1-a30c-e59a4079f55a","status":"running"}}
@@ -18,11 +19,13 @@
 {"item":{"body":{"agent":"fixture_writer","prompt":"","result":"Written.","type":"subagent"},"id":"call_KrtWrCMa1IBTJ4JEr5CvdJMs:01a0da41-bc86-72e1-a30c-e59a4079f55a","parent":null,"status":"running"}}
 {"item":{"body":{"agent":"fixture_writer","prompt":"","result":"Written.","type":"subagent"},"id":"call_KrtWrCMa1IBTJ4JEr5CvdJMs:01a0da41-bc86-72e1-a30c-e59a4079f55a","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":15104,"input_tokens":32127,"output_tokens":141}}
+{"context":{"max_tokens":258400,"total_processed_tokens":32268,"used_tokens":16161}}
 {"item":{"body":{"text":"","type":"message"},"id":"msg_03696b8961937e5c016ab6d995012487d099704aa73dea56e6","parent":null,"status":"running"}}
 {"text_delta":{"item":"msg_03696b8961937e5c016ab6d995012487d099704aa73dea56e6","text":"Written"}}
 {"text_delta":{"item":"msg_03696b8961937e5c016ab6d995012487d099704aa73dea56e6","text":"."}}
 {"item":{"body":{"text":"Written.","type":"message"},"id":"msg_03696b8961937e5c016ab6d995012487d099704aa73dea56e6","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":30208,"input_tokens":48351,"output_tokens":147}}
+{"context":{"max_tokens":258400,"total_processed_tokens":48498,"used_tokens":16230}}
 {"turn_ref":"01a0da41-a31f-7741-bda3-ebc5ad36c38f"}
 {"turn_ended":"completed"}
 {"exited":null}

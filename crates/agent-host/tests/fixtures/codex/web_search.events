@@ -23,6 +23,7 @@
 {"item":{"body":{"input":{"query":""},"kind":"web","name":"webSearch","title":"Web search","type":"tool"},"id":"exec-f0a0c7db-02b9-449e-9981-9d588f7509ad","parent":null,"status":"running"}}
 {"item":{"body":{"input":{"queries":null,"query":"FIFA World Cup 2026 ticket prices official","type":"search"},"kind":"web","name":"webSearch","title":"FIFA World Cup 2026 ticket prices official","type":"tool"},"id":"exec-f0a0c7db-02b9-449e-9981-9d588f7509ad","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":21248,"input_tokens":21428,"output_tokens":71}}
+{"context":{"max_tokens":258400,"total_processed_tokens":21499,"used_tokens":21499}}
 {"item":{"body":{"text":"","type":"message"},"id":"msg_03bceefdcc0be4af016ab5be1f494887d080c69010f9873eec","parent":null,"status":"running"}}
 {"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1f494887d080c69010f9873eec","text":"web"}}
 {"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1f494887d080c69010f9873eec","text":" search"}}
@@ -30,6 +31,7 @@
 {"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1f494887d080c69010f9873eec","text":" complete"}}
 {"item":{"body":{"text":"web search fixture complete","type":"message"},"id":"msg_03bceefdcc0be4af016ab5be1f494887d080c69010f9873eec","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":42496,"input_tokens":46848,"output_tokens":79}}
+{"context":{"max_tokens":258400,"total_processed_tokens":46927,"used_tokens":25428}}
 {"turn_ref":"01a0d5ee-8888-7d30-8f2b-68fe28f521bc"}
 {"turn_ended":"completed"}
 {"exited":null}

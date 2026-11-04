@@ -11,6 +11,7 @@
 {"item":{"body":{"text":"malformed update ","type":"message"},"id":"msg:1:2","parent":null,"status":"running"}}
 {"text_delta":{"item":"msg:1:2","text":"fixture ok"}}
 {"item":{"body":{"text":"malformed update fixture ok","type":"message"},"id":"msg:1:2","parent":null,"status":"running"}}
+{"context":{"max_tokens":200000,"used_tokens":1200}}
 {"item":{"body":{"text":"malformed update fixture ok","type":"message"},"id":"msg:1:2","parent":null,"status":"completed"}}
 {"turn_ended":"completed"}
 {"exited":null}

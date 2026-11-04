@@ -4,14 +4,14 @@
 //! `TurnRef`, `TurnEnded(Completed)`); [`Script::Manual`] only records what it was sent and lets
 //! the test emit events through the [`FakeSession`] handle; [`Script::Demo`] plays a whole turn
 //! across processes (`ROLL_AGENT_FAKE=1 roll agent up`, for `pnpm test:agents`): streamed text, a
-//! command that asks for approval, and an edit to a file in the workspace. All answer `interrupt` with
+//! command that asks for approval, an edit to a file in the workspace, and a context report. All answer `interrupt` with
 //! `TurnEnded(Interrupted)` when a turn is running, like the real providers. A session started
 //! with `fork` is a new conversation; the test reads what it was forked from (or the turn it
 //! resumed at) in its `config`. Turn refs are numbered per conversation, across its sessions.
 
 use super::{Item, Provider, ProviderEvent, RollbackStyle, Session, SessionConfig, TurnEnd, TurnInput};
 use agent_proto::{
-    Approval, ApprovalAction, AuthStatus, Capabilities, ChangeKind, Decision, FileChange, InteractionMode, ModelInfo, NodeBody,
+    Approval, ApprovalAction, AuthStatus, Capabilities, ChangeKind, ContextUsage, Decision, FileChange, InteractionMode, ModelInfo, NodeBody,
     NodeStatus, ProviderId, ProviderInfo, RequestBody, Response, RuntimeMode, ToolCall, ToolKind, Usage,
 };
 use async_trait::async_trait;
@@ -35,6 +35,8 @@ pub enum Script {
 
 /// The file a [`Script::Demo`] turn writes.
 pub const DEMO_FILE: &str = "ROLL_DEMO.md";
+/// The context a [`Script::Demo`] conversation reports after its first turn; it grows per turn.
+const DEMO_CONTEXT: u64 = 12_400;
 /// Pause between a [`Script::Demo`] turn's steps, so its records have distinct times.
 const DEMO_STEP: Duration = Duration::from_millis(40);
 
@@ -363,6 +365,8 @@ impl FakeSession {
         let id = self.next_item();
         self.emit(self.message(&id, &answer, NodeStatus::Completed));
         self.emit(ProviderEvent::Usage(Usage { input_tokens: said.len() as u64, output_tokens: answer.len() as u64, cached_tokens: 0, cost_usd: None }));
+        let used = DEMO_CONTEXT + 1_000 * self.inner.turns.fetch_add(1, Ordering::SeqCst) as u64;
+        self.emit(ProviderEvent::Context(ContextUsage { used_tokens: used, max_tokens: Some(200_000), total_processed_tokens: None }));
         self.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
     }
 }
