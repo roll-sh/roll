@@ -449,6 +449,8 @@ export interface ModelInfo {
   name: string;
   default: boolean;
   efforts: string[];
+  /** One of the machine's custom models (its settings), not one the provider lists. */
+  custom?: boolean;
 }
 
 export interface Capabilities {
@@ -478,7 +480,101 @@ export interface MachineInfo {
   arch: string;
   version: string;
   home: string;
+  /** The providers on offer: turned-off ones are left out (they are in `settings`). */
   providers: ProviderInfo[];
+  /** The machine's settings (`null`: a daemon from before machine settings). */
+  settings: MachineConfig | null;
+}
+
+// ── machine settings (docs/code/agents.md, "Machine settings") ──
+
+/** A machine's settings as its daemon reports them: what the owner set, and what applies otherwise. */
+export interface MachineConfig {
+  /** What the owner set from roll (`machine.configure` replaces it whole). */
+  set: MachineSettings;
+  /** What applies where `set` says nothing: the daemon's `config.toml`, else roll's defaults. */
+  base: SettingsBase;
+  /** Every provider the daemon has, on or off. */
+  providers: ProviderBase[];
+  /** The daemon's `config.toml`: API keys and base URLs are set there, never through roll. */
+  config_path: string;
+}
+
+export interface SettingsBase {
+  worktree_dir: string;
+  branch_prefix: string;
+  clone_dir: string | null;
+  /** Seconds; 0 never. */
+  pull_every: number;
+  max_depth: number;
+  max_children: number;
+  git_name: string | null;
+  git_email: string | null;
+}
+
+/** A provider as the daemon has it, and what its `config.toml` entry says (variable names only). */
+export interface ProviderBase {
+  id: ProviderId;
+  name: string;
+  binary: string | null;
+  /** How many arguments `config.toml` gives it. */
+  args: number;
+  env: string[];
+}
+
+/**
+ * What the owner set for a machine (T3 Code's server settings that belong to a machine). Every
+ * field overrides `SettingsBase` or the provider's `config.toml` entry; unset falls back. As the
+ * wire has it: read a provider's through `providerSettings`.
+ */
+export interface MachineSettings {
+  providers?: Record<ProviderId, ProviderSettings>;
+  /** What new threads on the machine start with, after their project's defaults. */
+  defaults?: ThreadDefaults;
+  worktree_dir?: string;
+  branch_prefix?: string;
+  clone_dir?: string;
+  pull_every?: number;
+  max_depth?: number;
+  max_children?: number;
+  /** Who publishing commits as (both or neither). */
+  git_name?: string;
+  git_email?: string;
+}
+
+/** One provider's settings on a machine (unset `enabled`: on). */
+export interface ProviderSettings {
+  enabled?: boolean;
+  binary?: string;
+  /** After `config.toml`'s. */
+  args?: string[];
+  /** Over `config.toml`'s; never a credential (`isCredentialEnv`). */
+  env?: Record<string, string>;
+  models?: CustomModel[];
+}
+
+export interface CustomModel {
+  /** The slug the provider takes. */
+  id: string;
+  name?: string;
+}
+
+/** A provider's settings with the defaults filled in. */
+export function providerSettings(set: MachineSettings, id: ProviderId): Required<Omit<ProviderSettings, "binary">> & { binary?: string } {
+  const p = set.providers?.[id] ?? {};
+  return { enabled: p.enabled ?? true, binary: p.binary, args: p.args ?? [], env: p.env ?? {}, models: p.models ?? [] };
+}
+
+/**
+ * A variable that may carry a credential or point a provider somewhere else (agent-proto's
+ * `is_credential_env`, kept identical): roll never relays one, so settings refuse it and say to
+ * set it in the machine's `config.toml`.
+ */
+export function isCredentialEnv(name: string): boolean {
+  const upper = name.toUpperCase();
+  return ["KEY", "TOKEN", "SECRET", "PASS", "CREDENTIAL", "AUTH", "COOKIE", "SESSION", "PRIVATE", "URL", "ENDPOINT", "PROXY", "HOST"].some((w) =>
+    upper.includes(w),
+  );
 }
 
 /** `starting`: on its way up again after a stop (woken by a command, or started by its owner). */
@@ -605,6 +701,8 @@ export type Command =
   | { type: "terminal.resize"; terminal: TerminalId; cols: number; rows: number }
   | { type: "terminal.close"; terminal: TerminalId }
   | { type: "provider.refresh" }
+  /** Replace the machine's settings whole; the reply comes after its `hello` with them. */
+  | { type: "machine.configure"; settings: MachineSettings }
   | { type: "diff.get"; thread: ThreadId; run?: RunId }
   | { type: "fs.list"; project?: ProjectId; path: string }
   | { type: "fs.read"; project: ProjectId; path: string }
@@ -703,7 +801,9 @@ export type StreamEvent =
   | { type: "machine_removed"; cursor: number; machine: MachineId }
   | { type: "delta"; machine: MachineId; delta: Delta }
   /** The owner's canvas was saved: a device showing an older `revision` loads it again. */
-  | { type: "canvas"; cursor: number; revision: number; updated_at: Millis };
+  | { type: "canvas"; cursor: number; revision: number; updated_at: Millis }
+  /** The owner's agents settings were saved: a device showing an older `revision` loads them again. */
+  | { type: "settings"; cursor: number; revision: number; updated_at: Millis };
 
 /** `GET`/`PUT /v1/code/agents/{owner}/canvas`: the canvas as the owner arranged it (opaque here). */
 export interface SavedCanvas {
@@ -723,6 +823,24 @@ export class CanvasConflict extends Error {
 
 /** The largest canvas the relay keeps, as compact JSON (bytes). */
 export const MAX_CANVAS = 64 * 1024;
+
+/** `GET`/`PUT /v1/code/agents/{owner}/settings`: the owner's agents settings (opaque here; `owner-settings.ts` parses them). */
+export interface SavedSettings {
+  /** `null` until the first save. */
+  settings: Record<string, unknown> | null;
+  revision: number;
+  updated_at: Millis | null;
+}
+
+/** A settings save over a revision that isn't the current one (409): `current` is what is there now. */
+export class SettingsConflict extends Error {
+  constructor(readonly current: SavedSettings) {
+    super(`the settings changed (they are at revision ${current.revision})`);
+  }
+}
+
+/** The largest settings document the relay keeps, as compact JSON (bytes). */
+export const MAX_SETTINGS = 32 * 1024;
 
 // ── the relay protocol (daemon ↔ relay; mirrored for the fixture tests) ──
 
@@ -1093,8 +1211,42 @@ const providerInfoD = obj<ProviderInfo>({
   version: opt(str),
   auth: literal("ready", "missing", "unknown"),
   detail: opt(str),
-  models: vec(obj<ModelInfo>({ id: str, name: str, default: withDefault(bool, () => false), efforts: vec(str) })),
+  models: vec(obj<ModelInfo>({ id: str, name: str, default: withDefault(bool, () => false), efforts: vec(str), custom: optional(bool) })),
   capabilities: capabilitiesD,
+});
+const providerSettingsD = obj<ProviderSettings>({
+  enabled: optional(bool),
+  binary: optional(str),
+  args: optional(array(str)),
+  env: optional(map(str)),
+  models: optional(array(obj<CustomModel>({ id: str, name: optional(str) }))),
+});
+const machineSettingsD = obj<MachineSettings>({
+  providers: optional(map(providerSettingsD)),
+  defaults: optional(threadDefaultsD),
+  worktree_dir: optional(str),
+  branch_prefix: optional(str),
+  clone_dir: optional(str),
+  pull_every: optional(int),
+  max_depth: optional(int),
+  max_children: optional(int),
+  git_name: optional(str),
+  git_email: optional(str),
+});
+const machineConfigD = obj<MachineConfig>({
+  set: machineSettingsD,
+  base: obj<SettingsBase>({
+    worktree_dir: str,
+    branch_prefix: str,
+    clone_dir: opt(str),
+    pull_every: int,
+    max_depth: int,
+    max_children: int,
+    git_name: opt(str),
+    git_email: opt(str),
+  }),
+  providers: array(obj<ProviderBase>({ id: str, name: str, binary: opt(str), args: withDefault(int, () => 0), env: vec(str) })),
+  config_path: str,
 });
 const machineInfoD = obj<MachineInfo>({
   hostname: str,
@@ -1103,6 +1255,7 @@ const machineInfoD = obj<MachineInfo>({
   version: str,
   home: str,
   providers: array(providerInfoD),
+  settings: opt(machineConfigD),
 });
 export const machineD = obj<Machine>({
   id: str,
@@ -1181,6 +1334,7 @@ export const commandD: Decoder<Command> = tagged("type", {
   "terminal.resize": cmd<"terminal.resize">(obj({ terminal: str, cols: int, rows: int })),
   "terminal.close": cmd<"terminal.close">(obj({ terminal: str })),
   "provider.refresh": cmd<"provider.refresh">(obj({})),
+  "machine.configure": cmd<"machine.configure">(obj({ settings: machineSettingsD })),
   "diff.get": cmd<"diff.get">(obj({ thread: str, run: optional(str) })),
   "fs.list": cmd<"fs.list">(obj({ project: optional(str), path: str })),
   "fs.read": cmd<"fs.read">(obj({ project: str, path: str })),
@@ -1233,6 +1387,7 @@ export const streamEventD: Decoder<StreamEvent> = tagged("type", {
   machine_removed: obj<{ cursor: number; machine: MachineId }>({ cursor: int, machine: str }),
   delta: obj<{ machine: MachineId; delta: Delta }>({ machine: str, delta: deltaD }),
   canvas: obj<{ cursor: number; revision: number; updated_at: Millis }>({ cursor: int, revision: int, updated_at: int }),
+  settings: obj<{ cursor: number; revision: number; updated_at: Millis }>({ cursor: int, revision: int, updated_at: int }),
 } satisfies Record<StreamEvent["type"], Decoder<object>>);
 
 /** The canvas document: any JSON object (the canvas parses it), kept whole. */
@@ -1241,6 +1396,7 @@ const canvasDocD: Decoder<Record<string, unknown> | null> = nullable((v, p) => {
   return v as Record<string, unknown>;
 });
 export const savedCanvasD = obj<SavedCanvas>({ canvas: canvasDocD, revision: int, updated_at: nullable(int) });
+export const savedSettingsD = obj<SavedSettings>({ settings: canvasDocD, revision: int, updated_at: nullable(int) });
 
 const stampedD = obj<Stamped>({ seq: int, entity: entityD });
 export const daemonFrameD: Decoder<DaemonFrame> = tagged("type", {
@@ -1515,6 +1671,20 @@ export function createAgentsApi(
         return decode(savedCanvasD, await call("PUT", `${ag(owner)}/canvas`, revision === undefined ? { canvas: doc } : { canvas: doc, revision }));
       } catch (e) {
         if (e instanceof ApiError && e.status === 409) throw new CanvasConflict(decode(savedCanvasD, e.body));
+        throw e;
+      }
+    },
+    /** The owner's agents settings (`settings: null` before the first save). */
+    settings: async (owner: string) => decode(savedSettingsD, await call("GET", `${ag(owner)}/settings`)),
+    /**
+     * Save the owner's agents settings. With `revision`, only over that revision, else a
+     * `SettingsConflict` holding what is there now; without, the last writer wins. Owners only.
+     */
+    saveSettings: async (owner: string, doc: Record<string, unknown>, revision?: number): Promise<SavedSettings> => {
+      try {
+        return decode(savedSettingsD, await call("PUT", `${ag(owner)}/settings`, revision === undefined ? { settings: doc } : { settings: doc, revision }));
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 409) throw new SettingsConflict(decode(savedSettingsD, e.body));
         throw e;
       }
     },

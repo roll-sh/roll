@@ -68,6 +68,11 @@ export interface AgentsData {
    * showing an older revision loads it again (`AgentsServices.canvas.load`).
    */
   canvas: { revision: number; updated_at: number } | null;
+  /**
+   * The newest save of the owner's agents settings the stream announced (`null`: none since the
+   * page opened). A device showing an older revision loads them again (`AgentsServices.settings`).
+   */
+  settings: { revision: number; updated_at: number } | null;
 }
 
 export const emptyData = (): AgentsData => ({
@@ -84,6 +89,7 @@ export const emptyData = (): AgentsData => ({
   tombs: new Map(),
   detail: new Set(),
   canvas: null,
+  settings: null,
 });
 
 /** Tombstones kept at most; the oldest go first (only a very late stale upsert could need one). */
@@ -140,6 +146,11 @@ class Draft {
   /** Revisions only go up: a late or replayed announcement never takes the canvas back. */
   canvas(revision: number, updated_at: number) {
     if (revision > (this.d.canvas?.revision ?? 0)) this.d.canvas = { revision, updated_at };
+  }
+
+  /** The same for the owner's agents settings. */
+  settings(revision: number, updated_at: number) {
+    if (revision > (this.d.settings?.revision ?? 0)) this.d.settings = { revision, updated_at };
   }
 
   machine(cursor: number, m: Machine) {
@@ -321,6 +332,10 @@ export function applyEvents(data: AgentsData, events: readonly StreamEvent[]): A
         break;
       case "canvas":
         d.canvas(ev.revision, ev.updated_at);
+        d.cursor(ev.cursor);
+        break;
+      case "settings":
+        d.settings(ev.revision, ev.updated_at);
         d.cursor(ev.cursor);
         break;
     }
