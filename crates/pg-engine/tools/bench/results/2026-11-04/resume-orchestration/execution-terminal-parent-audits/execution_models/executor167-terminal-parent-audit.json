@@ -1,0 +1,106 @@
+{
+  "commit": "cecceeaa60e1f63ae6dd179b214a812fb9c09f2d",
+  "ref": "refs/heads/wip/resume-20261104-executor167",
+  "remote_exact": true,
+  "status": "PASS",
+  "bundle_count": 18,
+  "payloads": 150,
+  "bundles": [
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-debug-c1594cc6",
+      "payloads": 14,
+      "manifest_sha256": "8ce0af7b80eed9a551ea7959ab31236deba3bac1af87c5139efc80dbbc586aa2"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-fixture-c1594cc6",
+      "payloads": 2,
+      "manifest_sha256": "20643a5b160462ef7243e7968e4871754721c2682e01a13ba34d9c5044b5788a"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-golden-6eb2c85e",
+      "payloads": 9,
+      "manifest_sha256": "d5821094fac47158d5aecf21151d5ca7ea8de6d08db0e8e583cc9e38411086d3"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-repair-3792eaec",
+      "payloads": 2,
+      "manifest_sha256": "708e8d064e8a26941cb2dabb799d9abfb57c91381310fa64fde9fa55a004a24a"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-review-compile-red",
+      "payloads": 7,
+      "manifest_sha256": "cfce97e8d90c3d5b7b0b91e58588d202a252fc621302f6920428fe4691b7cdc6"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-review-filter-red",
+      "payloads": 7,
+      "manifest_sha256": "37d8e0b530cd58775871cee116ad670e39c91db4eca9741a489eb3093e74d872"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-review-focused-green",
+      "payloads": 8,
+      "manifest_sha256": "9fc001d80b5175a3927beda9d67f5367659e03cdc24a9924f3865980700a6c70"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-review-progress1",
+      "payloads": 7,
+      "manifest_sha256": "d58e0d675c6f6258be2217955317fe3adc8723b96367168edf9d1aee27a7fa02"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-review-progress2",
+      "payloads": 8,
+      "manifest_sha256": "33c3b6881ef1b83cae812b1fb8795f3c196a7146db0f541b18bc64c9010769f7"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-review-progress3",
+      "payloads": 10,
+      "manifest_sha256": "16d9a0ab0e0d617e2dc42e6eb5dad67fcae4bb60b2cdab422d8d19a819ef740b"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-review-repair-source",
+      "payloads": 1,
+      "manifest_sha256": "900fd337599f1093d174a0cb22ae0e4eef93850212b47659425d3b1dfe02d72b"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-review-terminal",
+      "payloads": 13,
+      "manifest_sha256": "8cbf2a22d44b9fa43e9ab574321e7a07f24c2186850dcb0848b43efc1d2042f6"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-targeted-c1594cc6",
+      "payloads": 9,
+      "manifest_sha256": "c15b2b3f269a804790240bbc3f458e0ca9233f559d4ec67408bccf324cbf2c8f"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-terminal-c1594cc6",
+      "payloads": 18,
+      "manifest_sha256": "fca9bedbcd4f4cc4ca9d13cd1020a2003c6656a5a883557029d2b0a437b97532"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-varied-red",
+      "payloads": 10,
+      "manifest_sha256": "a3982b571f67744fb6ab8bde39c0b65335ffd164e19c647369ebe3d6b1627fc9"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-verify-3792eaec",
+      "payloads": 9,
+      "manifest_sha256": "4d52fe6197a733ccec6f27f5d749dd1c59d8d9f9f305d97036ff76211686fc83"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-verify-f92d227b",
+      "payloads": 8,
+      "manifest_sha256": "814b7c3aea420eff13167237c5148eb6486717f165180da3873588be8bfa5188"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167",
+      "payloads": 8,
+      "manifest_sha256": "9e530e6845cc7dd562f63a6969ee616b308d7a25d5b7c289788ffb27e094520c"
+    }
+  ],
+  "closed_membership": true,
+  "missing": 0,
+  "mismatch": 0,
+  "scope": "Committed evidence integrity only; no rerun or readiness acceptance",
+  "weighted_inner_MEDIUM": "OPEN",
+  "shared_head_index_status_unchanged": true
+}

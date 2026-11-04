@@ -1,0 +1,91 @@
+{
+  "commit": "069d2f9c6e82f48264e04c0f0306db686cae7d66",
+  "ref": "refs/heads/wip/resume-20261104-models170",
+  "remote_exact": true,
+  "status": "PASS",
+  "bundle_count": 15,
+  "payloads": 143,
+  "bundles": [
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-golden-7a6ed0cd",
+      "payloads": 7,
+      "manifest_sha256": "314989e12c28b41454a1264bd887b0e29fbaab2b9c8bda6c1f84562bacec071a"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-kept-focused-green",
+      "payloads": 8,
+      "manifest_sha256": "643fc9260d34832534ebc7c0c0ef38df3f76f3b7e36e03c55929b3c56d0f5bef"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-kept-red",
+      "payloads": 7,
+      "manifest_sha256": "1ecd3161d2c8b126948102d04ea0949509fe8a1f1dc9e042d61ff64de19c1b88"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-kept-repair-source",
+      "payloads": 1,
+      "manifest_sha256": "90c37961da4d996e2c9dc9fbf26319ce6137097faeee77fa970edc7f273e2508"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-repair-3bb04519",
+      "payloads": 2,
+      "manifest_sha256": "0714259902f8e23bda78fe46fa72c94d2cfd11ee1b39be03348c23780b2b7477"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-review-progress1",
+      "payloads": 10,
+      "manifest_sha256": "5e67ca2963ec65ab13880b1a5fe44faa600cd952281d99ec4dcc38f7fb85276a"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-review-progress2",
+      "payloads": 11,
+      "manifest_sha256": "9f577a75b9088d18f09d98bd0bf675cfd40927a9096e4f704e240bed9a58b173"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-review-regression-source",
+      "payloads": 1,
+      "manifest_sha256": "09a1f02dee47bd6c44fa437592ad53d7be10b357cc1715b2099f939263180726"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-review-terminal",
+      "payloads": 16,
+      "manifest_sha256": "58141da90f07faddda3703590887edf24c48b727b92f7db809c779bb168e76dc"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-targeted-3bb04519",
+      "payloads": 12,
+      "manifest_sha256": "86a820d07a4a83336523189b5d49f3ce2d4a41f58b06434c78e9e60a8cd1aa63"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-targeted-b9e2786a",
+      "payloads": 9,
+      "manifest_sha256": "357f46946f9d0e3412e0cc144f686f5401cf88b4ada1e47e617a6d3a47a14b4a"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-terminal-3bb04519",
+      "payloads": 19,
+      "manifest_sha256": "54962a24041ad64ff0b6361f9a7ca1ef8e8f608b55e2e42552aa41be0885a3c0"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-vacuum-readonly",
+      "payloads": 13,
+      "manifest_sha256": "f1bf21072ae9acb2bdac78dfc86ce763be7603d77b15f9425c95ac5b8f3623d8"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-verify-b9e2786a",
+      "payloads": 19,
+      "manifest_sha256": "a10e1e6bfb26dd4c7c8701465f35e41aa46782d2d290a94404788071598a7ce2"
+    },
+    {
+      "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170",
+      "payloads": 8,
+      "manifest_sha256": "01be07b24567c30fe69b66d81403cd8ec4eebe0d55220fb071dfc42ce5323548"
+    }
+  ],
+  "closed_membership": true,
+  "missing": 0,
+  "mismatch": 0,
+  "scope": "Committed evidence integrity only; no test rerun",
+  "readiness": "HELD: post-TOAST correctness and parent combined HIGH",
+  "shared_head_index_status_unchanged": true
+}

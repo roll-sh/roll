@@ -1,0 +1,7 @@
+{
+  "threadId": "thread:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Adelegate-task%3Apg-resume-20261104-execution_models-r1",
+  "messageId": "message:mcp:9e5a6feb-d435-4514-ac9d-07c1b03b444b:thread-send:pg-resume-20261104-defer149-overlap-continue-correctness",
+  "runId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A9e5a6feb-d435-4514-ac9d-07c1b03b444b%253Adelegate-task%253Apg-resume-20261104-execution_models-r1:ordinal:1",
+  "status": "running",
+  "delivery": "steered"
+}

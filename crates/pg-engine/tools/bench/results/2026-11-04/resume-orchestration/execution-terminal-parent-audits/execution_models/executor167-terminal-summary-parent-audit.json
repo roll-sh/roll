@@ -1,0 +1,131 @@
+{
+  "commit": "cecceeaa60e1f63ae6dd179b214a812fb9c09f2d",
+  "checks": [
+    {
+      "name": "parallel-current",
+      "exit": 0,
+      "source_unchanged": true,
+      "totals": [
+        10,
+        0,
+        0
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "pg-engine",
+        "--test",
+        "parallel_scan"
+      ]
+    },
+    {
+      "name": "build",
+      "exit": 0,
+      "source_unchanged": true,
+      "totals": [
+        0,
+        0,
+        0
+      ],
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "pg-engine",
+        "--bin",
+        "roll-engine"
+      ]
+    },
+    {
+      "name": "debug",
+      "exit": 0,
+      "source_unchanged": true,
+      "totals": [
+        447,
+        0,
+        18
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "pg-engine"
+      ]
+    },
+    {
+      "name": "release",
+      "exit": 0,
+      "source_unchanged": true,
+      "totals": [
+        447,
+        0,
+        18
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "pg-engine"
+      ]
+    },
+    {
+      "name": "clippy",
+      "exit": 0,
+      "source_unchanged": true,
+      "totals": [
+        0,
+        0,
+        0
+      ],
+      "command": [
+        "cargo",
+        "clippy",
+        "-p",
+        "pg-engine",
+        "--all-targets"
+      ]
+    },
+    {
+      "name": "crash30",
+      "exit": 0,
+      "source_unchanged": true,
+      "totals": [
+        2,
+        0,
+        0
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "pg-engine",
+        "--test",
+        "crash_random"
+      ]
+    },
+    {
+      "name": "postgres-unit",
+      "exit": 0,
+      "source_unchanged": true,
+      "totals": [
+        24,
+        0,
+        0
+      ],
+      "command": [
+        "pnpm",
+        "test:pg",
+        "--unit"
+      ]
+    }
+  ],
+  "source_gates": "PASS",
+  "weighted_inner_MEDIUM": "OPEN; readiness held",
+  "service_stack_acceptance": false,
+  "pnpm_unit_exercises_pg_engine": false,
+  "scope": "Parent checked committed logs, source pins and summaries; no test reruns"
+}

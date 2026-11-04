@@ -1,0 +1,200 @@
+{
+  "commit": "069d2f9c6e82f48264e04c0f0306db686cae7d66",
+  "checks": [
+    {
+      "name": "index-progress-current",
+      "exit": 0,
+      "source_unchanged": true,
+      "log_sha_verified": true,
+      "totals": [
+        3,
+        0,
+        0
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "pg-engine",
+        "--test",
+        "golden"
+      ]
+    },
+    {
+      "name": "maintenance-current",
+      "exit": 0,
+      "source_unchanged": true,
+      "log_sha_verified": true,
+      "totals": [
+        3,
+        0,
+        0
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "pg-engine",
+        "--test",
+        "golden"
+      ]
+    },
+    {
+      "name": "golden-current",
+      "exit": 0,
+      "source_unchanged": true,
+      "log_sha_verified": true,
+      "totals": [
+        3,
+        0,
+        0
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "pg-engine",
+        "--test",
+        "golden"
+      ]
+    },
+    {
+      "name": "models-current",
+      "exit": 0,
+      "source_unchanged": true,
+      "log_sha_verified": true,
+      "totals": [
+        21,
+        0,
+        0
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "pg-engine",
+        "--test",
+        "models_kept",
+        "--test",
+        "big_tables"
+      ]
+    },
+    {
+      "name": "build",
+      "exit": 0,
+      "source_unchanged": true,
+      "log_sha_verified": true,
+      "totals": [
+        0,
+        0,
+        0
+      ],
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "pg-engine",
+        "--bin",
+        "roll-engine"
+      ]
+    },
+    {
+      "name": "debug",
+      "exit": 0,
+      "source_unchanged": true,
+      "log_sha_verified": true,
+      "totals": [
+        453,
+        0,
+        18
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "pg-engine"
+      ]
+    },
+    {
+      "name": "release",
+      "exit": 0,
+      "source_unchanged": true,
+      "log_sha_verified": true,
+      "totals": [
+        453,
+        0,
+        18
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "pg-engine"
+      ]
+    },
+    {
+      "name": "clippy",
+      "exit": 0,
+      "source_unchanged": true,
+      "log_sha_verified": true,
+      "totals": [
+        0,
+        0,
+        0
+      ],
+      "command": [
+        "cargo",
+        "clippy",
+        "-p",
+        "pg-engine",
+        "--all-targets"
+      ]
+    },
+    {
+      "name": "crash30",
+      "exit": 0,
+      "source_unchanged": true,
+      "log_sha_verified": true,
+      "totals": [
+        2,
+        0,
+        0
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "pg-engine",
+        "--test",
+        "crash_random"
+      ]
+    },
+    {
+      "name": "postgres-unit",
+      "exit": 0,
+      "source_unchanged": true,
+      "log_sha_verified": true,
+      "totals": [
+        24,
+        0,
+        0
+      ],
+      "command": [
+        "pnpm",
+        "test:pg",
+        "--unit"
+      ]
+    }
+  ],
+  "source_gates": "PASS",
+  "readiness": "HELD: TOAST follow-up and parent combined HIGH",
+  "service_stack_acceptance": false,
+  "pnpm_unit_exercises_pg_engine": false,
+  "scope": "Parent checked committed logs, source pins and summaries; no test reruns"
+}
