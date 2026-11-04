@@ -1380,6 +1380,7 @@ fn sys_shared_scan(
     } {
         return Ok(Some(Box::new(LazyRowsNode {
             table,
+            catalog: ctx.catalog(),
             filter: None,
             need: need.map(Rc::from),
             rows: None,
@@ -1403,6 +1404,7 @@ fn sys_shared_scan(
                 None if filter.is_none_or(quiet_filter) => {
                     return Ok(Some(Box::new(LazyRowsNode {
                         table,
+                        catalog: ctx.catalog(),
                         filter: filter.cloned(),
                         need: need.map(Rc::from),
                         rows: None,
@@ -1419,6 +1421,7 @@ fn sys_shared_scan(
         {
             return Ok(Some(Box::new(LazyRowsNode {
                 table,
+                catalog: ctx.catalog(),
                 filter: filter.cloned(),
                 need: need.map(Rc::from),
                 rows: None,
@@ -1818,7 +1821,8 @@ impl Node for SharedRowsNode {
 /// joins pg_namespace) gets only those relations' rows made (`system::class_rows_where`).
 struct LazyRowsNode {
     table: crate::catalog::system::SysTable,
-    /// (Quiet, `quiet_filter`, unless the table is pg_class without a narrowing filter.)
+    catalog: Arc<crate::catalog::Catalog>,
+    /// A filter proven quiet before generation was deferred (`quiet_filter`).
     filter: Option<Expr>,
     need: Option<Rc<[bool]>>,
     rows: Option<SharedRowsNode>,
@@ -1827,9 +1831,12 @@ struct LazyRowsNode {
 impl LazyRowsNode {
     fn rows(&mut self, ctx: &ExecCtx) -> Result<&mut SharedRowsNode> {
         if self.rows.is_none() {
-            let rows = crate::catalog::system::rows_shared(self.table, ctx)?;
+            let held = (!Arc::ptr_eq(&self.catalog, &ctx.catalog()))
+                .then(|| ctx.reading_catalog(self.catalog.clone()));
+            let generation = held.as_ref().unwrap_or(ctx);
+            let rows = crate::catalog::system::rows_shared(self.table, generation)?;
             let picked = match &self.filter {
-                Some(f) => equality_picked(f, &rows, ctx)?,
+                Some(f) => equality_picked(f, &rows, generation)?,
                 None => None,
             };
             self.rows = Some(SharedRowsNode::new(rows, picked, self.filter.as_ref(), self.need.clone()));
@@ -1847,7 +1854,9 @@ impl Node for LazyRowsNode {
         match &mut self.rows {
             Some(r) => r.count_rest(ctx),
             None if self.filter.is_none() => {
-                let n = crate::catalog::system::row_count(self.table, ctx);
+                let held = (!Arc::ptr_eq(&self.catalog, &ctx.catalog()))
+                    .then(|| ctx.reading_catalog(self.catalog.clone()));
+                let n = crate::catalog::system::row_count(self.table, held.as_ref().unwrap_or(ctx));
                 // (Nothing is left once counted.)
                 let none = Arc::new(crate::catalog::system::SysRows::new(Vec::new()));
                 self.rows = Some(SharedRowsNode::new(none, None, None, None));
@@ -1859,12 +1868,15 @@ impl Node for LazyRowsNode {
 
     fn restrict_keys(&mut self, col: usize, keys: &[u32], ctx: &ExecCtx) -> Result<()> {
         use crate::catalog::system::SysTable;
+        let held = (!Arc::ptr_eq(&self.catalog, &ctx.catalog()))
+            .then(|| ctx.reading_catalog(self.catalog.clone()));
+        let generation = held.as_ref().unwrap_or(ctx);
         let quiet = self.filter.as_ref().is_none_or(quiet_filter);
         let subset = match (self.table, col) {
             _ if self.rows.is_some() || !quiet => None,
             (SysTable::PgClass, 0 | 2) => {
                 let mut w = match &self.filter {
-                    Some(f) => class_where(f, ctx)?,
+                    Some(f) => class_where(f, generation)?,
                     None => Default::default(),
                 };
                 let slot = if col == 0 { &mut w.oids } else { &mut w.schemas };
@@ -1873,9 +1885,9 @@ impl Node for LazyRowsNode {
                     keys.retain(|k| had.contains(k));
                 }
                 *slot = Some(keys);
-                crate::catalog::system::class_rows_where(ctx, &w)?
+                crate::catalog::system::class_rows_where(generation, &w)?
             }
-            (SysTable::PgAttribute, 0) => crate::catalog::system::attribute_rows_of(ctx, keys)?,
+            (SysTable::PgAttribute, 0) => crate::catalog::system::attribute_rows_of(generation, keys)?,
             _ => None,
         };
         if let Some(rows) = subset {
