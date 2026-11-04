@@ -4013,7 +4013,7 @@ pub fn reattach(t: &Table, d: Detached, rekey: &[(Vec<u8>, Vec<u8>)], db: &Datab
         }
     }
     if let Some(mut tt) = d.toast {
-        let mut rows = HashMap::with_capacity(tt.rows.len());
+        let mut rows = FastMap::with_capacity_and_hasher(tt.rows.len(), Default::default());
         for (old, new) in rekey {
             if let Some(e) = tt.rows.remove(old) {
                 rows.insert(new.clone(), e);
