@@ -2693,8 +2693,13 @@ impl Txn {
         o.upper_done = false;
         o.lower_head = None;
         o.lower_done = false;
-        it.src = self.toast_source(start, end, st.ts, mark, OwnVals::Now);
-        it.reader = None;
+        // (Without writes of ours the values' source is the store's, whatever the range: the
+        // one it had stays.)
+        let keep = self.writes.is_empty() && it.src.is_some() == crate::storage::toast::may_hold_rows(start, end);
+        if !keep {
+            it.src = self.toast_source(start, end, st.ts, mark, OwnVals::Now);
+            it.reader = None;
+        }
         true
     }
 

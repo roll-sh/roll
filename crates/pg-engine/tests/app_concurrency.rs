@@ -398,6 +398,30 @@ fn serializable_transfers_retried() {
 }
 
 #[test]
+fn secondary_index_update_cold_and_hot() {
+    on_engine(|t| async move {
+        let c = t.connect().await;
+        c.batch_execute(
+            "CREATE TABLE endpoint_account (id int PRIMARY KEY, balance bigint NOT NULL);
+             INSERT INTO endpoint_account VALUES (1, 1000);
+             SET enable_seqscan = off; SET enable_bitmapscan = off",
+        ).await.unwrap();
+        let plan: Vec<String> = c.query("EXPLAIN (COSTS OFF) UPDATE endpoint_account SET balance = balance - 3 WHERE id = 1", &[])
+            .await.unwrap().iter().map(|r| r.get(0)).collect();
+        assert!(plan.iter().any(|s| s.contains("Index Scan") && s.contains("endpoint_account_pkey")), "{plan:?}");
+        let cold = c.execute("UPDATE endpoint_account SET balance = balance - 3 WHERE id = 1", &[]).await.unwrap();
+        let cold_balance: i64 = c.query_one("SELECT balance FROM endpoint_account", &[]).await.unwrap().get(0);
+        for _ in 0..8 {
+            let _: i64 = c.query_one("SELECT sum(balance)::int8 FROM endpoint_account", &[]).await.unwrap().get(0);
+        }
+        let hot = c.execute("UPDATE endpoint_account SET balance = balance + 3 WHERE id = 1", &[]).await.unwrap();
+        let final_balance: i64 = c.query_one("SELECT balance FROM endpoint_account", &[]).await.unwrap().get(0);
+        eprintln!("secondary UPDATE plan={plan:?} cold_rows={cold} cold_balance={cold_balance} hot_rows={hot} final_balance={final_balance}");
+        assert_eq!((cold, cold_balance, hot, final_balance), (1, 997, 1, 1000));
+    });
+}
+
+#[test]
 fn advisory_lock_leader_election() {
     on_engine(advisory_leader);
 }

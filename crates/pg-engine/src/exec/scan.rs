@@ -557,6 +557,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             kfilter: None,
             erb: Default::default(),
             spare: None,
+            fscan: None,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -648,6 +649,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             kfilter: None,
             erb: Default::default(),
             spare: None,
+            fscan: None,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -729,6 +731,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             kfilter: None,
             erb: Default::default(),
             spare: None,
+            fscan: None,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -877,6 +880,7 @@ fn open_scan_as(
         kfilter: None,
         erb: Default::default(),
         spare: None,
+        fscan: None,
         run: Default::default(),
         pending: None,
         blocks: Default::default(),
@@ -1737,6 +1741,7 @@ fn dense_bitmap_scan(
         kfilter: None,
         erb: Default::default(),
         spare: None,
+        fscan: None,
         run: Default::default(),
         pending: None,
         one_run: false,
@@ -2165,6 +2170,9 @@ struct ScanNode {
     /// The last range's store iterator once it ended, for the next range to read on with
     /// (`Txn::reseek_snap`) instead of a new one.
     spare: Option<StoreIter>,
+    /// The table's rows read for a few keys at a time (`fetch_kept`): one scan kept and
+    /// sought from key to key, its sources staying in their blocks.
+    fscan: Option<Box<TxnScan>>,
     /// Such a scan read by worker threads (`parscan`), once decided (`par_tried`).
     par: Option<super::parscan::ParScan>,
     par_tried: bool,
@@ -3387,6 +3395,11 @@ impl ScanNode {
             {
                 return Ok(rows);
             }
+            if keys.len() < 4
+                && let Some(rows) = self.fetch_kept(keys, ctx)?
+            {
+                return Ok(rows);
+            }
             return fetch_rows(keys, ctx);
         };
         let txn = ctx.txn.borrow();
@@ -3401,6 +3414,35 @@ impl ScanNode {
             self.toast = Some(std::cell::RefCell::new(crate::txn::toast::Reader::new(src)));
         }
         get_sorted(&txn, keys, &snap, false)
+    }
+
+    /// `fetch_rows` of a few keys at the statement's snapshot through one scan kept from call
+    /// to call (`fscan`), sought to each key (`Txn::reseek_snap`): the next of ascending
+    /// lookups (a nested loop's inner rows, an index's entries in its table's order) reads on
+    /// in the blocks the last one read, instead of a lookup from the top each. Values are put
+    /// back as `fetch_rows` puts them. None: no statement snapshot.
+    fn fetch_kept(&mut self, keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Option<Vec<Option<bytes::Bytes>>>> {
+        let Some(snap) = ctx.snapshot() else {
+            return Ok(None);
+        };
+        let txn = ctx.txn.borrow();
+        let mut out = Vec::with_capacity(keys.len());
+        for k in keys {
+            // (The smallest key past `k`: user keys are prefix-free.)
+            let mut end = k.clone();
+            end.push(0);
+            let kept = self.fscan.take().and_then(|mut it| txn.reseek_snap(&mut it, k, &end, &snap).then_some(it));
+            let mut it = kept.unwrap_or_else(|| Box::new(txn.scan_snap(k, &end, &snap)));
+            out.push(match it.next() {
+                Some(r) => {
+                    let (rk, v) = r?;
+                    (rk == *k).then_some(v)
+                }
+                None => None,
+            });
+            self.fscan = Some(it);
+        }
+        Ok(Some(out))
     }
 
     /// Whether this scan's rows go through `LazyScan` (decided once): a plain sequential
@@ -3526,10 +3568,10 @@ impl ScanNode {
         self.prefilter.clone().flatten()
     }
 
-    /// The scan's filter decided by its kernel (None: left to `eval`) for a row made from
-    /// the stored row `bytes` (an index scan's rows, their conditions checked again): over
-    /// the stored values first (`StoredCmps`), else over the row.
-    fn filter_kernel(&mut self, bytes: &[u8], row: &Row) -> Option<bool> {
+    /// The scan's filter decided by its kernel (None: left to `eval`) for the stored row
+    /// `bytes` (an index scan's rows, their conditions checked again; a row whose filter reads
+    /// a few of its columns): over the stored values first (`StoredCmps`), else over `row`.
+    fn filter_kernel(&mut self, bytes: &[u8], row: Option<&Row>) -> Option<bool> {
         let stored = self.ios_cols.is_none() && !crate::storage::toast::has_external(bytes);
         let plan = &self.plan;
         let (k, cmps) = self
@@ -3547,7 +3589,7 @@ impl ScanNode {
         {
             return Some(pass);
         }
-        k.passes(row)
+        k.passes(row?)
     }
 
     fn full_row(&self, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<Row> {
@@ -3645,7 +3687,8 @@ impl ScanNode {
 fn scan_row_need(plan: &ScanPlan, key: &[u8], bytes: &[u8], need: &[bool], ctx: &ExecCtx) -> Result<Row> {
     let t = &plan.table;
     let (xmin, data) = split_header(bytes)?;
-    let mut row = crate::storage::row::decode_row_need(data, need)?;
+    // (Room for the key and system columns `scan_row_rest` adds: no reallocation per row.)
+    let mut row = crate::storage::row::decode_row_need_spare(data, need, rest_len(plan))?;
     if row.len() < t.columns.len() {
         for (i, c) in t.columns.iter().enumerate().skip(row.len()) {
             row.push(match need.get(i) {
@@ -3661,8 +3704,19 @@ fn scan_row_need(plan: &ScanPlan, key: &[u8], bytes: &[u8], need: &[bool], ctx: 
 
 /// A stored row as scan `plan` emits it: columns, then the key and system columns if asked.
 fn scan_row(plan: &ScanPlan, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<Row> {
+    // (Every column, as `scan_row_need` decodes them: sized once with the key and system
+    // columns.)
+    static ALL: [bool; 1664] = [true; 1664];
+    if let Some(all) = ALL.get(..plan.table.columns.len()) {
+        return scan_row_need(plan, key, bytes, all, ctx);
+    }
     let row = decode_table_row_at(&plan.table, Some(key), bytes)?;
     scan_row_rest(plan, key, bytes, row, ctx)
+}
+
+/// The values `scan_row_rest` adds after a row's columns.
+fn rest_len(plan: &ScanPlan) -> usize {
+    plan.with_key as usize + if plan.sys { NUM_SYS_COLS } else { 0 }
 }
 
 /// The key and system columns after a scanned row's columns, if the scan asks for them.
@@ -4560,20 +4614,35 @@ impl ScanNode {
             && self.ios_cols.is_none()
             && let Some(fm) = self.prefilter_mask().or_else(|| self.external_prefilter(bytes))
             && !predicate_locked(&self.plan.table, ctx)
-            && let Some(f) = &self.plan.filter
+            && self.plan.filter.is_some()
         {
             let ext = self.toast.is_some() && crate::storage::toast::has_external(bytes);
-            let probe = match ext {
-                true => self.row_ext(key, bytes, Some(&fm), None, ctx)?,
-                false => scan_row_need(&self.plan, key, bytes, &fm, ctx)?,
-            };
-            if !eval_bool(f, &probe, ctx)? {
-                ctx.filtered(self.key);
-                return Ok(None);
-            }
-            prefiltered = true;
-            if ext {
-                probed = Some((probe, fm));
+            // (Decided over the stored values, nothing decoded: `StoredCmps`; else over the
+            // filter's columns by its kernel, else `eval`.)
+            match self.filter_kernel(bytes, None) {
+                Some(false) => {
+                    ctx.filtered(self.key);
+                    return Ok(None);
+                }
+                Some(true) => prefiltered = true,
+                None => {
+                    let probe = match ext {
+                        true => self.row_ext(key, bytes, Some(&fm), None, ctx)?,
+                        false => scan_row_need(&self.plan, key, bytes, &fm, ctx)?,
+                    };
+                    let pass = match self.filter_kernel(bytes, Some(&probe)) {
+                        Some(p) => p,
+                        None => eval_bool(self.plan.filter.as_ref().expect("a filter"), &probe, ctx)?,
+                    };
+                    if !pass {
+                        ctx.filtered(self.key);
+                        return Ok(None);
+                    }
+                    prefiltered = true;
+                    if ext {
+                        probed = Some((probe, fm));
+                    }
+                }
             }
         }
         let mut row = match (lazy, &self.ios_cols, probed) {
@@ -4622,7 +4691,7 @@ impl ScanNode {
         }
         if !prefiltered
             && self.plan.filter.is_some()
-            && !match self.filter_kernel(bytes, &row) {
+            && !match self.filter_kernel(bytes, Some(&row)) {
                 Some(pass) => pass,
                 None => eval_bool(self.plan.filter.as_ref().expect("a filter"), &row, ctx)?,
             }
@@ -5269,6 +5338,7 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
         kfilter: None,
         erb: Default::default(),
         spare: None,
+        fscan: None,
         run: Default::default(),
         pending: None,
         one_run: false,
