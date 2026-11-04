@@ -1,6 +1,6 @@
 use pg_engine::storage::cache::BlockCache;
-use pg_engine::storage::read_once;
-use pg_engine::storage::sst::{SstReader, SstWriter, mvcc_key};
+use pg_engine::storage::{mvcc_key, read_once};
+use pg_engine::storage::sst::{SstReader, SstWriter};
 use std::sync::Arc;
 
 #[test]

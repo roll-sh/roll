@@ -3847,7 +3847,7 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     (a model of every version through flushes, compactions, collection, retirement and
     crashes, pinned snapshots read at every step), `tests/txn_spill.rs` (TRUNCATE / DROP with
     savepoints and spills).
-  - **Linked runs** (format 2: `SstMeta::commit_ts`, read by `sst::relink` when a block is
+  - **Linked runs** (format 2: `SstMeta::commit_ts`, read by `Block::decode_linked` when a block is
     loaded and by the index at open; files without it read as before): a spilled run whose
     every write was fresh (`Txn::put_fresh`: a new row's key, a fresh row id, and its index
     entries; an index build's sorted runs; a DELETE's deferred entry deletes) becomes a file
@@ -3858,8 +3858,18 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     (`Runs::segs`: a run's whole range spans every table between its first and last key, so
     pgbench -i's TRUNCATE and COPYs of three tables in one transaction linked nothing).
     Linked runs merge in tiers of 16, not 4.
-    `Store::close` compacts linked files away. COPY's 64 MB runs are linked; its last
-    buffer still goes into the commit's file.
+    Fresh sink runs use `StoreOptions::compress`; other temporary runs stay uncompressed.
+    A linked run can enter L1 directly when its key range overlaps no memtable, frozen
+    source, L0/L1 file or sibling run, its size fits the bottom-level target, and its
+    encoding meets the store's compression policy. Linked L1 commit timestamps, as well
+    as L0 timestamps, split WAL replay into ordered memtables. `Store::close` stages any
+    linked L1 files into L0 and compacts all linked files into ordinary SSTs, preserving
+    clean-close compatibility with pre-linked builds without expanding hot compaction.
+    Bottom-level compaction can reclaim a tombstone and all older versions only past
+    the snapshot horizon; its timestamp remains available to conflict checks while a
+    snapshot can still need it. Tests `storage_linked_gc` cover overlapping L0/L1 and
+    direct-L1 snapshots, replay barriers, compression policy and crash/clean reopen.
+    COPY's 64 MB runs are linked; its last buffer still goes into the commit's file.
   - **ANALYZE of a table too big to model** doesn't measure it: its pages are the estimate kept
     as it grew (`sizing::heap_blocks`), its tuples the rows the sample's pass counts, and its
     indexes' tuples and pages follow (`Ddl::sampled_counts`; an index's pages grow with its
