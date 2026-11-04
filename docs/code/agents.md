@@ -718,8 +718,12 @@ The surface has three views:
   are satellites of their thread. Only what is running right now moves: a running thread or
   subagent (and the edge into it) and a booting sandbox carry a calm accent pulse (`--accent`,
   1.6 s loop, off with reduced motion); the machine and project above them, and anything waiting
-  on you, keep still. Cards stay small: a thread's card is its status, title, what it's doing and
-  what it cost; a project's card sums it up like T3's project view (threads, running and
+  on you, keep still. Cards stay small: a thread's card is T3's thread row as a card
+  (`thread-status.tsx`): the project's monogram and name and the machine it runs on, T3's status
+  pill (pending approval, awaiting input, plan ready, working, connecting, failed, completed), the
+  title and what it's doing, the PR and work item it's attached to, its worktree and running
+  terminals, and what it cost; a run that finished since it was last opened turns its border
+  green (T3's completed tone) until it's opened; a project's card sums it up like T3's project view (threads, running and
   waiting, the PRs its threads made, the agents working in it); actions on machine and project
   cards show on hover (always on touch screens). The end of a thread card's footer and the
   conversation's composer footer show its context window as a small ring (T3's

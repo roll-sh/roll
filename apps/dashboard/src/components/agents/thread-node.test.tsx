@@ -2,8 +2,9 @@ import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { ThreadNode } from "./nodes";
+import { monogram, threadPill } from "./thread-status";
 import { Conversation } from "./session";
-import { approval, M1, machine, mirrored, node, project, run, thread } from "@/test/agents";
+import { approval, M1, machine, mirrored, node, project, question, run, terminal, thread } from "@/test/agents";
 import { agentsHarness, renderAgents } from "@/test/agents-render";
 
 describe("ThreadNode", () => {
@@ -27,6 +28,72 @@ describe("ThreadNode", () => {
     expect(screen.getByText("Find out why")).toBeInTheDocument();
     rerender(<ThreadNode thread={thread({ status: "error", error: "claude exited with 1" })} machine={machine()} />);
     expect(screen.getByText("claude exited with 1")).toBeInTheDocument();
+  });
+});
+
+describe("ThreadNode, T3's thread row as a card", () => {
+  it("shows the project, the machine it runs on, the PR, the worktree and a running terminal", () => {
+    const t = thread({
+      run_count: 1,
+      change: { repo: "acme/roll", number: 41, status: "ready", url: "/acme/roll/changes/41", detail: null },
+      worktree: { path: "/Users/ada/.roll/worktrees/thr_1", branch: "roll/fix-queue", base: "main" },
+    });
+    const h = agentsHarness({
+      entities: [mirrored("project", project({ name: "roll web" }), 1), mirrored("thread", t, 2), mirrored("terminal", terminal({ thread: "thr_1" }), 3)],
+    });
+    renderAgents(<ThreadNode thread={t} machine={machine()} />, h);
+    const card = screen.getByRole("button", { name: "Thread Fix the flaky queue test" });
+    expect(within(card).getByText("roll web")).toBeInTheDocument();
+    expect(within(card).getByText("RW")).toBeInTheDocument();
+    expect(within(card).getByLabelText("On ada-mbp")).toHaveTextContent("ada-mbp");
+    expect(within(card).getByRole("link", { name: "Change 41, ready" })).toHaveAttribute("href", "/acme/roll/changes/41");
+    expect(within(card).getByRole("img", { name: "Worktree roll/fix-queue" })).toBeInTheDocument();
+    expect(within(card).getByRole("img", { name: "1 terminal running" })).toBeInTheDocument();
+  });
+
+  it("goes green when done, says Completed until you've looked, and names what waits on you", () => {
+    const done = run({ status: "completed", completed_at: 5_000 });
+    const t = thread({ run_count: 1 });
+    const h = agentsHarness({ entities: [mirrored("thread", t, 1), mirrored("run", done, 2)] });
+    const { rerender } = renderAgents(<ThreadNode thread={t} machine={machine()} />, h);
+    const card = () => screen.getByRole("button", { name: "Thread Fix the flaky queue test" });
+    expect(card().className).toContain("border-ok");
+    expect(within(card()).getByRole("img", { name: "Completed" })).toBeInTheDocument();
+    // Seen since it finished: quiet again, as T3's row once you've opened it.
+    rerender(<ThreadNode thread={{ ...t, inbox: { ...t.inbox, visited_at: 6_000 } }} machine={machine()} />);
+    expect(card().className).not.toContain("border-ok");
+    expect(within(card()).queryByRole("img", { name: "Completed" })).toBeNull();
+
+    const waiting = thread({ status: "waiting", pending_requests: 1, active_run: "run_1" });
+    h.client.enqueue({ type: "entity", ...mirrored("request", approval(), 3) });
+    rerender(<ThreadNode thread={waiting} machine={machine()} />);
+    expect(card().className).not.toContain("border-ok");
+    expect(within(card()).getByRole("img", { name: "Pending approval" })).toBeInTheDocument();
+  });
+});
+
+describe("threadPill", () => {
+  it("follows T3's order: what waits on you, working, failed, plan ready, completed", () => {
+    const t = thread();
+    expect(threadPill(t, [], undefined)).toBeNull();
+    expect(threadPill({ ...t, status: "running" }, [], undefined)).toMatchObject({ label: "Working", pulse: true });
+    expect(threadPill({ ...t, status: "starting" }, [], undefined)?.label).toBe("Connecting");
+    expect(threadPill({ ...t, status: "waiting" }, [question()], undefined)?.label).toBe("Awaiting input");
+    expect(threadPill({ ...t, status: "waiting" }, [question(), approval()], undefined)?.label).toBe("Pending approval");
+    const plan = approval();
+    if (plan.body.type === "approval") plan.body.action = "plan";
+    expect(threadPill({ ...t, status: "waiting" }, [plan], undefined)?.label).toBe("Plan ready");
+    expect(threadPill({ ...t, status: "error" }, [], undefined)).toMatchObject({ label: "Failed", tone: "danger" });
+    expect(threadPill(t, [], run({ status: "completed", completed_at: 10 }))).toMatchObject({ label: "Completed", tone: "ok" });
+    // Somebody else's request says nothing about this thread.
+    expect(threadPill(t, [approval({ thread: "thr_9" })], undefined)).toBeNull();
+  });
+
+  it("makes T3's monogram: the first letter and a digit or the last word's first letter", () => {
+    expect(monogram("roll")).toBe("RL");
+    expect(monogram("roll web")).toBe("RW");
+    expect(monogram("web3 app")).toBe("W3");
+    expect(monogram("  ")).toBe("PR");
   });
 });
 
