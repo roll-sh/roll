@@ -7311,7 +7311,8 @@ settings, `shared_buffers=2GB`), CPU and anon + shmem from each container's cgro
 bench client on cores 8-11. `base` is `3df0c607` (round 2's end); `new` is this round on
 `73edecba` (so its TPC-H column includes agent 160's executor round 9 too). Engines alternated
 (base, new, base, new), each a fresh container; the machine had other agents' builds on it
-(load 11-15), so only alternated pairs are compared. Logs: `~/.cache/a164/logs`.
+(load 11-15), so only alternated pairs are compared. The numbers are copied from the run logs,
+which went with the scratch directory.
 
 ### The analytic window query (2M rows, 1,000 partitions; three alternated pairs, 3 reps each)
 
