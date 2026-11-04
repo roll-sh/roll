@@ -1900,6 +1900,62 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
       `--cache-mb 8` gives +28-32 MB); and the size models' share of apply (agent 151's
       next pushes: a cached last leaf in `btsim` insert, one row lookup per UPDATE).
     - Verified: see BENCH.md "Replication, round 6".
+  - **Round 7 (agent 158): the change stream's removal, one-pass decoding, COPY's
+    multi-insert in decoding's accounting.** BENCH.md "Replication, round 7" has the numbers.
+    - **What every slot confirmed is discarded, not deleted** (`repl/log.rs` `DbLog::confirmed`,
+      `discard_below`; `storage/discard.rs`). `gc_writes` read every confirmed record back
+      and committed a tombstone for each (a third of a walsender's CPU, and the block cache
+      filled with the records: about 15 MB of its memory). Now each sealed commit is noted in
+      `DbLog::unconfirmed` (position, end, xid; a subscriber far behind merges neighbours past
+      4,096 entries, conservatively), and when the slots' confirmed position moves
+      (`Repl::slots_changed`) two floors follow: change records of xids below the oldest of
+      (the oldest running xid, the xids of commits not confirmed) and commit records below
+      the first unconfirmed one. `Store::discard(start, end)` raises a range of keys nobody
+      reads again; flushes and compactions leave its entries out (records confirmed while in
+      the memtable never reach a file), a file wholly inside one goes unread
+      (`collect_ranges`), and reads never consult the list (unlike `rdel`'s range deletions,
+      which every read checks: this was the design question for storage, agent 149). A
+      keyspace with a discarded range is never kept as a hot range (`hot`: the change
+      stream's prefix looks like a relation's, and its version chains would keep what was
+      discarded; before, the tombstones trimmed them). Not
+      persisted: after a restart `Repl::opened` (after the prepared transactions are
+      recovered, so their xids hold the floor) rebuilds the queue from the commit records
+      and names the floors again. A slot made while floors are computed keeps them from
+      applying (the slot set is checked again). A running transaction holds the change
+      records from its xid on, as it holds PostgreSQL's restart_lsn. Also fixed: once the
+      last slot of a database was dropped (`gc_upto` = u64::MAX) nothing was ever removed
+      again for that database's later slots. Test `repl::log::tests::
+      confirmed_records_are_discarded` (prepared transactions, a restart, no slot),
+      `storage::tests::discarded_ranges_leave_flushes_and_compactions`.
+    - **One pass over a run of transactions' records** (`repl/decode.rs` `Prefetched`,
+      `Decoder::prefetch`, the walsender's loop): a store scan per transaction (a seek in
+      every file, the merge set up again) was most of the rest of a walsender's work. The
+      walsender takes the commit records in runs (256 kB of WAL, 4,096 at most) and reads
+      the change records of the run's transactions (none past 32 kB) in one scan of their
+      xid range, copying out only theirs, its blocks not kept in the block cache
+      (`storage::read_once`: PostgreSQL's walsender reads the WAL through the kernel's page
+      cache, not its buffers). Only for a decoder alone: two or more share each transaction
+      through `decode::Shared` (each reading it again would cost N passes), where the cache
+      helps.
+    - **COPY's multi-insert in decoding's accounting** (`log::multi_insert`, `Txn::copy_batch`,
+      `MULTI` records, `Change::batch`, `plugin.rs` `run`): a COPY's rows in a multi-insert
+      batch (CopyFrom's CIM_MULTI; `sizing::CopyLoad::row_done` says where a batch ends; the
+      batch is the transaction's, set before it has an id) are logged as such, and
+      the decoder counts the TOAST chunks of all of a batch's rows before its first row
+      (heap_multi_insert TOASTs the batch first), the transaction having a partial change
+      until the batch's last row (RBTXN_HAS_PARTIAL_CHANGE): over the limit meanwhile it
+      spills (statistics), at the last row it streams if it spilled
+      (ReorderBufferProcessPartialChange), then the memory check. A single row's chunks now
+      count one by one before it too (spills and streams where PostgreSQL's do, not only at
+      the row). test_decoding 1,044 / 1,047 (stream.sql whole).
+    - **Left**: apply (BENCH.md: 1.35-1.4x PostgreSQL's CPU after agent 151's models; the
+      profile is the size models' (still about a quarter: `sizing::updated`,
+      `sizing::index_insert`, `inserted_with`), the commit (memtable inserts, WAL append),
+      the unique check's scan per INSERT (`dml::committed_conflict`) and row location; the
+      per-change statement wrapper is down to about 3%); the test_decoding stats units (a
+      plan choice: three slot-creating function scans in one FROM are joined with s3
+      outside, PostgreSQL's nests s1, s2 then s3, reproducer in BENCH.md, sent to the
+      planner's owner, agent 155).
 - **TPC-H plans and analytic speed** (round 20, agent 64; BENCH.md "Round 20", STATUS.md):
   the engine's plans at SF1 compared with PostgreSQL 18.6's on the same data, both analyzed,
   and the causes of the differences fixed in statistics and estimates: ANALYZE samples pages

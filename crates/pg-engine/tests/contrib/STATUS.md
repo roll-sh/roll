@@ -87,7 +87,7 @@ has no `regress.so`, whose functions dblink's test creates).
 | spi | 52 | 52 | done (round 20, agent 80a) |
 | xml2 | 29 | 29 | done: xslt_process is a native XSLT 1.0 processor (see below) |
 | pg_overexplain | 37 | 36 | DEBUG / RANGE_TABLE done; internals' numbers (see below) |
-| test_decoding | 1047 | 1029 | logical decoding (round 20, agents 79 and 87; round 21, agent 108; see below) |
+| test_decoding | 1047 | 1044 | logical decoding (round 20, agents 79 and 87; round 21, agent 108; round 7 of replication, agent 158; see below) |
 
 ### test_decoding (round 20, agents 79 and 87)
 
@@ -132,6 +132,12 @@ INSERT VALUES (s.*), and `-c` settings stored normalized (RESET logical_decoding
   toast) match since the catalog's rounds. Left: stream 1, COPY's multi-insert queues all its
   TOAST chunks before its tuples, so PostgreSQL can't stream until the batch's last tuple
   (one row later than the engine); stats 3, the plan choices above.)
+- (Replication round 7, agent 158: **1,044 / 1,047**, base 1,043 on the same reference. A
+  COPY's multi-insert rows are logged as a batch's and decoding counts all the batch's TOAST
+  chunks before its first row, the transaction partial until its last (stream whole). Left:
+  stats 3: three slot-creating function scans in one FROM are planned with s3 outside
+  (`Nested Loop (s3, Materialize (Nested Loop (s1, s2)))`), PostgreSQL nests s1, s2, then s3,
+  so the slots take other places in pg_replication_slots; sent to the planner's owner.)
 
 End to end (agent 87, debug build, PostgreSQL 18.6 in a host-network container): a
 PostgreSQL subscriber (`CREATE SUBSCRIPTION ... PUBLICATION p1` against the engine) copies the

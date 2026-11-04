@@ -6419,6 +6419,87 @@ replica_identity, create_view) on a private reference. The full regress and pg_d
 runs weren't repeated for this batch: it changes the apply worker, the decoder and a
 sizing helper only the decoder calls, none of which those suites run.
 
+## Replication, round 7 (agent 158)
+
+HANDOFF.md "Round 7 (agent 158)" has what changed. Both servers in containers this round:
+PostgreSQL 18.6 (pinned image) and the engine (a `dist` build in the pinned glibc image,
+`tools/bench/repl/lib.sh` `ENGINE_DOCKER=1`), each on four cores of its own (the engine
+publisher or subscriber on 24-27; a PostgreSQL publisher on 20-23; `pubn.sh`'s subscriber on
+16-19; `apply.sh`'s PostgreSQL subscriber on 24-27 like the engine's), the host network,
+machine load 10-25 from other agents. Base: `5973e109` (origin with agent 151's model commits);
+head: this batch. Rounds interleaved (PostgreSQL, base, head each round).
+
+**Walsenders** (`pubn.sh`, 20,000 pgbench-like transactions, N PostgreSQL subscriptions;
+engine CPU and memory the whole process's, PostgreSQL's the walsenders'; two rounds):
+
+| N | PostgreSQL 18.6 | engine, base | engine, head | head / PostgreSQL CPU, memory |
+|---|---|---|---|---|
+| 1 | 0.93-0.96 s, CPU 0.16-0.18 s, 16 MB | 0.83-1.05 s, CPU 0.24-0.41 s, +37-48 MB | 0.84-1.04 s, CPU 0.12-0.13 s, +1 MB | 0.7-0.8, 0.06 |
+| 4 | 1.25-1.48 s, CPU 0.65-1.35 s, 64 MB | 0.82-0.90 s, CPU 0.73-0.89 s, +47-52 MB | 0.93-1.06 s, CPU 0.54-0.57 s, +32-34 MB | 0.4-0.9, 0.5 |
+| 16 | 3.54-3.82 s, CPU 2.71-3.15 s, 256 MB | 1.56-1.82 s, CPU 2.11-2.64 s, +48-63 MB | 1.69-1.72 s, CPU 2.02-2.06 s, +39-40 MB | 0.65-0.75, 0.15 |
+
+(PostgreSQL's N = 1 CPU had one round of 0.53 s, left out. Round 6's 0.34-0.41 s against
+0.15 s came from a host-run release engine.) Where one walsender went, base (`PERF=` LBR
+stacks, 80,000 transactions): about two thirds `gc_writes`' read-back and tombstones, the
+rest decoding, mostly a store scan per transaction. Head, the same: the one-pass read 26%
+(a quarter of it decompressing blocks, zstd), pgoutput's tuples 17% (timestamptz text 7%),
+sends 12% (one per transaction then: now one per run), change size accounting 3.5%.
+Memory at N = 1: the block cache no longer fills with the stream (the read-back was 15 MB of
+it, the per-transaction scans the rest); at N >= 2 the decoders share each transaction
+(`decode::Shared`) and read through the cache.
+
+**Apply** (`apply.sh`, PostgreSQL 18.6 publisher, 60,000 transactions, two rounds; every
+subscriber ends with the publisher's md5 of every row):
+
+| subscriber | time | CPU | memory | engine / PostgreSQL CPU |
+|---|---|---|---|---|
+| PostgreSQL 18.6 | 2.98-3.06 s | 2.31-2.51 s | apply worker 30 MB | |
+| engine, base | 3.55-3.88 s | 3.24-3.31 s | +47-49 MB | 1.35-1.4 |
+| engine, head | 3.55-4.02 s | 3.13-3.47 s | +43-49 MB | 1.35-1.4 |
+
+(This batch doesn't change apply: base and head are the same there. Round 6's 1.6 was a
+host-run engine before agent 151's models.) The apply thread now (head, LBR stacks): size
+models still about a quarter (`sizing::updated` 15.5%: its btree model insert 6.0%,
+`update_cid` 5.8%; `sizing::index_insert` 11.7%, `inserted_with` 8.8%: inclusive, they
+overlap), the commit 13.7% (`commit_async`: memtable inserts 7.2%, WAL append 3.2%), INSERT's
+unique check scanning the store (`dml::committed_conflict`) 10.8%, row location for UPDATE /
+DELETE 15.5%, the per-change statement wrapper about 3% (was 6%), value input 3%, feedback
+sends 2.6%. Sent to agents 151 (models) and 145 / 149 (commit, unique check).
+
+**pgbench check** (`pgb.sh`, scale 10, `-M prepared`, 8 clients, 20 s, `--cache-mb 2048`,
+engines in containers, four rounds interleaved; CPU per transaction of the engine
+process, VmHWM): select-only base 0.039-0.043 ms, head 0.039-0.042 ms; tpcb-like base
+0.430-0.447 ms, head 0.395-0.454 ms; VmHWM base 371-454 MB, head 433-456 MB. No change beyond the
+rounds' spread (the batch touches no OLTP path; without a slot a commit notes nothing).
+
+**test_decoding** 1,044 / 1,047 (base 1,043, the same reference): stream.sql's multi-insert unit
+matches (a block of 12 changes, then 1, as PostgreSQL's). Left: stats 3 (below).
+
+**Verified** (at 64b0efe3, on 5973e109): crate tests in debug (442 / 442, deep_input and
+logical_apply included) and release (441 / 442: the new discard test, which the hot-range
+change below fixed), clippy without new warnings, the difftest smoke, isolation 121 / 122
+(intra-grant-inplace, as on origin) and test_decoding's specs 2 / 3 (twophase_snapshot, as on
+base), a full regress run on a private reference 51,148 / 51,150 with 0 units changed against
+`results.tsv`, pg_dump_tap 14,817 / 14,817, the side-by-side e2e (`e2e.sh`, every scenario
+identical on the PostgreSQL and engine subscribers of both publishers; no table
+synchronization slot left on either publisher, checked now), the benchmarks above. Then the
+last two changes (a keyspace with a discarded range is never hot; the multi-insert batch kept
+on the transaction, so a COPY's first rows are a batch's too) and a rebase onto 4ac4d685:
+release crate tests, the targeted tests (repl, storage, logical_apply), clippy,
+test_decoding 1,044 / 1,047 and the e2e again (identical).
+
+**test_decoding stats units** (sent to agent 155, planner): three slot-creating function
+scans in one FROM are planned as `Nested Loop (Function Scan s3, Materialize (Nested Loop
+(s1, s2)))`; PostgreSQL 18.6 nests s1 and s2, then s3, so its slots are created a, b, c and
+take those places in pg_replication_slots, the engine's c, a, b:
+
+```sql
+EXPLAIN (COSTS OFF) SELECT 'init' FROM pg_create_logical_replication_slot('a', 'test_decoding') s1,
+  pg_create_logical_replication_slot('b', 'test_decoding') s2, pg_create_logical_replication_slot('c', 'test_decoding') s3;
+-- (with generate_series(1, 1) in their place both nest s1, s2, then s3)
+```
+
+
 ## Size models, round 2 (round 22, agent 126)
 
 HANDOFF.md, "Size models, round 2", has what changed. Release builds with frame pointers, the

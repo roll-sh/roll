@@ -11,6 +11,7 @@
 #   ENGINE     the engine binary under test                 WORK    scratch directory
 #   PG_CPUS    cpuset of the PostgreSQL containers (20-23)  E_CPUS  taskset of engines (24-27)
 #   C_CPUS     cpuset of the pgbench / psql container (28-29)
+#   ENGINE_DOCKER=1  engines in containers (cpuset E_CPUS) instead of host processes
 set -eu
 : "${A:?set A to your agent prefix, e.g. a152}"
 PORT0=${PORT0:?set PORT0 to the first port of your range}
@@ -19,6 +20,8 @@ PG_CPUS=${PG_CPUS:-20-23}
 E_CPUS=${E_CPUS:-24-27}
 C_CPUS=${C_CPUS:-28-29}
 IMG=${IMG:-postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873}
+# ENGINE_DOCKER=1: engines in containers of this image, as tools/bench/run.sh runs them.
+ENGINE_IMAGE=${ENGINE_IMAGE:-debian@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad}
 CLI=$A-rcli
 mkdir -p "$WORK"
 WT=$(basename "$(git rev-parse --show-toplevel)")
@@ -84,10 +87,12 @@ rows_digest() {
   q "$1" "$2" "SELECT (SELECT md5(string_agg(a::text, ',' ORDER BY id)) FROM acc a) || ' ' || (SELECT coalesce(md5(string_agg(h::text, ',' ORDER BY hid)), '') FROM hist h)"
 }
 
-# pg_up NAME PORT [-c setting...]: PostgreSQL 18.6, trust auth on 127.0.0.1 only.
+# pg_up NAME PORT [-c setting...]: PostgreSQL 18.6 (on cores CPUS, default PG_CPUS), trust auth on 127.0.0.1 only.
 pg_up() {
-  local n p
+  local n p cpus
   n=$1; p=$2; shift 2
+  # (A prefix assignment to a function call may outlive it in sh: taken and cleared.)
+  cpus=${CPUS:-$PG_CPUS}; unset CPUS
   if docker inspect "$n" >/dev/null 2>&1; then
     [ "$(docker inspect -f '{{index .Config.Labels "agent.repl.run"}}' "$n")" = "$RUN_ID" ] || {
       log "container $n already exists; choose another A to preserve its data"; exit 1;
@@ -97,7 +102,7 @@ pg_up() {
     docker rename "$n" "$n-saved-$RUN_ID-$ARCHIVE"
   fi
   need_free "$p"
-  docker run -d --name "$n" --network host --cpuset-cpus "$PG_CPUS" --memory 2g \
+  docker run -d --name "$n" --network host --cpuset-cpus "$cpus" --memory 2g \
     --label "agent.worktree=$WT" --label "agent.repl.run=$RUN_ID" -e POSTGRES_HOST_AUTH_METHOD=trust \
     -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8" "$IMG" \
     -c listen_addresses=127.0.0.1 -c port="$p" -c wal_level=logical -c max_wal_senders=40 \
@@ -124,11 +129,23 @@ eng_up() {
       mv "$WORK/$n.log" "$WORK/$n.log-saved-$RUN_ID-$ARCHIVE"
     fi
   fi
-  nice -n 19 taskset -c "$E_CPUS" "${ENGINE:?set ENGINE}" --data "$WORK/$n.data" --listen "127.0.0.1:$p" \
+  set -- --data "$WORK/$n.data" --listen "127.0.0.1:$p" \
     -c wal_level=logical -c max_replication_slots=40 -c max_wal_senders=40 \
     -c max_logical_replication_workers=40 --max-prepared-transactions 10 --allow-outbound '127.0.0.1' \
-    "$@" > "$WORK/$n.log" 2>&1 &
-  echo $! > "$WORK/$n.pid"
+    "$@"
+  if [ -n "${ENGINE_DOCKER:-}" ]; then
+    # A container as PostgreSQL's (its own slice and CPU weight; the image only supplies
+    # glibc, the binary is mounted): its process's host pid in the pid file.
+    docker rm "$n" >/dev/null 2>&1 || true
+    docker run -d --name "$n" --network host --cpuset-cpus "$E_CPUS" --stop-signal SIGINT \
+      --label "agent.worktree=$WT" --label "agent.repl.run=$RUN_ID" --user "$(id -u):$(id -g)" \
+      -v "$(dirname "${ENGINE:?set ENGINE}"):$(dirname "$ENGINE"):ro" -v "$WORK:$WORK" \
+      -v /usr/share/zoneinfo:/usr/share/zoneinfo:ro -e TMPDIR="$WORK" "$ENGINE_IMAGE" "$ENGINE" "$@" >/dev/null
+    docker inspect -f '{{.State.Pid}}' "$n" > "$WORK/$n.pid"
+  else
+    nice -n 19 taskset -c "$E_CPUS" "${ENGINE:?set ENGINE}" "$@" > "$WORK/$n.log" 2>&1 &
+    echo $! > "$WORK/$n.pid"
+  fi
   ENG_STARTED="$ENG_STARTED $n"
   for _ in $(seq 120); do q "$p" postgres "SELECT 1" >/dev/null 2>&1 && return 0; sleep 0.5; done
   log "engine $n did not start"; exit 1
@@ -138,6 +155,13 @@ eng_down() {
   [ -f "$WORK/$1.pid" ] || return 0
   pid=$(cat "$WORK/$1.pid")
   case " $ENG_STARTED " in *" $1 "*) ;; *) log "unowned pid file $WORK/$1.pid; refusing to signal it"; return 1 ;; esac
+  if [ -n "${ENGINE_DOCKER:-}" ]; then
+    docker stop -t 60 "$1" >/dev/null 2>&1 || true
+    docker logs "$1" > "$WORK/$1.log" 2>&1 || true
+    docker rm "$1" >/dev/null 2>&1 || true
+    rm -f "$WORK/$1.pid"
+    return 0
+  fi
   # (SIGINT: a fast shutdown; a smart one waits for every session, walsenders included.)
   kill -INT "$pid" 2>/dev/null || true
   for _ in $(seq 60); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done

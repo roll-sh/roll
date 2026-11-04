@@ -56,7 +56,8 @@ r=0
 while [ $r -lt "$ROUNDS" ]; do
   r=$((r + 1))
   if [ "$PUB" = pg ]; then pg_up "$A-rpub" $P_PUB; else ENGINE=${ENGINE} eng_up "$A-epub" $P_PUB; fi
-  pg_up "$A-rsub" $P_PG
+  # (On the engines' cores: each subscriber alone on the same four, apart from the publisher.)
+  CPUS=$E_CPUS pg_up "$A-rsub" $P_PG
   ENGINE=$ENGINE eng_up "$A-ehead" $P_HEAD
   [ -n "${BASE:-}" ] && ENGINE=$BASE eng_up "$A-ebase" $P_BASE
   for p in $P_PUB $(for s in $SUBS; do port_of "$s"; done); do q "$p" postgres "$schema" >/dev/null; done
