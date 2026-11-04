@@ -20,6 +20,8 @@ mod round7;
 mod round8;
 #[path = "round9.rs"]
 mod round9;
+#[path = "round10.rs"]
+mod round10;
 
 /// splitmix64: small, fast and good enough to drive a generator.
 pub struct Rng(u64);
@@ -164,6 +166,8 @@ pub struct Schema {
     pub round8: bool,
     /// Round 9: the `r9*` objects exist (`round9::schema`).
     pub round9: bool,
+    /// Round 10: the `r10*` objects exist (`round10::schema`).
+    pub round10: bool,
 }
 
 /// A column visible to an expression: its qualified reference and type.
@@ -254,6 +258,11 @@ pub const R8_SEEDS: u64 = 8000;
 /// edges, COPY into keyed, partitioned and triggered tables, index builds of every access
 /// method, range reads, and statistics after ANALYZE.
 pub const R9_SEEDS: u64 = 9000;
+/// The first seed generated with round 10's objects and statements (`round10.rs`), on the
+/// shared engine: nested loops rescanning parameterized index scans, custom against generic
+/// plans (STABLE casts, untyped parameters, re-plans after DDL), batch filters, group keys and
+/// hash-join probes, queue tables drained concurrently, statistics views over many tables.
+pub const R10_SEEDS: u64 = 10000;
 
 const TEXTS: &[&str] = &[
     "a", "b", "A", "B", "ab", "abc", "", " x", "x ", "é", "Z", "a%", "a_b", "10", "9", "ß",
@@ -2318,6 +2327,10 @@ pub fn schema(seed: u64) -> (Schema, Vec<String>) {
         out.extend(round9::schema(&mut Rng::new(seed ^ 0x9999_9999)));
         s.round9 = true;
     }
+    if seed >= R10_SEEDS {
+        out.extend(round10::schema(&mut Rng::new(seed ^ 0xAAAA_AAAA)));
+        s.round10 = true;
+    }
     (s, out)
 }
 
@@ -2459,6 +2472,10 @@ pub fn statements(seed: u64, s: &Schema, n: usize) -> Vec<Stmt> {
     });
     while out.len() < n {
         g.alias = 0;
+        if s.round10 && g.rng.chance(0.6) {
+            out.extend(g.round10_stmt());
+            continue;
+        }
         if s.round9 && g.rng.chance(0.55) {
             out.extend(g.round9_stmt());
             continue;
