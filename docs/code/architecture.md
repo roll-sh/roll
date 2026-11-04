@@ -96,8 +96,9 @@ Every repository has a full name, `<owner>/<repo>`, exactly as on GitHub.
   The dashboard (`/dashboard/code`) is where you manage repos. The public pages are where you
   read them.
 - **Status codes**: a missing owner or repo answers a real 404, and a renamed repo answers a 308
-  to its new name with the rest of the path kept. Pages stream, and a streamed response is
-  already committed to 200, so `apps/dashboard/src/proxy.ts` checks existence before rendering.
+  to its new name with the rest of the path kept. The route loaders look the owner, repo or
+  share up before anything renders (`apps/dashboard/src/lib/public-pages.ts`), so the status goes
+  out with the page.
 
 ## Data model (`code-store`)
 

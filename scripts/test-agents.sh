@@ -18,7 +18,7 @@ cd "$(dirname "$0")/.."
 PATHS=(crates/agent-proto crates/agent-host crates/code-control/src/agents crates/code-control/tests/agents.rs crates/code-control/tests/agents_code.rs
        crates/code-control/tests/common crates/code-control/tests/mcp.rs crates/code-control/tests/routes.rs
        crates/roll-cli/src/agent.rs crates/roll-cli/tests/agent.rs crates/roll-cli/Cargo.toml crates/rolld/src
-       apps/dashboard/src apps/dashboard/public/install.sh apps/desktop/src apps/desktop/test apps/dashboard/package.json apps/dashboard/next.config.ts
+       apps/dashboard/src apps/dashboard/public/install.sh apps/desktop/src apps/desktop/test apps/dashboard/package.json apps/dashboard/vite.config.ts apps/dashboard/server.mjs
        Cargo.toml Cargo.lock scripts/test-agents.sh scripts/agents-e2e.mjs)
 TARGET=${CARGO_TARGET_DIR:-target}
 STAMP=$TARGET/.test-agents.hash
