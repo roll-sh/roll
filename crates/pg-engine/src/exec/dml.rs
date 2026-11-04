@@ -3414,6 +3414,7 @@ fn index_entries_checked(
         let vals = index_values(bix, &p.row, ctx)?;
         if let Err(e) = super::rowsize::on_form(t, bix, vals.as_deref(), &p.row, ctx) {
             dead(&out);
+            super::pgstat::count_insert(ctx, t.oid, 1);
             return Err(e);
         }
         if let Some(v) = &vals
@@ -3489,7 +3490,10 @@ fn index_entries_checked(
                 _ => row_tid(t, &p.dkey, ctx),
             }
         };
-        super::rowsize::on_insert(t, bix, vals.as_deref(), &p.row, tid, ctx)?;
+        if let Err(e) = super::rowsize::on_insert(t, bix, vals.as_deref(), &p.row, tid, ctx) {
+            super::pgstat::count_insert(ctx, t.oid, 1);
+            return Err(e);
+        }
         out.vals.push(vals);
     }
     Ok(out)
