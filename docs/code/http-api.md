@@ -782,6 +782,63 @@ its own while it should run is started again. A running one goes to sleep (desir
 no command for it and no terminal output. "starting" is a stopped sandbox on its way up again (a wake,
 or start); its machine comes online once its daemon connects. Asleep, it isn't billed.
 
+### Automations
+
+Triggers, filters and steps that run the owner's agents and talk to the world (docs/code/automations.md).
+The wire types are `agent_proto::automation` (Rust) and `apps/dashboard/src/lib/automations-api.ts`;
+times are milliseconds. Reading (lists, runs, the catalog, dry runs) is the owner's tokens', agents
+included (404 to everyone else); changing automations, their secrets, cancelling and retrying runs is
+Code::manages (401 anonymous, 403 agent tokens); running one by hand is Code::manages, or an agent token
+when the automation has `allow_agents`. Every change of an automation or a run is an `automation`,
+`automation_removed` or `automation_run` event on the owner's stream (`GET …/events`, with a cursor, so a
+reconnect catches up), and a `notify` step's notice is a `notice` event (no cursor).
+
+```
+GET    /v1/code/agents/{owner}/automations → [Automation] /* oldest first, deleted ones left out */
+POST   /v1/code/agents/{owner}/automations AutomationSpec → 201 AutomationSaved
+       400 a bad spec (the message says where: "steps.2.config.prompt: unclosed {{"), an unknown trigger
+       source or step kind, a config its kind refuses, secrets used outside a webhook's header values;
+       422 at 200 automations, or a webhook trigger without ROLL_SECRET_KEY on the server.
+       A webhook trigger gets its URL and a secret (AutomationSaved.webhook_secret, `rlh_…`, shown once).
+GET    /v1/code/agents/{owner}/automations/catalog → Catalog /* every trigger source and step kind, with
+       JSON Schemas; integrations' too (needs_setup: not connected yet) */
+POST   /v1/code/agents/{owner}/automations/test TestRequest → TestResult
+       what the automation would do with the event: the trigger's and each filter's verdict, each step's
+       config with its templates filled in. Runs nothing; secrets are never filled in.
+GET    /v1/code/agents/{owner}/automations/runs?automation=&status=&before=&limit= → [AutomationRun]
+       newest first, 50 by default, at most 200; `before` a run id (the next page)
+GET    /v1/code/agents/{owner}/automations/runs/{run} → RunDetail {run, event}
+POST   /v1/code/agents/{owner}/automations/runs/{run}/cancel → AutomationRun /* "cancelled"; what its steps
+       made only for the run (a sandbox) is cleaned up; a final run is answered as it is */
+POST   /v1/code/agents/{owner}/automations/runs/{run}/retry → AutomationRun /* a failed or cancelled run goes on
+       from the step that stopped it (its attempts start over); 409 for a run that isn't */
+GET    /v1/code/agents/{owner}/automations/{id} → Automation
+PUT    /v1/code/agents/{owner}/automations/{id} AutomationSpec & {revision?} → AutomationSaved
+       replaces the definition; with `revision`, 409 {error, current: Automation} when it isn't the current one.
+       Runs going on keep the definition they started with.
+DELETE /v1/code/agents/{owner}/automations/{id} → 204 /* its runs going on are cancelled; its secrets dropped */
+POST   /v1/code/agents/{owner}/automations/{id}/enable  → Automation
+POST   /v1/code/agents/{owner}/automations/{id}/disable → Automation /* new events start nothing; runs going on go on */
+POST   /v1/code/agents/{owner}/automations/{id}/run RunNow {input?, key?} → 202 AutomationRun
+       an event of source `manual`, kind `run`, data {by, input}; the same `key` is the same run (200 then).
+       Any trigger can be run by hand (its filters still apply: a run they refuse is "skipped").
+GET    /v1/code/agents/{owner}/automations/{id}/runs?status=&before=&limit= → [AutomationRun]
+PUT    /v1/code/agents/{owner}/automations/{id}/secrets/{name} {value} → 204
+       name: [A-Z0-9_], 1 to 64; value at most 8 KiB, sealed with ROLL_SECRET_KEY (422 without it) and never
+       returned or logged; at most 20 per automation. Automation.secrets lists the names.
+DELETE /v1/code/agents/{owner}/automations/{id}/secrets/{name} → 204
+POST   /v1/code/agents/{owner}/automations/{id}/webhook/secret → AutomationSaved /* a new inbound secret, shown
+       once; the old one stops working */
+POST   /v1/code/agents/{owner}/automations/{id}/webhook  (no token: the signature is the credential)
+       → 202 {event: "aev_…", duplicate: bool}
+       Either `X-Roll-Signature-256: sha256=<hex HMAC-SHA256(secret, "{timestamp}.{body}")>` with
+       `X-Roll-Timestamp: <unix seconds>` within 5 minutes (roll's own webhook signature), idempotent by
+       `X-Roll-Delivery` (else the signature); or GitHub's `X-Hub-Signature-256` over the body with
+       `X-GitHub-Delivery` as the key. The body (JSON, else text; at most 256 KiB) is `event.data.body`,
+       the headers `event.data.headers` (signatures left out). 401 a bad or old signature, 404 no such
+       automation or not a webhook trigger, 409 disabled, 413 too big.
+```
+
 ## MCP
 
 `/v1/code/mcp` is an MCP server (Streamable HTTP, JSON-RPC 2.0) whose tools call this API on the

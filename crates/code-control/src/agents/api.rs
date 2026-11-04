@@ -364,8 +364,11 @@ fn cursor_of(ev: &StreamEvent) -> Option<u64> {
         StreamEvent::Machine { cursor, .. }
         | StreamEvent::MachineRemoved { cursor, .. }
         | StreamEvent::Canvas { cursor, .. }
-        | StreamEvent::Settings { cursor, .. } => Some(*cursor),
-        StreamEvent::Delta { .. } => None,
+        | StreamEvent::Settings { cursor, .. }
+        | StreamEvent::Automation { cursor, .. }
+        | StreamEvent::AutomationRemoved { cursor, .. }
+        | StreamEvent::AutomationRun { cursor, .. } => Some(*cursor),
+        StreamEvent::Delta { .. } | StreamEvent::Notice { .. } => None,
     }
 }
 
@@ -377,6 +380,10 @@ fn kind_of(ev: &StreamEvent) -> &'static str {
         StreamEvent::Delta { .. } => "delta",
         StreamEvent::Canvas { .. } => "canvas",
         StreamEvent::Settings { .. } => "settings",
+        StreamEvent::Automation { .. } => "automation",
+        StreamEvent::AutomationRemoved { .. } => "automation_removed",
+        StreamEvent::AutomationRun { .. } => "automation_run",
+        StreamEvent::Notice { .. } => "notice",
     }
 }
 
@@ -384,7 +391,14 @@ impl Stream {
     fn wants(&self, ev: &StreamEvent) -> bool {
         match ev {
             StreamEvent::Entity(m) => self.filter.wants(&m.entity),
-            StreamEvent::Machine { .. } | StreamEvent::MachineRemoved { .. } | StreamEvent::Canvas { .. } | StreamEvent::Settings { .. } => true,
+            StreamEvent::Machine { .. }
+            | StreamEvent::MachineRemoved { .. }
+            | StreamEvent::Canvas { .. }
+            | StreamEvent::Settings { .. }
+            | StreamEvent::Automation { .. }
+            | StreamEvent::AutomationRemoved { .. }
+            | StreamEvent::AutomationRun { .. }
+            | StreamEvent::Notice { .. } => true,
             StreamEvent::Delta { delta, .. } => match delta {
                 agent_proto::Delta::Text { thread, .. } | agent_proto::Delta::Output { thread, .. } => self.filter.threads.iter().any(|t| t == thread.as_str()),
                 agent_proto::Delta::Terminal { .. } => true,

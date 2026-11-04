@@ -53,7 +53,13 @@ id! {
     RequestId = "req_";
     CheckpointId = "chk_";
     TerminalId = "trm_";
+    /// An automation (`aut_…`), kept by the relay (`automation`).
+    AutomationId = "aut_";
+    AutomationRunId = "arn_";
+    AutomationEventId = "aev_";
 }
+
+pub mod automation;
 
 /// A provider instance on a machine: `codex`, `claude`, or `acp:<name>` (an ACP agent from the
 /// daemon's config, e.g. `acp:gemini`).
@@ -1907,6 +1913,14 @@ pub enum StreamEvent {
     /// The owner's agents settings were saved (SSE `id:` is its cursor): a device showing an
     /// older `revision` loads them again (`GET /v1/code/agents/{owner}/settings`).
     Settings { cursor: u64, revision: u64, updated_at: Millis },
+    /// An automation was made or changed (SSE `id:` is its cursor).
+    Automation { cursor: u64, automation: Box<automation::Automation> },
+    /// An automation was deleted.
+    AutomationRemoved { cursor: u64, automation: AutomationId },
+    /// An automation run was made or moved on (SSE `id:` is its cursor).
+    AutomationRun { cursor: u64, run: Box<automation::AutomationRun> },
+    /// A `notify` step's notice: ephemeral (no SSE `id:`), for a toast.
+    Notice { notice: automation::Notice },
 }
 
 /// `POST /v1/code/agents/{owner}/machines/{machine}/commands`.

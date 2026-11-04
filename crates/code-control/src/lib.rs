@@ -418,6 +418,8 @@ pub struct Code {
     pub agents: agents::Agents,
     /// roll-hosted sandboxes: the backend and the owners' reconcilers.
     pub sandboxes: agents::sandbox::Sandboxes,
+    /// roll code automations: the trigger and step registry and the engine's state here.
+    pub automations: agents::automations::Automations,
 }
 
 /// The databases a [`Code`] runs on: code-store's, code-control's, and the cluster's tables
@@ -520,6 +522,7 @@ impl Code {
             git_budget,
             agents: agents::Agents::default(),
             sandboxes,
+            automations: agents::automations::Automations::default(),
         });
         code.clean_worktrees();
         code.clean_indexes();
@@ -603,6 +606,11 @@ impl Code {
         // An agent machine's grant only opens git, for its one repo (`agents/code.rs`).
         if token.is_some_and(|t| t.starts_with(agents::GRANT_PREFIX)) {
             return Err(Error::Unauthorized);
+        }
+        // A step's call as its automation (agents/automations): checked before the open
+        // daemon's "everyone is admin", so `run_as` narrows it there too.
+        if let Some(t) = token.filter(|t| t.starts_with(agents::automations::TOKEN_PREFIX)) {
+            return self.automation_caller(t);
         }
         if let Some(t) = token
             && let Some(app) = self.app_caller(t)?

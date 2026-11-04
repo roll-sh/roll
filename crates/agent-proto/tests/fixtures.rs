@@ -4,6 +4,8 @@
 //!
 //! The `covered_*` matches are exhaustive: a new variant doesn't compile until it has a sample.
 
+mod automation_samples;
+
 use agent_proto::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -700,12 +702,17 @@ fn stream() -> Vec<StreamEvent> {
         StreamEvent::Delta { machine: mch(), delta: deltas().remove(1) },
         StreamEvent::Canvas { cursor: 10, revision: 3, updated_at: 1_762_000_000_000 },
         StreamEvent::Settings { cursor: 11, revision: 2, updated_at: 1_762_000_000_000 },
+        StreamEvent::Automation { cursor: 12, automation: Box::new(automation_samples::automations().remove(1)) },
+        StreamEvent::AutomationRemoved { cursor: 13, automation: automation_samples::aut(3) },
+        StreamEvent::AutomationRun { cursor: 14, run: Box::new(automation_samples::run(automation::RunState::Waiting)) },
+        StreamEvent::Notice { notice: automation_samples::notice() },
     ]
 }
 
 fn covered_stream(e: &StreamEvent) {
     match e {
         StreamEvent::Entity(_) | StreamEvent::Machine { .. } | StreamEvent::MachineRemoved { .. } | StreamEvent::Delta { .. } | StreamEvent::Canvas { .. } | StreamEvent::Settings { .. } => {}
+        StreamEvent::Automation { .. } | StreamEvent::AutomationRemoved { .. } | StreamEvent::AutomationRun { .. } | StreamEvent::Notice { .. } => {}
     }
 }
 

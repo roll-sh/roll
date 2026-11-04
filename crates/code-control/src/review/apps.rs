@@ -490,7 +490,7 @@ impl Code {
         Ok(client)
     }
 
-    fn private_webhooks_allowed(&self) -> bool {
+    pub(crate) fn private_webhooks_allowed(&self) -> bool {
         self.config.allow_private_webhooks.unwrap_or(self.config.admin_token.is_none())
     }
 

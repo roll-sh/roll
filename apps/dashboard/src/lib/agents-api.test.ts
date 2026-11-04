@@ -71,7 +71,8 @@ function prune(v: unknown): unknown {
 
 describe("agent-proto fixtures", () => {
   it("every fixture file has a decoder", () => {
-    const files = readdirSync(DIR).filter((f) => f.endsWith(".json"));
+    // automation*.json are automations-api.test.ts's.
+    const files = readdirSync(DIR).filter((f) => f.endsWith(".json") && !f.startsWith("automation"));
     expect(files.sort()).toEqual(Object.keys(decoders).sort());
   });
 
@@ -229,10 +230,13 @@ describe("agents api", () => {
     await vi.waitFor(() => expect(urls).toHaveLength(2), { timeout: 3000 });
     stop();
     // Every known event decoded (the unknown one dropped), ids are cursors, deltas have none.
-    expect(seen).toEqual(["entity", 7, "machine", 8, "machine_removed", 9, "delta", null, "canvas", 10, "settings", 11]);
+    expect(seen).toEqual([
+      ...["entity", 7, "machine", 8, "machine_removed", 9, "delta", null, "canvas", 10, "settings", 11],
+      ...["automation", 12, "automation_removed", 13, "automation_run", 14, "notice", null],
+    ]);
     expect(urls[0]).toBe("http://roll.test/v1/code/agents/acme/events?threads=thr_a&after=5");
-    expect(urls[1]).toBe("http://roll.test/v1/code/agents/acme/events?threads=thr_a&after=11");
-    expect(lastIds).toEqual(["5", "11"]);
+    expect(urls[1]).toBe("http://roll.test/v1/code/agents/acme/events?threads=thr_a&after=14");
+    expect(lastIds).toEqual(["5", "14"]);
   });
 });
 

@@ -29,6 +29,16 @@ import {
   withDefault,
   type Decoder,
 } from "./decode";
+import {
+  automationD,
+  automationRunD,
+  createAutomationsApi,
+  noticeD,
+  type Automation,
+  type AutomationId,
+  type AutomationRun,
+  type Notice,
+} from "./automations-api";
 import { ROLL_API } from "./roll-api";
 
 /** Milliseconds since the Unix epoch. */
@@ -808,7 +818,14 @@ export type StreamEvent =
   /** The owner's canvas was saved: a device showing an older `revision` loads it again. */
   | { type: "canvas"; cursor: number; revision: number; updated_at: Millis }
   /** The owner's agents settings were saved: a device showing an older `revision` loads them again. */
-  | { type: "settings"; cursor: number; revision: number; updated_at: Millis };
+  | { type: "settings"; cursor: number; revision: number; updated_at: Millis }
+  /** An automation was made or changed (`automations-api.ts`). */
+  | { type: "automation"; cursor: number; automation: Automation }
+  | { type: "automation_removed"; cursor: number; automation: AutomationId }
+  /** An automation run was made or moved on. */
+  | { type: "automation_run"; cursor: number; run: AutomationRun }
+  /** A `notify` step's notice: ephemeral (no cursor), for a toast. */
+  | { type: "notice"; notice: Notice };
 
 /** `GET`/`PUT /v1/code/agents/{owner}/canvas`: the canvas as the owner arranged it (opaque here). */
 export interface SavedCanvas {
@@ -1394,6 +1411,10 @@ export const streamEventD: Decoder<StreamEvent> = tagged("type", {
   delta: obj<{ machine: MachineId; delta: Delta }>({ machine: str, delta: deltaD }),
   canvas: obj<{ cursor: number; revision: number; updated_at: Millis }>({ cursor: int, revision: int, updated_at: int }),
   settings: obj<{ cursor: number; revision: number; updated_at: Millis }>({ cursor: int, revision: int, updated_at: int }),
+  automation: obj<{ cursor: number; automation: Automation }>({ cursor: int, automation: automationD }),
+  automation_removed: obj<{ cursor: number; automation: AutomationId }>({ cursor: int, automation: str }),
+  automation_run: obj<{ cursor: number; run: AutomationRun }>({ cursor: int, run: automationRunD }),
+  notice: obj<{ notice: Notice }>({ notice: noticeD }),
 } satisfies Record<StreamEvent["type"], Decoder<object>>);
 
 /** The canvas document: any JSON object (the canvas parses it), kept whole. */
@@ -1603,6 +1624,8 @@ export function createAgentsApi(
 
   return {
     authHeaders,
+    /** `/v1/code/agents/{owner}/automations…` (`automations-api.ts`). */
+    automations: createAutomationsApi(call),
     /** The fetch this client uses (the event stream follows it too). */
     fetch: doFetch,
     state: async (owner: string, threads: readonly string[] = []) =>

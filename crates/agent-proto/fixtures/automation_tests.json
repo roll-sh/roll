@@ -1,0 +1,254 @@
+[
+  {
+    "automation": {
+      "name": "Fix failing checks",
+      "description": "When the checks of a change fail, start an agent in a sandbox to fix them.",
+      "enabled": true,
+      "trigger": {
+        "type": "code",
+        "events": [
+          "check",
+          "change"
+        ],
+        "repos": [
+          "acme/app"
+        ]
+      },
+      "filters": [
+        {
+          "field": "event.data.repo",
+          "op": "equals",
+          "value": "acme/app"
+        },
+        {
+          "field": "event.data.change.title",
+          "op": "contains",
+          "value": "flaky",
+          "not": true
+        },
+        {
+          "field": "event.data.kind",
+          "op": "any_of",
+          "value": [
+            "landed",
+            "queue"
+          ]
+        },
+        {
+          "field": "event.data.change.labels",
+          "op": "has_label",
+          "value": "bug"
+        },
+        {
+          "field": "event.data.files",
+          "op": "glob",
+          "value": "src/**/*.rs"
+        },
+        {
+          "field": "event.data.change.url",
+          "op": "exists"
+        },
+        {
+          "field": "event.data.change.number",
+          "op": "gt",
+          "value": 10
+        },
+        {
+          "field": "event.data.change.number",
+          "op": "lt",
+          "value": 1000
+        }
+      ],
+      "steps": [
+        {
+          "id": "start",
+          "name": "Start the fix",
+          "kind": "agent.start",
+          "config": {
+            "effort": "high",
+            "interaction_mode": "plan",
+            "model": "claude-opus-5-5",
+            "orchestrator": true,
+            "project": {
+              "path": "app",
+              "repo": "acme/app",
+              "type": "repo"
+            },
+            "prompt": "The checks of {{event.data.change.url}} fail. Fix them.",
+            "provider": "claude",
+            "runtime_mode": "auto_edit",
+            "target": {
+              "keep": true,
+              "size": "large",
+              "type": "sandbox"
+            },
+            "title": "Fix {{event.data.change.title}}",
+            "worktree": true
+          },
+          "when": [
+            {
+              "field": "event.data.change.draft",
+              "op": "equals",
+              "value": false
+            }
+          ],
+          "retry": {
+            "attempts": 3,
+            "backoff_s": 30
+          },
+          "timeout_s": 600
+        },
+        {
+          "id": "wait",
+          "kind": "agent.wait",
+          "config": {
+            "on_timeout": "continue",
+            "thread": "{{steps.start.thread}}",
+            "timeout_s": 3600,
+            "until": [
+              "done",
+              "failed",
+              "waiting",
+              "settled"
+            ]
+          }
+        },
+        {
+          "id": "nudge",
+          "kind": "agent.message",
+          "config": {
+            "mode": "steer",
+            "text": "Run the tests again."
+          }
+        },
+        {
+          "id": "approve",
+          "kind": "agent.respond",
+          "config": {
+            "answers": {
+              "scope": "{{event.data.input.scope}}"
+            },
+            "first_option": true,
+            "message": "Automations only run cargo.",
+            "otherwise": "decline",
+            "rules": [
+              {
+                "action": "command",
+                "command": "cargo *",
+                "decision": "accept"
+              },
+              {
+                "action": "file_change",
+                "decision": "accept_for_session",
+                "files": "docs/**",
+                "tool": "Edit"
+              }
+            ]
+          }
+        },
+        {
+          "id": "publish",
+          "kind": "agent.publish",
+          "config": {
+            "land": true,
+            "message": "Fix checks"
+          },
+          "on_error": "continue"
+        },
+        {
+          "id": "test",
+          "kind": "agent.script",
+          "config": {
+            "project": {
+              "id": "prj_1234567890abcdef",
+              "type": "id"
+            },
+            "script": "test",
+            "target": {
+              "type": "project_machine"
+            }
+          }
+        },
+        {
+          "id": "settle",
+          "kind": "agent.settle",
+          "config": {
+            "action": "archive"
+          }
+        },
+        {
+          "id": "tell",
+          "kind": "webhook",
+          "config": {
+            "body": {
+              "text": "{{event.data.change.title}} is fixed"
+            },
+            "headers": {
+              "authorization": "Bearer {{secrets.EXAMPLE_TOKEN}}"
+            },
+            "method": "POST",
+            "ok_statuses": [
+              409
+            ],
+            "secret": "SIGNING",
+            "url": "https://hooks.example.com/roll"
+          }
+        },
+        {
+          "id": "toast",
+          "kind": "notify",
+          "config": {
+            "body": "{{steps.publish.url}}",
+            "level": "success",
+            "link": "{{steps.publish.url}}",
+            "title": "Fixed {{event.data.change.title}}"
+          }
+        },
+        {
+          "id": "later",
+          "kind": "delay",
+          "config": {
+            "seconds": 300
+          }
+        },
+        {
+          "id": "comment",
+          "kind": "linear.comment",
+          "config": {
+            "body": "On it",
+            "issue": "{{event.data.issue.id}}"
+          }
+        }
+      ],
+      "defaults": {
+        "target": {
+          "type": "any_online"
+        },
+        "project": {
+          "type": "id",
+          "id": "prj_1234567890abcdef"
+        },
+        "provider": "codex",
+        "model": "gpt-5.5",
+        "effort": "medium",
+        "runtime_mode": "full_access",
+        "interaction_mode": "default",
+        "worktree": true
+      },
+      "concurrency": "cancel_previous",
+      "rate_limit": {
+        "max": 10,
+        "per_s": 3600
+      },
+      "run_as": "fixer",
+      "allow_agents": true
+    },
+    "event": {
+      "source": "code",
+      "kind": "check",
+      "data": {
+        "repo": "acme/app"
+      }
+    }
+  }
+]

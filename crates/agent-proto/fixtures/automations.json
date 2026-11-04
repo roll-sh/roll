@@ -1,0 +1,457 @@
+[
+  {
+    "id": "aut_0000000000000001",
+    "name": "Fix failing checks",
+    "description": "When the checks of a change fail, start an agent in a sandbox to fix them.",
+    "enabled": true,
+    "trigger": {
+      "type": "code",
+      "events": [
+        "check",
+        "change"
+      ],
+      "repos": [
+        "acme/app"
+      ]
+    },
+    "filters": [
+      {
+        "field": "event.data.repo",
+        "op": "equals",
+        "value": "acme/app"
+      },
+      {
+        "field": "event.data.change.title",
+        "op": "contains",
+        "value": "flaky",
+        "not": true
+      },
+      {
+        "field": "event.data.kind",
+        "op": "any_of",
+        "value": [
+          "landed",
+          "queue"
+        ]
+      },
+      {
+        "field": "event.data.change.labels",
+        "op": "has_label",
+        "value": "bug"
+      },
+      {
+        "field": "event.data.files",
+        "op": "glob",
+        "value": "src/**/*.rs"
+      },
+      {
+        "field": "event.data.change.url",
+        "op": "exists"
+      },
+      {
+        "field": "event.data.change.number",
+        "op": "gt",
+        "value": 10
+      },
+      {
+        "field": "event.data.change.number",
+        "op": "lt",
+        "value": 1000
+      }
+    ],
+    "steps": [
+      {
+        "id": "start",
+        "name": "Start the fix",
+        "kind": "agent.start",
+        "config": {
+          "effort": "high",
+          "interaction_mode": "plan",
+          "model": "claude-opus-5-5",
+          "orchestrator": true,
+          "project": {
+            "path": "app",
+            "repo": "acme/app",
+            "type": "repo"
+          },
+          "prompt": "The checks of {{event.data.change.url}} fail. Fix them.",
+          "provider": "claude",
+          "runtime_mode": "auto_edit",
+          "target": {
+            "keep": true,
+            "size": "large",
+            "type": "sandbox"
+          },
+          "title": "Fix {{event.data.change.title}}",
+          "worktree": true
+        },
+        "when": [
+          {
+            "field": "event.data.change.draft",
+            "op": "equals",
+            "value": false
+          }
+        ],
+        "retry": {
+          "attempts": 3,
+          "backoff_s": 30
+        },
+        "timeout_s": 600
+      },
+      {
+        "id": "wait",
+        "kind": "agent.wait",
+        "config": {
+          "on_timeout": "continue",
+          "thread": "{{steps.start.thread}}",
+          "timeout_s": 3600,
+          "until": [
+            "done",
+            "failed",
+            "waiting",
+            "settled"
+          ]
+        }
+      },
+      {
+        "id": "nudge",
+        "kind": "agent.message",
+        "config": {
+          "mode": "steer",
+          "text": "Run the tests again."
+        }
+      },
+      {
+        "id": "approve",
+        "kind": "agent.respond",
+        "config": {
+          "answers": {
+            "scope": "{{event.data.input.scope}}"
+          },
+          "first_option": true,
+          "message": "Automations only run cargo.",
+          "otherwise": "decline",
+          "rules": [
+            {
+              "action": "command",
+              "command": "cargo *",
+              "decision": "accept"
+            },
+            {
+              "action": "file_change",
+              "decision": "accept_for_session",
+              "files": "docs/**",
+              "tool": "Edit"
+            }
+          ]
+        }
+      },
+      {
+        "id": "publish",
+        "kind": "agent.publish",
+        "config": {
+          "land": true,
+          "message": "Fix checks"
+        },
+        "on_error": "continue"
+      },
+      {
+        "id": "test",
+        "kind": "agent.script",
+        "config": {
+          "project": {
+            "id": "prj_1234567890abcdef",
+            "type": "id"
+          },
+          "script": "test",
+          "target": {
+            "type": "project_machine"
+          }
+        }
+      },
+      {
+        "id": "settle",
+        "kind": "agent.settle",
+        "config": {
+          "action": "archive"
+        }
+      },
+      {
+        "id": "tell",
+        "kind": "webhook",
+        "config": {
+          "body": {
+            "text": "{{event.data.change.title}} is fixed"
+          },
+          "headers": {
+            "authorization": "Bearer {{secrets.EXAMPLE_TOKEN}}"
+          },
+          "method": "POST",
+          "ok_statuses": [
+            409
+          ],
+          "secret": "SIGNING",
+          "url": "https://hooks.example.com/roll"
+        }
+      },
+      {
+        "id": "toast",
+        "kind": "notify",
+        "config": {
+          "body": "{{steps.publish.url}}",
+          "level": "success",
+          "link": "{{steps.publish.url}}",
+          "title": "Fixed {{event.data.change.title}}"
+        }
+      },
+      {
+        "id": "later",
+        "kind": "delay",
+        "config": {
+          "seconds": 300
+        }
+      },
+      {
+        "id": "comment",
+        "kind": "linear.comment",
+        "config": {
+          "body": "On it",
+          "issue": "{{event.data.issue.id}}"
+        }
+      }
+    ],
+    "defaults": {
+      "target": {
+        "type": "any_online"
+      },
+      "project": {
+        "type": "id",
+        "id": "prj_1234567890abcdef"
+      },
+      "provider": "codex",
+      "model": "gpt-5.5",
+      "effort": "medium",
+      "runtime_mode": "full_access",
+      "interaction_mode": "default",
+      "worktree": true
+    },
+    "concurrency": "cancel_previous",
+    "rate_limit": {
+      "max": 10,
+      "per_s": 3600
+    },
+    "run_as": "fixer",
+    "allow_agents": true,
+    "revision": 1,
+    "cursor": 21,
+    "created_at": 1762000000000,
+    "updated_at": 1762000000000,
+    "created_by": "acme"
+  },
+  {
+    "id": "aut_0000000000000002",
+    "name": "Nightly triage",
+    "enabled": true,
+    "trigger": {
+      "type": "schedule",
+      "cron": "0 3 * * 1-5",
+      "timezone": "Europe/Budapest"
+    },
+    "steps": [
+      {
+        "id": "toast",
+        "kind": "notify",
+        "config": {
+          "level": "info",
+          "title": "Hello"
+        }
+      }
+    ],
+    "concurrency": "skip",
+    "revision": 1,
+    "cursor": 22,
+    "created_at": 1762000000000,
+    "updated_at": 1762000000000,
+    "created_by": "acme",
+    "secrets": [
+      "EXAMPLE_TOKEN",
+      "SIGNING"
+    ],
+    "next_at": 1762003600000,
+    "last_run": {
+      "id": "arn_0a0b0c0d0e0f1011",
+      "status": "succeeded",
+      "at": 1762000000000
+    }
+  },
+  {
+    "id": "aut_0000000000000003",
+    "name": "Every hour",
+    "enabled": true,
+    "trigger": {
+      "type": "interval",
+      "every_s": 3600
+    },
+    "steps": [
+      {
+        "id": "toast",
+        "kind": "notify",
+        "config": {
+          "level": "info",
+          "title": "Hello"
+        }
+      }
+    ],
+    "concurrency": "queue",
+    "revision": 1,
+    "cursor": 23,
+    "created_at": 1762000000000,
+    "updated_at": 1762000000000,
+    "created_by": "acme"
+  },
+  {
+    "id": "aut_0000000000000004",
+    "name": "From CI",
+    "enabled": false,
+    "trigger": {
+      "type": "webhook"
+    },
+    "steps": [
+      {
+        "id": "toast",
+        "kind": "notify",
+        "config": {
+          "level": "info",
+          "title": "Hello"
+        }
+      }
+    ],
+    "concurrency": "parallel",
+    "revision": 1,
+    "cursor": 24,
+    "created_at": 1762000000000,
+    "updated_at": 1762000000000,
+    "created_by": "acme",
+    "webhook": {
+      "url": "https://api.roll.sh/v1/code/agents/acme/automations/aut_0000000000000004/webhook",
+      "secret_hint": "9f3a"
+    }
+  },
+  {
+    "id": "aut_0000000000000005",
+    "name": "By hand",
+    "enabled": true,
+    "trigger": {
+      "type": "manual"
+    },
+    "steps": [
+      {
+        "id": "toast",
+        "kind": "notify",
+        "config": {
+          "level": "info",
+          "title": "Hello"
+        }
+      }
+    ],
+    "concurrency": "parallel",
+    "revision": 1,
+    "cursor": 25,
+    "created_at": 1762000000000,
+    "updated_at": 1762000000000,
+    "created_by": "acme"
+  },
+  {
+    "id": "aut_0000000000000006",
+    "name": "Agents",
+    "enabled": true,
+    "trigger": {
+      "type": "agent",
+      "events": [
+        "thread.created",
+        "thread.done",
+        "thread.failed",
+        "thread.waiting",
+        "thread.settled",
+        "request.opened"
+      ]
+    },
+    "steps": [
+      {
+        "id": "toast",
+        "kind": "notify",
+        "config": {
+          "level": "info",
+          "title": "Hello"
+        }
+      }
+    ],
+    "concurrency": "parallel",
+    "revision": 1,
+    "cursor": 26,
+    "created_at": 1762000000000,
+    "updated_at": 1762000000000,
+    "created_by": "acme"
+  },
+  {
+    "id": "aut_0000000000000007",
+    "name": "Linear issues",
+    "enabled": true,
+    "trigger": {
+      "type": "integration",
+      "source": "linear",
+      "events": [
+        "issue.created"
+      ],
+      "config": {
+        "team": "ENG"
+      }
+    },
+    "steps": [
+      {
+        "id": "toast",
+        "kind": "notify",
+        "config": {
+          "level": "info",
+          "title": "Hello"
+        }
+      }
+    ],
+    "concurrency": "parallel",
+    "revision": 1,
+    "cursor": 27,
+    "created_at": 1762000000000,
+    "updated_at": 1762000000000,
+    "created_by": "acme"
+  },
+  {
+    "id": "aut_0000000000000008",
+    "name": "Every machine target",
+    "enabled": true,
+    "trigger": {
+      "type": "code"
+    },
+    "steps": [
+      {
+        "id": "toast",
+        "kind": "notify",
+        "config": {
+          "level": "info",
+          "title": "Hello"
+        }
+      }
+    ],
+    "defaults": {
+      "target": {
+        "type": "machine",
+        "machine": "ada-mbp"
+      }
+    },
+    "concurrency": "parallel",
+    "revision": 1,
+    "cursor": 28,
+    "created_at": 1762000000000,
+    "updated_at": 1762000000000,
+    "created_by": "acme"
+  }
+]

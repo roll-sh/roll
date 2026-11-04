@@ -263,6 +263,8 @@ const SECRET_PREFIXES: &[(&str, usize, bool)] = &[
     ("rlx_", 8, false),
     ("rla_", 8, false),
     ("rld_", 8, false),
+    ("rlr_", 8, false),
+    ("rlh_", 8, false),
     ("ghp_", 8, false),
     ("gho_", 8, false),
     ("ghu_", 8, false),
