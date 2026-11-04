@@ -201,6 +201,10 @@ async fn run(code: &Arc<Code>, machine: &MachineRow, socket: &mut WebSocket, mut
                         }
                     }
                     DaemonFrame::Delta { delta } => {
+                        // Terminal traffic keeps a sandbox awake (provider logins happen there).
+                        if matches!(delta, agent_proto::Delta::Terminal { .. }) {
+                            code.agents.touch(&machine.id);
+                        }
                         let _ = hub.events.send(Arc::new(StreamEvent::Delta { machine: MachineId(machine.id.clone()), delta }));
                     }
                     DaemonFrame::Reply { id, result } => code.agents.replied(&machine.id, &id, result),

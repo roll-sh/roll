@@ -95,4 +95,19 @@ describe("Composer", () => {
     renderAgents(<Composer mode={{ kind: "thread", thread: thread(), machine: machine() }} />, h);
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("half a thought");
   });
+
+  it("stays open on an asleep sandbox (sending wakes it), not on an offline computer", async () => {
+    const h = agentsHarness();
+    const asleep = machine({ online: false, sandbox: { backend: "agent37", size: "standard", status: "stopped", hourly_cents: 3, stopped_reason: "idle" } });
+    const { unmount } = renderAgents(<Composer mode={{ kind: "thread", thread: thread({ status: "waiting", pending_requests: 1 }), machine: asleep }} />, h);
+    const box = screen.getByRole("textbox", { name: "Message" });
+    expect(box).toBeEnabled();
+    expect(box).toHaveAttribute("placeholder", "The sandbox is asleep; sending wakes it");
+    await userEvent.type(box, "go on{Enter}");
+    await waitFor(() => expect(commands(h)).toEqual([expect.objectContaining({ type: "message.send", thread: "thr_1", text: "go on" })]));
+    unmount();
+    renderAgents(<Composer mode={{ kind: "thread", thread: thread(), machine: machine({ online: false }) }} />, agentsHarness());
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveAttribute("placeholder", "The machine is offline");
+  });
 });

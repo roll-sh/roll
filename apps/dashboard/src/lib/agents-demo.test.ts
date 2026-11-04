@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import type { Published } from "./agents-api";
+import { machineState, type Published } from "./agents-api";
 import { AgentsClient } from "./agents-client";
 import { DemoOwner } from "./agents-demo";
 import { busyThreads, pendingRequests, runsOf } from "./agents-store";
@@ -51,6 +51,27 @@ describe("agents demo", () => {
     const fork = await client.run<{ type: "created"; id: string }>("mch_demo_ada", { type: "thread.fork", thread: "thr_demo_json" }, "created");
     await until("the fork", () => client.data.threads.get(fork.id)?.value.lineage?.parent === "thr_demo_json");
     expect(await client.send("mch_nope", { type: "provider.refresh" })).toMatchObject({ type: "error", code: "machine_offline" });
+    release();
+  });
+
+  it("puts its sandbox to sleep while it waits on you, and the answer wakes it", async () => {
+    demo = new DemoOwner(0.01, false);
+    const client = new AgentsClient("demo", demo, (fn) => queueMicrotask(fn));
+    const release = client.hold();
+    const box = () => client.data.machines.get("mch_demo_box")?.value;
+    await until("the plan approval", () => pendingRequests(client.data, "thr_demo_ci").length === 1);
+    await until("the sandbox asleep", () => box()?.sandbox?.stopped_reason === "idle");
+    expect(machineState(box()!)).toBe("asleep");
+    expect((await demo.services().sandboxes.list("demo")).sandboxes[0]).toMatchObject({ status: "stopped", desired: "asleep", stopped_reason: "idle" });
+    // Nothing lost: the thread still waits, its approval still answerable.
+    expect(client.data.threads.get("thr_demo_ci")?.value.status).toBe("waiting");
+    const [req] = pendingRequests(client.data, "thr_demo_ci");
+    const answered = client.send("mch_demo_box", { type: "request.respond", request: req.id, response: { type: "decision", decision: "accept" } });
+    await until("waking", () => box()?.sandbox?.status === "starting");
+    expect(machineState(box()!)).toBe("waking");
+    expect(await answered).toEqual({ type: "ok" });
+    expect(box()?.online).toBe(true);
+    await until("the run to complete", () => runsOf(client.data, "thr_demo_ci")[0]?.status === "completed");
     release();
   });
 

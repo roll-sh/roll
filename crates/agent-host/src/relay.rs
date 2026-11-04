@@ -22,7 +22,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio_tungstenite::tungstenite::{self, Message, client::IntoClientRequest, protocol::WebSocketConfig};
 
 /// Records per `entities` frame.
@@ -35,6 +35,8 @@ const SILENCE: Duration = Duration::from_secs(60);
 const WELCOME_WAIT: Duration = Duration::from_secs(30);
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// How long a stopping daemon waits for the relay to acknowledge its last records.
+pub const DRAIN: Duration = Duration::from_secs(3);
 
 /// Where the relay is and who this machine is.
 #[derive(Clone)]
@@ -118,6 +120,8 @@ enum End {
     /// Try again (after backoff); `welcomed` resets the backoff.
     Retry { error: String, welcomed: bool },
     Stop(LinkError),
+    /// Stopping: the relay has every record, the link is closed.
+    Drained,
 }
 
 async fn open(cfg: &LinkConfig) -> Result<Ws, End> {
@@ -143,27 +147,39 @@ pub async fn check(cfg: &LinkConfig) -> Result<(), LinkError> {
         }
         Err(End::Stop(e)) => Err(e),
         Err(End::Retry { error, .. }) => Err(LinkError::Config(error)),
+        Err(End::Drained) => Ok(()),
     }
 }
 
-/// Keep the link up until it stops for good or `shutdown` completes (`Ok`).
+/// Keep the link up until it stops for good or `shutdown` completes (`Ok`). Once `shutdown`
+/// completes (the daemon has stopped its work and stored its last records), the link sends what
+/// the relay doesn't have yet and closes when it's acknowledged, waiting at most [`DRAIN`]: a
+/// machine going to sleep leaves the relay with its final state. Commands that come meanwhile
+/// aren't run: the relay sends them again on the next link.
 pub async fn run(daemon: Arc<dyn Daemon>, cfg: LinkConfig, events: mpsc::UnboundedSender<LinkEvent>, shutdown: impl Future<Output = ()>) -> Result<(), LinkError> {
     tokio::pin!(shutdown);
+    let (stop, stopping) = watch::channel(false);
     let mut backoff = BACKOFF_MIN;
     loop {
         let _ = events.send(LinkEvent::Connecting);
         let attempt = async {
             match open(&cfg).await {
-                Ok(ws) => session(&daemon, ws, &events).await,
+                Ok(ws) => session(&daemon, ws, &events, stopping.clone()).await,
                 Err(e) => e,
             }
         };
+        tokio::pin!(attempt);
         let end = tokio::select! {
-            e = attempt => e,
-            _ = &mut shutdown => return Ok(()),
+            e = &mut attempt => e,
+            _ = &mut shutdown => {
+                let _ = stop.send(true);
+                let _ = tokio::time::timeout(DRAIN, &mut attempt).await;
+                return Ok(());
+            }
         };
         let error = match end {
             End::Stop(e) => return Err(e),
+            End::Drained => return Ok(()),
             End::Retry { error, welcomed } => {
                 if welcomed {
                     backoff = BACKOFF_MIN;
@@ -245,8 +261,9 @@ struct Out {
     sent: u64,
 }
 
-/// One connected session: hello, welcome, then replay and live until something ends it.
-async fn session(daemon: &Arc<dyn Daemon>, mut ws: Ws, events: &mpsc::UnboundedSender<LinkEvent>) -> End {
+/// One connected session: hello, welcome, then replay and live until something ends it, or
+/// `stopping` turns true and the relay has acknowledged everything.
+async fn session(daemon: &Arc<dyn Daemon>, mut ws: Ws, events: &mpsc::UnboundedSender<LinkEvent>, mut stopping: watch::Receiver<bool>) -> End {
     let retry = |error: String, welcomed: bool| End::Retry { error, welcomed };
     let mut live = daemon.subscribe();
     if let Err(e) = ws.send(frame(&DaemonFrame::Hello { protocol: PROTOCOL, info: daemon.info().await })).await {
@@ -272,6 +289,8 @@ async fn session(daemon: &Arc<dyn Daemon>, mut ws: Ws, events: &mpsc::UnboundedS
     // Replies waiting for the records their command wrote: (the seq to have sent, id, reply).
     let mut held: Vec<(u64, String, Reply)> = Vec::new();
     let mut heard = tokio::time::Instant::now();
+    // Stopping: the newest seq as of the stop, which the relay must acknowledge.
+    let mut drain: Option<u64> = None;
     loop {
         // Replay a batch whenever nothing else is ready.
         if let Some(after) = out.replay {
@@ -301,9 +320,17 @@ async fn session(daemon: &Arc<dyn Daemon>, mut ws: Ws, events: &mpsc::UnboundedS
                 return retry(format!("sending a reply: {e}"), true);
             }
         }
+        if drain.is_some_and(|upto| acked >= upto && out.replay.is_none() && held.is_empty()) {
+            let _ = ws.close(None).await;
+            return End::Drained;
+        }
         let replaying = out.replay.is_some();
+        let draining = drain.is_some();
         tokio::select! {
             biased;
+            _ = stopping.changed(), if !draining => {
+                drain = Some(daemon.last_seq().await.unwrap_or(0));
+            }
             f = recv(&mut ws) => {
                 heard = tokio::time::Instant::now();
                 match f {
@@ -327,6 +354,8 @@ async fn session(daemon: &Arc<dyn Daemon>, mut ws: Ws, events: &mpsc::UnboundedS
                             return retry(format!("answering a ping: {e}"), true);
                         }
                     }
+                    // Stopping: the relay sends it again on the next link.
+                    Ok(In::Frame(RelayFrame::Command { .. })) if draining => {}
                     Ok(In::Frame(RelayFrame::Command { id, by, command, grant })) => {
                         let (tx, daemon) = (reply_tx.clone(), daemon.clone());
                         tokio::spawn(async move {

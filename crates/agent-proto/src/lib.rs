@@ -1241,16 +1241,33 @@ pub struct SandboxInfo {
     pub status: SandboxStatus,
     /// What it costs per running hour, in US cents.
     pub hourly_cents: u32,
+    /// Why a `stopped` sandbox is stopped: asleep (`idle`) or stopped by its owner. Unset
+    /// otherwise. A command to either wakes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_reason: Option<StopReason>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxStatus {
     Creating,
+    /// On its way up again after a stop (woken by a command, or started by its owner), until the
+    /// backend runs it.
+    Starting,
     Running,
     Stopped,
     Failed,
     Deleting,
+}
+
+/// Why a sandbox is stopped (docs/code/agents.md, "Sandboxes").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    /// Asleep: nothing ran on it for a while (`ROLL_SANDBOX_IDLE_STOP`).
+    Idle,
+    /// Its owner stopped it.
+    Owner,
 }
 
 /// A record as a browser sees it: which machine it's from and the owner-wide cursor.

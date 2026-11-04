@@ -115,6 +115,24 @@ Machine            a daemon (hostname, os, providers and their auth state, onlin
 - **Worktrees.** A thread may run in its own git worktree
   (`<data>/worktrees/<project>/<thread>`, branch `roll/<slug>`), so parallel threads never touch
   each other's files.
+- **Requests across a restart** (a sandbox going to sleep with an approval pending, `docker stop`,
+  a crash). A run that was only waiting on its user when the daemon stopped is *parked*: the next
+  start keeps it `waiting`, with its requests pending and its queue (the thread's `queued`) intact;
+  any other unfinished run is `interrupted` ("the daemon restarted") and its requests `cancelled`.
+  The provider turn that asked is gone, so answering a parked request resolves it and sends the
+  answer to the agent as a new turn on its resumed native conversation (sessions resume by native
+  id), in the same run: the decision or the answers as a message ("You asked for approval: …; I
+  approved it. … Go ahead and do it now."), with a `system` node in the run saying the machine
+  stopped meanwhile. The turn's other pending requests are withdrawn (the agent asks again if it
+  still needs them); an accepted approval also answers the resumed turn's first ask for the same
+  thing (the same action, command, tool and files) at once, so the user isn't asked twice. A
+  conversation that can't be resumed starts fresh, with the thread handed over and the run's own
+  prompt in front of the answer. `cancel` ends the run, steering a parked run goes on with the
+  steering input the same way, and an interrupt ends it. T3 Code does this for questions after a
+  restart (`ProviderRuntimeRecoveryService.ts`: a question becomes answerable by message, delivered
+  as a user message on the provider thread) and expires approvals there (`not_resumable`); roll
+  answers approvals the same way as questions, because a sandbox sleeps with approvals pending as a
+  matter of course.
 
 ## Sequences, sync and resume
 
@@ -173,7 +191,10 @@ a replay is still catching up. A frame the daemon can't read (a newer relay's fr
 command, or garbage) is skipped and the link stays up; a command among them gets an `invalid`
 reply. The relay does the same after `hello`: a daemon frame it can't read is skipped, a reply
 among them gives its waiters an `internal` error at once (not the timeout), and an entities batch
-keeps the records that parse. The daemon reconnects with jittered backoff (1 s doubling to 30 s). The relay's close codes say what to do:
+keeps the records that parse. The daemon reconnects with jittered backoff (1 s doubling to 30 s). A daemon that is stopping
+(SIGTERM: a sandbox going to sleep, `docker stop`) sends the records its shutdown wrote, runs no new
+command (they stay waiting on the relay, which sends them again on the next link), and closes the
+link once the relay has acknowledged every record up to its newest `seq` (3 s at most). The relay's close codes say what to do:
 4401 the token was revoked and 4400 the protocol isn't spoken (stop, with a clear error), 4409
 another daemon took the machine's link over (stop), 1012 the owner's agents moved to another
 cluster node (reconnect; docs/code/cluster.md, "An owner's agents").
@@ -409,8 +430,9 @@ that change (checks, reviews, the merge queue, landing) shows on the thread. The
 
 A sandbox is a machine roll hosts: a container running `roll agent up` with a machine token, so it
 appears on the canvas like any other machine (`Machine.sandbox`: backend, size, status, price). It's
-the product for people who don't want to connect their own machine: 3¢ per running hour for an
-always-on 2 vCPU / 4 GB (`standard`; `large` 6¢, `xlarge` 10¢; sizes are priced in config).
+the product for people who don't want to connect their own machine: 3¢ per running hour for a
+2 vCPU / 4 GB (`standard`; `large` 6¢, `xlarge` 10¢; sizes are priced in config), and it runs only
+while its agents work: it sleeps when idle and wakes when an agent needs it ("Sleep and wake" below).
 Prices are integer US cents per running hour (`hourly_cents`), and that is what's charged. Code: `code-control/src/agents/sandbox/`;
 routes: docs/code/http-api.md, "Sandboxes".
 
@@ -459,7 +481,8 @@ routes: docs/code/http-api.md, "Sandboxes".
   owner's requests, started by taking the lease, on a single node by `Code::start_sandboxes`)
   looks every 30 s: it creates what isn't created yet (retrying capacity errors, adopting a create
   whose answer was lost by roll's id, failing one the backend refuses or that takes over 15
-  minutes), starts an always-on sandbox that stopped on its own, records the backend's status into
+  minutes), starts a sandbox that should run but stopped on its own, puts an idle one to sleep,
+  records the backend's status into
   the sandbox and its machine (a `machine` event when it changes), and deletes. A sandbox's machine
   being removed deletes the sandbox; deleting a sandbox revokes its machine once the backend has
   deleted it. The lease isn't let go as idle while the owner has sandboxes.
@@ -474,8 +497,54 @@ routes: docs/code/http-api.md, "Sandboxes".
 - **Metering**: at each look, running time is added to `agent_sandbox_usage` per sandbox and UTC
   month (split at month boundaries), with the size's hourly price at creation; a row costs
   hours × `hourly_cents` / 100 dollars. `GET …/sandboxes/usage` shows it; there's no payment processor.
+  Metering ends at the look that sees it stopped, asleep or not.
 - **Limits** (config): sandboxes per owner (`ROLL_SANDBOX_MAX_PER_OWNER`, 5), sizes
   (`ROLL_SANDBOX_SIZES`), the URL sandboxes connect to (`ROLL_SANDBOX_API_URL`, default the API URL).
+
+**Sleep and wake** (`sandbox/wake.rs`). Billing is per running hour, so a sandbox runs only while
+its agents work: it stops when it's idle or only waiting on its user, and everything about it stays
+on the server meanwhile.
+
+- **Idle** means no thread of the machine is `starting` or `running` in the mirror (and the machine
+  is connected: offline, the mirror's statuses are the daemon's last word, not work going on). A
+  thread only `waiting` on its user is idle: it was asked to wait. A delegating parent isn't idle
+  while its children run, because the children are threads of the machine too. Activity the relay
+  sees go by also counts: a command for the machine, and terminal output (provider logins happen in a
+  terminal). It's noted in memory and folded into the sandbox's durable `last_active_at` at each
+  look; a busy look, a wake and an owner's start set it too.
+- **Sleeping**: the owner's reconciler stops a running sandbox once nothing happened for
+  `ROLL_SANDBOX_IDLE_STOP` (5 min; `0` turns sleeping off). Its desired state becomes `asleep`
+  (`Sandbox.status` `stopped`, `stopped_reason: idle`), apart from the owner's stop (`stopped`,
+  `stopped_reason: owner`); both are in the API and in `SandboxInfo` on the machine. agent37's own
+  auto-sleep isn't used (it counts only inbound HTTP, so it would put a working daemon to sleep);
+  roll drives stop and start itself. A reconciler that just started on a node (a restart, or the
+  owner's lease moving) never puts a sandbox to sleep sooner than one window after it started:
+  what the previous one saw since the last durable write is lost.
+- **Waking**: a command to a sandbox machine that's asleep, stopped by its owner or on its way down
+  (`message.send`, `thread.create`, `request.respond`, `terminal.open`, `run.interrupt`, `diff.get`,
+  `fs.*`, anything through `/commands`, the MCP tools that call it, and new projects) sets it running
+  (`starting` on the stream, so every open canvas pulses it), kicks the reconciler, and holds the
+  request until the daemon's link is up: a link newer than the one the stop left behind, at most
+  `ROLL_SANDBOX_WAKE_TIMEOUT` (180 s). Then the command goes out once, with the usual idempotency:
+  the daemon replies only after it has sent every record up to its newest `seq`, its replay
+  included, so a client that has the reply finds the woken machine's records. A wake that runs out
+  answers `machine_offline` ("still waking up"; the sandbox keeps waking and the same id is safe to
+  send again). Clients just wait for the HTTP request (the dashboard's commands have no timeout of
+  their own), rather than retrying a "waking" answer. A deleted or deleting (or failed) sandbox
+  never wakes.
+- **The race**: a command notes its activity before it reads the desired state, and the reconciler
+  puts a sandbox to sleep only if `last_active_at` hasn't moved, then reads the notes again (and
+  undoes it if one came in): either the command sees the sandbox asleep and wakes it, or the
+  reconciler sees the command. A wake takes the sandbox's lock, so a stop in progress finishes first.
+- **Nothing is lost while it sleeps**. The mirror keeps every record, so the machine's threads,
+  transcripts, requests and terminals still show, with their statuses. `docker stop`'s SIGTERM and
+  agent37's stop let `roll agent up` stop cleanly (`Host::shutdown`, 5 s): a run waiting on its user
+  is parked as it is (still `waiting`, its requests pending and answerable, its queue kept), any
+  other run is interrupted, every provider session is closed (providers write their conversations
+  out), and terminals end (`exited`). Then the link sends the records it wrote and closes once the
+  relay has acknowledged them (`relay::DRAIN`, 3 s); commands that come meanwhile aren't run (the
+  relay sends them again on the next link). A request answered after the wake resumes the
+  conversation ("Requests across a restart", in the domain model).
 
 **Logging providers in.** The owner logs the providers in from a terminal on the canvas
 (`terminal.open` with `command: "claude /login"` or `"codex login --device-auth"`): both are

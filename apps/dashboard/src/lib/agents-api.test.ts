@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
+  coming,
   commandD,
   commandRequestD,
   createAgentsApi,
@@ -11,7 +12,9 @@ import {
   entityD,
   loginPollD,
   machineLoginD,
+  machineState,
   pendingLoginD,
+  reachable,
   shareD,
   shareSummaryD,
   relayFrameD,
@@ -21,6 +24,9 @@ import {
   type Command,
   type CommandType,
   type Entity,
+  type Machine,
+  type MachineState,
+  type SandboxStatus,
   type StreamEvent,
 } from "./agents-api";
 import { httpTransport } from "./agents-client";
@@ -217,5 +223,27 @@ describe("agents api", () => {
     expect(urls[0]).toBe("http://roll.test/v1/code/agents/acme/events?threads=thr_a&after=5");
     expect(urls[1]).toBe("http://roll.test/v1/code/agents/acme/events?threads=thr_a&after=9");
     expect(lastIds).toEqual(["5", "9"]);
+  });
+});
+
+describe("machineState", () => {
+  const m = (online: boolean, sandbox: Machine["sandbox"]): Machine => ({ id: "mch_1", name: "box", online, info: null, sandbox, created_at: 0, last_seen: null });
+  const sb = (status: SandboxStatus, stopped_reason?: "idle" | "owner") => ({ backend: "agent37", size: "standard", status, hourly_cents: 3, ...(stopped_reason ? { stopped_reason } : {}) });
+
+  it("never calls a sandbox that wakes on its own offline", () => {
+    expect(machineState(m(true, sb("running")))).toBe("online");
+    expect(machineState(m(false, null))).toBe("offline");
+    expect(machineState(m(false, sb("stopped", "idle")))).toBe("asleep");
+    expect(machineState(m(false, sb("stopped", "owner")))).toBe("stopped");
+    expect(machineState(m(false, sb("starting")))).toBe("waking");
+    expect(machineState(m(false, sb("creating")))).toBe("booting");
+    expect(machineState(m(false, sb("running")))).toBe("connecting");
+    expect(machineState(m(false, sb("failed")))).toBe("offline");
+    expect(machineState(m(false, sb("deleting")))).toBe("offline");
+    // A command reaches it now or once it has woken; a deleted or failed one, or an offline computer, never.
+    expect([sb("stopped", "idle"), sb("stopped", "owner"), sb("starting")].every((s) => reachable(m(false, s)))).toBe(true);
+    expect([reachable(m(false, null)), reachable(m(false, sb("deleting"))), reachable(undefined)]).toEqual([false, false, false]);
+    expect(["waking", "booting", "connecting"].every((s) => coming(s as MachineState))).toBe(true);
+    expect(coming("asleep")).toBe(false);
   });
 });

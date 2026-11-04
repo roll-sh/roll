@@ -141,7 +141,7 @@ impl Code {
             rc.wake.notify_one();
             return;
         }
-        let rc = Arc::new(Reconciler { wake: Notify::new(), kicked: AtomicBool::new(false) });
+        let rc = Arc::new(Reconciler { wake: Notify::new(), kicked: AtomicBool::new(false), since: code_sql::now_ms() });
         running.insert(owner_id.to_string(), rc.clone());
         let owner = owner_id.to_string();
         rt.spawn(async move { me.reconcile_loop(owner, rc).await });
@@ -233,11 +233,19 @@ impl Code {
             Ok(state) => observed(&s, state),
             Err(e) => return self.note(&s, s.status, Some(e.to_string()), None, false).await,
         };
+        // A running sandbox whose machine has been idle for a window goes to sleep.
+        if s.desired == Desired::Running && status == SandboxStatus::Running && self.goes_to_sleep(&s).await {
+            s.desired = Desired::Asleep;
+        }
         // Make it what the owner asked for: an always-on sandbox that stopped (a crash, a host
-        // move) starts again; a stopped one stops.
+        // move) starts again; a stopped or sleeping one stops.
         let acted = match (s.desired, status) {
             (Desired::Running, SandboxStatus::Stopped) => Some(b.start(&backend_id).await),
-            (Desired::Stopped, SandboxStatus::Running | SandboxStatus::Creating) => Some(b.stop(&backend_id).await),
+            (desired, SandboxStatus::Running | SandboxStatus::Creating | SandboxStatus::Starting) if desired.is_stopped() => {
+                // The daemon on that link is on its way down: a wake waits for the next one.
+                self.sandboxes.stopped_links.lock().insert(s.machine_id.clone(), self.agents.link_conn(&s.machine_id));
+                Some(b.stop(&backend_id).await)
+            }
             _ => None,
         };
         match acted {

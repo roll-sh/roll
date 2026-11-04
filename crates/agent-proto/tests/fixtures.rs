@@ -505,10 +505,20 @@ fn machine() -> Machine {
         name: "ada-mbp".into(),
         online: true,
         info: Some(info()),
-        sandbox: Some(SandboxInfo { backend: "agent37".into(), size: "2cpu-4gb".into(), status: SandboxStatus::Running, hourly_cents: 3 }),
+        sandbox: Some(SandboxInfo { backend: "agent37".into(), size: "2cpu-4gb".into(), status: SandboxStatus::Running, hourly_cents: 3, stopped_reason: None }),
         created_at: T,
         last_seen: Some(T),
     }
+}
+
+/// A sandbox asleep (stopped while idle), and one on its way up again.
+fn asleep() -> Vec<Machine> {
+    let sandbox = |status, stopped_reason| Some(SandboxInfo { backend: "agent37".into(), size: "standard".into(), status, hourly_cents: 3, stopped_reason });
+    vec![
+        Machine { online: false, sandbox: sandbox(SandboxStatus::Stopped, Some(StopReason::Idle)), ..machine() },
+        Machine { online: false, sandbox: sandbox(SandboxStatus::Stopped, Some(StopReason::Owner)), ..machine() },
+        Machine { online: false, sandbox: sandbox(SandboxStatus::Starting, None), ..machine() },
+    ]
 }
 
 fn stream() -> Vec<StreamEvent> {
@@ -588,7 +598,8 @@ fn fixtures() {
     let p = login_polls();
     p.iter().for_each(covered_poll);
     check("login_polls", p);
-    check("state", vec![State { cursor: 9, machines: vec![machine()], entities: vec![Mirrored { cursor: 7, machine: mch(), entity: Entity::Project(project()) }] }]);
+    let machines = std::iter::once(machine()).chain(asleep()).collect();
+    check("state", vec![State { cursor: 9, machines, entities: vec![Mirrored { cursor: 7, machine: mch(), entity: Entity::Project(project()) }] }]);
     check("command_requests", vec![CommandRequest { id: "cmd_1".into(), command: Command::RunInterrupt { thread: thr() } }]);
     check(
         "device_logins",

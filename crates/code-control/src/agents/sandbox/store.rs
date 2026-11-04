@@ -5,7 +5,7 @@
 
 use super::{Desired, Size};
 use crate::agents::store::{self as machines, MachineRow};
-use agent_proto::{SandboxInfo, SandboxStatus};
+use agent_proto::{SandboxInfo, SandboxStatus, StopReason};
 use code_sql::{Conn, OptionalExtension, Row, params};
 
 pub const SCHEMA: &str = r#"
@@ -23,9 +23,10 @@ CREATE TABLE IF NOT EXISTS agent_sandboxes (
     memory_gb INTEGER NOT NULL,
     disk_gb INTEGER NOT NULL,
     hourly_cents INTEGER NOT NULL,
-    -- creating | running | stopped | failed | deleting (agent_proto::SandboxStatus)
+    -- creating | starting | running | stopped | failed | deleting (agent_proto::SandboxStatus)
     status TEXT NOT NULL,
-    -- running | stopped | deleted: what the owner asked for.
+    -- running | stopped | asleep | deleted: what the owner asked for (asleep: the reconciler
+    -- stopped it while idle).
     desired TEXT NOT NULL,
     -- The machine token and the owner's env, sealed (ROLL_SECRET_KEY) until the backend has them.
     sealed TEXT,
@@ -34,9 +35,13 @@ CREATE TABLE IF NOT EXISTS agent_sandboxes (
     updated_at INTEGER NOT NULL,
     -- Running time is metered up to here; set while the sandbox runs.
     metered_at INTEGER,
-    deleted_at INTEGER
+    deleted_at INTEGER,
+    -- When its machine last did something (a thread running, a command, terminal traffic, a
+    -- wake): it sleeps a window after.
+    last_active_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS agent_sandboxes_owner ON agent_sandboxes (owner_id, deleted_at);
+CREATE INDEX IF NOT EXISTS agent_sandboxes_machine ON agent_sandboxes (machine_id);
 CREATE TABLE IF NOT EXISTS agent_sandbox_usage (
     sandbox_id TEXT NOT NULL,
     -- YYYY-MM (UTC)
@@ -67,20 +72,37 @@ pub struct SandboxRow {
     pub updated_at: i64,
     pub metered_at: Option<i64>,
     pub deleted_at: Option<i64>,
+    pub last_active_at: Option<i64>,
 }
 
 impl SandboxRow {
     pub fn info(&self) -> SandboxInfo {
-        SandboxInfo { backend: self.backend.clone(), size: self.size.name.clone(), status: self.status, hourly_cents: self.size.hourly_cents }
+        SandboxInfo {
+            backend: self.backend.clone(),
+            size: self.size.name.clone(),
+            status: self.status,
+            hourly_cents: self.size.hourly_cents,
+            stopped_reason: self.stopped_reason(),
+        }
+    }
+
+    /// Why it's stopped, when it is: asleep, or the owner's stop.
+    pub fn stopped_reason(&self) -> Option<StopReason> {
+        match (self.status, self.desired) {
+            (SandboxStatus::Stopped, Desired::Asleep) => Some(StopReason::Idle),
+            (SandboxStatus::Stopped, Desired::Stopped) => Some(StopReason::Owner),
+            _ => None,
+        }
     }
 }
 
 const COLS: &str = "id, owner_id, machine_id, name, backend, backend_id, size, cpu, memory_gb, disk_gb, hourly_cents, status, desired, sealed, error, \
-                    created_at, updated_at, metered_at, deleted_at";
+                    created_at, updated_at, metered_at, deleted_at, last_active_at";
 
 pub(crate) fn status_str(s: SandboxStatus) -> &'static str {
     match s {
         SandboxStatus::Creating => "creating",
+        SandboxStatus::Starting => "starting",
         SandboxStatus::Running => "running",
         SandboxStatus::Stopped => "stopped",
         SandboxStatus::Failed => "failed",
@@ -91,6 +113,7 @@ pub(crate) fn status_str(s: SandboxStatus) -> &'static str {
 fn parse_status(s: &str) -> SandboxStatus {
     match s {
         "creating" => SandboxStatus::Creating,
+        "starting" => SandboxStatus::Starting,
         "running" => SandboxStatus::Running,
         "stopped" => SandboxStatus::Stopped,
         "deleting" => SandboxStatus::Deleting,
@@ -116,6 +139,7 @@ fn row(r: &Row<'_>) -> code_sql::Result<SandboxRow> {
         updated_at: r.get(16)?,
         metered_at: r.get(17)?,
         deleted_at: r.get(18)?,
+        last_active_at: r.get(19)?,
     })
 }
 
@@ -184,7 +208,7 @@ pub fn create(db: &code_sql::Db, n: &NewSandbox<'_>) -> code_sql::Result<Created
             return Ok(Created::TooManyMachines);
         }
         c.execute(
-            &format!("INSERT INTO agent_sandboxes ({COLS}) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 'creating', 'running', ?, NULL, ?, ?, NULL, NULL)"),
+            &format!("INSERT INTO agent_sandboxes ({COLS}) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 'creating', 'running', ?, NULL, ?, ?, NULL, NULL, ?)"),
             params![
                 n.id,
                 n.owner_id,
@@ -197,6 +221,7 @@ pub fn create(db: &code_sql::Db, n: &NewSandbox<'_>) -> code_sql::Result<Created
                 n.size.disk_gb as i64,
                 n.size.hourly_cents as i64,
                 n.sealed,
+                now,
                 now,
                 now
             ],
@@ -257,7 +282,9 @@ pub fn observe(db: &code_sql::Db, id: &str, o: &Observed<'_>, now: i64) -> code_
     })
 }
 
-/// The owner asked for `desired`. `None` if the owner has no such live sandbox.
+/// Ask for `desired`: the owner's start, stop or delete, or a command waking it (running). A
+/// stopped sandbox asked to run is `starting`, and active now: it gets a whole idle window. `None`
+/// if the owner has no such live sandbox.
 pub fn set_desired(db: &code_sql::Db, owner_id: &str, id: &str, desired: Desired) -> code_sql::Result<Option<(SandboxRow, Option<MachineRow>)>> {
     let now = code_sql::now_ms();
     db.write(|c| {
@@ -265,16 +292,49 @@ pub fn set_desired(db: &code_sql::Db, owner_id: &str, id: &str, desired: Desired
         if s.owner_id != owner_id || s.deleted_at.is_some() {
             return Ok(None);
         }
-        let status = if desired == Desired::Deleted { SandboxStatus::Deleting } else { s.status };
+        let status = match desired {
+            Desired::Deleted => SandboxStatus::Deleting,
+            Desired::Running if s.status == SandboxStatus::Stopped => SandboxStatus::Starting,
+            _ => s.status,
+        };
+        let active = if desired == Desired::Running { Some(now) } else { s.last_active_at };
         c.execute(
-            "UPDATE agent_sandboxes SET desired = ?, status = ?, updated_at = ? WHERE id = ?",
-            params![desired.as_str(), status_str(status), now, id],
+            "UPDATE agent_sandboxes SET desired = ?, status = ?, updated_at = ?, last_active_at = ? WHERE id = ?",
+            params![desired.as_str(), status_str(status), now, active, id],
         )?;
-        let was = s.status;
+        let was = s.info();
         let s = get(c, id)?.expect("still there");
-        let m = if was != status { sync_machine(c, &s)? } else { None };
+        let m = if s.info() != was { sync_machine(c, &s)? } else { None };
         Ok(Some((s, m)))
     })
+}
+
+/// The live sandbox a machine is, if it is one.
+pub fn by_machine(db: &code_sql::Db, machine_id: &str) -> code_sql::Result<Option<SandboxRow>> {
+    db.query_row(&format!("SELECT {COLS} FROM agent_sandboxes WHERE machine_id = ? AND deleted_at IS NULL"), [machine_id], row).optional()
+}
+
+/// Its machine did something at `at` (only ever moves forward).
+pub fn active(db: &code_sql::Db, id: &str, at: i64) -> code_sql::Result<()> {
+    db.execute("UPDATE agent_sandboxes SET last_active_at = ? WHERE id = ? AND (last_active_at IS NULL OR last_active_at < ?)", params![at, id, at])?;
+    Ok(())
+}
+
+/// Put a running sandbox to sleep, unless something woke it or it was active after `idle_since`
+/// meanwhile. Whether it now sleeps.
+pub fn sleep(db: &code_sql::Db, id: &str, idle_since: i64) -> code_sql::Result<bool> {
+    let n = db.execute(
+        "UPDATE agent_sandboxes SET desired = 'asleep', updated_at = ? WHERE id = ? AND desired = 'running' AND deleted_at IS NULL \
+         AND COALESCE(last_active_at, 0) <= ?",
+        params![code_sql::now_ms(), id, idle_since],
+    )?;
+    Ok(n == 1)
+}
+
+/// Something came in just as it was put to sleep: it stays up.
+pub fn unsleep(db: &code_sql::Db, id: &str) -> code_sql::Result<()> {
+    db.execute("UPDATE agent_sandboxes SET desired = 'running' WHERE id = ? AND desired = 'asleep'", [id])?;
+    Ok(())
 }
 
 /// The backend deleted it: meter the last of its running time, mark it deleted and revoke its

@@ -18,7 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { isBusy, type Checkpoint, type Diff, type Machine, type Request, type Run, type Thread } from "@/lib/agents-api";
+import { coming, isBusy, machineState, reachable, type Checkpoint, type Diff, type Machine, type Request, type Run, type Thread } from "@/lib/agents-api";
 import { checkpointsOf, nodeTree, providersFor, runsOf } from "@/lib/agents-store";
 import { DiffViewer } from "../code/diff";
 import { input } from "../ui";
@@ -252,7 +252,10 @@ function TitleBar({
   const [panel, setPanel] = useState<"publish" | "work" | null>(null);
   useEffect(() => setPanel(null), [thread.id]);
   const mid = machine?.id;
-  const online = !!machine?.online;
+  // An asleep sandbox counts: what's sent to it wakes it.
+  const online = reachable(machine);
+  const state = machine ? machineState(machine) : "offline";
+  const sleeping = state === "asleep" ? "Asleep · wakes when an agent needs it" : state === "stopped" ? "Stopped · sending starts it" : coming(state) && machine?.sandbox ? "Waking up…" : null;
   const project = data.projects.get(thread.project)?.value;
   const providers = providersFor(data, mid);
   const model = modelName(providers, thread.provider, thread.model);
@@ -312,6 +315,7 @@ function TitleBar({
           )}
           <p className="flex min-w-0 items-center gap-2 truncate text-[11.5px] leading-tight text-subtle">
             {busy ? <span className="shrink-0 shimmer">{thread.activity ?? threadStatusLabel[thread.status]}</span> : <span className="shrink-0">{threadStatusLabel[thread.status]}</span>}
+            {sleeping && <span className={`shrink-0 ${coming(state) ? "shimmer" : ""}`}>{sleeping}</span>}
             {!phone && (
               <>
                 <span className="truncate">

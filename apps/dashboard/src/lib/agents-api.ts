@@ -374,13 +374,19 @@ export interface MachineInfo {
   providers: ProviderInfo[];
 }
 
-export type SandboxStatus = "creating" | "running" | "stopped" | "failed" | "deleting";
+/** `starting`: on its way up again after a stop (woken by a command, or started by its owner). */
+export type SandboxStatus = "creating" | "starting" | "running" | "stopped" | "failed" | "deleting";
+
+/** Why a sandbox is stopped: asleep (`idle`: nothing ran on it for a while) or its owner's stop. A command to either wakes it. */
+export type StopReason = "idle" | "owner";
 
 export interface SandboxInfo {
   backend: string;
   size: string;
   status: SandboxStatus;
   hourly_cents: number;
+  /** Set while `stopped`. */
+  stopped_reason?: StopReason;
 }
 
 export interface Machine {
@@ -392,6 +398,35 @@ export interface Machine {
   created_at: Millis;
   last_seen: Millis | null;
 }
+
+/**
+ * What a machine is doing, as the canvas says it. A sandbox that isn't connected is never just
+ * "offline": it's asleep (stopped while idle), stopped by its owner, waking, booting or connecting,
+ * and a command to it wakes it (the relay holds the command until the sandbox is up).
+ */
+export type MachineState = "online" | "asleep" | "stopped" | "waking" | "booting" | "connecting" | "offline";
+
+export function machineState(m: Machine): MachineState {
+  if (m.online) return "online";
+  switch (m.sandbox?.status) {
+    case "creating":
+      return "booting";
+    case "starting":
+      return "waking";
+    case "running":
+      return "connecting";
+    case "stopped":
+      return m.sandbox.stopped_reason === "owner" ? "stopped" : "asleep";
+    default:
+      return "offline";
+  }
+}
+
+/** A command sent to the machine gets to it: now, or once its sandbox has woken. */
+export const reachable = (m: Machine | undefined): boolean => !!m && machineState(m) !== "offline";
+
+/** On its way up: the canvas pulses it. */
+export const coming = (s: MachineState): boolean => s === "waking" || s === "booting" || s === "connecting";
 
 // ── commands ──
 
@@ -861,8 +896,9 @@ export const machineD = obj<Machine>({
     obj<SandboxInfo>({
       backend: str,
       size: str,
-      status: literal("creating", "running", "stopped", "failed", "deleting"),
+      status: literal("creating", "starting", "running", "stopped", "failed", "deleting"),
       hourly_cents: int,
+      stopped_reason: optional(literal("idle", "owner")),
     }),
   ),
   created_at: int,

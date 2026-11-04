@@ -2,7 +2,7 @@
 
 import { Play, Square, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Machine } from "@/lib/agents-api";
+import type { Machine, SandboxInfo } from "@/lib/agents-api";
 import type { AgentsData } from "@/lib/agents-store";
 import type { AgentsServices } from "@/lib/agents-services";
 import { canStart, canStop, formatHourly, type Sandbox, type SandboxList, type SandboxUsageRow } from "@/lib/sandboxes-api";
@@ -75,11 +75,17 @@ export function useSandboxes(services: AgentsServices | undefined, owner: string
 
 const statusLabel: Record<Sandbox["status"], string> = {
   creating: "Starting up",
+  starting: "Waking",
   running: "Running",
   stopped: "Stopped",
   failed: "Failed",
   deleting: "Deleting",
 };
+
+/** Line 1 when it isn't running: asleep (stopped while idle) reads differently from the owner's stop. */
+export function sandboxLabel(info: SandboxInfo): string {
+  return info.status === "stopped" && info.stopped_reason !== "owner" ? "Asleep" : statusLabel[info.status];
+}
 
 /** `$3.90`. */
 export const dollars = (n: number) => `$${n.toFixed(2)}`;
@@ -94,7 +100,8 @@ export function SandboxPanel({ machine }: { machine: Machine }) {
   const [confirm, setConfirm] = useState(false);
   const status = info.status;
   const used = sb ? sandboxes?.usage.get(sb.id) : undefined;
-  const moving = status === "creating" || status === "deleting";
+  const moving = status === "creating" || status === "starting" || status === "deleting";
+  const asleep = status === "stopped" && info.stopped_reason !== "owner";
 
   const act = async (what: string, fn: () => Promise<unknown>) => {
     setBusy(what);
@@ -128,13 +135,13 @@ export function SandboxPanel({ machine }: { machine: Machine }) {
                   ? size
                     ? `${size.cpu} vCPU · ${size.memory_gb} GB`
                     : info.size
-                  : statusLabel[status]}
+                  : sandboxLabel(info)}
         </span>
         <span className="ml-auto shrink-0 font-mono text-[11px] text-muted">{formatHourly(size?.hourly_cents ?? info.hourly_cents)}</span>
         {sb && services && status !== "deleting" && !confirm && (
           <span className="-mr-1 flex shrink-0 items-center text-subtle">
             {canStart(sb) && (
-              <button disabled={busy !== null} onClick={() => act("start", () => services.sandboxes.start(owner, sb.id))} className={tool} aria-label="Start" title="Start">
+              <button disabled={busy !== null} onClick={() => act("start", () => services.sandboxes.start(owner, sb.id))} className={tool} aria-label="Start" title={asleep ? "Wake it now" : "Start"}>
                 <Play className="size-3" />
               </button>
             )}
@@ -155,6 +162,7 @@ export function SandboxPanel({ machine }: { machine: Machine }) {
         </p>
       )}
       {status === "creating" && <p className="text-[11.5px] text-subtle">Booting. It connects on its own in a minute or so.</p>}
+      {asleep && <p className="text-[11.5px] text-subtle">Wakes when an agent needs it. Asleep, it isn't billed.</p>}
       {sb?.error && <p className="text-[11.5px] text-danger">{sb.error}</p>}
       {confirm && sb && services && (
         <div className="flex items-center gap-1 text-[11.5px]">

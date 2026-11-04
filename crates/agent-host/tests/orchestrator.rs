@@ -360,18 +360,15 @@ async fn command_ids_are_idempotent() {
 }
 
 #[tokio::test]
-async fn a_restart_interrupts_runs_cancels_requests_and_resumes_the_native_thread() {
+async fn a_restart_interrupts_running_runs_and_resumes_the_native_thread() {
     let fake = manual("codex", false);
     let w = World::new(vec![fake.clone()]).await;
     let thread = w.thread("codex", Some("long job"), false).await;
     let session = fake.session(0).await;
     session.wait_calls(|c| c.len() == 1).await;
-    session.emit(ProviderEvent::Request {
-        id: "r".into(),
-        item: None,
-        body: RequestBody::Questions { questions: Vec::new() },
-    });
-    w.wait_thread(&thread, |t| t.status == ThreadStatus::Waiting).await;
+    // Events apply in order: once this node shows, the native thread id is stored.
+    session.emit(ProviderEvent::Item(Item { id: "m".into(), parent: None, status: NodeStatus::Running, body: NodeBody::Message { text: "working".into() } }));
+    w.wait("the node", |s| s.nodes(&thread).first().cloned()).await;
     let receipt = w.host.run("before".into(), "owner".into(), Command::ProviderRefresh {}).await;
     let home = w.home.clone();
     let World { host, dirs, .. } = w;
@@ -383,7 +380,6 @@ async fn a_restart_interrupts_runs_cancels_requests_and_resumes_the_native_threa
     let t = s.thread(&thread).unwrap();
     assert_eq!((t.status, t.active_run.clone(), t.pending_requests), (ThreadStatus::Idle, None, 0));
     assert_eq!(s.runs(&thread)[0].status, RunStatus::Interrupted);
-    assert_eq!(s.requests(&thread)[0].status, RequestStatus::Cancelled);
     assert_eq!(host.run("before".into(), "owner".into(), Command::ProviderRefresh {}).await, receipt);
 
     let reply = run(&host, Command::MessageSend {
@@ -398,6 +394,185 @@ async fn a_restart_interrupts_runs_cancels_requests_and_resumes_the_native_threa
     assert_eq!(resumed.config.resume.as_deref(), Some(session.native()));
     // The resumed conversation already holds run 1: nothing is handed over.
     assert_eq!(sends(&resumed.wait_calls(|c| c.len() == 1).await), vec!["carry on"]);
+    drop(dirs);
+}
+
+fn approval(command: &str) -> RequestBody {
+    RequestBody::Approval(Approval {
+        action: ApprovalAction::Command,
+        title: format!("Run `{command}`"),
+        command: Some(command.into()),
+        cwd: None,
+        files: Vec::new(),
+        reason: None,
+        tool: None,
+        input: serde_json::Value::Null,
+        decisions: vec![Decision::Accept, Decision::Decline],
+    })
+}
+
+/// A run waiting on an approval when the daemon stops (a sandbox going to sleep) stays waiting:
+/// the stop parks it and closes the session, the restart keeps its request pending and its
+/// queued message, and answering it resumes the provider's conversation with the decision, as a
+/// new turn in the same run. The resumed turn's ask for the same command is answered at once,
+/// and the queue drains after the run completes.
+#[tokio::test]
+async fn a_request_pending_when_the_daemon_stops_is_answered_after_a_restart() {
+    let fake = manual("codex", false);
+    let w = World::new(vec![fake.clone()]).await;
+    let thread = w.thread("codex", Some("clean up"), false).await;
+    let session = fake.session(0).await;
+    session.wait_calls(|c| c.len() == 1).await;
+    let tool = ToolCall {
+        name: "commandExecution".into(),
+        kind: ToolKind::Command,
+        title: "rm -rf build".into(),
+        input: serde_json::Value::Null,
+        output: None,
+        exit_code: None,
+        files: Vec::new(),
+    };
+    session.emit(ProviderEvent::Item(Item { id: "cmd".into(), parent: None, status: NodeStatus::Running, body: NodeBody::Tool(tool) }));
+    session.emit(ProviderEvent::Request { id: "rpc-7".into(), item: Some("cmd".into()), body: approval("rm -rf build") });
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Waiting).await;
+    assert!(matches!(w.send(&thread, "then the docs", SendMode::Queue).await, Reply::Created { .. }));
+
+    // SIGTERM: the waiting run is parked as it is, the session closed.
+    w.host.shutdown().await;
+    assert!(session.calls().contains(&Call::Close));
+    let check = |s: &Records| {
+        let t = s.thread(&thread).unwrap();
+        assert_eq!((t.status, t.pending_requests, t.queued.len()), (ThreadStatus::Waiting, 1, 1), "{t:?}");
+        let run = &s.runs(&thread)[0];
+        assert_eq!(run.status, RunStatus::Waiting);
+        assert_eq!(t.active_run.as_ref(), Some(&run.id));
+        let request = s.requests(&thread).pop().unwrap();
+        assert_eq!(request.status, RequestStatus::Pending);
+        let nodes = s.nodes(&thread);
+        let waiting = nodes.iter().find(|n| n.id == request.node).unwrap();
+        assert_eq!(waiting.status, NodeStatus::Waiting);
+        assert!(nodes.iter().filter(|n| n.id != request.node).all(|n| n.status == NodeStatus::Interrupted), "{nodes:?}");
+        request
+    };
+    let request = check(&w.state().await);
+    let home = w.home.clone();
+    let World { host, dirs, .. } = w;
+    drop(host);
+
+    // The next start: still waiting, still answerable.
+    let fake2 = manual("codex", false);
+    let host = open(&home, vec![fake2.clone()]).await;
+    assert_eq!(check(&state(&host).await).id, request.id);
+    let answer = Command::RequestRespond { request: request.id.clone(), response: Response::Decision { decision: Decision::Accept, message: None } };
+    assert_eq!(run(&host, answer.clone()).await, Reply::Ok);
+    let resumed = fake2.session(0).await;
+    assert_eq!(resumed.config.resume.as_deref(), Some(session.native()));
+    let said = sends(&resumed.wait_calls(|c| !sends(c).is_empty()).await);
+    assert_eq!(said.len(), 1);
+    assert!(said[0].contains("I approved it") && said[0].contains("rm -rf build") && !said[0].contains("clean up"), "the conversation has the prompt: {said:?}");
+    let s = state(&host).await;
+    let t = s.thread(&thread).unwrap();
+    let runs = s.runs(&thread);
+    assert_eq!((t.status, t.pending_requests, runs.len(), runs[0].status), (ThreadStatus::Running, 0, 1, RunStatus::Running));
+    let answered = s.requests(&thread).into_iter().find(|r| r.id == request.id).unwrap();
+    assert_eq!((answered.status, answered.resolved_by.as_deref()), (RequestStatus::Resolved, Some("owner")));
+    assert!(s.nodes(&thread).iter().any(|n| matches!(&n.body, NodeBody::System { text } if text.contains("machine stopped"))), "the transcript says so");
+    let again = run(&host, answer).await;
+    assert!(matches!(again, Reply::Error(ReplyError { code: ErrorCode::Conflict, .. })), "{again:?}");
+
+    // The agent asks to run it again: already approved.
+    resumed.emit(ProviderEvent::Request { id: "rpc-9".into(), item: None, body: approval("rm -rf build") });
+    resumed.wait_calls(|c| c.contains(&Call::Respond { request: "rpc-9".into(), response: Response::Decision { decision: Decision::Accept, message: None } })).await;
+    let s = state(&host).await;
+    assert!(s.requests(&thread).iter().all(|r| r.status == RequestStatus::Resolved && r.resolved_by.as_deref() == Some("owner")));
+    // Something else still asks.
+    resumed.emit(ProviderEvent::Request { id: "rpc-10".into(), item: None, body: approval("rm -rf dist") });
+    wait(&host, |s| s.thread(&thread).filter(|t| t.status == ThreadStatus::Waiting).cloned(), "a new ask").await;
+    resumed.emit(ProviderEvent::RequestCancelled { id: "rpc-10".into() });
+
+    // The run completes; the queued message runs next.
+    resumed.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
+    resumed.wait_calls(|c| sends(c).last().map(String::as_str) == Some("then the docs")).await;
+    let runs = wait(&host, |s| Some(s.runs(&thread)).filter(|r| r.len() == 2), "the queued run").await;
+    assert_eq!((runs[0].status, runs[0].ordinal), (RunStatus::Completed, 1));
+    drop(dirs);
+}
+
+/// Questions pending at a restart are answered as a message on the resumed conversation (T3's
+/// questions after a restart), a conversation that can't be resumed starts fresh with the run's
+/// prompt in front, and a `cancel` decision just ends the parked run.
+#[tokio::test]
+async fn parked_questions_are_answered_as_a_message_and_cancel_ends_the_run() {
+    let fake = manual("codex", false);
+    let w = World::new(vec![fake.clone()]).await;
+    let thread = w.thread("codex", Some("pick a color"), false).await;
+    let session = fake.session(0).await;
+    session.wait_calls(|c| c.len() == 1).await;
+    let question = Question { id: "color".into(), header: "Color".into(), question: "Which color?".into(), options: Vec::new(), multi: false };
+    session.emit(ProviderEvent::Request { id: "q1".into(), item: None, body: RequestBody::Questions { questions: vec![question] } });
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Waiting).await;
+    let other = w.thread("codex", Some("deploy"), false).await;
+    let session2 = fake.session(1).await;
+    session2.wait_calls(|c| c.len() == 1).await;
+    let mut deploy = approval("deploy");
+    if let RequestBody::Approval(a) = &mut deploy {
+        a.decisions.push(Decision::Cancel);
+    }
+    session2.emit(ProviderEvent::Request { id: "a1".into(), item: None, body: deploy });
+    w.wait_thread(&other, |t| t.status == ThreadStatus::Waiting).await;
+    let home = w.home.clone();
+    let World { host, dirs, .. } = w;
+    // A crash this time (no shutdown): the same.
+    drop(host);
+
+    let fake2 = manual("codex", false);
+    // The provider lost the conversation: the session starts fresh.
+    fake2.fail_next_start("no such conversation");
+    let host = open(&home, vec![fake2.clone()]).await;
+    let s = state(&host).await;
+    let q = s.requests(&thread).pop().unwrap();
+    assert_eq!(q.status, RequestStatus::Pending);
+    let answers = [("color".to_string(), "Blue".to_string())].into();
+    assert_eq!(run(&host, Command::RequestRespond { request: q.id.clone(), response: Response::Answers { answers } }).await, Reply::Ok);
+    let fresh = fake2.session(0).await;
+    assert_eq!(fresh.config.resume, None);
+    let said = sends(&fresh.wait_calls(|c| !sends(c).is_empty()).await);
+    assert!(said[0].contains("pick a color") && said[0].contains("Which color?") && said[0].contains("Blue"), "{said:?}");
+
+    // Cancel: the run ends, nothing is sent.
+    let a = state(&host).await.requests(&other).pop().unwrap();
+    let cancel = Command::RequestRespond { request: a.id, response: Response::Decision { decision: Decision::Cancel, message: None } };
+    assert_eq!(run(&host, cancel).await, Reply::Ok);
+    let s = state(&host).await;
+    let t = s.thread(&other).unwrap();
+    assert_eq!((t.status, t.active_run.clone()), (ThreadStatus::Idle, None));
+    assert_eq!(s.runs(&other)[0].status, RunStatus::Interrupted);
+    assert_eq!(s.requests(&other)[0].status, RequestStatus::Resolved);
+    assert_eq!(fake2.sessions().len(), 1, "no session for a cancelled run");
+    drop(dirs);
+}
+
+/// Interrupting a parked run ends it; the restart's queue stays held, like any interrupt.
+#[tokio::test]
+async fn a_parked_run_can_be_interrupted() {
+    let fake = manual("codex", false);
+    let w = World::new(vec![fake.clone()]).await;
+    let thread = w.thread("codex", Some("wait for me"), false).await;
+    let session = fake.session(0).await;
+    session.wait_calls(|c| c.len() == 1).await;
+    session.emit(ProviderEvent::Request { id: "a".into(), item: None, body: approval("make") });
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Waiting).await;
+    w.host.shutdown().await;
+    let home = w.home.clone();
+    let World { host, dirs, .. } = w;
+    drop(host);
+    let host = open(&home, vec![manual("codex", false)]).await;
+    assert_eq!(run(&host, Command::RunInterrupt { thread: thread.clone() }).await, Reply::Ok);
+    let s = state(&host).await;
+    let t = s.thread(&thread).unwrap();
+    assert_eq!((t.status, t.active_run.clone(), t.pending_requests), (ThreadStatus::Idle, None, 0));
+    assert_eq!(s.runs(&thread)[0].status, RunStatus::Interrupted);
+    assert_eq!(s.requests(&thread)[0].status, RequestStatus::Cancelled);
     drop(dirs);
 }
 

@@ -44,9 +44,11 @@ pub fn sandbox_json(s: &SandboxRow) -> Value {
         "size": s.size,
         "status": store::status_str(s.status),
         "desired": s.desired,
+        "stopped_reason": s.stopped_reason(),
         "error": s.error,
         "created_at": s.created_at,
         "updated_at": s.updated_at,
+        "last_active_at": s.last_active_at,
     })
 }
 

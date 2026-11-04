@@ -515,8 +515,7 @@ async fn command(
     super::code::follow(&code);
     let granted = super::code::grant_for(&code, &caller, &m, &req.command)?;
     let (grant, repo) = granted.map_or((None, None), |(g, r)| (Some(g), Some(r)));
-    let timeout = code.agents.command_timeout();
-    let reply = code.agents.command(&machine, req.id, sender(&caller), req.command.clone(), grant, timeout).await;
+    let reply = code.machine_command(&m, req.id, sender(&caller), req.command.clone(), grant).await;
     let reply = match repo {
         Some(r) => super::code::published(&code, api.as_ref().map(|e| &e.0), &headers, &m, &req.command, &r, reply).await,
         None => reply,

@@ -483,8 +483,7 @@ pub(super) async fn create_project(code: &Arc<Code>, api: Option<&ApiRouter>, ca
     };
     let command = Command::ProjectAdd { path, name: label, clone: Some(RepoRef { owner: o.name.clone(), repo: name.to_string() }) };
     let grant = grant_for(code, caller, m, &command)?.map(|(g, _)| g);
-    let timeout = code.agents.command_timeout();
-    Ok(code.agents.command(&m.id, id.to_string(), super::api::sender(caller), command, grant, timeout).await)
+    Ok(code.machine_command(m, id.to_string(), super::api::sender(caller), command, grant).await)
 }
 
 /// A work item from the API (`GET` one, or `claim` the next), as the thread's [`WorkRef`].

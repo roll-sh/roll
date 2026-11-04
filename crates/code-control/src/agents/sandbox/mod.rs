@@ -8,6 +8,8 @@
 //!   makes the backend match, syncs what it reports into the sandbox and its machine (a `machine`
 //!   event), and meters running time for billing. It runs on the node holding the lease
 //!   `agents:<owner id>`, like everything else of the owner's agents (docs/code/cluster.md).
+//! - Sandboxes run only while their agents work ([`wake`]): the reconciler puts one to sleep
+//!   (stops it) when its machine has been idle for `idle_stop`, and a command to it wakes it.
 //! - What a sandbox needs to start (its machine token and the provider env the owner gave) is
 //!   sealed with `ROLL_SECRET_KEY` until the backend has it, then dropped. It goes to the backend
 //!   and nowhere else: never into a response, a log or an error.
@@ -17,6 +19,7 @@ pub mod api;
 pub mod docker;
 mod reconcile;
 pub mod store;
+mod wake;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -44,12 +47,14 @@ impl Size {
     }
 }
 
-/// What the owner asked a sandbox to be.
+/// What a sandbox should be: what the owner asked for, or asleep (the reconciler stopped it while
+/// idle; a command to it wakes it, as one to an owner-stopped sandbox does).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Desired {
     Running,
     Stopped,
+    Asleep,
     Deleted,
 }
 
@@ -58,6 +63,7 @@ impl Desired {
         match self {
             Desired::Running => "running",
             Desired::Stopped => "stopped",
+            Desired::Asleep => "asleep",
             Desired::Deleted => "deleted",
         }
     }
@@ -65,9 +71,15 @@ impl Desired {
     fn parse(s: &str) -> Desired {
         match s {
             "stopped" => Desired::Stopped,
+            "asleep" => Desired::Asleep,
             "deleted" => Desired::Deleted,
             _ => Desired::Running,
         }
+    }
+
+    /// Stopped at the backend, for whatever reason.
+    pub fn is_stopped(self) -> bool {
+        matches!(self, Desired::Stopped | Desired::Asleep)
     }
 }
 
@@ -88,6 +100,11 @@ pub struct SandboxConfig {
     pub sweep_every: Duration,
     /// The API URL sandboxes connect to (`ROLL_API_URL` inside them); default `Config::api_url`.
     pub api_url: Option<String>,
+    /// A running sandbox whose machine did nothing for this long goes to sleep (is stopped until
+    /// a command wakes it); zero keeps sandboxes up.
+    pub idle_stop: Duration,
+    /// How long a command to a sleeping (or stopped) sandbox waits for it to wake and connect.
+    pub wake_timeout: Duration,
 }
 
 #[derive(Clone, Debug)]
@@ -106,8 +123,27 @@ impl Default for SandboxConfig {
             create_timeout: Duration::from_secs(15 * 60),
             sweep_every: Duration::from_secs(10 * 60),
             api_url: None,
+            idle_stop: Duration::from_secs(5 * 60),
+            wake_timeout: Duration::from_secs(180),
         }
     }
+}
+
+/// `300`, `300s`, `5m` or `1h`.
+fn parse_duration(s: &str) -> Option<Duration> {
+    let s = s.trim();
+    let (n, unit) = match s.find(|c: char| !c.is_ascii_digit()) {
+        Some(i) => s.split_at(i),
+        None => (s, "s"),
+    };
+    let n: u64 = n.parse().ok()?;
+    let secs = match unit.trim() {
+        "s" => n,
+        "m" => n.checked_mul(60)?,
+        "h" => n.checked_mul(3600)?,
+        _ => return None,
+    };
+    Some(Duration::from_secs(secs))
 }
 
 /// 3¢ an hour for the 2 vCPU / 4 GB, and the larger agent37 shapes.
@@ -146,6 +182,8 @@ impl SandboxConfig {
     ///   (`1`: `--storage-opt size=`)
     /// - `ROLL_SANDBOX_SIZES` (`name=cpu:memory_gb:disk_gb:hourly_cents,…`), `ROLL_SANDBOX_MAX_PER_OWNER`,
     ///   `ROLL_SANDBOX_API_URL`
+    /// - `ROLL_SANDBOX_IDLE_STOP` (`5m`; `0` keeps sandboxes up), `ROLL_SANDBOX_WAKE_TIMEOUT` (`180s`):
+    ///   seconds, or with `s`, `m` or `h`
     pub fn from_env() -> anyhow::Result<SandboxConfig> {
         Self::from_lookup(|k| std::env::var(k).ok().filter(|v| !v.trim().is_empty()))
     }
@@ -195,6 +233,14 @@ impl SandboxConfig {
             c.max_per_owner = n.parse().map_err(|_| anyhow::anyhow!("ROLL_SANDBOX_MAX_PER_OWNER is a number"))?;
         }
         c.api_url = get("ROLL_SANDBOX_API_URL");
+        if let Some(d) = get("ROLL_SANDBOX_IDLE_STOP") {
+            c.idle_stop = parse_duration(&d).ok_or_else(|| anyhow::anyhow!("ROLL_SANDBOX_IDLE_STOP is a duration (300, 300s, 5m), not {d:?}"))?;
+        }
+        if let Some(d) = get("ROLL_SANDBOX_WAKE_TIMEOUT") {
+            c.wake_timeout = parse_duration(&d)
+                .filter(|d| !d.is_zero())
+                .ok_or_else(|| anyhow::anyhow!("ROLL_SANDBOX_WAKE_TIMEOUT is a duration over zero (180, 3m), not {d:?}"))?;
+        }
         Ok(c)
     }
 }
@@ -276,12 +322,18 @@ pub struct Sandboxes {
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// The sweep runs on this node (it acts only while it holds the singleton).
     sweeping: AtomicBool,
+    /// The link each machine had when the reconciler stopped its sandbox, by machine: a wake
+    /// waits for a newer one (that link belongs to a daemon on its way down).
+    stopped_links: Mutex<HashMap<String, Option<u64>>>,
 }
 
 struct Reconciler {
     wake: Notify,
     /// Kicked since the reconciler last looked: it looks again before it stops.
     kicked: AtomicBool,
+    /// When it started on this node (ms). Nothing sleeps sooner than one idle window after: what
+    /// a previous process (or node) saw since the last durable `last_active_at` is unknown.
+    since: i64,
 }
 
 impl Sandboxes {
@@ -291,7 +343,7 @@ impl Sandboxes {
             Some(BackendConfig::Agent37(c)) => Some(Arc::new(agent37::Agent37::new(c.clone())?)),
             Some(BackendConfig::Docker(c)) => Some(Arc::new(docker::Docker::new(c.clone()))),
         };
-        Ok(Sandboxes { backend, reconcilers: Mutex::default(), locks: Mutex::default(), sweeping: AtomicBool::new(false) })
+        Ok(Sandboxes { backend, reconcilers: Mutex::default(), locks: Mutex::default(), sweeping: AtomicBool::new(false), stopped_links: Mutex::default() })
     }
 
     /// `agent37` or `docker`; `None` when sandboxes are off.
@@ -377,6 +429,16 @@ mod tests {
         assert!(matches!(c.backend, Some(BackendConfig::Docker(ref d)) if d.runtime == docker::Runtime::Named("runsc".into())));
         assert!(SandboxConfig::from_lookup(env(&[("ROLL_SANDBOX_BACKEND", "agent37")])).is_err());
         assert!(SandboxConfig::from_lookup(env(&[("ROLL_SANDBOX_BACKEND", "k8s")])).is_err());
+        // Sleeping: five minutes idle by default, `0` keeps sandboxes up.
+        let c = SandboxConfig::from_lookup(env(&[])).unwrap();
+        assert_eq!((c.idle_stop, c.wake_timeout), (Duration::from_secs(300), Duration::from_secs(180)));
+        let c = SandboxConfig::from_lookup(env(&[("ROLL_SANDBOX_IDLE_STOP", "0"), ("ROLL_SANDBOX_WAKE_TIMEOUT", "4m")])).unwrap();
+        assert_eq!((c.idle_stop, c.wake_timeout), (Duration::ZERO, Duration::from_secs(240)));
+        assert_eq!(SandboxConfig::from_lookup(env(&[("ROLL_SANDBOX_IDLE_STOP", "90s")])).unwrap().idle_stop, Duration::from_secs(90));
+        assert_eq!(SandboxConfig::from_lookup(env(&[("ROLL_SANDBOX_IDLE_STOP", "1h")])).unwrap().idle_stop, Duration::from_secs(3600));
+        for bad in [("ROLL_SANDBOX_IDLE_STOP", "soon"), ("ROLL_SANDBOX_IDLE_STOP", "5d"), ("ROLL_SANDBOX_WAKE_TIMEOUT", "0")] {
+            assert!(SandboxConfig::from_lookup(move |k: &str| (k == bad.0).then(|| bad.1.to_string())).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

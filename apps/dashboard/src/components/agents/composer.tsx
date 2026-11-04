@@ -12,6 +12,7 @@ import type {
   SendMode,
   Thread,
 } from "@/lib/agents-api";
+import { coming, machineState, reachable } from "@/lib/agents-api";
 import { btn, input } from "../ui";
 import { useAgents } from "./use-agents";
 
@@ -135,7 +136,9 @@ export function Composer({
   const efforts = modelInfo?.efforts ?? [];
   const running = !!thread && (thread.status === "starting" || thread.status === "running" || thread.status === "waiting");
   const caps = info?.capabilities;
-  const machineOnline = !!mode.machine?.online;
+  // An asleep (or stopped) sandbox takes messages: sending wakes it.
+  const machineOnline = reachable(mode.machine);
+  const state = mode.machine ? machineState(mode.machine) : "offline";
   const loggedOut = info && info.auth === "missing";
 
   const configure = (patch: Partial<Pick<Thread, "provider" | "model" | "effort" | "runtime_mode" | "interaction_mode">>) => {
@@ -214,7 +217,13 @@ export function Composer({
 
   const placeholder = !machineOnline
     ? "The machine is offline"
-    : thread?.status === "waiting"
+    : state === "asleep"
+      ? "The sandbox is asleep; sending wakes it"
+      : state === "stopped"
+        ? "The sandbox is stopped; sending starts it"
+        : coming(state)
+          ? "The sandbox is waking up; what you send goes once it's up"
+          : thread?.status === "waiting"
       ? "Answer above, or send a message to redirect the agent"
       : running
         ? sendMode === "queue"

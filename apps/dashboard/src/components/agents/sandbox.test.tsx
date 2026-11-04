@@ -16,9 +16,11 @@ const sb = (over: Partial<Sandbox> = {}): Sandbox => ({
   size: SIZE,
   status: "running",
   desired: "running",
+  stopped_reason: null,
   error: null,
   created_at: T0,
   updated_at: T0,
+  last_active_at: T0,
   ...over,
 });
 
@@ -87,6 +89,35 @@ describe("a sandbox machine on the canvas", () => {
     expect(screen.getByText(/connects on its own/)).toBeInTheDocument();
     rerender(<MachineNode machine={sandboxMachine("running", { online: false, info: null })} />);
     expect(screen.getByText("connecting")).toBeInTheDocument();
+  });
+
+  it("asleep is not offline: it says it wakes when needed, has no Stop, and pulses while waking", () => {
+    const stopped = (stopped_reason: "idle" | "owner") =>
+      sandboxMachine("stopped", { online: false, sandbox: { backend: "docker", size: "standard", status: "stopped", hourly_cents: 3, stopped_reason } });
+    const h = agentsHarness({ ctx: { services: fakeServices(), sandboxes: state(sb({ status: "stopped", desired: "asleep", stopped_reason: "idle" })) } });
+    const { rerender } = renderAgents(<MachineNode machine={stopped("idle")} />, h);
+    const card = screen.getByLabelText("Machine box");
+    expect(within(card).getByText("asleep")).toBeInTheDocument();
+    expect(within(card).queryByText("offline")).not.toBeInTheDocument();
+    expect(card.className).not.toContain("opacity-60");
+    const panel = within(card).getByRole("group", { name: "Sandbox" });
+    expect(within(panel).getByText("Asleep")).toBeInTheDocument();
+    expect(within(panel).getByText(/Wakes when an agent needs it/)).toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
+    expect(within(panel).getByRole("button", { name: "Start" })).toHaveAttribute("title", "Wake it now");
+
+    // Its owner's stop reads differently.
+    h.ctx.sandboxes = state(sb({ status: "stopped", desired: "stopped", stopped_reason: "owner" }));
+    rerender(<MachineNode machine={stopped("owner")} />);
+    expect(screen.getByText("stopped")).toBeInTheDocument();
+    expect(within(screen.getByRole("group", { name: "Sandbox" })).getByText("Stopped")).toBeInTheDocument();
+    expect(screen.queryByText(/Wakes when an agent needs it/)).not.toBeInTheDocument();
+
+    // Woken by a command: waking, pulsing, until its daemon is back.
+    h.ctx.sandboxes = state(sb({ status: "starting", desired: "running" }));
+    rerender(<MachineNode machine={sandboxMachine("starting", { online: false })} />);
+    expect(screen.getByText("waking")).toHaveClass("shimmer");
+    expect(within(screen.getByRole("group", { name: "Sandbox" })).getByText("Waking")).toHaveClass("shimmer");
   });
 
   it("puts logging a provider in first, in a terminal running the device login, and shows that terminal", async () => {

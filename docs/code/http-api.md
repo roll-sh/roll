@@ -609,6 +609,14 @@ POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, com
        200 with the Reply, or Reply.Error {type: "error", code, message, error /* = message */} with
        not_found 404, invalid 400, conflict 409, provider 422, internal 502,
        machine_offline 503 (not connected), timeout 504 (no reply in time).
+       A sandbox machine that is asleep, stopped by its owner, or on its way down is woken by any
+       command (also `project.add` through …/projects and the MCP tools, which call this route): the
+       sandbox is set running (Machine.sandbox.status "starting" on the stream) and the request is held
+       until its daemon's link is up, at most ROLL_SANDBOX_WAKE_TIMEOUT (180 s), then the command goes
+       out once and waits for its reply as usual (so allow for 180 + 30 s; a proxy in front of the API
+       must too). A wake that runs out answers machine_offline "the sandbox is still waking up …; send
+       the command again with the same id": the sandbox keeps waking, and the same id is safe to send
+       again. A sandbox being deleted (or failed) never wakes: machine_offline at once.
        Commands on a roll code repo (docs/code/agents.md, "Agents in roll code"): `project.add` with
        `clone: {owner, repo}` and `thread.publish` in a project that is a roll code repo carry a grant
        for that repo to the daemon. The repo must be the machine's owner's (400 otherwise, 404 when it
@@ -709,8 +717,10 @@ POST   /v1/code/agents/{owner}/sandboxes {name?, size? /* a Size name */, env?: 
        values one line of at most 4096 characters, 32 KiB in all; ROLL_*, AGENT37_*, HOME, USER, PATH,
        SHELL and IS_SANDBOX are reserved. 400 bad name, size or env; 422 at the owner's limit (deleting
        ones count until gone) or without ROLL_SECRET_KEY on the server; 503 sandboxes are off.
-POST   /v1/code/agents/{owner}/sandboxes/{id}/start → Sandbox   desired "running"; 409 while it's being deleted
-POST   /v1/code/agents/{owner}/sandboxes/{id}/stop  → Sandbox   desired "stopped" (running time stops being billed)
+POST   /v1/code/agents/{owner}/sandboxes/{id}/start → Sandbox   desired "running" (asleep ones too: a wake now);
+       409 while it's being deleted
+POST   /v1/code/agents/{owner}/sandboxes/{id}/stop  → Sandbox   desired "stopped" (running time stops being billed;
+       a command to it starts it again)
 DELETE /v1/code/agents/{owner}/sandboxes/{id} → 204 the backend deleted it and its data, and its machine is
        revoked (machine_removed); 202 Sandbox ("deleting") while the backend is still at it (retried).
        Removing a sandbox's machine (DELETE …/machines/{machine}, or `roll agent logout` in it) deletes the
@@ -722,14 +732,22 @@ GET    /v1/code/agents/{owner}/sandboxes/usage?month=YYYY-MM (default: this UTC 
        hours × hourly_cents / 100, rounded to a hundredth of a cent (0.0001). 400 for a malformed month.
 
 Sandbox = {id /* sbx_… */, name, machine /* mch_… */, backend, size: Size,
-           status: "creating" | "running" | "stopped" | "failed" | "deleting" /* = Machine.sandbox.status */,
-           desired: "running" | "stopped" | "deleted", error?: string /* the backend's last complaint */,
-           created_at, updated_at}
+           status: "creating" | "starting" | "running" | "stopped" | "failed" | "deleting" /* = Machine.sandbox.status */,
+           desired: "running" | "stopped" | "asleep" | "deleted" /* asleep: the reconciler stopped it while idle */,
+           stopped_reason?: "idle" | "owner" /* while stopped: asleep, or the owner's stop */,
+           error?: string /* the backend's last complaint */,
+           created_at, updated_at, last_active_at? /* its machine last did something; it sleeps a window after */}
+SandboxInfo = {backend, size /* a Size name */, status /* as Sandbox.status */, hourly_cents,
+               stopped_reason? /* as Sandbox.stopped_reason */}   (Machine.sandbox)
 Size = {name /* "standard" */, cpu, memory_gb, disk_gb, hourly_cents /* price per running hour, US cents */}
 ```
 
 A `failed` sandbox stays until it's deleted (a refused create isn't tried again). One that stopped on
-its own while it should run is started again.
+its own while it should run is started again. A running one goes to sleep (desired "asleep", status
+"stopped", stopped_reason "idle") once its machine has done nothing for ROLL_SANDBOX_IDLE_STOP (5 min;
+`0` keeps sandboxes up): no thread on it starting or running (a thread waiting on its user is idle),
+no command for it and no terminal output. "starting" is a stopped sandbox on its way up again (a wake,
+or start); its machine comes online once its daemon connects. Asleep, it isn't billed.
 
 ## MCP
 

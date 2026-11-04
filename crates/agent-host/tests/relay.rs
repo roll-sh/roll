@@ -332,6 +332,45 @@ async fn refused_tokens_and_shutdown() {
 
 // ── against the real relay ──
 
+/// A stopping daemon (SIGTERM: a sandbox going to sleep) sends the records its shutdown wrote,
+/// runs no new command (the relay sends it again on the next link), and closes the link once the
+/// relay has acknowledged everything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stopping_daemon_sends_its_last_records_then_closes() {
+    let daemon = Fake::new();
+    let (url, mut links) = scripted("rlm_good").await;
+    let (events, _events) = mpsc::unbounded_channel();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let last = daemon.clone();
+    let cfg = LinkConfig { api: url, token: "rlm_good".into() };
+    let task = tokio::spawn(relay::run(daemon.clone(), cfg, events, async move {
+        let _ = stopped.await;
+        // What `Host::shutdown` does: parks and interrupts, and stores the records.
+        last.upsert("prj_last", "final");
+    }));
+    let mut ws = links.recv().await.unwrap();
+    welcome(&mut ws, 0).await;
+    stop.send(()).unwrap();
+    assert_eq!(seqs(&mut ws, 1).await.0, vec![1]);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    send(&mut ws, &RelayFrame::Command { id: "late".into(), by: "acme".into(), command: archive("t"), grant: None }).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!task.is_finished(), "open until the relay has the records");
+    send(&mut ws, &RelayFrame::Ack { seq: 1 }).await;
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the link closes once acked");
+    assert!(tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap().is_ok());
+    assert_eq!(daemon.runs.load(Ordering::SeqCst), 0, "no command runs while stopping");
+}
+
 struct Relay {
     router: axum::Router,
     url: String,

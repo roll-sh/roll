@@ -415,6 +415,8 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     // Agents databases from before the mirror's quota.
     ("agent_machines", "records", "INTEGER NOT NULL DEFAULT 0"),
     ("agent_machines", "size", "INTEGER NOT NULL DEFAULT 0"),
+    // Sandboxes from before they slept when idle.
+    ("agent_sandboxes", "last_active_at", "INTEGER"),
 ];
 
 impl Db {

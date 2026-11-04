@@ -22,7 +22,7 @@ function state(over: Partial<SandboxesState> = {}): SandboxesState {
 }
 
 const booting: Machine = machine({ id: "mch_new", name: "scratch", online: false, info: null, sandbox: { backend: "docker", size: "large", status: "creating", hourly_cents: 6 } });
-const sandbox = { id: "sbx_1", name: "scratch", machine: "mch_new", backend: "docker", size: LARGE, status: "creating", desired: "running", error: null, created_at: 0, updated_at: 0 } satisfies Sandbox;
+const sandbox = { id: "sbx_1", name: "scratch", machine: "mch_new", backend: "docker", size: LARGE, status: "creating", desired: "running", stopped_reason: null, error: null, created_at: 0, updated_at: 0, last_active_at: 0 } satisfies Sandbox;
 
 describe("AddMachinePaths", () => {
   it("shows both ways in: the install steps and the sizes with their hourly price", () => {

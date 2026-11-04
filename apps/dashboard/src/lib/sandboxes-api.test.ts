@@ -10,9 +10,11 @@ const sandbox = (over: Partial<Sandbox> = {}): Sandbox => ({
   size: { name: "standard", cpu: 2, memory_gb: 4, disk_gb: 8, hourly_cents: 3 },
   status: "running",
   desired: "running",
+  stopped_reason: null,
   error: null,
   created_at: 1,
   updated_at: 2,
+  last_active_at: 2,
   ...over,
 });
 

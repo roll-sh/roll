@@ -42,6 +42,13 @@ pub(crate) struct Active {
     /// Steering input waiting for the interrupted turn to end (T3's steering restart).
     restart_with: Option<TurnInput>,
     interrupting: bool,
+    /// The run waits on its user, but the provider turn that asked is gone (the daemon stopped
+    /// while it waited: a sandbox going to sleep, a restart). Its requests are answered by a new
+    /// turn on the resumed conversation ([`Host::resume_parked`]).
+    pub(crate) parked: bool,
+    /// An approval its user accepted while parked, and who: the resumed turn asks again for the
+    /// same thing, and that ask is answered at once (once).
+    preapproved: Option<(String, Decision, Approval)>,
 }
 
 impl Active {
@@ -61,7 +68,35 @@ impl Active {
             thread_usage_before,
             restart_with: None,
             interrupting: false,
+            parked: false,
+            preapproved: None,
         }
+    }
+
+    /// A run that was waiting on its user when the daemon stopped, as the store has it: its
+    /// nodes, and its pending requests (with no provider request behind them any more).
+    pub(crate) fn parked(run: Run, nodes: Vec<Node>, requests: Vec<Request>, thread_usage: Usage) -> Active {
+        let before = Usage {
+            input_tokens: thread_usage.input_tokens.saturating_sub(run.usage.input_tokens),
+            output_tokens: thread_usage.output_tokens.saturating_sub(run.usage.output_tokens),
+            cached_tokens: thread_usage.cached_tokens.saturating_sub(run.usage.cached_tokens),
+            cost_usd: match (thread_usage.cost_usd, run.usage.cost_usd) {
+                (Some(t), Some(r)) => Some((t - r).max(0.0)),
+                (t, _) => t,
+            },
+        };
+        let mut active = Active::new(run, before);
+        active.usage_done = active.run.usage;
+        active.next_ordinal = nodes.iter().map(|n| n.ordinal).max().unwrap_or(0) + 1;
+        active.nodes = nodes.into_iter().map(|n| (n.id.clone(), n)).collect();
+        active.requests = requests.into_iter().filter(|r| r.status == RequestStatus::Pending).map(|r| (r.id.clone(), (String::new(), r))).collect();
+        active.parked = true;
+        active
+    }
+
+    /// Whether the run is only waiting on its user (requests pending, nothing else going on).
+    pub(crate) fn only_waiting(&self) -> bool {
+        self.run.status == RunStatus::Waiting && self.pending() > 0 && self.restart_with.is_none()
     }
 
     /// The next node ordinal of the run, for a node the orchestrator adds itself.
@@ -406,6 +441,39 @@ impl Host {
         }
     }
 
+    /// The daemon is stopping ([`Host::shutdown`]): park a run that only waits on its user (its
+    /// other open nodes stop with the turn), interrupt any other, and close the session.
+    pub(crate) async fn stop_thread(&self, rt: &mut Rt) -> anyhow::Result<()> {
+        let Some(active) = rt.active.as_mut() else {
+            self.close_session(rt).await;
+            return Ok(());
+        };
+        if active.parked {
+            return Ok(());
+        }
+        if active.only_waiting() {
+            let at = now();
+            let mut batch = Vec::new();
+            for node in active.nodes.values_mut().filter(|n| n.status == NodeStatus::Running) {
+                node.status = NodeStatus::Interrupted;
+                node.completed_at = Some(at);
+                batch.push(Entity::Node(node.clone()));
+            }
+            active.parked = true;
+            active.by_provider.clear();
+            self.put(batch)?;
+            self.close_session(rt).await;
+            return Ok(());
+        }
+        active.interrupting = true;
+        active.restart_with = None;
+        if let Some(session) = rt.live.as_ref().map(|l| l.session.clone()) {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.interrupt()).await;
+        }
+        self.close_session(rt).await;
+        self.finish_run(rt, RunStatus::Interrupted, Some("the machine stopped while it ran".into())).await
+    }
+
     /// Drains a session's events into an unbounded queue (so the provider never blocks on us)
     /// and applies them in order, flushing streaming nodes every [`super::FLUSH_EVERY`].
     fn spawn_pump(&self, thread: ThreadId, generation: u64, mut events: mpsc::Receiver<ProviderEvent>) {
@@ -502,7 +570,19 @@ impl Host {
                     self.delta(Delta::Output { thread: thread.clone(), node: node.clone(), text });
                 }
             }
-            ProviderEvent::Request { id, item, body } => self.on_request(rt, id, item, body)?,
+            ProviderEvent::Request { id, item, body } => {
+                // The resumed turn of a parked run asks again for what its user already accepted.
+                let pre = match (&body, rt.active.as_mut()) {
+                    (RequestBody::Approval(asked), Some(active)) => active.preapproved.take_if(|(_, _, a)| same_ask(a, asked)),
+                    _ => None,
+                };
+                let rid = self.on_request(rt, id, item, body.clone())?;
+                if let (Some((by, decision, _)), Some(rid)) = (pre, rid)
+                    && let Err(fail) = self.respond_locked(rt, &by, &rid, &body, Response::Decision { decision, message: None }).await
+                {
+                    tracing::warn!("answering {rid} as approved before: {:?}", fail.into_reply());
+                }
+            }
             ProviderEvent::RequestCancelled { id } => {
                 let Some(active) = rt.active.as_mut() else { return Ok(()) };
                 let Some(rid) = active.by_provider.remove(&id) else { return Ok(()) };
@@ -628,8 +708,9 @@ impl Host {
         self.put(batch)
     }
 
-    fn on_request(&self, rt: &mut Rt, provider_id: String, item: Option<String>, body: RequestBody) -> anyhow::Result<()> {
-        let Some(active) = rt.active.as_mut() else { return Ok(()) };
+    /// Records a request of the active run: its id, or `None` without an active run.
+    fn on_request(&self, rt: &mut Rt, provider_id: String, item: Option<String>, body: RequestBody) -> anyhow::Result<Option<RequestId>> {
+        let Some(active) = rt.active.as_mut() else { return Ok(None) };
         let at = now();
         let about = item.as_ref().and_then(|i| active.items.get(i)).and_then(|n| active.nodes.get(n));
         let node = Node {
@@ -645,6 +726,7 @@ impl Host {
         };
         let NodeBody::Request { request: rid } = &node.body else { unreachable!() };
         let rid = rid.clone();
+        let rid_out = rid.clone();
         active.next_ordinal += 1;
         let request = Request {
             id: rid.clone(),
@@ -668,7 +750,8 @@ impl Host {
         rt.thread.activity = active.activity();
         rt.thread.updated_at = at;
         let run = Entity::Run(active.run.clone());
-        self.put(vec![Entity::Node(node), Entity::Request(request), run, Entity::Thread(rt.thread.clone())])
+        self.put(vec![Entity::Node(node), Entity::Request(request), run, Entity::Thread(rt.thread.clone())])?;
+        Ok(Some(rid_out))
     }
 
     /// After a request is answered or withdrawn: back to running when none is pending.
@@ -827,6 +910,13 @@ impl Host {
     }
 
     async fn steer(&self, rt: &mut Rt, input: TurnInput) -> Res<()> {
+        if rt.active.as_ref().is_some_and(|a| a.parked) {
+            // Nothing is running to steer: the input goes on with the run, withdrawing what it
+            // waited on.
+            let active = rt.active.as_mut().expect("checked");
+            active.run.steers.push(input.text.clone());
+            return self.resume_parked(rt, Vec::new(), input).await;
+        }
         let Some(live) = rt.live.as_ref() else {
             return Err(Fail::Conflict("the run has no live session".into()));
         };
@@ -890,7 +980,11 @@ impl Host {
             _ => return Err(Fail::Invalid("the response doesn't fit the request".into())),
         }
         let mut rt = self.lock(&request.thread).await?;
-        let rt = &mut *rt;
+        self.respond_locked(&mut rt, by, id, &request.body, response).await
+    }
+
+    /// Answer a pending request of the thread's active run.
+    async fn respond_locked(&self, rt: &mut Rt, by: &str, id: &RequestId, body: &RequestBody, response: Response) -> Res<Reply> {
         let live = rt.live.as_ref().map(|l| l.session.clone());
         let Some(active) = rt.active.as_mut() else {
             return Err(Fail::Conflict(format!("request {id} is no longer pending")));
@@ -901,31 +995,20 @@ impl Host {
         if record.status != RequestStatus::Pending {
             return Err(Fail::Conflict(format!("request {id} is no longer pending")));
         }
+        if active.parked {
+            return self.answer_parked(rt, by, id, body, response).await;
+        }
         let Some(session) = live else {
             return Err(Fail::Conflict("the provider session ended".into()));
         };
         session.respond(&provider_id, &response).await.map_err(|e| Fail::Provider(format!("{e:#}")))?;
         // Accepting a plan takes the session out of plan mode (Claude switches itself); the
         // thread follows, so the next run doesn't put it back.
-        let leaves_plan = matches!(
-            (&request.body, &response),
-            (RequestBody::Approval(a), Response::Decision { decision: Decision::Accept | Decision::AcceptForSession, .. })
-                if a.action == ApprovalAction::Plan
-        );
+        let leaves_plan = leaves_plan(body, &response);
         let at = now();
         let mut batch = Vec::new();
-        if let Some((_, record)) = active.requests.get_mut(id) {
-            record.status = RequestStatus::Resolved;
-            record.resolved_at = Some(at);
-            record.resolved_by = Some(by.to_string());
-            record.response = Some(response);
-            batch.push(Entity::Request(record.clone()));
-            if let Some(node) = active.nodes.get_mut(&record.node) {
-                node.status = NodeStatus::Completed;
-                node.completed_at = Some(at);
-                batch.push(Entity::Node(node.clone()));
-            }
-        }
+        let active = rt.active.as_mut().expect("checked above");
+        resolve(active, id, by, response, at, &mut batch);
         active.by_provider.remove(&provider_id);
         batch.extend(self.settle_waiting(rt));
         if leaves_plan && rt.thread.interaction_mode == InteractionMode::Plan {
@@ -938,6 +1021,157 @@ impl Host {
         }
         self.put(batch)?;
         Ok(Reply::Ok)
+    }
+
+    /// Answer a request of a parked run: the provider turn that asked is gone, so the answer goes
+    /// to the agent as a new turn on its resumed conversation, in the same run, and the other
+    /// requests of that turn are withdrawn (the agent asks again if it still needs them). T3 Code
+    /// does this for questions after a restart (`ProviderRuntimeRecoveryService.ts`, a question
+    /// answerable by message); roll does it for approvals too, because a sandbox goes to sleep
+    /// with approvals pending as a matter of course. An accepted approval also answers the
+    /// resumed turn's ask for the same thing at once. `cancel` ends the run instead.
+    async fn answer_parked(&self, rt: &mut Rt, by: &str, id: &RequestId, body: &RequestBody, response: Response) -> Res<Reply> {
+        let at = now();
+        let text = answer_text(body, &response);
+        let mut batch = Vec::new();
+        let active = rt.active.as_mut().expect("parked runs are active");
+        if let (RequestBody::Approval(a), Response::Decision { decision: d @ (Decision::Accept | Decision::AcceptForSession), .. }) = (body, &response) {
+            active.preapproved = Some((by.to_string(), *d, a.clone()));
+        }
+        let cancel = matches!(response, Response::Decision { decision: Decision::Cancel, .. });
+        let plan = leaves_plan(body, &response);
+        resolve(active, id, by, response, at, &mut batch);
+        if cancel {
+            batch.extend(self.cancel_requests(rt));
+            self.put(batch)?;
+            self.finish_run(rt, RunStatus::Interrupted, None).await?;
+            return Ok(Reply::Ok);
+        }
+        if plan {
+            rt.thread.interaction_mode = InteractionMode::Default;
+        }
+        self.resume_parked(rt, batch, TurnInput { text, attachments: Vec::new() }).await?;
+        Ok(Reply::Ok)
+    }
+
+    /// Go on with a parked run: withdraw what it still waits on, note in its transcript that
+    /// the machine stopped meanwhile, and send `input` as a new turn on the resumed conversation.
+    /// A conversation that can't be resumed starts fresh, with the thread handed over and the
+    /// run's own prompt in front of the input.
+    pub(crate) async fn resume_parked(&self, rt: &mut Rt, mut batch: Vec<Entity>, input: TurnInput) -> Res<()> {
+        batch.extend(self.cancel_requests(rt));
+        let active = rt.active.as_mut().expect("parked runs are active");
+        let node = Node {
+            id: NodeId::from_suffix(&suffix()),
+            thread: rt.thread.id.clone(),
+            run: active.run.id.clone(),
+            parent: None,
+            ordinal: active.take_ordinal(),
+            status: NodeStatus::Completed,
+            started_at: now(),
+            completed_at: Some(now()),
+            body: NodeBody::System { text: "The machine stopped while this run waited; the answer went to the agent as a new message.".into() },
+        };
+        active.nodes.insert(node.id.clone(), node.clone());
+        batch.push(Entity::Node(node));
+        active.parked = false;
+        active.run.status = RunStatus::Running;
+        let (ordinal, prompt, attachments) = (active.run.ordinal, active.run.prompt.clone(), active.run.attachments.clone());
+        rt.thread.status = ThreadStatus::Running;
+        rt.thread.pending_requests = 0;
+        rt.thread.activity = None;
+        rt.thread.updated_at = now();
+        batch.push(Entity::Run(active.run.clone()));
+        batch.push(Entity::Thread(rt.thread.clone()));
+        self.put(batch)?;
+        let sent = async {
+            self.ensure_session(rt).await?;
+            let provider = rt.thread.provider.0.clone();
+            let fresh = rt.private.seen.get(&provider).is_none_or(|seen| *seen < ordinal);
+            let input = if fresh {
+                let text = handoff::prepend(self.handoff_for(rt)?, &format!("{prompt}\n\n{}", input.text));
+                TurnInput { text, attachments: [attachments, input.attachments].concat() }
+            } else {
+                input
+            };
+            let live = rt.live.as_ref().expect("ensure_session started one");
+            live.session.send(input).await.map_err(|e| Fail::Provider(format!("{e:#}")))
+        }
+        .await;
+        if let Err(fail) = sent {
+            let message = match &fail {
+                Fail::Provider(m) | Fail::Invalid(m) | Fail::Conflict(m) | Fail::NotFound(m) => m.clone(),
+                Fail::Internal(e) => format!("{e:#}"),
+            };
+            self.finish_run(rt, RunStatus::Failed, Some(message)).await?;
+            return Err(fail);
+        }
+        rt.private.seen.insert(rt.thread.provider.0.clone(), ordinal);
+        *rt.private.turns.entry(ordinal).or_default() += 1;
+        self.save_private(rt)?;
+        Ok(())
+    }
+}
+
+/// Accepting a plan leaves plan mode.
+fn leaves_plan(body: &RequestBody, response: &Response) -> bool {
+    matches!(
+        (body, response),
+        (RequestBody::Approval(a), Response::Decision { decision: Decision::Accept | Decision::AcceptForSession, .. })
+            if a.action == ApprovalAction::Plan
+    )
+}
+
+/// Mark a request answered (and its node done), adding the records to `batch`.
+fn resolve(active: &mut Active, id: &RequestId, by: &str, response: Response, at: Millis, batch: &mut Vec<Entity>) {
+    if let Some((_, record)) = active.requests.get_mut(id) {
+        record.status = RequestStatus::Resolved;
+        record.resolved_at = Some(at);
+        record.resolved_by = Some(by.to_string());
+        record.response = Some(response);
+        batch.push(Entity::Request(record.clone()));
+        if let Some(node) = active.nodes.get_mut(&record.node) {
+            node.status = NodeStatus::Completed;
+            node.completed_at = Some(at);
+            batch.push(Entity::Node(node.clone()));
+        }
+    }
+}
+
+/// The same thing asked again: the action, its command or tool, and the files it touches.
+fn same_ask(a: &Approval, b: &Approval) -> bool {
+    let paths = |x: &Approval| x.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
+    a.action == b.action && a.command == b.command && a.tool == b.tool && paths(a) == paths(b) && (a.command.is_some() || a.tool.is_some() || !a.files.is_empty() || a.title == b.title)
+}
+
+/// What a parked request's answer tells the agent, as a message (T3's question-and-answer pairs).
+fn answer_text(body: &RequestBody, response: &Response) -> String {
+    let note = "The session restarted while you waited, so that request is gone.";
+    match (body, response) {
+        (RequestBody::Approval(a), Response::Decision { decision, message }) => {
+            let what = match &a.command {
+                Some(c) => format!("{}\n\n    {c}", a.title),
+                None => a.title.clone(),
+            };
+            let because = message.as_deref().map(|m| format!(" ({m})")).unwrap_or_default();
+            match decision {
+                Decision::Accept | Decision::AcceptForSession => format!("You asked for approval: {what}\n\nI approved it{because}. {note} Go ahead and do it now."),
+                Decision::Decline | Decision::Cancel => format!("You asked for approval: {what}\n\nI declined it{because}. {note} Carry on without it."),
+            }
+        }
+        (RequestBody::Questions { questions }, Response::Answers { answers }) => {
+            let mut text = format!("You asked me some questions. {note} My answers:\n");
+            for q in questions {
+                let a = answers.get(&q.id).map(String::as_str).unwrap_or("(no answer)");
+                text.push_str(&format!("\n- {}\n  {a}\n", q.question));
+            }
+            for (id, a) in answers.iter().filter(|(id, _)| !questions.iter().any(|q| &&q.id == id)) {
+                text.push_str(&format!("\n- {id}\n  {a}\n"));
+            }
+            text
+        }
+        // Checked before: a response fits its request.
+        _ => note.to_string(),
     }
 }
 
@@ -957,5 +1191,42 @@ mod tests {
     fn activity_lines_are_one_short_line() {
         assert_eq!(one_line("\n  first line\nsecond", 120), "first line");
         assert_eq!(one_line(&"a".repeat(200), 10).chars().count(), 10);
+    }
+
+    fn ask(command: Option<&str>, title: &str) -> Approval {
+        Approval {
+            action: ApprovalAction::Command,
+            title: title.into(),
+            command: command.map(String::from),
+            cwd: None,
+            files: Vec::new(),
+            reason: None,
+            tool: None,
+            input: serde_json::Value::Null,
+            decisions: vec![Decision::Accept, Decision::Decline],
+        }
+    }
+
+    #[test]
+    fn a_parked_answer_reads_as_a_message() {
+        let body = RequestBody::Approval(ask(Some("cargo test"), "Run `cargo test`"));
+        let yes = answer_text(&body, &Response::Decision { decision: Decision::Accept, message: None });
+        assert!(yes.contains("    cargo test") && yes.contains("I approved it.") && yes.contains("do it now"), "{yes}");
+        let no = answer_text(&body, &Response::Decision { decision: Decision::Decline, message: Some("not today".into()) });
+        assert!(no.contains("I declined it (not today).") && no.contains("without it"), "{no}");
+        let q = |id: &str, question: &str| Question { id: id.into(), header: id.into(), question: question.into(), options: Vec::new(), multi: false };
+        let body = RequestBody::Questions { questions: vec![q("color", "Which color?"), q("size", "How big?")] };
+        let answers = [("color".to_string(), "Blue".to_string())].into();
+        let text = answer_text(&body, &Response::Answers { answers });
+        assert!(text.contains("- Which color?\n  Blue") && text.contains("- How big?\n  (no answer)"), "{text}");
+    }
+
+    #[test]
+    fn the_same_ask_is_the_same_action_on_the_same_thing() {
+        assert!(same_ask(&ask(Some("make"), "Run `make`"), &ask(Some("make"), "Run make")));
+        assert!(!same_ask(&ask(Some("make"), "x"), &ask(Some("make install"), "x")));
+        // Without a command, tool or files, only the title says what it is.
+        assert!(same_ask(&ask(None, "Leave plan mode"), &ask(None, "Leave plan mode")));
+        assert!(!same_ask(&ask(None, "Leave plan mode"), &ask(None, "Use the network")));
     }
 }

@@ -383,3 +383,87 @@ async fn a_machine_token_logs_in_without_a_code() {
     assert!(!e.run(&["agent", "login", "--machine-token", &token, "--name", "x"]).await.status.success());
     assert!(!e.login.exists());
 }
+
+/// What a sandbox going to sleep does to `roll agent up`: SIGTERM while a run waits on an approval
+/// stops it cleanly with the run still waiting on roll (records sent before it exits), and after the
+/// next start the approval is still answerable: the answer resumes the conversation, the agent's ask
+/// for the same command is answered at once, and the run completes (the fake provider's demo turn
+/// writes its file).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sigterm_parks_a_waiting_run_and_the_answer_resumes_it_after_a_restart() {
+    let env = env().await;
+    let e = &env;
+    e.login("box").await;
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&e.login).unwrap()).unwrap();
+    let machine = saved["machine"].as_str().unwrap().to_string();
+    let path = format!("/v1/code/agents/acme/machines/{machine}/commands");
+    let up = || {
+        let mut c = e.cmd(&["agent", "up"]);
+        c.env("ROLL_AGENT_FAKE", "1");
+        let mut child = c.spawn().unwrap();
+        let log = lines(&mut child);
+        (child, log)
+    };
+    let online = |want: bool| async move {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while e.machines().await[0]["online"].as_bool().unwrap_or(false) != want {
+            assert!(Instant::now() < deadline, "never online={want}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    let records = |kind: &'static str| async move {
+        let (_, state) = e.req("GET", "/v1/code/agents/acme/state", None).await;
+        state["entities"].as_array().unwrap().iter().filter(|m| m["entity"]["kind"] == kind).map(|m| m["entity"].clone()).collect::<Vec<_>>()
+    };
+
+    let (mut daemon, _log) = up();
+    online(true).await;
+    let project = e.dir.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let add = json!({ "id": "p1", "command": { "type": "project.add", "path": project, "name": "proj" } });
+    let (_, r) = e.req("POST", &path, Some(add)).await;
+    let project_id = r["id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
+    let create = json!({ "id": "t1", "command": { "type": "thread.create", "project": project_id, "provider": "fake", "runtime_mode": "ask", "prompt": "write the demo file" } });
+    let (s, r) = e.req("POST", &path, Some(create)).await;
+    assert_eq!(s.as_u16(), 200, "{r}");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !records("request").await.iter().any(|r| r["status"] == "pending") {
+        assert!(Instant::now() < deadline, "never asked");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // SIGTERM (`docker stop`, agent37's stop): a clean exit, the run still waiting on roll.
+    // SAFETY: signalling the child this test started.
+    unsafe { libc::kill(daemon.id() as i32, libc::SIGTERM) };
+    let status = tokio::task::spawn_blocking(move || wait_for(&mut daemon, Duration::from_secs(10))).await.unwrap().expect("stopped on SIGTERM");
+    assert!(status.success(), "{status:?}");
+    online(false).await;
+    let thread = records("thread").await.pop().unwrap();
+    assert_eq!((thread["status"].as_str(), thread["pending_requests"].as_u64()), (Some("waiting"), Some(1)), "{thread}");
+    let request = records("request").await.pop().unwrap();
+    assert_eq!(request["status"], "pending", "{request}");
+    assert_eq!(records("run").await[0]["status"], "waiting");
+
+    // Woken: the same approval, answered now.
+    let (mut daemon, log) = up();
+    online(true).await;
+    let answer = json!({ "id": "a1", "command": { "type": "request.respond", "request": request["id"], "response": { "type": "decision", "decision": "accept" } } });
+    let (s, r) = e.req("POST", &path, Some(answer)).await;
+    assert_eq!((s.as_u16(), r["type"].as_str()), (200, Some("ok")), "{r}");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let runs = records("run").await;
+        if runs.len() == 1 && runs[0]["status"] == "completed" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never completed: {runs:?} {:?}", log.try_iter().collect::<Vec<_>>());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let wrote = std::fs::read_to_string(project.join("ROLL_DEMO.md")).unwrap();
+    assert!(wrote.contains("I approved it"), "{wrote}");
+    assert!(records("request").await.iter().all(|r| r["status"] == "resolved"), "the repeated ask was answered too");
+    // SAFETY: signalling the child this test started.
+    unsafe { libc::kill(daemon.id() as i32, libc::SIGINT) };
+    let status = tokio::task::spawn_blocking(move || wait_for(&mut daemon, Duration::from_secs(10))).await.unwrap().expect("stopped");
+    assert!(status.success(), "{status:?}");
+}

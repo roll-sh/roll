@@ -215,8 +215,9 @@ pub(crate) fn suffix() -> String {
 }
 
 impl Host {
-    /// Opens the store in `config.home`, recovers from a previous process (running runs become
-    /// `interrupted`, pending requests `cancelled`, terminals `exited`) and gathers machine info.
+    /// Opens the store in `config.home`, recovers from a previous process (runs waiting on their
+    /// user stay waiting, other running runs become `interrupted` and their requests `cancelled`,
+    /// terminals `exited`) and gathers machine info.
     pub async fn open(config: Config, providers: Vec<Arc<dyn Provider>>) -> anyhow::Result<Arc<Host>> {
         std::fs::create_dir_all(&config.home)?;
         let store = Store::open(&config.db_path())?;
@@ -255,13 +256,25 @@ impl Host {
         self.mcp.url()
     }
 
+    /// After a previous process: a run that was only waiting on its user stays waiting (parked:
+    /// its pending requests are answered by a new turn on the resumed conversation, `runs.rs`),
+    /// every other unfinished run is interrupted with its requests cancelled, and terminals have
+    /// exited.
     fn recover(&self) -> anyhow::Result<()> {
         let at = now();
         let mut changed = Vec::new();
+        let requests: Vec<Request> =
+            self.store.list(EntityKind::Request)?.into_iter().filter_map(|e| if let Entity::Request(r) = e { Some(r) } else { None }).collect();
+        let pending = |run: &RunId| requests.iter().filter(|r| &r.run == run && r.status == RequestStatus::Pending).count() as u32;
+        let mut parked = std::collections::HashSet::new();
         for entity in self.store.list(EntityKind::Run)? {
             if let Entity::Run(mut run) = entity
                 && !run.status.is_terminal()
             {
+                if run.status == RunStatus::Waiting && pending(&run.id) > 0 {
+                    parked.insert(run.id.clone());
+                    continue;
+                }
                 run.status = RunStatus::Interrupted;
                 run.completed_at = Some(at);
                 run.error.get_or_insert_with(|| "the daemon restarted".into());
@@ -272,24 +285,35 @@ impl Host {
             if let Entity::Node(mut node) = entity
                 && matches!(node.status, NodeStatus::Running | NodeStatus::Waiting)
             {
+                // A parked run's requests still wait; anything else of it stopped with its turn.
+                let waits = parked.contains(&node.run)
+                    && matches!(&node.body, NodeBody::Request { request } if requests.iter().any(|r| &r.id == request && r.status == RequestStatus::Pending));
+                if waits {
+                    continue;
+                }
                 node.status = NodeStatus::Interrupted;
                 node.completed_at = Some(at);
                 changed.push(Entity::Node(node));
             }
         }
-        for entity in self.store.list(EntityKind::Request)? {
-            if let Entity::Request(mut request) = entity
-                && request.status == RequestStatus::Pending
-            {
+        for mut request in requests.iter().cloned() {
+            if request.status == RequestStatus::Pending && !parked.contains(&request.run) {
                 request.status = RequestStatus::Cancelled;
                 request.resolved_at = Some(at);
                 changed.push(Entity::Request(request));
             }
         }
         for entity in self.store.list(EntityKind::Thread)? {
-            if let Entity::Thread(mut thread) = entity
-                && (thread.status.is_busy() || thread.active_run.is_some() || thread.pending_requests > 0)
-            {
+            let Entity::Thread(mut thread) = entity else { continue };
+            if let Some(run) = thread.active_run.clone().filter(|r| parked.contains(r)) {
+                let waiting = pending(&run);
+                if (thread.status, thread.pending_requests) != (ThreadStatus::Waiting, waiting) {
+                    thread.status = ThreadStatus::Waiting;
+                    thread.pending_requests = waiting;
+                    thread.updated_at = at;
+                    changed.push(Entity::Thread(thread));
+                }
+            } else if thread.status.is_busy() || thread.active_run.is_some() || thread.pending_requests > 0 {
                 thread.status = ThreadStatus::Idle;
                 thread.active_run = None;
                 thread.pending_requests = 0;
@@ -308,6 +332,39 @@ impl Host {
         }
         self.store.put(changed, |_| {})?;
         Ok(())
+    }
+
+    /// Stops cleanly (SIGTERM: a sandbox going to sleep, `docker stop`, Ctrl-C). A run that only
+    /// waits on its user is parked as it is (its requests are answered after the next start, see
+    /// [`recover`](Host::recover)); any other run is interrupted; every provider session is
+    /// closed, so providers write their conversations out; terminals are hung up. Every record
+    /// it writes is in the store when this returns: the link sends them before the process ends
+    /// ([`crate::relay::run`]).
+    pub async fn shutdown(&self) {
+        let threads: Vec<_> = self.threads.lock().unwrap().values().cloned().collect();
+        for rt in threads {
+            let mut rt = rt.lock_owned().await;
+            if rt.gone {
+                continue;
+            }
+            if let Err(e) = self.stop_thread(&mut rt).await {
+                tracing::warn!("stopping {}: {e:#}", rt.thread.id);
+            }
+        }
+        let live: Vec<TerminalId> = self.terminals.lock().unwrap().keys().cloned().collect();
+        let mut exited = Vec::new();
+        for id in live {
+            self.hang_up(&id);
+            if let Some(Entity::Terminal(mut t)) = self.store.get(EntityKind::Terminal, id.as_str()).ok().flatten()
+                && t.status == TerminalStatus::Running
+            {
+                t.status = TerminalStatus::Exited;
+                exited.push(Entity::Terminal(t));
+            }
+        }
+        if let Err(e) = self.put(exited) {
+            tracing::warn!("recording terminals as exited: {e:#}");
+        }
     }
 
     /// Writes records and broadcasts them once they are durable.
@@ -382,9 +439,29 @@ impl Host {
         let thread = self.stored_thread(id)?;
         let private: Private = self.store.thread_state(id)?.unwrap_or_default();
         let git = crate::git::root(Path::new(&thread.cwd)).await.is_some();
-        let rt = Rt { thread, private, git, live: None, active: None, generation: 0, gone: false };
+        let active = self.parked_run(&thread)?;
+        let rt = Rt { thread, private, git, live: None, active, generation: 0, gone: false };
         let mut threads = self.threads.lock().unwrap();
         Ok(threads.entry(id.clone()).or_insert_with(|| Arc::new(AsyncMutex::new(rt))).clone())
+    }
+
+    /// The run a thread waits in with no provider turn behind it ([`recover`](Host::recover) kept
+    /// it waiting), if it has one.
+    fn parked_run(&self, thread: &Thread) -> anyhow::Result<Option<runs::Active>> {
+        let Some(run_id) = &thread.active_run else { return Ok(None) };
+        let Some(Entity::Run(run)) = self.store.get(EntityKind::Run, run_id.as_str())? else { return Ok(None) };
+        if run.status != RunStatus::Waiting {
+            return Ok(None);
+        }
+        let nodes = self.nodes_of(&thread.id)?.into_iter().filter(|n| n.run == run.id).collect();
+        let requests = self
+            .store
+            .of_thread(&thread.id, EntityKind::Request)?
+            .into_iter()
+            .filter_map(|e| if let Entity::Request(r) = e { Some(r) } else { None })
+            .filter(|r| r.run == run.id)
+            .collect();
+        Ok(Some(runs::Active::parked(run, nodes, requests, thread.usage)))
     }
 
     /// Locks a thread's runtime, refusing a deleted thread.

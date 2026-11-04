@@ -11,7 +11,7 @@
 import { ApiError } from "./code-api";
 import { getToken, requestSignIn } from "./code-token";
 import { array, decode, int, literal, nullable, num, obj, str, withDefault, type Decoder } from "./decode";
-import { machineD, type Machine, type Millis, type SandboxStatus } from "./agents-api";
+import { machineD, type Machine, type Millis, type SandboxStatus, type StopReason } from "./agents-api";
 import { ROLL_API } from "./roll-api";
 
 /** A size on offer and its always-on price. */
@@ -23,8 +23,8 @@ export interface SandboxSize {
   hourly_cents: number;
 }
 
-/** What the owner asked the sandbox to be. */
-export type SandboxDesired = "running" | "stopped" | "deleted";
+/** What the sandbox should be: what the owner asked for, or asleep (stopped while idle; the next command wakes it). */
+export type SandboxDesired = "running" | "stopped" | "asleep" | "deleted";
 
 export interface Sandbox {
   /** `sbx_…`. */
@@ -37,10 +37,14 @@ export interface Sandbox {
   /** The same as its machine's `sandbox.status`. */
   status: SandboxStatus;
   desired: SandboxDesired;
+  /** Why a `stopped` one is stopped: asleep (`idle`) or its owner's stop. */
+  stopped_reason: StopReason | null;
   /** The backend's last complaint (a capacity error being retried, why it failed). */
   error: string | null;
   created_at: Millis;
   updated_at: Millis;
+  /** When its machine last did something; it sleeps an idle window after. */
+  last_active_at: Millis | null;
 }
 
 export interface SandboxList {
@@ -93,11 +97,13 @@ export const sandboxD = obj<Sandbox>({
   machine: str,
   backend: str,
   size: sizeD,
-  status: literal("creating", "running", "stopped", "failed", "deleting"),
-  desired: literal("running", "stopped", "deleted"),
+  status: literal("creating", "starting", "running", "stopped", "failed", "deleting"),
+  desired: literal("running", "stopped", "asleep", "deleted"),
+  stopped_reason: withDefault(nullable(literal("idle", "owner")), () => null),
   error: withDefault(nullable(str), () => null),
   created_at: int,
   updated_at: int,
+  last_active_at: withDefault(nullable(int), () => null),
 });
 
 export const sandboxListD = obj<SandboxList>({
@@ -131,10 +137,10 @@ export function formatHourly(cents: number): string {
   return `$${(cents / 100).toFixed(2)}/h`;
 }
 
-/** A sandbox the owner can start (stopped, and not on its way out). */
+/** A sandbox the owner can start (stopped or asleep, and not on its way out). */
 export const canStart = (s: Sandbox) => s.desired !== "deleted" && s.status === "stopped";
-/** A sandbox the owner can stop. */
-export const canStop = (s: Sandbox) => s.desired === "running" && (s.status === "running" || s.status === "creating");
+/** A sandbox the owner can stop (an asleep one already is). */
+export const canStop = (s: Sandbox) => s.desired === "running" && (s.status === "running" || s.status === "creating" || s.status === "starting");
 
 const enc = encodeURIComponent;
 const base = (owner: string) => `/v1/code/agents/${enc(owner)}/sandboxes`;

@@ -5,6 +5,7 @@
 
 mod common;
 
+use agent_proto::{DaemonFrame, Delta, Entity, RelayFrame, Reply, Stamped, TerminalId};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -48,6 +49,8 @@ struct Mock {
     calls: Vec<String>,
     on_create: Vec<OnCreate>,
     next: u32,
+    /// Deletes answer 500 (a sandbox stays `deleting`).
+    fail_deletes: bool,
 }
 
 type M = Arc<Mutex<Mock>>;
@@ -110,6 +113,9 @@ async fn remove(State(m): State<M>, h: HeaderMap, Path(id): Path<String>) -> Res
     }
     let mut m = m.lock();
     m.calls.push(format!("DELETE /v1/instances/{id}"));
+    if m.fail_deletes {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
+    }
     match m.instances.remove(&id) {
         Some(_) => Json(json!({ "id": id, "deleted": true })).into_response(),
         None => err(StatusCode::NOT_FOUND, "not_found"),
@@ -152,6 +158,8 @@ struct World {
     url: String,
     mock: M,
     owner: String,
+    /// The sandbox config the app has (a second relay on the same database gets it too).
+    config: SandboxConfig,
 }
 
 async fn world(f: impl FnOnce(&mut SandboxConfig)) -> World {
@@ -161,6 +169,7 @@ async fn world(f: impl FnOnce(&mut SandboxConfig)) -> World {
     a37.template = "roll-agent-sandbox@3".into();
     let mut sc = SandboxConfig { backend: Some(BackendConfig::Agent37(a37)), reconcile_every: Duration::from_millis(100), ..Default::default() };
     f(&mut sc);
+    let config = sc.clone();
     let a = app_with(|c| {
         c.admin_token = Some(ADMIN.into());
         c.review.secret_key = Some(SECRET_KEY.into());
@@ -173,7 +182,7 @@ async fn world(f: impl FnOnce(&mut SandboxConfig)) -> World {
     let (_, t) = a.req("POST", "/v1/code/owners/acme/tokens", Some(json!({ "name": "me" })), Some(ADMIN)).await;
     let url = a.serve().await;
     a.code.start_sandboxes();
-    World { a, url, mock, owner: t["token"].as_str().unwrap().to_string() }
+    World { a, url, mock, owner: t["token"].as_str().unwrap().to_string(), config }
 }
 
 impl World {
@@ -209,6 +218,45 @@ impl World {
     async fn machine(&self, id: &str) -> Option<Value> {
         let (_, v) = self.req("GET", "/v1/code/agents/acme/machines", None).await;
         v.as_array().unwrap().iter().find(|m| m["id"] == id).cloned()
+    }
+
+    /// A new sandbox, running: its id, its machine, and the machine token agent37 got.
+    async fn running(&self) -> (String, String, String) {
+        let made = self.create(json!({ "name": "box" })).await;
+        let (id, machine) = (made["sandbox"]["id"].as_str().unwrap().to_string(), made["machine"]["id"].as_str().unwrap().to_string());
+        self.until(&id, "running", status_is("running")).await;
+        let token = self.mock.lock().creates.iter().find(|c| c["metadata"]["roll_sandbox"] == id.as_str()).unwrap()["env"]["ROLL_AGENT_TOKEN"].as_str().unwrap().to_string();
+        (id, machine, token)
+    }
+
+    /// What agent37 says the sandbox's instance is doing.
+    fn instance(&self, sandbox: &str) -> String {
+        let m = self.mock.lock();
+        let i = m.instances.values().find(|i| i["metadata"]["roll_sandbox"] == sandbox).expect("an instance");
+        i["status"].as_str().unwrap().to_string()
+    }
+
+    /// Wait until the instance is `status`.
+    async fn instance_is(&self, sandbox: &str, status: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.instance(sandbox) != status {
+            assert!(Instant::now() < deadline, "the instance never became {status}");
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    }
+
+    /// Running time metered this month, over every sandbox.
+    async fn metered_ms(&self) -> i64 {
+        let (_, usage) = self.req("GET", "/v1/code/agents/acme/sandboxes/usage", None).await;
+        usage["totals"]["running_ms"].as_i64().unwrap()
+    }
+
+    async fn wait_online(&self, machine: &str, online: bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.machine(machine).await.unwrap()["online"] != online {
+            assert!(Instant::now() < deadline, "the machine never became online={online}");
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
     }
 }
 
@@ -453,6 +501,174 @@ async fn the_agent37_client_is_bounded_and_keeps_its_key() {
     cfg.url = "http://127.0.0.1:1".into();
     let b = code_control::agents::sandbox::agent37::Agent37::new(cfg).unwrap();
     assert!(matches!(b.status("inst000001").await, Err(code_control::agents::sandbox::BackendError::Transient(_))));
+}
+
+// ── sleep and wake ──
+
+/// The idle window in these tests.
+const IDLE: Duration = Duration::from_millis(800);
+
+/// A thread's record as its daemon sends it.
+fn thread_record(id: &str, status: &str) -> Entity {
+    let pending = if status == "waiting" { 1 } else { 0 };
+    serde_json::from_value(json!({
+        "kind": "thread", "id": id, "project": "prj_1", "title": "work", "provider": "codex", "model": null,
+        "runtime_mode": "ask", "interaction_mode": "default", "cwd": "/home/roll/x", "status": status,
+        "run_count": 1, "pending_requests": pending, "created_at": 1, "updated_at": 1
+    }))
+    .unwrap()
+}
+
+fn message(id: &str) -> Value {
+    json!({ "id": id, "command": { "type": "message.send", "thread": "thr_1", "text": "go on" } })
+}
+
+/// A sandbox stays up while a thread on it runs, sleeps a window after it only waits on its
+/// user (stopped at agent37, metering ended, its records still there), and a command wakes it:
+/// held until the daemon connects again, then delivered once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_idle_sandbox_sleeps_and_a_command_wakes_it() {
+    let w = world(|c| c.idle_stop = IDLE).await;
+    let (id, machine, token) = w.running().await;
+    let (mut d, _) = Daemon::connect(&w.url, &token).await;
+    d.upsert(vec![Stamped { seq: 1, entity: thread_record("thr_1", "running") }]).await;
+    tokio::time::sleep(IDLE * 3).await;
+    let s = w.sandbox(&id).await.unwrap();
+    assert_eq!((s["status"].as_str(), s["desired"].as_str(), &s["stopped_reason"]), (Some("running"), Some("running"), &Value::Null), "a running thread keeps it up: {s}");
+
+    // Only waiting on its user is idle: asked to wait, not working.
+    d.upsert(vec![Stamped { seq: 2, entity: thread_record("thr_1", "waiting") }]).await;
+    let waited = Instant::now();
+    let asleep = w.until(&id, "asleep", status_is("stopped")).await;
+    assert!(waited.elapsed() >= IDLE / 2, "slept {:?} after the thread stopped running", waited.elapsed());
+    assert_eq!((asleep["desired"].as_str(), asleep["stopped_reason"].as_str()), (Some("asleep"), Some("idle")), "{asleep}");
+    assert_eq!(w.instance(&id), "stopped");
+    assert_eq!(w.machine(&machine).await.unwrap()["sandbox"]["stopped_reason"], "idle");
+    // agent37 stopped its container: the daemon goes away.
+    drop(d);
+    w.wait_online(&machine, false).await;
+    // Metering ended at the stop.
+    let metered = w.metered_ms().await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(w.metered_ms().await, metered, "no running time while asleep");
+    // Nothing's lost: the thread still shows, waiting.
+    let (_, state) = w.req("GET", "/v1/code/agents/acme/state", None).await;
+    let t = state["entities"].as_array().unwrap().iter().find(|e| e["entity"]["id"] == "thr_1").cloned().unwrap();
+    assert_eq!(t["entity"]["status"], "waiting");
+
+    // A command wakes it: starting at once on the stream, held until the daemon is back.
+    let w = Arc::new(w);
+    let path = format!("/v1/code/agents/acme/machines/{machine}/commands");
+    let send = {
+        let (w, path) = (w.clone(), path.clone());
+        tokio::spawn(async move { w.req("POST", &path, Some(message("wake-1"))).await })
+    };
+    let woken = w.until(&id, "woken", |s| s["desired"] == "running").await;
+    assert!(["starting", "running"].contains(&woken["status"].as_str().unwrap()), "{woken}");
+    assert_eq!(woken["stopped_reason"], Value::Null);
+    w.instance_is(&id, "running").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!send.is_finished(), "held until the daemon connects");
+    let (mut d, _) = Daemon::connect(&w.url, &token).await;
+    match d.recv().await {
+        Some(RelayFrame::Command { id, .. }) => assert_eq!(id, "wake-1"),
+        other => panic!("expected the command, got {other:?}"),
+    }
+    d.send(&DaemonFrame::Reply { id: "wake-1".into(), result: Reply::Created { id: "run_2".into() } }).await;
+    assert_eq!(send.await.unwrap(), (StatusCode::OK, json!({ "type": "created", "id": "run_2" })));
+    tokio::time::timeout(Duration::from_millis(300), d.recv()).await.expect_err("sent once");
+    // The wake counts as activity: it doesn't go straight back to sleep.
+    assert_eq!(w.sandbox(&id).await.unwrap()["status"], "running");
+}
+
+/// Terminal output (a provider login) keeps a sandbox up; silence puts it to sleep.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_traffic_keeps_a_sandbox_up() {
+    let w = world(|c| c.idle_stop = IDLE).await;
+    let (id, _, token) = w.running().await;
+    let (mut d, _) = Daemon::connect(&w.url, &token).await;
+    for _ in 0..12 {
+        d.send(&DaemonFrame::Delta { delta: Delta::Terminal { terminal: TerminalId("term_1".into()), data: "aGk=".into() } }).await;
+        tokio::time::sleep(IDLE / 4).await;
+    }
+    assert_eq!(w.sandbox(&id).await.unwrap()["status"], "running", "up while its terminal talks");
+    w.until(&id, "asleep", |s| s["stopped_reason"] == "idle").await;
+}
+
+/// A relay that starts (a restart, or another node taking the owner's agents over) doesn't know
+/// what the last one saw since the last durable write: nothing sleeps sooner than one window
+/// after it starts, however old the sandbox's last activity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restarted_relay_waits_a_whole_window_before_a_sandbox_sleeps() {
+    // The first relay keeps sandboxes up.
+    let w = world(|c| c.idle_stop = Duration::ZERO).await;
+    let (id, _, _) = w.running().await;
+    w.a.code.db.sql().execute("UPDATE agent_sandboxes SET last_active_at = 1 WHERE id = ?", [&id]).unwrap();
+    let window = Duration::from_millis(1500);
+    let mut sc = w.config.clone();
+    sc.idle_stop = window;
+    let second = common::open_in(w.a.dir.path(), |c| {
+        c.review.secret_key = Some(SECRET_KEY.into());
+        c.sandboxes = sc;
+    });
+    let started = Instant::now();
+    second.start_sandboxes();
+    tokio::time::sleep(window / 2).await;
+    assert_eq!(w.sandbox(&id).await.unwrap()["status"], "running", "not within a window of the start");
+    w.until(&id, "asleep", |s| s["stopped_reason"] == "idle").await;
+    assert!(started.elapsed() >= window, "slept {:?} after the start", started.elapsed());
+}
+
+/// A command to a sandbox its owner stopped starts it too; one whose daemon doesn't connect in
+/// time answers a clear `machine_offline` (the same id goes through once it's up); a sandbox
+/// being deleted never wakes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn waking_times_out_clearly_and_deleted_sandboxes_never_wake() {
+    let w = world(|c| c.wake_timeout = Duration::from_millis(700)).await;
+    let (id, machine, token) = w.running().await;
+    let (s, stopped) = w.req("POST", &format!("/v1/code/agents/acme/sandboxes/{id}/stop"), None).await;
+    assert_eq!((s, stopped["status"].as_str(), stopped["stopped_reason"].as_str()), (StatusCode::OK, Some("stopped"), Some("owner")), "{stopped}");
+    assert_eq!(w.machine(&machine).await.unwrap()["sandbox"]["stopped_reason"], "owner");
+
+    let path = format!("/v1/code/agents/acme/machines/{machine}/commands");
+    let (s, r) = w.req("POST", &path, Some(message("w1"))).await;
+    assert_eq!((s, r["code"].as_str()), (StatusCode::SERVICE_UNAVAILABLE, Some("machine_offline")), "{r}");
+    assert!(r["error"].as_str().unwrap().contains("still waking"), "{r}");
+    assert_eq!(w.sandbox(&id).await.unwrap()["desired"], "running", "an owner's stop is undone by a message");
+    w.instance_is(&id, "running").await;
+    // Up now: the same id goes through, once.
+    let (mut d, _) = Daemon::connect(&w.url, &token).await;
+    let w = Arc::new(w);
+    let send = {
+        let (w, path) = (w.clone(), path.clone());
+        tokio::spawn(async move { w.req("POST", &path, Some(message("w1"))).await })
+    };
+    match d.recv().await {
+        Some(RelayFrame::Command { id, .. }) => assert_eq!(id, "w1"),
+        other => panic!("expected the command, got {other:?}"),
+    }
+    d.send(&DaemonFrame::Reply { id: "w1".into(), result: Reply::Ok }).await;
+    assert_eq!(send.await.unwrap(), (StatusCode::OK, json!({ "type": "ok" })));
+    drop(d);
+    w.wait_online(&machine, false).await;
+
+    // Being deleted (agent37 is slow to): never woken.
+    w.mock.lock().fail_deletes = true;
+    let (s, _) = w.req("DELETE", &format!("/v1/code/agents/acme/sandboxes/{id}"), None).await;
+    assert_eq!(s, StatusCode::ACCEPTED);
+    let starts = w.mock.lock().calls.iter().filter(|c| c.ends_with("/start")).count();
+    let (s, r) = w.req("POST", &path, Some(message("w2"))).await;
+    assert_eq!((s, r["code"].as_str()), (StatusCode::SERVICE_UNAVAILABLE, Some("machine_offline")), "{r}");
+    assert!(r["error"].as_str().unwrap().contains("being deleted"), "{r}");
+    assert_eq!(w.mock.lock().calls.iter().filter(|c| c.ends_with("/start")).count(), starts);
+    // Deleted: its machine is gone.
+    w.mock.lock().fail_deletes = false;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while w.sandbox(&id).await.is_some() {
+        assert!(Instant::now() < deadline, "never deleted");
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert_eq!(w.req("POST", &path, Some(message("w3"))).await.0, StatusCode::NOT_FOUND);
 }
 
 // ── docker ──

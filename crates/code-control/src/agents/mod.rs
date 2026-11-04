@@ -58,6 +58,12 @@ pub struct Agents {
     work_idle_ms: AtomicU64,
     /// The mirror's quota, when not [`store::QUOTA`] (tests).
     quota: Mutex<Option<store::Quota>>,
+    /// When each machine last did something the relay saw go by (a command for it, terminal
+    /// output from it), in ms by machine: the sandbox reconciler folds it into the durable
+    /// `last_active_at` at each look.
+    touched: Mutex<HashMap<String, i64>>,
+    /// Woken whenever a link attaches (a woken sandbox's command waits for its daemon).
+    linked: Notify,
 }
 
 struct LinkHandle {
@@ -138,6 +144,42 @@ impl Agents {
         self.links.lock().contains_key(machine_id)
     }
 
+    /// The machine's link, if it has one: a number no later link has.
+    pub(crate) fn link_conn(&self, machine_id: &str) -> Option<u64> {
+        self.links.lock().get(machine_id).map(|l| l.conn)
+    }
+
+    /// Wait until the machine has a link other than `stale`, until `deadline`: whether it has.
+    pub(crate) async fn linked(&self, machine_id: &str, stale: Option<u64>, deadline: tokio::time::Instant) -> bool {
+        loop {
+            let attached = self.linked.notified();
+            tokio::pin!(attached);
+            attached.as_mut().enable();
+            if self.link_conn(machine_id).is_some_and(|c| Some(c) != stale) {
+                return true;
+            }
+            if tokio::time::timeout_at(deadline, attached).await.is_err() {
+                return false;
+            }
+        }
+    }
+
+    /// The machine did something just now (the relay saw it).
+    pub(crate) fn touch(&self, machine_id: &str) {
+        let now = code_sql::now_ms();
+        let mut touched = self.touched.lock();
+        if touched.len() > 4096 {
+            // Older than any idle window anyone sets: already folded into `last_active_at`.
+            touched.retain(|_, t| now - *t < 24 * 3_600_000);
+        }
+        touched.insert(machine_id.to_string(), now);
+    }
+
+    /// When the machine last did something the relay saw on this node, if it did.
+    pub(crate) fn touched(&self, machine_id: &str) -> Option<i64> {
+        self.touched.lock().get(machine_id).copied()
+    }
+
     /// How long commands wait for a daemon's reply (tests shorten it).
     pub fn set_command_timeout(&self, d: Duration) {
         self.timeout_ms.store(d.as_millis().max(1) as u64, Ordering::Relaxed);
@@ -212,6 +254,7 @@ impl Agents {
                 let _ = tx.try_send(p.frame.clone());
             }
         }
+        self.linked.notify_waiters();
         Attached { conn, rx, close }
     }
 

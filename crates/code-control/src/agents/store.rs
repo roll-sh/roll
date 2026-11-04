@@ -604,6 +604,21 @@ pub fn thread_of(db: &code_sql::Db, owner_id: &str, thread: &str) -> code_sql::R
     }))
 }
 
+/// Whether a thread of the machine is starting or running, as the mirror has it. A thread that
+/// only waits on its user doesn't count, nor does a parent waiting on its delegated children (the
+/// children are threads of their own, running). The LIKEs only narrow what's read: a match in a
+/// message's text is escaped (`\"status\"`), and every candidate is parsed.
+pub fn machine_busy(db: &code_sql::Db, machine_id: &str) -> code_sql::Result<bool> {
+    let rows: Vec<String> = db.query(
+        "SELECT json FROM agent_entities WHERE machine_id = ? AND kind = 'thread' AND (json LIKE ? OR json LIKE ?)",
+        params![machine_id, "%\"status\":\"running\"%", "%\"status\":\"starting\"%"],
+        |r| r.get(0),
+    )?;
+    Ok(rows.iter().any(|j| {
+        matches!(serde_json::from_str::<Entity>(j), Ok(Entity::Thread(t)) if matches!(t.status, agent_proto::ThreadStatus::Starting | agent_proto::ThreadStatus::Running))
+    }))
+}
+
 fn kind_str_of(kind: agent_proto::EntityKind) -> &'static str {
     use agent_proto::EntityKind as K;
     match kind {

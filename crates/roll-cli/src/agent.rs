@@ -323,7 +323,18 @@ async fn up(api: &str) -> anyhow::Result<()> {
         }
     });
     let link = LinkConfig { api: saved.api.clone(), token: saved.token.clone() };
-    let res = relay::run(host, link, events, stop_signal()).await;
+    // On Ctrl-C or SIGTERM (`docker stop`, a sandbox going to sleep) the daemon stops its work
+    // first (runs waiting on their user stay waiting; providers write their conversations out),
+    // then the link sends the last records before it closes.
+    let stopping = host.clone();
+    let shutdown = async move {
+        stop_signal().await;
+        eprintln!("roll agent: stopping");
+        if tokio::time::timeout(SHUTDOWN, stopping.shutdown()).await.is_err() {
+            eprintln!("roll agent: providers took over {} s to stop; leaving them", SHUTDOWN.as_secs());
+        }
+    };
+    let res = relay::run(host, link, events, shutdown).await;
     match res {
         Ok(()) => {
             eprintln!("roll agent: stopped");
@@ -332,6 +343,10 @@ async fn up(api: &str) -> anyhow::Result<()> {
         Err(e) => bail!("{e}"),
     }
 }
+
+/// How long a stopping daemon gives its runs and providers, before the link's last records
+/// (`relay::DRAIN`): within `docker stop`'s 10 s.
+const SHUTDOWN: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Ctrl-C or SIGTERM.
 async fn stop_signal() {

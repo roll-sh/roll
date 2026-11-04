@@ -2,7 +2,7 @@
 
 import { ArrowUpRight, CircleAlert, Folder, FolderPlus, GitBranch, GitFork, LogIn, MoreHorizontal, Plus, RefreshCw, SquareTerminal, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
-import { isBusy, type Machine, type Node, type Project, type ProviderInfo, type Request, type Run, type Thread } from "@/lib/agents-api";
+import { coming, isBusy, machineState, reachable, type Machine, type Node, type Project, type ProviderInfo, type Request, type Run, type Thread } from "@/lib/agents-api";
 import { providersFor } from "@/lib/agents-store";
 import { primary } from "../ui";
 import { ChangeChip, WorkChip } from "./change";
@@ -116,8 +116,8 @@ export function MachineNode({ machine }: { machine: Machine }) {
   const sandbox = machine.sandbox;
   const projects = [...client.data.projects.values()].filter((r) => r.machine === machine.id).length;
   const os = info ? `${OS_NAMES[info.os] ?? info.os} · ${info.arch} · roll ${info.version}` : sandbox ? null : "Never connected";
-  // A sandbox that's up but whose daemon hasn't connected (yet, or again) isn't "offline".
-  const state = machine.online ? "online" : sandbox?.status === "creating" ? "booting" : sandbox?.status === "running" ? "connecting" : "offline";
+  // A sandbox that isn't connected isn't "offline": it's asleep, stopped, or on its way up.
+  const state = machineState(machine);
   const installed = info?.providers.filter((p) => p.installed) ?? [];
   const missing = installed.filter((p) => p.auth === "missing");
   const ready = installed.some((p) => p.auth === "ready");
@@ -153,7 +153,7 @@ export function MachineNode({ machine }: { machine: Machine }) {
         )}
         <span className="flex shrink-0 items-center gap-1.5 text-[11px] text-subtle">
           <StatusDot status={machine.online ? "online" : "offline"} />
-          <span className={state === "booting" || state === "connecting" ? "shimmer" : ""}>{state}</span>
+          <span className={coming(state) ? "shimmer" : ""}>{state}</span>
         </span>
       </div>
       <div className="space-y-2.5 px-3.5 pt-1 pb-3">
@@ -229,7 +229,8 @@ export function MachineNode({ machine }: { machine: Machine }) {
 export function ProjectNode({ project, machine }: { project: Project; machine: Machine | undefined }) {
   const { client, busy, error, run } = useRun();
   const { startNew, demo } = useAgents();
-  const online = !!machine?.online;
+  // An asleep sandbox counts: what's sent to it wakes it.
+  const online = reachable(machine);
   const threads = [...client.data.threads.values()].some((r) => r.value.project === project.id);
   return (
     <Card width={256} label={`Project ${project.name}`}>

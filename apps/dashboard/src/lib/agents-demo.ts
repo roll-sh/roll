@@ -27,6 +27,7 @@ import type {
   Request,
   RequestResponse,
   Run,
+  SandboxInfo,
   State,
   StreamEvent,
   Terminal,
@@ -34,6 +35,7 @@ import type {
   ThreadId,
   Todo,
 } from "./agents-api";
+import { reachable } from "./agents-api";
 import type { AgentsTransport } from "./agents-client";
 import type { AgentsServices, RepoChoice } from "./agents-services";
 import { ApiError } from "./code-api";
@@ -86,6 +88,9 @@ const DEMO_SIZES: SandboxSize[] = [
   { name: "large", cpu: 4, memory_gb: 8, disk_gb: 40, hourly_cents: 6 },
   { name: "xl", cpu: 8, memory_gb: 16, disk_gb: 80, hourly_cents: 10 },
 ];
+
+/** How long a demo sandbox with nothing running stays up before it sleeps (scaled by `speed`). */
+const DEMO_IDLE_MS = 20_000;
 
 const DEMO_REPOS: RepoChoice[] = [
   { owner: "acme", name: "roll", full_name: "acme/roll", description: "keep the code rolling", visibility: "public", updated_at: 1_762_000_000 },
@@ -460,12 +465,42 @@ export class DemoOwner implements AgentsTransport {
 
   async command(machine: MachineId, _id: string, command: Command): Promise<Reply> {
     await this.sleep(120);
+    // Like the relay: a command to an asleep (or stopped) sandbox wakes it and waits for it.
+    const m = this.machines.get(machine);
+    if (m && !m.online && reachable(m)) await this.wake(machine);
     if (!this.machines.get(machine)?.online) return { type: "error", code: "machine_offline", message: "the machine isn't connected" };
     try {
       return this.handle(machine, command);
     } catch (e) {
       return { type: "error", code: "invalid", message: e instanceof Error ? e.message : String(e) };
     }
+  }
+
+  /** Start an asleep sandbox (`starting` on the stream) and wait until it's connected again. */
+  private async wake(machine: MachineId) {
+    const s = [...this.sandboxes.values()].find((x) => x.machine === machine);
+    if (!s || s.desired === "deleted") return;
+    this.lastBusy.set(machine, now());
+    if (s.status === "stopped") {
+      this.setSandbox(s.id, { status: "starting", desired: "running", stopped_reason: null, last_active_at: now() });
+      this.after(2500, () => this.setSandbox(s.id, { status: "running" }, { online: true, last_seen: now() }));
+    }
+    for (let i = 0; i < 40 && !this.machines.get(machine)?.online; i++) await this.sleep(150);
+  }
+
+  /** Sandboxes nothing runs on go to sleep, like the relay's reconciler does after `ROLL_SANDBOX_IDLE_STOP`. */
+  private nap() {
+    this.after(2000, () => {
+      const t = now();
+      for (const s of this.sandboxes.values()) {
+        if (s.status !== "running" || s.desired !== "running" || !this.machines.get(s.machine)?.online) continue;
+        const busy = [...this.records.values()].some((r) => r.machine === s.machine && r.entity.kind === "thread" && (r.entity.status === "starting" || r.entity.status === "running"));
+        const since = this.lastBusy.get(s.machine);
+        if (busy || since === undefined) this.lastBusy.set(s.machine, t);
+        else if (t - since >= DEMO_IDLE_MS * this.speed) this.setSandbox(s.id, { status: "stopped", desired: "asleep", stopped_reason: "idle", last_active_at: since }, { online: false, last_seen: t });
+      }
+      this.nap();
+    });
   }
 
   /** Stop every timer (tests, and leaving the page). */
@@ -488,11 +523,15 @@ export class DemoOwner implements AgentsTransport {
   // ── services: sandboxes, repos, work items (what `agents-services.ts` asks the API for) ──
 
   private sandboxes = new Map<string, Sandbox>();
+  /** When each sandbox machine last had a thread starting or running (it sleeps a while after). */
+  private lastBusy = new Map<MachineId, number>();
 
   private sandboxMachine(s: Sandbox, patch: Partial<Machine>) {
     const m = this.machines.get(s.machine);
     if (!m) return;
-    const next: Machine = { ...m, ...patch, sandbox: { backend: s.backend, size: s.size.name, status: s.status, hourly_cents: s.size.hourly_cents } };
+    const sandbox: SandboxInfo = { backend: s.backend, size: s.size.name, status: s.status, hourly_cents: s.size.hourly_cents };
+    if (s.status === "stopped") sandbox.stopped_reason = s.desired === "stopped" ? "owner" : "idle";
+    const next: Machine = { ...m, ...patch, sandbox };
     this.machines.set(m.id, next);
     this.emit({ type: "machine", cursor: ++this.cursor, machine: next });
   }
@@ -527,7 +566,7 @@ export class DemoOwner implements AgentsTransport {
           const sid = id("sbx_");
           const mid = id("mch_");
           const name = req.name?.trim() || `sandbox-${owner.sandboxes.size + 1}`;
-          const s: Sandbox = { id: sid, name, machine: mid, backend: "agent37", size, status: "creating", desired: "running", error: null, created_at: now(), updated_at: now() };
+          const s: Sandbox = { id: sid, name, machine: mid, backend: "agent37", size, status: "creating", desired: "running", stopped_reason: null, error: null, created_at: now(), updated_at: now(), last_active_at: now() };
           owner.sandboxes.set(sid, s);
           owner.machines.set(mid, { id: mid, name, online: false, info: null, sandbox: null, created_at: now(), last_seen: null });
           owner.sandboxMachine(s, {});
@@ -555,12 +594,13 @@ export class DemoOwner implements AgentsTransport {
         },
         async start(_o, sid) {
           sandbox(sid);
+          owner.lastBusy.set(sandbox(sid).machine, now());
           owner.after(1500, () => owner.setSandbox(sid, {}, { online: true, last_seen: now() }));
-          return owner.setSandbox(sid, { status: "running", desired: "running" })!;
+          return owner.setSandbox(sid, { status: "running", desired: "running", stopped_reason: null, last_active_at: now() })!;
         },
         async stop(_o, sid) {
           sandbox(sid);
-          return owner.setSandbox(sid, { status: "stopped", desired: "stopped" }, { online: false, last_seen: now() })!;
+          return owner.setSandbox(sid, { status: "stopped", desired: "stopped", stopped_reason: "owner" }, { online: false, last_seen: now() })!;
         },
         async remove(_o, sid) {
           const s = sandbox(sid);
@@ -648,11 +688,14 @@ export class DemoOwner implements AgentsTransport {
       size: DEMO_SIZES[0],
       status: "running",
       desired: "running",
+      stopped_reason: null,
       error: null,
       created_at: t0 - 6 * 86_400_000,
       updated_at: t0,
+      last_active_at: t0,
     });
     this.cursor = 2;
+    this.nap();
 
     const project = (pid: string, name: string, path: string, branch: string, dirty: boolean, repo: string | null): Project => ({
       id: pid,
