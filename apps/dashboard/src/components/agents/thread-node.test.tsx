@@ -180,6 +180,30 @@ describe("Conversation", () => {
     expect(h.openThread).toHaveBeenCalledWith("thr_9");
   });
 
+  it("opens the thread's terminal in a drawer under the conversation (T3's), with tabs, a new one and hide", async () => {
+    const term = terminal({ id: "trm_1", thread: "thr_1", title: "zsh" });
+    let made = 0;
+    const h = agentsHarness({
+      entities: [...entities, mirrored("terminal", term, 11)],
+      follow: ["thr_1"],
+      reply: (c) => (c.type === "terminal.open" ? ({ type: "created", id: `trm_new${++made}` } as never) : { type: "ok" }),
+    });
+    renderAgents(<Conversation thread={busy} machine={machine()} />, h);
+    await userEvent.click(screen.getByRole("button", { name: "Terminal in this thread's directory" }));
+    // The open terminal is reused, not a new one.
+    expect(h.command.mock.calls.some((c) => c[2].type === "terminal.open")).toBe(false);
+    const drawer = screen.getByRole("region", { name: "Terminal" });
+    expect(within(drawer).getByRole("tab", { name: /zsh/, selected: true })).toBeInTheDocument();
+    expect(within(drawer).getByRole("separator", { name: "Resize the terminal" })).toBeInTheDocument();
+    // The composer stays above it; the header's toggle hides it.
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Hide the terminal" }));
+    expect(screen.queryByRole("region", { name: "Terminal" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Terminal in this thread's directory" }));
+    await userEvent.click(within(screen.getByRole("region", { name: "Terminal" })).getByRole("button", { name: "New terminal" }));
+    expect(h.command.mock.calls.at(-1)?.[2]).toEqual({ type: "terminal.open", thread: "thr_1", cols: 100, rows: 26 });
+  });
+
   it("shows the diff beside the transcript", async () => {
     const h = agentsHarness({ entities, follow: ["thr_1"], reply: (c) => (c.type === "diff.get" ? { type: "diff", files: [], stat: { files: 0, additions: 0, deletions: 0 }, truncated: false } as never : { type: "ok" }) });
     renderAgents(<Conversation thread={busy} machine={machine()} />, h);

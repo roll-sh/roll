@@ -290,6 +290,10 @@ The product should feel alive: dots react to the cursor and the marks "think". E
       never raw colours or shadows.
     - The accent stays `#4c8dff`. No orange, no decorative gradients. The Horizon mark is in the
       header.
+    - The conversation (transcript, work log, composer, requests) behaves and moves like T3
+      Code's chat (popups scale from their trigger, disclosures animate their height, sheets
+      slide in, 150–300 ms, reduced motion honoured); its components name the T3 files they
+      follow.
   - After touching anything agents-related, run `pnpm test:agents` (it skips itself when nothing
     relevant changed; `--unit` skips the end-to-end run). New tests go in
     `agent-host/tests/{orchestrator,threads,git,terminal,mcp,relay,codex,claude,acp}.rs`,

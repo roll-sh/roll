@@ -3,15 +3,16 @@
 import {
   Archive,
   ArchiveRestore,
-  ArrowDown,
   Check,
   ChevronDown,
   ChevronRight,
   ClipboardList,
   FileDiff as DiffIcon,
+  ListPlus,
   GitBranch,
   MoreHorizontal,
   Pencil,
+  Plus,
   Split,
   SquareTerminal,
   Trash2,
@@ -19,7 +20,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { coming, isBusy, machineState, reachable, type Checkpoint, type Diff, type Machine, type Request, type Run, type Thread } from "@/lib/agents-api";
+import { coming, isBusy, machineState, reachable, type Checkpoint, type Diff, type Machine, type Request, type Run, type Terminal, type Thread } from "@/lib/agents-api";
 import { checkpointsOf, nodeTree, runsOf } from "@/lib/agents-store";
 import { DiffViewer } from "../code/diff";
 import { input } from "../ui";
@@ -118,118 +119,221 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
   };
 
   const cpByRun = new Map(checkpoints.filter((c) => c.run).map((c) => [c.run!, c]));
-  // On a phone whatever is beside the transcript takes its place.
-  const sideOnly = phone && side !== null;
+  // The diff goes beside the chat only when both fit (T3 keeps 360 px for the chat).
+  const body = useRef<HTMLDivElement>(null);
+  const wide = useWidth(body) >= 900;
 
   return (
     <div role="region" aria-label={`Thread ${thread.title}`} className="flex h-full min-h-0 flex-col bg-bg text-[13px]">
       <TitleBar thread={thread} machine={machine} start={start} end={end} side={side} setSide={setSide} setError={setError} />
-      <div className="flex min-h-0 flex-1">
-        <div className={`relative min-w-0 flex-1 flex-col ${sideOnly ? "hidden" : "flex"}`}>
-          <div ref={scroller} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto overscroll-contain select-text" data-scroll>
-            <div className="mx-auto w-full max-w-[780px] px-4 py-6 sm:px-6">
-              {!loaded ? (
-                <EmptyTranscript>
-                  <span className="shimmer">Loading the conversation…</span>
-                </EmptyTranscript>
-              ) : runs.length === 0 ? (
-                <EmptyTranscript>{readOnly ? "No runs yet." : "Nothing yet. Say what to do below."}</EmptyTranscript>
-              ) : (
-                <div className="space-y-9">
-                  {runs.map((r, i) => (
-                    <RunView key={r.id} run={r} tree={nodeTree(data, thread.id, r.id)} requests={requests} checkpoint={cpByRun.get(r.id)} now={now} actions={actions} busyThread={busy} last={i === runs.length - 1} />
-                  ))}
-                </div>
-              )}
+      <div ref={body} className="relative flex min-h-0 flex-1">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="relative min-h-0 flex-1">
+            <div ref={scroller} onScroll={onScroll} className="h-full overflow-y-auto overscroll-contain select-text" data-scroll>
+              <div className="mx-auto w-full max-w-[46rem] px-4 pt-4 pb-6 sm:px-6">
+                {!loaded ? (
+                  <EmptyTranscript>
+                    <span className="shimmer">Loading the conversation…</span>
+                  </EmptyTranscript>
+                ) : runs.length === 0 ? (
+                  <EmptyTranscript>{readOnly ? "No runs yet." : "Send a message to start the conversation."}</EmptyTranscript>
+                ) : (
+                  <div className="space-y-8">
+                    {runs.map((r, i) => (
+                      <RunView key={r.id} run={r} tree={nodeTree(data, thread.id, r.id)} requests={requests} checkpoint={cpByRun.get(r.id)} now={now} actions={actions} busyThread={busy} last={i === runs.length - 1} />
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
+            {!atEnd && (
+              // T3's "Scroll to end": a glass pill, with what's queued.
+              <button
+                onClick={() => {
+                  stick.current = true;
+                  scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" });
+                }}
+                className="glass absolute bottom-3 left-1/2 flex h-7 -translate-x-1/2 items-center gap-1 rounded-full border border-outline px-3 text-[12px] text-muted shadow-pop transition-opacity duration-150 starting:opacity-0 hover:text-fg"
+              >
+                <ChevronDown className="size-3.5" /> Scroll to end
+                {thread.queued.length > 0 && <span className="text-subtle">· {thread.queued.length} queued</span>}
+              </button>
+            )}
           </div>
-          {!atEnd && (
-            <button
-              onClick={() => {
-                stick.current = true;
-                scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" });
-              }}
-              className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full border border-line bg-panel px-2.5 py-1 text-[11.5px] text-muted hover:text-fg"
-            >
-              <ArrowDown className="size-3" /> Latest
-            </button>
+          {!readOnly && (
+            <div className="shrink-0 px-3 pt-1 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6 sm:pb-4">
+              <div className="mx-auto w-full max-w-[46rem]">
+                {thread.queued.length > 0 && (
+                  <ul className="mx-[1.375rem] -mb-4 space-y-0.5 rounded-t-2xl border border-b-0 border-outline bg-raised px-2 pt-2 pb-5" aria-label="Queued messages">
+                    {thread.queued.map((q) => (
+                      <li key={q.id} className="flex h-7 items-center gap-2 rounded-md px-1.5 text-[12.5px] transition-opacity duration-150 starting:opacity-0 hover:bg-fg/[0.05]">
+                        <ListPlus className="size-3.5 shrink-0 text-subtle" aria-label="Queued" />
+                        <span className="min-w-0 flex-1 truncate text-soft">{q.text}</span>
+                        <button
+                          onClick={() => run(() => client.run(mid!, { type: "message.unqueue", thread: thread.id, message: q.id }))}
+                          aria-label="Remove from queue"
+                          className="grid size-5 place-items-center rounded text-subtle hover:text-fg"
+                        >
+                          <X className="size-3.5" />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {thread.archived_at ? (
+                  <p className="py-3 text-center text-[12.5px] text-subtle">Archived. Unarchive it from the menu to keep going.</p>
+                ) : (
+                  <Composer key={thread.id} mode={{ kind: "thread", thread, machine }} autoFocus={!phone} />
+                )}
+                <ContextStrip thread={thread} machine={machine} runs={runs} />
+                {error && (
+                  <p className="mt-2 text-[12px] text-danger" role="alert">
+                    {error}
+                  </p>
+                )}
+              </div>
+            </div>
           )}
+          {sideTerminal && !readOnly && (
+            <TerminalDrawer
+              terminals={terminals}
+              current={sideTerminal}
+              machine={machine}
+              onPick={(id) => setSide({ kind: "terminal", id })}
+              onNew={() =>
+                run(async () => {
+                  const r = await client.run<{ type: "created"; id: string }>(mid!, { type: "terminal.open", thread: thread.id, cols: 100, rows: 26 }, "created");
+                  setSide({ kind: "terminal", id: r.id });
+                })
+              }
+              onClose={() => run(() => client.run(mid!, { type: "terminal.close", terminal: sideTerminal.id }))}
+              onHide={() => setSide(null)}
+            />
+          )}
+          {readOnly && error && <p className="px-6 pb-3 text-[12px] text-danger">{error}</p>}
         </div>
         {side?.kind === "diff" && !readOnly && (
-          <SidePanel full={phone}>
+          // T3's diff panel: beside the chat when there's room, over it (a sheet sliding in) when there isn't.
+          <aside
+            aria-label="Diff"
+            className={
+              wide
+                ? "flex w-[min(540px,calc(100%-360px))] min-w-[360px] shrink-0 flex-col border-l border-line"
+                : "absolute inset-0 z-20 flex flex-col bg-bg transition-[translate,opacity] duration-300 ease-drawer starting:translate-x-6 starting:opacity-0 motion-reduce:transition-none"
+            }
+          >
             <DiffPane thread={thread} machine={machine} runs={runs} run={side.run} onRun={(r) => setSide({ kind: "diff", run: r })} onClose={() => setSide(null)} />
-          </SidePanel>
-        )}
-        {sideTerminal && !readOnly && (
-          <SidePanel full={phone}>
-            <div className="flex items-center gap-1 border-b border-line px-2 py-1.5">
-              {terminals.map((t) => (
-                <button
-                  key={t.id}
-                  onClick={() => setSide({ kind: "terminal", id: t.id })}
-                  className={`flex max-w-48 items-center gap-1.5 rounded-md px-2 py-1 font-mono text-[11.5px] ${t.id === sideTerminal.id ? "bg-panel-2 text-fg" : "text-subtle hover:text-fg"}`}
-                >
-                  <SquareTerminal className="size-3 shrink-0" />
-                  <span className="truncate">{t.title}</span>
-                  {t.status === "exited" && <span className="text-subtle">· exited</span>}
-                </button>
-              ))}
-              <span className="ml-auto flex items-center">
-                <IconButton label="Close the terminal" onClick={() => run(() => client.run(mid!, { type: "terminal.close", terminal: sideTerminal.id }))}>
-                  <Trash2 className="size-3.5" />
-                </IconButton>
-                <IconButton label="Hide" onClick={() => setSide(null)}>
-                  <X className="size-3.5" />
-                </IconButton>
-              </span>
-            </div>
-            <div className="min-h-0 flex-1">
-              <TerminalView key={sideTerminal.id} terminal={sideTerminal} machine={machine} className="h-full" bare />
-            </div>
-          </SidePanel>
+          </aside>
         )}
       </div>
-      {!readOnly && !sideOnly && (
-        <div className="shrink-0 px-3 pt-1 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6 sm:pb-5">
-          <div className="mx-auto w-full max-w-[780px]">
-            {thread.queued.length > 0 && (
-              <ul className="mb-2 space-y-1" aria-label="Queued messages">
-                {thread.queued.map((q) => (
-                  <li key={q.id} className="flex items-center gap-2 rounded-lg border border-dashed border-line-2 px-2.5 py-1.5 text-[12px]">
-                    <span className="font-mono text-[10px] tracking-wide text-subtle uppercase">queued</span>
-                    <span className="min-w-0 flex-1 truncate">{q.text}</span>
-                    <button
-                      onClick={() => run(() => client.run(mid!, { type: "message.unqueue", thread: thread.id, message: q.id }))}
-                      aria-label="Remove from queue"
-                      className="text-subtle hover:text-fg"
-                    >
-                      <X className="size-3.5" />
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-            {thread.archived_at ? (
-              <p className="py-3 text-center text-[12.5px] text-subtle">Archived. Unarchive it from the menu to keep going.</p>
-            ) : (
-              <Composer key={thread.id} mode={{ kind: "thread", thread, machine }} autoFocus={!phone} />
-            )}
-            <ContextStrip thread={thread} machine={machine} runs={runs} />
-            {error && (
-              <p className="mt-2 text-[12px] text-danger" role="alert">
-                {error}
-              </p>
-            )}
-          </div>
-        </div>
-      )}
-      {readOnly && error && <p className="px-6 pb-3 text-[12px] text-danger">{error}</p>}
     </div>
   );
 }
 
-function SidePanel({ full, children }: { full: boolean; children: ReactNode }) {
-  return <div className={`flex min-h-0 shrink-0 flex-col ${full ? "w-full" : "w-[min(48%,760px)] min-w-[380px] border-l border-line"}`}>{children}</div>;
+const DRAWER_HEIGHT = "roll:agents:terminal-height";
+
+/** An element's width, following it as it resizes (0 until measured). */
+function useWidth(ref: React.RefObject<HTMLElement | null>): number {
+  const [w, setW] = useState(0);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    setW(el.getBoundingClientRect().width);
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(([e]) => setW(e.contentRect.width));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ref]);
+  return w;
+}
+
+/**
+ * The thread's terminals in a drawer under the conversation (T3's `ThreadTerminalDrawer`): as tall
+ * as it was last dragged to (180 px up to three quarters of the window), its tabs and new / close /
+ * hide in a slim header.
+ */
+function TerminalDrawer({
+  terminals,
+  current,
+  machine,
+  onPick,
+  onNew,
+  onClose,
+  onHide,
+}: {
+  terminals: Terminal[];
+  current: Terminal;
+  machine: Machine | undefined;
+  onPick: (id: string) => void;
+  onNew: () => void;
+  onClose: () => void;
+  onHide: () => void;
+}) {
+  const [height, setHeight] = useState(() => {
+    const saved = typeof window === "undefined" ? NaN : Number(localStorage.getItem(DRAWER_HEIGHT));
+    return Number.isFinite(saved) && saved > 0 ? saved : 280;
+  });
+  const clamp = (h: number) => Math.round(Math.max(180, Math.min(h, window.innerHeight * 0.75)));
+  const onPointerDown = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const y0 = e.clientY;
+    const h0 = height;
+    const el = e.currentTarget as HTMLElement;
+    el.setPointerCapture(e.pointerId);
+    let last = h0;
+    const move = (m: PointerEvent) => setHeight((last = clamp(h0 + y0 - m.clientY)));
+    const up = () => {
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      try {
+        localStorage.setItem(DRAWER_HEIGHT, String(last));
+      } catch {
+        // Not remembered.
+      }
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+  };
+  return (
+    <section
+      aria-label="Terminal"
+      className="relative flex shrink-0 flex-col border-t border-line bg-bg transition-[opacity,translate] duration-200 ease-drawer starting:translate-y-3 starting:opacity-0 motion-reduce:transition-none"
+      style={{ height: `min(${height}px, 75%)` }}
+    >
+      <div role="separator" aria-orientation="horizontal" aria-label="Resize the terminal" onPointerDown={onPointerDown} className="absolute inset-x-0 -top-1 z-10 h-1.5 cursor-row-resize transition-colors hover:bg-accent/25" />
+      <div className="flex h-7 shrink-0 items-center gap-0.5 px-1.5">
+        <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto" role="tablist" aria-label="Terminals">
+          {terminals.map((t) => (
+            <button
+              key={t.id}
+              role="tab"
+              aria-selected={t.id === current.id}
+              onClick={() => onPick(t.id)}
+              className={`flex h-6 max-w-40 shrink-0 items-center gap-1.5 rounded-md px-2 font-mono text-[11.5px] transition-colors ${t.id === current.id ? "bg-fg/[0.07] text-fg" : "text-subtle hover:text-fg"}`}
+            >
+              <SquareTerminal className="size-3 shrink-0" />
+              <span className="truncate">{t.title}</span>
+              {t.status === "exited" && <span className="text-faint">· exited</span>}
+            </button>
+          ))}
+        </div>
+        <span className="flex shrink-0 items-center text-muted">
+          <IconButton label="New terminal" onClick={onNew}>
+            <Plus className="size-3.5" />
+          </IconButton>
+          <IconButton label="Close the terminal" onClick={onClose}>
+            <Trash2 className="size-3.5" />
+          </IconButton>
+          <IconButton label="Hide" onClick={onHide}>
+            <X className="size-3.5" />
+          </IconButton>
+        </span>
+      </div>
+      <div className="min-h-0 flex-1">
+        <TerminalView key={current.id} terminal={current} machine={machine} className="h-full" bare />
+      </div>
+    </section>
+  );
 }
 
 /**

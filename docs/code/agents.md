@@ -829,8 +829,14 @@ The surface has three views:
   cards show on hover (always on touch screens). The end of a thread card's footer and the
   conversation's composer footer show its context window as a small ring (T3's
   `ContextWindowMeter`; "62% of 200k" on hover, tokens only when the window is unknown),
-  monochrome until it's more than 90 % full, then accent. Approvals are answered right on their card;
-  questions say what they ask and open the conversation. The layout is a tidy tree in columns
+  monochrome until it's more than 90 % full, then accent. Every request is answered right on its
+  card, without opening the conversation (`pending-request.tsx`): the thread's name (it opens the
+  conversation), the last three steps that led to it in the work log's rows (the earlier ones a
+  click away), then the request itself: an approval with Approve and Decline (a note back to the
+  agent) and the rest under "More options", a plan with Implement and Refine, questions one at a
+  time as T3's user-input panel (radio or check rows, 1–9 pick, one choice moves on after 200 ms,
+  your own words in a line, Previous / Next question / Submit). A phone's canvas shows the oldest
+  the same way. The layout is a tidy tree in columns
   (one per depth, as wide as its widest card), so cards never overlap. Dragging a card moves it
   among its siblings (they make room as it passes; ⌥↑/⌥↓ do the same from the keyboard); that
   order is remembered per owner and synced through roll, new work keeps its default place
@@ -861,9 +867,20 @@ The surface has three views:
   place), so they never overlap; the header drags them among their siblings, the corner resizes
   them (arrows on the focused corner too). They always show on their view whatever its filter,
   at most 12 per view, sizes remembered per view.
-- **A conversation.** Clicking a thread opens it in a panel docked beside the canvas (resizable, remembered; on a phone it covers the canvas), its card selected on the canvas. A machine's or project's settings open in the same panel (`#agents/settings/<key>`, from its card), and so do the owner's (`#agents/settings/owner`, the header's gear or ⌘,; "Machine settings", "Owner settings"). Finished subagents (a done provider subagent, a delegated thread that's done) leave the canvas; their results stay in the parent's transcript. The conversation shows the transcript
-  in a centred column, the composer under it, the diff (of the thread or one run) or the thread's
-  terminals beside it. Everything is managed from there: approvals in the transcript, fork, roll
+- **A conversation.** Clicking a thread opens it in a panel docked beside the canvas (resizable, remembered; on a phone it covers the canvas), its card selected on the canvas. A machine's or project's settings open in the same panel (`#agents/settings/<key>`, from its card), and so do the owner's (`#agents/settings/owner`, the header's gear or ⌘,; "Machine settings", "Owner settings"). Finished subagents (a done provider subagent, a delegated thread that's done) leave the canvas; their results stay in the parent's transcript. The conversation is T3's chat
+  view (`session.tsx`, `transcript.tsx`, `work-log.tsx`, `composer.tsx`; the grouping is
+  `lib/agents-worklog.ts`): a header that is a breadcrumb (the project, the title, T3's status
+  pill) with Diff, Terminal and Share and the rest under More; the transcript in a 46 rem column
+  (the user's turn a bubble on the right, the agent's words bare, its steps a calm work log: a
+  group of tool calls and thinking reads as one sentence, "Ran 3 commands and read 2 files", a
+  live one shows the step it's on, and a finished run folds into "Worked for 2m 13s" above its
+  answer, with the files it changed in a card and copy, fork and roll back under it); approvals as
+  rows in the work log; the composer under it (T3's: a message to a running agent steers it,
+  ⌘/Ctrl queues it, the send button says which; the agent's questions sit on top of the composer
+  and what's typed is your own answer) with the machine, branch and cost in a strip below; the
+  thread's terminals in a resizable drawer under it all; the diff (of the thread or one run)
+  beside the chat when the panel is wide enough, else sliding over it. Everything is managed from
+  there: fork, roll
   back, publish, share, rename, archive, delete, take a work item. The title is a switcher to the
   other conversations (the ones waiting on you first), so there's no need to go back to the
   canvas; Escape (or ←) goes back. The canvas stays mounted underneath, so going back is instant.

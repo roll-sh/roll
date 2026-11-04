@@ -120,7 +120,7 @@ describe("roll code on a thread", () => {
     const t = thread({ run_count: 0 });
     renderAgents(<Conversation thread={t} machine={machine()} />, agentsHarness({ entities: [mirrored("thread", t, 1)], follow: ["thr_1"] }));
     expect(screen.queryByText("Loading the conversation…")).not.toBeInTheDocument();
-    expect(screen.getByText(/Nothing yet/)).toBeInTheDocument();
+    expect(screen.getByText("Send a message to start the conversation.")).toBeInTheDocument();
   });
 });
 
