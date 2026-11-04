@@ -6882,6 +6882,14 @@ composite types, including latency, CPU, and footprint. That gate is HELD. Combi
 verification remains pending. Earlier failed pg_dump TAP and E2E outputs remain failed,
 including runs whose Rust wrapper returned zero.
 
+The bounded follow-up on `0925007d` adds a natural INNER golden and a controlled-plan
+contract test. Debug and release each pass the controlled test and all four a166 files in
+all three modes. The controlled plan changes only `outer_first` and observes one restricted
+generation. The natural plan prefetches its outer row. Plain count shows no whole generation,
+but direct post-DDL `count_rest` coverage remains a gap. The failed first counter gate and
+count plan-shape probe remain failed in `results/2026-11-04/resume-owner166/followup-keys/`.
+No performance measurement was added.
+
 ## OLTP round 3 (round 23, agent 136)
 
 HANDOFF.md, "OLTP round 3", has what changed: extended-protocol statements bound once per

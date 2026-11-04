@@ -1,0 +1,119 @@
+{
+  "baseline": [
+    [
+      "float has excessive precision",
+      "crates/pg-engine/src/sql/func/math.rs:78:21"
+    ],
+    [
+      "float has excessive precision",
+      "crates/pg-engine/src/sql/func/math.rs:79:22"
+    ],
+    [
+      "float has excessive precision",
+      "crates/pg-engine/src/sql/func/math.rs:80:21"
+    ],
+    [
+      "float has excessive precision",
+      "crates/pg-engine/src/sql/func/math.rs:81:22"
+    ],
+    [
+      "float has excessive precision",
+      "crates/pg-engine/src/sql/func/math.rs:82:21"
+    ],
+    [
+      "items after a test module",
+      "crates/pg-engine/src/types/json.rs:946:1"
+    ],
+    [
+      "items after a test module",
+      "crates/pg-engine/src/types/text.rs:2436:1"
+    ],
+    [
+      "length comparison to zero",
+      "crates/pg-engine/src/sql/binder/expr.rs:3325:45"
+    ],
+    [
+      "the `Err`-variant returned from this function is very large",
+      "crates/pg-engine/src/sql/binder/optimize.rs:3458:88"
+    ],
+    [
+      "the loop variable `j` is used to index `rkeys`",
+      "crates/pg-engine/src/sql/paths/joinpath/partitionwise.rs:1318:18"
+    ],
+    [
+      "this `if` statement can be collapsed",
+      "crates/pg-engine/src/sql/explain.rs:9840:32"
+    ],
+    [
+      "this loop could be written as a `while let` loop",
+      "crates/pg-engine/src/sql/binder/fold.rs:189:9"
+    ],
+    [
+      "useless use of `format!`",
+      "crates/pg-engine/tests/difftest/round8.rs:874:103"
+    ],
+    [
+      "using `chunks_exact` with a constant chunk size",
+      "crates/pg-engine/tools/bench/bench.rs:836:40"
+    ]
+  ],
+  "current": [
+    [
+      "float has excessive precision",
+      "crates/pg-engine/src/sql/func/math.rs:78:21"
+    ],
+    [
+      "float has excessive precision",
+      "crates/pg-engine/src/sql/func/math.rs:79:22"
+    ],
+    [
+      "float has excessive precision",
+      "crates/pg-engine/src/sql/func/math.rs:80:21"
+    ],
+    [
+      "float has excessive precision",
+      "crates/pg-engine/src/sql/func/math.rs:81:22"
+    ],
+    [
+      "float has excessive precision",
+      "crates/pg-engine/src/sql/func/math.rs:82:21"
+    ],
+    [
+      "items after a test module",
+      "crates/pg-engine/src/types/json.rs:946:1"
+    ],
+    [
+      "items after a test module",
+      "crates/pg-engine/src/types/text.rs:2436:1"
+    ],
+    [
+      "length comparison to zero",
+      "crates/pg-engine/src/sql/binder/expr.rs:3325:45"
+    ],
+    [
+      "the `Err`-variant returned from this function is very large",
+      "crates/pg-engine/src/sql/binder/optimize.rs:3458:88"
+    ],
+    [
+      "the loop variable `j` is used to index `rkeys`",
+      "crates/pg-engine/src/sql/paths/joinpath/partitionwise.rs:1318:18"
+    ],
+    [
+      "this `if` statement can be collapsed",
+      "crates/pg-engine/src/sql/explain.rs:9840:32"
+    ],
+    [
+      "this loop could be written as a `while let` loop",
+      "crates/pg-engine/src/sql/binder/fold.rs:189:9"
+    ],
+    [
+      "useless use of `format!`",
+      "crates/pg-engine/tests/difftest/round8.rs:874:103"
+    ],
+    [
+      "using `chunks_exact` with a constant chunk size",
+      "crates/pg-engine/tools/bench/bench.rs:836:40"
+    ]
+  ],
+  "added": []
+}

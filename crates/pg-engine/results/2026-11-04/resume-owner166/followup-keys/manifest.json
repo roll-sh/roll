@@ -2,7 +2,7 @@
   "sha256": {
     "a166_lazy_keys_count.out": "e97965f06045e1750313f3e09618ad6523501723c74fe0f87a8a30486e86b2bc",
     "a166_lazy_keys_count.sql": "86ab881d3034611139a5e9c275378f427d8b889cd4b49e0e6d886ba4e239de33",
-    "disposition.md": "9dcd91bdc9923773b2a1fc61c442b2e506a1f870aa903c26344b11b1e859139d",
+    "disposition.md": "3a37c77ec84e84831d160306cdf80c3fa0dbf2e660b792f6a8da0f34b8f822a4",
     "gate1/debug.command.json": "05d5c62e625d973a8cb5888b1dd100cddc881e40f9b78635384cb4fbdaee26af",
     "gate1/debug.log": "ba55ef7fbe5b29d7620137d8a03a21d6bcca00d4b4b553965c7ec842abab1112",
     "gate1/results.json": "8c7c282ccda861e31a64710ff10153e7610cce152366a84126fcd3822125deb9",
@@ -11,6 +11,21 @@
     "gate1/source-status-before": "4d9ced5f961f1d1577c5860ef274af3a643f21e01fae334ac6ad07471d177a0a",
     "gate1-wrapper.log": "2f161066a232984ba6e33e0e537bdb519ed6bf93a80424ed9d40c84c43320032",
     "gate1.py": "f322cc208cb67a7356503dbe5caf8500a16ed1a11f95694e3b99d3c49a22b8c1",
+    "gate2/clippy-warning-comparison.json": "8fff0fe9dedd2b41ff63327f89959956ce6ecad36e467d9df4c962953d9ec6c2",
+    "gate2/clippy.command.json": "c063d5d41f5b2fdc675d8845dd1afc95de0006904571dc520e43a59590615427",
+    "gate2/clippy.log": "24008d5b4831cc0e8c99190780625378bc889a6cff7a4c3355513ac0ad31a3f6",
+    "gate2/complete": "78bf1f1b25a995488583b8d68e812dbe6ff35e49b1ccf7ba06c0b91dcee4be7b",
+    "gate2/debug.command.json": "05d5c62e625d973a8cb5888b1dd100cddc881e40f9b78635384cb4fbdaee26af",
+    "gate2/debug.log": "9637a0730fbe8bd4ba961886ec8eb0506601fe8779859e0cee0fbe9934c10e99",
+    "gate2/release.command.json": "7521757ef89d80054adc725696656aaff6b01547370759b08da9a3a84b4b2e79",
+    "gate2/release.log": "76e90d30a7e2d865c92b00f162d30cf675f60af27fc992ee2c3fcfd2a9ff217b",
+    "gate2/results.json": "f774bd1e0f7de967eba6ae171f57acb7d4f13d527b0a86708581d7bdaf50de5d",
+    "gate2/source-head": "ab8ad9d57b8a160befd1552a3e263a7edd7e4a17cb93c81176b462a988c78f5a",
+    "gate2/source-sha256.json": "9cce6112a6a4333a660426f30ce235726b85e99ea35d3c244bae9a49de5c2998",
+    "gate2/source-status-after": "4d9ced5f961f1d1577c5860ef274af3a643f21e01fae334ac6ad07471d177a0a",
+    "gate2/source-status-before": "4d9ced5f961f1d1577c5860ef274af3a643f21e01fae334ac6ad07471d177a0a",
+    "gate2-wrapper.log": "a46990fb33e37a2b4190f4f4ac265504f7a4d0cdee748a9f2b5c267a78bad6e6",
+    "gate2.py": "bda1590b06cfcc1039c327836b383cfa5efa13331964d3354f5e1dba0f608b61",
     "p1/commands.json": "8012454721c14b730441e20132d7bb2b786099ee1e75f1584fe865c85ec85be3",
     "p1/complete": "da9ed6e5d3cae893879333e54f498ab8ccf1f127246d1f0a5ea49baa052726b0",
     "p1/create-engine-db.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -72,6 +87,6 @@
     "record-wrapper.log": "7055fed1a9a3e2897f3bd019fe2c108ef8449dd09ef47ac040787e4373e14da4",
     "record.py": "6b3bf2655da06b4ce1bf6235636b9bbba07d699c41414e2c8b0c349de3a9b640"
   },
-  "files": 71,
-  "scope": "bounded probes, PG18.6 recording, and explicitly FAILED first counter gate"
+  "files": 86,
+  "scope": "natural PG18.6 probes, failed p2/gate1, and passing controlled-plan gate2 with limits"
 }

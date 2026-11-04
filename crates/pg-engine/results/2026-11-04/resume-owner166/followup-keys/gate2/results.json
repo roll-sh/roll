@@ -1,0 +1,49 @@
+[
+  {
+    "name": "debug",
+    "exit": 0,
+    "validated": true,
+    "summaries": [
+      [
+        "ok",
+        "1",
+        "0",
+        "0"
+      ],
+      [
+        "ok",
+        "3",
+        "0",
+        "0"
+      ]
+    ],
+    "sha256": "9637a0730fbe8bd4ba961886ec8eb0506601fe8779859e0cee0fbe9934c10e99"
+  },
+  {
+    "name": "release",
+    "exit": 0,
+    "validated": true,
+    "summaries": [
+      [
+        "ok",
+        "1",
+        "0",
+        "0"
+      ],
+      [
+        "ok",
+        "3",
+        "0",
+        "0"
+      ]
+    ],
+    "sha256": "76e90d30a7e2d865c92b00f162d30cf675f60af27fc992ee2c3fcfd2a9ff217b"
+  },
+  {
+    "name": "clippy",
+    "exit": 0,
+    "validated": true,
+    "summaries": [],
+    "sha256": "24008d5b4831cc0e8c99190780625378bc889a6cff7a4c3355513ac0ad31a3f6"
+  }
+]
