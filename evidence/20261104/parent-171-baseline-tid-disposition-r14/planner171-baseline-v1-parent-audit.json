@@ -1,0 +1,28 @@
+{
+  "time": "2026-11-04T20:48:13.430849+00:00",
+  "evidence_commit": "a776a571a8e983373f550d08025e02b6001505cf",
+  "remote_exact": true,
+  "closed_files": 460,
+  "hashes_verified": 459,
+  "evidence_only_changes": 26,
+  "baseline_effective_tree": "490f86ac7e46272cdbb981049c9bcfc4a02b401a",
+  "generic_exit": 0,
+  "generic_counts": [
+    1,
+    5
+  ],
+  "parallel_exit": 101,
+  "parallel_counts": [
+    [
+      2,
+      0
+    ],
+    [
+      2,
+      0
+    ]
+  ],
+  "restoration_receipt_verified": true,
+  "source_acceptance": false,
+  "next": "Corrected registered-backend parallelfixture pair ONLY authorized; no repair"
+}
