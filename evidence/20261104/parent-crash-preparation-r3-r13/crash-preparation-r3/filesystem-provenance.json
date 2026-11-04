@@ -1,0 +1,42 @@
+{
+  "status": "PREPARATION_ONLY_UNCOMPILED_UNFORMATTED_UNRUN",
+  "original_evidence_commit": "aa48d3c9be313a6a67810e6d6d69b1f633685823",
+  "original_plan_path": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-weighted-terminal/plan.json",
+  "original_plan_sha256": "c4b77baa9d77bad2a6378bd43eedf753558ecc08d725447ecde69184fc457bb4",
+  "original_plan_head": "278a28966a8921da90c6ead9cfeb3f332306d788",
+  "original_configured_TMPDIR": "/home/meszmate/.cache/a167/tmp",
+  "original_crash_stage": [
+    {
+      "name": "crash30",
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "pg-engine",
+        "--test",
+        "crash_random"
+      ],
+      "expect": "^test result: ok\\.",
+      "env": {
+        "CRASH_SEEDS": "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30",
+        "CRASH_ROUNDS": "4"
+      }
+    }
+  ],
+  "original_filesystem_at_failure": "NOT_CAPTURED; current mount metadata does not establish historical filesystem identity",
+  "future_configured_filesystem": "persistent disk; runtime configured type must match current mountinfo; tmpfs/ramfs rejected",
+  "current_metadata_source": "read-only /proc/self/mountinfo; no storage probe",
+  "current_metadata_utc": "2026-11-04T20:19:43.494292+00:00",
+  "current_preparation_cache_mount": {
+    "mount_point": "/",
+    "filesystem_type": "ext4",
+    "mount_source": "/dev/md2"
+  },
+  "current_original_TMPDIR_mount": {
+    "mount_point": "/",
+    "filesystem_type": "ext4",
+    "mount_source": "/dev/md2"
+  },
+  "medium_identity_claim": false
+}

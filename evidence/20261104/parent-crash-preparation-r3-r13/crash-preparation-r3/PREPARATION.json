@@ -1,0 +1,97 @@
+{
+  "status": "PREPARATION_ONLY_UNCOMPILED_UNFORMATTED_UNRUN",
+  "diagnostic_revision": "preparation-r3",
+  "event_schema": 3,
+  "base_source": "278a28966a8921da90c6ead9cfeb3f332306d788",
+  "base_tree": "95a87e3cacd4100a09adc93f5c5362e7de2900b4",
+  "original_failed_evidence": "aa48d3c9be313a6a67810e6d6d69b1f633685823",
+  "original_failed_test_binary_sha256": "a35916fbfff20bcbe555d5a5c1d77d0688d24686f9696a1148ce2e1c8ec59ec5",
+  "original_failure": "exit 101 remains unattributed; no pass clears it; no storage-cause claim",
+  "immutable_prior_preparations": [
+    {
+      "directory": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/executor278-crash14-preparation-r1",
+      "payloads": 9,
+      "sha256sums_sha256": "20d5d29c6eded640b068072789df0c2b6ff1d4cfb15fb8ab140367731867ea0c",
+      "all_payloads_verified_unchanged": true
+    },
+    {
+      "directory": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/executor278-crash14-preparation-r2",
+      "payloads": 13,
+      "sha256sums_sha256": "e59572fcc6d4074357ddea8777d81db1b601922df3a04742ce6fc652e5673154",
+      "all_payloads_verified_unchanged": true
+    }
+  ],
+  "independent_reviews": [
+    {
+      "path": "independent-review-r1.json",
+      "sha256": "ca002ca6b98fcb41d4cbdd60d57ecf3f05a35f47bcb9d4c3b9eb4f9dd76b4d50",
+      "taskId": "node:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Adelegate-task%3Apg-resume-20261104-crash14-diagnostic-review-r1"
+    },
+    {
+      "path": "independent-review-r2.json",
+      "sha256": "28a578b704a521805cbb03d8b477e91e96414cf903fcbdd168da8af842b15503",
+      "taskId": "node:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Adelegate-task%3Apg-resume-20261104-crash14-diagnostic-review-r2"
+    }
+  ],
+  "patch_sha256": "21079848cd2fd62b7f35555551622c72f0f27843d5e7650a948ff308da4396ca",
+  "source_manifest_sha256": "62975fa2bb943c0fb47f8ed4c566812d8b47ff53bfd127e107b39ebbb2b60e15",
+  "test_only_paths": [
+    "crates/pg-engine/tests/crash_random.rs",
+    "crates/pg-engine/tests/support/crash14_diagnostic.rs"
+  ],
+  "production_input_count": 882,
+  "production_changes": [],
+  "source_text_checks_only": [
+    "Model Debug derive in candidate and generator",
+    "append_log/replay/row_diff/step byte-identical bodies",
+    "pure flags seam used; no after-pass snapshot branch or pre-oracle signal assertion"
+  ],
+  "original_failure_configuration": {
+    "profile": "release",
+    "TMPDIR": "/home/meszmate/.cache/a167/tmp",
+    "filesystem_at_failure": "NOT_CAPTURED"
+  },
+  "current_filesystem_metadata": {
+    "mount_point": "/",
+    "filesystem_type": "ext4",
+    "mount_source": "/dev/md2"
+  },
+  "metadata_source": "read-only /proc/self/mountinfo, not a storage probe or historical-medium proof",
+  "performed": [
+    "Read FULL cached R2 independent review and R1/R2 artifacts",
+    "Created cache-only R3 sourcecopies/patch/documents/manifests and retained exact sealed failure-plan bytes",
+    "Read-only Git object identity and immutable-cache checksum checks; source-text inspection only",
+    "Read kernel mount-table metadata to record configured/current filesystem provenance"
+  ],
+  "not_performed": [
+    "Source/ref/index/target mutation",
+    "Patch application anywhere",
+    "Compilation/parser controls/tests/rustfmt",
+    "Engine/crash/SSI/storage execution or probes/reruns",
+    "Services/containers/children",
+    "Push/export"
+  ],
+  "future_limits": {
+    "free_disk_floor_gib": 30,
+    "hard_capture_budget_gib": 12,
+    "minimum_initial_free_gib": 42,
+    "image_data_byte_cap_gib": 2,
+    "record_cap_mib": 1,
+    "dump_raw_cap_mib": 16,
+    "history_data_per_process_mib": 128,
+    "history_summary_per_process_mib": 8,
+    "failure_data_per_process_mib": 256,
+    "failure_summary_per_process_mib": 8,
+    "child_watchdogs": "300s entry and 5s post-arm; classified state outside image",
+    "overall_deadline": "20-minute WHOLE PROCESS GROUP; TERM then KILL after 5 seconds; direct preverified release binary"
+  },
+  "limitations": [
+    "All R3 code remains UNCOMPILED/UNFORMATTED/UNRUN; source corrections are not a compiler verdict",
+    "Instrumentation changes binary/schedule/I/O/crash boundary; no source or original-medium equivalence",
+    "Seed alone cannot reconstruct retained original model/failure; seed+journal is not full interrupted state; preserve models/digests",
+    "Budgets/caps/lost markers/missing dumps/timeouts/reset/query errors make evidence incomplete",
+    "I/O failure can also defeat channel marker update; no infallible-storage promise",
+    "Planned signal origin/time unproved even with armed SIGKILL and no recorded watchdog; pre-arm/watchdog exits rejected",
+    "Failure snapshots are separate statements; actual chosen scan paths/timeouts not proven; SIGKILL is not power loss"
+  ]
+}

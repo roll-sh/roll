@@ -1,0 +1,152 @@
+{
+  "status": "PREPARATION_ONLY_UNCOMPILED_UNFORMATTED_UNRUN",
+  "scope": "Pure journal parser and injected read-result controls. No engine, storage, crash, SSI, service, or container.",
+  "cause_claim": false,
+  "cases": [
+    {
+      "name": "complete_records",
+      "hex": "3020630a3120610a",
+      "original_expected_flags": [
+        true,
+        false
+      ],
+      "diagnostic_expected_valid": true
+    },
+    {
+      "name": "truncated_final_marker",
+      "hex": "3020630a3120",
+      "original_expected_flags": [
+        true,
+        false
+      ],
+      "diagnostic_expected_valid": false,
+      "meaning": "Original parser treats an incomplete record as aborted. This does not establish an original-run torn append."
+    },
+    {
+      "name": "missing_terminator_committed",
+      "hex": "3020630a312063",
+      "original_expected_flags": [
+        true,
+        true
+      ],
+      "diagnostic_expected_valid": false
+    },
+    {
+      "name": "wrong_record_id",
+      "hex": "3020630a393920630a",
+      "original_expected_flags": [
+        true,
+        true
+      ],
+      "diagnostic_expected_valid": false
+    },
+    {
+      "name": "injected_read_error",
+      "input": "Err(PermissionDenied), injected without chmod or real filesystem access",
+      "original_expected_flags": [],
+      "diagnostic_expected_read_error": true,
+      "meaning": "A recorded error differs from a valid empty journal even though the original oracle returns the same flags."
+    },
+    {
+      "name": "invalid_utf8",
+      "hex": "ff",
+      "original_read_to_string_expected": "InvalidData",
+      "original_expected_flags": [],
+      "diagnostic_expected_valid": false
+    },
+    {
+      "name": "merged_partial_marker_then_commit",
+      "segments_text": [
+        "0 c\n1 ",
+        "2 c\n"
+      ],
+      "segments_hex": [
+        "3020630a3120",
+        "3220630a"
+      ],
+      "hex": "3020630a31203220630a",
+      "original_expected_flags": [
+        true,
+        true
+      ],
+      "expected_logical_records": 3,
+      "original_expected_records": 2,
+      "diagnostic_expected_valid": false,
+      "meaning": "Legacy parser accepts suffix c on merged line, losing one index. Audit flags wrong field count; no repair and no cause attribution."
+    },
+    {
+      "name": "merged_unterminated_commit_then_abort",
+      "segments_text": [
+        "0 c\n1 c",
+        "2 a\n"
+      ],
+      "segments_hex": [
+        "3020630a312063",
+        "3220610a"
+      ],
+      "hex": "3020630a3120633220610a",
+      "original_expected_flags": [
+        true,
+        false
+      ],
+      "expected_logical_records": 3,
+      "original_expected_records": 2,
+      "diagnostic_expected_valid": false,
+      "meaning": "Merged status c2 is invalid; legacy suffix parser returns false. Audit only; no cause attribution."
+    },
+    {
+      "name": "digits_only_merged_tear",
+      "segments_text": [
+        "0 c\n1",
+        "2 a\n"
+      ],
+      "segments_hex": [
+        "3020630a31",
+        "3220610a"
+      ],
+      "hex": "3020630a313220610a",
+      "original_expected_flags": [
+        true,
+        false
+      ],
+      "expected_logical_records": 3,
+      "original_expected_records": 2,
+      "diagnostic_expected_valid": false,
+      "expected_bad_id": 12,
+      "meaning": "Digits concatenate into record id 12, where audit expects 1; original flags do not validate IDs."
+    },
+    {
+      "name": "empty_file",
+      "hex": "",
+      "original_expected_flags": [],
+      "diagnostic_expected_valid": true,
+      "diagnostic_expected_records": 0
+    },
+    {
+      "name": "empty_line",
+      "hex": "0a",
+      "original_expected_flags": [
+        false
+      ],
+      "diagnostic_expected_valid": false,
+      "diagnostic_expected_records": 1
+    },
+    {
+      "name": "round0_not_found",
+      "input": "flags(Err(io::Error::from(io::ErrorKind::NotFound)))",
+      "original_expected_flags": [],
+      "diagnostic_expected_read_error": true,
+      "audit_input": "none: missing file has no byte slice",
+      "normal_round0_absence": true
+    }
+  ],
+  "minimal_future_proof": "Only under separate authorization, call candidate flags(Result<String>) and audit(&[u8]) on these literals/injected errors. Compare listed old flags and annotations. No candidate code or controls were executed in preparation. No engine/storage/crash runtime or cause attribution.",
+  "execution": "NONE: all expected outcomes are specified, UNRUN.",
+  "diagnostic_revision": "preparation-r3",
+  "event_schema": 3,
+  "pure_seams": {
+    "flags": "flags(std::io::Result<String>) -> Vec<bool>: original unwrap_or_default().lines().map(ends_with(\" c\")) semantics",
+    "audit": "audit(&[u8]) -> serde_json::Value: pure strict annotation; never repairs/replaces legacy flags",
+    "read_errors": "Inject Result errors directly; no chmod, files, engine or storage. NotFound is normal initial round-0 absence, not proof of damage."
+  }
+}

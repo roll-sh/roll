@@ -1,0 +1,15 @@
+{
+  "utc": "2026-11-04T20:41:54.355880+00:00",
+  "status": "CHECKSUM_AUDIT_ONLY",
+  "verified_payload_counts": {
+    "r1": 9,
+    "r2": 13,
+    "r3": 16
+  },
+  "r3_patch_sha256": "21079848cd2fd62b7f35555551622c72f0f27843d5e7650a948ff308da4396ca",
+  "r3_manifest_sha256": "62975fa2bb943c0fb47f8ed4c566812d8b47ff53bfd127e107b39ebbb2b60e15",
+  "source_changes": false,
+  "build_or_runtime": false,
+  "original_crash101": "UNATTRIBUTED,NOTCLEARED",
+  "next": "Fresh independent static review; no execution authorization"
+}
