@@ -597,7 +597,10 @@ The surface has three views:
   start, stop and delete, and puts logging a provider in first (a terminal on the canvas running
   the device login). A machine with no projects offers adding one (a folder, a clone of one of the
   owner's roll code repos, or a new repo); a project with no threads offers starting one. Offline
-  machines are dimmed with when they were last seen.
+  machines are dimmed with when they were last seen. A sandbox that isn't connected is never
+  "offline": it's asleep ("Asleep · wakes when an agent needs it", no Stop), stopped, or waking
+  (pulsing, on every open canvas), and its threads' composers, approvals and actions stay usable
+  (what's sent wakes it; `machineState` in `agents-api.ts`).
 - **roll code.** Thread cards and sessions show `Thread.change` (a chip linking to the change)
   and `Thread.work`. Publishing shows what landing did as a result, never an error; a thread
   outside a worktree is offered a fork into one first, and new threads in a roll code project

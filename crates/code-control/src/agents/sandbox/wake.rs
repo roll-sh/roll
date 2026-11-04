@@ -81,7 +81,7 @@ impl Code {
     pub(crate) async fn machine_command(&self, m: &MachineRow, id: String, by: String, command: Command, grant: Option<CodeGrant>) -> Reply {
         if m.sandbox.is_some()
             && self.sandboxes.backend.is_some()
-            && let Err(reply) = self.wake(m).await
+            && let Some(reply) = self.wake(m).await
         {
             return reply;
         }
@@ -89,25 +89,26 @@ impl Code {
     }
 
     /// Make sure a sandbox machine is up for a command: at once when it runs and is connected;
-    /// else set it running and wait for its daemon's link. `Err` is the reply to give instead.
-    async fn wake(&self, m: &MachineRow) -> Result<(), Reply> {
+    /// else set it running and wait for its daemon's link. `Some` is the reply to give instead.
+    async fn wake(&self, m: &MachineRow) -> Option<Reply> {
+        let offline = |why: &str| Some(error(ErrorCode::MachineOffline, why));
         // Noted before the desired state is read (the module doc's race).
         self.agents.touch(&m.id);
         let db = self.db.sql();
         let s = match store::by_machine(db, &m.id) {
             Ok(Some(s)) => s,
-            Ok(None) => return Ok(()),
+            Ok(None) => return None,
             Err(e) => {
                 tracing::warn!(machine = %m.id, error = %e, "reading a machine's sandbox");
-                return Ok(());
+                return None;
             }
         };
         let online = self.agents.online(&m.id);
         if s.desired == Desired::Running && online {
-            return Ok(());
+            return None;
         }
         if let Some(why) = unwakeable(&s) {
-            return if online { Ok(()) } else { Err(error(ErrorCode::MachineOffline, &why)) };
+            return if online { None } else { offline(&why) };
         }
         let stale = {
             // A look in progress (a stop) finishes first.
@@ -115,14 +116,14 @@ impl Code {
             let _one = lock.lock().await;
             let s = match store::sandbox(db, &s.id) {
                 Ok(Some(s)) => s,
-                Ok(None) => return Err(error(ErrorCode::MachineOffline, "the sandbox was deleted")),
+                Ok(None) => return offline("the sandbox was deleted"),
                 Err(e) => {
                     tracing::warn!(sandbox = %s.id, error = %e, "reading a sandbox to wake");
-                    return Err(error(ErrorCode::MachineOffline, "the sandbox couldn't be woken; try again"));
+                    return offline("the sandbox couldn't be woken; try again");
                 }
             };
             if let Some(why) = unwakeable(&s) {
-                return Err(error(ErrorCode::MachineOffline, &why));
+                return offline(&why);
             }
             if s.desired != Desired::Running || s.status == SandboxStatus::Stopped {
                 let hub = self.agents.hub(&s.owner_id);
@@ -132,7 +133,7 @@ impl Code {
                     Ok(_) => {}
                     Err(e) => {
                         tracing::warn!(sandbox = %s.id, error = %e, "waking a sandbox");
-                        return Err(error(ErrorCode::MachineOffline, "the sandbox couldn't be woken; try again"));
+                        return offline("the sandbox couldn't be woken; try again");
                     }
                 }
                 tracing::info!(sandbox = %s.id, was = s.desired.as_str(), "waking a sandbox for a command");
@@ -142,12 +143,9 @@ impl Code {
         self.kick_sandboxes(&s.owner_id);
         let wait = self.config.sandboxes.wake_timeout;
         if self.agents.linked(&m.id, stale, tokio::time::Instant::now() + wait).await {
-            return Ok(());
+            return None;
         }
-        Err(error(
-            ErrorCode::MachineOffline,
-            &format!("the sandbox is still waking up (it didn't connect within {} s); send the command again with the same id", wait.as_secs()),
-        ))
+        offline(&format!("the sandbox is still waking up (it didn't connect within {} s); send the command again with the same id", wait.as_secs()))
     }
 }
 
