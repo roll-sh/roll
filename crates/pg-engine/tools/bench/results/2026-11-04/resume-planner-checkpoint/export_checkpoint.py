@@ -18,6 +18,8 @@ def git(*args, data=None, env=None):
 readme = '''# Recovery and OLTP165 review checkpoint (2026-11-04)
 
 
+171FULLGATE UPDATE: DEBUG completed457/0/18/61,command0+stageaudit0,60actualbinaryhashes. RELEASE is active;laterstagesNOTCOMPLETE. Active release raw excluded. No fullpipelinepass.
+
 171FULLGATE LAUNCH: exactcleancac0933b,source/tree/frozenrunner/map/toolchain/startup
 controls captured. No inheritedtestoverrides;explicitgoldenunsets;ordinarydefault
 crashtests only,no configuredstress/probes/services. c861455actualmaps plusONLYkept7→8/
@@ -436,6 +438,9 @@ for name in ('source.txt', 'tree.txt', 'initial.status', 'startup-controls.json'
     sources['full171-lazy-v1/' + name] = str(D / 'full171-lazy-v1' / name)
 sources['runners/audit171-full-terminal.py'] = str(D / 'audit171-full-terminal.py')
 sources['full171-lazy-v1/affinity-observation-debug-golden.json'] = str(D / 'full171-lazy-v1/affinity-observation-debug-golden.json')
+# Completed debug stage only; release output is active and intentionally excluded.
+for name in ('debug-test.command', 'debug-test.log', 'debug-test-audit.log', 'debug-test-summary.json', 'debug-test-binaries.json', 'debug-test-completion.json'):
+    sources['full171-lazy-v1/' + name] = str(D / 'full171-lazy-v1' / name)
 for name, source in sources.items():
     files[name] = Path(source).read_bytes()
 files['manifest.json'] = (json.dumps({name: {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}

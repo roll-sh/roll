@@ -1,0 +1,16 @@
+{
+  "stage": "debug-test",
+  "source": "cac0933bc4eb5ef87674889542cab271de4615d0",
+  "tree": "bd48e5074887125072d7c23cb09c78fe6fe15c0b",
+  "command_exit": 0,
+  "stage_audit_exit": 0,
+  "summary": {
+    "passed": 457,
+    "failed": 0,
+    "ignored": 18,
+    "summaries": 61
+  },
+  "binary_count": 60,
+  "later_stages": "RUNNING release; not a full pipeline pass",
+  "observed_utc": "2026-11-04T22:07:46.824710+00:00"
+}

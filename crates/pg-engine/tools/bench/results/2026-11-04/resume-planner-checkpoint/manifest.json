@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "67d042ebffe81971d588c2a892f0218a51feecb165ebd4aba74e479a5ff093a5",
-    "bytes": 18572
+    "sha256": "327fb1a378373e9de72c03a45f8f892071a0c058f2eb0cb3d430c6babcf32c1c",
+    "bytes": 18755
   },
   "baseline171-v1/RESTORED.txt": {
     "sha256": "2ad11b1db92238f171853cadc56294d550edeed718924b1b46054ccb24969691",
@@ -772,8 +772,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "aba26fe866b1cdd77a3e966cf1d8f8e3b5c3bd7674cb36d16615a6a7afb56954",
-    "bytes": 36993
+    "sha256": "5e52f52a79821c71b8b417748317635c103fddf2bb518b41938e298d8a9ec717",
+    "bytes": 37497
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -1034,6 +1034,30 @@
   "full171-lazy-v1/affinity-observation-debug-golden.json": {
     "sha256": "c8cfe7f0140f350d34c28e3c27bd212e087ef2c487869c5e038b2680797d6897",
     "bytes": 4810
+  },
+  "full171-lazy-v1/debug-test-audit.log": {
+    "sha256": "e0cd2a3735867ab91821c5791525506c194d756946af2f4daaf295f55be06e41",
+    "bytes": 83
+  },
+  "full171-lazy-v1/debug-test-binaries.json": {
+    "sha256": "ebec47cac91ee29264250fbaeac3edfef8098ce45d4193f5d8e553e53cc48ad4",
+    "bytes": 14505
+  },
+  "full171-lazy-v1/debug-test-completion.json": {
+    "sha256": "42214667cf30dfffdc84e874ecfe833356599e513469dd8c141a7515826974d3",
+    "bytes": 418
+  },
+  "full171-lazy-v1/debug-test-summary.json": {
+    "sha256": "90320f7be8f7a342ad2c77e0035b22c70c25207f65ee47ec6e7e85d1885ebb32",
+    "bytes": 4017
+  },
+  "full171-lazy-v1/debug-test.command": {
+    "sha256": "a58cb89f43a482980467f2846f5490a07e7950df8f44eb8825c0aac12cd6eaea",
+    "bytes": 25
+  },
+  "full171-lazy-v1/debug-test.log": {
+    "sha256": "360eca2f114d5e1faa171bab6948a1d36362ba35ef9f8289d322e8f4ff4e41f4",
+    "bytes": 38570
   },
   "full171-lazy-v1/disk-before-debug-test.json": {
     "sha256": "3b7ace71210be77b6ecf45db5cc6c25f6dd99bf0ba6efb9315e687a6be9669ca",
