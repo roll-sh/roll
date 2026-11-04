@@ -910,7 +910,7 @@ async fn large_shares_are_trimmed_to_fit_or_refused() {
     assert!(v["error"].as_str().unwrap().contains("too large to share"), "{v}");
 }
 
-/// The canvas as the owner arranged it (`agents/canvas.rs`): one opaque JSON object per owner,
+/// The canvas as the owner arranged it (`agents/docs.rs`): one opaque JSON object per owner,
 /// saved over a revision or last-writer-wins, at most 64 KiB, the owner's alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_canvas_is_kept_per_owner_with_revisions() {

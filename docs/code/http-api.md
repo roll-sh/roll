@@ -583,6 +583,7 @@ GET /v1/code/agents/{owner}/events?threads=…&after=<cursor> → SSE, events na
        event: machine_removed  id: <cursor>   data: {type: "machine_removed", cursor, machine: mch_…}
        event: delta            (no id)        data: {type: "delta", machine, delta: Delta}
        event: canvas           id: <cursor>   data: {type: "canvas", cursor, revision, updated_at}
+       event: settings         id: <cursor>   data: {type: "settings", cursor, revision, updated_at}
        Load /state, then open /events?after=<state.cursor>: a snapshot plus everything with a newer
        cursor is complete. A reconnect with Last-Event-ID (EventSource sends it) first gets what
        changed since, from the mirror (each record once, at its newest), then goes on live; cursors
@@ -606,6 +607,13 @@ PUT /v1/code/agents/{owner}/canvas {canvas: object, revision?: int} → SavedCan
        its cursor (the owner's, so the snapshot's cursor counts it), and a stream catching up gets the
        canvas's last save if it's newer: a device showing an older revision loads it again.
 
+GET /v1/code/agents/{owner}/settings → SavedSettings {settings: object | null, revision, updated_at: Millis | null}
+PUT /v1/code/agents/{owner}/settings {settings: object, revision?: int} → SavedSettings
+       The owner's agents settings (docs/code/agents.md, "Owner settings"): a document of its own
+       beside the canvas, exactly as …/canvas (revisions, 409 with what is there, the same readers and
+       writers, 400/401/403/404), at most 32 KiB of compact JSON (413), announced on /events as
+       `settings`. The dashboard's schema (lib/owner-settings.ts); roll keeps nothing secret there.
+
 POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, command: Command} → Reply
        Forwarded to the machine's daemon; waits up to 30 s for its reply. `id` (1–128 characters) is
        the idempotency key, per sender: retrying with the same id never runs the command twice (the
@@ -620,8 +628,13 @@ POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, com
        `thread.unarchive`, `message.send`, `message.unqueue`, `run.interrupt`, `thread.publish`,
        `diff.get`, `git.status`, and `fs.list`/`fs.read` in a project. The rest (`terminal.*`,
        `fs.list` without a project, `request.respond`, `project.add`, `project.remove`,
-       `project.update`, `project.pull`, `thread.delete`, `checkpoint.rollback`, `provider.refresh`)
-       needs Code::manages.
+       `project.update`, `project.pull`, `thread.delete`, `checkpoint.rollback`, `provider.refresh`,
+       `machine.configure`) needs Code::manages.
+       `machine.configure {settings: MachineSettings}` replaces the machine's settings whole
+       (docs/code/agents.md, "Machine settings"); the reply comes after the daemon's `hello` with them
+       (Machine.info.settings). Settings that would carry a credential or an address (a variable named
+       like a key, token, URL, endpoint, proxy or host), or break MachineSettings::check, are a 400
+       here and never reach the machine.
        200 with the Reply, or Reply.Error {type: "error", code, message, error /* = message */} with
        not_found 404, invalid 400, conflict 409, provider 422, internal 502,
        machine_offline 503 (not connected), timeout 504 (no reply in time).

@@ -252,8 +252,9 @@ unless it is 0).
 **Auth is the user's own.** The daemon runs the provider CLIs installed on the machine with the
 logins already there, exactly as T3 Code and Conductor do; roll never reads, copies or relays a
 provider credential. API keys and `ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL` can be set per provider
-in the daemon config. A provider's status (installed, version, logged in) is reported in
-`hello` and refreshed on `provider.refresh`; logging in happens in a terminal on the canvas.
+in the daemon config (only there: machine settings refuse them, "Machine settings"). A provider's
+status (installed, version, logged in) is reported in `hello` and refreshed on `provider.refresh`;
+logging in happens in a terminal on the canvas.
 
 ## Delegation (roll's orchestrator MCP)
 
@@ -573,6 +574,90 @@ Code: `agent-host/src/orchestrator/settle.rs`; the threads sidebar is
   opens the next one in the sidebar's order (wrapping, skipping settled and snoozed ones; the
   canvas when there's none), T3's settle and advance; on a settled thread it un-settles it.
 
+## Machine settings
+
+What lives on a machine is set from roll and kept by its daemon (T3 Code's server settings,
+`apps/server/src/serverSettings.ts` and the provider instances of `packages/contracts/src/settings.ts`
+there). `machine.configure {settings}` replaces the machine's `MachineSettings` whole; the daemon
+checks them, stores them in `agent.db` (the `settings` table, never mirrored as a record), applies
+them, sends `hello` again and then replies, so a client that has the reply finds them on the relay.
+They ride in `MachineInfo.settings` (`MachineConfig`): what was set (`set`), what applies where it
+says nothing (`base`: `config.toml`, else roll's defaults), every provider the daemon has, on or off,
+with what `config.toml` gives it (its binary, how many arguments, the *names* of its variables), and
+the path of `config.toml`. Riding in `hello` rather than an entity keeps them with the machine record
+the relay already persists and streams (`machine` events, the last word of an offline machine), and
+next to `providers`, which they change; a lagged link sends `hello` again, so nothing is lost. Code:
+`agent-host/src/orchestrator/settings.rs`; the panel is `components/agents/machine-settings.tsx`.
+
+- **Over `config.toml`, never rewriting it.** `config.toml` stays the machine's own file. Every
+  setting overrides it: the binary instead of its binary, arguments after its arguments, variables
+  over its variables of the same name; unset falls back to it.
+- **Never a credential.** `MachineSettings::check` (agent-proto, mirrored in `lib/machine-settings.ts`)
+  refuses any variable whose name holds `KEY`, `TOKEN`, `SECRET`, `PASS`, `CREDENTIAL`, `AUTH`,
+  `COOKIE`, `SESSION`, `PRIVATE`, `URL`, `ENDPOINT`, `PROXY` or `HOST` (`is_credential_env`): keys,
+  tokens and anything that points a provider somewhere else. The dashboard refuses them before
+  sending, the relay before forwarding (400) and the daemon again. The panel says to set them in
+  `config.toml` on the machine (its path is shown) or in a sandbox's sealed env, and shows
+  `config.toml`'s variables by name only: their values never leave the machine.
+- **A provider turned off** (`enabled: false`) leaves `MachineInfo.providers` (never probed), so
+  nothing offers it; new threads, switching to it and delegating to it are refused (`provider`), and
+  a thread already on it takes no new turn until it is turned on or switches provider. Rolling back
+  its records still works.
+- **Binary, arguments, environment** reach the adapters for their next process (`Provider::configure`,
+  `LiveConfig`); a running session keeps what it started with.
+- **Custom models** are added to the provider's `models` (`custom: true`), after its own, so every
+  picker lists them and delegation accepts them. The panel holds T3's rules (a slug, at most 256
+  characters, not built in, not twice).
+- **Machine limits** (agent-proto `settings_limits`): 64 variables, 64 arguments, 100 custom models
+  per provider; paths absolute or `~/…`; a branch prefix git takes; auto-pull at least daily;
+  subagents at most 8 deep, 1 to 32 tasks per thread; a git name and email both or neither.
+- Changing them is the owner's (`Code::manages`); agent tokens can't (agents/policy.rs).
+
+## Owner settings
+
+What follows the user to every device (T3's client settings that roll has a use for) is one
+document per owner, kept by roll beside the canvas's (`GET`/`PUT /v1/code/agents/{owner}/settings`,
+`agents/docs.rs`): opaque JSON of at most 32 KiB, saved over a revision, and announced on the event
+stream as `settings`, so open devices load it again. `lib/owner-settings.ts` is its schema (keys it
+doesn't know are kept). Agent tokens read it but never change it. It opens beside the canvas
+(`#agents/settings/owner`) from the agents header's gear and ⌘, (T3's desktop menu shortcut; on
+every page), and links to each machine's settings.
+
+**Every T3 setting, and where it lives in roll.** Machine: in the daemon (above). Owner: in the
+owner's document. Project: `Project.settings` ("Project settings"). Not applicable: what roll's
+dashboard or desktop app already decides, or features roll doesn't have.
+
+| T3 setting | roll | Where |
+|---|---|---|
+| Providers: enabled, display name, binary path, home path (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`), launch args, environment | on/off, binary, extra arguments, environment (home paths are variables); names are the daemon's | machine |
+| Provider secrets (API keys, `secretProviders`, sensitive env) | never through roll: `config.toml` or a sandbox's sealed env | machine-local only |
+| Custom models (`customModels`), hidden models, model order | custom models; hiding and ordering: not applicable (the picker sorts favourites first) | machine |
+| Favourite models (`favorites`) and roll's recent models | `favorite_models`, `recent_models` (localStorage is the cache; `agents-models.ts`) | owner |
+| Default model (`defaultModelSelection`), permissions (`defaultRuntimeMode`), workspace (`defaultThreadEnvMode`), plan mode | new-thread defaults: project, then machine, then owner (`newThreadDefaults`) | project, machine, owner |
+| Worktrees: `worktreesDirectory`, `branchNamePrefix` | worktree folder, branch prefix | machine |
+| `branchNamingMode`, `newWorktreesStartFromOrigin`, `worktreeSubmodules`, `worktreeCleanup` | not applicable (branches are `<prefix>/<title>`, from the checkout's HEAD; worktrees go with their thread) | — |
+| Git identity for commits | `git_name`, `git_email` for publishing | machine |
+| `defaultAutoPull`, `automaticGitFetchInterval` | auto-pull per project; how often it fetches (`pull_every`) | project, machine |
+| Add project starts in (`addProjectBaseDirectory`) | the clone folder (`clone_dir`); folders start at the machine's home | machine |
+| Delegation (T3's orchestrator limits) | subagent depth, tasks per thread | machine |
+| `notificationMode`, `inAppNotificationsEnabled` | notifications: off, notifications, sound, both (the browser; the desktop app notifies itself) | owner |
+| `confirmThreadDelete` | confirm before deleting a thread | owner |
+| `confirmThreadArchive`, `confirmThreadUnpin`, `confirmQuit` | not applicable (archive is undoable; no pins; the desktop app quits from its tray) | — |
+| `sendShortcut` | send with Enter or ⌘/Ctrl+Enter | owner |
+| `followUpBehavior` | while a run is going: queue or steer | owner |
+| Keybindings | the shortcuts, listed (not rebindable) | owner (read-only) |
+| Theme, contrast, glass, fonts, chat width, word wrap, timestamps, effort display, math | not applicable: the dashboard's theme and type | — |
+| Auto-settle after days and on merge (`sidebarAutoSettleAfterDays`, `sidebarAutoSettleOnMerge`) | `ProjectSettings.auto_settle` ("Settling") | project |
+| Snooze presets, sidebar grouping and order, working shelf | T3's snooze presets as they are; the threads sidebar groups by project, newest first | — |
+| Text generation model, thread title instructions, response streaming | not applicable (titles come from the first message; streaming is always on) | — |
+| Diffs & PRs (layout, whitespace, colours, open in app), source control writing style, review guides | not applicable yet (roll code's review is its own) | — |
+| Browser, devices, SnapShots, scheduled tasks, environments, sharing, labs, maintenance, update checks | not applicable (no browser or device tools; sharing is `shares`; the CLI updates itself) | — |
+| Rename, remove, sandbox size/start/stop/delete, provider logins | in the machine's panel (still on its card) | machine |
+
+**Search** is T3's `settingsSearch.ts` (`lib/settings-search.ts`): every word of the query in a
+row's title, section or search terms (accents and case ignored), the title ranked first; matching
+rows stay in their sections, a provider's card opens on a match inside it, and `/` or ⌘F focus it.
+
 ## Sandboxes
 
 A sandbox is a machine roll hosts: a container running `roll agent up` with a machine token, so it
@@ -760,7 +845,7 @@ The surface has three views:
   place), so they never overlap; the header drags them among their siblings, the corner resizes
   them (arrows on the focused corner too). They always show on their view whatever its filter,
   at most 12 per view, sizes remembered per view.
-- **A conversation.** Clicking a thread opens it in a panel docked beside the canvas (resizable, remembered; on a phone it covers the canvas), its card selected on the canvas. A machine's or project's settings open in the same panel (`#agents/settings/<key>`). Finished subagents (a done provider subagent, a delegated thread that's done) leave the canvas; their results stay in the parent's transcript. The conversation shows the transcript
+- **A conversation.** Clicking a thread opens it in a panel docked beside the canvas (resizable, remembered; on a phone it covers the canvas), its card selected on the canvas. A machine's or project's settings open in the same panel (`#agents/settings/<key>`, from its card), and so do the owner's (`#agents/settings/owner`, the header's gear or ⌘,; "Machine settings", "Owner settings"). Finished subagents (a done provider subagent, a delegated thread that's done) leave the canvas; their results stay in the parent's transcript. The conversation shows the transcript
   in a centred column, the composer under it, the diff (of the thread or one run) or the thread's
   terminals beside it. Everything is managed from there: approvals in the transcript, fork, roll
   back, publish, share, rename, archive, delete, take a work item. The title is a switcher to the
@@ -845,7 +930,7 @@ The surface has three views:
   the bottom of the canvas, answerable with one tap; fitting the canvas keeps cards readable (at
   least 55 %) and starts at the machines.
 - **Remembered on every device.** How the owner arranged the canvas is kept by roll
-  (`GET`/`PUT /v1/code/agents/{owner}/canvas`; `agents/canvas.rs`), so the laptop, the phone and
+  (`GET`/`PUT /v1/code/agents/{owner}/canvas`; `agents/docs.rs`), so the laptop, the phone and
   the desktop app show the same arrangement. The document is the canvas's own (at most 64 KiB of
   JSON) and opaque to roll; the dashboard reaches it through `AgentsServices.canvas`. It is
   `{ order, pins?, views? }`: `order` and `pins` are All's, `views` the owner's views
