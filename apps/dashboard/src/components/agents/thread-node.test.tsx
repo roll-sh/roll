@@ -1,11 +1,14 @@
-import { screen, within } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ThreadNode } from "./nodes";
 import { monogram, threadPill } from "./thread-status";
 import { Conversation } from "./session";
 import { approval, M1, machine, mirrored, node, project, question, run, terminal, thread } from "@/test/agents";
 import { agentsHarness, renderAgents } from "@/test/agents-render";
+
+// xterm needs a real canvas: the drawer's terminal is a stand-in here.
+vi.mock("./terminal", () => ({ TerminalView: ({ terminal }: { terminal: { title: string } }) => <div>terminal {terminal.title}</div> }));
 
 describe("ThreadNode", () => {
   it("shows what the agent is doing, what waits for you, and what it cost", async () => {
@@ -119,6 +122,25 @@ describe("Conversation", () => {
     mirrored("request", approval({ run: "run_2", node: "nod_d" }), 9),
     mirrored("checkpoint", { id: "chk_1", thread: "thr_1", run: "run_1", ordinal: 1, commit: "abc", stat: { files: 1, additions: 2, deletions: 1 }, created_at: 0 }, 10),
   ];
+
+  it("opens the thread's terminal in the drawer, even when its record arrives after the reply", async () => {
+    const idle = { ...busy, status: "idle" as const, active_run: null, pending_requests: 0, queued: [] };
+    const h = agentsHarness({ entities: entities.filter((e) => e.entity.kind !== "request"), follow: ["thr_1"], reply: (c) => (c.type === "terminal.open" ? { type: "created", id: "trm_new" } : { type: "ok" }) });
+    const ui = () => <Conversation thread={idle} machine={machine()} />;
+    const { rerender } = renderAgents(ui(), h);
+    await userEvent.click(screen.getByRole("button", { name: "Terminal in this thread's directory" }));
+    expect(h.command.mock.calls.at(-1)?.[2]).toMatchObject({ type: "terminal.open", thread: "thr_1" });
+    // The reply came first; the drawer waits for the record instead of giving up on it.
+    rerender(ui());
+    // The record comes in on the stream a moment later, and the drawer shows it.
+    act(() => h.client.enqueue({ type: "entity", ...mirrored("terminal", terminal({ id: "trm_new", thread: "thr_1" }), 20) }));
+    rerender(ui());
+    expect(screen.getByRole("tablist", { name: "Terminals" })).toBeInTheDocument();
+    // Closed elsewhere: the drawer goes.
+    act(() => h.client.enqueue({ type: "entity", cursor: 21, machine: M1, entity: { kind: "removed", entity: "terminal", id: "trm_new", thread: "thr_1" } }));
+    rerender(ui());
+    await vi.waitFor(() => expect(screen.queryByRole("tablist", { name: "Terminals" })).toBeNull());
+  });
 
   it("renders every run's transcript, streaming text and the approval in place", async () => {
     const h = agentsHarness({ entities, follow: ["thr_1"] });

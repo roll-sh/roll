@@ -73,8 +73,12 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
   useEffect(() => setSide(null), [thread.id]);
   const terminals = [...data.terminals.values()].filter((r) => r.value.thread === thread.id).map((r) => r.value);
   const sideTerminal = side?.kind === "terminal" ? terminals.find((t) => t.id === side.id) : undefined;
+  // The drawer closes when its terminal goes away, not while a just-opened one is on its way.
+  const shownTerminal = useRef<string | null>(null);
   useEffect(() => {
-    if (side?.kind === "terminal" && !sideTerminal) setSide(null);
+    if (side?.kind !== "terminal") return;
+    if (sideTerminal) shownTerminal.current = side.id;
+    else if (shownTerminal.current === side.id) setSide(null);
   }, [side, sideTerminal]);
 
   const [error, setError] = useState<string | null>(null);
