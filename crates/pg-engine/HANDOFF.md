@@ -2747,9 +2747,29 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
       origin);
     - full regress on a private reference: 51,148 / 51,150, 0 units changed;
     - pg_dump_tap 14,817 / 14,817.
-  - Left: the rescan covers plain index scans only (Project, Result or Sort inner sides
-    reopen); 149's point lookup behind `next`; SQL functions' plans opened per call (agent
-    150's burst profile: 19% of `fn`).
+  - Left:
+    - The rescan covers plain index scans only. Project, Result or Sort inner sides reopen.
+    - 149's point lookup behind `next`.
+  - Measured, not changed:
+    - **A SQL function called per row is already ahead of PostgreSQL.** The function is
+      150's `burst_fa`, `SELECT abalance + 1 FROM pgbench_accounts WHERE aid = a` (STABLE,
+      scale 10). `SELECT sum(burst_fa(g)) FROM generate_series(1, 20000) g` takes 158-177 ms
+      against PostgreSQL's 259-287 ms (dist, containers). Opening its plan is 4-5% of the
+      engine's profile (`open_node` / `open_scan` / `kernel::compile`), and binding doesn't
+      show. So a per-call-site cache (fmgr_sql's fn_extra) was not built.
+    - **Where TPC-H's time goes now.** This is a flat profile of the engine over all 22
+      queries (dist, after this step):
+      - point fetches, about 20%: `Block::seek` 6.3%, `Block::read` 5.1%,
+        `Store::get_versions_with` 3.0%, `find_block` 2.6%, `block_with` 2.4%. These come from
+        the nested-loop inner sides of q02 / q04 / q17 / q20 / q21 / q22 and keyed lookups
+        (agent 149);
+      - decoding column batches, about 11%: `Pre::decode` (the executor's `decode_cols`)
+        6.8%, `skip_value` 1.9%, `peek_num` 1.3%, `take_bytes` 1.0%;
+      - batch kernels, about 7%: `VB::eval` 2.3%, `VN::at` 2.2% (per row, recursive: a
+        column-at-a-time evaluation over the selection is next), `VB::Call`'s leaves 1.2% (dates
+        against timestamps compared as values: an i64-instant fast path is next), `Pre::fate`
+        1.1%;
+      - `AggNode::run` 1.8%, most of it q13's grouping above its join.
 - **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
   longer overflows the stack of the thread that runs it, however deep the input nests. A
   host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the
