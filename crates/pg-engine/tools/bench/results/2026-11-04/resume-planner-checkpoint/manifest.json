@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "625065f2012d8b20cfa85a0117d50255fe9967c83bfb7d5e736bde3985e7aee4",
-    "bytes": 9425
+    "sha256": "2e8225a56de5995230da9539c448aeb2ee424bd548aef944c0445758c4e17646",
+    "bytes": 9985
   },
   "bytea165compare/RESTORED": {
     "sha256": "cfeb0d7a74ac20eb1d46d347c00db409be5f9c5b47ca77e388b2e494a65d91c3",
@@ -93,6 +93,38 @@
   },
   "check165fixed/tree.txt": {
     "sha256": "0662b53ce16326094c91d35608f44059b2715bb609df884cece5b27852e4d8b5",
+    "bytes": 41
+  },
+  "check165ind-v2/affinity-observation-debug.json": {
+    "sha256": "353f870df69398a58d5c13b340f10c906ede8765c897115c2019af29069b4356",
+    "bytes": 4667
+  },
+  "check165ind-v2/debug-completed-exits.tsv": {
+    "sha256": "f08abcdc322c626e258456ce735cd82410657a770f20177d70bae93cba340fc1",
+    "bytes": 13
+  },
+  "check165ind-v2/debug-test-summary.json": {
+    "sha256": "a3acdd6802a54cc9ea7a202afd48191f90954ddfcb187fc78d318efd84cac3ff",
+    "bytes": 3947
+  },
+  "check165ind-v2/debug-test.command": {
+    "sha256": "a58cb89f43a482980467f2846f5490a07e7950df8f44eb8825c0aac12cd6eaea",
+    "bytes": 25
+  },
+  "check165ind-v2/debug-test.log": {
+    "sha256": "5793f0bf5bd7d6b1d3b624da60a62fcaee03fc7be9be75b7611a7a48aee3d1e3",
+    "bytes": 38176
+  },
+  "check165ind-v2/initial.status": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  "check165ind-v2/source.txt": {
+    "sha256": "cfeb0d7a74ac20eb1d46d347c00db409be5f9c5b47ca77e388b2e494a65d91c3",
+    "bytes": 41
+  },
+  "check165ind-v2/tree.txt": {
+    "sha256": "8dfa0aab3e5a59d8af57f56da2d8253de6b850eda93c8516e48dbab328f3515d",
     "bytes": 41
   },
   "check165r2-runner-error/exits.tsv": {
@@ -356,8 +388,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "02d9c95c814e2ec44c8cd061599ea2dc7cde6cc1ae16e425dc42078cd6bdbc5e",
-    "bytes": 20889
+    "sha256": "9a450d7c4edc0440ca7af7abc8f080c2f983099ebf534ad769c2af0f2213e051",
+    "bytes": 21711
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",

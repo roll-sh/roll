@@ -97,7 +97,13 @@ frozen453/0/18/60. Successorcheck165ind-v2 uses exact perbinary map/auditor, sel
 against oldcaab448summary, frozenrunnerhashes preserved. Per-candidate stack check scoped
 pnpm test:pg --unit; stamp skip explicitlySKIP/noexecution; no service-stack orpgengine
 acceptance. One final forced service gate held. Exactab3 fullgate nowactive,partialcurrent
-outputs excluded;fullgates pending. Independent exactab3 static review found noHIGH/MEDIUM,
+release/Clippy/build/unit-stack outputs excluded while active. Exactab3 DEBUG passed453/
+0/18/60;every perbinary summary matches frozen map. Wire67/67 passed in this fullrun;
+earlier fullwire101 remains preserved, no causal/performance inference. Release active.
+Observed debugcargo593561/parallel_scan1489244 effectiveaffinity0-35,overlapping149reserved
+4-7,22-25;nice19/jobs2/threads2 enforced, NO CPUisolation claim. No affinity/runnerchange;
+149timing deferred while overlap persists. Future launch-control assessment held until
+currentfulljobterminal/rawexport. Fullremaining gates pending. Independent exactab3 static review found noHIGH/MEDIUM,
 22paths/cursor exclusionverified;rawresult andcount/reviewer-scopeerratum retained.
 
 Owned cache runners now fail explicitly on logged failures (Bash ! guards do not imply

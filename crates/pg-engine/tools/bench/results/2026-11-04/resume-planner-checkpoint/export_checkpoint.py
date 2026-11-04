@@ -114,7 +114,13 @@ frozen453/0/18/60. Successorcheck165ind-v2 uses exact perbinary map/auditor, sel
 against oldcaab448summary, frozenrunnerhashes preserved. Per-candidate stack check scoped
 pnpm test:pg --unit; stamp skip explicitlySKIP/noexecution; no service-stack orpgengine
 acceptance. One final forced service gate held. Exactab3 fullgate nowactive,partialcurrent
-outputs excluded;fullgates pending. Independent exactab3 static review found noHIGH/MEDIUM,
+release/Clippy/build/unit-stack outputs excluded while active. Exactab3 DEBUG passed453/
+0/18/60;every perbinary summary matches frozen map. Wire67/67 passed in this fullrun;
+earlier fullwire101 remains preserved, no causal/performance inference. Release active.
+Observed debugcargo593561/parallel_scan1489244 effectiveaffinity0-35,overlapping149reserved
+4-7,22-25;nice19/jobs2/threads2 enforced, NO CPUisolation claim. No affinity/runnerchange;
+149timing deferred while overlap persists. Future launch-control assessment held until
+currentfulljobterminal/rawexport. Fullremaining gates pending. Independent exactab3 static review found noHIGH/MEDIUM,
 22paths/cursor exclusionverified;rawresult andcount/reviewer-scopeerratum retained.
 
 Owned cache runners now fail explicitly on logged failures (Bash ! guards do not imply
@@ -254,6 +260,8 @@ for campaign in ('embedded165v2', 'embedded165v3', 'green165r2', 'green165r2v2',
             sources[campaign + '/' + artifact.name] = str(artifact)
 for runner in ('embedded165v3.sh', 'green165r2.sh', 'green165r2v2.sh', 'check165r2.sh', 'check165r2-runner-error.sh', 'wrapper-selftest-results.json', 'red165r3.sh', 'green165r3.sh', 'R3-CASE-MATRIX.md', 'check165r3.sh', 'independent165.patch', 'independent165-scope.json', 'independent165-merge-audit.json', 'independent165-candidate.patch', 'DEFERRED-CURSOR-R4.md', 'focus165ind.sh', 'bytea165compare.py', 'check165ind.sh', 'check165ind-v2.sh', 'audit165-summary.py', 'ind165-expected-per-binary.json', 'ind165-test-count-reconciliation.json', 'ind165-frozen-runner.sha256', 'count-map-verification.json', 'count-map-check165fixed.json', 'caab-auditor-selfcheck.json', 'oltp-independent-source-review-r1-result.json', 'independent-review-erratum.md'):
     sources['runners/' + runner] = str(D / runner)
+for name in ('source.txt', 'tree.txt', 'initial.status', 'debug-test.command', 'debug-test.log', 'debug-test-summary.json', 'debug-completed-exits.tsv', 'affinity-observation-debug.json'):
+    sources['check165ind-v2/' + name] = str(D / 'check165ind-v2' / name)
 for name, source in sources.items():
     files[name] = Path(source).read_bytes()
 files['manifest.json'] = (json.dumps({name: {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}
