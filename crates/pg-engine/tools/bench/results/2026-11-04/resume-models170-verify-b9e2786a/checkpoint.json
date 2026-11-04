@@ -1,0 +1,7 @@
+{
+  "head": "b9e2786a1445770577a986b28861141d006f2d6b",
+  "tree": "3a54115b9155b8a6f79e578a29cbc3d504e28833",
+  "status": "",
+  "time_utc": "2026-11-04T13:04:06.620861+00:00",
+  "note": "Exactb9e2786a golden3/3 targeted, models10/10, build PASS; full debug FAILED exit101 at full golden: shuffled1/60, direct2/654, wire2/653 files differ. Both a148_index_progress and loft_maint emit extra CLUSTER notices. Release/clippy/crash30/postgres-unit NOT RUN. No acceptance or cap lift; originals immutable."
+}
