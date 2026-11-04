@@ -1,0 +1,37 @@
+
+running 1 test
+ivfflat l2 build: recall@10 0.925
+ivfflat l2 reinsert: recall@10 0.917
+ivfflat l2: identical
+ivfflat cosine build: recall@10 0.967
+ivfflat cosine reinsert: recall@10 0.958
+ivfflat cosine: identical
+ivfflat ip halfvec build: recall@10 0.950
+ivfflat ip halfvec reinsert: recall@10 0.908
+ivfflat ip halfvec: identical
+ivfflat hamming build: recall@10 0.275
+ivfflat hamming reinsert: recall@10 0.258
+ivfflat hamming: identical
+hnsw l2 build: recall@10 0.983
+hnsw l2 reinsert: recall@10 1.000
+hnsw l2: identical
+hnsw cosine build: recall@10 1.000
+hnsw cosine reinsert: recall@10 1.000
+hnsw cosine: identical
+hnsw l1 halfvec build: recall@10 1.000
+hnsw l1 halfvec reinsert: recall@10 1.000
+hnsw l1 halfvec: identical
+hnsw ip build: recall@10 0.975
+test pgvector_equality has been running for over 60 seconds
+hnsw ip reinsert: recall@10 0.950
+hnsw ip: identical
+hnsw sparsevec l2 build: recall@10 0.992
+hnsw sparsevec l2 reinsert: recall@10 0.992
+hnsw sparsevec l2: identical
+hnsw jaccard build: recall@10 0.808
+hnsw jaccard: identical (build)
+pgvector_equality: 480 queries, every one identical
+test pgvector_equality ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 114.74s
+
