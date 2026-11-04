@@ -1,0 +1,46 @@
+{
+  "owner": "166",
+  "source_head": "0cd26bfd3b19bc43a113dced2254674355d0a55a",
+  "source_audit": {
+    "/home/meszmate/.cache/a166/logs-d/test-debug.log": {
+      "test_summaries": 60,
+      "passed": 450,
+      "failed": 0,
+      "ignored": 18,
+      "errors": [],
+      "warnings": 0,
+      "finished": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 03s"
+      ]
+    },
+    "/home/meszmate/.cache/a166/logs-d/test-release.log": {
+      "test_summaries": 60,
+      "passed": 450,
+      "failed": 0,
+      "ignored": 18,
+      "errors": [],
+      "warnings": 0,
+      "finished": [
+        "    Finished `release` profile [optimized + debuginfo] target(s) in 18m 19s"
+      ]
+    },
+    "/home/meszmate/.cache/a166/logs-d/clippy.log": {
+      "test_summaries": 0,
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "errors": [],
+      "warnings": 18,
+      "finished": [
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 04s"
+      ]
+    }
+  },
+  "historical_source": "0cd26bfd",
+  "current_checks": "queued: build, focused debug tests including deep_input, clippy, pg_dump TAP after adding missing reference sources, pnpm test:pg",
+  "acceptance": "PENDING; source not offered for integration before current checks and required footprint/performance evidence",
+  "frozen_regress_gate": "51,148 / 51,150 unchanged; no gate files modified",
+  "performance": "No new measurements; historical partial numbers do not support a global claim",
+  "idle_engine": "a166-engine stopped gracefully; PID2135800/port53321 absent, data preserved",
+  "source_manifest": "SHA256 of source/test/example files and Cargo identities; evidence-only commit does not modify these"
+}
