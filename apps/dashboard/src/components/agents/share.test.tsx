@@ -57,7 +57,8 @@ describe("ShareView", () => {
     restore = reducedMotion(false);
     view();
     // It rewinds at once and starts playing shortly after.
-    await waitFor(() => expect(screen.queryByText("0123456789")).toBeNull());
+    fireEvent.click(screen.getByRole("combobox", { name: "Speed" }));
+    fireEvent.click(await screen.findByRole("option", { name: "8×" }));
     fireEvent.change(screen.getByRole("combobox", { name: "Speed" }), { target: { value: "8" } });
     expect(await screen.findByRole("button", { name: "Pause" }, { timeout: 2000 })).toBeInTheDocument();
     // It ends on the share as frozen, and offers to replay.

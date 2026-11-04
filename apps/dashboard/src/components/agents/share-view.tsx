@@ -23,6 +23,7 @@ import { useMarkState } from "../mark-state";
 import { AgentsCanvas, type CanvasHandle } from "./agents-canvas";
 import { Card, RequestNode, SubagentNode, ThreadNode } from "./nodes";
 import { Conversation, IconButton } from "./session";
+import { Select } from "./ui";
 import { AgentsContext, useMarkDriver, type AgentsCtx } from "./use-agents";
 
 export const SPEEDS = [0.5, 1, 2, 4, 8] as const;
@@ -219,16 +220,17 @@ export function ShareView({ share }: { share: Share }) {
             {clock(ms)} / {clock(tl.duration)}
           </span>
           <Scrubber share={share} value={ms} max={tl.duration} tl={tl} onChange={(v) => setMs(v)} onGrab={() => setPlaying(false)} />
-          <label className="flex items-center gap-1.5 text-[11.5px] text-subtle">
+          <span className="flex items-center gap-1 text-[11.5px] text-subtle">
             Speed
-            <select value={speed} onChange={(e) => setSpeed(Number(e.target.value) as (typeof SPEEDS)[number])} aria-label="Speed" className="rounded-md border border-line bg-bg px-1.5 py-0.5 font-mono text-[11.5px] text-fg">
-              {SPEEDS.map((s) => (
-                <option key={s} value={s}>
-                  {s}×
-                </option>
-              ))}
-            </select>
-          </label>
+            <Select
+              label="Speed"
+              variant="ghost"
+              className="font-mono"
+              value={String(speed)}
+              onChange={(v) => setSpeed(Number(v) as (typeof SPEEDS)[number])}
+              options={SPEEDS.map((s) => ({ value: String(s), label: `${s}×` }))}
+            />
+          </span>
           <span className="ml-auto hidden text-[11px] text-subtle sm:inline">
             {new Date(real).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "medium" })}
           </span>

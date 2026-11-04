@@ -32,6 +32,7 @@ import { toFileDiff } from "./request-card";
 import { ShareButton } from "./share";
 import { MachineIcon, Stat, StatusDot, usageLine } from "./shared";
 import { TerminalView } from "./terminal";
+import { Select } from "./ui";
 import { orchestration, OrchestratorChip, ProjectMonogram, StatusPill, threadPill } from "./thread-status";
 import { EmptyTranscript, RunView, type TranscriptActions } from "./transcript";
 import { useAgents, usePrefs } from "./use-agents";
@@ -668,17 +669,18 @@ export function DiffPane({
 
   return (
     <>
-      <div className="flex items-center gap-2 border-b border-line px-3 py-1.5">
-        <select value={run ?? ""} onChange={(e) => onRun(e.target.value || null)} aria-label="Diff of" className={`${input} min-w-0 border-transparent bg-transparent py-1 text-[12px] hover:border-line`}>
-          <option value="">Whole thread</option>
-          {runs
-            .filter((r) => r.status !== "rolled_back")
-            .map((r) => (
-              <option key={r.id} value={r.id}>
-                Run {r.ordinal}: {r.prompt.slice(0, 40)}
-              </option>
-            ))}
-        </select>
+      <div className="flex h-10 items-center gap-2 border-b border-line px-3">
+        <Select
+          label="Diff of"
+          variant="ghost"
+          className="min-w-0 max-w-64"
+          value={run ?? "all"}
+          onChange={(v) => onRun(v === "all" ? null : v)}
+          options={[
+            { value: "all", label: "Whole thread" },
+            ...runs.filter((r) => r.status !== "rolled_back").map((r) => ({ value: r.id, label: `Run ${r.ordinal}: ${r.prompt.slice(0, 40)}` })),
+          ]}
+        />
         {diff && <Stat stat={diff.stat} className="text-[11.5px]" />}
         <span className="ml-auto">
           <IconButton label="Close the diff" onClick={onClose}>
