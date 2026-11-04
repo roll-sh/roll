@@ -1,0 +1,2 @@
+ts	phase	decision	why	evidence	result
+2026-11-04T17:03:12Z	executor-r3-main	Record named weighted case closed but new InitPlan/CTE MEDIUM and Materialize scoping concern remain	Independent main review agrees with supplement and identifies executor/display material decision seam plus known stray test run	/home/meszmate/.cache/pg-engine-resume-20261104/executor-source-review-r3-result.json; executor-r3-main-response.json	Static review only;278 pin unchanged; postterminal bounded probes and scoped correction required; no readiness
