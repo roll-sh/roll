@@ -1,0 +1,19 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a76932e8127f6d35b/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 42.49s
+     Running tests/storage_linked_gc.rs (/home/meszmate/.cache/a169/target/debug/deps/storage_linked_gc-cc17f010b275031f)
+
+running 4 tests
+test clean_close_rewrites_direct_linked_l1_for_prelinked_readers ... ok
+test direct_l1_replay_barrier_preserves_tombstones_snapshots_and_wal_order ... ok
+test linked_tombstones_preserve_snapshots_and_conflicts_until_gc ... ok
+test fresh_transaction_sink_honors_store_compression_policy ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/storage_read_once.rs (/home/meszmate/.cache/a169/target/debug/deps/storage_read_once-9b7f7627769b5249)
+
+running 1 test
+test one_pass_reads_skip_admission_reuse_cached_blocks_and_restore_on_unwind ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

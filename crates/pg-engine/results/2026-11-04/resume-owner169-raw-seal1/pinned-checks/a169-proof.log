@@ -1,0 +1,11 @@
+START proof-release 2026-11-04T11:08:09Z
+proof-release EXIT 101
+  |
+3 | use pg_engine::storage::sst::{SstReader, SstWriter, mvcc_key};
+  |                                                     ^^^^^^^^ no `mvcc_key` in `storage::sst`
+
+For more information about this error, try `rustc --explain E0432`.
+error: could not compile `pg-engine` (test "storage_linked_gc") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `pg-engine` (test "storage_read_once") due to 1 previous error
+HEAVY-EXIT 1

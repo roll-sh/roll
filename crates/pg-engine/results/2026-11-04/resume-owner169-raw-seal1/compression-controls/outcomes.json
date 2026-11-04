@@ -1,0 +1,66 @@
+{
+  "source_predicate": "storage_linked_gc::fresh_transaction_sink_honors_store_compression_policy: nonempty files; no compressed block when disabled; any compressed file iff enabled",
+  "cases": [
+    {
+      "name": "true-all-raw",
+      "command": [
+        "python3",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-policy-control.py",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/true-all-raw.json"
+      ],
+      "expected_exit": 1,
+      "actual_exit": 1,
+      "stdout": "{\"input\": {\"store_compress\": true, \"files_compressed\": [false, false]}, \"accepted\": false}\n",
+      "stderr": ""
+    },
+    {
+      "name": "false-has-compressed",
+      "command": [
+        "python3",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-policy-control.py",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/false-has-compressed.json"
+      ],
+      "expected_exit": 1,
+      "actual_exit": 1,
+      "stdout": "{\"input\": {\"store_compress\": false, \"files_compressed\": [false, true]}, \"accepted\": false}\n",
+      "stderr": ""
+    },
+    {
+      "name": "false-all-raw",
+      "command": [
+        "python3",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-policy-control.py",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/false-all-raw.json"
+      ],
+      "expected_exit": 0,
+      "actual_exit": 0,
+      "stdout": "{\"input\": {\"store_compress\": false, \"files_compressed\": [false, false]}, \"accepted\": true}\n",
+      "stderr": ""
+    },
+    {
+      "name": "true-mixed",
+      "command": [
+        "python3",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-policy-control.py",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/true-mixed.json"
+      ],
+      "expected_exit": 0,
+      "actual_exit": 0,
+      "stdout": "{\"input\": {\"store_compress\": true, \"files_compressed\": [true, false]}, \"accepted\": true}\n",
+      "stderr": ""
+    },
+    {
+      "name": "true-all-compressed",
+      "command": [
+        "python3",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-policy-control.py",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/true-all-compressed.json"
+      ],
+      "expected_exit": 0,
+      "actual_exit": 0,
+      "stdout": "{\"input\": {\"store_compress\": true, \"files_compressed\": [true, true]}, \"accepted\": true}\n",
+      "stderr": ""
+    }
+  ],
+  "status": "PASS"
+}

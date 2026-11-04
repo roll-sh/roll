@@ -1,0 +1,66 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a76932e8127f6d35b/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 44s
+     Running tests/big_tables.rs (/home/meszmate/.cache/a169/target/debug/deps/big_tables-b522deff6cca6663)
+
+running 15 tests
+test copy_past_the_model ... ok
+test analyze_samples_pages_of_big_tables ... ok
+test deferred_entry_deletes ... ok
+test copy_through_the_sink ... ok
+test estimate_kept_across_restart ... ok
+test estimate_rebuilt_with_higher_model_limit ... ok
+test heap_pages_kept_across_restart ... ok
+test index_build_measures_as_analyze ... ok
+test index_only_scans_from_entries ... ok
+test measured_sizes_from_stored_rows ... ok
+test deferred_model_matches ... ok
+test toast_locks_past_the_model ... ok
+test vacuum_keeps_xmins_of_unchanged_tables ... ok
+test parallel_index_builds ... ok
+test vacuum_skips_unchanged_tables ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.52s
+
+     Running tests/crash_ctids.rs (/home/meszmate/.cache/a169/target/debug/deps/crash_ctids-b6ce3d36a5b496ca)
+
+running 6 tests
+test crash_ctids_child ... ok
+test ctids_survive_a_restart ... ok
+test old_duplicate_ctids_repaired_once ... ok
+test prepared_ctids_survive_a_restart ... ok
+test vacuum_full_after_rolled_back_updates ... ok
+test ctids_survive_a_crash ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.37s
+
+     Running tests/crash_unlogged.rs (/home/meszmate/.cache/a169/target/debug/deps/crash_unlogged-afddc046dc91acf4)
+
+running 4 tests
+test crash_unlogged_child ... ok
+test crash_unlogged_prepared_child ... ok
+test prepared_writes_to_unlogged_tables_lost_in_a_crash ... ok
+test unlogged_relations_reset_after_a_crash ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+     Running tests/storage_linked_gc.rs (/home/meszmate/.cache/a169/target/debug/deps/storage_linked_gc-cc17f010b275031f)
+
+running 1 test
+test linked_tombstones_preserve_snapshots_and_conflicts_until_gc ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/storage_read_once.rs (/home/meszmate/.cache/a169/target/debug/deps/storage_read_once-9b7f7627769b5249)
+
+running 1 test
+test one_pass_reads_skip_admission_reuse_cached_blocks_and_restore_on_unwind ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/storage_upgrade_batches.rs (/home/meszmate/.cache/a169/target/debug/deps/storage_upgrade_batches-d174698264542c69)
+
+running 1 test
+test large_table_rekeyed_in_batches ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.13s
+

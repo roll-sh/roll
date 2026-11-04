@@ -1,0 +1,30 @@
+060c6f4f43ddb8e12d45a1f0882cc3cd8535a7c0
+    Finished `release` profile [optimized] target(s) in 0.25s
+     Running unittests src/lib.rs (/home/meszmate/.cache/a169/target/release/deps/pg_engine-2ee33b49d98c4a1b)
+
+running 1 test
+
+thread 'storage::tests::lone_linked_runs_go_to_l1' (474027) panicked at crates/pg-engine/src/storage/mod.rs:3207:21:
+assertion `left == right` failed: b0004
+  left: None
+ right: Some(4)
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: core::panicking::assert_failed_inner
+   3: core::panicking::assert_failed::<core::option::Option<u64>, core::option::Option<u64>>
+   4: pg_engine::storage::tests::lone_linked_runs_go_to_l1::{closure#6}
+   5: pg_engine::storage::tests::lone_linked_runs_go_to_l1
+   6: <pg_engine::storage::tests::lone_linked_runs_go_to_l1::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+test storage::tests::lone_linked_runs_go_to_l1 ... FAILED
+
+failures:
+
+failures:
+    storage::tests::lone_linked_runs_go_to_l1
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 191 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `-p pg-engine --lib`
+HEAVY-EXIT 101

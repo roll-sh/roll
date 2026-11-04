@@ -1,0 +1,61 @@
+START proof-release 2026-11-04T11:42:00Z
+proof-release EXIT 0
+
+     Running tests/storage_read_once.rs (/home/meszmate/.cache/a169/target/release/deps/storage_read_once-b63b805f2eb74417)
+
+running 1 test
+test one_pass_reads_skip_admission_reuse_cached_blocks_and_restore_on_unwind ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+START focused-debug 2026-11-04T11:42:02Z
+focused-debug EXIT 0
+test storage::tests::ingested_commits_and_crash_recovery ... ok
+test storage::tests::reverse_scan_matches_forward ... ok
+test storage::tests::scans_step_over_deleted_runs_once ... ok
+test storage::tests::snapshots_survive_compaction ... ok
+test storage::tests::range_deletions_and_crash_recovery ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 164 filtered out; finished in 2.79s
+
+START proof-debug 2026-11-04T11:46:18Z
+proof-debug EXIT 0
+
+     Running tests/storage_upgrade_batches.rs (/home/meszmate/.cache/a169/target/debug/deps/storage_upgrade_batches-d174698264542c69)
+
+running 1 test
+test large_table_rekeyed_in_batches ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.13s
+
+START crash-release 2026-11-04T11:49:33Z
+crash-release EXIT 0
+
+running 2 tests
+test crash_random_child ... ok
+test random_crashes has been running for over 60 seconds
+test random_crashes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 226.64s
+
+START repl-release 2026-11-04T11:53:25Z
+repl-release EXIT 0
+    Finished `release` profile [optimized] target(s) in 0.13s
+     Running unittests src/lib.rs (/home/meszmate/.cache/a169/target/release/deps/pg_engine-2ee33b49d98c4a1b)
+
+running 1 test
+test repl::log::tests::confirmed_records_are_discarded ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 191 filtered out; finished in 0.04s
+
+START clippy 2026-11-04T11:53:25Z
+clippy EXIT 0
+874 | ...PARED 'r8none{k}'"), format!("\\s2 BEGIN"), "SELECT 1".into()]).clone());
+    |                         ^^^^^^^^^^^^^^^^^^^^^ help: consider using `.to_string()`: `"\\s2 BEGIN".to_string()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#useless_format
+    = note: `#[warn(clippy::useless_format)]` on by default
+
+warning: `pg-engine` (test "difftest") generated 1 warning (run `cargo clippy --fix --test "difftest" -p pg-engine -- ` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 01s
+START build 2026-11-04T11:55:27Z

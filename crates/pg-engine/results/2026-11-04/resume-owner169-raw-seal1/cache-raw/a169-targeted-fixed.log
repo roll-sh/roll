@@ -1,0 +1,31 @@
+START storage-release 2026-11-04T10:51:21Z
+storage-release EXIT 0
+test storage::tests::ingested_commits_and_crash_recovery ... ok
+test storage::tests::reverse_scan_matches_forward ... ok
+test storage::tests::scans_step_over_deleted_runs_once ... ok
+test storage::tests::snapshots_survive_compaction ... ok
+test storage::tests::range_deletions_and_crash_recovery ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 164 filtered out; finished in 0.42s
+
+START sst-release 2026-11-04T11:00:25Z
+sst-release EXIT 0
+running 4 tests
+test storage::sst::tests::block_index_find ... ok
+test storage::sst::tests::block_positions ... ok
+test storage::sst::tests::linked_blocks_decode_as_relinked ... ok
+test storage::sst::tests::fast_mod_is_rem ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 188 filtered out; finished in 0.02s
+
+START integrations-release 2026-11-04T11:00:25Z
+integrations-release EXIT 0
+
+     Running tests/txn_spill.rs (/home/meszmate/.cache/a169/target/release/deps/txn_spill-cf6b8ac933a4e2c5)
+
+running 1 test
+test spilled_transactions_read_like_buffered_ones ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.91s
+
+HEAVY-EXIT 0

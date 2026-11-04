@@ -1,0 +1,8 @@
+    Finished `release` profile [optimized] target(s) in 0.13s
+     Running unittests src/lib.rs (/home/meszmate/.cache/a169/target/release/deps/pg_engine-2ee33b49d98c4a1b)
+
+running 1 test
+test repl::log::tests::confirmed_records_are_discarded ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 191 filtered out; finished in 0.04s
+

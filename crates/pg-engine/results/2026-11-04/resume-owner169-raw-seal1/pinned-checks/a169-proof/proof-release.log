@@ -1,0 +1,17 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a76932e8127f6d35b/crates/pg-engine)
+error[E0432]: unresolved import `pg_engine::storage::sst::mvcc_key`
+ --> crates/pg-engine/tests/storage_linked_gc.rs:2:53
+  |
+2 | use pg_engine::storage::sst::{SstReader, SstWriter, mvcc_key};
+  |                                                     ^^^^^^^^ no `mvcc_key` in `storage::sst`
+
+error[E0432]: unresolved import `pg_engine::storage::sst::mvcc_key`
+ --> crates/pg-engine/tests/storage_read_once.rs:3:53
+  |
+3 | use pg_engine::storage::sst::{SstReader, SstWriter, mvcc_key};
+  |                                                     ^^^^^^^^ no `mvcc_key` in `storage::sst`
+
+For more information about this error, try `rustc --explain E0432`.
+error: could not compile `pg-engine` (test "storage_linked_gc") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `pg-engine` (test "storage_read_once") due to 1 previous error
