@@ -1,0 +1,40 @@
+[
+  {
+    "name": "transfer",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "pg-engine",
+      "--test",
+      "app_concurrency",
+      "serializable_transfers_retried",
+      "--",
+      "--exact",
+      "--nocapture"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "f0563cd8687f155ec8d31cf47d8fa891a11d0c72",
+      "tree": "099752e3ba57f5bda27083ae33489f3453ceb734",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "f0563cd8687f155ec8d31cf47d8fa891a11d0c72",
+      "tree": "099752e3ba57f5bda27083ae33489f3453ceb734",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 66.76s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 128.8353555202484,
+    "log_sha256": "dffd6cfc38b89fa38fc7036e4325c49efc0ad0d51a7782d04fb45b65a12836d8",
+    "passed_tests": 1,
+    "pass": true
+  }
+]

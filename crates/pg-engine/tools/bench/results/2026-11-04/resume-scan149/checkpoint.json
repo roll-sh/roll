@@ -1,0 +1,7 @@
+{
+  "head": "2a854a48074dbd3317807f634a773f29540b2673",
+  "tree": "7b41c62e7ca291f3f349ec68838dff1ab5f3b34d",
+  "status": "",
+  "time_utc": "2026-11-04T11:10:55.462195+00:00",
+  "note": "Recovery checkpoint only. Historical logs lack full source pinning and do not verify current HEAD. Current plan is queued; no new acceptance, performance, correctness or footprint pass. Original failed logs preserved unchanged."
+}
