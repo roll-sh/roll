@@ -1,0 +1,41 @@
+[
+  {
+    "name": "record-golden",
+    "command": [
+      "cargo",
+      "test",
+      "--release",
+      "-p",
+      "pg-engine",
+      "--test",
+      "golden"
+    ],
+    "env": {
+      "GOLDEN_RECORD": "127.0.0.1:53343",
+      "GOLDEN_PASSWORD": "pw",
+      "GOLDEN_FILTER": "a167_"
+    },
+    "source_before": {
+      "head": "6eb2c85e491c7915dc7fa957326455694573e3cd",
+      "tree": "137ee107a97d5f36515a91858a2904606282b4c2",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "6eb2c85e491c7915dc7fa957326455694573e3cd",
+      "tree": "137ee107a97d5f36515a91858a2904606282b4c2",
+      "status": "?? crates/pg-engine/tests/sql/a167_subplan_nestloop.out",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 664.285581111908,
+    "log_sha256": "dfac924db580beeaf9c11df275be6b88f6eb8c066c63db6ed0aaf4312d81c854",
+    "passed_tests": 3,
+    "pass": true
+  }
+]

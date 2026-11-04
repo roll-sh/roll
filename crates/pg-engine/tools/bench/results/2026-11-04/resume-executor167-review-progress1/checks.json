@@ -1,0 +1,76 @@
+[
+  {
+    "name": "parallel-current",
+    "command": [
+      "cargo",
+      "test",
+      "--release",
+      "-p",
+      "pg-engine",
+      "--test",
+      "parallel_scan"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "0595bf7325b0b4cde8d02d9f8e51ebd17b528d05",
+      "tree": "774b978c229b40536e4a0c7286b38e928f2d789c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "0595bf7325b0b4cde8d02d9f8e51ebd17b528d05",
+      "tree": "774b978c229b40536e4a0c7286b38e928f2d789c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 54.72s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 569.0863771438599,
+    "log_sha256": "0ec57e78d552ec94e1cbe62f793e0795c14a9a88e47807d8bc9a8bf92cedecb3",
+    "binaries": {
+      "/home/meszmate/.cache/a167/target/release/deps/parallel_scan-8d4ffc131bf0eb77": {
+        "sha256": "3e330b6f3304e1bb6dd66ebb75d374bb488f67048733555ec2ab6eadbc4b4e1e",
+        "bytes": 84806368
+      }
+    },
+    "passed_tests": 10,
+    "pass": true
+  },
+  {
+    "name": "build",
+    "command": [
+      "cargo",
+      "build",
+      "-p",
+      "pg-engine",
+      "--bin",
+      "roll-engine"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "0595bf7325b0b4cde8d02d9f8e51ebd17b528d05",
+      "tree": "774b978c229b40536e4a0c7286b38e928f2d789c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "0595bf7325b0b4cde8d02d9f8e51ebd17b528d05",
+      "tree": "774b978c229b40536e4a0c7286b38e928f2d789c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [],
+    "fatal_lines": [],
+    "elapsed_s": 42.773282289505005,
+    "log_sha256": "029872576db5ade3efc9f1d234a5e956c0d9aca2464239ae18bd98cd8f3fc45c",
+    "binaries": {},
+    "passed_tests": 0,
+    "pass": true
+  }
+]

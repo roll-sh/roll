@@ -1,0 +1,109 @@
+{
+  "owner": "executor167",
+  "head": "c1594cc6c9fac649ee76a86d711e1bf880871f08",
+  "terminal": true,
+  "gate_result": "configured exact-source stages PASS; review HOLD; no readiness/performance claim",
+  "stages": [
+    {
+      "name": "reordered-current",
+      "exit": 0,
+      "passed_tests": 1,
+      "ignored": 0,
+      "pass": true,
+      "warnings": [],
+      "skips": []
+    },
+    {
+      "name": "golden-current",
+      "exit": 0,
+      "passed_tests": 3,
+      "ignored": 0,
+      "pass": true,
+      "warnings": [],
+      "skips": []
+    },
+    {
+      "name": "parallel-current",
+      "exit": 0,
+      "passed_tests": 10,
+      "ignored": 0,
+      "pass": true,
+      "warnings": [],
+      "skips": []
+    },
+    {
+      "name": "build",
+      "exit": 0,
+      "passed_tests": 0,
+      "ignored": 0,
+      "pass": true,
+      "warnings": [],
+      "skips": []
+    },
+    {
+      "name": "debug",
+      "exit": 0,
+      "passed_tests": 447,
+      "ignored": 18,
+      "pass": true,
+      "warnings": [],
+      "skips": []
+    },
+    {
+      "name": "release",
+      "exit": 0,
+      "passed_tests": 447,
+      "ignored": 18,
+      "pass": true,
+      "warnings": [],
+      "skips": []
+    },
+    {
+      "name": "clippy",
+      "exit": 0,
+      "passed_tests": 0,
+      "ignored": 0,
+      "pass": true,
+      "warnings": [
+        "warning: length comparison to zero",
+        "warning: this loop could be written as a `while let` loop",
+        "warning: the `Err`-variant returned from this function is very large",
+        "warning: the loop variable `j` is used to index `rkeys`",
+        "warning: this `if` statement can be collapsed",
+        "warning: float has excessive precision",
+        "warning: float has excessive precision",
+        "warning: float has excessive precision",
+        "warning: float has excessive precision",
+        "warning: float has excessive precision",
+        "warning: items after a test module",
+        "warning: items after a test module",
+        "warning: `pg-engine` (lib) generated 10 warnings (run `cargo clippy --fix --lib -p pg-engine -- ` to apply 7 suggestions)",
+        "warning: useless use of `format!`",
+        "warning: `pg-engine` (lib test) generated 12 warnings (10 duplicates) (run `cargo clippy --fix --lib -p pg-engine --tests -- ` to apply 2 suggestions)",
+        "warning: `pg-engine` (test \"difftest\") generated 1 warning (run `cargo clippy --fix --test \"difftest\" -p pg-engine -- ` to apply 1 suggestion)",
+        "warning: using `chunks_exact` with a constant chunk size",
+        "warning: `pg-engine` (example \"bench\") generated 1 warning (run `cargo clippy --fix --example \"bench\" -p pg-engine -- ` to apply 1 suggestion)"
+      ],
+      "skips": []
+    },
+    {
+      "name": "crash30",
+      "exit": 0,
+      "passed_tests": 2,
+      "ignored": 0,
+      "pass": true,
+      "warnings": [],
+      "skips": []
+    },
+    {
+      "name": "postgres-unit",
+      "exit": 0,
+      "passed_tests": 24,
+      "ignored": 0,
+      "pass": true,
+      "warnings": [],
+      "skips": []
+    }
+  ],
+  "remaining_review": "varying SubPlan outer loops; reordered ListFill path proof"
+}
