@@ -65,6 +65,12 @@ pub(crate) fn btree_size(types: &[DataType], all: &[Value], fmt: &crate::types::
 fn btree_size_of(t: &Table, bix: &BoundIndex, vals: &[Value], row: &[Value], ctx: &ExecCtx) -> Option<usize> {
     let include = bix.index.include.iter().map(|&i| row.get(i).cloned().unwrap_or(Value::Null));
     let all: Vec<Value> = vals.iter().cloned().chain(include).collect();
+    if surely_small(&all)
+        && !bix.keys.iter().any(|k| matches!(k.ty(), DataType::Bpchar(_)))
+        && !bix.index.include.iter().any(|&i| matches!(t.columns[i].ty, DataType::Bpchar(_)))
+    {
+        return None;
+    }
     let mut types: Vec<DataType> = bix.keys.iter().map(|k| k.ty()).collect();
     types.extend(bix.index.include.iter().map(|&i| t.columns[i].ty.clone()));
     btree_size(&types, &all, ctx.fmt())
