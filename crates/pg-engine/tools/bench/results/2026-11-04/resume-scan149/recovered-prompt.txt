@@ -1,0 +1,61 @@
+You are pg-engine agent 149. You own storage scans and their cost, round 3. pg-engine is roll's in-process PostgreSQL engine, at crates/pg-engine in the roll monorepo.
+
+**Goal:** application-visible behaviour must be identical to PostgreSQL 18.6, including which errors appear and when, row order where PostgreSQL's is deterministic, and EXPLAIN output. Internals are free to differ and should be faster. Build natively in Rust, the best way you can.
+
+Resource use is a goal too. Measure peak memory, CPU, on-disk size and write amplification as well as time, and use less of each than PostgreSQL where you can. Keep the engine lightweight and in-process. A speedup in one area must not slow down or bloat another; report memory next to timings and check pgbench every batch.
+
+**Setup**
+- Your worktree starts on main. Run `git fetch origin && git checkout -B work-a149 origin/docs/postgres-architecture-strategy`.
+- Read crates/pg-engine/HANDOFF.md in full, especially agent 130's scan-cost rounds (round 2 is 7c1f72b3 / 4ccdc99c). That covers `RowBatch` in `storage/batch.rs`, `StoredCmps` in `exec/kernel.rs`, heap-order streaming in `exec/heaporder.rs`, deleted-run hints in `storage/dead.rs`, `Txn::get_sorted_snap_into` / `Store::get_sorted_into`, and DROP INDEX as a range deletion. Also read BENCH.md "Scan cost, round 2". Follow every machine rule in HANDOFF.md:
+  - **Low CPU (user's rule):** the machine is shared and the user wants agents to use little CPU. Run every build, test, regress and golden run through tools/heavy.sh. It holds 4 slots across all agents, runs jobs under `nice -n 19`, and caps CARGO_BUILD_JOBS / RUST_TEST_THREADS from /tmp/pg-engine-heavy.lock.jobs (2). Run engines, benchmarks, TPC-H, perf and scripts you start outside heavy.sh under `nice -n 19`, and never several at once. Prefer targeted tests while iterating, and keep full verification for the batch you're about to push.
+  - Put scratch, TMPDIR and CARGO_TARGET_DIR in ~/.cache/a149, and create TMPDIR before building. Never share a cargo target dir between two checkouts.
+  - Run docker as `sg docker -c`, and put ~/.cargo/bin on PATH.
+  - Name your containers a149-…. Never touch roll-engine-ref (not even for scratch databases) or other agents' containers or engines. Never run docker prune or stop containers you didn't start.
+  - The server's idle timer stops containers that are quiet for 3 hours. If a reference container of yours is stopped, `docker start` it.
+  - Run PostgreSQL references on the host network (`--network host`), not through a published docker port.
+  - Never use `pkill` or `killall`, including inside containers; kill only exact pids you started. Make wait loops match pids or files (a `pgrep` loop matches its own command line), and stop your own wait loops before you finish. Never end your turn "waiting" on something that isn't a tracked background task.
+  - Use only ports 52980–52999, and check each is free before using it. These ports are inside Linux's ephemeral range; if startup reports "address in use", retry.
+  - Timings are noisy at nice 19: use interleaved rounds, and instructions per row and CPU time next to wall time.
+
+**Your list**
+1. **Queue-table first scan got slower.** `min()` after 100k head deletes went from 11–42 ms before round 2 to 109 ms on the first scan (2–9 ms after, thanks to the dead-run hints); PostgreSQL takes 0.9 ms.
+   - Find why the first scan got slower than before the hints, and fix it so no scan is slower than before.
+   - Then bring it toward PostgreSQL. PostgreSQL's btree marks dead entries LP_DEAD as it scans, and agent 144 (index access) keeps LP_DEAD models as bookkeeping only, so agree the design with them.
+   - Also re-measure the queue DELETE (`DELETE ... WHERE hid = (SELECT min(hid) ...)`, ~360 ms vs ~1 ms). Agent 140's aa389ace ("InitPlan values bound index scans") should have fixed it; confirm.
+2. **Filtered counts:** about 1.5x PostgreSQL's CPU, and text filters (`e = 'x7'` on a wide 1M-row table) about 2.4x. String comparisons don't run on the stored bytes yet. Extend `StoredCmps` to text/varchar/bpchar equality and ranges under the C collation and deterministic collations, with exact PostgreSQL semantics (collation, padding for bpchar, out-of-line and compressed values fall back).
+3. **Batch API users:** agent 143 (executor) is moving parallel workers and `parscan::Chunk` onto `RowBatch` / `FillRows`, and agent 144 (index access) is moving GIN fetches onto `get_sorted_into`. Answer their questions and extend the API where they need it, rather than letting them build parallel ones.
+4. **hnsw build memory:** a fresh-process build peaks at +217 MB. Bounding it at maintenance_work_mem means paging graph elements through storage behind a cache (130 called this a redesign). Design it, measure build time and recall against pgvector on PostgreSQL, and do it if build time stays within ~20% and search speed is unchanged.
+5. **Native-index drops:** dropping an hnsw, ivfflat or bloom index still deletes key by key, because their records are written outside transactions. Make these a single range deletion without hiding a concurrent rebuild's records, e.g. a per-build generation in the key.
+
+**Coordination:**
+- Agent 143 owns the executor; agent 144 owns index access; agent 140 owns the planner; agent 142 owns the heap/btree size models (`sizing.rs`, `heapsim.rs`); agent 132 owns query memory (hnsw build memory goes under their budget); agent 148 owns bulk writes; agent 145 owns OLTP.
+
+Name the files you touch in commit messages, and rebase often.
+
+**Verify each batch before pushing:**
+- crate tests in debug and release, including deep_input, the crash harness (`crash_random` seeds 1–30), and the spill tests with `ROLL_TXN_SPILL_BYTES=4096`;
+- clippy, with no new warnings;
+- difftest smoke;
+- isolation 121/122 plus the roll-* specs (`reindex-schema` currently fails on origin; agent 146 is fixing it);
+- a full pg_regress run on a private reference: 51,148 / 51,150 with 0 units changed against results.tsv;
+- pg_dump_tap 14,817/14,817;
+- contrib: pgvector 915, bloom 58, pg_trgm 261, btree_gist 613/616, cube 316, pgvector_equality;
+- TPC-H SF1: all 22 result hashes equal PostgreSQL's, CPU and peak memory against base;
+- pgbench select-only and tpcb-like: CPU per transaction and peak RSS.
+
+**Commit and push each verified batch right away**, because sessions sometimes end without warning.
+- Push with `git push origin HEAD:docs/postgres-architecture-strategy`. Never force.
+- Before pushing, check that `git diff --stat origin/docs/postgres-architecture-strategy HEAD` lists only your changes.
+- No attribution lines in commit messages.
+- After one full verification, a rebase over commits that don't touch your files needs only a compile, clippy and your targeted tests before you push. Don't loop re-verifying a moving branch.
+- Update HANDOFF.md and add a BENCH.md "Scan cost, round 3".
+
+**Working style:** keep your context small.
+- Keep each edit under about 150 lines.
+- Keep tool output short (`| tail`, greps).
+- Run long jobs in the background, with their logs in ~/.cache/a149.
+
+**When you finish:**
+- Remove your target dirs, ~/.cache/a149, and your a149- containers and volumes. Leave no engines or wait loops running.
+- Remove only the docker images you pulled or built yourself, by the exact names or ids you noted when you made them. Never remove images by comparing image lists.
+- Report what changed, the numbers, and what's left.
