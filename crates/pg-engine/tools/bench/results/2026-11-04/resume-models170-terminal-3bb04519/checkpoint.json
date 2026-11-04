@@ -1,0 +1,7 @@
+{
+  "head": "3bb04519be5a02bc6a041395a3a122a644a994d8",
+  "tree": "60958310c764b51ea572371fe2dea82902f85df9",
+  "status": "",
+  "time_utc": "2026-11-04T14:29:47.708935+00:00",
+  "note": "configured exact-source stages PASS; review HOLD; no readiness/performance claim; 163 modeled parallel oversized/INCLUDE combined hazard; deterministic kept-header/Take::None; EXPLAIN header fallback; cap-lift/resource gates"
+}
