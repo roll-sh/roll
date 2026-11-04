@@ -22,7 +22,7 @@ TRUNCATE a163_bk;
 INSERT INTO a163_bk (during) VALUES (tsrange('2026-02-01 00:30', '2026-02-01 00:45'));
 INSERT INTO a163_bk (during) SELECT tsrange(timestamp '2026-03-01' + g * interval '1 hour',
   timestamp '2026-03-01' + (g + 1) * interval '1 hour') FROM generate_series(1, 200) g;
-DELETE FROM a163_bk WHERE during && tsrange('2026-03-01 50:00', '2026-03-01 52:00');
+DELETE FROM a163_bk WHERE during && tsrange(timestamp '2026-03-01' + interval '50 hours', timestamp '2026-03-01' + interval '52 hours');
 INSERT INTO a163_bk (during) VALUES (tsrange('2026-03-03 02:30', '2026-03-03 03:30'));
 SAVEPOINT s;
 INSERT INTO a163_bk (during) VALUES (tsrange('2026-03-01 10:30', '2026-03-01 11:30'));

@@ -1668,7 +1668,7 @@ impl Ddl<'_, '_> {
         let old = frozen?;
         let oldest = m.oldest_xmin(old)?;
         self.measured_xmin.set(Some((t.oid, old, oldest, toast_frozen.map(|f| (f, u64::MAX)))));
-        crate::txn::unchanged::SKIPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::txn::unchanged::note_skip();
         Some(RowMeasure::new(m.rows, m.live, Vec::new()))
     }
 

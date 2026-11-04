@@ -465,7 +465,7 @@ fn deferred_entry_deletes() {
 /// table loaded the same way without the TRUNCATE is read, and gives the same.
 #[test]
 fn vacuum_skips_unchanged_tables() {
-    use pg_engine::txn::unchanged::SKIPS;
+    use pg_engine::txn::unchanged::skips as skipped;
     let dir = tempfile::tempdir().unwrap();
     let eng = open(dir.path());
     with_max_versions(500, || {
@@ -483,8 +483,8 @@ fn vacuum_skips_unchanged_tables() {
         let stats = |s: &mut Session, t: &str, x: &str| {
             rows(s, &format!("SELECT relpages, reltuples, relallvisible, relfrozenxid::text = '{x}' FROM pg_class WHERE relname = '{t}'"))
         };
-        let skips = |n| assert_eq!(SKIPS.load(Ordering::Relaxed), n);
-        let base = SKIPS.load(Ordering::Relaxed);
+        let skips = |n| assert_eq!(skipped(), n);
+        let base = skipped();
         run(&mut s, "VACUUM vu_a");
         skips(base + 1);
         run(&mut s, "VACUUM vu_b");

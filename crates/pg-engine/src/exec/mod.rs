@@ -28,6 +28,7 @@ pub mod sizing;
 pub mod skipcount;
 pub mod spill;
 pub mod replication;
+pub mod rowsize;
 pub mod toast;
 pub mod trigger;
 pub mod vector;

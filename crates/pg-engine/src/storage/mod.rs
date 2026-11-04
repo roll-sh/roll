@@ -1293,6 +1293,12 @@ impl Store {
         if let Some(u) = untouched.as_mut() {
             for f in &linked {
                 let (lo, hi) = (key_table(&f.meta.first_key), key_table(&f.meta.last_key));
+                // (A run of one table's index entries, an index build's, leaves its rows and
+                // out-of-line values alone.)
+                let (first, last) = (&f.meta.first_key[..], &f.meta.last_key[..]);
+                if lo == hi && first >= &keys::index_prefix(lo, 1)[..] && last < &toast::prefix(lo)[..] {
+                    continue;
+                }
                 u.retain(|t, _| *t < lo || *t > hi);
             }
         }

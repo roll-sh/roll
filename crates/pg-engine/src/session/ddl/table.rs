@@ -3717,10 +3717,22 @@ impl Ddl<'_, '_> {
         let quad = crate::exec::dml::quad_point_index(&bix, self.ctx);
         let (mut points, mut nan) = (0usize, false);
         let counts = self.ctx;
+        // (A btree entry past a third of a page fails as the build loads its entries, after
+        // the unique check: the first in index order, `rowsize`. Its key and size, the row.)
+        let mut oversized: Option<(Vec<u8>, usize, Vec<u8>)> = None;
         let mut step = |dkey: &[u8], vals: &[Value]| -> Result<()> {
             crate::exec::pgstat::count_returned(counts, t.oid, 1);
             entries += 1;
             progress.scanned(entries);
+            crate::exec::rowsize::on_form(t, &bix, Some(vals), &[], counts)?;
+            if ix.method == "btree"
+                && let Some(n) = crate::exec::rowsize::btree_oversized(t, &bix, vals, &[], counts)?
+            {
+                let k = index_entry_key(t, ix, vals, dkey, &bix.colls);
+                if oversized.as_ref().is_none_or(|o| k < o.0) {
+                    oversized = Some((k, n, dkey.to_vec()));
+                }
+            }
             if quad && let Some(v) = vals.first().filter(|v| !v.is_null()) {
                 points += 1;
                 nan |= crate::exec::dml::nan_point(v);
@@ -3737,7 +3749,7 @@ impl Ddl<'_, '_> {
                     return Err(self.duplicate_key(t, &bix, first.as_deref().unwrap_or(vals), &ix.name));
                 }
             }
-            if crate::exec::scan::stores_entries(ix) {
+            if crate::exec::scan::stores_entries(&bix) {
                 let k = index_entry_key(t, ix, vals, dkey, &bix.colls);
                 batch_bytes += k.len() + dkey.len() + 64;
                 batch.push((k, dkey.to_vec()));
@@ -3816,6 +3828,10 @@ impl Ddl<'_, '_> {
             }
         }
         drop(seen);
+        if let Some((_, n, dkey)) = oversized {
+            let tid = crate::exec::dml::row_tid(t, &dkey, self.ctx);
+            return Err(crate::exec::rowsize::btree_error(t, &bix, n, tid, self.ctx));
+        }
         if serial {
             progress.loaded(entries);
         }
@@ -3926,7 +3942,7 @@ impl Ddl<'_, '_> {
                     return Err(self.duplicate_key(new, bix, &vals, &bix.index.name));
                 }
                 // (A native method's index is built again after the statement.)
-                if crate::exec::scan::stores_entries(&bix.index) && !crate::ext::index_am::is_native(&self.cat, &bix.index.method) {
+                if crate::exec::scan::stores_entries(bix) && !crate::ext::index_am::is_native(&self.cat, &bix.index.method) {
                     self.ctx
                         .txn
                         .borrow_mut()
@@ -4016,7 +4032,7 @@ impl Ddl<'_, '_> {
                 }
                 dkey
             };
-            for bix in bixs.iter().filter(|b| crate::exec::scan::stores_entries(&b.index) && !crate::ext::index_am::is_native(&self.cat, &b.index.method)) {
+            for bix in bixs.iter().filter(|b| crate::exec::scan::stores_entries(b) && !crate::ext::index_am::is_native(&self.cat, &b.index.method)) {
                 if let Some(vals) = index_values(bix, &row, self)? {
                     self.ctx
                         .txn

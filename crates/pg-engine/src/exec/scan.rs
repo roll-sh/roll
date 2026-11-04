@@ -3,7 +3,7 @@
 use super::{BoxNode, ExecCtx, Node, Row};
 use crate::catalog::{Index, Table};
 use crate::error::{Error, Result, code};
-use crate::sql::expr::{eval, eval_bool};
+use crate::sql::expr::{Expr, eval, eval_bool};
 use crate::sql::plan::{Access, BitmapQual, IndexBounds, RowMark, ScanPlan, Wait};
 use crate::storage::keys::{KeyColl, encode_index_value, encode_value, index_prefix, prefix_end};
 use crate::storage::row::{ROW_HEADER, ROW_HEADER_EXT, ROW_HEADER_TID, ROW_HEADER_TID_EXT, decode_row};
@@ -257,12 +257,20 @@ pub fn reads_entries(ix: &Index) -> bool {
     ix.id != 0 && matches!(ix.method.as_str(), "btree" | "hash")
 }
 
-/// Whether index `ix` keeps an entry per row in storage (`index_entry_key`): every one with
-/// an id of its own but GIN and BRIN ones, which nothing reads. (Their scans and models read
-/// the rows; a GiST index's entries serve its exclusion constraint's leading `=`, an
-/// SP-GiST one's quad_point_ops' root count, `dml::quad_insert_check`.)
-pub fn stores_entries(ix: &Index) -> bool {
-    ix.id != 0 && !matches!(ix.method.as_str(), "gin" | "brin")
+/// Whether index `bix` keeps an entry per row in storage (`index_entry_key`): a btree or
+/// hash index with an id of its own, an SP-GiST index of one point column (quad_point_ops'
+/// root count reads them, `dml::quad_insert_check`), and a GiST index whose exclusion
+/// constraint's first operator is `=` (its check reads the rows sharing that value by their
+/// entries). Nothing reads other SP-GiST, GiST, GIN or BRIN entries: their scans and size
+/// models read the rows.
+pub fn stores_entries(bix: &crate::sql::plan::BoundIndex) -> bool {
+    bix.index.id != 0
+        && match bix.index.method.as_str() {
+            "btree" | "hash" => true,
+            "spgist" => bix.index.columns.len() == 1 && matches!(bix.keys.first().map(|k| k.ty()), Some(crate::types::DataType::Point)),
+            "gist" => bix.constraint.as_ref().is_some_and(|c| c.exclusion.is_some() && c.leading_eq),
+            _ => false,
+        }
 }
 
 fn ranges(
@@ -526,6 +534,29 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
     if let Some((keys, fetched, stat)) = keyed {
         let mut plan = s.clone();
         plan.access = Access::Seq;
+        // (The conditions the bitmap's index scans checked on each row they kept, read at the
+        // statement's snapshot as the heap side reads it, aren't checked again: the rest of
+        // the filter is, and only its columns are decoded.)
+        let mut need = need;
+        // (Not under a row mark: a newer version a lock finds is checked against them all.)
+        if let (Access::Bitmap(q, _), Some(f)) = (&s.access, &s.filter)
+            && ctx.snapshot().is_some()
+            && s.mark.is_none()
+        {
+            let mut checked = Vec::new();
+            bitmap_checked(q, &mut checked);
+            let conj: Vec<&Expr> = match f {
+                Expr::And(a) => a.iter().collect(),
+                e => vec![e],
+            };
+            let rest: Vec<Expr> = conj.into_iter().filter(|c| !checked.iter().any(|x| x.same_as(c))).cloned().collect();
+            plan.filter = match rest.len() {
+                0 => None,
+                1 => rest.into_iter().next(),
+                _ => Some(Expr::And(rest)),
+            };
+            need = scan_need(&plan, raw_need, ctx);
+        }
         return Ok(Box::new(ScanNode {
             stat,
             sample: None,
@@ -1850,6 +1881,20 @@ impl KeptRows {
             return None;
         }
         keys.iter().map(|k| self.rows.remove(k)).collect()
+    }
+}
+
+/// The conditions every row a bitmap selects passed (`bitmap_keys` checks an index's quals
+/// on each row it keeps; an AND's rows pass each child's, an OR's only one's).
+fn bitmap_checked<'a>(q: &'a BitmapQual, out: &mut Vec<&'a Expr>) {
+    match q {
+        BitmapQual::Index { quals, .. } => out.extend(quals.iter().map(|c| &c.orig)),
+        BitmapQual::And(qs) => {
+            for q in qs {
+                bitmap_checked(q, out);
+            }
+        }
+        BitmapQual::Or(_) => {}
     }
 }
 
