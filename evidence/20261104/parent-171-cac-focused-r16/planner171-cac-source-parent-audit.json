@@ -1,0 +1,17 @@
+{
+  "utc": "2026-11-04T21:04:17.630596+00:00",
+  "candidate": "cac0933bc4eb5ef87674889542cab271de4615d0",
+  "tree": "bd48e5074887125072d7c23cb09c78fe6fe15c0b",
+  "base": "c8618834caf45bc0a34cf9985c07f9bc13b498ef",
+  "net_paths": [
+    "crates/pg-engine/src/session/mod.rs",
+    "crates/pg-engine/src/sql/paths.rs",
+    "crates/pg-engine/tests/kept_plans.rs",
+    "crates/pg-engine/tests/parallel_scan.rs"
+  ],
+  "restored_parent_and_unmodified_shared_hooks_verified": true,
+  "remote_exact": true,
+  "builds_or_tests_by_parent": false,
+  "source_acceptance": false,
+  "fresh_review_task": "node:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Adelegate-task%3Apg-resume-20261104-planner171-source-review-r2"
+}

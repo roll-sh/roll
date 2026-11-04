@@ -1,0 +1,35 @@
+{
+  "utc": "2026-11-04T21:13:18.835724+00:00",
+  "source": "cac0933bc4eb5ef87674889542cab271de4615d0",
+  "tree": "bd48e5074887125072d7c23cb09c78fe6fe15c0b",
+  "all_seven_actual_exits": {
+    "generic": 0,
+    "parallel": 0,
+    "logical-parallel": 0,
+    "logical-prepared-stream": 0,
+    "kept": 0,
+    "cost-golden": 0,
+    "clippy": 0
+  },
+  "raw_test_executions": 15,
+  "raw_summaries": 6,
+  "actual_binary_files_sha256_verified": true,
+  "frozen_hashes_verified": true,
+  "source_patch_exact_committed_diff_vs_c861": true,
+  "source_clean_parent_verified": true,
+  "library_clippy_errors": 0,
+  "library_clippy_warnings": 10,
+  "warnings_in_changed_production_paths": false,
+  "full_gates": "NOTRUN",
+  "source_acceptance": false,
+  "performance_acceptance": false,
+  "earlier_serial_bound_cause": "UNATTRIBUTED",
+  "audit_erratum": {
+    "initial_check": "assert source.patch is empty",
+    "initial_result": "AssertionError, prior parent audit stopped before writing PASS receipt",
+    "cause": "Wrong audit interpretation: runner explicitly saves git diff --binary c861, not an uncommitted diff",
+    "corrected_check": "Exact committed c861..cac diff equality plus separate clean worktree check",
+    "source_gate_or_threshold_changes": false,
+    "test_rerun": false
+  }
+}
