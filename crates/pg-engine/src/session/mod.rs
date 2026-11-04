@@ -231,11 +231,7 @@ impl Prepared {
 /// with the WAL writer's delay (wal_writer_delay, ms). Its other levels (local,
 /// remote_write, remote_apply, on) all wait for the local WAL fsync: no synchronous standby.
 fn async_commit(state: &SessionState) -> Option<u64> {
-    let st = state.settings.borrow();
-    let off = st
-        .get_str("synchronous_commit")
-        .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "off" | "false" | "no" | "0"));
-    off.then(|| st.int("wal_writer_delay").max(1) as u64)
+    state.settings.borrow().hot().async_commit
 }
 
 /// A bound portal (extended protocol), run on Execute; rows beyond `max_rows` wait here.
@@ -334,6 +330,8 @@ pub struct Session {
     /// statement_timeout runs from when it started, across everything it does. Each
     /// statement of a query string and each extended-protocol message starts it afresh.
     waits_armed: bool,
+    /// Its notification listener (`listener`).
+    listener: std::cell::OnceCell<crate::notify::ListenerHandle>,
     /// NOTICE / WARNING messages for the client.
     pub notices: Vec<Error>,
     /// LISTEN channels.
@@ -474,6 +472,7 @@ impl Session {
             cancel: Arc::new(AtomicBool::new(false)),
             reads_clear_cancel: false,
             waits_armed: false,
+            listener: std::cell::OnceCell::new(),
             notices: Vec::new(),
             infer_params: false,
             multi_stmt: false,
@@ -549,7 +548,7 @@ impl Session {
         let st = self.state.settings.borrow();
         let after = |v: i64| std::time::Instant::now() + std::time::Duration::from_millis(v as u64);
         if self.status == TxnStatus::Idle {
-            let v = st.int("idle_session_timeout");
+            let v = st.hot().idle_session_timeout;
             return (v > 0).then(|| {
                 let e = Error::new(
                     code::IDLE_SESSION_TIMEOUT,
@@ -558,7 +557,7 @@ impl Session {
                 (after(v), e.fatal())
             });
         }
-        let v = st.int("idle_in_transaction_session_timeout");
+        let v = st.hot().idle_in_transaction_timeout;
         let idle = (v > 0).then(|| {
             let e = Error::new(
                 code::IDLE_IN_TRANSACTION_SESSION_TIMEOUT,
@@ -568,7 +567,7 @@ impl Session {
         });
         // (transaction_timeout SET in the block and not yet armed by a statement runs from
         // now.)
-        let tt = st.int("transaction_timeout");
+        let tt = st.hot().transaction_timeout;
         let txn = self.txn.as_ref().and_then(|t| {
             let mut t = t.borrow_mut();
             if tt <= 0 {
@@ -632,14 +631,28 @@ impl Session {
 
     /// The client is waiting: deliver notifications directly (outside a transaction block).
     pub fn notifications_idle(&self) {
-        if self.status == TxnStatus::Idle {
-            self.state.db.notify.idle(self.state.pid);
+        if self.status == TxnStatus::Idle
+            && let Some(l) = self.listener()
+        {
+            l.idle();
         }
     }
 
     /// Handling a client message: hold notifications.
     pub fn notifications_busy(&self) {
-        self.state.db.notify.busy(self.state.pid);
+        if let Some(l) = self.listener() {
+            l.busy();
+        }
+    }
+
+    /// This session's notification listener, found in the hub once it has one.
+    fn listener(&self) -> Option<&crate::notify::ListenerHandle> {
+        if self.listener.get().is_none()
+            && let Some(l) = self.state.db.notify.handle(self.state.pid)
+        {
+            let _ = self.listener.set(l);
+        }
+        self.listener.get()
     }
 
     pub(crate) fn now() -> i64 {
@@ -1658,14 +1671,7 @@ impl Session {
         let path = self.state.search_path();
         let who = {
             let cat = self.txn.as_ref().unwrap().borrow().catalog();
-            (
-                self.state.current_role(&cat),
-                self.state
-                    .settings
-                    .borrow()
-                    .get_str("row_security")
-                    != Some("off"),
-            )
+            (self.state.current_role(&cat), self.state.settings.borrow().hot().row_security)
         };
         if !cursor
             && let Some((v, sp, w, b)) = &*p.bound.lock()
@@ -1699,6 +1705,7 @@ impl Session {
             }
             let _serial = crate::scoped::set(&crate::sql::paths::parallel::SERIAL, cursor, "parallel::SERIAL");
             if keep_unplanned {
+                b.keep_site = true;
                 litplan::analyzed_bound(b.analyze_statement(stmt)?, ctx)
             } else {
                 b.bind_statement(stmt).map(|bq| (bq, None))
@@ -1752,7 +1759,8 @@ impl Session {
         }
     }
 
-    /// A custom plan: bound afresh with the parameters' values as constants.
+    /// A custom plan: the statement's analysis with the parameters' values put in
+    /// (`litplan::values_custom`), or bound afresh with them as constants.
     fn bound_custom(
         &mut self,
         p: &Prepared,
@@ -1760,14 +1768,10 @@ impl Session {
         params: &[Value],
     ) -> Result<Arc<BoundQuery>> {
         self.ensure_txn();
-        let types = p.param_types.clone();
-        let domains = p.plans.lock().param_oids.clone();
-        let b = self.with_ctx(params, |ctx| {
-            let mut b = Binder::new(ctx, types);
-            b.param_consts = true;
-            b.param_domains = domains;
-            b.bind_statement(stmt)
-        })?;
+        let b = match self.values_custom(p, stmt, params) {
+            Some(b) => b,
+            None => self.bound_custom_afresh(p, stmt, params)?,
+        };
         if let Some(fixed) = &p.plans.lock().fixed_result
             && *fixed != result_row(&b.cols)
         {
@@ -1780,6 +1784,18 @@ impl Session {
         Ok(Arc::new(b))
     }
 
+    /// A custom plan bound afresh: the statement with the parameters' values as constants.
+    pub(super) fn bound_custom_afresh(&mut self, p: &Prepared, stmt: &Node, params: &[Value]) -> Result<BoundQuery> {
+        let types = p.param_types.clone();
+        let domains = p.plans.lock().param_oids.clone();
+        self.with_ctx(params, |ctx| {
+            let mut b = Binder::new(ctx, types);
+            b.param_consts = true;
+            b.param_domains = domains;
+            b.bind_statement(stmt)
+        })
+    }
+
     /// Whether running `p` with `params` takes a custom plan (choose_custom_plan): with
     /// parameter values, the first five times, unless plan_cache_mode decides (None: it's up
     /// to the costs).
@@ -1787,16 +1803,10 @@ impl Session {
         if params.is_empty() || p.param_types.is_empty() {
             return Some(false);
         }
-        match self
-            .state
-            .settings
-            .borrow()
-            .get_str("plan_cache_mode")
-        {
-            Some("force_generic_plan") => Some(false),
-            Some("force_custom_plan") => Some(true),
-            _ if p.plans.lock().custom < 5 => Some(true),
-            _ => None,
+        match self.state.settings.borrow().hot().force_custom {
+            Some(c) => Some(c),
+            None if p.plans.lock().custom < 5 => Some(true),
+            None => None,
         }
     }
 
@@ -1970,13 +1980,17 @@ impl Session {
                 }
                 kept
             }
-            None => {
-                let bq = self.planned(p, own(p)?, params)?.0;
-                if p.lit.is_some() && params.is_empty() {
-                    self.lit_learn(p, own(p)?, &bq);
+            None => match self.lit_values_plan(p, params) {
+                // (A plan that depends on the values: the template's analysis with them in.)
+                Some(bq) => (bq, Vec::new()),
+                None => {
+                    let bq = self.planned(p, own(p)?, params)?.0;
+                    if p.lit.is_some() && params.is_empty() {
+                        self.lit_learn(p, own(p)?, &bq);
+                    }
+                    (bq, Vec::new())
                 }
-                (bq, Vec::new())
-            }
+            },
         };
         self.pgss_planned(planning.elapsed());
         // Its relations are locked before it runs; a wait for a lock may end with another
@@ -3647,6 +3661,9 @@ fn param_log_string(v: &str, state: &SessionState) -> String {
 /// StartTransaction: XactDeferrable = DefaultXactDeferrable (transaction_deferrable starts
 /// as default_transaction_deferrable; it's off unless that is on).
 fn default_deferrable(state: &SessionState) {
+    if !state.settings.borrow().hot().default_deferrable {
+        return;
+    }
     let mut st = state.settings.borrow_mut();
     if st.bool("default_transaction_deferrable") && !st.bool("transaction_deferrable") {
         let _ = st.set("transaction_deferrable", Some("on"), true, true);

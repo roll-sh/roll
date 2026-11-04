@@ -517,6 +517,13 @@ Routed through the coordinator 2026-11-03.
   `((n)::name) COLLATE ...`; `SELECT DISTINCT t COLLATE "en-x-icu"` groups by `(t)::text`. Also
   under a join (`a.t`) and over a UNION ALL; with a LIMIT.
 - Round 8's small-work_mem hash-or-sort choice again (r8big, HashSetOp vs SetOp).
+- Re-probed on `31066020` (agent 162, 2026-11-03, reproducers above): still open, with the
+  same owners: the plan cache (0 / 6 against 1 / 5; EXPLAIN EXECUTE's literal), BETWEEN's
+  parameter types (42725), `arr @> '{2}'` (15 rows against 1,000), `n_distinct = 50` (-0.5385
+  against 50), the sort keys under COLLATE, the partitioned top-N, seed 5069's `DELETE ... USING
+  v0` (22023), round 6's domain comparison in EXPLAIN. `SELECT max(id), min(id), max(v) FROM
+  r9s WHERE id < 100` and round 8's `SELECT DISTINCT k, length(s) ... ORDER BY` under 64 kB
+  agree on these reduced shapes. indisready: agent 144's 21e3863f, on the branch since.
 
 ## Round 8 grammar (agent 147)
 
@@ -1333,7 +1340,9 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
 - **Round 8 seeds, found, not fixed** (agent 147; re-routed to the current owners by agent 156 on
   2026-11-03, all re-probed on `ed0c85fe`, reproducers below). Owners as of 2026-11-03's end:
   executor agent 160, OLTP and protocol agent 159, planner agent 155, catalog agent 146, index
-  access agent 144, bulk writes agent 148, size models agent 161:
+  access agent 144, bulk writes agent 148, size models agent 161 (still so on 2026-11-04,
+  agent 162; also storage scans agent 149, query memory agent 150, postgres_fdw agent 157,
+  replication agent 158):
   - Planner (agent 155), under a small work_mem (seeds 8018, 8023, 8026, 8035, 8049, 8130):
     `SET work_mem = '64kB'` over `r8big (id int PRIMARY KEY, k int, s text)` filled with
     `SELECT i, (i * 7919) % 97, md5(i::text) FROM generate_series(1, 3020) i` and analysed:

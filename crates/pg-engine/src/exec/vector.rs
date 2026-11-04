@@ -51,8 +51,13 @@ pub enum VB {
     /// A string comparison of bytes (`ops::str_cmp`): column against constant, bpchar's
     /// without trailing spaces (the constant trimmed already).
     Str { test: fn(Ordering) -> bool, col: usize, k: Box<[u8]>, bp: bool, col_first: bool },
-    /// `col [NOT] IN (strings)` by bytes (each item's `=` a byte comparison).
+    /// `col [NOT] IN (strings)` by bytes (each item's `=` a byte comparison), and
+    /// `col = ANY (array)` / `col <> ALL (array)` of strings.
     StrIn { col: usize, items: Vec<Option<Box<[u8]>>>, bp: bool, neg: bool },
+    /// `col [NOT] LIKE 'pattern'` of a text column (`K::Like`).
+    Like { col: usize, pat: Box<crate::sql::func::string::LikePattern>, neg: bool },
+    /// `col = ANY (array)` / `col <> ALL (array)` of exact numbers (None: a NULL item).
+    NumIn { col: usize, items: Vec<Option<(i128, u32)>>, neg: bool },
     /// Any other pure binary call returning bool over fixed-width columns and constants:
     /// each column's value made (no allocation) and `f` called, as `K::Call` calls it.
     Call { f: PureFn, args: Box<[Leaf; 2]>, strict: bool },
@@ -269,6 +274,36 @@ impl VB {
                 }
                 VB::StrIn { col, items, bp: bp?, neg: *neg }
             }
+            K::Like(a, pat, neg) => match **a {
+                K::Col(col) if matches!(types.get(col), Some(DataType::Text | DataType::Varchar(_))) => {
+                    VB::Like { col, pat: pat.clone(), neg: *neg }
+                }
+                _ => return None,
+            },
+            K::ArrayOp(args, f, all) => {
+                // (An empty array is false for ANY even for a NULL: left to the row path.)
+                let [K::Col(col), K::Const(Value::Array(a))] = &**args else { return None };
+                if a.items.is_empty() {
+                    return None;
+                }
+                let (test, bp) = str_cmp(*f)?;
+                let eq = test(Ordering::Equal) && !test(Ordering::Less) && !test(Ordering::Greater);
+                let ne = !test(Ordering::Equal) && test(Ordering::Less) && test(Ordering::Greater);
+                let neg = match (*all, eq, ne) {
+                    (false, true, _) => false,
+                    (true, _, true) => true,
+                    _ => return None,
+                };
+                if text_col(types, *col) {
+                    let items = a.items.iter().map(|v| text_const(v, bp)).collect::<Option<_>>()?;
+                    VB::StrIn { col: *col, items, bp, neg }
+                } else if !bp && matches!(types.get(*col), Some(DataType::Int2 | DataType::Int4 | DataType::Int8 | DataType::Numeric(_))) {
+                    let num = |v: &Value| if v.is_null() { Some(None) } else { super::kernel::small_num(v).map(Some) };
+                    VB::NumIn { col: *col, items: a.items.iter().map(num).collect::<Option<_>>()?, neg }
+                } else {
+                    return None;
+                }
+            }
             _ => return None,
         })
     }
@@ -382,6 +417,50 @@ impl VB {
                     };
                 }
             }
+            VB::Like { col, pat, neg } => {
+                let Some(c) = col_at(b, *col) else { return fill(sel, out, Tri::Out) };
+                if !matches!(c.data, ColData::Bytes(_)) {
+                    return fill(sel, out, Tri::Out);
+                }
+                for &r in sel {
+                    let r = r as usize;
+                    out[r] = if c.nulls[r] {
+                        Tri::N
+                    } else {
+                        match std::str::from_utf8(c.bytes(b, r)).ok().map(|s| pat.matches(s)) {
+                            Some(Ok(m)) if m != *neg => Tri::T,
+                            Some(Ok(_)) => Tri::F,
+                            _ => Tri::Out,
+                        }
+                    };
+                }
+            }
+            VB::NumIn { col, items, neg } => {
+                let Some(c) = col_at(b, *col) else { return fill(sel, out, Tri::Out) };
+                let saw_null = items.iter().any(Option::is_none);
+                let (hit, miss) = if *neg { (Tri::F, Tri::T) } else { (Tri::T, Tri::F) };
+                for &r in sel {
+                    let r = r as usize;
+                    out[r] = match num_at(c, r) {
+                        None => Tri::Out,
+                        Some(None) => Tri::N,
+                        Some(Some((x, sx))) => {
+                            let mut t = if saw_null { Tri::N } else { miss };
+                            for &(y, sy) in items.iter().flatten() {
+                                match scaled_cmp(x, sx, y, sy) {
+                                    Some(Ordering::Equal) => {
+                                        t = hit;
+                                        break;
+                                    }
+                                    Some(_) => {}
+                                    None => t = Tri::Out,
+                                }
+                            }
+                            t
+                        }
+                    };
+                }
+            }
             VB::Call { f, args, strict } => {
                 for &r in sel {
                     let r = r as usize;
@@ -409,7 +488,7 @@ impl VB {
         match self {
             VB::And(a) | VB::Or(a) => a.iter().for_each(|a| a.cols(out)),
             VB::Not(a) => a.cols(out),
-            VB::IsNull(c, _) | VB::Col(c) | VB::Str { col: c, .. } | VB::StrIn { col: c, .. } => out.push(*c),
+            VB::IsNull(c, _) | VB::Col(c) | VB::Str { col: c, .. } | VB::StrIn { col: c, .. } | VB::NumIn { col: c, .. } | VB::Like { col: c, .. } => out.push(*c),
             VB::NumCmp { args, .. } => args.iter().for_each(|a| a.cols(out)),
             VB::Call { args, .. } => out.extend(args.iter().filter_map(|l| match l {
                 Leaf::Col(c, _) => Some(*c),

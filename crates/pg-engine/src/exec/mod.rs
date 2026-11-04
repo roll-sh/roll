@@ -106,6 +106,13 @@ pub trait Node {
         Ok(None)
     }
 
+    /// ExecReScan: read again from the start, under the enclosing rows the caller pushed
+    /// now (`ExecCtx::with_outer`), whose values a parameterized scan's conditions read.
+    /// False: this node can't, and nothing changed (the caller opens the plan again).
+    fn rescan(&mut self, _ctx: &ExecCtx) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Before its first row: a node that can may leave out the rows whose column `col` (an
     /// oid) is none of `keys`, which nothing above can match (an inner or semi hash join's
     /// outer side, its inner side built: a catalog scan then reads the matching rows through
@@ -277,6 +284,20 @@ pub fn streaming_notices<T>(f: impl FnOnce() -> T) -> T {
         }
     }
     let _back = Back(STREAMING.with(|s| s.replace(true)));
+    f()
+}
+
+/// Run `f` with its notices collected, not sent as they are raised (inside
+/// `streaming_notices` too): work whose notices the caller may drop, a plan made a second
+/// time to check one (`session::litplan`).
+pub fn collected_notices<T>(f: impl FnOnce() -> T) -> T {
+    struct Back(bool);
+    impl Drop for Back {
+        fn drop(&mut self) {
+            STREAMING.with(|s| s.set(self.0));
+        }
+    }
+    let _back = Back(STREAMING.with(|s| s.replace(false)));
     f()
 }
 
@@ -682,9 +703,10 @@ pub fn arm_statement_waits(t: &mut crate::txn::Txn, settings: &crate::session::s
     let ms = |v: i64| std::time::Duration::from_millis(v as u64);
     let lt = settings.lock_timeout();
     t.lock_timeout = (lt > 0).then(|| ms(lt));
-    t.deadlock_timeout = ms(settings.int("deadlock_timeout").max(1));
+    let hot = settings.hot();
+    t.deadlock_timeout = ms(hot.deadlock_timeout.max(1));
     let st = settings.statement_timeout();
-    let tt = settings.int("transaction_timeout");
+    let tt = hot.transaction_timeout;
     t.deadline = (st > 0 && (tt <= 0 || st < tt)).then(|| Instant::now() + ms(st));
     if tt <= 0 {
         t.txn_deadline = None;

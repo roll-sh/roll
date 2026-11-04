@@ -80,6 +80,11 @@ pub(crate) struct TempCleanup {
 }
 
 impl TempCleanup {
+    /// Whether a scope is open (a statement running).
+    pub(crate) fn active(&self) -> bool {
+        self.active.get()
+    }
+
     pub(crate) fn run<T>(self: &Rc<Self>, f: impl FnOnce() -> Result<T>) -> Result<T> {
         self.scoped(false, None, f)
     }

@@ -3452,6 +3452,10 @@ fn index_entries_checked(
     Ok(out)
 }
 
+/// Rows a bulk load (a held COPY, an INSERT … SELECT) stores through the write buffer before
+/// it opens the sink, whose room is the buffer's size: a small load isn't worth that.
+const SINK_AFTER: u64 = 10_000;
+
 /// Write an inserted row and its index entries; its AFTER ROW event queued.
 fn store_inserted(
     rules: &TableRules,
@@ -3677,7 +3681,14 @@ impl InsertNode {
         if copy_load.as_ref().is_some_and(|l| l.held()) {
             ctx.txn.borrow_mut().hold_rows(rules.table.oid);
         }
-        let sink = bulk.then_some(false);
+        // So does an INSERT … SELECT that reads only other tables and models as it goes
+        // (`deferred_inserts`: each row stored once, with its TID while the table is modelled).
+        let select_bulk = plan.copy.is_none()
+            && copy_load.is_some()
+            && rules.table.has_rowid()
+            && rules.indexes.iter().all(|b| b.index.method == "btree" && !checks_rows(b))
+            && !ctx.txn.borrow().sink_open();
+        let sink = (bulk || select_bulk).then_some(false);
         // Such a COPY into a table this transaction emptied (TRUNCATE, then COPY, as pgbench
         // -i and COPY FREEZE do) measures its rows as they go in: VACUUM finds them as it
         // left them without reading them (`txn::unchanged`).
@@ -3857,7 +3868,10 @@ impl InsertNode {
         // go to runs once the table is past the model's size, or when its rows are held and
         // so stored with their TIDs: nothing stamps them then.)
         match self.sink {
-            Some(false) if self.copy_load.as_ref().is_some_and(|l| l.rows_wait()) => {
+            Some(false)
+                if self.copy_load.as_ref().is_some_and(|l| l.rows_wait())
+                    && (ctx.processed.get() >= SINK_AFTER || self.copy_load.as_ref().is_some_and(|l| !l.held())) =>
+            {
                 let mut txn = ctx.txn.borrow_mut();
                 self.sink = txn.open_sink().then_some(true);
                 if self.sink.is_some() && self.copy_load.as_ref().is_some_and(|l| l.held()) {
@@ -4200,6 +4214,7 @@ impl Node for InsertNode {
                     let mut txn = ctx.txn.borrow_mut();
                     if super::sizing::is_estimated(self.plan.rules.table.oid, &ctx.sess.db)
                         || self.copy_load.as_ref().is_some_and(|l| l.held())
+                        || self.plan.copy.is_none()
                     {
                         txn.sink_runs_ok();
                     }
@@ -4244,7 +4259,18 @@ impl Node for InsertNode {
             };
             let inserted = match self.plan.copy.clone() {
                 Some(c) => self.insert_copied(&c, src, ctx)?,
-                None => self.insert(src, ctx)?,
+                None => {
+                    // (Its rows are stored as they go, final: the sink takes them once there
+                    // are enough to be worth its room.)
+                    if self.sink == Some(false) && ctx.processed.get() >= SINK_AFTER {
+                        let mut txn = ctx.txn.borrow_mut();
+                        self.sink = txn.open_sink().then_some(true);
+                        if self.sink.is_some() {
+                            txn.sink_runs_ok();
+                        }
+                    }
+                    self.insert(src, ctx)?
+                }
             };
             let Some((mut row, key, old)) = inserted else {
                 continue;

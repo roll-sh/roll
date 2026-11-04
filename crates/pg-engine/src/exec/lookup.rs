@@ -254,8 +254,12 @@ impl Lookup {
             }
         };
         sc.loops += 1;
-        sc.fetched += found.len() as u64;
+        // (A semi or anti join's inner scan stops at its first match, as ExecNestLoop's
+        // does: the rows after it aren't fetched.)
+        let first = matches!(self.kind, JoinKind::Semi | JoinKind::Anti);
+        let mut read = 0u64;
         for r in found.iter() {
+            read += 1;
             let view = Joined::Pair { l, r: super::pipe::Inner::plain(r), keep: None };
             let mut pass = true;
             for k in [&self.filter, &self.cond].into_iter().flatten() {
@@ -265,13 +269,20 @@ impl Lookup {
                         pass = false;
                         break;
                     }
-                    None => return false,
+                    None => {
+                        sc.fetched += found.len() as u64;
+                        return false;
+                    }
                 }
             }
             if pass {
                 out.push(r.clone());
+                if first {
+                    break;
+                }
             }
         }
+        sc.fetched += read;
         true
     }
 

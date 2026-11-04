@@ -1,0 +1,337 @@
+> CREATE TABLE a160_o (id int, k int, lim int)
+-- CREATE TABLE
+
+> CREATE TABLE a160_i (id int, k int, v int, t text)
+-- CREATE TABLE
+
+> INSERT INTO a160_o SELECT g, g % 7, g % 5 FROM generate_series(1, 40) g
+-- INSERT 0 40
+
+> INSERT INTO a160_o VALUES (41, NULL, 1), (42, 100, 0)
+-- INSERT 0 2
+
+> INSERT INTO a160_i SELECT g, g % 7, g * 3, 'r' || g FROM generate_series(1, 200) g
+-- INSERT 0 200
+
+> CREATE INDEX a160_i_k ON a160_i (k, id)
+-- CREATE INDEX
+
+> CREATE INDEX a160_i_v ON a160_i USING hash (v)
+-- CREATE INDEX
+
+> ANALYZE a160_o, a160_i
+-- ANALYZE
+
+> SET enable_hashjoin = off
+-- SET
+
+> SET enable_mergejoin = off
+-- SET
+
+> SET enable_material = off
+-- SET
+
+> SET enable_memoize = off
+-- SET
+
+> SET enable_seqscan = off
+-- SET
+
+> SET enable_bitmapscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT o.id, i.id FROM a160_o o JOIN a160_i i ON i.k = o.k AND i.id < o.id * 2
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on a160_o o
+        Disabled: true
+  ->  Index Only Scan using a160_i_k on a160_i i
+        Index Cond: ((k = o.k) AND (id < (o.id * 2)))
+-- EXPLAIN
+
+> SELECT o.id, count(*), sum(i.v), min(i.t) FROM a160_o o JOIN a160_i i ON i.k = o.k AND i.id < o.id * 2
+> GROUP BY o.id ORDER BY o.id
+id:int4 | count:int8 | sum:int8 | min:text
+1 | 1 | 3 | r1
+2 | 1 | 6 | r2
+3 | 1 | 9 | r3
+4 | 1 | 12 | r4
+5 | 1 | 15 | r5
+6 | 1 | 18 | r6
+7 | 1 | 21 | r7
+8 | 3 | 72 | r1
+9 | 3 | 81 | r16
+10 | 3 | 90 | r10
+11 | 3 | 99 | r11
+12 | 3 | 108 | r12
+13 | 3 | 117 | r13
+14 | 3 | 126 | r14
+15 | 5 | 225 | r1
+16 | 5 | 240 | r16
+17 | 5 | 255 | r10
+18 | 5 | 270 | r11
+19 | 5 | 285 | r12
+20 | 5 | 300 | r13
+21 | 5 | 315 | r14
+22 | 7 | 462 | r1
+23 | 7 | 483 | r16
+24 | 7 | 504 | r10
+25 | 7 | 525 | r11
+26 | 7 | 546 | r12
+27 | 7 | 567 | r13
+28 | 7 | 588 | r14
+29 | 9 | 783 | r1
+30 | 9 | 810 | r16
+31 | 9 | 837 | r10
+32 | 9 | 864 | r11
+33 | 9 | 891 | r12
+34 | 9 | 918 | r13
+35 | 9 | 945 | r14
+36 | 11 | 1188 | r1
+37 | 11 | 1221 | r16
+38 | 11 | 1254 | r10
+39 | 11 | 1287 | r11
+40 | 11 | 1320 | r12
+-- SELECT 40
+
+> SELECT o.id, i.id, i.v FROM a160_o o JOIN a160_i i ON i.k = o.k WHERE o.id IN (3, 10, 41, 42) AND i.id < 40
+id:int4 | id:int4 | v:int4
+10 | 10 | 30
+10 | 17 | 51
+10 | 24 | 72
+10 | 3 | 9
+10 | 31 | 93
+10 | 38 | 114
+3 | 10 | 30
+3 | 17 | 51
+3 | 24 | 72
+3 | 3 | 9
+3 | 31 | 93
+3 | 38 | 114
+-- SELECT 12
+
+> SELECT o.id, i.id FROM a160_o o LEFT JOIN a160_i i ON i.k = o.k AND i.id = o.id + 7 WHERE o.id > 30 ORDER BY o.id
+id:int4 | id:int4
+31 | 38
+32 | 39
+33 | 40
+34 | 41
+35 | 42
+36 | 43
+37 | 44
+38 | 45
+39 | 46
+40 | 47
+41 | NULL
+42 | NULL
+-- SELECT 12
+
+> EXPLAIN (COSTS OFF)
+> SELECT o.id FROM a160_o o WHERE EXISTS (SELECT 1 FROM a160_i i WHERE i.k = o.k AND i.v > o.id * 10)
+QUERY PLAN:text
+Nested Loop Semi Join
+  ->  Seq Scan on a160_o o
+        Disabled: true
+  ->  Index Scan using a160_i_k on a160_i i
+        Index Cond: (k = o.k)
+        Filter: (v > (o.id * 10))
+-- EXPLAIN
+
+> SELECT o.id FROM a160_o o WHERE EXISTS (SELECT 1 FROM a160_i i WHERE i.k = o.k AND i.v > o.id * 10)
+id:int4
+1
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+2
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+3
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+4
+40
+5
+6
+7
+8
+9
+-- SELECT 40
+
+> SELECT o.id FROM a160_o o WHERE NOT EXISTS (SELECT 1 FROM a160_i i WHERE i.k = o.k AND i.v > o.id * 15)
+id:int4
+40
+41
+42
+-- SELECT 3
+
+> SELECT o.id, i.id FROM a160_o o JOIN a160_i i ON i.v = o.id * 3 WHERE o.id < 12
+id:int4 | id:int4
+1 | 1
+10 | 10
+11 | 11
+2 | 2
+3 | 3
+4 | 4
+5 | 5
+6 | 6
+7 | 7
+8 | 8
+9 | 9
+-- SELECT 11
+
+> SELECT o.id, (SELECT i.id FROM a160_i i WHERE i.k = o.k ORDER BY i.k DESC, i.id DESC LIMIT 1) FROM a160_o o
+> WHERE o.id < 9
+id:int4 | id:int4
+1 | 197
+2 | 198
+3 | 199
+4 | 200
+5 | 194
+6 | 195
+7 | 196
+8 | 197
+-- SELECT 8
+
+> SELECT o.id, l.id FROM a160_o o, LATERAL (SELECT i.id FROM a160_i i WHERE i.k = o.k ORDER BY i.k, i.id LIMIT o.lim) l
+> WHERE o.id BETWEEN 5 AND 12
+id:int4 | id:int4
+6 | 6
+7 | 7
+7 | 14
+8 | 1
+8 | 8
+8 | 15
+9 | 2
+9 | 9
+9 | 16
+9 | 23
+11 | 4
+12 | 5
+12 | 12
+-- SELECT 13
+
+> CREATE FUNCTION a160_seen(int) RETURNS bool LANGUAGE plpgsql VOLATILE AS
+> $$ BEGIN RAISE NOTICE 'inner %', $1; RETURN true; END $$
+-- CREATE FUNCTION
+
+> SELECT o.id, i.id FROM a160_o o JOIN a160_i i ON i.k = o.k AND a160_seen(i.id) WHERE o.id IN (1, 2) LIMIT 3
+NOTICE 00000: inner 1
+CONTEXT: PL/pgSQL function a160_seen(integer) line 1 at RAISE
+NOTICE 00000: inner 8
+CONTEXT: PL/pgSQL function a160_seen(integer) line 1 at RAISE
+NOTICE 00000: inner 15
+CONTEXT: PL/pgSQL function a160_seen(integer) line 1 at RAISE
+id:int4 | id:int4
+1 | 1
+1 | 15
+1 | 8
+-- SELECT 3
+
+> SELECT o.id FROM a160_o o WHERE o.id IN (1, 2) AND EXISTS (SELECT 1 FROM a160_i i WHERE i.k = o.k AND a160_seen(i.id))
+NOTICE 00000: inner 1
+CONTEXT: PL/pgSQL function a160_seen(integer) line 1 at RAISE
+NOTICE 00000: inner 2
+CONTEXT: PL/pgSQL function a160_seen(integer) line 1 at RAISE
+id:int4
+1
+2
+-- SELECT 2
+
+> SELECT o.id, i.id, 10 / (i.id - 50) FROM a160_o o JOIN a160_i i ON i.k = o.k WHERE o.id IN (1, 8) AND a160_seen(i.id)
+NOTICE 00000: inner 1
+CONTEXT: PL/pgSQL function a160_seen(integer) line 1 at RAISE
+NOTICE 00000: inner 8
+CONTEXT: PL/pgSQL function a160_seen(integer) line 1 at RAISE
+NOTICE 00000: inner 15
+CONTEXT: PL/pgSQL function a160_seen(integer) line 1 at RAISE
+NOTICE 00000: inner 22
+CONTEXT: PL/pgSQL function a160_seen(integer) line 1 at RAISE
+NOTICE 00000: inner 29
+CONTEXT: PL/pgSQL function a160_seen(integer) line 1 at RAISE
+NOTICE 00000: inner 36
+CONTEXT: PL/pgSQL function a160_seen(integer) line 1 at RAISE
+NOTICE 00000: inner 43
+CONTEXT: PL/pgSQL function a160_seen(integer) line 1 at RAISE
+NOTICE 00000: inner 50
+CONTEXT: PL/pgSQL function a160_seen(integer) line 1 at RAISE
+ERROR 22012: division by zero
+
+> BEGIN
+-- BEGIN
+
+> DECLARE c CURSOR FOR SELECT o.id, i.id FROM a160_o o JOIN a160_i i ON i.k = o.k WHERE o.id IN (2, 9) AND i.id < 30
+-- DECLARE CURSOR
+
+> FETCH 3 FROM c
+id:int4 | id:int4
+2 | 16
+2 | 2
+2 | 9
+-- FETCH 3
+
+> FETCH ALL FROM c
+id:int4 | id:int4
+2 | 23
+9 | 16
+9 | 2
+9 | 23
+9 | 9
+-- FETCH 5
+
+> COMMIT
+-- COMMIT
+
+> SELECT pg_stat_force_next_flush()
+pg_stat_force_next_flush:void
+
+-- SELECT 1
+
+> CREATE TEMP TABLE a160_before AS SELECT idx_scan FROM pg_stat_user_indexes WHERE indexrelname = 'a160_i_k'
+-- SELECT 1
+
+> SELECT count(*) FROM a160_o o JOIN a160_i i ON i.k = o.k AND i.id < 20
+count:int8
+110
+-- SELECT 1
+
+> SELECT pg_stat_force_next_flush()
+pg_stat_force_next_flush:void
+
+-- SELECT 1
+
+> SELECT s.idx_scan - b.idx_scan AS scans FROM pg_stat_user_indexes s, a160_before b WHERE s.indexrelname = 'a160_i_k'
+scans:int8
+41
+-- SELECT 1
+
+> DROP FUNCTION a160_seen(int)
+-- DROP FUNCTION
+
+> DROP TABLE a160_o, a160_i
+-- DROP TABLE
+

@@ -6,6 +6,7 @@
 //! parent level and pushed as one outer row when the level runs, read inside as `Outer(1, i)`.
 
 pub mod ast;
+pub(crate) mod custom;
 mod dml;
 mod expr;
 pub(crate) use expr::numeric_const;
@@ -103,6 +104,8 @@ pub struct Analyzed {
     /// The statement's row-level security, as its planning reads it.
     rls: optimize::StatementRls,
     replannable: bool,
+    /// Where its SELECT's own level placed the WHERE (`Binder::keep_site`).
+    site: Option<Arc<custom::WhereSite>>,
 }
 
 /// What `Analyzed::plan` plans.
@@ -776,6 +779,10 @@ pub struct Binder<'b, 'a> {
     pub(crate) fmgr_call: bool,
     /// A custom plan: `$n` is its value.
     pub param_consts: bool,
+    /// An analysis to be kept: where its SELECT's own level placed the WHERE is noted
+    /// (`custom::WhereSite`), for custom plans made from it (`Analyzed::bind_values`).
+    pub keep_site: bool,
+    pub(crate) where_site: custom::Sites,
     /// Relations that exist but can't be referenced here (the other side of a MERGE NOT
     /// MATCHED clause), for errors.
     pub(crate) unreachable: Vec<ScopeRel>,
@@ -935,6 +942,8 @@ impl<'b, 'a> Binder<'b, 'a> {
             insert_locs: Vec::new(),
             fmgr_call: false,
             param_consts: false,
+            keep_site: false,
+            where_site: custom::Sites::None,
             unreachable: Vec::new(),
             in_merge: false,
             in_conflict: false,
@@ -1341,6 +1350,7 @@ impl<'b, 'a> Binder<'b, 'a> {
         // (A plain SELECT's own level is planned by `Analyzed::plan`: one with a WITH plans
         // its body under its CTEs' estimates, a set operation its arms, as they are bound.)
         let saved_top = (self.defer_top.take(), self.top_step.take());
+        let saved_site = std::mem::take(&mut self.where_site);
         if let Some(pg_query::NodeEnum::SelectStmt(s)) = ast::inner(n)
             && !self.deparse
             && s.with_clause.is_none()
@@ -1359,6 +1369,7 @@ impl<'b, 'a> Binder<'b, 'a> {
         };
         let top = std::mem::replace(&mut self.top_step, saved_top.1);
         self.defer_top = saved_top.0;
+        let site = std::mem::replace(&mut self.where_site, saved_site);
         let (plan, cols) = r?;
         // Access paths of a data-modifying statement's scans (SELECTs plan their own),
         // planned by `Analyzed::plan`; an error PostgreSQL's parse analysis raises, the
@@ -1372,7 +1383,10 @@ impl<'b, 'a> Binder<'b, 'a> {
             Some(t) => Step::Select(t),
             None => Step::Planned,
         };
-        Ok(self.analyzed(plan, cols, step, None, start))
+        let site = matches!(step, Step::Select(_)).then(|| site.finish(&plan)).flatten();
+        let mut a = self.analyzed(plan, cols, step, None, start);
+        a.site = site;
+        Ok(a)
     }
 
     /// The statement analyzed, `start` the planner calls made before its analysis began.
@@ -1404,6 +1418,7 @@ impl<'b, 'a> Binder<'b, 'a> {
             fold_err: Vec::new(),
             rls: Default::default(),
             replannable: self.planned_in_analysis == start,
+            site: None,
         }
     }
 

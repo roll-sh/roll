@@ -522,6 +522,34 @@ struct Derived {
     /// parallel_leader_participation off: a Gather's part runs in the workers alone, whose
     /// locks end with them (`exec::parallel_part`).
     workers_alone: bool,
+    /// What every message or statement reads (`Settings::hot`).
+    hot: Hot,
+}
+
+/// The settings every protocol message or statement reads, by value: worked out once per
+/// change of the settings instead of looked up by name each time.
+#[derive(Clone)]
+pub struct Hot {
+    /// idle_session_timeout, idle_in_transaction_session_timeout, transaction_timeout,
+    /// deadlock_timeout (ms).
+    pub idle_session_timeout: i64,
+    pub idle_in_transaction_timeout: i64,
+    pub transaction_timeout: i64,
+    pub deadlock_timeout: i64,
+    /// track_activity_query_size (bytes).
+    pub activity_query_size: usize,
+    /// row_security isn't off.
+    pub row_security: bool,
+    /// plan_cache_mode: None auto, Some(true) force_custom_plan, Some(false)
+    /// force_generic_plan.
+    pub force_custom: Option<bool>,
+    /// synchronous_commit off: commits return before their WAL fsync, which the WAL writer
+    /// does every wal_writer_delay (ms).
+    pub async_commit: Option<u64>,
+    /// default_transaction_deferrable.
+    pub default_deferrable: bool,
+    /// application_name, as SHOW gives it.
+    pub application_name: String,
 }
 
 /// A session's search path (`session_search_path`) for a `$user` and backend id: what every
@@ -1435,6 +1463,28 @@ impl Settings {
                 logs_inside: self.bool("log_lock_waits")
                     || self.get_str("auto_explain.log_nested_statements") == Some("on"),
                 workers_alone: !self.bool("parallel_leader_participation"),
+                hot: Hot {
+                    idle_session_timeout: self.int("idle_session_timeout"),
+                    idle_in_transaction_timeout: self.int("idle_in_transaction_session_timeout"),
+                    transaction_timeout: self.int("transaction_timeout"),
+                    deadlock_timeout: self.int("deadlock_timeout"),
+                    activity_query_size: self
+                        .get_str("track_activity_query_size")
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(1024),
+                    row_security: self.get_str("row_security") != Some("off"),
+                    force_custom: match self.get_str("plan_cache_mode") {
+                        Some("force_generic_plan") => Some(false),
+                        Some("force_custom_plan") => Some(true),
+                        _ => None,
+                    },
+                    async_commit: self
+                        .get_str("synchronous_commit")
+                        .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "off" | "false" | "no" | "0"))
+                        .then(|| self.int("wal_writer_delay").max(1) as u64),
+                    default_deferrable: self.bool("default_transaction_deferrable"),
+                    application_name: self.show("application_name").unwrap_or_default(),
+                },
             })
         })
     }
@@ -2312,6 +2362,11 @@ impl Settings {
     /// `int("lock_timeout")`.
     pub fn lock_timeout(&self) -> i64 {
         self.derived().lock_timeout
+    }
+
+    /// The settings every message or statement reads (`Hot`).
+    pub fn hot(&self) -> &Hot {
+        &self.derived().hot
     }
 
     /// How the scanner reads string literals under these settings.

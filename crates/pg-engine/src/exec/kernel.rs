@@ -43,6 +43,9 @@ pub enum K {
     /// A cast that reads no session setting (`cast_pure`): a length coercion, a string type
     /// to another, a number to another, a date to a timestamp.
     Cast(Box<K>, Box<(DataType, DataType)>, bool),
+    /// `text [NOT] LIKE 'pattern'` (`neg`: NOT), the pattern compiled once, under no
+    /// collation or a deterministic one (which LIKE doesn't consult).
+    Like(Box<K>, Box<crate::sql::func::string::LikePattern>, bool),
     /// A pgvector distance function's call (strict, float8): its kernel, when the values'
     /// dimensions agree (`ext::vector::distance_kernel`).
     Dist(crate::ext::vector::DistKernel, Box<[K; 2]>),
@@ -308,6 +311,19 @@ fn compile_node(e: &Expr) -> Option<K> {
         Expr::Col(i, _) => K::Col(*i),
         Expr::Const(v, _) => K::Const(v.clone()),
         Expr::Relabel(e, _) | Expr::SqlSyntax(e) | Expr::Collate(e, ..) => compile(e)?,
+        // (A cast that leaves a string as it is, to an unbounded type of its own kind or
+        // varchar to text, is no cast: `l_shipmode::bpchar` of a char(10). bpchar to text
+        // trims: not one.)
+        Expr::Cast(e, from, to, _)
+            if matches!(
+                (from, to),
+                (DataType::Bpchar(_), DataType::Bpchar(-1))
+                    | (DataType::Varchar(_), DataType::Varchar(-1) | DataType::Text)
+                    | (DataType::Text, DataType::Text | DataType::Varchar(-1))
+            ) =>
+        {
+            compile(e)?
+        }
         Expr::Cast(e, from, to, explicit) if cast_pure(from, to) => {
             K::Cast(Box::new(compile(e)?), Box::new((from.clone(), to.clone())), *explicit)
         }
@@ -344,6 +360,18 @@ fn compile_node(e: &Expr) -> Option<K> {
                 f: pure_call(def, ty)?,
                 args: Box::new([compile(&args[0])?, compile(&args[1])?]),
             }
+        }
+        Expr::Call(def, args, DataType::Bool)
+            if args.len() == 2
+                && def.strict
+                && !def.spread
+                && def.coll.as_ref().is_none_or(|c| c.deterministic)
+                && matches!(args[0].ty(), DataType::Text | DataType::Varchar(_))
+                && let Some(neg) = crate::sql::func::string::like_kind(def.imp)
+                && let Expr::Const(Value::Text(p), _) = &args[1] =>
+        {
+            let pat = crate::sql::func::string::LikePattern::new(p, Some('\\')).ok()?;
+            K::Like(Box::new(compile(&args[0])?), Box::new(pat), neg)
         }
         Expr::Call(def, args, ty) if args.len() == 2 => K::Call {
             f: pure_call(def, ty).or_else(|| collated_bytes(def, args))?,
@@ -631,6 +659,14 @@ impl K {
                     }
                 }
                 if saw_null { Value::Null } else { Value::Bool(*all) }
+            }
+            K::Like(a, pat, neg) => {
+                let mut t = Value::Null;
+                match a.arg(row, &mut t)? {
+                    Value::Null => Value::Null,
+                    Value::Text(s) => Value::Bool(pat.matches(s).ok()? != *neg),
+                    _ => return None,
+                }
             }
             K::Cast(a, types, explicit) => {
                 let v = a.run(row)?;

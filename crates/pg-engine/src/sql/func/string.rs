@@ -1058,6 +1058,38 @@ fn like_tokens_match(toks: &[LikeTok], n: usize, at: impl Fn(usize) -> char) -> 
     Ok(ti == toks.len())
 }
 
+/// A LIKE pattern compiled once (`exec::kernel::K::Like`): what `like_match` matches, the
+/// pattern's tokens kept (shareable with a parallel scan's workers).
+#[derive(Clone)]
+pub struct LikePattern(Box<[LikeTok]>);
+
+impl LikePattern {
+    pub fn new(pat: &str, escape: Option<char>) -> Result<LikePattern> {
+        Ok(LikePattern(like_tokens(pat, escape)?.to_vec().into_boxed_slice()))
+    }
+
+    /// `st LIKE pattern` (an error where `like_match`'s would be).
+    pub fn matches(&self, st: &str) -> Result<bool> {
+        if st.is_ascii() {
+            let b = st.as_bytes();
+            return like_tokens_match(&self.0, b.len(), |i| b[i] as char);
+        }
+        let chars: Vec<char> = st.chars().collect();
+        like_tokens_match(&self.0, chars.len(), |i| chars[i])
+    }
+}
+
+/// Whether `imp` is text LIKE (Some(false)) or NOT LIKE (Some(true)), without ILIKE's folding.
+pub fn like_kind(imp: super::FnImpl) -> Option<bool> {
+    if std::ptr::fn_addr_eq(imp, like as super::FnImpl) {
+        Some(false)
+    } else if std::ptr::fn_addr_eq(imp, not_like as super::FnImpl) {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 /// Match `s` against a LIKE pattern with `escape` (None = no escape character).
 pub fn like_match(st: &str, pat: &str, escape: Option<char>, ci: bool) -> Result<bool> {
     // ILIKE lowers both sides with lower() first.

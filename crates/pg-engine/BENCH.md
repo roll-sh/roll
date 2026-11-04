@@ -2056,6 +2056,107 @@ between rounds (select-only 42.6k / 33.9k base, 34.6k / 39.0k new).
   runs agree, statistics included. `big_tables` `deferred_entry_deletes`: inline over a
   table too big to model.
 
+## Executor, round 9 (round 25, agent 160)
+
+Step 1: nested-loop rescan and wider batch kernels (HANDOFF "Executor, round 9, step 1").
+**base** is the branch at `3df0c607`; **new** is this step on top of it. Both are dist builds
+(fat LTO) of their own checkouts.
+
+How it was run:
+- Each server is in a container of its own, both pinned to the same four CPUs (4-7) and
+  both in system.slice. The client is on 8-11, at nice 19.
+- PostgreSQL 18.6 is the pinned image with the bench settings (shared_buffers 2 GB, host
+  network). The engine has `--cache-mb 2048`, with its binary bind-mounted
+  (`run.sh ENGINE_DOCKER=1`).
+- Rounds are interleaved: PostgreSQL, new, base, base, new, PostgreSQL. Each engine run is
+  a fresh server, a warm-up pass, then the measured one.
+- User-space instructions and cycles come from `perf stat -e instructions:u,cycles:u` of the
+  engine process, from a privileged helper container. CPU is the cgroup's.
+- The machine ran at load 15-40. Wall times move about ±10% from run to run.
+
+### 200,000 inner index lookups (`bench nl`: hash and merge joins off, serial; 1M-row `nl_t`, primary key; median of 5)
+
+| query | PostgreSQL | base | new |
+|---|---|---|---|
+| `sum(t.v) FROM generate_series(1, 200000) g JOIN nl_t t ON t.id = g` | 0.23, 0.26 s | 0.84, 0.85 s | **0.68, 0.69 s** (-19%) |
+| `LEFT JOIN nl_t t ON t.id = g * 7` | 0.24, 0.27 s | 0.70, 0.71 s | **0.55, 0.58 s** (-19%) |
+| `EXISTS (... WHERE t.id = g * 3)` | 0.20, 0.21 s | 0.60, 0.61 s | **0.44, 0.44 s** (-27%) |
+| user instructions, 10^9 (the 3 queries, 5 runs each) | | 80.7, 81.2 | **68.4, 69.6 (-15%)** |
+| user cycles, 10^9 | | 43.5, 43.9 | **34.8, 35.3 (-20%)** |
+| peak (engine VmHWM) | | 173-175 MB | 171-173 MB |
+
+The inner join is 2.8x PostgreSQL's time, down from 3.4x (round 8 measured 3.2x on a release
+build). The rest is the storage lookup, which agent 149's point-lookup path behind `next`
+takes on: a TxnScan per rescan, the entry seek, the row fetch.
+
+### TPC-H SF1 (all 22 over the wire)
+
+| | PostgreSQL | base | new |
+|---|---|---|---|
+| wall, s (sum of the 22) | 12.41, 11.98 | 19.58, 18.88 | **17.02, 17.63** |
+| CPU, s (cgroup) | 29.1, 29.6 | 45.5, 45.2 | **41.6, 42.7** |
+| user instructions, 10^9 | | 303.4, 305.2 | **280.3, 281.4 (-7.7%)** |
+| user cycles, 10^9 | | 176.8, 175.3 | **163.1, 162.7 (-7.5%)** |
+| peak, MB (engine VmHWM; PostgreSQL's anon + shmem) | 1,775, 1,775 | 1,832, 1,832 | 1,836, 1,829 |
+
+All 22 result hashes equal PostgreSQL's in every run.
+
+**Engine/PostgreSQL (new): wall 1.42x, CPU 1.44x, peak 1.03x.** Round 8's 2.4x / 1.9x / 1.44x
+came from release builds, and since then from size models, scan cost rounds and query memory.
+The base here measures 1.58x / 1.54x.
+
+Per query, seconds (the round's medians):
+
+| | q01 | q10 | q12 | q13 | q18 | q21 | q22 |
+|---|---|---|---|---|---|---|---|
+| PostgreSQL | 1.98 | 0.65 | 0.60 | 0.73 | 2.53 | 0.62 | 0.10 |
+| base | 1.37 | 1.31 | 1.63 | 1.62 | 2.04 | 1.45 | 0.86 |
+| new | **1.23** | **0.82** | **1.31** | **1.39** | **2.00** | **0.96** | **0.43** |
+
+- q01 and q18 are ahead of PostgreSQL.
+- q10 and q12 read lineitem through filters on char(n) columns (`l_returnflag = 'R'`,
+  `l_shipmode IN (...)`). Under the binder's `::bpchar` cast, neither the
+  stored comparisons nor the batch filter took them, so every row was decoded and filtered
+  row by row. The cast now compiles away.
+- q21 and q22 are nested-loop semi and anti joins over inner index scans: lineitem l2 / l3
+  by `lineitem_pkey`, orders by `orders_o_custkey_idx`. They are rescanned now, and stop at
+  the first match, as do the workers' lookups.
+- q13 gains from LIKE becoming a kernel: orders' `o_comment NOT LIKE` filter runs in the
+  workers (`LikePattern::matches` is 5% of its profile). What's left is the grouping above
+  the join (`AggNode::run`, 18%).
+
+### pgbench and the footprint gate (`scoreboard.sh quick`, SB_ONLY=pgbench,analytic: 2 interleaved rounds, scale 1)
+
+User instructions per transaction (`perf stat` of the engine; scale 10, `-M prepared`, 8
+clients, 15 s after a 5 s warm-up, a fresh data directory each; new, base, base, new, two
+rounds):
+
+| | base | new |
+|---|---|---|
+| select-only | 82.7k-82.9k | 82.8k-83.0k |
+| simple-update (`-N`) | 366k-397k | 375k-397k |
+| tpcb-like | 878k-910k | 863k-904k |
+
+These are unchanged: point reads and updates don't take the changed paths.
+
+Engine/PostgreSQL (scale 1, 2 rounds, CPU per operation; above 1x the engine is ahead):
+
+| | base | new |
+|---|---|---|
+| select-only, 1 / 8 / 32 clients | 0.99x / 0.81x / 0.89x | 0.98x / 0.83x / 0.89x |
+| tpcb-like, 1 / 8 / 32 clients | 0.88x / 0.90x / 1.17x | 0.83x / 0.82x / 1.17x |
+
+The two scoreboard runs were not interleaved and the machine's load moved between them. The
+instruction counts above are the measure.
+
+Footprint gate (new):
+- fresh data directory 3.03 MB (PostgreSQL 38.9);
+- idle CPU over 5 minutes 0.02 s (0.54);
+- 100 idle sessions 29.9 MB (211).
+
+All three pass. The step adds no thread, timer or cache. The inner node it keeps lives as
+long as its join.
+
 ## Executor, round 8 (round 25, agent 154)
 
 Step 1 of batch execution (HANDOFF "Executor: batch execution, the next step", "What is
@@ -6548,6 +6649,33 @@ reference): 51,148 / 51,150, no unit changed against `results.tsv` (the stats fi
 generated views); isolation 121 / 122 specs (intra-grant-inplace) and the 17 roll-* specs;
 `pg_dump_tap` 14,817 / 14,817; the difftest smoke.
 
+### Fourth batch: pg_stat_*_indexes, one table's statistics
+
+pg_stat_all_indexes / user_indexes / sys_indexes are generated in one pass too, and a query
+naming the table (`relname = ...`, `schemaname = ...`) makes that table's rows alone (HANDOFF).
+At 10,000 tables (psql `\timing`, ms; fresh engine; release builds at nice 19; PostgreSQL 18.6
+on the host network with the same tables):
+
+| | batch 3 (or its base where the view ran its SQL) | batch 4 | PostgreSQL | engine / PostgreSQL |
+|---|---|---|---|---|
+| `count(*)` of pg_stat_user_tables, first (pg_class's rows made too) | 186 | 188 | 39 | 4.8x |
+| the same again | 26 | 13 | 17 | 0.78x |
+| pg_stat_user_tables `WHERE relname = 't5005'`, again | 33 | 3.0 | 0.8 | 3.7x |
+| `count(*)` of pg_stat_user_indexes | 470 | 14-39 | 23-25 | 0.6-1.6x |
+| pg_stat_user_indexes `WHERE relname = 't5005'` | 10 | 3.4 | 1.1 | 3.1x |
+| engine CPU over the file, peak RSS | 0.42 s, 150 MB | 0.39 s, 153 MB | | |
+
+What is left in the lookups is reading pg_class's kept rows for the name (every relation's
+row is visited; PostgreSQL reads one through pg_class_relname_nsp_index); a query's first
+read of pg_class still makes its rows (188 ms against 39).
+
+### Verification (round 24, agent 146, fourth batch)
+
+On `d18d6f84`: `cargo test -p pg-engine` debug (golden `a146_stat_views` new), clippy (nothing
+new), the regression suite in full (debug, private reference): 51,148 / 51,150, no unit changed
+against `results.tsv`; isolation 121 / 122 specs (intra-grant-inplace) and the 17 roll-* specs;
+`pg_dump_tap` 14,817 / 14,817; the difftest smoke.
+
 ## OLTP round 3 (round 23, agent 136)
 
 HANDOFF.md, "OLTP round 3", has what changed: extended-protocol statements bound once per
@@ -6724,6 +6852,94 @@ Peak memory over the matrix: engine VmHWM 425-465 MB; PostgreSQL's cgroup memory
 - **memory_load** (`many_sessions_stay_bounded`, 100 sessions, release): +50.2 MB of heap at
   this round's first batch, +57.0 at d22006b9, +61.7 / +62.4 at 74a3ad38 / b0c4238b (bound
   120); debug builds vary 82-126 MB run to run on any of them.
+
+## OLTP, round 5 (round 25, agent 159)
+
+HANDOFF.md, "OLTP round 5", has what changed: custom plans from the Parse's analysis with the
+values put in (`Analyzed::bind_values`), simple queries planned from their template's analysis,
+per-message settings by value (`Settings::hot`), each session's notification listener kept.
+
+### Against PostgreSQL (container on both sides, dist build)
+
+**base** is origin's `5973e109` (round 4 and agent 151's size-model commits), **new** is this
+round (with the lock-table presize the footprint gate below left out, under 1% of CPU), both `--profile dist` in containers of the pinned debian image, PostgreSQL 18.6 in its
+own (shared_buffers 2 GB), all three on cores 4-7 with --cpu-shares 2, pgbench 18.6 in a fourth
+container on 8-11; scale 10, 10 s per run after a 4 s select-only warm-up, fresh data per server
+and round, two interleaved rounds (the order reversed in the second). CPU ms per transaction
+from each server container's cgroup (cpu.stat usage_usec); each cell the range over the rounds;
+ratio = engine / PostgreSQL CPU per transaction (means of the rounds; below 1: the engine uses
+less). The machine ran at load 20-30.
+
+| workload | mode | clients | pg tps | base tps | new tps | pg ms | base ms | new ms | base/pg | new/pg |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| select-only | simple | 1 | 9,286-10,157 | 11,145-11,965 | 12,230-12,253 | 0.076-0.086 | 0.061-0.070 | 0.057-0.060 | 0.80 | 0.72 |
+| select-only | simple | 8 | 44,535-48,361 | 58,380-62,271 | 73,049-74,426 | 0.073-0.083 | 0.054-0.060 | 0.045-0.047 | 0.73 | 0.59 |
+| select-only | simple | 32 | 44,688-47,466 | 61,628-85,235 | 89,619-90,353 | 0.083-0.088 | 0.047-0.064 | 0.044-0.044 | 0.65 | 0.52 |
+| select-only | extended | 1 | 7,965-8,176 | 9,244-10,118 | 10,452-11,917 | 0.098-0.102 | 0.067-0.086 | 0.058-0.069 | 0.76 | 0.63 |
+| select-only | extended | 8 | 35,023-41,419 | 50,692-65,583 | 63,696-64,934 | 0.088-0.104 | 0.054-0.072 | 0.054-0.054 | 0.66 | 0.56 |
+| select-only | extended | 32 | 34,543-45,371 | 61,716-71,857 | 74,045-75,249 | 0.087-0.115 | 0.056-0.065 | 0.053-0.054 | 0.60 | 0.53 |
+| select-only | prepared | 1 | 13,466-13,951 | 10,892-13,679 | 12,844-14,160 | 0.051-0.053 | 0.052-0.059 | 0.050-0.053 | 1.07 | 0.99 |
+| select-only | prepared | 8 | 67,693-84,295 | 64,967-77,752 | 73,213-77,176 | 0.040-0.049 | 0.045-0.054 | 0.044-0.045 | 1.11 | 1.00 |
+| select-only | prepared | 32 | 70,350-87,555 | 80,004-92,248 | 89,269-90,110 | 0.045-0.056 | 0.043-0.050 | 0.044-0.044 | 0.92 | 0.88 |
+| simple-update | simple | 1 | 1,896-2,078 | 2,391-2,578 | 2,453-2,492 | 0.355-0.400 | 0.253-0.298 | 0.266-0.271 | 0.73 | 0.71 |
+| simple-update | simple | 8 | 8,847-11,735 | 10,629-11,349 | 11,304-11,602 | 0.282-0.357 | 0.296-0.306 | 0.278-0.286 | 0.94 | 0.88 |
+| simple-update | simple | 32 | 9,634-11,395 | 8,352-9,028 | 9,786-10,044 | 0.317-0.368 | 0.401-0.426 | 0.366-0.376 | 1.21 | 1.08 |
+| simple-update | extended | 1 | 1,730-2,000 | 2,155-2,328 | 2,352-2,376 | 0.373-0.453 | 0.314-0.326 | 0.290-0.297 | 0.77 | 0.71 |
+| simple-update | extended | 8 | 7,016-9,563 | 10,698-10,965 | 10,115-10,966 | 0.347-0.440 | 0.310-0.326 | 0.297-0.301 | 0.81 | 0.76 |
+| simple-update | extended | 32 | 6,762-9,648 | 8,310-9,624 | 5,624-9,621 | 0.375-0.503 | 0.388-0.443 | 0.387-0.472 | 0.95 | 0.98 |
+| simple-update | prepared | 1 | 2,455-2,874 | 2,556-2,638 | 2,456-2,665 | 0.226-0.280 | 0.259-0.291 | 0.285-0.298 | 1.09 | 1.15 |
+| simple-update | prepared | 8 | 10,895-14,540 | 11,641-12,929 | 11,376-13,590 | 0.211-0.285 | 0.257-0.285 | 0.238-0.267 | 1.09 | 1.02 |
+| simple-update | prepared | 32 | 8,984-15,623 | 12,508-13,843 | 12,236-14,926 | 0.221-0.340 | 0.266-0.294 | 0.248-0.280 | 1.00 | 0.94 |
+| tpcb-like | simple | 1 | 1,149-1,459 | 1,310-1,315 | 1,473-1,484 | 0.497-0.656 | 0.577-0.577 | 0.494-0.520 | 1.00 | 0.88 |
+| tpcb-like | simple | 8 | 4,636-7,367 | 5,445-6,135 | 6,384-6,634 | 0.432-0.656 | 0.504-0.546 | 0.486-0.503 | 0.97 | 0.91 |
+| tpcb-like | simple | 32 | 4,102-6,553 | 5,923-6,435 | 7,216-7,440 | 0.549-0.798 | 0.497-0.578 | 0.453-0.480 | 0.80 | 0.69 |
+| tpcb-like | extended | 1 | 975-1,306 | 1,337-1,476 | 1,584-1,705 | 0.580-0.880 | 0.658-0.668 | 0.497-0.531 | 0.91 | 0.70 |
+| tpcb-like | extended | 8 | 3,999-6,487 | 4,459-4,564 | 5,459-5,748 | 0.522-0.776 | 0.593-0.607 | 0.503-0.515 | 0.92 | 0.78 |
+| tpcb-like | extended | 32 | 4,109-5,866 | 2,985-4,098 | 3,841-5,288 | 0.624-0.837 | 0.692-0.903 | 0.582-0.785 | 1.09 | 0.94 |
+| tpcb-like | prepared | 1 | 1,803-1,902 | 1,520-1,663 | 1,625-1,791 | 0.346-0.398 | 0.505-0.509 | 0.387-0.437 | 1.36 | 1.11 |
+| tpcb-like | prepared | 8 | 6,892-10,219 | 4,354-5,665 | 6,019-6,803 | 0.307-0.429 | 0.446-0.535 | 0.409-0.457 | 1.33 | 1.18 |
+| tpcb-like | prepared | 32 | 7,548-9,258 | 3,323-5,343 | 5,030-5,496 | 0.369-0.440 | 0.525-0.763 | 0.523-0.610 | 1.59 | 1.40 |
+| 100-row pk range | simple | 1 | 5,425-6,145 | 2,317-2,721 | 3,129-3,229 | 0.140-0.157 | 0.391-0.427 | 0.279-0.368 | 2.75 | 2.18 |
+| 100-row pk range | simple | 8 | 29,922-31,209 | 10,221-11,960 | 14,207-14,364 | 0.124-0.129 | 0.333-0.390 | 0.276-0.280 | 2.86 | 2.20 |
+| 100-row pk range | simple | 32 | 29,720-29,946 | 9,567-10,963 | 11,774-12,602 | 0.133-0.134 | 0.364-0.417 | 0.317-0.338 | 2.93 | 2.45 |
+| 100-row pk range | extended | 1 | 4,929-5,446 | 2,216-2,548 | 2,986-3,209 | 0.158-0.173 | 0.354-0.413 | 0.281-0.304 | 2.31 | 1.76 |
+| 100-row pk range | extended | 8 | 23,260-26,101 | 10,535-11,684 | 12,284-12,920 | 0.148-0.167 | 0.339-0.377 | 0.305-0.321 | 2.27 | 1.98 |
+| 100-row pk range | extended | 32 | 20,542-24,161 | 9,254-10,204 | 11,107-12,339 | 0.164-0.193 | 0.391-0.427 | 0.324-0.359 | 2.29 | 1.91 |
+| 100-row pk range | prepared | 1 | 6,094-6,292 | 2,543-2,570 | 3,094-3,157 | 0.135-0.139 | 0.355-0.357 | 0.284-0.295 | 2.60 | 2.11 |
+| 100-row pk range | prepared | 8 | 29,066-32,323 | 10,412-10,879 | 13,403-14,425 | 0.118-0.132 | 0.365-0.381 | 0.274-0.296 | 2.98 | 2.28 |
+| 100-row pk range | prepared | 32 | 19,623-31,403 | 10,416-10,612 | 9,204-12,282 | 0.126-0.201 | 0.377-0.383 | 0.325-0.429 | 2.33 | 2.31 |
+
+- **The range read** (`SELECT sum(abalance) ... WHERE aid BETWEEN :aid AND :aid + 99`): 15-28%
+  less CPU per transaction than base on every protocol (prepared and extended: custom plans
+  from the analysis; simple: the template's analysis). Its profile after (release with frame
+  pointers, 8 clients, prepared): execution 41% (the aggregate over a 100-row index scan),
+  `bound_custom` 19% of which planning 13% (`plan_query_limited`) and the substitution 4.6%,
+  the custom plan's cost (`plan_cost`, the EXPLAIN builder's estimate tree) 19.7%: that one
+  waits for the planner to hand over its chosen path's cost (agent 155's item).
+- **tpcb-like prepared** 1.33-1.59 -> 1.11-1.40; **simple-update prepared** 1.00-1.09 ->
+  0.94-1.15 (its 1-client cell rerun in three more interleaved rounds: base 0.244-0.258, new
+  0.250-0.254 ms, the same). Where tpcb-like prepared's CPU goes (8 clients): the UPDATEs'
+  row scans 31.6% (`next_heap_ordered` 14.8%: tellers' and branches' version chains in their
+  hot ranges, which PostgreSQL seq-scans too; storage, agent 149), send 12-14%, receive 6%,
+  commit 7.2% (`wait_durable` 2.7%), `run_query`'s own work 8.3% (relation locks 18% of it,
+  privilege checks 15%, `begin_statement` 12%, search_path copies 7-10%, settings by name 6%),
+  Bind 3%, the allocator 10% as leaf. simple-update prepared: send 18%, commit 12%, receive
+  7.6%, `run_query`'s own work 16.5%, pg_stat_activity updates per message 3.5%, the notify
+  hub's mutex 1.7% (now per session).
+- **select-only** 0.52-1.00 on every protocol (base 0.60-1.11); **tpcb-like simple / extended**
+  0.69-0.94 (base 0.80-1.09).
+- Peak memory over the matrix: engine VmHWM base 451 MB, new 445 MB; PostgreSQL's cgroup
+  memory.peak 1,211 MB (shared_buffers 2 GB, cumulative).
+
+- **Footprint gate** (scoreboard.sh's three measures, the engine in its container on cores 4-7,
+  base and this round's measured build alternated, six runs each): fresh data directory 3.0
+  MB either side; idle CPU 0-0.05 s per 5 minutes either side; with 100 idle sessions the
+  container's anon + shmem 29.3 MB base, 30.7 MB the measured build (RSS 52.4-54.6 against
+  55.2-56.4 MB; without sessions 24.7-25.9 against 26.1-26.4 MB). Both pass the gate (33 MB,
+  and below PostgreSQL's); the growth was traced to presizing the lock table (`Txn::locks_held`
+  with room for 8: a 672-byte allocation class each connection thread's mimalloc heap then
+  touches), which was left out of the commit. The committed code wasn't measured again in
+  dist (the heavy queue held 20+ jobs): the next scoreboard run should confirm 29-30 MB.
 
 ## Application CPU (round 24, agent 133)
 
