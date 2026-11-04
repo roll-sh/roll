@@ -1,0 +1,23 @@
+diff --git a/crates/pg-engine/tests/parallel_scan.rs b/crates/pg-engine/tests/parallel_scan.rs
+index 6c7fa8db..185b2131 100644
+--- a/crates/pg-engine/tests/parallel_scan.rs
++++ b/crates/pg-engine/tests/parallel_scan.rs
+@@ -956,7 +956,8 @@ fn parallel_workers_use_execution_context_after_parse_inner() {
+     use pg_engine::{session::Outcome, types::Value};
+     let dir = tempfile::tempdir().unwrap();
+     let engine = open(dir.path());
+-    let mut s = engine.connect(1, "postgres", "postgres", "parse_context").unwrap();
++    let (pid, _, _) = engine.register_backend(None, None);
++    let mut s = engine.connect(pid, "postgres", "postgres", "parse_context").unwrap();
+     s.query("CREATE TABLE p171_parallel AS SELECT g AS a FROM generate_series(1,3000000) g; ANALYZE p171_parallel").unwrap();
+     let sql = "SELECT a FROM p171_parallel WHERE a % 3000000 = 0";
+     fn counts(s: &mut Session) -> (i64, i64) {
+@@ -991,6 +992,8 @@ fn parallel_workers_use_execution_context_after_parse_inner() {
+         println!("{name}: worker to_launch/launched delta={delta:?}");
+         deltas.push(delta);
+     }
++    drop(s);
++    engine.unregister_backend(pid);
+     engine.shutdown();
+     assert_eq!(deltas, [(2, 2), (2, 2)], "actual worker launches follow settings at first execution");
+ }

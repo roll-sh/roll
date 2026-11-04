@@ -1,0 +1,79 @@
+{
+  "status": "BOUNDED CONTROL/RED PAIR COMPLETED;NOTSOURCEACCEPTANCE",
+  "fixture": {
+    "commit": "e7d41432241cde1962eecb4204d2d8e44096c085",
+    "tree": "641824fa60ba6ccbc8a3cbfe6870e6135ffadccd",
+    "remote": "e7d41432241cde1962eecb4204d2d8e44096c085",
+    "ref": "refs/heads/wip/a171-fixture-v2-resume-20261104",
+    "fixture_patch_sha256": "837459d07862b53d24e2d3d91ced99b32cbdaff87947396fef292b745b8ed8f7",
+    "head_unchanged": true,
+    "production_unchanged": true,
+    "generic_fixture_unchanged": true,
+    "original_fixture_ref_untouched": "eb548388550e00d6ca9697c70317cd27c366efbb",
+    "static_audit": "static-registration-audit.json"
+  },
+  "baseline": {
+    "production": "c8618834caf45bc0a34cf9985c07f9bc13b498ef",
+    "exit": 0,
+    "passed": 1,
+    "failed": 0,
+    "both_planned_launched": [
+      2,
+      2
+    ],
+    "source": {
+      "production": "c8618834caf45bc0a34cf9985c07f9bc13b498ef",
+      "effective_tree": "4931e77e47d7d55dda97d3cfa7f1eea56f92917f",
+      "head": "a6fe3e4e626b0552c14320c18211886d1b16ad38",
+      "fixturepatch_sha256": "837459d07862b53d24e2d3d91ced99b32cbdaff87947396fef292b745b8ed8f7",
+      "production_byte_identical": true
+    },
+    "binary": {
+      "binary": "/home/meszmate/.cache/a171/target/debug/deps/parallel_scan-e11614aaa9489d66",
+      "sha256": "b9519d7406ac3a9230442f603488c153dbb159a19d5a4d3e618177099a3486e5",
+      "crate_compiling": true,
+      "mtime_ns": 1793825451523668763
+    }
+  },
+  "candidate": {
+    "production": "a6fe3e4e626b0552c14320c18211886d1b16ad38",
+    "exit": 101,
+    "passed": 0,
+    "failed": 1,
+    "both_planned_launched": [
+      0,
+      0
+    ],
+    "source": {
+      "production": "a6fe3e4e626b0552c14320c18211886d1b16ad38",
+      "effective_tree": "641824fa60ba6ccbc8a3cbfe6870e6135ffadccd",
+      "head": "a6fe3e4e626b0552c14320c18211886d1b16ad38",
+      "fixturepatch_sha256": "837459d07862b53d24e2d3d91ced99b32cbdaff87947396fef292b745b8ed8f7",
+      "production_byte_identical": true
+    },
+    "binary": {
+      "binary": "/home/meszmate/.cache/a171/target/debug/deps/parallel_scan-e11614aaa9489d66",
+      "sha256": "08b095a087b8a70fbcac87a77ac34e033976fb710d688c16a710e941d38647fd",
+      "crate_compiling": true,
+      "mtime_ns": 1793825605537845340
+    }
+  },
+  "both_current_explain": "Gather2;correctone row",
+  "restoration": "a6fe plus exactrevisedfixturepatch;HEAD/indexunchanged;productiondiffempty",
+  "owned_pids_absent": [
+    903267,
+    903268,
+    903289,
+    925752,
+    972239,
+    972240,
+    972241
+  ],
+  "own_shared_slot_released": true,
+  "observed_remaining_slots": [],
+  "old_evidence": "a776a571 and eb548388 unchanged;initial unregistered fixture limits launch attribution",
+  "generic": "UNCHANGED priorc861PASS1/5 and a6feRED0/6;NOTRERUN",
+  "production_repair": "NOTAPPLIED;parentreviewrequired",
+  "serial_bound_assertion": "unattributed;NOTRERUN",
+  "later_checks": "NOTRUN"
+}

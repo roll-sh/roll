@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "dbdc18c88ab0bc0ad3525f09982a06683236f0e35921dfcebeed59ac351d3bd6",
-    "bytes": 16159
+    "sha256": "83b6d609f0c30a1c0456c025ebd16ca344b3bea967dfb5d2ce843cf6586dc92e",
+    "bytes": 16932
   },
   "baseline171-v1/RESTORED.txt": {
     "sha256": "2ad11b1db92238f171853cadc56294d550edeed718924b1b46054ccb24969691",
@@ -772,8 +772,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "ac02455cb3438ae261e6c1767c1d5cb1cfcae9ccc6d68b1d2a47991a5d974ea4",
-    "bytes": 32898
+    "sha256": "bf9e85d6029016d8610f6677e0c4574cc8046948722e1fe3b4ea6f27b55f2e04",
+    "bytes": 34004
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -1246,6 +1246,114 @@
   "oltp165/test-release-failed.log": {
     "sha256": "05525c4c6f34b7872216b672e1f937f18be10617c50e8bb998ffc942aecbbd30",
     "bytes": 6402
+  },
+  "parallel171-v2/fixture-v2-backup.json": {
+    "sha256": "8e26e028879b6d7bb69f2692a80f75148be0037e8e435c00c32fd473a19d20b6",
+    "bytes": 549
+  },
+  "parallel171-v2/fixtures-v2.patch": {
+    "sha256": "837459d07862b53d24e2d3d91ced99b32cbdaff87947396fef292b745b8ed8f7",
+    "bytes": 4422
+  },
+  "parallel171-v2/revision-only.patch": {
+    "sha256": "9e00f9ec4b974864c85230eb00145a77dc7e48294509f19d1d5bd2052dfb497f",
+    "bytes": 1289
+  },
+  "parallel171-v2/runtime/RESTORED-BEFORE-CANDIDATE.txt": {
+    "sha256": "33460466b3e615f1cf03cd3bcbf0d5d3815e0f476e4e44011b132bebe9ad39fc",
+    "bytes": 66
+  },
+  "parallel171-v2/runtime/RESTORED.txt": {
+    "sha256": "354f4729ccd9a531f9c0d5036820f63957e815c3998dbc505c814ddc4e41eec9",
+    "bytes": 73
+  },
+  "parallel171-v2/runtime/TERMINAL.json": {
+    "sha256": "35378bfc04b336f4efe54ab2d570a034e407f5c8b1fcc9c339316abc00118ef1",
+    "bytes": 2919
+  },
+  "parallel171-v2/runtime/affinity-observation-candidate.json": {
+    "sha256": "df75d660b47ee018d74f947fc1723d1a50ca73b8f526c2451b8e79707fb84fc0",
+    "bytes": 1482
+  },
+  "parallel171-v2/runtime/baseline-binary.json": {
+    "sha256": "3012253ad95b5629fd3eecaf537567946f56ec5e56ed53c62323d7fbf9d533d8",
+    "bytes": 236
+  },
+  "parallel171-v2/runtime/baseline-identity.json": {
+    "sha256": "9e63d0a556e663abe9437e3e4ca649070e99a327646838118e1e605410b28d2c",
+    "bytes": 311
+  },
+  "parallel171-v2/runtime/baseline-source.patch": {
+    "sha256": "a04b84d349588e9150657c4ff9b25379ec041962df6e0f8aca77124f98c6b23b",
+    "bytes": 13415
+  },
+  "parallel171-v2/runtime/baseline.command": {
+    "sha256": "d6cd522123e31329e3febe1f1e0d5ac523fcf516c01330fad28bbc354af7bd88",
+    "bytes": 119
+  },
+  "parallel171-v2/runtime/baseline.log": {
+    "sha256": "8b6c3df492938b85eb26f4ad9a1500e175539bc236a016ef110ae98a710ebe07",
+    "bytes": 1089
+  },
+  "parallel171-v2/runtime/candidate-binary.json": {
+    "sha256": "962f95d1a0373a15bd87a33852f3d7777fcb29ba5411b064b22b1bed90f09120",
+    "bytes": 236
+  },
+  "parallel171-v2/runtime/candidate-identity.json": {
+    "sha256": "a11db546b7c871583ddee76f861c11dbed3652684464dbc0ecf4578495ad0eda",
+    "bytes": 311
+  },
+  "parallel171-v2/runtime/candidate-source.patch": {
+    "sha256": "837459d07862b53d24e2d3d91ced99b32cbdaff87947396fef292b745b8ed8f7",
+    "bytes": 4422
+  },
+  "parallel171-v2/runtime/candidate.command": {
+    "sha256": "d6cd522123e31329e3febe1f1e0d5ac523fcf516c01330fad28bbc354af7bd88",
+    "bytes": 119
+  },
+  "parallel171-v2/runtime/candidate.log": {
+    "sha256": "f55f5e0c0a290978776d0271bfb12aaafbfdf208ce500575007ad9bce00843d2",
+    "bytes": 1738
+  },
+  "parallel171-v2/runtime/exits.tsv": {
+    "sha256": "9ea96c6f6634a60b74f6126aee1394ff42701e3dcb8507e0f84d63147d18db03",
+    "bytes": 25
+  },
+  "parallel171-v2/runtime/frozen.sha256": {
+    "sha256": "b1eddb55aacb11fab3b458b38b34b51762b23e311163dd2f0728793c5b062232",
+    "bytes": 493
+  },
+  "parallel171-v2/runtime/original.patch": {
+    "sha256": "837459d07862b53d24e2d3d91ced99b32cbdaff87947396fef292b745b8ed8f7",
+    "bytes": 4422
+  },
+  "parallel171-v2/runtime/parent-transition.patch": {
+    "sha256": "41c73f9564d1b8bcacc4f950ae620e6675720aa95022f80192e3851a03c9735d",
+    "bytes": 8993
+  },
+  "parallel171-v2/runtime/restored-production.patch": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  "parallel171-v2/runtime/restored.patch": {
+    "sha256": "837459d07862b53d24e2d3d91ced99b32cbdaff87947396fef292b745b8ed8f7",
+    "bytes": 4422
+  },
+  "parallel171-v2/runtime/source-start.txt": {
+    "sha256": "d09d28070c3260e34310ba71d4d8ba3652f95c828aa4a6208a04011a2a2aec30",
+    "bytes": 41
+  },
+  "parallel171-v2/runtime/startup-controls.json": {
+    "sha256": "5cd8e9adfa0647178be68ffd048bae80471639fced1ec52671f609cec1870991",
+    "bytes": 149
+  },
+  "parallel171-v2/static-registration-audit.json": {
+    "sha256": "15e6982a8222f570b6e98ce09b003fdaa8c56f08ce84ac8b1b32c5f90383e55b",
+    "bytes": 863
+  },
+  "parallel171-v2/wrapper.log": {
+    "sha256": "9f46d4e162c6fb25e9b83cec1a4806ea84eb070c5f93f8442d3e1ec9116fe8aa",
+    "bytes": 711
   },
   "planner171/base-dist.log": {
     "sha256": "c6f67d9ec1111929e8530aefa083a27140b312d8372de29c912c4c6d666e18d1",
@@ -1786,6 +1894,10 @@
   "runners/oltp-independent-source-review-r2-result.json": {
     "sha256": "0c8013be5e31eb18f1ff3b699ea440a2b906855bfc403d6308b349841773b2c0",
     "bytes": 8367
+  },
+  "runners/parallel171-v2.sh": {
+    "sha256": "140a43315172371d61b74d57d2fbaa07985e1c22817f2376097f2eb4209f8e4d",
+    "bytes": 5102
   },
   "runners/planner171-source-review-r1-result.json": {
     "sha256": "b72299ebcc9f5c7e1fce5ea068038b2a6a6900f98f78fb850d857986e26a6c89",

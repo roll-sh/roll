@@ -1,0 +1,10 @@
+baseline	0
+/home/meszmate/.cache/pg-engine-resume-20261104/session_planner/parallel171-v2/runtime/parent-transition.patch: OK
+/home/meszmate/.cache/pg-engine-resume-20261104/session_planner/parallel171-v2/runtime/original.patch: OK
+/home/meszmate/.cache/pg-engine-resume-20261104/session_planner/parallel171-v2.sh: OK
+candidate	101
+/home/meszmate/.cache/pg-engine-resume-20261104/session_planner/parallel171-v2/runtime/parent-transition.patch: OK
+/home/meszmate/.cache/pg-engine-resume-20261104/session_planner/parallel171-v2/runtime/original.patch: OK
+/home/meszmate/.cache/pg-engine-resume-20261104/session_planner/parallel171-v2.sh: OK
+PARALLEL171-V2-BOUNDED-PAIR-CONFIRMED-NO-SOURCE-ACCEPTANCE
+HEAVY-EXIT 0

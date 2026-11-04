@@ -1,0 +1,12 @@
+{
+  "commit": "e7d41432241cde1962eecb4204d2d8e44096c085",
+  "tree": "641824fa60ba6ccbc8a3cbfe6870e6135ffadccd",
+  "remote": "e7d41432241cde1962eecb4204d2d8e44096c085",
+  "ref": "refs/heads/wip/a171-fixture-v2-resume-20261104",
+  "fixture_patch_sha256": "837459d07862b53d24e2d3d91ced99b32cbdaff87947396fef292b745b8ed8f7",
+  "head_unchanged": true,
+  "production_unchanged": true,
+  "generic_fixture_unchanged": true,
+  "original_fixture_ref_untouched": "eb548388550e00d6ca9697c70317cd27c366efbb",
+  "static_audit": "static-registration-audit.json"
+}

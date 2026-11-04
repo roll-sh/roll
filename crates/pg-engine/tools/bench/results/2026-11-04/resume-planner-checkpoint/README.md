@@ -1,6 +1,17 @@
 # Recovery and OLTP165 review checkpoint (2026-11-04)
 
 
+LATEST171 REGISTEREDFIXTURE: originalfailedc861control usedconnect(1)withoutbackend
+registration. Identicalc861/a6feenginecode returns no workers forunregisteredleader.
+Separatefixturev2 e7d41432 addsregister/usePID/drop/unregister only;genericunchanged.
+Exactv2parallelfilterONCEperproduction: c861PASS0/1test,bothcasesplanned/launched2/2;
+a6feRED101/0pass1fail,both0/0,currentEXPLAINGather2/correctrow. Originalv1fixtures/raw
+2/0baseline preserved,a776/eb548388untouched. Runtimev2source/tree/patch/binaryhashes/
+actualexits/affinity/rebuildlogs sealed. Exacta6fe+v2restored,HEAD/indexunchanged,owned
+processes/slotgone. STOPafterpair;lazyproposalNOTAPPLIED;nofurthergreens/fullgates.
+Genericpriorc8611/5versusa6fe0/6stands;notrerun. Serial-boundassertionunattributed.
+
+
 LATEST171: boundedc861parentproduction control genericPASSED1/5; parallelbehavioral
 FAILED101 withplanned/launched2/0inBOTHsetting-change cases (expected2/2). Current
 EXPLAINGather2/correctrow. a6fehad0/0;baselinealso launched0,unattributed. Scoped

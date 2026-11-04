@@ -1,0 +1,13 @@
+{
+  "c861_a6fe_identical_files": {
+    "crates/pg-engine/src/engine.rs": "fb793b3af3b448b8f12ad247e32b8966f57383bffaeb145d27762fd62b6536d3",
+    "crates/pg-engine/src/exec/parallel_part.rs": "d7271108309a998f0a219ad12656c6170867c734cd8f93bdb6d36fc42e55a421",
+    "crates/pg-engine/tests/backend_status.rs": "6a1a689ba0a4c1a8a50b141dad40034b45c6e46b8b4f4690ce61491769d77400"
+  },
+  "register_backend": "engine.rs997 inserts backends slot andreturnsPID",
+  "connect": "engine.rs1047 createsSessionbutdoesnotinsertbackends",
+  "start_parallel_workers": "engine.rs2202 returns emptywithout leader registration",
+  "launch": "parallel_part.rs245 records planned and pids.len",
+  "existing_test": "backend_status registersPID/connects withit/dropSession/unregisterPID/shutdown",
+  "runtime_attribution": "NOTYETPROVEN; priorc8612/0 preserved; revisedfixtureseparate"
+}
