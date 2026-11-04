@@ -70,11 +70,11 @@ fn crash_async_child() {
         s.query(&format!("UPDATE ctr SET n = {k}")).unwrap();
         s.query("COMMIT").unwrap();
         if sync {
-            writeln!(log, "s {k}").unwrap();
+            log.write_all(format!("s {k}\n").as_bytes()).unwrap();
             log.sync_all().unwrap();
         }
         if pause == Some(k - first) {
-            writeln!(log, "p {k}").unwrap();
+            log.write_all(format!("p {k}\n").as_bytes()).unwrap();
             log.sync_all().unwrap();
             std::thread::sleep(Duration::from_secs(3600));
         }

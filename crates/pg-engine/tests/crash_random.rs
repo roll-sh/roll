@@ -313,19 +313,64 @@ fn step(seed: u64, i: u64, m: &Model) -> (Vec<String>, End, Vec<Op>) {
     (sql, end, ops)
 }
 
-/// The steps log: one line per finished step, `<i> c` (its effects are in) or `<i> a`.
+/// The steps log: one line per finished step, `<i> c` (its effects are in) or `<i> a`. A
+/// crash can cut the last line short (the step's commit returned, its line wasn't all
+/// written): such a step counts as in flight, as a commit whose client never heard back,
+/// and `settle` decides it from the database. Each line must be the step it numbers.
 fn read_log(dir: &Path) -> Vec<bool> {
-    std::fs::read_to_string(dir.join("steps"))
-        .unwrap_or_default()
+    let text = std::fs::read_to_string(dir.join("steps")).unwrap_or_default();
+    let whole = &text[..text.rfind('\n').map_or(0, |n| n + 1)];
+    whole
         .lines()
-        .map(|l| l.ends_with(" c"))
+        .enumerate()
+        .map(|(i, l)| match l.strip_prefix(&format!("{i} ")) {
+            Some("c") => true,
+            Some("a") => false,
+            _ => panic!("the steps log's line {i} is {l:?}"),
+        })
         .collect()
 }
 
+/// Log step `i`'s outcome: one write of the whole line, after any cut short line is gone.
 fn append_log(dir: &Path, i: usize, committed: bool) {
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("steps")).unwrap();
-    writeln!(f, "{i} {}", if committed { "c" } else { "a" }).unwrap();
+    let path = dir.join("steps");
+    let len = std::fs::read_to_string(&path).map_or(0, |t| t.rfind('\n').map_or(0, |n| n + 1)) as u64;
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path).unwrap();
+    if f.metadata().unwrap().len() != len {
+        f.set_len(len).unwrap();
+    }
+    f.write_all(format!("{i} {}\n", if committed { "c" } else { "a" }).as_bytes()).unwrap();
     f.sync_all().unwrap();
+}
+
+fn write_log(dir: &Path, log: &[bool]) {
+    let text: String = log.iter().enumerate().map(|(i, c)| format!("{i} {}\n", if *c { "c" } else { "a" })).collect();
+    let f = dir.join("steps");
+    std::fs::write(&f, text).unwrap();
+    std::fs::File::open(&f).unwrap().sync_all().unwrap();
+}
+
+/// `CRASH_ASYNC=1`: the child commits with synchronous_commit off.
+fn async_commit() -> bool {
+    std::env::var("CRASH_ASYNC").is_ok_and(|v| v == "1")
+}
+
+/// The steps txlog holds (by sequential scan).
+fn logged_steps(s: &mut Session) -> std::collections::BTreeSet<usize> {
+    s.query("SET enable_indexscan = off; SET enable_bitmapscan = off; SET enable_indexonlyscan = off").unwrap();
+    let r = texts(s, "SELECT i FROM txlog");
+    s.query("RESET ALL").unwrap();
+    r.iter().map(|v| v.trim_start_matches("Int4(").trim_end_matches(')').parse().unwrap()).collect()
+}
+
+/// Whether a and b hold exactly the model's rows (by sequential scan).
+fn rows_are(s: &mut Session, m: &Model) -> bool {
+    s.query("SET enable_indexscan = off; SET enable_bitmapscan = off; SET enable_indexonlyscan = off").unwrap();
+    let a = texts(s, "SELECT id, v, w, u FROM a ORDER BY id");
+    let b = texts(s, "SELECT id, a_id, x FROM b ORDER BY id");
+    s.query("RESET ALL").unwrap();
+    a == m.a.iter().map(|(k, (v, w, u))| format!("Int4({k})|Int4({v})|{w}|Int4({u})")).collect::<Vec<_>>()
+        && b == m.b.iter().map(|(k, (a, x))| format!("Int4({k})|Int4({a})|Int4({x})")).collect::<Vec<_>>()
 }
 
 /// The model after the logged steps.
@@ -351,6 +396,41 @@ const SCHEMA: &[&str] = &[
     "CREATE TABLE txlog (i int PRIMARY KEY, sv bigint DEFAULT nextval('s'))",
 ];
 
+unsafe extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
+/// SIGKILL this process (as a crash: nothing flushed, nothing run).
+fn sigkill() -> ! {
+    // SAFETY: kill(2) with this process's id and SIGKILL.
+    unsafe { kill(std::process::id() as i32, 9) };
+    unreachable!("killed")
+}
+
+/// Return once the `n`th file a flush, compaction or checkpoint starts writing in the
+/// databases' directories under `base` (an SST, a WAL or a manifest) has appeared.
+fn wait_for_files(base: &Path, n: usize) {
+    let scan = |seen: &mut std::collections::HashSet<std::path::PathBuf>| {
+        let mut new = 0;
+        for d in std::fs::read_dir(base).into_iter().flatten().flatten() {
+            for f in std::fs::read_dir(d.path()).into_iter().flatten().flatten() {
+                let p = f.path();
+                if matches!(p.extension().and_then(|e| e.to_str()), Some("sst" | "wal" | "tmp")) && seen.insert(p) {
+                    new += 1;
+                }
+            }
+        }
+        new
+    };
+    let mut seen = std::collections::HashSet::new();
+    scan(&mut seen);
+    let mut events = 0;
+    while events <= n {
+        std::thread::sleep(Duration::from_micros(20));
+        events += scan(&mut seen);
+    }
+}
+
 /// Run steps `from..to`, logging each one's outcome; with `kill`, a thread kills the process
 /// `kill.1` microseconds after step `kill.0` starts.
 fn run_steps(s: &mut Session, dir: &Path, seed: u64, m: &mut Model, from: usize, to: usize, kill: Option<(usize, u64)>) {
@@ -358,10 +438,14 @@ fn run_steps(s: &mut Session, dir: &Path, seed: u64, m: &mut Model, from: usize,
         if let Some((at, us)) = kill
             && at == i
         {
+            let data = dir.join("data").join("base");
+            let on = std::env::var("CRASH_KILL_ON").ok().map(|v| v.parse::<usize>().unwrap());
             std::thread::spawn(move || {
+                if let Some(n) = on {
+                    wait_for_files(&data, n);
+                }
                 std::thread::sleep(Duration::from_micros(us));
-                let me = std::process::id().to_string();
-                std::process::Command::new("kill").args(["-9", &me]).status().unwrap();
+                sigkill();
             });
         }
         let (sql, end, ops) = step(seed, i as u64, m);
@@ -395,13 +479,44 @@ fn run_steps(s: &mut Session, dir: &Path, seed: u64, m: &mut Model, from: usize,
 /// finished as the step would have), log it, and return the model of every logged step.
 fn settle(s: &mut Session, dir: &Path, seed: u64) -> Model {
     let mut log = read_log(dir);
+    let txlog = logged_steps(s);
+    if async_commit() {
+        // (Asynchronous commits a crash lost: a suffix of the commits, every one after the
+        // first lost one. The steps from there are forgotten and run again.)
+        if let Some(f) = (0..log.len()).find(|&i| log[i] && !txlog.contains(&i)) {
+            let after: Vec<usize> = txlog.iter().copied().filter(|&i| i > f).collect();
+            assert!(after.is_empty(), "seed {seed}: step {f}'s commit was lost, but later ones weren't: {after:?}");
+            log.truncate(f);
+            write_log(dir, &log);
+        }
+    }
+    // Durability: exactly the steps logged as committed are in txlog (and the one in flight
+    // may be).
+    let want: Vec<usize> = (0..log.len()).filter(|&i| log[i]).collect();
+    let got: Vec<usize> = txlog.iter().copied().filter(|&i| i < log.len()).collect();
+    assert_eq!(got, want.clone(), "seed {seed}: txlog against the steps logged as committed");
     let m = replay(seed, &log);
     let i = log.len();
     let (_, end, ops) = step(seed, i as u64, &m);
+    let late: Vec<usize> = txlog.iter().copied().filter(|&j| j > i).collect();
+    assert!(late.is_empty(), "seed {seed}: txlog has steps {late:?} past the one in flight ({i})");
     // (DDL holds locks that reads of its tables wait for.)
     let ddl = ops.iter().any(|o| matches!(o, Op::AddCol(..) | Op::Index(_) | Op::MkTable(..) | Op::DropTable(_) | Op::TruncB));
     let prepared = texts(s, "SELECT gid FROM pg_prepared_xacts");
-    let in_log = one(s, &format!("SELECT count(*) FROM txlog WHERE i = {i}")) == "Int8(1)";
+    let in_log = txlog.contains(&i);
+    if !ddl && !prepared.contains(&format!("p{i}")) && end != End::Maint {
+        // Atomicity: the step in flight left all of its writes or none, and txlog agrees.
+        let mut with = m.clone();
+        if matches!(end, End::Commit | End::Prepare(true)) {
+            ops.iter().for_each(|o| with.apply(o));
+        }
+        let (none, all) = (rows_are(s, &m), rows_are(s, &with));
+        assert!(
+            if in_log { all } else { none },
+            "seed {seed}: step {i} ({end:?}) in flight: txlog row {in_log}, but the rows are {}",
+            if all { "all of its writes" } else if none { "none of its writes" } else { "some of its writes (a partial transaction)" }
+        );
+    }
     let committed = if prepared.contains(&format!("p{i}")) {
         // (Prepared, not committed yet: none of it shows.)
         assert!(!in_log, "seed {seed}: step {i} is prepared, but its rows show");
@@ -413,7 +528,7 @@ fn settle(s: &mut Session, dir: &Path, seed: u64) -> Model {
         c
     } else {
         assert!(prepared.is_empty(), "seed {seed}: prepared {prepared:?} at step {i}");
-        assert!(!in_log || end != End::Rollback, "seed {seed}: step {i} rolled back, but its rows show");
+        assert!(!in_log || !matches!(end, End::Rollback | End::Prepare(false)), "seed {seed}: step {i} rolled back, but its rows show");
         in_log
     };
     append_log(dir, i, committed);
@@ -501,6 +616,9 @@ fn crash_random_child() {
     let dir = Path::new(&dir);
     let eng = open(&dir.join("data"));
     let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    if async_commit() {
+        s.query("SET synchronous_commit = off").unwrap();
+    }
     let log = read_log(dir);
     if log.is_empty() {
         for q in SCHEMA {
@@ -517,20 +635,35 @@ fn crash_random_child() {
 fn crash_round(dir: &Path, seed: u64, round: u64) {
     let mut r = Rng::new(seed, 1_000_000 + round);
     let at = read_log(dir).len() + 20 + r.below(150) as usize;
-    let out = std::process::Command::new(std::env::current_exe().unwrap())
+    let us = r.below(20_000);
+    // A third of the rounds die mid-write of a file: the `n`th one written from step `at` on
+    // (a flush, compaction or checkpoint), `us` / 50 microseconds after it appeared.
+    let on = (r.below(3) == 0).then(|| r.below(4));
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+    child
         .args(["--exact", "crash_random_child", "--nocapture", "--test-threads=1"])
         .env("CRASH_RANDOM_DIR", dir)
         .env("CRASH_SEED", seed.to_string())
         .env("CRASH_KILL_AT", at.to_string())
-        .env("CRASH_KILL_US", r.below(20_000).to_string())
-        .output()
-        .unwrap();
+        .env("CRASH_KILL_US", if on.is_some() { us / 50 } else { us }.to_string());
+    if let Some(n) = on {
+        child.env("CRASH_KILL_ON", n.to_string());
+    }
+    let out = child.output().unwrap();
     let why = String::from_utf8_lossy(&out.stderr)
         .lines()
         .filter(|l| l.contains("panicked") || l.contains("seed"))
         .collect::<Vec<_>>()
         .join("\n");
     assert!(out.status.code().is_none(), "seed {seed} round {round}: the child failed: {why}");
+    if let Ok(save) = std::env::var("CRASH_SAVE") {
+        // (The crashed state, for `crash_inspect`.)
+        let to = Path::new(&save).join(format!("s{seed}-r{round}"));
+        let _ = std::fs::remove_dir_all(&to);
+        std::fs::create_dir_all(&to).unwrap();
+        let ok = std::process::Command::new("cp").arg("-a").arg(dir.join("data")).arg(dir.join("steps")).arg(&to).status().unwrap();
+        assert!(ok.success());
+    }
     let eng = open(&dir.join("data"));
     let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
     let mut m = settle(&mut s, dir, seed);
@@ -549,6 +682,29 @@ fn crash_round(dir: &Path, seed: u64, round: u64) {
     check(&mut s, seed, &m, &format!("round {round}, 50 steps after a clean restart"));
     drop(s);
     eng.shutdown();
+}
+
+/// Recover a copy of a state `CRASH_SAVE` kept (`CRASH_INSPECT=<dir>`, with `CRASH_SEED`),
+/// settle it and check it, printing what the in-flight step left.
+#[test]
+fn crash_inspect() {
+    let Ok(src) = std::env::var("CRASH_INSPECT") else {
+        return;
+    };
+    let seed: u64 = std::env::var("CRASH_SEED").unwrap().parse().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let ok = std::process::Command::new("cp").arg("-a").arg(format!("{src}/data")).arg(format!("{src}/steps")).arg(tmp.path()).status().unwrap();
+    assert!(ok.success());
+    let dir = tmp.path();
+    let eng = open(&dir.join("data"));
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    let i = read_log(dir).len();
+    eprintln!("in flight: step {i}; txlog max {}", one(&mut s, "SELECT max(i), count(*) FROM txlog"));
+    eprintln!("txlog row by seq scan: {}", one(&mut s, &format!("SET enable_indexscan = off; SET enable_bitmapscan = off; SELECT count(*) FROM txlog WHERE i = {i}")));
+    s.query("RESET ALL").unwrap();
+    let m = settle(&mut s, dir, seed);
+    check(&mut s, seed, &m, &format!("inspected after step {}", read_log(dir).len()));
+    eprintln!("inspect: ok");
 }
 
 #[test]
