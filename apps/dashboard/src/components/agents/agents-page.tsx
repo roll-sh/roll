@@ -185,7 +185,7 @@ export function AgentsSurface({
       if (e.key !== "Escape" || e.defaultPrevented) return;
       const el = e.target as HTMLElement | null;
       const typing = el && (el.isContentEditable || /^(INPUT|SELECT)$/.test(el.tagName) || (el.tagName === "TEXTAREA" && (el as HTMLTextAreaElement).value !== ""));
-      if (typing || el?.closest(".xterm, [role=dialog]:not([data-surface])")) return;
+      if (typing || el?.closest(".xterm, [role=dialog]:not([data-surface]), [role=listbox], [role=menu]")) return;
       if (shown.kind !== "canvas") close();
       else onClose?.();
     };

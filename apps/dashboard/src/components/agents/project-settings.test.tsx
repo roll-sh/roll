@@ -189,8 +189,8 @@ describe("project settings on the canvas", () => {
     const m = machine({ info: { ...machine().info!, providers: [provider(), provider({ id: "codex", name: "Codex", models: [] })] } });
     const p = withSettings({ defaults: { provider: "codex", runtime_mode: "ask", interaction_mode: "plan", worktree: true } });
     renderAgents(<Composer mode={{ kind: "new", project: p, machine: m }} onSubmit={onSubmit} />, agentsHarness());
-    expect(screen.getByRole("combobox", { name: "Provider" })).toHaveValue("codex");
-    expect(screen.getByRole("checkbox", { name: "Worktree" })).toBeChecked();
+    expect(screen.getByRole("button", { name: /^Model: Codex/ })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Worktree" })).toBeChecked();
     await userEvent.type(screen.getByRole("textbox", { name: "Message" }), "go{Enter}");
     await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ provider: "codex", runtime_mode: "ask", interaction_mode: "plan", worktree: true })));
   });

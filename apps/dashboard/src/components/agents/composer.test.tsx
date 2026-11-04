@@ -43,7 +43,10 @@ describe("Composer", () => {
   it("reconfigures the thread when the model or plan mode changes", async () => {
     const h = agentsHarness();
     renderAgents(<Composer mode={{ kind: "thread", thread: thread(), machine: machine() }} />, h);
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Model" }), "claude-sonnet-5");
+    await userEvent.click(screen.getByRole("button", { name: /^Model: Opus 5.5/ }));
+    await userEvent.click(await screen.findByRole("option", { name: /Sonnet 5/ }));
+    // A model without effort levels closes the picker.
+    await waitFor(() => expect(screen.queryByRole("option", { name: /Sonnet 5/ })).toBeNull());
     await userEvent.type(screen.getByRole("textbox", { name: "Message" }), "{Shift>}{Tab}{/Shift}");
     await waitFor(() =>
       expect(commands(h)).toEqual([
@@ -59,16 +62,18 @@ describe("Composer", () => {
     const m = machine({ info: { ...machine().info!, providers: [provider({ id: "codex", name: "Codex", auth: "missing" }), provider()] } });
     renderAgents(<Composer mode={{ kind: "new", project: project(), machine: m }} onSubmit={onSubmit} />, h);
     // The logged-in provider is picked, not the first one.
-    expect(screen.getByRole("combobox", { name: "Provider" })).toHaveValue("claude");
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Effort" }), "max");
-    await userEvent.click(screen.getByRole("checkbox", { name: "Worktree" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Model: Opus 5.5/ }));
+    await userEvent.click(await screen.findByRole("radio", { name: "Max" }));
+    expect(screen.getByRole("button", { name: "Model: Opus 5.5 · max" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("switch", { name: "Worktree" }));
     await userEvent.type(screen.getByRole("textbox", { name: "Message" }), "Add a --json flag{Enter}");
     await waitFor(() =>
       expect(onSubmit).toHaveBeenCalledWith({
         provider: "claude",
         model: "claude-opus-5-5",
         effort: "max",
-        runtime_mode: "auto_edit",
+        // New threads have full access unless their project says otherwise.
+        runtime_mode: "full_access",
         interaction_mode: "default",
         worktree: true,
         prompt: "Add a --json flag",

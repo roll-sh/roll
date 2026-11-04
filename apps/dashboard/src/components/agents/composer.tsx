@@ -15,7 +15,8 @@ import type {
 import { coming, machineState, reachable } from "@/lib/agents-api";
 import { btn } from "../ui";
 import { ContextMeter } from "./context-meter";
-import { ModelPicker, Picker, resolveModel } from "./model-picker";
+import { DEFAULT_RUNTIME_MODE, ModelPicker, PermissionsMenu, resolveModel, type ModelChoice } from "./model-picker";
+import { Switch } from "./ui";
 import { useAgents } from "./use-agents";
 
 /** What a new thread starts with (the `thread.create` fields the composer picks). */
@@ -34,12 +35,6 @@ export type ComposerMode = { kind: "new"; project: Project; machine: Machine } |
 
 /** Images only, at most 5 MiB each (agent-proto `Attachment`). */
 export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
-
-const runtimeModes: { id: RuntimeMode; label: string; hint: string }[] = [
-  { id: "full_access", label: "Full access", hint: "Runs commands and edits files without asking" },
-  { id: "auto_edit", label: "Auto edit", hint: "Edits in the workspace freely; asks before commands" },
-  { id: "ask", label: "Ask", hint: "Asks before everything" },
-];
 
 const draftKey = (k: string) => `roll:agents:draft:${k}`;
 
@@ -93,7 +88,7 @@ export function Composer({
   const [provider, setProvider] = useState<string>(() => thread?.provider ?? preset?.provider ?? defaultProvider(providers)?.id ?? "");
   const [model, setModel] = useState<string | null>(thread?.model ?? preset?.model ?? null);
   const [effort, setEffort] = useState<string | null>(thread?.effort ?? preset?.effort ?? null);
-  const [runtime, setRuntime] = useState<RuntimeMode>(thread?.runtime_mode ?? defaults?.runtime_mode ?? "auto_edit");
+  const [runtime, setRuntime] = useState<RuntimeMode>(thread?.runtime_mode ?? defaults?.runtime_mode ?? DEFAULT_RUNTIME_MODE);
   const [plan, setPlan] = useState<InteractionMode>(thread?.interaction_mode ?? defaults?.interaction_mode ?? "default");
   // A roll code project publishes threads as changes, which needs a worktree: on by default there.
   const [worktree, setWorktree] = useState(mode.kind === "new" && (defaults?.worktree ?? !!mode.project.repo));
@@ -150,13 +145,17 @@ export function Composer({
     client.run(mode.machine.id, { type: "thread.configure", thread: thread.id, ...clean }).catch((e: Error) => setError(e.message));
   };
 
-  const pickProvider = (id: string) => {
-    setProvider(id);
-    const p = providers.find((x) => x.id === id);
-    const m = p?.models.find((x) => x.default) ?? p?.models[0];
-    setModel(m?.id ?? null);
-    setEffort(null);
-    configure({ provider: id, model: m?.id ?? undefined });
+  // A new provider or model clears the effort unless one comes with it; the thread follows.
+  const pick = (next: ModelChoice) => {
+    const patch: Partial<Pick<Thread, "provider" | "model" | "effort">> = {};
+    if (next.provider !== provider) patch.provider = next.provider;
+    const nextModel = resolveModel(providers.find((p) => p.id === next.provider), next.model)?.id ?? null;
+    if (nextModel && (nextModel !== modelInfo?.id || patch.provider)) patch.model = nextModel;
+    if (next.effort && next.effort !== effort) patch.effort = next.effort;
+    setProvider(next.provider);
+    setModel(nextModel);
+    setEffort(next.effort);
+    if (Object.keys(patch).length) configure(patch);
   };
 
   const addFiles = async (list: FileList | File[]) => {
@@ -301,30 +300,14 @@ export function Composer({
         style={{ fieldSizing: "content" } as React.CSSProperties}
       />
       <div className="flex flex-wrap items-center gap-1 px-2 pb-2">
-        <ModelPicker
-          providers={providers}
-          provider={provider}
-          model={model}
-          effort={effort}
-          onProvider={pickProvider}
-          onModel={(id) => {
-            setModel(id);
-            setEffort(null);
-            configure({ model: id });
-          }}
-          onEffort={(id) => {
-            setEffort(id);
-            if (id) configure({ effort: id });
-          }}
-        />
-        <Picker
-          label="Runtime mode"
+        <ModelPicker providers={providers} value={{ provider, model: modelInfo?.id ?? model, effort }} onChange={pick} side={mode.kind === "new" ? "bottom" : "top"} />
+        <PermissionsMenu
           value={runtime}
+          side={mode.kind === "new" ? "bottom" : "top"}
           onChange={(id) => {
-            setRuntime(id as RuntimeMode);
-            configure({ runtime_mode: id as RuntimeMode });
+            setRuntime(id);
+            configure({ runtime_mode: id });
           }}
-          options={runtimeModes.map((r) => ({ id: r.id, label: r.label, hint: r.hint }))}
         />
         {(caps?.plan_mode ?? true) && (
           <button
@@ -340,8 +323,8 @@ export function Composer({
           </button>
         )}
         {mode.kind === "new" && (
-          <label className="inline-flex cursor-pointer items-center gap-1.5 px-1.5 py-1 text-[11.5px] text-subtle hover:text-fg" title="Work in its own git worktree on a new branch">
-            <input type="checkbox" checked={worktree} onChange={(e) => setWorktree(e.target.checked)} className="accent-[var(--accent)]" />
+          <label className="inline-flex cursor-pointer items-center gap-1.5 px-1.5 py-1 text-[12px] text-muted hover:text-fg" title="Work in its own git worktree on a new branch">
+            <Switch size="sm" checked={worktree} onCheckedChange={setWorktree} aria-label="Worktree" />
             Worktree
           </label>
         )}

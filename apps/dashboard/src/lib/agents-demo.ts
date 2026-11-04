@@ -748,7 +748,7 @@ export class DemoOwner implements AgentsTransport {
       project("prj_demo_roll", "roll", "/Users/ada/roll", "main", true, "roll", {
         settings: {
           auto_pull: true,
-          defaults: { provider: "claude", runtime_mode: "auto_edit", worktree: true },
+          defaults: { provider: "claude", runtime_mode: "full_access", worktree: true },
           scripts: [
             { id: "setup", name: "Install", command: "pnpm install", icon: "configure", on_worktree: true },
             { id: "test", name: "Test", command: "cargo test -p roll-cli", icon: "test", on_worktree: false },
@@ -778,7 +778,7 @@ export class DemoOwner implements AgentsTransport {
       provider,
       model,
       effort: provider === "claude" ? "high" : "medium",
-      runtime_mode: "auto_edit",
+      runtime_mode: "full_access",
       interaction_mode: "default",
       cwd: `/Users/ada/${pid === "prj_demo_web" ? "web" : "roll"}`,
       worktree: null,

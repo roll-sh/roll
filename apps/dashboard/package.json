@@ -10,6 +10,7 @@
     "test": "vitest run && node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./test/register.mjs --test \"test/*.test.ts\""
   },
   "dependencies": {
+    "@base-ui/react": "1.9.0",
     "@roll/brand": "workspace:*",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",

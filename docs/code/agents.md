@@ -104,7 +104,9 @@ Machine            a daemon (hostname, os, providers and their auth state, onlin
   newest kept run's, and a fork its parent's at the fork point until its first session, which
   keeps it when the fork is native and clears it when it starts fresh with a summary.
 - **Runtime modes** (T3's): `full_access` (no approvals), `auto_edit` (edits in the workspace
-  allowed, commands ask), `ask` (everything asks). **Interaction modes**: `default`, `plan`.
+  allowed, commands ask), `ask` (everything asks). New threads get `full_access` unless their
+  project's defaults say otherwise (T3's default; `RuntimeMode::default()`, the composer's and the
+  demo's). **Interaction modes**: `default`, `plan`.
 - **Checkpoints.** Before the first run the daemon records the base tree; after every run it
   snapshots the worktree into a commit under `refs/roll/checkpoints/<thread>/<ordinal>` using a
   private index (`GIT_INDEX_FILE`), never touching the user's index or HEAD. The diff of run N is
@@ -682,6 +684,24 @@ The surface has three views:
 - **A new agent.** Pick the machine and project (the last used by default; adding a project is
   right there), say what to do, and it opens as a conversation. Recent conversations are listed
   under the composer.
+- **The model picker** (`model-picker.tsx`, T3's `ProviderModelPicker`, `ModelPickerContent`,
+  `ModelListRow`, `ModelPickerSidebar` and the docked effort column of `ComposerModelEffort`).
+  The trigger names the provider, the model and its effort. The popup has a sidebar (Favorites,
+  Recent, then one button per installed provider of the machine), a search across every provider
+  (T3's ranking: exact name, prefix, word start, substring, fuzzy from three letters; favourites
+  boosted), the list (favourites first in a provider; a star on each row, a check on the picked
+  one) and the picked model's effort levels in a column beside it. It opens on Favorites when
+  there are some, else on the provider in use. Keyboard as T3's: type to search, arrows and Enter,
+  ← or Shift+Tab to the providers, → to the effort levels, ⌘/Ctrl+Shift+↑/↓ to switch providers.
+  Picking a model with effort levels moves to them; picking a level closes it. Permissions are a
+  menu beside it (T3's `PermissionsMenu`). Favourites and the last five picked models are kept in
+  this browser (`lib/agents-models.ts`, `modelPrefs`); T3 keeps favourites in its server
+  settings, and moving them to an owner-level record is the one seam to change.
+- **Controls.** The agents surface uses T3's own controls, never native `<select>`s or
+  checkboxes: `components/agents/ui/` ports T3's `components/ui` (Base UI) to roll's colours —
+  `Select`, `Menu`, `Popover`, `Combobox`, `Switch` and `Segmented`. Popups float in a
+  translucent panel with a soft shadow, grow out of their trigger (scale 0.98 and a fade, 150 ms)
+  and honour reduced motion; highlights are a neutral fill and only an "on" state is accent.
 
 - **Getting started.** An owner with no machines sees the globe (`RollMark`) and the two ways in
   side by side, the same as "Add machine" on the canvas: connect your computer (install,
