@@ -191,6 +191,36 @@ fn indexes_of(ctx: &ExecCtx, of: &HashSet<u32>, scan: bool) -> HashMap<u32, Vec<
     out
 }
 
+/// The view's row count for planning (`sql::explain::sys_tuples`), from the relation maps'
+/// sizes and Postgres's own relations, without making its rows: after each DDL statement the
+/// parallel-plan check of a query reading a view made every row of it to count them (17 ms at
+/// 10,000 tables). An estimate, as a view's is for Postgres's planner; TOAST tables aren't
+/// counted.
+pub fn row_estimate(table: SysTable, ctx: &ExecCtx) -> Option<f64> {
+    let (shape, part) = shape(table)?;
+    let kinds: &[u8] = match shape {
+        Shape::Tables => b"rtmp",
+        Shape::IoSequences => b"S",
+        Shape::Indexes | Shape::IoIndexes => b"i",
+        Shape::IoTables => b"rtm",
+    };
+    let builtin = (super::static_rows::rows(SysTable::PgClass).iter())
+        .filter(|r| matches!(r[17], Value::Char(k) if kinds.contains(&k)))
+        .count();
+    let cat = ctx.catalog();
+    let user = match shape {
+        Shape::IoSequences => cat.sequences.len(),
+        Shape::Indexes | Shape::IoIndexes => cat.indexes.len(),
+        _ => cat.tables.len() + cat.views.len(),
+    };
+    let n = match part {
+        Part::All => user + builtin,
+        Part::User => user,
+        Part::Sys => builtin,
+    };
+    Some(n.max(1) as f64)
+}
+
 /// The view's rows, in relation oid order (pg_stat_*_tables' grouping sorts by c.oid; the
 /// indexes views by (relid, indexrelid)); of the relations `sel` fixes alone.
 pub fn rows_of(table: SysTable, ctx: &ExecCtx, sel: &StatSel) -> Result<Vec<Row>> {

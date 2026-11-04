@@ -17317,10 +17317,14 @@ pub(crate) fn sys_tuples(table: crate::catalog::system::SysTable, ctx: &ExecCtx)
         }
         .map_or(1000.0, |n| n as f64)
     } else {
-        // (Counted without generating the rows where it can be: `row_count`.)
+        // (Counted without generating the rows where it can be: `row_count`; the statistics
+        // views estimated from the relation maps' sizes, `stat_views::row_estimate`.)
         match crate::catalog::system::row_count(table, ctx) {
             Some(n) => n as f64,
-            None => crate::catalog::system::rows(table, ctx).map_or(1000.0, |r| r.len() as f64),
+            None => match crate::catalog::stat_views::row_estimate(table, ctx) {
+                Some(n) => n,
+                None => crate::catalog::system::rows(table, ctx).map_or(1000.0, |r| r.len() as f64),
+            },
         }
     }
     .max(1.0);
