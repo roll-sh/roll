@@ -1,0 +1,22 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a814fa71b51112148/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 44.25s
+     Running unittests src/lib.rs (/home/meszmate/.cache/a149/target/debug/deps/pg_engine-357a2b04731fc140)
+
+running 1 test
+endpoint proof ts=1 cold=[] hot=[([0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], b"account-balance")] merging_before=true hot_after=true
+
+thread 'storage::tests::point_fetch_endpoint_matches_get_cold_and_hot' (1798755) panicked at crates/pg-engine/src/storage/mod.rs:3392:9:
+assertion `left == right` failed: point-fetch endpoint must include physical MVCC versions before hot promotion
+  left: []
+ right: [([0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], b"account-balance")]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test storage::tests::point_fetch_endpoint_matches_get_cold_and_hot ... FAILED
+
+failures:
+
+failures:
+    storage::tests::point_fetch_endpoint_matches_get_cold_and_hot
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 186 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p pg-engine --lib`

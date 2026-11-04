@@ -1,0 +1,6 @@
+{"name": "storage", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "sql", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "transfer", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "build", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "debug", "exit": 101, "expected_summary": true, "pass": false}
+HEAVY-EXIT 101

@@ -1,0 +1,73 @@
+[
+  {
+    "name": "build",
+    "command": [
+      "cargo",
+      "build",
+      "-p",
+      "pg-engine",
+      "--bin",
+      "roll-engine"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "2a854a48074dbd3317807f634a773f29540b2673",
+      "tree": "7b41c62e7ca291f3f349ec68838dff1ab5f3b34d",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "2a854a48074dbd3317807f634a773f29540b2673",
+      "tree": "7b41c62e7ca291f3f349ec68838dff1ab5f3b34d",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [],
+    "fatal_lines": [],
+    "elapsed_s": 154.11399030685425,
+    "log_sha256": "156267ffbd554f1ee236e0605b991492224aa4db6821167221a58ff8eabd21fb",
+    "passed_tests": 0,
+    "pass": true
+  },
+  {
+    "name": "debug",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "pg-engine"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "2a854a48074dbd3317807f634a773f29540b2673",
+      "tree": "7b41c62e7ca291f3f349ec68838dff1ab5f3b34d",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "2a854a48074dbd3317807f634a773f29540b2673",
+      "tree": "7b41c62e7ca291f3f349ec68838dff1ab5f3b34d",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 101,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 184 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 18.66s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: FAILED. 5 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 98.58s"
+    ],
+    "fatal_lines": [
+      "failures:",
+      "failures:",
+      "test result: FAILED. 5 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 98.58s",
+      "error: test failed, to rerun pass `-p pg-engine --test app_concurrency`"
+    ],
+    "elapsed_s": 226.05399346351624,
+    "log_sha256": "c65acb1b37d7b540d0ce18912e91ea6d29245398204a8a8cef310aa6cb08eb53",
+    "passed_tests": 184,
+    "pass": false
+  }
+]

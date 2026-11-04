@@ -1,0 +1,29 @@
+{
+  "worktree": "/home/meszmate/roll/.claude/worktrees/agent-a814fa71b51112148",
+  "head": "f0563cd8687f155ec8d31cf47d8fa891a11d0c72",
+  "output": "/home/meszmate/.cache/pg-engine-resume-20261104/execution_models/a149-baseline-transfer",
+  "env": {
+    "TMPDIR": "/home/meszmate/.cache/a149/tmp",
+    "CARGO_TARGET_DIR": "/home/meszmate/.cache/a149/target",
+    "CARGO_BUILD_JOBS": "2",
+    "RUST_TEST_THREADS": "2"
+  },
+  "stages": [
+    {
+      "name": "transfer",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "pg-engine",
+        "--test",
+        "app_concurrency",
+        "serializable_transfers_retried",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "expect": "^test result: ok\\."
+    }
+  ]
+}

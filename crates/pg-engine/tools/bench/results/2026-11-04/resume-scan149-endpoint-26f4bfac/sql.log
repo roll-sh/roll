@@ -1,0 +1,10 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a814fa71b51112148/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 18.85s
+     Running tests/app_concurrency.rs (/home/meszmate/.cache/a149/target/debug/deps/app_concurrency-92d70bfa5da59eb5)
+
+running 1 test
+secondary UPDATE plan=["Update on endpoint_account", "  ->  Index Scan using endpoint_account_pkey on endpoint_account", "        Index Cond: (id = 1)"] cold_rows=1 cold_balance=997 hot_rows=1 final_balance=1000
+test secondary_index_update_cold_and_hot ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.17s
+

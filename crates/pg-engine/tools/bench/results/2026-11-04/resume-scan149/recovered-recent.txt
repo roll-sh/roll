@@ -1,0 +1,141 @@
+[1283] I'm checking whether `toast::may_hold_rows` is public, since it's called as `t::may_hold_rows` from inside the transaction module, and it looks like at least `pub(crate)` is enough. I also want to confirm that collecting an empty `mem_in` iterator into a `Vec` doesn't allocate, which it shouldn't.
+
+I'm now checking the reuse path in ScanNode's seek(), where the toast reader gets rebuilt for each reseek. For index range scans the source is None, so that case skips. For table ranges, I'd need to compare the source with the current reader, but the Reader API is unclear, so I'm leaving that for now. Next I'll rebuild dev and measure.
+
+
+
+[1284] $ sh crates/pg-engine/tools/heavy-bg.sh /home/meszmate/.cache/a149/devbuild.log sh /home/meszmate/.cache/a149/devbuild.sh; tail -2 /home/meszmate/.cache/a149/vi.out
+started pid 846009 -> /home/meszmate/.cache/a149/devbuild.log
+contrib:  pgvector   915 / 915 ;  bloom   58 / 58 ;  pg_trgm   261 / 261 ;  btree_gist   613 / 616 ;  cube   316 / 316 ; 
+end2 05:58
+
+[1285] $ sh /home/meszmate/.cache/a149/waitlog.sh /home/meszmate/.cache/a149/vi.out 'regress: [0-9]' 1 580; tail -1 /home/meszmate/.cache/a149/vi.out; head -3 /home/meszmate/.cache/a149/devbuild.log; true
+end2 05:58
+
+[1286] $ sh /home/meszmate/.cache/a149/waitlog.sh /home/meszmate/.cache/a149/vi.out 'regress: [0-9]' 1 580; tail -1 /home/meszmate/.cache/a149/vi.out; head -3 /home/meszmate/.cache/a149/devbuild.log; true
+end2 05:58
+
+[1287] I'm checking where the row gets its extra column, since pushing the key onto a full row forces a reallocation. The spare-capacity variant of the decode function should avoid that, so I'm working out how to pass the right extra count into the full-row path.
+
+I'm writing the extra-count calculation for the row path, which passes the key and system columns into the spare-capacity decoder. I also want to see whether the table-row decoder has a spare-capacity variant for the scan path.
+
+
+
+[1288] $ cd /home/meszmate/.cache/a149/dev-src/crates/pg-engine && grep -n 'pub fn decode_row_need_spare' -A12 src/storage/row.rs | head -14; sed -n 75,100p src/exec/scan.rs
+772:pub fn decode_row_need_spare(b: &[u8], need: &[bool], spare: usize) -> Result<Vec<Value>> {
+773-    let mut pos = 0;
+774-    let n = get_varint(b, &mut pos)? as usize;
+775-    let mut row = Vec::with_capacity(n + spare);
+776-    // (The values after the last column needed aren't walked.)
+777-    let last = need[..need.len().min(n)].iter().rposition(|&x| x).map_or(0, |i| i + 1);
+778-    for &want in &need[..last] {
+779-        if want {
+780-            row.push(decode_value(b, &mut pos)?);
+781-        } else {
+782-            skip_value(b, &mut pos)?;
+783-            row.push(Value::Null);
+784-        }
+pub fn decode_table_row(t: &Table, bytes: &[u8]) -> Result<Row> {
+    decode_table_row_at(t, None, bytes)
+}
+
+/// `decode_table_row` of the row stored under `key` (when known).
+pub fn decode_table_row_at(t: &Table, key: Option<&[u8]>, bytes: &[u8]) -> Result<Row> {
+    let (xmin, data) = split_header(bytes)?;
+    let mut row = decode_row(data)?;
+    if row.len() < t.columns.len() {
+        for c in &t.columns[row.len()..] {
+            row.push(c.missing.clone().unwrap_or(Value::Null));
+        }
+    }
+    row.truncate(t.columns.len());
+    super::sizing::note_read(t.oid, xmin, key, &row);
+    Ok(row)
+}
+
+/// `decode_table_row` building only the columns `need` marks (the others NULL), for a reader
+/// that keeps none of the values (a measurement).
+pub fn decode_table_row_need(t: &Table, bytes: &[u8], need: &[bool]) -> Result<Row> {
+    let (_, data) = split_header(bytes)?;
+    let mut row = crate::storage::row::decode_row_need(data, need)?;
+    if row.len() < t.columns.len() {
+        for c in &t.columns[row.len()..] {
+            row.push(c.missing.clone().unwrap_or(Value::Null));
+
+[1289] I'm sizing the buffer so it covers the stored count and the table's column count, plus a spare margin. In the row scanner I'd swap in a variant that takes that spare value, which the stored count alone doesn't cover.
+
+I'm weighing whether to change decode_row_need_spare so its capacity is the larger of the stored count and the column count, plus the spare amount, since the stored count alone can undersize the buffer. Before editing it, I want to grep for its other callers.
+
+
+
+[1290] $ cd /home/meszmate/.cache/a149/dev-src/crates/pg-engine && grep -rn 'decode_row_need_spare\|decode_row_need(' src --include=*.rs | grep -v 'pub fn' | head
+src/storage/row.rs:768:    decode_row_need_spare(b, need, 0)
+src/storage/row.rs:823:            let part = decode_row_need(&enc, &need).unwrap();
+src/exec/parscan.rs:593:            Some(n) => crate::storage::row::decode_row_need_spare(data, n, self.extra.len())?,
+src/exec/scan.rs:97:    let mut row = crate::storage::row::decode_row_need(data, need)?;
+src/exec/scan.rs:3690:    let mut row = crate::storage::row::decode_row_need(data, need)?;
+
+[1291] $ cd /home/meszmate/.cache/a149/dev-src/crates/pg-engine && sed -i '775s/    let mut row = Vec::with_capacity(n + spare);/    let mut row = Vec::with_capacity(n.max(need.len()) + spare);/' src/storage/row.rs && sed -n 769,775p src/storage/row.rs && sed -n 3684,3692p src/exec/scan.rs
+}
+
+/// `decode_row_need` with room for `spare` more values after the row's.
+pub fn decode_row_need_spare(b: &[u8], need: &[bool], spare: usize) -> Result<Vec<Value>> {
+    let mut pos = 0;
+    let n = get_varint(b, &mut pos)? as usize;
+    let mut row = Vec::with_capacity(n.max(need.len()) + spare);
+/// `scan_row` decoding only the table columns `need` marks (the others NULL). The values
+/// decoded are noted as read (`sizing::note_read`) as a whole row's are: a column not
+/// decoded can't be carried anywhere.
+fn scan_row_need(plan: &ScanPlan, key: &[u8], bytes: &[u8], need: &[bool], ctx: &ExecCtx) -> Result<Row> {
+    let t = &plan.table;
+    let (xmin, data) = split_header(bytes)?;
+    let mut row = crate::storage::row::decode_row_need(data, need)?;
+    if row.len() < t.columns.len() {
+        for (i, c) in t.columns.iter().enumerate().skip(row.len()) {
+
+[1292] $ cd /home/meszmate/.cache/a149/dev-src/crates/pg-engine && sed -i '3690s/    let mut row = crate::storage::row::decode_row_need(data, need)?;/    \/\/ (Room for the key and system columns `scan_row_rest` adds: no reallocation per row.)\n    let mut row = crate::storage::row::decode_row_need_spare(data, need, rest_len(plan))?;/' src/exec/scan.rs && sed -n 3689,3692p src/exec/scan.rs && grep -n '^fn scan_row(plan' -A4 src/exec/scan.rs
+    let (xmin, data) = split_header(bytes)?;
+    // (Room for the key and system columns `scan_row_rest` adds: no reallocation per row.)
+    let mut row = crate::storage::row::decode_row_need_spare(data, need, rest_len(plan))?;
+    if row.len() < t.columns.len() {
+3706:fn scan_row(plan: &ScanPlan, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<Row> {
+3707-    let row = decode_table_row_at(&plan.table, Some(key), bytes)?;
+3708-    scan_row_rest(plan, key, bytes, row, ctx)
+3709-}
+3710-
+[This command modified 1 file you've previously read: ../../../../.cache/a149/dev-src/crates/pg-engine/src/exec/scan.rs. Call Read before editing.]
+
+[1293] I'm adding a small `rest_len` helper near `scan_row_rest` to size the remaining columns. I'm also weighing whether `scan_row` should reserve capacity up front or switch to a need-all decode variant, since allocating a `vec![true; ncols]` per row seems wasteful.
+
+I'm switching `scan_row` to a static all-true mask sized to the column limit, so it avoids allocating a fresh `vec![true; ncols]` on every row.
+
+
+
+[1294] /home/meszmate/.cache/a149/dev-src/crates/pg-engine/src/exec/scan.rs
+The file /home/meszmate/.cache/a149/dev-src/crates/pg-engine/src/exec/scan.rs has been updated successfully.
+
+[1295] $ cd /home/meszmate/.cache/a149/dev-src/crates/pg-engine && grep -n 'fn sys_values' -A6 src/exec/scan.rs | head -8; grep -n 'fn scan_row_rest' -A22 src/exec/scan.rs | grep -n 'push\|extend'
+164:pub fn sys_values(key: &[u8], xmin: u64, xmax: u64, table: u32) -> [Value; NUM_SYS_COLS] {
+165-    [
+166-        ctid_of(key),
+167-        Value::Oid(xmin as u32),
+168-        Value::Oid(0),
+169-        Value::Oid(xmax as u32),
+170-        Value::Oid(0),
+3:3725-        row.push(Value::Bytea(Arc::from(key)));
+16:3738-        row.extend(sys);
+
+[1296] $ cd /home/meszmate/.cache/a149/dev-src/crates/pg-engine && sed -i 's/    plan.with_key as usize + if plan.sys { 5 } else { 0 }/    plan.with_key as usize + if plan.sys { NUM_SYS_COLS } else { 0 }/' src/exec/scan.rs && grep -n 'NUM_SYS_COLS } else' src/exec/scan.rs && grep -n 'const NUM_SYS_COLS\|NUM_SYS_COLS;' src/exec/scan.rs | head -3
+3719:    plan.with_key as usize + if plan.sys { NUM_SYS_COLS } else { 0 }
+139:pub const NUM_SYS_COLS: usize = 6;
+[This command modified 1 file you've previously read: ../../../../.cache/a149/dev-src/crates/pg-engine/src/exec/scan.rs. Call Read before editing.]
+
+[1297] Six system columns, so that tableoid check is still needed, and I'm glad I used the constant there. The earlier dev build may already be running on the older dev source, but that doesn't change anything; I'll rebuild once it's done. Checking the states now.
+
+
+
+[1298] $ head -3 /home/meszmate/.cache/a149/devbuild.log; tail -1 /home/meszmate/.cache/a149/vi.out; grep -c 'engine ok' /home/meszmate/.cache/a149/vi-regress.log
+end2 05:58
+182
+
+[1299] $ sh /home/meszmate/.cache/a149/waitlog.sh /home/meszmate/.cache/a149/vi.out 'regress: [0-9]' 1 580; tail -1 /home/meszmate/.cache/a149/vi.out; head -3 /home/meszmate/.cache/a149/devbuild.log; true
