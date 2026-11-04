@@ -1,0 +1,32 @@
+{
+  "worktree": "/home/meszmate/roll/.claude/worktrees/agent-a0718617fe2ff9006",
+  "head": "7a6ed0cdbded3f7fda226933666f82de2695aa6e",
+  "output": "/home/meszmate/.cache/pg-engine-resume-20261104/execution_models/a170-prepare-golden",
+  "env": {
+    "TMPDIR": "/home/meszmate/.cache/a170/tmp",
+    "CARGO_TARGET_DIR": "/home/meszmate/.cache/a170/target",
+    "CARGO_BUILD_JOBS": "2",
+    "RUST_TEST_THREADS": "2"
+  },
+  "stages": [
+    {
+      "name": "record-golden",
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "pg-engine",
+        "--test",
+        "golden"
+      ],
+      "expect": "^test result: ok\\.",
+      "env": {
+        "GOLDEN_RECORD": "127.0.0.1:53405",
+        "GOLDEN_PASSWORD": "pw",
+        "GOLDEN_FILTER": "a170_"
+      },
+      "allows_recorded_goldens": true
+    }
+  ]
+}
