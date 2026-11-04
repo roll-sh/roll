@@ -20,6 +20,7 @@ use crate::storage::keys::{encode_value, index_prefix, prefix_end};
 use crate::txn::Database;
 use crate::txn::xids::Xids;
 use crate::types::{DataType, Value};
+use crate::exec::fasthash::{HashMap as FastMap, HashSet as FastSet};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -169,19 +170,20 @@ impl Models {
 /// One shard of a database's models (`Models`): the tables whose oids fall in it.
 #[derive(Default)]
 pub struct RelFiles {
-    heaps: HashMap<u32, Heap>,
-    btrees: HashMap<u32, Btree>,
+    // (The maps every model read and write looks a table up in: the fast hasher.)
+    heaps: FastMap<u32, Heap>,
+    btrees: FastMap<u32, Btree>,
     /// Out-of-line values of each table's rows, by table.
-    toast: HashMap<u32, Toast>,
+    toast: FastMap<u32, Toast>,
     /// Tables too big to model.
-    untracked: HashSet<u32>,
+    untracked: FastSet<u32>,
     /// Tables whose models this process dropped (a model built for one of the others is
     /// the first since the database was opened).
     dropped: HashSet<u32>,
     /// Their heaps' estimated sizes.
     estimated: HashMap<u32, EstHeap>,
     /// Bulk loads (COPY) in progress, by (table, transaction).
-    bulk: HashMap<(u32, u64), Bulk>,
+    bulk: FastMap<(u32, u64), Bulk>,
     /// Hash indexes: the heap's estimated tuples when each was built (its initial
     /// buckets).
     hash_est: HashMap<u32, f64>,
@@ -189,7 +191,7 @@ pub struct RelFiles {
     /// pending list.
     gin_built: HashMap<u32, Vec<HashSet<Vec<u8>>>>,
     /// GiST point_ops / range_ops indexes' histories (`gistlog`), by index.
-    gist_logs: HashMap<u32, Arc<gistlog::GistLog>>,
+    gist_logs: FastMap<u32, Arc<gistlog::GistLog>>,
     /// BRIN indexes: which page ranges have a summary.
     brin: HashMap<u32, BrinRanges>,
     /// The dead tuples the last VACUUM of each table had to keep (what it reports as the
@@ -378,7 +380,7 @@ impl Ext {
 #[derive(Default)]
 struct Toast {
     next_id: u64,
-    rows: HashMap<Vec<u8>, Vec<Ext>>,
+    rows: FastMap<Vec<u8>, Vec<Ext>>,
 }
 
 /// TOAST_TUPLE_THRESHOLD and TOAST_TUPLE_TARGET.
@@ -1222,8 +1224,8 @@ pub fn stored_datum(
 
 /// toast_save_datum: a value's chunks go into the TOAST table and its index.
 fn save_toast(
-    heaps: &mut HashMap<u32, Heap>,
-    btrees: &mut HashMap<u32, Btree>,
+    heaps: &mut FastMap<u32, Heap>,
+    btrees: &mut FastMap<u32, Btree>,
     toast: &mut Toast,
     v: &Vis,
     toast_oid: u32,
@@ -1266,7 +1268,7 @@ fn save_toast(
 }
 
 /// toast_delete_datum: a value's chunks are deleted.
-fn delete_toast(heaps: &mut HashMap<u32, Heap>, toast_oid: u32, exts: &[Ext], xid: u64, v: &Vis) {
+fn delete_toast(heaps: &mut FastMap<u32, Heap>, toast_oid: u32, exts: &[Ext], xid: u64, v: &Vis) {
     let Some(heap) = heaps.get_mut(&toast_oid) else {
         return;
     };
@@ -1884,7 +1886,7 @@ fn vis_for<'a>(xids: &'a Xids, table: u32, ctx: &ExecCtx) -> Vis<'a> {
 
 /// Add a btree entry for a new heap tuple at `tid`.
 fn index_insert(
-    btrees: &mut HashMap<u32, Btree>,
+    btrees: &mut FastMap<u32, Btree>,
     heap: &Heap,
     v: &Vis,
     entries: Vec<(u32, Key, bool)>,
@@ -2001,7 +2003,7 @@ fn gist_entries(
 }
 
 /// `entries` (`gist_entries`) went into their indexes for the heap tuple at `tid`.
-fn gist_log(logs: &mut HashMap<u32, Arc<gistlog::GistLog>>, entries: &[(u32, Option<crate::catalog::gistsim::Key>)], tid: Tid) {
+fn gist_log(logs: &mut FastMap<u32, Arc<gistlog::GistLog>>, entries: &[(u32, Option<crate::catalog::gistsim::Key>)], tid: Tid) {
     for (ix, k) in entries {
         if let Some(l) = logs.get_mut(ix)
             && !Arc::make_mut(l).insert(tid, *k)
