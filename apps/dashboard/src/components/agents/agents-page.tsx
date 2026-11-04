@@ -22,7 +22,7 @@ import { Launcher } from "./new-agent";
 import { PinnedConversation, PinnedDiff, PinnedTerminal } from "./pinned";
 import { MachineNode, ProjectNode, RequestNode, SubagentNode, ThreadNode } from "./nodes";
 import { PromptBar } from "./prompt-bar";
-import { RequestCard } from "./request-card";
+import { PendingRequest } from "./pending-request";
 import { SettingsPanel } from "./settings-panel";
 import { useSandboxes } from "./sandbox";
 import { Conversation, IconButton } from "./session";
@@ -700,16 +700,12 @@ function PhoneWaiting({ client }: { client: AgentsClient }) {
   const q = requests[0];
   const t = data.threads.get(q.thread);
   return (
-    <div className="rise absolute inset-x-2 bottom-[max(0.5rem,env(safe-area-inset-bottom))] z-20 max-h-[55%] overflow-y-auto rounded-xl border border-accent/40 bg-panel px-3.5 py-3" aria-label="Waiting for you">
-      <RequestCard
+    <div className="rise absolute inset-x-2 bottom-[max(0.5rem,env(safe-area-inset-bottom))] z-20 max-h-[55%] overflow-y-auto rounded-2xl border border-outline bg-raised px-3.5 py-3 shadow-pop" aria-label="Waiting for you">
+      <PendingRequest
         request={q}
-        compact
-        context={
-          <button onClick={() => setAgentsView({ kind: "thread", thread: q.thread })} className="truncate hover:text-fg">
-            {t?.value.title}
-            {requests.length > 1 && <span className="ml-1.5 font-mono text-accent">+{requests.length - 1}</span>}
-          </button>
-        }
+        data={data}
+        onOpen={() => setAgentsView({ kind: "thread", thread: q.thread })}
+        extra={requests.length > 1 && <span className="shrink-0 font-mono text-accent">+{requests.length - 1}</span>}
         onRespond={(response) => client.run(t!.machine, { type: "request.respond", request: q.id, response })}
       />
     </div>

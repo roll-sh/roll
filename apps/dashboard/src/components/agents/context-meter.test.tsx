@@ -58,6 +58,7 @@ describe("context on the canvas and in the composer", () => {
     renderAgents(<Composer mode={{ kind: "thread", thread: thread({ context }), machine: machine() }} />, agentsHarness());
     const meter = screen.getByRole("img", { name: "Context window 62% used" });
     const send = screen.getByRole("button", { name: "Send" });
-    expect(meter.closest("span.ml-auto")).toBe(send.closest("span.ml-auto"));
+    expect(meter.closest("[data-composer-actions]")).not.toBeNull();
+    expect(meter.closest("[data-composer-actions]")).toBe(send.closest("[data-composer-actions]"));
   });
 });

@@ -1,8 +1,8 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { Composer } from "./composer";
-import { machine, mirrored, project, provider, thread } from "@/test/agents";
+import { approval, machine, mirrored, project, provider, question, thread } from "@/test/agents";
 import { agentsHarness, renderAgents } from "@/test/agents-render";
 
 const commands = (h: ReturnType<typeof agentsHarness>) => h.command.mock.calls.map((c) => c[2]);
@@ -19,24 +19,65 @@ describe("Composer", () => {
     expect(box).toHaveValue("");
   });
 
-  it("queues while a run is going, steers on request, and ⌘/Ctrl+Enter flips it once", async () => {
+  it("steers a running agent (T3's default follow-up); ⌘/Ctrl queues it, and the button says which", async () => {
     const h = agentsHarness();
     renderAgents(<Composer mode={{ kind: "thread", thread: thread({ status: "running", active_run: "run_1" }), machine: machine() }} />, h);
+    // There's no queue/steer chooser: the send button is the whole control.
+    expect(screen.queryByRole("radio", { name: "steer" })).toBeNull();
     const box = screen.getByRole("textbox", { name: "Message" });
-    await userEvent.type(box, "then run clippy{Enter}");
-    await waitFor(() => expect(commands(h).at(-1)).toMatchObject({ type: "message.send", mode: "queue" }));
     await userEvent.type(box, "only Postgres");
-    fireEvent.keyDown(box, { key: "Enter", ctrlKey: true });
+    expect(screen.getByRole("button", { name: "Steer message" })).toHaveAttribute("title", expect.stringMatching(/to queue$/));
+    await userEvent.type(box, "{Enter}");
     await waitFor(() => expect(commands(h).at(-1)).toMatchObject({ type: "message.send", text: "only Postgres", mode: "steer" }));
-    await userEvent.click(screen.getByRole("radio", { name: "steer" }));
-    await userEvent.type(box, "also docs{Enter}");
-    await waitFor(() => expect(commands(h).at(-1)).toMatchObject({ text: "also docs", mode: "steer" }));
+    await userEvent.type(box, "then run clippy");
+    fireEvent.keyDown(window, { key: "Control", ctrlKey: true });
+    expect(screen.getByRole("button", { name: "Queue message" })).toBeInTheDocument();
+    fireEvent.keyUp(window, { key: "Control", ctrlKey: false });
+    fireEvent.keyDown(box, { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(commands(h).at(-1)).toMatchObject({ type: "message.send", text: "then run clippy", mode: "queue" }));
+    await userEvent.type(box, "also docs");
+    fireEvent.click(screen.getByRole("button", { name: "Steer message" }), { metaKey: true });
+    await waitFor(() => expect(commands(h).at(-1)).toMatchObject({ text: "also docs", mode: "queue" }));
   });
 
-  it("interrupts a running thread from an empty composer", async () => {
+  it("redirects (steers) while an approval waits, even with ⌘/Ctrl", async () => {
+    const t = thread({ status: "waiting", active_run: "run_1", pending_requests: 1 });
+    const h = agentsHarness({ entities: [mirrored("thread", t, 1), mirrored("request", approval(), 2)] });
+    renderAgents(<Composer mode={{ kind: "thread", thread: t, machine: machine() }} />, h);
+    const box = screen.getByRole("textbox", { name: "Message" });
+    expect(box).toHaveAttribute("placeholder", "Send a message to redirect the agent");
+    await userEvent.type(box, "use the fake runner");
+    fireEvent.keyDown(box, { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(commands(h).at(-1)).toMatchObject({ text: "use the fake runner", mode: "steer" }));
+  });
+
+  it("answers the agent's questions in T3's panel: 1–9 pick, a choice moves on, the typed text is your own answer", async () => {
+    const t = thread({ status: "waiting", active_run: "run_1", pending_requests: 1 });
+    const h = agentsHarness({ entities: [mirrored("thread", t, 1), mirrored("request", question(), 2)] });
+    renderAgents(<Composer mode={{ kind: "thread", thread: t, machine: machine() }} />, h);
+    const panel = screen.getByRole("group", { name: "Questions from the agent" });
+    expect(within(panel).getByText("Which database should the test use?")).toBeInTheDocument();
+    expect(within(panel).getByText("1/2")).toBeInTheDocument();
+    const box = screen.getByRole("textbox", { name: "Message" });
+    expect(box).toHaveAttribute("placeholder", "Type your own answer, or pick one above");
+    // "2" picks Postgres from the empty composer; one choice moves on after 200 ms.
+    fireEvent.keyDown(box, { key: "2" });
+    expect(within(panel).getByRole("radio", { name: /Postgres/ })).toHaveAttribute("aria-checked", "true");
+    expect(await within(panel).findByText("What should run after the fix?")).toBeInTheDocument();
+    await userEvent.click(within(panel).getByRole("checkbox", { name: /Clippy/ }));
+    await userEvent.type(box, "fmt");
+    await userEvent.click(screen.getByRole("button", { name: "Submit answers" }));
+    await waitFor(() =>
+      expect(commands(h).at(-1)).toEqual({ type: "request.respond", request: "req_2", response: { type: "answers", answers: { db: "Postgres", checks: "Clippy, fmt" } } }),
+    );
+    // Answered as a response, never sent as a message.
+    expect(commands(h).some((c) => c.type === "message.send")).toBe(false);
+  });
+
+  it("stops a running thread from an empty composer", async () => {
     const h = agentsHarness();
     renderAgents(<Composer mode={{ kind: "thread", thread: thread({ status: "running" }), machine: machine() }} />, h);
-    await userEvent.click(screen.getByRole("button", { name: "Interrupt" }));
+    await userEvent.click(screen.getByRole("button", { name: "Stop generation" }));
     await waitFor(() => expect(commands(h)).toEqual([{ type: "run.interrupt", thread: "thr_1" }]));
   });
 

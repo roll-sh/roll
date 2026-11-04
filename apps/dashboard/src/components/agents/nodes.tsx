@@ -12,7 +12,7 @@ import { ContextMeter } from "./context-meter";
 import { Menu } from "./menu";
 import { NewProject } from "./project-new";
 import { PullLine } from "./project-settings";
-import { RequestCard } from "./request-card";
+import { PendingRequest } from "./pending-request";
 import { SandboxPanel } from "./sandbox";
 import { ago, loginCommand, MachineIcon, modelName, providerName, shortPath, Stat, StatusDot, threadStatusLabel, usageLine } from "./shared";
 import { orchestration, OrchestratorChip, ProjectMonogram, StatusPill, threadDone, threadPill } from "./thread-status";
@@ -515,39 +515,21 @@ export function SubagentNode({ node }: { node: Node }) {
 
 // ── request beside its thread ──
 
+/**
+ * A request beside its thread, answered right on the card: approvals and plans with their buttons,
+ * questions one at a time with their options (T3's user-input panel), and the last steps that led
+ * to it above (`PendingRequest`). No need to open the conversation.
+ */
 export function RequestNode({ request }: { request: Request }) {
   const { client, openThread, readOnly } = useAgents();
-  const t = client.data.threads.get(request.thread);
-  const machine = t?.machine;
-  // Questions want room to think: the card says what's asked and the conversation answers it.
-  if (request.body.type === "questions" && !readOnly) {
-    const qs = request.body.questions;
-    return (
-      <Card width={280} label="Waiting for you" onClick={() => openThread(request.thread)}>
-        <div className="px-3.5 py-3">
-          <p className="flex items-center gap-1.5 text-[11px] text-subtle">
-            <span className="size-1.5 shrink-0 rounded-full bg-accent" aria-hidden />
-            <span className="truncate">Waiting for you · {t?.value.title}</span>
-          </p>
-          <p className="mt-1.5 line-clamp-2 text-[12.5px] leading-snug font-medium">{qs[0]?.question}</p>
-          {qs.length > 1 && <p className="mt-0.5 text-[11.5px] text-subtle">and {qs.length - 1} more</p>}
-          <span className="mt-2.5 inline-flex items-center gap-1 rounded-md bg-fg px-2 py-1 text-[11.5px] font-medium text-bg">Answer</span>
-        </div>
-      </Card>
-    );
-  }
+  const machine = client.data.threads.get(request.thread)?.machine;
   return (
     <Card width={352} label="Waiting for you">
       <div className="px-3.5 py-3" data-nodrag>
-        <RequestCard
+        <PendingRequest
           request={request}
-          compact
-          context={
-            <button className="flex min-w-0 items-center gap-1.5 hover:text-fg" onClick={() => openThread(request.thread)} title="Open the conversation">
-              <span className="size-1.5 shrink-0 rounded-full bg-accent" aria-hidden />
-              <span className="truncate">Waiting for you · {t?.value.title}</span>
-            </button>
-          }
+          data={client.data}
+          onOpen={() => openThread(request.thread)}
           onRespond={readOnly ? undefined : (response) => client.run(machine!, { type: "request.respond", request: request.id, response })}
         />
       </div>

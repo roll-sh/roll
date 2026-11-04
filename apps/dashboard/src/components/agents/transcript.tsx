@@ -367,7 +367,8 @@ export function NodeView({ t, requests, actions, live }: { t: NodeTree; requests
     case "request": {
       const q = requests.get(b.request);
       if (!q) return null;
-      return <RequestCard request={q} onRespond={actions.respond && ((r) => actions.respond!(q.id, r))} />;
+      // Questions are answered in the composer's panel below; approvals right here.
+      return <RequestCard request={q} onRespond={actions.respond && ((r) => actions.respond!(q.id, r))} hostedQuestions={!!actions.respond} />;
     }
     case "system":
       return <p className="text-center text-[12px] text-subtle">{b.text}</p>;

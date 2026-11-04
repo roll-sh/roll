@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowUp, ImagePlus, ListChecks, Square, X } from "lucide-react";
+import { Bot, CornerUpRight, ListPlus, Paperclip, PencilRuler, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   Attachment,
@@ -8,14 +8,15 @@ import type {
   Machine,
   ProviderInfo,
   Project,
+  Question,
   RuntimeMode,
   SendMode,
   Thread,
 } from "@/lib/agents-api";
 import { coming, machineState, reachable } from "@/lib/agents-api";
-import { btn } from "../ui";
 import { ContextMeter } from "./context-meter";
 import { DEFAULT_RUNTIME_MODE, ModelPicker, PermissionsMenu, resolveModel, type ModelChoice } from "./model-picker";
+import { pickByDigit, pill, QuestionsPanel, quiet, useQuestionFlow } from "./request-card";
 import { Switch } from "./ui";
 import { useAgents } from "./use-agents";
 
@@ -57,11 +58,35 @@ export function readAsAttachment(file: File): Promise<Attachment> {
   });
 }
 
+/** ⌘ or Ctrl held (T3's `useShortcutModifierState`): the send button shows what a click would do. */
+function useModifierHeld(): boolean {
+  const [held, setHeld] = useState(false);
+  useEffect(() => {
+    const on = (e: KeyboardEvent) => setHeld(e.metaKey || e.ctrlKey);
+    const off = () => setHeld(false);
+    window.addEventListener("keydown", on);
+    window.addEventListener("keyup", on);
+    window.addEventListener("blur", off);
+    return () => {
+      window.removeEventListener("keydown", on);
+      window.removeEventListener("keyup", on);
+      window.removeEventListener("blur", off);
+    };
+  }, []);
+  return held;
+}
+
+const NO_QUESTIONS: Question[] = [];
+
 /**
- * The composer, T3 Code's behaviour on the canvas: Enter sends and Shift+Enter breaks the line;
- * while a run is going a message is queued (or steers it; ⌘/Ctrl+Enter does the other one once);
- * Shift+Tab toggles plan mode; images paste or drop in. Provider, model, effort and modes come
- * from the machine's providers. On a thread, changing them reconfigures the thread's next runs.
+ * The composer, T3 Code's `ChatComposer` (MIT): a raised card, the prompt over a footer with
+ * attach on the left and the model, permissions and plan mode beside the send button on the right.
+ * Enter sends, Shift+Enter breaks the line, Shift+Tab toggles plan mode, images paste or drop in.
+ * While a run is going a message steers it (T3's default follow-up); ⌘/Ctrl (Enter or a click)
+ * queues it for after the run instead, and the send button shows which. With nothing typed the
+ * button stops the run. Questions the agent asked sit on top of the card (T3's user-input panel):
+ * 1–9 pick, what's typed here is the custom answer, and the button goes to the next question or
+ * submits. On a thread, changing the pickers reconfigures its next runs.
  */
 export function Composer({
   mode,
@@ -92,12 +117,18 @@ export function Composer({
   const [plan, setPlan] = useState<InteractionMode>(thread?.interaction_mode ?? defaults?.interaction_mode ?? "default");
   // A roll code project publishes threads as changes, which needs a worktree: on by default there.
   const [worktree, setWorktree] = useState(mode.kind === "new" && (defaults?.worktree ?? !!mode.project.repo));
-  const [sendMode, setSendMode] = useState<SendMode>("queue");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const area = useRef<HTMLTextAreaElement>(null);
   const files = useRef<HTMLInputElement>(null);
+  const held = useModifierHeld();
+
+  // What the agent is waiting on in this thread: questions are answered here, an approval above.
+  const pending = thread ? [...client.data.requests.values()].map((r) => r.value).filter((r) => r.thread === thread.id && r.status === "pending") : [];
+  const asked = pending.find((r) => r.body.type === "questions");
+  const approvalWaiting = pending.some((r) => r.body.type === "approval");
+  const flow = useQuestionFlow(asked?.body.type === "questions" ? asked.body.questions : NO_QUESTIONS, asked?.id);
 
   // Follow the thread's own settings when they change elsewhere.
   useEffect(() => {
@@ -138,6 +169,8 @@ export function Composer({
   const machineOnline = reachable(mode.machine);
   const state = mode.machine ? machineState(mode.machine) : "offline";
   const loggedOut = info && info.auth === "missing";
+  // A follow-up while running steers; with ⌘/Ctrl it queues. Waiting on an approval, it always steers (redirects).
+  const queues = (mod: boolean) => running && !approvalWaiting && mod;
 
   const configure = (patch: Partial<Pick<Thread, "provider" | "model" | "effort" | "runtime_mode" | "interaction_mode">>) => {
     if (!thread || !mode.machine) return;
@@ -170,7 +203,7 @@ export function Composer({
     }
   };
 
-  const submit = async (flip = false) => {
+  const submit = async (mod = false) => {
     const prompt = text.trim();
     if ((!prompt && !attachments.length) || busy || !machineOnline) return;
     setBusy(true);
@@ -188,7 +221,7 @@ export function Composer({
           ...(attachments.length ? { attachments } : {}),
         });
       } else {
-        const m: SendMode = running ? (flip ? (sendMode === "queue" ? "steer" : "queue") : sendMode) : "queue";
+        const m: SendMode = queues(mod) ? "queue" : "steer";
         await client.run(mode.machine!.id, {
           type: "message.send",
           thread: mode.thread.id,
@@ -199,6 +232,25 @@ export function Composer({
       }
       setText("");
       setAttachments([]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // The questions: the button goes on to the next one, and answers on the last.
+  const answer = async () => {
+    if (!asked || busy || !machineOnline) return;
+    if (!flow.last) {
+      if (flow.answered) flow.next();
+      return;
+    }
+    if (!flow.complete) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await client.run(mode.machine!.id, { type: "request.respond", request: asked.id, response: { type: "answers", answers: flow.answers() } });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -217,6 +269,7 @@ export function Composer({
     configure({ interaction_mode: next });
   };
 
+  const question = asked ? flow.question : null;
   const placeholder = !machineOnline
     ? "The machine is offline"
     : state === "asleep"
@@ -224,20 +277,24 @@ export function Composer({
       : state === "stopped"
         ? "The sandbox is stopped; sending starts it"
         : coming(state)
-          ? "The sandbox is waking up; what you send goes once it's up"
-          : thread?.status === "waiting"
-      ? "Answer above, or send a message to redirect the agent"
-      : running
-        ? sendMode === "queue"
-          ? "Queue a message for when this run ends…"
-          : "Steer the running agent…"
-        : mode.kind === "new"
-          ? "Describe the task. Enter starts it."
-          : "Send a follow-up…";
+          ? "Waking the sandbox; this goes once it's up"
+          : question
+            ? question.options.length
+              ? "Type your own answer, or pick one above"
+              : "Type your answer"
+            : approvalWaiting
+              ? "Send a message to redirect the agent"
+              : mode.kind === "new"
+                ? "Describe the task. Enter starts it."
+                : "Ask anything";
+  const value = question ? flow.custom(question) : text;
+  const setValue = question ? flow.setCustom : setText;
+  const hasText = !!text.trim() || attachments.length > 0;
+  const queuing = queues(held);
 
   return (
     <div
-      className={`rounded-xl border bg-bg transition-colors ${dragging ? "border-accent/60" : "border-line-2 focus-within:border-subtle"}`}
+      className="relative"
       onDragOver={(e) => {
         if (caps?.images === false) return;
         e.preventDefault();
@@ -251,151 +308,197 @@ export function Composer({
       }}
       data-nodrag
     >
-      {attachments.length > 0 && (
-        <ul className="flex flex-wrap gap-1.5 px-2.5 pt-2.5" aria-label="Attachments">
-          {attachments.map((a, i) => (
-            <li key={`${a.name}-${i}`} className="group relative">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={`data:${a.mime};base64,${a.data}`} alt={a.name} className="size-12 rounded-md border border-line object-cover" />
+      {asked && (
+        // T3's attached banner: tucked under the card's top edge.
+        <div className="mx-[1.375rem] -mb-4 rounded-t-2xl border border-b-0 border-outline bg-raised px-3.5 pt-3 pb-6 transition-opacity duration-150 starting:opacity-0">
+          <QuestionsPanel flow={flow} />
+        </div>
+      )}
+      <div
+        className={`@container/composer relative z-10 rounded-2xl border bg-raised shadow-float inset-shadow-highlight transition-colors duration-200 ${dragging ? "border-accent/60 ring-1 ring-accent/40 ring-inset" : "border-outline"}`}
+      >
+        {attachments.length > 0 && (
+          <ul className="flex flex-wrap gap-1.5 px-4 pt-3.5" aria-label="Attachments">
+            {attachments.map((a, i) => (
+              <li key={`${a.name}-${i}`} className="group relative transition-[opacity,scale] duration-300 ease-drawer starting:scale-95 starting:opacity-0">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={`data:${a.mime};base64,${a.data}`} alt={a.name} className="size-12 rounded-lg border border-line-2 object-cover" />
+                <button
+                  type="button"
+                  onClick={() => setAttachments((x) => x.filter((_, j) => j !== i))}
+                  aria-label={`Remove ${a.name}`}
+                  className="absolute -top-1.5 -right-1.5 grid size-4 place-items-center rounded-full border border-line-2 bg-popover text-subtle hover:text-fg"
+                >
+                  <X className="size-2.5" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <textarea
+          ref={area}
+          rows={2}
+          value={value}
+          disabled={!machineOnline}
+          onChange={(e) => setValue(e.target.value)}
+          onPaste={(e) => {
+            const imgs = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith("image/"));
+            if (imgs.length && caps?.images !== false && !question) {
+              e.preventDefault();
+              void addFiles(imgs);
+            }
+          }}
+          onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+            if (question && pickByDigit(flow, e, value !== "")) return;
+            if (e.key === "Enter" && !e.shiftKey && !e.altKey) {
+              e.preventDefault();
+              if (question) void answer();
+              else void submit(e.metaKey || e.ctrlKey);
+            } else if (e.key === "Tab" && e.shiftKey && (caps?.plan_mode ?? true)) {
+              e.preventDefault();
+              togglePlan();
+            } else if (e.key === "Escape" && onCancel) {
+              onCancel();
+            }
+          }}
+          placeholder={placeholder}
+          aria-label="Message"
+          className="block max-h-52 min-h-[3.25rem] w-full resize-none bg-transparent px-4 pt-3.5 pb-2 text-[14px] leading-relaxed outline-none placeholder:text-subtle sm:pt-4"
+          style={{ fieldSizing: "content" } as React.CSSProperties}
+        />
+        <div className="flex min-w-0 items-center px-2 pb-2">
+          {caps?.images !== false && (
+            <>
               <button
                 type="button"
-                onClick={() => setAttachments((x) => x.filter((_, j) => j !== i))}
-                aria-label={`Remove ${a.name}`}
-                className="absolute -top-1.5 -right-1.5 grid size-4 place-items-center rounded-full border border-line bg-panel text-subtle hover:text-fg"
+                onClick={() => files.current?.click()}
+                className="me-1 grid size-8 shrink-0 place-items-center rounded-lg text-muted transition-colors hover:bg-fg/[0.06] hover:text-fg"
+                title="Attach images"
+                aria-label="Attach images"
               >
-                <X className="size-2.5" />
+                <Paperclip className="size-4" />
               </button>
-            </li>
-          ))}
-        </ul>
-      )}
-      <textarea
-        ref={area}
-        rows={mode.kind === "new" ? 3 : 2}
-        value={text}
-        disabled={!machineOnline}
-        onChange={(e) => setText(e.target.value)}
-        onPaste={(e) => {
-          const imgs = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith("image/"));
-          if (imgs.length && caps?.images !== false) {
-            e.preventDefault();
-            void addFiles(imgs);
-          }
-        }}
-        onKeyDown={(e) => {
-          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-          if (e.key === "Enter" && !e.shiftKey && !e.altKey) {
-            e.preventDefault();
-            void submit(e.metaKey || e.ctrlKey);
-          } else if (e.key === "Tab" && e.shiftKey && (caps?.plan_mode ?? true)) {
-            e.preventDefault();
-            togglePlan();
-          } else if (e.key === "Escape" && onCancel) {
-            onCancel();
-          }
-        }}
-        placeholder={placeholder}
-        aria-label="Message"
-        className="block max-h-60 min-h-12 w-full resize-none bg-transparent px-3 pt-2.5 pb-1 text-[13.5px] leading-relaxed outline-none placeholder:text-subtle"
-        style={{ fieldSizing: "content" } as React.CSSProperties}
-      />
-      <div className="flex flex-wrap items-center gap-1 px-2 pb-2">
-        <ModelPicker providers={providers} value={{ provider, model: modelInfo?.id ?? model, effort }} onChange={pick} side={mode.kind === "new" ? "bottom" : "top"} />
-        <PermissionsMenu
-          value={runtime}
-          side={mode.kind === "new" ? "bottom" : "top"}
-          onChange={(id) => {
-            setRuntime(id);
-            configure({ runtime_mode: id });
-          }}
-        />
-        {(caps?.plan_mode ?? true) && (
-          <button
-            type="button"
-            onClick={togglePlan}
-            aria-pressed={plan === "plan"}
-            title="Plan first, change nothing until approved (Shift+Tab)"
-            className={`inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11.5px] transition ${
-              plan === "plan" ? "bg-accent/15 text-accent" : "text-subtle hover:text-fg"
-            }`}
-          >
-            <ListChecks className="size-3.5" /> Plan
-          </button>
-        )}
-        {mode.kind === "new" && (
-          <label className="inline-flex cursor-pointer items-center gap-1.5 px-1.5 py-1 text-[12px] text-muted hover:text-fg" title="Work in its own git worktree on a new branch">
-            <Switch size="sm" checked={worktree} onCheckedChange={setWorktree} aria-label="Worktree" />
-            Worktree
-          </label>
-        )}
-        {caps?.images !== false && (
-          <>
-            <button type="button" onClick={() => files.current?.click()} className="p-1 text-subtle hover:text-fg" title="Attach images" aria-label="Attach images">
-              <ImagePlus className="size-3.5" />
-            </button>
-            <input
-              ref={files}
-              type="file"
-              accept="image/*"
-              multiple
-              hidden
-              onChange={(e) => {
-                if (e.target.files) void addFiles(e.target.files);
-                e.target.value = "";
-              }}
-            />
-          </>
-        )}
-        <span className="ml-auto flex items-center gap-1">
-          {thread?.context && (
-            <span className="grid size-7 place-items-center">
-              <ContextMeter context={thread.context} size={18} />
-            </span>
+              <input
+                ref={files}
+                type="file"
+                accept="image/*"
+                multiple
+                hidden
+                onChange={(e) => {
+                  if (e.target.files) void addFiles(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+            </>
           )}
-          {running && (
-            <span className="flex rounded-md border border-line p-px text-[11px]" role="radiogroup" aria-label="While running">
-              {(["queue", "steer"] as const).map((m) => (
+          <div className="flex min-w-0 flex-1 items-center justify-end gap-2" data-composer-actions>
+            {/* Narrow (a side panel, a phone): the chips keep their icons and the model its name, as T3's footer compacts. */}
+            <div className="flex min-w-0 flex-1 items-center justify-end gap-0.5 overflow-hidden whitespace-nowrap [&>*]:shrink-0 [&>*:first-child]:min-w-0 [&>*:first-child]:shrink @max-[28rem]/composer:[&_[aria-label^='Permissions:']]:gap-0.5 @max-[28rem]/composer:[&_[aria-label^='Permissions:']]:text-[0px]">
+              <ModelPicker providers={providers} value={{ provider, model: modelInfo?.id ?? model, effort }} onChange={pick} side={mode.kind === "new" ? "bottom" : "top"} />
+              <PermissionsMenu
+                value={runtime}
+                side={mode.kind === "new" ? "bottom" : "top"}
+                onChange={(id) => {
+                  setRuntime(id);
+                  configure({ runtime_mode: id });
+                }}
+              />
+              {(caps?.plan_mode ?? true) && (
                 <button
-                  key={m}
                   type="button"
-                  role="radio"
-                  aria-checked={sendMode === m}
-                  onClick={() => setSendMode(m)}
-                  title={m === "queue" ? "Send after this run ends" : caps?.steer ? "Add to the running turn" : "Interrupt and restart with this added"}
-                  className={`rounded px-1.5 py-0.5 ${sendMode === m ? "bg-panel-2 text-fg" : "text-subtle hover:text-fg"}`}
+                  onClick={togglePlan}
+                  aria-pressed={plan === "plan"}
+                  aria-label="Plan mode"
+                  title={plan === "plan" ? "Plan mode: plans first and changes nothing until you approve (Shift+Tab)" : "Build mode (Shift+Tab for plan mode)"}
+                  className={`inline-flex h-7 shrink-0 items-center gap-1.5 rounded-lg px-2 text-[12px] font-medium transition-colors hover:bg-fg/[0.06] ${plan === "plan" ? "text-accent" : "text-soft"}`}
                 >
-                  {m}
+                  {plan === "plan" ? <PencilRuler className="size-4" /> : <Bot className="size-4" />}
+                  <span className="@max-[28rem]/composer:hidden">{plan === "plan" ? "Plan" : "Build"}</span>
                 </button>
-              ))}
-            </span>
-          )}
-          {onCancel && (
-            <button type="button" onClick={onCancel} className={btn}>
-              Cancel
-            </button>
-          )}
-          {running && !text.trim() ? (
-            <button type="button" onClick={interrupt} aria-label="Interrupt" title="Interrupt the run" className="grid size-7 place-items-center rounded-lg bg-fg text-bg hover:opacity-85">
-              <Square className="size-3" fill="currentColor" />
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => void submit()}
-              disabled={busy || !machineOnline || (!text.trim() && !attachments.length) || (mode.kind === "new" && (!provider || !!loggedOut))}
-              aria-label={running ? (sendMode === "queue" ? "Queue message" : "Steer") : mode.kind === "new" ? "Start thread" : "Send"}
-              className="grid size-7 place-items-center rounded-lg bg-fg text-bg transition hover:opacity-85 disabled:opacity-25"
-            >
-              <ArrowUp className="size-4" strokeWidth={2.25} />
-            </button>
-          )}
-        </span>
+              )}
+              {mode.kind === "new" && (
+                <label className="inline-flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg px-2 text-[12px] font-medium text-soft hover:bg-fg/[0.06]" title="Work in its own git worktree on a new branch">
+                  <Switch size="sm" checked={worktree} onCheckedChange={setWorktree} aria-label="Worktree" />
+                  Worktree
+                </label>
+              )}
+            </div>
+            {thread?.context && <ContextMeter context={thread.context} size={18} />}
+            {onCancel && (
+              <button type="button" onClick={onCancel} className={quiet}>
+                Cancel
+              </button>
+            )}
+            {question ? (
+              <span className="flex shrink-0 items-center gap-1">
+                {flow.index > 0 && (
+                  <button type="button" onClick={flow.back} className={quiet}>
+                    Previous
+                  </button>
+                )}
+                <button type="button" onClick={() => void answer()} disabled={busy || !machineOnline || (flow.last ? !flow.complete : !flow.answered)} className={pill}>
+                  {busy ? (
+                    <span className="shimmer">Sending…</span>
+                  ) : flow.last ? (
+                    flow.questions.length === 1 ? (
+                      "Submit answer"
+                    ) : (
+                      "Submit answers"
+                    )
+                  ) : (
+                    <>
+                      Next<span className="@max-[28rem]/composer:hidden">&nbsp;question</span>
+                    </>
+                  )}
+                </button>
+              </span>
+            ) : running && !hasText ? (
+              <button
+                type="button"
+                onClick={interrupt}
+                aria-label="Stop generation"
+                title="Interrupt"
+                className="grid size-8 shrink-0 place-items-center rounded-full bg-danger/90 text-white shadow-xs transition-colors duration-150 hover:bg-danger"
+              >
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
+                  <rect x="2" y="2" width="8" height="8" rx="1.5" />
+                </svg>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={(e) => void submit(e.metaKey || e.ctrlKey)}
+                disabled={busy || !machineOnline || !hasText || (mode.kind === "new" && (!provider || !!loggedOut))}
+                aria-label={running ? (queuing ? "Queue message" : "Steer message") : mode.kind === "new" ? "Start thread" : "Send"}
+                title={running ? (approvalWaiting ? "Send to redirect the agent" : `Click to steer, ${MOD}-click to queue`) : undefined}
+                className="grid size-8 shrink-0 place-items-center rounded-full bg-accent text-white shadow-xs transition-[transform,background-color,opacity] duration-150 enabled:hover:scale-105 enabled:active:scale-[0.97] disabled:bg-fg/[0.12] disabled:text-subtle motion-reduce:transition-none"
+              >
+                {busy ? (
+                  <span className="size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent motion-reduce:animate-none" aria-hidden />
+                ) : running ? (
+                  queuing ? (
+                    <ListPlus className="size-4" />
+                  ) : (
+                    <CornerUpRight className="size-4" />
+                  )
+                ) : (
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
+                    <path d="M7 11.5V2.5M7 2.5L3 6.5M7 2.5L11 6.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+              </button>
+            )}
+          </div>
+        </div>
       </div>
       {(error || loggedOut) && (
-        <p className="px-3 pb-2 text-[12px] text-danger" role="alert">
+        <p className="px-3 pt-2 text-[12px] text-danger" role="alert">
           {error ?? `${info!.name} isn't logged in on this machine. Use "Log in" on the machine.`}
         </p>
       )}
     </div>
   );
 }
+
+const MOD = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
