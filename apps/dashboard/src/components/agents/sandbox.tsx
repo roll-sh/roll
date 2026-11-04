@@ -116,7 +116,20 @@ export function SandboxPanel({ machine }: { machine: Machine }) {
     <div className="space-y-1 rounded-lg border border-line bg-bg px-2.5 py-2" data-nodrag role="group" aria-label="Sandbox">
       <div className="flex items-center gap-2 text-[12px]">
         <span className={`size-1.5 shrink-0 rounded-full ${moving ? "bg-accent" : status === "running" ? "bg-ok" : status === "failed" ? "bg-danger" : "bg-subtle"}`} aria-hidden />
-        <span className={moving || busy ? "shimmer" : ""}>{busy === "start" ? "Starting…" : busy === "stop" ? "Stopping…" : busy === "delete" ? "Deleting…" : statusLabel[status]}</span>
+        {/* Running is the machine's "online": then the line is what's rented. */}
+        <span className={`min-w-0 truncate ${moving || busy ? "shimmer" : ""} ${status === "running" && !busy ? "font-mono text-[11px] text-muted" : ""}`} title={size ? `${size.name}: ${size.cpu} vCPU, ${size.memory_gb} GB, ${size.disk_gb} GB disk` : undefined}>
+          {busy === "start"
+            ? "Starting…"
+            : busy === "stop"
+              ? "Stopping…"
+              : busy === "delete"
+                ? "Deleting…"
+                : status === "running"
+                  ? size
+                    ? `${size.cpu} vCPU · ${size.memory_gb} GB`
+                    : info.size
+                  : statusLabel[status]}
+        </span>
         <span className="ml-auto shrink-0 font-mono text-[11px] text-muted">{formatHourly(size?.hourly_cents ?? info.hourly_cents)}</span>
         {sb && services && status !== "deleting" && !confirm && (
           <span className="-mr-1 flex shrink-0 items-center text-subtle">
@@ -136,10 +149,11 @@ export function SandboxPanel({ machine }: { machine: Machine }) {
           </span>
         )}
       </div>
-      <p className="truncate font-mono text-[11px] text-subtle" title={size ? `${size.disk_gb} GB disk` : undefined}>
-        {size ? `${size.name} · ${size.cpu} vCPU · ${size.memory_gb} GB` : info.size}
-        {used && ` · ${used.running_hours.toFixed(1)} h, ${dollars(used.price_usd)} this month`}
-      </p>
+      {used && (
+        <p className="text-[11.5px] text-subtle">
+          <span className="font-mono text-muted">{used.running_hours.toFixed(1)} h</span> this month · <span className="font-mono text-muted">{dollars(used.price_usd)}</span>
+        </p>
+      )}
       {status === "creating" && <p className="text-[11.5px] text-subtle">Booting. It connects on its own in a minute or so.</p>}
       {sb?.error && <p className="text-[11.5px] text-danger">{sb.error}</p>}
       {confirm && sb && services && (
