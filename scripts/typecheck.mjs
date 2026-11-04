@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // `pnpm typecheck`: every workspace package's own `typecheck` script, all packages at once, with
 // `tsc` resolving to TypeScript 7 (the native compiler, the root devDependency) instead of the
-// package's TypeScript 5.9. The packages keep 5.9 because Next's build uses its compiler API; both
+// package's TypeScript 5.9. The packages keep 5.9 for their own builds (the SDKs' `tsc` emit); both
 // report the same diagnostics on this repo (checked with injected errors when this was added).
 // Each package's scripts stay the one place that says what it checks.
 import { spawn } from "node:child_process";

@@ -23,7 +23,7 @@ RUST_PATHS=(crates/agent-proto crates/agent-host crates/model-gateway crates/cod
             crates/roll-cli/src/agent.rs crates/roll-cli/tests/agent.rs crates/roll-cli/src/gateway.rs crates/roll-cli/tests/gateway.rs crates/roll-cli/Cargo.toml
             docs/code/test-coverage.md Cargo.toml Cargo.lock scripts/test-agents.sh scripts/lib/gate.sh)
 E2E_PATHS=("${RUST_PATHS[@]}" crates/code-control/src crates/rolld/src apps/dashboard/public/install.sh scripts/agents-e2e.mjs)
-DASH_PATHS=(apps/dashboard/src apps/dashboard/public apps/dashboard/package.json apps/dashboard/next.config.ts apps/dashboard/tsconfig.json
+DASH_PATHS=(apps/dashboard/src apps/dashboard/public apps/dashboard/package.json apps/dashboard/vite.config.ts apps/dashboard/server.mjs apps/dashboard/tsconfig.json
             packages/brand/src pnpm-lock.yaml scripts/agents-e2e.mjs)
 
 unit_only=0
