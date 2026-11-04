@@ -34,6 +34,10 @@ Monorepo for roll, serverless infrastructure. Use pnpm for the web side (`apps/*
   - Body text is 13–14px in the dashboard.
 - Icons are `lucide-react` at 14–16px with a 1.5 stroke.
 - Spacing is generous. Panels are flat (`bg-panel`, 1px border, radius 8–12) with no drop shadows.
+- **Exception: the agents surface** (popup, `/dashboard/agents`, desktop Agents window). At the
+  user's request it has layered surfaces, soft shadows on floating things, glass popovers and
+  Linear-style weights. Its rules are in `docs/code/agents-design.md`. Everything else above still
+  applies there (accent, no orange, Horizon, motion).
 
 ## Motion and interactivity
 
@@ -277,6 +281,15 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     user's index, HEAD or working files outside a rollback the user asked for.
   - Canvas motion follows the rules above: one canvas engine, calm accent pulses only on busy
     work, reduced motion honoured.
+  - The agents surface has its own design system, `docs/code/agents-design.md` (the user's
+    request, overriding "quieter, no shadows" inside it only):
+    - Linear's inverted L: chrome flush on the base, the canvas an inset panel, a floating sheet.
+    - A near-black ladder, with tokens under `[data-agents]` in globals.css.
+    - Translucent hairlines with a top highlight, and deep shadows on what floats.
+    - Use its tokens (`bg-canvas`, `bg-sheet`, `shadow-pop`, `inset-shadow-highlight`, `glass`…),
+      never raw colours or shadows.
+    - The accent stays `#4c8dff`. No orange, no decorative gradients. The Horizon mark is in the
+      header.
   - After touching anything agents-related, run `pnpm test:agents` (it skips itself when nothing
     relevant changed; `--unit` skips the end-to-end run). New tests go in
     `agent-host/tests/{orchestrator,threads,git,terminal,mcp,relay,codex,claude,acp}.rs`,

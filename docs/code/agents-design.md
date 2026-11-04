@@ -1,0 +1,243 @@
+# roll code agents: design system
+
+The visual system of the agents surface: the popup over every dashboard page, `/dashboard/agents`,
+and the desktop app's Agents window. Everything else in the dashboard follows AGENTS.md's
+"Aesthetics" (quiet, flat, no shadows). The agents surface is the one place that has depth,
+because the user asked for it: "better designed than Linear", with T3 Code's look and motion.
+
+The tokens are in `apps/dashboard/src/app/globals.css`. The surface is scoped by `[data-agents]`
+(on the popup's dialog and on the full-window page). Inside the scope, the shared tokens (`--bg`,
+`--panel`, `--line`, `--muted`…) take the agents values, so a plain `bg-panel` or `border-line`
+in an agents component already sits on the right layer. The agents-only tokens are on `:root` too,
+because Base UI popups portal to `<body>`.
+
+## Principles
+
+1. **Structure is felt, not seen.** Layers do the separating; hairlines are faint. Spacing
+   replaces rules wherever it can. *(Linear 2026 refresh)*
+2. **The inverted L.** The chrome (header, threads sidebar) sits flush on the darkest base. The
+   working area (the canvas) is one inset, rounded panel a step up. What you open floats as a
+   sheet a step up again. *(Linear's app)*
+3. **Depth only where things float.** Cards, sheets, popovers and the composer have shadows.
+   Chrome and the canvas don't. *(T3 Code, Linear)*
+4. **Colour means state.** The accent `#4c8dff` is for focus, active, running and waiting.
+   Green means done, red means failed. Everything else is neutral. Never orange, and never a
+   decorative gradient.
+5. **Motion is fast and purposeful.** It comes from where the thing comes from, is never
+   bouncy, and is static under reduced motion.
+
+## Surfaces (elevation)
+
+| Level | Token | Dark | Light | Used for |
+|---|---|---|---|---|
+| 0 base | `--bg` | `#08090a` | `#f1f1f2` | header, threads sidebar, around the panels |
+| 1 canvas | `--canvas` (`bg-canvas`) | `#0d0e10` | `#fafafa` | the inset canvas panel, under the dot field |
+| 2 sheet | `--sheet` (`bg-sheet`) | `#111214` | `#ffffff` | side panel (conversation, settings), dialogs |
+| 3 card | `--panel` = `--raised` | `#141518` | `#ffffff` | canvas cards, the composer, path cards |
+| 4 fill | `--panel-2` | `#1a1b1e` | `#f2f2f4` | inputs, fills inside cards, icon tiles |
+| 4 popover | `--popover` (`glass`) | `#1a1b1e` at 88% plus blur | `#ffffff` | menus, selects, the palette, the card toolbar |
+| 5 pressed | `--panel-3` | `#222327` | `#e8e8eb` | pressed and active controls |
+| message | `--message` | `#1d1e22` | `#eeeef0` | the user's turn |
+
+Each step is about +2–3 L, with almost no chroma. That matches Linear's measured ladder
+(`#08090a`, `#0f1011`, `#141516`, `#191a1b`) and Raycast's greys (`#07080a`, `#0c0d0f`,
+`#111214`). Inside `[data-panel]` (the side panel), `--bg` is the sheet colour, so conversation
+code that says `bg-bg` matches the sheet it's in.
+
+On glass or sheets, hover fills are translucent foreground: `bg-fg/[0.04]` for hover,
+`bg-fg/[0.06–0.07]` for selected or open. That's T3's `--accent` at white/4%.
+
+## Lines and highlights
+
+| Token | Dark | Light | Used for |
+|---|---|---|---|
+| `--line` | white 5.5% | ink 6.5% | dividers inside cards, quiet field borders |
+| `--line-2` | white 8.5% | ink 10% | card, sheet and tab borders (the default) |
+| `--line-3` | white 13% | ink 16% | hover, strong |
+| `--outline` | white 8.5% | ink 9% | portaled popups (same as `line-2`, but on `:root`) |
+| `--highlight` (`inset-shadow-highlight`) | inset 0 1px white 5% | none | top edge of raised things: cards, tabs, sheets, popovers, tiles |
+
+The alphas come from Linear (5% translucent, 8% default, 12–15% strong) and T3 (`--border`
+white 8%). The highlight is Raycast's signature `inset 0 1px #ffffff0d`. Don't put the
+highlight on flat chrome.
+
+## Shadows
+
+| Token | Dark | Used for |
+|---|---|---|
+| `shadow-card` | `0 1px 2px /35%, 0 8px 20px -12px /70%` | canvas cards, the primary button |
+| `shadow-card-hover` | `0 1px 2px /40%, 0 16px 32px -14px /80%` | a hovered or selected card |
+| `shadow-float` | `0 1px 2px /35%, 0 14px 32px -18px /75%` | the composer (T3's `shadow-composer-dark`) |
+| `shadow-pop` | `0 4px 12px -2px /35%, 0 18px 44px -18px /80%` | menus, popovers, the card toolbar, the zoom bar |
+| `shadow-sheet` | `0 24px 72px -20px /90%` | the side panel, dialogs, the palette (T3's `dialog-glass`) |
+
+Shadows are deep and pulled in under the surface, never halos. Light mode uses the same shapes
+at 5–26% ink.
+
+## Canvas engine colours
+
+`canvas-engine.ts` resolves these through `resolveColor`, which drops alpha, so they're opaque:
+`--dot` (dark `#7e828b`, drawn at 24% alpha) and `--edge` (`#2e3035`). `--canvas` is used to
+punch out the edge ports. `refreshColors()` reruns on a theme change (the canvas listens for
+`prefers-color-scheme`).
+
+- **Dot field:** a 28px grid, readable at rest. The pointer swells it, a click ripples it, and
+  it sweeps while anything runs. Keep it: the user likes it.
+- **Edges:** 1.25px beziers from a parent's right edge to a child's left, with a ring port at
+  each end. Busy edges use the accent at 50% with one travelling dot. Forks are dashed.
+- **Busy ring:** 1px of accent at 8–25% alpha, breathing over 1.6s, 3–5px outside the card.
+
+## Cards (`Card` in nodes.tsx)
+
+- **Frame:** `rounded-xl border border-line-2 bg-panel shadow-card inset-shadow-highlight`.
+  Clickable cards get `border-line-3` and `shadow-card-hover` on hover. Focus is a 2px accent
+  outline offset by 2px.
+- **Tones (border):** busy `accent/40` (plus the engine's ring), done `ok/40` (T3's green for a
+  finished run you haven't opened), error `danger/45`, muted at 60% opacity.
+- **Selected** (its conversation or settings are open): an accent hairline plus a 3px accent
+  halo at 16% (`[data-card][data-selected]` in globals.css).
+- **Header:** an `IconTile` (24px, `bg-panel-2`, a hairline, the highlight, a 14px icon), then the
+  name in 13.5px at weight 590, then the status. Body text is 12–13px. Meta is 11px, with
+  `font-mono tabular-nums` for numbers.
+- **Tools:** `HoverActions` is a floating glass toolbar over the card's top-right corner. It
+  appears on hover, on focus, and always on touch. It takes no room in the card, so names never
+  truncate.
+
+## Chrome
+
+- **Header (48px):** flush on the base, with no rule under it. It holds the sidebar toggle, the
+  Horizon mark (22px, the shared state), "Agents" (14px, weight 590), a divider, the status
+  (a dot plus "2 running"), and an accent pill with the waiting count. A small uppercase
+  "Demo" tag shows in the demo. On the right: the palette field (a hairline field with a ⌘K
+  chip), muted icon buttons, the white primary "New agent" (with a highlight and shadow,
+  `active:scale-[0.97]`), a divider, and Close. On a phone the waiting pill shows only its count,
+  and Add a machine and Settings move under More.
+- **Views bar (44px):** inside the canvas panel. The selected tab is a raised chip
+  (`bg-panel-2`, `border-line-2`, highlight, `shadow-card`). Other tabs are bare text with a
+  translucent hover. Counts sit in 16px round badges. The filter field is the same quiet field as
+  the palette trigger.
+- **Canvas panel:** `mx-2 mb-2 rounded-xl border border-line bg-canvas`. On a phone it's full
+  bleed.
+- **Zoom bar:** glass, `rounded-[10px]`, `shadow-pop`, highlight, 28px buttons, the zoom in
+  tabular mono. Auto-fit never goes below 60% (cards stay readable) and frames from the top.
+  "Fit everything" (`1`) fits all of it.
+- **Side panel:** a floating sheet, `rounded-xl border-line-2 bg-sheet shadow-sheet`, inset 8px
+  from the window and level with the canvas panel's top. The resize grip is a 3px pill that
+  appears in the gap on hover and turns accent while held. On a phone it covers the canvas.
+- **Threads sidebar:** flush on the base with no rule. Rows are 30px; titles are 13px in
+  `text-soft`, weight 510 when open. Hover is `fg/4%`; selected is `fg/7%` plus the highlight.
+  Meta is 10.5–11px tabular.
+- **Popovers and menus:** `glass` with `border-outline`, `shadow-pop` and the highlight. Rows are
+  28px at 13px, the highlighted row is `bg-fg/[0.07]`, and icons are muted 14px at stroke 1.75.
+  `ui/cn.ts`'s `glass` is the one definition for Base UI popups.
+- **Dialogs and the palette:** a `--scrim` (black 60%, 2–3px blur), then a sheet that is
+  `rounded-2xl border-line-2 bg-sheet shadow-sheet`, with a 17px/590 title and a 12.5px muted
+  lead.
+- **Empty and loading states:** loading shows the Horizon mark (40px, thinking) over a
+  shimmering line. With no machines, the globe (`RollMark`) shows big over the `DotField` with
+  both ways in. An empty view is one calm sentence with a text link back.
+
+## Type
+
+Geist Sans and Geist Mono, using variable weights the way Linear does: 400 body, 510 labels and
+tabs, 590 titles.
+
+| Role | Size and weight | Tracking |
+|---|---|---|
+| display (empty state) | 28–32 / 590 | −0.05em |
+| dialog title | 17 / 590 | −0.025em |
+| surface title ("Agents") | 14 / 590 | −0.02em |
+| card title | 13.5 / 590 (machine, project), 13.5 / 500 (thread) | −0.015em |
+| body | 13 / 400 | −0.005em |
+| label, tab | 12.5 / 510 | −0.01em |
+| meta | 11–11.5 / 400 | 0 |
+| micro and counts | 10–10.5 mono, tabular | 0 |
+
+Text levels: `--fg` `#f7f8f8`, `--soft` `#d0d6e0` (secondary body), `--muted` `#8a8f98`, `--subtle`
+`#62666d`, `--faint` `#45474d`. These are Linear's four, plus a faint step for disabled text.
+
+## Spacing, radii, icons
+
+- **Spacing:** a 4px grid. Card padding is 12px; chrome gutters are 8px; gaps are 4, 8 and 10px.
+- **Radii:** 6 for controls (`rounded-md`), 8 for tiles and toasts, 10 for popovers and the zoom
+  bar, 12 for cards and sheets (`rounded-xl`), 16 for dialogs and the palette (`rounded-2xl`),
+  full for pills.
+- **Icons:** lucide at 14–16px with stroke 1.75 in chrome (T3) and 1.5 in dense lists.
+
+## Motion
+
+| What | How |
+|---|---|
+| popup opening | `.sheet-in`: translateY 10px, scale 0.985 → 1, fade, 260ms, `--ease-drawer` |
+| chrome settling | `.chrome-in`: translateY −4px, fade, 300ms on the drawer curve, 50ms after the sheet |
+| side panel and sidebar | `.panel-in` / `.sidebar-in`: translateX ±28px, fade, 240ms on the drawer curve |
+| popovers and menus | scale 0.98 → 1 plus fade, 150ms, `--ease-out-soft` `(0.23,1,0.32,1)`, from the trigger |
+| palette and dialogs | scale 0.98 plus fade, 200ms on the drawer curve, with the scrim fading in over 200ms |
+| hover and colour | 150ms; buttons press to scale 0.97 |
+| cards | ease to their layout slot (spring-like, 0.22 per frame); new cards grow from their parent |
+| state loops | the busy ring and pulse dots breathe over 1.6s; shimmer runs 1.8s; no flashing |
+
+The drawer curve `cubic-bezier(0.32,0.72,0,1)` is T3's `--ease-drawer`. Every keyframe class is
+switched off under `prefers-reduced-motion`, and the engine draws a static, state-correct frame.
+
+## Do / don't
+
+- **Do** use the tokens (`bg-canvas`, `bg-sheet`, `bg-panel`, `border-line-2`, `shadow-pop`,
+  `inset-shadow-highlight`, `glass`). **Don't** hard-code a hex, an rgb or a shadow in a
+  component.
+- **Do** put the accent only on focus, active, running and waiting. **Don't** tint whole cards,
+  and **don't** use orange or decorative gradients.
+- **Do** float tools over cards. **Don't** reserve invisible room for hover buttons.
+- **Do** let layers separate things. **Don't** add a border-r or border-b where a panel edge
+  already does it.
+- **Do** use the Horizon mark in the header (`HorizonMark`). **Don't** put the globe in a bar.
+- **Do** honour reduced motion. **Don't** animate anything that isn't changing state.
+
+## References
+
+Researched on 2026-11-04 from public pages only. The screenshots are in
+`~/.local/share/roll-agents/shots/design/refs/`. **M** means measured from CSS or source; **E**
+means eyeballed.
+
+- **Linear.** Sources: "How we redesigned the Linear UI" (part II), "Behind the latest design
+  refresh" (2026), and the StyleX post.
+  - Themes are generated in LCH from base, accent and contrast, with 100+ derived tokens
+    replacing 98 hand-written ones.
+  - Elevation runs background, foreground, panels, dialogs, modals. A selected or focused
+    surface re-derives the theme from its own background.
+  - The sidebar is "a few notches dimmer". There are fewer separators: "structure should be
+    felt, not seen".
+  - Marketing CSS (M): levels `#08090a`, `#0f1011`, `#141516`, `#191a1b`. Borders `#ffffff0d`,
+    `#ffffff14`, `#ffffff1f`, `#ffffff26`. Text `#f7f8f8`, `#d0d6e0`, `#8a8f98`, `#62666d`.
+    Weights 400, 510, 590, 680. Text 13px at −0.01em, titles at −0.012 to −0.022em. Radii 4–32.
+    Motion 180ms with ease-out quint.
+  - App (E): the inverted L (sidebar flush, the main view an inset rounded panel); the agent chat
+    a floating card one step brighter; the composer a raised well.
+  - **Taken here:** the ladder, the alphas, the text levels, the weights, the inverted L, the
+    floating sheet, and "dim the chrome".
+- **T3 Code.** Read from source (M: `apps/web/src/index.css`, `components/ui/*`; and
+  `~/.local/share/roll-agents/t3-chat-spec.md`).
+  - Dark background `#000`; card and popover are neutral-950 mixed 97% with white; message 92%.
+  - Border white 8%, input 11%, hover white 4%.
+  - Shadows: composer `0 14px 32px -18px /75%`; popovers `0 18px 44px -18px /80%`; `dialog-glass`
+    is `inset 0 1px white 4%, 0 24px 72px -20px /90%`.
+  - `--ease-drawer (0.32,0.72,0,1)`; popovers scale 0.98 at about 150ms; buttons press to 0.97.
+  - Lucide icons at stroke 1.75; radius 8.
+  - **Taken here:** `shadow-float`, `shadow-pop`, `shadow-sheet`, the glass, the drawer curve,
+    the popup motion, the green "done" tone, and the translucent hover fills.
+- **Raycast** (M).
+  - Greys `#07080a`, `#0c0d0f`, `#111214`, `#1b1c1e`; border `#242728`.
+  - The signature top highlight `inset 0 1px #ffffff1a` (and `0d` on bars); glass blurs at
+    10–36px.
+  - **Taken here:** the top highlight on raised things and the near-black greys.
+- **Vercel** (M).
+  - `background-100` `hsl(0 0% 4%)` over `#000`; gray-alpha `#ffffff0f`, `17`, `21`.
+  - Borders drawn as `0 0 0 1px` shadows; the focus ring is `0 0 0 2px bg, 0 0 0 4px blue`.
+  - Popover 200ms, overlay 300ms. Its `swift` curve overshoots, which we avoid.
+  - **Taken here:** the 2px offset focus ring.
+- **Cursor** (E).
+  - Near-black with groups under small labels with counts.
+  - Two-line rows (title, then muted status); the selected row is a raised fill with no border.
+  - **Taken here:** the sidebar's rows and the count badges.
+- Figma (light only), Arc (now a farewell page) and t3.chat (behind a browser check) gave
+  nothing usable.
