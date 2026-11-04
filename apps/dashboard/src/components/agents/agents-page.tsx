@@ -1,7 +1,7 @@
 "use client";
 
 import { DotField, RollLogo, RollMark } from "@roll/brand";
-import { Archive, ArrowLeft, MoreHorizontal, Plus, Server, Share2, X } from "lucide-react";
+import { Archive, ArrowLeft, MoreHorizontal, PanelRightClose, Plus, Server, Share2, X } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { isBusy } from "@/lib/agents-api";
@@ -18,6 +18,7 @@ import { Menu } from "./menu";
 import { NewAgent } from "./new-agent";
 import { MachineNode, ProjectNode, RequestNode, SubagentNode, ThreadNode } from "./nodes";
 import { RequestCard } from "./request-card";
+import { SettingsPanel } from "./settings-panel";
 import { useSandboxes } from "./sandbox";
 import { Conversation, IconButton } from "./session";
 import { TerminalNode } from "./terminal";
@@ -119,6 +120,14 @@ export function AgentsSurface({
     if (gone) setAgentsView({ kind: "canvas" });
   }, [gone]);
   const shown: AgentsView = gone ? { kind: "canvas" } : view;
+  // The card beside the open panel, selected on the canvas.
+  const selected = shown.kind === "thread" ? `t:${shown.thread}` : shown.kind === "settings" ? shown.target : undefined;
+  useEffect(() => {
+    if (!selected) return;
+    // Once the panel has made the canvas narrower.
+    const t = setTimeout(() => canvas.current?.reveal(selected), 280);
+    return () => clearTimeout(t);
+  }, [selected]);
 
   // Detail for the open conversation, and for busy threads so their subagents appear.
   useEffect(() => {
@@ -222,13 +231,9 @@ export function AgentsSurface({
       <div className="relative flex h-full min-h-0 flex-col bg-bg text-fg">
         {/* The full window drives the logo itself (in the popup, the header already does). */}
         {chrome === "window" && <MarkDriver client={client} />}
-        {shown.kind === "thread" && threadOpen ? (
-          <Conversation thread={threadOpen.value} machine={data.machines.get(threadOpen.machine)?.value} start={back} end={end} />
-        ) : shown.kind === "new" ? (
-          <NewAgent key={newIn ?? ""} project={newIn} start={back} end={end} />
-        ) : null}
-        {/* The canvas stays mounted under a conversation, so going back is instant and keeps the view. */}
-        <div className={`min-h-0 flex-1 flex-col ${shown.kind === "canvas" ? "flex" : "hidden"}`}>
+        {shown.kind === "new" && <NewAgent key={newIn ?? ""} project={newIn} start={back} end={end} />}
+        {/* The canvas stays mounted under a new agent's composer, so going back is instant and keeps the view. */}
+        <div className={`min-h-0 flex-1 flex-col ${shown.kind === "new" ? "hidden" : "flex"}`}>
           <div className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-3" data-drag-region>
             {chrome === "window" && <WindowHome />}
             <h2 className="text-[13.5px] font-semibold tracking-[-0.02em]">Agents</h2>
@@ -259,18 +264,90 @@ export function AgentsSurface({
               {end}
             </span>
           </div>
-          <div className="relative min-h-0 flex-1">
-            {data.machines.size === 0 && snap.conn !== "connecting" ? (
-              <Empty demo={demo} onCreated={onSandbox} />
-            ) : (
-              <CanvasView canvasRef={canvas} data={data} showArchived={showArchived} storageKey={client.owner} pendingFocus={pendingFocus} visible={shown.kind === "canvas"} />
+          <div className="relative flex min-h-0 flex-1">
+            <div className="relative min-h-0 min-w-0 flex-1">
+              {data.machines.size === 0 && snap.conn !== "connecting" ? (
+                <Empty demo={demo} onCreated={onSandbox} />
+              ) : (
+                <CanvasView canvasRef={canvas} data={data} showArchived={showArchived} storageKey={client.owner} pendingFocus={pendingFocus} visible={shown.kind !== "new"} selected={selected} />
+              )}
+              {phone && shown.kind === "canvas" && requests.length > 0 && <PhoneWaiting client={client} />}
+            </div>
+            {shown.kind === "thread" && threadOpen && (
+              <SidePanel phone={phone} label="Conversation">
+                <Conversation
+                  thread={threadOpen.value}
+                  machine={data.machines.get(threadOpen.machine)?.value}
+                  start={
+                    <IconButton label="Close the conversation (Esc)" onClick={close}>
+                      {phone ? <ArrowLeft className="size-4" /> : <PanelRightClose className="size-4" />}
+                    </IconButton>
+                  }
+                />
+              </SidePanel>
             )}
-            {phone && shown.kind === "canvas" && requests.length > 0 && <PhoneWaiting client={client} />}
+            {shown.kind === "settings" && (
+              <SidePanel phone={phone} label="Settings">
+                <SettingsPanel key={shown.target} target={shown.target} onClose={close} />
+              </SidePanel>
+            )}
           </div>
         </div>
         {adding && <AddMachineDialog onClose={() => setAdding(false)} onCreated={onSandbox} />}
       </div>
     </AgentsContext.Provider>
+  );
+}
+
+const PANEL_WIDTH = "roll:agents:panel-width";
+
+/**
+ * What's open beside the canvas (a conversation, settings): docked on the right, sliding in, as
+ * wide as it was last dragged to; on a phone it covers the canvas.
+ */
+function SidePanel({ phone, label, children }: { phone: boolean; label: string; children: ReactNode }) {
+  const [width, setWidth] = useState(() => {
+    const saved = typeof window === "undefined" ? NaN : Number(localStorage.getItem(PANEL_WIDTH));
+    return Number.isFinite(saved) && saved > 0 ? saved : 640;
+  });
+  const clamp = (w: number) => Math.round(Math.max(380, Math.min(w, window.innerWidth - 320)));
+  const onPointerDown = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const x0 = e.clientX;
+    const w0 = width;
+    const el = e.currentTarget as HTMLElement;
+    el.setPointerCapture(e.pointerId);
+    let last = w0;
+    const move = (m: PointerEvent) => setWidth((last = clamp(w0 + x0 - m.clientX)));
+    const up = () => {
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      try {
+        localStorage.setItem(PANEL_WIDTH, String(last));
+      } catch {
+        // Not remembered.
+      }
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+  };
+  return (
+    <aside
+      aria-label={label}
+      className={`panel-in flex min-h-0 flex-col bg-bg ${phone ? "absolute inset-0 z-20" : "relative shrink-0 border-l border-line"}`}
+      style={phone ? undefined : { width: `min(${width}px, calc(100% - 320px))` }}
+    >
+      {!phone && (
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize the panel"
+          onPointerDown={onPointerDown}
+          className="absolute inset-y-0 -left-1 z-10 w-2 cursor-col-resize transition-colors hover:bg-accent/20"
+        />
+      )}
+      {children}
+    </aside>
   );
 }
 
@@ -296,6 +373,7 @@ function CanvasView({
   storageKey,
   pendingFocus,
   visible,
+  selected,
 }: {
   canvasRef: React.RefObject<CanvasHandle | null>;
   data: AgentsClient["data"];
@@ -303,6 +381,7 @@ function CanvasView({
   storageKey: string;
   pendingFocus: React.RefObject<string | null>;
   visible: boolean;
+  selected?: string;
 }) {
   const graph = useMemo(() => deriveGraph(data, { showArchived }), [data, showArchived]);
   const { services, owner } = useAgents();
@@ -333,7 +412,7 @@ function CanvasView({
         return <TerminalNode terminal={data.terminals.get(n.id)!.value} machine={machineOf(n)} />;
     }
   };
-  return <AgentsCanvas ref={canvasRef} graph={graph} storageKey={storageKey} sync={sync} render={render} defaultSize={defaultSize} active={visible} />;
+  return <AgentsCanvas ref={canvasRef} graph={graph} storageKey={storageKey} sync={sync} render={render} defaultSize={defaultSize} active={visible} selected={selected} />;
 }
 
 /**

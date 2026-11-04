@@ -51,6 +51,20 @@ describe("agents graph", () => {
     expect(deriveGraph(waiting).nodes.get("t:thr_1")!.busy).toBe(false);
   });
 
+  it("lets finished subagents go: a done subagent node and a delegated thread that's done leave the canvas", () => {
+    const d = applyEvents(sample(), [
+      ev("node", node({ type: "subagent", agent: "Explore", prompt: "find callers", child: null, result: "3 callers" }, { id: "nod_s", status: "completed" }), 30),
+      ev("thread", thread({ id: "thr_d", title: "Delegated", created_at: 40, lineage: { parent: "thr_1", relation: "subagent", root: "thr_1", from_run: "run_1" } }), 31),
+      ev("thread", thread({ id: "thr_w", title: "Delegated, working", status: "running", created_at: 41, lineage: { parent: "thr_1", relation: "subagent", root: "thr_1", from_run: "run_1" } }), 32),
+    ]);
+    const g = deriveGraph(d);
+    expect(g.nodes.has("s:nod_s")).toBe(false);
+    expect(g.nodes.has("t:thr_d")).toBe(false);
+    expect(g.nodes.has("t:thr_w")).toBe(true);
+    // A fork stays: it's the user's own thread.
+    expect(g.nodes.has("t:thr_2")).toBe(true);
+  });
+
   it("moves an open thread's requests into the session and shows archived threads on request", () => {
     const g = deriveGraph(sample(), { expanded: new Set(["thr_1"]), showArchived: true });
     expect(g.nodes.has(keyOf.request("req_1"))).toBe(false);

@@ -45,6 +45,8 @@ export interface OrderSync {
 export interface CanvasHandle {
   /** Pan (and zoom) so a node is in view; `zoom` sets the scale. */
   focus: (key: string, zoom?: number) => void;
+  /** Pan to a node only if it isn't already in view (it keeps the zoom). */
+  reveal: (key: string) => void;
   fit: () => void;
 }
 
@@ -68,8 +70,10 @@ export const AgentsCanvas = forwardRef<
     overlay?: ReactNode;
     /** Off while something covers the canvas: its keys go to that instead. */
     active?: boolean;
+    /** The card whose conversation or settings are open beside it. */
+    selected?: string;
   }
->(function AgentsCanvas({ graph, storageKey, sync, render, defaultSize, onEscape, overlay, active = true }, ref) {
+>(function AgentsCanvas({ graph, storageKey, sync, render, defaultSize, onEscape, overlay, active = true, selected }, ref) {
   const reduced = useReducedMotion();
   const container = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -251,7 +255,21 @@ export const AgentsCanvas = forwardRef<
     [positions, sizeOf],
   );
 
-  useImperativeHandle(ref, () => ({ focus, fit: () => fit(true) }), [focus, fit]);
+  const reveal = useCallback(
+    (key: string) => {
+      const e = engine.current;
+      const p = positions.get(key);
+      if (!e || !p) return;
+      const s = sizeOf(key);
+      const { x, y, k } = e.view;
+      const { w, h } = e.viewport;
+      const inView = p.x * k + x >= 0 && p.y * k + y >= 0 && (p.x + s.w) * k + x <= w && (p.y + s.h) * k + y <= h;
+      if (!inView) focus(key, e.view.k);
+    },
+    [positions, sizeOf, focus],
+  );
+
+  useImperativeHandle(ref, () => ({ focus, reveal, fit: () => fit(true) }), [focus, reveal, fit]);
 
   // A card's siblings in the order shown.
   const siblingsOf = useCallback(
@@ -411,7 +429,7 @@ export const AgentsCanvas = forwardRef<
       <canvas ref={canvas} aria-hidden className="pointer-events-none absolute inset-0" />
       <div ref={world} className="absolute top-0 left-0 origin-top-left" style={{ willChange: "transform" }}>
         {[...graph.nodes.values()].map((n) => (
-          <CardSlot key={n.key} node={n} engine={engine}>
+          <CardSlot key={n.key} node={n} engine={engine} selected={n.key === selected}>
             {render(n)}
           </CardSlot>
         ))}
@@ -460,7 +478,7 @@ function ToolButton({ label, onClick, children }: { label: string; onClick: () =
 }
 
 /** A card's slot in the world layer; the engine positions it. */
-function CardSlot({ node, engine, children }: { node: GraphNode; engine: React.RefObject<CanvasEngine | null>; children: ReactNode }) {
+function CardSlot({ node, engine, selected, children }: { node: GraphNode; engine: React.RefObject<CanvasEngine | null>; selected: boolean; children: ReactNode }) {
   const el = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const e = engine.current;
@@ -470,7 +488,7 @@ function CardSlot({ node, engine, children }: { node: GraphNode; engine: React.R
     return () => e.unregister(node.key, d);
   }, [engine, node.key]);
   return (
-    <div ref={el} data-card data-key={node.key} data-kind={node.kind} className="absolute top-0 left-0" style={{ transform: "translate3d(-99999px,0,0)" }}>
+    <div ref={el} data-card data-key={node.key} data-kind={node.kind} data-selected={selected || undefined} className="absolute top-0 left-0" style={{ transform: "translate3d(-99999px,0,0)" }}>
       <div className="rise">{children}</div>
     </div>
   );

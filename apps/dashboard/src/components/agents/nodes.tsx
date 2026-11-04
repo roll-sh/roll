@@ -5,6 +5,7 @@ import { useState, type ReactNode } from "react";
 import { coming, isRunning, machineState, reachable, type Machine, type Node, type Project, type ProviderInfo, type Request, type Run, type Thread } from "@/lib/agents-api";
 import { projectStats, type ProjectStats } from "@/lib/agents-graph";
 import { providersFor } from "@/lib/agents-store";
+import { setAgentsView } from "@/lib/agents-surface";
 import { primary } from "../ui";
 import { ChangeChip, changeStatusLabel, WorkChip } from "./change";
 import { ContextMeter } from "./context-meter";
@@ -141,8 +142,13 @@ export function MachineNode({ machine }: { machine: Machine }) {
       <div className="flex items-center gap-2 px-3.5 pt-3">
         <MachineIcon machine={machine} className="size-4 text-muted" />
         <span className="min-w-0 flex-1 truncate font-medium tracking-[-0.01em]">{machine.name}</span>
+        <HoverActions>
+          <Tool label="Machine settings" onClick={() => setAgentsView({ kind: "settings", target: `m:${machine.id}` })}>
+            <Settings2 />
+          </Tool>
+        </HoverActions>
         {machine.online && (
-          <HoverActions>
+          <HoverActions className="-ml-1.5">
             <Tool label="Add a project" onClick={() => setAdding(true)}>
               <FolderPlus />
             </Tool>

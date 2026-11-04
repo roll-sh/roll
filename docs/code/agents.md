@@ -658,7 +658,7 @@ The surface has three views:
   sideways), pinching zooms about the fingers (ctrl+wheel in Chromium, Firefox and Electron,
   gesture events in Safari, two touches on a touch screen), ⌘/ctrl+wheel zooms with a mouse,
   dragging the background or space-drag pans, and + − 0 1 and the arrows work from the keyboard.
-- **A conversation.** Clicking a thread opens it on its own, filling the surface: the transcript
+- **A conversation.** Clicking a thread opens it in a panel docked beside the canvas (resizable, remembered; on a phone it covers the canvas), its card selected on the canvas. A machine's or project's settings open in the same panel (`#agents/settings/<key>`). Finished subagents (a done provider subagent, a delegated thread that's done) leave the canvas; their results stay in the parent's transcript. The conversation shows the transcript
   in a centred column, the composer under it, the diff (of the thread or one run) or the thread's
   terminals beside it. Everything is managed from there: approvals in the transcript, fork, roll
   back, publish, share, rename, archive, delete, take a work item. The title is a switcher to the

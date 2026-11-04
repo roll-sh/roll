@@ -80,8 +80,10 @@ export function deriveGraph(data: AgentsData, opts: GraphOptions = {}): Graph {
   }
 
   // Threads: newest first under their parent, so fresh work sits at the top.
+  // A delegated subagent's thread leaves once it's done (its result is in its parent's transcript).
   const visible = [...data.threads.values()]
     .filter((r) => opts.showArchived || r.value.archived_at === null)
+    .filter((r) => r.value.lineage?.relation !== "subagent" || isBusy(r.value.status) || r.value.status === "error")
     .sort((a, b) => b.value.created_at - a.value.created_at || a.value.id.localeCompare(b.value.id));
   const shown = new Set(visible.map((r) => r.value.id));
   const parentOf = (t: Thread): string | null => {
@@ -128,7 +130,8 @@ export function deriveGraph(data: AgentsData, opts: GraphOptions = {}): Graph {
     const subs: Node[] = [];
     for (const n of inner.values()) {
       const b = n.value.body;
-      if (n.value.run !== run || b.type !== "subagent") continue;
+      // Only while they work: a finished subagent has nothing to show beside its thread.
+      if (n.value.run !== run || b.type !== "subagent" || n.value.status !== "running") continue;
       if (b.child && shown.has(b.child)) continue;
       subs.push(n.value);
     }
