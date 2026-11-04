@@ -1,0 +1,43 @@
+{
+  "phase": "build",
+  "closed": true,
+  "scope": "every bundle file except this manifest; no files may be added",
+  "files": {
+    "BUILD-PASS": {
+      "sha256": "5eb0fedd10ece7628390a36f194261c3d3d0c007009ccda93035a03f6f5994e5",
+      "bytes": 55
+    },
+    "baseline.after.json": {
+      "sha256": "9f29a14436b214c4431811599e261949c97433457ea8bc7e2bc1e14fb7a32298",
+      "bytes": 571985
+    },
+    "baseline.before.json": {
+      "sha256": "9f29a14436b214c4431811599e261949c97433457ea8bc7e2bc1e14fb7a32298",
+      "bytes": 571985
+    },
+    "build-baseline.log": {
+      "sha256": "74071a476b3b68b5eb882b437f176a800d6bc5652059f6be61c00017035296a1",
+      "bytes": 5874
+    },
+    "build-candidate.log": {
+      "sha256": "0378c4260d98263556724dad5ac3f0dcb3e666d6916e5ec4d1434ca804909359",
+      "bytes": 5964
+    },
+    "builds.json": {
+      "sha256": "73d91752a4eab94644ed416177151597cb1123dad395ffcd59d2622a93593d50",
+      "bytes": 1155
+    },
+    "candidate.after.json": {
+      "sha256": "a25fcb8b4fa57f608d8f85e2b1124cd05fdc39b28d28f393bc11cbc1d6ac5522",
+      "bytes": 576785
+    },
+    "candidate.before.json": {
+      "sha256": "a25fcb8b4fa57f608d8f85e2b1124cd05fdc39b28d28f393bc11cbc1d6ac5522",
+      "bytes": 576785
+    },
+    "heavy-build.log": {
+      "sha256": "3c737854de412d74a6af1ab6f78aaf9861c4e141d21b5201e7965408cbe35ffd",
+      "bytes": 13
+    }
+  }
+}
