@@ -1,0 +1,23 @@
+    Finished `release` profile [optimized] target(s) in 0.30s
+     Running tests/crash_random.rs (/home/meszmate/.cache/a167/target/release/deps/crash_random-4b8f70c02654e372)
+
+running 2 tests
+test crash_random_child ... ok
+test random_crashes has been running for over 60 seconds
+test random_crashes ... FAILED
+
+failures:
+
+---- random_crashes stdout ----
+
+thread 'random_crashes' (126219) panicked at crates/pg-engine/tests/crash_random.rs:455:13:
+seed 14: round 2, recovered after step 691: a by seqscan: 2833 rows, 2832 expected: missing ["Int4(1070163)|Int4(159)|b1070163|Int4(7491141)", "Int4(1070173)|Int4(69)|b1070173|Int4(7491211)", "Int4(1070184)|Int4(80)|b1070184|Int4(7491288)", "Int4(1080000)|Int4(69)|w1080000-6|Int4(2522289)", "Int4(1180331)|Int4(35)|b1180331|Int4(8262317)"], unexpected ["Int4(1070173)|Int4(96)|b1070173|Int4(7491211)", "Int4(1070192)|Int4(88)|b1070192|Int4(7491344)", "Int4(1130000)|Int4(294)|w1130000-436|Int4(7910000)", "Int4(1180322)|Int4(26)|b1180322|Int4(8262254)", "Int4(1180331)|Int4(35)|w1180331-935|Int4(8262317)"]; with enable_seqscan = off; SET enable_bitmapscan = off: Int8(2833)|Int8(9288629278); with enable_indexscan = off; SET enable_indexonlyscan = off; SET enable_bitmapscan = off: Int8(2833)|Int8(9288629278); ctids of a: Int8(2833)|Int8(2833)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    random_crashes
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 103.15s
+
+error: test failed, to rerun pass `-p pg-engine --test crash_random`

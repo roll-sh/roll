@@ -1,0 +1,43 @@
+
+running 1 test
+
+thread '<unnamed>' (2297422) panicked at crates/pg-engine/tests/golden.rs:191:9:
+1 of 1 golden files differ:
+
+a167_subplan_varied.sql:
+   > FROM a167_o o WHERE o.k <= 2
+   QUERY PLAN:text
+   Seq Scan on a167_o o (actual rows=2.00 loops=1)
+     Filter: (k <= 2)
+     Rows Removed by Filter: 4
+     SubPlan 1
+       ->  Aggregate (actual rows=1.00 loops=2)
+             ->  Nested Loop (actual rows=4.50 loops=2)
+                   Join Filter: (r.rk = n.rk)
+                   Rows Removed by Join Filter: 9
+                   ->  Seq Scan on a167_r r (actual rows=1.50 loops=2)
+                         Filter: (rk < (2 + (o.k % 2)))
+                         Rows Removed by Filter: 2
+ -                 ->  Seq Scan on a167_n n (actual rows=9.00 loops=3)
+ +                 ->  Seq Scan on a167_n n (actual rows=9.00 loops=4)
+   -- EXPLAIN
+   
+   > RESET enable_hashjoin
+   -- RESET
+   
+   > RESET enable_mergejoin
+   -- RESET
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'golden' (2297421) panicked at crates/pg-engine/tests/golden.rs:147:10:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+test golden ... FAILED
+
+failures:
+
+failures:
+    golden
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.12s
+
