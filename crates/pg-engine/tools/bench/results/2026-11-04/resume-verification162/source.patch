@@ -1,0 +1,345 @@
+diff --git a/crates/pg-engine/HANDOFF.md b/crates/pg-engine/HANDOFF.md
+index d8fded8c..da3ed3c9 100644
+--- a/crates/pg-engine/HANDOFF.md
++++ b/crates/pg-engine/HANDOFF.md
+@@ -4944,6 +4944,17 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
+   1,648), pg_dump_tap 14,817 / 14,817. `tools/difftest-guard.sh <base> <head>` runs the guard.
+   Those worker checks included the held monitoring commit. The parent integrates the
+   round8 fixes without it and runs combined verification in `~/.cache/pg-engine-sol-resume/`.
++  Round 26, agent 162 (difftest round 10 and the guard): a grammar for seeds from 10000 on
++  (`difftest/round10.rs`): nested loops rescanning parameterized index scans (NULL and empty
++  outer sides, LIMIT, LATERAL, semi- and anti-joins, rows and loops read off EXPLAIN ANALYZE
++  by `r10an`), custom against generic plans with STABLE casts of text parameters, untyped
++  parameters and re-plans after DDL, batch filters, group keys and hash-join probes over
++  NULL-heavy, overflowing and collated data, queue tables drained by two sessions, statistics
++  views over many tables. Its findings and routes (a semi-join's nested loop and a
++  GroupAggregate under a LIMIT reading past what PostgreSQL reads, STABLE casts in custom
++  plans): tests/difftest/STATUS.md, "Round 10". Engine fixes: ANALYZE's n_dead_tup from the
++  heap model's dead versions, an INSERT failing on a unique key counted, binary array_recv's
++  header checks in its order (golden `a162_stats_dead`).
+ - **Backend-status recovery** (2026-11-01, base `f350cef4`):
+   `pg_stat_get_backend_subxact` reads the same raw backend-status snapshot as the other
+   backend accessors, `pg_stat_get_activity`, `pg_stat_get_backend_idset`, database backend
+diff --git a/crates/pg-engine/src/exec/dml.rs b/crates/pg-engine/src/exec/dml.rs
+index f621b551..adb0df2e 100644
+--- a/crates/pg-engine/src/exec/dml.rs
++++ b/crates/pg-engine/src/exec/dml.rs
+@@ -3438,6 +3438,9 @@ fn index_entries_checked(
+                                     ctx,
+                                 );
+                             }
++                            // heap_insert counted it (pgstat_count_heap_insert); the abort
++                            // makes it a dead tuple.
++                            super::pgstat::count_insert(ctx, t.oid, 1);
+                             return Err(index_violation(t, bix, v, other.as_deref(), ctx));
+                         }
+                     }
+diff --git a/crates/pg-engine/src/session/ddl/vacuum.rs b/crates/pg-engine/src/session/ddl/vacuum.rs
+index e5503757..8c3e962a 100644
+--- a/crates/pg-engine/src/session/ddl/vacuum.rs
++++ b/crates/pg-engine/src/session/ddl/vacuum.rs
+@@ -551,11 +551,15 @@ impl Ddl<'_, '_> {
+                             Some(n) => n,
+                             None => self.count_rows(&r)?,
+                         } as i64;
++                        // acquire_sample_rows' deadrows: the dead and recently dead versions
++                        // in the heap model (the whole table, as a full sample reads it).
++                        let dead = crate::exec::sizing::heap_tuple_stats(r.oid, self.ctx)?
++                            .map_or(0, |s| s.2 as i64);
+                         crate::exec::pgstat::report_analyze(
+                             self.ctx,
+                             r.oid,
+                             live,
+-                            0,
++                            dead,
+                             cols.is_empty(),
+                             false,
+                             ms(started),
+diff --git a/crates/pg-engine/src/types/binary.rs b/crates/pg-engine/src/types/binary.rs
+index b980ccbc..dbdb3231 100644
+--- a/crates/pg-engine/src/types/binary.rs
++++ b/crates/pg-engine/src/types/binary.rs
+@@ -1081,8 +1081,6 @@ fn decode_array(mut b: &[u8], elem: &DataType, ctx: &FormatCtx) -> Result<Value>
+         Ok(b.get_i32())
+     };
+     let ndim = int(&mut b)?;
+-    let flags = int(&mut b)?;
+-    let _elem_oid = int(&mut b)?;
+     if ndim < 0 {
+         bail!(
+             INVALID_BINARY_REPRESENTATION,
+@@ -1095,9 +1093,11 @@ fn decode_array(mut b: &[u8], elem: &DataType, ctx: &FormatCtx) -> Result<Value>
+             "number of array dimensions ({ndim}) exceeds the maximum allowed (6)"
+         );
+     }
++    let flags = int(&mut b)?;
+     if flags != 0 && flags != 1 {
+         bail!(INVALID_BINARY_REPRESENTATION, "invalid array flags");
+     }
++    let _elem_oid = int(&mut b)?;
+     let mut dims = Vec::new();
+     for _ in 0..ndim {
+         if b.len() < 8 {
+diff --git a/crates/pg-engine/tests/difftest/STATUS.md b/crates/pg-engine/tests/difftest/STATUS.md
+index 4fa25475..9b618ae1 100644
+--- a/crates/pg-engine/tests/difftest/STATUS.md
++++ b/crates/pg-engine/tests/difftest/STATUS.md
+@@ -308,6 +308,97 @@ errors in transactions, recursive CTEs with SEARCH / CYCLE, window frames with E
+ | round 5, base (0f9f0609, round 5 generator) | 5256–5355 × 100 | 9,697 | crash 2, wrong_rows 39, wrong_state 7, engine_error 14, missing_error 8, wrong_error 28, eval_error 26, notice 7, tag 1 |
+ | round 5, batch 2 | 5256–5355 × 100 | 10,064 | wrong_rows 1, wrong_state 2, engine_error 8, missing_error 12, wrong_error 21, eval_error 13, notice 3, tag 1 (110 above error_message in the base, 52 here; 64 gone; none new but 6 past a base divergence; the wrong_rows / wrong_state are the old grammar's, the base's too: DISTINCT ON's physical order, a failing UPDATE condition, ANALYZE's sample) |
+ 
++## Round 10 grammar (agent 162)
++
++Seeds from `R10_SEEDS` (10000) on add the `r10*` objects (`round10.rs`) to round 9's; 60% of the
++statements are `round10_stmt`'s, aimed where round 10's optimisers work:
++
++- **Nested loops rescanning parameterized index scans** (agent 160): `r10o` (200-2,500 outer
++  rows, `kn` a third NULL) joined to `r10i` (3,000-9,000 rows, indexed on `k`, `t` and sometimes
++  `(k, v)`) on `k`, a range of `k`, `= ANY (ARRAY[o.k, o.kn, NULL])` and text keys; outer sides
++  empty, NULL-keyed, of every size; LIMIT above, LATERAL with ORDER BY / LIMIT inside, LEFT
++  JOIN LATERAL aggregates, EXISTS / NOT EXISTS / IN / NOT IN / `<> ALL`, correlated
++  sub-selects with OFFSET, a division by zero in the projection; hash and merge joins off, and
++  Memoize, Material, sequential, bitmap or index-only scans off; EXPLAIN ANALYZE without timing
++  and memory lines (`r10an`) counts rows and loops.
++- **Custom against generic plans** (agents 159 and 155): templates whose text parameters are
++  cast by STABLE input functions (`$1::int[]`, `$1::date`, `$1::timestamptz`, `$1::regclass`,
++  `$1::int`, with bad values), untyped parameters (SQL PREPARE without types, untyped Parse:
++  `$1 IS NULL`, `$1 || t`, BETWEEN, coalesce, `= ANY ($1)`, `$1 + $2`), executed 6-12 times
++  with DDL partway (an index made, ANALYZE, a column added and dropped, a table of the same
++  name earlier on the search_path, extended statistics), plan counts read at the end.
++- **Batch execution** (agents 160 and 154) over `r10b` (`a` 70% NULL with int4's limits, `b`
++  near int8's, numeric keys `1.0` / `1.00` / `1e30`, `-0` / `0` / `NaN` floats, text under the
++  database collation, C and ICU): filters whose quals PostgreSQL orders by cost (`a + 1 > 0 AND
++  a < 0`), group keys with NULLs, ROLLUP with GROUPING, overflowing sums, hash joins on
++  duplicate, NULL, float and numeric keys (inner, outer, semi, anti, a join filter that
++  overflows, a collation conflict), under a 64 kB work_mem.
++- **Queue tables** (agents 159 and 148): `DELETE ... WHERE id = (SELECT min(id) ...) RETURNING`,
++  SKIP LOCKED, the UPDATE and CTE forms; session 2 inserting in an open transaction, deleting
++  or updating the same head (a lock wait, then the recheck), skipping locked rows.
++- **Statistics views over 15-60 tables** (agents 146 and 161): pg_stat_user_tables after
++  `pg_stat_force_next_flush()` from this session and session 2, pg_stat_xact_user_tables across
++  a rolled-back savepoint, a snapshot cached for the transaction while another session
++  flushes, VACUUM / ANALYZE counts, `pg_stat_reset_single_table_counters`, TRUNCATE.
++
++## Round 10 (agent 162)
++
++Seeds 10000-10149 (23,363 statements, release, on `31066020` with the grammar): wrong_rows 394,
++plan_variance 2, engine_error 49, missing_error 4, wrong_error 32, eval_error 25,
++error_detail 13. The queue tables agreed throughout, and so did the statistics views but for
++the two counts fixed below. Found:
++
++- **Executor (agent 160): a semi- or anti-join's nested loop reads its whole inner side per
++  outer row** (`NestLoopNode::right_rows` collects every inner row before the join looks at
++  one), where ExecNestLoop stops at the first match. Errors come from inner rows PostgreSQL
++  never reads, and EXPLAIN ANALYZE's rows differ (`Index Scan ... (actual rows=42.90 loops=49)`
++  against `rows=1.00`). Not caused by a recent push (the same on `5386239f`):
++  `CREATE TABLE r10o (id int PRIMARY KEY, k int); INSERT INTO r10o SELECT i, i % 40 FROM
++  generate_series(1, 1000) i; CREATE TABLE r10i (id int PRIMARY KEY, k int, v int); INSERT INTO
++  r10i SELECT i, i % 50, i % 7 FROM generate_series(1, 5000) i; CREATE INDEX r10i_k ON r10i (k);
++  ANALYZE r10o; ANALYZE r10i; SELECT count(*) FROM r10o o WHERE EXISTS (SELECT 1 FROM r10i i
++  WHERE i.k = o.k AND 1 / (i.id - 1601) > -5) AND o.id < 3` fails 22012, PostgreSQL returns 2.
++- **Executor (agent 160): a GroupAggregate under a LIMIT computes every group**: over the same
++  tables, `SET enable_hashjoin = off; SET enable_mergejoin = off; SELECT o.id, count(i.id),
++  sum(i.v / (o.id - 30)) FROM r10o o JOIN r10i i ON i.k = o.k WHERE o.id < 40 GROUP BY o.id
++  ORDER BY o.id LIMIT 5` fails 22012, PostgreSQL returns five rows (its GroupAggregate shows
++  `actual rows=5`, its outer Index Scan 6 rows; the engine's 39 and 39).
++  Both still so on `75f83bc0`, after agent 160's nested-loop rescans (0bb7ddd1).
++- **Plan cache (agent 159, with the planner's custom-plan design, agent 171): STABLE casts of text
++  parameters.** PostgreSQL's custom plan reduces `$1::int[]` (a CoerceViaIO) to the output
++  function's constant and the STABLE input function, shown `('{1}'::cstring)::integer[]`; the
++  engine folds it whole (`'{1}'::integer[]`) or, when folding fails, keeps `('x'::text)::date`.
++  PostgreSQL's selectivity estimates evaluate STABLE functions (estimate_expression_value), so
++  a bad value fails the custom plan while planning: `k = ANY ($1::int[]) AND id < $2` with
++  `'{1,x}'`, 0 is 22P02 in PostgreSQL, 0 rows in the engine; `d > $1::timestamptz` with
++  `'2026-02-30'` 22008 (over the protocol PostgreSQL's 22008 comes before Bind's result-format
++  check, the engine's 08P01); `oid = $1::regclass` with `'r10nope'` 42P01. A failed custom plan
++  isn't counted, so pg_prepared_statements' counts differ after one (48 + 23 cases with the
++  generic plan never chosen, round 9's item). A plain query folds it too: `SELECT relname FROM
++  pg_class WHERE oid = 'pg_class'::text::regclass` shows `Index Cond: (oid = '1259'::oid)`,
++  PostgreSQL `(oid = (('pg_class'::text)::regclass)::oid)`.
++- **Planner (agent 171, who took the planner over from agent 155)**: a group key a custom plan makes constant (`SELECT coalesce($1, k),
++  count(*) FROM r10o WHERE id < 50 GROUP BY 1 ORDER BY 1` with 1000) keeps `Sort Key: (1000)`
++  above the GroupAggregate; PostgreSQL drops the constant pathkey. EXPLAIN of a merge join of
++  `x.tc = y.t` (C against the database collation): the engine `Merge Cond: (x.tc = y.t)` /
++  `Sort Key: y.t`, PostgreSQL `(x.tc = (y.t)::text)` / `y.t COLLATE "C"` (the sort-key COLLATE
++  item of round 9). Plan choices under EXPLAIN ANALYZE (index against sequential and bitmap
++  scans, Memoize) and round 9's partitioned top-N.
++- **Catalog (agent 146)**: `SELECT relname FROM pg_class WHERE oid = $1::regclass` as a generic
++  plan is a Seq Scan with a filter; PostgreSQL's is an Index Scan using pg_class_oid_index
++  (a catalog index qual over a STABLE expression).
++- **Index builds (agent 144)**: which duplicate a failing build names: `CREATE UNIQUE INDEX
++  tc3_u ON tc3 (c)` over a composite with a collated field (round 3's `tc3`) reports `(z,3)`
++  where PostgreSQL reports `(Z,3)`; an exclusion constraint's gist build `Key (r)=([1,2))
++  conflicts with key (r)=([0,5))`, PostgreSQL `([0,2))` (seed 10112 #109).
++- **Fixed (agent 162)**: ANALYZE set n_dead_tup to 0; PostgreSQL reports the dead versions its
++  sample finds (`vacuum.rs`: the heap model's dead and recently dead tuples). An INSERT failing
++  on a unique key didn't count its heap tuple (n_tup_ins, then n_dead_tup with the abort;
++  `dml.rs`). A binary array parameter read flags and the element type before checking the
++  dimension count (08P01 "insufficient data left in message" where array_recv reports 54000;
++  `types/binary.rs`). Golden `a162_stats_dead`. Not fixed: an UPDATE failing on a unique key
++  doesn't count n_tup_upd either (not seen in a seed).
++
+ ## Round 9 grammar (agent 156)
+ 
+ Seeds from `R9_SEEDS` (9000) on add the `r9*` objects (`round9.rs`) to round 8's shared engine
+@@ -366,6 +457,7 @@ all of it (round 9's seeds too with `GUARD_SEEDS`).
+ | 2026-11-03 | `251924c1` / `ed0c85fe` (release) | 70,215 | 0 | 37 lines: round 7's binary domain-array element oid (seeds 7024, 7087-7145, 8032, 8132), Bind's result-format check before the custom plan (7063, 08P01 vs 22003) |
+ | 2026-11-03, `tools/difftest-guard.sh`, rounds 6-9 | `847fbdba` / `1f676b8a` | 93,717 | 3 lines, one case (seed 9014 #82: a generic plan's Index Only Scan where PostgreSQL has a Bitmap Heap Scan), not reproducible from its reduced case on either binary: background VACUUM timing (both servers' autovacuum visits a seed's tables at random points), so round 9's tables no longer autovacuum | 6: agent 145's result-type check (0A000, seeds 9060, 9061, 9067, 9090) and binary array dimensions (54000, seed 9073) |
+ | 2026-11-03, rounds 6-9 (head with round 9's tables not autovacuuming) | `1f676b8a` / `5386239f` (agent 154's batch execution 86c04b88, agent 148's COPY flush bd7ba755) | 93,717 | 0 | 7: COPY's sequence values after a late duplicate (seeds 9010, 9093, 9119), and plans of seeds 9017, 9046 (the autovacuum change) |
++| 2026-11-03, rounds 6-9 (agent 162) | `5386239f` / `31066020` (agent 149's scan cost round 3, batch 2, 4e89b2ff) | 93,717 | 0 | 0 |
+ 
+ ## Round 9 (agent 156)
+ 
+@@ -426,6 +518,15 @@ Routed through the coordinator 2026-11-03.
+   `((n)::name) COLLATE ...`; `SELECT DISTINCT t COLLATE "en-x-icu"` groups by `(t)::text`. Also
+   under a join (`a.t`) and over a UNION ALL; with a LIMIT.
+ - Round 8's small-work_mem hash-or-sort choice again (r8big, HashSetOp vs SetOp).
++- Re-probed on `31066020` (agent 162, 2026-11-03, reproducers above): still open, with the
++  same owners (the planner's now agent 171's): the plan cache (0 / 6 against 1 / 5; EXPLAIN EXECUTE's literal), BETWEEN's
++  parameter types (42725), `arr @> '{2}'` (15 rows against 1,000), the sort keys under
++  COLLATE, the partitioned top-N, seed 5069's `DELETE ... USING v0` (22023), round 6's domain
++  comparison in EXPLAIN; all still so on `75f83bc0` (after agent 159's custom plans from the
++  Parse's analysis, 363366c2). `SELECT max(id), min(id), max(v) FROM r9s WHERE id < 100` and
++  round 8's `SELECT DISTINCT k, length(s) ... ORDER BY` under 64 kB agree on these reduced
++  shapes. Agree on `75f83bc0`: `n_distinct = 50` (-0.5385 on `31066020`; agent 146's catalog
++  round 9), indisready (agent 144's 21e3863f).
+ 
+ ## Round 8 grammar (agent 147)
+ 
+@@ -1242,7 +1343,10 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
+ - **Round 8 seeds, found, not fixed** (agent 147; re-routed to the current owners by agent 156 on
+   2026-11-03, all re-probed on `ed0c85fe`, reproducers below). Owners as of 2026-11-03's end:
+   executor agent 160, OLTP and protocol agent 159, planner agent 155, catalog agent 146, index
+-  access agent 144, bulk writes agent 148, size models agent 161:
++  access agent 144, bulk writes agent 148, size models agent 161 (still so on 2026-11-04,
++  agent 162, but the planner: agent 171 since 2026-11-04, agent 155 having finished; also
++  storage scans agent 149, query memory agent 150, postgres_fdw agent 157, replication agent
++  158):
+   - Planner (agent 155), under a small work_mem (seeds 8018, 8023, 8026, 8035, 8049, 8130):
+     `SET work_mem = '64kB'` over `r8big (id int PRIMARY KEY, k int, s text)` filled with
+     `SELECT i, (i * 7919) % 97, md5(i::text) FROM generate_series(1, 3020) i` and analysed:
+diff --git a/crates/pg-engine/tests/sql/a162_stats_dead.out b/crates/pg-engine/tests/sql/a162_stats_dead.out
+new file mode 100644
+index 00000000..ff698a6c
+--- /dev/null
++++ b/crates/pg-engine/tests/sql/a162_stats_dead.out
+@@ -0,0 +1,86 @@
++> CREATE TABLE a162_v (id int PRIMARY KEY, v int) WITH (autovacuum_enabled = off)
++-- CREATE TABLE
++
++> INSERT INTO a162_v SELECT i, i FROM generate_series(1, 30) i
++-- INSERT 0 30
++
++> DELETE FROM a162_v WHERE id > 10
++-- DELETE 20
++
++> UPDATE a162_v SET v = 0 WHERE id < 3
++-- UPDATE 2
++
++> SELECT pg_stat_force_next_flush()
++pg_stat_force_next_flush:void
++
++-- SELECT 1
++
++> SELECT n_tup_ins, n_tup_upd, n_tup_del, n_live_tup, n_dead_tup, n_mod_since_analyze FROM pg_stat_user_tables WHERE relname = 'a162_v'
++n_tup_ins:int8 | n_tup_upd:int8 | n_tup_del:int8 | n_live_tup:int8 | n_dead_tup:int8 | n_mod_since_analyze:int8
++30 | 2 | 20 | 10 | 22 | 52
++-- SELECT 1
++
++> ANALYZE a162_v
++-- ANALYZE
++
++> SELECT n_live_tup, n_dead_tup, n_mod_since_analyze, analyze_count FROM pg_stat_user_tables WHERE relname = 'a162_v'
++n_live_tup:int8 | n_dead_tup:int8 | n_mod_since_analyze:int8 | analyze_count:int8
++10 | 22 | 0 | 1
++-- SELECT 1
++
++> VACUUM a162_v
++-- VACUUM
++
++> SELECT n_live_tup, n_dead_tup, vacuum_count FROM pg_stat_user_tables WHERE relname = 'a162_v'
++n_live_tup:int8 | n_dead_tup:int8 | vacuum_count:int8
++10 | 0 | 1
++-- SELECT 1
++
++> INSERT INTO a162_v VALUES (3, 0)
++ERROR 23505: duplicate key value violates unique constraint "a162_v_pkey"
++DETAIL: Key (id)=(3) already exists.
++OBJECTS: schema=public table=a162_v constraint=a162_v_pkey
++
++> INSERT INTO a162_v VALUES (100, 0), (4, 0)
++ERROR 23505: duplicate key value violates unique constraint "a162_v_pkey"
++DETAIL: Key (id)=(4) already exists.
++OBJECTS: schema=public table=a162_v constraint=a162_v_pkey
++
++> BEGIN
++-- BEGIN
++
++> INSERT INTO a162_v VALUES (200, 0)
++-- INSERT 0 1
++
++> SAVEPOINT s
++-- SAVEPOINT
++
++> INSERT INTO a162_v VALUES (1, 1)
++ERROR 23505: duplicate key value violates unique constraint "a162_v_pkey"
++DETAIL: Key (id)=(1) already exists.
++OBJECTS: schema=public table=a162_v constraint=a162_v_pkey
++
++> ROLLBACK TO s
++-- ROLLBACK
++
++> SELECT n_tup_ins FROM pg_stat_xact_user_tables WHERE relname = 'a162_v'
++n_tup_ins:int8
++5
++-- SELECT 1
++
++> COMMIT
++-- COMMIT
++
++> SELECT pg_stat_force_next_flush()
++pg_stat_force_next_flush:void
++
++-- SELECT 1
++
++> SELECT n_tup_ins, n_live_tup, n_dead_tup, n_ins_since_vacuum FROM pg_stat_user_tables WHERE relname = 'a162_v'
++n_tup_ins:int8 | n_live_tup:int8 | n_dead_tup:int8 | n_ins_since_vacuum:int8
++35 | 11 | 4 | 5
++-- SELECT 1
++
++> DROP TABLE a162_v
++-- DROP TABLE
++
+diff --git a/crates/pg-engine/tests/sql/a162_stats_dead.sql b/crates/pg-engine/tests/sql/a162_stats_dead.sql
+new file mode 100644
+index 00000000..76c539a7
+--- /dev/null
++++ b/crates/pg-engine/tests/sql/a162_stats_dead.sql
+@@ -0,0 +1,27 @@
++-- ANALYZE reports the dead versions it finds (acquire_sample_rows' deadrows) as n_dead_tup,
++-- and an INSERT that fails on a unique key still counts its heap tuple (inserted, then dead
++-- with the abort). (ANALYZE right after DML whose counts this backend hasn't flushed yet:
++-- PostgreSQL subtracts the pending ones, so the result depends on its flush interval.)
++CREATE TABLE a162_v (id int PRIMARY KEY, v int) WITH (autovacuum_enabled = off);
++INSERT INTO a162_v SELECT i, i FROM generate_series(1, 30) i;
++DELETE FROM a162_v WHERE id > 10;
++UPDATE a162_v SET v = 0 WHERE id < 3;
++SELECT pg_stat_force_next_flush();
++SELECT n_tup_ins, n_tup_upd, n_tup_del, n_live_tup, n_dead_tup, n_mod_since_analyze FROM pg_stat_user_tables WHERE relname = 'a162_v';
++ANALYZE a162_v;
++SELECT n_live_tup, n_dead_tup, n_mod_since_analyze, analyze_count FROM pg_stat_user_tables WHERE relname = 'a162_v';
++VACUUM a162_v;
++SELECT n_live_tup, n_dead_tup, vacuum_count FROM pg_stat_user_tables WHERE relname = 'a162_v';
++
++INSERT INTO a162_v VALUES (3, 0);
++INSERT INTO a162_v VALUES (100, 0), (4, 0);
++BEGIN;
++INSERT INTO a162_v VALUES (200, 0);
++SAVEPOINT s;
++INSERT INTO a162_v VALUES (1, 1);
++ROLLBACK TO s;
++SELECT n_tup_ins FROM pg_stat_xact_user_tables WHERE relname = 'a162_v';
++COMMIT;
++SELECT pg_stat_force_next_flush();
++SELECT n_tup_ins, n_live_tup, n_dead_tup, n_ins_since_vacuum FROM pg_stat_user_tables WHERE relname = 'a162_v';
++DROP TABLE a162_v;
