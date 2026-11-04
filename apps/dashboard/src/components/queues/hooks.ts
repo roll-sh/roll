@@ -1,5 +1,3 @@
-"use client";
-
 import type { MarkState } from "@roll/brand";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { errorMessage, OfflineError } from "@/lib/queues-api";

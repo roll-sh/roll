@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * ⌘K for working at scale (docs/code/agents.md, "Working at scale"): the view as a canvas, list or
  * board, its grouping and order, "Next that needs me", and every bulk action on the selection.

@@ -1,5 +1,3 @@
-"use client";
-
 import { ArrowDownFromLine, ArrowRightFromLine, CircleDot, ListRestart, Maximize, Minus, Plus } from "lucide-react";
 import {
   forwardRef,

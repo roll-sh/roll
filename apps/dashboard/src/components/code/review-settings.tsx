@@ -1,7 +1,5 @@
-"use client";
-
 import { Minus, Plus, X } from "lucide-react";
-import Link from "next/link";
+import { Link } from "@/components/link";
 import { useEffect, useState } from "react";
 import { codeApi, shortId, type Repo, type ReviewRules, type ReviewSettings } from "@/lib/code-api";
 import { clampApprovals, parseGlobs, rulesPatch, tightened } from "@/lib/review";

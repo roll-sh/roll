@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Endpoints in the agents settings (docs/code/agents.md, "Endpoints"): a machine's endpoints and
  * each provider's "Endpoint" row (machine settings), the owner's profiles and applying one to

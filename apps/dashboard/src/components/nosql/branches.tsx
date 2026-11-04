@@ -1,9 +1,7 @@
-"use client";
-
 import { HorizonMark } from "@roll/brand";
 import { GitBranch, GitCompare, RefreshCw, RotateCcw } from "lucide-react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "@tanstack/react-router";
+import { Link } from "@/components/link";
 import { useCallback, useEffect, useState } from "react";
 import { branchTree, descendants, formatSpan, nosqlApi, validName, type NosqlDb, type NosqlDiff } from "@/lib/nosql-api";
 import { diffKind } from "@/lib/nosql-cql";
@@ -124,7 +122,7 @@ function BranchList({ db, all }: { db: NosqlDb; all: NosqlDb[] }) {
 }
 
 function NewBranch({ db, busy, run }: { db: NosqlDb; busy: string | null; run: Run }) {
-  const router = useRouter();
+  const navigate = useNavigate();
   const [name, setName] = useState(`${db.name}-branch`.slice(0, 40));
   const [mode, setMode] = useState<"now" | "past">("now");
   const [at, setAt] = useState(() => Math.max(earliest(db, now()), now() - 900));
@@ -150,7 +148,7 @@ function NewBranch({ db, busy, run }: { db: NosqlDb; busy: string | null; run: R
               ...(expires != null ? { expires_at: expires } : {}),
             }),
           );
-          if (b) router.push(`/dashboard/nosql/${b.id}`);
+          if (b) navigate({ href: `/dashboard/nosql/${b.id}` });
         }}
       >
         <Field label="Name" hint={name && !validName(name) ? "1–40 lowercase letters, digits or -" : undefined}>

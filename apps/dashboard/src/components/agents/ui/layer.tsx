@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Popups, menus and dialogs portal to <body>, outside the agents surface's `[data-agents]`, so they
  * took the dashboard's shared tokens (`--fg`, `--muted`, `--line`, `--panel-2`) instead of the

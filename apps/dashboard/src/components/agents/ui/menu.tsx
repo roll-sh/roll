@@ -1,5 +1,3 @@
-"use client";
-
 /** Ported from T3 Code's `components/ui/menu.tsx` (MIT), in roll's colours. */
 
 import { Menu as MenuPrimitive } from "@base-ui/react/menu";

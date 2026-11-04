@@ -1,5 +1,3 @@
-"use client";
-
 import { DotField, HorizonMark } from "@roll/brand";
 import { Check, Copy, Eye, EyeOff, GitBranch, Moon, Play, Plus, Power, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";

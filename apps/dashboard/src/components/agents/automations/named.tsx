@@ -1,5 +1,3 @@
-"use client";
-
 import { useAgents } from "../use-agents";
 
 /** Ids the runner and the daemon write into messages: `thr_…`, `prj_…`, `mch_…`. */

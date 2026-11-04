@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * On a change's page in roll code: the agent conversation that published it, if one of the
  * signed-in owner's did (its thread record names the change). A link back to it, and for a

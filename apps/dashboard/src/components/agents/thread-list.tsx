@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The threads as Linear's list and board (docs/code/agents.md, "Working at scale"): the same threads
  * the canvas shows for the view, filtered and focused the same way, grouped, sub-grouped and sorted

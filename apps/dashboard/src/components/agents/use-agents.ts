@@ -1,5 +1,3 @@
-"use client";
-
 import { createContext, useContext, useEffect, useRef, useSyncExternalStore } from "react";
 import type { MachineId, Thread, ThreadId } from "@/lib/agents-api";
 import type { BulkSpec } from "@/lib/agents-bulk";

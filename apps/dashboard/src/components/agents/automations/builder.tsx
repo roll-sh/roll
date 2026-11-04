@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The builder (docs/code/automations-ui.md): one vertical flow of cards, When → Only if → steps,
  * joined by hairline connectors with a `+` that inserts a step there (Zapier's editor, Linear

@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The work log's rows (T3 Code's `components/chat/WorkLog.tsx` and `TimelineWorkGroupRows.tsx`,
  * MIT): a step is an icon, what it did and, on a click, its output, the files it changed or its

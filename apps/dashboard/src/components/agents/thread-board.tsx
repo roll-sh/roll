@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The threads as Linear's board (docs/code/agents.md, "Working at scale"): a column per group
  * (status by default: Needs you · Running · Queued · Failed · Done, every column always there),

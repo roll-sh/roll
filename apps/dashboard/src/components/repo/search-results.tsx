@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { Link } from "@/components/link";
 import type { SearchResult } from "@/lib/code-api";
 import { groupMatches, highlightRanges, overlayNote, searchLinkRev, splitHighlights } from "@/lib/ai-review";
 import { blobHref } from "./paths";

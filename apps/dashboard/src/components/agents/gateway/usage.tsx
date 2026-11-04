@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Usage and cost (docs/code/gateway.md, "Usage and cost"), drawn by the dataviz skill's rules:
  * filters in one row above (range, group, measure), stat tiles, then stacked columns by day: the

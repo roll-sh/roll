@@ -1,7 +1,5 @@
-"use client";
-
 import { ArrowUpToLine, CircleX, GitMerge, Pause, Play, X } from "lucide-react";
-import Link from "next/link";
+import { Link } from "@/components/link";
 import { useEffect, useState } from "react";
 import { formatCount } from "@/lib/redis-api";
 import { codeApi, shortId, type CodeInfo, type Queue, type QueueEntry, type Repo } from "@/lib/code-api";

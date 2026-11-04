@@ -1,5 +1,3 @@
-"use client";
-
 import { Lock, Plus, Trash2, X } from "lucide-react";
 import { useState } from "react";
 import { formatCount } from "@/lib/redis-api";

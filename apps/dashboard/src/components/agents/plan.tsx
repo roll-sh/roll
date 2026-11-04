@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Plan mode, as T3 Code does it (`ProposedPlanCard.tsx`, `ComposerPlanFollowUpBanner.tsx`,
  * `ComposerPrimaryActions.tsx`, `useProposedPlanSend.ts`; MIT): the proposed plan is a card in

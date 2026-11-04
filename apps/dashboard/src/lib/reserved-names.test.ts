@@ -11,12 +11,18 @@ describe("reserved names", () => {
   });
 
   it("cover every top-level route of the app", () => {
-    const app = join(__dirname, "..", "app");
-    const routes = readdirSync(app).filter((name) => {
-      if (statSync(join(app, name)).isDirectory()) return !/^[[(_@]/.test(name);
-      return /^(icon|apple-icon|favicon|opengraph-image|twitter-image|robots|sitemap|manifest)\./.test(name);
-    });
+    // TanStack's file names: `foo.tsx`, `foo.bar.tsx` and `foo/` are all `/foo`; params (`$x`),
+    // groups, pathless layouts, ignored files, the root and the home page aren't names.
+    const dir = join(__dirname, "..", "routes");
+    const routes = readdirSync(dir)
+      .map((name) => (statSync(join(dir, name)).isDirectory() ? name : name.split(".")[0]))
+      .filter((top) => !/^[$(_\-[]/.test(top) && top !== "index" && top !== "route");
+    expect(routes).toContain("dashboard");
     for (const r of routes) expect(RESERVED_NAMES, r).toContain(r);
+  });
+
+  it("cover every static file at the top level", () => {
+    for (const f of readdirSync(join(__dirname, "..", "..", "public"))) expect(RESERVED_NAMES, f).toContain(f);
   });
 
   it("include the names a valid owner could otherwise take", () => {

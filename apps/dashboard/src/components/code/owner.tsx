@@ -1,8 +1,6 @@
-"use client";
-
 import { HorizonMark } from "@roll/brand";
 import { ChevronDown, ChevronRight, ExternalLink, Plus, RotateCw, Trash2 } from "lucide-react";
-import Link from "next/link";
+import { Link } from "@/components/link";
 import { useCallback, useEffect, useLayoutEffect, useState } from "react";
 import { codeApi, isNotFound, type CodeInfo, type Owner, type Repo, type ReviewApp, type ReviewAppSecrets } from "@/lib/code-api";
 import { canWrite } from "@/lib/queue";

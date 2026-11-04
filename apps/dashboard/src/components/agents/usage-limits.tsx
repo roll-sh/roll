@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * A provider account's usage limits: one row per window with what's left, a hairline bar with the
  * pace marker and when it resets (T3's `apps/web/src/components/usage/UsageLimits.tsx`,

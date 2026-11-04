@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The small tag on a thread's canvas card when an automation started it: the automation's name,
  * opening its run. Reads the automations store (`ThreadOrigin`); nothing when there's none.

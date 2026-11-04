@@ -1,5 +1,3 @@
-"use client";
-
 import { ArrowDown, FileDiff as DiffIcon, MessageSquare, PanelRight, PinOff, SquareTerminal } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { isBusy, isRunning, type Checkpoint, type Machine, type Request, type Run, type Terminal, type Thread } from "@/lib/agents-api";

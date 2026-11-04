@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * What can be done to one automation from anywhere it shows (a list row's hover actions, its
  * overview, the builder's header): pause or turn on, run now, duplicate, delete. Each answers with

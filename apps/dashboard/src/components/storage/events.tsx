@@ -1,5 +1,3 @@
-"use client";
-
 import { Cloud, Inbox, Plus, RefreshCw, Trash2, Waves, Webhook } from "lucide-react";
 import { useState } from "react";
 import {

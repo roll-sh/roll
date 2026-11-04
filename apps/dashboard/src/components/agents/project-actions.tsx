@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * What can be done with a project, the same everywhere it shows (docs/code/agents.md,
  * "Projects"): its card's ⋯, its row under a machine's folded projects, its group in the sidebar

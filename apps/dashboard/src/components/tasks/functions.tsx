@@ -1,5 +1,3 @@
-"use client";
-
 import { Ban, Boxes, Pause, Play, RefreshCw, RotateCcw, Send, Trash2 } from "lucide-react";
 import { useState } from "react";
 import {

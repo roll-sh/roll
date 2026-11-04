@@ -1,8 +1,6 @@
-"use client";
-
 import { HorizonMark } from "@roll/brand";
 import { ArrowLeft } from "lucide-react";
-import Link from "next/link";
+import { Link } from "@/components/link";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { codeApi, type CodeInfo, type Repo } from "@/lib/code-api";
 import { CodeShell } from "./shell";

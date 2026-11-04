@@ -1,5 +1,3 @@
-"use client";
-
 import { useState, type ReactNode } from "react";
 import { Menu as Root, MenuItem as Item, MenuPopup, MenuTrigger } from "./ui/menu";
 

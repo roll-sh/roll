@@ -1,5 +1,3 @@
-"use client";
-
 import {
   ChevronRight,
   Download,
@@ -815,8 +813,7 @@ function ImagePreview({ bucket, objectKey, versionId }: { bucket: string; object
     <div className="space-y-2">
       <div className="flex h-[200px] items-center justify-center overflow-hidden rounded-lg border border-line bg-bg">
         {src ? (
-          // A blob: URL of a rendition; next/image has nothing to optimize here.
-          // eslint-disable-next-line @next/next/no-img-element
+          // A blob: URL of a rendition.
           <img src={src} alt={`Preview of ${objectKey}`} className="rise max-h-full max-w-full object-contain" />
         ) : failed ? (
           <p className="px-4 text-center text-[12px] text-subtle">No preview: {failed}</p>

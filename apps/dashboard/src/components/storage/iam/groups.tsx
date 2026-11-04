@@ -1,5 +1,3 @@
-"use client";
-
 import { Plus, UserRound } from "lucide-react";
 import { useState } from "react";
 import { iamApi, type IamUser } from "@/lib/storage-iam";

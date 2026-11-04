@@ -1,5 +1,3 @@
-"use client";
-
 import { Archive, KeyRound, Layers, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { formatBytes } from "@/lib/roll-api";

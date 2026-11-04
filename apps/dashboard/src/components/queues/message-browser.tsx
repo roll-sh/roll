@@ -1,5 +1,3 @@
-"use client";
-
 import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, RefreshCw, Skull } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { type BrowsedMessage, errorMessage, exchangeLabel, formatBytes, qapi } from "@/lib/queues-api";

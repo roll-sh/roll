@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Big diffs stay cheap: a file's rows go in blocks of BLOCK (one `<tbody>` each), and only the
  * blocks near the scroll viewport hold their rows; the rest are one row of their last measured

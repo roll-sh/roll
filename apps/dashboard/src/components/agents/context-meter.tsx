@@ -1,5 +1,3 @@
-"use client";
-
 import { Minimize2 } from "lucide-react";
 import type { ContextUsage } from "@/lib/agents-api";
 import { compactionNote, formatContextTokens, readContext, type ContextReading } from "@/lib/agents-context";

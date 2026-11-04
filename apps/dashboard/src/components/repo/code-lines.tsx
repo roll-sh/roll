@@ -1,7 +1,5 @@
-"use client";
-
 import { Check, Copy, History, Link2 } from "lucide-react";
-import Link from "next/link";
+import { Link } from "@/components/link";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { blameNote, blameRows, isBlameKey, type BlameRow } from "@/lib/blame";
 import { codeApi, firstLine, shortId, type Blame } from "@/lib/code-api";

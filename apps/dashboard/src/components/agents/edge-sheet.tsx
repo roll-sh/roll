@@ -1,5 +1,3 @@
-"use client";
-
 import { useReducedMotion } from "@roll/brand";
 import { motion, type Transition } from "motion/react";
 import { useEffect, useState, type ReactNode } from "react";

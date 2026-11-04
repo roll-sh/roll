@@ -1,4 +1,4 @@
-// Lets `node --test` run the dashboard's TypeScript modules as Next resolves them: the `@/`
+// Lets `node --test` run the dashboard's TypeScript modules as Vite resolves them: the `@/`
 // alias and extensionless relative imports. Node strips the types itself (no build step).
 import { registerHooks } from "node:module";
 import { pathToFileURL } from "node:url";

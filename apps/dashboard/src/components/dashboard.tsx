@@ -1,5 +1,3 @@
-"use client";
-
 import { DotField } from "@roll/brand";
 import { useRef, useState } from "react";
 import { AppShell } from "./app-shell";

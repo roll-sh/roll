@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Routes and aliases (docs/code/gateway.md, "Routing"): where requests for a model go, in order,
  * the next target taking over on failover. A route whose targets ask for another name is an alias

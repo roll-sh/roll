@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Pickers over the owner's integrations (`lookup-api.ts`): `useLookupSource` turns a lookup
  * (`linear/teams`, `slack/channels`, a parent such as a team) into the shared picker's source, and
