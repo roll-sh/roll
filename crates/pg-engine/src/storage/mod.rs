@@ -1827,35 +1827,36 @@ impl Store {
         Ok(())
     }
 
-    /// During clean close only, put linked L1 files among the inputs the normal
-    /// compactor rewrites. Persist the move before publishing it: a crash at either
-    /// stage leaves the same linked files recoverable, never unlisted.
-    fn stage_linked_l1_for_close(&self) -> Result<()> {
+    /// Rewrite linked L1 files individually on clean close. Each replacement is
+    /// durable before publication; unrelated L1 files and concurrent frozen L0
+    /// sources keep their identities. Only one replacement file is added at a time.
+    fn rewrite_linked_l1_for_close(&self) -> Result<()> {
         let _bg = self.bg.lock();
-        let mut m = self.manifest.lock();
-        let mut v = self.view.write();
-        let mut next = m.clone();
-        let mut l0 = v.l0.clone();
-        let mut l1 = Vec::with_capacity(v.l1.len());
-        for s in &v.l1 {
-            if s.meta.commit_ts.is_some() {
-                let at = l0_place(&next.l0, &s.meta);
-                next.l0.insert(at, s.meta.clone());
-                l0.insert(at, s.clone());
-            } else {
-                l1.push(s.clone());
+        loop {
+            let Some(f) = self.view().l1.iter().find(|s| s.meta.commit_ts.is_some()).cloned() else {
+                return Ok(());
+            };
+            let outputs = self.rewrite_without(&f, &[], 0)?;
+            let mut m = self.manifest.lock();
+            let mut v = self.view.write();
+            let mut l1 = Vec::with_capacity(v.l1.len());
+            for s in &v.l1 {
+                if s.meta.id == f.meta.id {
+                    l1.extend(outputs.iter().cloned());
+                } else {
+                    l1.push(s.clone());
+                }
             }
+            let mut next = m.clone();
+            next.l1 = l1.iter().map(|s| s.meta.clone()).collect();
+            next.next_id = self.next_id.load(Ordering::Relaxed);
+            write_manifest(&self.dir, &next)?;
+            *m = next;
+            *v = Arc::new(View {
+                mem: v.mem.clone(), imm: v.imm.clone(), l0: v.l0.clone(), l1, rdels: v.rdels.clone(),
+            });
+            f.mark_obsolete();
         }
-        if l1.len() == v.l1.len() {
-            return Ok(());
-        }
-        next.l1.retain(|s| s.commit_ts.is_none());
-        write_manifest(&self.dir, &next)?;
-        *m = next;
-        *v = Arc::new(View {
-            mem: v.mem.clone(), imm: v.imm.clone(), l0, l1, rdels: v.rdels.clone(),
-        });
-        Ok(())
     }
 
     /// Flush everything to SSTs and stop accepting commits. After this the store holds no
@@ -1869,9 +1870,9 @@ impl Store {
         if !self.closed.load(Ordering::Acquire) && (!self.view().rdels.is_empty() || linked(&self.view())) {
             self.rotate()?;
             self.flush_all()?;
-            self.stage_linked_l1_for_close()?;
             self.compact()?;
             self.collect_ranges()?;
+            self.rewrite_linked_l1_for_close()?;
         }
         if self.closed.swap(true, Ordering::AcqRel) {
             return Ok(());
@@ -3195,6 +3196,49 @@ mod tests {
             |_| Ok(()),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn close_rewrite_preserves_unrelated_l1_and_pending_ingest() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path(), StoreOptions { sync: false, background: false, ..Default::default() }).unwrap();
+        put(&s, "m0000", Some("middle"));
+        s.flush_memtables().unwrap();
+        s.compact().unwrap();
+        let middle = s.view().l1[0].meta.id;
+        let spill = s.spill_dir();
+        std::fs::create_dir_all(&spill).unwrap();
+        let mut runs = Vec::new();
+        for (id, prefix) in [(1000, "a"), (1001, "z")] {
+            let mut w = SstWriter::create_run(&spill, id, true).unwrap();
+            for i in 0..256 {
+                w.add(&mvcc_key(format!("{prefix}{i:04}").as_bytes(), 1), Some(&[1; 80])).unwrap();
+            }
+            runs.push(Arc::new(SstReader::open(&spill, w.finish().unwrap(), s.opts.cache.clone()).unwrap()));
+        }
+        s.commit_sorted(0, &mut std::iter::empty(), |_, _| Ok(()), &|_, _| Ok(()), |_| {}, runs).unwrap();
+        assert_eq!(s.view().l1.iter().filter(|f| f.meta.commit_ts.is_some()).count(), 2);
+        // The state a concurrent ingest can leave between close's flush and rewrite:
+        // its manifest L0 entry is still a Frozen::Sst, absent from view.l0.
+        s.commit_sorted(1, &mut std::iter::once(Ok((b"n0000".to_vec(), Some(Bytes::from_static(b"pending"))))), |_, _| Ok(()), &|_, _| Ok(()), |_| {}, Vec::new()).unwrap();
+        let pending: Vec<_> = s.manifest.lock().l0.iter().map(|m| m.id).collect();
+        assert_eq!(pending.len(), 1);
+        assert!(s.view().l0.is_empty());
+        assert!(s.view().imm.iter().any(|f| matches!(f, Frozen::Sst(_))));
+        s.rewrite_linked_l1_for_close().unwrap();
+        assert_eq!(s.manifest.lock().l0.iter().map(|m| m.id).collect::<Vec<_>>(), pending);
+        assert!(s.view().l0.is_empty());
+        assert!(s.view().l1.iter().any(|f| f.meta.id == middle), "the ordinary file between the linked ranges is untouched");
+        assert!(s.view().l1.iter().all(|f| f.meta.commit_ts.is_none()));
+        assert_eq!(s.get(b"n0000", s.visible_ts()).unwrap().as_deref(), Some(&b"pending"[..]));
+        s.close().unwrap();
+        assert!(s.view().l1.iter().any(|f| f.meta.id == middle));
+        drop(s);
+        let s = Store::open(dir.path(), StoreOptions { sync: false, background: false, ..Default::default() }).unwrap();
+        assert_eq!(s.get(b"m0000", s.visible_ts()).unwrap().as_deref(), Some(&b"middle"[..]));
+        assert_eq!(s.get(b"n0000", s.visible_ts()).unwrap().as_deref(), Some(&b"pending"[..]));
+        assert_eq!(s.scan(b"a", b"b", s.visible_ts()).count(), 256);
+        assert_eq!(s.scan(b"z", b"{", s.visible_ts()).count(), 256);
     }
 
     /// A linked run whose keys no other source holds goes to L1 as it is (written once);

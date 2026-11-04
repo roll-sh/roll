@@ -3862,9 +3862,12 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     A linked run can enter L1 directly when its key range overlaps no memtable, frozen
     source, L0/L1 file or sibling run, its size fits the bottom-level target, and its
     encoding meets the store's compression policy. Linked L1 commit timestamps, as well
-    as L0 timestamps, split WAL replay into ordered memtables. `Store::close` stages any
-    linked L1 files into L0 and compacts all linked files into ordinary SSTs, preserving
-    clean-close compatibility with pre-linked builds without expanding hot compaction.
+    as L0 timestamps, split WAL replay into ordered memtables. After normal pending L0
+    compaction and range collection, `Store::close` rewrites each remaining linked L1
+    file individually into an ordinary L1 file, preserving unrelated file identities
+    and clean-close compatibility with pre-linked builds without expanding hot compaction.
+    Clean-close compatibility assumes writers have drained; the pre-existing race with
+    a writer adding linked L0 after the compatibility pass is not redesigned here.
     Bottom-level compaction can reclaim a tombstone and all older versions only past
     the snapshot horizon; its timestamp remains available to conflict checks while a
     snapshot can still need it. Tests `storage_linked_gc` cover overlapping L0/L1 and
