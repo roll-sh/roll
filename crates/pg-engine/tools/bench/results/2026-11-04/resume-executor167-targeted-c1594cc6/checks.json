@@ -1,0 +1,113 @@
+[
+  {
+    "name": "reordered-current",
+    "command": [
+      "cargo",
+      "test",
+      "--release",
+      "-p",
+      "pg-engine",
+      "--test",
+      "parallel_scan",
+      "reordered_heaps_through_batches",
+      "--",
+      "--exact",
+      "--nocapture"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "c1594cc6c9fac649ee76a86d711e1bf880871f08",
+      "tree": "58ff6a42818f23863213a7f3a14b8d13abfde466",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "c1594cc6c9fac649ee76a86d711e1bf880871f08",
+      "tree": "58ff6a42818f23863213a7f3a14b8d13abfde466",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 1.93s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 6.881540060043335,
+    "log_sha256": "bea7ea84f2052611c940b68b4b6df533065d2adee88a299a7fd3251a1b998474",
+    "passed_tests": 1,
+    "pass": true
+  },
+  {
+    "name": "golden-current",
+    "command": [
+      "cargo",
+      "test",
+      "--release",
+      "-p",
+      "pg-engine",
+      "--test",
+      "golden"
+    ],
+    "env": {
+      "GOLDEN_FILTER": "a167_"
+    },
+    "source_before": {
+      "head": "c1594cc6c9fac649ee76a86d711e1bf880871f08",
+      "tree": "58ff6a42818f23863213a7f3a14b8d13abfde466",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "c1594cc6c9fac649ee76a86d711e1bf880871f08",
+      "tree": "58ff6a42818f23863213a7f3a14b8d13abfde466",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 0.3355391025543213,
+    "log_sha256": "79cca0ee382206640d20497cec0aab3be55db94f2bf269d3e9841ebb8307307d",
+    "passed_tests": 3,
+    "pass": true
+  },
+  {
+    "name": "parallel-current",
+    "command": [
+      "cargo",
+      "test",
+      "--release",
+      "-p",
+      "pg-engine",
+      "--test",
+      "parallel_scan"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "c1594cc6c9fac649ee76a86d711e1bf880871f08",
+      "tree": "58ff6a42818f23863213a7f3a14b8d13abfde466",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "c1594cc6c9fac649ee76a86d711e1bf880871f08",
+      "tree": "58ff6a42818f23863213a7f3a14b8d13abfde466",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 52.53s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 52.763245820999146,
+    "log_sha256": "a7609bdc3774bbae99146e9e3d063d50bd9936ae0d6de282f374c033ca93519b",
+    "passed_tests": 10,
+    "pass": true
+  }
+]
