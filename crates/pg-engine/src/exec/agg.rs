@@ -2841,7 +2841,7 @@ impl AggNode {
                 .groups
                 .iter()
                 .enumerate()
-                .all(|(i, g)| red[i] || (colls.get(i).is_none_or(Option::is_none) && !equal_apart(&g.ty())))
+                .all(|(i, g)| red[i] || (colls.get(i).is_none_or(Option::is_none) && !key_equal_apart(g, proj.as_deref())))
             && (self.groups.is_empty()
                 || self.plan.as_ref().is_some_and(|p| {
                     let sorted = super::pghash::agg_estimate(p, ctx).sorted;
@@ -2986,7 +2986,7 @@ impl AggNode {
             // 0, under a nondeterministic collation) show.
             let presort = presort.or_else(|| {
                 // (Estimated only when it can matter: a plain aggregate has one group.)
-                let shown = colls.iter().any(Option::is_some) || self.groups.iter().any(|g| equal_apart(&g.ty()));
+                let shown = colls.iter().any(Option::is_some) || self.groups.iter().any(|g| key_equal_apart(g, input.projection()));
                 if self.groups.is_empty() || (!shown && self.aggs.iter().all(order_insensitive)) {
                     return None;
                 }
@@ -3698,6 +3698,28 @@ fn through_projection(e: &crate::sql::expr::Expr, proj: &[crate::sql::expr::Expr
 /// exact sums and averages, min / max of types whose equal values are the same).
 /// Whether two equal values of type `t` can look different (interval_eq, numeric_eq,
 /// float8eq over -0 / 0, jsonb's numbers, arrays and ranges of them).
+/// Whether a group key's values may be equal and look different (`equal_apart` of its type,
+/// unless the expression only makes whole numbers: EXTRACT of a date's field; a column of
+/// the projection `proj` below, its expression).
+fn key_equal_apart(e: &crate::sql::expr::Expr, proj: Option<&[crate::sql::expr::Expr]>) -> bool {
+    let mut x = e;
+    while let crate::sql::expr::Expr::Relabel(y, _) = x {
+        x = y;
+    }
+    if let (crate::sql::expr::Expr::Col(i, _), Some(p)) = (x, proj)
+        && let Some(y) = p.get(*i)
+    {
+        return key_equal_apart(y, None);
+    }
+    if let crate::sql::expr::Expr::Call(def, args, _) = x
+        && let [_, arg] = &args[..]
+        && crate::sql::func::datetime::extracts_whole(def.imp, &arg.ty())
+    {
+        return false;
+    }
+    equal_apart(&e.ty())
+}
+
 fn equal_apart(t: &crate::types::DataType) -> bool {
     use crate::types::DataType as D;
     match t {

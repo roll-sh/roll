@@ -580,6 +580,12 @@ fn p_date_part(x: &Value, y: &Value, _: &crate::types::DataType) -> Result<Value
     part_value_local(text_arg(x), y, false)
 }
 
+/// Whether `imp` is EXTRACT and its argument a date: every field of a date is a whole number,
+/// so its numerics are equal only when they look alike (scale 0).
+pub fn extracts_whole(imp: super::FnImpl, arg: &crate::types::DataType) -> bool {
+    std::ptr::fn_addr_eq(imp, extract as super::FnImpl) && matches!(arg, crate::types::DataType::Date)
+}
+
 /// `ops::pure` for EXTRACT and date_part (a timestamptz's fields are left to the session).
 pub(super) fn pure(imp: super::FnImpl) -> Option<super::ops::PureFn> {
     let table: [(super::FnImpl, super::ops::PureFn); 2] = [(extract, p_extract), (date_part, p_date_part)];
