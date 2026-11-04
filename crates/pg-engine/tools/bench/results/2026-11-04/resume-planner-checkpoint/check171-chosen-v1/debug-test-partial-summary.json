@@ -1,0 +1,175 @@
+{
+  "status": "FAILED",
+  "partial_only": true,
+  "passed": 305,
+  "failed": 2,
+  "ignored": 9,
+  "summaries": 33,
+  "per_binary": {
+    "src/lib.rs": [
+      187,
+      0,
+      2
+    ],
+    "src/bin/roll-engine.rs": [
+      0,
+      0,
+      0
+    ],
+    "tests/app_concurrency.rs": [
+      6,
+      0,
+      1
+    ],
+    "tests/autovacuum.rs": [
+      6,
+      0,
+      0
+    ],
+    "tests/autovacuum_log.rs": [
+      1,
+      0,
+      0
+    ],
+    "tests/backend_lifecycle.rs": [
+      2,
+      0,
+      0
+    ],
+    "tests/backend_status.rs": [
+      1,
+      0,
+      0
+    ],
+    "tests/big_tables.rs": [
+      15,
+      0,
+      0
+    ],
+    "tests/catalog_format.rs": [
+      4,
+      0,
+      0
+    ],
+    "tests/catalog_storage.rs": [
+      6,
+      0,
+      0
+    ],
+    "tests/compact_locks.rs": [
+      4,
+      0,
+      0
+    ],
+    "tests/connection_log.rs": [
+      1,
+      0,
+      0
+    ],
+    "tests/crash_async_commit.rs": [
+      2,
+      0,
+      0
+    ],
+    "tests/crash_bulk.rs": [
+      2,
+      0,
+      0
+    ],
+    "tests/crash_ctids.rs": [
+      6,
+      0,
+      0
+    ],
+    "tests/crash_random.rs": [
+      2,
+      0,
+      0
+    ],
+    "tests/crash_unlogged.rs": [
+      4,
+      0,
+      0
+    ],
+    "tests/ddl_scaling.rs": [
+      6,
+      0,
+      0
+    ],
+    "tests/deep_input.rs": [
+      3,
+      0,
+      0
+    ],
+    "tests/deparse_identity.rs": [
+      4,
+      0,
+      0
+    ],
+    "tests/difftest.rs": [
+      0,
+      0,
+      5
+    ],
+    "tests/drop_storage.rs": [
+      2,
+      0,
+      0
+    ],
+    "tests/fdw_loopback.rs": [
+      8,
+      0,
+      0
+    ],
+    "tests/fdw_traffic.rs": [
+      0,
+      0,
+      1
+    ],
+    "tests/golden.rs": [
+      3,
+      0,
+      0
+    ],
+    "tests/hba.rs": [
+      1,
+      0,
+      0
+    ],
+    "tests/heap_order_scan.rs": [
+      1,
+      0,
+      0
+    ],
+    "tests/index_key_format.rs": [
+      4,
+      0,
+      0
+    ],
+    "tests/kept_plans.rs": [
+      7,
+      0,
+      0
+    ],
+    "tests/lifecycle_log.rs": [
+      1,
+      0,
+      0
+    ],
+    "tests/locale.rs": [
+      1,
+      0,
+      0
+    ],
+    "tests/log_collector.rs": [
+      1,
+      0,
+      0
+    ],
+    "tests/logical_apply.rs": [
+      14,
+      2,
+      0
+    ]
+  }
+}

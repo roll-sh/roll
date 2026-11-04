@@ -1,0 +1,48 @@
+{
+  "observed_utc": "2026-11-04T20:12:40.001854+00:00",
+  "source": "a6fe3e4e626b0552c14320c18211886d1b16ad38",
+  "tree": "8f551e832ec5f7ee990fa6afc36ebbb4feb76aff",
+  "clean": true,
+  "frozen_runner_hashes_match": true,
+  "owned_job_processes_absent": true,
+  "status": "FAILED",
+  "command_exits": {
+    "debug-test": "101"
+  },
+  "later_stages": {
+    "release-test": "NOTRUN after fail-fast debug101",
+    "clippy": "NOTRUN after fail-fast debug101",
+    "build": "NOTRUN after fail-fast debug101",
+    "postgres-unit": "NOTRUN after fail-fast debug101"
+  },
+  "full_expected": {
+    "passed": 455,
+    "failed": 0,
+    "ignored": 18,
+    "summaries": 61
+  },
+  "partial_actual": {
+    "status": "FAILED",
+    "partial_only": true,
+    "passed": 305,
+    "failed": 2,
+    "ignored": 9,
+    "summaries": 33
+  },
+  "failed_tests": [
+    "logical_apply::parallel_apply",
+    "logical_apply::prepared_stream_without_two_phase_cleans_up"
+  ],
+  "raw_failure_points": [
+    "new costed() assertion: planned107.1375 vs EXPLAIN111.1375/0Gathers",
+    "existing explain::total_and_gathers serial-bound assertion"
+  ],
+  "attribution": "No actual Parse/Bind settings/generic runtime proof yet. Existing-explain assertion baseline attribution not established.",
+  "source_acceptance": false,
+  "performance_acceptance": false,
+  "resource_observations": [
+    "startup-controls.json",
+    "affinity-observation-debug.json"
+  ],
+  "next": "Export failure first; parent-selected session-only lazy cost design, no exec hook/cache generations; coordinate bounded actual red before source repair."
+}

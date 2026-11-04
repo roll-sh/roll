@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "788386c85f2e894be12b7ca11825c0549bdf2e90d9603f3c340fa2389e824ef7",
-    "bytes": 14380
+    "sha256": "7a476133489b485561c3b1bf48bc18d0afe2a373a75265736bcee419a0e20bac",
+    "bytes": 15068
   },
   "bytea165compare/RESTORED": {
     "sha256": "cfeb0d7a74ac20eb1d46d347c00db409be5f9c5b47ca77e388b2e494a65d91c3",
@@ -495,6 +495,54 @@
     "sha256": "2819207fe9c2282afd3351414ca5e40d2eb35e561177be1c5ce49c7d55209429",
     "bytes": 73
   },
+  "check171-chosen-v1/TERMINAL.json": {
+    "sha256": "9d5ebdb468f98f56ac3c1ef0178b2d73a5f7a2119863b1af628347a723ef531f",
+    "bytes": 1588
+  },
+  "check171-chosen-v1/affinity-observation-debug.json": {
+    "sha256": "b52303ee475b4d1bff09f90daadf96e124e10aaeb1807f253f599bf6d0d0853a",
+    "bytes": 1905
+  },
+  "check171-chosen-v1/debug-test-partial-summary.json": {
+    "sha256": "8c88743378d5ddf874e1c6134b862d9a343cacf344751ee7dab3532a45169d84",
+    "bytes": 2248
+  },
+  "check171-chosen-v1/debug-test.command": {
+    "sha256": "cb58d0562272a4cf4dc15aa0f10635fa4fdca7c5773fba62b6e9eac1bff1fe46",
+    "bytes": 63
+  },
+  "check171-chosen-v1/debug-test.log": {
+    "sha256": "41ad1e8bd7663b2ecad80780c8e844f0e3b121fe24ed0cb29ebdf7e0269d15a4",
+    "bytes": 30473
+  },
+  "check171-chosen-v1/exits.tsv": {
+    "sha256": "3c6c9070996f8894ff0755b8bc87a31d8aaf4143c1b2d3ed2201301f1e051104",
+    "bytes": 15
+  },
+  "check171-chosen-v1/initial.status": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  "check171-chosen-v1/source.txt": {
+    "sha256": "d09d28070c3260e34310ba71d4d8ba3652f95c828aa4a6208a04011a2a2aec30",
+    "bytes": 41
+  },
+  "check171-chosen-v1/startup-controls.json": {
+    "sha256": "ed46ef6b400b79b116b2439bf4a1986d414ed8799146dd597ecbaa6ff7310cfb",
+    "bytes": 161
+  },
+  "check171-chosen-v1/toolchain.txt": {
+    "sha256": "db19261270b0428d1cffd44795917261238eab88402716d4f372b5b1c1350a6d",
+    "bytes": 232
+  },
+  "check171-chosen-v1/tree.txt": {
+    "sha256": "975a2a11e767ad68495ec9aa03f9fe88d0f21f994f0a31afb23d8437083d9bdf",
+    "bytes": 41
+  },
+  "check171-chosen-v1/wrapper.log": {
+    "sha256": "1b796df4d58ef400cb7fa85549f68af29e637944f4b87f9e2486cc2a0be5bfb7",
+    "bytes": 165
+  },
   "embedded165/cursor_replay_probe.rs": {
     "sha256": "be8240164ee8f786b529810e08a5c5bdd34342d9cb3e16e9cede465e5673bd55",
     "bytes": 1131
@@ -636,8 +684,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "118e49a31e506f411aba668400a6a8a23df1facc314d8d35b2aa442db5300e1d",
-    "bytes": 29794
+    "sha256": "6a50eaa26ef2a00eca8f6d537e0271130a0ee294c1d439e83bde20850dd907e6",
+    "bytes": 30889
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",

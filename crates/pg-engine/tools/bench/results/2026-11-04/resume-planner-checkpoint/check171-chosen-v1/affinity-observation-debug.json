@@ -1,0 +1,106 @@
+{
+  "observed_utc": "2026-11-04T20:06:59.885716+00:00",
+  "source": "a6fe3e4e626b0552c14320c18211886d1b16ad38",
+  "scope": "single read-only sample of current full-debug Cargo children and existing threads; no lifetime isolation claim",
+  "processes": [
+    {
+      "pid": 3474035,
+      "ppid": 3220626,
+      "nice": 19,
+      "command": "/home/meszmate/.cache/a171/target/debug/deps/golden-9749ad749af5ca1c ",
+      "tasks": [
+        {
+          "tid": 3474035,
+          "affinity": [
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            18,
+            19
+          ]
+        },
+        {
+          "tid": 3491608,
+          "affinity": [
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            18,
+            19
+          ]
+        },
+        {
+          "tid": 3491615,
+          "affinity": [
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            18,
+            19
+          ]
+        },
+        {
+          "tid": 3491616,
+          "affinity": [
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            18,
+            19
+          ]
+        },
+        {
+          "tid": 3491617,
+          "affinity": [
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            18,
+            19
+          ]
+        },
+        {
+          "tid": 3491618,
+          "affinity": [
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            18,
+            19
+          ]
+        },
+        {
+          "tid": 3955834,
+          "affinity": [
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            18,
+            19
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -174,9 +174,14 @@ AFTER165terminal/export,scope transferredcleanly onto c861 as a6fe3e4e onnewowne
 work-a171-chosen-cost-20261104,newremote wip/a171-chosen-cost-resume-20261104 independently
 verified. Sixpaths102+/2-,eachadded/removedline exactlyoriginal;audit+patch preserved.
 Existingcostgolden matchedONErealSQLfile inall3modes;kept7passed,bothcommands0.
-Originalfocusedwrapper/heavy/runnergone,cleana6fe unchanged. Fullchosen171 pipelineactive,
+Originalfocusedwrapper/heavy/runnergone,cleana6fe unchanged. Fullchosen171 pipelineFAILED,
 frozenexpected455/0/18/61 matchesactualcompletec861map;no test/Cargodelta. Existingheavy,
 targeta171,taskset8-13,18-19/nice19/jobs2/testthreads<=2;partialfulloutputsexcluded;
+Terminaldebug101 atlogical_apply:14pass/2fail (parallel_apply,newcostedassert107.1375vs
+EXPLAIN111.1375;prepared_stream_without_two_phase_cleans_up,existingserial-boundassert).
+Partialdebug summary ONLY;release/Clippy/dist/unitNOTRUN. Sourcea6fe/runner/map unchanged,
+ownedjobsgone. Rawfaileddebug/partialmap/terminal/source/affinity exported;no attribution
+to reviewedParse/Bind cases orsecondfailure'sbaseline established. AcceptanceHELD.
 no newtiming/service. Earliercargo check stillhasinsufficient sourceidentity. Chosen-cost
 current-source acceptance andcustomANY/IN correctness handoff remainpending;scope171only.
 IndependentstaticR1 a6fe vs c861 found noHIGH/TWOintroducedMEDIUM: eagerParsecost/gathers
@@ -185,6 +190,9 @@ runtimeattribution;sourceacceptance HELD regardless ofpinned fullpasses. Fullrun
 map unchangedthroughterminal/export. Cache-onlylazycurrentdescribeproposal andParse/Bind
 parallel/genericfixtures preserved NOTRUN/NOTAPPLIED;movingstoredScanEstreadlater alone
 wouldnotfixstaleestimates. No newexecution/source/timing/service whilepinruns.
+Parent nowprefers session-only lazyplan_cost currentdescribe,removingcosted/ScanEst and
+leavingparallel_partunchanged;no newcachegenerations. No repair/repro executed before
+failedpin'sterminalrawexport;coordinateboundedactualParse/Bindreds next.
 
 FDW172 recovered clean at63f7c0b4, remote wip/a172-resume-20261104, with no interrupted
 round8 implementation. Completed baseline dist/contrib evidence reports
@@ -343,6 +351,9 @@ for name in ('release-test.command', 'release-test.log', 'release-test-summary.j
 for name in ('build.command', 'build.log', 'engine.sha256', 'postgres-unit.command', 'postgres-unit.log', 'postgres-unit-status.json', 'postgres-unit-summary.json', 'exits.tsv', 'current.status', 'TERMINAL.json', 'debug-test-terminal-audit.json', 'release-test-terminal-audit.json'):
     sources['check165ind-v3/' + name] = str(D / 'check165ind-v3' / name)
 sources['check165ind-v3/wrapper.log'] = str(D / 'check165ind-v3-wrapper.log')
+for name in ('source.txt', 'tree.txt', 'initial.status', 'startup-controls.json', 'toolchain.txt', 'debug-test.command', 'debug-test.log', 'debug-test-partial-summary.json', 'exits.tsv', 'affinity-observation-debug.json', 'TERMINAL.json'):
+    sources['check171-chosen-v1/' + name] = str(D / 'check171-chosen-v1' / name)
+sources['check171-chosen-v1/wrapper.log'] = str(D / 'check171-chosen-v1-wrapper.log')
 for name, source in sources.items():
     files[name] = Path(source).read_bytes()
 files['manifest.json'] = (json.dumps({name: {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}
