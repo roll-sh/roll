@@ -1,0 +1,20 @@
+[
+  {
+    "commit": "5c31223568fead896be10e66edd59e3d5a261002",
+    "binary": "/home/meszmate/.cache/a162/ab/5c312235/roll-engine",
+    "sha256": "935915339293bee2a1eeeea4762b4b9cfec1a603aa294b6c816f18d4b90dff0b",
+    "size": 69415720,
+    "profile": "dist",
+    "build_log": "/home/meszmate/.cache/a162/ab/5c312235/build.log",
+    "measurements": "NONE: INCONCLUSIVE, no quiet window"
+  },
+  {
+    "commit": "63f7c0b48be85baec516ce53870ed8f6d03cd68c",
+    "binary": "/home/meszmate/.cache/a162/ab/63f7c0b4/roll-engine",
+    "sha256": "e0f61866f4bec67f4d42f04397006e1aca6eae5a23acb59ada557f2578a8a438",
+    "size": 69420568,
+    "profile": "dist",
+    "build_log": "/home/meszmate/.cache/a162/ab/63f7c0b4/build.log",
+    "measurements": "NONE: INCONCLUSIVE, no quiet window"
+  }
+]

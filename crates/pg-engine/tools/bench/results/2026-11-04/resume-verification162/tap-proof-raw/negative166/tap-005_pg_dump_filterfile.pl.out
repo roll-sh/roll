@@ -1,0 +1,338 @@
+not ok 1 - filter file without patterns
+not ok 2 - table one dumped
+not ok 3 - table two dumped
+not ok 4 - table three dumped
+not ok 5 - table three one dumped
+not ok 6 - dump tables with filter patterns as well as comments and whitespace
+not ok 7 - dumped table one
+not ok 8 - dumped table two
+ok 9 - table three not dumped
+ok 10 - table three_one not dumped
+ok 11 - content of table one is not included
+not ok 12 - content of table two is included
+not ok 13 - filter file without patterns
+not ok 14 - dumped table one
+not ok 15 - dumped table two
+not ok 16 - dumped table three
+not ok 17 - dump tables with exclusion of a single table
+ok 18 - table one not dumped
+not ok 19 - dumped table two
+not ok 20 - dumped table three
+not ok 21 - dumped table three_one
+not ok 22 - dump tables with wildcard in pattern
+ok 23 - table one not dumped
+ok 24 - table two not dumped
+not ok 25 - dumped table three
+not ok 26 - dumped table three_one
+not ok 27 - dump tables with multiline names requiring quoting
+not ok 28 - dump table with new line in name
+not ok 29 - dump tables with filter
+ok 30 - dump table with new line in name
+not ok 31 - exclude the public schema
+ok 32 - no table dumped
+not ok 33 - exclude the public schema with multiple filters
+ok 34 - no table dumped
+not ok 35 - dump tables with filter
+not ok 36 - dump table with multiline strange name
+not ok 37 - dump tables with filter
+not ok 38 - dump table with multiline strange name
+ok 39 - dump nonexisting foreign server: exit code not 0
+not ok 40 - dump nonexisting foreign server: matches
+GLOB(0x55e163934990)include foreign_data dummyserver
+not ok 41 - dump foreign_data with filter
+not ok 42 - dump foreign server
+ok 43 - erroneously exclude foreign server: exit code not 0
+not ok 44 - erroneously exclude foreign server: matches
+ok 45 - invalid syntax: incorrect filter command: exit code not 0
+not ok 46 - invalid syntax: incorrect filter command: matches
+ok 47 - invalid syntax: invalid object type specified: exit code not 0
+not ok 48 - invalid syntax: invalid object type specified: matches
+ok 49 - invalid syntax: missing object identifier pattern: exit code not 0
+not ok 50 - invalid syntax: missing object identifier pattern: matches
+ok 51 - invalid syntax: extra content after object identifier pattern: exit code not 0
+not ok 52 - invalid syntax: extra content after object identifier pattern: matches
+not ok 53 - strict names with matching pattern
+not ok 54 - no table dumped
+ok 55 - inclusion of non-existing objects with --strict names: exit code not 0
+not ok 56 - inclusion of non-existing objects with --strict names: matches
+not ok 57 - dump tables with exclusion of a database
+ok 58 - database postgres is not dumped
+not ok 59 - database template1 is dumped
+ok 60 - pg_dumpall: option --exclude-database cannot be used together with -g/--globals-only: exit code not 0
+not ok 61 - pg_dumpall: option --exclude-database cannot be used together with -g/--globals-only: matches
+ok 62 - invalid syntax: incorrect filter command: exit code not 0
+not ok 63 - invalid syntax: incorrect filter command: matches
+ok 64 - invalid syntax: exclusion of non-existing object type: exit code not 0
+not ok 65 - invalid syntax: exclusion of non-existing object type: matches
+ok 66 - invalid syntax: exclusion of unsupported object type: exit code not 0
+not ok 67 - invalid syntax: exclusion of unsupported object type: matches
+not ok 68 - dump all tables
+not ok 69 - restore tables with filter
+not ok 70 - wanted table restored
+ok 71 - unwanted table is not restored
+ok 72 - invalid syntax: inclusion of unallowed object: exit code not 0
+not ok 73 - invalid syntax: inclusion of unallowed object: matches
+ok 74 - invalid syntax: inclusion of unallowed object: exit code not 0
+not ok 75 - invalid syntax: inclusion of unallowed object: matches
+ok 76 - invalid syntax: exclusion of unallowed object: exit code not 0
+not ok 77 - invalid syntax: exclusion of unallowed object: matches
+ok 78 - invalid syntax: exclusion of unallowed object: exit code not 0
+not ok 79 - invalid syntax: exclusion of unallowed object: matches
+not ok 80 - dump all objects from sourcedb
+not ok 81 - restore function with filter
+not ok 82 - wanted function restored
+ok 83 - unwanted function is not restored
+not ok 84 - restore function with filter
+not ok 85 - wanted function restored
+not ok 86 - restore function with filter
+not ok 87 - wanted index restored
+ok 88 - unwanted index are not restored
+not ok 89 - wanted trigger restored
+ok 90 - unwanted trigger is not restored
+not ok 91 - restore function with filter
+not ok 92 - wanted table from schema restored
+not ok 93 - wanted sequence from schema restored
+ok 94 - unwanted table is not restored
+not ok 95 - restore function with filter
+ok 96 - unwanted table from schema is not restored
+ok 97 - unwanted sequence from schema is not restored
+not ok 98 - wanted table restored
+not ok 99 - wanted table restored
+not ok 100 - filter file without patterns
+not ok 101 - dumped children table
+not ok 102 - filter file without patterns
+ok 103 - exclude dumped children table
+not ok 104 - filter file without patterns
+not ok 105 - dumped children table
+ok 106 - exclude dumped children table
+ok 107 - dump nonexisting extension: exit code not 0
+not ok 108 - dump nonexisting extension: matches
+1..108
+
+#   Failed test 'filter file without patterns'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_dump --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt postgres
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'table one dumped'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 103.
+#   Failed test 'table two dumped'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 104.
+#   Failed test 'table three dumped'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 105.
+#   Failed test 'table three one dumped'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 106.
+#   Failed test 'dump tables with filter patterns as well as comments and whitespace'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_dump --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt postgres
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'dumped table one'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 133.
+#   Failed test 'dumped table two'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 134.
+#   Failed test 'content of table two is included'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 140.
+#   Failed test 'filter file without patterns'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_dump --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt postgres
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'dumped table one'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 162.
+#   Failed test 'dumped table two'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 163.
+#   Failed test 'dumped table three'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 164.
+#   Failed test 'dump tables with exclusion of a single table'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_dump --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt postgres
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'dumped table two'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 185.
+#   Failed test 'dumped table three'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 186.
+#   Failed test 'dumped table three_one'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 187.
+#   Failed test 'dump tables with wildcard in pattern'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_dump --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt postgres
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'dumped table three'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 210.
+#   Failed test 'dumped table three_one'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 211.
+#   Failed test 'dump tables with multiline names requiring quoting'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_dump --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt postgres
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'dump table with new line in name'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 233.
+#   Failed test 'dump tables with filter'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_dump --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt postgres
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'exclude the public schema'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_dump --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt postgres
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'exclude the public schema with multiple filters'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_dump --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile2.txt postgres
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'dump tables with filter'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_dump --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt postgres
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'dump table with multiline strange name'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 324.
+#   Failed test 'dump tables with filter'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_dump --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt postgres
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'dump table with multiline strange name'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 344.
+#   Failed test 'dump nonexisting foreign server: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump: error: no matching foreign servers were found for pattern)'
+#   Failed test 'dump foreign_data with filter'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_dump --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt postgres
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'dump foreign server'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 383.
+#   Failed test 'erroneously exclude foreign server: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:exclude filter for "foreign data" is not allowed)'
+#   Failed test 'invalid syntax: incorrect filter command: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:invalid filter command)'
+#   Failed test 'invalid syntax: invalid object type specified: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:unsupported filter object type: "table-data")'
+#   Failed test 'invalid syntax: missing object identifier pattern: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:missing object name)'
+#   Failed test 'invalid syntax: extra content after object identifier pattern: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:no matching tables were found)'
+#   Failed test 'strict names with matching pattern'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_dump --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt --strict-names postgres
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'no table dumped'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 500.
+#   Failed test 'inclusion of non-existing objects with --strict names: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:no matching tables were found)'
+#   Failed test 'dump tables with exclusion of a database'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_dumpall --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'database template1 is dumped'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 541.
+#   Failed test 'pg_dumpall: option --exclude-database cannot be used together with -g/--globals-only: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dumpall\:\ error\:\ option\ \-\-exclude\-database\ cannot\ be\ used\ together\ with\ \-g\/\-\-globals\-only)'
+#   Failed test 'invalid syntax: incorrect filter command: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:invalid filter command)'
+#   Failed test 'invalid syntax: exclusion of non-existing object type: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:unsupported filter object type: "xxx")'
+#   Failed test 'invalid syntax: exclusion of unsupported object type: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dumpall: error: invalid format in filter)'
+#   Failed test 'dump all tables'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_dump --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/filter_test.dump --format custom postgres
+#   Failed test 'restore tables with filter'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_restore --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt --format custom /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/filter_test.dump
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'wanted table restored'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 635.
+#   Failed test 'invalid syntax: inclusion of unallowed object: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:include filter for "table data" is not allowed)'
+#   Failed test 'invalid syntax: inclusion of unallowed object: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:include filter for "extension" is not allowed)'
+#   Failed test 'invalid syntax: exclusion of unallowed object: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:exclude filter for "extension" is not allowed)'
+#   Failed test 'invalid syntax: exclusion of unallowed object: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:exclude filter for "table data" is not allowed)'
+#   Failed test 'dump all objects from sourcedb'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_dump --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/filter_test.dump --format custom sourcedb
+#   Failed test 'restore function with filter'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_restore --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt --format custom /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/filter_test.dump
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'wanted function restored'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 730.
+#   Failed test 'restore function with filter'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_restore --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt --format custom /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/filter_test.dump
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'wanted function restored'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 754.
+#   Failed test 'restore function with filter'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_restore --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt --format custom /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/filter_test.dump
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'wanted index restored'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 778.
+#   Failed test 'wanted trigger restored'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 780.
+#   Failed test 'restore function with filter'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_restore --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt --format custom /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/filter_test.dump
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'wanted table from schema restored'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 801.
+#   Failed test 'wanted sequence from schema restored'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 802.
+#   Failed test 'restore function with filter'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_restore --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt --format custom /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/filter_test.dump
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'wanted table restored'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 828.
+#   Failed test 'wanted table restored'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 829.
+#   Failed test 'filter file without patterns'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_dump --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt postgres
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'dumped children table'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 852.
+#   Failed test 'filter file without patterns'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_dump --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt postgres
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'filter file without patterns'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_dump --port 53325 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql --filter /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/inputfile.txt postgres
+# missing output file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp1/plain.sql
+#   Failed test 'dumped children table'
+#   at /home/meszmate/.cache/a166/pgr1/src-repo/src/bin/pg_dump/t/005_pg_dump_filterfile.pl line 893.
+#   Failed test 'dump nonexisting extension: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump: error: no matching extensions were found)'
+# Looks like you failed 73 tests of 108.

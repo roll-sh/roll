@@ -1,0 +1,162 @@
+
+running 1 test
+test smoke ...   [error_detail] seed 1 #1: 42P01
+  [error_detail] seed 1 #34: 42803
+  [error_detail] seed 1 #35: 42803
+  [missing_error] seed 1 #53: 42803: column "s8.u" must appear in the GROUP BY clause or be used in an aggregate function
+seed 1: 0.9s
+  [error_detail] seed 2 #41: 42P01
+  [error_detail] seed 2 #66: 42725
+  [error_message] seed 2 #76: column "t2.b" must appear in the GROUP BY clause or be used in an aggregate function | column "t2.id" must appear in the GROUP BY clause or be used in an aggreg
+seed 2: 0.7s
+  [error_detail] seed 3 #4: 42725
+  [eval_error] seed 3 #24: 22008: cannot subtract infinite dates vs 22P02: invalid input syntax for type integer: "2.50"
+  [error_message] seed 3 #31: FOR KEY SHARE is not allowed with UNION/INTERSECT/EXCEPT | FOR KEY SHARE is not allowed with HAVING clause
+  [error_detail] seed 3 #35: 42P01
+  [error_detail] seed 3 #44: 42P01
+  [eval_error] seed 3 #54: ok vs 22023: cannot get array length of a non-array
+  [eval_error] seed 3 #78: ok vs 22003: integer out of range
+seed 3: 0.9s
+  [error_detail] seed 4 #29: 42725
+  [error_message] seed 4 #65: subquery uses ungrouped column "t11.a" from outer query | subquery uses ungrouped column "t12.n" from outer query
+seed 4: 0.8s
+  [eval_error] seed 5 #6: ok vs 22023: cannot get array length of a non-array
+  [error_detail] seed 5 #9: 42803
+  [error_detail] seed 5 #22: 42601
+  [error_detail] seed 5 #36: 42601
+seed 5: 0.7s
+  [error_detail] seed 6 #14: 42601
+  [error_detail] seed 6 #38: 42P01
+  [error_detail] seed 6 #76: 42601
+seed 6: 0.8s
+seed 7: 1.5s
+  [error_detail] seed 8 #76: 42P01
+seed 8: 0.8s
+  [error_detail] seed 9 #38: 42803
+  [error_detail] seed 9 #39: 42P01
+  [error_detail] seed 9 #46: 42725
+  [error_detail] seed 9 #80: 42725
+seed 9: 0.8s
+  [error_detail] seed 10 #4: 42803
+  [error_message] seed 10 #43: subquery uses ungrouped column "t1.b" from outer query | subquery uses ungrouped column "t1.a" from outer query
+seed 10: 1.1s
+  [error_detail] seed 11 #22: 42P01
+  [error_message] seed 11 #75: subquery uses ungrouped column "s1.c2" from outer query | subquery uses ungrouped column "t10.c" from outer query
+seed 11: 0.8s
+  [eval_error] seed 12 #52: ok vs 2201G: operand, lower bound, and upper bound cannot be NaN
+seed 12: 0.9s
+seed 13: 1.0s
+  [eval_error] seed 14 #47: ok vs 22023: cannot get array length of a non-array
+  [error_detail] seed 14 #62: 42725
+  [missing_error] seed 14 #75: 0A000: FOR KEY SHARE cannot be applied to the nullable side of an outer join
+seed 14: 0.6s
+  [error_message] seed 15 #1: subquery uses ungrouped column "s1.c0" from outer query | subquery uses ungrouped column "s3.v1" from outer query
+  [wrong_error] seed 15 #26: 42P10 vs 42725
+  [error_detail] seed 15 #55: 42803
+  [error_detail] seed 15 #57: 42803
+seed 15: 0.6s
+  [error_detail] seed 16 #41: 42P01
+seed 16: 0.7s
+  [error_detail] seed 17 #68: 42804
+seed 17: 0.7s
+seed 18: 1.0s
+  [error_detail] seed 19 #1: 42725
+  [error_detail] seed 19 #59: 42725
+  [error_message] seed 19 #79: cannot delete from scalar | cannot get array length of a scalar
+seed 19: 1.1s
+  [wrong_error] seed 20 #41: 42803 vs 42725
+seed 20: 0.8s
+  [error_detail] seed 21 #10: 42725
+  [error_message] seed 21 #43: aggregate functions are not allowed in WHERE | aggregate functions are not allowed in FROM clause of their own query level
+  [error_message] seed 21 #53: cannot delete from scalar | cannot get array length of a non-array
+seed 21: 0.8s
+  [error_detail] seed 22 #58: 42725
+seed 22: 0.8s
+  [error_detail] seed 23 #4: 42P01
+  [error_detail] seed 23 #30: 42P01
+  [error_message] seed 23 #64: subquery uses ungrouped column "s1.c1" from outer query | column "s1.c0" must appear in the GROUP BY clause or be used in an aggregate function
+seed 23: 0.7s
+  [error_detail] seed 24 #20: 42P01
+seed 24: 0.9s
+  [error_detail] seed 25 #0: 42803
+seed 25: 0.9s
+difftest: seeds=25 statements=2000 queries=1691 both_error=502 plan_runs=309 oracle_runs=347 secs=21 missing_error=2 wrong_error=2 eval_error=6 error_message=10 error_detail=35
+  both error    38  22023 cannot get array length of a scalar
+  both error    31  22023 cannot get array length of a non-array
+  both error    29  42601 syntax error at or near ","
+  both error    29  42P01 relation "t2" does not exist
+  both error    23  42803 aggregate functions are not allowed in WHERE
+  both error    22  42P01 invalid reference to FROM-clause entry for table "t1"
+  both error    19  42804 could not determine polymorphic type because input has
+  both error    14  22023 cannot delete from scalar
+  both error    14  42803 aggregate functions are not allowed in JOIN conditions
+  both error    12  42725 function array_agg(unknown) is not unique
+  both error    11  42P01 invalid reference to FROM-clause entry for table "s1"
+  both error    11  42P01 invalid reference to FROM-clause entry for table "t2"
+  [error_detail] seed 1604 #26: 42725
+  [error_detail] seed 1604 #37: 42803
+  [error_detail] seed 1604 #53: 42725
+  [eval_error] seed 1604 #74: ok vs 22000: range lower bound must be less than or equal to range upper bound
+seed 1604: 0.8s
+difftest: seeds=1 statements=74 queries=58 both_error=23 plan_runs=6 oracle_runs=15 secs=1 eval_error=1 error_detail=3
+  both error     5  22023 cannot get array length of a non-array
+  both error     2  42601 syntax error at or near ","
+  both error     2  42725 function array_agg(unknown) is not unique
+  both error     2  42803 aggregate functions are not allowed in FROM clause of 
+  both error     2  42804 could not determine polymorphic type because input has
+  both error     1  22003 integer out of range
+  both error     1  22003 smallint out of range
+  both error     1  42601 unreachable WHEN clause specified after unconditional 
+  both error     1  42703 column "id" does not exist
+  both error     1  42803 aggregate function calls cannot be nested
+  both error     1  42803 aggregate functions are not allowed in GROUP BY
+  both error     1  42803 aggregate functions are not allowed in WHERE
+  [error_detail] seed 1777 #9: 42725
+seed 1777: 0.4s
+difftest: seeds=1 statements=35 queries=28 both_error=9 plan_runs=4 oracle_runs=6 secs=0 error_detail=1
+  both error     2  25P02 current transaction is aborted, commands ignored until
+  both error     1  22008 cannot subtract infinite dates
+  both error     1  22023 cannot get array length of a scalar
+  both error     1  42601 syntax error at or near ","
+  both error     1  42725 function array_agg(unknown) is not unique
+  both error     1  42803 aggregate functions are not allowed in WHERE
+  both error     1  42804 could not determine polymorphic type because input has
+  both error     1  42883 operator does not exist: date - bigint
+  [eval_error] seed 1827 #2: 22023: cannot get array length of a non-array vs ok
+  [error_detail] seed 1827 #6: 42601
+  [error_detail] seed 1827 #25: 42601
+  [eval_error] seed 1827 #35: ok vs 22003: bigint out of range
+seed 1827: 0.7s
+difftest: seeds=1 statements=40 queries=32 both_error=12 plan_runs=6 oracle_runs=6 secs=1 eval_error=2 error_detail=2
+  both error     4  22023 cannot get array length of a non-array
+  both error     3  42601 syntax error at or near ","
+  both error     1  22023 cannot get array length of a scalar
+  both error     1  42601 syntax error at or near ">"
+  both error     1  42804 could not determine polymorphic type because input has
+  both error     1  42P10 invalid reference to FROM-clause entry for table "s8"
+  both error     1  42P21 collation mismatch between explicit collations "POSIX"
+  [error_detail] seed 1829 #29: 42P01
+  [eval_error] seed 1829 #78: ok vs 22003: numeric field overflow
+  [error_detail] seed 1829 #87: 42601
+seed 1829: 2.3s
+difftest: seeds=1 statements=98 queries=61 both_error=13 plan_runs=14 oracle_runs=20 secs=2 eval_error=1 error_detail=2
+  both error     2  22023 cannot delete from scalar
+  both error     2  22023 cannot get array length of a non-array
+  both error     2  42601 syntax error at or near ","
+  both error     2  42803 aggregate functions are not allowed in WHERE
+  both error     1  22003 bigint out of range
+  both error     1  42803 column "t1.d" must appear in the GROUP BY clause or be
+  both error     1  42804 could not determine polymorphic type because input has
+  both error     1  42P01 invalid reference to FROM-clause entry for table "s1"
+  both error     1  42P01 invalid reference to FROM-clause entry for table "t5"
+seed 1830: 0.6s
+difftest: seeds=1 statements=10 queries=8 both_error=1 plan_runs=1 oracle_runs=0 secs=1
+  both error     1  42803 aggregate functions are not allowed in FILTER
+seed 1832: 0.2s
+difftest: seeds=1 statements=5 queries=2 both_error=2 plan_runs=1 oracle_runs=0 secs=0
+  both error     1  22023 cannot delete from scalar
+  both error     1  42804 could not determine polymorphic type because input has
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 26.14s
+

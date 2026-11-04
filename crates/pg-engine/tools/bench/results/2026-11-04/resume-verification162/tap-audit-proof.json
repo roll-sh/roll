@@ -1,0 +1,86 @@
+[
+  {
+    "name": "complete",
+    "expected_exit": 0,
+    "actual_exit": 0,
+    "sha256": "58a5e7fbb3459c981048e21de08250ad8ad40303f6ab31d9ddee829d3bfc200f"
+  },
+  {
+    "name": "plan-first",
+    "expected_exit": 0,
+    "actual_exit": 0,
+    "sha256": "b00a6f2b5422044fce29358268e8dc84d870d9a967f1d042b5e49ebd84e3afc4"
+  },
+  {
+    "name": "failed",
+    "expected_exit": 1,
+    "actual_exit": 1,
+    "sha256": "ffa474a1ae4826b5215a048bac86aa2043e94c2c82655e3a858861c23bcd72c9"
+  },
+  {
+    "name": "missing-plan",
+    "expected_exit": 1,
+    "actual_exit": 1,
+    "sha256": "78896f57fcab32f2c818a19f4f409de2ac0c71725419cb21939eab68944e787e"
+  },
+  {
+    "name": "truncated",
+    "expected_exit": 1,
+    "actual_exit": 1,
+    "sha256": "455b692dbf8f6c34105b4f7a557355d6524ed4de1a0c1e9e219cfc32ea1a707a"
+  },
+  {
+    "name": "duplicate",
+    "expected_exit": 1,
+    "actual_exit": 1,
+    "sha256": "65b7825cd05267625a59fda36746a98943cd111f5e0c07b2dddf465c8eef96a7"
+  },
+  {
+    "name": "missing-number",
+    "expected_exit": 1,
+    "actual_exit": 1,
+    "sha256": "a3e8b0252a8589cb5e1c5c218903c2ac1ec9de69112e8c470a013ddfaa67b525"
+  },
+  {
+    "name": "skip",
+    "expected_exit": 1,
+    "actual_exit": 1,
+    "sha256": "16107b19a6ca3d9b119e55d356d8f0dd0ed8af3809b64594e5ba589bff1da0b2"
+  },
+  {
+    "name": "todo",
+    "expected_exit": 1,
+    "actual_exit": 1,
+    "sha256": "ffd8af58bb1ee9de1ee71b49713d3d344cf69c2e68431607baa9e272db279131"
+  },
+  {
+    "name": "bailout",
+    "expected_exit": 1,
+    "actual_exit": 1,
+    "sha256": "6098f0b02352764bae04a47af43f4a63eedd0efb36ce527c92b84d31284779ca"
+  },
+  {
+    "name": "duplicate-plan",
+    "expected_exit": 1,
+    "actual_exit": 1,
+    "sha256": "d2e77d9c4eb1b177257ed06f36315a56584555f8e5d65349424b22e99990763e"
+  },
+  {
+    "name": "plan-middle",
+    "expected_exit": 1,
+    "actual_exit": 1,
+    "sha256": "7a1fece2c5bc1699ea1c032c352c583c1ae43241c884a557706d6c08f2233182"
+  },
+  {
+    "name": "real166-false-Rust-pass",
+    "expected_exit": 1,
+    "actual_exit": 1,
+    "log": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a166-checks/pgdump.log",
+    "log_sha256": "5c44d83d5e4f85976aaacf01f4eb5546031b31194e61a809cb2545130bd55db1"
+  },
+  {
+    "name": "real162-passing-14817",
+    "actual_exit": 0,
+    "output": "tap-real-pass.json"
+  }
+]
