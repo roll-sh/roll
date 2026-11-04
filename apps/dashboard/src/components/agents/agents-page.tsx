@@ -1,7 +1,7 @@
 "use client";
 
 import { DotField, HorizonMark, RollMark } from "@roll/brand";
-import { Archive, ArrowLeft, MoreHorizontal, PanelRightClose, Pin, PinOff, Plus, Search, Server, Settings, Share2, X } from "lucide-react";
+import { Archive, ArrowLeft, MoreHorizontal, PanelRightClose, Pin, PinOff, Plus, Search, Server, Settings, Share2, X, Zap } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { isBusy } from "@/lib/agents-api";
@@ -17,6 +17,9 @@ import { useModelPrefsSync, useOwnerSettings } from "@/lib/owner-settings";
 import { useMarkState, useMarkStateValue } from "../mark-state";
 import { AddMachineDialog, AddMachinePaths } from "./add-machine";
 import { AgentsCanvas, type CanvasHandle } from "./agents-canvas";
+import { AutomationPanel } from "./automations/automation-panel";
+import { AutomationsView } from "./automations/automations-view";
+import { Notices } from "./automations/notices";
 import { CommandPalette, type PaletteHost } from "./command-palette";
 import { Menu } from "./menu";
 import { Launcher } from "./new-agent";
@@ -244,12 +247,14 @@ export function AgentsSurface({
       const el = e.target as HTMLElement | null;
       const typing = el && (el.isContentEditable || /^(INPUT|SELECT)$/.test(el.tagName) || (el.tagName === "TEXTAREA" && (el as HTMLTextAreaElement).value !== ""));
       if (typing || el?.closest(".xterm, [role=dialog]:not([data-surface]), [role=listbox], [role=menu]")) return;
-      if (shown.kind !== "canvas") close();
+      // An open automation closes to the list first; the list goes back to the canvas.
+      if (shown.kind === "automations" && shown.open) setAgentsView({ kind: "automations", list: shown.list });
+      else if (shown.kind !== "canvas") close();
       else onClose?.();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [shown.kind, close, onClose]);
+  }, [shown, close, onClose]);
 
   // ⌘K: the command palette, while the agents are showing (T3's `commandPalette.toggle`). It
   // comes first, so the dashboard's own ⌘K ("Ask roll") stays for the page behind. A terminal
@@ -277,6 +282,7 @@ export function AgentsSurface({
   );
 
   const { busy: working, requests } = rolling(data);
+  const toggleAutomations = useCallback(() => setAgentsView(shown.kind === "automations" ? { kind: "canvas" } : { kind: "automations" }), [shown.kind]);
   // Waiting on you isn't running: those show as the waiting count.
   const running = working.filter((t) => t.status !== "waiting").length;
   const archived = [...data.threads.values()].filter((r) => r.value.archived_at !== null).length;
@@ -358,6 +364,9 @@ export function AgentsSurface({
               </button>
               {/* On a phone these are under More; the bar keeps its room for what is live. */}
               <span className="flex max-sm:hidden">
+                <IconButton label={shown.kind === "automations" ? "Back to the canvas" : "Automations"} active={shown.kind === "automations"} onClick={toggleAutomations}>
+                  <Zap className="size-4" strokeWidth={1.75} />
+                </IconButton>
                 <IconButton label="Add a machine" onClick={() => setAdding(true)}>
                   <Server className="size-4" strokeWidth={1.75} />
                 </IconButton>
@@ -369,6 +378,7 @@ export function AgentsSurface({
                 label="More"
                 trigger={<MoreHorizontal className="size-4" strokeWidth={1.75} />}
                 items={[
+                  phone && { label: shown.kind === "automations" ? "Back to the canvas" : "Automations", icon: <Zap />, onSelect: toggleAutomations },
                   phone && { label: "Add a machine", icon: <Server />, onSelect: () => setAdding(true) },
                   phone && { label: "Agents settings", icon: <Settings />, onSelect: () => setAgentsView({ kind: "settings", target: "owner" }) },
                   archived > 0 && { label: `${showArchived ? "Hide" : "Show"} archived (${archived})`, icon: <Archive />, onSelect: () => setShowArchived((s) => !s) },
@@ -382,20 +392,26 @@ export function AgentsSurface({
             <ThreadsSidebar data={data} open={sidebar} setOpen={setSidebar} phone={phone} openThread={shown.kind === "thread" ? shown.thread : null} />
             {/* The working area: an inset panel one step up from the chrome (Linear's inverted L). */}
             <div className={`relative min-h-0 min-w-0 flex-1 overflow-hidden bg-canvas ${phone ? "" : "mx-2 mb-2 rounded-xl border border-line"}`}>
-              {data.machines.size === 0 && snap.conn !== "connecting" ? (
+              {data.machines.size === 0 && snap.conn !== "connecting" && shown.kind !== "automations" ? (
                 <Empty demo={demo} onCreated={onSandbox} />
               ) : (
-                <CanvasView
-                  canvasRef={canvas}
-                  data={data}
-                  showArchived={showArchived}
-                  views={views}
-                  pendingFocus={pendingFocus}
-                  visible={shown.kind !== "new"}
-                  selected={selected}
-                  phone={phone}
-                  onLaunch={onLaunch}
-                />
+                <>
+                  {shown.kind === "automations" && <AutomationsView view={shown} phone={phone} />}
+                  {/* Kept mounted under the automations, so the canvas comes back where it was. */}
+                  <div className={shown.kind === "automations" ? "hidden" : "contents"}>
+                    <CanvasView
+                      canvasRef={canvas}
+                      data={data}
+                      showArchived={showArchived}
+                      views={views}
+                      pendingFocus={pendingFocus}
+                      visible={shown.kind !== "new" && shown.kind !== "automations"}
+                      selected={selected}
+                      phone={phone}
+                      onLaunch={onLaunch}
+                    />
+                  </div>
+                </>
               )}
               {phone && shown.kind === "canvas" && requests.length > 0 && <PhoneWaiting client={client} />}
               {launchError && (
@@ -424,8 +440,14 @@ export function AgentsSurface({
                 <SettingsPanel key={shown.target} target={shown.target} onClose={close} />
               </SidePanel>
             )}
+            {shown.kind === "automations" && shown.open && (
+              <SidePanel phone={phone} label="Automation">
+                <AutomationPanel key={`${shown.open}:${shown.template ?? ""}`} view={{ ...shown, open: shown.open }} onClose={() => setAgentsView({ kind: "automations", list: shown.list })} />
+              </SidePanel>
+            )}
           </div>
         </div>
+        <Notices />
         {adding && <AddMachineDialog onClose={() => setAdding(false)} onCreated={onSandbox} />}
         {shown.kind === "new" && <Launcher key={`${shown.project ?? ""}|${shown.machine ?? ""}|${shown.at?.x ?? ""},${shown.at?.y ?? ""}`} project={shown.project} machine={shown.machine} at={shown.at} onClose={close} />}
         <CommandPalette host={host} />

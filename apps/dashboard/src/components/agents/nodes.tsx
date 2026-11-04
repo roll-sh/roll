@@ -7,6 +7,7 @@ import { projectStats, type ProjectStats } from "@/lib/agents-graph";
 import { providersFor } from "@/lib/agents-store";
 import { setAgentsView } from "@/lib/agents-surface";
 import { primary } from "../ui";
+import { AutomationChip, useThreadOrigin } from "./automations/chip";
 import { ChangeChip, changeStatusLabel, WorkChip } from "./change";
 import { ContextMeter } from "./context-meter";
 import { Menu } from "./menu";
@@ -402,6 +403,8 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
   const project = data.projects.get(thread.project)?.value;
   const terminals = [...data.terminals.values()].filter((r) => r.value.thread === thread.id && r.value.status !== "exited").length;
   const orchestrated = thread.orchestrator ? orchestration(thread, [...data.threads.values()].map((r) => r.value)) : null;
+  // Started by an automation: its tag, opening the run.
+  const origin = useThreadOrigin(thread.id);
   // Idle with nothing to say but the last prompt: no line when that's the title again.
   const quiet = !thread.error && !running && thread.status !== "waiting";
   const tone = thread.status === "error" ? "error" : running ? "busy" : thread.archived_at ? "muted" : done ? "done" : undefined;
@@ -451,8 +454,9 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
           )}
         </p>
         )}
-        {(thread.orchestrator || thread.change || thread.work || thread.worktree || terminals > 0) && (
+        {(thread.orchestrator || thread.change || thread.work || thread.worktree || terminals > 0 || origin) && (
           <div className="mt-2 flex min-w-0 items-center gap-2 text-[11px] text-subtle">
+            {origin && <AutomationChip origin={origin} />}
             {orchestrated && <OrchestratorChip {...orchestrated} />}
             {thread.change && <ChangeChip change={thread.change} />}
             {thread.work && <WorkChip work={thread.work} className="min-w-0 flex-1" />}

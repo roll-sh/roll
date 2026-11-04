@@ -24,6 +24,7 @@ import {
   type WorkItemRef,
 } from "./agents-api";
 import { ApiError, codeApi, type Repo } from "./code-api";
+import type { AutomationsApi } from "./automations-api";
 import { sandboxesApi, type SandboxesApi } from "./sandboxes-api";
 
 /** A repo to clone onto a machine (only what the picker shows). */
@@ -60,6 +61,8 @@ export interface AgentsServices {
   canvas: OwnerDoc;
   /** The owner's agents settings (`owner-settings.ts` parses them). Other devices hear a save as `AgentsData.settings`. */
   settings: OwnerDoc;
+  /** The owner's automations (`automations-api.ts`); unset: the Automations view says they aren't here. */
+  automations?: AutomationsApi;
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -146,6 +149,7 @@ export function httpServices(
     machines: { rename: api.renameMachine, remove: api.removeMachine },
     canvas: httpCanvas(api),
     settings: httpSettings(api),
+    automations: api.automations,
   };
 }
 

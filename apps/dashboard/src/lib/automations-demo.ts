@@ -1,423 +1,813 @@
 /**
- * The automations of the agents demo (`agents-demo.ts`'s owner): a few believable automations
- * and their runs, kept in memory behind the same shape as `createAutomationsApi`, so the
- * Automations view works signed out. Runs made with "Run now" move through their steps on
- * timers, and every change is announced through `on` as the stream would.
+ * The demo owner's automations (`/dashboard?demo#agents/automations`): `AutomationsApi` answered in
+ * memory, with believable automations and a week of runs, and runs that really go: an
+ * `agent.start` step starts a thread on the demo canvas, `agent.wait` follows it, a `notify` step
+ * sends a notice. Every change is an `automation`/`automation_run` event on the demo's stream, as
+ * the relay sends them. The template filling and filters here are a small stand-in for the
+ * server's (`template.rs`, `filter.rs`), enough for "Test" to show something true-looking.
  */
-import type { StreamEvent } from "./agents-api";
-import type {
-  Automation,
-  AutomationId,
-  AutomationRun,
-  AutomationSaved,
-  AutomationSpec,
-  AutomationsApi,
-  Catalog,
-  RunDetail,
-  RunNow,
-  RunsQuery,
-  Step,
-  StepRun,
-  TestRequest,
-  TestResult,
+
+import type { Command, Machine, MachineId, Reply, StreamEvent, ThreadStatus } from "./agents-api";
+import {
+  isRunFinal,
+  type Automation,
+  type AutomationEvent as WireEvent,
+  type AutomationRun,
+  type AutomationSpec,
+  type AutomationsApi,
+  type Catalog,
+  type Filter,
+  type RunState,
+  type Step,
+  type StepRun,
+  type TestResult,
 } from "./automations-api";
-import { isRunFinal } from "./automations-api";
+import { ApiError } from "./code-api";
+import { BUILT_IN_STEPS, BUILT_IN_TRIGGERS, triggerSource, withBuiltIns } from "./automations-ui";
+
+/** What the demo owner lends its automations. */
+export interface DemoHost {
+  emit(ev: StreamEvent): void;
+  /** The next stream cursor. */
+  next(): number;
+  machines(): Machine[];
+  projects(): { id: string; name: string; machine: MachineId; repo: string | null }[];
+  command(machine: MachineId, c: Command): Promise<Reply>;
+  threadStatus(thread: string): ThreadStatus | undefined;
+  after(ms: number, fn: () => void): void;
+}
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
+const DAY = 24 * HOUR;
 
-function step(id: string, kind: string, config: unknown, extra: Partial<Step> = {}): Step {
-  return { id, kind, config, when: [], retry: null, timeout_s: null, ...extra };
-}
+let seq = 0;
+const nid = (prefix: string) => `${prefix}${Date.now().toString(36)}${(++seq).toString(36).padStart(4, "0")}`;
 
-const MBP = "mch_demo_ada";
+const step = (id: string, kind: string, config: Record<string, unknown>, over: Partial<Step> = {}): Step => ({ id, kind, config, when: [], retry: null, timeout_s: null, ...over });
 
-/** The demo's automations, as of `now`. */
-export function demoAutomationSpecs(): (AutomationSpec & { id: AutomationId })[] {
-  const base = { enabled: true, filters: [], concurrency: "parallel" as const, rate_limit: null, run_as: null };
-  return [
-    {
-      ...base,
-      id: "aut_demo_checks",
-      name: "Fix failing checks",
-      description: "When a change's checks fail, an agent in a fresh sandbox fixes them and pushes to the same branch.",
-      trigger: { type: "code", events: ["check"], repos: ["acme/roll"] },
-      filters: [{ field: "event.data.check.status", op: "equals", value: "failed" }],
-      concurrency: "cancel_previous",
-      steps: [
-        step("start", "agent.start", {
-          target: { type: "sandbox", size: "standard" },
-          project: { type: "repo", repo: "acme/roll", path: null },
-          provider: "codex",
-          model: "gpt-5.5",
-          effort: "high",
-          runtime_mode: "auto_edit",
-          interaction_mode: null,
-          worktree: true,
-          title: "Fix {{event.data.check.name}} on #{{event.data.change.number}}",
-          prompt: "The check {{event.data.check.name}} fails on {{event.data.change.url}}. Find out why and fix it.",
-        }),
-        step("wait", "agent.wait", { thread: "{{steps.start.thread}}", until: ["done", "failed"], timeout_s: 3600 }),
-        step("publish", "agent.publish", { thread: null, message: "Fix {{event.data.check.name}}", land: false }, { when: [{ field: "steps.wait.outcome", op: "equals", value: "done" }] }),
-        step("tell", "notify", { title: "Checks fixed on #{{event.data.change.number}}", level: "success", link: "{{steps.publish.url}}" }),
-      ],
-    },
-    {
-      ...base,
-      id: "aut_demo_triage",
-      name: "Morning triage",
-      description: "Weekdays at 9:00, an orchestrator reads yesterday's issues and opens work items.",
-      trigger: { type: "schedule", cron: "0 9 * * 1-5", timezone: "Europe/Budapest" },
-      concurrency: "skip",
-      steps: [
-        step("start", "agent.start", {
-          target: { type: "machine", machine: "ada-mbp" },
-          project: { type: "id", id: "prj_demo_roll" },
-          provider: "claude",
-          model: null,
-          effort: null,
-          runtime_mode: "ask",
-          interaction_mode: "plan",
-          worktree: false,
-          title: "Triage {{event.data.at}}",
-          prompt: "Go through the issues opened since yesterday, group them, and open a work item for each real bug.",
-          orchestrator: true,
-        }),
-        step("answer", "agent.respond", { thread: null, rules: [{ action: "command", command: "gh *", files: null, tool: null, decision: "accept" }], otherwise: null, message: null }),
-      ],
-    },
-    {
-      ...base,
-      id: "aut_demo_deploy",
-      name: "Tell Slack when a deploy lands",
-      description: "Every landing on main posts to the release channel.",
-      trigger: { type: "code", events: ["landed"], repos: [] },
-      steps: [
-        step("post", "webhook", {
-          url: "https://hooks.slack.com/services/T000/B000/XXXX",
-          method: "POST",
-          body: { text: "{{event.data.repo}}: {{event.data.change.title}} landed" },
-          secret: null,
-          ok_statuses: [],
-        }),
-      ],
-    },
-    {
-      ...base,
-      id: "aut_demo_release",
-      name: "Cut a release",
-      description: "By hand: an agent bumps the version, writes the changelog and queues the change to land.",
-      trigger: { type: "manual" },
-      allow_agents: true,
-      steps: [
-        step("start", "agent.start", {
-          target: { type: "any_online" },
-          project: { type: "id", id: "prj_demo_roll" },
-          provider: "codex",
-          model: null,
-          effort: null,
-          runtime_mode: "full_access",
-          interaction_mode: null,
-          worktree: true,
-          title: "Release {{event.data.input.version | default:\"next\"}}",
-          prompt: "Bump the version to {{event.data.input.version | default:\"the next minor\"}}, update CHANGELOG.md from the landed changes, and run the tests.",
-        }),
-        step("wait", "agent.wait", { thread: null, until: ["done", "failed"], timeout_s: 1800 }),
-        step("ship", "agent.publish", { thread: null, message: "Release {{event.data.input.version}}", land: true }),
-        step("tell", "notify", { title: "Release queued", body: "{{steps.ship.landing.message}}", level: "success", link: "{{steps.ship.url}}" }),
-      ],
-    },
-  ];
-}
+const agentStart = (over: Record<string, unknown>) => ({
+  target: null,
+  project: null,
+  provider: "claude",
+  model: "claude-opus-5-5",
+  effort: "high",
+  runtime_mode: "full_access",
+  interaction_mode: null,
+  worktree: true,
+  title: null,
+  prompt: "",
+  ...over,
+});
 
-function stepRun(s: Step, status: StepRun["status"], at: number, output: unknown = null, extra: Partial<StepRun> = {}): StepRun {
-  const done = status === "succeeded" || status === "failed" || status === "skipped";
-  return {
-    id: s.id,
-    kind: s.kind,
-    status,
-    attempt: status === "pending" || status === "skipped" ? 0 : 1,
-    started_at: status === "pending" ? null : at,
-    finished_at: done ? at + 30_000 : null,
-    next_at: null,
-    output,
-    error: null,
-    log: [],
-    ...extra,
-  };
-}
-
-/** The demo's run history, newest first. */
-export function demoRuns(now: number): AutomationRun[] {
-  const [checks, triage, deploy] = demoAutomationSpecs();
-  const run = (n: number, a: (typeof checks), status: AutomationRun["status"], at: number, steps: StepRun[], summary: string, extra: Partial<AutomationRun> = {}): AutomationRun => ({
-    id: `arn_demo_${n}`,
-    automation: a.id,
-    name: a.name,
-    status,
-    event: { id: `aev_demo_${n}`, source: a.trigger.type, kind: a.trigger.type === "schedule" ? "tick" : a.trigger.type === "code" ? "check" : "run", summary, at },
-    steps,
-    threads: [],
-    cursor: 0,
-    created_at: at,
-    started_at: at,
-    finished_at: isRunFinal(status) ? at + 4 * MIN : null,
-    reason: null,
-    ...extra,
-  });
-  const out = { machine: "mch_demo_sbx", project: "prj_demo_roll", thread: "thr_demo_fix", sandbox: "sbx_demo" };
-  return [
-    run(
-      1,
-      checks,
-      "waiting",
-      now - 6 * MIN,
-      [stepRun(checks.steps[0], "succeeded", now - 6 * MIN, out), stepRun(checks.steps[1], "waiting", now - 5 * MIN, null, { next_at: now + 25_000 }), stepRun(checks.steps[2], "pending", 0), stepRun(checks.steps[3], "pending", 0)],
-      "acme/roll#142: check test failed",
-      { threads: [{ machine: "mch_demo_sbx", thread: "thr_demo_fix", step: "start" }] },
-    ),
-    run(2, deploy, "succeeded", now - 2 * HOUR, [stepRun(deploy.steps[0], "succeeded", now - 2 * HOUR, { status: 200, body: "ok" })], "acme/roll#139: landed"),
-    run(
-      3,
-      deploy,
-      "failed",
-      now - 5 * HOUR,
-      [
-        stepRun(deploy.steps[0], "failed", now - 5 * HOUR, null, {
-          attempt: 3,
-          error: "hooks.slack.com answered 503 (after 3 attempts)",
-          log: [{ at: now - 5 * HOUR, level: "warn", text: "attempt 1 failed: hooks.slack.com answered 503; trying again in 10 s" }],
-        }),
-      ],
-      "acme/roll#137: landed",
-      { reason: "step post failed: hooks.slack.com answered 503 (after 3 attempts)" },
-    ),
-    run(4, triage, "succeeded", now - 26 * HOUR, [stepRun(triage.steps[0], "succeeded", now - 26 * HOUR, { ...out, machine: MBP, thread: "thr_demo_triage" }), stepRun(triage.steps[1], "succeeded", now - 26 * HOUR, { answered: ["req_1"], left: [] })], "Scheduled for 09:00"),
-    run(5, triage, "skipped", now - 50 * HOUR, triage.steps.map((s) => stepRun(s, "skipped", 0)), "Scheduled for 09:00", { reason: "another run was going" }),
-  ];
-}
-
-export const DEMO_CATALOG: Catalog = {
+/** The demo catalog: the built-ins, plus integrations that aren't connected yet. */
+const CATALOG: Catalog = withBuiltIns({
   triggers: [
-    { source: "manual", title: "By hand", description: "Run it from the dashboard, the CLI or MCP.", events: [{ kind: "run", title: "Run", fields: ["input", "by"], sample: null }], config: null },
-    { source: "schedule", title: "On a schedule", description: "A cron expression in a time zone.", events: [{ kind: "tick", title: "Tick", fields: ["at"], sample: null }], config: null },
-    { source: "interval", title: "Every so often", description: "Every so many seconds.", events: [{ kind: "tick", title: "Tick", fields: ["at"], sample: null }], config: null },
-    { source: "webhook", title: "A webhook", description: "A signed POST to the automation's URL.", events: [{ kind: "post", title: "Post", fields: ["body", "headers"], sample: null }], config: null },
-    { source: "code", title: "roll code", description: "Changes, checks, reviews, the queue, landings.", events: ["landed", "change", "check", "review", "queue", "work"].map((k) => ({ kind: k, title: k, fields: ["repo", "change.number", "change.title"], sample: null })), config: null },
-    { source: "agent", title: "Agents", description: "Threads finishing, failing, waiting on you.", events: ["thread.done", "thread.failed", "thread.waiting", "request.opened"].map((k) => ({ kind: k, title: k, fields: ["thread.title", "run.status"], sample: null })), config: null },
+    ...BUILT_IN_TRIGGERS,
+    {
+      source: "linear",
+      title: "Linear",
+      description: "Issues assigned to roll, comments that mention it, status changes.",
+      events: [
+        { kind: "issue.assigned", title: "Issue assigned to roll", fields: ["issue.identifier", "issue.title", "issue.description", "issue.url", "issue.labels", "issue.team"] },
+        { kind: "comment.mention", title: "Mentioned in a comment", fields: ["issue.identifier", "issue.title", "comment.body", "comment.author"] },
+      ],
+      config: { type: "object", properties: { team: { type: "string", title: "Team", description: "Its key, e.g. ENG. Empty: every team." } } },
+      needs_setup: true,
+    },
+    {
+      source: "slack",
+      title: "Slack",
+      description: "/roll, mentions of @roll, and messages in a channel.",
+      events: [{ kind: "command", title: "/roll command", fields: ["text", "user", "channel"] }],
+      config: { type: "object", properties: { channel: { type: "string", title: "Channel" } } },
+      needs_setup: true,
+    },
   ],
-  steps: ["agent.start", "agent.wait", "agent.message", "agent.respond", "agent.publish", "agent.script", "agent.settle", "webhook", "notify", "delay"].map((k) => ({
-    kind: k,
-    title: k,
-    description: "",
-    config: { type: "object" },
-    output: k === "agent.start" ? ["machine", "project", "thread", "sandbox"] : [],
-    integration: null,
-  })),
-};
+  steps: [
+    {
+      kind: "linear.comment",
+      title: "Comment on the issue",
+      description: "A comment in Linear, as roll.",
+      config: { type: "object", required: ["body"], properties: { issue: { type: "string", title: "Issue", format: "template" }, body: { type: "string", title: "Comment", format: "template-long" } } },
+      output: ["comment", "url"],
+      integration: "linear",
+      needs_setup: true,
+    },
+    {
+      kind: "slack.post",
+      title: "Post to Slack",
+      description: "A message in a channel or a thread.",
+      config: { type: "object", required: ["channel", "text"], properties: { channel: { type: "string", title: "Channel", format: "template" }, text: { type: "string", title: "Message", format: "template-long" } } },
+      output: ["ts", "permalink"],
+      integration: "slack",
+      needs_setup: true,
+    },
+  ],
+});
 
-/**
- * The demo's automations as an `AutomationsApi`. `on` gets the stream events a real relay would
- * send (the demo owner forwards them to the canvas).
- */
-export class DemoAutomations implements AutomationsApi {
-  private automations = new Map<AutomationId, Automation>();
-  private history: AutomationRun[];
-  private cursor = 1000;
-  private timers = new Set<ReturnType<typeof setTimeout>>();
+export class DemoAutomations {
+  private automations = new Map<string, Automation>();
+  private runs = new Map<string, AutomationRun>();
+  private events = new Map<string, WireEvent>();
+  private seeded = false;
 
-  constructor(
-    private on: (ev: StreamEvent) => void = () => {},
-    private speed = 1,
-    now = Date.now(),
-  ) {
-    this.history = demoRuns(now);
-    for (const s of demoAutomationSpecs()) {
-      const { id, ...spec } = s;
-      const last = this.history.find((r) => r.automation === id);
-      this.automations.set(id, {
-        ...spec,
-        id,
-        revision: 1,
-        cursor: this.cursor++,
-        created_at: now - 30 * 24 * HOUR,
-        updated_at: now - 3 * 24 * HOUR,
-        created_by: "acme",
-        secrets: spec.trigger.type === "code" && id === "aut_demo_deploy" ? ["SLACK_WEBHOOK"] : [],
-        webhook: null,
-        next_at: spec.trigger.type === "schedule" ? now + 14 * HOUR : null,
-        last_run: last ? { id: last.id, status: last.status, at: last.created_at } : null,
-      });
-    }
+  constructor(private host: DemoHost) {}
+
+  // ── records ──
+
+  private putAutomation(a: Automation): Automation {
+    const next = { ...a, cursor: this.host.next(), updated_at: Date.now() };
+    this.automations.set(a.id, next);
+    this.host.emit({ type: "automation", cursor: next.cursor, automation: next });
+    return next;
   }
 
-  /** Stop the timers of runs going on. */
-  stop() {
-    this.timers.forEach(clearTimeout);
-    this.timers.clear();
+  private putRun(r: AutomationRun): AutomationRun {
+    const next = { ...r, cursor: this.host.next() };
+    this.runs.set(r.id, next);
+    this.host.emit({ type: "automation_run", cursor: next.cursor, run: next });
+    return next;
   }
 
-  private find(id: AutomationId): Automation {
+  private patchStep(rid: string, sid: string, patch: Partial<StepRun>, run: Partial<AutomationRun> = {}) {
+    const r = this.runs.get(rid);
+    if (!r || isRunFinal(r.status)) return;
+    this.putRun({ ...r, ...run, steps: r.steps.map((s) => (s.id === sid ? { ...s, ...patch } : s)) });
+  }
+
+  private log(rid: string, sid: string, text: string, level: "info" | "warn" | "error" = "info") {
+    const r = this.runs.get(rid);
+    const s = r?.steps.find((x) => x.id === sid);
+    if (!s) return;
+    this.patchStep(rid, sid, { log: [...s.log, { at: Date.now(), level, text }] });
+  }
+
+  private must(id: string) {
     const a = this.automations.get(id);
-    if (!a) throw new Error(`automation ${id} not found`);
+    if (!a) throw new ApiError("no such automation", 404, null);
     return a;
   }
 
-  private publishRun(r: AutomationRun) {
-    r.cursor = this.cursor++;
-    const a = this.automations.get(r.automation);
-    if (a) a.last_run = { id: r.id, status: r.status, at: r.created_at };
-    this.on({ type: "automation_run", cursor: r.cursor, run: structuredClone(r) });
-  }
+  // ── the seed: a believable week ──
 
-  private save(spec: AutomationSpec, id: AutomationId, prev?: Automation): AutomationSaved {
-    const now = Date.now();
-    const a: Automation = {
+  private seed() {
+    if (this.seeded) return;
+    this.seeded = true;
+    const t = Date.now();
+    const machines = this.host.machines();
+    const mbp = machines.find((m) => !m.sandbox) ?? machines[0];
+    const projects = this.host.projects();
+    const roll = projects.find((p) => p.name === "roll") ?? projects[0];
+    const make = (id: string, spec: AutomationSpec, at: number, over: Partial<Automation> = {}): Automation => ({
       ...spec,
       id,
-      revision: (prev?.revision ?? 0) + 1,
-      cursor: this.cursor++,
-      created_at: prev?.created_at ?? now,
-      updated_at: now,
-      created_by: prev?.created_by ?? "acme",
-      secrets: prev?.secrets ?? [],
-      webhook: spec.trigger.type === "webhook" ? { url: `https://api.roll.sh/v1/code/agents/acme/automations/${id}/webhook`, secret_hint: "d3m0" } : null,
-      next_at: spec.trigger.type === "schedule" || spec.trigger.type === "interval" ? now + HOUR : null,
-      last_run: prev?.last_run ?? null,
+      revision: 1,
+      cursor: this.host.next(),
+      created_at: at,
+      updated_at: at,
+      created_by: "ada",
+      secrets: [],
+      webhook: null,
+      next_at: null,
+      last_run: null,
+      ...over,
+    });
+    const base = { enabled: true, filters: [] as Filter[], concurrency: "parallel" as const, rate_limit: null, run_as: null };
+    const list: Automation[] = [
+      make(
+        "aut_demo_mainfix",
+        {
+          ...base,
+          name: "Fix a broken main",
+          description: "Main is red: find the cause, fix it, queue the fix.",
+          trigger: { type: "code", events: ["work"], repos: ["acme/roll"] },
+          filters: [
+            { field: "event.data.labels", op: "has_label", value: "broken-main" },
+            { field: "event.data.state", op: "equals", value: "open" },
+          ],
+          steps: [
+            step("fix", "agent.start", agentStart({ target: { type: "sandbox", size: "standard" }, project: { type: "repo", repo: "acme/roll", path: null }, title: "Fix main: {{ event.data.title }}", prompt: "Main is broken: {{ event.data.title }}.\n\nFind the commit that broke it, fix the cause, and make the checks pass." }), { retry: { attempts: 2, backoff_s: 60 } }),
+            step("wait", "agent.wait", { thread: "{{ steps.fix.thread }}", until: ["done", "failed"], timeout_s: 5400, on_timeout: "fail" }),
+            step("land", "agent.publish", { thread: "{{ steps.fix.thread }}", message: "Fix main: {{ event.data.title }}", land: true }),
+          ],
+          concurrency: "cancel_previous",
+        },
+        t - 12 * DAY,
+      ),
+      make(
+        "aut_demo_triage",
+        {
+          ...base,
+          name: "Morning triage",
+          description: "Labels and prioritises yesterday's new work items.",
+          trigger: { type: "schedule", cron: "0 9 * * 1-5", timezone: "Europe/Budapest" },
+          steps: [
+            step("triage", "agent.start", agentStart({ target: { type: "project_machine" }, project: roll ? { type: "id", id: roll.id } : null, provider: "codex", model: "gpt-5.5-codex", effort: "medium", runtime_mode: "auto_edit", worktree: false, title: "Triage", prompt: "Read the work items opened since the last triage. Label, prioritise, close duplicates. Summarise what needs a person." })),
+            step("wait", "agent.wait", { thread: "{{ steps.triage.thread }}", until: ["done", "failed"], timeout_s: 3600, on_timeout: "continue" }),
+            step("tell", "notify", { title: "Triage is done", body: "{{ steps.wait.summary | truncate:280 }}", level: "success", link: null }),
+          ],
+          concurrency: "skip",
+        },
+        t - 20 * DAY,
+        { next_at: nextWeekday9(t) },
+      ),
+      make(
+        "aut_demo_publish",
+        {
+          ...base,
+          name: "Publish finished work",
+          description: "Done threads in a worktree become changes in the merge queue.",
+          trigger: { type: "agent", events: ["thread.done"] },
+          filters: [{ field: "event.data.project", op: "equals", value: roll?.id ?? "prj_demo_roll" }],
+          steps: [
+            step("publish", "agent.publish", { thread: "{{ event.data.thread }}", message: null, land: true }),
+            step("settle", "agent.settle", { thread: "{{ event.data.thread }}", action: "settle" }),
+          ],
+        },
+        t - 9 * DAY,
+      ),
+      make(
+        "aut_demo_run",
+        {
+          ...base,
+          name: `Run on ${mbp?.name ?? "my machine"}`,
+          description: "An agent in a fresh worktree, started by hand.",
+          trigger: { type: "manual" },
+          steps: [
+            step("start", "agent.start", agentStart({ target: mbp ? { type: "machine", machine: mbp.id } : { type: "any_online" }, project: roll ? { type: "id", id: roll.id } : null, prompt: '{{ event.data.input.prompt | default:"Pick an open work item and fix it." }}' })),
+            step("wait", "agent.wait", { thread: "{{ steps.start.thread }}", until: ["done", "failed", "waiting"], timeout_s: 7200, on_timeout: "continue" }),
+            step("tell", "notify", { title: "{{ automation.name }}: {{ steps.wait.status }}", body: "{{ steps.wait.summary | truncate:200 }}", level: "info", link: null }),
+          ],
+          allow_agents: true,
+        },
+        t - 3 * DAY,
+      ),
+      make(
+        "aut_demo_approve",
+        {
+          ...base,
+          name: "Approve tests and builds",
+          description: "Yes to test, build and lint commands.",
+          trigger: { type: "agent", events: ["request.opened"] },
+          filters: [{ field: "event.data.action", op: "equals", value: "command" }],
+          steps: [
+            step("answer", "agent.respond", {
+              thread: "{{ event.data.thread }}",
+              rules: [
+                { action: "command", command: "cargo test*", files: null, tool: null, decision: "accept" },
+                { action: "command", command: "pnpm test*", files: null, tool: null, decision: "accept" },
+              ],
+              otherwise: null,
+              message: null,
+            }),
+          ],
+        },
+        t - 15 * DAY,
+      ),
+      make(
+        "aut_demo_deploy",
+        {
+          ...base,
+          enabled: false,
+          name: "Deploy hook from CI",
+          description: "CI posts a failed deploy; an agent reads the log and opens a fix.",
+          trigger: { type: "webhook" },
+          steps: [
+            step("start", "agent.start", agentStart({ target: { type: "sandbox", size: "large", keep: false }, project: { type: "repo", repo: "acme/infra", path: null }, title: "Deploy failed: {{ event.data.body.service }}", prompt: "The deploy of {{ event.data.body.service }} failed:\n\n{{ event.data.body.log | lines:80 }}\n\nFind out why and open a fix." })),
+            step("ping", "webhook", { url: "https://hooks.acme.dev/deploys", method: "POST", headers: { Authorization: "Bearer {{ secrets.ACME_TOKEN }}" }, body: { thread: "{{ steps.start.thread }}" }, secret: null, ok_statuses: [] }),
+          ],
+        },
+        t - 30 * DAY,
+        { secrets: ["ACME_TOKEN"], webhook: { url: "https://roll.sh/v1/code/agents/demo/automations/aut_demo_deploy/hook", secret_hint: "q7Zk" } },
+      ),
+    ];
+    for (const a of list) this.automations.set(a.id, a);
+
+    // A week of runs.
+    const past = (a: Automation, at: number, status: RunState, summary: string, opts: { failAt?: number; error?: string; threads?: { thread: string; machine: string; step: string }[]; skipped?: string } = {}) => {
+      const rid = nid("arn_demo");
+      let clock = at + 400;
+      const steps: StepRun[] = a.steps.map((s, i) => {
+        const len = s.kind === "agent.wait" ? 6 * MIN + ((at / 1000) % 9) * MIN : s.kind === "agent.start" ? 2400 : 900 + (i * 377) % 1400;
+        const failed = opts.failAt === i;
+        const after = opts.failAt !== undefined && i > opts.failAt;
+        const start = clock;
+        clock += len;
+        const st: StepRun["status"] = status === "skipped" ? "skipped" : failed ? "failed" : after ? "skipped" : "succeeded";
+        return {
+          id: s.id,
+          kind: s.kind,
+          status: st,
+          attempt: failed && s.retry ? s.retry.attempts : st === "skipped" ? 0 : 1,
+          started_at: st === "skipped" ? null : start,
+          finished_at: st === "skipped" ? null : clock,
+          next_at: null,
+          output: st === "succeeded" ? demoOutput(s, opts.threads?.[0]?.thread) : null,
+          error: failed ? (opts.error ?? "failed") : null,
+          log: st === "skipped" ? [] : demoLog(s, start, failed ? opts.error : undefined),
+        };
+      });
+      const run: AutomationRun = {
+        id: rid,
+        automation: a.id,
+        name: a.name,
+        status,
+        event: { id: nid("aev_demo"), source: triggerSource(a.trigger), kind: eventKind(a), summary, at },
+        steps,
+        threads: opts.threads ?? [],
+        cursor: this.host.next(),
+        created_at: at,
+        started_at: status === "skipped" ? null : at + 200,
+        finished_at: status === "skipped" ? at : clock,
+        reason: opts.skipped ?? (status === "failed" ? (opts.error ?? null) : null),
+      };
+      this.runs.set(rid, run);
+      this.events.set(run.event.id, { id: run.event.id, source: run.event.source, kind: run.event.kind, key: `${run.event.source}:${run.event.id}`, at, data: demoEventData(a, summary), automation: a.id });
     };
-    this.automations.set(id, a);
-    this.on({ type: "automation", cursor: a.cursor, automation: structuredClone(a) });
-    return { automation: structuredClone(a), webhook_secret: spec.trigger.type === "webhook" && !prev?.webhook ? "rlh_demo_shown_once" : null };
-  }
+    const [mainfix, triage, publish, run, approve] = list;
+    const box = machines.find((m) => m.sandbox)?.id ?? mbp?.id ?? "";
+    past(mainfix, t - 2 * DAY - 3 * HOUR, "succeeded", "acme/roll#88 Main is red: lander_retries_once flakes", { threads: [{ thread: "thr_demo_ci", machine: box, step: "fix" }] });
+    past(mainfix, t - 5 * DAY - HOUR, "failed", "acme/roll#81 Main is red: e2e postgres restart", { failAt: 1, error: "the thread failed: cargo test exited 101" });
+    for (let d = 0; d < 7; d++) {
+      const at = startOfDay(t) - d * DAY + 9 * HOUR;
+      if (at > t || [0, 6].includes(new Date(at).getDay())) continue;
+      past(triage, at, d === 3 ? "failed" : "succeeded", "Weekdays at 09:00", d === 3 ? { failAt: 0, error: "no machine with prj_demo_roll is online" } : {});
+    }
+    past(publish, t - 50 * MIN, "succeeded", "Thread done: Add --json to roll code status", { threads: [] });
+    past(publish, t - 1 * DAY - 2 * HOUR, "succeeded", "Thread done: Tidy the README's quick start");
+    past(publish, t - 3 * DAY, "skipped", "Thread done: Spike: edge middleware", { skipped: "a filter didn't match: event.data.project is prj_demo_web" });
+    past(run, t - 26 * HOUR, "succeeded", "Run by ada", { threads: [{ thread: "thr_demo_next", machine: mbp?.id ?? "", step: "start" }] });
+    for (let i = 0; i < 9; i++) past(approve, t - i * 7 * HOUR - 20 * MIN, i === 4 ? "failed" : "succeeded", i % 2 ? "Request: cargo test -p roll-cli code" : "Request: pnpm test --filter dashboard", i === 4 ? { failAt: 0, error: "the request was answered before the rule ran" } : {});
 
-  list = async () => [...this.automations.values()].map((a) => structuredClone(a));
-  get = async (_owner: string, id: AutomationId) => structuredClone(this.find(id));
-  create = async (_owner: string, spec: AutomationSpec) => this.save(spec, `aut_demo_${Math.random().toString(36).slice(2, 10)}`);
-  update = async (_owner: string, id: AutomationId, spec: AutomationSpec, revision?: number) => {
-    const prev = this.find(id);
-    if (revision !== undefined && revision !== prev.revision) throw new Error(`the automation changed (it is at revision ${prev.revision})`);
-    return this.save(spec, id, prev);
-  };
-  remove = async (_owner: string, id: AutomationId) => {
-    this.automations.delete(id);
-    this.on({ type: "automation_removed", cursor: this.cursor++, automation: id });
-  };
-  enable = async (_owner: string, id: AutomationId) => this.save({ ...this.find(id), enabled: true }, id, this.find(id)).automation;
-  disable = async (_owner: string, id: AutomationId) => this.save({ ...this.find(id), enabled: false }, id, this.find(id)).automation;
-
-  run = async (_owner: string, id: AutomationId, req: Partial<RunNow> = {}) => {
-    const a = this.find(id);
-    const now = Date.now();
-    const r: AutomationRun = {
-      id: `arn_demo_${Math.random().toString(36).slice(2, 10)}`,
-      automation: id,
-      name: a.name,
-      status: "running",
-      event: { id: `aev_demo_${now}`, source: "manual", kind: "run", summary: "Run by acme", at: now },
-      steps: a.steps.map((s) => stepRun(s, "pending", 0)),
-      threads: [],
+    // One going right now: main broke a few minutes ago and an agent is on it.
+    const live = this.putRun({
+      id: nid("arn_demo"),
+      automation: mainfix.id,
+      name: mainfix.name,
+      status: "waiting",
+      event: { id: nid("aev_demo"), source: "code", kind: "work", summary: "acme/roll#93 Main is red: the flaky queue test", at: t - 4 * MIN },
+      steps: mainfix.steps.map((s, i) => ({
+        id: s.id,
+        kind: s.kind,
+        status: i === 0 ? "succeeded" : i === 1 ? "waiting" : "pending",
+        attempt: i < 2 ? 1 : 0,
+        started_at: i === 0 ? t - 4 * MIN : i === 1 ? t - 4 * MIN + 3000 : null,
+        finished_at: i === 0 ? t - 4 * MIN + 2900 : null,
+        next_at: null,
+        output: i === 0 ? { thread: "thr_demo_flaky", machine: mbp?.id, project: "prj_demo_roll", branch: "roll/fix-the-flaky-queue-test" } : null,
+        error: null,
+        log: i === 0 ? demoLog(s, t - 4 * MIN) : i === 1 ? [{ at: t - 4 * MIN + 3000, level: "info", text: "Waiting for thr_demo_flaky to be done or fail (up to 1h 30m)" }] : [],
+      })),
+      threads: [{ thread: "thr_demo_flaky", machine: mbp?.id ?? "", step: "fix" }],
       cursor: 0,
-      created_at: now,
-      started_at: now,
+      created_at: t - 4 * MIN,
+      started_at: t - 4 * MIN + 100,
       finished_at: null,
       reason: null,
-    };
-    void req;
-    this.history.unshift(r);
-    this.publishRun(r);
-    this.advance(r, 0);
-    return structuredClone(r);
-  };
+    });
+    this.events.set(live.event.id, { id: live.event.id, source: "code", kind: "work", key: `code:${live.event.id}`, at: live.event.at, data: { repo: "acme/roll", number: 93, title: "Main is red: the flaky queue test", state: "open", labels: ["broken-main"] }, automation: mainfix.id });
+    for (const a of list) {
+      const last = [...this.runs.values()].filter((r) => r.automation === a.id).sort((x, y) => y.created_at - x.created_at)[0];
+      if (last) this.automations.set(a.id, { ...this.automations.get(a.id)!, last_run: { id: last.id, status: last.status, at: last.created_at } });
+    }
+    // It finishes on its own a little later, so the run detail moves while you watch.
+    this.host.after(24_000, () => this.finishWaiting(live.id, "done"));
+  }
 
-  /** Move a demo run through its steps: each one runs for a moment and succeeds. */
-  private advance(r: AutomationRun, i: number) {
-    if (r.status === "cancelled") return;
-    const s = r.steps[i];
-    if (!s) {
-      r.status = "succeeded";
-      r.finished_at = Date.now();
-      this.publishRun(r);
+  private finishWaiting(rid: string, status: "done" | "failed") {
+    const r = this.runs.get(rid);
+    if (!r || isRunFinal(r.status)) return;
+    const w = r.steps.find((s) => s.status === "waiting");
+    if (!w) return;
+    this.patchStep(rid, w.id, { status: "succeeded", finished_at: Date.now(), output: { status, thread: r.threads[0]?.thread ?? null, summary: "Fixed: the queue test waited on a timer; it now waits on the event." } }, { status: "running" });
+    this.log(rid, w.id, `The thread is ${status}`);
+    this.host.after(600, () => void this.advance(rid));
+  }
+
+  // ── running ──
+
+  private startRun(a: Automation, source: string, kind: string, data: unknown, summary: string): AutomationRun {
+    const at = Date.now();
+    const evId = nid("aev_demo");
+    this.events.set(evId, { id: evId, source, kind, key: `${source}:${evId}`, at, data, automation: a.id });
+    const run = this.putRun({
+      id: nid("arn_demo"),
+      automation: a.id,
+      name: a.name,
+      status: "queued",
+      event: { id: evId, source, kind, summary, at },
+      steps: a.steps.map((s) => ({ id: s.id, kind: s.kind, status: "pending", attempt: 0, started_at: null, finished_at: null, next_at: null, output: null, error: null, log: [] })),
+      threads: [],
+      cursor: 0,
+      created_at: at,
+      started_at: null,
+      finished_at: null,
+      reason: null,
+    });
+    this.automations.set(a.id, { ...a, last_run: { id: run.id, status: run.status, at } });
+    this.host.after(500, () => {
+      const r = this.runs.get(run.id);
+      if (r && r.status === "queued") this.putRun({ ...r, status: "running", started_at: Date.now() });
+      void this.advance(run.id);
+    });
+    return run;
+  }
+
+  /** Run the next pending step of a run. */
+  private async advance(rid: string) {
+    const r = this.runs.get(rid);
+    if (!r || isRunFinal(r.status)) return;
+    const a = this.automations.get(r.automation);
+    const next = r.steps.find((s) => s.status === "pending" || s.status === "retrying");
+    if (!next || !a) {
+      const failed = r.steps.some((s) => s.status === "failed");
+      this.putRun({ ...r, status: failed ? "failed" : "succeeded", finished_at: Date.now() });
       return;
     }
-    s.status = s.kind === "agent.wait" ? "waiting" : "running";
-    s.attempt = 1;
-    s.started_at = Date.now();
-    r.status = s.status === "waiting" ? "waiting" : "running";
-    this.publishRun(r);
-    const t = setTimeout(
-      () => {
-        this.timers.delete(t);
-        if (r.status === "cancelled") return;
-        s.status = "succeeded";
-        s.finished_at = Date.now();
-        if (s.kind === "agent.start") {
-          s.output = { machine: MBP, project: "prj_demo_roll", thread: `thr_demo_${r.id.slice(-6)}` };
-          r.threads.push({ machine: MBP, thread: `thr_demo_${r.id.slice(-6)}`, step: s.id });
+    const s = a.steps.find((x) => x.id === next.id)!;
+    this.patchStep(rid, s.id, { status: "running", attempt: next.attempt + 1, started_at: Date.now() }, { status: "running" });
+    const ctx = this.context(r, a);
+    const cfg = render(s.config, ctx) as Record<string, unknown>;
+    try {
+      const out = await this.runStep(rid, s, cfg);
+      if (out === "waiting") return;
+      this.patchStep(rid, s.id, { status: "succeeded", finished_at: Date.now(), output: out });
+      this.host.after(500, () => void this.advance(rid));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.log(rid, s.id, msg, "error");
+      this.patchStep(rid, s.id, { status: "failed", finished_at: Date.now(), error: msg });
+      const cur = this.runs.get(rid)!;
+      if (s.on_error === "continue") this.host.after(400, () => void this.advance(rid));
+      else this.putRun({ ...cur, status: "failed", finished_at: Date.now(), reason: `${s.id}: ${msg}`, steps: cur.steps.map((x) => (x.status === "pending" ? { ...x, status: "skipped" } : x)) });
+    }
+  }
+
+  private context(r: AutomationRun, a: Automation): Record<string, unknown> {
+    const steps: Record<string, unknown> = {};
+    for (const s of r.steps) if (s.output) steps[s.id] = s.output;
+    return { event: { ...this.events.get(r.event.id), data: this.events.get(r.event.id)?.data }, steps, run: { id: r.id, threads: r.threads }, automation: { id: a.id, name: a.name }, owner: "demo" };
+  }
+
+  private async runStep(rid: string, s: Step, cfg: Record<string, unknown>): Promise<unknown> {
+    const wait = (ms: number) => new Promise<void>((res) => this.host.after(ms, res));
+    switch (s.kind) {
+      case "agent.start": {
+        const machines = this.host.machines();
+        const projects = this.host.projects();
+        const target = cfg.target as { type: string; machine?: string; size?: string } | null;
+        const pref = cfg.project as { type: string; id?: string; repo?: string } | null;
+        let project = pref?.type === "id" ? projects.find((p) => p.id === pref.id) : pref?.type === "repo" ? projects.find((p) => p.repo === pref.repo) : projects[0];
+        let machine = target?.type === "machine" ? machines.find((m) => m.id === target.machine) : project ? machines.find((m) => m.id === project!.machine) : machines.find((m) => m.online);
+        if (target?.type === "sandbox") {
+          this.log(rid, s.id, `Waking a ${target.size ?? "standard"} sandbox`);
+          machine = machines.find((m) => m.sandbox) ?? machine;
+          await wait(900);
         }
-        this.advance(r, i + 1);
+        if (!machine) throw new Error("no machine is online");
+        if (!project || project.machine !== machine.id) project = projects.find((p) => p.machine === machine!.id) ?? project;
+        if (!project) throw new Error(`no project on ${machine.name}`);
+        this.log(rid, s.id, `Starting ${cfg.model ?? cfg.provider ?? "an agent"} on ${machine.name} in ${project.name}${cfg.worktree ? " (worktree)" : ""}`);
+        const reply = await this.host.command(machine.id, {
+          type: "thread.create",
+          project: project.id,
+          provider: (cfg.provider as string) || "claude",
+          ...(cfg.model ? { model: cfg.model as string } : {}),
+          ...(cfg.effort ? { effort: cfg.effort as string } : {}),
+          worktree: !!cfg.worktree,
+          ...(cfg.title ? { title: cfg.title as string } : {}),
+          prompt: (cfg.prompt as string) || "Look around and say what you see.",
+          orchestrator: !!cfg.orchestrator,
+        });
+        if (reply.type !== "created") throw new Error(reply.type === "error" ? reply.message : "the machine didn't start it");
+        const r = this.runs.get(rid)!;
+        this.putRun({ ...r, threads: [...r.threads, { machine: machine.id, thread: reply.id, step: s.id }] });
+        this.log(rid, s.id, `Thread ${reply.id} started`);
+        return { thread: reply.id, machine: machine.id, project: project.id, branch: cfg.worktree ? `roll/${reply.id}` : null };
+      }
+      case "agent.wait": {
+        const thread = (cfg.thread as string) || this.runs.get(rid)!.threads.at(-1)?.thread;
+        if (!thread) throw new Error("no thread to wait for");
+        this.patchStep(rid, s.id, { status: "waiting" }, { status: "waiting" });
+        this.log(rid, s.id, `Waiting for ${thread}`);
+        const started = Date.now();
+        const poll = () => {
+          const st = this.host.threadStatus(thread);
+          const r = this.runs.get(rid);
+          if (!r || isRunFinal(r.status)) return;
+          if (st === "idle" || st === "error" || st === undefined || Date.now() - started > 90_000) this.finishWaiting(rid, st === "error" ? "failed" : "done");
+          else this.host.after(1000, poll);
+        };
+        this.host.after(2500, poll);
+        return "waiting";
+      }
+      case "notify": {
+        await wait(300);
+        const r = this.runs.get(rid)!;
+        this.host.emit({ type: "notice", notice: { id: nid("ntc_demo"), title: String(cfg.title ?? "Notice"), body: cfg.body ? String(cfg.body) : undefined, level: (cfg.level as "info") ?? "info", link: (cfg.link as string) ?? null, automation: r.automation, run: rid, at: Date.now() } });
+        this.log(rid, s.id, "Notice sent");
+        return { id: nid("ntc_") };
+      }
+      case "delay": {
+        const sec = Math.min(Number(cfg.seconds) || 1, 4);
+        this.log(rid, s.id, `Waiting ${cfg.seconds}s`);
+        await wait(sec * 1000);
+        return {};
+      }
+      case "webhook": {
+        this.log(rid, s.id, `${cfg.method ?? "POST"} ${cfg.url}`);
+        await wait(700);
+        this.log(rid, s.id, "200 OK in 182 ms");
+        return { status: 200, body: '{"ok":true}', json: { ok: true } };
+      }
+      case "agent.publish": {
+        await wait(1100);
+        this.log(rid, s.id, "Published acme/roll#94");
+        if (cfg.land) this.log(rid, s.id, "Queued to land (position 1)");
+        return { change: 94, url: "https://roll.sh/acme/roll/changes/94", queued: !!cfg.land };
+      }
+      default:
+        if (s.kind.includes(".") && !s.kind.startsWith("agent.")) throw new Error(`connect ${s.kind.split(".")[0]} first`);
+        await wait(800);
+        this.log(rid, s.id, `${BUILT_IN_STEPS[s.kind as keyof typeof BUILT_IN_STEPS]?.title ?? s.kind}: done`);
+        return {};
+    }
+  }
+
+  // ── the API ──
+
+  api(): AutomationsApi {
+    const me = this;
+    const spec = (s: AutomationSpec) => {
+      if (!s.name.trim()) throw new ApiError("name: give it a name", 400, null);
+      if (!s.steps.length) throw new ApiError("steps: at least one step", 400, null);
+      return s;
+    };
+    const saved = (a: Automation, secret: string | null = null) => ({ automation: a, webhook_secret: secret });
+    const hook = (id: string) => ({ url: `https://roll.sh/v1/code/agents/demo/automations/${id}/hook`, secret_hint: "" });
+    return {
+      async list() {
+        me.seed();
+        return [...me.automations.values()].sort((a, b) => a.created_at - b.created_at);
       },
-      (s.kind === "agent.wait" ? 6000 : 1200) / this.speed,
-    );
-    this.timers.add(t);
+      async get(_o, id) {
+        me.seed();
+        return me.must(id);
+      },
+      async create(_o, s) {
+        me.seed();
+        spec(s);
+        const id = nid("aut_demo");
+        const secret = s.trigger.type === "webhook" ? `rlh_${Math.random().toString(36).slice(2, 14)}${Math.random().toString(36).slice(2, 14)}` : null;
+        const a = me.putAutomation({ ...s, id, revision: 1, cursor: 0, created_at: Date.now(), updated_at: Date.now(), created_by: "ada", secrets: [], webhook: secret ? { ...hook(id), secret_hint: secret.slice(-4) } : null, next_at: s.trigger.type === "schedule" ? nextWeekday9(Date.now()) : null, last_run: null });
+        return saved(a, secret);
+      },
+      async update(_o, id, s, revision) {
+        const a = me.must(id);
+        if (revision !== undefined && revision !== a.revision) throw new ApiError("someone saved a newer version", 409, { current: a });
+        spec(s);
+        let secret: string | null = null;
+        let webhook = a.webhook;
+        if (s.trigger.type === "webhook" && !webhook) {
+          secret = `rlh_${Math.random().toString(36).slice(2, 14)}${Math.random().toString(36).slice(2, 14)}`;
+          webhook = { ...hook(id), secret_hint: secret.slice(-4) };
+        } else if (s.trigger.type !== "webhook") webhook = null;
+        return saved(me.putAutomation({ ...a, ...s, revision: a.revision + 1, webhook }), secret);
+      },
+      async remove(_o, id) {
+        me.must(id);
+        me.automations.delete(id);
+        me.host.emit({ type: "automation_removed", cursor: me.host.next(), automation: id });
+      },
+      async enable(_o, id) {
+        return me.putAutomation({ ...me.must(id), enabled: true });
+      },
+      async disable(_o, id) {
+        return me.putAutomation({ ...me.must(id), enabled: false });
+      },
+      async run(_o, id, req = {}) {
+        const a = me.must(id);
+        return me.startRun(a, "manual", "run", { by: "ada", input: req.input ?? null }, "Run by ada");
+      },
+      async runsOf(_o, id, q = {}) {
+        me.seed();
+        return page([...me.runs.values()].filter((r) => r.automation === id), q);
+      },
+      async runs(_o, q = {}) {
+        me.seed();
+        return page([...me.runs.values()].filter((r) => !q.automation || r.automation === q.automation), q);
+      },
+      async runDetail(_o, rid) {
+        me.seed();
+        const run = me.runs.get(rid);
+        if (!run) throw new ApiError("no such run", 404, null);
+        const event = me.events.get(run.event.id) ?? { id: run.event.id, source: run.event.source, kind: run.event.kind, key: run.event.id, at: run.event.at, data: null, automation: run.automation };
+        return { run, event };
+      },
+      async cancel(_o, rid) {
+        const r = me.runs.get(rid);
+        if (!r) throw new ApiError("no such run", 404, null);
+        if (isRunFinal(r.status)) return r;
+        return me.putRun({ ...r, status: "cancelled", finished_at: Date.now(), reason: "cancelled by ada", steps: r.steps.map((s) => (isStepOpen(s.status) ? { ...s, status: "cancelled", finished_at: s.started_at ? Date.now() : null } : s)) });
+      },
+      async retry(_o, rid) {
+        const r = me.runs.get(rid);
+        if (!r) throw new ApiError("no such run", 404, null);
+        if (r.status !== "failed" && r.status !== "cancelled") throw new ApiError("only a failed or cancelled run goes again", 409, null);
+        const next = me.putRun({ ...r, status: "running", finished_at: null, reason: null, steps: r.steps.map((s) => (s.status === "failed" || s.status === "cancelled" || (s.status === "skipped" && s.started_at === null) ? { ...s, status: "pending", attempt: 0, error: null, finished_at: null, log: s.log } : s)) });
+        me.host.after(400, () => void me.advance(rid));
+        return next;
+      },
+      async setSecret(_o, id, name) {
+        const a = me.must(id);
+        if (!a.secrets.includes(name)) me.putAutomation({ ...a, secrets: [...a.secrets, name].sort() });
+      },
+      async removeSecret(_o, id, name) {
+        const a = me.must(id);
+        me.putAutomation({ ...a, secrets: a.secrets.filter((s) => s !== name) });
+      },
+      async rotateWebhookSecret(_o, id) {
+        const a = me.must(id);
+        const secret = `rlh_${Math.random().toString(36).slice(2, 14)}${Math.random().toString(36).slice(2, 14)}`;
+        return saved(me.putAutomation({ ...a, webhook: { ...hook(id), secret_hint: secret.slice(-4) } }), secret);
+      },
+      async catalog() {
+        return CATALOG;
+      },
+      async test(_o, req): Promise<TestResult> {
+        const a = req.automation;
+        const ctx = { event: { source: req.event.source, kind: req.event.kind, id: "aev_test", data: req.event.data }, steps: {}, run: { id: "arn_test", threads: [] }, automation: { id: "aut_test", name: a.name }, owner: "demo" };
+        const trigger = triggerSource(a.trigger) === req.event.source && (!("events" in a.trigger) || !a.trigger.events.length || (a.trigger.events as string[]).includes(req.event.kind) || a.trigger.type === "code");
+        const filters = a.filters.map((f) => holds(f, ctx));
+        const steps = a.steps.map((s) => {
+          const known = CATALOG.steps.find((k) => k.kind === s.kind);
+          if (!known) return { id: s.id, runs: false, config: s.config, error: `no step kind ${s.kind}` };
+          const runs = s.when.every((f) => holds(f, ctx));
+          return { id: s.id, runs, config: render(s.config, ctx), error: known.needs_setup ? `connect ${known.integration} first` : null };
+        });
+        return { matched: trigger && filters.every(Boolean), trigger, filters, steps };
+      },
+    };
   }
+}
 
-  runsOf = async (_owner: string, id: AutomationId, q: RunsQuery = {}) => this.select(q, id);
-  runs = async (_owner: string, q: RunsQuery & { automation?: AutomationId } = {}) => this.select(q, q.automation);
+const isStepOpen = (s: StepRun["status"]) => s === "pending" || s === "running" || s === "waiting" || s === "retrying";
 
-  private select(q: RunsQuery, automation?: AutomationId): AutomationRun[] {
-    let out = this.history.filter((r) => (!automation || r.automation === automation) && (!q.status || r.status === q.status));
-    if (q.before) {
-      const i = out.findIndex((r) => r.id === q.before);
-      out = i >= 0 ? out.slice(i + 1) : out;
-    }
-    return out.slice(0, q.limit ?? 50).map((r) => structuredClone(r));
+function page(runs: AutomationRun[], q: { before?: string; limit?: number; status?: RunState }) {
+  let list = runs.sort((a, b) => b.created_at - a.created_at);
+  if (q.status) list = list.filter((r) => r.status === q.status);
+  if (q.before) {
+    const i = list.findIndex((r) => r.id === q.before);
+    list = i < 0 ? [] : list.slice(i + 1);
   }
+  return list.slice(0, Math.min(q.limit ?? 50, 200));
+}
 
-  runDetail = async (_owner: string, run: string): Promise<RunDetail> => {
-    const r = this.history.find((x) => x.id === run);
-    if (!r) throw new Error(`run ${run} not found`);
-    return { run: structuredClone(r), event: { id: r.event.id, source: r.event.source, kind: r.event.kind, key: `${r.event.source}:${r.event.id}`, at: r.event.at, data: {}, automation: r.automation } };
-  };
+function eventKind(a: Automation): string {
+  const t = a.trigger;
+  if (t.type === "manual") return "run";
+  if (t.type === "schedule" || t.type === "interval") return "tick";
+  if (t.type === "webhook") return "post";
+  return t.events[0] ?? "event";
+}
 
-  cancel = async (_owner: string, run: string) => {
-    const r = this.history.find((x) => x.id === run);
-    if (!r) throw new Error(`run ${run} not found`);
-    if (!isRunFinal(r.status)) {
-      r.status = "cancelled";
-      r.finished_at = Date.now();
-      r.reason = "cancelled";
-      for (const s of r.steps) if (!["succeeded", "failed", "skipped"].includes(s.status)) s.status = "cancelled";
-      this.publishRun(r);
+function demoEventData(a: Automation, summary: string): unknown {
+  const t = a.trigger;
+  if (t.type === "code") return { repo: t.repos[0] ?? "acme/roll", number: Number(/#(\d+)/.exec(summary)?.[1] ?? 1), title: summary.replace(/^.*?#\d+ /, ""), state: "open", labels: ["broken-main"] };
+  if (t.type === "agent") return { machine: "mch_demo_ada", project: "prj_demo_roll", thread: "thr_demo_json", title: summary.replace(/^[^:]+: /, ""), action: "command", command: summary.replace(/^Request: /, "") };
+  if (t.type === "manual") return { by: "ada", input: { prompt: "Pick an open work item and fix it." } };
+  if (t.type === "webhook") return { body: { service: "api", log: "error: health check failed" }, headers: { "content-type": "application/json" } };
+  return { at: Date.now(), scheduled: Date.now() };
+}
+
+function demoOutput(s: Step, thread?: string): unknown {
+  switch (s.kind) {
+    case "agent.start":
+      return { thread: thread ?? "thr_demo_json", machine: "mch_demo_ada", project: "prj_demo_roll", branch: "roll/fix" };
+    case "agent.wait":
+      return { status: "done", thread: thread ?? "thr_demo_json", summary: "Done: the change is small and has a test." };
+    case "agent.publish":
+      return { change: 88, url: "https://roll.sh/acme/roll/changes/88", queued: true };
+    case "agent.respond":
+      return { answered: 1 };
+    case "notify":
+      return { id: "ntc_demo" };
+    default:
+      return {};
+  }
+}
+
+function demoLog(s: Step, at: number, error?: string) {
+  const lines: { at: number; level: "info" | "warn" | "error"; text: string }[] = [];
+  const add = (dt: number, text: string, level: "info" | "warn" | "error" = "info") => lines.push({ at: at + dt, level, text });
+  switch (s.kind) {
+    case "agent.start":
+      add(0, "Resolving the target");
+      add(700, "Starting claude (Opus 5.5) in a worktree");
+      add(2200, "Thread started");
+      break;
+    case "agent.wait":
+      add(0, "Waiting for the thread to be done or fail");
+      break;
+    case "agent.publish":
+      add(0, "Publishing the worktree as a change");
+      add(800, "Queued to land");
+      break;
+    case "agent.respond":
+      add(0, "Matched rule 1: accept");
+      break;
+    default:
+      add(0, "Started");
+  }
+  if (error) add(1500, error, "error");
+  return lines;
+}
+
+function startOfDay(t: number) {
+  const d = new Date(t);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function nextWeekday9(t: number) {
+  let d = startOfDay(t) + 9 * HOUR;
+  while (d <= t || [0, 6].includes(new Date(d).getDay())) d += DAY;
+  return d;
+}
+
+// ── a stand-in for the server's templates and filters ──
+
+function lookup(ctx: unknown, path: string): unknown {
+  let cur = ctx;
+  for (const p of path.split(".")) {
+    if (cur === null || typeof cur !== "object") return undefined;
+    cur = (cur as Record<string, unknown>)[p];
+  }
+  return cur;
+}
+
+const show = (v: unknown) => (v === undefined || v === null ? "" : typeof v === "string" ? v : typeof v === "object" ? JSON.stringify(v) : String(v));
+
+/** `{{ path | default:"x" | upper | truncate:N }}`, enough of `template.rs` for the demo. */
+export function renderTemplate(s: string, ctx: unknown): string {
+  return s.replace(/{{\s*([^}|]+?)\s*((?:\|[^}]*)?)}}/g, (_m, path: string, pipes: string) => {
+    let v: unknown = lookup(ctx, path.trim());
+    for (const raw of pipes.split("|").slice(1)) {
+      const t = raw.trim();
+      const colon = t.indexOf(":");
+      const name = colon < 0 ? t : t.slice(0, colon);
+      const a = colon < 0 ? undefined : t.slice(colon + 1).trim().replace(/^"([\s\S]*)"$/, "$1");
+      if (name === "default" && (v === undefined || v === null || v === "")) v = a && /^[a-z_]+(\.[\w]+)+$/.test(a) ? lookup(ctx, a) : a;
+      else if (name === "upper") v = show(v).toUpperCase();
+      else if (name === "lower") v = show(v).toLowerCase();
+      else if (name === "trim") v = show(v).trim();
+      else if (name === "truncate") v = show(v).length > Number(a) ? `${show(v).slice(0, Number(a))}…` : v;
+      else if (name === "json") v = JSON.stringify(v ?? null);
+      else if (name === "lines") v = show(v).split("\n").slice(0, Number(a)).join("\n");
     }
-    return structuredClone(r);
-  };
-
-  retry = async (_owner: string, run: string) => {
-    const r = this.history.find((x) => x.id === run);
-    if (!r || (r.status !== "failed" && r.status !== "cancelled")) throw new Error("only a failed or cancelled run can be retried");
-    const i = r.steps.findIndex((s) => s.status === "failed" || s.status === "cancelled");
-    for (const s of r.steps.slice(i)) Object.assign(s, { status: "pending", attempt: 0, error: null, finished_at: null });
-    r.status = "running";
-    r.reason = null;
-    r.finished_at = null;
-    this.advance(r, Math.max(0, i));
-    return structuredClone(r);
-  };
-
-  setSecret = async (_owner: string, id: AutomationId, name: string) => {
-    const a = this.find(id);
-    if (!a.secrets.includes(name)) a.secrets = [...a.secrets, name].sort();
-  };
-  removeSecret = async (_owner: string, id: AutomationId, name: string) => {
-    const a = this.find(id);
-    a.secrets = a.secrets.filter((s) => s !== name);
-  };
-  rotateWebhookSecret = async (_owner: string, id: AutomationId) => ({ automation: structuredClone(this.find(id)), webhook_secret: "rlh_demo_rotated" });
-  catalog = async () => structuredClone(DEMO_CATALOG);
-  test = async (_owner: string, req: TestRequest): Promise<TestResult> => ({
-    matched: req.automation.trigger.type === req.event.source,
-    trigger: req.automation.trigger.type === req.event.source,
-    filters: req.automation.filters.map(() => true),
-    steps: req.automation.steps.map((s) => ({ id: s.id, runs: true, config: s.config, error: null })),
+    return show(v);
   });
+}
+
+function render(v: unknown, ctx: unknown): unknown {
+  if (typeof v === "string") return renderTemplate(v, ctx);
+  if (Array.isArray(v)) return v.map((x) => render(x, ctx));
+  if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, render(x, ctx)]));
+  return v;
+}
+
+function holds(f: Filter, ctx: unknown): boolean {
+  const v = lookup(ctx, f.field);
+  const want = f.value;
+  let ok: boolean;
+  switch (f.op) {
+    case "equals":
+      ok = String(v) === String(want);
+      break;
+    case "contains":
+      ok = Array.isArray(v) ? v.map(String).includes(String(want)) : show(v).toLowerCase().includes(String(want).toLowerCase());
+      break;
+    case "any_of":
+      ok = Array.isArray(want) && want.map(String).includes(String(v));
+      break;
+    case "has_label":
+      ok = Array.isArray(v) && v.some((l) => (typeof l === "object" && l ? (l as { name?: string }).name : l) === want);
+      break;
+    case "glob": {
+      const re = new RegExp(`^${String(want).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*\/?/g, "(?:[^/]+/)*").replace(/(?<!\))\*/g, "[^/]*")}$`);
+      ok = (Array.isArray(v) ? v : [v]).some((x) => re.test(show(x)));
+      break;
+    }
+    case "exists":
+      ok = v !== undefined && v !== null;
+      break;
+    case "gt":
+      ok = Number(v) > Number(want);
+      break;
+    case "lt":
+      ok = Number(v) < Number(want);
+      break;
+  }
+  return f.not ? !ok : ok;
 }

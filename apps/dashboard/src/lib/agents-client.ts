@@ -24,6 +24,7 @@ import {
 } from "./agents-api";
 import { decode } from "./decode";
 import { applyEvents, applySnapshot, emptyData, follow, type AgentsData } from "./agents-store";
+import { isAutomationEvent, type AutomationEvent } from "./automations-store";
 import { streamSse } from "./sse";
 
 export interface AgentsTransport {
@@ -87,6 +88,7 @@ export class AgentsClient {
   private followTimer: ReturnType<typeof setTimeout> | null = null;
   private generation = 0;
   private terminals = new Map<TerminalId, { chunks: string[]; size: number; listeners: Set<(b64: string) => void> }>();
+  private automationListeners = new Set<(ev: AutomationEvent) => void>();
 
   constructor(
     readonly owner: string,
@@ -229,6 +231,11 @@ export class AgentsClient {
 
   /** Apply events (the transport's, or a test's) in the next batch. */
   enqueue(ev: StreamEvent) {
+    // Automations aren't canvas records: their store (`automations-store.ts`) keeps them.
+    if (isAutomationEvent(ev)) {
+      for (const l of this.automationListeners) l(ev);
+      return;
+    }
     if (ev.type === "delta" && ev.delta.type === "terminal") {
       this.terminalBytes(ev.delta.terminal, ev.delta.data);
       return;
@@ -251,6 +258,12 @@ export class AgentsClient {
     t.size += b64.length;
     while (t.size > TERMINAL_KEEP && t.chunks.length > 1) t.size -= t.chunks.shift()!.length;
     for (const l of t.listeners) l(b64);
+  }
+
+  /** The stream's automation events (`automation`, `automation_removed`, `automation_run`, `notice`) as they arrive. */
+  onAutomation(fn: (ev: AutomationEvent) => void): () => void {
+    this.automationListeners.add(fn);
+    return () => void this.automationListeners.delete(fn);
   }
 
   /** Terminal output as it arrives (base64). Returns what was kept so far and the unsubscribe. */

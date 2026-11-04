@@ -17,12 +17,14 @@ import {
   GitFork,
   Maximize,
   MessageSquare,
+  Play,
   Plus,
   Search,
   Server,
   Settings2,
   Square,
   Workflow,
+  Zap,
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -45,6 +47,7 @@ import {
   type PaletteView,
 } from "./command-palette.logic";
 import { targetLabel, useGoalTargets, useLaunchGoal, type GoalKind, type GoalTarget } from "./orchestrate";
+import { useAutomations } from "./automations/shared";
 import { NewProject } from "./project-new";
 import { MachineIcon, StatusDot } from "./shared";
 import { useAgents } from "./use-agents";
@@ -86,6 +89,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
   const { target, targets } = useGoalTargets();
   const machineCount = data.machines.size;
   const [now] = useState(() => Date.now());
+  const auto = useAutomations();
 
   const [stack, dispatch] = useReducer(reduceStack, undefined, () => ({ query: intent.kind === "search" ? (intent.query ?? "") : "", views: [] }));
   const [error, setError] = useState<string | null>(null);
@@ -223,6 +227,38 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
       !!open && { kind: "action", value: "action:archive", title: open.archived_at === null ? `Archive “${open.title}”` : `Unarchive “${open.title}”`, searchTerms: ["settle", "hide", "done"], icon: open.archived_at === null ? <Archive className={ICON} /> : <ArchiveRestore className={ICON} />, run: () => client.run(at, { type: open.archived_at === null ? "thread.archive" : "thread.unarchive", thread: open.id }) },
       addProject,
       { kind: "action", value: "action:add-machine", title: "Add machine", searchTerms: ["connect", "computer", "sandbox", "rent"], icon: <Server className={ICON} />, run: host.addMachine },
+      !!auto.store && { kind: "action", value: "action:automations", title: "Automations", searchTerms: ["workflow", "trigger", "schedule", "cron", "webhook", "zap", "rules"], icon: <Zap className={ICON} />, run: () => setAgentsView({ kind: "automations" }) },
+      !!auto.store && { kind: "action", value: "action:new-automation", title: "New automation", searchTerms: ["workflow", "trigger", "schedule", "template"], icon: <Plus className={ICON} />, run: () => setAgentsView({ kind: "automations", open: "new" }) },
+      auto.automations.size > 0 && {
+        kind: "submenu",
+        value: "action:run-automation",
+        title: "Run automation…",
+        searchTerms: ["workflow", "trigger", "start"],
+        icon: <Play className={ICON} />,
+        view: {
+          label: "Run automation",
+          placeholder: "Which automation?",
+          groups: [
+            {
+              value: "automations",
+              label: "Automations",
+              items: [...auto.automations.values()].map((x) => ({
+                kind: "action" as const,
+                value: `run-automation:${x.id}`,
+                title: x.name,
+                description: x.enabled ? x.description : "Paused",
+                icon: <Zap className={ICON} />,
+                run: async () => {
+                  const s = auto.store!;
+                  const r = await s.api.run(s.owner, x.id, {});
+                  s.putRun(r);
+                  setAgentsView({ kind: "automations", open: x.id, tab: "runs", run: r.id });
+                },
+              })),
+            },
+          ],
+        },
+      },
       projects.length > 0 && { kind: "submenu", value: "action:project-settings", title: "Project settings", searchTerms: ["auto-pull", "defaults", "scripts", "configure"], icon: <Settings2 className={ICON} />, view: projectsView("Project settings", (p) => setAgentsView({ kind: "settings", target: `p:${p.id}` })) },
       machines.length > 0 && {
         kind: "submenu",
@@ -295,7 +331,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
     };
     // Rebuilt when the records change; `query` only tags thread picks.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, projects, machines, openRecord, host, targets, query]);
+  }, [data, projects, machines, openRecord, host, targets, query, auto.automations, auto.store]);
 
   const shown: PaletteGroup[] = useMemo(() => {
     if (view?.panel) return [];

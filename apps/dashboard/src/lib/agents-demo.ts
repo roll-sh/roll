@@ -42,6 +42,7 @@ import type {
 } from "./agents-api";
 import { DEFAULT_AUTO_SETTLE, EMPTY_INBOX, NO_SETTINGS, reachable } from "./agents-api";
 import type { AgentsTransport } from "./agents-client";
+import { DemoAutomations } from "./automations-demo";
 import { memoryCanvas, memorySettings, type AgentsServices, type RepoChoice } from "./agents-services";
 import { offeredProviders, settingsError } from "./machine-settings";
 import { ApiError } from "./code-api";
@@ -514,6 +515,22 @@ export class DemoOwner implements AgentsTransport {
   private settings = memorySettings();
   /** Every provider each demo machine has, on or off (its info lists the ones on). */
   private allProviders = new Map<MachineId, ProviderInfo[]>();
+  /** The demo's automations and their runs (`automations-demo.ts`): runs start threads here. */
+  private automations = new DemoAutomations({
+    emit: (ev) => this.emit(ev),
+    next: () => ++this.cursor,
+    machines: () => (this.start(), [...this.machines.values()]),
+    projects: () =>
+      [...this.records.values()]
+        .filter((r) => r.entity.kind === "project")
+        .map((r) => {
+          const p = r.entity as unknown as Project;
+          return { id: p.id, name: p.name, machine: r.machine, repo: p.repo ? `${p.repo.owner}/${p.repo.repo}` : null };
+        }),
+    command: (machine, c) => this.command(machine, `auto_${Date.now()}`, c),
+    threadStatus: (tid) => this.get<Thread>("thread", tid)?.status,
+    after: (ms, fn) => this.after(ms, fn),
+  });
   /**
    * `speed` scales every delay (tests run the demo fast); `keepAlive` starts new work whenever
    * the canvas goes quiet; `empty` starts with no machines (`?demo=empty`: the first-run screen).
@@ -750,6 +767,7 @@ export class DemoOwner implements AgentsTransport {
       return s;
     };
     return {
+      automations: owner.automations.api(),
       sandboxes: {
         async list() {
           owner.start();
