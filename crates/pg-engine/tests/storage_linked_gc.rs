@@ -123,10 +123,10 @@ fn direct_l1_replay_barrier_preserves_tombstones_snapshots_and_wal_order() {
     assert_eq!(m["l1"][0]["commit_ts"], linked, "exercise direct L1");
     assert!(m["l1"][0]["max_ts"].as_u64().unwrap() > m["flushed_ts"].as_u64().unwrap());
     let after = s.commit(vec![(b"b0004".to_vec(), Some(Bytes::from_static(b"after")))], |_| Ok(())).unwrap();
-    let check = |s: &Store| {
+    let check = |s: &Store, stage: &str| {
         for ts in [before, linked, after] {
             assert_eq!(s.get(b"a0000", ts).unwrap().as_deref(), Some(&b"before"[..]));
-            assert_eq!(s.get_version(b"b0006", ts).unwrap(), (ts >= linked).then_some((linked, None)));
+            assert_eq!(s.get_version(b"b0006", ts).unwrap(), (ts >= linked).then_some((linked, None)), "stage={stage}, ts={ts}");
             let want = if ts == before { None } else if ts == linked { Some((linked, None)) } else { Some((after, Some(Bytes::from_static(b"after")))) };
             assert_eq!(s.get_version(b"b0004", ts).unwrap(), want);
             assert_eq!(s.get(b"b0005", ts).unwrap().as_deref(), (ts >= linked).then_some(&[b'v'; 80][..]));
@@ -135,22 +135,22 @@ fn direct_l1_replay_barrier_preserves_tombstones_snapshots_and_wal_order() {
         assert_eq!(s.latest_version_ts(b"b0004").unwrap(), Some(after));
         assert_eq!(s.get_versions(&[b"b0004", b"b0006"], linked).unwrap(), vec![Some((linked, None)), Some((linked, None))]);
     };
-    check(&s);
+    check(&s, "before crash");
     drop(pin);
     drop(s); // Crash reopen with WAL before elsewhere and WAL after inside the run.
     let s = Store::open(dir.path(), opts()).unwrap();
     let pin = s.pin(before);
-    check(&s);
+    check(&s, "after crash");
     let m = manifest(dir.path());
     for meta in m["l0"].as_array().unwrap() {
         assert!(!(meta["min_ts"].as_u64().unwrap() < linked && meta["max_ts"].as_u64().unwrap() > linked), "WAL straddles linked barrier: {meta}");
     }
-    s.commit(vec![(b"b".to_vec(), Some(Bytes::from_static(b"left"))), (b"bz".to_vec(), Some(Bytes::from_static(b"right")))], |_| Ok(())).unwrap();
+    s.commit(vec![(b"b0000".to_vec(), Some(Bytes::from_static(b"left"))), (b"b1999".to_vec(), Some(Bytes::from_static(b"right")))], |_| Ok(())).unwrap();
     s.flush_memtables().unwrap();
     s.compact().unwrap();
-    check(&s); // The pinned snapshot keeps deletion metadata and every live version.
+    check(&s, "after pinned compact"); // The pinned snapshot keeps deletion metadata and every live version.
     drop(pin);
-    let now = s.commit(vec![(b"b".to_vec(), Some(Bytes::from_static(b"left2"))), (b"bz".to_vec(), Some(Bytes::from_static(b"right2")))], |_| Ok(())).unwrap();
+    let now = s.commit(vec![(b"b0000".to_vec(), Some(Bytes::from_static(b"left2"))), (b"b1999".to_vec(), Some(Bytes::from_static(b"right2")))], |_| Ok(())).unwrap();
     s.flush_memtables().unwrap();
     s.compact().unwrap();
     assert_eq!(s.latest_version_ts(b"b0006").unwrap(), None);
@@ -185,10 +185,16 @@ fn fresh_transaction_sink_honors_store_compression_policy() {
         let m = manifest(dir.path());
         let files: Vec<_> = m["l0"].as_array().unwrap().iter().chain(m["l1"].as_array().unwrap()).filter(|f| f["commit_ts"].as_u64() == Some(ts)).collect();
         assert!(!files.is_empty(), "the sink must actually link its fresh runs");
+        let mut compressed_files = 0;
         for meta in files {
             let reader = SstReader::open(dir.path(), serde_json::from_value(meta.clone()).unwrap(), opts().cache).unwrap();
-            assert_eq!(reader.first_block_compressed().unwrap(), compress);
+            let compressed = reader.first_block_compressed().unwrap();
+            assert!(!compressed || compress, "compression disabled, meta={meta}");
+            compressed_files += usize::from(compressed);
         }
+        // Compression permits smaller encoded blocks; it does not force compression.
+        // The small final sink remainder uses the ordinary uncompressed temporary run.
+        assert_eq!(compressed_files > 0, compress);
         assert_eq!(s.scan(b"zzzzzzzz", b"{", ts).count(), 2000);
         drop(db);
         s.close().unwrap();
