@@ -152,9 +152,14 @@ speedup can be claimed without the required repetitions, work checks and limiter
 Historical m0/m1 are partial campaigns without complete raw pgbench/source gates and
 cannot establish a performance regression or gain. Old footprints do not verify caab.
 
-Planner171's six dirty SQL files are preserved in ec5b9f39, remote
-wip/a171-resume-20261104. Its earlier cargo check lacks adequate source identity;
-chosen-cost validation has NOT started. This scope remains exclusively171.
+Planner171's original six-file WIP ec5b9f39 andremote wip/a171-resume-20261104 remainintact.
+AFTER165terminal/export,scope transferredcleanly onto c861 as a6fe3e4e onnewownerbranch
+work-a171-chosen-cost-20261104,newremote wip/a171-chosen-cost-resume-20261104 independently
+verified. Sixpaths102+/2-,eachadded/removedline exactlyoriginal;audit+patch preserved.
+Existingcostgolden3modes/kept7 focusedvalidation iscompiling underexistingheavy,targeta171,
+taskset8-13,18-19/nice19/jobs2/testthreads<=2,startupguardpassed. Partialoutputsexcluded;
+no newtiming/service. Earliercargo check stillhasinsufficient sourceidentity. Chosen-cost
+current-source acceptance andcustomANY/IN correctness handoff remainpending;scope171only.
 
 FDW172 recovered clean at63f7c0b4, remote wip/a172-resume-20261104, with no interrupted
 round8 implementation. Completed baseline dist/contrib evidence reports

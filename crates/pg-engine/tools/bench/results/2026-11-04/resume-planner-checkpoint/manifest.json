@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "ef412d66cc05d71e36d79af53989de9f8d53d51031a0066853e526f5da142df3",
-    "bytes": 13194
+    "sha256": "9c014172ee3da1ae192994608ed111708cb624f9218f55d2624ddc76892f5c51",
+    "bytes": 13692
   },
   "bytea165compare/RESTORED": {
     "sha256": "cfeb0d7a74ac20eb1d46d347c00db409be5f9c5b47ca77e388b2e494a65d91c3",
@@ -636,8 +636,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "a0d575344b4c0e5c82f447ec02cd4f5d4cff905928f42f77833f927e692d0a25",
-    "bytes": 27991
+    "sha256": "425f9092a9a4aab0b082c5280784c988e05122bad5d6def0f2187016d27145a0",
+    "bytes": 28630
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -1339,6 +1339,14 @@
     "sha256": "2e118548af8498cc83f162fda45d8928d32f912bb98e46f1c34dd0e901c735a1",
     "bytes": 1686
   },
+  "runners/chosen171-candidate.patch": {
+    "sha256": "90e263c6c93b1e2ddb06919577ef6c95bbdfcb11958519400aa4064e4e4058bf",
+    "bytes": 8993
+  },
+  "runners/chosen171-transfer-audit.json": {
+    "sha256": "1c0f50d9e2218327f821055567cdf91cd9e891038ddee8ccc05469f065f63679",
+    "bytes": 738
+  },
   "runners/clippy-v3-bookkeeping-failure.json": {
     "sha256": "7e422054aa1e3f2e028f84367466c16a18fa68a7f83d6763f23915ec9d9b5021",
     "bytes": 335
@@ -1378,6 +1386,10 @@
   "runners/focus165ind.sh": {
     "sha256": "92adc7eedcb86450acebe1d2ba124ab89f291698bb6f9d4212eb90260c2ed624",
     "bytes": 1385
+  },
+  "runners/focus171-v1.sh": {
+    "sha256": "f8ad2b093f2bfb5e4e9655a5c0e922ea570655f248c6cfd399b5331a3692eeea",
+    "bytes": 1988
   },
   "runners/footprint.sh": {
     "sha256": "afc925795bcc33c12ed2392ed9684d81b83ca8966227c4341577501c2064dd21",

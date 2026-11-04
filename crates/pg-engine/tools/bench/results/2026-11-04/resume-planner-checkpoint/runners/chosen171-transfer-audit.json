@@ -1,0 +1,24 @@
+{
+  "source": "a6fe3e4e626b0552c14320c18211886d1b16ad38",
+  "base": "c8618834caf45bc0a34cf9985c07f9bc13b498ef",
+  "original_backup": "ec5b9f39dc32f56c98956e0e783dc5028e3fc53b",
+  "paths": [
+    "crates/pg-engine/src/sql/binder/dml.rs",
+    "crates/pg-engine/src/sql/binder/mod.rs",
+    "crates/pg-engine/src/sql/binder/select.rs",
+    "crates/pg-engine/src/sql/paths.rs",
+    "crates/pg-engine/src/sql/paths/syscat.rs",
+    "crates/pg-engine/src/sql/plan.rs"
+  ],
+  "added_removed_lines_exact_to_original": true,
+  "three_way_clean": true,
+  "old_branch_and_backup_unchanged": true,
+  "tests_added": 0,
+  "expected_full": {
+    "passed": 455,
+    "failed": 0,
+    "ignored": 18,
+    "summaries": 61
+  },
+  "status": "NOT YET VALIDATED"
+}

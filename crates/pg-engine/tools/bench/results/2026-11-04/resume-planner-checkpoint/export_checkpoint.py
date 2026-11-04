@@ -169,9 +169,14 @@ speedup can be claimed without the required repetitions, work checks and limiter
 Historical m0/m1 are partial campaigns without complete raw pgbench/source gates and
 cannot establish a performance regression or gain. Old footprints do not verify caab.
 
-Planner171's six dirty SQL files are preserved in ec5b9f39, remote
-wip/a171-resume-20261104. Its earlier cargo check lacks adequate source identity;
-chosen-cost validation has NOT started. This scope remains exclusively171.
+Planner171's original six-file WIP ec5b9f39 andremote wip/a171-resume-20261104 remainintact.
+AFTER165terminal/export,scope transferredcleanly onto c861 as a6fe3e4e onnewownerbranch
+work-a171-chosen-cost-20261104,newremote wip/a171-chosen-cost-resume-20261104 independently
+verified. Sixpaths102+/2-,eachadded/removedline exactlyoriginal;audit+patch preserved.
+Existingcostgolden3modes/kept7 focusedvalidation iscompiling underexistingheavy,targeta171,
+taskset8-13,18-19/nice19/jobs2/testthreads<=2,startupguardpassed. Partialoutputsexcluded;
+no newtiming/service. Earliercargo check stillhasinsufficient sourceidentity. Chosen-cost
+current-source acceptance andcustomANY/IN correctness handoff remainpending;scope171only.
 
 FDW172 recovered clean at63f7c0b4, remote wip/a172-resume-20261104, with no interrupted
 round8 implementation. Completed baseline dist/contrib evidence reports
@@ -318,6 +323,8 @@ sources['runners/audit165-v3-terminal.py'] = str(D / 'audit165-v3-terminal.py')
 sources['runners/ab3-dist-artifact-preserved.json'] = str(D / 'ab3-dist-artifact-preserved.json')
 sources['runners/clippy-v3-bookkeeping-failure.json'] = str(D / 'clippy-v3-bookkeeping-failure.json')
 sources['runners/INDEPENDENT165-HANDOFF.md'] = str(D / 'INDEPENDENT165-HANDOFF.md')
+for name in ('chosen171-candidate.patch', 'chosen171-transfer-audit.json', 'focus171-v1.sh'):
+    sources['runners/' + name] = str(D / name)
 for name in ('release-test.command', 'release-test.log', 'release-test-summary.json', 'clippy.command', 'clippy.log', 'clippy-completed-exits.tsv', 'clippy-warning-audit.json'):
     sources['check165ind-v3/' + name] = str(D / 'check165ind-v3' / name)
 for name in ('build.command', 'build.log', 'engine.sha256', 'postgres-unit.command', 'postgres-unit.log', 'postgres-unit-status.json', 'postgres-unit-summary.json', 'exits.tsv', 'current.status', 'TERMINAL.json', 'debug-test-terminal-audit.json', 'release-test-terminal-audit.json'):
