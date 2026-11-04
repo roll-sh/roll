@@ -1,0 +1,37 @@
+{
+  "utc": "2026-11-04T15:31:57.482269+00:00",
+  "owner": 163,
+  "head": "483b4d6e5d41e9025aaa518d5774abd7971f4204",
+  "source_commits": [
+    "37e9896225915add74cb51e0d966765cdf01d8b4",
+    "15d59127d87cb8954d47ea833e74ca077aa7d0b8"
+  ],
+  "test_followups": [
+    "a54718cadcd4407b93fc5fd7f976a6268e2e31de",
+    "483b4d6e5d41e9025aaa518d5774abd7971f4204"
+  ],
+  "local_current_gates": "PASS build0 focused203pass0fail2existingignored Clippy0(14baseline-identicaldiagnostics) releasegolden3pass releasemeasured1pass",
+  "targeted_current_gates": "PASS2PGreviewgoldens3modes measuredINCLUDE1 (2816/8320 unchanged) isolation6perms44steps;6actualwaits6BitmapHeap2BitmapOr",
+  "source_pins": "current runner verified HEAD plus all declared source/Cargo/Rust/SQL/golden hashes before/after eachstep",
+  "raw_bitmaps_sha256": "cbc3b8b145a6c7e1abb8fe3376a8f708f85d2c59a196b3f2e4ed4d639d9416d3",
+  "failures_preserved": [
+    "red engine101",
+    "isolatedredengine101",
+    "CICredengine101",
+    "cic-focused measured101",
+    "targetedVACUUMbacktrace101"
+  ],
+  "vacuum_gap": "TxnScan detoasts8300text; raw8332/heapitem8340 passed asphysical tuple; genericfallbackalso wrong.170owns separatetoastawarefixafterc66terminal; no163fix/probeduplicate, noheapclamp, no cleanbaseline attribution",
+  "acceptance_held": [
+    "fresh483source review",
+    "combined170modeledworker sizevalidation/parity",
+    "separate VACUUMcorrectnessgap",
+    "performance/footprint/finalcombinedservice"
+  ],
+  "GIN_limits": [
+    "byte/C referencecovered; collation errorprecedenceunverified",
+    "single accumulation batch; PGmaintenance_work_mem flushpriorityunmodelled"
+  ],
+  "169": "797 source/targets untouched; parentworkerowns",
+  "166": "complete tests55dd+092 docsfa74 raw915b51b5 independently238payloadsverified; controlledplanlabel/countgapexplicit"
+}

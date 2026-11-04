@@ -1,0 +1,11 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/crates/pg-engine)
+    Finished `release` profile [optimized] target(s) in 8m 08s
+     Running tests/golden.rs (/home/meszmate/.cache/a163/target/release/deps/golden-6b1d444c0e7b10e7)
+
+running 3 tests
+test golden_shuffled ... ok
+test golden ... ok
+test golden_wire ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+

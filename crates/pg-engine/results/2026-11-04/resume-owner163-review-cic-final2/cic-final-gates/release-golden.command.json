@@ -1,0 +1,16 @@
+{
+  "argv": [
+    "cargo",
+    "test",
+    "--release",
+    "-p",
+    "pg-engine",
+    "--test",
+    "golden"
+  ],
+  "env": {
+    "GOLDEN_FILTER": "a163_review_"
+  },
+  "cwd": "/home/meszmate/roll/.claude/worktrees/agent-a3512214927146502",
+  "source_head": "483b4d6e5d41e9025aaa518d5774abd7971f4204"
+}

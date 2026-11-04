@@ -1,0 +1,11 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/crates/pg-engine)
+    Finished `release` profile [optimized] target(s) in 5.27s
+     Running tests/big_tables.rs (/home/meszmate/.cache/a163/target/release/deps/big_tables-25e51df44301bd70)
+
+running 1 test
+measured serial INCLUDE: estimated=true heap_model=false workers=0: index row size 2816 exceeds btree version 4 maximum 2704 for index "mi_i"
+measured serial INCLUDE: estimated=true heap_model=false workers=0: index row requires 8320 bytes, maximum size is 8191
+test measured_serial_include_size ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.08s
+

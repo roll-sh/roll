@@ -1,0 +1,9 @@
+{
+  "commit": "cb17994c7ae066a037b6b41e4fa191fb34438164",
+  "ref": "refs/heads/wip/resume-20261104-a163-review-final1",
+  "payloads": 52,
+  "manifest": "crates/pg-engine/results/2026-11-04/resume-owner163-review-final1/manifest.json",
+  "committed_blob_sha256_verified": true,
+  "head_index_unchanged": true,
+  "remote": "cb17994c7ae066a037b6b41e4fa191fb34438164"
+}

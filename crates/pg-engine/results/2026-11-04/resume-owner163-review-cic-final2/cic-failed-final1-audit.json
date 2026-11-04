@@ -1,0 +1,9 @@
+{
+  "commit": "98bfaf07bc0f73c27e43e9a99e658dd1ba785a75",
+  "ref": "refs/heads/wip/resume-20261104-a163-review-cic-failed-final1",
+  "payloads": 77,
+  "manifest": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/manifest.json",
+  "committed_blob_sha256_verified": true,
+  "head_index_unchanged": true,
+  "remote": "98bfaf07bc0f73c27e43e9a99e658dd1ba785a75"
+}

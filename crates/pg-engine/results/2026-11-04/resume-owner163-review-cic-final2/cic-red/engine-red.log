@@ -1,0 +1,42 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.11s
+     Running tests/golden.rs (/home/meszmate/.cache/a163/target/debug/deps/golden-6af41b6f5ce20b8e)
+
+running 1 test
+
+thread '<unnamed>' (2736078) panicked at crates/pg-engine/tests/golden.rs:191:9:
+1 of 1 golden files differ:
+
+a163_review_concurrent.sql:
+   > SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname
+   relname:name | indisvalid:bool | indisready:bool
+ - a163_cic_i | f | f
+ + -- SELECT 0
+ - -- SELECT 1
+ + 
+ - 
+ + > REINDEX INDEX CONCURRENTLY a163_cic_i
+ - > REINDEX INDEX CONCURRENTLY a163_cic_i
+ + ERROR 42P01: relation "a163_cic_i" does not exist
+ - ERROR 54000: index row requires 8320 bytes, maximum size is 8191
+ + 
+ - 
+ + > SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname
+ - > SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname
+ + relname:name | indisvalid:bool | indisready:bool
+ - relname:name | indisvalid:bool | indisready:bool
+ + -- SELECT 0
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'golden' (2736077) panicked at crates/pg-engine/tests/golden.rs:147:10:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+test golden ... FAILED
+
+failures:
+
+failures:
+    golden
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.28s
+
+error: test failed, to rerun pass `-p pg-engine --test golden`

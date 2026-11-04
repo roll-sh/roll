@@ -1,0 +1,37 @@
+{
+  "container_id": "457f0051bfa693bef05a26f4de118399162c829fd2b1e6a28f45c52e432a2305",
+  "image_id": "sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873",
+  "image_name": "postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873",
+  "command": [
+    "-c",
+    "listen_addresses=127.0.0.1",
+    "-c",
+    "port=53263"
+  ],
+  "mounts": [
+    {
+      "Type": "volume",
+      "Name": "60df48615d6bdf813fca20a3e6aab718fae723e6a28ddefd69d1ec0a19b677c3",
+      "Source": "/var/lib/docker/volumes/60df48615d6bdf813fca20a3e6aab718fae723e6a28ddefd69d1ec0a19b677c3/_data",
+      "Destination": "/var/lib/postgresql",
+      "Driver": "local",
+      "Mode": "",
+      "RW": true,
+      "Propagation": ""
+    }
+  ],
+  "network_mode": "host",
+  "version_command": [
+    "docker",
+    "exec",
+    "a163-iref",
+    "psql",
+    "-p",
+    "53263",
+    "-U",
+    "postgres",
+    "-Atc",
+    "select version();"
+  ],
+  "version_output": "PostgreSQL 18.6 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit\n"
+}

@@ -1,0 +1,99 @@
+Parsed test spec with 2 sessions
+
+starting permutation: planlock begin change lock commit final
+step planlock: EXPLAIN (COSTS OFF) SELECT id FROM rb WHERE v=1 AND id<5 FOR UPDATE;
+QUERY PLAN                           
+-------------------------------------
+LockRows                             
+  ->  Bitmap Heap Scan on rb         
+        Recheck Cond: (v = 1)        
+        Filter: (id < 5)             
+        ->  Bitmap Index Scan on rb_v
+              Index Cond: (v = 1)    
+(6 rows)
+
+step begin: BEGIN;
+step change: UPDATE rb SET v=99, w=99 WHERE id=1;
+step lock: SELECT id FROM rb WHERE v=1 AND id<5 FOR UPDATE; <waiting ...>
+step commit: COMMIT;
+step lock: <... completed>
+id
+--
+(0 rows)
+
+step final: SELECT id,v,w FROM rb WHERE id IN (1,1001) ORDER BY id;
+id| v| w
+--+--+--
+ 1|99|99
+(1 row)
+
+
+starting permutation: planor plainor begin change lockor commit plainor final
+step planor: EXPLAIN (COSTS OFF) SELECT id FROM rb WHERE (v=1 OR w=1) AND id<5 FOR UPDATE;
+QUERY PLAN                                 
+-------------------------------------------
+LockRows                                   
+  ->  Bitmap Heap Scan on rb               
+        Recheck Cond: ((v = 1) OR (w = 1)) 
+        Filter: (id < 5)                   
+        ->  BitmapOr                       
+              ->  Bitmap Index Scan on rb_v
+                    Index Cond: (v = 1)    
+              ->  Bitmap Index Scan on rb_w
+                    Index Cond: (w = 1)    
+(9 rows)
+
+step plainor: SELECT id FROM rb WHERE (v=1 OR w=1) AND id<5 ORDER BY id;
+id
+--
+ 1
+(1 row)
+
+step begin: BEGIN;
+step change: UPDATE rb SET v=99, w=99 WHERE id=1;
+step lockor: SELECT id FROM rb WHERE (v=1 OR w=1) AND id<5 FOR UPDATE; <waiting ...>
+step commit: COMMIT;
+step lockor: <... completed>
+id
+--
+(0 rows)
+
+step plainor: SELECT id FROM rb WHERE (v=1 OR w=1) AND id<5 ORDER BY id;
+id
+--
+(0 rows)
+
+step final: SELECT id,v,w FROM rb WHERE id IN (1,1001) ORDER BY id;
+id| v| w
+--+--+--
+ 1|99|99
+(1 row)
+
+
+starting permutation: planupdate begin change update commit final
+step planupdate: EXPLAIN (COSTS OFF) UPDATE rb SET id=id+1000 WHERE v=1 AND id<5 RETURNING id;
+QUERY PLAN                           
+-------------------------------------
+Update on rb                         
+  ->  Bitmap Heap Scan on rb         
+        Recheck Cond: (v = 1)        
+        Filter: (id < 5)             
+        ->  Bitmap Index Scan on rb_v
+              Index Cond: (v = 1)    
+(6 rows)
+
+step begin: BEGIN;
+step change: UPDATE rb SET v=99, w=99 WHERE id=1;
+step update: UPDATE rb SET id=id+1000 WHERE v=1 AND id<5 RETURNING id; <waiting ...>
+step commit: COMMIT;
+step update: <... completed>
+id
+--
+(0 rows)
+
+step final: SELECT id,v,w FROM rb WHERE id IN (1,1001) ORDER BY id;
+id| v| w
+--+--+--
+ 1|99|99
+(1 row)
+

@@ -1,0 +1,56 @@
+[
+  {
+    "name": "review-goldens",
+    "exit": 0,
+    "summaries": [
+      [
+        3,
+        0,
+        0
+      ]
+    ],
+    "expected": [
+      [
+        3,
+        0,
+        0
+      ]
+    ]
+  },
+  {
+    "name": "measured-include",
+    "exit": 0,
+    "summaries": [
+      [
+        1,
+        0,
+        0
+      ]
+    ],
+    "expected": [
+      [
+        1,
+        0,
+        0
+      ]
+    ]
+  },
+  {
+    "name": "bitmap-isolation",
+    "exit": 0,
+    "summaries": [
+      [
+        1,
+        0,
+        0
+      ]
+    ],
+    "expected": [
+      [
+        1,
+        0,
+        0
+      ]
+    ]
+  }
+]

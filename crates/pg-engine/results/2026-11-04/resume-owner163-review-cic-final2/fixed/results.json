@@ -1,0 +1,98 @@
+[
+  {
+    "name": "build",
+    "exit": 0,
+    "summaries": [],
+    "expected": null
+  },
+  {
+    "name": "focused",
+    "exit": 0,
+    "summaries": [
+      [
+        184,
+        0,
+        2
+      ],
+      [
+        15,
+        0,
+        0
+      ],
+      [
+        3,
+        0,
+        0
+      ],
+      [
+        3,
+        0,
+        0
+      ]
+    ],
+    "expected": [
+      [
+        184,
+        0,
+        2
+      ],
+      [
+        15,
+        0,
+        0
+      ],
+      [
+        3,
+        0,
+        0
+      ],
+      [
+        3,
+        0,
+        0
+      ]
+    ]
+  },
+  {
+    "name": "clippy",
+    "exit": 0,
+    "summaries": [],
+    "expected": null
+  },
+  {
+    "name": "release-golden",
+    "exit": 0,
+    "summaries": [
+      [
+        3,
+        0,
+        0
+      ]
+    ],
+    "expected": [
+      [
+        3,
+        0,
+        0
+      ]
+    ]
+  },
+  {
+    "name": "bitmap-isolation",
+    "exit": 0,
+    "summaries": [
+      [
+        1,
+        0,
+        0
+      ]
+    ],
+    "expected": [
+      [
+        1,
+        0,
+        0
+      ]
+    ]
+  }
+]

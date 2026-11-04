@@ -1,0 +1,19 @@
+{
+  "source_head": "483b4d6e5d41e9025aaa518d5774abd7971f4204",
+  "debug_bin_provenance": "explicit current build gate",
+  "release_bin_provenance": "cargo test --release integration build; not used for performance claims",
+  "binaries": [
+    {
+      "path": "/home/meszmate/.cache/a163/target/debug/roll-engine",
+      "bytes": 332635024,
+      "sha256": "ddaff1f2d3ec63baa817e36e4c1a16559d89539ea385a2a6cc7c82c25dce1dde",
+      "mtime_ns": 1793804650459422769
+    },
+    {
+      "path": "/home/meszmate/.cache/a163/target/release/roll-engine",
+      "bytes": 86451416,
+      "sha256": "972797f25bbebae4399e21cee04e3b824fc74bd6debb211d0c7259dd8aba87e6",
+      "mtime_ns": 1793806172755021651
+    }
+  ]
+}
