@@ -1,0 +1,12 @@
+{
+  "source_head": "af6639ec",
+  "engine_runtime_source": "unchanged5c312235",
+  "sync_crashes": 1200,
+  "async_crashes": 120,
+  "matrix_status": "PASS",
+  "oracle_controls": "debug/release PASS,injects partial and lost-ack recovered SQL states;not a deliberately broken engine binary",
+  "original_fixture": "PASS;originalstepshash unchanged",
+  "clippy": "exit0,existingwarnings",
+  "pg_e2e": "FAILED101:12passed4failed;externalrestore/connectivity",
+  "integration": "parent combined service gate held"
+}

@@ -1,0 +1,17 @@
+crash-build EXIT 0
+ack-regression EXIT 0
+sync-1 EXIT 0
+sync-2 EXIT 0
+sync-3 EXIT 0
+sync-4 EXIT 0
+sync-5 EXIT 0
+sync-6 EXIT 0
+sync-7 EXIT 0
+sync-8 EXIT 0
+sync-9 EXIT 0
+sync-10 EXIT 0
+async EXIT 0
+targeted-debug EXIT 0
+targeted-release EXIT 0
+clippy EXIT 0
+pg-e2e EXIT 101

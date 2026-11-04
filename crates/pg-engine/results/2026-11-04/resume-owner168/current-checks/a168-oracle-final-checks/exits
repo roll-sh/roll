@@ -1,0 +1,6 @@
+build-release EXIT 0
+negative-controls EXIT 0
+original-failure EXIT 0
+log-regression EXIT 0
+controls-debug EXIT 0
+clippy EXIT 0

@@ -1,0 +1,47 @@
+diff --git a/crates/pg-engine/tests/crash_random.rs b/crates/pg-engine/tests/crash_random.rs
+index 08a554be..9c456ebf 100644
+--- a/crates/pg-engine/tests/crash_random.rs
++++ b/crates/pg-engine/tests/crash_random.rs
+@@ -732,3 +732,42 @@ fn random_crashes() {
+         }
+     }
+ }
++
++#[test]
++fn recovery_oracle_rejects_partial_and_lost_acknowledged_transactions() {
++    let empty = Model::default();
++    let seed = (1..1000).find(|&seed| {
++        let (_, end, ops) = step(seed, 0, &empty);
++        let mut with = empty.clone();
++        for op in &ops { with.apply(op); }
++        end == End::Commit && with.a.len() >= 2 && ops.iter().all(|op| !matches!(op,
++            Op::AddCol(..) | Op::Index(_) | Op::MkTable(..) | Op::DropTable(_) | Op::TruncB))
++    }).unwrap();
++    for partial in [true, false] {
++        let dir = tempfile::tempdir().unwrap();
++        let eng = open(&dir.path().join("data"));
++        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
++        for sql in SCHEMA { s.query(sql).unwrap(); }
++        let mut model = Model::default();
++        run_steps(&mut s, dir.path(), seed, &mut model, 0, 1, None);
++        if partial {
++            // Deliberately construct the state a partial commit would have left.
++            let first = model.a.keys().next().unwrap();
++            s.query(&format!("DELETE FROM a WHERE id = {first}")).unwrap();
++            std::fs::write(dir.path().join("steps"), "").unwrap();
++        } else {
++            // The acknowledgement remains, but every effect of its commit is gone.
++            s.query("TRUNCATE b, a, txlog CASCADE").unwrap();
++        }
++        drop(s);
++        eng.shutdown();
++        let eng = open(&dir.path().join("data"));
++        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
++        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            settle(&mut s, dir.path(), seed);
++        })).err().expect("the recovery oracle accepted deliberately broken recovered state");
++        let message = failure.downcast_ref::<String>().map(String::as_str)
++            .or_else(|| failure.downcast_ref::<&str>().copied()).unwrap();
++        assert!(message.contains(if partial { "partial transaction" } else { "txlog against the steps logged as committed" }), "{message}");
++    }
++}
