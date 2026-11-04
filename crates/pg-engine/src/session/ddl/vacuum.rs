@@ -1653,9 +1653,20 @@ impl Ddl<'_, '_> {
                     sizes.push(relsize::heap_tuple_of_len(len));
                     continue;
                 }
-                // The scan expands TOAST values. Measure their on-page representation,
-                // including storage/compression policy and virtual or dropped columns.
-                let len = crate::exec::sizing::layout(t, &row, self.ctx, &unpinned).0;
+                // DROP does not rewrite old tuples: their stored values still occupy
+                // space. Virtual columns, in contrast, have no stored representation.
+                for &i in &virt {
+                    if let Some(value) = row.get_mut(i) {
+                        *value = Value::Null;
+                    }
+                }
+                let raw = relsize::heap_tuple_len(&types, &row, &text);
+                // Large scan values are detoasted, so use their on-page layout.
+                let len = if raw <= crate::exec::sizing::TOAST_THRESHOLD {
+                    raw
+                } else {
+                    crate::exec::sizing::layout(t, &row, self.ctx, &unpinned).0
+                };
                 sizes.push(relsize::heap_tuple_of_len(len));
             }
         }
