@@ -1,0 +1,7 @@
+{
+  "head": "4b7db3a9b0fb4c97632a192eb858340985f18e10",
+  "tree": "2065f62883022dd21a17cd7fd750e57cb4a6ee63",
+  "status": "",
+  "time_utc": "2026-11-04T18:34:37.474130+00:00",
+  "note": "Test-only4b7db3a9, production047 unchanged. PG18.6 kept667mainpages before/afterDROP, bothCOPYshapes accepted1mainpage and correctvalues/MD5. Engine newtests UNRUN; prior047focused passes do not validate these paths. No broaderfullgate/performanceclaim."
+}

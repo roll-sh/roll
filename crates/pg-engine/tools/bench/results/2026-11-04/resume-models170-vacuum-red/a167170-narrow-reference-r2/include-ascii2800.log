@@ -1,0 +1,8 @@
+ERROR:  54000: index row size 2816 exceeds btree version 4 maximum 2704 for index "vt_ascii2800_k_payload_idx"
+DETAIL:  Index row references tuple (32,80) in relation "vt_ascii2800".
+HINT:  Values larger than 1/3 of a buffer page cannot be indexed.
+Consider a function index of an MD5 hash of the value, or use full text indexing.
+SCHEMA NAME:  public
+TABLE NAME:  vt_ascii2800
+CONSTRAINT NAME:  vt_ascii2800_k_payload_idx
+LOCATION:  _bt_check_third_page, nbtutils.c:4231

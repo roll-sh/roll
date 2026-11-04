@@ -1,0 +1,24 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a0718617fe2ff9006/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.12s
+     Running tests/vacuum_toast_measure.rs (/home/meszmate/.cache/a170/target/debug/deps/vacuum_toast_measure-1b0b2de39716b05f)
+
+running 2 tests
+
+thread 'vacuum_measures_large_unicode_heap' (1982819) panicked at crates/pg-engine/src/catalog/relsize.rs:591:9:
+attempt to subtract with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test vacuum_measures_large_unicode_heap ... FAILED
+
+thread 'vacuum_measures_large_ascii_heap' (1982818) panicked at crates/pg-engine/src/catalog/relsize.rs:591:9:
+attempt to subtract with overflow
+test vacuum_measures_large_ascii_heap ... FAILED
+
+failures:
+
+failures:
+    vacuum_measures_large_ascii_heap
+    vacuum_measures_large_unicode_heap
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.18s
+
+error: test failed, to rerun pass `-p pg-engine --test vacuum_toast_measure`
