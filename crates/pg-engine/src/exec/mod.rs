@@ -106,6 +106,13 @@ pub trait Node {
         Ok(None)
     }
 
+    /// ExecReScan: read again from the start, under the enclosing rows the caller pushed
+    /// now (`ExecCtx::with_outer`), whose values a parameterized scan's conditions read.
+    /// False: this node can't, and nothing changed (the caller opens the plan again).
+    fn rescan(&mut self, _ctx: &ExecCtx) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Before its first row: a node that can may leave out the rows whose column `col` (an
     /// oid) is none of `keys`, which nothing above can match (an inner or semi hash join's
     /// outer side, its inner side built: a catalog scan then reads the matching rows through

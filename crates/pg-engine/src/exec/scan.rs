@@ -802,120 +802,37 @@ fn open_scan_as(
     s: &ScanPlan,
     shared: Option<&Arc<crate::sql::plan::Plan>>,
     key: usize,
-    mut ranges: Vec<(Vec<u8>, Vec<u8>)>,
+    ranges: Vec<(Vec<u8>, Vec<u8>)>,
     need: Option<Rc<[bool]>>,
     ctx: &ExecCtx,
 ) -> Result<BoxNode> {
     let secondary = s.current_of.is_none() && s.index.as_ref().is_some_and(|(ix, _)| reads_entries(ix));
     let only = s.current_of.as_ref().map(|_| ranges[0].0.clone());
     let rev = s.reverse && s.index.is_some() && only.is_none();
-    if rev {
-        ranges.reverse();
-    }
     let sample = s
         .sample
         .as_deref()
         .map(|ts| Sampler::new(ts, ctx))
         .transpose()?;
-    // A btree index scan marks the dead entries it passes (kill_prior_tuple): as it passes
-    // them, or (an index-only scan under EXPLAIN ANALYZE, which counts the heap fetches of
-    // the entries it passes) the whole of its ranges now.
-    let ios = matches!(s.access, Access::Index { only: true, .. }) && ctx.instrumented();
-    let mut ios_entries = None;
-    let mut kills = None;
-    if let (Some((ix, _)), None) = (&s.index, &s.current_of)
-        && ix.method == "btree"
-        && matches!(s.access, Access::Index { .. } | Access::Unplanned)
-    {
-        let prefix = index_prefix(s.table.oid, ix.id);
-        if ios {
-            ios_entries = super::sizing::index_scanned(s.table.oid, ix.oid, &prefix, &ranges, true, ctx)
-                .map(IosEntries::new);
-        } else {
-            kills = super::sizing::Kills::new(s.table.oid, ix.oid, &prefix, &ranges, rev, ctx);
-        }
-    }
     let ios_cols = if secondary && only.is_none() {
         index_only_columns(s, ctx)
     } else {
         None
     };
-    // (An index-only scan under EXPLAIN ANALYZE counts what its whole ranges hold.)
-    let skip = match (&s.index, &only) {
-        (Some((ix, b)), None) if ix.method == "btree" && !ios && s.sample.is_none() => b.skip.as_ref().map(|sk| {
-            Box::new(Skip { scan: (**sk).clone(), main: (Vec::new(), Vec::new()), pre: None, targets: Default::default(), misses: 0, plain: false })
-        }),
-        _ => None,
-    };
-    let heap_read = s
-        .index
-        .as_ref()
-        .is_some_and(|(ix, _)| !matches!(ix.method.as_str(), "btree" | "hash"));
     // A `roll_pk_clustered` table's rows come in key order, as stored (read as they come,
     // its pages pruned as a sequential scan's are).
     let clustered = s.table.storage_pkey().is_some() && s.table.pk_clustered();
     if clustered && only.is_none() && s.index.is_none() && s.sample.is_none() {
         super::sizing::scanned_pages(s.table.oid, 0, None, ctx);
     }
+    let heap_read = s
+        .index
+        .as_ref()
+        .is_some_and(|(ix, _)| !matches!(ix.method.as_str(), "btree" | "hash"));
     let tid_order =
         !clustered && only.is_none() && (s.index.is_none() || secondary || heap_read);
-    // pgstat_count_heap_scan / pgstat_count_index_scan (a sample scan isn't counted as a
-    // scan, its rows are).
-    let stat = if only.is_some() || !super::pgstat::scan_counts(ctx) {
-        StatTarget::Off
-    } else {
-        match &s.index {
-            Some((ix, _)) => {
-                super::pgstat::count_index_scan(ctx, ix.oid);
-                StatTarget::Index(ix.oid)
-            }
-            None => {
-                if s.sample.is_none() {
-                    super::pgstat::count_seqscan(ctx, s.table.oid);
-                    let n = super::sizing::modelled_blocks(s.table.oid, ctx).unwrap_or(0) as i64;
-                    super::pgstat::count_blocks(ctx, s.table.oid, n);
-                    super::pgstat::io_scan(ctx, s.table.oid, n);
-                }
-                StatTarget::Seq(s.table.oid)
-            }
-        }
-    };
-    // SSI: a sequential scan predicate-locks the whole relation as it starts, and meets
-    // every tuple concurrent transactions wrote there; an index scan locks the index pages
-    // it reads (the relation, for an index without pages modelled) and meets the entries
-    // concurrent transactions added in its ranges; the tuples it fetches are locked as it
-    // fetches them (`ssi_fetched`; a TID scan's too).
-    if only.is_none()
-        && !matches!(s.access, Access::Tid { .. } | Access::TidRange(_))
-        && predicate_locked(&s.table, ctx)
-    {
-        let me = ctx.txn.borrow().id;
-        let ssi = &ctx.sess.db.ssi;
-        match &s.index {
-            None => {
-                ctx.txn.borrow_mut().predicate_lock(s.table.oid, None);
-                ssi.read_relation(me, s.table.oid)?;
-            }
-            Some((ix, _)) if ix.id != 0 => {
-                let prefix = index_prefix(s.table.oid, ix.id);
-                let pages = match ix.method.as_str() {
-                    "btree" => super::sizing::btree_leaf_pages(s.table.oid, ix.oid, &prefix, &ranges, &ctx.sess.db),
-                    "hash" => hash_scan_buckets(s, ix, ctx)?,
-                    _ => None,
-                };
-                match pages {
-                    Some(ps) if !ps.is_empty() => {
-                        for p in ps {
-                            ctx.txn.borrow_mut().predicate_lock_page(ix.oid, p);
-                        }
-                    }
-                    _ => ctx.txn.borrow_mut().predicate_lock(ix.oid, None),
-                }
-                ssi.read_entries(me, ix.oid, &ranges)?;
-            }
-            Some(_) => {}
-        }
-    }
+    let Bound { ranges, kills, ios_entries, skip, stat } = bind_scan(s, ranges, only.is_some(), rev, ctx)?;
+    let ios = matches!(s.access, Access::Index { only: true, .. }) && ctx.instrumented();
     Ok(Box::new(ScanNode {
         stat,
         sample,
@@ -968,6 +885,124 @@ fn open_scan_as(
         am: None,
         one_run: collation_equal_run(s),
     }))
+}
+
+/// Whether `plan` is a scan `ScanNode::rescan_index` rescans: a btree or hash index scan
+/// read by its ranges.
+pub fn rescans(plan: &crate::sql::plan::Plan) -> bool {
+    let crate::sql::plan::Plan::Scan(s) = plan else { return false };
+    let Some((ix, b)) = &s.index else { return false };
+    s.current_of.is_none()
+        && s.sample.is_none()
+        && s.table.foreign.is_none()
+        && matches!(s.access, Access::Index { .. })
+        && matches!(ix.method.as_str(), "btree" | "hash")
+        && b.order.is_empty()
+}
+
+/// What a scan over its ranges starts with, at open and again at each rescan.
+struct Bound {
+    ranges: Vec<(Vec<u8>, Vec<u8>)>,
+    kills: Option<super::sizing::Kills>,
+    ios_entries: Option<IosEntries>,
+    skip: Option<Box<Skip>>,
+    stat: StatTarget,
+}
+
+/// A scan of `s` starting over `ranges` (`only`: WHERE CURRENT OF's one key; `rev`: read
+/// backward): its ranges in the order it reads them, its LP_DEAD marks (or EXPLAIN
+/// ANALYZE's entries), its skip scan, the scan counted in the statistics, its SSI locks.
+fn bind_scan(s: &ScanPlan, mut ranges: Vec<(Vec<u8>, Vec<u8>)>, only: bool, rev: bool, ctx: &ExecCtx) -> Result<Bound> {
+    if rev {
+        ranges.reverse();
+    }
+    // A btree index scan marks the dead entries it passes (kill_prior_tuple): as it passes
+    // them, or (an index-only scan under EXPLAIN ANALYZE, which counts the heap fetches of
+    // the entries it passes) the whole of its ranges now.
+    let ios = matches!(s.access, Access::Index { only: true, .. }) && ctx.instrumented();
+    let mut ios_entries = None;
+    let mut kills = None;
+    if let (Some((ix, _)), false) = (&s.index, only)
+        && ix.method == "btree"
+        && matches!(s.access, Access::Index { .. } | Access::Unplanned)
+    {
+        let prefix = index_prefix(s.table.oid, ix.id);
+        if ios {
+            ios_entries = super::sizing::index_scanned(s.table.oid, ix.oid, &prefix, &ranges, true, ctx)
+                .map(IosEntries::new);
+        } else {
+            kills = super::sizing::Kills::new(s.table.oid, ix.oid, &prefix, &ranges, rev, ctx);
+        }
+    }
+    // (An index-only scan under EXPLAIN ANALYZE counts what its whole ranges hold.)
+    let skip = match (&s.index, only) {
+        (Some((ix, b)), false) if ix.method == "btree" && !ios && s.sample.is_none() => b.skip.as_ref().map(|sk| {
+            Box::new(Skip { scan: (**sk).clone(), main: (Vec::new(), Vec::new()), pre: None, targets: Default::default(), misses: 0, plain: false })
+        }),
+        _ => None,
+    };
+    // pgstat_count_heap_scan / pgstat_count_index_scan (a sample scan isn't counted as a
+    // scan, its rows are).
+    let stat = if only || !super::pgstat::scan_counts(ctx) {
+        StatTarget::Off
+    } else {
+        match &s.index {
+            Some((ix, _)) => {
+                // (A btree scan whose conditions can't hold, a NULL key among them, ends
+                // before it is counted: _bt_first's qual_ok. A hash scan counts first.)
+                if !(ranges.is_empty() && ix.method == "btree") {
+                    super::pgstat::count_index_scan(ctx, ix.oid);
+                }
+                StatTarget::Index(ix.oid)
+            }
+            None => {
+                if s.sample.is_none() {
+                    super::pgstat::count_seqscan(ctx, s.table.oid);
+                    let n = super::sizing::modelled_blocks(s.table.oid, ctx).unwrap_or(0) as i64;
+                    super::pgstat::count_blocks(ctx, s.table.oid, n);
+                    super::pgstat::io_scan(ctx, s.table.oid, n);
+                }
+                StatTarget::Seq(s.table.oid)
+            }
+        }
+    };
+    // SSI: a sequential scan predicate-locks the whole relation as it starts, and meets
+    // every tuple concurrent transactions wrote there; an index scan locks the index pages
+    // it reads (the relation, for an index without pages modelled) and meets the entries
+    // concurrent transactions added in its ranges; the tuples it fetches are locked as it
+    // fetches them (`ssi_fetched`; a TID scan's too).
+    if !only
+        && !matches!(s.access, Access::Tid { .. } | Access::TidRange(_))
+        && predicate_locked(&s.table, ctx)
+    {
+        let me = ctx.txn.borrow().id;
+        let ssi = &ctx.sess.db.ssi;
+        match &s.index {
+            None => {
+                ctx.txn.borrow_mut().predicate_lock(s.table.oid, None);
+                ssi.read_relation(me, s.table.oid)?;
+            }
+            Some((ix, _)) if ix.id != 0 => {
+                let prefix = index_prefix(s.table.oid, ix.id);
+                let pages = match ix.method.as_str() {
+                    "btree" => super::sizing::btree_leaf_pages(s.table.oid, ix.oid, &prefix, &ranges, &ctx.sess.db),
+                    "hash" => hash_scan_buckets(s, ix, ctx)?,
+                    _ => None,
+                };
+                match pages {
+                    Some(ps) if !ps.is_empty() => {
+                        for p in ps {
+                            ctx.txn.borrow_mut().predicate_lock_page(ix.oid, p);
+                        }
+                    }
+                    _ => ctx.txn.borrow_mut().predicate_lock(ix.oid, None),
+                }
+                ssi.read_entries(me, ix.oid, &ranges)?;
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(Bound { ranges, kills, ios_entries, skip, stat })
 }
 
 /// An index or bitmap heap scan fetched row `key` (stored as `bytes`): PredicateLockTID on
@@ -2154,6 +2189,10 @@ struct ScanNode {
     am: Option<Box<crate::ext::index_am::ScanState>>,
 }
 
+/// Index scans rescanned in place (`ScanNode::rescan_index`), for tests.
+#[doc(hidden)]
+pub static INDEX_RESCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Rows index-only scans made from index entries alone (`ScanNode::index_row`), for tests.
 #[doc(hidden)]
 pub static ROWS_FROM_INDEX_ENTRIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2575,6 +2614,53 @@ fn backward_order(s: &ScanPlan, key: &[u8], run: &mut Vec<(Vec<u8>, bytes::Bytes
 }
 
 impl ScanNode {
+    /// `Node::rescan` (ExecReScanIndexScan): a btree or hash index scan's ranges bound again
+    /// to the enclosing rows pushed now, and read from their start. What it compiled,
+    /// decided and allocated stays (the plan, `need`, the masks, the row buffers); what it
+    /// read goes. False: a scan of another kind, which the caller opens again.
+    fn rescan_index(&mut self, ctx: &ExecCtx) -> Result<bool> {
+        let s: &ScanPlan = &self.plan;
+        let Some((ix, b)) = &s.index else { return Ok(false) };
+        if self.keys.is_some()
+            || self.am.is_some()
+            || self.only.is_some()
+            || self.sample.is_some()
+            || self.par.is_some()
+            || self.ios
+            || ctx.instrumented()
+            || !matches!(ix.method.as_str(), "btree" | "hash")
+            || !matches!(s.access, Access::Index { .. })
+            || !b.order.is_empty()
+        {
+            return Ok(false);
+        }
+        let r = ranges(&s.table, ix, b, ctx)?;
+        // (The entries the last scan passed are marked as it goes.)
+        self.kills = None;
+        let bound = bind_scan(s, r, false, self.rev, ctx)?;
+        self.ranges = bound.ranges;
+        self.kills = bound.kills;
+        self.ios_entries = bound.ios_entries;
+        self.skip = bound.skip;
+        self.stat = bound.stat;
+        self.cur_range = 0;
+        self.iter = None;
+        self.rb.clear();
+        self.rb_max = RB_MIN;
+        self.held = false;
+        self.one = None;
+        self.run_blocks.clear();
+        self.emitted = 0;
+        self.run.clear();
+        self.pending = None;
+        self.fetched.clear();
+        self.batch = FETCH_BATCH_MIN;
+        self.last_block = None;
+        self.toast = None;
+        INDEX_RESCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(true)
+    }
+
     /// Starts reading the next range (false: none left), in descending key order for a
     /// backward scan.
     fn open_range(&mut self, ctx: &ExecCtx) -> bool {
@@ -4293,6 +4379,10 @@ impl Node for ScanNode {
             return self.next_par(ctx);
         }
         Ok(self.next(ctx)?.map(|r| super::pipe::Item::Row(r, super::pipe::ALL)))
+    }
+
+    fn rescan(&mut self, ctx: &ExecCtx) -> Result<bool> {
+        self.rescan_index(ctx)
     }
 
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {

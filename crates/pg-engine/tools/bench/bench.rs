@@ -5,8 +5,15 @@
 //!     bench --target inproc --data <dir> <workload> [options]
 //!
 //! Workloads: oltp-load, oltp, analytic-load, analytic, tpch-load, tpch, bulk, stream-load, stream,
-//! ddl, scale, idle, burst-load, burst,
+//! ddl, scale, idle, burst-load, burst, nl-load, nl,
 //! startup, startup-catalog, vector (pgvector). Results are printed as `RESULT\t<label>\t<workload>\t<case>\t<k=v>...` lines.
+
+/// The nested loop workload's settings, then the query, as one string.
+macro_rules! nl_query {
+    ($q:literal) => {
+        concat!("SET enable_hashjoin = off; SET enable_mergejoin = off; SET max_parallel_workers_per_gather = 0; ", $q)
+    };
+}
 
 mod access;
 mod burst;
@@ -1061,6 +1068,28 @@ fn analytic(cx: &Ctx) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Nested loops over a parameterized inner index scan (ExecReScan per outer row)
+
+fn nl_load(cx: &Ctx) {
+    let rows: i64 = cx.opt("rows", 1_000_000);
+    let mut c = cx.conn();
+    let t0 = Instant::now();
+    run_script(c.as_mut(), "DROP TABLE IF EXISTS nl_t");
+    run_script(c.as_mut(), "CREATE TABLE nl_t (id int PRIMARY KEY, v int)");
+    must(c.simple(&format!("INSERT INTO nl_t SELECT i, i % 1000 FROM generate_series(1, {rows}) i")), "nl_t");
+    run_script(c.as_mut(), "VACUUM ANALYZE nl_t");
+    cx.report("nl-load", "load", &[("secs", format!("{:.2}", t0.elapsed().as_secs_f64()))]);
+}
+
+/// Hash and merge joins off, serial (`nl_query!`): each outer row's inner index lookup is a
+/// rescan.
+const NL_QUERIES: &[(&str, &str)] = &[
+    ("inner", nl_query!("SELECT sum(t.v) FROM generate_series(1, 200000) g JOIN nl_t t ON t.id = g")),
+    ("semi", nl_query!("SELECT count(*) FROM generate_series(1, 200000) g WHERE EXISTS (SELECT 1 FROM nl_t t WHERE t.id = g * 3)")),
+    ("left", nl_query!("SELECT count(t.v) FROM generate_series(1, 200000) g LEFT JOIN nl_t t ON t.id = g * 7")),
+];
+
+// ---------------------------------------------------------------------------------------------
 // TPC-H
 
 fn tpch_load(cx: &Ctx) {
@@ -1809,6 +1838,8 @@ fn main() {
             "analytic" => analytic(&cx),
             "tpch-load" => tpch_load(&cx),
             "tpch" => run_queries(&cx, "tpch", tpch::QUERIES),
+            "nl-load" => nl_load(&cx),
+            "nl" => run_queries(&cx, "nl", NL_QUERIES),
             "bulk" => bulk(&cx),
             "stream-load" => stream_load(&cx),
             "stream" => stream(&cx),
