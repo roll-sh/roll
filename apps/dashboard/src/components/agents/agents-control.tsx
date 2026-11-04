@@ -101,7 +101,7 @@ function Pill({ count, waiting, first }: { count: number; waiting: number; first
   );
 }
 
-/** The agents over the page: nearly the whole window, the page dimmed behind it. */
+/** The agents over the page: the whole window, like an app of its own. */
 function Popup({ client, services, error, demo }: Pick<ReturnType<typeof useAgentsConnection>, "client" | "services" | "error"> & { demo: boolean }) {
   const { open, view } = useAgentsSurface();
 
@@ -132,7 +132,7 @@ function Popup({ client, services, error, demo }: Pick<ReturnType<typeof useAgen
         aria-modal="true"
         aria-label="Agents"
         data-surface
-        className="sheet-in absolute inset-0 overflow-hidden bg-bg sm:inset-x-4 sm:top-3 sm:bottom-4 sm:rounded-xl sm:border sm:border-line-2 lg:inset-x-8 lg:top-5 lg:bottom-6"
+        className="sheet-in absolute inset-0 overflow-hidden bg-bg"
       >
         {client && services ? (
           <AgentsSurface client={client} services={services} demo={demo} chrome="popup" onClose={hideAgents} />
