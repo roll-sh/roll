@@ -294,6 +294,15 @@ The product should feel alive: dots react to the cursor and the marks "think". E
       Code's chat (popups scale from their trigger, disclosures animate their height, sheets
       slide in, 150–300 ms, reduced motion honoured); its components name the T3 files they
       follow.
+  - Chat ops (docs/code/chatops.md): `crates/code-chat` is the Slack and Discord wire (no roll
+    types); `crates/code-control/src/chatops/` holds installs, the action queue, bindings, and the
+    `slack`/`discord`/`github` triggers and steps. A platform's request is verified (signature and
+    timestamp), then recorded in `chat_actions` by the platform's own id, before it's acknowledged.
+    Answers and steers act as the automation that bound the chat thread, through the API
+    (`Code::automation_api`), never by calling the relay directly. Only the install's members may drive
+    roll from a workspace. GitHub comments count only from `OWNER`/`MEMBER`/`COLLABORATOR`, and a
+    fork's pull request counts only after `approve-run`. Tests: `code-control/tests/chatops.rs`,
+    `github.rs` (`automations_*`), `roll-cli/tests/agent.rs::a_slack_button_answers_the_fake_providers_approval`.
   - After touching anything agents-related, run `pnpm test:agents` (it skips itself when nothing
     relevant changed; `--unit` skips the end-to-end run). New tests go in
     `agent-host/tests/{orchestrator,threads,git,terminal,mcp,relay,codex,claude,acp}.rs`,

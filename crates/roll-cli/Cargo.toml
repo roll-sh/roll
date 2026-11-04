@@ -44,7 +44,9 @@ urlencoding.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+code-chat.workspace = true
 code-control.workspace = true
+code-sql.workspace = true
 pg-storage.workspace = true
 tempfile.workspace = true
 aws-sdk-s3.workspace = true

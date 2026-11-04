@@ -29,6 +29,7 @@ import {
   withDefault,
   type Decoder,
 } from "./decode";
+import { createIntegrationsApi } from "./integrations-api";
 import {
   automationD,
   automationRunD,
@@ -1626,6 +1627,8 @@ export function createAgentsApi(
     authHeaders,
     /** `/v1/code/agents/{owner}/automations…` (`automations-api.ts`). */
     automations: createAutomationsApi(call),
+    /** `/v1/code/agents/{owner}/integrations…` (`integrations-api.ts`): Slack, Discord and GitHub. */
+    integrations: createIntegrationsApi(call),
     /** The fetch this client uses (the event stream follows it too). */
     fetch: doFetch,
     state: async (owner: string, threads: readonly string[] = []) =>

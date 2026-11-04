@@ -839,6 +839,43 @@ POST   /v1/code/agents/{owner}/automations/{id}/webhook  (no token: the signatur
        automation or not a webhook trigger, 409 disabled, 413 too big.
 ```
 
+## Chat ops
+
+Slack, Discord and GitHub for the agents (docs/code/chatops.md). The owner's integrations are under
+`/v1/code/agents/{owner}`, routed like the rest of it; the owner manages them and its agent tokens
+get 403.
+
+```
+GET    /v1/code/agents/{owner}/integrations → {
+         slack:   {configured, installs: [Install]},
+         discord: {configured, installs: [Install]},
+         github:  {configured, app_slug, install_url, repos: [{repo, github, url, connected, mirror}]},
+         sealing: bool}                                 # ROLL_SECRET_KEY set (Slack needs it)
+       Install = {id, team_id, team_name, bot_user_id, installer, members: [user id], anyone, created_at}
+POST   /v1/code/agents/{owner}/integrations/{slack|discord}/install → {url}
+       The platform's install URL with a one-time state (10 minutes). 422 when the platform (or, for
+       Slack, ROLL_SECRET_KEY) isn't configured; 404 an unknown platform.
+PATCH  /v1/code/agents/{owner}/integrations/{platform}/{id}  {members?: [user id], anyone?} → Install
+       Who may drive roll from it besides the installer. 400 more than 200 ids or one that isn't
+       letters and digits.
+DELETE /v1/code/agents/{owner}/integrations/{platform}/{id} → 204
+```
+
+The platforms' endpoints, which any node answers (`cluster::classify`: global). Each one is 404 while
+its platform isn't configured, and 401 on a missing, wrong or stale signature (more than five
+minutes off).
+
+```
+GET  /v1/code/chat/slack/oauth?code&state      → 303 to {web}/dashboard/agents?owner=…&settings=integrations&integration=slack&connected=<team>
+                                                  (or &error=expired | <why>, e.g. the workspace belongs to another owner)
+GET  /v1/code/chat/discord/oauth?code&state     → the same for Discord (the guild from the token exchange, not the query)
+POST /v1/code/chat/slack/events                 Events API: {challenge} for url_verification; else 200, recorded once per event_id
+POST /v1/code/chat/slack/commands               /roll: 200 {response_type: "ephemeral", text}
+POST /v1/code/chat/slack/interactions           buttons, selects, modals: 200 (empty)
+POST /v1/code/chat/discord/interactions         200 with the interaction's answer: {type: 1} a ping, 4 an ephemeral
+                                                line, 6 a deferred update, 9 a modal
+```
+
 ## MCP
 
 `/v1/code/mcp` is an MCP server (Streamable HTTP, JSON-RPC 2.0) whose tools call this API on the

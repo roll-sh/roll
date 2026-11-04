@@ -47,6 +47,7 @@ import { memoryCanvas, memorySettings, type AgentsServices, type RepoChoice } fr
 import { offeredProviders, settingsError } from "./machine-settings";
 import { ApiError } from "./code-api";
 import type { Sandbox, SandboxSize } from "./sandboxes-api";
+import { isMemberId, MAX_MEMBERS, type ChatInstall, type ChatPlatform, type Integrations, type IntegrationsApi } from "./integrations-api";
 
 // ── the cast ──
 
@@ -116,6 +117,65 @@ const DEMO_REPOS: RepoChoice[] = [
   { owner: "acme", name: "infra", full_name: "acme/infra", description: null, visibility: "private", updated_at: 1_761_800_000 },
   { owner: "acme", name: "docs", full_name: "acme/docs", description: "Guides and the API reference", visibility: "public", updated_at: 1_761_700_000 },
 ];
+
+/**
+ * The demo's chat ops, in memory: Slack connected to "Acme" (its members editable, disconnecting
+ * forgets it), Discord not configured on the server, the GitHub App configured with two repos.
+ * Connecting can't leave the demo, so it says why instead.
+ */
+export function demoIntegrations(): IntegrationsApi {
+  const state: Integrations = {
+    slack: {
+      configured: true,
+      installs: [
+        {
+          id: "chi_demo1",
+          team_id: "T04ACME",
+          team_name: "Acme",
+          bot_user_id: "U07ROLLBOT",
+          installer: "U02ADA",
+          members: ["U03GRACE"],
+          anyone: false,
+          created_at: 1_761_500_000_000,
+        },
+      ],
+    },
+    discord: { configured: false, installs: [] },
+    github: {
+      configured: true,
+      app_slug: "roll-code",
+      install_url: "https://github.com/apps/roll-code/installations/new",
+      repos: [
+        { repo: "acme/roll", github: "acme-inc/roll", url: "https://github.com/acme-inc/roll", connected: true, mirror: "ok" },
+        { repo: "acme/web", github: "acme-inc/web", url: "https://github.com/acme-inc/web", connected: true, mirror: "pending" },
+      ],
+    },
+    sealing: true,
+  };
+  const find = (platform: ChatPlatform, id: string) => {
+    const i = state[platform].installs.find((x) => x.id === id);
+    if (!i) throw new ApiError(`integration ${id} not found`, 404, null);
+    return i;
+  };
+  return {
+    list: async () => structuredClone(state),
+    install: async (_o, platform) => {
+      throw new ApiError(`The demo can't connect ${platform === "slack" ? "Slack" : "Discord"}. On your own server, this opens its install page.`, 422, null);
+    },
+    update: async (_o, platform, id, patch) => {
+      const i = find(platform, id);
+      const members = patch.members?.map((m) => m.trim()).filter(Boolean);
+      if (members && (members.length > MAX_MEMBERS || !members.every(isMemberId))) throw new ApiError("members are at most 200 platform user ids (letters and digits)", 400, null);
+      const next: ChatInstall = { ...i, members: members ? [...new Set(members)] : i.members, anyone: patch.anyone ?? i.anyone };
+      state[platform].installs = state[platform].installs.map((x) => (x.id === id ? next : x));
+      return structuredClone(next);
+    },
+    remove: async (_o, platform, id) => {
+      find(platform, id);
+      state[platform].installs = state[platform].installs.filter((x) => x.id !== id);
+    },
+  };
+}
 
 /**
  * What a demo daemon reports about its providers and settings, as `roll agent up` does: the
@@ -513,6 +573,8 @@ export class DemoOwner implements AgentsTransport {
   private canvas = memoryCanvas();
   /** The demo owner's agents settings, the same. */
   private settings = memorySettings();
+  /** The demo owner's Slack, Discord and GitHub, the same. */
+  private integrations = demoIntegrations();
   /** Every provider each demo machine has, on or off (its info lists the ones on). */
   private allProviders = new Map<MachineId, ProviderInfo[]>();
   /** The demo's automations and their runs (`automations-demo.ts`): runs start threads here. */
@@ -883,6 +945,7 @@ export class DemoOwner implements AgentsTransport {
       },
       canvas: owner.canvas,
       settings: owner.settings,
+      integrations: owner.integrations,
     };
   }
 

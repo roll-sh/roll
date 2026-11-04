@@ -106,8 +106,37 @@ async fn comment(State(m): S, Path((o, r, n)): Path<(String, String, u64)>, Json
     Json(json!({ "id": 1, "body": b["body"] }))
 }
 
-async fn pulls(State(m): S) -> Json<Value> {
-    Json(Value::Array(m.pulls.lock().values().filter(|p| p["state"] == "open").cloned().collect()))
+async fn pulls(State(m): S, axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>) -> Json<Value> {
+    // `head=owner:branch` narrows it to that branch's pull request, as GitHub does.
+    let head = q.get("head").and_then(|h| h.split_once(':')).map(|(_, b)| b.to_string());
+    Json(Value::Array(m.pulls.lock().values().filter(|p| p["state"] == "open" && head.as_ref().is_none_or(|h| p["head"]["ref"] == h.as_str())).cloned().collect()))
+}
+
+async fn create_pull(State(m): S, Path((o, r)): Path<(String, String)>, Json(b): Json<Value>) -> Json<Value> {
+    record(&m, "POST", format!("/repos/{o}/{r}/pulls"), b.clone());
+    let n = 50 + m.pulls.lock().len() as u64;
+    let pr = json!({
+        "number": n, "title": b["title"], "body": b["body"], "state": "open", "draft": b["draft"], "html_url": format!("https://github.com/{o}/{r}/pull/{n}"),
+        "user": { "login": "roll-test[bot]", "id": 1 }, "head": { "ref": b["head"], "sha": "0".repeat(40), "repo": repo_json(&m) }, "base": { "ref": b["base"], "sha": "0".repeat(40), "repo": repo_json(&m) },
+    });
+    m.pulls.lock().insert(n, pr.clone());
+    Json(pr)
+}
+
+async fn add_labels(State(m): S, Path((o, r, n)): Path<(String, String, u64)>, Json(b): Json<Value>) -> Json<Value> {
+    record(&m, "POST", format!("/repos/{o}/{r}/issues/{n}/labels"), b.clone());
+    Json(Value::Array(b["labels"].as_array().cloned().unwrap_or_default().into_iter().map(|l| json!({ "name": l })).collect()))
+}
+
+async fn remove_label(State(m): S, Path((o, r, n, l)): Path<(String, String, u64, String)>) -> Response {
+    record(&m, "DELETE", format!("/repos/{o}/{r}/issues/{n}/labels/{l}"), Value::Null);
+    // GitHub's answer for a label the issue doesn't have.
+    if l == "absent" { (StatusCode::NOT_FOUND, Json(json!({ "message": "Label does not exist" }))).into_response() } else { Json(json!([])).into_response() }
+}
+
+async fn create_status(State(m): S, Path((o, r, sha)): Path<(String, String, String)>, Json(b): Json<Value>) -> Json<Value> {
+    record(&m, "POST", format!("/repos/{o}/{r}/statuses/{sha}"), b.clone());
+    Json(json!({ "id": 1, "state": b["state"], "context": b["context"] }))
 }
 
 async fn pull(State(m): S, Path((_o, _r, n)): Path<(String, String, u64)>) -> Response {
@@ -228,7 +257,10 @@ async fn github_mock() -> GitHub {
         .route("/repos/{o}/{r}/issues", get(issues))
         .route("/repos/{o}/{r}/issues/{n}", get(issue).patch(patch_issue))
         .route("/repos/{o}/{r}/issues/{n}/comments", post(comment))
-        .route("/repos/{o}/{r}/pulls", get(pulls))
+        .route("/repos/{o}/{r}/issues/{n}/labels", post(add_labels))
+        .route("/repos/{o}/{r}/issues/{n}/labels/{l}", axum::routing::delete(remove_label))
+        .route("/repos/{o}/{r}/statuses/{sha}", post(create_status))
+        .route("/repos/{o}/{r}/pulls", get(pulls).post(create_pull))
         .route("/repos/{o}/{r}/pulls/{n}", get(pull).patch(patch_pull))
         .route("/repos/{o}/{r}/pulls/{n}/reviews", post(create_review))
         .route("/repos/{o}/{r}/pulls/{n}/reviews/{id}/comments", get(review_comments))
@@ -1636,4 +1668,200 @@ async fn outbound_notifications_once_each() {
     a.ok("POST", &format!("/v1/code/work/{w12}/complete"), None).await;
     until("issue 12's notification handled", || async { mark(a, &format!("issue-closed:{w12}")).as_deref() == Some("done") }).await;
     assert!(!g.mock.calls.lock().iter().any(|(_, p, _)| p.starts_with("/repos/acme/app/issues/12")));
+}
+
+// ── automations (chatops::github) ──
+
+/// A connected acme/app (imported), with an automation listening to GitHub: what an owner who
+/// set one up has. (App, the mock, its scratch dir, the history checkout, main's sha.)
+async fn connected_with_automation() -> (App, GitHub, tempfile::TempDir, std::path::PathBuf, String) {
+    let g = github_mock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let w = seed(tmp.path(), &format!("{}/git/acme/app.git", g.base));
+    let main_sha = git(tmp.path(), &w, &["rev-parse", "main"]).trim().to_string();
+    let a = app(Some("admin-secret"));
+    enable(&a, &g, fast_mirror());
+    let admin = Some("admin-secret");
+    a.req("POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" })), admin).await;
+    let connect = json!({ "owner": "acme", "name": "app", "source": { "github": { "installation_id": INSTALLATION, "owner": "acme", "repo": "app" } } });
+    let (s, body) = a.req("POST", "/v1/code/repos", Some(connect), admin).await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    until("import", || async { a.req("GET", "/v1/code/repos/acme/app", None, admin).await.1["import"]["state"] == "done" }).await;
+    let owner = a.code.db.owner("acme").unwrap().unwrap().id;
+    let db = a.code.db.sql();
+    db.execute(
+        "INSERT INTO automations (id, owner_id, spec, enabled, source, revision, cursor, created_at, updated_at, created_by) VALUES ('aut_gh', ?, '{}', 1, 'github', 1, 0, 0, 0, 'test')",
+        [owner.as_str()],
+    )
+    .unwrap();
+    db.execute("INSERT INTO automation_listens (automation_id, owner_id, source, kind, repo_id) VALUES ('aut_gh', ?, 'github', '*', '*')", [owner.as_str()]).unwrap();
+    (a, g, tmp, w, main_sha)
+}
+
+fn automation_events(a: &App) -> Vec<(String, String, Value)> {
+    a.code
+        .db
+        .sql()
+        .query("SELECT key, kind, data FROM automation_events WHERE source = 'github' ORDER BY at, id", code_sql::params![], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })
+        .unwrap()
+        .into_iter()
+        .map(|(k, kind, d)| (k, kind, serde_json::from_str(&d).unwrap()))
+        .collect()
+}
+
+/// GitHub events become the owner's automation events: issues, `@roll` comments only from people
+/// who can push, review requests, failing checks on main; a fork's pull request only once a
+/// writer approved its head; a redelivery records nothing twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn automations_hear_github_with_comment_authority_and_forks() {
+    let (a, g, tmp, w, main_sha) = connected_with_automation().await;
+    let repo = repo_json(&g.mock);
+    let inst = json!({ "id": INSTALLATION });
+    let kinds = |a: &App| automation_events(a).into_iter().map(|e| e.1).collect::<Vec<_>>();
+
+    let mut issue = issue_json(11, "Login 500s", "open", &["bug"]);
+    issue["author_association"] = json!("MEMBER");
+    let opened = json!({ "action": "opened", "issue": issue, "repository": repo, "installation": inst });
+    assert_eq!(hook(&a, "issues", "a-1", &opened, SECRET).await, StatusCode::OK);
+    // GitHub redelivering it (the same delivery id) records nothing new.
+    assert_eq!(hook(&a, "issues", "a-1", &opened, SECRET).await, StatusCode::OK);
+    let ev = automation_events(&a);
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    assert_eq!((ev[0].1.as_str(), ev[0].2["number"].as_u64(), ev[0].2["trusted_author"].as_bool(), ev[0].2["repo"].as_str()), ("issue.opened", Some(11), Some(true), Some("acme/app")));
+    assert!(ev[0].0.starts_with("github:a-1:"), "{}", ev[0].0);
+
+    // A stranger's issue is recorded as untrusted: the trigger takes it only with `anyone`.
+    let mut stranger = issue_json(12, "Please add X", "open", &[]);
+    stranger["author_association"] = json!("NONE");
+    hook(&a, "issues", "a-2", &json!({ "action": "opened", "issue": stranger, "repository": repo, "installation": inst }), SECRET).await;
+    let ev = automation_events(&a);
+    let trig = a.code.automations.registry.trigger("github").expect("registered");
+    let as_event = |e: &(String, String, Value)| -> agent_proto::automation::AutomationEvent {
+        serde_json::from_value(json!({ "id": "aev_1", "source": "github", "kind": e.1, "key": e.0, "at": 1, "data": e.2 })).unwrap()
+    };
+    assert!(!trig.matches(&json!({}), &as_event(&ev[1])), "a stranger's issue starts nothing by default");
+    assert!(trig.matches(&json!({ "anyone": true }), &as_event(&ev[1])));
+    assert!(trig.matches(&json!({ "labels": ["bug"] }), &as_event(&ev[0])));
+    assert!(!trig.matches(&json!({ "labels": ["docs"] }), &as_event(&ev[0])));
+    assert!(!trig.matches(&json!({ "repos": ["other"] }), &as_event(&ev[0])));
+
+    // @roll comments: only people who can push speak for roll.
+    let comment = |n: u64, body: &str, assoc: &str, pr: bool| {
+        let mut issue = issue_json(n, "t", "open", &[]);
+        if pr {
+            issue["pull_request"] = json!({ "url": "x" });
+        }
+        json!({ "action": "created", "issue": issue, "repository": repo, "installation": inst,
+            "comment": { "id": n * 100, "body": body, "user": { "login": "octo", "id": 9 }, "author_association": assoc, "html_url": "https://github.com/acme/app/issues/1#c" } })
+    };
+    hook(&a, "issue_comment", "a-3", &comment(11, "@roll fix this please", "CONTRIBUTOR", false), SECRET).await;
+    hook(&a, "issue_comment", "a-4", &comment(11, "@rollbar is down", "MEMBER", false), SECRET).await;
+    hook(&a, "issue_comment", "a-5", &comment(11, "thanks!", "MEMBER", false), SECRET).await;
+    assert_eq!(kinds(&a), ["issue.opened", "issue.opened"]);
+    hook(&a, "issue_comment", "a-6", &comment(11, "Looks real. @roll fix this please", "MEMBER", false), SECRET).await;
+    let ev = automation_events(&a);
+    assert_eq!((ev[2].1.as_str(), ev[2].2["prompt"].as_str(), ev[2].2["is_pr"].as_bool()), ("comment.mention", Some("fix this please"), Some(false)));
+
+    // A fork's pull request: nothing until a writer approves its head.
+    let feature_sha = git(tmp.path(), &w, &["rev-parse", "feature"]).trim().to_string();
+    let mut pr = pr_json(&g.mock, 8, "feature", &feature_sha, &main_sha);
+    pr["head"]["repo"] = json!({ "id": 99, "name": "app", "full_name": "eve/app", "private": false, "default_branch": "main", "fork": true,
+        "owner": { "login": "eve", "id": 99, "type": "User" }, "clone_url": format!("{}/git/acme/app.git", g.base), "html_url": "https://github.com/eve/app" });
+    g.mock.pulls.lock().insert(8, pr.clone());
+    hook(&a, "pull_request", "a-7", &json!({ "action": "opened", "number": 8, "pull_request": pr, "repository": repo, "installation": inst }), SECRET).await;
+    hook(&a, "issue_comment", "a-8", &comment(8, "@roll review the migration", "MEMBER", true), SECRET).await;
+    let review = json!({ "action": "review_requested", "number": 8, "pull_request": pr, "requested_reviewer": { "login": "ada" }, "repository": repo, "installation": inst });
+    hook(&a, "pull_request", "a-9", &review, SECRET).await;
+    assert_eq!(automation_events(&a).len(), 3, "a fork's pull request starts nothing on its own");
+    let changes = a.req("GET", "/v1/code/repos/acme/app/changes", None, Some("admin-secret")).await.1;
+    let fork = changes.as_array().unwrap().iter().find(|c| c["github_pr"] == 8).unwrap()["id"].as_str().unwrap().to_string();
+    let (s, _) = a.req("POST", &format!("/v1/code/changes/{fork}/approve-run"), None, Some("admin-secret")).await;
+    assert_eq!(s, StatusCode::OK);
+    hook(&a, "issue_comment", "a-10", &comment(8, "@roll review the migration", "MEMBER", true), SECRET).await;
+    hook(&a, "pull_request", "a-11", &review, SECRET).await;
+    let ev = automation_events(&a);
+    assert_eq!(kinds(&a)[3..], ["comment.mention", "review.requested"]);
+    assert_eq!((ev[3].2["is_pr"].as_bool(), ev[3].2["change"]["id"].as_str()), (Some(true), Some(fork.as_str())));
+    assert_eq!(ev[4].2["reviewer"], "ada");
+
+    // Failing checks: on main (a check run, a commit status); a fork's branch with no pull request
+    // listed starts nothing; a passing one neither.
+    let check = |branch: &str, conclusion: &str| {
+        json!({ "action": "completed", "repository": repo, "installation": inst, "check_run": {
+            "id": 1, "name": "ci / test", "head_sha": main_sha, "status": "completed", "conclusion": conclusion, "details_url": "https://ci.example.com/1",
+            "check_suite": { "head_branch": branch }, "pull_requests": [] } })
+    };
+    hook(&a, "check_run", "a-12", &check("main", "failure"), SECRET).await;
+    hook(&a, "check_run", "a-13", &check("eve-branch", "failure"), SECRET).await;
+    hook(&a, "check_run", "a-14", &check("main", "success"), SECRET).await;
+    let status = json!({ "sha": main_sha, "state": "error", "context": "ci/build", "branches": [{ "name": "main" }], "repository": repo, "installation": inst, "target_url": "https://ci.example.com/b" });
+    hook(&a, "status", "a-15", &status, SECRET).await;
+    let ev = automation_events(&a);
+    assert_eq!(kinds(&a)[5..], ["check.failed", "check.failed"], "{ev:?}");
+    assert_eq!((ev[5].2["on_default"].as_bool(), ev[5].2["check"].as_str(), ev[5].2["via"].as_str()), (Some(true), Some("ci / test"), Some("check_run")));
+    assert_eq!((ev[6].2["check"].as_str(), ev[6].2["via"].as_str()), (Some("ci/build"), Some("status")));
+    assert!(trig.matches(&json!({ "branches": ["main"] }), &as_event(&ev[5])));
+    assert!(!trig.matches(&json!({ "branches": ["release"] }), &as_event(&ev[5])));
+}
+
+/// The GitHub steps against the mock: a comment (made once however often the step runs), labels,
+/// a commit status, and a pull request opened from a roll change (its head pushed as a branch),
+/// which the change is linked to; only the owner's own connected repos.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn automation_steps_comment_label_status_and_open_a_pull_request() {
+    use agent_proto::automation::{AutomationId, AutomationRunId, Step};
+    use code_control::agents::automations::{OwnerRef, StepContext, StepOutcome};
+    let (a, g, _tmp, _w, main_sha) = connected_with_automation().await;
+    let owner = OwnerRef { id: a.code.db.owner("acme").unwrap().unwrap().id, name: "acme".into() };
+    let event = json!({ "source": "github", "kind": "comment.mention", "data": { "repo": "acme/app", "number": 11, "sha": main_sha } });
+    let run = |kind: &str, config: Value, step: &str| {
+        let s: Step = serde_json::from_value(json!({ "id": step, "kind": kind, "config": config })).unwrap();
+        let mut ctx = StepContext::new(a.code.clone(), owner.clone(), AutomationId("aut_gh".into()), "gh".into(), None, AutomationRunId("arn_gh".into()), s, 1, json!({ "event": event, "steps": {} }), Value::Null, 0);
+        let k = a.code.automations.registry.step(kind).expect("registered");
+        async move { k.run(&mut ctx).await }
+    };
+    let calls = |m: &str, p: &str| g.mock.calls.lock().iter().filter(|c| c.0 == m && c.1 == p).count();
+
+    let out = run("github.comment", json!({ "body": "On it: {{event.data.number}}" }), "c").await;
+    assert!(matches!(&out, StepOutcome::Done(v) if v["number"] == 11), "{out:?}");
+    assert_eq!(g.mock.calls.lock().iter().rev().find(|c| c.1 == "/repos/acme/app/issues/11/comments").unwrap().2["body"], "On it: 11");
+    // The same step of the same run again (a retried attempt): no second comment.
+    run("github.comment", json!({ "body": "On it" }), "c").await;
+    assert_eq!(calls("POST", "/repos/acme/app/issues/11/comments"), 1);
+
+    let out = run("github.label", json!({ "add": ["roll"], "remove": ["triage", "absent"] }), "l").await;
+    assert_eq!(out, StepOutcome::Done(json!({ "labels": ["roll"], "number": 11 })));
+    assert_eq!(calls("DELETE", "/repos/acme/app/issues/11/labels/absent"), 1, "a label it doesn't have is fine");
+
+    let out = run("github.status", json!({ "state": "failure", "context": "roll/agent", "description": "the agent found the bug" }), "s").await;
+    assert!(matches!(out, StepOutcome::Done(_)), "{out:?}");
+    let st = g.mock.calls.lock().iter().find(|c| c.1 == format!("/repos/acme/app/statuses/{main_sha}")).unwrap().2.clone();
+    assert_eq!((st["state"].as_str(), st["context"].as_str()), (Some("failure"), Some("roll/agent")));
+    assert!(matches!(run("github.status", json!({ "state": "great" }), "s2").await, StepOutcome::Fail(_)));
+
+    // Another owner's repo is out of reach.
+    a.req("POST", "/v1/code/owners", Some(json!({ "name": "evil", "kind": "org" })), Some("admin-secret")).await;
+    a.req("POST", "/v1/code/repos", Some(json!({ "owner": "evil", "name": "app" })), Some("admin-secret")).await;
+    let out = run("github.comment", json!({ "repo": "evil/app", "number": 1, "body": "x" }), "e").await;
+    assert!(matches!(&out, StepOutcome::Fail(m) if m.contains("isn't one of this owner's")), "{out:?}");
+
+    // A roll change opened as a pull request: its head pushed to GitHub, the PR opened, the
+    // change linked to it (so its webhook finds the change), and a second run finds that PR.
+    let body = json!({ "title": "Fix login", "message": "Fix login", "base": "main", "author": "agent", "files": { "fix.txt": { "content": "fixed\n" } } });
+    let (s, c) = a.req("POST", "/v1/code/repos/acme/app/changes", Some(body), Some("admin-secret")).await;
+    assert_eq!(s, StatusCode::CREATED, "{c}");
+    let n = c["number"].as_u64().unwrap();
+    let out = run("github.pr", json!({ "change": n.to_string() }), "p").await;
+    let StepOutcome::Done(pr) = out else { panic!("{out:?}") };
+    let created = g.mock.calls.lock().iter().find(|c| c.1 == "/repos/acme/app/pulls").unwrap().2.clone();
+    assert_eq!((created["base"].as_str(), created["title"].as_str()), (Some("main"), Some("Fix login")));
+    let branch = created["head"].as_str().unwrap().to_string();
+    let refs = g.gh.ok("GET", "/v1/code/repos/acme/app/refs", None).await;
+    assert!(refs.to_string().contains(&branch), "the branch is on GitHub: {refs}");
+    let linked = a.req("GET", &format!("/v1/code/repos/acme/app/changes/{n}"), None, Some("admin-secret")).await.1;
+    assert_eq!(linked["github_pr"], pr["number"]);
+    run("github.pr", json!({ "change": n }), "p2").await;
+    assert_eq!(calls("POST", "/repos/acme/app/pulls"), 1, "one pull request per change");
 }

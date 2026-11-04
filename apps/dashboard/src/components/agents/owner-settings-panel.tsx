@@ -4,7 +4,8 @@
  * The owner's agents settings in the side panel (`{ kind: "settings", target: "owner" }`,
  * `#agents/settings/owner`, ⌘,): what follows the user to every device, T3 Code's client settings
  * that roll has a use for (`SettingsPanels.tsx` there: General, Chat, Threads, Keybindings), and
- * the way to each machine's own settings. Saved by roll per owner (`AgentsServices.settings`), so
+ * the way to each machine's own settings, and the owner's Slack, Discord and GitHub
+ * (`integrations.tsx`). Saved by roll per owner (`AgentsServices.settings`), so
  * other devices change too; each change saves at once, as in T3.
  */
 
@@ -14,6 +15,7 @@ import { reachable, type ProviderInfo } from "@/lib/agents-api";
 import { setAgentsView } from "@/lib/agents-surface";
 import { desktop } from "@/lib/desktop";
 import { DEFAULT_OWNER_SETTINGS, RESTORABLE, type NotifyMode, type OwnerSettings } from "@/lib/owner-settings";
+import { INTEGRATION_SETTINGS, IntegrationsSection } from "./integrations";
 import { DefaultsRows } from "./machine-settings";
 import { SaveState, SettingRow, SettingsPage, SettingsSection, useSearching, type Setting } from "./settings-ui";
 import { MachineIcon } from "./shared";
@@ -77,7 +79,7 @@ function usePermission(): NotificationPermission | "unsupported" {
 }
 
 export function OwnerSettingsPanel({ onClose }: { onClose: () => void }) {
-  const { client, owner, prefs } = useAgents();
+  const { client, owner, prefs, services } = useAgents();
   const settings = prefs?.settings ?? DEFAULT_OWNER_SETTINGS;
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -99,10 +101,11 @@ export function OwnerSettingsPanel({ onClose }: { onClose: () => void }) {
       S.mode,
       S.workspace,
       ...machines.map((m) => ({ id: `machine.${m.id}`, title: m.name, section: "Machines", terms: ["machine settings", "providers", m.info?.os ?? "", m.sandbox ? "sandbox" : "computer"] })),
+      ...(services ? Object.values(INTEGRATION_SETTINGS) : []),
       S.keyboard,
       S.restore,
     ],
-    [machines],
+    [machines, services],
   );
 
   const save = async (patch: Partial<OwnerSettings>) => {
@@ -192,6 +195,7 @@ export function OwnerSettingsPanel({ onClose }: { onClose: () => void }) {
           />
         ))}
       </SettingsSection>
+      {services && <IntegrationsSection owner={owner} api={services.integrations} />}
       <SettingsSection title="Keyboard" ids={[S.keyboard.id]}>
         <SettingRow s={S.keyboard}>
           <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[12.5px]">

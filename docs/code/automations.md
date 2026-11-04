@@ -212,3 +212,4 @@ Besides the traits (above):
   and `lib/automations-demo.ts` (the demo's automations and runs, in memory).
 
 Tests: docs/code/test-coverage.md, "Automations".
+Slack, Discord and GitHub are integrations of this kind: docs/code/chatops.md (`crates/code-control/src/chatops/`).

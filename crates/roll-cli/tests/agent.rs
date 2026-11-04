@@ -25,9 +25,16 @@ struct Env {
 }
 
 async fn env() -> Env {
+    env_with(|_| {}).await
+}
+
+/// [`env`] with the relay's config adjusted, and `setup` run on it before it serves.
+async fn env_with(f: impl FnOnce(&mut Config)) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let objects = Objects::new(&StorageConfig::Local(dir.path().join("objects"))).unwrap();
-    let code = Code::open(Config::local(dir.path().join("home")), objects).unwrap();
+    let mut config = Config::local(dir.path().join("home"));
+    f(&mut config);
+    let code = Code::open(config, objects).unwrap();
     let router = code_control::api::router(code.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://{}", listener.local_addr().unwrap());
@@ -526,4 +533,162 @@ async fn automation_commands_drive_the_routes() {
     assert!(run(a(&["delete", "Hello"])).await.status.success());
     let out = run(a(&["list"])).await;
     assert!(!String::from_utf8_lossy(&out.stdout).contains("Hello"));
+/// Chat ops end to end (docs/code/chatops.md, "The key flow"): the real daemon runs the fake
+/// provider's turn, which asks to run a command; `slack.status` posts the thread's status and the
+/// approval as buttons to a mock Slack; a signed click on Approve answers it through
+/// `request.respond`; the turn finishes and the status says so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slack_button_answers_the_fake_providers_approval() {
+    use agent_proto::automation::{AutomationId, AutomationRunId, Step};
+    use code_control::agents::automations::{OwnerRef, StepContext, StepOutcome};
+
+    // A mock Slack Web API that records what it's sent.
+    let calls: Arc<std::sync::Mutex<Vec<(String, Value)>>> = Default::default();
+    let slack = {
+        let calls = calls.clone();
+        let n = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        axum::Router::new().fallback(move |uri: axum::http::Uri, body: String| {
+            let (calls, n) = (calls.clone(), n.clone());
+            async move {
+                let b: Value = serde_json::from_str(&body).unwrap_or(Value::String(body));
+                let method = uri.path().trim_start_matches('/').to_string();
+                calls.lock().unwrap().push((method.clone(), b.clone()));
+                let ts = format!("1700000000.{:06}", n.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1);
+                axum::Json(match method.as_str() {
+                    "oauth.v2.access" => json!({ "ok": true, "access_token": "xoxb-e2e", "token_type": "bot", "bot_user_id": "UBOT", "app_id": "A1", "scope": "chat:write", "team": { "id": "T1", "name": "Acme" }, "authed_user": { "id": "UADA" } }),
+                    "chat.postMessage" => json!({ "ok": true, "channel": b["channel"], "ts": ts }),
+                    "chat.update" => json!({ "ok": true, "channel": b["channel"], "ts": b["ts"] }),
+                    _ => json!({ "ok": true }),
+                })
+            }
+        })
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let slack_base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, slack).await.unwrap() });
+    let e = &env_with(|c| c.review.secret_key = Some("0123456789abcdef0123456789abcdef".into())).await;
+    let code = e._code.clone();
+    const SIGNING: &str = "e2e-signing-secret";
+    let cfg = code_control::chatops::SlackConfig {
+        client_id: "1.2".into(),
+        client_secret: "s".into(),
+        signing_secret: SIGNING.into(),
+        api_base: slack_base,
+        authorize_url: "https://slack.com/oauth/v2/authorize".into(),
+    };
+    code_control::chatops::enable(&code, Some(cfg), None).unwrap();
+
+    // The owner connects the workspace, and has an automation (as the engine would save it).
+    let (_, v) = e.req("POST", "/v1/code/agents/acme/integrations/slack/install", None).await;
+    let state = v["url"].as_str().unwrap().split("state=").nth(1).unwrap().split('&').next().unwrap().to_string();
+    // The callback sends the browser on to the dashboard: not followed here.
+    let no_redirects = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+    let r = no_redirects.get(format!("{}/v1/code/chat/slack/oauth?code=c&state={state}", e.api)).send().await.unwrap();
+    assert_eq!(r.status(), 303);
+    assert!(r.headers()["location"].to_str().unwrap().contains("connected=Acme"), "{:?}", r.headers());
+    let owner_id = code.db.owner("acme").unwrap().unwrap().id;
+    code.db
+        .sql()
+        .execute(
+            "INSERT INTO automations (id, owner_id, spec, enabled, source, revision, cursor, created_at, updated_at, created_by) VALUES ('aut_e2e', ?, '{}', 1, 'slack', 1, 0, 0, 0, 'test')",
+            [owner_id.as_str()],
+        )
+        .unwrap();
+
+    // A machine with the fake provider, and a thread whose turn waits on an approval.
+    e.login("box").await;
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&e.login).unwrap()).unwrap();
+    let machine = saved["machine"].as_str().unwrap().to_string();
+    let path = format!("/v1/code/agents/acme/machines/{machine}/commands");
+    let mut c = e.cmd(&["agent", "up"]);
+    c.env("ROLL_AGENT_FAKE", "1");
+    let mut daemon = c.spawn().unwrap();
+    let log = lines(&mut daemon);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !e.machines().await[0]["online"].as_bool().unwrap_or(false) {
+        assert!(Instant::now() < deadline, "never online");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let project = e.dir.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let (_, r) = e.req("POST", &path, Some(json!({ "id": "p1", "command": { "type": "project.add", "path": project, "name": "proj" } }))).await;
+    let project_id = r["id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
+    let create = json!({ "id": "t1", "command": { "type": "thread.create", "project": project_id, "provider": "fake", "runtime_mode": "ask", "prompt": "write the demo file" } });
+    let (_, r) = e.req("POST", &path, Some(create)).await;
+    let thread = r["id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
+    let records = |kind: &'static str| async move {
+        let (_, state) = e.req("GET", "/v1/code/agents/acme/state", None).await;
+        state["entities"].as_array().unwrap().iter().filter(|m| m["entity"]["kind"] == kind).map(|m| m["entity"].clone()).collect::<Vec<_>>()
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !records("request").await.iter().any(|r| r["status"] == "pending") {
+        assert!(Instant::now() < deadline, "never asked");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // The status step, as the engine runs it after `/roll` in C1.
+    let step = |state: Value| {
+        let s: Step = serde_json::from_value(json!({ "id": "status", "kind": "slack.status", "config": { "machine": machine, "thread": thread } })).unwrap();
+        let ctx = json!({ "event": { "source": "slack", "kind": "command", "data": { "team": "T1", "channel": "C1", "thread_ts": null } }, "steps": {} });
+        StepContext::new(code.clone(), OwnerRef { id: owner_id.clone(), name: "acme".into() }, AutomationId("aut_e2e".into()), "e2e".into(), None, AutomationRunId("arn_e2e".into()), s, 1, ctx, state, code_sql::now_ms())
+    };
+    let kind = code.automations.registry.step("slack.status").unwrap();
+    let mut ctx = step(Value::Null);
+    assert!(matches!(kind.run(&mut ctx).await, StepOutcome::Wait { .. }));
+    let card = calls.lock().unwrap().iter().filter(|c| c.0 == "chat.postMessage").nth(1).cloned().expect("a request card").1;
+    assert!(card.to_string().contains("tee ROLL_DEMO.md"), "{card}");
+    let approve = card["blocks"].as_array().unwrap().iter().filter(|b| b["type"] == "actions").flat_map(|b| b["elements"].as_array().unwrap().clone()).find(|b| b["text"]["text"] == "Approve").unwrap();
+
+    // The click, signed as Slack signs it.
+    let payload = json!({ "type": "block_actions", "team": { "id": "T1" }, "user": { "id": "UADA", "username": "ada" }, "channel": { "id": "C1" },
+        "message": { "ts": "1700000000.000002" }, "trigger_id": "trig-1", "actions": [{ "type": "button", "action_id": approve["action_id"], "block_id": "roll.choices", "value": approve["value"] }] });
+    let body = format!("payload={}", urlencoding::encode(&payload.to_string()));
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let r = e.http.post(format!("{}/v1/code/chat/slack/interactions", e.api))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("x-slack-request-timestamp", ts.to_string())
+        .header("x-slack-signature", code_chat::slack::sign(SIGNING, ts, body.as_bytes()))
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    // The turn goes on and finishes; the file is written.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let runs = records("run").await;
+        if runs.iter().any(|r| r["status"] == "completed") && records("thread").await[0]["status"] == "idle" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never completed: {runs:?} {:?}", log.try_iter().collect::<Vec<_>>());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(project.join("ROLL_DEMO.md").exists());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !calls.lock().unwrap().iter().any(|c| c.0 == "chat.update" && c.1.to_string().contains("Answered by")) {
+        assert!(Instant::now() < deadline, "the card says who answered");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Answering the fake's repeated ask (it asks again after the first answer) the same way.
+    for r in records("request").await.into_iter().filter(|r| r["status"] == "pending") {
+        let answer = json!({ "id": format!("a-{}", r["id"].as_str().unwrap()), "command": { "type": "request.respond", "request": r["id"], "response": { "type": "decision", "decision": "accept" } } });
+        e.req("POST", &path, Some(answer)).await;
+    }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let out = loop {
+        let mut ctx2 = step(ctx.state().clone());
+        match kind.run(&mut ctx2).await {
+            StepOutcome::Done(out) => break out,
+            StepOutcome::Wait { .. } => ctx = ctx2,
+            other => panic!("{other:?}"),
+        }
+        assert!(Instant::now() < deadline, "the status never finished");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(out["status"], "done", "{out}");
+    // SAFETY: signalling the child this test started.
+    unsafe { libc::kill(daemon.id() as i32, libc::SIGINT) };
+    let status = tokio::task::spawn_blocking(move || wait_for(&mut daemon, Duration::from_secs(10))).await.unwrap().expect("stopped");
+    assert!(status.success(), "{status:?}");
 }

@@ -150,6 +150,13 @@ fn query_value(s: &str) -> String {
 /// redirect's query), and the dashboard's settings show the result.
 async fn finish(code: &Arc<Code>, p: Platform, q: OAuthQuery) -> Response {
     let name = p.as_str();
+    let configured = match p {
+        Platform::Slack => code.slack().is_some(),
+        Platform::Discord => code.discord().is_some(),
+    };
+    if !configured {
+        return Error::NotFound(name.into()).into_response();
+    }
     if let Some(e) = q.error {
         return back(code, &format!("integration={name}&error={}", query_value(&e)));
     }
@@ -160,6 +167,8 @@ async fn finish(code: &Arc<Code>, p: Platform, q: OAuthQuery) -> Response {
         Err(e) => return e.into_response(),
     };
     let redirect = super::redirect_uri(code, p);
+    let owner = code.db.owner_by_id(&owner_id).ok().flatten().map(|o| o.name).unwrap_or_default();
+    let failed = |e: String| back(code, &format!("owner={}&integration={name}&error={}", query_value(&owner), query_value(&e)));
     let new = match p {
         Platform::Slack => {
             let Some((cfg, client)) = code.slack() else { return Error::NotFound("Slack".into()).into_response() };
@@ -174,7 +183,7 @@ async fn finish(code: &Arc<Code>, p: Platform, q: OAuthQuery) -> Response {
                     token: Some(a.access_token.clone()),
                     installer: a.installer.clone(),
                 },
-                Err(e) => return back(code, &format!("integration={name}&error={}", query_value(&e.to_string()))),
+                Err(e) => return failed(e.to_string()),
             }
         }
         Platform::Discord => {
@@ -196,14 +205,13 @@ async fn finish(code: &Arc<Code>, p: Platform, q: OAuthQuery) -> Response {
                         installer: String::new(),
                     }
                 }
-                Err(e) => return back(code, &format!("integration={name}&error={}", query_value(&e.to_string()))),
+                Err(e) => return failed(e.to_string()),
             }
         }
     };
-    let owner = code.db.owner_by_id(&owner_id).ok().flatten().map(|o| o.name).unwrap_or_default();
     match super::save_install(code, &new) {
         Ok(i) => back(code, &format!("owner={}&integration={name}&connected={}", query_value(&owner), query_value(&i.team_name))),
-        Err(Error::Conflict(m)) => back(code, &format!("owner={}&integration={name}&error={}", query_value(&owner), query_value(&m))),
+        Err(Error::Conflict(m)) => failed(m),
         Err(e) => e.into_response(),
     }
 }

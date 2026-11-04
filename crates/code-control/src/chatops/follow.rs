@@ -96,7 +96,7 @@ pub(crate) async fn step(ctx: &mut StepContext, surface: &dyn Surface, install: 
         Ok(None) => return StepOutcome::Fail(format!("thread {} never showed up on machine {}", f.thread, f.machine)),
         Err(e) => return StepOutcome::Retry(e.to_string()),
     };
-    let mut card = cards::status(&code, &owner.name, &v);
+    let mut card = cards::status(&code.config.web_url, &owner.name, &v);
 
     // The status message, once.
     let ts_mark = format!("status:{}", ctx.idempotency_key());

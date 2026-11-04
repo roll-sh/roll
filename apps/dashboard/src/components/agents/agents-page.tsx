@@ -13,6 +13,7 @@ import type { AgentsServices } from "@/lib/agents-services";
 import { isNewAgentKey, setAgentsView, useAgentsSurface, viewFromHash, type AgentsView } from "@/lib/agents-surface";
 import { ALL, applyView, isPinned, pinKey, pinnedConversations, pinOf, viewStorageKey, type Pin as PinRec } from "@/lib/agents-views";
 import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
+import { LINK_PARAMS, type IntegrationsLink } from "@/lib/integrations-api";
 import { useModelPrefsSync, useOwnerSettings } from "@/lib/owner-settings";
 import { useMarkState, useMarkStateValue } from "../mark-state";
 import { AddMachineDialog, AddMachinePaths } from "./add-machine";
@@ -21,6 +22,7 @@ import { AutomationPanel } from "./automations/automation-panel";
 import { AutomationsView } from "./automations/automations-view";
 import { Notices } from "./automations/notices";
 import { CommandPalette, type PaletteHost } from "./command-palette";
+import { openIntegrations } from "./integrations";
 import { Menu } from "./menu";
 import { Launcher } from "./new-agent";
 import { PinnedConversation, PinnedDiff, PinnedTerminal } from "./pinned";
@@ -58,13 +60,32 @@ export function usePhone(): boolean {
  * `/dashboard/agents`: the agents surface filling the window. The desktop app's Agents window
  * shows this page; in a browser the header's popup is the usual way in.
  */
-export function AgentsPage({ demo = false, owner, focus, fresh = false }: { demo?: boolean; owner?: string; focus?: string; fresh?: boolean }) {
+export function AgentsPage({
+  demo = false,
+  owner,
+  focus,
+  fresh = false,
+  integrations,
+}: {
+  demo?: boolean;
+  owner?: string;
+  focus?: string;
+  fresh?: boolean;
+  /** Back from installing Slack or Discord (`?settings=integrations&…`): the settings, on the integrations. */
+  integrations?: IntegrationsLink | null;
+}) {
   const { client, services, error } = useAgentsConnection({ owner, demo });
-  // Where the window opens (`?new`, `?focus=t:thr_…`, or a `#agents/…` link as the popup takes
-  // them), before the first paint.
+  // Where the window opens (`?new`, `?focus=t:thr_…`, `?settings=integrations`, or a `#agents/…`
+  // link as the popup takes them), before the first paint.
   useLayoutEffect(() => {
     const linked = viewFromHash(window.location.hash);
-    if (fresh) setAgentsView({ kind: "new" });
+    if (integrations) {
+      openIntegrations(integrations);
+      // Shown once: a reload or a shared URL doesn't say it again.
+      const url = new URL(window.location.href);
+      for (const k of LINK_PARAMS) url.searchParams.delete(k);
+      window.history.replaceState(window.history.state, "", url);
+    } else if (fresh) setAgentsView({ kind: "new" });
     else if (focus?.startsWith("t:")) setAgentsView({ kind: "thread", thread: focus.slice(2) });
     else if (linked) setAgentsView(linked);
     // Only where it opens; later views are the user's.

@@ -103,12 +103,13 @@ impl ThreadView {
 }
 
 /// Where the thread opens in the dashboard.
-pub(crate) fn thread_url(code: &Code, owner: &str, thread: &str) -> String {
-    format!("{}/dashboard/agents?owner={owner}&focus={thread}", code.config.web_url.trim_end_matches('/'))
+pub(crate) fn thread_url(web: &str, owner: &str, thread: &str) -> String {
+    format!("{}/dashboard/agents?owner={owner}&focus={thread}", web.trim_end_matches('/'))
 }
 
 /// The thread's live status card.
-pub(crate) fn status(code: &Code, owner: &str, v: &ThreadView) -> StatusCard {
+/// `web` is the dashboard's URL (`Config::web_url`).
+pub(crate) fn status(web: &str, owner: &str, v: &ThreadView) -> StatusCard {
     let t = &v.thread;
     let (tone, word) = match (v.ended(), t.status) {
         (Some(Ended::Done), _) => (Tone::Done, "Done"),
@@ -142,7 +143,7 @@ pub(crate) fn status(code: &Code, owner: &str, v: &ThreadView) -> StatusCard {
             format!("{mark} {}", one_line(title, 120))
         })
         .collect();
-    let mut links = vec![Link { label: "Open in roll".into(), url: thread_url(code, owner, t.id.as_str()) }];
+    let mut links = vec![Link { label: "Open in roll".into(), url: thread_url(web, owner, t.id.as_str()) }];
     if let Some(c) = &t.change {
         links.push(Link { label: format!("{}#{}", c.repo, c.number), url: c.url.clone() });
     }
@@ -304,6 +305,49 @@ mod tests {
         assert!(response(&r, "d9", &[]).is_err());
         assert!(response(&r, "s", &[]).is_err());
         let _ = Decision::Accept;
+    }
+
+    fn view(thread: Value, run: &str, steps: usize) -> ThreadView {
+        let run: Run = serde_json::from_value(json!({ "id": "run_1", "thread": "thr_1", "ordinal": 1, "provider": "codex", "status": run, "prompt": "p", "requested_at": 1 })).unwrap();
+        let steps = (0..steps).map(|i| (format!("step {i}"), if i % 2 == 0 { NodeStatus::Completed } else { NodeStatus::Failed })).collect();
+        ThreadView { machine_id: "mch_1".into(), thread: serde_json::from_value(thread).unwrap(), run: Some(run), steps, requests: vec![] }
+    }
+
+    fn thread(status: &str, extra: Value) -> Value {
+        let mut t = json!({
+            "id": "thr_1", "project": "prj_1", "title": "Fix   the\nlogin test", "provider": "codex", "model": null, "runtime_mode": "ask",
+            "interaction_mode": "default", "cwd": "/x", "status": status, "run_count": 1, "pending_requests": 0, "created_at": 1, "updated_at": 1
+        });
+        t.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        t
+    }
+
+    #[test]
+    fn status_cards_say_where_the_thread_is_and_link_its_change() {
+        let running = view(thread("running", json!({ "active_run": "run_1", "activity": "running npm test" })), "running", 9);
+        let card = status("https://roll.sh/", "acme", &running);
+        assert_eq!((card.tone, card.title.as_str()), (Tone::Running, "Fix the login test"));
+        assert_eq!(card.status, "Running · 9 steps · running npm test");
+        assert_eq!(card.lines.len(), STEPS, "the newest steps");
+        assert_eq!(card.lines.last().unwrap(), "✓ step 8");
+        assert_eq!(card.links[0].url, "https://roll.sh/dashboard/agents?owner=acme&focus=thr_1");
+        assert_eq!(running.ended(), None);
+
+        let change = json!({ "change": { "repo": "acme/app", "number": 7, "status": "ready", "url": "https://roll.sh/acme/app/changes/7", "detail": "2 checks passed" } });
+        let done = view(thread("idle", change), "completed", 1);
+        let card = status("https://roll.sh", "acme", &done);
+        assert_eq!((done.ended(), card.tone, card.status.as_str()), (Some(Ended::Done), Tone::Done, "Done · 1 step"));
+        assert_eq!((card.links[1].label.as_str(), card.links[1].url.as_str()), ("acme/app#7", "https://roll.sh/acme/app/changes/7"));
+        assert_eq!(card.footer.as_deref(), Some("2 checks passed"));
+        assert_eq!(done.output()["change"]["url"], "https://roll.sh/acme/app/changes/7");
+
+        let failed = view(thread("error", json!({ "error": "the provider exited" })), "failed", 0);
+        let card = status("https://roll.sh", "acme", &failed);
+        assert_eq!((failed.ended(), card.tone, card.footer.as_deref()), (Some(Ended::Failed), Tone::Failed, Some("the provider exited")));
+        let waiting = view(thread("waiting", json!({ "active_run": "run_1", "pending_requests": 1 })), "waiting", 0);
+        assert_eq!((waiting.ended(), status("w", "o", &waiting).status.as_str()), (None, "Waiting on you"));
+        let stopped = view(thread("idle", json!({})), "interrupted", 0);
+        assert_eq!(stopped.ended(), Some(Ended::Stopped));
     }
 
     #[test]

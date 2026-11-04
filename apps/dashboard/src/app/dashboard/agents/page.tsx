@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
 import { AgentsPage } from "@/components/agents/agents-page";
+import { parseIntegrationsLink } from "@/lib/integrations-api";
 
 export const metadata: Metadata = { title: "Agents" };
 
@@ -15,7 +16,7 @@ export default function AgentsRoute({ searchParams }: PageProps<"/dashboard/agen
   return (
     <Suspense fallback={null}>
       {searchParams.then((sp) => (
-        <AgentsPage demo={sp.demo !== undefined} owner={one(sp.owner)} focus={one(sp.focus)} fresh={sp.new !== undefined} />
+        <AgentsPage demo={sp.demo !== undefined} owner={one(sp.owner)} focus={one(sp.focus)} fresh={sp.new !== undefined} integrations={parseIntegrationsLink(sp)} />
       ))}
     </Suspense>
   );

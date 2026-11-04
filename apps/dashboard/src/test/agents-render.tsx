@@ -5,6 +5,7 @@ import { vi, type Mock } from "vitest";
 import type { Command, Machine, MachineId, Mirrored, Reply } from "@/lib/agents-api";
 import { AgentsClient, type AgentsTransport } from "@/lib/agents-client";
 import { memoryCanvas, memorySettings, type AgentsServices } from "@/lib/agents-services";
+import { NO_INTEGRATIONS } from "@/lib/integrations-api";
 import type { SandboxSize } from "@/lib/sandboxes-api";
 import { AgentsContext, type AgentsCtx } from "@/components/agents/use-agents";
 import { machine as machineFixture, M1 } from "./agents";
@@ -50,14 +51,15 @@ export function renderAgents(ui: ReactElement, h: AgentsHarness) {
  * them), behind mocks.
  */
 export function fakeServices(
-  over: Omit<Partial<AgentsServices>, "sandboxes" | "canvas" | "settings" | "machines"> & {
+  over: Omit<Partial<AgentsServices>, "sandboxes" | "canvas" | "settings" | "machines" | "integrations"> & {
     sandboxes?: Partial<AgentsServices["sandboxes"]>;
     canvas?: Partial<AgentsServices["canvas"]>;
     settings?: Partial<AgentsServices["settings"]>;
     machines?: Partial<AgentsServices["machines"]>;
+    integrations?: Partial<AgentsServices["integrations"]>;
   } = {},
 ): AgentsServices {
-  const { sandboxes, canvas, settings, machines, ...rest } = over;
+  const { sandboxes, canvas, settings, machines, integrations, ...rest } = over;
   const kept = memoryCanvas();
   const prefs = memorySettings();
   return {
@@ -81,6 +83,13 @@ export function fakeServices(
     },
     canvas: { load: vi.fn(kept.load), save: vi.fn(kept.save), ...canvas },
     settings: { load: vi.fn(prefs.load), save: vi.fn(prefs.save), ...settings },
+    integrations: {
+      list: vi.fn(async () => NO_INTEGRATIONS),
+      install: vi.fn(),
+      update: vi.fn(),
+      remove: vi.fn(async () => {}),
+      ...integrations,
+    },
     ...rest,
   };
 }

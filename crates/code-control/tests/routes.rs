@@ -910,4 +910,41 @@ async fn automation_routes_follow_the_auth_matrix() {
     assert_eq!(call(a, "POST", base, Some(&hook), Some(ADMIN)).await, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(call(a, "DELETE", &format!("{base}/{id}"), None, Some(&w.agent)).await, FORBIDDEN);
     assert_eq!(call(a, "DELETE", &format!("{base}/{id}"), None, Some(&w.acme)).await, StatusCode::NO_CONTENT);
+/// Chat ops (docs/code/chatops.md): the owner manages its integrations; its agents, other owners
+/// and review apps can't, and anonymous callers are 401. The platforms' endpoints look at no
+/// caller: they answer 404 while the platform isn't configured, and check the platform's
+/// signature when it is (chatops.rs).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chatops_routes_follow_the_auth_matrix() {
+    let w = world().await;
+    let a = &w.a;
+    let base = "/v1/code/agents/acme/integrations";
+    let body = json!({ "members": ["U1"] });
+    let (acme, agent, other, app_in) = (Some(w.acme.as_str()), Some(w.agent.as_str()), Some(w.other.as_str()), Some(w.app_in.as_str()));
+    assert_eq!(call(a, "GET", base, None, acme).await, OK);
+    // Not configured on this server: the owner is told so; a missing install is a 404.
+    assert_eq!(call(a, "POST", &format!("{base}/slack/install"), None, acme).await, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(call(a, "POST", &format!("{base}/discord/install"), None, acme).await, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(call(a, "POST", &format!("{base}/teams/install"), None, acme).await, NOT_FOUND);
+    assert_eq!(call(a, "PATCH", &format!("{base}/slack/chi_x"), Some(&body), acme).await, NOT_FOUND);
+    assert_eq!(call(a, "DELETE", &format!("{base}/slack/chi_x"), None, acme).await, NOT_FOUND);
+    let routes = [
+        ("GET", base.to_string()),
+        ("POST", format!("{base}/slack/install")),
+        ("PATCH", format!("{base}/slack/chi_x")),
+        ("DELETE", format!("{base}/slack/chi_x")),
+    ];
+    for (who, token, want) in [("agent", agent, FORBIDDEN), ("review app", app_in, FORBIDDEN), ("another owner", other, FORBIDDEN), ("anonymous", None, StatusCode::UNAUTHORIZED)] {
+        for (m, p) in &routes {
+            assert_eq!(call(a, m, p, Some(&body), token).await, want, "{who}: {m} {p}");
+        }
+    }
+    for p in ["/v1/code/chat/slack/events", "/v1/code/chat/slack/commands", "/v1/code/chat/slack/interactions", "/v1/code/chat/discord/interactions"] {
+        for token in [None, acme] {
+            assert_eq!(call(a, "POST", p, Some(&json!({})), token).await, NOT_FOUND, "{p}");
+        }
+    }
+    for p in ["/v1/code/chat/slack/oauth?code=x&state=y", "/v1/code/chat/discord/oauth?code=x&state=y"] {
+        assert_eq!(call(a, "GET", p, None, None).await, NOT_FOUND, "{p}: no such platform here");
+    }
 }

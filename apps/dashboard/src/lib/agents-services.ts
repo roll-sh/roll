@@ -25,6 +25,7 @@ import {
 } from "./agents-api";
 import { ApiError, codeApi, type Repo } from "./code-api";
 import type { AutomationsApi } from "./automations-api";
+import type { IntegrationsApi } from "./integrations-api";
 import { sandboxesApi, type SandboxesApi } from "./sandboxes-api";
 
 /** A repo to clone onto a machine (only what the picker shows). */
@@ -63,6 +64,8 @@ export interface AgentsServices {
   settings: OwnerDoc;
   /** The owner's automations (`automations-api.ts`); unset: the Automations view says they aren't here. */
   automations?: AutomationsApi;
+  /** The owner's Slack, Discord and GitHub connections (chat ops; `integrations-api.ts`). */
+  integrations: IntegrationsApi;
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -150,6 +153,7 @@ export function httpServices(
     canvas: httpCanvas(api),
     settings: httpSettings(api),
     automations: api.automations,
+    integrations: api.integrations,
   };
 }
 
