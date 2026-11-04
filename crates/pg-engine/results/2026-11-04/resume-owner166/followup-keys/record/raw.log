@@ -1,0 +1,7 @@
+
+running 1 test
+recorded /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/sql/a166_lazy_keys_count.sql
+test golden ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.10s
+

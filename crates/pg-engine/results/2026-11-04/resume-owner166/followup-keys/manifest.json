@@ -1,5 +1,7 @@
 {
   "sha256": {
+    "a166_lazy_keys_count.out": "e97965f06045e1750313f3e09618ad6523501723c74fe0f87a8a30486e86b2bc",
+    "a166_lazy_keys_count.sql": "86ab881d3034611139a5e9c275378f427d8b889cd4b49e0e6d886ba4e239de33",
     "disposition.md": "558235bdb87d0de919977fdc203a4313f6029c810d7668bcb7caaade70c0d648",
     "p1/commands.json": "8012454721c14b730441e20132d7bb2b786099ee1e75f1584fe865c85ec85be3",
     "p1/complete": "da9ed6e5d3cae893879333e54f498ab8ccf1f127246d1f0a5ea49baa052726b0",
@@ -55,8 +57,13 @@
     "p2/source-head.stdout": "3836b06944dfe32270f4ad1744c222505519cf8be684098933888bf128535376",
     "p2/source-status.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "p2/source-status.stdout": "71befa2dd5daee029a2b530faa83af5ab4ac140bad770511552a390628d2e42c",
-    "p2/wrapper.log": "5b6f294e7fb91d0ee4a82099867f28108c81254b87b7e741ffd519d35eb364e3"
+    "p2/wrapper.log": "5b6f294e7fb91d0ee4a82099867f28108c81254b87b7e741ffd519d35eb364e3",
+    "record/command.json": "f25eac8d0df6edf7bb67be09bde7d2bb3e279c3b9d0296b22e3b118aa73cdfcd",
+    "record/raw.log": "c00e34d1cc58d61862cbb2e8c184e9715b9bd66d135fc586c8d1873367dd0a40",
+    "record/result.json": "3d11400b06893aa15e16a246fc53d9da18ce1247d08c0a4a63c22229975c67fa",
+    "record-wrapper.log": "7055fed1a9a3e2897f3bd019fe2c108ef8449dd09ef47ac040787e4373e14da4",
+    "record.py": "6b3bf2655da06b4ce1bf6235636b9bbba07d699c41414e2c8b0c349de3a9b640"
   },
-  "files": 56,
-  "scope": "p1 successful INNER/result probe; p2 failed count plan-shape probe; no engine data"
+  "files": 63,
+  "scope": "bounded INNER/count probes and PG18.6 golden recording; p2 shape remains failed"
 }
