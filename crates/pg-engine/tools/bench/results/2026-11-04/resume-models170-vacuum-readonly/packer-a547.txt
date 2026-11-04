@@ -1,0 +1,56 @@
+540: /// space map offers, else on a new page.
+541: pub fn heap_pages(tuples: impl Iterator<Item = usize>) -> i32 {
+542:     let mut p = HeapPacker::default();
+543:     for t in tuples {
+544:         p.push(t);
+545:     }
+546:     p.pages()
+547: }
+548: 
+549: /// `heap_pages` a tuple at a time (a load counting its pages as it goes).
+550: #[derive(Default)]
+551: pub struct HeapPacker {
+552:     /// Per page: (pd_upper - pd_lower, line pointers).
+553:     pages: Vec<(usize, usize)>,
+554:     fsm: Vec<FsmPage>,
+555:     current: Option<usize>,
+556: }
+557: 
+558: impl HeapPacker {
+559:     pub fn push(&mut self, t: usize) {
+560:         const MAX_TUPLES: usize = 291;
+561:         let heap_free = |p: (usize, usize)| {
+562:             if p.1 >= MAX_TUPLES {
+563:                 0
+564:             } else {
+565:                 p.0.saturating_sub(ITEM_ID)
+566:             }
+567:         };
+568:         let (pages, fsm) = (&mut self.pages, &mut self.fsm);
+569:         let len = t - ITEM_ID;
+570:         let mut target = self.current;
+571:         while let Some(b) = target {
+572:             let free = heap_free(pages[b]);
+573:             if len <= free {
+574:                 break;
+575:             }
+576:             // Record this page's free space and ask its FSM page for another.
+577:             let (fp, slot) = (b / FSM_SLOTS, b % FSM_SLOTS);
+578:             if fsm.len() <= fp {
+579:                 fsm.resize_with(fp + 1, FsmPage::new);
+580:             }
+581:             fsm[fp].set(slot, avail_cat(free));
+582:             target = fsm[fp]
+583:                 .search(needed_cat(len))
+584:                 .map(|s| fp * FSM_SLOTS + s)
+585:                 .filter(|&n| n < pages.len());
+586:         }
+587:         let b = target.unwrap_or_else(|| {
+588:             pages.push((BLCKSZ - PAGE_HEADER, 0));
+589:             pages.len() - 1
+590:         });
+591:         pages[b].0 -= len + ITEM_ID;
+592:         pages[b].1 += 1;
+593:         self.current = Some(b);
+594:     }
+595: 

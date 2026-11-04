@@ -1,0 +1,5 @@
+{"name": "golden-current", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "models-current", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "build", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "debug", "exit": 101, "expected_summary": true, "pass": false}
+HEAVY-EXIT 101

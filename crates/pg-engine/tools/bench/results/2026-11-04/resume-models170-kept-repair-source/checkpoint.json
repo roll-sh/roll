@@ -1,0 +1,7 @@
+{
+  "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+  "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+  "status": "",
+  "time_utc": "2026-11-04T15:06:03.113288+00:00",
+  "note": "Source checkpoint c66a0768 only; red regression evidence retained separately. Rejected/bailed kept records invalidate cached header; restored-shape assertions scoped to actual restore; btree page counts fall back to pending header. Focused validation pending."
+}
