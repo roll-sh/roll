@@ -299,7 +299,7 @@ impl Store {
     }
 
     /// `f` written again without the entries `live` covers (none left: no file).
-    fn rewrite_without(&self, f: &Arc<SstReader>, live: &[RangeDel], horizon: u64) -> Result<Vec<Arc<SstReader>>> {
+    pub(super) fn rewrite_without(&self, f: &Arc<SstReader>, live: &[RangeDel], horizon: u64) -> Result<Vec<Arc<SstReader>>> {
         let live = RangeDels::new(live.to_vec());
         let mut merge = Merge::new(vec![Cursor::level_uncached(vec![f.clone()])], Vec::new());
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
