@@ -111,58 +111,45 @@ export function SandboxPanel({ machine }: { machine: Machine }) {
   };
 
   const size = sb?.size;
+  const tool = "grid size-6 place-items-center rounded-md hover:bg-panel-2 hover:text-fg disabled:opacity-40";
   return (
-    <div className="space-y-1.5 rounded-lg border border-line bg-bg px-2.5 py-2" data-nodrag role="group" aria-label="Sandbox">
+    <div className="space-y-1 rounded-lg border border-line bg-bg px-2.5 py-2" data-nodrag role="group" aria-label="Sandbox">
       <div className="flex items-center gap-2 text-[12px]">
         <span className={`size-1.5 shrink-0 rounded-full ${moving ? "bg-accent" : status === "running" ? "bg-ok" : status === "failed" ? "bg-danger" : "bg-subtle"}`} aria-hidden />
-        <span className={moving ? "shimmer" : ""}>{statusLabel[status]}</span>
-        <span className="min-w-0 truncate font-mono text-[11px] text-subtle" title={size ? `${size.disk_gb} GB disk` : undefined}>
-          {size ? `${size.name} · ${size.cpu} vCPU · ${size.memory_gb} GB` : info.size}
-        </span>
+        <span className={moving || busy ? "shimmer" : ""}>{busy === "start" ? "Starting…" : busy === "stop" ? "Stopping…" : busy === "delete" ? "Deleting…" : statusLabel[status]}</span>
         <span className="ml-auto shrink-0 font-mono text-[11px] text-muted">{formatHourly(size?.hourly_cents ?? info.hourly_cents)}</span>
+        {sb && services && status !== "deleting" && !confirm && (
+          <span className="-mr-1 flex shrink-0 items-center text-subtle">
+            {canStart(sb) && (
+              <button disabled={busy !== null} onClick={() => act("start", () => services.sandboxes.start(owner, sb.id))} className={tool} aria-label="Start" title="Start">
+                <Play className="size-3" />
+              </button>
+            )}
+            {canStop(sb) && (
+              <button disabled={busy !== null} onClick={() => act("stop", () => services.sandboxes.stop(owner, sb.id))} className={tool} aria-label="Stop" title="Stop (a stopped sandbox isn't billed)">
+                <Square className="size-3" />
+              </button>
+            )}
+            <button onClick={() => setConfirm(true)} className={tool} aria-label="Delete sandbox" title="Delete the sandbox">
+              <Trash2 className="size-3" />
+            </button>
+          </span>
+        )}
       </div>
+      <p className="truncate font-mono text-[11px] text-subtle" title={size ? `${size.disk_gb} GB disk` : undefined}>
+        {size ? `${size.name} · ${size.cpu} vCPU · ${size.memory_gb} GB` : info.size}
+        {used && ` · ${used.running_hours.toFixed(1)} h, ${dollars(used.price_usd)} this month`}
+      </p>
       {status === "creating" && <p className="text-[11.5px] text-subtle">Booting. It connects on its own in a minute or so.</p>}
       {sb?.error && <p className="text-[11.5px] text-danger">{sb.error}</p>}
-      {(used || (sb && services && status !== "deleting")) && (
-        <div className="flex items-center gap-1 text-[11.5px] text-subtle">
-          {used && (
-            <span className="min-w-0 truncate">
-              <span className="font-mono text-muted">{used.running_hours.toFixed(1)} h</span> this month · <span className="font-mono text-muted">{dollars(used.price_usd)}</span>
-            </span>
-          )}
-          {sb && services && status !== "deleting" && (
-            <span className="ml-auto flex shrink-0 items-center gap-0.5">
-              {canStart(sb) && (
-                <button disabled={busy !== null} onClick={() => act("start", () => services.sandboxes.start(owner, sb.id))} className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 hover:bg-panel-2 hover:text-fg disabled:opacity-40">
-                  <Play className="size-3" /> {busy === "start" ? <span className="shimmer">Starting…</span> : "Start"}
-                </button>
-              )}
-              {canStop(sb) && (
-                <button
-                  disabled={busy !== null}
-                  onClick={() => act("stop", () => services.sandboxes.stop(owner, sb.id))}
-                  className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 hover:bg-panel-2 hover:text-fg disabled:opacity-40"
-                  title="A stopped sandbox isn't billed"
-                >
-                  <Square className="size-3" /> {busy === "stop" ? <span className="shimmer">Stopping…</span> : "Stop"}
-                </button>
-              )}
-              {confirm ? (
-                <>
-                  <button disabled={busy !== null} onClick={() => act("delete", () => services.sandboxes.remove(owner, sb.id))} className="rounded-md px-1.5 py-0.5 text-danger hover:bg-danger/10">
-                    {busy === "delete" ? <span className="shimmer">Deleting…</span> : "Delete it and its files"}
-                  </button>
-                  <button onClick={() => setConfirm(false)} className="p-0.5 hover:text-fg" aria-label="Keep the sandbox">
-                    <X className="size-3.5" />
-                  </button>
-                </>
-              ) : (
-                <button onClick={() => setConfirm(true)} className="p-1 hover:text-fg" aria-label="Delete sandbox" title="Delete the sandbox">
-                  <Trash2 className="size-3.5" />
-                </button>
-              )}
-            </span>
-          )}
+      {confirm && sb && services && (
+        <div className="flex items-center gap-1 text-[11.5px]">
+          <button disabled={busy !== null} onClick={() => act("delete", () => services.sandboxes.remove(owner, sb.id))} className="rounded-md px-1.5 py-0.5 text-danger hover:bg-danger/10">
+            Delete it and its files
+          </button>
+          <button onClick={() => setConfirm(false)} className="p-0.5 text-subtle hover:text-fg" aria-label="Keep the sandbox">
+            <X className="size-3.5" />
+          </button>
         </div>
       )}
       {error && <p className="text-[11.5px] text-danger">{error}</p>}
