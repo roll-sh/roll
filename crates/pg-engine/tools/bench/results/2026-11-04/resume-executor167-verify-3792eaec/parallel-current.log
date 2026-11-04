@@ -1,0 +1,34 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a6193f5e45a7ae4f1/crates/pg-engine)
+    Finished `release` profile [optimized] target(s) in 4.63s
+     Running tests/parallel_scan.rs (/home/meszmate/.cache/a167/target/release/deps/parallel_scan-8d4ffc131bf0eb77)
+
+running 10 tests
+test bitmap_quals_on_entries ... ok
+test numeric_topk_matches_serial ... ok
+test parallel_fetches_match_serial ... ok
+test parallel_joins_match_serial ... ok
+test parallel_lookups_match_serial ... ok
+test parallel_scans_match_serial ... ok
+test parallel_scans_of_modelled_heaps ... ok
+test split_keys_cover_in_order ... ok
+test reordered_heaps_through_batches ... FAILED
+test vector_batches_match_rows ... ok
+
+failures:
+
+---- reordered_heaps_through_batches stdout ----
+
+thread '<unnamed>' (3826766) panicked at crates/pg-engine/tests/parallel_scan.rs:1015:5:
+rows went through column batches
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'reordered_heaps_through_batches' (3826382) panicked at crates/pg-engine/tests/parallel_scan.rs:143:10:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+
+
+failures:
+    reordered_heaps_through_batches
+
+test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 53.05s
+
+error: test failed, to rerun pass `-p pg-engine --test parallel_scan`
