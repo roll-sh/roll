@@ -1,0 +1,33 @@
+Planner171 bounded candidate and terminal handoff
+
+Exact source: cac0933bc4eb5ef87674889542cab271de4615d0, tree bd48e5074887125072d7c23cb09c78fe6fe15c0b. Clean original worktree /home/meszmate/roll/.claude/worktrees/agent-ad5ff4bf47e789536, branch work-a171-lazy-cost-20261104. Owner backup refs/heads/wip/a171-lazy-cost-resume-20261104 independently verified exact. Source, HEAD and staged state were unchanged through both pinned runs. No shared-parent/main edits. Parent alone decides integration.
+
+Review the NET diff from c8618834caf45bc0a34cf9985c07f9bc13b498ef: four files,122 insertions/1 deletion. Production ONLY src/session/mod.rs and src/sql/paths.rs. Tests ONLY kept_plans.rs and parallel_scan.rs. Candidate commit parent is the bad intermediate a6fe: integrate the audited net c861 delta rather than the intermediate eager optimization. Patch: lazy171-candidate/net-c861-candidate.patch; source-scope-audit.json proves binder/dml/select/plan/syscat/engine/parallel_part exact parent bytes. Original branches/fixture/red/baseline refs remain intact.
+
+The existing first Session::plan_cost cache miss tries fresh paths::describe only under the original narrow scan/project/subquery/foreign/parallel eligibility guards; otherwise it retains the original EXPLAIN fallback. Existing Arc/OnceLock, planning_charge/check_cost_estimate and parent lazy Gather discovery remain. No eager Parse-time prefill, ScanEst, duplicate formula, generations or executor hooks. Exact cached proposal SHA7dc538928f33e5a3bf3f671e159ea7466c8ea15075ff0afbe4d609999ab0b47e was applied before the pins.
+
+Validation results remain separate by run:
+
+| Stage | Original full171-lazy-v1 | Separate remaining171-lazy-v1 |
+| --- | --- | --- |
+| Unfiltered debug | command0/audit0;457passed,0failed,18ignored,61summaries;60binary hashes | Not rerun |
+| Unfiltered release | command0/audit0;same457/0/18/61;60binary hashes | Not rerun |
+| Release all-target Clippy | command0 BUT frozen audit1,HEAVY1;original pipeline FAILED/PARTIAL | Not rerun |
+| Dist roll-engine | NOTRUN after fail-fast | First run command0/audit0;fresh intended crate;actual binary preserved |
+| pnpm test:pg --unit | NOTRUN after fail-fast | First run command0/audit0;EXECUTED24passed,0failed,0ignored,5summaries |
+
+The frozen Clippy parser expanded24JSON warning messages into29primary-span entries and compared those to historical14warning diagnostics. Raw10library warnings appear twice across compilation units; json.rs has5primary spans and text.rs2. Parent append-only posthoc comparison deduplicates ONLY exact diagnostic locations across compilation units, uses the single distinct primary filepath per warning and preserves all5distinct math locations. The resulting14message/path multiset exactly matches historical c861; all warning paths are byte-identical. Raw SHA b276908063ca9ecfd121336af8f77200fc04888cc117eb40398809583451996f. Original parser/report/audit1/HEAVY1/NOTRUN classifications are preserved and frozen, with no Clippy rerun, source/threshold change or original full-pipeline PASS claim. Parent comparison copy: runners/remaining171-parent-clippy-posthoc.json.
+
+Dist artifact: /home/meszmate/.cache/a171/bin/lazy-cac0933b/roll-engine,69,451,432bytes,SHA25602155aafc79c86e24696f4f0cae43b10c54774aac4b33c5d7f0dd767a3d06fb3. Hash matches actual target/dist binary;source/profile/compile provenance in remaining171-lazy-v1/build-artifact.json and rawbuild.log.
+
+Two separate read-only terminal audits verify raw exits, exact maps, source/tree/clean state, frozen hashes, actual binaries, absence of each owned process group and release of its heavy slot. Original TERMINAL.json remains FAILED/PARTIAL; separate TERMINAL.json says SEPARATE DIST/UNIT COMPLETE. All9original frozen inputs and11new frozen inputs remain unchanged. New freeze also seals original failed report/ledgers/wrapper/terminal. Both runs use existing a171target/tmp,shared4slots/jobs2/nice19/testthreads2/taskset8-13,18-19;each stage passes its frozen30GiBfloor. Wrapper/heavy housekeeping unrestricted;startup and selected samples only,not a lifetime isolation/performance claim. Target35GiB;no new targets/cleanup/services/stress/probes/benchmarks.
+
+Prior focused successor: seven commands0;generic1/5,registered parallel both2/2,each ORIGINAL logical_apply failure separatelyPASS,whole kept8,costgolden ONE SQL file in all3modes,libraryClippy0.15test executions/6summaries includes generic again in wholekept8. Parent audited/sealed evidence7dbc9cbf/8659ffdd. Full default debug/release now add broader coverage; no separately configured crash/seed14/SSI/storage/diagnostic tests ran.
+
+Controls retained: actual PG18.6 oracle generic1/5 and parallel both2/2. c861 generic1/5 vs a6fe0/6; corrected registered-backend v2 fixture c861 both2/2 vs a6fe both0/0. Corrected test patch SHA837459d07862b53d24e2d3d91ced99b32cbdaff87947396fef292b745b8ed8f7;v2fixturebackupe7d41432241cde1962eecb4204d2d8e44096c085. Original v1 omitted backend registration and its2/0baseline failure is fixture-limited,preserved unchanged. Earlier a6fe fulldebug101/partial305pass2fail9ignored33summaries and laterNOTRUN remain failed historical evidence.
+
+Independent static R2 reports no HIGH/MEDIUM; both R1MEDIUMs fixed. Three LOWs remain: no debug cost-equivalence assertion under concurrent growth,unconfirmed nearest-order/skipbounds Subquery guard hole,comment/blank-line nits. No extra assertions,probes or formatting added. The original EXPLAIN serial-bound assertion's prior cause remains UNATTRIBUTED; passing focused/full tests and the eligible helper bypass do not prove causality. CustomANY EXPLAIN/publiccustom=IN resolution mismatches remain separate unfixed planner/binder parity gaps.
+
+Acceptance still HELD for parent independent terminal audit/integration decision. pnpm --unit does NOT execute pg-engine or Docker/service-stack tests. No runtime idle/scaled footprint,performance advantage or global faster-than-Postgres claim. Combined runtime/service/resource/performance gates are separate parent work.
+
+Evidence refs: original failure export77e28dd9dbf75727edbefbec1b614f60f2d896f4;separate launchb0eca491;closed dist989a6e03. Final terminal export is recorded by checkpoint-receipt.json and refs/heads/wip/resume-20261104-planner-evidence;all evidence-only first-parent diffs,each payload hashed. Original165 remains cleanc861 standaloneclosed,cursor7ffa deferred;172 remains clean63f7c0b4 baselineclosure,no implementation candidate. See INDEPENDENT165-HANDOFF.md and FDW172-BASELINE-HANDOFF.md. No more rounds or launches authorized in this owner batch.

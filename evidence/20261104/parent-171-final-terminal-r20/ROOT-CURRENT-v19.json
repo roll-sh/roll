@@ -1,0 +1,72 @@
+{
+  "time": "2026-11-04T23:05:33.736220+00:00",
+  "shared_source": "fe7b0023c9df19a6dae1e6067ba8454998db48c5",
+  "integration": "HELD; shared source clean fe7b0023; no owner candidate integrated",
+  "performance": "NO broad performance acceptance",
+  "lanes": {
+    "165": {
+      "source": "c8618834",
+      "owner_report": "All9commands terminal0; parentaudited381files380hashes exactraw455/0/18/61debug+release anddistbinary/unit24/5; standaloneverificationCOMPLETE",
+      "limits": "Earlierwire101/R2LOWs retained; no parentintegration/service/performance acceptance"
+    },
+    "167": {
+      "source": "d9e2279c",
+      "focused": "PASS golden3modes/reordered1/libClippy0 ownerseal7eff5c45",
+      "new_review": "R4 N1 static plausible MEDIUM nested InitPlan undercount; owner cache-only preparation assigned; reviewer stale runtime paragraphs corrected",
+      "full": "UNRUN on d9e; original278crash101/pgunitNOTRUN remain independent"
+    },
+    "170": {
+      "source": "1b6a80b9",
+      "focused": "PASS5+2+25/libClippy ownerseal a313c23a",
+      "review": "No newHIGH/MEDIUM in range; measured-parbuild rawheap sizing staticMEDIUM outside range now parent-owned; historicalphysicalfidelity held",
+      "full": "UNRUN on successor"
+    },
+    "163_combined": {
+      "candidate": "e686696a testonly successor of cace;39changedblobhashes/2501snapshotinputs verified and exactremote",
+      "behavioral_red": "b56 actualcompiled101;2workers6000modelreturns0validations; seal4bf103ca",
+      "invalid_attempt": "First intendedcace reusedredbinary invalid; seal834a37fa, no sourceattribution",
+      "actual_green": "cace recompiled fromintendedsnapshot; 28serialparallelcases14realworkerbuilds PASS; exactdifferentbinarybb597bdb; parenttrace/sourceaudit seal0a4f017d",
+      "runtime_obligation": "Modeledsizevalidation focusedproof achieved;PGsize/precedence/stats/PLAINoraclesconfirmed. FourestimatedDETAILTIDs differ;P6-P12/finalgatespending.",
+      "next": "PG18.6R2 parentaudited/export3a9d0bfe:20fixtures+2frozencontrols allcaptured,44commands194entries;fourestimatedTIDcomparisonsFAILEDretained;read-onlysourcedispositionassigned,noenginebuild.",
+      "encoding": "Exact e686 focused3/library193pass2ignored PASS; measuredencoding/parscanTLS held",
+      "separate_gaps": "Measuredparbuild rawTOASTheapsizing MEDIUM remains outsideoriginalmodeledHIGH; newstats oracle pending",
+      "TID_disposition": "Staticread-onlyassessment:row_tid/modelled_tid/ctid_ofbodiesunchangedacrosse686/fe7/c66/483;preexistingsynthetichashfallbackexplainsfourmismatches. StillfailedPGparitycomparisons,noexemption/noexpectationchange"
+    },
+    "166": {
+      "bounded": "PASS",
+      "acceptance": "coverage/perf/finalintegration pending"
+    },
+    "169": {
+      "correctness": "PASS",
+      "performance": "HOLD/INCONCLUSIVE memory/indexoutlier/close topology"
+    },
+    "148": {
+      "performance": "HOLD/INCONCLUSIVE invalidfalsezero"
+    },
+    "149": {
+      "correctness": "focused endpointPASS",
+      "performance": "originalDDL101 unresolved; isolatedtargetNOTRUN/DEFERRED"
+    },
+    "171": {
+      "source": "cac0933bc4eb5ef87674889542cab271de4615d0 treebd48e507",
+      "focused": "ParentrawauditPASS7commands0;15testexecutions/6summaries (generic1,registeredparallel1,originallogicalcases1each,kept8,golden3modes);libClippy0/10warningsnonechangedproductionpaths. Auditbookkeepinginitialsource.patchassertfailurepreserved,correctedvscommitteddiff;notestre-run.",
+      "full": "OriginalfrozenpipelineTERMINALFAILEDHEAVY1atClippyAUDIT1;cargoClippy0. Debug+releaseEACHrawexact457/0/18/61,parentverified60actualbinaryhasheseach. Dist/unitNOTRUNthere.",
+      "review": "FreshR2STATICnoHIGH/MEDIUM,bothpriorMEDIUMssourcefixed;3LOWs retained;reviewerpendingfocusedprosesupersededbyparent7commandPASSaudit.",
+      "action": "Bounded owner batch CLOSED; parent independently audited final owner export and separate DIST/UNIT. Standalone gate package COMPLETE across two plans; original frozen pipeline remains FAILED/PARTIAL. No additional owner runs.",
+      "customANY_IN": "Earliercorrectnessdiscrepancies retained, no timing",
+      "behavioral_red": "Parent-audited93501ac9:433files/432hashes,22evidence-onlychanges;bothcompiledbehavioralRED101;generic0/6,parallelboth0/0,currentGather2,productionpatchEMPTY. Baseline/repairheldawaitPG.",
+      "baseline_audit": "a776a571closed460files/459hashes/26evidence-onlychanges;genericexit0parallel101,restorationreceiptverified",
+      "unregistered_fixture": "Originalbaseline2/0 preserveda776;staticmissingleaderregistration,correctedtest-onlypair establishes baselineworkerlaunch.",
+      "Clippy_disposition": "Append-onlyposthoccomparisonexistingraw:24warningmessages29primaryspanentries\u219210exactduplicatecopiescollapsed\u219214distinctdiagnostics,exacthistoricalmessage/pathmultiset,allwarningpathsunchangedc861,nonechangedprod. Frozenfailedaudituntouched/no rerun.",
+      "separate_remaining": "First-run dist command0/audit0; pnpm test:pg --unit command0/audit0 EXECUTED24/0/0/5. Actual saved and target binary SHA02155aafc79c86e24696f4f0cae43b10c54774aac4b33c5d7f0dd767a3d06fb3 independently verified; old9/new11 frozen inputs unchanged; owned groups absent/slots released.",
+      "final_owner_export": "f7342c74d2295a13bb5ad58e0676f41f8bbee763; parent verified605closedfiles604hashes15evidence-onlychangedpaths and exactremote",
+      "parent_disposition": "Standalone validation closed with separate Clippy diagnostic comparison; original audit1 retained. No parent integration/service/performance acceptance. Three source LOWs and prior serial-bound cause UNATTRIBUTED retained.",
+      "parent_audit_erratum": "Earlier parent assertion expected incorrect colon in HEAVY-EXIT marker; corrected exact raw marker, original attempt preserved in new receipt; no gate reruns or frozen edits."
+    },
+    "172": "Read-only baseline closure; clean63f7; no round8 candidate;2350/2458 and108mismatches retained; historical runner repair required before rerun."
+  },
+  "crash_diagnostic": "FreshR3staticreview no certaincompileblocker;R1/R2HIGH/MEDIUMaddressed. R3config/historydifference andevidence-timing limits retained in parentdisposition;NOcompile/runtimeauthorized;original101open.",
+  "latest_parent_backup": "99a07fd3aee741b7ea525d1c9b209d652cb9d7f9",
+  "oracle_r2_task": "node:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Athread-send%3Apg-resume-20261104-combined-pg18-oracles-r2",
+  "planner171_followup_task": "node:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Athread-send%3Apg-resume-20261104-171-baseline-lazy-repair-r2"
+}

@@ -1,0 +1,41 @@
+{
+  "utc": "2026-11-04T23:05:08.555124+00:00",
+  "candidate": "cac0933bc4eb5ef87674889542cab271de4615d0",
+  "tree": "bd48e5074887125072d7c23cb09c78fe6fe15c0b",
+  "parent_terminal_audit": "PASS",
+  "standalone_gate_package": "COMPLETE across original and separately authorized plans; Clippy accepted by separate raw-diagnostic comparison",
+  "original_pipeline": "FAILED/PARTIAL; frozen Clippy audit1/HEAVY1; dist/unit NOTRUN there",
+  "separate_dist_unit": "commands0/audits0; unit EXECUTED24/0/0/5",
+  "frozen_counts": {
+    "full171-frozen.sha256": 9,
+    "remaining171-frozen.sha256": 11
+  },
+  "artifact": {
+    "binary": "/home/meszmate/.cache/a171/bin/lazy-cac0933b/roll-engine",
+    "sha256": "02155aafc79c86e24696f4f0cae43b10c54774aac4b33c5d7f0dd767a3d06fb3",
+    "bytes": 69451432,
+    "profile": "dist",
+    "source": "cac0933bc4eb5ef87674889542cab271de4615d0",
+    "source_artifact": "/home/meszmate/.cache/a171/target/dist/roll-engine",
+    "source_artifact_matches": true
+  },
+  "process_groups_absent": [
+    1841329,
+    3890750
+  ],
+  "owned_slots_released": true,
+  "audit_erratum": {
+    "prior_parent_audit": "AssertionError before receipt write",
+    "cause": "Expected HEAVY-EXIT: 1 instead of actual HEAVY-EXIT 1",
+    "correction": "Exact anchored comparison to actual marker; no frozen inputs or gate results changed; no rerun"
+  },
+  "retained_limits": [
+    "3 source-review LOWs",
+    "prior serial-bound cause unattributed",
+    "custom ANY/IN gaps"
+  ],
+  "integration_acceptance": false,
+  "service_acceptance": false,
+  "performance_acceptance": false,
+  "shared_source_unchanged": true
+}

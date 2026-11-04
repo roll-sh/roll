@@ -1,0 +1,18 @@
+{
+  "candidate": "cac0933bc4eb5ef87674889542cab271de4615d0",
+  "tree": "bd48e5074887125072d7c23cb09c78fe6fe15c0b",
+  "evidence": {
+    "commit": "f7342c74d2295a13bb5ad58e0676f41f8bbee763",
+    "ref": "refs/heads/wip/resume-20261104-planner-evidence",
+    "remote": "f7342c74d2295a13bb5ad58e0676f41f8bbee763",
+    "files": 605,
+    "manifest_entries": 604,
+    "changed_paths": 15,
+    "evidence_only_first_parent": true,
+    "source_head": "c8618834caf45bc0a34cf9985c07f9bc13b498ef"
+  },
+  "original_full_pipeline": "FAILED/PARTIAL at frozenClippyAUDIT1/HEAVY1;dist/unitNOTRUNthere",
+  "separate_remaining": "DISTandUNITcompletedboth0/audit0;unitEXECUTED24/0/0/5",
+  "handoff": "/home/meszmate/.cache/pg-engine-resume-20261104/session_planner/PLANNER171-LAZY-HANDOFF.md",
+  "acceptance": "parentheld;no performance/service/resourceclaim"
+}
