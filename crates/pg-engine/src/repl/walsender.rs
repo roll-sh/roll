@@ -524,35 +524,53 @@ fn stream_acquired(
         let seen = db.log.commit_count();
         let end = db.log.safe_end(&r.wal);
         if end > pos {
-            for m in super::decode::markers(&db.store, pos, end) {
-                let m = m?;
-                let mut err = None;
-                // (Written out every 64 kB and at each transaction's end, not after every
-                // message: a write per change was most of a walsender's CPU.)
-                let mut unflushed = 0usize;
-                dec.decode(&m, &mut |o| {
-                    // (A logical walsender's walEnd is the record's own position too,
-                    // WalSndPrepareWrite: a receiver confirming it confirms no later one.)
-                    w.put(b'd', &xlog_data(o.lsn, o.lsn, &o.data));
-                    unflushed += o.data.len() + 25;
-                    if unflushed >= 64 << 10 {
-                        unflushed = 0;
-                        if let Err(e) = w.flush() {
-                            err = Some(e);
-                        }
+            let mut it = super::decode::markers(&db.store, pos, end);
+            let mut batch: Vec<super::log::Marker> = Vec::new();
+            loop {
+                // (A run of transactions at a time, their change records read in one pass.)
+                batch.clear();
+                let mut wal = 0;
+                for m in it.by_ref() {
+                    let m = m?;
+                    wal += m.end_lsn.saturating_sub(m.first_lsn);
+                    batch.push(m);
+                    if wal >= super::decode::PREFETCH_BYTES || batch.len() >= 4096 {
+                        break;
                     }
-                    Ok(())
-                })?;
-                if err.is_none()
-                    && unflushed > 0
-                    && let Err(e) = w.flush()
-                {
-                    err = Some(e);
                 }
-                if let Some(e) = err {
-                    return Err(e.into());
+                if batch.is_empty() {
+                    break;
+                }
+                dec.prefetch(&batch)?;
+                // (Written out every 64 kB and at the run's end, not after every message or
+                // transaction: a write per change was most of a walsender's CPU, and one per
+                // transaction a tenth of it catching up. Live, a run is a transaction.)
+                let mut unflushed = 0usize;
+                for m in &batch {
+                    let mut err = None;
+                    dec.decode(m, &mut |o| {
+                        // (A logical walsender's walEnd is the record's own position too,
+                        // WalSndPrepareWrite: a receiver confirming it confirms no later one.)
+                        w.put(b'd', &xlog_data(o.lsn, o.lsn, &o.data));
+                        unflushed += o.data.len() + 25;
+                        if unflushed >= 64 << 10 {
+                            unflushed = 0;
+                            if let Err(e) = w.flush() {
+                                err = Some(e);
+                            }
+                        }
+                        Ok(())
+                    })?;
+                    if let Some(e) = err {
+                        return Err(e.into());
+                    }
+                }
+                if unflushed > 0 {
+                    w.flush()?;
                 }
             }
+            // (No rows kept while idle.)
+            dec.prefetch(&[])?;
             pos = end;
             if sent < end {
                 sent = end;
