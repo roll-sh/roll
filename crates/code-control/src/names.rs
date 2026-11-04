@@ -3,9 +3,9 @@
 /// Names roll.sh keeps for itself: owners share the top level of `roll.sh/<owner>` with the
 /// app's own routes. Mirrors `apps/dashboard/src/lib/reserved-names.ts`; change both together.
 pub const RESERVED: &[&str] = &[
-    // Routes and files in apps/dashboard/src/app.
-    "dashboard", "icon.svg", "favicon.ico", "_next", "install.sh",
-    // Next.js and web conventions.
+    // Routes and files in apps/dashboard/src/routes and public/, and the app's own paths.
+    "dashboard", "icon.svg", "favicon.ico", "_next", "_serverfn", "install.sh",
+    // Web conventions.
     "api", "robots.txt", "sitemap.xml", "manifest.json", "manifest.webmanifest", ".well-known", "opengraph-image",
     "twitter-image", "apple-icon", "static", "assets", "public",
     // Product and marketing pages.
@@ -131,19 +131,21 @@ mod tests {
         ours.sort_unstable();
         assert_eq!(ours, theirs, "crates/code-control/src/names.rs and apps/dashboard/src/lib/reserved-names.ts differ");
 
-        // Every top-level route the Next app answers is reserved.
-        for entry in std::fs::read_dir(dir.join("app")).expect("src/app") {
+        // Every top-level route the app answers is reserved: routes (src/routes, TanStack's file
+        // names: `foo.tsx`, `foo.bar.tsx` and `foo/` are all `/foo`) and static files (public/).
+        for entry in std::fs::read_dir(dir.join("routes")).expect("src/routes") {
             let entry = entry.unwrap();
             let name = entry.file_name().to_string_lossy().to_string();
-            let route = if entry.file_type().unwrap().is_dir() {
-                !name.starts_with(['[', '(', '_', '@'])
-            } else {
-                let stem = name.split('.').next().unwrap_or("");
-                ["icon", "apple-icon", "favicon", "opengraph-image", "twitter-image", "robots", "sitemap", "manifest"].contains(&stem)
-            };
-            if route {
-                assert!(RESERVED.contains(&name.as_str()), "src/app/{name} is a top-level route but not a reserved name");
+            let top = if entry.file_type().unwrap().is_dir() { name.as_str() } else { name.split('.').next().unwrap_or("") };
+            // Params, groups, pathless layouts, ignored files, the root and the home page.
+            if top.starts_with(['$', '(', '_', '-', '[']) || top == "index" || top == "route" {
+                continue;
             }
+            assert!(RESERVED.contains(&top), "src/routes/{name} is a top-level route but `{top}` isn't a reserved name");
+        }
+        for entry in std::fs::read_dir(dir.join("../public")).expect("public") {
+            let name = entry.unwrap().file_name().to_string_lossy().to_string();
+            assert!(RESERVED.contains(&name.as_str()), "public/{name} is served at the top level but isn't a reserved name");
         }
         for (i, n) in RESERVED.iter().enumerate() {
             assert_eq!(*n, n.to_ascii_lowercase(), "reserved names are lowercase");

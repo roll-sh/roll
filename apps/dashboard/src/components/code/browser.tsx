@@ -1,5 +1,3 @@
-"use client";
-
 import { ExternalLink, File, FileSymlink, Folder, FolderGit2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { formatBytes } from "@/lib/roll-api";

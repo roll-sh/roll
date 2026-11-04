@@ -1,7 +1,5 @@
-"use client";
-
 import { File, Search } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "@tanstack/react-router";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { codeApi, isNotFound } from "@/lib/code-api";
 
@@ -85,7 +83,7 @@ const TargetCtx = createContext<(t: Target | null) => void>(() => {});
  * <KeysTarget>.
  */
 export function RepoKeys({ repo, defaultRev, children }: { repo: string; defaultRev: string; children: ReactNode }) {
-  const router = useRouter();
+  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [target, setTarget] = useState<Target | null>(null);
   const rev = target?.rev ?? defaultRev;
@@ -103,10 +101,10 @@ export function RepoKeys({ repo, defaultRev, children }: { repo: string; default
         // A search box on the page takes `/` itself; elsewhere it opens code search.
         if (document.querySelector("[data-repo-search]")) return;
         e.preventDefault();
-        router.push(`/${repo}/search`);
+        navigate({ href: `/${repo}/search` });
       } else if (e.key === "y" && permalink) {
         e.preventDefault();
-        router.replace(`${permalink}${window.location.search}${window.location.hash}`, { scroll: false });
+        navigate({ href: `${permalink}${window.location.search}${window.location.hash}`, replace: true, resetScroll: false });
       }
     };
     const onOpen = () => setOpen(true);
@@ -116,7 +114,7 @@ export function RepoKeys({ repo, defaultRev, children }: { repo: string; default
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("roll:finder", onOpen);
     };
-  }, [permalink, router, repo]);
+  }, [permalink, navigate, repo]);
 
   return (
     <TargetCtx.Provider value={setTarget}>
@@ -152,7 +150,7 @@ export function FinderButton() {
 }
 
 function Finder({ repo, rev, onClose }: { repo: string; rev: string; onClose: () => void }) {
-  const router = useRouter();
+  const navigate = useNavigate();
   const [all, setAll] = useState<{ paths: string[]; truncated: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState("");
@@ -190,9 +188,9 @@ function Finder({ repo, rev, onClose }: { repo: string; rev: string; onClose: ()
   const go = useCallback(
     (path: string) => {
       onClose();
-      router.push(`/${repo}/blob/${encodeURIComponent(rev)}/${path.split("/").map(encodeURIComponent).join("/")}`);
+      navigate({ href: `/${repo}/blob/${encodeURIComponent(rev)}/${path.split("/").map(encodeURIComponent).join("/")}` });
     },
-    [onClose, repo, rev, router],
+    [onClose, repo, rev, navigate],
   );
 
   return (

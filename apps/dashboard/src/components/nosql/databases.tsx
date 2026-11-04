@@ -1,10 +1,8 @@
-"use client";
-
 import { HorizonMark } from "@roll/brand";
 import { ChevronRight, GitBranch, Moon, Plus } from "lucide-react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "@/components/link";
 import { formatBytes } from "@/lib/roll-api";
 import {
   branchTree,
@@ -69,7 +67,7 @@ function useNosqlList() {
 }
 
 export function NosqlDatabases() {
-  const router = useRouter();
+  const navigate = useNavigate();
   const { info, dbs, offline, refresh } = useNosqlList();
   const { busy, error, run } = useAction(refresh);
   const [creating, setCreating] = useState(false);
@@ -108,7 +106,7 @@ export function NosqlDatabases() {
             const d = await run("create", () => nosqlApi.create(req));
             if (d) {
               setCreating(false);
-              router.push(`/dashboard/nosql/${d.id}`);
+              navigate({ href: `/dashboard/nosql/${d.id}` });
             }
           }}
         />

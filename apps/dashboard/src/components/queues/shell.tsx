@@ -1,9 +1,7 @@
-"use client";
-
 import { DotField, HorizonMark } from "@roll/brand";
-import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { useLocation } from "@tanstack/react-router";
 import type { ReactNode } from "react";
+import { Link } from "@/components/link";
 import { ROLL_API } from "@/lib/queues-api";
 import { AppShell } from "../app-shell";
 import { useMarkState } from "../mark-state";
@@ -23,7 +21,7 @@ const tabs = [
 ];
 
 function Tabs() {
-  const pathname = usePathname();
+  const pathname = useLocation({ select: (l) => l.pathname });
   return (
     <nav className="-mx-1 mt-5 flex gap-1 overflow-x-auto border-b border-line" aria-label="Queues sections">
       {tabs.map((t) => {

@@ -1,5 +1,3 @@
-"use client";
-
 import { Pencil, Plus, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { type Policy, qapi } from "@/lib/queues-api";

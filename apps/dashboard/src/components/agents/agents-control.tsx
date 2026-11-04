@@ -1,5 +1,3 @@
-"use client";
-
 import { Plus } from "lucide-react";
 import { useEffect, useLayoutEffect, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";

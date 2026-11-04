@@ -1,5 +1,3 @@
-"use client";
-
 import type { ReactNode } from "react";
 import { AppShell } from "../app-shell";
 import { SignIn } from "./sign-in";

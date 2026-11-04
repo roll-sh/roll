@@ -1002,7 +1002,7 @@ jsdom (`vitest.config.mts` projects `node` and `dom`, setup in `src/test/`).
 | git proxy: target URL, header allowlist, forwarding headers, streaming body, dropped response headers, 401 passthrough, 502 | `src/lib/git-proxy.test.ts` |
 | sign-in token storage and events | `src/lib/code-token.test.ts` |
 | owner tokens list and revoke requests, token rows (prefix or id, last use) | `src/lib/code-api.test.ts`, `src/lib/ci.test.ts` |
-| 404 and rename proxy: path classification, 404 rewrite, 308 redirect, API down, app routes untouched | `src/proxy.test.ts` (and checked against `next dev`: real 404 and 308) |
+| 404s and renames on public pages: the app's own names never reach the API, a missing repo or owner is a 404, a renamed repo a 308 keeping the rest of the path and the query, API down is the error page; the route tree sends app routes, owner and repo pages and git traffic where they belong, and keeps search params as written | `src/lib/public-pages.test.ts`, `src/router.test.tsx` (and checked against the production server: real 404 and 308) |
 | reserved names: lowercase, unique, every top-level route, in sync with Rust | `src/lib/reserved-names.test.ts`, `code-control/src/names.rs::reserved_matches_the_dashboard` |
 | diff view: threads at their line and side (unified and split, context lines, ranges, renames), off-diff, outdated and "elsewhere" threads, n/p focus, collapse, binary and too-large files, line selection and shift-click ranges, composer and drafts at their rows | `src/components/code/diff.test.tsx` (`DiffViewer: threads in a unified diff`, `DiffViewer: split view`, `DiffViewer: commenting on lines`) |
 | change page review flow: click a line, Comment now → `createThread` with path, side, line and start_line; Suggest; old side; failures keep text; pending review (Start/Add to review, edit, remove, stored across reloads, stale revision, discard) submitted with a verdict → `submitReview` body; closed changes read-only | `src/components/code/changes.test.tsx` (`CodeChange: commenting on a line`, `CodeChange: a pending review`) |
@@ -1020,7 +1020,7 @@ jsdom (`vitest.config.mts` projects `node` and `dom`, setup in `src/test/`).
 | the canvas under a trackpad: two-finger scroll pans in any direction, pinch (ctrl+wheel, Safari's gesture events) zooms, shift turns a mouse wheel sideways, scrollable content keeps its wheel | `src/components/agents/agents-surface.test.tsx` ("the canvas under a trackpad") |
 | agents share replay: idle gaps shortened to `MAX_GAP`, both clocks map back, steps; records appear at their times, running text streams in proportion, runs and threads busy (pulse) and waiting on unanswered approvals, subagent threads appear when started, the last moment is the share as frozen, reduced motion shows text whole; stats | `src/lib/agents-replay.test.ts` |
 | the share page: final frame first, read-only (no composer, answers, share, rename or delete), reduced motion stays put and steps through states, rewinds and plays to the end at 8×, scrubbing; a read-only session; the Share button (subagent threads checkbox, link, manage link, refusal) and the shares list (revoke after asking, empty) | `src/components/agents/share.test.tsx` |
-| share pages give real 404s (unknown and revoked ids, through the proxy), preview images aren't checked | `src/proxy.test.ts` ("gives an unknown or revoked share a real 404", "finds share pages only") |
+| share pages give real 404s (unknown and revoked ids, from the page's loader), preview images aren't checked | `src/lib/public-pages.test.ts` ("share pages"), `src/router.test.tsx` |
 | the connect page: "Approve ada-mbp (macOS)?" from the pending lookup, a code nobody waits with answered at once, approving still works when the lookup fails, minted tokens signed in with `roll agent login --machine-token` (masked, `--api` when needed), the install line from this web app | `src/components/agents/connect.test.tsx` |
 | new agents fixtures (`pending_logins`, `machine_logins`, `shares`, `share_summaries`) decode strictly | `src/lib/agents-api.test.ts` |
 | a machine's state: an unconnected sandbox is asleep, stopped, waking, booting or connecting (never "offline"), and a command reaches it; failed, deleting and offline computers aren't reachable | `src/lib/agents-api.test.ts` ("machineState") |
@@ -1137,7 +1137,7 @@ only the scripted fake providers (`ROLL_AGENT_FAKE=1`).
 | `diff.get` of the run | `ROLL_DEMO.md` added with the prompt |
 | a reconnect with `?after=` and a newer `Last-Event-ID` | resumes after the newer |
 | a share | the link on the web app, read anonymously (`no-store`), every record kind, the edit, no home directory |
-| the dashboard (`next build`, `next start`) | `/dashboard/agents` 200 with its title; the share page 200 titled after the thread, OpenGraph and `noindex`; its preview image a PNG; a missing share 404 |
+| the dashboard (`vite build`, `node server.mjs`) | `/dashboard/agents` 200 with its title; the share page 200 titled after the thread, OpenGraph and `noindex`; its preview image a PNG; a missing share 404 |
 | `roll agent logout` | `up` stops (exit 1, "roll agent login"), the machine is gone, the share stays |
 | `install.sh` (`scripts/test-agents.sh`) | from a local release: this machine's asset, checksum checked, installed and runs; a wrong checksum installs nothing |
 

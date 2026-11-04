@@ -57,7 +57,7 @@ async function freePort() {
 /** Clean environment for the children: nothing from the developer's roll setup leaks in. */
 function env(extra = {}) {
   const e = { ...process.env };
-  for (const k of Object.keys(e)) if (k.startsWith("ROLL_") || k === "NEXT_PUBLIC_ROLL_API") delete e[k];
+  for (const k of Object.keys(e)) if (k.startsWith("ROLL_") || k.startsWith("VITE_ROLL_")) delete e[k];
   return { ...e, NO_COLOR: "1", RUST_LOG: "warn", ...extra };
 }
 
@@ -285,11 +285,11 @@ async function main() {
   // ── the dashboard, production build, against this rolld ──
   if (withDashboard) {
     const dash = join(ROOT, "apps/dashboard");
-    log("building the dashboard (next build)…");
-    // Into `.next` (`next dev` keeps its own `.next/dev`), with this rolld's address built in.
-    const webEnv = env({ NEXT_PUBLIC_ROLL_API: API, ROLL_API_URL: API, NEXT_TELEMETRY_DISABLED: "1" });
-    execFileSync("pnpm", ["exec", "next", "build"], { cwd: dash, env: webEnv, stdio: ["ignore", "inherit", "inherit"] });
-    start("next start", "pnpm", ["exec", "next", "start", "-H", "127.0.0.1", "-p", String(webPort)], { cwd: dash, env: webEnv });
+    log("building the dashboard (vite build)…");
+    // Into `dist/` with this rolld's address built into the client; the server reads ROLL_API_URL.
+    const webEnv = env({ VITE_ROLL_API: API, ROLL_API_URL: API });
+    execFileSync("pnpm", ["exec", "vite", "build"], { cwd: dash, env: webEnv, stdio: ["ignore", "inherit", "inherit"] });
+    start("dashboard", "node", ["server.mjs", "-H", "127.0.0.1", "-p", String(webPort)], { cwd: dash, env: webEnv });
     const page = async (path) => {
       const r = await fetch(`${WEB}${path}`, { redirect: "manual" });
       return { status: r.status, text: await r.text(), type: r.headers.get("content-type") };

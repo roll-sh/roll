@@ -1,5 +1,3 @@
-"use client";
-
 import { Lock, Search, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { type Connection, formatBytes, formatDuration, qapi } from "@/lib/queues-api";

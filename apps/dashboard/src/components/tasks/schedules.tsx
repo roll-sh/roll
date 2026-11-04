@@ -1,5 +1,3 @@
-"use client";
-
 import { Pause, Play, Plus, Trash2, Zap } from "lucide-react";
 import { useState } from "react";
 import { cronHint, formatTime, rel, tasks, type Schedule, type ScheduleRequest } from "@/lib/tasks-api";

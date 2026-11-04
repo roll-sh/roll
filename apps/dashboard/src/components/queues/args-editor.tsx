@@ -1,5 +1,3 @@
-"use client";
-
 import { Plus, X } from "lucide-react";
 import type { QueueType } from "@/lib/queues-api";
 import { Chips, ICON, iconBtn, input } from "./ui";

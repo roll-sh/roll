@@ -1,10 +1,8 @@
-"use client";
-
 import { HorizonMark } from "@roll/brand";
 import { ArrowLeft, ChevronRight, ExternalLink, Lock, Plus, Search } from "lucide-react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { Link } from "@/components/link";
 import { formatCount } from "@/lib/redis-api";
 import {
   codeApi,
@@ -59,7 +57,7 @@ function useRepoList() {
 }
 
 export function CodeRepos() {
-  const router = useRouter();
+  const navigate = useNavigate();
   const { info, repos, offline, refresh } = useRepoList();
   const { busy, error, run } = useAction(refresh);
   const [creating, setCreating] = useState(false);
@@ -68,7 +66,7 @@ export function CodeRepos() {
     const repo = await run("create", () => codeApi.createRepo(input));
     if (repo) {
       setCreating(false);
-      router.push(`/dashboard/code/${repo.full_name}`);
+      navigate({ href: `/dashboard/code/${repo.full_name}` });
     }
   };
 

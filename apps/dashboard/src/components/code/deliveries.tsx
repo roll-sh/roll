@@ -1,5 +1,3 @@
-"use client";
-
 import { useEffect, useState } from "react";
 import type { Delivery } from "@/lib/code-api";
 import { formatWait } from "@/lib/queue";

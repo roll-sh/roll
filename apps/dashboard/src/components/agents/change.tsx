@@ -1,5 +1,3 @@
-"use client";
-
 import { ArrowUpRight, ClipboardList, GitPullRequest, X } from "lucide-react";
 import { useState } from "react";
 import type { ChangeStatus, Landing, Machine, Published, Thread, ThreadChange, WorkRef } from "@/lib/agents-api";

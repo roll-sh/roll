@@ -6,7 +6,7 @@ Serverless infrastructure for everything.
 
 ```
 apps/
-  dashboard/        Next.js 16 app — brand playground (/), dashboard (/dashboard, /dashboard/code, /dashboard/databases, /dashboard/streams, /dashboard/tasks, /dashboard/storage, /dashboard/nosql), public repo pages (/<owner>/<repo>)
+  dashboard/        TanStack Start app — brand playground (/), dashboard (/dashboard, /dashboard/code, /dashboard/databases, /dashboard/streams, /dashboard/tasks, /dashboard/storage, /dashboard/nosql), public repo pages (/<owner>/<repo>)
 packages/
   brand/            @roll/brand — logo geometry, animation engine, React components, SVG assets
   tasks/            @roll/tasks — TypeScript SDK: client, pull consumer, signature verification, workflows
@@ -88,7 +88,7 @@ import { RollMark, RollLogo, DotField } from "@roll/brand";
 ## Assets
 
 `pnpm --filter @roll/brand export` regenerates static SVGs into `packages/brand/assets/`,
-`apps/dashboard/public/brand/`, and the favicon `apps/dashboard/src/app/icon.svg` — from the same
+`apps/dashboard/public/brand/`, and the favicon `apps/dashboard/public/icon.svg` — from the same
 geometry the animation uses.
 
 ## AI assistant

@@ -1,5 +1,3 @@
-"use client";
-
 import {
   Check,
   ChevronRight,
@@ -131,7 +129,6 @@ function UserMessage({ run }: { run: Run }) {
         {run.attachments.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-1.5">
             {run.attachments.map((a, i) => (
-              // eslint-disable-next-line @next/next/no-img-element
               <img key={i} src={`data:${a.mime};base64,${a.data}`} alt={a.name} className="size-16 rounded-md border border-line object-cover" />
             ))}
           </div>

@@ -1,8 +1,6 @@
-"use client";
-
 import { ArrowRight, Plus, Trash2 } from "lucide-react";
-import Link from "next/link";
 import { useState } from "react";
+import { Link } from "@/components/link";
 import { replicationInput, replicationStatus, storageApi, type Bucket, type ReplicationRule } from "@/lib/storage-api";
 import { iconBtn } from "../tasks/ui";
 import { btn, ErrorNote, input, Panel, primary } from "../ui";

@@ -1,5 +1,3 @@
-"use client";
-
 import { ArrowUp, ChevronDown, ImagePlus, ListChecks, Square, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
@@ -253,7 +251,6 @@ export function Composer({
         <ul className="flex flex-wrap gap-1.5 px-2.5 pt-2.5" aria-label="Attachments">
           {attachments.map((a, i) => (
             <li key={`${a.name}-${i}`} className="group relative">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src={`data:${a.mime};base64,${a.data}`} alt={a.name} className="size-12 rounded-md border border-line object-cover" />
               <button
                 type="button"

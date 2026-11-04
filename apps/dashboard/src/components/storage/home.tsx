@@ -1,9 +1,7 @@
-"use client";
-
 import { ChevronRight, GitBranch, Plus } from "lucide-react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
+import { Link } from "@/components/link";
 import { formatCount } from "@/lib/redis-api";
 import { formatBytes } from "@/lib/roll-api";
 import {
@@ -56,7 +54,7 @@ function useMonthToDate(scope: string) {
 }
 
 export function StorageHome() {
-  const router = useRouter();
+  const navigate = useNavigate();
   const { info, buckets, offline, denied, refresh } = useStorage();
   const { busy, error, setError, run } = useAction(refresh);
   const [tabRaw, setTabRaw] = useHashTab<Tab>(TAB_VALUES, "buckets");
@@ -143,7 +141,7 @@ export function StorageHome() {
                       );
                       if (b) {
                         setCreating(false);
-                        router.push(`/dashboard/storage/${encodeURIComponent(b.name)}`);
+                        navigate({ href: `/dashboard/storage/${encodeURIComponent(b.name)}` });
                       }
                     }}
                   />

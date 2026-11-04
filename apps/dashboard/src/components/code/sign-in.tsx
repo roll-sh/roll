@@ -1,5 +1,3 @@
-"use client";
-
 import { KeyRound, LogOut, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { codeApi, createCodeApi, type CodeInfo } from "@/lib/code-api";
