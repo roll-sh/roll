@@ -1,0 +1,468 @@
+\set HIDE_TOAST_COMPRESSION false
+-- @@@ 0
+-- ensure we get stable results regardless of installation's default
+SET default_toast_compression = 'pglz';
+-- @@@ 1
+-- test creating table with compression method
+CREATE TABLE cmdata(f1 text COMPRESSION pglz);
+-- @@@ 2
+CREATE INDEX idx ON cmdata(f1);
+-- @@@ 3
+INSERT INTO cmdata VALUES(repeat('1234567890', 1000));
+-- @@@ 4
+\d+ cmdata
+                                        Table "public.cmdata"
+ Column | Type | Collation | Nullable | Default | Storage  | Compression | Stats target | Description 
+--------+------+-----------+----------+---------+----------+-------------+--------------+-------------
+ f1     | text |           |          |         | extended | pglz        |              | 
+Indexes:
+    "idx" btree (f1)
+
+-- @@@ 5
+CREATE TABLE cmdata1(f1 TEXT COMPRESSION lz4);
+-- @@@ 6
+INSERT INTO cmdata1 VALUES(repeat('1234567890', 1004));
+-- @@@ 7
+\d+ cmdata1
+                                        Table "public.cmdata1"
+ Column | Type | Collation | Nullable | Default | Storage  | Compression | Stats target | Description 
+--------+------+-----------+----------+---------+----------+-------------+--------------+-------------
+ f1     | text |           |          |         | extended | lz4         |              | 
+
+-- @@@ 8
+-- verify stored compression method in the data
+SELECT pg_column_compression(f1) FROM cmdata;
+ pg_column_compression 
+-----------------------
+ pglz
+(1 row)
+
+-- @@@ 9
+SELECT pg_column_compression(f1) FROM cmdata1;
+ pg_column_compression 
+-----------------------
+ lz4
+(1 row)
+
+-- @@@ 10
+-- decompress data slice
+SELECT SUBSTR(f1, 200, 5) FROM cmdata;
+ substr 
+--------
+ 01234
+(1 row)
+
+-- @@@ 11
+SELECT SUBSTR(f1, 2000, 50) FROM cmdata1;
+                       substr                       
+----------------------------------------------------
+ 01234567890123456789012345678901234567890123456789
+(1 row)
+
+-- @@@ 12
+-- copy with table creation
+SELECT * INTO cmmove1 FROM cmdata;
+-- @@@ 13
+\d+ cmmove1
+                                        Table "public.cmmove1"
+ Column | Type | Collation | Nullable | Default | Storage  | Compression | Stats target | Description 
+--------+------+-----------+----------+---------+----------+-------------+--------------+-------------
+ f1     | text |           |          |         | extended |             |              | 
+
+-- @@@ 14
+SELECT pg_column_compression(f1) FROM cmmove1;
+ pg_column_compression 
+-----------------------
+ pglz
+(1 row)
+
+-- @@@ 15
+-- copy to existing table
+CREATE TABLE cmmove3(f1 text COMPRESSION pglz);
+-- @@@ 16
+INSERT INTO cmmove3 SELECT * FROM cmdata;
+-- @@@ 17
+INSERT INTO cmmove3 SELECT * FROM cmdata1;
+-- @@@ 18
+SELECT pg_column_compression(f1) FROM cmmove3;
+ pg_column_compression 
+-----------------------
+ pglz
+ lz4
+(2 rows)
+
+-- @@@ 19
+-- test LIKE INCLUDING COMPRESSION
+CREATE TABLE cmdata2 (LIKE cmdata1 INCLUDING COMPRESSION);
+-- @@@ 20
+\d+ cmdata2
+                                        Table "public.cmdata2"
+ Column | Type | Collation | Nullable | Default | Storage  | Compression | Stats target | Description 
+--------+------+-----------+----------+---------+----------+-------------+--------------+-------------
+ f1     | text |           |          |         | extended | lz4         |              | 
+
+-- @@@ 21
+DROP TABLE cmdata2;
+-- @@@ 22
+-- try setting compression for incompressible data type
+CREATE TABLE cmdata2 (f1 int COMPRESSION pglz);
+ERROR:  column data type integer does not support compression
+-- @@@ 23
+-- update using datum from different table
+CREATE TABLE cmmove2(f1 text COMPRESSION pglz);
+-- @@@ 24
+INSERT INTO cmmove2 VALUES (repeat('1234567890', 1004));
+-- @@@ 25
+SELECT pg_column_compression(f1) FROM cmmove2;
+ pg_column_compression 
+-----------------------
+ pglz
+(1 row)
+
+-- @@@ 26
+UPDATE cmmove2 SET f1 = cmdata1.f1 FROM cmdata1;
+-- @@@ 27
+SELECT pg_column_compression(f1) FROM cmmove2;
+ pg_column_compression 
+-----------------------
+ lz4
+(1 row)
+
+-- @@@ 28
+-- test externally stored compressed data
+CREATE OR REPLACE FUNCTION large_val() RETURNS TEXT LANGUAGE SQL AS
+'select array_agg(fipshash(g::text))::text from generate_series(1, 256) g';
+-- @@@ 29
+CREATE TABLE cmdata2 (f1 text COMPRESSION pglz);
+-- @@@ 30
+INSERT INTO cmdata2 SELECT large_val() || repeat('a', 4000);
+-- @@@ 31
+SELECT pg_column_compression(f1) FROM cmdata2;
+ pg_column_compression 
+-----------------------
+ pglz
+(1 row)
+
+-- @@@ 32
+INSERT INTO cmdata1 SELECT large_val() || repeat('a', 4000);
+-- @@@ 33
+SELECT pg_column_compression(f1) FROM cmdata1;
+ pg_column_compression 
+-----------------------
+ lz4
+ lz4
+(2 rows)
+
+-- @@@ 34
+SELECT SUBSTR(f1, 200, 5) FROM cmdata1;
+ substr 
+--------
+ 01234
+ 79026
+(2 rows)
+
+-- @@@ 35
+SELECT SUBSTR(f1, 200, 5) FROM cmdata2;
+ substr 
+--------
+ 79026
+(1 row)
+
+-- @@@ 36
+DROP TABLE cmdata2;
+-- @@@ 37
+--test column type update varlena/non-varlena
+CREATE TABLE cmdata2 (f1 int);
+-- @@@ 38
+\d+ cmdata2
+                                         Table "public.cmdata2"
+ Column |  Type   | Collation | Nullable | Default | Storage | Compression | Stats target | Description 
+--------+---------+-----------+----------+---------+---------+-------------+--------------+-------------
+ f1     | integer |           |          |         | plain   |             |              | 
+
+-- @@@ 39
+ALTER TABLE cmdata2 ALTER COLUMN f1 TYPE varchar;
+-- @@@ 40
+\d+ cmdata2
+                                              Table "public.cmdata2"
+ Column |       Type        | Collation | Nullable | Default | Storage  | Compression | Stats target | Description 
+--------+-------------------+-----------+----------+---------+----------+-------------+--------------+-------------
+ f1     | character varying |           |          |         | extended |             |              | 
+
+-- @@@ 41
+ALTER TABLE cmdata2 ALTER COLUMN f1 TYPE int USING f1::integer;
+-- @@@ 42
+\d+ cmdata2
+                                         Table "public.cmdata2"
+ Column |  Type   | Collation | Nullable | Default | Storage | Compression | Stats target | Description 
+--------+---------+-----------+----------+---------+---------+-------------+--------------+-------------
+ f1     | integer |           |          |         | plain   |             |              | 
+
+-- @@@ 43
+--changing column storage should not impact the compression method
+--but the data should not be compressed
+ALTER TABLE cmdata2 ALTER COLUMN f1 TYPE varchar;
+-- @@@ 44
+ALTER TABLE cmdata2 ALTER COLUMN f1 SET COMPRESSION pglz;
+-- @@@ 45
+\d+ cmdata2
+                                              Table "public.cmdata2"
+ Column |       Type        | Collation | Nullable | Default | Storage  | Compression | Stats target | Description 
+--------+-------------------+-----------+----------+---------+----------+-------------+--------------+-------------
+ f1     | character varying |           |          |         | extended | pglz        |              | 
+
+-- @@@ 46
+ALTER TABLE cmdata2 ALTER COLUMN f1 SET STORAGE plain;
+-- @@@ 47
+\d+ cmdata2
+                                              Table "public.cmdata2"
+ Column |       Type        | Collation | Nullable | Default | Storage | Compression | Stats target | Description 
+--------+-------------------+-----------+----------+---------+---------+-------------+--------------+-------------
+ f1     | character varying |           |          |         | plain   | pglz        |              | 
+
+-- @@@ 48
+INSERT INTO cmdata2 VALUES (repeat('123456789', 800));
+-- @@@ 49
+SELECT pg_column_compression(f1) FROM cmdata2;
+ pg_column_compression 
+-----------------------
+ 
+(1 row)
+
+-- @@@ 50
+-- test compression with materialized view
+CREATE MATERIALIZED VIEW compressmv(x) AS SELECT * FROM cmdata1;
+-- @@@ 51
+\d+ compressmv
+                                Materialized view "public.compressmv"
+ Column | Type | Collation | Nullable | Default | Storage  | Compression | Stats target | Description 
+--------+------+-----------+----------+---------+----------+-------------+--------------+-------------
+ x      | text |           |          |         | extended |             |              | 
+View definition:
+ SELECT f1 AS x
+   FROM cmdata1;
+
+-- @@@ 52
+SELECT pg_column_compression(f1) FROM cmdata1;
+ pg_column_compression 
+-----------------------
+ lz4
+ lz4
+(2 rows)
+
+-- @@@ 53
+SELECT pg_column_compression(x) FROM compressmv;
+ pg_column_compression 
+-----------------------
+ lz4
+ lz4
+(2 rows)
+
+-- @@@ 54
+-- test compression with partition
+CREATE TABLE cmpart(f1 text COMPRESSION lz4) PARTITION BY HASH(f1);
+-- @@@ 55
+CREATE TABLE cmpart1 PARTITION OF cmpart FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+-- @@@ 56
+CREATE TABLE cmpart2(f1 text COMPRESSION pglz);
+-- @@@ 57
+ALTER TABLE cmpart ATTACH PARTITION cmpart2 FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+-- @@@ 58
+INSERT INTO cmpart VALUES (repeat('123456789', 1004));
+-- @@@ 59
+INSERT INTO cmpart VALUES (repeat('123456789', 4004));
+-- @@@ 60
+SELECT pg_column_compression(f1) FROM cmpart1;
+ pg_column_compression 
+-----------------------
+ lz4
+(1 row)
+
+-- @@@ 61
+SELECT pg_column_compression(f1) FROM cmpart2;
+ pg_column_compression 
+-----------------------
+ pglz
+(1 row)
+
+-- @@@ 62
+-- test compression with inheritance
+CREATE TABLE cminh() INHERITS(cmdata, cmdata1); -- error
+NOTICE:  merging multiple inherited definitions of column "f1"
+ERROR:  column "f1" has a compression method conflict
+DETAIL:  pglz versus lz4
+-- @@@ 63
+CREATE TABLE cminh(f1 TEXT COMPRESSION lz4) INHERITS(cmdata); -- error
+NOTICE:  merging column "f1" with inherited definition
+ERROR:  column "f1" has a compression method conflict
+DETAIL:  pglz versus lz4
+-- @@@ 64
+CREATE TABLE cmdata3(f1 text);
+-- @@@ 65
+CREATE TABLE cminh() INHERITS (cmdata, cmdata3);
+NOTICE:  merging multiple inherited definitions of column "f1"
+-- @@@ 66
+-- test default_toast_compression GUC
+SET default_toast_compression = '';
+ERROR:  invalid value for parameter "default_toast_compression": ""
+HINT:  Available values: pglz, lz4.
+-- @@@ 67
+SET default_toast_compression = 'I do not exist compression';
+ERROR:  invalid value for parameter "default_toast_compression": "I do not exist compression"
+HINT:  Available values: pglz, lz4.
+-- @@@ 68
+SET default_toast_compression = 'lz4';
+-- @@@ 69
+SET default_toast_compression = 'pglz';
+-- @@@ 70
+-- test alter compression method
+ALTER TABLE cmdata ALTER COLUMN f1 SET COMPRESSION lz4;
+-- @@@ 71
+INSERT INTO cmdata VALUES (repeat('123456789', 4004));
+-- @@@ 72
+\d+ cmdata
+                                        Table "public.cmdata"
+ Column | Type | Collation | Nullable | Default | Storage  | Compression | Stats target | Description 
+--------+------+-----------+----------+---------+----------+-------------+--------------+-------------
+ f1     | text |           |          |         | extended | lz4         |              | 
+Indexes:
+    "idx" btree (f1)
+Child tables: cminh
+
+-- @@@ 73
+SELECT pg_column_compression(f1) FROM cmdata;
+ pg_column_compression 
+-----------------------
+ pglz
+ lz4
+(2 rows)
+
+-- @@@ 74
+ALTER TABLE cmdata2 ALTER COLUMN f1 SET COMPRESSION default;
+-- @@@ 75
+\d+ cmdata2
+                                              Table "public.cmdata2"
+ Column |       Type        | Collation | Nullable | Default | Storage | Compression | Stats target | Description 
+--------+-------------------+-----------+----------+---------+---------+-------------+--------------+-------------
+ f1     | character varying |           |          |         | plain   |             |              | 
+
+-- @@@ 76
+-- test alter compression method for materialized views
+ALTER MATERIALIZED VIEW compressmv ALTER COLUMN x SET COMPRESSION lz4;
+-- @@@ 77
+\d+ compressmv
+                                Materialized view "public.compressmv"
+ Column | Type | Collation | Nullable | Default | Storage  | Compression | Stats target | Description 
+--------+------+-----------+----------+---------+----------+-------------+--------------+-------------
+ x      | text |           |          |         | extended | lz4         |              | 
+View definition:
+ SELECT f1 AS x
+   FROM cmdata1;
+
+-- @@@ 78
+-- test alter compression method for partitioned tables
+ALTER TABLE cmpart1 ALTER COLUMN f1 SET COMPRESSION pglz;
+-- @@@ 79
+ALTER TABLE cmpart2 ALTER COLUMN f1 SET COMPRESSION lz4;
+-- @@@ 80
+-- new data should be compressed with the current compression method
+INSERT INTO cmpart VALUES (repeat('123456789', 1004));
+-- @@@ 81
+INSERT INTO cmpart VALUES (repeat('123456789', 4004));
+-- @@@ 82
+SELECT pg_column_compression(f1) FROM cmpart1;
+ pg_column_compression 
+-----------------------
+ lz4
+ pglz
+(2 rows)
+
+-- @@@ 83
+SELECT pg_column_compression(f1) FROM cmpart2;
+ pg_column_compression 
+-----------------------
+ pglz
+ lz4
+(2 rows)
+
+-- @@@ 84
+-- VACUUM FULL does not recompress
+SELECT pg_column_compression(f1) FROM cmdata;
+ pg_column_compression 
+-----------------------
+ pglz
+ lz4
+(2 rows)
+
+-- @@@ 85
+VACUUM FULL cmdata;
+-- @@@ 86
+SELECT pg_column_compression(f1) FROM cmdata;
+ pg_column_compression 
+-----------------------
+ pglz
+ lz4
+(2 rows)
+
+-- @@@ 87
+-- test expression index
+DROP TABLE cmdata2;
+-- @@@ 88
+CREATE TABLE cmdata2 (f1 TEXT COMPRESSION pglz, f2 TEXT COMPRESSION lz4);
+-- @@@ 89
+CREATE UNIQUE INDEX idx1 ON cmdata2 ((f1 || f2));
+-- @@@ 90
+INSERT INTO cmdata2 VALUES((SELECT array_agg(fipshash(g::TEXT))::TEXT FROM
+generate_series(1, 50) g), VERSION());
+-- @@@ 91
+-- check data is ok
+SELECT length(f1) FROM cmdata;
+ length 
+--------
+  10000
+  36036
+(2 rows)
+
+-- @@@ 92
+SELECT length(f1) FROM cmdata1;
+ length 
+--------
+  10040
+  12449
+(2 rows)
+
+-- @@@ 93
+SELECT length(f1) FROM cmmove1;
+ length 
+--------
+  10000
+(1 row)
+
+-- @@@ 94
+SELECT length(f1) FROM cmmove2;
+ length 
+--------
+  10040
+(1 row)
+
+-- @@@ 95
+SELECT length(f1) FROM cmmove3;
+ length 
+--------
+  10000
+  10040
+(2 rows)
+
+-- @@@ 96
+CREATE TABLE badcompresstbl (a text COMPRESSION I_Do_Not_Exist_Compression); -- fails
+ERROR:  invalid compression method "i_do_not_exist_compression"
+-- @@@ 97
+CREATE TABLE badcompresstbl (a text);
+-- @@@ 98
+ALTER TABLE badcompresstbl ALTER a SET COMPRESSION I_Do_Not_Exist_Compression; -- fails
+ERROR:  invalid compression method "i_do_not_exist_compression"
+-- @@@ 99
+DROP TABLE badcompresstbl;
+-- @@@ 100
+\set HIDE_TOAST_COMPRESSION true
+-- @@@ 101

@@ -1,0 +1,614 @@
+-- xid and xid8
+-- values in range, in octal, decimal, hex
+select '010'::xid,
+       '42'::xid,
+       '0xffffffff'::xid,
+       '-1'::xid,
+	   '010'::xid8,
+	   '42'::xid8,
+	   '0xffffffffffffffff'::xid8,
+	   '-1'::xid8;
+ xid | xid |    xid     |    xid     | xid8 | xid8 |         xid8         |         xid8         
+-----+-----+------------+------------+------+------+----------------------+----------------------
+   8 |  42 | 4294967295 | 4294967295 |    8 |   42 | 18446744073709551615 | 18446744073709551615
+(1 row)
+
+-- @@@ 0
+-- garbage values
+select ''::xid;
+ERROR:  invalid input syntax for type xid: ""
+LINE 1: select ''::xid;
+               ^
+-- @@@ 1
+select 'asdf'::xid;
+ERROR:  invalid input syntax for type xid: "asdf"
+LINE 1: select 'asdf'::xid;
+               ^
+-- @@@ 2
+select ''::xid8;
+ERROR:  invalid input syntax for type xid8: ""
+LINE 1: select ''::xid8;
+               ^
+-- @@@ 3
+select 'asdf'::xid8;
+ERROR:  invalid input syntax for type xid8: "asdf"
+LINE 1: select 'asdf'::xid8;
+               ^
+-- @@@ 4
+-- Also try it with non-error-throwing API
+SELECT pg_input_is_valid('42', 'xid');
+ pg_input_is_valid 
+-------------------
+ t
+(1 row)
+
+-- @@@ 5
+SELECT pg_input_is_valid('asdf', 'xid');
+ pg_input_is_valid 
+-------------------
+ f
+(1 row)
+
+-- @@@ 6
+SELECT * FROM pg_input_error_info('0xffffffffff', 'xid');
+                      message                      | detail | hint | sql_error_code 
+---------------------------------------------------+--------+------+----------------
+ value "0xffffffffff" is out of range for type xid |        |      | 22003
+(1 row)
+
+-- @@@ 7
+SELECT pg_input_is_valid('42', 'xid8');
+ pg_input_is_valid 
+-------------------
+ t
+(1 row)
+
+-- @@@ 8
+SELECT pg_input_is_valid('asdf', 'xid8');
+ pg_input_is_valid 
+-------------------
+ f
+(1 row)
+
+-- @@@ 9
+SELECT * FROM pg_input_error_info('0xffffffffffffffffffff', 'xid8');
+                           message                            | detail | hint | sql_error_code 
+--------------------------------------------------------------+--------+------+----------------
+ value "0xffffffffffffffffffff" is out of range for type xid8 |        |      | 22003
+(1 row)
+
+-- @@@ 10
+-- equality
+select '1'::xid = '1'::xid;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 11
+select '1'::xid != '1'::xid;
+ ?column? 
+----------
+ f
+(1 row)
+
+-- @@@ 12
+select '1'::xid8 = '1'::xid8;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 13
+select '1'::xid8 != '1'::xid8;
+ ?column? 
+----------
+ f
+(1 row)
+
+-- @@@ 14
+-- conversion
+select '1'::xid = '1'::xid8::xid;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 15
+select '1'::xid != '1'::xid8::xid;
+ ?column? 
+----------
+ f
+(1 row)
+
+-- @@@ 16
+-- we don't want relational operators for xid, due to use of modular arithmetic
+select '1'::xid < '2'::xid;
+ERROR:  operator does not exist: xid < xid
+LINE 1: select '1'::xid < '2'::xid;
+                        ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 17
+select '1'::xid <= '2'::xid;
+ERROR:  operator does not exist: xid <= xid
+LINE 1: select '1'::xid <= '2'::xid;
+                        ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 18
+select '1'::xid > '2'::xid;
+ERROR:  operator does not exist: xid > xid
+LINE 1: select '1'::xid > '2'::xid;
+                        ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 19
+select '1'::xid >= '2'::xid;
+ERROR:  operator does not exist: xid >= xid
+LINE 1: select '1'::xid >= '2'::xid;
+                        ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 20
+-- we want them for xid8 though
+select '1'::xid8 < '2'::xid8, '2'::xid8 < '2'::xid8, '2'::xid8 < '1'::xid8;
+ ?column? | ?column? | ?column? 
+----------+----------+----------
+ t        | f        | f
+(1 row)
+
+-- @@@ 21
+select '1'::xid8 <= '2'::xid8, '2'::xid8 <= '2'::xid8, '2'::xid8 <= '1'::xid8;
+ ?column? | ?column? | ?column? 
+----------+----------+----------
+ t        | t        | f
+(1 row)
+
+-- @@@ 22
+select '1'::xid8 > '2'::xid8, '2'::xid8 > '2'::xid8, '2'::xid8 > '1'::xid8;
+ ?column? | ?column? | ?column? 
+----------+----------+----------
+ f        | f        | t
+(1 row)
+
+-- @@@ 23
+select '1'::xid8 >= '2'::xid8, '2'::xid8 >= '2'::xid8, '2'::xid8 >= '1'::xid8;
+ ?column? | ?column? | ?column? 
+----------+----------+----------
+ f        | t        | t
+(1 row)
+
+-- @@@ 24
+-- we also have a 3way compare for btrees
+select xid8cmp('1', '2'), xid8cmp('2', '2'), xid8cmp('2', '1');
+ xid8cmp | xid8cmp | xid8cmp 
+---------+---------+---------
+      -1 |       0 |       1
+(1 row)
+
+-- @@@ 25
+-- min() and max() for xid8
+create table xid8_t1 (x xid8);
+-- @@@ 26
+insert into xid8_t1 values ('0'), ('010'), ('42'), ('0xffffffffffffffff'), ('-1');
+-- @@@ 27
+select min(x), max(x) from xid8_t1;
+ min |         max          
+-----+----------------------
+   0 | 18446744073709551615
+(1 row)
+
+-- @@@ 28
+-- xid8 has btree and hash opclasses
+create index on xid8_t1 using btree(x);
+-- @@@ 29
+create index on xid8_t1 using hash(x);
+-- @@@ 30
+drop table xid8_t1;
+-- @@@ 31
+-- pg_snapshot data type and related functions
+-- Note: another set of tests similar to this exists in txid.sql, for a limited
+-- time (the relevant functions share C code)
+-- i/o
+select '12:13:'::pg_snapshot;
+ pg_snapshot 
+-------------
+ 12:13:
+(1 row)
+
+-- @@@ 32
+select '12:18:14,16'::pg_snapshot;
+ pg_snapshot 
+-------------
+ 12:18:14,16
+(1 row)
+
+-- @@@ 33
+select '12:16:14,14'::pg_snapshot;
+ pg_snapshot 
+-------------
+ 12:16:14
+(1 row)
+
+-- @@@ 34
+-- errors
+select '31:12:'::pg_snapshot;
+ERROR:  invalid input syntax for type pg_snapshot: "31:12:"
+LINE 1: select '31:12:'::pg_snapshot;
+               ^
+-- @@@ 35
+select '0:1:'::pg_snapshot;
+ERROR:  invalid input syntax for type pg_snapshot: "0:1:"
+LINE 1: select '0:1:'::pg_snapshot;
+               ^
+-- @@@ 36
+select '12:13:0'::pg_snapshot;
+ERROR:  invalid input syntax for type pg_snapshot: "12:13:0"
+LINE 1: select '12:13:0'::pg_snapshot;
+               ^
+-- @@@ 37
+select '12:16:14,13'::pg_snapshot;
+ERROR:  invalid input syntax for type pg_snapshot: "12:16:14,13"
+LINE 1: select '12:16:14,13'::pg_snapshot;
+               ^
+-- @@@ 38
+-- also try it with non-error-throwing API
+select pg_input_is_valid('12:13:', 'pg_snapshot');
+ pg_input_is_valid 
+-------------------
+ t
+(1 row)
+
+-- @@@ 39
+select pg_input_is_valid('31:12:', 'pg_snapshot');
+ pg_input_is_valid 
+-------------------
+ f
+(1 row)
+
+-- @@@ 40
+select * from pg_input_error_info('31:12:', 'pg_snapshot');
+                       message                       | detail | hint | sql_error_code 
+-----------------------------------------------------+--------+------+----------------
+ invalid input syntax for type pg_snapshot: "31:12:" |        |      | 22P02
+(1 row)
+
+-- @@@ 41
+select pg_input_is_valid('12:16:14,13', 'pg_snapshot');
+ pg_input_is_valid 
+-------------------
+ f
+(1 row)
+
+-- @@@ 42
+select * from pg_input_error_info('12:16:14,13', 'pg_snapshot');
+                         message                          | detail | hint | sql_error_code 
+----------------------------------------------------------+--------+------+----------------
+ invalid input syntax for type pg_snapshot: "12:16:14,13" |        |      | 22P02
+(1 row)
+
+-- @@@ 43
+create temp table snapshot_test (
+	nr	integer,
+	snap	pg_snapshot
+);
+-- @@@ 44
+insert into snapshot_test values (1, '12:13:');
+-- @@@ 45
+insert into snapshot_test values (2, '12:20:13,15,18');
+-- @@@ 46
+insert into snapshot_test values (3, '100001:100009:100005,100007,100008');
+-- @@@ 47
+insert into snapshot_test values (4, '100:150:101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131');
+-- @@@ 48
+select snap from snapshot_test order by nr;
+                                                                snap                                                                 
+-------------------------------------------------------------------------------------------------------------------------------------
+ 12:13:
+ 12:20:13,15,18
+ 100001:100009:100005,100007,100008
+ 100:150:101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131
+(4 rows)
+
+-- @@@ 49
+select  pg_snapshot_xmin(snap),
+	pg_snapshot_xmax(snap),
+	pg_snapshot_xip(snap)
+from snapshot_test order by nr;
+ pg_snapshot_xmin | pg_snapshot_xmax | pg_snapshot_xip 
+------------------+------------------+-----------------
+               12 |               20 |              13
+               12 |               20 |              15
+               12 |               20 |              18
+           100001 |           100009 |          100005
+           100001 |           100009 |          100007
+           100001 |           100009 |          100008
+              100 |              150 |             101
+              100 |              150 |             102
+              100 |              150 |             103
+              100 |              150 |             104
+              100 |              150 |             105
+              100 |              150 |             106
+              100 |              150 |             107
+              100 |              150 |             108
+              100 |              150 |             109
+              100 |              150 |             110
+              100 |              150 |             111
+              100 |              150 |             112
+              100 |              150 |             113
+              100 |              150 |             114
+              100 |              150 |             115
+              100 |              150 |             116
+              100 |              150 |             117
+              100 |              150 |             118
+              100 |              150 |             119
+              100 |              150 |             120
+              100 |              150 |             121
+              100 |              150 |             122
+              100 |              150 |             123
+              100 |              150 |             124
+              100 |              150 |             125
+              100 |              150 |             126
+              100 |              150 |             127
+              100 |              150 |             128
+              100 |              150 |             129
+              100 |              150 |             130
+              100 |              150 |             131
+(37 rows)
+
+-- @@@ 50
+select id, pg_visible_in_snapshot(id::text::xid8, snap)
+from snapshot_test, generate_series(11, 21) id
+where nr = 2;
+ id | pg_visible_in_snapshot 
+----+------------------------
+ 11 | t
+ 12 | t
+ 13 | f
+ 14 | t
+ 15 | f
+ 16 | t
+ 17 | t
+ 18 | f
+ 19 | t
+ 20 | f
+ 21 | f
+(11 rows)
+
+-- @@@ 51
+-- test bsearch
+select id, pg_visible_in_snapshot(id::text::xid8, snap)
+from snapshot_test, generate_series(90, 160) id
+where nr = 4;
+ id  | pg_visible_in_snapshot 
+-----+------------------------
+  90 | t
+  91 | t
+  92 | t
+  93 | t
+  94 | t
+  95 | t
+  96 | t
+  97 | t
+  98 | t
+  99 | t
+ 100 | t
+ 101 | f
+ 102 | f
+ 103 | f
+ 104 | f
+ 105 | f
+ 106 | f
+ 107 | f
+ 108 | f
+ 109 | f
+ 110 | f
+ 111 | f
+ 112 | f
+ 113 | f
+ 114 | f
+ 115 | f
+ 116 | f
+ 117 | f
+ 118 | f
+ 119 | f
+ 120 | f
+ 121 | f
+ 122 | f
+ 123 | f
+ 124 | f
+ 125 | f
+ 126 | f
+ 127 | f
+ 128 | f
+ 129 | f
+ 130 | f
+ 131 | f
+ 132 | t
+ 133 | t
+ 134 | t
+ 135 | t
+ 136 | t
+ 137 | t
+ 138 | t
+ 139 | t
+ 140 | t
+ 141 | t
+ 142 | t
+ 143 | t
+ 144 | t
+ 145 | t
+ 146 | t
+ 147 | t
+ 148 | t
+ 149 | t
+ 150 | f
+ 151 | f
+ 152 | f
+ 153 | f
+ 154 | f
+ 155 | f
+ 156 | f
+ 157 | f
+ 158 | f
+ 159 | f
+ 160 | f
+(71 rows)
+
+-- @@@ 52
+-- test current values also
+select pg_current_xact_id() >= pg_snapshot_xmin(pg_current_snapshot());
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 53
+-- we can't assume current is always less than xmax, however
+select pg_visible_in_snapshot(pg_current_xact_id(), pg_current_snapshot());
+ pg_visible_in_snapshot 
+------------------------
+ f
+(1 row)
+
+-- @@@ 54
+-- test 64bitness
+select pg_snapshot '1000100010001000:1000100010001100:1000100010001012,1000100010001013';
+                             pg_snapshot                             
+---------------------------------------------------------------------
+ 1000100010001000:1000100010001100:1000100010001012,1000100010001013
+(1 row)
+
+-- @@@ 55
+select pg_visible_in_snapshot('1000100010001012', '1000100010001000:1000100010001100:1000100010001012,1000100010001013');
+ pg_visible_in_snapshot 
+------------------------
+ f
+(1 row)
+
+-- @@@ 56
+select pg_visible_in_snapshot('1000100010001015', '1000100010001000:1000100010001100:1000100010001012,1000100010001013');
+ pg_visible_in_snapshot 
+------------------------
+ t
+(1 row)
+
+-- @@@ 57
+-- test 64bit overflow
+SELECT pg_snapshot '1:9223372036854775807:3';
+       pg_snapshot       
+-------------------------
+ 1:9223372036854775807:3
+(1 row)
+
+-- @@@ 58
+SELECT pg_snapshot '1:9223372036854775808:3';
+ERROR:  invalid input syntax for type pg_snapshot: "1:9223372036854775808:3"
+LINE 1: SELECT pg_snapshot '1:9223372036854775808:3';
+                           ^
+-- @@@ 59
+-- test pg_current_xact_id_if_assigned
+BEGIN;
+-- @@@ 60
+SELECT pg_current_xact_id_if_assigned() IS NULL;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 61
+SELECT pg_current_xact_id() \gset
+-- @@@ 62
+SELECT pg_current_xact_id_if_assigned() IS NOT DISTINCT FROM xid8 :'pg_current_xact_id';
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 63
+COMMIT;
+-- @@@ 64
+-- test xid status functions
+BEGIN;
+-- @@@ 65
+SELECT pg_current_xact_id() AS committed \gset
+-- @@@ 66
+COMMIT;
+-- @@@ 67
+BEGIN;
+-- @@@ 68
+SELECT pg_current_xact_id() AS rolledback \gset
+-- @@@ 69
+ROLLBACK;
+-- @@@ 70
+BEGIN;
+-- @@@ 71
+SELECT pg_current_xact_id() AS inprogress \gset
+-- @@@ 72
+SELECT pg_xact_status(:committed::text::xid8) AS committed;
+ committed 
+-----------
+ committed
+(1 row)
+
+-- @@@ 73
+SELECT pg_xact_status(:rolledback::text::xid8) AS rolledback;
+ rolledback 
+------------
+ aborted
+(1 row)
+
+-- @@@ 74
+SELECT pg_xact_status(:inprogress::text::xid8) AS inprogress;
+ inprogress  
+-------------
+ in progress
+(1 row)
+
+-- @@@ 75
+SELECT pg_xact_status('1'::xid8); -- BootstrapTransactionId is always committed
+ pg_xact_status 
+----------------
+ committed
+(1 row)
+
+-- @@@ 76
+SELECT pg_xact_status('2'::xid8); -- FrozenTransactionId is always committed
+ pg_xact_status 
+----------------
+ committed
+(1 row)
+
+-- @@@ 77
+SELECT pg_xact_status('3'::xid8); -- in regress testing FirstNormalTransactionId will always be behind oldestXmin
+ pg_xact_status 
+----------------
+ 
+(1 row)
+
+-- @@@ 78
+COMMIT;
+-- @@@ 79
+BEGIN;
+-- @@@ 80
+CREATE FUNCTION test_future_xid_status(xid8)
+RETURNS void
+LANGUAGE plpgsql
+AS
+$$
+BEGIN
+  PERFORM pg_xact_status($1);
+  RAISE EXCEPTION 'didn''t ERROR at xid in the future as expected';
+EXCEPTION
+  WHEN invalid_parameter_value THEN
+    RAISE NOTICE 'Got expected error for xid in the future';
+END;
+$$;
+-- @@@ 81
+SELECT test_future_xid_status((:inprogress + 10000)::text::xid8);
+NOTICE:  Got expected error for xid in the future
+ test_future_xid_status 
+------------------------
+ 
+(1 row)
+
+-- @@@ 82
+ROLLBACK;
+-- @@@ 83

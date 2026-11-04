@@ -1,0 +1,69 @@
+{
+  "status": "PASS",
+  "cases": [
+    {
+      "case": "complete",
+      "exit": 0
+    },
+    {
+      "case": "plan-first",
+      "exit": 0
+    },
+    {
+      "case": "failed",
+      "exit": 1
+    },
+    {
+      "case": "missing-plan",
+      "exit": 1
+    },
+    {
+      "case": "truncated",
+      "exit": 1
+    },
+    {
+      "case": "duplicate",
+      "exit": 1
+    },
+    {
+      "case": "missing-number",
+      "exit": 1
+    },
+    {
+      "case": "skip",
+      "exit": 1
+    },
+    {
+      "case": "todo",
+      "exit": 1
+    },
+    {
+      "case": "bailout",
+      "exit": 1
+    },
+    {
+      "case": "duplicate-plan",
+      "exit": 1
+    },
+    {
+      "case": "plan-middle",
+      "exit": 1
+    },
+    {
+      "case": "plan-skip",
+      "exit": 1
+    },
+    {
+      "case": "real166-false-Rust-pass",
+      "exit": 1
+    },
+    {
+      "case": "real162-passing-14817",
+      "exit": 0
+    },
+    {
+      "case": "missing-raw-files",
+      "exit": 1
+    }
+  ]
+}

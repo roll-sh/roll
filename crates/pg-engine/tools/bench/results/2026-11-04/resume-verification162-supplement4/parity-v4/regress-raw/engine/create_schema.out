@@ -1,0 +1,128 @@
+--
+-- CREATE_SCHEMA
+--
+-- Schema creation with elements.
+CREATE ROLE regress_create_schema_role SUPERUSER;
+-- @@@ 0
+-- Cases where schema creation fails as objects are qualified with a schema
+-- that does not match with what's expected.
+-- This checks all the object types that include schema qualifications.
+CREATE SCHEMA AUTHORIZATION regress_create_schema_role
+  CREATE SEQUENCE schema_not_existing.seq;
+ERROR:  CREATE specifies a schema (schema_not_existing) different from the one being created (regress_create_schema_role)
+-- @@@ 1
+CREATE SCHEMA AUTHORIZATION regress_create_schema_role
+  CREATE TABLE schema_not_existing.tab (id int);
+ERROR:  CREATE specifies a schema (schema_not_existing) different from the one being created (regress_create_schema_role)
+-- @@@ 2
+CREATE SCHEMA AUTHORIZATION regress_create_schema_role
+  CREATE VIEW schema_not_existing.view AS SELECT 1;
+ERROR:  CREATE specifies a schema (schema_not_existing) different from the one being created (regress_create_schema_role)
+-- @@@ 3
+CREATE SCHEMA AUTHORIZATION regress_create_schema_role
+  CREATE INDEX ON schema_not_existing.tab (id);
+ERROR:  CREATE specifies a schema (schema_not_existing) different from the one being created (regress_create_schema_role)
+-- @@@ 4
+CREATE SCHEMA AUTHORIZATION regress_create_schema_role
+  CREATE TRIGGER schema_trig BEFORE INSERT ON schema_not_existing.tab
+  EXECUTE FUNCTION schema_trig.no_func();
+ERROR:  CREATE specifies a schema (schema_not_existing) different from the one being created (regress_create_schema_role)
+-- @@@ 5
+-- Again, with a role specification and no schema names.
+SET ROLE regress_create_schema_role;
+-- @@@ 6
+CREATE SCHEMA AUTHORIZATION CURRENT_ROLE
+  CREATE SEQUENCE schema_not_existing.seq;
+ERROR:  CREATE specifies a schema (schema_not_existing) different from the one being created (regress_create_schema_role)
+-- @@@ 7
+CREATE SCHEMA AUTHORIZATION CURRENT_ROLE
+  CREATE TABLE schema_not_existing.tab (id int);
+ERROR:  CREATE specifies a schema (schema_not_existing) different from the one being created (regress_create_schema_role)
+-- @@@ 8
+CREATE SCHEMA AUTHORIZATION CURRENT_ROLE
+  CREATE VIEW schema_not_existing.view AS SELECT 1;
+ERROR:  CREATE specifies a schema (schema_not_existing) different from the one being created (regress_create_schema_role)
+-- @@@ 9
+CREATE SCHEMA AUTHORIZATION CURRENT_ROLE
+  CREATE INDEX ON schema_not_existing.tab (id);
+ERROR:  CREATE specifies a schema (schema_not_existing) different from the one being created (regress_create_schema_role)
+-- @@@ 10
+CREATE SCHEMA AUTHORIZATION CURRENT_ROLE
+  CREATE TRIGGER schema_trig BEFORE INSERT ON schema_not_existing.tab
+  EXECUTE FUNCTION schema_trig.no_func();
+ERROR:  CREATE specifies a schema (schema_not_existing) different from the one being created (regress_create_schema_role)
+-- @@@ 11
+-- Again, with a schema name and a role specification.
+CREATE SCHEMA regress_schema_1 AUTHORIZATION CURRENT_ROLE
+  CREATE SEQUENCE schema_not_existing.seq;
+ERROR:  CREATE specifies a schema (schema_not_existing) different from the one being created (regress_schema_1)
+-- @@@ 12
+CREATE SCHEMA regress_schema_1 AUTHORIZATION CURRENT_ROLE
+  CREATE TABLE schema_not_existing.tab (id int);
+ERROR:  CREATE specifies a schema (schema_not_existing) different from the one being created (regress_schema_1)
+-- @@@ 13
+CREATE SCHEMA regress_schema_1 AUTHORIZATION CURRENT_ROLE
+  CREATE VIEW schema_not_existing.view AS SELECT 1;
+ERROR:  CREATE specifies a schema (schema_not_existing) different from the one being created (regress_schema_1)
+-- @@@ 14
+CREATE SCHEMA regress_schema_1 AUTHORIZATION CURRENT_ROLE
+  CREATE INDEX ON schema_not_existing.tab (id);
+ERROR:  CREATE specifies a schema (schema_not_existing) different from the one being created (regress_schema_1)
+-- @@@ 15
+CREATE SCHEMA regress_schema_1 AUTHORIZATION CURRENT_ROLE
+  CREATE TRIGGER schema_trig BEFORE INSERT ON schema_not_existing.tab
+  EXECUTE FUNCTION schema_trig.no_func();
+ERROR:  CREATE specifies a schema (schema_not_existing) different from the one being created (regress_schema_1)
+-- @@@ 16
+RESET ROLE;
+-- @@@ 17
+-- Cases where the schema creation succeeds.
+-- The schema created matches the role name.
+CREATE SCHEMA AUTHORIZATION regress_create_schema_role
+  CREATE TABLE regress_create_schema_role.tab (id int);
+-- @@@ 18
+\d regress_create_schema_role.tab
+      Table "regress_create_schema_role.tab"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ id     | integer |           |          | 
+
+-- @@@ 19
+DROP SCHEMA regress_create_schema_role CASCADE;
+NOTICE:  drop cascades to table regress_create_schema_role.tab
+-- @@@ 20
+-- Again, with a different role specification and no schema names.
+SET ROLE regress_create_schema_role;
+-- @@@ 21
+CREATE SCHEMA AUTHORIZATION CURRENT_ROLE
+  CREATE TABLE regress_create_schema_role.tab (id int);
+-- @@@ 22
+\d regress_create_schema_role.tab
+      Table "regress_create_schema_role.tab"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ id     | integer |           |          | 
+
+-- @@@ 23
+DROP SCHEMA regress_create_schema_role CASCADE;
+NOTICE:  drop cascades to table tab
+-- @@@ 24
+-- Again, with a schema name and a role specification.
+CREATE SCHEMA regress_schema_1 AUTHORIZATION CURRENT_ROLE
+  CREATE TABLE regress_schema_1.tab (id int);
+-- @@@ 25
+\d regress_schema_1.tab
+           Table "regress_schema_1.tab"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ id     | integer |           |          | 
+
+-- @@@ 26
+DROP SCHEMA regress_schema_1 CASCADE;
+NOTICE:  drop cascades to table regress_schema_1.tab
+-- @@@ 27
+RESET ROLE;
+-- @@@ 28
+-- Clean up
+DROP ROLE regress_create_schema_role;
+-- @@@ 29

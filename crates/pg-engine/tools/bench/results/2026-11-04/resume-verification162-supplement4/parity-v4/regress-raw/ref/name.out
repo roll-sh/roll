@@ -1,0 +1,237 @@
+--
+-- NAME
+-- all inputs are silently truncated at NAMEDATALEN-1 (63) characters
+--
+-- fixed-length by reference
+SELECT name 'name string' = name 'name string' AS "True";
+ True 
+------
+ t
+(1 row)
+
+-- @@@ 0
+SELECT name 'name string' = name 'name string ' AS "False";
+ False 
+-------
+ f
+(1 row)
+
+-- @@@ 1
+--
+--
+--
+CREATE TABLE NAME_TBL(f1 name);
+-- @@@ 2
+INSERT INTO NAME_TBL(f1) VALUES ('1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQR');
+-- @@@ 3
+INSERT INTO NAME_TBL(f1) VALUES ('1234567890abcdefghijklmnopqrstuvwxyz1234567890abcdefghijklmnopqr');
+-- @@@ 4
+INSERT INTO NAME_TBL(f1) VALUES ('asdfghjkl;');
+-- @@@ 5
+INSERT INTO NAME_TBL(f1) VALUES ('343f%2a');
+-- @@@ 6
+INSERT INTO NAME_TBL(f1) VALUES ('d34aaasdf');
+-- @@@ 7
+INSERT INTO NAME_TBL(f1) VALUES ('');
+-- @@@ 8
+INSERT INTO NAME_TBL(f1) VALUES ('1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ');
+-- @@@ 9
+SELECT * FROM NAME_TBL;
+                               f1                                
+-----------------------------------------------------------------
+ 1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQ
+ 1234567890abcdefghijklmnopqrstuvwxyz1234567890abcdefghijklmnopq
+ asdfghjkl;
+ 343f%2a
+ d34aaasdf
+ 
+ 1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQ
+(7 rows)
+
+-- @@@ 10
+SELECT c.f1 FROM NAME_TBL c WHERE c.f1 <> '1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQR';
+                               f1                                
+-----------------------------------------------------------------
+ 1234567890abcdefghijklmnopqrstuvwxyz1234567890abcdefghijklmnopq
+ asdfghjkl;
+ 343f%2a
+ d34aaasdf
+ 
+(5 rows)
+
+-- @@@ 11
+SELECT c.f1 FROM NAME_TBL c WHERE c.f1 = '1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQR';
+                               f1                                
+-----------------------------------------------------------------
+ 1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQ
+ 1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQ
+(2 rows)
+
+-- @@@ 12
+SELECT c.f1 FROM NAME_TBL c WHERE c.f1 < '1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQR';
+ f1 
+----
+ 
+(1 row)
+
+-- @@@ 13
+SELECT c.f1 FROM NAME_TBL c WHERE c.f1 <= '1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQR';
+                               f1                                
+-----------------------------------------------------------------
+ 1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQ
+ 
+ 1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQ
+(3 rows)
+
+-- @@@ 14
+SELECT c.f1 FROM NAME_TBL c WHERE c.f1 > '1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQR';
+                               f1                                
+-----------------------------------------------------------------
+ 1234567890abcdefghijklmnopqrstuvwxyz1234567890abcdefghijklmnopq
+ asdfghjkl;
+ 343f%2a
+ d34aaasdf
+(4 rows)
+
+-- @@@ 15
+SELECT c.f1 FROM NAME_TBL c WHERE c.f1 >= '1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQR';
+                               f1                                
+-----------------------------------------------------------------
+ 1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQ
+ 1234567890abcdefghijklmnopqrstuvwxyz1234567890abcdefghijklmnopq
+ asdfghjkl;
+ 343f%2a
+ d34aaasdf
+ 1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQ
+(6 rows)
+
+-- @@@ 16
+SELECT c.f1 FROM NAME_TBL c WHERE c.f1 ~ '.*';
+                               f1                                
+-----------------------------------------------------------------
+ 1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQ
+ 1234567890abcdefghijklmnopqrstuvwxyz1234567890abcdefghijklmnopq
+ asdfghjkl;
+ 343f%2a
+ d34aaasdf
+ 
+ 1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQ
+(7 rows)
+
+-- @@@ 17
+SELECT c.f1 FROM NAME_TBL c WHERE c.f1 !~ '.*';
+ f1 
+----
+(0 rows)
+
+-- @@@ 18
+SELECT c.f1 FROM NAME_TBL c WHERE c.f1 ~ '[0-9]';
+                               f1                                
+-----------------------------------------------------------------
+ 1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQ
+ 1234567890abcdefghijklmnopqrstuvwxyz1234567890abcdefghijklmnopq
+ 343f%2a
+ d34aaasdf
+ 1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQ
+(5 rows)
+
+-- @@@ 19
+SELECT c.f1 FROM NAME_TBL c WHERE c.f1 ~ '.*asdf.*';
+     f1     
+------------
+ asdfghjkl;
+ d34aaasdf
+(2 rows)
+
+-- @@@ 20
+DROP TABLE NAME_TBL;
+-- @@@ 21
+DO $$
+DECLARE r text[];
+BEGIN
+  r := parse_ident('Schemax.Tabley');
+  RAISE NOTICE '%', format('%I.%I', r[1], r[2]);
+  r := parse_ident('"SchemaX"."TableY"');
+  RAISE NOTICE '%', format('%I.%I', r[1], r[2]);
+END;
+$$;
+NOTICE:  schemax.tabley
+NOTICE:  "SchemaX"."TableY"
+-- @@@ 22
+SELECT parse_ident('foo.boo');
+ parse_ident 
+-------------
+ {foo,boo}
+(1 row)
+
+-- @@@ 23
+SELECT parse_ident('foo.boo[]'); -- should fail
+ERROR:  string is not a valid identifier: "foo.boo[]"
+-- @@@ 24
+SELECT parse_ident('foo.boo[]', strict => false); -- ok
+ parse_ident 
+-------------
+ {foo,boo}
+(1 row)
+
+-- @@@ 25
+-- should fail
+SELECT parse_ident(' ');
+ERROR:  string is not a valid identifier: " "
+-- @@@ 26
+SELECT parse_ident(' .aaa');
+ERROR:  string is not a valid identifier: " .aaa"
+DETAIL:  No valid identifier before ".".
+-- @@@ 27
+SELECT parse_ident(' aaa . ');
+ERROR:  string is not a valid identifier: " aaa . "
+DETAIL:  No valid identifier after ".".
+-- @@@ 28
+SELECT parse_ident('aaa.a%b');
+ERROR:  string is not a valid identifier: "aaa.a%b"
+-- @@@ 29
+SELECT parse_ident(E'X\rXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX');
+ERROR:  string is not a valid identifier: "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+-- @@@ 30
+SELECT length(a[1]), length(a[2]) from parse_ident('"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx".yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy') as a ;
+ length | length 
+--------+--------
+    414 |    289
+(1 row)
+
+-- @@@ 31
+SELECT parse_ident(' first . "  second  " ."   third   ". "  ' || repeat('x',66) || '"');
+                                                parse_ident                                                
+-----------------------------------------------------------------------------------------------------------
+ {first,"  second  ","   third   ","  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
+(1 row)
+
+-- @@@ 32
+SELECT parse_ident(' first . "  second  " ."   third   ". "  ' || repeat('x',66) || '"')::name[];
+                                             parse_ident                                              
+------------------------------------------------------------------------------------------------------
+ {first,"  second  ","   third   ","  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
+(1 row)
+
+-- @@@ 33
+SELECT parse_ident(E'"c".X XXXX\002XXXXXX');
+ERROR:  string is not a valid identifier: ""c".X XXXXXXXXXX"
+-- @@@ 34
+SELECT parse_ident('1020');
+ERROR:  string is not a valid identifier: "1020"
+-- @@@ 35
+SELECT parse_ident('10.20');
+ERROR:  string is not a valid identifier: "10.20"
+-- @@@ 36
+SELECT parse_ident('.');
+ERROR:  string is not a valid identifier: "."
+DETAIL:  No valid identifier before ".".
+-- @@@ 37
+SELECT parse_ident('.1020');
+ERROR:  string is not a valid identifier: ".1020"
+DETAIL:  No valid identifier before ".".
+-- @@@ 38
+SELECT parse_ident('xxx.1020');
+ERROR:  string is not a valid identifier: "xxx.1020"
+DETAIL:  No valid identifier after ".".
+-- @@@ 39

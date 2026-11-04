@@ -1,0 +1,503 @@
+--
+-- IF EXISTS tests
+--
+-- table (will be really dropped at the end)
+DROP TABLE test_exists;
+ERROR:  table "test_exists" does not exist
+-- @@@ 0
+DROP TABLE IF EXISTS test_exists;
+NOTICE:  table "test_exists" does not exist, skipping
+-- @@@ 1
+CREATE TABLE test_exists (a int, b text);
+-- @@@ 2
+-- view
+DROP VIEW test_view_exists;
+ERROR:  view "test_view_exists" does not exist
+-- @@@ 3
+DROP VIEW IF EXISTS test_view_exists;
+NOTICE:  view "test_view_exists" does not exist, skipping
+-- @@@ 4
+CREATE VIEW test_view_exists AS select * from test_exists;
+-- @@@ 5
+DROP VIEW IF EXISTS test_view_exists;
+-- @@@ 6
+DROP VIEW test_view_exists;
+ERROR:  view "test_view_exists" does not exist
+-- @@@ 7
+-- index
+DROP INDEX test_index_exists;
+ERROR:  index "test_index_exists" does not exist
+-- @@@ 8
+DROP INDEX IF EXISTS test_index_exists;
+NOTICE:  index "test_index_exists" does not exist, skipping
+-- @@@ 9
+CREATE INDEX test_index_exists on test_exists(a);
+-- @@@ 10
+DROP INDEX IF EXISTS test_index_exists;
+-- @@@ 11
+DROP INDEX test_index_exists;
+ERROR:  index "test_index_exists" does not exist
+-- @@@ 12
+-- sequence
+DROP SEQUENCE test_sequence_exists;
+ERROR:  sequence "test_sequence_exists" does not exist
+-- @@@ 13
+DROP SEQUENCE IF EXISTS test_sequence_exists;
+NOTICE:  sequence "test_sequence_exists" does not exist, skipping
+-- @@@ 14
+CREATE SEQUENCE test_sequence_exists;
+-- @@@ 15
+DROP SEQUENCE IF EXISTS test_sequence_exists;
+-- @@@ 16
+DROP SEQUENCE test_sequence_exists;
+ERROR:  sequence "test_sequence_exists" does not exist
+-- @@@ 17
+-- schema
+DROP SCHEMA test_schema_exists;
+ERROR:  schema "test_schema_exists" does not exist
+-- @@@ 18
+DROP SCHEMA IF EXISTS test_schema_exists;
+NOTICE:  schema "test_schema_exists" does not exist, skipping
+-- @@@ 19
+CREATE SCHEMA test_schema_exists;
+-- @@@ 20
+DROP SCHEMA IF EXISTS test_schema_exists;
+-- @@@ 21
+DROP SCHEMA test_schema_exists;
+ERROR:  schema "test_schema_exists" does not exist
+-- @@@ 22
+-- type
+DROP TYPE test_type_exists;
+ERROR:  type "test_type_exists" does not exist
+-- @@@ 23
+DROP TYPE IF EXISTS test_type_exists;
+NOTICE:  type "test_type_exists" does not exist, skipping
+-- @@@ 24
+CREATE type test_type_exists as (a int, b text);
+-- @@@ 25
+DROP TYPE IF EXISTS test_type_exists;
+-- @@@ 26
+DROP TYPE test_type_exists;
+ERROR:  type "test_type_exists" does not exist
+-- @@@ 27
+-- domain
+DROP DOMAIN test_domain_exists;
+ERROR:  type "test_domain_exists" does not exist
+-- @@@ 28
+DROP DOMAIN IF EXISTS test_domain_exists;
+NOTICE:  type "test_domain_exists" does not exist, skipping
+-- @@@ 29
+CREATE domain test_domain_exists as int not null check (value > 0);
+-- @@@ 30
+DROP DOMAIN IF EXISTS test_domain_exists;
+-- @@@ 31
+DROP DOMAIN test_domain_exists;
+ERROR:  type "test_domain_exists" does not exist
+-- @@@ 32
+---
+--- role/user/group
+---
+CREATE USER regress_test_u1;
+-- @@@ 33
+CREATE ROLE regress_test_r1;
+-- @@@ 34
+CREATE GROUP regress_test_g1;
+-- @@@ 35
+DROP USER regress_test_u2;
+ERROR:  role "regress_test_u2" does not exist
+-- @@@ 36
+DROP USER IF EXISTS regress_test_u1, regress_test_u2;
+NOTICE:  role "regress_test_u2" does not exist, skipping
+-- @@@ 37
+DROP USER regress_test_u1;
+ERROR:  role "regress_test_u1" does not exist
+-- @@@ 38
+DROP ROLE regress_test_r2;
+ERROR:  role "regress_test_r2" does not exist
+-- @@@ 39
+DROP ROLE IF EXISTS regress_test_r1, regress_test_r2;
+NOTICE:  role "regress_test_r2" does not exist, skipping
+-- @@@ 40
+DROP ROLE regress_test_r1;
+ERROR:  role "regress_test_r1" does not exist
+-- @@@ 41
+DROP GROUP regress_test_g2;
+ERROR:  role "regress_test_g2" does not exist
+-- @@@ 42
+DROP GROUP IF EXISTS regress_test_g1, regress_test_g2;
+NOTICE:  role "regress_test_g2" does not exist, skipping
+-- @@@ 43
+DROP GROUP regress_test_g1;
+ERROR:  role "regress_test_g1" does not exist
+-- @@@ 44
+-- collation
+DROP COLLATION IF EXISTS test_collation_exists;
+NOTICE:  collation "test_collation_exists" does not exist, skipping
+-- @@@ 45
+-- conversion
+DROP CONVERSION test_conversion_exists;
+ERROR:  conversion "test_conversion_exists" does not exist
+-- @@@ 46
+DROP CONVERSION IF EXISTS test_conversion_exists;
+NOTICE:  conversion "test_conversion_exists" does not exist, skipping
+-- @@@ 47
+CREATE CONVERSION test_conversion_exists
+    FOR 'LATIN1' TO 'UTF8' FROM iso8859_1_to_utf8;
+-- @@@ 48
+DROP CONVERSION test_conversion_exists;
+-- @@@ 49
+-- text search parser
+DROP TEXT SEARCH PARSER test_tsparser_exists;
+ERROR:  text search parser "test_tsparser_exists" does not exist
+-- @@@ 50
+DROP TEXT SEARCH PARSER IF EXISTS test_tsparser_exists;
+NOTICE:  text search parser "test_tsparser_exists" does not exist, skipping
+-- @@@ 51
+-- text search dictionary
+DROP TEXT SEARCH DICTIONARY test_tsdict_exists;
+ERROR:  text search dictionary "test_tsdict_exists" does not exist
+-- @@@ 52
+DROP TEXT SEARCH DICTIONARY IF EXISTS test_tsdict_exists;
+NOTICE:  text search dictionary "test_tsdict_exists" does not exist, skipping
+-- @@@ 53
+CREATE TEXT SEARCH DICTIONARY test_tsdict_exists (
+        Template=ispell,
+        DictFile=ispell_sample,
+        AffFile=ispell_sample
+);
+-- @@@ 54
+DROP TEXT SEARCH DICTIONARY test_tsdict_exists;
+-- @@@ 55
+-- test search template
+DROP TEXT SEARCH TEMPLATE test_tstemplate_exists;
+ERROR:  text search template "test_tstemplate_exists" does not exist
+-- @@@ 56
+DROP TEXT SEARCH TEMPLATE IF EXISTS test_tstemplate_exists;
+NOTICE:  text search template "test_tstemplate_exists" does not exist, skipping
+-- @@@ 57
+-- text search configuration
+DROP TEXT SEARCH CONFIGURATION test_tsconfig_exists;
+ERROR:  text search configuration "test_tsconfig_exists" does not exist
+-- @@@ 58
+DROP TEXT SEARCH CONFIGURATION IF EXISTS test_tsconfig_exists;
+NOTICE:  text search configuration "test_tsconfig_exists" does not exist, skipping
+-- @@@ 59
+CREATE TEXT SEARCH CONFIGURATION test_tsconfig_exists (COPY=english);
+-- @@@ 60
+DROP TEXT SEARCH CONFIGURATION test_tsconfig_exists;
+-- @@@ 61
+-- extension
+DROP EXTENSION test_extension_exists;
+ERROR:  extension "test_extension_exists" does not exist
+-- @@@ 62
+DROP EXTENSION IF EXISTS test_extension_exists;
+NOTICE:  extension "test_extension_exists" does not exist, skipping
+-- @@@ 63
+-- functions
+DROP FUNCTION test_function_exists();
+ERROR:  function test_function_exists() does not exist
+-- @@@ 64
+DROP FUNCTION IF EXISTS test_function_exists();
+NOTICE:  function test_function_exists() does not exist, skipping
+-- @@@ 65
+DROP FUNCTION test_function_exists(int, text, int[]);
+ERROR:  function test_function_exists(integer, text, integer[]) does not exist
+-- @@@ 66
+DROP FUNCTION IF EXISTS test_function_exists(int, text, int[]);
+NOTICE:  function test_function_exists(pg_catalog.int4,text,pg_catalog.int4[]) does not exist, skipping
+-- @@@ 67
+-- aggregate
+DROP AGGREGATE test_aggregate_exists(*);
+ERROR:  aggregate test_aggregate_exists(*) does not exist
+-- @@@ 68
+DROP AGGREGATE IF EXISTS test_aggregate_exists(*);
+NOTICE:  aggregate test_aggregate_exists() does not exist, skipping
+-- @@@ 69
+DROP AGGREGATE test_aggregate_exists(int);
+ERROR:  aggregate test_aggregate_exists(integer) does not exist
+-- @@@ 70
+DROP AGGREGATE IF EXISTS test_aggregate_exists(int);
+NOTICE:  aggregate test_aggregate_exists(pg_catalog.int4) does not exist, skipping
+-- @@@ 71
+-- operator
+DROP OPERATOR @#@ (int, int);
+ERROR:  operator does not exist: integer @#@ integer
+-- @@@ 72
+DROP OPERATOR IF EXISTS @#@ (int, int);
+NOTICE:  operator @#@ does not exist, skipping
+-- @@@ 73
+CREATE OPERATOR @#@
+        (leftarg = int8, rightarg = int8, procedure = int8xor);
+-- @@@ 74
+DROP OPERATOR @#@ (int8, int8);
+-- @@@ 75
+-- language
+DROP LANGUAGE test_language_exists;
+ERROR:  language "test_language_exists" does not exist
+-- @@@ 76
+DROP LANGUAGE IF EXISTS test_language_exists;
+NOTICE:  language "test_language_exists" does not exist, skipping
+-- @@@ 77
+-- cast
+DROP CAST (text AS text);
+ERROR:  cast from type text to type text does not exist
+-- @@@ 78
+DROP CAST IF EXISTS (text AS text);
+NOTICE:  cast from type text to type text does not exist, skipping
+-- @@@ 79
+-- trigger
+DROP TRIGGER test_trigger_exists ON test_exists;
+ERROR:  trigger "test_trigger_exists" for table "test_exists" does not exist
+-- @@@ 80
+DROP TRIGGER IF EXISTS test_trigger_exists ON test_exists;
+NOTICE:  trigger "test_trigger_exists" for relation "test_exists" does not exist, skipping
+-- @@@ 81
+DROP TRIGGER test_trigger_exists ON no_such_table;
+ERROR:  relation "no_such_table" does not exist
+-- @@@ 82
+DROP TRIGGER IF EXISTS test_trigger_exists ON no_such_table;
+NOTICE:  relation "no_such_table" does not exist, skipping
+-- @@@ 83
+DROP TRIGGER test_trigger_exists ON no_such_schema.no_such_table;
+ERROR:  schema "no_such_schema" does not exist
+-- @@@ 84
+DROP TRIGGER IF EXISTS test_trigger_exists ON no_such_schema.no_such_table;
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 85
+CREATE TRIGGER test_trigger_exists
+    BEFORE UPDATE ON test_exists
+    FOR EACH ROW EXECUTE PROCEDURE suppress_redundant_updates_trigger();
+-- @@@ 86
+DROP TRIGGER test_trigger_exists ON test_exists;
+-- @@@ 87
+-- rule
+DROP RULE test_rule_exists ON test_exists;
+ERROR:  rule "test_rule_exists" for relation "test_exists" does not exist
+-- @@@ 88
+DROP RULE IF EXISTS test_rule_exists ON test_exists;
+NOTICE:  rule "test_rule_exists" for relation "test_exists" does not exist, skipping
+-- @@@ 89
+DROP RULE test_rule_exists ON no_such_table;
+ERROR:  relation "no_such_table" does not exist
+-- @@@ 90
+DROP RULE IF EXISTS test_rule_exists ON no_such_table;
+NOTICE:  relation "no_such_table" does not exist, skipping
+-- @@@ 91
+DROP RULE test_rule_exists ON no_such_schema.no_such_table;
+ERROR:  schema "no_such_schema" does not exist
+-- @@@ 92
+DROP RULE IF EXISTS test_rule_exists ON no_such_schema.no_such_table;
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 93
+CREATE RULE test_rule_exists AS ON INSERT TO test_exists
+    DO INSTEAD
+    INSERT INTO test_exists VALUES (NEW.a, NEW.b || NEW.a::text);
+-- @@@ 94
+DROP RULE test_rule_exists ON test_exists;
+-- @@@ 95
+-- foreign data wrapper
+DROP FOREIGN DATA WRAPPER test_fdw_exists;
+ERROR:  foreign-data wrapper "test_fdw_exists" does not exist
+-- @@@ 96
+DROP FOREIGN DATA WRAPPER IF EXISTS test_fdw_exists;
+NOTICE:  foreign-data wrapper "test_fdw_exists" does not exist, skipping
+-- @@@ 97
+-- foreign server
+DROP SERVER test_server_exists;
+ERROR:  server "test_server_exists" does not exist
+-- @@@ 98
+DROP SERVER IF EXISTS test_server_exists;
+NOTICE:  server "test_server_exists" does not exist, skipping
+-- @@@ 99
+-- operator class
+DROP OPERATOR CLASS test_operator_class USING btree;
+ERROR:  operator class "test_operator_class" does not exist for access method "btree"
+-- @@@ 100
+DROP OPERATOR CLASS IF EXISTS test_operator_class USING btree;
+NOTICE:  operator class "test_operator_class" does not exist for access method "btree", skipping
+-- @@@ 101
+DROP OPERATOR CLASS test_operator_class USING no_such_am;
+ERROR:  access method "no_such_am" does not exist
+-- @@@ 102
+DROP OPERATOR CLASS IF EXISTS test_operator_class USING no_such_am;
+ERROR:  access method "no_such_am" does not exist
+-- @@@ 103
+-- operator family
+DROP OPERATOR FAMILY test_operator_family USING btree;
+ERROR:  operator family "test_operator_family" does not exist for access method "btree"
+-- @@@ 104
+DROP OPERATOR FAMILY IF EXISTS test_operator_family USING btree;
+NOTICE:  operator family "test_operator_family" does not exist for access method "btree", skipping
+-- @@@ 105
+DROP OPERATOR FAMILY test_operator_family USING no_such_am;
+ERROR:  access method "no_such_am" does not exist
+-- @@@ 106
+DROP OPERATOR FAMILY IF EXISTS test_operator_family USING no_such_am;
+ERROR:  access method "no_such_am" does not exist
+-- @@@ 107
+-- access method
+DROP ACCESS METHOD no_such_am;
+ERROR:  access method "no_such_am" does not exist
+-- @@@ 108
+DROP ACCESS METHOD IF EXISTS no_such_am;
+NOTICE:  access method "no_such_am" does not exist, skipping
+-- @@@ 109
+-- drop the table
+DROP TABLE IF EXISTS test_exists;
+-- @@@ 110
+DROP TABLE test_exists;
+ERROR:  table "test_exists" does not exist
+-- @@@ 111
+-- be tolerant with missing schemas, types, etc
+DROP AGGREGATE IF EXISTS no_such_schema.foo(int);
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 112
+DROP AGGREGATE IF EXISTS foo(no_such_type);
+NOTICE:  type "no_such_type" does not exist, skipping
+-- @@@ 113
+DROP AGGREGATE IF EXISTS foo(no_such_schema.no_such_type);
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 114
+DROP CAST IF EXISTS (INTEGER AS no_such_type2);
+NOTICE:  type "no_such_type2" does not exist, skipping
+-- @@@ 115
+DROP CAST IF EXISTS (no_such_type1 AS INTEGER);
+NOTICE:  type "no_such_type1" does not exist, skipping
+-- @@@ 116
+DROP CAST IF EXISTS (INTEGER AS no_such_schema.bar);
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 117
+DROP CAST IF EXISTS (no_such_schema.foo AS INTEGER);
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 118
+DROP COLLATION IF EXISTS no_such_schema.foo;
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 119
+DROP CONVERSION IF EXISTS no_such_schema.foo;
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 120
+DROP DOMAIN IF EXISTS no_such_schema.foo;
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 121
+DROP FOREIGN TABLE IF EXISTS no_such_schema.foo;
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 122
+DROP FUNCTION IF EXISTS no_such_schema.foo();
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 123
+DROP FUNCTION IF EXISTS foo(no_such_type);
+NOTICE:  type "no_such_type" does not exist, skipping
+-- @@@ 124
+DROP FUNCTION IF EXISTS foo(no_such_schema.no_such_type);
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 125
+DROP INDEX IF EXISTS no_such_schema.foo;
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 126
+DROP MATERIALIZED VIEW IF EXISTS no_such_schema.foo;
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 127
+DROP OPERATOR IF EXISTS no_such_schema.+ (int, int);
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 128
+DROP OPERATOR IF EXISTS + (no_such_type, no_such_type);
+NOTICE:  type "no_such_type" does not exist, skipping
+-- @@@ 129
+DROP OPERATOR IF EXISTS + (no_such_schema.no_such_type, no_such_schema.no_such_type);
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 130
+DROP OPERATOR IF EXISTS # (NONE, no_such_schema.no_such_type);
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 131
+DROP OPERATOR CLASS IF EXISTS no_such_schema.widget_ops USING btree;
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 132
+DROP OPERATOR FAMILY IF EXISTS no_such_schema.float_ops USING btree;
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 133
+DROP RULE IF EXISTS foo ON no_such_schema.bar;
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 134
+DROP SEQUENCE IF EXISTS no_such_schema.foo;
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 135
+DROP TABLE IF EXISTS no_such_schema.foo;
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 136
+DROP TEXT SEARCH CONFIGURATION IF EXISTS no_such_schema.foo;
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 137
+DROP TEXT SEARCH DICTIONARY IF EXISTS no_such_schema.foo;
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 138
+DROP TEXT SEARCH PARSER IF EXISTS no_such_schema.foo;
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 139
+DROP TEXT SEARCH TEMPLATE IF EXISTS no_such_schema.foo;
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 140
+DROP TRIGGER IF EXISTS foo ON no_such_schema.bar;
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 141
+DROP TYPE IF EXISTS no_such_schema.foo;
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 142
+DROP VIEW IF EXISTS no_such_schema.foo;
+NOTICE:  schema "no_such_schema" does not exist, skipping
+-- @@@ 143
+-- Check we receive an ambiguous function error when there are
+-- multiple matching functions.
+CREATE FUNCTION test_ambiguous_funcname(int) returns int as $$ select $1; $$ language sql;
+-- @@@ 144
+CREATE FUNCTION test_ambiguous_funcname(text) returns text as $$ select $1; $$ language sql;
+-- @@@ 145
+DROP FUNCTION test_ambiguous_funcname;
+ERROR:  function name "test_ambiguous_funcname" is not unique
+HINT:  Specify the argument list to select the function unambiguously.
+-- @@@ 146
+DROP FUNCTION IF EXISTS test_ambiguous_funcname;
+ERROR:  function name "test_ambiguous_funcname" is not unique
+HINT:  Specify the argument list to select the function unambiguously.
+-- @@@ 147
+-- cleanup
+DROP FUNCTION test_ambiguous_funcname(int);
+-- @@@ 148
+DROP FUNCTION test_ambiguous_funcname(text);
+-- @@@ 149
+-- Likewise for procedures.
+CREATE PROCEDURE test_ambiguous_procname(int) as $$ begin end; $$ language plpgsql;
+-- @@@ 150
+CREATE PROCEDURE test_ambiguous_procname(text) as $$ begin end; $$ language plpgsql;
+-- @@@ 151
+DROP PROCEDURE test_ambiguous_procname;
+ERROR:  procedure name "test_ambiguous_procname" is not unique
+HINT:  Specify the argument list to select the procedure unambiguously.
+-- @@@ 152
+DROP PROCEDURE IF EXISTS test_ambiguous_procname;
+ERROR:  procedure name "test_ambiguous_procname" is not unique
+HINT:  Specify the argument list to select the procedure unambiguously.
+-- @@@ 153
+-- Check we get a similar error if we use ROUTINE instead of PROCEDURE.
+DROP ROUTINE IF EXISTS test_ambiguous_procname;
+ERROR:  routine name "test_ambiguous_procname" is not unique
+HINT:  Specify the argument list to select the routine unambiguously.
+-- @@@ 154
+-- cleanup
+DROP PROCEDURE test_ambiguous_procname(int);
+-- @@@ 155
+DROP PROCEDURE test_ambiguous_procname(text);
+-- @@@ 156
+-- This test checks both the functionality of 'if exists' and the syntax
+-- of the drop database command.
+drop database test_database_exists (force);
+ERROR:  database "test_database_exists" does not exist
+-- @@@ 157
+drop database test_database_exists with (force);
+ERROR:  database "test_database_exists" does not exist
+-- @@@ 158
+drop database if exists test_database_exists (force);
+NOTICE:  database "test_database_exists" does not exist, skipping
+-- @@@ 159
+drop database if exists test_database_exists with (force);
+NOTICE:  database "test_database_exists" does not exist, skipping
+-- @@@ 160

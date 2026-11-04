@@ -1,0 +1,43 @@
+CREATE TABLE delete_test (
+    id SERIAL PRIMARY KEY,
+    a INT,
+    b text
+);
+-- @@@ 0
+INSERT INTO delete_test (a) VALUES (10);
+-- @@@ 1
+INSERT INTO delete_test (a, b) VALUES (50, repeat('x', 10000));
+-- @@@ 2
+INSERT INTO delete_test (a) VALUES (100);
+-- @@@ 3
+-- allow an alias to be specified for DELETE's target table
+DELETE FROM delete_test AS dt WHERE dt.a > 75;
+-- @@@ 4
+-- if an alias is specified, don't allow the original table name
+-- to be referenced
+DELETE FROM delete_test dt WHERE delete_test.a > 25;
+ERROR:  invalid reference to FROM-clause entry for table "delete_test"
+LINE 1: DELETE FROM delete_test dt WHERE delete_test.a > 25;
+                                         ^
+HINT:  Perhaps you meant to reference the table alias "dt".
+-- @@@ 5
+SELECT id, a, char_length(b) FROM delete_test;
+ id | a  | char_length 
+----+----+-------------
+  1 | 10 |            
+  2 | 50 |       10000
+(2 rows)
+
+-- @@@ 6
+-- delete a row with a TOASTed value
+DELETE FROM delete_test WHERE a > 25;
+-- @@@ 7
+SELECT id, a, char_length(b) FROM delete_test;
+ id | a  | char_length 
+----+----+-------------
+  1 | 10 |            
+(1 row)
+
+-- @@@ 8
+DROP TABLE delete_test;
+-- @@@ 9

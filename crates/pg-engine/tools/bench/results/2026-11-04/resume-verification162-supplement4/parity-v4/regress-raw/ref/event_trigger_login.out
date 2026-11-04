@@ -1,0 +1,53 @@
+-- Login event triggers
+CREATE TABLE user_logins(id serial, who text);
+-- @@@ 0
+GRANT SELECT ON user_logins TO public;
+-- @@@ 1
+CREATE FUNCTION on_login_proc() RETURNS event_trigger AS $$
+BEGIN
+  INSERT INTO user_logins (who) VALUES (SESSION_USER);
+  RAISE NOTICE 'You are welcome!';
+END;
+$$ LANGUAGE plpgsql;
+-- @@@ 2
+CREATE EVENT TRIGGER on_login_trigger ON login EXECUTE PROCEDURE on_login_proc();
+-- @@@ 3
+ALTER EVENT TRIGGER on_login_trigger ENABLE ALWAYS;
+-- @@@ 4
+\c
+NOTICE:  You are welcome!
+-- @@@ 5
+SELECT COUNT(*) FROM user_logins;
+ count 
+-------
+     1
+(1 row)
+
+-- @@@ 6
+\c
+NOTICE:  You are welcome!
+-- @@@ 7
+SELECT COUNT(*) FROM user_logins;
+ count 
+-------
+     2
+(1 row)
+
+-- @@@ 8
+-- Check dathasloginevt in system catalog
+SELECT dathasloginevt FROM pg_database WHERE datname= :'DBNAME';
+ dathasloginevt 
+----------------
+ t
+(1 row)
+
+-- @@@ 9
+-- Cleanup
+DROP TABLE user_logins;
+-- @@@ 10
+DROP EVENT TRIGGER on_login_trigger;
+-- @@@ 11
+DROP FUNCTION on_login_proc();
+-- @@@ 12
+\c
+-- @@@ 13

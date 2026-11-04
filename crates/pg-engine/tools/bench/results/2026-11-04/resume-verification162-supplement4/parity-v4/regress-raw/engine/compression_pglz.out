@@ -1,0 +1,132 @@
+--
+-- Tests for PGLZ compression
+--
+-- directory paths and dlsuffix are passed to us in environment variables
+\getenv libdir PG_LIBDIR
+-- @@@ 0
+\getenv dlsuffix PG_DLSUFFIX
+-- @@@ 1
+\set regresslib :libdir '/regress' :dlsuffix
+-- @@@ 2
+CREATE FUNCTION test_pglz_compress(bytea)
+  RETURNS bytea
+  AS :'regresslib' LANGUAGE C STRICT;
+ERROR:  could not access file "/usr/local/lib/postgresql/regress.so": No such file or directory
+-- @@@ 3
+CREATE FUNCTION test_pglz_decompress(bytea, int4, bool)
+  RETURNS bytea
+  AS :'regresslib' LANGUAGE C STRICT;
+ERROR:  could not access file "/usr/local/lib/postgresql/regress.so": No such file or directory
+-- @@@ 4
+-- Round-trip with pglz: compress then decompress.
+SELECT test_pglz_decompress(test_pglz_compress(
+    decode(repeat('abcd', 100), 'escape')), 400, false) =
+    decode(repeat('abcd', 100), 'escape') AS roundtrip_ok;
+ERROR:  function test_pglz_compress(bytea) does not exist
+LINE 1: SELECT test_pglz_decompress(test_pglz_compress(
+                                    ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 5
+SELECT test_pglz_decompress(test_pglz_compress(
+    decode(repeat('abcd', 100), 'escape')), 400, true) =
+    decode(repeat('abcd', 100), 'escape') AS roundtrip_ok;
+ERROR:  function test_pglz_compress(bytea) does not exist
+LINE 1: SELECT test_pglz_decompress(test_pglz_compress(
+                                    ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 6
+-- Decompression with rawsize too large, fails to fill the destination
+-- buffer.
+SELECT test_pglz_decompress(test_pglz_compress(
+    decode(repeat('abcd', 100), 'escape')), 500, true);
+ERROR:  function test_pglz_compress(bytea) does not exist
+LINE 1: SELECT test_pglz_decompress(test_pglz_compress(
+                                    ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 7
+-- Decompression with rawsize too small, fails with source not fully
+-- consumed.
+SELECT test_pglz_decompress(test_pglz_compress(
+    decode(repeat('abcd', 100), 'escape')), 100, true);
+ERROR:  function test_pglz_compress(bytea) does not exist
+LINE 1: SELECT test_pglz_decompress(test_pglz_compress(
+                                    ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 8
+-- Corrupted compressed data.  Set control bit with read of a match tag,
+-- no data follows.
+SELECT length(test_pglz_decompress('\x01'::bytea, 1024, false)) AS ctrl_only_len;
+ERROR:  function test_pglz_decompress(bytea, integer, boolean) does not exist
+LINE 1: SELECT length(test_pglz_decompress('\x01'::bytea, 1024, fals...
+                      ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 9
+SELECT test_pglz_decompress('\x01'::bytea, 1024, true);
+ERROR:  function test_pglz_decompress(bytea, integer, boolean) does not exist
+LINE 1: SELECT test_pglz_decompress('\x01'::bytea, 1024, true);
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 10
+-- Corrupted compressed data.  Set control bit with read of a match tag,
+-- 1 byte follows.
+SELECT test_pglz_decompress('\x01ff'::bytea, 1024, false);
+ERROR:  function test_pglz_decompress(bytea, integer, boolean) does not exist
+LINE 1: SELECT test_pglz_decompress('\x01ff'::bytea, 1024, false);
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 11
+SELECT test_pglz_decompress('\x01ff'::bytea, 1024, true);
+ERROR:  function test_pglz_decompress(bytea, integer, boolean) does not exist
+LINE 1: SELECT test_pglz_decompress('\x01ff'::bytea, 1024, true);
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 12
+-- Corrupted compressed data.  Set control bit with match tag where length
+-- nibble is 3 bytes (extended length), no data follows.
+SELECT test_pglz_decompress('\x010f01'::bytea, 1024, false);
+ERROR:  function test_pglz_decompress(bytea, integer, boolean) does not exist
+LINE 1: SELECT test_pglz_decompress('\x010f01'::bytea, 1024, false);
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 13
+SELECT test_pglz_decompress('\x010f01'::bytea, 1024, true);
+ERROR:  function test_pglz_decompress(bytea, integer, boolean) does not exist
+LINE 1: SELECT test_pglz_decompress('\x010f01'::bytea, 1024, true);
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 14
+-- Corrupted compressed data.  Set control bit with a valid 2-byte match
+-- tag where offset exceeds output written.
+SELECT test_pglz_decompress('\x011001'::bytea, 1024, false);
+ERROR:  function test_pglz_decompress(bytea, integer, boolean) does not exist
+LINE 1: SELECT test_pglz_decompress('\x011001'::bytea, 1024, false);
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 15
+SELECT test_pglz_decompress('\x011001'::bytea, 1024, true);
+ERROR:  function test_pglz_decompress(bytea, integer, boolean) does not exist
+LINE 1: SELECT test_pglz_decompress('\x011001'::bytea, 1024, true);
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 16
+-- Corrupted compressed data.  Set control bit with a valid 2-byte match
+-- tag where offset is 0.
+SELECT test_pglz_decompress('\x010300'::bytea, 1024, false);
+ERROR:  function test_pglz_decompress(bytea, integer, boolean) does not exist
+LINE 1: SELECT test_pglz_decompress('\x010300'::bytea, 1024, false);
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 17
+SELECT test_pglz_decompress('\x010300'::bytea, 1024, true);
+ERROR:  function test_pglz_decompress(bytea, integer, boolean) does not exist
+LINE 1: SELECT test_pglz_decompress('\x010300'::bytea, 1024, true);
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 18
+-- Clean up
+DROP FUNCTION test_pglz_compress;
+ERROR:  could not find a function named "test_pglz_compress"
+-- @@@ 19
+DROP FUNCTION test_pglz_decompress;
+ERROR:  could not find a function named "test_pglz_decompress"
+-- @@@ 20

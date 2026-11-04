@@ -1,0 +1,231 @@
+--
+-- Tests for some likely failure cases with combo cmin/cmax mechanism
+--
+CREATE TEMP TABLE combocidtest (foobar int);
+-- @@@ 0
+BEGIN;
+-- @@@ 1
+-- a few dummy ops to push up the CommandId counter
+INSERT INTO combocidtest SELECT 1 LIMIT 0;
+-- @@@ 2
+INSERT INTO combocidtest SELECT 1 LIMIT 0;
+-- @@@ 3
+INSERT INTO combocidtest SELECT 1 LIMIT 0;
+-- @@@ 4
+INSERT INTO combocidtest SELECT 1 LIMIT 0;
+-- @@@ 5
+INSERT INTO combocidtest SELECT 1 LIMIT 0;
+-- @@@ 6
+INSERT INTO combocidtest SELECT 1 LIMIT 0;
+-- @@@ 7
+INSERT INTO combocidtest SELECT 1 LIMIT 0;
+-- @@@ 8
+INSERT INTO combocidtest SELECT 1 LIMIT 0;
+-- @@@ 9
+INSERT INTO combocidtest SELECT 1 LIMIT 0;
+-- @@@ 10
+INSERT INTO combocidtest SELECT 1 LIMIT 0;
+-- @@@ 11
+INSERT INTO combocidtest VALUES (1);
+-- @@@ 12
+INSERT INTO combocidtest VALUES (2);
+-- @@@ 13
+SELECT ctid,cmin,* FROM combocidtest;
+ ctid  | cmin | foobar 
+-------+------+--------
+ (0,1) |   10 |      1
+ (0,2) |   11 |      2
+(2 rows)
+
+-- @@@ 14
+SAVEPOINT s1;
+-- @@@ 15
+UPDATE combocidtest SET foobar = foobar + 10;
+-- @@@ 16
+-- here we should see only updated tuples
+SELECT ctid,cmin,* FROM combocidtest;
+ ctid  | cmin | foobar 
+-------+------+--------
+ (0,3) |   12 |     11
+ (0,4) |   12 |     12
+(2 rows)
+
+-- @@@ 17
+ROLLBACK TO s1;
+-- @@@ 18
+-- now we should see old tuples, but with combo CIDs starting at 0
+SELECT ctid,cmin,* FROM combocidtest;
+ ctid  | cmin | foobar 
+-------+------+--------
+ (0,1) |    0 |      1
+ (0,2) |    1 |      2
+(2 rows)
+
+-- @@@ 19
+COMMIT;
+-- @@@ 20
+-- combo data is not there anymore, but should still see tuples
+SELECT ctid,cmin,* FROM combocidtest;
+ ctid  | cmin | foobar 
+-------+------+--------
+ (0,1) |    0 |      1
+ (0,2) |    1 |      2
+(2 rows)
+
+-- @@@ 21
+-- Test combo CIDs with portals
+BEGIN;
+-- @@@ 22
+INSERT INTO combocidtest VALUES (333);
+-- @@@ 23
+DECLARE c CURSOR FOR SELECT ctid,cmin,* FROM combocidtest;
+-- @@@ 24
+DELETE FROM combocidtest;
+-- @@@ 25
+FETCH ALL FROM c;
+ ctid  | cmin | foobar 
+-------+------+--------
+ (0,1) |    1 |      1
+ (0,2) |    1 |      2
+ (0,5) |    0 |    333
+(3 rows)
+
+-- @@@ 26
+ROLLBACK;
+-- @@@ 27
+SELECT ctid,cmin,* FROM combocidtest;
+ ctid  | cmin | foobar 
+-------+------+--------
+ (0,1) |    1 |      1
+ (0,2) |    1 |      2
+(2 rows)
+
+-- @@@ 28
+-- check behavior with locked tuples
+BEGIN;
+-- @@@ 29
+-- a few dummy ops to push up the CommandId counter
+INSERT INTO combocidtest SELECT 1 LIMIT 0;
+-- @@@ 30
+INSERT INTO combocidtest SELECT 1 LIMIT 0;
+-- @@@ 31
+INSERT INTO combocidtest SELECT 1 LIMIT 0;
+-- @@@ 32
+INSERT INTO combocidtest SELECT 1 LIMIT 0;
+-- @@@ 33
+INSERT INTO combocidtest SELECT 1 LIMIT 0;
+-- @@@ 34
+INSERT INTO combocidtest SELECT 1 LIMIT 0;
+-- @@@ 35
+INSERT INTO combocidtest SELECT 1 LIMIT 0;
+-- @@@ 36
+INSERT INTO combocidtest SELECT 1 LIMIT 0;
+-- @@@ 37
+INSERT INTO combocidtest SELECT 1 LIMIT 0;
+-- @@@ 38
+INSERT INTO combocidtest SELECT 1 LIMIT 0;
+-- @@@ 39
+INSERT INTO combocidtest VALUES (444);
+-- @@@ 40
+SELECT ctid,cmin,* FROM combocidtest;
+ ctid  | cmin | foobar 
+-------+------+--------
+ (0,1) |    1 |      1
+ (0,2) |    1 |      2
+ (0,6) |   10 |    444
+(3 rows)
+
+-- @@@ 41
+SAVEPOINT s1;
+-- @@@ 42
+-- this doesn't affect cmin
+SELECT ctid,cmin,* FROM combocidtest FOR UPDATE;
+ ctid  | cmin | foobar 
+-------+------+--------
+ (0,1) |    1 |      1
+ (0,2) |    1 |      2
+ (0,6) |   10 |    444
+(3 rows)
+
+-- @@@ 43
+SELECT ctid,cmin,* FROM combocidtest;
+ ctid  | cmin | foobar 
+-------+------+--------
+ (0,1) |    1 |      1
+ (0,2) |    1 |      2
+ (0,6) |   10 |    444
+(3 rows)
+
+-- @@@ 44
+-- but this does
+UPDATE combocidtest SET foobar = foobar + 10;
+-- @@@ 45
+SELECT ctid,cmin,* FROM combocidtest;
+ ctid  | cmin | foobar 
+-------+------+--------
+ (0,7) |   12 |     11
+ (0,8) |   12 |     12
+ (0,9) |   12 |    454
+(3 rows)
+
+-- @@@ 46
+ROLLBACK TO s1;
+-- @@@ 47
+SELECT ctid,cmin,* FROM combocidtest;
+ ctid  | cmin | foobar 
+-------+------+--------
+ (0,1) |   12 |      1
+ (0,2) |   12 |      2
+ (0,6) |    0 |    444
+(3 rows)
+
+-- @@@ 48
+COMMIT;
+-- @@@ 49
+SELECT ctid,cmin,* FROM combocidtest;
+ ctid  | cmin | foobar 
+-------+------+--------
+ (0,1) |   12 |      1
+ (0,2) |   12 |      2
+ (0,6) |    0 |    444
+(3 rows)
+
+-- @@@ 50
+-- test for bug reported in
+-- CABRT9RC81YUf1=jsmWopcKJEro=VoeG2ou6sPwyOUTx_qteRsg@mail.gmail.com
+CREATE TABLE IF NOT EXISTS testcase(
+	id int PRIMARY KEY,
+	balance numeric
+);
+-- @@@ 51
+INSERT INTO testcase VALUES (1, 0);
+-- @@@ 52
+BEGIN;
+-- @@@ 53
+SELECT * FROM testcase WHERE testcase.id = 1 FOR UPDATE;
+ id | balance 
+----+---------
+  1 |       0
+(1 row)
+
+-- @@@ 54
+UPDATE testcase SET balance = balance + 400 WHERE id=1;
+-- @@@ 55
+SAVEPOINT subxact;
+-- @@@ 56
+UPDATE testcase SET balance = balance - 100 WHERE id=1;
+-- @@@ 57
+ROLLBACK TO SAVEPOINT subxact;
+-- @@@ 58
+-- should return one tuple
+SELECT * FROM testcase WHERE id = 1 FOR UPDATE;
+ id | balance 
+----+---------
+  1 |     400
+(1 row)
+
+-- @@@ 59
+ROLLBACK;
+-- @@@ 60
+DROP TABLE testcase;
+-- @@@ 61

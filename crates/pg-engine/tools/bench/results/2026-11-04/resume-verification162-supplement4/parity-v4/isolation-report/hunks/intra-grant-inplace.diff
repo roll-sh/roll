@@ -1,0 +1,39 @@
+--- reference
++++ engine
+ 
+ starting permutation: b1 drop1 b3 sfu3 revoke4 c1 r3
+ step b1: BEGIN;
+ step drop1: 
+ 	DELETE FROM pg_class WHERE relname = 'intra_grant_inplace';
+ 
++ERROR:  permission denied for table pg_class
+ step b3: BEGIN ISOLATION LEVEL READ COMMITTED;
+ step sfu3: 
+ 	SELECT relhasindex FROM pg_class
+ 	WHERE oid = 'intra_grant_inplace'::regclass FOR UPDATE;
++
++relhasindex
++-----------
++f          
++(1 row)
++
+- <waiting ...>
+ step revoke4: 
+ 	DO $$
+ 	BEGIN
+ 		REVOKE SELECT ON intra_grant_inplace FROM PUBLIC;
+ 	EXCEPTION WHEN others THEN
+ 		RAISE WARNING 'got: %', regexp_replace(sqlerrm, '[0-9]+', 'REDACTED');
+ 	END
+ 	$$;
+  <waiting ...>
+ step c1: COMMIT;
++step r3: ROLLBACK;
+-step sfu3: <... completed>
+-relhasindex
+------------
+-(0 rows)
+-
+-s4: WARNING:  got: cache lookup failed for relation REDACTED
+ step revoke4: <... completed>
+-step r3: ROLLBACK;

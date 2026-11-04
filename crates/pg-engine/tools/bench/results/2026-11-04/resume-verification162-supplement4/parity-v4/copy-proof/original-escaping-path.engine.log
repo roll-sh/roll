@@ -1,0 +1,12 @@
+2026-11-04 13:00:50.201 UTC [4112395] LOG:  starting PostgreSQL 18.6 (roll) on x86_64-pc-linux-gnu, compiled by rustc, 64-bit
+2026-11-04 13:00:50.201 UTC [4112395] LOG:  listening on IPv4 address "127.0.0.1", port 53254
+2026-11-04 13:00:50.201 UTC [32] LOG:  database system was shut down at 2026-11-04 13:00:50 UTC
+2026-11-04 13:00:50.201 UTC [4112395] LOG:  database system is ready to accept connections
+2026-11-04 13:00:50.397 UTC [4950] ERROR:  absolute path not allowed
+2026-11-04 13:00:50.397 UTC [4950] STATEMENT:  COPY a162_copy_fixture FROM '/home/meszmate/.cache/a162/pgr/resume-3997cf00/src-repo/src/test/regress/data/onek.data';
+2026-11-04 13:00:50.403 UTC [4112395] LOG:  received smart shutdown request
+2026-11-04 13:00:50.403 UTC [4112395] LOG:  background worker "logical replication launcher" (PID 35) exited with exit code 1
+2026-11-04 13:00:50.403 UTC [30] LOG:  shutting down
+2026-11-04 13:00:50.403 UTC [30] LOG:  checkpoint starting: shutdown immediate
+2026-11-04 13:00:50.537 UTC [30] LOG:  checkpoint complete: wrote 1 buffers (0.0%), wrote 0 SLRU buffers; 4 WAL file(s) added, 4 removed, 0 recycled; write=0.080 s, sync=0.055 s, total=0.134 s; sync files=21, longest=0.026 s, average=0.003 s; distance=0 kB, estimate=0 kB; lsn=0/1000028, redo lsn=0/1000028
+2026-11-04 13:00:50.537 UTC [4112395] LOG:  database system is shut down

@@ -1,0 +1,15 @@
+{
+  "status": "PASS",
+  "engine_source": "3997cf00a2a301fed65f00469625ff14f223f227",
+  "engine_sha256": "9e876733e089594f98399bf3caebb1c2027a1a1506e606e0e6586841b813ce2d",
+  "fixture_sha256": "1f59332622392237c33d997e605177db5d77dc09b370599005223b0adf901b5c",
+  "reference_rows": 1000,
+  "corrected_engine_rows": 1000,
+  "original_engine_exit": 3,
+  "original_error": "absolute path not allowed",
+  "original_canonical_path": "/home/meszmate/.cache/a162/pgr/src-repo/src/test/regress/data/onek.data",
+  "corrected_canonical_path": "/home/meszmate/.cache/a162/pgr/resume-3997cf00-r4/src-repo/src/test/regress/data/onek.data",
+  "old_allowed_root": "/home/meszmate/.cache/a162/pgr/resume-3997cf00",
+  "new_allowed_root": "/home/meszmate/.cache/a162/pgr/resume-3997cf00-r4",
+  "source_or_limits_changes": false
+}

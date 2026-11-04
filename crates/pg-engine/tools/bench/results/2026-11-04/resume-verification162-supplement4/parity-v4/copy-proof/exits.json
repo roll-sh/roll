@@ -1,0 +1,81 @@
+[
+  {
+    "label": "postgres-reference",
+    "command": [
+      "docker",
+      "exec",
+      "-i",
+      "a162-rref",
+      "psql",
+      "-X",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-U",
+      "postgres",
+      "-d",
+      "postgres"
+    ],
+    "exit": 0
+  },
+  {
+    "label": "original-escaping-path",
+    "command": [
+      "docker",
+      "exec",
+      "-i",
+      "-e",
+      "PGPASSWORD=pw",
+      "a162-psql",
+      "psql",
+      "-X",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "53254",
+      "-U",
+      "postgres",
+      "-d",
+      "postgres"
+    ],
+    "exit": 3
+  },
+  {
+    "label": "original-escaping-path-engine-cleanup",
+    "pid": 4112395,
+    "exit": 0
+  },
+  {
+    "label": "corrected-contained-path",
+    "command": [
+      "docker",
+      "exec",
+      "-i",
+      "-e",
+      "PGPASSWORD=pw",
+      "a162-psql",
+      "psql",
+      "-X",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "53254",
+      "-U",
+      "postgres",
+      "-d",
+      "postgres"
+    ],
+    "exit": 0
+  },
+  {
+    "label": "corrected-contained-path-engine-cleanup",
+    "pid": 4112773,
+    "exit": 0
+  }
+]

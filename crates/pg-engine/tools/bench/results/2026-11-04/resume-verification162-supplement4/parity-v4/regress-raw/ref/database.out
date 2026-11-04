@@ -1,0 +1,37 @@
+CREATE DATABASE regression_tbd
+	ENCODING utf8 LC_COLLATE "C" LC_CTYPE "C" TEMPLATE template0;
+-- @@@ 0
+ALTER DATABASE regression_tbd RENAME TO regression_utf8;
+-- @@@ 1
+ALTER DATABASE regression_utf8 SET TABLESPACE regress_tblspace;
+-- @@@ 2
+ALTER DATABASE regression_utf8 RESET TABLESPACE;
+-- @@@ 3
+ALTER DATABASE regression_utf8 CONNECTION_LIMIT 123;
+-- @@@ 4
+-- Test PgDatabaseToastTable.  Doing this with GRANT would be slow.
+BEGIN;
+-- @@@ 5
+UPDATE pg_database
+SET datacl = array_fill(makeaclitem(10, 10, 'USAGE', false), ARRAY[5e5::int])
+WHERE datname = 'regression_utf8';
+-- @@@ 6
+-- load catcache entry, if nothing else does
+ALTER DATABASE regression_utf8 RESET TABLESPACE;
+-- @@@ 7
+ROLLBACK;
+-- @@@ 8
+CREATE ROLE regress_datdba_before;
+-- @@@ 9
+CREATE ROLE regress_datdba_after;
+-- @@@ 10
+ALTER DATABASE regression_utf8 OWNER TO regress_datdba_before;
+-- @@@ 11
+REASSIGN OWNED BY regress_datdba_before TO regress_datdba_after;
+-- @@@ 12
+DROP DATABASE regression_utf8;
+-- @@@ 13
+DROP ROLE regress_datdba_before;
+-- @@@ 14
+DROP ROLE regress_datdba_after;
+-- @@@ 15

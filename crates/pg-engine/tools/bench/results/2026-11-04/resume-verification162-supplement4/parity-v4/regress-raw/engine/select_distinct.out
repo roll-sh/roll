@@ -1,0 +1,699 @@
+--
+-- SELECT_DISTINCT
+--
+--
+-- awk '{print $3;}' onek.data | sort -n | uniq
+--
+SELECT DISTINCT two FROM onek ORDER BY 1;
+ two 
+-----
+   0
+   1
+(2 rows)
+
+-- @@@ 0
+--
+-- awk '{print $5;}' onek.data | sort -n | uniq
+--
+SELECT DISTINCT ten FROM onek ORDER BY 1;
+ ten 
+-----
+   0
+   1
+   2
+   3
+   4
+   5
+   6
+   7
+   8
+   9
+(10 rows)
+
+-- @@@ 1
+--
+-- awk '{print $16;}' onek.data | sort -d | uniq
+--
+SELECT DISTINCT string4 FROM onek ORDER BY 1;
+ string4 
+---------
+ AAAAxx
+ HHHHxx
+ OOOOxx
+ VVVVxx
+(4 rows)
+
+-- @@@ 2
+--
+-- awk '{print $3,$16,$5;}' onek.data | sort -d | uniq |
+-- sort +0n -1 +1d -2 +2n -3
+--
+SELECT DISTINCT two, string4, ten
+   FROM onek
+   ORDER BY two using <, string4 using <, ten using <;
+ two | string4 | ten 
+-----+---------+-----
+   0 | AAAAxx  |   0
+   0 | AAAAxx  |   2
+   0 | AAAAxx  |   4
+   0 | AAAAxx  |   6
+   0 | AAAAxx  |   8
+   0 | HHHHxx  |   0
+   0 | HHHHxx  |   2
+   0 | HHHHxx  |   4
+   0 | HHHHxx  |   6
+   0 | HHHHxx  |   8
+   0 | OOOOxx  |   0
+   0 | OOOOxx  |   2
+   0 | OOOOxx  |   4
+   0 | OOOOxx  |   6
+   0 | OOOOxx  |   8
+   0 | VVVVxx  |   0
+   0 | VVVVxx  |   2
+   0 | VVVVxx  |   4
+   0 | VVVVxx  |   6
+   0 | VVVVxx  |   8
+   1 | AAAAxx  |   1
+   1 | AAAAxx  |   3
+   1 | AAAAxx  |   5
+   1 | AAAAxx  |   7
+   1 | AAAAxx  |   9
+   1 | HHHHxx  |   1
+   1 | HHHHxx  |   3
+   1 | HHHHxx  |   5
+   1 | HHHHxx  |   7
+   1 | HHHHxx  |   9
+   1 | OOOOxx  |   1
+   1 | OOOOxx  |   3
+   1 | OOOOxx  |   5
+   1 | OOOOxx  |   7
+   1 | OOOOxx  |   9
+   1 | VVVVxx  |   1
+   1 | VVVVxx  |   3
+   1 | VVVVxx  |   5
+   1 | VVVVxx  |   7
+   1 | VVVVxx  |   9
+(40 rows)
+
+-- @@@ 3
+--
+-- awk '{print $2;}' person.data |
+-- awk '{if(NF!=1){print $2;}else{print;}}' - emp.data |
+-- awk '{if(NF!=1){print $2;}else{print;}}' - student.data |
+-- awk 'BEGIN{FS="      ";}{if(NF!=1){print $5;}else{print;}}' - stud_emp.data |
+-- sort -n -r | uniq
+--
+SELECT DISTINCT p.age FROM person* p ORDER BY age using >;
+ age 
+-----
+  98
+  88
+  78
+  68
+  60
+  58
+  50
+  48
+  40
+  38
+  34
+  30
+  28
+  25
+  24
+  23
+  20
+  19
+  18
+   8
+(20 rows)
+
+-- @@@ 4
+--
+-- Check mentioning same column more than once
+--
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT count(*) FROM
+  (SELECT DISTINCT two, four, two FROM tenk1) ss;
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Aggregate
+   Output: count(*)
+   ->  HashAggregate
+         Output: tenk1.two, tenk1.four, tenk1.two
+         Group Key: tenk1.two, tenk1.four
+         ->  Seq Scan on public.tenk1
+               Output: tenk1.two, tenk1.four, tenk1.two
+(7 rows)
+
+-- @@@ 5
+SELECT count(*) FROM
+  (SELECT DISTINCT two, four, two FROM tenk1) ss;
+ count 
+-------
+     4
+(1 row)
+
+-- @@@ 6
+--
+-- Compare results between plans using sorting and plans using hash
+-- aggregation. Force spilling in both cases by setting work_mem low.
+--
+SET work_mem='64kB';
+-- @@@ 7
+-- Produce results with sorting.
+SET enable_hashagg=FALSE;
+-- @@@ 8
+SET jit_above_cost=0;
+-- @@@ 9
+EXPLAIN (costs off)
+SELECT DISTINCT g%1000 FROM generate_series(0,9999) g;
+                   QUERY PLAN                   
+------------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: ((g % 1000))
+         ->  Function Scan on generate_series g
+(4 rows)
+
+-- @@@ 10
+CREATE TABLE distinct_group_1 AS
+SELECT DISTINCT g%1000 FROM generate_series(0,9999) g;
+-- @@@ 11
+SET jit_above_cost TO DEFAULT;
+-- @@@ 12
+CREATE TABLE distinct_group_2 AS
+SELECT DISTINCT (g%1000)::text FROM generate_series(0,9999) g;
+-- @@@ 13
+SET enable_seqscan = 0;
+-- @@@ 14
+-- Check to see we get an incremental sort plan
+EXPLAIN (costs off)
+SELECT DISTINCT hundred, two FROM tenk1;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Unique
+   ->  Incremental Sort
+         Sort Key: hundred, two
+         Presorted Key: hundred
+         ->  Index Scan using tenk1_hundred on tenk1
+(5 rows)
+
+-- @@@ 15
+RESET enable_seqscan;
+-- @@@ 16
+SET enable_hashagg=TRUE;
+-- @@@ 17
+-- Produce results with hash aggregation.
+SET enable_sort=FALSE;
+-- @@@ 18
+SET jit_above_cost=0;
+-- @@@ 19
+EXPLAIN (costs off)
+SELECT DISTINCT g%1000 FROM generate_series(0,9999) g;
+                QUERY PLAN                
+------------------------------------------
+ HashAggregate
+   Group Key: (g % 1000)
+   ->  Function Scan on generate_series g
+(3 rows)
+
+-- @@@ 20
+CREATE TABLE distinct_hash_1 AS
+SELECT DISTINCT g%1000 FROM generate_series(0,9999) g;
+-- @@@ 21
+SET jit_above_cost TO DEFAULT;
+-- @@@ 22
+CREATE TABLE distinct_hash_2 AS
+SELECT DISTINCT (g%1000)::text FROM generate_series(0,9999) g;
+-- @@@ 23
+SET enable_sort=TRUE;
+-- @@@ 24
+SET work_mem TO DEFAULT;
+-- @@@ 25
+-- Compare results
+(SELECT * FROM distinct_hash_1 EXCEPT SELECT * FROM distinct_group_1)
+  UNION ALL
+(SELECT * FROM distinct_group_1 EXCEPT SELECT * FROM distinct_hash_1);
+ ?column? 
+----------
+(0 rows)
+
+-- @@@ 26
+(SELECT * FROM distinct_hash_1 EXCEPT SELECT * FROM distinct_group_1)
+  UNION ALL
+(SELECT * FROM distinct_group_1 EXCEPT SELECT * FROM distinct_hash_1);
+ ?column? 
+----------
+(0 rows)
+
+-- @@@ 27
+DROP TABLE distinct_hash_1;
+-- @@@ 28
+DROP TABLE distinct_hash_2;
+-- @@@ 29
+DROP TABLE distinct_group_1;
+-- @@@ 30
+DROP TABLE distinct_group_2;
+-- @@@ 31
+-- Test parallel DISTINCT
+SET parallel_tuple_cost=0;
+-- @@@ 32
+SET parallel_setup_cost=0;
+-- @@@ 33
+SET min_parallel_table_scan_size=0;
+-- @@@ 34
+SET max_parallel_workers_per_gather=2;
+-- @@@ 35
+-- Ensure we get a parallel plan
+EXPLAIN (costs off)
+SELECT DISTINCT four FROM tenk1;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Unique
+   ->  Gather Merge
+         Workers Planned: 2
+         ->  Sort
+               Sort Key: four
+               ->  HashAggregate
+                     Group Key: four
+                     ->  Parallel Seq Scan on tenk1
+(8 rows)
+
+-- @@@ 36
+-- Ensure the parallel plan produces the correct results
+SELECT DISTINCT four FROM tenk1;
+ four 
+------
+    0
+    1
+    2
+    3
+(4 rows)
+
+-- @@@ 37
+CREATE OR REPLACE FUNCTION distinct_func(a INT) RETURNS INT AS $$
+  BEGIN
+    RETURN a;
+  END;
+$$ LANGUAGE plpgsql PARALLEL UNSAFE;
+-- @@@ 38
+-- Ensure we don't do parallel distinct with a parallel unsafe function
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT distinct_func(1) FROM tenk1;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: (distinct_func(1))
+         ->  Index Only Scan using tenk1_hundred on tenk1
+(4 rows)
+
+-- @@@ 39
+-- make the function parallel safe
+CREATE OR REPLACE FUNCTION distinct_func(a INT) RETURNS INT AS $$
+  BEGIN
+    RETURN a;
+  END;
+$$ LANGUAGE plpgsql PARALLEL SAFE;
+-- @@@ 40
+-- Ensure we do parallel distinct now that the function is parallel safe
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT distinct_func(1) FROM tenk1;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Unique
+   ->  Gather Merge
+         Workers Planned: 2
+         ->  Unique
+               ->  Sort
+                     Sort Key: (distinct_func(1))
+                     ->  Parallel Seq Scan on tenk1
+(7 rows)
+
+-- @@@ 41
+RESET max_parallel_workers_per_gather;
+-- @@@ 42
+RESET min_parallel_table_scan_size;
+-- @@@ 43
+RESET parallel_setup_cost;
+-- @@@ 44
+RESET parallel_tuple_cost;
+-- @@@ 45
+--
+-- Test the planner's ability to use a LIMIT 1 instead of a Unique node when
+-- all of the distinct_pathkeys have been marked as redundant
+--
+-- Ensure we get a plan with a Limit 1
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT four FROM tenk1 WHERE four = 0;
+         QUERY PLAN         
+----------------------------
+ Limit
+   ->  Seq Scan on tenk1
+         Filter: (four = 0)
+(3 rows)
+
+-- @@@ 46
+-- Ensure the above gives us the correct result
+SELECT DISTINCT four FROM tenk1 WHERE four = 0;
+ four 
+------
+    0
+(1 row)
+
+-- @@@ 47
+-- Ensure we get a plan with a Limit 1
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT four FROM tenk1 WHERE four = 0 AND two <> 0;
+                 QUERY PLAN                  
+---------------------------------------------
+ Limit
+   ->  Seq Scan on tenk1
+         Filter: ((two <> 0) AND (four = 0))
+(3 rows)
+
+-- @@@ 48
+-- Ensure no rows are returned
+SELECT DISTINCT four FROM tenk1 WHERE four = 0 AND two <> 0;
+ four 
+------
+(0 rows)
+
+-- @@@ 49
+-- Ensure we get a plan with a Limit 1 when the SELECT list contains constants
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT four,1,2,3 FROM tenk1 WHERE four = 0;
+         QUERY PLAN         
+----------------------------
+ Limit
+   ->  Seq Scan on tenk1
+         Filter: (four = 0)
+(3 rows)
+
+-- @@@ 50
+-- Ensure we only get 1 row
+SELECT DISTINCT four,1,2,3 FROM tenk1 WHERE four = 0;
+ four | ?column? | ?column? | ?column? 
+------+----------+----------+----------
+    0 |        1 |        2 |        3
+(1 row)
+
+-- @@@ 51
+SET parallel_setup_cost=0;
+-- @@@ 52
+SET min_parallel_table_scan_size=0;
+-- @@@ 53
+SET max_parallel_workers_per_gather=2;
+-- @@@ 54
+-- Ensure we get a plan with a Limit 1 in both partial distinct and final
+-- distinct
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT four FROM tenk1 WHERE four = 10;
+                  QUERY PLAN                  
+----------------------------------------------
+ Limit
+   ->  Gather
+         Workers Planned: 2
+         ->  Limit
+               ->  Parallel Seq Scan on tenk1
+                     Filter: (four = 10)
+(6 rows)
+
+-- @@@ 55
+RESET max_parallel_workers_per_gather;
+-- @@@ 56
+RESET min_parallel_table_scan_size;
+-- @@@ 57
+RESET parallel_setup_cost;
+-- @@@ 58
+--
+-- Also, some tests of IS DISTINCT FROM, which doesn't quite deserve its
+-- very own regression file.
+--
+CREATE TEMP TABLE disttable (f1 integer);
+-- @@@ 59
+INSERT INTO DISTTABLE VALUES(1);
+-- @@@ 60
+INSERT INTO DISTTABLE VALUES(2);
+-- @@@ 61
+INSERT INTO DISTTABLE VALUES(3);
+-- @@@ 62
+INSERT INTO DISTTABLE VALUES(NULL);
+-- @@@ 63
+-- basic cases
+SELECT f1, f1 IS DISTINCT FROM 2 as "not 2" FROM disttable;
+ f1 | not 2 
+----+-------
+  1 | t
+  2 | f
+  3 | t
+    | t
+(4 rows)
+
+-- @@@ 64
+SELECT f1, f1 IS DISTINCT FROM NULL as "not null" FROM disttable;
+ f1 | not null 
+----+----------
+  1 | t
+  2 | t
+  3 | t
+    | f
+(4 rows)
+
+-- @@@ 65
+SELECT f1, f1 IS DISTINCT FROM f1 as "false" FROM disttable;
+ f1 | false 
+----+-------
+  1 | f
+  2 | f
+  3 | f
+    | f
+(4 rows)
+
+-- @@@ 66
+SELECT f1, f1 IS DISTINCT FROM f1+1 as "not null" FROM disttable;
+ f1 | not null 
+----+----------
+  1 | t
+  2 | t
+  3 | t
+    | f
+(4 rows)
+
+-- @@@ 67
+-- check that optimizer constant-folds it properly
+SELECT 1 IS DISTINCT FROM 2 as "yes";
+ yes 
+-----
+ t
+(1 row)
+
+-- @@@ 68
+SELECT 2 IS DISTINCT FROM 2 as "no";
+ no 
+----
+ f
+(1 row)
+
+-- @@@ 69
+SELECT 2 IS DISTINCT FROM null as "yes";
+ yes 
+-----
+ t
+(1 row)
+
+-- @@@ 70
+SELECT null IS DISTINCT FROM null as "no";
+ no 
+----
+ f
+(1 row)
+
+-- @@@ 71
+-- negated form
+SELECT 1 IS NOT DISTINCT FROM 2 as "no";
+ no 
+----
+ f
+(1 row)
+
+-- @@@ 72
+SELECT 2 IS NOT DISTINCT FROM 2 as "yes";
+ yes 
+-----
+ t
+(1 row)
+
+-- @@@ 73
+SELECT 2 IS NOT DISTINCT FROM null as "no";
+ no 
+----
+ f
+(1 row)
+
+-- @@@ 74
+SELECT null IS NOT DISTINCT FROM null as "yes";
+ yes 
+-----
+ t
+(1 row)
+
+-- @@@ 75
+--
+-- Test the planner's ability to reorder the distinctClause Pathkeys to match
+-- the input path's ordering
+--
+CREATE TABLE distinct_tbl (x int, y int);
+-- @@@ 76
+INSERT INTO distinct_tbl SELECT i%10, i%10 FROM generate_series(1, 1000) AS i;
+-- @@@ 77
+CREATE INDEX distinct_tbl_x_y_idx ON distinct_tbl (x, y);
+-- @@@ 78
+ANALYZE distinct_tbl;
+-- @@@ 79
+-- Produce results with sorting.
+SET enable_hashagg TO OFF;
+-- @@@ 80
+-- Ensure we avoid the need to re-sort by reordering the distinctClause
+-- Pathkeys to match the ordering of the input path
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT y, x FROM distinct_tbl;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Unique
+   ->  Index Only Scan using distinct_tbl_x_y_idx on distinct_tbl
+(2 rows)
+
+-- @@@ 81
+SELECT DISTINCT y, x FROM distinct_tbl;
+ y | x 
+---+---
+ 0 | 0
+ 1 | 1
+ 2 | 2
+ 3 | 3
+ 4 | 4
+ 5 | 5
+ 6 | 6
+ 7 | 7
+ 8 | 8
+ 9 | 9
+(10 rows)
+
+-- @@@ 82
+-- Ensure we leverage incremental-sort by reordering the distinctClause
+-- Pathkeys to partially match the ordering of the input path
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT y, x FROM (SELECT * FROM distinct_tbl ORDER BY x) s;
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Unique
+   ->  Incremental Sort
+         Sort Key: s.x, s.y
+         Presorted Key: s.x
+         ->  Subquery Scan on s
+               ->  Index Only Scan using distinct_tbl_x_y_idx on distinct_tbl
+(6 rows)
+
+-- @@@ 83
+SELECT DISTINCT y, x FROM (SELECT * FROM distinct_tbl ORDER BY x) s;
+ y | x 
+---+---
+ 0 | 0
+ 1 | 1
+ 2 | 2
+ 3 | 3
+ 4 | 4
+ 5 | 5
+ 6 | 6
+ 7 | 7
+ 8 | 8
+ 9 | 9
+(10 rows)
+
+-- @@@ 84
+-- Ensure we avoid the need to re-sort in partial distinct by reordering the
+-- distinctClause Pathkeys to match the ordering of the input path
+SET parallel_tuple_cost=0;
+-- @@@ 85
+SET parallel_setup_cost=0;
+-- @@@ 86
+SET min_parallel_table_scan_size=0;
+-- @@@ 87
+SET min_parallel_index_scan_size=0;
+-- @@@ 88
+SET max_parallel_workers_per_gather=2;
+-- @@@ 89
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT y, x FROM distinct_tbl limit 10;
+                                         QUERY PLAN                                          
+---------------------------------------------------------------------------------------------
+ Limit
+   ->  Unique
+         ->  Gather Merge
+               Workers Planned: 1
+               ->  Unique
+                     ->  Parallel Index Only Scan using distinct_tbl_x_y_idx on distinct_tbl
+(6 rows)
+
+-- @@@ 90
+SELECT DISTINCT y, x FROM distinct_tbl limit 10;
+ y | x 
+---+---
+ 0 | 0
+ 1 | 1
+ 2 | 2
+ 3 | 3
+ 4 | 4
+ 5 | 5
+ 6 | 6
+ 7 | 7
+ 8 | 8
+ 9 | 9
+(10 rows)
+
+-- @@@ 91
+RESET max_parallel_workers_per_gather;
+-- @@@ 92
+RESET min_parallel_index_scan_size;
+-- @@@ 93
+RESET min_parallel_table_scan_size;
+-- @@@ 94
+RESET parallel_setup_cost;
+-- @@@ 95
+RESET parallel_tuple_cost;
+-- @@@ 96
+-- Ensure we reorder the distinctClause Pathkeys to match the ordering of the
+-- input path even if there is ORDER BY clause
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT y, x FROM distinct_tbl ORDER BY y;
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Sort
+   Sort Key: y
+   ->  Unique
+         ->  Index Only Scan using distinct_tbl_x_y_idx on distinct_tbl
+(4 rows)
+
+-- @@@ 97
+SELECT DISTINCT y, x FROM distinct_tbl ORDER BY y;
+ y | x 
+---+---
+ 0 | 0
+ 1 | 1
+ 2 | 2
+ 3 | 3
+ 4 | 4
+ 5 | 5
+ 6 | 6
+ 7 | 7
+ 8 | 8
+ 9 | 9
+(10 rows)
+
+-- @@@ 98
+RESET enable_hashagg;
+-- @@@ 99
+DROP TABLE distinct_tbl;
+-- @@@ 100

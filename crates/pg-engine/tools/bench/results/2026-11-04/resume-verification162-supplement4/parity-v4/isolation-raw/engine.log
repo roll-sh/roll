@@ -1,0 +1,1731 @@
+2026-11-04 13:05:36.754 UTC [52859] LOG:  starting PostgreSQL 18.6 (roll) on x86_64-pc-linux-gnu, compiled by rustc, 64-bit
+2026-11-04 13:05:36.754 UTC [52859] LOG:  listening on IPv4 address "127.0.0.1", port 53253
+2026-11-04 13:05:36.754 UTC [32] LOG:  database system was shut down at 2026-11-04 13:05:36 UTC
+2026-11-04 13:05:36.754 UTC [52859] LOG:  database system is ready to accept connections
+2026-11-04 13:05:36.987 UTC [9598] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:36.987 UTC [9598] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:36.987 UTC [9598] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:36.987 UTC [9598] STATEMENT:  UPDATE bank_account SET balance = -11 WHERE id = 'X';
+2026-11-04 13:05:37.286 UTC [9608] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:37.286 UTC [9608] DETAIL:  Reason code: Canceled on identification as a pivot, during conflict in checking.
+2026-11-04 13:05:37.286 UTC [9608] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:37.286 UTC [9608] STATEMENT:  INSERT INTO test VALUES (42);
+2026-11-04 13:05:37.291 UTC [9608] ERROR:  duplicate key value violates unique constraint "test_pkey"
+2026-11-04 13:05:37.291 UTC [9608] DETAIL:  Key (i)=(42) already exists.
+2026-11-04 13:05:37.291 UTC [9608] STATEMENT:  INSERT INTO test VALUES (42);
+2026-11-04 13:05:37.394 UTC [9612] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:37.394 UTC [9612] DETAIL:  Reason code: Canceled on identification as a pivot, during conflict in checking.
+2026-11-04 13:05:37.394 UTC [9612] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:37.394 UTC [9612] STATEMENT:  INSERT INTO test VALUES (42);
+2026-11-04 13:05:37.398 UTC [9612] ERROR:  duplicate key value violates unique constraint "test_pkey"
+2026-11-04 13:05:37.398 UTC [9612] DETAIL:  Key (i)=(42) already exists.
+2026-11-04 13:05:37.398 UTC [9612] STATEMENT:  INSERT INTO test VALUES (42);
+2026-11-04 13:05:37.530 UTC [9616] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:37.530 UTC [9616] DETAIL:  Reason code: Canceled on identification as a pivot, during conflict in checking.
+2026-11-04 13:05:37.530 UTC [9616] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:37.530 UTC [9616] CONTEXT:  SQL function "insert_unique" statement 1
+2026-11-04 13:05:37.530 UTC [9616] STATEMENT:  SELECT insert_unique(1, '2');
+2026-11-04 13:05:37.650 UTC [9620] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:37.650 UTC [9620] DETAIL:  Reason code: Canceled on identification as a pivot, during conflict in checking.
+2026-11-04 13:05:37.650 UTC [9620] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:37.650 UTC [9620] STATEMENT:  INSERT INTO invoice VALUES (2016, 3);
+2026-11-04 13:05:37.671 UTC [9620] ERROR:  duplicate key value violates unique constraint "invoice_pkey"
+2026-11-04 13:05:37.671 UTC [9620] DETAIL:  Key (year, invoice_number)=(2016, 3) already exists.
+2026-11-04 13:05:37.671 UTC [9620] STATEMENT:  INSERT INTO invoice VALUES (2016, 3);
+2026-11-04 13:05:37.698 UTC [9620] ERROR:  duplicate key value violates unique constraint "invoice_pkey"
+2026-11-04 13:05:37.698 UTC [9620] DETAIL:  Key (year, invoice_number)=(2016, 3) already exists.
+2026-11-04 13:05:37.698 UTC [9620] STATEMENT:  INSERT INTO invoice VALUES (2016, 3);
+2026-11-04 13:05:37.779 UTC [9624] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:37.779 UTC [9624] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:37.779 UTC [9624] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:37.779 UTC [9624] STATEMENT:  COMMIT;
+2026-11-04 13:05:37.782 UTC [9623] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:37.782 UTC [9623] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:37.782 UTC [9623] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:37.782 UTC [9623] STATEMENT:  COMMIT;
+2026-11-04 13:05:37.784 UTC [9624] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:37.784 UTC [9624] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:37.784 UTC [9624] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:37.784 UTC [9624] STATEMENT:  COMMIT;
+2026-11-04 13:05:37.788 UTC [9623] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:37.788 UTC [9623] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:37.788 UTC [9623] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:37.788 UTC [9623] STATEMENT:  COMMIT;
+2026-11-04 13:05:38.007 UTC [9629] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:38.007 UTC [9629] DETAIL:  Reason code: Canceled on conflict out to pivot 1074, during read.
+2026-11-04 13:05:38.007 UTC [9629] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:38.007 UTC [9629] STATEMENT:  SELECT * FROM receipt WHERE deposit_date = DATE '2008-12-22';
+2026-11-04 13:05:38.012 UTC [9627] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:38.012 UTC [9627] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:38.012 UTC [9627] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:38.012 UTC [9627] STATEMENT:  COMMIT;
+2026-11-04 13:05:38.017 UTC [9627] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:38.017 UTC [9627] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:38.017 UTC [9627] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:38.017 UTC [9627] STATEMENT:  COMMIT;
+2026-11-04 13:05:38.165 UTC [9629] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:38.165 UTC [9629] DETAIL:  Reason code: Canceled on conflict out to pivot 1275, during read.
+2026-11-04 13:05:38.165 UTC [9629] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:38.165 UTC [9629] STATEMENT:  SELECT * FROM receipt WHERE deposit_date = DATE '2008-12-22';
+2026-11-04 13:05:38.167 UTC [9627] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:38.167 UTC [9627] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:38.167 UTC [9627] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:38.167 UTC [9627] STATEMENT:  COMMIT;
+2026-11-04 13:05:38.169 UTC [9627] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:38.169 UTC [9627] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:38.169 UTC [9627] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:38.169 UTC [9627] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.347 UTC [9633] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.347 UTC [9633] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:41.347 UTC [9633] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.347 UTC [9633] STATEMENT:  DELETE FROM statute WHERE statute_cite = '123.45(1)a' AND eff_date = DATE '2008-01-01';
+2026-11-04 13:05:41.353 UTC [9633] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.353 UTC [9633] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.353 UTC [9633] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.353 UTC [9633] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.358 UTC [9632] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.358 UTC [9632] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.358 UTC [9632] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.358 UTC [9632] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.363 UTC [9633] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.363 UTC [9633] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:41.363 UTC [9633] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.363 UTC [9633] STATEMENT:  DELETE FROM statute WHERE statute_cite = '123.45(1)a' AND eff_date = DATE '2008-01-01';
+2026-11-04 13:05:41.369 UTC [9633] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.369 UTC [9633] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.369 UTC [9633] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.369 UTC [9633] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.374 UTC [9632] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.374 UTC [9632] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.374 UTC [9632] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.374 UTC [9632] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.379 UTC [9633] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.379 UTC [9633] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.379 UTC [9633] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.379 UTC [9633] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.384 UTC [9632] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.384 UTC [9632] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.384 UTC [9632] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.384 UTC [9632] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.388 UTC [9632] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.388 UTC [9632] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:41.388 UTC [9632] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.388 UTC [9632] STATEMENT:  INSERT INTO offense VALUES (1, '123.45(1)a', DATE '2009-05-15');
+2026-11-04 13:05:41.392 UTC [9633] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.392 UTC [9633] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:41.392 UTC [9633] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.392 UTC [9633] STATEMENT:  DELETE FROM statute WHERE statute_cite = '123.45(1)a' AND eff_date = DATE '2008-01-01';
+2026-11-04 13:05:41.397 UTC [9633] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.397 UTC [9633] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.397 UTC [9633] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.397 UTC [9633] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.401 UTC [9632] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.401 UTC [9632] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.401 UTC [9632] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.401 UTC [9632] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.405 UTC [9633] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.405 UTC [9633] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.405 UTC [9633] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.405 UTC [9633] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.409 UTC [9632] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.409 UTC [9632] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.409 UTC [9632] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.409 UTC [9632] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.413 UTC [9632] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.413 UTC [9632] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:41.413 UTC [9632] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.413 UTC [9632] STATEMENT:  INSERT INTO offense VALUES (1, '123.45(1)a', DATE '2009-05-15');
+2026-11-04 13:05:41.417 UTC [9633] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.417 UTC [9633] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.417 UTC [9633] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.417 UTC [9633] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.421 UTC [9632] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.421 UTC [9632] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.421 UTC [9632] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.421 UTC [9632] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.426 UTC [9632] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.426 UTC [9632] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:41.426 UTC [9632] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.426 UTC [9632] STATEMENT:  INSERT INTO offense VALUES (1, '123.45(1)a', DATE '2009-05-15');
+2026-11-04 13:05:41.744 UTC [9637] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.744 UTC [9637] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:41.744 UTC [9637] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.744 UTC [9637] STATEMENT:  UPDATE person SET is_project_manager = false WHERE person_id = 1;
+2026-11-04 13:05:41.750 UTC [9637] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.750 UTC [9637] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.750 UTC [9637] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.750 UTC [9637] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.756 UTC [9636] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.756 UTC [9636] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.756 UTC [9636] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.756 UTC [9636] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.761 UTC [9637] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.761 UTC [9637] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:41.761 UTC [9637] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.761 UTC [9637] STATEMENT:  UPDATE person SET is_project_manager = false WHERE person_id = 1;
+2026-11-04 13:05:41.767 UTC [9637] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.767 UTC [9637] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.767 UTC [9637] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.767 UTC [9637] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.772 UTC [9636] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.772 UTC [9636] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.772 UTC [9636] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.772 UTC [9636] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.778 UTC [9637] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.778 UTC [9637] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.778 UTC [9637] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.778 UTC [9637] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.783 UTC [9636] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.783 UTC [9636] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.783 UTC [9636] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.783 UTC [9636] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.788 UTC [9636] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.788 UTC [9636] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:41.788 UTC [9636] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.788 UTC [9636] STATEMENT:  INSERT INTO project VALUES (101, 'Build Great Wall', 1);
+2026-11-04 13:05:41.794 UTC [9637] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.794 UTC [9637] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:41.794 UTC [9637] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.794 UTC [9637] STATEMENT:  UPDATE person SET is_project_manager = false WHERE person_id = 1;
+2026-11-04 13:05:41.800 UTC [9637] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.800 UTC [9637] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.800 UTC [9637] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.800 UTC [9637] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.805 UTC [9636] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.805 UTC [9636] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.805 UTC [9636] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.805 UTC [9636] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.811 UTC [9637] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.811 UTC [9637] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.811 UTC [9637] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.811 UTC [9637] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.816 UTC [9636] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.816 UTC [9636] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.816 UTC [9636] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.816 UTC [9636] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.822 UTC [9636] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.822 UTC [9636] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:41.822 UTC [9636] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.822 UTC [9636] STATEMENT:  INSERT INTO project VALUES (101, 'Build Great Wall', 1);
+2026-11-04 13:05:41.827 UTC [9637] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.827 UTC [9637] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.827 UTC [9637] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.827 UTC [9637] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.833 UTC [9636] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.833 UTC [9636] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:41.833 UTC [9636] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.833 UTC [9636] STATEMENT:  COMMIT;
+2026-11-04 13:05:41.839 UTC [9636] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:41.839 UTC [9636] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:41.839 UTC [9636] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:41.839 UTC [9636] STATEMENT:  INSERT INTO project VALUES (101, 'Build Great Wall', 1);
+2026-11-04 13:05:42.124 UTC [9641] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.124 UTC [9641] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:42.124 UTC [9641] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.124 UTC [9641] STATEMENT:  UPDATE room_reservation SET start_time = TIMESTAMP WITH TIME ZONE '2010-04-01 13:30', end_time = TIMESTAMP WITH TIME ZONE '2010-04-01 14:30' WHERE room_id = '101' AND start_time = TIMESTAMP WITH TIME ZONE '2010-04-01 10:00';
+2026-11-04 13:05:42.129 UTC [9641] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.129 UTC [9641] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.129 UTC [9641] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.129 UTC [9641] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.133 UTC [9640] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.133 UTC [9640] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.133 UTC [9640] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.133 UTC [9640] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.138 UTC [9641] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.138 UTC [9641] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:42.138 UTC [9641] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.138 UTC [9641] STATEMENT:  UPDATE room_reservation SET start_time = TIMESTAMP WITH TIME ZONE '2010-04-01 13:30', end_time = TIMESTAMP WITH TIME ZONE '2010-04-01 14:30' WHERE room_id = '101' AND start_time = TIMESTAMP WITH TIME ZONE '2010-04-01 10:00';
+2026-11-04 13:05:42.143 UTC [9641] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.143 UTC [9641] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.143 UTC [9641] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.143 UTC [9641] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.148 UTC [9640] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.148 UTC [9640] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.148 UTC [9640] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.148 UTC [9640] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.153 UTC [9641] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.153 UTC [9641] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.153 UTC [9641] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.153 UTC [9641] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.157 UTC [9640] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.157 UTC [9640] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.157 UTC [9640] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.157 UTC [9640] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.162 UTC [9640] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.162 UTC [9640] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:42.162 UTC [9640] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.162 UTC [9640] STATEMENT:  INSERT INTO room_reservation VALUES ('101', TIMESTAMP WITH TIME ZONE '2010-04-01 13:00', TIMESTAMP WITH TIME ZONE '2010-04-01 14:00', 'Carol');
+2026-11-04 13:05:42.167 UTC [9641] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.167 UTC [9641] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:42.167 UTC [9641] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.167 UTC [9641] STATEMENT:  UPDATE room_reservation SET start_time = TIMESTAMP WITH TIME ZONE '2010-04-01 13:30', end_time = TIMESTAMP WITH TIME ZONE '2010-04-01 14:30' WHERE room_id = '101' AND start_time = TIMESTAMP WITH TIME ZONE '2010-04-01 10:00';
+2026-11-04 13:05:42.171 UTC [9641] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.171 UTC [9641] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.171 UTC [9641] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.171 UTC [9641] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.176 UTC [9640] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.176 UTC [9640] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.176 UTC [9640] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.176 UTC [9640] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.181 UTC [9641] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.181 UTC [9641] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.181 UTC [9641] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.181 UTC [9641] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.186 UTC [9640] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.186 UTC [9640] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.186 UTC [9640] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.186 UTC [9640] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.190 UTC [9640] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.190 UTC [9640] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:42.190 UTC [9640] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.190 UTC [9640] STATEMENT:  INSERT INTO room_reservation VALUES ('101', TIMESTAMP WITH TIME ZONE '2010-04-01 13:00', TIMESTAMP WITH TIME ZONE '2010-04-01 14:00', 'Carol');
+2026-11-04 13:05:42.195 UTC [9641] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.195 UTC [9641] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.195 UTC [9641] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.195 UTC [9641] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.199 UTC [9640] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.199 UTC [9640] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.199 UTC [9640] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.199 UTC [9640] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.204 UTC [9640] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.204 UTC [9640] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:42.204 UTC [9640] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.204 UTC [9640] STATEMENT:  INSERT INTO room_reservation VALUES ('101', TIMESTAMP WITH TIME ZONE '2010-04-01 13:00', TIMESTAMP WITH TIME ZONE '2010-04-01 14:00', 'Carol');
+2026-11-04 13:05:42.458 UTC [9645] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.458 UTC [9645] DETAIL:  Reason code: Canceled on conflict out to pivot 2177, during read.
+2026-11-04 13:05:42.458 UTC [9645] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.458 UTC [9645] STATEMENT:  SELECT SUM(balance) FROM accounts;
+2026-11-04 13:05:42.463 UTC [9645] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.463 UTC [9645] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.463 UTC [9645] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.463 UTC [9645] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.467 UTC [9644] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.467 UTC [9644] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.467 UTC [9644] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.467 UTC [9644] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.471 UTC [9645] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.471 UTC [9645] DETAIL:  Reason code: Canceled on conflict out to pivot 2189, during read.
+2026-11-04 13:05:42.471 UTC [9645] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.471 UTC [9645] STATEMENT:  SELECT SUM(balance) FROM accounts;
+2026-11-04 13:05:42.475 UTC [9645] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.475 UTC [9645] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.475 UTC [9645] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.475 UTC [9645] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.479 UTC [9644] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.479 UTC [9644] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.479 UTC [9644] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.479 UTC [9644] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.483 UTC [9645] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.483 UTC [9645] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.483 UTC [9645] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.483 UTC [9645] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.488 UTC [9644] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.488 UTC [9644] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.488 UTC [9644] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.488 UTC [9644] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.492 UTC [9644] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.492 UTC [9644] DETAIL:  Reason code: Canceled on conflict out to pivot 2210, during read.
+2026-11-04 13:05:42.492 UTC [9644] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.492 UTC [9644] STATEMENT:  SELECT SUM(balance) FROM accounts;
+2026-11-04 13:05:42.497 UTC [9645] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.497 UTC [9645] DETAIL:  Reason code: Canceled on conflict out to pivot 2214, during read.
+2026-11-04 13:05:42.497 UTC [9645] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.497 UTC [9645] STATEMENT:  SELECT SUM(balance) FROM accounts;
+2026-11-04 13:05:42.501 UTC [9645] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.501 UTC [9645] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.501 UTC [9645] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.501 UTC [9645] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.505 UTC [9644] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.505 UTC [9644] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.505 UTC [9644] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.505 UTC [9644] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.509 UTC [9645] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.509 UTC [9645] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.509 UTC [9645] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.509 UTC [9645] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.513 UTC [9644] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.513 UTC [9644] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.513 UTC [9644] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.513 UTC [9644] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.518 UTC [9644] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.518 UTC [9644] DETAIL:  Reason code: Canceled on conflict out to pivot 2233, during read.
+2026-11-04 13:05:42.518 UTC [9644] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.518 UTC [9644] STATEMENT:  SELECT SUM(balance) FROM accounts;
+2026-11-04 13:05:42.523 UTC [9645] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.523 UTC [9645] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.523 UTC [9645] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.523 UTC [9645] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.527 UTC [9644] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.527 UTC [9644] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.527 UTC [9644] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.527 UTC [9644] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.531 UTC [9644] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.531 UTC [9644] DETAIL:  Reason code: Canceled on conflict out to pivot 2245, during read.
+2026-11-04 13:05:42.531 UTC [9644] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.531 UTC [9644] STATEMENT:  SELECT SUM(balance) FROM accounts;
+2026-11-04 13:05:42.752 UTC [9649] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.752 UTC [9649] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:42.752 UTC [9649] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.752 UTC [9649] STATEMENT:  DELETE FROM a WHERE i = 1;
+2026-11-04 13:05:42.758 UTC [9649] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.758 UTC [9649] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:42.758 UTC [9649] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.758 UTC [9649] STATEMENT:  DELETE FROM a WHERE i = 1;
+2026-11-04 13:05:42.763 UTC [9649] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.763 UTC [9649] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.763 UTC [9649] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.763 UTC [9649] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.769 UTC [9648] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.769 UTC [9648] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.769 UTC [9648] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.769 UTC [9648] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.774 UTC [9649] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.774 UTC [9649] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:42.774 UTC [9649] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.774 UTC [9649] STATEMENT:  DELETE FROM a WHERE i = 1;
+2026-11-04 13:05:42.779 UTC [9649] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.779 UTC [9649] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:42.779 UTC [9649] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.779 UTC [9649] STATEMENT:  DELETE FROM a WHERE i = 1;
+2026-11-04 13:05:42.784 UTC [9649] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.784 UTC [9649] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.784 UTC [9649] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.784 UTC [9649] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.790 UTC [9648] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.790 UTC [9648] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.790 UTC [9648] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.790 UTC [9648] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.795 UTC [9649] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.795 UTC [9649] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:42.795 UTC [9649] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.795 UTC [9649] STATEMENT:  DELETE FROM a WHERE i = 1;
+2026-11-04 13:05:42.800 UTC [9649] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.800 UTC [9649] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.800 UTC [9649] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.800 UTC [9649] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.806 UTC [9648] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.806 UTC [9648] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.806 UTC [9648] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.806 UTC [9648] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.811 UTC [9649] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.811 UTC [9649] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.811 UTC [9649] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.811 UTC [9649] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.816 UTC [9648] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.816 UTC [9648] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.816 UTC [9648] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.816 UTC [9648] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.822 UTC [9648] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.822 UTC [9648] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:42.822 UTC [9648] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.822 UTC [9648] STATEMENT:  INSERT INTO b VALUES (1);
+2026-11-04 13:05:42.827 UTC [9649] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.827 UTC [9649] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:42.827 UTC [9649] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.827 UTC [9649] STATEMENT:  DELETE FROM a WHERE i = 1;
+2026-11-04 13:05:42.832 UTC [9649] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.832 UTC [9649] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:42.832 UTC [9649] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.832 UTC [9649] STATEMENT:  DELETE FROM a WHERE i = 1;
+2026-11-04 13:05:42.838 UTC [9649] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.838 UTC [9649] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.838 UTC [9649] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.838 UTC [9649] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.843 UTC [9648] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.843 UTC [9648] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.843 UTC [9648] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.843 UTC [9648] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.849 UTC [9649] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.849 UTC [9649] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:42.849 UTC [9649] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.849 UTC [9649] STATEMENT:  DELETE FROM a WHERE i = 1;
+2026-11-04 13:05:42.855 UTC [9649] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.855 UTC [9649] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.855 UTC [9649] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.855 UTC [9649] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.860 UTC [9648] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.860 UTC [9648] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.860 UTC [9648] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.860 UTC [9648] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.865 UTC [9649] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.865 UTC [9649] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.865 UTC [9649] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.865 UTC [9649] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.871 UTC [9648] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.871 UTC [9648] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.871 UTC [9648] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.871 UTC [9648] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.876 UTC [9648] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.876 UTC [9648] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:42.876 UTC [9648] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.876 UTC [9648] STATEMENT:  INSERT INTO b VALUES (1);
+2026-11-04 13:05:42.882 UTC [9649] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.882 UTC [9649] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:42.882 UTC [9649] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.882 UTC [9649] STATEMENT:  DELETE FROM a WHERE i = 1;
+2026-11-04 13:05:42.887 UTC [9649] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.887 UTC [9649] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.887 UTC [9649] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.887 UTC [9649] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.893 UTC [9648] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.893 UTC [9648] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.893 UTC [9648] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.893 UTC [9648] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.898 UTC [9649] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.898 UTC [9649] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.898 UTC [9649] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.898 UTC [9649] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.904 UTC [9648] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.904 UTC [9648] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.904 UTC [9648] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.904 UTC [9648] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.909 UTC [9648] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.909 UTC [9648] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:42.909 UTC [9648] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.909 UTC [9648] STATEMENT:  INSERT INTO b VALUES (1);
+2026-11-04 13:05:42.915 UTC [9649] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.915 UTC [9649] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.915 UTC [9649] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.915 UTC [9649] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.920 UTC [9648] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.920 UTC [9648] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:42.920 UTC [9648] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.920 UTC [9648] STATEMENT:  COMMIT;
+2026-11-04 13:05:42.926 UTC [9648] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:42.926 UTC [9648] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:42.926 UTC [9648] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:42.926 UTC [9648] STATEMENT:  INSERT INTO b VALUES (1);
+2026-11-04 13:05:43.142 UTC [9653] ERROR:  child row exists
+2026-11-04 13:05:43.142 UTC [9653] CONTEXT:  PL/pgSQL function ri_parent() line 5 at RAISE
+2026-11-04 13:05:43.142 UTC [9653] STATEMENT:  DELETE FROM parent WHERE parent_id = 0;
+2026-11-04 13:05:43.146 UTC [9653] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.146 UTC [9653] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:43.146 UTC [9653] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.146 UTC [9653] STATEMENT:  DELETE FROM parent WHERE parent_id = 0;
+2026-11-04 13:05:43.151 UTC [9653] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.151 UTC [9653] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:43.151 UTC [9653] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.151 UTC [9653] STATEMENT:  COMMIT;
+2026-11-04 13:05:43.156 UTC [9652] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.156 UTC [9652] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:43.156 UTC [9652] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.156 UTC [9652] STATEMENT:  COMMIT;
+2026-11-04 13:05:43.160 UTC [9653] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.160 UTC [9653] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:43.160 UTC [9653] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.160 UTC [9653] STATEMENT:  DELETE FROM parent WHERE parent_id = 0;
+2026-11-04 13:05:43.165 UTC [9653] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.165 UTC [9653] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:43.165 UTC [9653] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.165 UTC [9653] STATEMENT:  COMMIT;
+2026-11-04 13:05:43.170 UTC [9652] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.170 UTC [9652] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:43.170 UTC [9652] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.170 UTC [9652] STATEMENT:  COMMIT;
+2026-11-04 13:05:43.174 UTC [9653] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.174 UTC [9653] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:43.174 UTC [9653] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.174 UTC [9653] STATEMENT:  COMMIT;
+2026-11-04 13:05:43.178 UTC [9652] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.178 UTC [9652] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:43.178 UTC [9652] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.178 UTC [9652] STATEMENT:  COMMIT;
+2026-11-04 13:05:43.182 UTC [9652] ERROR:  parent row missing
+2026-11-04 13:05:43.182 UTC [9652] CONTEXT:  PL/pgSQL function ri_child() line 5 at RAISE
+2026-11-04 13:05:43.182 UTC [9652] STATEMENT:  INSERT INTO child (parent_id) VALUES (0);
+2026-11-04 13:05:43.446 UTC [9657] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.446 UTC [9657] DETAIL:  Reason code: Canceled on conflict out to pivot 2498, during read.
+2026-11-04 13:05:43.446 UTC [9657] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.446 UTC [9657] STATEMENT:  select * from test_t where val2 = 1;
+2026-11-04 13:05:43.470 UTC [9657] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.470 UTC [9657] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:43.470 UTC [9657] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.470 UTC [9657] STATEMENT:  COMMIT;
+2026-11-04 13:05:43.493 UTC [9656] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.493 UTC [9656] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:43.493 UTC [9656] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.493 UTC [9656] STATEMENT:  COMMIT;
+2026-11-04 13:05:43.517 UTC [9657] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.517 UTC [9657] DETAIL:  Reason code: Canceled on conflict out to pivot 2511, during read.
+2026-11-04 13:05:43.517 UTC [9657] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.517 UTC [9657] STATEMENT:  select * from test_t where val2 = 1;
+2026-11-04 13:05:43.540 UTC [9657] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.540 UTC [9657] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:43.540 UTC [9657] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.540 UTC [9657] STATEMENT:  COMMIT;
+2026-11-04 13:05:43.578 UTC [9656] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.578 UTC [9656] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:43.578 UTC [9656] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.578 UTC [9656] STATEMENT:  COMMIT;
+2026-11-04 13:05:43.598 UTC [9657] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.598 UTC [9657] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:43.598 UTC [9657] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.598 UTC [9657] STATEMENT:  COMMIT;
+2026-11-04 13:05:43.619 UTC [9656] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.619 UTC [9656] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:43.619 UTC [9656] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.619 UTC [9656] STATEMENT:  COMMIT;
+2026-11-04 13:05:43.640 UTC [9656] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.640 UTC [9656] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:43.640 UTC [9656] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.640 UTC [9656] STATEMENT:  update test_t set val2 = 2 where val2 = 1 and id = 10;
+2026-11-04 13:05:43.661 UTC [9657] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.661 UTC [9657] DETAIL:  Reason code: Canceled on conflict out to pivot 2535, during read.
+2026-11-04 13:05:43.661 UTC [9657] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.661 UTC [9657] STATEMENT:  select * from test_t where val2 = 1;
+2026-11-04 13:05:43.682 UTC [9657] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.682 UTC [9657] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:43.682 UTC [9657] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.682 UTC [9657] STATEMENT:  COMMIT;
+2026-11-04 13:05:43.703 UTC [9656] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.703 UTC [9656] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:43.703 UTC [9656] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.703 UTC [9656] STATEMENT:  COMMIT;
+2026-11-04 13:05:43.735 UTC [9657] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.735 UTC [9657] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:43.735 UTC [9657] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.735 UTC [9657] STATEMENT:  COMMIT;
+2026-11-04 13:05:43.762 UTC [9656] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.762 UTC [9656] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:43.762 UTC [9656] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.762 UTC [9656] STATEMENT:  COMMIT;
+2026-11-04 13:05:43.803 UTC [9656] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.803 UTC [9656] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:43.803 UTC [9656] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.803 UTC [9656] STATEMENT:  update test_t set val2 = 2 where val2 = 1 and id = 10;
+2026-11-04 13:05:43.843 UTC [9657] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.843 UTC [9657] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:43.843 UTC [9657] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.843 UTC [9657] STATEMENT:  COMMIT;
+2026-11-04 13:05:43.865 UTC [9656] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.865 UTC [9656] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:43.865 UTC [9656] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.865 UTC [9656] STATEMENT:  COMMIT;
+2026-11-04 13:05:43.886 UTC [9656] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:43.886 UTC [9656] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:43.886 UTC [9656] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:43.886 UTC [9656] STATEMENT:  update test_t set val2 = 2 where val2 = 1 and id = 10;
+2026-11-04 13:05:44.001 UTC [9661] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:44.001 UTC [9661] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:44.001 UTC [9661] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:44.001 UTC [9661] STATEMENT:  COMMIT;
+2026-11-04 13:05:44.006 UTC [9661] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:44.006 UTC [9661] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:44.006 UTC [9661] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:44.006 UTC [9661] STATEMENT:  COMMIT;
+2026-11-04 13:05:44.022 UTC [9661] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:44.022 UTC [9661] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:44.022 UTC [9661] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:44.022 UTC [9661] STATEMENT:  COMMIT;
+2026-11-04 13:05:44.025 UTC [9661] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:44.025 UTC [9661] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:44.025 UTC [9661] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:44.025 UTC [9661] STATEMENT:  COMMIT;
+2026-11-04 13:05:44.056 UTC [9661] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:44.056 UTC [9661] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:44.056 UTC [9661] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:44.056 UTC [9661] STATEMENT:  COMMIT;
+2026-11-04 13:05:44.060 UTC [9661] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:44.060 UTC [9661] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:44.060 UTC [9661] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:44.060 UTC [9661] STATEMENT:  COMMIT;
+2026-11-04 13:05:44.098 UTC [9661] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:44.098 UTC [9661] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:44.098 UTC [9661] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:44.098 UTC [9661] STATEMENT:  COMMIT;
+2026-11-04 13:05:44.102 UTC [9661] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:44.102 UTC [9661] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:44.102 UTC [9661] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:44.102 UTC [9661] STATEMENT:  COMMIT;
+2026-11-04 13:05:44.119 UTC [9661] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:44.119 UTC [9661] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:44.119 UTC [9661] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:44.119 UTC [9661] STATEMENT:  COMMIT;
+2026-11-04 13:05:44.123 UTC [9661] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:44.123 UTC [9661] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:44.123 UTC [9661] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:44.123 UTC [9661] STATEMENT:  COMMIT;
+2026-11-04 13:05:44.174 UTC [9661] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:44.174 UTC [9661] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:44.174 UTC [9661] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:44.174 UTC [9661] STATEMENT:  COMMIT;
+2026-11-04 13:05:44.179 UTC [9661] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:44.179 UTC [9661] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:44.179 UTC [9661] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:44.179 UTC [9661] STATEMENT:  COMMIT;
+2026-11-04 13:05:44.217 UTC [9661] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:44.217 UTC [9661] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:44.217 UTC [9661] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:44.217 UTC [9661] STATEMENT:  COMMIT;
+2026-11-04 13:05:44.219 UTC [9661] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:44.219 UTC [9661] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:44.219 UTC [9661] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:44.219 UTC [9661] STATEMENT:  COMMIT;
+2026-11-04 13:05:44.242 UTC [9661] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:44.242 UTC [9661] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:44.242 UTC [9661] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:44.242 UTC [9661] STATEMENT:  COMMIT;
+2026-11-04 13:05:44.244 UTC [9661] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:44.244 UTC [9661] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:44.244 UTC [9661] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:44.244 UTC [9661] STATEMENT:  COMMIT;
+2026-11-04 13:05:46.126 UTC [9665] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:46.126 UTC [9665] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:05:46.126 UTC [9665] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:46.126 UTC [9665] STATEMENT:  UPDATE t SET txt = 'a' WHERE id = 1;
+2026-11-04 13:05:47.049 UTC [9672] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:47.049 UTC [9672] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:47.049 UTC [9672] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:47.049 UTC [9672] STATEMENT:  COMMIT;
+2026-11-04 13:05:47.141 UTC [9671] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:47.141 UTC [9671] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:47.141 UTC [9671] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:47.141 UTC [9671] STATEMENT:  COMMIT;
+2026-11-04 13:05:47.236 UTC [9672] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:47.236 UTC [9672] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:47.236 UTC [9672] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:47.236 UTC [9672] STATEMENT:  COMMIT;
+2026-11-04 13:05:47.326 UTC [9671] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:47.326 UTC [9671] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:47.326 UTC [9671] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:47.326 UTC [9671] STATEMENT:  COMMIT;
+2026-11-04 13:05:47.553 UTC [9680] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:47.553 UTC [9680] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:05:47.553 UTC [9680] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:47.553 UTC [9680] STATEMENT:  COMMIT;
+2026-11-04 13:05:47.650 UTC [9684] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:47.650 UTC [9684] DETAIL:  Reason code: Canceled on conflict out to pivot 3116, during read.
+2026-11-04 13:05:47.650 UTC [9684] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:47.650 UTC [9684] STATEMENT:  SELECT * FROM txn1 WHERE id = 7;
+2026-11-04 13:05:47.656 UTC [9684] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:05:47.656 UTC [9684] DETAIL:  Reason code: Canceled on conflict out to pivot 3121, during read.
+2026-11-04 13:05:47.656 UTC [9684] HINT:  The transaction might succeed if retried.
+2026-11-04 13:05:47.656 UTC [9684] STATEMENT:  SELECT * FROM txn1 WHERE id = 7;
+2026-11-04 13:05:47.794 UTC [9689] ERROR:  deadlock detected
+2026-11-04 13:05:47.794 UTC [9689] DETAIL:  Process 9689 waits for AccessExclusiveLock on relation 22579 of database 22578; blocked by process 9688.
+	Process 9688 waits for AccessExclusiveLock on relation 22579 of database 22578; blocked by process 9689.
+2026-11-04 13:05:47.794 UTC [9689] HINT:  See server log for query details.
+2026-11-04 13:05:47.794 UTC [9689] STATEMENT:  LOCK TABLE a1 IN ACCESS EXCLUSIVE MODE;
+2026-11-04 13:05:48.372 UTC [9699] ERROR:  deadlock detected
+2026-11-04 13:05:48.372 UTC [9699] DETAIL:  Process 9699 waits for AccessExclusiveLock on relation 22583 of database 22582; blocked by process 9692.
+	Process 9692 waits for AccessExclusiveLock on relation 22586 of database 22582; blocked by process 9693.
+	Process 9693 waits for AccessExclusiveLock on relation 22589 of database 22582; blocked by process 9694.
+	Process 9694 waits for AccessExclusiveLock on relation 22592 of database 22582; blocked by process 9695.
+	Process 9695 waits for AccessExclusiveLock on relation 22595 of database 22582; blocked by process 9696.
+	Process 9696 waits for AccessExclusiveLock on relation 22598 of database 22582; blocked by process 9697.
+	Process 9697 waits for AccessExclusiveLock on relation 22601 of database 22582; blocked by process 9698.
+	Process 9698 waits for AccessExclusiveLock on relation 22604 of database 22582; blocked by process 9699.
+2026-11-04 13:05:48.372 UTC [9699] HINT:  See server log for query details.
+2026-11-04 13:05:48.372 UTC [9699] STATEMENT:  LOCK TABLE a1;
+2026-11-04 13:05:50.286 UTC [9728] ERROR:  no partition of relation "d_listp" found for row
+2026-11-04 13:05:50.286 UTC [9728] DETAIL:  Partition key of the failing row contains (a) = (2).
+2026-11-04 13:05:50.286 UTC [9728] STATEMENT:  INSERT INTO d_listp VALUES (2);
+2026-11-04 13:05:50.911 UTC [9733] ERROR:  insert or update on table "d_lp_fk_r" violates foreign key constraint "d_lp_fk_r_a_fkey"
+2026-11-04 13:05:50.911 UTC [9733] DETAIL:  Key (a)=(1) is not present in table "d_lp_fk".
+2026-11-04 13:05:50.911 UTC [9733] STATEMENT:  INSERT INTO d_lp_fk_r VALUES (1);
+2026-11-04 13:05:50.985 UTC [9732] ERROR:  removing partition "d_lp_fk_1" violates foreign key constraint "d_lp_fk_r_a_fkey_1"
+2026-11-04 13:05:50.985 UTC [9732] DETAIL:  Key (a)=(1) is still referenced from table "d_lp_fk_r".
+2026-11-04 13:05:50.985 UTC [9732] STATEMENT:  ALTER TABLE d_lp_fk DETACH PARTITION d_lp_fk_1 CONCURRENTLY;
+2026-11-04 13:05:51.027 UTC [9733] ERROR:  insert or update on table "d_lp_fk_r" violates foreign key constraint "d_lp_fk_r_a_fkey"
+2026-11-04 13:05:51.027 UTC [9733] DETAIL:  Key (a)=(1) is not present in table "d_lp_fk".
+2026-11-04 13:05:51.027 UTC [9733] STATEMENT:  INSERT INTO d_lp_fk_r VALUES (1);
+2026-11-04 13:05:51.308 UTC [9737] ERROR:  canceling statement due to user request
+2026-11-04 13:05:51.308 UTC [9737] STATEMENT:  ALTER TABLE d3_listp DETACH PARTITION d3_listp1 CONCURRENTLY;
+2026-11-04 13:05:51.309 UTC [9736] ERROR:  cannot alter partition "d3_listp1" with an incomplete detach
+2026-11-04 13:05:51.309 UTC [9736] HINT:  Use ALTER TABLE ... DETACH PARTITION ... FINALIZE to complete the pending detach operation.
+2026-11-04 13:05:51.309 UTC [9736] STATEMENT:  ALTER TABLE d3_listp1 ALTER a DROP NOT NULL;
+2026-11-04 13:05:51.330 UTC [9737] ERROR:  canceling statement due to user request
+2026-11-04 13:05:51.330 UTC [9737] STATEMENT:  ALTER TABLE d3_listp DETACH PARTITION d3_listp1 CONCURRENTLY;
+2026-11-04 13:05:51.331 UTC [9736] ERROR:  no partition of relation "d3_listp" found for row
+2026-11-04 13:05:51.331 UTC [9736] DETAIL:  Partition key of the failing row contains (a) = (1).
+2026-11-04 13:05:51.331 UTC [9736] STATEMENT:  INSERT INTO d3_listp VALUES (1);
+2026-11-04 13:05:51.361 UTC [9737] ERROR:  canceling statement due to user request
+2026-11-04 13:05:51.361 UTC [9737] STATEMENT:  ALTER TABLE d3_listp DETACH PARTITION d3_listp1 CONCURRENTLY;
+2026-11-04 13:05:51.402 UTC [9737] ERROR:  canceling statement due to user request
+2026-11-04 13:05:51.402 UTC [9737] STATEMENT:  ALTER TABLE d3_listp DETACH PARTITION d3_listp1 CONCURRENTLY;
+2026-11-04 13:05:51.432 UTC [9737] ERROR:  canceling statement due to user request
+2026-11-04 13:05:51.432 UTC [9737] STATEMENT:  ALTER TABLE d3_listp DETACH PARTITION d3_listp2 CONCURRENTLY;
+2026-11-04 13:05:51.460 UTC [9737] ERROR:  canceling statement due to user request
+2026-11-04 13:05:51.460 UTC [9737] STATEMENT:  ALTER TABLE d3_listp DETACH PARTITION d3_listp2 CONCURRENTLY;
+2026-11-04 13:05:51.482 UTC [9737] ERROR:  canceling statement due to user request
+2026-11-04 13:05:51.482 UTC [9737] STATEMENT:  ALTER TABLE d3_listp DETACH PARTITION d3_listp1 CONCURRENTLY;
+2026-11-04 13:05:51.528 UTC [9737] ERROR:  canceling statement due to user request
+2026-11-04 13:05:51.528 UTC [9737] STATEMENT:  ALTER TABLE d3_listp DETACH PARTITION d3_listp1 CONCURRENTLY;
+2026-11-04 13:05:51.546 UTC [9737] ERROR:  canceling statement due to user request
+2026-11-04 13:05:51.546 UTC [9737] STATEMENT:  ALTER TABLE d3_listp DETACH PARTITION d3_listp1 CONCURRENTLY;
+2026-11-04 13:05:51.547 UTC [9737] ERROR:  partition "d3_listp1" already pending detach in partitioned table "public.d3_listp"
+2026-11-04 13:05:51.547 UTC [9737] HINT:  Use ALTER TABLE ... DETACH PARTITION ... FINALIZE to complete the pending detach operation.
+2026-11-04 13:05:51.547 UTC [9737] STATEMENT:  ALTER TABLE d3_listp DETACH PARTITION d3_listp2 CONCURRENTLY;
+2026-11-04 13:05:51.566 UTC [9737] ERROR:  canceling statement due to user request
+2026-11-04 13:05:51.566 UTC [9737] STATEMENT:  ALTER TABLE d3_listp DETACH PARTITION d3_listp1 CONCURRENTLY;
+2026-11-04 13:05:51.606 UTC [9737] ERROR:  canceling statement due to user request
+2026-11-04 13:05:51.606 UTC [9737] STATEMENT:  ALTER TABLE d3_listp DETACH PARTITION d3_listp1 CONCURRENTLY;
+2026-11-04 13:05:51.654 UTC [9737] ERROR:  canceling statement due to user request
+2026-11-04 13:05:51.654 UTC [9737] STATEMENT:  ALTER TABLE d3_listp DETACH PARTITION d3_listp1 CONCURRENTLY;
+2026-11-04 13:05:51.713 UTC [9737] ERROR:  canceling statement due to user request
+2026-11-04 13:05:51.713 UTC [9737] STATEMENT:  ALTER TABLE d3_listp DETACH PARTITION d3_listp1 CONCURRENTLY;
+2026-11-04 13:05:51.761 UTC [9737] ERROR:  canceling statement due to user request
+2026-11-04 13:05:51.761 UTC [9737] STATEMENT:  ALTER TABLE d3_listp DETACH PARTITION d3_listp1 CONCURRENTLY;
+2026-11-04 13:05:51.813 UTC [9737] ERROR:  canceling statement due to user request
+2026-11-04 13:05:51.813 UTC [9737] STATEMENT:  ALTER TABLE d3_listp DETACH PARTITION d3_listp1 CONCURRENTLY;
+2026-11-04 13:05:51.862 UTC [9737] ERROR:  canceling statement due to user request
+2026-11-04 13:05:51.862 UTC [9737] STATEMENT:  ALTER TABLE d3_listp DETACH PARTITION d3_listp1 CONCURRENTLY;
+2026-11-04 13:05:51.890 UTC [9737] ERROR:  canceling statement due to user request
+2026-11-04 13:05:51.890 UTC [9737] STATEMENT:  ALTER TABLE d3_listp DETACH PARTITION d3_listp1 CONCURRENTLY;
+2026-11-04 13:05:51.965 UTC [9737] ERROR:  canceling statement due to user request
+2026-11-04 13:05:51.965 UTC [9737] STATEMENT:  ALTER TABLE d3_listp DETACH PARTITION d3_listp1 CONCURRENTLY;
+2026-11-04 13:05:52.175 UTC [9741] ERROR:  canceling statement due to user request
+2026-11-04 13:05:52.175 UTC [9741] STATEMENT:  alter table d4_primary detach partition d4_primary1 concurrently;
+2026-11-04 13:05:52.175 UTC [9740] ERROR:  insert or update on table "d4_fk" violates foreign key constraint "d4_fk_a_fkey"
+2026-11-04 13:05:52.175 UTC [9740] DETAIL:  Key (a)=(1) is not present in table "d4_primary".
+2026-11-04 13:05:52.175 UTC [9740] STATEMENT:  insert into d4_fk values (1);
+2026-11-04 13:05:52.199 UTC [9740] ERROR:  insert or update on table "d4_fk" violates foreign key constraint "d4_fk_a_fkey"
+2026-11-04 13:05:52.199 UTC [9740] DETAIL:  Key (a)=(1) is not present in table "d4_primary".
+2026-11-04 13:05:52.199 UTC [9740] STATEMENT:  insert into d4_fk values (1);
+2026-11-04 13:05:52.219 UTC [9741] ERROR:  canceling statement due to user request
+2026-11-04 13:05:52.219 UTC [9741] STATEMENT:  alter table d4_primary detach partition d4_primary1 concurrently;
+2026-11-04 13:05:52.220 UTC [9740] ERROR:  insert or update on table "d4_fk" violates foreign key constraint "d4_fk_a_fkey"
+2026-11-04 13:05:52.220 UTC [9740] DETAIL:  Key (a)=(1) is not present in table "d4_primary".
+2026-11-04 13:05:52.220 UTC [9740] STATEMENT:  insert into d4_fk values (1);
+2026-11-04 13:05:52.243 UTC [9740] ERROR:  insert or update on table "d4_fk" violates foreign key constraint "d4_fk_a_fkey"
+2026-11-04 13:05:52.243 UTC [9740] DETAIL:  Key (a)=(1) is not present in table "d4_primary".
+2026-11-04 13:05:52.243 UTC [9740] STATEMENT:  insert into d4_fk values (1);
+2026-11-04 13:05:52.267 UTC [9741] ERROR:  canceling statement due to user request
+2026-11-04 13:05:52.267 UTC [9741] STATEMENT:  alter table d4_primary detach partition d4_primary1 concurrently;
+2026-11-04 13:05:52.268 UTC [9740] ERROR:  insert or update on table "d4_fk" violates foreign key constraint "d4_fk_a_fkey"
+2026-11-04 13:05:52.268 UTC [9740] DETAIL:  Key (a)=(1) is not present in table "d4_primary".
+2026-11-04 13:05:52.268 UTC [9740] STATEMENT:  insert into d4_fk values (1);
+2026-11-04 13:05:52.307 UTC [9740] ERROR:  insert or update on table "d4_fk" violates foreign key constraint "d4_fk_a_fkey"
+2026-11-04 13:05:52.307 UTC [9740] DETAIL:  Key (a)=(1) is not present in table "d4_primary".
+2026-11-04 13:05:52.307 UTC [9740] STATEMENT:  insert into d4_fk values (1);
+2026-11-04 13:05:52.327 UTC [9741] ERROR:  canceling statement due to user request
+2026-11-04 13:05:52.327 UTC [9741] STATEMENT:  alter table d4_primary detach partition d4_primary1 concurrently;
+2026-11-04 13:05:52.328 UTC [9740] ERROR:  insert or update on table "d4_fk" violates foreign key constraint "d4_fk_a_fkey"
+2026-11-04 13:05:52.328 UTC [9740] DETAIL:  Key (a)=(1) is not present in table "d4_primary".
+2026-11-04 13:05:52.328 UTC [9740] STATEMENT:  insert into d4_fk values (1);
+2026-11-04 13:05:52.367 UTC [9740] ERROR:  insert or update on table "d4_fk" violates foreign key constraint "d4_fk_a_fkey"
+2026-11-04 13:05:52.367 UTC [9740] DETAIL:  Key (a)=(1) is not present in table "d4_primary".
+2026-11-04 13:05:52.367 UTC [9740] STATEMENT:  insert into d4_fk values (1);
+2026-11-04 13:05:52.427 UTC [9740] ERROR:  insert or update on table "d4_fk" violates foreign key constraint "d4_fk_a_fkey"
+2026-11-04 13:05:52.427 UTC [9740] DETAIL:  Key (a)=(1) is not present in table "d4_primary".
+2026-11-04 13:05:52.427 UTC [9740] STATEMENT:  insert into d4_fk values (1);
+2026-11-04 13:05:52.435 UTC [9740] ERROR:  insert or update on table "d4_fk" violates foreign key constraint "d4_fk_a_fkey"
+2026-11-04 13:05:52.435 UTC [9740] DETAIL:  Key (a)=(1) is not present in table "d4_primary".
+2026-11-04 13:05:52.435 UTC [9740] STATEMENT:  insert into d4_fk values (1);
+2026-11-04 13:05:52.443 UTC [9740] ERROR:  insert or update on table "d4_fk" violates foreign key constraint "d4_fk_a_fkey"
+2026-11-04 13:05:52.443 UTC [9740] DETAIL:  Key (a)=(1) is not present in table "d4_primary".
+2026-11-04 13:05:52.443 UTC [9740] STATEMENT:  insert into d4_fk values (1);
+2026-11-04 13:05:52.451 UTC [9740] ERROR:  insert or update on table "d4_fk" violates foreign key constraint "d4_fk_a_fkey"
+2026-11-04 13:05:52.451 UTC [9740] DETAIL:  Key (a)=(1) is not present in table "d4_primary".
+2026-11-04 13:05:52.451 UTC [9740] STATEMENT:  insert into d4_fk values (1);
+2026-11-04 13:05:52.471 UTC [9741] ERROR:  canceling statement due to user request
+2026-11-04 13:05:52.471 UTC [9741] STATEMENT:  alter table d4_primary detach partition d4_primary1 concurrently;
+2026-11-04 13:05:52.471 UTC [9740] ERROR:  insert or update on table "d4_fk" violates foreign key constraint "d4_fk_a_fkey"
+2026-11-04 13:05:52.471 UTC [9740] DETAIL:  Key (a)=(1) is not present in table "d4_primary".
+2026-11-04 13:05:52.471 UTC [9740] STATEMENT:  update d4_fk set a = 1 where current of f;
+2026-11-04 13:05:52.491 UTC [9740] ERROR:  insert or update on table "d4_fk" violates foreign key constraint "d4_fk_a_fkey"
+2026-11-04 13:05:52.491 UTC [9740] DETAIL:  Key (a)=(1) is not present in table "d4_primary".
+2026-11-04 13:05:52.491 UTC [9740] STATEMENT:  update d4_fk set a = 1 where current of f;
+2026-11-04 13:05:52.510 UTC [9741] ERROR:  removing partition "d4_primary1" violates foreign key constraint "d4_fk_a_fkey_1"
+2026-11-04 13:05:52.510 UTC [9741] DETAIL:  Key (a)=(1) is still referenced from table "d4_fk".
+2026-11-04 13:05:52.510 UTC [9741] STATEMENT:  alter table d4_primary detach partition d4_primary1 concurrently;
+2026-11-04 13:05:52.531 UTC [9742] ERROR:  insert or update on table "d4_fk" violates foreign key constraint "d4_fk_a_fkey"
+2026-11-04 13:05:52.531 UTC [9742] DETAIL:  Key (a)=(1) is not present in table "d4_primary".
+2026-11-04 13:05:52.531 UTC [9742] STATEMENT:  insert into d4_fk values (1);
+2026-11-04 13:05:52.583 UTC [9742] ERROR:  insert or update on table "d4_fk" violates foreign key constraint "d4_fk_a_fkey"
+2026-11-04 13:05:52.583 UTC [9742] DETAIL:  Key (a)=(1) is not present in table "d4_primary".
+2026-11-04 13:05:52.583 UTC [9742] STATEMENT:  insert into d4_fk values (1);
+2026-11-04 13:05:52.615 UTC [9741] ERROR:  canceling statement due to user request
+2026-11-04 13:05:52.615 UTC [9741] STATEMENT:  alter table d4_primary detach partition d4_primary1 concurrently;
+2026-11-04 13:05:52.651 UTC [9742] ERROR:  insert or update on table "d4_fk" violates foreign key constraint "d4_fk_a_fkey"
+2026-11-04 13:05:52.651 UTC [9742] DETAIL:  Key (a)=(1) is not present in table "d4_primary".
+2026-11-04 13:05:52.651 UTC [9742] STATEMENT:  insert into d4_fk values (1);
+2026-11-04 13:05:52.702 UTC [9741] ERROR:  canceling statement due to user request
+2026-11-04 13:05:52.702 UTC [9741] STATEMENT:  alter table d4_primary detach partition d4_primary1 concurrently;
+2026-11-04 13:05:52.704 UTC [9740] ERROR:  insert or update on table "d4_fk" violates foreign key constraint "d4_fk_a_fkey"
+2026-11-04 13:05:52.704 UTC [9740] DETAIL:  Key (a)=(1) is not present in table "d4_primary".
+2026-11-04 13:05:52.704 UTC [9740] STATEMENT:  insert into d4_fk values (1);
+2026-11-04 13:05:52.727 UTC [9741] ERROR:  canceling statement due to user request
+2026-11-04 13:05:52.727 UTC [9741] STATEMENT:  alter table d4_primary detach partition d4_primary1 concurrently;
+2026-11-04 13:05:52.728 UTC [9740] ERROR:  insert or update on table "d4_fk" violates foreign key constraint "d4_fk_a_fkey"
+2026-11-04 13:05:52.728 UTC [9740] DETAIL:  Key (a)=(1) is not present in table "d4_primary".
+2026-11-04 13:05:52.728 UTC [9740] STATEMENT:  insert into d4_fk values (1);
+2026-11-04 13:05:54.194 UTC [9758] ERROR:  insert or update on table "pfk1" violates foreign key constraint "pfk_a_fkey"
+2026-11-04 13:05:54.194 UTC [9758] DETAIL:  Key (a)=(1) is not present in table "ppk".
+2026-11-04 13:05:54.194 UTC [9758] STATEMENT:  alter table pfk attach partition pfk1 for values in (1);
+2026-11-04 13:05:54.199 UTC [9758] ERROR:  insert or update on table "pfk1" violates foreign key constraint "pfk_a_fkey"
+2026-11-04 13:05:54.199 UTC [9758] DETAIL:  Key (a)=(1) is not present in table "ppk".
+2026-11-04 13:05:54.199 UTC [9758] STATEMENT:  alter table pfk attach partition pfk1 for values in (1);
+2026-11-04 13:05:54.218 UTC [9758] ERROR:  insert or update on table "pfk1" violates foreign key constraint "pfk_a_fkey"
+2026-11-04 13:05:54.218 UTC [9758] DETAIL:  Key (a)=(1) is not present in table "ppk".
+2026-11-04 13:05:54.218 UTC [9758] STATEMENT:  alter table pfk attach partition pfk1 for values in (1);
+2026-11-04 13:05:54.223 UTC [9758] ERROR:  insert or update on table "pfk1" violates foreign key constraint "pfk_a_fkey"
+2026-11-04 13:05:54.223 UTC [9758] DETAIL:  Key (a)=(1) is not present in table "ppk".
+2026-11-04 13:05:54.223 UTC [9758] STATEMENT:  alter table pfk attach partition pfk1 for values in (1);
+2026-11-04 13:05:54.242 UTC [9758] ERROR:  insert or update on table "pfk1" violates foreign key constraint "pfk_a_fkey"
+2026-11-04 13:05:54.242 UTC [9758] DETAIL:  Key (a)=(1) is not present in table "ppk".
+2026-11-04 13:05:54.242 UTC [9758] STATEMENT:  alter table pfk attach partition pfk1 for values in (1);
+2026-11-04 13:05:54.263 UTC [9757] ERROR:  update or delete on table "ppk1" violates foreign key constraint "pfk_a_fkey_1" on table "pfk"
+2026-11-04 13:05:54.263 UTC [9757] DETAIL:  Key (a)=(1) is still referenced from table "pfk".
+2026-11-04 13:05:54.263 UTC [9757] STATEMENT:  delete from ppk1 where a = 1;
+2026-11-04 13:05:54.269 UTC [9757] ERROR:  update or delete on table "ppk1" violates foreign key constraint "pfk_a_fkey_1" on table "pfk"
+2026-11-04 13:05:54.269 UTC [9757] DETAIL:  Key (a)=(1) is still referenced from table "pfk".
+2026-11-04 13:05:54.269 UTC [9757] STATEMENT:  delete from ppk1 where a = 1;
+2026-11-04 13:05:54.274 UTC [9758] ERROR:  insert or update on table "pfk1" violates foreign key constraint "pfk_a_fkey"
+2026-11-04 13:05:54.274 UTC [9758] DETAIL:  Key (a)=(1) is not present in table "ppk".
+2026-11-04 13:05:54.274 UTC [9758] STATEMENT:  alter table pfk attach partition pfk1 for values in (1);
+2026-11-04 13:05:54.294 UTC [9758] ERROR:  insert or update on table "pfk1" violates foreign key constraint "pfk_a_fkey"
+2026-11-04 13:05:54.294 UTC [9758] DETAIL:  Key (a)=(1) is not present in table "ppk".
+2026-11-04 13:05:54.294 UTC [9758] STATEMENT:  alter table pfk attach partition pfk1 for values in (1);
+2026-11-04 13:05:54.315 UTC [9757] ERROR:  update or delete on table "ppk1" violates foreign key constraint "pfk_a_fkey_1" on table "pfk"
+2026-11-04 13:05:54.315 UTC [9757] DETAIL:  Key (a)=(1) is still referenced from table "pfk".
+2026-11-04 13:05:54.315 UTC [9757] STATEMENT:  delete from ppk1 where a = 1;
+2026-11-04 13:05:54.321 UTC [9757] ERROR:  update or delete on table "ppk1" violates foreign key constraint "pfk_a_fkey_1" on table "pfk"
+2026-11-04 13:05:54.321 UTC [9757] DETAIL:  Key (a)=(1) is still referenced from table "pfk".
+2026-11-04 13:05:54.321 UTC [9757] STATEMENT:  delete from ppk1 where a = 1;
+2026-11-04 13:05:54.343 UTC [9757] ERROR:  update or delete on table "ppk1" violates foreign key constraint "pfk_a_fkey_1" on table "pfk"
+2026-11-04 13:05:54.343 UTC [9757] DETAIL:  Key (a)=(1) is still referenced from table "pfk".
+2026-11-04 13:05:54.343 UTC [9757] STATEMENT:  delete from ppk1 where a = 1;
+2026-11-04 13:05:54.349 UTC [9757] ERROR:  update or delete on table "ppk1" violates foreign key constraint "pfk_a_fkey_1" on table "pfk"
+2026-11-04 13:05:54.349 UTC [9757] DETAIL:  Key (a)=(1) is still referenced from table "pfk".
+2026-11-04 13:05:54.349 UTC [9757] STATEMENT:  delete from ppk1 where a = 1;
+2026-11-04 13:05:54.355 UTC [9757] ERROR:  update or delete on table "ppk1" violates foreign key constraint "pfk_a_fkey_1" on table "pfk"
+2026-11-04 13:05:54.355 UTC [9757] DETAIL:  Key (a)=(1) is still referenced from table "pfk".
+2026-11-04 13:05:54.355 UTC [9757] STATEMENT:  delete from ppk1 where a = 1;
+2026-11-04 13:05:54.751 UTC [9762] ERROR:  insert or update on table "pfk1" violates foreign key constraint "pfk_a_fkey"
+2026-11-04 13:05:54.751 UTC [9762] DETAIL:  Key (a)=(1) is not present in table "ppk".
+2026-11-04 13:05:54.751 UTC [9762] STATEMENT:  insert into pfk values (1);
+2026-11-04 13:05:54.770 UTC [9762] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:05:54.770 UTC [9762] CONTEXT:  SQL statement "SELECT 1 FROM "public"."ppk" x WHERE "a" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x"
+2026-11-04 13:05:54.770 UTC [9762] STATEMENT:  insert into pfk values (1);
+2026-11-04 13:05:54.790 UTC [9762] ERROR:  insert or update on table "pfk1" violates foreign key constraint "pfk_a_fkey"
+2026-11-04 13:05:54.790 UTC [9762] DETAIL:  Key (a)=(1) is not present in table "ppk".
+2026-11-04 13:05:54.790 UTC [9762] STATEMENT:  insert into pfk values (1);
+2026-11-04 13:05:54.814 UTC [9762] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:05:54.814 UTC [9762] CONTEXT:  SQL statement "SELECT 1 FROM "public"."ppk" x WHERE "a" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x"
+2026-11-04 13:05:54.814 UTC [9762] STATEMENT:  insert into pfk values (1);
+2026-11-04 13:05:54.835 UTC [9761] ERROR:  update or delete on table "ppk1" violates foreign key constraint "pfk_a_fkey_1" on table "pfk"
+2026-11-04 13:05:54.835 UTC [9761] DETAIL:  Key (a)=(1) is still referenced from table "pfk".
+2026-11-04 13:05:54.835 UTC [9761] STATEMENT:  delete from ppk where a = 1;
+2026-11-04 13:05:54.855 UTC [9761] ERROR:  update or delete on table "ppk1" violates foreign key constraint "pfk_a_fkey_1" on table "pfk"
+2026-11-04 13:05:54.855 UTC [9761] DETAIL:  Key (a)=(1) is still referenced from table "pfk".
+2026-11-04 13:05:54.855 UTC [9761] STATEMENT:  delete from ppk where a = 1;
+2026-11-04 13:05:55.084 UTC [9765] ERROR:  insert or update on table "fk_parted_pk_2" violates foreign key constraint "fk_parted_pk_a_fkey"
+2026-11-04 13:05:55.084 UTC [9765] DETAIL:  Key (a)=(2) is not present in table "pk_noparted".
+2026-11-04 13:05:55.084 UTC [9765] STATEMENT:  INSERT INTO fk_parted_pk VALUES (2);
+2026-11-04 13:05:55.126 UTC [9766] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:05:55.126 UTC [9766] CONTEXT:  SQL statement "DELETE FROM "public"."fk_parted_pk" WHERE $1 OPERATOR(pg_catalog.=) "a""
+2026-11-04 13:05:55.126 UTC [9766] STATEMENT:  DELETE FROM pk_noparted WHERE a = 2;
+2026-11-04 13:05:55.146 UTC [9766] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:05:55.146 UTC [9766] CONTEXT:  SQL statement "UPDATE ONLY "public"."fk_noparted_sn" SET "a" = NULL WHERE $1 OPERATOR(pg_catalog.=) "a""
+2026-11-04 13:05:55.146 UTC [9766] STATEMENT:  DELETE FROM pk_noparted WHERE a = 2;
+2026-11-04 13:05:56.243 UTC [9775] ERROR:  tuple to be updated was already modified by an operation triggered by the current command
+2026-11-04 13:05:56.243 UTC [9775] HINT:  Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.
+2026-11-04 13:05:56.243 UTC [9775] STATEMENT:  WITH doup AS (UPDATE accounts SET balance = balance + 1100 WHERE accountid = 'checking' RETURNING *, update_checking(999)) UPDATE accounts a SET balance = doup.balance + 100 FROM doup RETURNING *;
+2026-11-04 13:05:56.311 UTC [9775] ERROR:  tuple to be deleted was already modified by an operation triggered by the current command
+2026-11-04 13:05:56.311 UTC [9775] HINT:  Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.
+2026-11-04 13:05:56.311 UTC [9775] STATEMENT:  WITH doup AS (UPDATE accounts SET balance = balance + 1100 WHERE accountid = 'checking' RETURNING *, update_checking(999)) DELETE FROM accounts a USING doup RETURNING *;
+2026-11-04 13:05:57.122 UTC [9775] ERROR:  tuple to be locked was already moved to another partition due to concurrent update
+2026-11-04 13:05:57.122 UTC [9775] STATEMENT:  
+		with u as (update another_parttbl set a = 1 returning another_parttbl.*)
+		update parttbl p set a = u.a from u where p.a = u.a and p.c = 1 returning p.*;
+	
+2026-11-04 13:05:59.066 UTC [9781] ERROR:  duplicate key value violates unique constraint "trigtest_pkey"
+2026-11-04 13:05:59.066 UTC [9781] DETAIL:  Key (key)=(key-a) already exists.
+2026-11-04 13:05:59.066 UTC [9781] STATEMENT:  INSERT INTO trigtest VALUES ('key-a', 'val-a-s2') RETURNING *;
+2026-11-04 13:05:59.798 UTC [9781] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:05:59.798 UTC [9781] STATEMENT:  
+	    UPDATE trigtest SET data = data || '-ups2'
+	    WHERE
+	        noisy_oper('upd', key, '=', 'key-a') AND
+	        noisy_oper('upk', data, '<>', 'mismatch')
+	    RETURNING *, new.data = old.data || '-ups2' AS check_old_and_new;
+	
+2026-11-04 13:05:59.858 UTC [9781] ERROR:  could not serialize access due to concurrent delete
+2026-11-04 13:05:59.858 UTC [9781] STATEMENT:  
+	    UPDATE trigtest SET data = data || '-ups2'
+	    WHERE
+	        noisy_oper('upd', key, '=', 'key-a') AND
+	        noisy_oper('upk', data, '<>', 'mismatch')
+	    RETURNING *, new.data = old.data || '-ups2' AS check_old_and_new;
+	
+2026-11-04 13:06:00.649 UTC [9791] ERROR:  deadlock detected
+2026-11-04 13:06:00.649 UTC [9791] DETAIL:  Process 9791 waits for ExclusiveLock on tuple of relation 1259 of database 29839; blocked by process 9790.
+	Process 9790 waits for ShareLock on transaction 5101; blocked by process 9791.
+2026-11-04 13:06:00.649 UTC [9791] HINT:  See server log for query details.
+2026-11-04 13:06:00.649 UTC [9791] STATEMENT:  ALTER TABLE intra_grant_inplace ADD PRIMARY KEY (c);
+2026-11-04 13:06:00.733 UTC [9790] ERROR:  permission denied for table pg_class
+2026-11-04 13:06:00.733 UTC [9790] STATEMENT:  
+		DELETE FROM pg_class WHERE relname = 'intra_grant_inplace';
+	
+2026-11-04 13:06:02.366 UTC [9814] FATAL:  terminating connection due to administrator command
+2026-11-04 13:06:02.366 UTC [9814] STATEMENT:  
+	    SELECT pg_terminate_backend(pg_backend_pid());
+	
+2026-11-04 13:06:02.622 UTC [9823] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:02.622 UTC [9823] STATEMENT:  INSERT INTO ints(key, val) VALUES(1, 'donothing2'), (1, 'donothing3') ON CONFLICT DO NOTHING;
+2026-11-04 13:06:02.638 UTC [9822] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:02.638 UTC [9822] STATEMENT:  INSERT INTO ints(key, val) VALUES(1, 'donothing1') ON CONFLICT DO NOTHING;
+2026-11-04 13:06:02.658 UTC [9823] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:02.658 UTC [9823] STATEMENT:  INSERT INTO ints(key, val) VALUES(1, 'donothing2'), (1, 'donothing3') ON CONFLICT DO NOTHING;
+2026-11-04 13:06:02.674 UTC [9822] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:02.674 UTC [9822] STATEMENT:  INSERT INTO ints(key, val) VALUES(1, 'donothing1') ON CONFLICT DO NOTHING;
+2026-11-04 13:06:05.418 UTC [9848] ERROR:  duplicate key value violates unique constraint "target_pkey"
+2026-11-04 13:06:05.418 UTC [9848] DETAIL:  Key (key)=(1) already exists.
+2026-11-04 13:06:05.418 UTC [9848] STATEMENT:  MERGE INTO target t USING (SELECT 1 as key, 'merge2' as val) s ON s.key = t.key WHEN NOT MATCHED THEN INSERT VALUES (s.key, s.val) WHEN MATCHED THEN UPDATE set val = t.val || ' updated by merge2';
+2026-11-04 13:06:05.419 UTC [9848] ERROR:  current transaction is aborted, commands ignored until end of transaction block
+2026-11-04 13:06:05.419 UTC [9848] STATEMENT:  SELECT * FROM target;
+2026-11-04 13:06:05.438 UTC [9848] ERROR:  duplicate key value violates unique constraint "target_pkey"
+2026-11-04 13:06:05.438 UTC [9848] DETAIL:  Key (key)=(1) already exists.
+2026-11-04 13:06:05.438 UTC [9848] STATEMENT:  MERGE INTO target t USING (SELECT 1 as key, 'merge2' as val) s ON s.key = t.key WHEN NOT MATCHED THEN INSERT VALUES (s.key, s.val) WHEN MATCHED THEN UPDATE set val = t.val || ' updated by merge2';
+2026-11-04 13:06:05.439 UTC [9848] ERROR:  current transaction is aborted, commands ignored until end of transaction block
+2026-11-04 13:06:05.439 UTC [9848] STATEMENT:  SELECT * FROM target;
+2026-11-04 13:06:05.482 UTC [9848] ERROR:  duplicate key value violates unique constraint "target_pkey"
+2026-11-04 13:06:05.482 UTC [9848] DETAIL:  Key (key)=(1) already exists.
+2026-11-04 13:06:05.482 UTC [9848] STATEMENT:  MERGE INTO target t USING (SELECT 1 as key, 'merge2' as val) s ON s.key = t.key WHEN NOT MATCHED THEN INSERT VALUES (s.key, s.val) WHEN MATCHED THEN UPDATE set val = t.val || ' updated by merge2';
+2026-11-04 13:06:05.483 UTC [9848] ERROR:  current transaction is aborted, commands ignored until end of transaction block
+2026-11-04 13:06:05.483 UTC [9848] STATEMENT:  SELECT * FROM target;
+2026-11-04 13:06:06.362 UTC [9856] ERROR:  MERGE command cannot affect row a second time
+2026-11-04 13:06:06.362 UTC [9856] HINT:  Ensure that not more than one source row matches any one target row.
+2026-11-04 13:06:06.362 UTC [9856] STATEMENT:  
+	  MERGE INTO pa_target t
+	  USING (VALUES (1), (1)) v(a)
+	  ON t.key = v.a
+	  WHEN MATCHED THEN
+		UPDATE set val = t.val || ' updated by pa_merge2c_dup';  -- should fail
+	
+2026-11-04 13:06:06.538 UTC [9856] ERROR:  tuple to be locked was already moved to another partition due to concurrent update
+2026-11-04 13:06:06.538 UTC [9856] STATEMENT:  
+	  MERGE INTO pa_target t
+	  USING (SELECT 1 as key, 'pa_merge2a' as val) s
+	  ON s.key = t.key
+	  WHEN NOT MATCHED THEN
+		INSERT VALUES (s.key, s.val)
+	  WHEN MATCHED THEN
+		UPDATE set key = t.key + 1, val = t.val || ' updated by ' || s.val
+	  WHEN NOT MATCHED BY SOURCE THEN
+		UPDATE set key = t.key + 1, val = t.val || ' source not matched by pa_merge2a'
+	  RETURNING merge_action(), old, new, t.*;
+	
+2026-11-04 13:06:06.538 UTC [9856] ERROR:  current transaction is aborted, commands ignored until end of transaction block
+2026-11-04 13:06:06.538 UTC [9856] STATEMENT:  SELECT * FROM pa_target;
+2026-11-04 13:06:06.618 UTC [9856] ERROR:  MERGE command cannot affect row a second time
+2026-11-04 13:06:06.618 UTC [9856] HINT:  Ensure that not more than one source row matches any one target row.
+2026-11-04 13:06:06.618 UTC [9856] STATEMENT:  
+	  MERGE INTO pa_target t
+	  USING (VALUES (1), (1)) v(a)
+	  ON t.key = v.a
+	  WHEN MATCHED THEN
+		UPDATE set val = t.val || ' updated by pa_merge2c_dup';  -- should fail
+	
+2026-11-04 13:06:06.642 UTC [9855] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:06.642 UTC [9855] STATEMENT:  
+	  MERGE INTO target t
+	  USING (SELECT 1 as key, 'merge1' as val) s
+	  ON s.key = t.key
+	  WHEN NOT MATCHED THEN
+		INSERT VALUES (s.key, s.val)
+	  WHEN MATCHED THEN
+	    UPDATE set key = t.key + 1, val = t.val || ' updated by ' || s.val;
+	
+2026-11-04 13:06:07.462 UTC [9859] ERROR:  tuple to be locked was already moved to another partition due to concurrent update
+2026-11-04 13:06:07.462 UTC [9859] STATEMENT:  
+	  MERGE INTO target_pa t
+	  USING (SELECT 1 as key) s
+	  ON s.key = t.key
+	  WHEN MATCHED AND balance < 0 THEN
+	    DELETE
+	  WHEN MATCHED AND balance < 100 THEN
+		UPDATE SET balance = balance * 2, val = t.val || ' when1'
+	  WHEN MATCHED AND balance < 200 THEN
+		UPDATE SET balance = balance * 4, val = t.val || ' when2'
+	  WHEN MATCHED AND balance < 300 THEN
+		UPDATE SET balance = balance * 8, val = t.val || ' when3'
+	  RETURNING t.key, old.balance AS old_balance, new.balance AS new_balance, t.status, t.val;
+	
+2026-11-04 13:06:07.486 UTC [9859] ERROR:  tuple to be locked was already moved to another partition due to concurrent update
+2026-11-04 13:06:07.486 UTC [9859] STATEMENT:  
+	  MERGE INTO target_pa t
+	  USING (SELECT 1 as key) s
+	  ON s.key = t.key
+	  WHEN MATCHED AND balance < 0 THEN
+	    DELETE
+	  WHEN MATCHED AND balance < 100 THEN
+		UPDATE SET balance = balance * 2, val = t.val || ' when1'
+	  WHEN MATCHED AND balance < 200 THEN
+		UPDATE SET balance = balance * 4, val = t.val || ' when2'
+	  WHEN MATCHED AND balance < 300 THEN
+		UPDATE SET balance = balance * 8, val = t.val || ' when3'
+	  RETURNING t.key, old.balance AS old_balance, new.balance AS new_balance, t.status, t.val;
+	
+2026-11-04 13:06:10.690 UTC [9894] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:10.690 UTC [9894] STATEMENT:  SELECT * FROM lcku_table WHERE pg_advisory_lock(578902068) IS NOT NULL FOR KEY SHARE;
+2026-11-04 13:06:10.726 UTC [9894] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:10.726 UTC [9894] STATEMENT:  SELECT * FROM lcku_table WHERE pg_advisory_lock(578902068) IS NOT NULL FOR KEY SHARE;
+2026-11-04 13:06:10.746 UTC [9894] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:10.746 UTC [9894] STATEMENT:  SELECT * FROM lcku_table WHERE pg_advisory_lock(578902068) IS NOT NULL FOR KEY SHARE;
+2026-11-04 13:06:10.814 UTC [9894] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:10.814 UTC [9894] STATEMENT:  SELECT * FROM lcku_table WHERE pg_advisory_lock(578902068) IS NOT NULL FOR KEY SHARE;
+2026-11-04 13:06:10.866 UTC [9894] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:10.866 UTC [9894] STATEMENT:  SELECT * FROM lcku_table WHERE pg_advisory_lock(578902068) IS NOT NULL FOR KEY SHARE;
+2026-11-04 13:06:10.886 UTC [9894] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:10.886 UTC [9894] STATEMENT:  SELECT * FROM lcku_table WHERE pg_advisory_lock(578902068) IS NOT NULL FOR KEY SHARE;
+2026-11-04 13:06:10.938 UTC [9894] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:10.938 UTC [9894] STATEMENT:  SELECT * FROM lcku_table WHERE pg_advisory_lock(578902068) IS NOT NULL FOR KEY SHARE;
+2026-11-04 13:06:10.974 UTC [9894] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:10.974 UTC [9894] STATEMENT:  SELECT * FROM lcku_table WHERE pg_advisory_lock(578902068) IS NOT NULL FOR KEY SHARE;
+2026-11-04 13:06:10.994 UTC [9894] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:10.994 UTC [9894] STATEMENT:  SELECT * FROM lcku_table WHERE pg_advisory_lock(578902068) IS NOT NULL FOR KEY SHARE;
+2026-11-04 13:06:11.062 UTC [9894] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:11.062 UTC [9894] STATEMENT:  SELECT * FROM lcku_table WHERE pg_advisory_lock(578902068) IS NOT NULL FOR KEY SHARE;
+2026-11-04 13:06:11.114 UTC [9894] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:11.114 UTC [9894] STATEMENT:  SELECT * FROM lcku_table WHERE pg_advisory_lock(578902068) IS NOT NULL FOR KEY SHARE;
+2026-11-04 13:06:11.134 UTC [9894] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:11.134 UTC [9894] STATEMENT:  SELECT * FROM lcku_table WHERE pg_advisory_lock(578902068) IS NOT NULL FOR KEY SHARE;
+2026-11-04 13:06:12.279 UTC [9907] ERROR:  relation "pg_toast.reind_con_toast" does not exist
+2026-11-04 13:06:12.279 UTC [9907] STATEMENT:  REINDEX TABLE CONCURRENTLY pg_toast.reind_con_toast;
+2026-11-04 13:06:12.279 UTC [9907] ERROR:  relation "reind_con_wide" does not exist at character 37
+2026-11-04 13:06:12.279 UTC [9907] STATEMENT:  SELECT id, substr(data, 1, 10) FROM reind_con_wide ORDER BY id;
+2026-11-04 13:06:12.307 UTC [9907] ERROR:  relation "pg_toast.reind_con_toast_idx" does not exist
+2026-11-04 13:06:12.307 UTC [9907] STATEMENT:  REINDEX INDEX CONCURRENTLY pg_toast.reind_con_toast_idx;
+2026-11-04 13:06:12.307 UTC [9907] ERROR:  relation "reind_con_wide" does not exist at character 37
+2026-11-04 13:06:12.307 UTC [9907] STATEMENT:  SELECT id, substr(data, 1, 10) FROM reind_con_wide ORDER BY id;
+2026-11-04 13:06:12.321 UTC [9907] ERROR:  relation "reind_con_wide" does not exist at character 37
+2026-11-04 13:06:12.321 UTC [9907] STATEMENT:  SELECT id, substr(data, 1, 10) FROM reind_con_wide ORDER BY id;
+2026-11-04 13:06:12.335 UTC [9907] ERROR:  relation "reind_con_wide" does not exist at character 37
+2026-11-04 13:06:12.335 UTC [9907] STATEMENT:  SELECT id, substr(data, 1, 10) FROM reind_con_wide ORDER BY id;
+2026-11-04 13:06:12.507 UTC [9907] ERROR:  relation "pg_toast.reind_con_toast" does not exist
+2026-11-04 13:06:12.507 UTC [9907] STATEMENT:  REINDEX TABLE CONCURRENTLY pg_toast.reind_con_toast;
+2026-11-04 13:06:12.507 UTC [9907] ERROR:  relation "reind_con_wide" does not exist at character 37
+2026-11-04 13:06:12.507 UTC [9907] STATEMENT:  SELECT id, substr(data, 1, 10) FROM reind_con_wide ORDER BY id;
+2026-11-04 13:06:12.535 UTC [9907] ERROR:  relation "pg_toast.reind_con_toast_idx" does not exist
+2026-11-04 13:06:12.535 UTC [9907] STATEMENT:  REINDEX INDEX CONCURRENTLY pg_toast.reind_con_toast_idx;
+2026-11-04 13:06:12.535 UTC [9907] ERROR:  relation "reind_con_wide" does not exist at character 37
+2026-11-04 13:06:12.535 UTC [9907] STATEMENT:  SELECT id, substr(data, 1, 10) FROM reind_con_wide ORDER BY id;
+2026-11-04 13:06:12.550 UTC [9907] ERROR:  relation "reind_con_wide" does not exist at character 37
+2026-11-04 13:06:12.550 UTC [9907] STATEMENT:  SELECT id, substr(data, 1, 10) FROM reind_con_wide ORDER BY id;
+2026-11-04 13:06:12.565 UTC [9907] ERROR:  relation "reind_con_wide" does not exist at character 37
+2026-11-04 13:06:12.565 UTC [9907] STATEMENT:  SELECT id, substr(data, 1, 10) FROM reind_con_wide ORDER BY id;
+2026-11-04 13:06:12.786 UTC [9907] ERROR:  relation "pg_toast.reind_con_toast" does not exist
+2026-11-04 13:06:12.786 UTC [9907] STATEMENT:  REINDEX TABLE CONCURRENTLY pg_toast.reind_con_toast;
+2026-11-04 13:06:12.787 UTC [9907] ERROR:  relation "reind_con_wide" does not exist at character 37
+2026-11-04 13:06:12.787 UTC [9907] STATEMENT:  SELECT id, substr(data, 1, 10) FROM reind_con_wide ORDER BY id;
+2026-11-04 13:06:12.815 UTC [9907] ERROR:  relation "pg_toast.reind_con_toast_idx" does not exist
+2026-11-04 13:06:12.815 UTC [9907] STATEMENT:  REINDEX INDEX CONCURRENTLY pg_toast.reind_con_toast_idx;
+2026-11-04 13:06:12.815 UTC [9907] ERROR:  relation "reind_con_wide" does not exist at character 37
+2026-11-04 13:06:12.815 UTC [9907] STATEMENT:  SELECT id, substr(data, 1, 10) FROM reind_con_wide ORDER BY id;
+2026-11-04 13:06:12.830 UTC [9907] ERROR:  relation "reind_con_wide" does not exist at character 37
+2026-11-04 13:06:12.830 UTC [9907] STATEMENT:  SELECT id, substr(data, 1, 10) FROM reind_con_wide ORDER BY id;
+2026-11-04 13:06:12.844 UTC [9907] ERROR:  relation "reind_con_wide" does not exist at character 37
+2026-11-04 13:06:12.844 UTC [9907] STATEMENT:  SELECT id, substr(data, 1, 10) FROM reind_con_wide ORDER BY id;
+2026-11-04 13:06:14.286 UTC [9917] ERROR:  update or delete on table "parent" violates foreign key constraint "child_i_fkey" on table "child"
+2026-11-04 13:06:14.286 UTC [9917] DETAIL:  Key (i)=(1) is still referenced from table "child".
+2026-11-04 13:06:14.286 UTC [9917] STATEMENT:  DELETE FROM parent;
+2026-11-04 13:06:14.322 UTC [9917] ERROR:  update or delete on table "parent" violates foreign key constraint "child_i_fkey" on table "child"
+2026-11-04 13:06:14.322 UTC [9917] DETAIL:  Key (i)=(1) is still referenced from table "child".
+2026-11-04 13:06:14.322 UTC [9917] STATEMENT:  DELETE FROM parent;
+2026-11-04 13:06:14.358 UTC [9917] ERROR:  update or delete on table "parent" violates foreign key constraint "child_i_fkey" on table "child"
+2026-11-04 13:06:14.358 UTC [9917] DETAIL:  Key (i)=(1) is still referenced from table "child".
+2026-11-04 13:06:14.358 UTC [9917] STATEMENT:  DELETE FROM parent;
+2026-11-04 13:06:14.394 UTC [9917] ERROR:  update or delete on table "parent" violates foreign key constraint "child_i_fkey" on table "child"
+2026-11-04 13:06:14.394 UTC [9917] DETAIL:  Key (i)=(1) is still referenced from table "child".
+2026-11-04 13:06:14.394 UTC [9917] STATEMENT:  DELETE FROM parent;
+2026-11-04 13:06:14.414 UTC [9917] ERROR:  update or delete on table "parent" violates foreign key constraint "child_i_fkey" on table "child"
+2026-11-04 13:06:14.414 UTC [9917] DETAIL:  Key (i)=(1) is still referenced from table "child".
+2026-11-04 13:06:14.414 UTC [9917] STATEMENT:  DELETE FROM parent;
+2026-11-04 13:06:14.434 UTC [9917] ERROR:  update or delete on table "parent" violates foreign key constraint "child_i_fkey" on table "child"
+2026-11-04 13:06:14.434 UTC [9917] DETAIL:  Key (i)=(1) is still referenced from table "child".
+2026-11-04 13:06:14.434 UTC [9917] STATEMENT:  DELETE FROM parent;
+2026-11-04 13:06:14.454 UTC [9917] ERROR:  update or delete on table "parent" violates foreign key constraint "child_i_fkey" on table "child"
+2026-11-04 13:06:14.454 UTC [9917] DETAIL:  Key (i)=(1) is still referenced from table "child".
+2026-11-04 13:06:14.454 UTC [9917] STATEMENT:  DELETE FROM parent;
+2026-11-04 13:06:14.474 UTC [9917] ERROR:  update or delete on table "parent" violates foreign key constraint "child_i_fkey" on table "child"
+2026-11-04 13:06:14.474 UTC [9917] DETAIL:  Key (i)=(1) is still referenced from table "child".
+2026-11-04 13:06:14.474 UTC [9917] STATEMENT:  DELETE FROM parent;
+2026-11-04 13:06:17.114 UTC [9946] ERROR:  could not obtain lock on row in relation "foo"
+2026-11-04 13:06:17.114 UTC [9946] STATEMENT:  SELECT * FROM foo FOR UPDATE NOWAIT;
+2026-11-04 13:06:17.117 UTC [9946] ERROR:  could not obtain lock on row in relation "foo"
+2026-11-04 13:06:17.117 UTC [9946] STATEMENT:  SELECT * FROM foo FOR UPDATE NOWAIT;
+2026-11-04 13:06:17.120 UTC [9945] ERROR:  could not obtain lock on row in relation "foo"
+2026-11-04 13:06:17.120 UTC [9945] STATEMENT:  SELECT * FROM foo FOR UPDATE NOWAIT;
+2026-11-04 13:06:17.123 UTC [9945] ERROR:  could not obtain lock on row in relation "foo"
+2026-11-04 13:06:17.123 UTC [9945] STATEMENT:  SELECT * FROM foo FOR UPDATE NOWAIT;
+2026-11-04 13:06:17.257 UTC [9950] ERROR:  could not obtain lock on row in relation "foo"
+2026-11-04 13:06:17.257 UTC [9950] STATEMENT:  SELECT * FROM foo FOR UPDATE NOWAIT;
+2026-11-04 13:06:17.260 UTC [9950] ERROR:  could not obtain lock on row in relation "foo"
+2026-11-04 13:06:17.260 UTC [9950] STATEMENT:  SELECT * FROM foo FOR UPDATE NOWAIT;
+2026-11-04 13:06:17.263 UTC [9949] ERROR:  could not obtain lock on row in relation "foo"
+2026-11-04 13:06:17.263 UTC [9949] STATEMENT:  SELECT * FROM foo FOR SHARE NOWAIT;
+2026-11-04 13:06:17.394 UTC [9955] ERROR:  could not obtain lock on row in relation "foo"
+2026-11-04 13:06:17.394 UTC [9955] STATEMENT:  SELECT * FROM foo FOR UPDATE NOWAIT;
+2026-11-04 13:06:17.582 UTC [9958] ERROR:  could not obtain lock on row in relation "foo"
+2026-11-04 13:06:17.582 UTC [9958] STATEMENT:  SELECT * FROM foo WHERE pg_advisory_lock(0) IS NOT NULL FOR UPDATE NOWAIT;
+2026-11-04 13:06:17.727 UTC [9962] ERROR:  could not obtain lock on row in relation "test_nowait"
+2026-11-04 13:06:17.727 UTC [9962] STATEMENT:  
+		BEGIN ISOLATION LEVEL READ COMMITTED;
+		EXECUTE sl1_run;
+		SELECT xmin, xmax, ctid, * FROM test_nowait;
+	
+2026-11-04 13:06:22.972 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:22.972 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:22.972 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:22.977 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:22.977 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:22.977 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:22.983 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:22.983 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:22.983 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.003 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.003 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.003 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.008 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.008 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.008 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.013 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.013 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.013 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.031 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.031 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.031 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.036 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.036 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.036 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.055 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.055 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.055 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.095 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.095 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.095 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.100 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.100 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.100 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.105 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.105 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.105 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.127 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.127 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.127 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.132 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.132 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.132 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.151 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.151 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.151 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.187 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.187 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.187 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.194 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.194 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.194 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.214 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.214 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.214 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.254 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.254 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.254 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.258 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.258 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.258 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.261 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.261 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.261 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.264 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.264 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.264 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.268 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.268 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.268 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.272 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.272 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.272 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.276 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.276 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.276 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.294 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.294 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.294 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.298 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.298 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.298 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.315 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.315 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.315 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.351 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.351 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.351 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.356 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.356 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.356 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.375 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.375 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.375 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.418 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.418 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.418 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.423 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.423 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.423 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.428 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.428 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.428 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.433 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.433 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.433 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.438 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.438 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.438 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.443 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.443 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.443 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.463 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.463 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.463 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.506 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.506 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.506 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.511 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.511 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.511 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.516 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.516 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.516 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.521 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.521 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.521 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.526 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.526 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.526 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.531 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.531 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.531 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.535 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.535 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.535 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.540 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.540 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.540 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.545 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.545 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.545 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.549 UTC [10002] ERROR:  duplicate key value violates unique constraint "a_pkey"
+2026-11-04 13:06:23.549 UTC [10002] DETAIL:  Key (i)=(0) already exists.
+2026-11-04 13:06:23.549 UTC [10002] STATEMENT:  INSERT INTO a VALUES (0);
+2026-11-04 13:06:23.911 UTC [10006] ERROR:  attribute "a" of relation "c1" does not match parent's type
+2026-11-04 13:06:23.911 UTC [10006] STATEMENT:  SELECT SUM(a) FROM p;
+2026-11-04 13:06:24.429 UTC [10014] ERROR:  nextval: reached maximum value of sequence "seq1" (10)
+2026-11-04 13:06:24.429 UTC [10014] STATEMENT:  SELECT nextval('seq1') FROM generate_series(1, 15);
+2026-11-04 13:06:24.447 UTC [10014] ERROR:  nextval: reached maximum value of sequence "seq1" (10)
+2026-11-04 13:06:24.447 UTC [10014] STATEMENT:  SELECT nextval('seq1') FROM generate_series(1, 15);
+2026-11-04 13:06:24.909 UTC [10029] ERROR:  canceling statement due to statement timeout
+2026-11-04 13:06:24.909 UTC [10029] STATEMENT:  LOCK TABLE accounts;
+2026-11-04 13:06:24.923 UTC [10029] ERROR:  canceling statement due to lock timeout
+2026-11-04 13:06:24.923 UTC [10029] STATEMENT:  LOCK TABLE accounts;
+2026-11-04 13:06:24.937 UTC [10029] ERROR:  canceling statement due to lock timeout
+2026-11-04 13:06:24.937 UTC [10029] STATEMENT:  LOCK TABLE accounts;
+2026-11-04 13:06:24.950 UTC [10029] ERROR:  canceling statement due to statement timeout
+2026-11-04 13:06:24.950 UTC [10029] STATEMENT:  LOCK TABLE accounts;
+2026-11-04 13:06:24.963 UTC [10029] ERROR:  canceling statement due to statement timeout
+2026-11-04 13:06:24.963 UTC [10029] CONTEXT:  while deleting tuple (0,1) in relation "accounts"
+2026-11-04 13:06:24.963 UTC [10029] STATEMENT:  DELETE FROM accounts WHERE accountid = 'checking';
+2026-11-04 13:06:24.977 UTC [10029] ERROR:  canceling statement due to lock timeout
+2026-11-04 13:06:24.977 UTC [10029] CONTEXT:  while deleting tuple (0,1) in relation "accounts"
+2026-11-04 13:06:24.977 UTC [10029] STATEMENT:  DELETE FROM accounts WHERE accountid = 'checking';
+2026-11-04 13:06:24.992 UTC [10029] ERROR:  canceling statement due to lock timeout
+2026-11-04 13:06:24.992 UTC [10029] CONTEXT:  while deleting tuple (0,1) in relation "accounts"
+2026-11-04 13:06:24.992 UTC [10029] STATEMENT:  DELETE FROM accounts WHERE accountid = 'checking';
+2026-11-04 13:06:25.006 UTC [10029] ERROR:  canceling statement due to statement timeout
+2026-11-04 13:06:25.006 UTC [10029] CONTEXT:  while deleting tuple (0,1) in relation "accounts"
+2026-11-04 13:06:25.006 UTC [10029] STATEMENT:  DELETE FROM accounts WHERE accountid = 'checking';
+2026-11-04 13:06:25.184 UTC [10033] WARNING:  skipping vacuum of "part2" --- relation no longer exists
+2026-11-04 13:06:25.224 UTC [10033] WARNING:  skipping analyze of "part2" --- relation no longer exists
+2026-11-04 13:06:25.264 UTC [10033] WARNING:  skipping vacuum of "part2" --- relation no longer exists
+2026-11-04 13:06:25.397 UTC [10037] WARNING:  permission denied to vacuum "vacuum_tab", skipping it
+2026-11-04 13:06:25.401 UTC [10037] WARNING:  permission denied to vacuum "vacuum_tab", skipping it
+2026-11-04 13:06:25.405 UTC [10037] WARNING:  permission denied to vacuum "vacuum_tab", skipping it
+2026-11-04 13:06:25.409 UTC [10037] WARNING:  permission denied to vacuum "vacuum_tab", skipping it
+2026-11-04 13:06:25.412 UTC [10037] WARNING:  permission denied to analyze "vacuum_tab", skipping it
+2026-11-04 13:06:25.416 UTC [10037] WARNING:  permission denied to analyze "vacuum_tab", skipping it
+2026-11-04 13:06:25.418 UTC [10037] WARNING:  permission denied to analyze "vacuum_tab", skipping it
+2026-11-04 13:06:25.421 UTC [10037] WARNING:  permission denied to analyze "vacuum_tab", skipping it
+2026-11-04 13:06:25.592 UTC [10041] WARNING:  skipping vacuum of "part1" --- lock not available
+2026-11-04 13:06:25.598 UTC [10041] WARNING:  skipping analyze of "part1" --- lock not available
+2026-11-04 13:06:25.603 UTC [10041] WARNING:  skipping vacuum of "part1" --- lock not available
+2026-11-04 13:06:25.608 UTC [10041] WARNING:  skipping vacuum of "part1" --- lock not available
+2026-11-04 13:06:25.614 UTC [10041] WARNING:  skipping vacuum of "part1" --- lock not available
+2026-11-04 13:06:25.620 UTC [10041] WARNING:  skipping analyze of "part1" --- lock not available
+2026-11-04 13:06:25.642 UTC [10041] WARNING:  skipping vacuum of "part1" --- lock not available
+2026-11-04 13:06:25.662 UTC [10041] WARNING:  skipping vacuum of "part1" --- lock not available
+2026-11-04 13:06:27.144 UTC [10053] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.144 UTC [10053] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:27.144 UTC [10053] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.144 UTC [10053] STATEMENT:  insert into hash_tbl (id, p)
+				  select g, 20 from generate_series(51, 60) g;
+2026-11-04 13:06:27.151 UTC [10053] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.151 UTC [10053] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:27.151 UTC [10053] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.151 UTC [10053] STATEMENT:  commit;
+2026-11-04 13:06:27.157 UTC [10052] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.157 UTC [10052] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:27.157 UTC [10052] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.157 UTC [10052] STATEMENT:  commit;
+2026-11-04 13:06:27.163 UTC [10053] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.163 UTC [10053] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:27.163 UTC [10053] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.163 UTC [10053] STATEMENT:  insert into hash_tbl (id, p)
+				  select g, 20 from generate_series(51, 60) g;
+2026-11-04 13:06:27.170 UTC [10053] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.170 UTC [10053] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:27.170 UTC [10053] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.170 UTC [10053] STATEMENT:  commit;
+2026-11-04 13:06:27.177 UTC [10052] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.177 UTC [10052] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:27.177 UTC [10052] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.177 UTC [10052] STATEMENT:  commit;
+2026-11-04 13:06:27.184 UTC [10053] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.184 UTC [10053] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:27.184 UTC [10053] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.184 UTC [10053] STATEMENT:  commit;
+2026-11-04 13:06:27.191 UTC [10052] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.191 UTC [10052] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:27.191 UTC [10052] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.191 UTC [10052] STATEMENT:  commit;
+2026-11-04 13:06:27.198 UTC [10052] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.198 UTC [10052] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:27.198 UTC [10052] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.198 UTC [10052] STATEMENT:  insert into hash_tbl (id, p)
+				  select g, 30 from generate_series(41, 50) g;
+2026-11-04 13:06:27.204 UTC [10053] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.204 UTC [10053] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:27.204 UTC [10053] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.204 UTC [10053] STATEMENT:  insert into hash_tbl (id, p)
+				  select g, 20 from generate_series(51, 60) g;
+2026-11-04 13:06:27.212 UTC [10053] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.212 UTC [10053] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:27.212 UTC [10053] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.212 UTC [10053] STATEMENT:  commit;
+2026-11-04 13:06:27.220 UTC [10052] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.220 UTC [10052] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:27.220 UTC [10052] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.220 UTC [10052] STATEMENT:  commit;
+2026-11-04 13:06:27.228 UTC [10053] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.228 UTC [10053] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:27.228 UTC [10053] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.228 UTC [10053] STATEMENT:  commit;
+2026-11-04 13:06:27.235 UTC [10052] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.235 UTC [10052] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:27.235 UTC [10052] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.235 UTC [10052] STATEMENT:  commit;
+2026-11-04 13:06:27.243 UTC [10052] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.243 UTC [10052] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:27.243 UTC [10052] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.243 UTC [10052] STATEMENT:  insert into hash_tbl (id, p)
+				  select g, 30 from generate_series(41, 50) g;
+2026-11-04 13:06:27.251 UTC [10053] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.251 UTC [10053] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:27.251 UTC [10053] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.251 UTC [10053] STATEMENT:  commit;
+2026-11-04 13:06:27.260 UTC [10052] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.260 UTC [10052] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:27.260 UTC [10052] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.260 UTC [10052] STATEMENT:  commit;
+2026-11-04 13:06:27.268 UTC [10052] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.268 UTC [10052] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:27.268 UTC [10052] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.268 UTC [10052] STATEMENT:  insert into hash_tbl (id, p)
+				  select g, 30 from generate_series(41, 50) g;
+2026-11-04 13:06:27.718 UTC [10057] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.718 UTC [10057] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:27.718 UTC [10057] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.718 UTC [10057] STATEMENT:  insert into gist_point_tbl (id, p)
+				  select g, point(g*500, g*500) from generate_series(1, 5) g;
+2026-11-04 13:06:27.752 UTC [10057] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.752 UTC [10057] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:27.752 UTC [10057] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.752 UTC [10057] STATEMENT:  commit;
+2026-11-04 13:06:27.785 UTC [10056] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.785 UTC [10056] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:27.785 UTC [10056] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.785 UTC [10056] STATEMENT:  commit;
+2026-11-04 13:06:27.813 UTC [10057] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.813 UTC [10057] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:27.813 UTC [10057] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.813 UTC [10057] STATEMENT:  insert into gist_point_tbl (id, p)
+				  select g, point(g*500, g*500) from generate_series(1, 5) g;
+2026-11-04 13:06:27.846 UTC [10057] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.846 UTC [10057] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:27.846 UTC [10057] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.846 UTC [10057] STATEMENT:  commit;
+2026-11-04 13:06:27.885 UTC [10056] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.885 UTC [10056] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:27.885 UTC [10056] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.885 UTC [10056] STATEMENT:  commit;
+2026-11-04 13:06:27.930 UTC [10057] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.930 UTC [10057] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:27.930 UTC [10057] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.930 UTC [10057] STATEMENT:  commit;
+2026-11-04 13:06:27.963 UTC [10056] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.963 UTC [10056] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:27.963 UTC [10056] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.963 UTC [10056] STATEMENT:  commit;
+2026-11-04 13:06:27.988 UTC [10056] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:27.988 UTC [10056] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:27.988 UTC [10056] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:27.988 UTC [10056] STATEMENT:  insert into gist_point_tbl (id, p)
+				  select g, point(g*500, g*500) from generate_series(15, 20) g;
+2026-11-04 13:06:28.024 UTC [10057] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:28.024 UTC [10057] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:28.024 UTC [10057] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:28.024 UTC [10057] STATEMENT:  insert into gist_point_tbl (id, p)
+				  select g, point(g*500, g*500) from generate_series(1, 5) g;
+2026-11-04 13:06:28.065 UTC [10057] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:28.065 UTC [10057] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:28.065 UTC [10057] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:28.065 UTC [10057] STATEMENT:  commit;
+2026-11-04 13:06:28.100 UTC [10056] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:28.100 UTC [10056] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:28.100 UTC [10056] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:28.100 UTC [10056] STATEMENT:  commit;
+2026-11-04 13:06:28.135 UTC [10057] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:28.135 UTC [10057] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:28.135 UTC [10057] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:28.135 UTC [10057] STATEMENT:  commit;
+2026-11-04 13:06:28.167 UTC [10056] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:28.167 UTC [10056] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:28.167 UTC [10056] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:28.167 UTC [10056] STATEMENT:  commit;
+2026-11-04 13:06:28.194 UTC [10056] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:28.194 UTC [10056] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:28.194 UTC [10056] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:28.194 UTC [10056] STATEMENT:  insert into gist_point_tbl (id, p)
+				  select g, point(g*500, g*500) from generate_series(15, 20) g;
+2026-11-04 13:06:28.232 UTC [10057] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:28.232 UTC [10057] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:28.232 UTC [10057] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:28.232 UTC [10057] STATEMENT:  commit;
+2026-11-04 13:06:28.265 UTC [10056] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:28.265 UTC [10056] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:28.265 UTC [10056] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:28.265 UTC [10056] STATEMENT:  commit;
+2026-11-04 13:06:28.292 UTC [10056] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:28.292 UTC [10056] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:28.292 UTC [10056] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:28.292 UTC [10056] STATEMENT:  insert into gist_point_tbl (id, p)
+				  select g, point(g*500, g*500) from generate_series(15, 20) g;
+2026-11-04 13:06:29.271 UTC [10061] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:29.271 UTC [10061] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:29.271 UTC [10061] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:29.271 UTC [10061] STATEMENT:  insert into gin_tbl values (array[1]);
+2026-11-04 13:06:29.365 UTC [10061] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:29.365 UTC [10061] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:29.365 UTC [10061] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:29.365 UTC [10061] STATEMENT:  insert into gin_tbl values (array[1]);
+2026-11-04 13:06:29.458 UTC [10061] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:29.458 UTC [10061] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:29.458 UTC [10061] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:29.458 UTC [10061] STATEMENT:  commit;
+2026-11-04 13:06:29.542 UTC [10061] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:29.542 UTC [10061] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:29.542 UTC [10061] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:29.542 UTC [10061] STATEMENT:  commit;
+2026-11-04 13:06:29.638 UTC [10061] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:29.638 UTC [10061] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:29.638 UTC [10061] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:29.638 UTC [10061] STATEMENT:  insert into gin_tbl values (array[2]);
+2026-11-04 13:06:29.755 UTC [10061] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:29.755 UTC [10061] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:29.755 UTC [10061] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:29.755 UTC [10061] STATEMENT:  insert into gin_tbl values (array[2]);
+2026-11-04 13:06:29.840 UTC [10061] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:29.840 UTC [10061] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:29.840 UTC [10061] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:29.840 UTC [10061] STATEMENT:  commit;
+2026-11-04 13:06:29.946 UTC [10061] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:29.946 UTC [10061] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:29.946 UTC [10061] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:29.946 UTC [10061] STATEMENT:  commit;
+2026-11-04 13:06:30.023 UTC [10061] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:30.023 UTC [10061] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:30.023 UTC [10061] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:30.023 UTC [10061] STATEMENT:  insert into gin_tbl values (array[800]);
+2026-11-04 13:06:30.090 UTC [10061] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:30.090 UTC [10061] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:30.090 UTC [10061] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:30.090 UTC [10061] STATEMENT:  insert into gin_tbl values (array[800]);
+2026-11-04 13:06:30.170 UTC [10061] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:30.170 UTC [10061] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:30.170 UTC [10061] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:30.170 UTC [10061] STATEMENT:  commit;
+2026-11-04 13:06:30.287 UTC [10061] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:30.287 UTC [10061] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:30.287 UTC [10061] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:30.287 UTC [10061] STATEMENT:  commit;
+2026-11-04 13:06:31.539 UTC [10061] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:31.539 UTC [10061] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:31.539 UTC [10061] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:31.539 UTC [10061] STATEMENT:  insert into gin_tbl values (array[1]);
+2026-11-04 13:06:31.647 UTC [10061] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:31.647 UTC [10061] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:31.647 UTC [10061] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:31.647 UTC [10061] STATEMENT:  insert into gin_tbl values (array[2]);
+2026-11-04 13:06:31.755 UTC [10061] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:31.755 UTC [10061] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:31.755 UTC [10061] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:31.755 UTC [10061] STATEMENT:  insert into gin_tbl values (array[1]);
+2026-11-04 13:06:31.858 UTC [10061] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:31.858 UTC [10061] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:31.858 UTC [10061] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:31.858 UTC [10061] STATEMENT:  insert into gin_tbl values (array[2000]);
+2026-11-04 13:06:31.959 UTC [10061] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:31.959 UTC [10061] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:31.959 UTC [10061] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:31.959 UTC [10061] STATEMENT:  insert into gin_tbl values (array[2000]);
+2026-11-04 13:06:32.042 UTC [10061] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:32.042 UTC [10061] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:32.042 UTC [10061] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:32.042 UTC [10061] STATEMENT:  commit;
+2026-11-04 13:06:32.141 UTC [10061] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:32.141 UTC [10061] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:32.141 UTC [10061] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:32.141 UTC [10061] STATEMENT:  commit;
+2026-11-04 13:06:32.266 UTC [10066] ERROR:  new row for relation "tpart_default" violates partition constraint
+2026-11-04 13:06:32.266 UTC [10066] DETAIL:  Failing row contains (110, xxx).
+2026-11-04 13:06:32.266 UTC [10066] STATEMENT:  insert into tpart values (110,'xxx'), (120, 'yyy'), (150, 'zzz');
+2026-11-04 13:06:32.287 UTC [10066] ERROR:  new row for relation "tpart_default" violates partition constraint
+2026-11-04 13:06:32.287 UTC [10066] DETAIL:  Failing row contains (xxx, 110).
+2026-11-04 13:06:32.287 UTC [10066] STATEMENT:  insert into tpart_default (i, j) values (110, 'xxx'), (120, 'yyy'), (150, 'zzz');
+2026-11-04 13:06:32.307 UTC [10065] ERROR:  updated partition constraint for default partition "tpart_default_default" would be violated by some row
+2026-11-04 13:06:32.307 UTC [10065] STATEMENT:  alter table tpart attach partition tpart_2 for values from (100) to (200);
+2026-11-04 13:06:32.654 UTC [10075] ERROR:  tuple to be locked was already moved to another partition due to concurrent update
+2026-11-04 13:06:32.654 UTC [10075] STATEMENT:  DELETE FROM foo WHERE a=1;
+2026-11-04 13:06:32.678 UTC [10075] ERROR:  tuple to be locked was already moved to another partition due to concurrent update
+2026-11-04 13:06:32.678 UTC [10075] STATEMENT:  UPDATE foo SET b='EFG' WHERE a=1;
+2026-11-04 13:06:32.738 UTC [10075] ERROR:  tuple to be locked was already moved to another partition due to concurrent update
+2026-11-04 13:06:32.738 UTC [10075] STATEMENT:  UPDATE footrg SET b='XYZ' WHERE a=1;
+2026-11-04 13:06:32.758 UTC [10074] ERROR:  tuple to be locked was already moved to another partition due to concurrent update
+2026-11-04 13:06:32.758 UTC [10074] STATEMENT:  UPDATE footrg SET b='EFG' WHERE a=1;
+2026-11-04 13:06:32.782 UTC [10075] ERROR:  tuple to be locked was already moved to another partition due to concurrent update
+2026-11-04 13:06:32.782 UTC [10075] CONTEXT:  SQL statement "SELECT 1 FROM ONLY "public"."foo_range_parted1" x WHERE "a" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x"
+2026-11-04 13:06:32.782 UTC [10075] STATEMENT:  INSERT INTO bar VALUES(7);
+2026-11-04 13:06:32.826 UTC [10075] ERROR:  tuple to be locked was already moved to another partition due to concurrent update
+2026-11-04 13:06:32.826 UTC [10075] CONTEXT:  SQL statement "SELECT 1 FROM ONLY "public"."foo_range_parted1" x WHERE "a" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x"
+2026-11-04 13:06:32.826 UTC [10075] STATEMENT:  INSERT INTO bar VALUES(7);
+2026-11-04 13:06:32.882 UTC [10075] ERROR:  tuple to be locked was already moved to another partition due to concurrent update
+2026-11-04 13:06:32.882 UTC [10075] CONTEXT:  SQL statement "SELECT 1 FROM ONLY "public"."foo_range_parted1" x WHERE "a" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x"
+2026-11-04 13:06:32.882 UTC [10075] STATEMENT:  INSERT INTO bar VALUES(7);
+2026-11-04 13:06:33.534 UTC [10085] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:33.534 UTC [10085] STATEMENT:  INSERT INTO foo VALUES(2, 'session-3 donothing'), (2, 'session-3 donothing2') ON CONFLICT DO NOTHING;
+2026-11-04 13:06:33.586 UTC [10085] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:33.586 UTC [10085] STATEMENT:  INSERT INTO foo VALUES(2, 'session-3 donothing'), (2, 'session-3 donothing2') ON CONFLICT DO NOTHING;
+2026-11-04 13:06:33.642 UTC [10085] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:33.642 UTC [10085] STATEMENT:  INSERT INTO foo VALUES(2, 'session-3 donothing'), (2, 'session-3 donothing2') ON CONFLICT DO NOTHING;
+2026-11-04 13:06:33.682 UTC [10085] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:33.682 UTC [10085] STATEMENT:  INSERT INTO foo VALUES(2, 'session-3 donothing'), (2, 'session-3 donothing2') ON CONFLICT DO NOTHING;
+2026-11-04 13:06:33.738 UTC [10085] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:33.738 UTC [10085] STATEMENT:  INSERT INTO foo VALUES(2, 'session-3 donothing'), (2, 'session-3 donothing2') ON CONFLICT DO NOTHING;
+2026-11-04 13:06:33.790 UTC [10085] ERROR:  could not serialize access due to concurrent update
+2026-11-04 13:06:33.790 UTC [10085] STATEMENT:  INSERT INTO foo VALUES(2, 'session-3 donothing'), (2, 'session-3 donothing2') ON CONFLICT DO NOTHING;
+2026-11-04 13:06:34.771 UTC [10101] WARNING:  permission denied to cluster "cluster_part_tab1", skipping it
+2026-11-04 13:06:34.771 UTC [10101] WARNING:  permission denied to cluster "cluster_part_tab2", skipping it
+2026-11-04 13:06:34.799 UTC [10101] WARNING:  permission denied to cluster "cluster_part_tab1", skipping it
+2026-11-04 13:06:34.799 UTC [10101] WARNING:  permission denied to cluster "cluster_part_tab2", skipping it
+2026-11-04 13:06:34.803 UTC [10101] WARNING:  permission denied to cluster "cluster_part_tab1", skipping it
+2026-11-04 13:06:34.803 UTC [10101] WARNING:  permission denied to cluster "cluster_part_tab2", skipping it
+2026-11-04 13:06:34.808 UTC [10101] WARNING:  permission denied to cluster "cluster_part_tab1", skipping it
+2026-11-04 13:06:34.808 UTC [10101] WARNING:  permission denied to cluster "cluster_part_tab2", skipping it
+2026-11-04 13:06:34.896 UTC [10105] ERROR:  permission denied for table truncate_tab
+2026-11-04 13:06:34.896 UTC [10105] STATEMENT:  TRUNCATE truncate_tab;
+2026-11-04 13:06:34.899 UTC [10105] ERROR:  permission denied for table truncate_tab
+2026-11-04 13:06:34.899 UTC [10105] STATEMENT:  TRUNCATE truncate_tab;
+2026-11-04 13:06:34.902 UTC [10105] ERROR:  permission denied for table truncate_tab
+2026-11-04 13:06:34.902 UTC [10105] STATEMENT:  TRUNCATE truncate_tab;
+2026-11-04 13:06:34.904 UTC [10105] ERROR:  permission denied for table truncate_tab
+2026-11-04 13:06:34.904 UTC [10105] STATEMENT:  TRUNCATE truncate_tab;
+2026-11-04 13:06:35.076 UTC [10109] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:35.076 UTC [10109] DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+2026-11-04 13:06:35.076 UTC [10109] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:35.076 UTC [10109] STATEMENT:  UPDATE bank_account SET balance = -11 WHERE id = 'X';
+2026-11-04 13:06:35.447 UTC [10136] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:35.447 UTC [10136] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:35.447 UTC [10136] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:35.447 UTC [10136] STATEMENT:  COMMIT;
+2026-11-04 13:06:35.455 UTC [10136] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:35.455 UTC [10136] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:35.455 UTC [10136] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:35.455 UTC [10136] STATEMENT:  COMMIT;
+2026-11-04 13:06:35.464 UTC [10136] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:35.464 UTC [10136] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:35.464 UTC [10136] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:35.464 UTC [10136] STATEMENT:  COMMIT;
+2026-11-04 13:06:35.473 UTC [10136] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:35.473 UTC [10136] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:35.473 UTC [10136] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:35.473 UTC [10136] STATEMENT:  COMMIT;
+2026-11-04 13:06:35.482 UTC [10136] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:35.482 UTC [10136] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:35.482 UTC [10136] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:35.482 UTC [10136] STATEMENT:  COMMIT;
+2026-11-04 13:06:35.491 UTC [10136] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:35.491 UTC [10136] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:35.491 UTC [10136] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:35.491 UTC [10136] STATEMENT:  COMMIT;
+2026-11-04 13:06:35.500 UTC [10136] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:35.500 UTC [10136] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:35.500 UTC [10136] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:35.500 UTC [10136] STATEMENT:  COMMIT;
+2026-11-04 13:06:35.508 UTC [10136] ERROR:  could not serialize access due to read/write dependencies among transactions
+2026-11-04 13:06:35.508 UTC [10136] DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+2026-11-04 13:06:35.508 UTC [10136] HINT:  The transaction might succeed if retried.
+2026-11-04 13:06:35.508 UTC [10136] STATEMENT:  COMMIT;
+2026-11-04 13:06:35.939 UTC [10144] ERROR:  cannot drop schema testschema because other objects depend on it
+2026-11-04 13:06:35.939 UTC [10144] DETAIL:  function testschema.foo() depends on schema testschema
+2026-11-04 13:06:35.939 UTC [10144] HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+2026-11-04 13:06:35.939 UTC [10144] STATEMENT:  DROP SCHEMA testschema;
+2026-11-04 13:06:35.966 UTC [10143] ERROR:  referenced schema was concurrently dropped
+2026-11-04 13:06:35.966 UTC [10143] STATEMENT:  CREATE FUNCTION testschema.foo() RETURNS int AS 'select 1' LANGUAGE sql;
+2026-11-04 13:06:35.991 UTC [10144] ERROR:  cannot drop schema alterschema because other objects depend on it
+2026-11-04 13:06:35.991 UTC [10144] DETAIL:  function alterschema.falter() depends on schema alterschema
+2026-11-04 13:06:35.991 UTC [10144] HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+2026-11-04 13:06:35.991 UTC [10144] STATEMENT:  DROP SCHEMA alterschema;
+2026-11-04 13:06:36.015 UTC [10143] ERROR:  referenced schema was concurrently dropped
+2026-11-04 13:06:36.015 UTC [10143] STATEMENT:  ALTER FUNCTION public.falter() SET SCHEMA alterschema;
+2026-11-04 13:06:36.039 UTC [10144] ERROR:  cannot drop type foo because other objects depend on it
+2026-11-04 13:06:36.039 UTC [10144] DETAIL:  function fooargtype(foo) depends on type foo
+2026-11-04 13:06:36.039 UTC [10144] HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+2026-11-04 13:06:36.039 UTC [10144] STATEMENT:  DROP TYPE public.foo;
+2026-11-04 13:06:36.063 UTC [10143] ERROR:  referenced type was concurrently dropped
+2026-11-04 13:06:36.063 UTC [10143] STATEMENT:  CREATE FUNCTION fooargtype(num foo) RETURNS int AS 'select 1' LANGUAGE sql;
+2026-11-04 13:06:36.087 UTC [10144] ERROR:  cannot drop type id because other objects depend on it
+2026-11-04 13:06:36.087 UTC [10144] DETAIL:  function footrettype() depends on type id
+2026-11-04 13:06:36.087 UTC [10144] HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+2026-11-04 13:06:36.087 UTC [10144] STATEMENT:  DROP DOMAIN id;
+2026-11-04 13:06:36.111 UTC [10143] ERROR:  referenced type was concurrently dropped
+2026-11-04 13:06:36.111 UTC [10143] STATEMENT:  CREATE FUNCTION footrettype() RETURNS id LANGUAGE sql RETURN 1;
+2026-11-04 13:06:36.135 UTC [10144] ERROR:  cannot drop function f() because other objects depend on it
+2026-11-04 13:06:36.135 UTC [10144] DETAIL:  function foofunc() depends on function f()
+2026-11-04 13:06:36.135 UTC [10144] HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+2026-11-04 13:06:36.135 UTC [10144] STATEMENT:  DROP FUNCTION f();
+2026-11-04 13:06:36.159 UTC [10143] ERROR:  referenced function was concurrently dropped
+2026-11-04 13:06:36.159 UTC [10143] STATEMENT:  CREATE FUNCTION foofunc() RETURNS int LANGUAGE SQL RETURN f() + 1;
+2026-11-04 13:06:36.183 UTC [10144] ERROR:  cannot drop type id because other objects depend on it
+2026-11-04 13:06:36.183 UTC [10144] DETAIL:  type idid depends on type id
+2026-11-04 13:06:36.183 UTC [10144] HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+2026-11-04 13:06:36.183 UTC [10144] STATEMENT:  DROP DOMAIN id;
+2026-11-04 13:06:36.210 UTC [10143] ERROR:  referenced type was concurrently dropped
+2026-11-04 13:06:36.210 UTC [10143] STATEMENT:  CREATE DOMAIN idid as id;
+2026-11-04 13:06:36.235 UTC [10144] ERROR:  cannot drop type footab because other objects depend on it
+2026-11-04 13:06:36.235 UTC [10144] DETAIL:  column a of table tabtype depends on type footab
+2026-11-04 13:06:36.235 UTC [10144] HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+2026-11-04 13:06:36.235 UTC [10144] STATEMENT:  DROP TYPE public.footab;
+2026-11-04 13:06:36.254 UTC [10143] ERROR:  referenced type was concurrently dropped
+2026-11-04 13:06:36.254 UTC [10143] STATEMENT:  CREATE TABLE tabtype(a footab);
+2026-11-04 13:06:36.275 UTC [10144] ERROR:  cannot drop foreign-data wrapper fdw_wrapper because other objects depend on it
+2026-11-04 13:06:36.275 UTC [10144] DETAIL:  server srv_fdw_wrapper depends on foreign-data wrapper fdw_wrapper
+2026-11-04 13:06:36.275 UTC [10144] HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+2026-11-04 13:06:36.275 UTC [10144] STATEMENT:  DROP FOREIGN DATA WRAPPER fdw_wrapper RESTRICT;
+2026-11-04 13:06:36.298 UTC [10143] ERROR:  referenced foreign-data wrapper was concurrently dropped
+2026-11-04 13:06:36.298 UTC [10143] STATEMENT:  CREATE SERVER srv_fdw_wrapper FOREIGN DATA WRAPPER fdw_wrapper;
+2026-11-04 13:06:36.319 UTC [10144] ERROR:  role "regress_dependency" cannot be dropped because some objects depend on it
+2026-11-04 13:06:36.319 UTC [10144] DETAIL:  owner of function falter()
+2026-11-04 13:06:36.319 UTC [10144] STATEMENT:  DROP ROLE regress_dependency;
+2026-11-04 13:06:36.415 UTC [10146] WARNING:  "wal_level" is insufficient to publish logical changes
+2026-11-04 13:06:36.415 UTC [10146] HINT:  Set "wal_level" to "logical" before creating subscriptions.

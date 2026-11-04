@@ -1,0 +1,102 @@
+--
+-- PARALLEL
+--
+begin;
+-- @@@ 0
+-- encourage use of parallel plans
+set parallel_setup_cost=0;
+-- @@@ 1
+set parallel_tuple_cost=0;
+-- @@@ 2
+set min_parallel_table_scan_size=0;
+-- @@@ 3
+set max_parallel_workers_per_gather=4;
+-- @@@ 4
+--
+-- Test write operations that has an underlying query that is eligible
+-- for parallel plans
+--
+explain (costs off) create table parallel_write as
+    select length(stringu1) from tenk1 group by length(stringu1);
+                    QUERY PLAN                     
+---------------------------------------------------
+ Finalize HashAggregate
+   Group Key: (length((stringu1)::text))
+   ->  Gather
+         Workers Planned: 4
+         ->  Partial HashAggregate
+               Group Key: length((stringu1)::text)
+               ->  Parallel Seq Scan on tenk1
+(7 rows)
+
+-- @@@ 5
+create table parallel_write as
+    select length(stringu1) from tenk1 group by length(stringu1);
+-- @@@ 6
+drop table parallel_write;
+-- @@@ 7
+explain (costs off) select length(stringu1) into parallel_write
+    from tenk1 group by length(stringu1);
+                    QUERY PLAN                     
+---------------------------------------------------
+ Finalize HashAggregate
+   Group Key: (length((stringu1)::text))
+   ->  Gather
+         Workers Planned: 4
+         ->  Partial HashAggregate
+               Group Key: length((stringu1)::text)
+               ->  Parallel Seq Scan on tenk1
+(7 rows)
+
+-- @@@ 8
+select length(stringu1) into parallel_write
+    from tenk1 group by length(stringu1);
+-- @@@ 9
+drop table parallel_write;
+-- @@@ 10
+explain (costs off) create materialized view parallel_mat_view as
+    select length(stringu1) from tenk1 group by length(stringu1);
+                    QUERY PLAN                     
+---------------------------------------------------
+ Finalize HashAggregate
+   Group Key: (length((stringu1)::text))
+   ->  Gather
+         Workers Planned: 4
+         ->  Partial HashAggregate
+               Group Key: length((stringu1)::text)
+               ->  Parallel Seq Scan on tenk1
+(7 rows)
+
+-- @@@ 11
+create materialized view parallel_mat_view as
+    select length(stringu1) from tenk1 group by length(stringu1);
+-- @@@ 12
+create unique index on parallel_mat_view(length);
+-- @@@ 13
+refresh materialized view parallel_mat_view;
+-- @@@ 14
+refresh materialized view concurrently parallel_mat_view;
+-- @@@ 15
+drop materialized view parallel_mat_view;
+-- @@@ 16
+prepare prep_stmt as select length(stringu1) from tenk1 group by length(stringu1);
+-- @@@ 17
+explain (costs off) create table parallel_write as execute prep_stmt;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Finalize HashAggregate
+   Group Key: (length((stringu1)::text))
+   ->  Gather
+         Workers Planned: 4
+         ->  Partial HashAggregate
+               Group Key: length((stringu1)::text)
+               ->  Parallel Seq Scan on tenk1
+(7 rows)
+
+-- @@@ 18
+create table parallel_write as execute prep_stmt;
+-- @@@ 19
+drop table parallel_write;
+-- @@@ 20
+rollback;
+-- @@@ 21

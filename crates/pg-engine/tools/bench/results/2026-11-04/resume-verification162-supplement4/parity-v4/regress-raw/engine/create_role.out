@@ -1,0 +1,432 @@
+-- ok, superuser can create users with any set of privileges
+CREATE ROLE regress_role_super SUPERUSER;
+-- @@@ 0
+CREATE ROLE regress_role_admin CREATEDB CREATEROLE REPLICATION BYPASSRLS;
+-- @@@ 1
+GRANT CREATE ON DATABASE regression_a162_resume TO regress_role_admin WITH GRANT OPTION;
+-- @@@ 2
+CREATE ROLE regress_role_limited_admin CREATEROLE;
+-- @@@ 3
+CREATE ROLE regress_role_normal;
+-- @@@ 4
+-- fail, CREATEROLE user can't give away role attributes without having them
+SET SESSION AUTHORIZATION regress_role_limited_admin;
+-- @@@ 5
+CREATE ROLE regress_nosuch_superuser SUPERUSER;
+ERROR:  permission denied to create role
+DETAIL:  Only roles with the SUPERUSER attribute may create roles with the SUPERUSER attribute.
+-- @@@ 6
+CREATE ROLE regress_nosuch_replication_bypassrls REPLICATION BYPASSRLS;
+ERROR:  permission denied to create role
+DETAIL:  Only roles with the REPLICATION attribute may create roles with the REPLICATION attribute.
+-- @@@ 7
+CREATE ROLE regress_nosuch_replication REPLICATION;
+ERROR:  permission denied to create role
+DETAIL:  Only roles with the REPLICATION attribute may create roles with the REPLICATION attribute.
+-- @@@ 8
+CREATE ROLE regress_nosuch_bypassrls BYPASSRLS;
+ERROR:  permission denied to create role
+DETAIL:  Only roles with the BYPASSRLS attribute may create roles with the BYPASSRLS attribute.
+-- @@@ 9
+CREATE ROLE regress_nosuch_createdb CREATEDB;
+ERROR:  permission denied to create role
+DETAIL:  Only roles with the CREATEDB attribute may create roles with the CREATEDB attribute.
+-- @@@ 10
+-- ok, can create a role without any special attributes
+CREATE ROLE regress_role_limited;
+-- @@@ 11
+-- fail, can't give it in any of the restricted attributes
+ALTER ROLE regress_role_limited SUPERUSER;
+ERROR:  permission denied to alter role
+DETAIL:  Only roles with the SUPERUSER attribute may change the SUPERUSER attribute.
+-- @@@ 12
+ALTER ROLE regress_role_limited REPLICATION;
+ERROR:  permission denied to alter role
+DETAIL:  Only roles with the REPLICATION attribute may change the REPLICATION attribute.
+-- @@@ 13
+ALTER ROLE regress_role_limited CREATEDB;
+ERROR:  permission denied to alter role
+DETAIL:  Only roles with the CREATEDB attribute may change the CREATEDB attribute.
+-- @@@ 14
+ALTER ROLE regress_role_limited BYPASSRLS;
+ERROR:  permission denied to alter role
+DETAIL:  Only roles with the BYPASSRLS attribute may change the BYPASSRLS attribute.
+-- @@@ 15
+DROP ROLE regress_role_limited;
+-- @@@ 16
+-- ok, can give away these role attributes if you have them
+SET SESSION AUTHORIZATION regress_role_admin;
+-- @@@ 17
+CREATE ROLE regress_replication_bypassrls REPLICATION BYPASSRLS;
+-- @@@ 18
+CREATE ROLE regress_replication REPLICATION;
+-- @@@ 19
+CREATE ROLE regress_bypassrls BYPASSRLS;
+-- @@@ 20
+CREATE ROLE regress_createdb CREATEDB;
+-- @@@ 21
+-- ok, can toggle these role attributes off and on if you have them
+ALTER ROLE regress_replication NOREPLICATION;
+-- @@@ 22
+ALTER ROLE regress_replication REPLICATION;
+-- @@@ 23
+ALTER ROLE regress_bypassrls NOBYPASSRLS;
+-- @@@ 24
+ALTER ROLE regress_bypassrls BYPASSRLS;
+-- @@@ 25
+ALTER ROLE regress_createdb NOCREATEDB;
+-- @@@ 26
+ALTER ROLE regress_createdb CREATEDB;
+-- @@@ 27
+-- fail, can't toggle SUPERUSER
+ALTER ROLE regress_createdb SUPERUSER;
+ERROR:  permission denied to alter role
+DETAIL:  Only roles with the SUPERUSER attribute may change the SUPERUSER attribute.
+-- @@@ 28
+ALTER ROLE regress_createdb NOSUPERUSER;
+ERROR:  permission denied to alter role
+DETAIL:  Only roles with the SUPERUSER attribute may change the SUPERUSER attribute.
+-- @@@ 29
+-- ok, having CREATEROLE is enough to create users with these privileges
+CREATE ROLE regress_createrole CREATEROLE NOINHERIT;
+-- @@@ 30
+GRANT CREATE ON DATABASE regression_a162_resume TO regress_createrole WITH GRANT OPTION;
+-- @@@ 31
+CREATE ROLE regress_login LOGIN;
+-- @@@ 32
+CREATE ROLE regress_inherit INHERIT;
+-- @@@ 33
+CREATE ROLE regress_connection_limit CONNECTION LIMIT 5;
+-- @@@ 34
+CREATE ROLE regress_encrypted_password ENCRYPTED PASSWORD 'foo';
+-- @@@ 35
+CREATE ROLE regress_password_null PASSWORD NULL;
+-- @@@ 36
+-- ok, backwards compatible noise words should be ignored
+CREATE ROLE regress_noiseword SYSID 12345;
+NOTICE:  SYSID can no longer be specified
+-- @@@ 37
+-- fail, cannot grant membership in superuser role
+CREATE ROLE regress_nosuch_super IN ROLE regress_role_super;
+ERROR:  permission denied to grant role "regress_role_super"
+DETAIL:  Only roles with the SUPERUSER attribute may grant roles with the SUPERUSER attribute.
+-- @@@ 38
+-- fail, database owner cannot have members
+CREATE ROLE regress_nosuch_dbowner IN ROLE pg_database_owner;
+ERROR:  role "pg_database_owner" cannot have explicit members
+-- @@@ 39
+-- ok, can grant other users into a role
+CREATE ROLE regress_inroles ROLE
+	regress_role_super, regress_createdb, regress_createrole, regress_login,
+	regress_inherit, regress_connection_limit, regress_encrypted_password, regress_password_null;
+-- @@@ 40
+-- fail, cannot grant a role into itself
+CREATE ROLE regress_nosuch_recursive ROLE regress_nosuch_recursive;
+ERROR:  role "regress_nosuch_recursive" is a member of role "regress_nosuch_recursive"
+-- @@@ 41
+-- ok, can grant other users into a role with admin option
+CREATE ROLE regress_adminroles ADMIN
+	regress_role_super, regress_createdb, regress_createrole, regress_login,
+	regress_inherit, regress_connection_limit, regress_encrypted_password, regress_password_null;
+-- @@@ 42
+-- fail, cannot grant a role into itself with admin option
+CREATE ROLE regress_nosuch_admin_recursive ADMIN regress_nosuch_admin_recursive;
+ERROR:  role "regress_nosuch_admin_recursive" is a member of role "regress_nosuch_admin_recursive"
+-- @@@ 43
+-- fail, regress_createrole does not have CREATEDB privilege
+SET SESSION AUTHORIZATION regress_createrole;
+-- @@@ 44
+CREATE DATABASE regress_nosuch_db;
+ERROR:  permission denied to create database
+-- @@@ 45
+-- ok, regress_createrole can create new roles
+CREATE ROLE regress_plainrole;
+-- @@@ 46
+-- ok, roles with CREATEROLE can create new roles with it
+CREATE ROLE regress_rolecreator CREATEROLE;
+-- @@@ 47
+-- ok, roles with CREATEROLE can create new roles with different role
+-- attributes, including CREATEROLE
+CREATE ROLE regress_hasprivs CREATEROLE LOGIN INHERIT CONNECTION LIMIT 5;
+-- @@@ 48
+-- ok, we should be able to modify a role we created
+COMMENT ON ROLE regress_hasprivs IS 'some comment';
+-- @@@ 49
+SELECT shobj_description('regress_hasprivs'::regrole, 'pg_authid') IS NOT NULL AS has_comment;
+ has_comment 
+-------------
+ t
+(1 row)
+
+-- @@@ 50
+COMMENT ON ROLE regress_hasprivs IS NULL;
+-- @@@ 51
+SELECT shobj_description('regress_hasprivs'::regrole, 'pg_authid') IS NULL AS no_comment;
+ no_comment 
+------------
+ t
+(1 row)
+
+-- @@@ 52
+COMMENT ON ROLE regress_hasprivs IS 'add the comment back';
+-- @@@ 53
+SELECT shobj_description('regress_hasprivs'::regrole, 'pg_authid') IS NOT NULL AS has_comment;
+ has_comment 
+-------------
+ t
+(1 row)
+
+-- @@@ 54
+COMMENT ON ROLE regress_hasprivs IS ''; -- empty string removes the comment, same as NULL
+-- @@@ 55
+SELECT shobj_description('regress_hasprivs'::regrole, 'pg_authid') IS NULL AS no_comment;
+ no_comment 
+------------
+ t
+(1 row)
+
+-- @@@ 56
+ALTER ROLE regress_hasprivs RENAME TO regress_tenant;
+-- @@@ 57
+ALTER ROLE regress_tenant NOINHERIT NOLOGIN CONNECTION LIMIT 7;
+-- @@@ 58
+-- fail, we should be unable to modify a role we did not create
+COMMENT ON ROLE regress_role_normal IS 'some comment';
+ERROR:  permission denied
+DETAIL:  The current user must have the ADMIN option on role "regress_role_normal".
+-- @@@ 59
+ALTER ROLE regress_role_normal RENAME TO regress_role_abnormal;
+ERROR:  permission denied to rename role
+DETAIL:  Only roles with the CREATEROLE attribute and the ADMIN option on role "regress_role_normal" may rename this role.
+-- @@@ 60
+ALTER ROLE regress_role_normal NOINHERIT NOLOGIN CONNECTION LIMIT 7;
+ERROR:  permission denied to alter role
+DETAIL:  Only roles with the CREATEROLE attribute and the ADMIN option on role "regress_role_normal" may alter this role.
+-- @@@ 61
+-- ok, regress_tenant can create objects within the database
+SET SESSION AUTHORIZATION regress_tenant;
+-- @@@ 62
+CREATE TABLE tenant_table (i integer);
+-- @@@ 63
+CREATE INDEX tenant_idx ON tenant_table(i);
+-- @@@ 64
+CREATE VIEW tenant_view AS SELECT * FROM pg_catalog.pg_class;
+-- @@@ 65
+REVOKE ALL PRIVILEGES ON tenant_table FROM PUBLIC;
+-- @@@ 66
+-- fail, these objects belonging to regress_tenant
+SET SESSION AUTHORIZATION regress_createrole;
+-- @@@ 67
+DROP INDEX tenant_idx;
+ERROR:  must be owner of index tenant_idx
+-- @@@ 68
+ALTER TABLE tenant_table ADD COLUMN t text;
+ERROR:  must be owner of table tenant_table
+-- @@@ 69
+DROP TABLE tenant_table;
+ERROR:  must be owner of table tenant_table
+-- @@@ 70
+ALTER VIEW tenant_view OWNER TO regress_role_admin;
+ERROR:  must be owner of view tenant_view
+-- @@@ 71
+DROP VIEW tenant_view;
+ERROR:  must be owner of view tenant_view
+-- @@@ 72
+-- fail, can't create objects owned as regress_tenant
+CREATE SCHEMA regress_tenant_schema AUTHORIZATION regress_tenant;
+ERROR:  must be able to SET ROLE "regress_tenant"
+-- @@@ 73
+-- fail, we don't inherit permissions from regress_tenant
+REASSIGN OWNED BY regress_tenant TO regress_createrole;
+ERROR:  permission denied to reassign objects
+DETAIL:  Only roles with privileges of role "regress_tenant" may reassign objects owned by it.
+-- @@@ 74
+-- ok, create a role with a value for createrole_self_grant
+SET createrole_self_grant = 'set, inherit';
+-- @@@ 75
+CREATE ROLE regress_tenant2;
+-- @@@ 76
+GRANT CREATE ON DATABASE regression_a162_resume TO regress_tenant2;
+-- @@@ 77
+-- ok, regress_tenant2 can create objects within the database
+SET SESSION AUTHORIZATION regress_tenant2;
+-- @@@ 78
+CREATE TABLE tenant2_table (i integer);
+-- @@@ 79
+REVOKE ALL PRIVILEGES ON tenant2_table FROM PUBLIC;
+-- @@@ 80
+-- ok, because we have SET and INHERIT on regress_tenant2
+SET SESSION AUTHORIZATION regress_createrole;
+-- @@@ 81
+CREATE SCHEMA regress_tenant2_schema AUTHORIZATION regress_tenant2;
+-- @@@ 82
+ALTER SCHEMA regress_tenant2_schema OWNER TO regress_createrole;
+-- @@@ 83
+ALTER TABLE tenant2_table OWNER TO regress_createrole;
+-- @@@ 84
+ALTER TABLE tenant2_table OWNER TO regress_tenant2;
+-- @@@ 85
+-- with SET but not INHERIT, we can give away objects but not take them
+REVOKE INHERIT OPTION FOR regress_tenant2 FROM regress_createrole;
+-- @@@ 86
+ALTER SCHEMA regress_tenant2_schema OWNER TO regress_tenant2;
+-- @@@ 87
+ALTER TABLE tenant2_table OWNER TO regress_createrole;
+ERROR:  must be owner of table tenant2_table
+-- @@@ 88
+-- with INHERIT but not SET, we can take objects but not give them away
+GRANT regress_tenant2 TO regress_createrole WITH INHERIT TRUE, SET FALSE;
+-- @@@ 89
+ALTER TABLE tenant2_table OWNER TO regress_createrole;
+-- @@@ 90
+ALTER TABLE tenant2_table OWNER TO regress_tenant2;
+ERROR:  must be able to SET ROLE "regress_tenant2"
+-- @@@ 91
+DROP TABLE tenant2_table;
+-- @@@ 92
+-- fail, CREATEROLE is not enough to create roles in privileged roles
+CREATE ROLE regress_read_all_data IN ROLE pg_read_all_data;
+ERROR:  permission denied to grant role "pg_read_all_data"
+DETAIL:  Only roles with the ADMIN option on role "pg_read_all_data" may grant this role.
+-- @@@ 93
+CREATE ROLE regress_write_all_data IN ROLE pg_write_all_data;
+ERROR:  permission denied to grant role "pg_write_all_data"
+DETAIL:  Only roles with the ADMIN option on role "pg_write_all_data" may grant this role.
+-- @@@ 94
+CREATE ROLE regress_monitor IN ROLE pg_monitor;
+ERROR:  permission denied to grant role "pg_monitor"
+DETAIL:  Only roles with the ADMIN option on role "pg_monitor" may grant this role.
+-- @@@ 95
+CREATE ROLE regress_read_all_settings IN ROLE pg_read_all_settings;
+ERROR:  permission denied to grant role "pg_read_all_settings"
+DETAIL:  Only roles with the ADMIN option on role "pg_read_all_settings" may grant this role.
+-- @@@ 96
+CREATE ROLE regress_read_all_stats IN ROLE pg_read_all_stats;
+ERROR:  permission denied to grant role "pg_read_all_stats"
+DETAIL:  Only roles with the ADMIN option on role "pg_read_all_stats" may grant this role.
+-- @@@ 97
+CREATE ROLE regress_stat_scan_tables IN ROLE pg_stat_scan_tables;
+ERROR:  permission denied to grant role "pg_stat_scan_tables"
+DETAIL:  Only roles with the ADMIN option on role "pg_stat_scan_tables" may grant this role.
+-- @@@ 98
+CREATE ROLE regress_read_server_files IN ROLE pg_read_server_files;
+ERROR:  permission denied to grant role "pg_read_server_files"
+DETAIL:  Only roles with the ADMIN option on role "pg_read_server_files" may grant this role.
+-- @@@ 99
+CREATE ROLE regress_write_server_files IN ROLE pg_write_server_files;
+ERROR:  permission denied to grant role "pg_write_server_files"
+DETAIL:  Only roles with the ADMIN option on role "pg_write_server_files" may grant this role.
+-- @@@ 100
+CREATE ROLE regress_execute_server_program IN ROLE pg_execute_server_program;
+ERROR:  permission denied to grant role "pg_execute_server_program"
+DETAIL:  Only roles with the ADMIN option on role "pg_execute_server_program" may grant this role.
+-- @@@ 101
+CREATE ROLE regress_signal_backend IN ROLE pg_signal_backend;
+ERROR:  permission denied to grant role "pg_signal_backend"
+DETAIL:  Only roles with the ADMIN option on role "pg_signal_backend" may grant this role.
+-- @@@ 102
+-- fail, role still owns database objects
+DROP ROLE regress_tenant;
+ERROR:  role "regress_tenant" cannot be dropped because some objects depend on it
+DETAIL:  owner of table tenant_table
+owner of view tenant_view
+-- @@@ 103
+-- fail, creation of these roles failed above so they do not now exist
+SET SESSION AUTHORIZATION regress_role_admin;
+-- @@@ 104
+DROP ROLE regress_nosuch_superuser;
+ERROR:  role "regress_nosuch_superuser" does not exist
+-- @@@ 105
+DROP ROLE regress_nosuch_replication_bypassrls;
+ERROR:  role "regress_nosuch_replication_bypassrls" does not exist
+-- @@@ 106
+DROP ROLE regress_nosuch_replication;
+ERROR:  role "regress_nosuch_replication" does not exist
+-- @@@ 107
+DROP ROLE regress_nosuch_bypassrls;
+ERROR:  role "regress_nosuch_bypassrls" does not exist
+-- @@@ 108
+DROP ROLE regress_nosuch_super;
+ERROR:  role "regress_nosuch_super" does not exist
+-- @@@ 109
+DROP ROLE regress_nosuch_dbowner;
+ERROR:  role "regress_nosuch_dbowner" does not exist
+-- @@@ 110
+DROP ROLE regress_nosuch_recursive;
+ERROR:  role "regress_nosuch_recursive" does not exist
+-- @@@ 111
+DROP ROLE regress_nosuch_admin_recursive;
+ERROR:  role "regress_nosuch_admin_recursive" does not exist
+-- @@@ 112
+DROP ROLE regress_plainrole;
+-- @@@ 113
+-- must revoke privileges before dropping role
+REVOKE CREATE ON DATABASE regression_a162_resume FROM regress_createrole CASCADE;
+-- @@@ 114
+-- ok, should be able to drop non-superuser roles we created
+DROP ROLE regress_replication_bypassrls;
+-- @@@ 115
+DROP ROLE regress_replication;
+-- @@@ 116
+DROP ROLE regress_bypassrls;
+-- @@@ 117
+DROP ROLE regress_createdb;
+-- @@@ 118
+DROP ROLE regress_createrole;
+-- @@@ 119
+DROP ROLE regress_login;
+-- @@@ 120
+DROP ROLE regress_inherit;
+-- @@@ 121
+DROP ROLE regress_connection_limit;
+-- @@@ 122
+DROP ROLE regress_encrypted_password;
+-- @@@ 123
+DROP ROLE regress_password_null;
+-- @@@ 124
+DROP ROLE regress_noiseword;
+-- @@@ 125
+DROP ROLE regress_inroles;
+-- @@@ 126
+DROP ROLE regress_adminroles;
+-- @@@ 127
+-- fail, cannot drop ourself, nor superusers or roles we lack ADMIN for
+DROP ROLE regress_role_super;
+ERROR:  permission denied to drop role
+DETAIL:  Only roles with the SUPERUSER attribute may drop roles with the SUPERUSER attribute.
+-- @@@ 128
+DROP ROLE regress_role_admin;
+ERROR:  current user cannot be dropped
+-- @@@ 129
+DROP ROLE regress_rolecreator;
+ERROR:  permission denied to drop role
+DETAIL:  Only roles with the CREATEROLE attribute and the ADMIN option on role "regress_rolecreator" may drop this role.
+-- @@@ 130
+-- ok
+RESET SESSION AUTHORIZATION;
+-- @@@ 131
+REVOKE CREATE ON DATABASE regression_a162_resume FROM regress_role_admin CASCADE;
+-- @@@ 132
+DROP INDEX tenant_idx;
+-- @@@ 133
+DROP TABLE tenant_table;
+-- @@@ 134
+DROP VIEW tenant_view;
+-- @@@ 135
+DROP SCHEMA regress_tenant2_schema;
+-- @@@ 136
+-- check for duplicated drop
+DROP ROLE regress_tenant, regress_tenant;
+-- @@@ 137
+DROP ROLE regress_tenant2;
+-- @@@ 138
+DROP ROLE regress_rolecreator;
+-- @@@ 139
+DROP ROLE regress_role_admin;
+-- @@@ 140
+DROP ROLE regress_role_limited_admin;
+-- @@@ 141
+DROP ROLE regress_role_super;
+-- @@@ 142
+DROP ROLE regress_role_normal;
+-- @@@ 143

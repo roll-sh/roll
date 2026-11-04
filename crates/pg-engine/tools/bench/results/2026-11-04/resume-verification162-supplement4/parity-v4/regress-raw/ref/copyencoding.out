@@ -1,0 +1,68 @@
+--
+-- Test cases for encoding with COPY commands
+--
+-- skip test if not UTF8 server encoding
+SELECT getdatabaseencoding() <> 'UTF8'
+       AS skip_test \gset
+-- @@@ 0
+\if :skip_test
+-- @@@ 1
+\quit
+-- @@@ 2
+\endif
+-- @@@ 3
+-- directory paths are passed to us in environment variables
+\getenv abs_builddir PG_ABS_BUILDDIR
+-- @@@ 4
+\set utf8_csv :abs_builddir '/results/copyencoding_utf8.csv'
+-- @@@ 5
+CREATE TABLE copy_encoding_tab (t text);
+-- @@@ 6
+-- Valid cases
+-- Use ENCODING option
+-- U+3042 HIRAGANA LETTER A
+COPY (SELECT E'\u3042') TO :'utf8_csv' WITH (FORMAT csv, ENCODING 'UTF8');
+-- @@@ 7
+-- Read UTF8 data as LATIN1: no error
+COPY copy_encoding_tab FROM :'utf8_csv' WITH (FORMAT csv, ENCODING 'LATIN1');
+-- @@@ 8
+-- Use client_encoding
+SET client_encoding TO UTF8;
+-- @@@ 9
+-- U+3042 HIRAGANA LETTER A
+COPY (SELECT E'\u3042') TO :'utf8_csv' WITH (FORMAT csv);
+-- @@@ 10
+-- Read UTF8 data as LATIN1: no error
+SET client_encoding TO LATIN1;
+-- @@@ 11
+COPY copy_encoding_tab FROM :'utf8_csv' WITH (FORMAT csv);
+-- @@@ 12
+RESET client_encoding;
+-- @@@ 13
+-- Invalid cases
+-- Use ENCODING explicitly
+-- U+3042 HIRAGANA LETTER A
+COPY (SELECT E'\u3042') TO :'utf8_csv' WITH (FORMAT csv, ENCODING 'UTF8');
+-- @@@ 14
+-- Read UTF8 data as EUC_JP: no error
+COPY copy_encoding_tab FROM :'utf8_csv' WITH (FORMAT csv, ENCODING 'EUC_JP');
+ERROR:  invalid byte sequence for encoding "EUC_JP": 0xe3 0x81
+CONTEXT:  COPY copy_encoding_tab, line 1
+-- @@@ 15
+-- Use client_encoding
+SET client_encoding TO UTF8;
+-- @@@ 16
+-- U+3042 HIRAGANA LETTER A
+COPY (SELECT E'\u3042') TO :'utf8_csv' WITH (FORMAT csv);
+-- @@@ 17
+-- Read UTF8 data as EUC_JP: no error
+SET client_encoding TO EUC_JP;
+-- @@@ 18
+COPY copy_encoding_tab FROM :'utf8_csv' WITH (FORMAT csv);
+ERROR:  invalid byte sequence for encoding "EUC_JP": 0xe3 0x81
+CONTEXT:  COPY copy_encoding_tab, line 1
+-- @@@ 19
+RESET client_encoding;
+-- @@@ 20
+DROP TABLE copy_encoding_tab;
+-- @@@ 21

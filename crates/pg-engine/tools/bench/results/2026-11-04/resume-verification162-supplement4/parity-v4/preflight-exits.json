@@ -1,0 +1,108 @@
+[
+  {
+    "name": "a162-psql-inspect",
+    "command": [
+      "docker",
+      "inspect",
+      "--format",
+      "{{json .Mounts}}",
+      "a162-psql"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "a162-psql-cwd",
+    "command": [
+      "docker",
+      "exec",
+      "-w",
+      "/home/meszmate/.cache/a162/pgr/resume-3997cf00-r4/build",
+      "a162-psql",
+      "sh",
+      "-eu",
+      "-c",
+      "pwd; test -w .; psql --version; pg_dump --version; pg_restore --version"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "a162-dclient-inspect",
+    "command": [
+      "docker",
+      "inspect",
+      "--format",
+      "{{json .Mounts}}",
+      "a162-dclient"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "a162-dclient-cwd",
+    "command": [
+      "docker",
+      "exec",
+      "-w",
+      "/home/meszmate/.cache/a162/pgdump/resume-3997cf00-r4/tap",
+      "a162-dclient",
+      "sh",
+      "-eu",
+      "-c",
+      "pwd; test -w .; psql --version; pg_dump --version; pg_restore --version"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "reference-ready",
+    "command": [
+      "docker",
+      "exec",
+      "a162-rref",
+      "pg_isready",
+      "-U",
+      "postgres"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "reference-version",
+    "command": [
+      "docker",
+      "exec",
+      "a162-rref",
+      "psql",
+      "-X",
+      "-At",
+      "-U",
+      "postgres",
+      "-d",
+      "postgres",
+      "-c",
+      "SELECT version()"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "isolation-reference",
+    "command": [
+      "docker",
+      "exec",
+      "-e",
+      "PGPASSWORD=pw",
+      "a162-iref",
+      "psql",
+      "-X",
+      "-At",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "53250",
+      "-U",
+      "postgres",
+      "-d",
+      "postgres",
+      "-c",
+      "SHOW server_version"
+    ],
+    "exit": 0
+  }
+]

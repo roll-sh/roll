@@ -1,0 +1,73 @@
+CREATE OPERATOR === (
+        PROCEDURE = int8eq,
+        LEFTARG = bigint,
+        RIGHTARG = bigint,
+        COMMUTATOR = ===
+);
+-- @@@ 0
+CREATE OPERATOR !== (
+        PROCEDURE = int8ne,
+        LEFTARG = bigint,
+        RIGHTARG = bigint,
+        NEGATOR = ===,
+        COMMUTATOR = !==
+);
+-- @@@ 1
+DROP OPERATOR !==(bigint, bigint);
+-- @@@ 2
+SELECT  ctid, oprcom
+FROM    pg_catalog.pg_operator fk
+WHERE   oprcom != 0 AND
+        NOT EXISTS(SELECT 1 FROM pg_catalog.pg_operator pk WHERE pk.oid = fk.oprcom);
+ ctid | oprcom 
+------+--------
+(0 rows)
+
+-- @@@ 3
+SELECT  ctid, oprnegate
+FROM    pg_catalog.pg_operator fk
+WHERE   oprnegate != 0 AND
+        NOT EXISTS(SELECT 1 FROM pg_catalog.pg_operator pk WHERE pk.oid = fk.oprnegate);
+ ctid | oprnegate 
+------+-----------
+(0 rows)
+
+-- @@@ 4
+DROP OPERATOR ===(bigint, bigint);
+-- @@@ 5
+CREATE OPERATOR <| (
+        PROCEDURE = int8lt,
+        LEFTARG = bigint,
+        RIGHTARG = bigint
+);
+-- @@@ 6
+CREATE OPERATOR |> (
+        PROCEDURE = int8gt,
+        LEFTARG = bigint,
+        RIGHTARG = bigint,
+        NEGATOR = <|,
+        COMMUTATOR = <|
+);
+-- @@@ 7
+DROP OPERATOR |>(bigint, bigint);
+-- @@@ 8
+SELECT  ctid, oprcom
+FROM    pg_catalog.pg_operator fk
+WHERE   oprcom != 0 AND
+        NOT EXISTS(SELECT 1 FROM pg_catalog.pg_operator pk WHERE pk.oid = fk.oprcom);
+ ctid | oprcom 
+------+--------
+(0 rows)
+
+-- @@@ 9
+SELECT  ctid, oprnegate
+FROM    pg_catalog.pg_operator fk
+WHERE   oprnegate != 0 AND
+        NOT EXISTS(SELECT 1 FROM pg_catalog.pg_operator pk WHERE pk.oid = fk.oprnegate);
+ ctid | oprnegate 
+------+-----------
+(0 rows)
+
+-- @@@ 10
+DROP OPERATOR <|(bigint, bigint);
+-- @@@ 11

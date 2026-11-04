@@ -1,0 +1,565 @@
+CALL nonexistent();  -- error
+ERROR:  procedure nonexistent() does not exist
+LINE 1: CALL nonexistent();
+             ^
+HINT:  No procedure matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 0
+CALL random();  -- error
+ERROR:  random() is not a procedure
+LINE 1: CALL random();
+             ^
+HINT:  To call a function, use SELECT.
+-- @@@ 1
+CREATE FUNCTION cp_testfunc1(a int) RETURNS int LANGUAGE SQL AS $$ SELECT a $$;
+-- @@@ 2
+CREATE TABLE cp_test (a int, b text);
+-- @@@ 3
+CREATE PROCEDURE ptest1(x text)
+LANGUAGE SQL
+AS $$
+INSERT INTO cp_test VALUES (1, x);
+$$;
+-- @@@ 4
+\df ptest1
+                        List of functions
+ Schema |  Name  | Result data type | Argument data types | Type 
+--------+--------+------------------+---------------------+------
+ public | ptest1 |                  | IN x text           | proc
+(1 row)
+
+-- @@@ 5
+SELECT pg_get_functiondef('ptest1'::regproc);
+                  pg_get_functiondef                  
+------------------------------------------------------
+ CREATE OR REPLACE PROCEDURE public.ptest1(IN x text)+
+  LANGUAGE sql                                       +
+ AS $procedure$                                      +
+ INSERT INTO cp_test VALUES (1, x);                  +
+ $procedure$                                         +
+ 
+(1 row)
+
+-- @@@ 6
+-- show only normal functions
+\dfn public.*test*1
+                           List of functions
+ Schema |     Name     | Result data type | Argument data types | Type 
+--------+--------------+------------------+---------------------+------
+ public | cp_testfunc1 | integer          | a integer           | func
+(1 row)
+
+-- @@@ 7
+-- show only procedures
+\dfp public.*test*1
+                        List of functions
+ Schema |  Name  | Result data type | Argument data types | Type 
+--------+--------+------------------+---------------------+------
+ public | ptest1 |                  | IN x text           | proc
+(1 row)
+
+-- @@@ 8
+SELECT ptest1('x');  -- error
+ERROR:  ptest1(unknown) is a procedure
+LINE 1: SELECT ptest1('x');
+               ^
+HINT:  To call a procedure, use CALL.
+-- @@@ 9
+CALL ptest1('a');  -- ok
+-- @@@ 10
+CALL ptest1('xy' || 'zzy');  -- ok, constant-folded arg
+-- @@@ 11
+CALL ptest1(substring(random()::numeric(20,15)::text, 1, 1));  -- ok, volatile arg
+-- @@@ 12
+SELECT * FROM cp_test ORDER BY b COLLATE "C";
+ a |   b   
+---+-------
+ 1 | 0
+ 1 | a
+ 1 | xyzzy
+(3 rows)
+
+-- @@@ 13
+-- SQL-standard body
+CREATE PROCEDURE ptest1s(x text)
+LANGUAGE SQL
+BEGIN ATOMIC
+  INSERT INTO cp_test VALUES (1, x);
+END;
+-- @@@ 14
+\df ptest1s
+                        List of functions
+ Schema |  Name   | Result data type | Argument data types | Type 
+--------+---------+------------------+---------------------+------
+ public | ptest1s |                  | IN x text           | proc
+(1 row)
+
+-- @@@ 15
+SELECT pg_get_functiondef('ptest1s'::regproc);
+                  pg_get_functiondef                   
+-------------------------------------------------------
+ CREATE OR REPLACE PROCEDURE public.ptest1s(IN x text)+
+  LANGUAGE sql                                        +
+ BEGIN ATOMIC                                         +
+  INSERT INTO cp_test (a, b)                          +
+    VALUES (1, ptest1s.x);                            +
+ END                                                  +
+ 
+(1 row)
+
+-- @@@ 16
+CALL ptest1s('b');
+-- @@@ 17
+SELECT * FROM cp_test ORDER BY b COLLATE "C";
+ a |   b   
+---+-------
+ 1 | 0
+ 1 | a
+ 1 | b
+ 1 | xyzzy
+(4 rows)
+
+-- @@@ 18
+-- utility functions currently not supported here
+CREATE PROCEDURE ptestx()
+LANGUAGE SQL
+BEGIN ATOMIC
+  CREATE TABLE x (a int);
+END;
+ERROR:  CREATE TABLE is not yet supported in unquoted SQL function body
+-- @@@ 19
+CREATE PROCEDURE ptest2()
+LANGUAGE SQL
+AS $$
+SELECT 5;
+$$;
+-- @@@ 20
+CALL ptest2();
+-- @@@ 21
+-- nested CALL
+TRUNCATE cp_test;
+-- @@@ 22
+CREATE PROCEDURE ptest3(y text)
+LANGUAGE SQL
+AS $$
+CALL ptest1(y);
+CALL ptest1($1);
+$$;
+-- @@@ 23
+CALL ptest3('b');
+-- @@@ 24
+SELECT * FROM cp_test;
+ a | b 
+---+---
+ 1 | b
+ 1 | b
+(2 rows)
+
+-- @@@ 25
+-- output arguments
+CREATE PROCEDURE ptest4a(INOUT a int, INOUT b int)
+LANGUAGE SQL
+AS $$
+SELECT 1, 2;
+$$;
+-- @@@ 26
+CALL ptest4a(NULL, NULL);
+ a | b 
+---+---
+ 1 | 2
+(1 row)
+
+-- @@@ 27
+CREATE PROCEDURE ptest4b(INOUT b int, INOUT a int)
+LANGUAGE SQL
+AS $$
+CALL ptest4a(a, b);  -- error, not supported
+$$;
+ERROR:  calling procedures with output arguments is not supported in SQL functions
+CONTEXT:  SQL function "ptest4b"
+-- @@@ 28
+-- we used to get confused by a single output argument that is composite
+CREATE PROCEDURE ptest4c(INOUT comp int8_tbl)
+LANGUAGE SQL
+AS $$
+SELECT ROW(1, 2);
+$$;
+-- @@@ 29
+CALL ptest4c(NULL);
+ comp  
+-------
+ (1,2)
+(1 row)
+
+-- @@@ 30
+DROP PROCEDURE ptest4a, ptest4c;
+-- @@@ 31
+-- named and default parameters
+CREATE OR REPLACE PROCEDURE ptest5(a int, b text, c int default 100)
+LANGUAGE SQL
+AS $$
+INSERT INTO cp_test VALUES(a, b);
+INSERT INTO cp_test VALUES(c, b);
+$$;
+-- @@@ 32
+TRUNCATE cp_test;
+-- @@@ 33
+CALL ptest5(10, 'Hello', 20);
+-- @@@ 34
+CALL ptest5(10, 'Hello');
+-- @@@ 35
+CALL ptest5(10, b => 'Hello');
+-- @@@ 36
+CALL ptest5(b => 'Hello', a => 10);
+-- @@@ 37
+SELECT * FROM cp_test;
+  a  |   b   
+-----+-------
+  10 | Hello
+  20 | Hello
+  10 | Hello
+ 100 | Hello
+  10 | Hello
+ 100 | Hello
+  10 | Hello
+ 100 | Hello
+(8 rows)
+
+-- @@@ 38
+-- polymorphic types
+CREATE PROCEDURE ptest6(a int, b anyelement)
+LANGUAGE SQL
+AS $$
+SELECT NULL::int;
+$$;
+-- @@@ 39
+CALL ptest6(1, 2);
+-- @@@ 40
+CREATE PROCEDURE ptest6a(inout a anyelement, out b anyelement)
+LANGUAGE SQL
+AS $$
+SELECT $1, $1;
+$$;
+-- @@@ 41
+CALL ptest6a(1, null);
+ a | b 
+---+---
+ 1 | 1
+(1 row)
+
+-- @@@ 42
+CALL ptest6a(1.1, null);
+  a  |  b  
+-----+-----
+ 1.1 | 1.1
+(1 row)
+
+-- @@@ 43
+CREATE PROCEDURE ptest6b(a anyelement, out b anyelement, out c anyarray)
+LANGUAGE SQL
+AS $$
+SELECT $1, array[$1];
+$$;
+-- @@@ 44
+CALL ptest6b(1, null, null);
+ b |  c  
+---+-----
+ 1 | {1}
+(1 row)
+
+-- @@@ 45
+CALL ptest6b(1.1, null, null);
+  b  |   c   
+-----+-------
+ 1.1 | {1.1}
+(1 row)
+
+-- @@@ 46
+CREATE PROCEDURE ptest6c(inout a anyelement, inout b anyelement)
+LANGUAGE SQL
+AS $$
+SELECT $1, 1;
+$$;
+-- @@@ 47
+CALL ptest6c(1, null);
+ a | b 
+---+---
+ 1 | 1
+(1 row)
+
+-- @@@ 48
+CALL ptest6c(1.1, null);  -- fails before v13
+  a  | b 
+-----+---
+ 1.1 | 1
+(1 row)
+
+-- @@@ 49
+-- collation assignment
+CREATE PROCEDURE ptest7(a text, b text)
+LANGUAGE SQL
+AS $$
+SELECT a = b;
+$$;
+-- @@@ 50
+CALL ptest7(least('a', 'b'), 'a');
+-- @@@ 51
+-- empty body
+CREATE PROCEDURE ptest8(x text)
+BEGIN ATOMIC
+END;
+-- @@@ 52
+\df ptest8
+                        List of functions
+ Schema |  Name  | Result data type | Argument data types | Type 
+--------+--------+------------------+---------------------+------
+ public | ptest8 |                  | IN x text           | proc
+(1 row)
+
+-- @@@ 53
+SELECT pg_get_functiondef('ptest8'::regproc);
+                  pg_get_functiondef                  
+------------------------------------------------------
+ CREATE OR REPLACE PROCEDURE public.ptest8(IN x text)+
+  LANGUAGE sql                                       +
+ BEGIN ATOMIC                                        +
+ END                                                 +
+ 
+(1 row)
+
+-- @@@ 54
+CALL ptest8('');
+-- @@@ 55
+-- OUT parameters
+CREATE PROCEDURE ptest9(OUT a int)
+LANGUAGE SQL
+AS $$
+INSERT INTO cp_test VALUES (1, 'a');
+SELECT 1;
+$$;
+-- @@@ 56
+-- standard way to do a call:
+CALL ptest9(NULL);
+ a 
+---
+ 1
+(1 row)
+
+-- @@@ 57
+-- you can write an expression, but it's not evaluated
+CALL ptest9(1/0);  -- no error
+ a 
+---
+ 1
+(1 row)
+
+-- @@@ 58
+-- ... and it had better match the type of the parameter
+CALL ptest9(1./0.);  -- error
+ERROR:  procedure ptest9(numeric) does not exist
+LINE 1: CALL ptest9(1./0.);
+             ^
+HINT:  No procedure matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 59
+-- check named-parameter matching
+CREATE PROCEDURE ptest10(OUT a int, IN b int, IN c int)
+LANGUAGE SQL AS $$ SELECT b - c $$;
+-- @@@ 60
+CALL ptest10(null, 7, 4);
+ a 
+---
+ 3
+(1 row)
+
+-- @@@ 61
+CALL ptest10(a => null, b => 8, c => 2);
+ a 
+---
+ 6
+(1 row)
+
+-- @@@ 62
+CALL ptest10(null, 7, c => 2);
+ a 
+---
+ 5
+(1 row)
+
+-- @@@ 63
+CALL ptest10(null, c => 4, b => 11);
+ a 
+---
+ 7
+(1 row)
+
+-- @@@ 64
+CALL ptest10(b => 8, c => 2, a => 0);
+ a 
+---
+ 6
+(1 row)
+
+-- @@@ 65
+CREATE PROCEDURE ptest11(a OUT int, VARIADIC b int[]) LANGUAGE SQL
+  AS $$ SELECT b[1] + b[2] $$;
+-- @@@ 66
+CALL ptest11(null, 11, 12, 13);
+ a  
+----
+ 23
+(1 row)
+
+-- @@@ 67
+-- check resolution of ambiguous DROP commands
+CREATE PROCEDURE ptest10(IN a int, IN b int, IN c int)
+LANGUAGE SQL AS $$ SELECT a + b - c $$;
+-- @@@ 68
+\df ptest10
+                                   List of functions
+ Schema |  Name   | Result data type |            Argument data types            | Type 
+--------+---------+------------------+-------------------------------------------+------
+ public | ptest10 |                  | IN a integer, IN b integer, IN c integer  | proc
+ public | ptest10 |                  | OUT a integer, IN b integer, IN c integer | proc
+(2 rows)
+
+-- @@@ 69
+drop procedure ptest10;  -- fail
+ERROR:  procedure name "ptest10" is not unique
+HINT:  Specify the argument list to select the procedure unambiguously.
+-- @@@ 70
+drop procedure ptest10(int, int, int);  -- fail
+ERROR:  procedure name "ptest10" is not unique
+-- @@@ 71
+begin;
+-- @@@ 72
+drop procedure ptest10(out int, int, int);
+-- @@@ 73
+\df ptest10
+                                   List of functions
+ Schema |  Name   | Result data type |           Argument data types            | Type 
+--------+---------+------------------+------------------------------------------+------
+ public | ptest10 |                  | IN a integer, IN b integer, IN c integer | proc
+(1 row)
+
+-- @@@ 74
+drop procedure ptest10(int, int, int);  -- now this would work
+-- @@@ 75
+rollback;
+-- @@@ 76
+begin;
+-- @@@ 77
+drop procedure ptest10(in int, int, int);
+-- @@@ 78
+\df ptest10
+                                   List of functions
+ Schema |  Name   | Result data type |            Argument data types            | Type 
+--------+---------+------------------+-------------------------------------------+------
+ public | ptest10 |                  | OUT a integer, IN b integer, IN c integer | proc
+(1 row)
+
+-- @@@ 79
+drop procedure ptest10(int, int, int);  -- now this would work
+-- @@@ 80
+rollback;
+-- @@@ 81
+-- various error cases
+CALL version();  -- error: not a procedure
+ERROR:  version() is not a procedure
+LINE 1: CALL version();
+             ^
+HINT:  To call a function, use SELECT.
+-- @@@ 82
+CALL sum(1);  -- error: not a procedure
+ERROR:  sum(integer) is not a procedure
+LINE 1: CALL sum(1);
+             ^
+HINT:  To call a function, use SELECT.
+-- @@@ 83
+CREATE PROCEDURE ptestx() LANGUAGE SQL WINDOW AS $$ INSERT INTO cp_test VALUES (1, 'a') $$;
+ERROR:  invalid attribute in procedure definition
+LINE 1: CREATE PROCEDURE ptestx() LANGUAGE SQL WINDOW AS $$ INSERT I...
+                                               ^
+-- @@@ 84
+CREATE PROCEDURE ptestx() LANGUAGE SQL STRICT AS $$ INSERT INTO cp_test VALUES (1, 'a') $$;
+ERROR:  invalid attribute in procedure definition
+LINE 1: CREATE PROCEDURE ptestx() LANGUAGE SQL STRICT AS $$ INSERT I...
+                                               ^
+-- @@@ 85
+CREATE PROCEDURE ptestx(a VARIADIC int[], b OUT int) LANGUAGE SQL
+  AS $$ SELECT a[1] $$;
+ERROR:  VARIADIC parameter must be the last parameter
+LINE 1: CREATE PROCEDURE ptestx(a VARIADIC int[], b OUT int) LANGUAG...
+                                                  ^
+-- @@@ 86
+CREATE PROCEDURE ptestx(a int DEFAULT 42, b OUT int) LANGUAGE SQL
+  AS $$ SELECT a $$;
+ERROR:  procedure OUT parameters cannot appear after one with a default value
+LINE 1: CREATE PROCEDURE ptestx(a int DEFAULT 42, b OUT int) LANGUAG...
+                                                  ^
+-- @@@ 87
+ALTER PROCEDURE ptest1(text) STRICT;
+ERROR:  invalid attribute in procedure definition
+LINE 1: ALTER PROCEDURE ptest1(text) STRICT;
+                                     ^
+-- @@@ 88
+ALTER FUNCTION ptest1(text) VOLATILE;  -- error: not a function
+ERROR:  ptest1(text) is not a function
+-- @@@ 89
+ALTER PROCEDURE cp_testfunc1(int) VOLATILE;  -- error: not a procedure
+ERROR:  cp_testfunc1(integer) is not a procedure
+-- @@@ 90
+ALTER PROCEDURE nonexistent() VOLATILE;
+ERROR:  procedure nonexistent() does not exist
+-- @@@ 91
+DROP FUNCTION ptest1(text);  -- error: not a function
+ERROR:  ptest1(text) is not a function
+-- @@@ 92
+DROP PROCEDURE cp_testfunc1(int);  -- error: not a procedure
+ERROR:  cp_testfunc1(integer) is not a procedure
+-- @@@ 93
+DROP PROCEDURE nonexistent();
+ERROR:  procedure nonexistent() does not exist
+-- @@@ 94
+-- privileges
+CREATE USER regress_cp_user1;
+-- @@@ 95
+GRANT INSERT ON cp_test TO regress_cp_user1;
+-- @@@ 96
+REVOKE EXECUTE ON PROCEDURE ptest1(text) FROM PUBLIC;
+-- @@@ 97
+SET ROLE regress_cp_user1;
+-- @@@ 98
+CALL ptest1('a');  -- error
+ERROR:  permission denied for procedure ptest1
+-- @@@ 99
+RESET ROLE;
+-- @@@ 100
+GRANT EXECUTE ON PROCEDURE ptest1(text) TO regress_cp_user1;
+-- @@@ 101
+SET ROLE regress_cp_user1;
+-- @@@ 102
+CALL ptest1('a');  -- ok
+-- @@@ 103
+RESET ROLE;
+-- @@@ 104
+-- ROUTINE syntax
+ALTER ROUTINE cp_testfunc1(int) RENAME TO cp_testfunc1a;
+-- @@@ 105
+ALTER ROUTINE cp_testfunc1a RENAME TO cp_testfunc1;
+-- @@@ 106
+ALTER ROUTINE ptest1(text) RENAME TO ptest1a;
+-- @@@ 107
+ALTER ROUTINE ptest1a RENAME TO ptest1;
+-- @@@ 108
+DROP ROUTINE cp_testfunc1(int);
+-- @@@ 109
+-- cleanup
+DROP PROCEDURE ptest1;
+-- @@@ 110
+DROP PROCEDURE ptest1s;
+-- @@@ 111
+DROP PROCEDURE ptest2;
+-- @@@ 112
+DROP TABLE cp_test;
+-- @@@ 113
+DROP USER regress_cp_user1;
+-- @@@ 114

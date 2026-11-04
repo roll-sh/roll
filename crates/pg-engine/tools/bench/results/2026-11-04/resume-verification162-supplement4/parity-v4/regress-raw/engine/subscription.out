@@ -1,0 +1,666 @@
+--
+-- SUBSCRIPTION
+--
+CREATE ROLE regress_subscription_user LOGIN SUPERUSER;
+-- @@@ 0
+CREATE ROLE regress_subscription_user2;
+-- @@@ 1
+CREATE ROLE regress_subscription_user3 IN ROLE pg_create_subscription;
+-- @@@ 2
+CREATE ROLE regress_subscription_user_dummy LOGIN NOSUPERUSER;
+-- @@@ 3
+SET SESSION AUTHORIZATION 'regress_subscription_user';
+-- @@@ 4
+-- fail - no publications
+CREATE SUBSCRIPTION regress_testsub CONNECTION 'foo';
+ERROR:  syntax error at or near ";"
+LINE 1: CREATE SUBSCRIPTION regress_testsub CONNECTION 'foo';
+                                                            ^
+-- @@@ 5
+-- fail - no connection
+CREATE SUBSCRIPTION regress_testsub PUBLICATION foo;
+ERROR:  syntax error at or near "PUBLICATION"
+LINE 1: CREATE SUBSCRIPTION regress_testsub PUBLICATION foo;
+                                            ^
+-- @@@ 6
+-- fail - cannot do CREATE SUBSCRIPTION CREATE SLOT inside transaction block
+BEGIN;
+-- @@@ 7
+CREATE SUBSCRIPTION regress_testsub CONNECTION 'testconn' PUBLICATION testpub WITH (create_slot);
+ERROR:  CREATE SUBSCRIPTION ... WITH (create_slot = true) cannot run inside a transaction block
+-- @@@ 8
+COMMIT;
+-- @@@ 9
+-- fail - invalid connection string
+CREATE SUBSCRIPTION regress_testsub CONNECTION 'testconn' PUBLICATION testpub;
+ERROR:  invalid connection string syntax: missing "=" after "testconn" in connection info string
+
+-- @@@ 10
+-- fail - duplicate publications
+CREATE SUBSCRIPTION regress_testsub CONNECTION 'dbname=regress_doesnotexist' PUBLICATION foo, testpub, foo WITH (connect = false);
+ERROR:  publication name "foo" used more than once
+-- @@@ 11
+-- ok
+CREATE SUBSCRIPTION regress_testsub CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (connect = false);
+WARNING:  subscription was created, but is not connected
+HINT:  To initiate replication, you must manually create the replication slot, enable the subscription, and refresh the subscription.
+-- @@@ 12
+COMMENT ON SUBSCRIPTION regress_testsub IS 'test subscription';
+-- @@@ 13
+SELECT obj_description(s.oid, 'pg_subscription') FROM pg_subscription s;
+  obj_description  
+-------------------
+ test subscription
+(1 row)
+
+-- @@@ 14
+-- Check if the subscription stats are created and stats_reset is updated
+-- by pg_stat_reset_subscription_stats().
+SELECT subname, stats_reset IS NULL stats_reset_is_null FROM pg_stat_subscription_stats WHERE subname = 'regress_testsub';
+     subname     | stats_reset_is_null 
+-----------------+---------------------
+ regress_testsub | t
+(1 row)
+
+-- @@@ 15
+SELECT pg_stat_reset_subscription_stats(oid) FROM pg_subscription WHERE subname = 'regress_testsub';
+ pg_stat_reset_subscription_stats 
+----------------------------------
+ 
+(1 row)
+
+-- @@@ 16
+SELECT subname, stats_reset IS NULL stats_reset_is_null FROM pg_stat_subscription_stats WHERE subname = 'regress_testsub';
+     subname     | stats_reset_is_null 
+-----------------+---------------------
+ regress_testsub | f
+(1 row)
+
+-- @@@ 17
+-- Reset the stats again and check if the new reset_stats is updated.
+SELECT stats_reset as prev_stats_reset FROM pg_stat_subscription_stats WHERE subname = 'regress_testsub' \gset
+-- @@@ 18
+SELECT pg_stat_reset_subscription_stats(oid) FROM pg_subscription WHERE subname = 'regress_testsub';
+ pg_stat_reset_subscription_stats 
+----------------------------------
+ 
+(1 row)
+
+-- @@@ 19
+SELECT :'prev_stats_reset' < stats_reset FROM pg_stat_subscription_stats WHERE subname = 'regress_testsub';
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 20
+-- fail - name already exists
+CREATE SUBSCRIPTION regress_testsub CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (connect = false);
+ERROR:  subscription "regress_testsub" already exists
+-- @@@ 21
+-- fail - must be superuser
+SET SESSION AUTHORIZATION 'regress_subscription_user2';
+-- @@@ 22
+CREATE SUBSCRIPTION regress_testsub2 CONNECTION 'dbname=regress_doesnotexist' PUBLICATION foo WITH (connect = false);
+ERROR:  permission denied to create subscription
+DETAIL:  Only roles with privileges of the "pg_create_subscription" role may create subscriptions.
+-- @@@ 23
+SET SESSION AUTHORIZATION 'regress_subscription_user';
+-- @@@ 24
+-- fail - invalid option combinations
+CREATE SUBSCRIPTION regress_testsub2 CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (connect = false, copy_data = true);
+ERROR:  connect = false and copy_data = true are mutually exclusive options
+-- @@@ 25
+CREATE SUBSCRIPTION regress_testsub2 CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (connect = false, enabled = true);
+ERROR:  connect = false and enabled = true are mutually exclusive options
+-- @@@ 26
+CREATE SUBSCRIPTION regress_testsub2 CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (connect = false, create_slot = true);
+ERROR:  connect = false and create_slot = true are mutually exclusive options
+-- @@@ 27
+CREATE SUBSCRIPTION regress_testsub2 CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (slot_name = NONE, enabled = true);
+ERROR:  slot_name = NONE and enabled = true are mutually exclusive options
+-- @@@ 28
+CREATE SUBSCRIPTION regress_testsub2 CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (slot_name = NONE, enabled = false, create_slot = true);
+ERROR:  slot_name = NONE and create_slot = true are mutually exclusive options
+-- @@@ 29
+CREATE SUBSCRIPTION regress_testsub2 CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (slot_name = NONE);
+ERROR:  subscription with slot_name = NONE must also set enabled = false
+-- @@@ 30
+CREATE SUBSCRIPTION regress_testsub2 CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (slot_name = NONE, enabled = false);
+ERROR:  subscription with slot_name = NONE must also set create_slot = false
+-- @@@ 31
+CREATE SUBSCRIPTION regress_testsub2 CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (slot_name = NONE, create_slot = false);
+ERROR:  subscription with slot_name = NONE must also set enabled = false
+-- @@@ 32
+-- ok - with slot_name = NONE
+CREATE SUBSCRIPTION regress_testsub3 CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (slot_name = NONE, connect = false);
+WARNING:  subscription was created, but is not connected
+HINT:  To initiate replication, you must manually create the replication slot, enable the subscription, and refresh the subscription.
+-- @@@ 33
+-- fail
+ALTER SUBSCRIPTION regress_testsub3 ENABLE;
+ERROR:  cannot enable subscription that does not have a slot name
+-- @@@ 34
+ALTER SUBSCRIPTION regress_testsub3 REFRESH PUBLICATION;
+ERROR:  ALTER SUBSCRIPTION ... REFRESH is not allowed for disabled subscriptions
+-- @@@ 35
+-- fail - origin must be either none or any
+CREATE SUBSCRIPTION regress_testsub4 CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (slot_name = NONE, connect = false, origin = foo);
+ERROR:  unrecognized origin value: "foo"
+-- @@@ 36
+-- now it works
+CREATE SUBSCRIPTION regress_testsub4 CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (slot_name = NONE, connect = false, origin = none);
+WARNING:  subscription was created, but is not connected
+HINT:  To initiate replication, you must manually create the replication slot, enable the subscription, and refresh the subscription.
+-- @@@ 37
+\dRs+ regress_testsub4
+                                                                                                                 List of subscriptions
+       Name       |           Owner           | Enabled | Publication | Binary | Streaming | Two-phase commit | Disable on error | Origin | Password required | Run as owner? | Failover | Synchronous commit |          Conninfo           | Skip LSN 
+------------------+---------------------------+---------+-------------+--------+-----------+------------------+------------------+--------+-------------------+---------------+----------+--------------------+-----------------------------+----------
+ regress_testsub4 | regress_subscription_user | f       | {testpub}   | f      | parallel  | d                | f                | none   | t                 | f             | f        | off                | dbname=regress_doesnotexist | 0/0
+(1 row)
+
+-- @@@ 38
+ALTER SUBSCRIPTION regress_testsub4 SET (origin = any);
+-- @@@ 39
+\dRs+ regress_testsub4
+                                                                                                                 List of subscriptions
+       Name       |           Owner           | Enabled | Publication | Binary | Streaming | Two-phase commit | Disable on error | Origin | Password required | Run as owner? | Failover | Synchronous commit |          Conninfo           | Skip LSN 
+------------------+---------------------------+---------+-------------+--------+-----------+------------------+------------------+--------+-------------------+---------------+----------+--------------------+-----------------------------+----------
+ regress_testsub4 | regress_subscription_user | f       | {testpub}   | f      | parallel  | d                | f                | any    | t                 | f             | f        | off                | dbname=regress_doesnotexist | 0/0
+(1 row)
+
+-- @@@ 40
+DROP SUBSCRIPTION regress_testsub3;
+-- @@@ 41
+DROP SUBSCRIPTION regress_testsub4;
+-- @@@ 42
+-- fail, connection string does not parse
+CREATE SUBSCRIPTION regress_testsub5 CONNECTION 'i_dont_exist=param' PUBLICATION testpub;
+ERROR:  invalid connection string syntax: invalid connection option "i_dont_exist"
+
+-- @@@ 43
+-- fail, connection string parses, but doesn't work (and does so without
+-- connecting, so this is reliable and safe)
+CREATE SUBSCRIPTION regress_testsub5 CONNECTION 'port=-1' PUBLICATION testpub;
+ERROR:  subscription "regress_testsub5" could not connect to the publisher: invalid port number: "-1"
+-- @@@ 44
+-- fail - invalid connection string during ALTER
+ALTER SUBSCRIPTION regress_testsub CONNECTION 'foobar';
+ERROR:  invalid connection string syntax: missing "=" after "foobar" in connection info string
+
+-- @@@ 45
+\dRs+
+                                                                                                                List of subscriptions
+      Name       |           Owner           | Enabled | Publication | Binary | Streaming | Two-phase commit | Disable on error | Origin | Password required | Run as owner? | Failover | Synchronous commit |          Conninfo           | Skip LSN 
+-----------------+---------------------------+---------+-------------+--------+-----------+------------------+------------------+--------+-------------------+---------------+----------+--------------------+-----------------------------+----------
+ regress_testsub | regress_subscription_user | f       | {testpub}   | f      | parallel  | d                | f                | any    | t                 | f             | f        | off                | dbname=regress_doesnotexist | 0/0
+(1 row)
+
+-- @@@ 46
+ALTER SUBSCRIPTION regress_testsub SET PUBLICATION testpub2, testpub3 WITH (refresh = false);
+-- @@@ 47
+ALTER SUBSCRIPTION regress_testsub CONNECTION 'dbname=regress_doesnotexist2';
+-- @@@ 48
+ALTER SUBSCRIPTION regress_testsub SET (slot_name = 'newname');
+-- @@@ 49
+ALTER SUBSCRIPTION regress_testsub SET (password_required = false);
+-- @@@ 50
+ALTER SUBSCRIPTION regress_testsub SET (run_as_owner = true);
+-- @@@ 51
+\dRs+
+                                                                                                                     List of subscriptions
+      Name       |           Owner           | Enabled |     Publication     | Binary | Streaming | Two-phase commit | Disable on error | Origin | Password required | Run as owner? | Failover | Synchronous commit |           Conninfo           | Skip LSN 
+-----------------+---------------------------+---------+---------------------+--------+-----------+------------------+------------------+--------+-------------------+---------------+----------+--------------------+------------------------------+----------
+ regress_testsub | regress_subscription_user | f       | {testpub2,testpub3} | f      | parallel  | d                | f                | any    | f                 | t             | f        | off                | dbname=regress_doesnotexist2 | 0/0
+(1 row)
+
+-- @@@ 52
+ALTER SUBSCRIPTION regress_testsub SET (password_required = true);
+-- @@@ 53
+ALTER SUBSCRIPTION regress_testsub SET (run_as_owner = false);
+-- @@@ 54
+-- fail
+ALTER SUBSCRIPTION regress_testsub SET (slot_name = '');
+ERROR:  replication slot name "" is too short
+-- @@@ 55
+-- fail
+ALTER SUBSCRIPTION regress_doesnotexist CONNECTION 'dbname=regress_doesnotexist2';
+ERROR:  subscription "regress_doesnotexist" does not exist
+-- @@@ 56
+ALTER SUBSCRIPTION regress_testsub SET (create_slot = false);
+ERROR:  unrecognized subscription parameter: "create_slot"
+-- @@@ 57
+-- ok
+ALTER SUBSCRIPTION regress_testsub SKIP (lsn = '0/12345');
+-- @@@ 58
+\dRs+
+                                                                                                                     List of subscriptions
+      Name       |           Owner           | Enabled |     Publication     | Binary | Streaming | Two-phase commit | Disable on error | Origin | Password required | Run as owner? | Failover | Synchronous commit |           Conninfo           | Skip LSN 
+-----------------+---------------------------+---------+---------------------+--------+-----------+------------------+------------------+--------+-------------------+---------------+----------+--------------------+------------------------------+----------
+ regress_testsub | regress_subscription_user | f       | {testpub2,testpub3} | f      | parallel  | d                | f                | any    | t                 | f             | f        | off                | dbname=regress_doesnotexist2 | 0/12345
+(1 row)
+
+-- @@@ 59
+-- ok - with lsn = NONE
+ALTER SUBSCRIPTION regress_testsub SKIP (lsn = NONE);
+-- @@@ 60
+-- fail
+ALTER SUBSCRIPTION regress_testsub SKIP (lsn = '0/0');
+ERROR:  invalid WAL location (LSN): 0/0
+-- @@@ 61
+\dRs+
+                                                                                                                     List of subscriptions
+      Name       |           Owner           | Enabled |     Publication     | Binary | Streaming | Two-phase commit | Disable on error | Origin | Password required | Run as owner? | Failover | Synchronous commit |           Conninfo           | Skip LSN 
+-----------------+---------------------------+---------+---------------------+--------+-----------+------------------+------------------+--------+-------------------+---------------+----------+--------------------+------------------------------+----------
+ regress_testsub | regress_subscription_user | f       | {testpub2,testpub3} | f      | parallel  | d                | f                | any    | t                 | f             | f        | off                | dbname=regress_doesnotexist2 | 0/0
+(1 row)
+
+-- @@@ 62
+BEGIN;
+-- @@@ 63
+ALTER SUBSCRIPTION regress_testsub ENABLE;
+-- @@@ 64
+\dRs
+                            List of subscriptions
+      Name       |           Owner           | Enabled |     Publication     
+-----------------+---------------------------+---------+---------------------
+ regress_testsub | regress_subscription_user | t       | {testpub2,testpub3}
+(1 row)
+
+-- @@@ 65
+ALTER SUBSCRIPTION regress_testsub DISABLE;
+-- @@@ 66
+\dRs
+                            List of subscriptions
+      Name       |           Owner           | Enabled |     Publication     
+-----------------+---------------------------+---------+---------------------
+ regress_testsub | regress_subscription_user | f       | {testpub2,testpub3}
+(1 row)
+
+-- @@@ 67
+COMMIT;
+-- @@@ 68
+-- fail - must be owner of subscription
+SET ROLE regress_subscription_user_dummy;
+-- @@@ 69
+ALTER SUBSCRIPTION regress_testsub RENAME TO regress_testsub_dummy;
+ERROR:  must be owner of subscription regress_testsub
+-- @@@ 70
+RESET ROLE;
+-- @@@ 71
+ALTER SUBSCRIPTION regress_testsub RENAME TO regress_testsub_foo;
+-- @@@ 72
+ALTER SUBSCRIPTION regress_testsub_foo SET (synchronous_commit = local);
+-- @@@ 73
+ALTER SUBSCRIPTION regress_testsub_foo SET (synchronous_commit = foobar);
+ERROR:  invalid value for parameter "synchronous_commit": "foobar"
+HINT:  Available values: local, remote_write, remote_apply, on, off.
+-- @@@ 74
+\dRs+
+                                                                                                                       List of subscriptions
+        Name         |           Owner           | Enabled |     Publication     | Binary | Streaming | Two-phase commit | Disable on error | Origin | Password required | Run as owner? | Failover | Synchronous commit |           Conninfo           | Skip LSN 
+---------------------+---------------------------+---------+---------------------+--------+-----------+------------------+------------------+--------+-------------------+---------------+----------+--------------------+------------------------------+----------
+ regress_testsub_foo | regress_subscription_user | f       | {testpub2,testpub3} | f      | parallel  | d                | f                | any    | t                 | f             | f        | local              | dbname=regress_doesnotexist2 | 0/0
+(1 row)
+
+-- @@@ 75
+-- rename back to keep the rest simple
+ALTER SUBSCRIPTION regress_testsub_foo RENAME TO regress_testsub;
+-- @@@ 76
+-- ok, we're a superuser
+ALTER SUBSCRIPTION regress_testsub OWNER TO regress_subscription_user2;
+-- @@@ 77
+-- fail - cannot do DROP SUBSCRIPTION inside transaction block with slot name
+BEGIN;
+-- @@@ 78
+DROP SUBSCRIPTION regress_testsub;
+ERROR:  DROP SUBSCRIPTION cannot run inside a transaction block
+-- @@@ 79
+COMMIT;
+-- @@@ 80
+ALTER SUBSCRIPTION regress_testsub SET (slot_name = NONE);
+-- @@@ 81
+-- now it works
+BEGIN;
+-- @@@ 82
+DROP SUBSCRIPTION regress_testsub;
+-- @@@ 83
+COMMIT;
+-- @@@ 84
+DROP SUBSCRIPTION IF EXISTS regress_testsub;
+NOTICE:  subscription "regress_testsub" does not exist, skipping
+-- @@@ 85
+DROP SUBSCRIPTION regress_testsub;  -- fail
+ERROR:  subscription "regress_testsub" does not exist
+-- @@@ 86
+-- fail - binary must be boolean
+CREATE SUBSCRIPTION regress_testsub CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (connect = false, binary = foo);
+ERROR:  binary requires a Boolean value
+-- @@@ 87
+-- now it works
+CREATE SUBSCRIPTION regress_testsub CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (connect = false, binary = true);
+WARNING:  subscription was created, but is not connected
+HINT:  To initiate replication, you must manually create the replication slot, enable the subscription, and refresh the subscription.
+-- @@@ 88
+\dRs+
+                                                                                                                List of subscriptions
+      Name       |           Owner           | Enabled | Publication | Binary | Streaming | Two-phase commit | Disable on error | Origin | Password required | Run as owner? | Failover | Synchronous commit |          Conninfo           | Skip LSN 
+-----------------+---------------------------+---------+-------------+--------+-----------+------------------+------------------+--------+-------------------+---------------+----------+--------------------+-----------------------------+----------
+ regress_testsub | regress_subscription_user | f       | {testpub}   | t      | parallel  | d                | f                | any    | t                 | f             | f        | off                | dbname=regress_doesnotexist | 0/0
+(1 row)
+
+-- @@@ 89
+ALTER SUBSCRIPTION regress_testsub SET (binary = false);
+-- @@@ 90
+ALTER SUBSCRIPTION regress_testsub SET (slot_name = NONE);
+-- @@@ 91
+\dRs+
+                                                                                                                List of subscriptions
+      Name       |           Owner           | Enabled | Publication | Binary | Streaming | Two-phase commit | Disable on error | Origin | Password required | Run as owner? | Failover | Synchronous commit |          Conninfo           | Skip LSN 
+-----------------+---------------------------+---------+-------------+--------+-----------+------------------+------------------+--------+-------------------+---------------+----------+--------------------+-----------------------------+----------
+ regress_testsub | regress_subscription_user | f       | {testpub}   | f      | parallel  | d                | f                | any    | t                 | f             | f        | off                | dbname=regress_doesnotexist | 0/0
+(1 row)
+
+-- @@@ 92
+DROP SUBSCRIPTION regress_testsub;
+-- @@@ 93
+-- fail - streaming must be boolean or 'parallel'
+CREATE SUBSCRIPTION regress_testsub CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (connect = false, streaming = foo);
+ERROR:  streaming requires a Boolean value or "parallel"
+-- @@@ 94
+-- now it works
+CREATE SUBSCRIPTION regress_testsub CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (connect = false, streaming = true);
+WARNING:  subscription was created, but is not connected
+HINT:  To initiate replication, you must manually create the replication slot, enable the subscription, and refresh the subscription.
+-- @@@ 95
+\dRs+
+                                                                                                                List of subscriptions
+      Name       |           Owner           | Enabled | Publication | Binary | Streaming | Two-phase commit | Disable on error | Origin | Password required | Run as owner? | Failover | Synchronous commit |          Conninfo           | Skip LSN 
+-----------------+---------------------------+---------+-------------+--------+-----------+------------------+------------------+--------+-------------------+---------------+----------+--------------------+-----------------------------+----------
+ regress_testsub | regress_subscription_user | f       | {testpub}   | f      | on        | d                | f                | any    | t                 | f             | f        | off                | dbname=regress_doesnotexist | 0/0
+(1 row)
+
+-- @@@ 96
+ALTER SUBSCRIPTION regress_testsub SET (streaming = parallel);
+-- @@@ 97
+\dRs+
+                                                                                                                List of subscriptions
+      Name       |           Owner           | Enabled | Publication | Binary | Streaming | Two-phase commit | Disable on error | Origin | Password required | Run as owner? | Failover | Synchronous commit |          Conninfo           | Skip LSN 
+-----------------+---------------------------+---------+-------------+--------+-----------+------------------+------------------+--------+-------------------+---------------+----------+--------------------+-----------------------------+----------
+ regress_testsub | regress_subscription_user | f       | {testpub}   | f      | parallel  | d                | f                | any    | t                 | f             | f        | off                | dbname=regress_doesnotexist | 0/0
+(1 row)
+
+-- @@@ 98
+ALTER SUBSCRIPTION regress_testsub SET (streaming = false);
+-- @@@ 99
+ALTER SUBSCRIPTION regress_testsub SET (slot_name = NONE);
+-- @@@ 100
+\dRs+
+                                                                                                                List of subscriptions
+      Name       |           Owner           | Enabled | Publication | Binary | Streaming | Two-phase commit | Disable on error | Origin | Password required | Run as owner? | Failover | Synchronous commit |          Conninfo           | Skip LSN 
+-----------------+---------------------------+---------+-------------+--------+-----------+------------------+------------------+--------+-------------------+---------------+----------+--------------------+-----------------------------+----------
+ regress_testsub | regress_subscription_user | f       | {testpub}   | f      | off       | d                | f                | any    | t                 | f             | f        | off                | dbname=regress_doesnotexist | 0/0
+(1 row)
+
+-- @@@ 101
+-- fail - publication already exists
+ALTER SUBSCRIPTION regress_testsub ADD PUBLICATION testpub WITH (refresh = false);
+ERROR:  publication "testpub" is already in subscription "regress_testsub"
+-- @@@ 102
+-- fail - publication used more than once
+ALTER SUBSCRIPTION regress_testsub ADD PUBLICATION testpub1, testpub1 WITH (refresh = false);
+ERROR:  publication name "testpub1" used more than once
+-- @@@ 103
+-- ok - add two publications into subscription
+ALTER SUBSCRIPTION regress_testsub ADD PUBLICATION testpub1, testpub2 WITH (refresh = false);
+-- @@@ 104
+-- fail - publications already exist
+ALTER SUBSCRIPTION regress_testsub ADD PUBLICATION testpub1, testpub2 WITH (refresh = false);
+ERROR:  publication "testpub1" is already in subscription "regress_testsub"
+-- @@@ 105
+\dRs+
+                                                                                                                        List of subscriptions
+      Name       |           Owner           | Enabled |         Publication         | Binary | Streaming | Two-phase commit | Disable on error | Origin | Password required | Run as owner? | Failover | Synchronous commit |          Conninfo           | Skip LSN 
+-----------------+---------------------------+---------+-----------------------------+--------+-----------+------------------+------------------+--------+-------------------+---------------+----------+--------------------+-----------------------------+----------
+ regress_testsub | regress_subscription_user | f       | {testpub,testpub1,testpub2} | f      | off       | d                | f                | any    | t                 | f             | f        | off                | dbname=regress_doesnotexist | 0/0
+(1 row)
+
+-- @@@ 106
+-- fail - publication used more than once
+ALTER SUBSCRIPTION regress_testsub DROP PUBLICATION testpub1, testpub1 WITH (refresh = false);
+ERROR:  publication name "testpub1" used more than once
+-- @@@ 107
+-- fail - all publications are deleted
+ALTER SUBSCRIPTION regress_testsub DROP PUBLICATION testpub, testpub1, testpub2 WITH (refresh = false);
+ERROR:  cannot drop all the publications from a subscription
+-- @@@ 108
+-- fail - publication does not exist in subscription
+ALTER SUBSCRIPTION regress_testsub DROP PUBLICATION testpub3 WITH (refresh = false);
+ERROR:  publication "testpub3" is not in subscription "regress_testsub"
+-- @@@ 109
+-- ok - delete publications
+ALTER SUBSCRIPTION regress_testsub DROP PUBLICATION testpub1, testpub2 WITH (refresh = false);
+-- @@@ 110
+\dRs+
+                                                                                                                List of subscriptions
+      Name       |           Owner           | Enabled | Publication | Binary | Streaming | Two-phase commit | Disable on error | Origin | Password required | Run as owner? | Failover | Synchronous commit |          Conninfo           | Skip LSN 
+-----------------+---------------------------+---------+-------------+--------+-----------+------------------+------------------+--------+-------------------+---------------+----------+--------------------+-----------------------------+----------
+ regress_testsub | regress_subscription_user | f       | {testpub}   | f      | off       | d                | f                | any    | t                 | f             | f        | off                | dbname=regress_doesnotexist | 0/0
+(1 row)
+
+-- @@@ 111
+DROP SUBSCRIPTION regress_testsub;
+-- @@@ 112
+CREATE SUBSCRIPTION regress_testsub CONNECTION 'dbname=regress_doesnotexist' PUBLICATION mypub
+       WITH (connect = false, create_slot = false, copy_data = false);
+WARNING:  subscription was created, but is not connected
+HINT:  To initiate replication, you must manually create the replication slot, enable the subscription, and refresh the subscription.
+-- @@@ 113
+ALTER SUBSCRIPTION regress_testsub ENABLE;
+-- @@@ 114
+-- fail - ALTER SUBSCRIPTION with refresh is not allowed in a transaction
+-- block or function
+BEGIN;
+-- @@@ 115
+ALTER SUBSCRIPTION regress_testsub SET PUBLICATION mypub WITH (refresh = true);
+ERROR:  ALTER SUBSCRIPTION with refresh cannot run inside a transaction block
+-- @@@ 116
+END;
+-- @@@ 117
+BEGIN;
+-- @@@ 118
+ALTER SUBSCRIPTION regress_testsub REFRESH PUBLICATION;
+ERROR:  ALTER SUBSCRIPTION ... REFRESH cannot run inside a transaction block
+-- @@@ 119
+END;
+-- @@@ 120
+CREATE FUNCTION func() RETURNS VOID AS
+$$ ALTER SUBSCRIPTION regress_testsub SET PUBLICATION mypub WITH (refresh = true) $$ LANGUAGE SQL;
+-- @@@ 121
+SELECT func();
+ERROR:  ALTER SUBSCRIPTION with refresh cannot be executed from a function
+CONTEXT:  SQL function "func" statement 1
+-- @@@ 122
+ALTER SUBSCRIPTION regress_testsub DISABLE;
+-- @@@ 123
+ALTER SUBSCRIPTION regress_testsub SET (slot_name = NONE);
+-- @@@ 124
+DROP SUBSCRIPTION regress_testsub;
+-- @@@ 125
+DROP FUNCTION func;
+-- @@@ 126
+-- fail - two_phase must be boolean
+CREATE SUBSCRIPTION regress_testsub CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (connect = false, two_phase = foo);
+ERROR:  two_phase requires a Boolean value
+-- @@@ 127
+-- now it works
+CREATE SUBSCRIPTION regress_testsub CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (connect = false, two_phase = true);
+WARNING:  subscription was created, but is not connected
+HINT:  To initiate replication, you must manually create the replication slot, enable the subscription, and refresh the subscription.
+-- @@@ 128
+\dRs+
+                                                                                                                List of subscriptions
+      Name       |           Owner           | Enabled | Publication | Binary | Streaming | Two-phase commit | Disable on error | Origin | Password required | Run as owner? | Failover | Synchronous commit |          Conninfo           | Skip LSN 
+-----------------+---------------------------+---------+-------------+--------+-----------+------------------+------------------+--------+-------------------+---------------+----------+--------------------+-----------------------------+----------
+ regress_testsub | regress_subscription_user | f       | {testpub}   | f      | parallel  | p                | f                | any    | t                 | f             | f        | off                | dbname=regress_doesnotexist | 0/0
+(1 row)
+
+-- @@@ 129
+-- we can alter streaming when two_phase enabled
+ALTER SUBSCRIPTION regress_testsub SET (streaming = true);
+-- @@@ 130
+\dRs+
+                                                                                                                List of subscriptions
+      Name       |           Owner           | Enabled | Publication | Binary | Streaming | Two-phase commit | Disable on error | Origin | Password required | Run as owner? | Failover | Synchronous commit |          Conninfo           | Skip LSN 
+-----------------+---------------------------+---------+-------------+--------+-----------+------------------+------------------+--------+-------------------+---------------+----------+--------------------+-----------------------------+----------
+ regress_testsub | regress_subscription_user | f       | {testpub}   | f      | on        | p                | f                | any    | t                 | f             | f        | off                | dbname=regress_doesnotexist | 0/0
+(1 row)
+
+-- @@@ 131
+ALTER SUBSCRIPTION regress_testsub SET (slot_name = NONE);
+-- @@@ 132
+DROP SUBSCRIPTION regress_testsub;
+-- @@@ 133
+-- two_phase and streaming are compatible.
+CREATE SUBSCRIPTION regress_testsub CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (connect = false, streaming = true, two_phase = true);
+WARNING:  subscription was created, but is not connected
+HINT:  To initiate replication, you must manually create the replication slot, enable the subscription, and refresh the subscription.
+-- @@@ 134
+\dRs+
+                                                                                                                List of subscriptions
+      Name       |           Owner           | Enabled | Publication | Binary | Streaming | Two-phase commit | Disable on error | Origin | Password required | Run as owner? | Failover | Synchronous commit |          Conninfo           | Skip LSN 
+-----------------+---------------------------+---------+-------------+--------+-----------+------------------+------------------+--------+-------------------+---------------+----------+--------------------+-----------------------------+----------
+ regress_testsub | regress_subscription_user | f       | {testpub}   | f      | on        | p                | f                | any    | t                 | f             | f        | off                | dbname=regress_doesnotexist | 0/0
+(1 row)
+
+-- @@@ 135
+ALTER SUBSCRIPTION regress_testsub SET (slot_name = NONE);
+-- @@@ 136
+DROP SUBSCRIPTION regress_testsub;
+-- @@@ 137
+-- fail - disable_on_error must be boolean
+CREATE SUBSCRIPTION regress_testsub CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (connect = false, disable_on_error = foo);
+ERROR:  disable_on_error requires a Boolean value
+-- @@@ 138
+-- now it works
+CREATE SUBSCRIPTION regress_testsub CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (connect = false, disable_on_error = false);
+WARNING:  subscription was created, but is not connected
+HINT:  To initiate replication, you must manually create the replication slot, enable the subscription, and refresh the subscription.
+-- @@@ 139
+\dRs+
+                                                                                                                List of subscriptions
+      Name       |           Owner           | Enabled | Publication | Binary | Streaming | Two-phase commit | Disable on error | Origin | Password required | Run as owner? | Failover | Synchronous commit |          Conninfo           | Skip LSN 
+-----------------+---------------------------+---------+-------------+--------+-----------+------------------+------------------+--------+-------------------+---------------+----------+--------------------+-----------------------------+----------
+ regress_testsub | regress_subscription_user | f       | {testpub}   | f      | parallel  | d                | f                | any    | t                 | f             | f        | off                | dbname=regress_doesnotexist | 0/0
+(1 row)
+
+-- @@@ 140
+ALTER SUBSCRIPTION regress_testsub SET (disable_on_error = true);
+-- @@@ 141
+\dRs+
+                                                                                                                List of subscriptions
+      Name       |           Owner           | Enabled | Publication | Binary | Streaming | Two-phase commit | Disable on error | Origin | Password required | Run as owner? | Failover | Synchronous commit |          Conninfo           | Skip LSN 
+-----------------+---------------------------+---------+-------------+--------+-----------+------------------+------------------+--------+-------------------+---------------+----------+--------------------+-----------------------------+----------
+ regress_testsub | regress_subscription_user | f       | {testpub}   | f      | parallel  | d                | t                | any    | t                 | f             | f        | off                | dbname=regress_doesnotexist | 0/0
+(1 row)
+
+-- @@@ 142
+ALTER SUBSCRIPTION regress_testsub SET (slot_name = NONE);
+-- @@@ 143
+DROP SUBSCRIPTION regress_testsub;
+-- @@@ 144
+-- let's do some tests with pg_create_subscription rather than superuser
+SET SESSION AUTHORIZATION regress_subscription_user3;
+-- @@@ 145
+-- fail, not enough privileges
+CREATE SUBSCRIPTION regress_testsub CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (connect = false);
+ERROR:  permission denied for database regression_a162_resume
+-- @@@ 146
+-- fail, must specify password
+RESET SESSION AUTHORIZATION;
+-- @@@ 147
+GRANT CREATE ON DATABASE REGRESSION TO regress_subscription_user3;
+ERROR:  database "regression" does not exist
+-- @@@ 148
+SET SESSION AUTHORIZATION regress_subscription_user3;
+-- @@@ 149
+CREATE SUBSCRIPTION regress_testsub CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (connect = false);
+ERROR:  permission denied for database regression_a162_resume
+-- @@@ 150
+-- fail, can't set password_required=false
+RESET SESSION AUTHORIZATION;
+-- @@@ 151
+GRANT CREATE ON DATABASE REGRESSION TO regress_subscription_user3;
+ERROR:  database "regression" does not exist
+-- @@@ 152
+SET SESSION AUTHORIZATION regress_subscription_user3;
+-- @@@ 153
+CREATE SUBSCRIPTION regress_testsub CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (connect = false, password_required = false);
+ERROR:  permission denied for database regression_a162_resume
+-- @@@ 154
+-- ok
+RESET SESSION AUTHORIZATION;
+-- @@@ 155
+GRANT CREATE ON DATABASE REGRESSION TO regress_subscription_user3;
+ERROR:  database "regression" does not exist
+-- @@@ 156
+SET SESSION AUTHORIZATION regress_subscription_user3;
+-- @@@ 157
+CREATE SUBSCRIPTION regress_testsub CONNECTION 'dbname=regress_doesnotexist password=regress_fakepassword' PUBLICATION testpub WITH (connect = false);
+ERROR:  permission denied for database regression_a162_resume
+-- @@@ 158
+-- we cannot give the subscription away to some random user
+ALTER SUBSCRIPTION regress_testsub OWNER TO regress_subscription_user;
+ERROR:  subscription "regress_testsub" does not exist
+-- @@@ 159
+-- but we can rename the subscription we just created
+ALTER SUBSCRIPTION regress_testsub RENAME TO regress_testsub2;
+ERROR:  subscription "regress_testsub" does not exist
+-- @@@ 160
+-- ok, even after losing pg_create_subscription we can still rename it
+RESET SESSION AUTHORIZATION;
+-- @@@ 161
+REVOKE pg_create_subscription FROM regress_subscription_user3;
+-- @@@ 162
+SET SESSION AUTHORIZATION regress_subscription_user3;
+-- @@@ 163
+ALTER SUBSCRIPTION regress_testsub2 RENAME TO regress_testsub;
+ERROR:  subscription "regress_testsub2" does not exist
+-- @@@ 164
+-- fail, after losing CREATE on the database we can't rename it any more
+RESET SESSION AUTHORIZATION;
+-- @@@ 165
+REVOKE CREATE ON DATABASE REGRESSION FROM regress_subscription_user3;
+ERROR:  database "regression" does not exist
+-- @@@ 166
+SET SESSION AUTHORIZATION regress_subscription_user3;
+-- @@@ 167
+ALTER SUBSCRIPTION regress_testsub RENAME TO regress_testsub2;
+ERROR:  subscription "regress_testsub" does not exist
+-- @@@ 168
+-- fail - cannot do ALTER SUBSCRIPTION SET (failover) inside transaction block
+BEGIN;
+-- @@@ 169
+ALTER SUBSCRIPTION regress_testsub SET (failover);
+ERROR:  subscription "regress_testsub" does not exist
+-- @@@ 170
+COMMIT;
+-- @@@ 171
+-- ok, owning it is enough for this stuff
+ALTER SUBSCRIPTION regress_testsub SET (slot_name = NONE);
+ERROR:  subscription "regress_testsub" does not exist
+-- @@@ 172
+DROP SUBSCRIPTION regress_testsub;
+ERROR:  subscription "regress_testsub" does not exist
+-- @@@ 173
+RESET SESSION AUTHORIZATION;
+-- @@@ 174
+DROP ROLE regress_subscription_user;
+-- @@@ 175
+DROP ROLE regress_subscription_user2;
+-- @@@ 176
+DROP ROLE regress_subscription_user3;
+-- @@@ 177
+DROP ROLE regress_subscription_user_dummy;
+-- @@@ 178

@@ -1,0 +1,1234 @@
+-- relative tablespace locations are not allowed
+CREATE TABLESPACE regress_tblspace LOCATION 'relative'; -- fail
+ERROR:  tablespace location must be an absolute path
+-- @@@ 0
+-- empty tablespace locations are not usually allowed
+CREATE TABLESPACE regress_tblspace LOCATION ''; -- fail
+ERROR:  tablespace location must be an absolute path
+-- @@@ 1
+-- as a special developer-only option to allow us to use tablespaces
+-- with streaming replication on the same server, an empty location
+-- can be allowed as a way to say that the tablespace should be created
+-- as a directory in pg_tblspc, rather than being a symlink
+SET allow_in_place_tablespaces = true;
+-- @@@ 2
+-- create a tablespace using WITH clause
+CREATE TABLESPACE regress_tblspacewith LOCATION '' WITH (some_nonexistent_parameter = true); -- fail
+ERROR:  unrecognized parameter "some_nonexistent_parameter"
+-- @@@ 3
+CREATE TABLESPACE regress_tblspacewith LOCATION '' WITH (random_page_cost = 3.0); -- ok
+-- @@@ 4
+-- check to see the parameter was used
+SELECT spcoptions FROM pg_tablespace WHERE spcname = 'regress_tblspacewith';
+       spcoptions       
+------------------------
+ {random_page_cost=3.0}
+(1 row)
+
+-- @@@ 5
+-- drop the tablespace so we can re-use the location
+DROP TABLESPACE regress_tblspacewith;
+-- @@@ 6
+-- This returns a relative path as of an effect of allow_in_place_tablespaces,
+-- masking the tablespace OID used in the path name.
+SELECT regexp_replace(pg_tablespace_location(oid), '(pg_tblspc)/(\d+)', '\1/NNN')
+  FROM pg_tablespace  WHERE spcname = 'regress_tblspace';
+ regexp_replace 
+----------------
+ pg_tblspc/NNN
+(1 row)
+
+-- @@@ 7
+-- try setting and resetting some properties for the new tablespace
+ALTER TABLESPACE regress_tblspace SET (random_page_cost = 1.0, seq_page_cost = 1.1);
+-- @@@ 8
+ALTER TABLESPACE regress_tblspace SET (some_nonexistent_parameter = true);  -- fail
+ERROR:  unrecognized parameter "some_nonexistent_parameter"
+-- @@@ 9
+ALTER TABLESPACE regress_tblspace RESET (random_page_cost = 2.0); -- fail
+ERROR:  RESET must not include values for parameters
+-- @@@ 10
+ALTER TABLESPACE regress_tblspace RESET (random_page_cost, effective_io_concurrency); -- ok
+-- @@@ 11
+-- REINDEX (TABLESPACE)
+-- catalogs and system tablespaces
+-- system catalog, fail
+REINDEX (TABLESPACE regress_tblspace) TABLE pg_am;
+ERROR:  cannot move system relation "pg_am_name_index"
+-- @@@ 12
+REINDEX (TABLESPACE regress_tblspace) TABLE CONCURRENTLY pg_am;
+ERROR:  cannot reindex system catalogs concurrently
+-- @@@ 13
+-- shared catalog, fail
+REINDEX (TABLESPACE regress_tblspace) TABLE pg_authid;
+ERROR:  cannot move system relation "pg_authid_rolname_index"
+-- @@@ 14
+REINDEX (TABLESPACE regress_tblspace) TABLE CONCURRENTLY pg_authid;
+ERROR:  cannot reindex system catalogs concurrently
+-- @@@ 15
+-- toast relations, fail
+REINDEX (TABLESPACE regress_tblspace) INDEX pg_toast.pg_toast_1262_index;
+ERROR:  cannot move system relation "pg_toast_1262_index"
+-- @@@ 16
+REINDEX (TABLESPACE regress_tblspace) INDEX CONCURRENTLY pg_toast.pg_toast_1262_index;
+ERROR:  cannot reindex system catalogs concurrently
+-- @@@ 17
+REINDEX (TABLESPACE regress_tblspace) TABLE pg_toast.pg_toast_1262;
+ERROR:  cannot move system relation "pg_toast_1262_index"
+-- @@@ 18
+REINDEX (TABLESPACE regress_tblspace) TABLE CONCURRENTLY pg_toast.pg_toast_1262;
+ERROR:  cannot reindex system catalogs concurrently
+-- @@@ 19
+-- system catalog, fail
+REINDEX (TABLESPACE pg_global) TABLE pg_authid;
+ERROR:  cannot move system relation "pg_authid_rolname_index"
+-- @@@ 20
+REINDEX (TABLESPACE pg_global) TABLE CONCURRENTLY pg_authid;
+ERROR:  cannot reindex system catalogs concurrently
+-- @@@ 21
+-- table with toast relation
+CREATE TABLE regress_tblspace_test_tbl (num1 bigint, num2 double precision, t text);
+-- @@@ 22
+INSERT INTO regress_tblspace_test_tbl (num1, num2, t)
+  SELECT round(random()*100), random(), 'text'
+  FROM generate_series(1, 10) s(i);
+-- @@@ 23
+CREATE INDEX regress_tblspace_test_tbl_idx ON regress_tblspace_test_tbl (num1);
+-- @@@ 24
+-- move to global tablespace, fail
+REINDEX (TABLESPACE pg_global) INDEX regress_tblspace_test_tbl_idx;
+ERROR:  only shared relations can be placed in pg_global tablespace
+-- @@@ 25
+REINDEX (TABLESPACE pg_global) INDEX CONCURRENTLY regress_tblspace_test_tbl_idx;
+ERROR:  cannot move non-shared relation to tablespace "pg_global"
+-- @@@ 26
+-- check transactional behavior of REINDEX (TABLESPACE)
+BEGIN;
+-- @@@ 27
+REINDEX (TABLESPACE regress_tblspace) INDEX regress_tblspace_test_tbl_idx;
+-- @@@ 28
+REINDEX (TABLESPACE regress_tblspace) TABLE regress_tblspace_test_tbl;
+-- @@@ 29
+ROLLBACK;
+-- @@@ 30
+-- no relation moved to the new tablespace
+SELECT c.relname FROM pg_class c, pg_tablespace s
+  WHERE c.reltablespace = s.oid AND s.spcname = 'regress_tblspace';
+ relname 
+---------
+(0 rows)
+
+-- @@@ 31
+-- check that all indexes are moved to a new tablespace with different
+-- relfilenode.
+-- Save first the existing relfilenode for the toast and main relations.
+SELECT relfilenode as main_filenode FROM pg_class
+  WHERE relname = 'regress_tblspace_test_tbl_idx' \gset
+-- @@@ 32
+SELECT relfilenode as toast_filenode FROM pg_class
+  WHERE oid =
+    (SELECT i.indexrelid
+       FROM pg_class c,
+            pg_index i
+       WHERE i.indrelid = c.reltoastrelid AND
+             c.relname = 'regress_tblspace_test_tbl') \gset
+-- @@@ 33
+REINDEX (TABLESPACE regress_tblspace) TABLE regress_tblspace_test_tbl;
+-- @@@ 34
+SELECT c.relname FROM pg_class c, pg_tablespace s
+  WHERE c.reltablespace = s.oid AND s.spcname = 'regress_tblspace'
+  ORDER BY c.relname;
+            relname            
+-------------------------------
+ regress_tblspace_test_tbl_idx
+(1 row)
+
+-- @@@ 35
+ALTER TABLE regress_tblspace_test_tbl SET TABLESPACE regress_tblspace;
+-- @@@ 36
+ALTER TABLE regress_tblspace_test_tbl SET TABLESPACE pg_default;
+-- @@@ 37
+SELECT c.relname FROM pg_class c, pg_tablespace s
+  WHERE c.reltablespace = s.oid AND s.spcname = 'regress_tblspace'
+  ORDER BY c.relname;
+            relname            
+-------------------------------
+ regress_tblspace_test_tbl_idx
+(1 row)
+
+-- @@@ 38
+-- Move back to the default tablespace.
+ALTER INDEX regress_tblspace_test_tbl_idx SET TABLESPACE pg_default;
+-- @@@ 39
+SELECT c.relname FROM pg_class c, pg_tablespace s
+  WHERE c.reltablespace = s.oid AND s.spcname = 'regress_tblspace'
+  ORDER BY c.relname;
+ relname 
+---------
+(0 rows)
+
+-- @@@ 40
+REINDEX (TABLESPACE regress_tblspace, CONCURRENTLY) TABLE regress_tblspace_test_tbl;
+-- @@@ 41
+SELECT c.relname FROM pg_class c, pg_tablespace s
+  WHERE c.reltablespace = s.oid AND s.spcname = 'regress_tblspace'
+  ORDER BY c.relname;
+            relname            
+-------------------------------
+ regress_tblspace_test_tbl_idx
+(1 row)
+
+-- @@@ 42
+SELECT relfilenode = :main_filenode AS main_same FROM pg_class
+  WHERE relname = 'regress_tblspace_test_tbl_idx';
+ main_same 
+-----------
+ f
+(1 row)
+
+-- @@@ 43
+SELECT relfilenode = :toast_filenode as toast_same FROM pg_class
+  WHERE oid =
+    (SELECT i.indexrelid
+       FROM pg_class c,
+            pg_index i
+       WHERE i.indrelid = c.reltoastrelid AND
+             c.relname = 'regress_tblspace_test_tbl');
+ toast_same 
+------------
+ f
+(1 row)
+
+-- @@@ 44
+DROP TABLE regress_tblspace_test_tbl;
+-- @@@ 45
+-- REINDEX (TABLESPACE) with partitions
+-- Create a partition tree and check the set of relations reindexed
+-- with their new tablespace.
+CREATE TABLE tbspace_reindex_part (c1 int, c2 int) PARTITION BY RANGE (c1);
+-- @@@ 46
+CREATE TABLE tbspace_reindex_part_0 PARTITION OF tbspace_reindex_part
+  FOR VALUES FROM (0) TO (10) PARTITION BY list (c2);
+-- @@@ 47
+CREATE TABLE tbspace_reindex_part_0_1 PARTITION OF tbspace_reindex_part_0
+  FOR VALUES IN (1);
+-- @@@ 48
+CREATE TABLE tbspace_reindex_part_0_2 PARTITION OF tbspace_reindex_part_0
+  FOR VALUES IN (2);
+-- @@@ 49
+-- This partitioned table will have no partitions.
+CREATE TABLE tbspace_reindex_part_10 PARTITION OF tbspace_reindex_part
+   FOR VALUES FROM (10) TO (20) PARTITION BY list (c2);
+-- @@@ 50
+-- Create some partitioned indexes
+CREATE INDEX tbspace_reindex_part_index ON ONLY tbspace_reindex_part (c1);
+-- @@@ 51
+CREATE INDEX tbspace_reindex_part_index_0 ON ONLY tbspace_reindex_part_0 (c1);
+-- @@@ 52
+ALTER INDEX tbspace_reindex_part_index ATTACH PARTITION tbspace_reindex_part_index_0;
+-- @@@ 53
+-- This partitioned index will have no partitions.
+CREATE INDEX tbspace_reindex_part_index_10 ON ONLY tbspace_reindex_part_10 (c1);
+-- @@@ 54
+ALTER INDEX tbspace_reindex_part_index ATTACH PARTITION tbspace_reindex_part_index_10;
+-- @@@ 55
+CREATE INDEX tbspace_reindex_part_index_0_1 ON ONLY tbspace_reindex_part_0_1 (c1);
+-- @@@ 56
+ALTER INDEX tbspace_reindex_part_index_0 ATTACH PARTITION tbspace_reindex_part_index_0_1;
+-- @@@ 57
+CREATE INDEX tbspace_reindex_part_index_0_2 ON ONLY tbspace_reindex_part_0_2 (c1);
+-- @@@ 58
+ALTER INDEX tbspace_reindex_part_index_0 ATTACH PARTITION tbspace_reindex_part_index_0_2;
+-- @@@ 59
+SELECT relid, parentrelid, level FROM pg_partition_tree('tbspace_reindex_part_index')
+  ORDER BY relid, level;
+             relid              |         parentrelid          | level 
+--------------------------------+------------------------------+-------
+ tbspace_reindex_part_index     |                              |     0
+ tbspace_reindex_part_index_0   | tbspace_reindex_part_index   |     1
+ tbspace_reindex_part_index_10  | tbspace_reindex_part_index   |     1
+ tbspace_reindex_part_index_0_1 | tbspace_reindex_part_index_0 |     2
+ tbspace_reindex_part_index_0_2 | tbspace_reindex_part_index_0 |     2
+(5 rows)
+
+-- @@@ 60
+-- Track the original tablespace, relfilenode and OID of each index
+-- in the tree.
+CREATE TEMP TABLE reindex_temp_before AS
+  SELECT oid, relname, relfilenode, reltablespace
+  FROM pg_class
+    WHERE relname ~ 'tbspace_reindex_part_index';
+-- @@@ 61
+REINDEX (TABLESPACE regress_tblspace, CONCURRENTLY) TABLE tbspace_reindex_part;
+-- @@@ 62
+-- REINDEX CONCURRENTLY changes the OID of the old relation, hence a check
+-- based on the relation name below.
+SELECT b.relname,
+       CASE WHEN a.relfilenode = b.relfilenode THEN 'relfilenode is unchanged'
+       ELSE 'relfilenode has changed' END AS filenode,
+       CASE WHEN a.reltablespace = b.reltablespace THEN 'reltablespace is unchanged'
+       ELSE 'reltablespace has changed' END AS tbspace
+  FROM reindex_temp_before b JOIN pg_class a ON b.relname = a.relname
+  ORDER BY 1;
+            relname             |         filenode         |          tbspace           
+--------------------------------+--------------------------+----------------------------
+ tbspace_reindex_part_index     | relfilenode is unchanged | reltablespace is unchanged
+ tbspace_reindex_part_index_0   | relfilenode is unchanged | reltablespace is unchanged
+ tbspace_reindex_part_index_0_1 | relfilenode has changed  | reltablespace has changed
+ tbspace_reindex_part_index_0_2 | relfilenode has changed  | reltablespace has changed
+ tbspace_reindex_part_index_10  | relfilenode is unchanged | reltablespace is unchanged
+(5 rows)
+
+-- @@@ 63
+DROP TABLE tbspace_reindex_part;
+-- @@@ 64
+-- create a schema we can use
+CREATE SCHEMA testschema;
+-- @@@ 65
+-- try a table
+CREATE TABLE testschema.foo (i int) TABLESPACE regress_tblspace;
+-- @@@ 66
+SELECT relname, spcname FROM pg_catalog.pg_tablespace t, pg_catalog.pg_class c
+    where c.reltablespace = t.oid AND c.relname = 'foo';
+ relname |     spcname      
+---------+------------------
+ foo     | regress_tblspace
+(1 row)
+
+-- @@@ 67
+INSERT INTO testschema.foo VALUES(1);
+-- @@@ 68
+INSERT INTO testschema.foo VALUES(2);
+-- @@@ 69
+-- tables from dynamic sources
+CREATE TABLE testschema.asselect TABLESPACE regress_tblspace AS SELECT 1;
+-- @@@ 70
+SELECT relname, spcname FROM pg_catalog.pg_tablespace t, pg_catalog.pg_class c
+    where c.reltablespace = t.oid AND c.relname = 'asselect';
+ relname  |     spcname      
+----------+------------------
+ asselect | regress_tblspace
+(1 row)
+
+-- @@@ 71
+PREPARE selectsource(int) AS SELECT $1;
+-- @@@ 72
+CREATE TABLE testschema.asexecute TABLESPACE regress_tblspace
+    AS EXECUTE selectsource(2);
+-- @@@ 73
+SELECT relname, spcname FROM pg_catalog.pg_tablespace t, pg_catalog.pg_class c
+    where c.reltablespace = t.oid AND c.relname = 'asexecute';
+  relname  |     spcname      
+-----------+------------------
+ asexecute | regress_tblspace
+(1 row)
+
+-- @@@ 74
+-- index
+CREATE INDEX foo_idx on testschema.foo(i) TABLESPACE regress_tblspace;
+-- @@@ 75
+SELECT relname, spcname FROM pg_catalog.pg_tablespace t, pg_catalog.pg_class c
+    where c.reltablespace = t.oid AND c.relname = 'foo_idx';
+ relname |     spcname      
+---------+------------------
+ foo_idx | regress_tblspace
+(1 row)
+
+-- @@@ 76
+-- check \d output
+\d testschema.foo
+              Table "testschema.foo"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ i      | integer |           |          | 
+Indexes:
+    "foo_idx" btree (i), tablespace "regress_tblspace"
+Tablespace: "regress_tblspace"
+
+-- @@@ 77
+\d testschema.foo_idx
+      Index "testschema.foo_idx"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ i      | integer | yes  | i
+btree, for table "testschema.foo"
+Tablespace: "regress_tblspace"
+
+-- @@@ 78
+--
+-- partitioned table
+--
+CREATE TABLE testschema.part (a int) PARTITION BY LIST (a);
+-- @@@ 79
+SET default_tablespace TO pg_global;
+-- @@@ 80
+CREATE TABLE testschema.part_1 PARTITION OF testschema.part FOR VALUES IN (1);
+ERROR:  only shared relations can be placed in pg_global tablespace
+-- @@@ 81
+RESET default_tablespace;
+-- @@@ 82
+CREATE TABLE testschema.part_1 PARTITION OF testschema.part FOR VALUES IN (1);
+-- @@@ 83
+SET default_tablespace TO regress_tblspace;
+-- @@@ 84
+CREATE TABLE testschema.part_2 PARTITION OF testschema.part FOR VALUES IN (2);
+-- @@@ 85
+SET default_tablespace TO pg_global;
+-- @@@ 86
+CREATE TABLE testschema.part_3 PARTITION OF testschema.part FOR VALUES IN (3);
+ERROR:  only shared relations can be placed in pg_global tablespace
+-- @@@ 87
+ALTER TABLE testschema.part SET TABLESPACE regress_tblspace;
+-- @@@ 88
+CREATE TABLE testschema.part_3 PARTITION OF testschema.part FOR VALUES IN (3);
+-- @@@ 89
+CREATE TABLE testschema.part_4 PARTITION OF testschema.part FOR VALUES IN (4)
+  TABLESPACE pg_default;
+-- @@@ 90
+CREATE TABLE testschema.part_56 PARTITION OF testschema.part FOR VALUES IN (5, 6)
+  PARTITION BY LIST (a);
+-- @@@ 91
+ALTER TABLE testschema.part SET TABLESPACE pg_default;
+-- @@@ 92
+CREATE TABLE testschema.part_78 PARTITION OF testschema.part FOR VALUES IN (7, 8)
+  PARTITION BY LIST (a);
+ERROR:  only shared relations can be placed in pg_global tablespace
+-- @@@ 93
+CREATE TABLE testschema.part_910 PARTITION OF testschema.part FOR VALUES IN (9, 10)
+  PARTITION BY LIST (a) TABLESPACE regress_tblspace;
+-- @@@ 94
+RESET default_tablespace;
+-- @@@ 95
+CREATE TABLE testschema.part_78 PARTITION OF testschema.part FOR VALUES IN (7, 8)
+  PARTITION BY LIST (a);
+-- @@@ 96
+SELECT relname, spcname FROM pg_catalog.pg_class c
+    JOIN pg_catalog.pg_namespace n ON (c.relnamespace = n.oid)
+    LEFT JOIN pg_catalog.pg_tablespace t ON c.reltablespace = t.oid
+    where c.relname LIKE 'part%' AND n.nspname = 'testschema' order by relname;
+ relname  |     spcname      
+----------+------------------
+ part     | 
+ part_1   | 
+ part_2   | regress_tblspace
+ part_3   | regress_tblspace
+ part_4   | 
+ part_56  | regress_tblspace
+ part_78  | 
+ part_910 | regress_tblspace
+(8 rows)
+
+-- @@@ 97
+RESET default_tablespace;
+-- @@@ 98
+DROP TABLE testschema.part;
+-- @@@ 99
+-- partitioned index
+CREATE TABLE testschema.part (a int) PARTITION BY LIST (a);
+-- @@@ 100
+CREATE TABLE testschema.part1 PARTITION OF testschema.part FOR VALUES IN (1);
+-- @@@ 101
+CREATE INDEX part_a_idx ON testschema.part (a) TABLESPACE regress_tblspace;
+-- @@@ 102
+CREATE TABLE testschema.part2 PARTITION OF testschema.part FOR VALUES IN (2);
+-- @@@ 103
+SELECT relname, spcname FROM pg_catalog.pg_tablespace t, pg_catalog.pg_class c
+    where c.reltablespace = t.oid AND c.relname LIKE 'part%_idx' ORDER BY relname;
+   relname   |     spcname      
+-------------+------------------
+ part1_a_idx | regress_tblspace
+ part2_a_idx | regress_tblspace
+ part_a_idx  | regress_tblspace
+(3 rows)
+
+-- @@@ 104
+\d testschema.part
+        Partitioned table "testschema.part"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ a      | integer |           |          | 
+Partition key: LIST (a)
+Indexes:
+    "part_a_idx" btree (a), tablespace "regress_tblspace"
+Number of partitions: 2 (Use \d+ to list them.)
+
+-- @@@ 105
+\d+ testschema.part
+                           Partitioned table "testschema.part"
+ Column |  Type   | Collation | Nullable | Default | Storage | Stats target | Description 
+--------+---------+-----------+----------+---------+---------+--------------+-------------
+ a      | integer |           |          |         | plain   |              | 
+Partition key: LIST (a)
+Indexes:
+    "part_a_idx" btree (a), tablespace "regress_tblspace"
+Partitions: testschema.part1 FOR VALUES IN (1),
+            testschema.part2 FOR VALUES IN (2)
+
+-- @@@ 106
+\d testschema.part1
+             Table "testschema.part1"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ a      | integer |           |          | 
+Partition of: testschema.part FOR VALUES IN (1)
+Indexes:
+    "part1_a_idx" btree (a), tablespace "regress_tblspace"
+
+-- @@@ 107
+\d+ testschema.part1
+                                 Table "testschema.part1"
+ Column |  Type   | Collation | Nullable | Default | Storage | Stats target | Description 
+--------+---------+-----------+----------+---------+---------+--------------+-------------
+ a      | integer |           |          |         | plain   |              | 
+Partition of: testschema.part FOR VALUES IN (1)
+Partition constraint: ((a IS NOT NULL) AND (a = 1))
+Indexes:
+    "part1_a_idx" btree (a), tablespace "regress_tblspace"
+
+-- @@@ 108
+\d testschema.part_a_idx
+Partitioned index "testschema.part_a_idx"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ a      | integer | yes  | a
+btree, for table "testschema.part"
+Number of partitions: 2 (Use \d+ to list them.)
+Tablespace: "regress_tblspace"
+
+-- @@@ 109
+\d+ testschema.part_a_idx
+           Partitioned index "testschema.part_a_idx"
+ Column |  Type   | Key? | Definition | Storage | Stats target 
+--------+---------+------+------------+---------+--------------
+ a      | integer | yes  | a          | plain   | 
+btree, for table "testschema.part"
+Partitions: testschema.part1_a_idx,
+            testschema.part2_a_idx
+Tablespace: "regress_tblspace"
+
+-- @@@ 110
+-- partitioned rels cannot specify the default tablespace.  These fail:
+CREATE TABLE testschema.dflt (a int PRIMARY KEY) PARTITION BY LIST (a) TABLESPACE pg_default;
+ERROR:  cannot specify default tablespace for partitioned relations
+-- @@@ 111
+CREATE TABLE testschema.dflt (a int PRIMARY KEY USING INDEX TABLESPACE pg_default) PARTITION BY LIST (a);
+ERROR:  cannot specify default tablespace for partitioned relations
+-- @@@ 112
+SET default_tablespace TO 'pg_default';
+-- @@@ 113
+CREATE TABLE testschema.dflt (a int PRIMARY KEY) PARTITION BY LIST (a) TABLESPACE regress_tblspace;
+ERROR:  cannot specify default tablespace for partitioned relations
+-- @@@ 114
+CREATE TABLE testschema.dflt (a int PRIMARY KEY USING INDEX TABLESPACE regress_tblspace) PARTITION BY LIST (a);
+ERROR:  cannot specify default tablespace for partitioned relations
+-- @@@ 115
+-- but these work:
+CREATE TABLE testschema.dflt (a int PRIMARY KEY USING INDEX TABLESPACE regress_tblspace) PARTITION BY LIST (a) TABLESPACE regress_tblspace;
+-- @@@ 116
+SET default_tablespace TO '';
+-- @@@ 117
+CREATE TABLE testschema.dflt2 (a int PRIMARY KEY) PARTITION BY LIST (a);
+-- @@@ 118
+DROP TABLE testschema.dflt, testschema.dflt2;
+-- @@@ 119
+-- check that default_tablespace doesn't affect ALTER TABLE index rebuilds
+CREATE TABLE testschema.test_default_tab(id bigint) TABLESPACE regress_tblspace;
+-- @@@ 120
+INSERT INTO testschema.test_default_tab VALUES (1);
+-- @@@ 121
+CREATE INDEX test_index1 on testschema.test_default_tab (id);
+-- @@@ 122
+CREATE INDEX test_index2 on testschema.test_default_tab (id) TABLESPACE regress_tblspace;
+-- @@@ 123
+ALTER TABLE testschema.test_default_tab ADD CONSTRAINT test_index3 PRIMARY KEY (id);
+-- @@@ 124
+ALTER TABLE testschema.test_default_tab ADD CONSTRAINT test_index4 UNIQUE (id) USING INDEX TABLESPACE regress_tblspace;
+-- @@@ 125
+\d testschema.test_index1
+   Index "testschema.test_index1"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+btree, for table "testschema.test_default_tab"
+
+-- @@@ 126
+\d testschema.test_index2
+   Index "testschema.test_index2"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+btree, for table "testschema.test_default_tab"
+Tablespace: "regress_tblspace"
+
+-- @@@ 127
+\d testschema.test_index3
+   Index "testschema.test_index3"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+primary key, btree, for table "testschema.test_default_tab"
+
+-- @@@ 128
+\d testschema.test_index4
+   Index "testschema.test_index4"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+unique, btree, for table "testschema.test_default_tab"
+Tablespace: "regress_tblspace"
+
+-- @@@ 129
+-- use a custom tablespace for default_tablespace
+SET default_tablespace TO regress_tblspace;
+-- @@@ 130
+-- tablespace should not change if no rewrite
+ALTER TABLE testschema.test_default_tab ALTER id TYPE bigint;
+-- @@@ 131
+\d testschema.test_index1
+   Index "testschema.test_index1"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+btree, for table "testschema.test_default_tab"
+
+-- @@@ 132
+\d testschema.test_index2
+   Index "testschema.test_index2"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+btree, for table "testschema.test_default_tab"
+Tablespace: "regress_tblspace"
+
+-- @@@ 133
+\d testschema.test_index3
+   Index "testschema.test_index3"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+primary key, btree, for table "testschema.test_default_tab"
+
+-- @@@ 134
+\d testschema.test_index4
+   Index "testschema.test_index4"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+unique, btree, for table "testschema.test_default_tab"
+Tablespace: "regress_tblspace"
+
+-- @@@ 135
+SELECT * FROM testschema.test_default_tab;
+ id 
+----
+  1
+(1 row)
+
+-- @@@ 136
+-- tablespace should not change even if there is an index rewrite
+ALTER TABLE testschema.test_default_tab ALTER id TYPE int;
+-- @@@ 137
+\d testschema.test_index1
+    Index "testschema.test_index1"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ id     | integer | yes  | id
+btree, for table "testschema.test_default_tab"
+
+-- @@@ 138
+\d testschema.test_index2
+    Index "testschema.test_index2"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ id     | integer | yes  | id
+btree, for table "testschema.test_default_tab"
+Tablespace: "regress_tblspace"
+
+-- @@@ 139
+\d testschema.test_index3
+    Index "testschema.test_index3"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ id     | integer | yes  | id
+primary key, btree, for table "testschema.test_default_tab"
+
+-- @@@ 140
+\d testschema.test_index4
+    Index "testschema.test_index4"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ id     | integer | yes  | id
+unique, btree, for table "testschema.test_default_tab"
+Tablespace: "regress_tblspace"
+
+-- @@@ 141
+SELECT * FROM testschema.test_default_tab;
+ id 
+----
+  1
+(1 row)
+
+-- @@@ 142
+-- now use the default tablespace for default_tablespace
+SET default_tablespace TO '';
+-- @@@ 143
+-- tablespace should not change if no rewrite
+ALTER TABLE testschema.test_default_tab ALTER id TYPE int;
+-- @@@ 144
+\d testschema.test_index1
+    Index "testschema.test_index1"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ id     | integer | yes  | id
+btree, for table "testschema.test_default_tab"
+
+-- @@@ 145
+\d testschema.test_index2
+    Index "testschema.test_index2"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ id     | integer | yes  | id
+btree, for table "testschema.test_default_tab"
+Tablespace: "regress_tblspace"
+
+-- @@@ 146
+\d testschema.test_index3
+    Index "testschema.test_index3"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ id     | integer | yes  | id
+primary key, btree, for table "testschema.test_default_tab"
+
+-- @@@ 147
+\d testschema.test_index4
+    Index "testschema.test_index4"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ id     | integer | yes  | id
+unique, btree, for table "testschema.test_default_tab"
+Tablespace: "regress_tblspace"
+
+-- @@@ 148
+-- tablespace should not change even if there is an index rewrite
+ALTER TABLE testschema.test_default_tab ALTER id TYPE bigint;
+-- @@@ 149
+\d testschema.test_index1
+   Index "testschema.test_index1"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+btree, for table "testschema.test_default_tab"
+
+-- @@@ 150
+\d testschema.test_index2
+   Index "testschema.test_index2"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+btree, for table "testschema.test_default_tab"
+Tablespace: "regress_tblspace"
+
+-- @@@ 151
+\d testschema.test_index3
+   Index "testschema.test_index3"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+primary key, btree, for table "testschema.test_default_tab"
+
+-- @@@ 152
+\d testschema.test_index4
+   Index "testschema.test_index4"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+unique, btree, for table "testschema.test_default_tab"
+Tablespace: "regress_tblspace"
+
+-- @@@ 153
+DROP TABLE testschema.test_default_tab;
+-- @@@ 154
+-- check that default_tablespace doesn't affect ALTER TABLE index rebuilds
+-- (this time with a partitioned table)
+CREATE TABLE testschema.test_default_tab_p(id bigint, val bigint)
+    PARTITION BY LIST (id) TABLESPACE regress_tblspace;
+-- @@@ 155
+CREATE TABLE testschema.test_default_tab_p1 PARTITION OF testschema.test_default_tab_p
+    FOR VALUES IN (1);
+-- @@@ 156
+INSERT INTO testschema.test_default_tab_p VALUES (1);
+-- @@@ 157
+CREATE INDEX test_index1 on testschema.test_default_tab_p (val);
+-- @@@ 158
+CREATE INDEX test_index2 on testschema.test_default_tab_p (val) TABLESPACE regress_tblspace;
+-- @@@ 159
+ALTER TABLE testschema.test_default_tab_p ADD CONSTRAINT test_index3 PRIMARY KEY (id);
+-- @@@ 160
+ALTER TABLE testschema.test_default_tab_p ADD CONSTRAINT test_index4 UNIQUE (id) USING INDEX TABLESPACE regress_tblspace;
+-- @@@ 161
+\d testschema.test_index1
+Partitioned index "testschema.test_index1"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ val    | bigint | yes  | val
+btree, for table "testschema.test_default_tab_p"
+Number of partitions: 1 (Use \d+ to list them.)
+
+-- @@@ 162
+\d testschema.test_index2
+Partitioned index "testschema.test_index2"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ val    | bigint | yes  | val
+btree, for table "testschema.test_default_tab_p"
+Number of partitions: 1 (Use \d+ to list them.)
+Tablespace: "regress_tblspace"
+
+-- @@@ 163
+\d testschema.test_index3
+Partitioned index "testschema.test_index3"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+primary key, btree, for table "testschema.test_default_tab_p"
+Number of partitions: 1 (Use \d+ to list them.)
+
+-- @@@ 164
+\d testschema.test_index4
+Partitioned index "testschema.test_index4"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+unique, btree, for table "testschema.test_default_tab_p"
+Number of partitions: 1 (Use \d+ to list them.)
+Tablespace: "regress_tblspace"
+
+-- @@@ 165
+-- use a custom tablespace for default_tablespace
+SET default_tablespace TO regress_tblspace;
+-- @@@ 166
+-- tablespace should not change if no rewrite
+ALTER TABLE testschema.test_default_tab_p ALTER val TYPE bigint;
+-- @@@ 167
+\d testschema.test_index1
+Partitioned index "testschema.test_index1"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ val    | bigint | yes  | val
+btree, for table "testschema.test_default_tab_p"
+Number of partitions: 1 (Use \d+ to list them.)
+
+-- @@@ 168
+\d testschema.test_index2
+Partitioned index "testschema.test_index2"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ val    | bigint | yes  | val
+btree, for table "testschema.test_default_tab_p"
+Number of partitions: 1 (Use \d+ to list them.)
+Tablespace: "regress_tblspace"
+
+-- @@@ 169
+\d testschema.test_index3
+Partitioned index "testschema.test_index3"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+primary key, btree, for table "testschema.test_default_tab_p"
+Number of partitions: 1 (Use \d+ to list them.)
+
+-- @@@ 170
+\d testschema.test_index4
+Partitioned index "testschema.test_index4"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+unique, btree, for table "testschema.test_default_tab_p"
+Number of partitions: 1 (Use \d+ to list them.)
+Tablespace: "regress_tblspace"
+
+-- @@@ 171
+SELECT * FROM testschema.test_default_tab_p;
+ id | val 
+----+-----
+  1 |    
+(1 row)
+
+-- @@@ 172
+-- tablespace should not change even if there is an index rewrite
+ALTER TABLE testschema.test_default_tab_p ALTER val TYPE int;
+-- @@@ 173
+\d testschema.test_index1
+Partitioned index "testschema.test_index1"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ val    | integer | yes  | val
+btree, for table "testschema.test_default_tab_p"
+Number of partitions: 1 (Use \d+ to list them.)
+
+-- @@@ 174
+\d testschema.test_index2
+Partitioned index "testschema.test_index2"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ val    | integer | yes  | val
+btree, for table "testschema.test_default_tab_p"
+Number of partitions: 1 (Use \d+ to list them.)
+Tablespace: "regress_tblspace"
+
+-- @@@ 175
+\d testschema.test_index3
+Partitioned index "testschema.test_index3"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+primary key, btree, for table "testschema.test_default_tab_p"
+Number of partitions: 1 (Use \d+ to list them.)
+
+-- @@@ 176
+\d testschema.test_index4
+Partitioned index "testschema.test_index4"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+unique, btree, for table "testschema.test_default_tab_p"
+Number of partitions: 1 (Use \d+ to list them.)
+Tablespace: "regress_tblspace"
+
+-- @@@ 177
+SELECT * FROM testschema.test_default_tab_p;
+ id | val 
+----+-----
+  1 |    
+(1 row)
+
+-- @@@ 178
+-- now use the default tablespace for default_tablespace
+SET default_tablespace TO '';
+-- @@@ 179
+-- tablespace should not change if no rewrite
+ALTER TABLE testschema.test_default_tab_p ALTER val TYPE int;
+-- @@@ 180
+\d testschema.test_index1
+Partitioned index "testschema.test_index1"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ val    | integer | yes  | val
+btree, for table "testschema.test_default_tab_p"
+Number of partitions: 1 (Use \d+ to list them.)
+
+-- @@@ 181
+\d testschema.test_index2
+Partitioned index "testschema.test_index2"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ val    | integer | yes  | val
+btree, for table "testschema.test_default_tab_p"
+Number of partitions: 1 (Use \d+ to list them.)
+Tablespace: "regress_tblspace"
+
+-- @@@ 182
+\d testschema.test_index3
+Partitioned index "testschema.test_index3"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+primary key, btree, for table "testschema.test_default_tab_p"
+Number of partitions: 1 (Use \d+ to list them.)
+
+-- @@@ 183
+\d testschema.test_index4
+Partitioned index "testschema.test_index4"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+unique, btree, for table "testschema.test_default_tab_p"
+Number of partitions: 1 (Use \d+ to list them.)
+Tablespace: "regress_tblspace"
+
+-- @@@ 184
+-- tablespace should not change even if there is an index rewrite
+ALTER TABLE testschema.test_default_tab_p ALTER val TYPE bigint;
+-- @@@ 185
+\d testschema.test_index1
+Partitioned index "testschema.test_index1"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ val    | bigint | yes  | val
+btree, for table "testschema.test_default_tab_p"
+Number of partitions: 1 (Use \d+ to list them.)
+
+-- @@@ 186
+\d testschema.test_index2
+Partitioned index "testschema.test_index2"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ val    | bigint | yes  | val
+btree, for table "testschema.test_default_tab_p"
+Number of partitions: 1 (Use \d+ to list them.)
+Tablespace: "regress_tblspace"
+
+-- @@@ 187
+\d testschema.test_index3
+Partitioned index "testschema.test_index3"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+primary key, btree, for table "testschema.test_default_tab_p"
+Number of partitions: 1 (Use \d+ to list them.)
+
+-- @@@ 188
+\d testschema.test_index4
+Partitioned index "testschema.test_index4"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ id     | bigint | yes  | id
+unique, btree, for table "testschema.test_default_tab_p"
+Number of partitions: 1 (Use \d+ to list them.)
+Tablespace: "regress_tblspace"
+
+-- @@@ 189
+DROP TABLE testschema.test_default_tab_p;
+-- @@@ 190
+-- check that default_tablespace affects index additions in ALTER TABLE
+CREATE TABLE testschema.test_tab(id int) TABLESPACE regress_tblspace;
+-- @@@ 191
+INSERT INTO testschema.test_tab VALUES (1);
+-- @@@ 192
+SET default_tablespace TO regress_tblspace;
+-- @@@ 193
+ALTER TABLE testschema.test_tab ADD CONSTRAINT test_tab_unique UNIQUE (id);
+-- @@@ 194
+SET default_tablespace TO '';
+-- @@@ 195
+ALTER TABLE testschema.test_tab ADD CONSTRAINT test_tab_pkey PRIMARY KEY (id);
+-- @@@ 196
+\d testschema.test_tab_unique
+  Index "testschema.test_tab_unique"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ id     | integer | yes  | id
+unique, btree, for table "testschema.test_tab"
+Tablespace: "regress_tblspace"
+
+-- @@@ 197
+\d testschema.test_tab_pkey
+   Index "testschema.test_tab_pkey"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ id     | integer | yes  | id
+primary key, btree, for table "testschema.test_tab"
+
+-- @@@ 198
+SELECT * FROM testschema.test_tab;
+ id 
+----
+  1
+(1 row)
+
+-- @@@ 199
+DROP TABLE testschema.test_tab;
+-- @@@ 200
+-- check that default_tablespace is handled correctly by multi-command
+-- ALTER TABLE that includes a tablespace-preserving rewrite
+CREATE TABLE testschema.test_tab(a int, b int, c int);
+-- @@@ 201
+SET default_tablespace TO regress_tblspace;
+-- @@@ 202
+ALTER TABLE testschema.test_tab ADD CONSTRAINT test_tab_unique UNIQUE (a);
+-- @@@ 203
+CREATE INDEX test_tab_a_idx ON testschema.test_tab (a);
+-- @@@ 204
+SET default_tablespace TO '';
+-- @@@ 205
+CREATE INDEX test_tab_b_idx ON testschema.test_tab (b);
+-- @@@ 206
+\d testschema.test_tab_unique
+  Index "testschema.test_tab_unique"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ a      | integer | yes  | a
+unique, btree, for table "testschema.test_tab"
+Tablespace: "regress_tblspace"
+
+-- @@@ 207
+\d testschema.test_tab_a_idx
+  Index "testschema.test_tab_a_idx"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ a      | integer | yes  | a
+btree, for table "testschema.test_tab"
+Tablespace: "regress_tblspace"
+
+-- @@@ 208
+\d testschema.test_tab_b_idx
+  Index "testschema.test_tab_b_idx"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ b      | integer | yes  | b
+btree, for table "testschema.test_tab"
+
+-- @@@ 209
+ALTER TABLE testschema.test_tab ALTER b TYPE bigint, ADD UNIQUE (c);
+-- @@@ 210
+\d testschema.test_tab_unique
+  Index "testschema.test_tab_unique"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ a      | integer | yes  | a
+unique, btree, for table "testschema.test_tab"
+Tablespace: "regress_tblspace"
+
+-- @@@ 211
+\d testschema.test_tab_a_idx
+  Index "testschema.test_tab_a_idx"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ a      | integer | yes  | a
+btree, for table "testschema.test_tab"
+Tablespace: "regress_tblspace"
+
+-- @@@ 212
+\d testschema.test_tab_b_idx
+  Index "testschema.test_tab_b_idx"
+ Column |  Type  | Key? | Definition 
+--------+--------+------+------------
+ b      | bigint | yes  | b
+btree, for table "testschema.test_tab"
+
+-- @@@ 213
+DROP TABLE testschema.test_tab;
+-- @@@ 214
+-- let's try moving a table from one place to another
+CREATE TABLE testschema.atable AS VALUES (1), (2);
+-- @@@ 215
+CREATE UNIQUE INDEX anindex ON testschema.atable(column1);
+-- @@@ 216
+ALTER TABLE testschema.atable SET TABLESPACE regress_tblspace;
+-- @@@ 217
+ALTER INDEX testschema.anindex SET TABLESPACE regress_tblspace;
+-- @@@ 218
+ALTER INDEX testschema.part_a_idx SET TABLESPACE pg_global;
+ERROR:  only shared relations can be placed in pg_global tablespace
+-- @@@ 219
+ALTER INDEX testschema.part_a_idx SET TABLESPACE pg_default;
+-- @@@ 220
+ALTER INDEX testschema.part_a_idx SET TABLESPACE regress_tblspace;
+-- @@@ 221
+INSERT INTO testschema.atable VALUES(3);	-- ok
+-- @@@ 222
+INSERT INTO testschema.atable VALUES(1);	-- fail (checks index)
+ERROR:  duplicate key value violates unique constraint "anindex"
+DETAIL:  Key (column1)=(1) already exists.
+-- @@@ 223
+SELECT COUNT(*) FROM testschema.atable;		-- checks heap
+ count 
+-------
+     3
+(1 row)
+
+-- @@@ 224
+-- let's try moving a materialized view from one place to another
+CREATE MATERIALIZED VIEW testschema.amv AS SELECT * FROM testschema.atable;
+-- @@@ 225
+ALTER MATERIALIZED VIEW testschema.amv SET TABLESPACE regress_tblspace;
+-- @@@ 226
+REFRESH MATERIALIZED VIEW testschema.amv;
+-- @@@ 227
+SELECT COUNT(*) FROM testschema.amv;
+ count 
+-------
+     3
+(1 row)
+
+-- @@@ 228
+-- Will fail with bad path
+CREATE TABLESPACE regress_badspace LOCATION '/no/such/location';
+ERROR:  directory "/no/such/location" does not exist
+-- @@@ 229
+-- No such tablespace
+CREATE TABLE bar (i int) TABLESPACE regress_nosuchspace;
+ERROR:  tablespace "regress_nosuchspace" does not exist
+-- @@@ 230
+-- Fail, in use for some partitioned object
+DROP TABLESPACE regress_tblspace;
+ERROR:  tablespace "regress_tblspace" cannot be dropped because some objects depend on it
+DETAIL:  tablespace for index testschema.part_a_idx
+-- @@@ 231
+ALTER INDEX testschema.part_a_idx SET TABLESPACE pg_default;
+-- @@@ 232
+-- Fail, not empty
+DROP TABLESPACE regress_tblspace;
+ERROR:  tablespace "regress_tblspace" is not empty
+-- @@@ 233
+-- Adequate cache initialization before GRANT
+\c -
+-- @@@ 234
+BEGIN;
+-- @@@ 235
+GRANT ALL ON TABLESPACE regress_tblspace TO PUBLIC;
+-- @@@ 236
+ROLLBACK;
+-- @@@ 237
+CREATE ROLE regress_tablespace_user1 login;
+-- @@@ 238
+CREATE ROLE regress_tablespace_user2 login;
+-- @@@ 239
+GRANT USAGE ON SCHEMA testschema TO regress_tablespace_user2;
+-- @@@ 240
+ALTER TABLESPACE regress_tblspace OWNER TO regress_tablespace_user1;
+-- @@@ 241
+CREATE TABLE testschema.tablespace_acl (c int);
+-- @@@ 242
+-- new owner lacks permission to create this index from scratch
+CREATE INDEX k ON testschema.tablespace_acl (c) TABLESPACE regress_tblspace;
+-- @@@ 243
+ALTER TABLE testschema.tablespace_acl OWNER TO regress_tablespace_user2;
+-- @@@ 244
+SET SESSION ROLE regress_tablespace_user2;
+-- @@@ 245
+CREATE TABLE tablespace_table (i int) TABLESPACE regress_tblspace; -- fail
+ERROR:  permission denied for tablespace regress_tblspace
+-- @@@ 246
+ALTER TABLE testschema.tablespace_acl ALTER c TYPE bigint;
+-- @@@ 247
+REINDEX (TABLESPACE regress_tblspace) TABLE tablespace_table; -- fail
+ERROR:  permission denied for tablespace regress_tblspace
+-- @@@ 248
+REINDEX (TABLESPACE regress_tblspace, CONCURRENTLY) TABLE tablespace_table; -- fail
+ERROR:  permission denied for tablespace regress_tblspace
+-- @@@ 249
+RESET ROLE;
+-- @@@ 250
+ALTER TABLESPACE regress_tblspace RENAME TO regress_tblspace_renamed;
+-- @@@ 251
+ALTER TABLE ALL IN TABLESPACE regress_tblspace_renamed SET TABLESPACE pg_default;
+-- @@@ 252
+ALTER INDEX ALL IN TABLESPACE regress_tblspace_renamed SET TABLESPACE pg_default;
+-- @@@ 253
+ALTER MATERIALIZED VIEW ALL IN TABLESPACE regress_tblspace_renamed SET TABLESPACE pg_default;
+-- @@@ 254
+-- Should show notice that nothing was done
+ALTER TABLE ALL IN TABLESPACE regress_tblspace_renamed SET TABLESPACE pg_default;
+NOTICE:  no matching relations in tablespace "regress_tblspace_renamed" found
+-- @@@ 255
+ALTER MATERIALIZED VIEW ALL IN TABLESPACE regress_tblspace_renamed SET TABLESPACE pg_default;
+NOTICE:  no matching relations in tablespace "regress_tblspace_renamed" found
+-- @@@ 256
+-- Should succeed
+DROP TABLESPACE regress_tblspace_renamed;
+-- @@@ 257
+DROP SCHEMA testschema CASCADE;
+NOTICE:  drop cascades to 7 other objects
+DETAIL:  drop cascades to table testschema.foo
+drop cascades to table testschema.asselect
+drop cascades to table testschema.asexecute
+drop cascades to table testschema.part
+drop cascades to table testschema.atable
+drop cascades to materialized view testschema.amv
+drop cascades to table testschema.tablespace_acl
+-- @@@ 258
+DROP ROLE regress_tablespace_user1;
+-- @@@ 259
+DROP ROLE regress_tablespace_user2;
+-- @@@ 260

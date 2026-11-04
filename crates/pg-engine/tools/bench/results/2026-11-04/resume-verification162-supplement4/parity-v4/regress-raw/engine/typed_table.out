@@ -1,0 +1,178 @@
+CREATE TABLE ttable1 OF nothing;
+ERROR:  type "nothing" does not exist
+LINE 1: CREATE TABLE ttable1 OF nothing;
+                                ^
+-- @@@ 0
+CREATE TYPE person_type AS (id int, name text);
+-- @@@ 1
+CREATE TABLE persons OF person_type;
+-- @@@ 2
+CREATE TABLE IF NOT EXISTS persons OF person_type;
+NOTICE:  relation "persons" already exists, skipping
+-- @@@ 3
+SELECT * FROM persons;
+ id | name 
+----+------
+(0 rows)
+
+-- @@@ 4
+\d persons
+              Table "public.persons"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ id     | integer |           |          | 
+ name   | text    |           |          | 
+Typed table of type: person_type
+
+-- @@@ 5
+CREATE FUNCTION get_all_persons() RETURNS SETOF person_type
+LANGUAGE SQL
+AS $$
+    SELECT * FROM persons;
+$$;
+-- @@@ 6
+SELECT * FROM get_all_persons();
+ id | name 
+----+------
+(0 rows)
+
+-- @@@ 7
+-- certain ALTER TABLE operations on typed tables are not allowed
+ALTER TABLE persons ADD COLUMN comment text;
+ERROR:  cannot add column to typed table
+-- @@@ 8
+ALTER TABLE persons DROP COLUMN name;
+ERROR:  cannot drop column from typed table
+-- @@@ 9
+ALTER TABLE persons RENAME COLUMN id TO num;
+ERROR:  cannot rename column of typed table
+-- @@@ 10
+ALTER TABLE persons ALTER COLUMN name TYPE varchar;
+ERROR:  cannot alter column type of typed table
+LINE 1: ALTER TABLE persons ALTER COLUMN name TYPE varchar;
+                                         ^
+-- @@@ 11
+CREATE TABLE stuff (id int);
+-- @@@ 12
+ALTER TABLE persons INHERIT stuff;
+ERROR:  cannot change inheritance of typed table
+-- @@@ 13
+CREATE TABLE personsx OF person_type (myname WITH OPTIONS NOT NULL); -- error
+ERROR:  column "myname" does not exist
+-- @@@ 14
+CREATE TABLE persons2 OF person_type (
+    id WITH OPTIONS PRIMARY KEY,
+    UNIQUE (name)
+);
+-- @@@ 15
+\d persons2
+              Table "public.persons2"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ id     | integer |           | not null | 
+ name   | text    |           |          | 
+Indexes:
+    "persons2_pkey" PRIMARY KEY, btree (id)
+    "persons2_name_key" UNIQUE CONSTRAINT, btree (name)
+Typed table of type: person_type
+
+-- @@@ 16
+CREATE TABLE persons3 OF person_type (
+    PRIMARY KEY (id),
+    name WITH OPTIONS DEFAULT ''
+);
+-- @@@ 17
+\d persons3
+              Table "public.persons3"
+ Column |  Type   | Collation | Nullable | Default  
+--------+---------+-----------+----------+----------
+ id     | integer |           | not null | 
+ name   | text    |           |          | ''::text
+Indexes:
+    "persons3_pkey" PRIMARY KEY, btree (id)
+Typed table of type: person_type
+
+-- @@@ 18
+CREATE TABLE persons4 OF person_type (
+    name WITH OPTIONS NOT NULL,
+    name WITH OPTIONS DEFAULT ''  -- error, specified more than once
+);
+ERROR:  column "name" specified more than once
+-- @@@ 19
+DROP TYPE person_type RESTRICT;
+ERROR:  cannot drop type person_type because other objects depend on it
+DETAIL:  table persons depends on type person_type
+function get_all_persons() depends on type person_type
+table persons2 depends on type person_type
+table persons3 depends on type person_type
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+-- @@@ 20
+DROP TYPE person_type CASCADE;
+NOTICE:  drop cascades to 4 other objects
+DETAIL:  drop cascades to table persons
+drop cascades to function get_all_persons()
+drop cascades to table persons2
+drop cascades to table persons3
+-- @@@ 21
+CREATE TABLE persons5 OF stuff; -- only CREATE TYPE AS types may be used
+ERROR:  type stuff is the row type of another table
+DETAIL:  A typed table must use a stand-alone composite type created with CREATE TYPE.
+-- @@@ 22
+CREATE TYPE tt_enum_type AS ENUM ('a');
+-- @@@ 23
+CREATE TABLE of_tt_enum_type OF tt_enum_type; -- not a composite type at all
+ERROR:  type tt_enum_type is not a composite type
+-- @@@ 24
+DROP TYPE tt_enum_type;
+-- @@@ 25
+DROP TABLE stuff;
+-- @@@ 26
+-- implicit casting
+CREATE TYPE person_type AS (id int, name text);
+-- @@@ 27
+CREATE TABLE persons OF person_type;
+-- @@@ 28
+INSERT INTO persons VALUES (1, 'test');
+-- @@@ 29
+CREATE FUNCTION namelen(person_type) RETURNS int LANGUAGE SQL AS $$ SELECT length($1.name) $$;
+-- @@@ 30
+SELECT id, namelen(persons) FROM persons;
+ id | namelen 
+----+---------
+  1 |       4
+(1 row)
+
+-- @@@ 31
+CREATE TABLE persons2 OF person_type (
+    id WITH OPTIONS PRIMARY KEY,
+    UNIQUE (name)
+);
+-- @@@ 32
+\d persons2
+              Table "public.persons2"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ id     | integer |           | not null | 
+ name   | text    |           |          | 
+Indexes:
+    "persons2_pkey" PRIMARY KEY, btree (id)
+    "persons2_name_key" UNIQUE CONSTRAINT, btree (name)
+Typed table of type: person_type
+
+-- @@@ 33
+CREATE TABLE persons3 OF person_type (
+    PRIMARY KEY (id),
+    name NOT NULL DEFAULT ''
+);
+-- @@@ 34
+\d persons3
+              Table "public.persons3"
+ Column |  Type   | Collation | Nullable | Default  
+--------+---------+-----------+----------+----------
+ id     | integer |           | not null | 
+ name   | text    |           | not null | ''::text
+Indexes:
+    "persons3_pkey" PRIMARY KEY, btree (id)
+Typed table of type: person_type
+
+-- @@@ 35

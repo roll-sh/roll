@@ -1,0 +1,893 @@
+--
+-- Enum tests
+--
+CREATE TYPE rainbow AS ENUM ('red', 'orange', 'yellow', 'green', 'blue', 'purple');
+-- @@@ 0
+--
+-- Did it create the right number of rows?
+--
+SELECT COUNT(*) FROM pg_enum WHERE enumtypid = 'rainbow'::regtype;
+ count 
+-------
+     6
+(1 row)
+
+-- @@@ 1
+--
+-- I/O functions
+--
+SELECT 'red'::rainbow;
+ rainbow 
+---------
+ red
+(1 row)
+
+-- @@@ 2
+SELECT 'mauve'::rainbow;
+ERROR:  invalid input value for enum rainbow: "mauve"
+LINE 1: SELECT 'mauve'::rainbow;
+               ^
+-- @@@ 3
+-- Also try it with non-error-throwing API
+SELECT pg_input_is_valid('red', 'rainbow');
+ pg_input_is_valid 
+-------------------
+ t
+(1 row)
+
+-- @@@ 4
+SELECT pg_input_is_valid('mauve', 'rainbow');
+ pg_input_is_valid 
+-------------------
+ f
+(1 row)
+
+-- @@@ 5
+SELECT * FROM pg_input_error_info('mauve', 'rainbow');
+                    message                    | detail | hint | sql_error_code 
+-----------------------------------------------+--------+------+----------------
+ invalid input value for enum rainbow: "mauve" |        |      | 22P02
+(1 row)
+
+-- @@@ 6
+\x
+-- @@@ 7
+SELECT * FROM pg_input_error_info(repeat('too_long', 32), 'rainbow');
+-[ RECORD 1 ]--+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+message        | invalid input value for enum rainbow: "too_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_longtoo_long"
+detail         | 
+hint           | 
+sql_error_code | 22P02
+
+-- @@@ 8
+\x
+-- @@@ 9
+--
+-- adding new values
+--
+CREATE TYPE planets AS ENUM ( 'venus', 'earth', 'mars' );
+-- @@@ 10
+SELECT enumlabel, enumsortorder
+FROM pg_enum
+WHERE enumtypid = 'planets'::regtype
+ORDER BY 2;
+ enumlabel | enumsortorder 
+-----------+---------------
+ venus     |             1
+ earth     |             2
+ mars      |             3
+(3 rows)
+
+-- @@@ 11
+ALTER TYPE planets ADD VALUE 'uranus';
+-- @@@ 12
+SELECT enumlabel, enumsortorder
+FROM pg_enum
+WHERE enumtypid = 'planets'::regtype
+ORDER BY 2;
+ enumlabel | enumsortorder 
+-----------+---------------
+ venus     |             1
+ earth     |             2
+ mars      |             3
+ uranus    |             4
+(4 rows)
+
+-- @@@ 13
+ALTER TYPE planets ADD VALUE 'mercury' BEFORE 'venus';
+-- @@@ 14
+ALTER TYPE planets ADD VALUE 'saturn' BEFORE 'uranus';
+-- @@@ 15
+ALTER TYPE planets ADD VALUE 'jupiter' AFTER 'mars';
+-- @@@ 16
+ALTER TYPE planets ADD VALUE 'neptune' AFTER 'uranus';
+-- @@@ 17
+SELECT enumlabel, enumsortorder
+FROM pg_enum
+WHERE enumtypid = 'planets'::regtype
+ORDER BY 2;
+ enumlabel | enumsortorder 
+-----------+---------------
+ mercury   |             0
+ venus     |             1
+ earth     |             2
+ mars      |             3
+ jupiter   |          3.25
+ saturn    |           3.5
+ uranus    |             4
+ neptune   |             5
+(8 rows)
+
+-- @@@ 18
+SELECT enumlabel, enumsortorder
+FROM pg_enum
+WHERE enumtypid = 'planets'::regtype
+ORDER BY enumlabel::planets;
+ enumlabel | enumsortorder 
+-----------+---------------
+ mercury   |             0
+ venus     |             1
+ earth     |             2
+ mars      |             3
+ jupiter   |          3.25
+ saturn    |           3.5
+ uranus    |             4
+ neptune   |             5
+(8 rows)
+
+-- @@@ 19
+-- errors for adding labels
+ALTER TYPE planets ADD VALUE
+  'plutoplutoplutoplutoplutoplutoplutoplutoplutoplutoplutoplutoplutopluto';
+ERROR:  invalid enum label "plutoplutoplutoplutoplutoplutoplutoplutoplutoplutoplutoplutoplutopluto"
+DETAIL:  Labels must be 63 bytes or less.
+-- @@@ 20
+ALTER TYPE planets ADD VALUE 'pluto' AFTER 'zeus';
+ERROR:  "zeus" is not an existing enum label
+-- @@@ 21
+-- if not exists tests
+--  existing value gives error
+ALTER TYPE planets ADD VALUE 'mercury';
+ERROR:  enum label "mercury" already exists
+-- @@@ 22
+-- unless IF NOT EXISTS is specified
+ALTER TYPE planets ADD VALUE IF NOT EXISTS 'mercury';
+NOTICE:  enum label "mercury" already exists, skipping
+-- @@@ 23
+-- should be neptune, not mercury
+SELECT enum_last(NULL::planets);
+ enum_last 
+-----------
+ neptune
+(1 row)
+
+-- @@@ 24
+ALTER TYPE planets ADD VALUE IF NOT EXISTS 'pluto';
+-- @@@ 25
+-- should be pluto, i.e. the new value
+SELECT enum_last(NULL::planets);
+ enum_last 
+-----------
+ pluto
+(1 row)
+
+-- @@@ 26
+--
+-- Test inserting so many values that we have to renumber
+--
+create type insenum as enum ('L1', 'L2');
+-- @@@ 27
+alter type insenum add value 'i1' before 'L2';
+-- @@@ 28
+alter type insenum add value 'i2' before 'L2';
+-- @@@ 29
+alter type insenum add value 'i3' before 'L2';
+-- @@@ 30
+alter type insenum add value 'i4' before 'L2';
+-- @@@ 31
+alter type insenum add value 'i5' before 'L2';
+-- @@@ 32
+alter type insenum add value 'i6' before 'L2';
+-- @@@ 33
+alter type insenum add value 'i7' before 'L2';
+-- @@@ 34
+alter type insenum add value 'i8' before 'L2';
+-- @@@ 35
+alter type insenum add value 'i9' before 'L2';
+-- @@@ 36
+alter type insenum add value 'i10' before 'L2';
+-- @@@ 37
+alter type insenum add value 'i11' before 'L2';
+-- @@@ 38
+alter type insenum add value 'i12' before 'L2';
+-- @@@ 39
+alter type insenum add value 'i13' before 'L2';
+-- @@@ 40
+alter type insenum add value 'i14' before 'L2';
+-- @@@ 41
+alter type insenum add value 'i15' before 'L2';
+-- @@@ 42
+alter type insenum add value 'i16' before 'L2';
+-- @@@ 43
+alter type insenum add value 'i17' before 'L2';
+-- @@@ 44
+alter type insenum add value 'i18' before 'L2';
+-- @@@ 45
+alter type insenum add value 'i19' before 'L2';
+-- @@@ 46
+alter type insenum add value 'i20' before 'L2';
+-- @@@ 47
+alter type insenum add value 'i21' before 'L2';
+-- @@@ 48
+alter type insenum add value 'i22' before 'L2';
+-- @@@ 49
+alter type insenum add value 'i23' before 'L2';
+-- @@@ 50
+alter type insenum add value 'i24' before 'L2';
+-- @@@ 51
+alter type insenum add value 'i25' before 'L2';
+-- @@@ 52
+alter type insenum add value 'i26' before 'L2';
+-- @@@ 53
+alter type insenum add value 'i27' before 'L2';
+-- @@@ 54
+alter type insenum add value 'i28' before 'L2';
+-- @@@ 55
+alter type insenum add value 'i29' before 'L2';
+-- @@@ 56
+alter type insenum add value 'i30' before 'L2';
+-- @@@ 57
+-- The exact values of enumsortorder will now depend on the local properties
+-- of float4, but in any reasonable implementation we should get at least
+-- 20 splits before having to renumber; so only hide values > 20.
+SELECT enumlabel,
+       case when enumsortorder > 20 then null else enumsortorder end as so
+FROM pg_enum
+WHERE enumtypid = 'insenum'::regtype
+ORDER BY enumsortorder;
+ enumlabel | so 
+-----------+----
+ L1        |  1
+ i1        |  2
+ i2        |  3
+ i3        |  4
+ i4        |  5
+ i5        |  6
+ i6        |  7
+ i7        |  8
+ i8        |  9
+ i9        | 10
+ i10       | 11
+ i11       | 12
+ i12       | 13
+ i13       | 14
+ i14       | 15
+ i15       | 16
+ i16       | 17
+ i17       | 18
+ i18       | 19
+ i19       | 20
+ i20       |   
+ i21       |   
+ i22       |   
+ i23       |   
+ i24       |   
+ i25       |   
+ i26       |   
+ i27       |   
+ i28       |   
+ i29       |   
+ i30       |   
+ L2        |   
+(32 rows)
+
+-- @@@ 58
+--
+-- Basic table creation, row selection
+--
+CREATE TABLE enumtest (col rainbow);
+-- @@@ 59
+INSERT INTO enumtest values ('red'), ('orange'), ('yellow'), ('green');
+-- @@@ 60
+COPY enumtest FROM stdin;
+-- @@@ 61
+SELECT * FROM enumtest;
+  col   
+--------
+ red
+ orange
+ yellow
+ green
+ blue
+ purple
+(6 rows)
+
+-- @@@ 62
+--
+-- Operators, no index
+--
+SELECT * FROM enumtest WHERE col = 'orange';
+  col   
+--------
+ orange
+(1 row)
+
+-- @@@ 63
+SELECT * FROM enumtest WHERE col <> 'orange' ORDER BY col;
+  col   
+--------
+ red
+ yellow
+ green
+ blue
+ purple
+(5 rows)
+
+-- @@@ 64
+SELECT * FROM enumtest WHERE col > 'yellow' ORDER BY col;
+  col   
+--------
+ green
+ blue
+ purple
+(3 rows)
+
+-- @@@ 65
+SELECT * FROM enumtest WHERE col >= 'yellow' ORDER BY col;
+  col   
+--------
+ yellow
+ green
+ blue
+ purple
+(4 rows)
+
+-- @@@ 66
+SELECT * FROM enumtest WHERE col < 'green' ORDER BY col;
+  col   
+--------
+ red
+ orange
+ yellow
+(3 rows)
+
+-- @@@ 67
+SELECT * FROM enumtest WHERE col <= 'green' ORDER BY col;
+  col   
+--------
+ red
+ orange
+ yellow
+ green
+(4 rows)
+
+-- @@@ 68
+--
+-- Cast to/from text
+--
+SELECT 'red'::rainbow::text || 'hithere';
+  ?column?  
+------------
+ redhithere
+(1 row)
+
+-- @@@ 69
+SELECT 'red'::text::rainbow = 'red'::rainbow;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 70
+--
+-- Aggregates
+--
+SELECT min(col) FROM enumtest;
+ min 
+-----
+ red
+(1 row)
+
+-- @@@ 71
+SELECT max(col) FROM enumtest;
+  max   
+--------
+ purple
+(1 row)
+
+-- @@@ 72
+SELECT max(col) FROM enumtest WHERE col < 'green';
+  max   
+--------
+ yellow
+(1 row)
+
+-- @@@ 73
+--
+-- Index tests, force use of index
+--
+SET enable_seqscan = off;
+-- @@@ 74
+SET enable_bitmapscan = off;
+-- @@@ 75
+--
+-- Btree index / opclass with the various operators
+--
+CREATE UNIQUE INDEX enumtest_btree ON enumtest USING btree (col);
+-- @@@ 76
+SELECT * FROM enumtest WHERE col = 'orange';
+  col   
+--------
+ orange
+(1 row)
+
+-- @@@ 77
+SELECT * FROM enumtest WHERE col <> 'orange' ORDER BY col;
+  col   
+--------
+ red
+ yellow
+ green
+ blue
+ purple
+(5 rows)
+
+-- @@@ 78
+SELECT * FROM enumtest WHERE col > 'yellow' ORDER BY col;
+  col   
+--------
+ green
+ blue
+ purple
+(3 rows)
+
+-- @@@ 79
+SELECT * FROM enumtest WHERE col >= 'yellow' ORDER BY col;
+  col   
+--------
+ yellow
+ green
+ blue
+ purple
+(4 rows)
+
+-- @@@ 80
+SELECT * FROM enumtest WHERE col < 'green' ORDER BY col;
+  col   
+--------
+ red
+ orange
+ yellow
+(3 rows)
+
+-- @@@ 81
+SELECT * FROM enumtest WHERE col <= 'green' ORDER BY col;
+  col   
+--------
+ red
+ orange
+ yellow
+ green
+(4 rows)
+
+-- @@@ 82
+SELECT min(col) FROM enumtest;
+ min 
+-----
+ red
+(1 row)
+
+-- @@@ 83
+SELECT max(col) FROM enumtest;
+  max   
+--------
+ purple
+(1 row)
+
+-- @@@ 84
+SELECT max(col) FROM enumtest WHERE col < 'green';
+  max   
+--------
+ yellow
+(1 row)
+
+-- @@@ 85
+DROP INDEX enumtest_btree;
+-- @@@ 86
+--
+-- Hash index / opclass with the = operator
+--
+CREATE INDEX enumtest_hash ON enumtest USING hash (col);
+-- @@@ 87
+SELECT * FROM enumtest WHERE col = 'orange';
+  col   
+--------
+ orange
+(1 row)
+
+-- @@@ 88
+DROP INDEX enumtest_hash;
+-- @@@ 89
+--
+-- End index tests
+--
+RESET enable_seqscan;
+-- @@@ 90
+RESET enable_bitmapscan;
+-- @@@ 91
+--
+-- Domains over enums
+--
+CREATE DOMAIN rgb AS rainbow CHECK (VALUE IN ('red', 'green', 'blue'));
+-- @@@ 92
+SELECT 'red'::rgb;
+ rgb 
+-----
+ red
+(1 row)
+
+-- @@@ 93
+SELECT 'purple'::rgb;
+ERROR:  value for domain rgb violates check constraint "rgb_check"
+-- @@@ 94
+SELECT 'purple'::rainbow::rgb;
+ERROR:  value for domain rgb violates check constraint "rgb_check"
+-- @@@ 95
+DROP DOMAIN rgb;
+-- @@@ 96
+--
+-- Arrays
+--
+SELECT '{red,green,blue}'::rainbow[];
+     rainbow      
+------------------
+ {red,green,blue}
+(1 row)
+
+-- @@@ 97
+SELECT ('{red,green,blue}'::rainbow[])[2];
+ rainbow 
+---------
+ green
+(1 row)
+
+-- @@@ 98
+SELECT 'red' = ANY ('{red,green,blue}'::rainbow[]);
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 99
+SELECT 'yellow' = ANY ('{red,green,blue}'::rainbow[]);
+ ?column? 
+----------
+ f
+(1 row)
+
+-- @@@ 100
+SELECT 'red' = ALL ('{red,green,blue}'::rainbow[]);
+ ?column? 
+----------
+ f
+(1 row)
+
+-- @@@ 101
+SELECT 'red' = ALL ('{red,red}'::rainbow[]);
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 102
+--
+-- Support functions
+--
+SELECT enum_first(NULL::rainbow);
+ enum_first 
+------------
+ red
+(1 row)
+
+-- @@@ 103
+SELECT enum_last('green'::rainbow);
+ enum_last 
+-----------
+ purple
+(1 row)
+
+-- @@@ 104
+SELECT enum_range(NULL::rainbow);
+              enum_range               
+---------------------------------------
+ {red,orange,yellow,green,blue,purple}
+(1 row)
+
+-- @@@ 105
+SELECT enum_range('orange'::rainbow, 'green'::rainbow);
+      enum_range       
+-----------------------
+ {orange,yellow,green}
+(1 row)
+
+-- @@@ 106
+SELECT enum_range(NULL, 'green'::rainbow);
+        enum_range         
+---------------------------
+ {red,orange,yellow,green}
+(1 row)
+
+-- @@@ 107
+SELECT enum_range('orange'::rainbow, NULL);
+            enum_range             
+-----------------------------------
+ {orange,yellow,green,blue,purple}
+(1 row)
+
+-- @@@ 108
+SELECT enum_range(NULL::rainbow, NULL);
+              enum_range               
+---------------------------------------
+ {red,orange,yellow,green,blue,purple}
+(1 row)
+
+-- @@@ 109
+--
+-- User functions, can't test perl/python etc here since may not be compiled.
+--
+CREATE FUNCTION echo_me(anyenum) RETURNS text AS $$
+BEGIN
+RETURN $1::text || 'omg';
+END
+$$ LANGUAGE plpgsql;
+-- @@@ 110
+SELECT echo_me('red'::rainbow);
+ echo_me 
+---------
+ redomg
+(1 row)
+
+-- @@@ 111
+--
+-- Concrete function should override generic one
+--
+CREATE FUNCTION echo_me(rainbow) RETURNS text AS $$
+BEGIN
+RETURN $1::text || 'wtf';
+END
+$$ LANGUAGE plpgsql;
+-- @@@ 112
+SELECT echo_me('red'::rainbow);
+ echo_me 
+---------
+ redwtf
+(1 row)
+
+-- @@@ 113
+--
+-- If we drop the original generic one, we don't have to qualify the type
+-- anymore, since there's only one match
+--
+DROP FUNCTION echo_me(anyenum);
+-- @@@ 114
+SELECT echo_me('red');
+ echo_me 
+---------
+ redwtf
+(1 row)
+
+-- @@@ 115
+DROP FUNCTION echo_me(rainbow);
+-- @@@ 116
+--
+-- RI triggers on enum types
+--
+CREATE TABLE enumtest_parent (id rainbow PRIMARY KEY);
+-- @@@ 117
+CREATE TABLE enumtest_child (parent rainbow REFERENCES enumtest_parent);
+-- @@@ 118
+INSERT INTO enumtest_parent VALUES ('red');
+-- @@@ 119
+INSERT INTO enumtest_child VALUES ('red');
+-- @@@ 120
+INSERT INTO enumtest_child VALUES ('blue');  -- fail
+ERROR:  insert or update on table "enumtest_child" violates foreign key constraint "enumtest_child_parent_fkey"
+DETAIL:  Key (parent)=(blue) is not present in table "enumtest_parent".
+-- @@@ 121
+DELETE FROM enumtest_parent;  -- fail
+ERROR:  update or delete on table "enumtest_parent" violates foreign key constraint "enumtest_child_parent_fkey" on table "enumtest_child"
+DETAIL:  Key (id)=(red) is still referenced from table "enumtest_child".
+-- @@@ 122
+--
+-- cross-type RI should fail
+--
+CREATE TYPE bogus AS ENUM('good', 'bad', 'ugly');
+-- @@@ 123
+CREATE TABLE enumtest_bogus_child(parent bogus REFERENCES enumtest_parent);
+ERROR:  foreign key constraint "enumtest_bogus_child_parent_fkey" cannot be implemented
+DETAIL:  Key columns "parent" of the referencing table and "id" of the referenced table are of incompatible types: bogus and rainbow.
+-- @@@ 124
+DROP TYPE bogus;
+-- @@@ 125
+-- check renaming a value
+ALTER TYPE rainbow RENAME VALUE 'red' TO 'crimson';
+-- @@@ 126
+SELECT enumlabel, enumsortorder
+FROM pg_enum
+WHERE enumtypid = 'rainbow'::regtype
+ORDER BY 2;
+ enumlabel | enumsortorder 
+-----------+---------------
+ crimson   |             1
+ orange    |             2
+ yellow    |             3
+ green     |             4
+ blue      |             5
+ purple    |             6
+(6 rows)
+
+-- @@@ 127
+-- check that renaming a non-existent value fails
+ALTER TYPE rainbow RENAME VALUE 'red' TO 'crimson';
+ERROR:  "red" is not an existing enum label
+-- @@@ 128
+-- check that renaming to an existent value fails
+ALTER TYPE rainbow RENAME VALUE 'blue' TO 'green';
+ERROR:  enum label "green" already exists
+-- @@@ 129
+--
+-- check transactional behaviour of ALTER TYPE ... ADD VALUE
+--
+CREATE TYPE bogus AS ENUM('good');
+-- @@@ 130
+-- check that we can add new values to existing enums in a transaction
+-- but we can't use them
+BEGIN;
+-- @@@ 131
+ALTER TYPE bogus ADD VALUE 'new';
+-- @@@ 132
+SAVEPOINT x;
+-- @@@ 133
+SELECT 'new'::bogus;  -- unsafe
+ERROR:  unsafe use of new value "new" of enum type bogus
+LINE 1: SELECT 'new'::bogus;
+               ^
+HINT:  New enum values must be committed before they can be used.
+-- @@@ 134
+ROLLBACK TO x;
+-- @@@ 135
+SELECT enum_first(null::bogus);  -- safe
+ enum_first 
+------------
+ good
+(1 row)
+
+-- @@@ 136
+SELECT enum_last(null::bogus);  -- unsafe
+ERROR:  unsafe use of new value "new" of enum type bogus
+HINT:  New enum values must be committed before they can be used.
+-- @@@ 137
+ROLLBACK TO x;
+-- @@@ 138
+SELECT enum_range(null::bogus);  -- unsafe
+ERROR:  unsafe use of new value "new" of enum type bogus
+HINT:  New enum values must be committed before they can be used.
+-- @@@ 139
+ROLLBACK TO x;
+-- @@@ 140
+COMMIT;
+-- @@@ 141
+SELECT 'new'::bogus;  -- now safe
+ bogus 
+-------
+ new
+(1 row)
+
+-- @@@ 142
+SELECT enumlabel, enumsortorder
+FROM pg_enum
+WHERE enumtypid = 'bogus'::regtype
+ORDER BY 2;
+ enumlabel | enumsortorder 
+-----------+---------------
+ good      |             1
+ new       |             2
+(2 rows)
+
+-- @@@ 143
+-- check that we recognize the case where the enum already existed but was
+-- modified in the current txn; this should not be considered safe
+BEGIN;
+-- @@@ 144
+ALTER TYPE bogus RENAME TO bogon;
+-- @@@ 145
+ALTER TYPE bogon ADD VALUE 'bad';
+-- @@@ 146
+SELECT 'bad'::bogon;
+ERROR:  unsafe use of new value "bad" of enum type bogon
+LINE 1: SELECT 'bad'::bogon;
+               ^
+HINT:  New enum values must be committed before they can be used.
+-- @@@ 147
+ROLLBACK;
+-- @@@ 148
+-- but a renamed value is safe to use later in same transaction
+BEGIN;
+-- @@@ 149
+ALTER TYPE bogus RENAME VALUE 'good' to 'bad';
+-- @@@ 150
+SELECT 'bad'::bogus;
+ bogus 
+-------
+ bad
+(1 row)
+
+-- @@@ 151
+ROLLBACK;
+-- @@@ 152
+DROP TYPE bogus;
+-- @@@ 153
+-- check that values created during CREATE TYPE can be used in any case
+BEGIN;
+-- @@@ 154
+CREATE TYPE bogus AS ENUM('good','bad','ugly');
+-- @@@ 155
+ALTER TYPE bogus RENAME TO bogon;
+-- @@@ 156
+select enum_range(null::bogon);
+   enum_range    
+-----------------
+ {good,bad,ugly}
+(1 row)
+
+-- @@@ 157
+ROLLBACK;
+-- @@@ 158
+-- we must allow this usage to support pg_dump in binary upgrade mode
+BEGIN;
+-- @@@ 159
+CREATE TYPE bogus AS ENUM('good');
+-- @@@ 160
+ALTER TYPE bogus RENAME TO bogon;
+-- @@@ 161
+ALTER TYPE bogon ADD VALUE 'bad';
+-- @@@ 162
+ALTER TYPE bogon ADD VALUE 'ugly';
+-- @@@ 163
+select enum_range(null::bogon);
+   enum_range    
+-----------------
+ {good,bad,ugly}
+(1 row)
+
+-- @@@ 164
+ROLLBACK;
+-- @@@ 165
+--
+-- Cleanup
+--
+DROP TABLE enumtest_child;
+-- @@@ 166
+DROP TABLE enumtest_parent;
+-- @@@ 167
+DROP TABLE enumtest;
+-- @@@ 168
+DROP TYPE rainbow;
+-- @@@ 169
+--
+-- Verify properly cleaned up
+--
+SELECT COUNT(*) FROM pg_type WHERE typname = 'rainbow';
+ count 
+-------
+     0
+(1 row)
+
+-- @@@ 170
+SELECT * FROM pg_enum WHERE NOT EXISTS
+  (SELECT 1 FROM pg_type WHERE pg_type.oid = enumtypid);
+ oid | enumtypid | enumsortorder | enumlabel 
+-----+-----------+---------------+-----------
+(0 rows)
+
+-- @@@ 171

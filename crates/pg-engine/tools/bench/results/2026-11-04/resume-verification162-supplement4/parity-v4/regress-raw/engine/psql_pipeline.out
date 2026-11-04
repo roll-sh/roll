@@ -1,0 +1,1254 @@
+--
+-- Tests using psql pipelining
+--
+CREATE TABLE psql_pipeline(a INTEGER PRIMARY KEY, s TEXT);
+-- @@@ 0
+-- Single query
+\startpipeline
+-- @@@ 1
+SELECT $1 \bind 'val1' \sendpipeline
+-- @@@ 2
+\endpipeline
+ ?column? 
+----------
+ val1
+(1 row)
+
+-- @@@ 3
+\startpipeline
+-- @@@ 4
+SELECT 'val1';
+-- @@@ 5
+\endpipeline
+ ?column? 
+----------
+ val1
+(1 row)
+
+-- @@@ 6
+-- Multiple queries
+\startpipeline
+-- @@@ 7
+SELECT $1 \bind 'val1' \sendpipeline
+-- @@@ 8
+SELECT $1, $2 \bind 'val2' 'val3' \sendpipeline
+-- @@@ 9
+SELECT $1, $2 \bind 'val2' 'val3' \sendpipeline
+-- @@@ 10
+SELECT 'val4';
+-- @@@ 11
+SELECT 'val5', 'val6';
+-- @@@ 12
+\endpipeline
+ ?column? 
+----------
+ val1
+(1 row)
+
+ ?column? | ?column? 
+----------+----------
+ val2     | val3
+(1 row)
+
+ ?column? | ?column? 
+----------+----------
+ val2     | val3
+(1 row)
+
+ ?column? 
+----------
+ val4
+(1 row)
+
+ ?column? | ?column? 
+----------+----------
+ val5     | val6
+(1 row)
+
+-- @@@ 13
+-- Multiple queries in single line, separated by semicolons
+\startpipeline
+-- @@@ 14
+SELECT 1; SELECT 2; SELECT 3
+;
+-- @@@ 15
+\echo :PIPELINE_COMMAND_COUNT
+3
+-- @@@ 16
+\endpipeline
+ ?column? 
+----------
+        1
+(1 row)
+
+ ?column? 
+----------
+        2
+(1 row)
+
+ ?column? 
+----------
+        3
+(1 row)
+
+-- @@@ 17
+-- Test \flush
+\startpipeline
+-- @@@ 18
+\flush
+-- @@@ 19
+SELECT $1 \bind 'val1' \sendpipeline
+-- @@@ 20
+\flush
+-- @@@ 21
+SELECT $1, $2 \bind 'val2' 'val3' \sendpipeline
+-- @@@ 22
+SELECT $1, $2 \bind 'val2' 'val3' \sendpipeline
+-- @@@ 23
+\flush
+-- @@@ 24
+SELECT 'val4';
+-- @@@ 25
+SELECT 'val5', 'val6';
+-- @@@ 26
+\endpipeline
+ ?column? 
+----------
+ val1
+(1 row)
+
+ ?column? | ?column? 
+----------+----------
+ val2     | val3
+(1 row)
+
+ ?column? | ?column? 
+----------+----------
+ val2     | val3
+(1 row)
+
+ ?column? 
+----------
+ val4
+(1 row)
+
+ ?column? | ?column? 
+----------+----------
+ val5     | val6
+(1 row)
+
+-- @@@ 27
+-- Send multiple syncs
+\startpipeline
+-- @@@ 28
+\echo :PIPELINE_COMMAND_COUNT
+0
+-- @@@ 29
+\echo :PIPELINE_SYNC_COUNT
+0
+-- @@@ 30
+\echo :PIPELINE_RESULT_COUNT
+0
+-- @@@ 31
+SELECT $1 \bind 'val1' \sendpipeline
+-- @@@ 32
+\syncpipeline
+-- @@@ 33
+\syncpipeline
+-- @@@ 34
+SELECT $1, $2 \bind 'val2' 'val3' \sendpipeline
+-- @@@ 35
+\syncpipeline
+-- @@@ 36
+SELECT $1, $2 \bind 'val4' 'val5' \sendpipeline
+-- @@@ 37
+\echo :PIPELINE_COMMAND_COUNT
+1
+-- @@@ 38
+\echo :PIPELINE_SYNC_COUNT
+3
+-- @@@ 39
+\echo :PIPELINE_RESULT_COUNT
+2
+-- @@@ 40
+SELECT 'val7';
+-- @@@ 41
+\syncpipeline
+-- @@@ 42
+\syncpipeline
+-- @@@ 43
+SELECT 'val8';
+-- @@@ 44
+\syncpipeline
+-- @@@ 45
+SELECT 'val9';
+-- @@@ 46
+\echo :PIPELINE_COMMAND_COUNT
+1
+-- @@@ 47
+\echo :PIPELINE_SYNC_COUNT
+6
+-- @@@ 48
+\echo :PIPELINE_RESULT_COUNT
+5
+-- @@@ 49
+\endpipeline
+ ?column? 
+----------
+ val1
+(1 row)
+
+ ?column? | ?column? 
+----------+----------
+ val2     | val3
+(1 row)
+
+ ?column? | ?column? 
+----------+----------
+ val4     | val5
+(1 row)
+
+ ?column? 
+----------
+ val7
+(1 row)
+
+ ?column? 
+----------
+ val8
+(1 row)
+
+ ?column? 
+----------
+ val9
+(1 row)
+
+-- @@@ 50
+-- Query terminated with a semicolon replaces an unnamed prepared
+-- statement.
+\startpipeline
+-- @@@ 51
+SELECT $1 \parse ''
+-- @@@ 52
+SELECT 1;
+-- @@@ 53
+\bind_named ''
+-- @@@ 54
+\endpipeline
+ ?column? 
+----------
+        1
+(1 row)
+
+-- @@@ 55
+-- Extended query is appended to pipeline by a semicolon after a
+-- newline.
+\startpipeline
+-- @@@ 56
+SELECT $1 \bind 1
+;
+-- @@@ 57
+SELECT 2;
+-- @@@ 58
+\endpipeline
+ ?column? 
+----------
+ 1
+(1 row)
+
+ ?column? 
+----------
+        2
+(1 row)
+
+-- @@@ 59
+-- \startpipeline should not have any effect if already in a pipeline.
+\startpipeline
+-- @@@ 60
+\startpipeline
+-- @@@ 61
+SELECT $1 \bind 'val1' \sendpipeline
+-- @@@ 62
+\endpipeline
+ ?column? 
+----------
+ val1
+(1 row)
+
+-- @@@ 63
+-- Convert an implicit transaction block to an explicit transaction block.
+\startpipeline
+-- @@@ 64
+INSERT INTO psql_pipeline VALUES ($1) \bind 1 \sendpipeline
+-- @@@ 65
+BEGIN \bind \sendpipeline
+-- @@@ 66
+INSERT INTO psql_pipeline VALUES ($1) \bind 2 \sendpipeline
+-- @@@ 67
+ROLLBACK \bind \sendpipeline
+-- @@@ 68
+\endpipeline
+-- @@@ 69
+-- Multiple explicit transactions
+\startpipeline
+-- @@@ 70
+BEGIN \bind \sendpipeline
+-- @@@ 71
+INSERT INTO psql_pipeline VALUES ($1) \bind 1 \sendpipeline
+-- @@@ 72
+ROLLBACK \bind \sendpipeline
+-- @@@ 73
+BEGIN \bind \sendpipeline
+-- @@@ 74
+INSERT INTO psql_pipeline VALUES ($1) \bind 1 \sendpipeline
+-- @@@ 75
+COMMIT \bind \sendpipeline
+-- @@@ 76
+\endpipeline
+-- @@@ 77
+-- Use \parse and \bind_named
+\startpipeline
+-- @@@ 78
+SELECT $1 \parse ''
+-- @@@ 79
+SELECT $1, $2 \parse ''
+-- @@@ 80
+SELECT $2 \parse pipeline_1
+-- @@@ 81
+\bind_named '' 1 2 \sendpipeline
+-- @@@ 82
+\bind_named pipeline_1 2 \sendpipeline
+-- @@@ 83
+\endpipeline
+ERROR:  could not determine data type of parameter $1
+-- @@@ 84
+-- \getresults displays all results preceding a \flushrequest.
+\startpipeline
+-- @@@ 85
+SELECT $1 \bind 1 \sendpipeline
+-- @@@ 86
+SELECT $1 \bind 2 \sendpipeline
+-- @@@ 87
+\flushrequest
+-- @@@ 88
+\getresults
+ ?column? 
+----------
+ 1
+(1 row)
+
+ ?column? 
+----------
+ 2
+(1 row)
+
+-- @@@ 89
+\endpipeline
+-- @@@ 90
+-- \getresults displays all results preceding a \syncpipeline.
+\startpipeline
+-- @@@ 91
+SELECT $1 \bind 1 \sendpipeline
+-- @@@ 92
+SELECT $1 \bind 2 \sendpipeline
+-- @@@ 93
+\syncpipeline
+-- @@@ 94
+\getresults
+ ?column? 
+----------
+ 1
+(1 row)
+
+ ?column? 
+----------
+ 2
+(1 row)
+
+-- @@@ 95
+\endpipeline
+-- @@@ 96
+-- \getresults immediately returns if there is no result to fetch.
+\startpipeline
+-- @@@ 97
+\getresults
+No pending results to get
+-- @@@ 98
+SELECT $1 \bind 2 \sendpipeline
+-- @@@ 99
+\getresults
+No pending results to get
+-- @@@ 100
+\flushrequest
+-- @@@ 101
+\endpipeline
+ ?column? 
+----------
+ 2
+(1 row)
+
+-- @@@ 102
+\getresults
+No pending results to get
+-- @@@ 103
+-- \getresults only fetches results preceding a \flushrequest.
+\startpipeline
+-- @@@ 104
+SELECT $1 \bind 2 \sendpipeline
+-- @@@ 105
+\flushrequest
+-- @@@ 106
+SELECT $1 \bind 2 \sendpipeline
+-- @@@ 107
+\getresults
+ ?column? 
+----------
+ 2
+(1 row)
+
+-- @@@ 108
+\endpipeline
+ ?column? 
+----------
+ 2
+(1 row)
+
+-- @@@ 109
+-- \getresults only fetches results preceding a \syncpipeline.
+\startpipeline
+-- @@@ 110
+SELECT $1 \bind 2 \sendpipeline
+-- @@@ 111
+\syncpipeline
+-- @@@ 112
+SELECT $1 \bind 2 \sendpipeline
+-- @@@ 113
+\getresults
+ ?column? 
+----------
+ 2
+(1 row)
+
+-- @@@ 114
+\endpipeline
+ ?column? 
+----------
+ 2
+(1 row)
+
+-- @@@ 115
+-- Use pipeline with chunked results for both \getresults and \endpipeline.
+\startpipeline
+-- @@@ 116
+\set FETCH_COUNT 10
+-- @@@ 117
+SELECT $1 \bind 2 \sendpipeline
+-- @@@ 118
+\flushrequest
+-- @@@ 119
+\getresults
+ ?column? 
+----------
+ 2
+(1 row)
+
+-- @@@ 120
+SELECT $1 \bind 2 \sendpipeline
+-- @@@ 121
+\endpipeline
+ ?column? 
+----------
+ 2
+(1 row)
+
+-- @@@ 122
+\unset FETCH_COUNT
+-- @@@ 123
+-- \getresults with specific number of requested results.
+\startpipeline
+-- @@@ 124
+SELECT $1 \bind 1 \sendpipeline
+-- @@@ 125
+SELECT $1 \bind 2 \sendpipeline
+-- @@@ 126
+SELECT $1 \bind 3 \sendpipeline
+-- @@@ 127
+\echo :PIPELINE_SYNC_COUNT
+0
+-- @@@ 128
+\syncpipeline
+-- @@@ 129
+\echo :PIPELINE_SYNC_COUNT
+1
+-- @@@ 130
+\echo :PIPELINE_RESULT_COUNT
+3
+-- @@@ 131
+\getresults 1
+ ?column? 
+----------
+ 1
+(1 row)
+
+-- @@@ 132
+\echo :PIPELINE_RESULT_COUNT
+2
+-- @@@ 133
+SELECT $1 \bind 4 \sendpipeline
+-- @@@ 134
+\getresults 3
+ ?column? 
+----------
+ 2
+(1 row)
+
+ ?column? 
+----------
+ 3
+(1 row)
+
+-- @@@ 135
+\echo :PIPELINE_RESULT_COUNT
+0
+-- @@@ 136
+\endpipeline
+ ?column? 
+----------
+ 4
+(1 row)
+
+-- @@@ 137
+-- \syncpipeline count as one command to fetch for \getresults.
+\startpipeline
+-- @@@ 138
+\syncpipeline
+-- @@@ 139
+\syncpipeline
+-- @@@ 140
+SELECT $1 \bind 1 \sendpipeline
+-- @@@ 141
+\flushrequest
+-- @@@ 142
+\getresults 2
+-- @@@ 143
+\getresults 1
+ ?column? 
+----------
+ 1
+(1 row)
+
+-- @@@ 144
+\endpipeline
+-- @@@ 145
+-- \getresults 0 should get all the results.
+\startpipeline
+-- @@@ 146
+SELECT $1 \bind 1 \sendpipeline
+-- @@@ 147
+SELECT $1 \bind 2 \sendpipeline
+-- @@@ 148
+SELECT $1 \bind 3 \sendpipeline
+-- @@@ 149
+\syncpipeline
+-- @@@ 150
+\getresults 0
+ ?column? 
+----------
+ 1
+(1 row)
+
+ ?column? 
+----------
+ 2
+(1 row)
+
+ ?column? 
+----------
+ 3
+(1 row)
+
+-- @@@ 151
+\endpipeline
+-- @@@ 152
+--
+-- Pipeline errors
+--
+-- \endpipeline outside of pipeline should fail
+\endpipeline
+cannot send pipeline when not in pipeline mode
+-- @@@ 153
+-- After an aborted pipeline, commands after a \syncpipeline should be
+-- displayed.
+\startpipeline
+-- @@@ 154
+SELECT $1 \bind \sendpipeline
+-- @@@ 155
+\syncpipeline
+-- @@@ 156
+SELECT $1 \bind 1 \sendpipeline
+-- @@@ 157
+\endpipeline
+ERROR:  bind message supplies 0 parameters, but prepared statement "" requires 1
+ ?column? 
+----------
+ 1
+(1 row)
+
+-- @@@ 158
+-- For an incorrect number of parameters, the pipeline is aborted and
+-- the following queries will not be executed.
+\startpipeline
+-- @@@ 159
+SELECT \bind 'val1' \sendpipeline
+-- @@@ 160
+SELECT $1 \bind 'val1' \sendpipeline
+-- @@@ 161
+\endpipeline
+ERROR:  bind message supplies 1 parameters, but prepared statement "" requires 0
+-- @@@ 162
+-- Using a semicolon with a parameter triggers an error and aborts
+-- the pipeline.
+\startpipeline
+-- @@@ 163
+SELECT $1;
+-- @@@ 164
+SELECT 1;
+-- @@@ 165
+\endpipeline
+ERROR:  bind message supplies 0 parameters, but prepared statement "" requires 1
+-- @@@ 166
+-- An explicit transaction with an error needs to be rollbacked after
+-- the pipeline.
+\startpipeline
+-- @@@ 167
+BEGIN \bind \sendpipeline
+-- @@@ 168
+INSERT INTO psql_pipeline VALUES ($1) \bind 1 \sendpipeline
+-- @@@ 169
+ROLLBACK \bind \sendpipeline
+-- @@@ 170
+\endpipeline
+ERROR:  duplicate key value violates unique constraint "psql_pipeline_pkey"
+DETAIL:  Key (a)=(1) already exists.
+-- @@@ 171
+ROLLBACK;
+-- @@@ 172
+-- \watch is not allowed in a pipeline.
+\startpipeline
+-- @@@ 173
+SELECT \bind \sendpipeline
+-- @@@ 174
+\watch 1
+\watch not allowed in pipeline mode
+-- @@@ 175
+\endpipeline
+--
+(1 row)
+
+-- @@@ 176
+-- \gdesc should fail as synchronous commands are not allowed in a pipeline,
+-- and the pipeline should still be usable.
+\startpipeline
+-- @@@ 177
+SELECT $1 \bind 1 \gdesc
+synchronous command execution functions are not allowed in pipeline mode
+-- @@@ 178
+SELECT $1 \bind 1 \sendpipeline
+-- @@@ 179
+\endpipeline
+ ?column? 
+----------
+ 1
+(1 row)
+
+-- @@@ 180
+-- \gset is not allowed in a pipeline, pipeline should still be usable.
+\startpipeline
+-- @@@ 181
+SELECT $1 as i, $2 as j \parse ''
+-- @@@ 182
+SELECT $1 as k, $2 as l \parse 'second'
+-- @@@ 183
+\bind_named '' 1 2 \gset
+\gset not allowed in pipeline mode
+-- @@@ 184
+\bind_named second 1 2 \gset pref02_ \echo :pref02_i :pref02_j
+\gset not allowed in pipeline mode
+-- @@@ 185
+\bind_named '' 1 2 \sendpipeline
+-- @@@ 186
+\endpipeline
+ i | j 
+---+---
+ 1 | 2
+(1 row)
+
+-- @@@ 187
+-- \g and \gx are not allowed, pipeline should still be usable.
+\startpipeline
+-- @@@ 188
+SELECT $1 \bind 1 \g
+\g not allowed in pipeline mode
+-- @@@ 189
+SELECT $1 \bind 1 \g (format=unaligned tuples_only=on)
+\g not allowed in pipeline mode
+-- @@@ 190
+SELECT $1 \bind 1 \gx
+\gx not allowed in pipeline mode
+-- @@@ 191
+SELECT $1 \bind 1 \gx (format=unaligned tuples_only=on)
+\gx not allowed in pipeline mode
+-- @@@ 192
+\reset
+-- @@@ 193
+SELECT $1 \bind 1 \sendpipeline
+-- @@@ 194
+\endpipeline
+ ?column? 
+----------
+ 1
+(1 row)
+
+-- @@@ 195
+-- \g and \gx warnings should be emitted in an aborted pipeline, with
+-- pipeline still usable.
+\startpipeline
+-- @@@ 196
+SELECT $1 \bind \sendpipeline
+-- @@@ 197
+\flushrequest
+-- @@@ 198
+\getresults
+ERROR:  bind message supplies 0 parameters, but prepared statement "" requires 1
+-- @@@ 199
+SELECT $1 \bind 1 \g
+\g not allowed in pipeline mode
+-- @@@ 200
+SELECT $1 \bind 1 \gx
+\gx not allowed in pipeline mode
+-- @@@ 201
+\endpipeline
+-- @@@ 202
+-- \sendpipeline is not allowed outside of a pipeline
+\sendpipeline
+\sendpipeline not allowed outside of pipeline mode
+-- @@@ 203
+SELECT $1 \bind 1 \sendpipeline
+\sendpipeline not allowed outside of pipeline mode
+-- @@@ 204
+\reset
+-- @@@ 205
+-- \sendpipeline is not allowed if not preceded by \bind or \bind_named
+\startpipeline
+-- @@@ 206
+\sendpipeline
+\sendpipeline must be used after \bind or \bind_named
+-- @@@ 207
+SELECT 1 \sendpipeline
+\sendpipeline must be used after \bind or \bind_named
+-- @@@ 208
+\endpipeline
+-- @@@ 209
+-- \gexec is not allowed, pipeline should still be usable.
+\startpipeline
+-- @@@ 210
+SELECT 'INSERT INTO psql_pipeline(a) SELECT generate_series(1, 10)' \parse 'insert_stmt'
+-- @@@ 211
+\bind_named insert_stmt \gexec
+\gexec not allowed in pipeline mode
+-- @@@ 212
+\bind_named insert_stmt \sendpipeline
+-- @@@ 213
+SELECT COUNT(*) FROM psql_pipeline \bind \sendpipeline
+-- @@@ 214
+\endpipeline
+                          ?column?                          
+------------------------------------------------------------
+ INSERT INTO psql_pipeline(a) SELECT generate_series(1, 10)
+(1 row)
+
+ count 
+-------
+     1
+(1 row)
+
+-- @@@ 215
+-- After an error, pipeline is aborted and requires \syncpipeline to be
+-- reusable.
+\startpipeline
+-- @@@ 216
+SELECT $1 \bind \sendpipeline
+-- @@@ 217
+SELECT $1 \bind 1 \sendpipeline
+-- @@@ 218
+SELECT $1 \parse a
+-- @@@ 219
+\bind_named a 1 \sendpipeline
+-- @@@ 220
+\close_prepared a
+-- @@@ 221
+\flushrequest
+-- @@@ 222
+\getresults
+ERROR:  bind message supplies 0 parameters, but prepared statement "" requires 1
+-- @@@ 223
+-- Pipeline is aborted.
+SELECT $1 \bind 1 \sendpipeline
+-- @@@ 224
+SELECT $1 \parse a
+-- @@@ 225
+\bind_named a 1 \sendpipeline
+-- @@@ 226
+\close_prepared a
+-- @@@ 227
+-- Sync allows pipeline to recover.
+\syncpipeline
+-- @@@ 228
+\getresults
+Pipeline aborted, command did not run
+-- @@@ 229
+SELECT $1 \bind 1 \sendpipeline
+-- @@@ 230
+SELECT $1 \parse a
+-- @@@ 231
+\bind_named a 1 \sendpipeline
+-- @@@ 232
+\close_prepared a
+-- @@@ 233
+\flushrequest
+-- @@@ 234
+\getresults
+ ?column? 
+----------
+ 1
+(1 row)
+
+ ?column? 
+----------
+ 1
+(1 row)
+
+-- @@@ 235
+\endpipeline
+-- @@@ 236
+-- In an aborted pipeline, \getresults 1 aborts commands one at a time.
+\startpipeline
+-- @@@ 237
+SELECT $1 \bind \sendpipeline
+-- @@@ 238
+SELECT $1 \bind 1 \sendpipeline
+-- @@@ 239
+SELECT $1 \parse a
+-- @@@ 240
+\bind_named a 1 \sendpipeline
+-- @@@ 241
+\syncpipeline
+-- @@@ 242
+\getresults 1
+ERROR:  bind message supplies 0 parameters, but prepared statement "" requires 1
+-- @@@ 243
+\getresults 1
+Pipeline aborted, command did not run
+-- @@@ 244
+\getresults 1
+Pipeline aborted, command did not run
+-- @@@ 245
+\getresults 1
+Pipeline aborted, command did not run
+-- @@@ 246
+\getresults 1
+-- @@@ 247
+\endpipeline
+-- @@@ 248
+-- Test chunked results with an aborted pipeline.
+\startpipeline
+-- @@@ 249
+\set FETCH_COUNT 10
+-- @@@ 250
+SELECT $1 \bind \sendpipeline
+-- @@@ 251
+\flushrequest
+-- @@@ 252
+\getresults
+ERROR:  bind message supplies 0 parameters, but prepared statement "" requires 1
+-- @@@ 253
+SELECT $1 \bind \sendpipeline
+-- @@@ 254
+\endpipeline
+fetching results in chunked mode failed
+Pipeline aborted, command did not run
+-- @@@ 255
+\unset FETCH_COUNT
+-- @@@ 256
+-- \getresults returns an error when an incorrect number is provided.
+\startpipeline
+-- @@@ 257
+\getresults -1
+\getresults: invalid number of requested results
+-- @@@ 258
+\endpipeline
+-- @@@ 259
+-- \getresults when there is no result should not impact the next
+-- query executed.
+\getresults 1
+No pending results to get
+-- @@@ 260
+select 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+-- @@@ 261
+-- Error messages accumulate and are repeated.
+\startpipeline
+-- @@@ 262
+SELECT 1 \bind \sendpipeline
+-- @@@ 263
+\gdesc
+synchronous command execution functions are not allowed in pipeline mode
+-- @@@ 264
+\gdesc
+synchronous command execution functions are not allowed in pipeline mode
+synchronous command execution functions are not allowed in pipeline mode
+-- @@@ 265
+\endpipeline
+ ?column? 
+----------
+        1
+(1 row)
+
+-- @@@ 266
+--
+-- Pipelines and transaction blocks
+--
+-- SET LOCAL will issue a warning when modifying a GUC outside of a
+-- transaction block.  The change will still be valid as a pipeline
+-- runs within an implicit transaction block.  Sending a sync will
+-- commit the implicit transaction block. The first command after a
+-- sync will not be seen as belonging to a pipeline.
+\startpipeline
+-- @@@ 267
+SET LOCAL statement_timeout='1h' \bind \sendpipeline
+-- @@@ 268
+SHOW statement_timeout \bind \sendpipeline
+-- @@@ 269
+\syncpipeline
+-- @@@ 270
+SHOW statement_timeout \bind \sendpipeline
+-- @@@ 271
+SET LOCAL statement_timeout='2h' \bind \sendpipeline
+-- @@@ 272
+SHOW statement_timeout \bind \sendpipeline
+-- @@@ 273
+\endpipeline
+WARNING:  SET LOCAL can only be used in transaction blocks
+ statement_timeout 
+-------------------
+ 1h
+(1 row)
+
+ statement_timeout 
+-------------------
+ 0
+(1 row)
+
+ statement_timeout 
+-------------------
+ 2h
+(1 row)
+
+-- @@@ 274
+-- REINDEX CONCURRENTLY fails if not the first command in a pipeline.
+\startpipeline
+-- @@@ 275
+SELECT $1 \bind 1 \sendpipeline
+-- @@@ 276
+REINDEX TABLE CONCURRENTLY psql_pipeline \bind \sendpipeline
+-- @@@ 277
+SELECT $1 \bind 2 \sendpipeline
+-- @@@ 278
+\endpipeline
+ ?column? 
+----------
+ 1
+(1 row)
+
+ERROR:  REINDEX CONCURRENTLY cannot run inside a transaction block
+-- @@@ 279
+-- REINDEX CONCURRENTLY works if it is the first command in a pipeline.
+\startpipeline
+-- @@@ 280
+REINDEX TABLE CONCURRENTLY psql_pipeline \bind \sendpipeline
+-- @@@ 281
+SELECT $1 \bind 2 \sendpipeline
+-- @@@ 282
+\endpipeline
+ ?column? 
+----------
+ 2
+(1 row)
+
+-- @@@ 283
+-- Subtransactions are not allowed in a pipeline.
+\startpipeline
+-- @@@ 284
+SAVEPOINT a \bind \sendpipeline
+-- @@@ 285
+SELECT $1 \bind 1 \sendpipeline
+-- @@@ 286
+ROLLBACK TO SAVEPOINT a \bind \sendpipeline
+-- @@@ 287
+SELECT $1 \bind 2 \sendpipeline
+-- @@@ 288
+\endpipeline
+ERROR:  SAVEPOINT can only be used in transaction blocks
+-- @@@ 289
+-- LOCK fails as the first command in a pipeline, as not seen in an
+-- implicit transaction block.
+\startpipeline
+-- @@@ 290
+LOCK psql_pipeline \bind \sendpipeline
+-- @@@ 291
+SELECT $1 \bind 2 \sendpipeline
+-- @@@ 292
+\endpipeline
+ERROR:  LOCK TABLE can only be used in transaction blocks
+-- @@@ 293
+-- LOCK succeeds as it is not the first command in a pipeline,
+-- seen in an implicit transaction block.
+\startpipeline
+-- @@@ 294
+SELECT $1 \bind 1 \sendpipeline
+-- @@@ 295
+LOCK psql_pipeline \bind \sendpipeline
+-- @@@ 296
+SELECT $1 \bind 2 \sendpipeline
+-- @@@ 297
+\endpipeline
+ ?column? 
+----------
+ 1
+(1 row)
+
+ ?column? 
+----------
+ 2
+(1 row)
+
+-- @@@ 298
+-- VACUUM works as the first command in a pipeline.
+\startpipeline
+-- @@@ 299
+VACUUM psql_pipeline \bind \sendpipeline
+-- @@@ 300
+\endpipeline
+-- @@@ 301
+-- VACUUM fails when not the first command in a pipeline.
+\startpipeline
+-- @@@ 302
+SELECT 1 \bind \sendpipeline
+-- @@@ 303
+VACUUM psql_pipeline \bind \sendpipeline
+-- @@@ 304
+\endpipeline
+ ?column? 
+----------
+        1
+(1 row)
+
+ERROR:  VACUUM cannot run inside a transaction block
+-- @@@ 305
+-- VACUUM works after a \syncpipeline.
+\startpipeline
+-- @@@ 306
+SELECT 1 \bind \sendpipeline
+-- @@@ 307
+\syncpipeline
+-- @@@ 308
+VACUUM psql_pipeline \bind \sendpipeline
+-- @@@ 309
+\endpipeline
+ ?column? 
+----------
+        1
+(1 row)
+
+-- @@@ 310
+-- Deferred constraint violation at commit time in a pipeline.
+CREATE TABLE psql_pipeline_defer (a INTEGER PRIMARY KEY DEFERRABLE INITIALLY DEFERRED);
+-- @@@ 311
+\startpipeline
+-- @@@ 312
+INSERT INTO psql_pipeline_defer VALUES ($1), ($1) RETURNING * \bind 1 \sendpipeline
+-- @@@ 313
+\endpipeline
+ a 
+---
+ 1
+ 1
+(2 rows)
+
+ERROR:  duplicate key value violates unique constraint "psql_pipeline_defer_pkey"
+DETAIL:  Key (a)=(1) already exists.
+-- @@@ 314
+-- Same with \syncpipeline and commands after the failing sync.
+\startpipeline
+-- @@@ 315
+INSERT INTO psql_pipeline_defer VALUES ($1), ($1) \bind 1 \sendpipeline
+-- @@@ 316
+\syncpipeline
+-- @@@ 317
+SELECT $1 \bind 'after_sync_1' \sendpipeline
+-- @@@ 318
+\endpipeline
+ERROR:  duplicate key value violates unique constraint "psql_pipeline_defer_pkey"
+DETAIL:  Key (a)=(1) already exists.
+   ?column?   
+--------------
+ after_sync_1
+(1 row)
+
+-- @@@ 319
+-- More patterns with more \syncpipeline, more commands and \getresults
+\startpipeline
+-- @@@ 320
+INSERT INTO psql_pipeline_defer VALUES ($1), ($1) \bind 1 \sendpipeline
+-- @@@ 321
+INSERT INTO psql_pipeline_defer VALUES ($1), ($1) \bind 1 \sendpipeline
+-- @@@ 322
+\syncpipeline
+-- @@@ 323
+SELECT $1 \bind 'after_sync_1' \sendpipeline
+-- @@@ 324
+\getresults
+ERROR:  duplicate key value violates unique constraint "psql_pipeline_defer_pkey"
+DETAIL:  Key (a)=(1) already exists.
+-- @@@ 325
+SELECT $1 \bind 'after_sync_2' \sendpipeline
+-- @@@ 326
+\endpipeline
+   ?column?   
+--------------
+ after_sync_1
+(1 row)
+
+   ?column?   
+--------------
+ after_sync_2
+(1 row)
+
+-- @@@ 327
+\startpipeline
+-- @@@ 328
+INSERT INTO psql_pipeline_defer VALUES ($1), ($1) \bind 1 \sendpipeline
+-- @@@ 329
+INSERT INTO psql_pipeline_defer VALUES ($1), ($1) \bind 1 \sendpipeline
+-- @@@ 330
+\syncpipeline
+-- @@@ 331
+\getresults
+ERROR:  duplicate key value violates unique constraint "psql_pipeline_defer_pkey"
+DETAIL:  Key (a)=(1) already exists.
+-- @@@ 332
+SELECT $1 \bind 'after_sync_1' \sendpipeline
+-- @@@ 333
+\getresults
+-- @@@ 334
+SELECT $1 \bind 'after_sync_2' \sendpipeline
+-- @@@ 335
+INSERT INTO psql_pipeline_defer VALUES ($1), ($1) \bind 1 \sendpipeline
+-- @@@ 336
+INSERT INTO psql_pipeline_defer VALUES ($1), ($1) \bind 1 \sendpipeline
+-- @@@ 337
+SELECT $1 \bind 'after_sync_3' \sendpipeline
+-- @@@ 338
+SELECT $1 \bind 'after_sync_4' \sendpipeline
+-- @@@ 339
+SELECT $1 \bind 'after_sync_5' \sendpipeline
+-- @@@ 340
+\endpipeline
+   ?column?   
+--------------
+ after_sync_1
+(1 row)
+
+   ?column?   
+--------------
+ after_sync_2
+(1 row)
+
+   ?column?   
+--------------
+ after_sync_3
+(1 row)
+
+   ?column?   
+--------------
+ after_sync_4
+(1 row)
+
+   ?column?   
+--------------
+ after_sync_5
+(1 row)
+
+ERROR:  duplicate key value violates unique constraint "psql_pipeline_defer_pkey"
+DETAIL:  Key (a)=(1) already exists.
+-- @@@ 341
+-- Deferred error combined with a regular command error after the sync.
+\startpipeline
+-- @@@ 342
+INSERT INTO psql_pipeline_defer VALUES ($1), ($1) \bind 1 \sendpipeline
+-- @@@ 343
+\syncpipeline
+-- @@@ 344
+SELECT $1 \bind \sendpipeline
+-- @@@ 345
+SELECT $1 \bind 'after_error' \sendpipeline
+-- @@@ 346
+\endpipeline
+ERROR:  duplicate key value violates unique constraint "psql_pipeline_defer_pkey"
+DETAIL:  Key (a)=(1) already exists.
+ERROR:  bind message supplies 0 parameters, but prepared statement "" requires 1
+-- @@@ 347
+-- Empty sync segment followed by a deferred error.
+\startpipeline
+-- @@@ 348
+\syncpipeline
+-- @@@ 349
+INSERT INTO psql_pipeline_defer VALUES ($1), ($1) \bind 1 \sendpipeline
+-- @@@ 350
+\endpipeline
+ERROR:  duplicate key value violates unique constraint "psql_pipeline_defer_pkey"
+DETAIL:  Key (a)=(1) already exists.
+-- @@@ 351
+-- Deferred error with \getresults reading results one at a time.
+\startpipeline
+-- @@@ 352
+INSERT INTO psql_pipeline_defer VALUES ($1), ($1) \bind 1 \sendpipeline
+-- @@@ 353
+SELECT $1 \bind 'partial' \sendpipeline
+-- @@@ 354
+\syncpipeline
+-- @@@ 355
+\getresults 1
+-- @@@ 356
+\getresults 1
+ ?column? 
+----------
+ partial
+(1 row)
+
+-- @@@ 357
+\getresults
+ERROR:  duplicate key value violates unique constraint "psql_pipeline_defer_pkey"
+DETAIL:  Key (a)=(1) already exists.
+-- @@@ 358
+\endpipeline
+-- @@@ 359
+DROP TABLE psql_pipeline_defer;
+-- @@@ 360
+-- Clean up
+DROP TABLE psql_pipeline;
+-- @@@ 361

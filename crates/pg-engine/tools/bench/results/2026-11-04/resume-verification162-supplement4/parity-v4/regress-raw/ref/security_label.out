@@ -1,0 +1,72 @@
+--
+-- Test for facilities of security label
+--
+-- initial setups
+SET client_min_messages TO 'warning';
+-- @@@ 0
+DROP ROLE IF EXISTS regress_seclabel_user1;
+-- @@@ 1
+DROP ROLE IF EXISTS regress_seclabel_user2;
+-- @@@ 2
+RESET client_min_messages;
+-- @@@ 3
+CREATE USER regress_seclabel_user1 WITH CREATEROLE;
+-- @@@ 4
+CREATE USER regress_seclabel_user2;
+-- @@@ 5
+CREATE TABLE seclabel_tbl1 (a int, b text);
+-- @@@ 6
+CREATE TABLE seclabel_tbl2 (x int, y text);
+-- @@@ 7
+CREATE VIEW seclabel_view1 AS SELECT * FROM seclabel_tbl2;
+-- @@@ 8
+CREATE FUNCTION seclabel_four() RETURNS integer AS $$SELECT 4$$ language sql;
+-- @@@ 9
+CREATE DOMAIN seclabel_domain AS text;
+-- @@@ 10
+ALTER TABLE seclabel_tbl1 OWNER TO regress_seclabel_user1;
+-- @@@ 11
+ALTER TABLE seclabel_tbl2 OWNER TO regress_seclabel_user2;
+-- @@@ 12
+--
+-- Test of SECURITY LABEL statement without a plugin
+--
+SECURITY LABEL ON TABLE seclabel_tbl1 IS 'classified';			-- fail
+ERROR:  no security label providers have been loaded
+-- @@@ 13
+SECURITY LABEL FOR 'dummy' ON TABLE seclabel_tbl1 IS 'classified';		-- fail
+ERROR:  security label provider "dummy" is not loaded
+-- @@@ 14
+SECURITY LABEL ON TABLE seclabel_tbl1 IS '...invalid label...';		-- fail
+ERROR:  no security label providers have been loaded
+-- @@@ 15
+SECURITY LABEL ON TABLE seclabel_tbl3 IS 'unclassified';			-- fail
+ERROR:  no security label providers have been loaded
+-- @@@ 16
+SECURITY LABEL ON ROLE regress_seclabel_user1 IS 'classified';			-- fail
+ERROR:  no security label providers have been loaded
+-- @@@ 17
+SECURITY LABEL FOR 'dummy' ON ROLE regress_seclabel_user1 IS 'classified';		-- fail
+ERROR:  security label provider "dummy" is not loaded
+-- @@@ 18
+SECURITY LABEL ON ROLE regress_seclabel_user1 IS '...invalid label...';		-- fail
+ERROR:  no security label providers have been loaded
+-- @@@ 19
+SECURITY LABEL ON ROLE regress_seclabel_user3 IS 'unclassified';			-- fail
+ERROR:  no security label providers have been loaded
+-- @@@ 20
+-- clean up objects
+DROP FUNCTION seclabel_four();
+-- @@@ 21
+DROP DOMAIN seclabel_domain;
+-- @@@ 22
+DROP VIEW seclabel_view1;
+-- @@@ 23
+DROP TABLE seclabel_tbl1;
+-- @@@ 24
+DROP TABLE seclabel_tbl2;
+-- @@@ 25
+DROP USER regress_seclabel_user1;
+-- @@@ 26
+DROP USER regress_seclabel_user2;
+-- @@@ 27

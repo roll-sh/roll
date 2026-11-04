@@ -1,0 +1,202 @@
+--
+-- Regression tests for schemas (namespaces)
+--
+-- set the whitespace-only search_path to test that the
+-- GUC list syntax is preserved during a schema creation
+SELECT pg_catalog.set_config('search_path', ' ', false);
+ set_config 
+------------
+  
+(1 row)
+
+-- @@@ 0
+CREATE SCHEMA test_ns_schema_1
+       CREATE UNIQUE INDEX abc_a_idx ON abc (a)
+       CREATE VIEW abc_view AS
+              SELECT a+1 AS a, b+1 AS b FROM abc
+       CREATE TABLE abc (
+              a serial,
+              b int UNIQUE
+       );
+-- @@@ 1
+-- verify that the correct search_path restored on abort
+SET search_path to public;
+-- @@@ 2
+BEGIN;
+-- @@@ 3
+SET search_path to public, test_ns_schema_1;
+-- @@@ 4
+CREATE SCHEMA test_ns_schema_2
+       CREATE VIEW abc_view AS SELECT c FROM abc;
+ERROR:  column "c" does not exist
+LINE 2:        CREATE VIEW abc_view AS SELECT c FROM abc;
+                                              ^
+-- @@@ 5
+COMMIT;
+-- @@@ 6
+SHOW search_path;
+ search_path 
+-------------
+ public
+(1 row)
+
+-- @@@ 7
+-- verify that the correct search_path preserved
+-- after creating the schema and on commit
+BEGIN;
+-- @@@ 8
+SET search_path to public, test_ns_schema_1;
+-- @@@ 9
+CREATE SCHEMA test_ns_schema_2
+       CREATE VIEW abc_view AS SELECT a FROM abc;
+-- @@@ 10
+SHOW search_path;
+       search_path        
+--------------------------
+ public, test_ns_schema_1
+(1 row)
+
+-- @@@ 11
+COMMIT;
+-- @@@ 12
+SHOW search_path;
+       search_path        
+--------------------------
+ public, test_ns_schema_1
+(1 row)
+
+-- @@@ 13
+DROP SCHEMA test_ns_schema_2 CASCADE;
+NOTICE:  drop cascades to view test_ns_schema_2.abc_view
+-- @@@ 14
+-- verify that the objects were created
+SELECT COUNT(*) FROM pg_class WHERE relnamespace =
+    (SELECT oid FROM pg_namespace WHERE nspname = 'test_ns_schema_1');
+ count 
+-------
+     5
+(1 row)
+
+-- @@@ 15
+INSERT INTO test_ns_schema_1.abc DEFAULT VALUES;
+-- @@@ 16
+INSERT INTO test_ns_schema_1.abc DEFAULT VALUES;
+-- @@@ 17
+INSERT INTO test_ns_schema_1.abc DEFAULT VALUES;
+-- @@@ 18
+SELECT * FROM test_ns_schema_1.abc;
+ a | b 
+---+---
+ 1 |  
+ 2 |  
+ 3 |  
+(3 rows)
+
+-- @@@ 19
+SELECT * FROM test_ns_schema_1.abc_view;
+ a | b 
+---+---
+ 2 |  
+ 3 |  
+ 4 |  
+(3 rows)
+
+-- @@@ 20
+ALTER SCHEMA test_ns_schema_1 RENAME TO test_ns_schema_renamed;
+-- @@@ 21
+SELECT COUNT(*) FROM pg_class WHERE relnamespace =
+    (SELECT oid FROM pg_namespace WHERE nspname = 'test_ns_schema_1');
+ count 
+-------
+     0
+(1 row)
+
+-- @@@ 22
+-- test IF NOT EXISTS cases
+CREATE SCHEMA test_ns_schema_renamed; -- fail, already exists
+ERROR:  schema "test_ns_schema_renamed" already exists
+-- @@@ 23
+CREATE SCHEMA IF NOT EXISTS test_ns_schema_renamed; -- ok with notice
+NOTICE:  schema "test_ns_schema_renamed" already exists, skipping
+-- @@@ 24
+CREATE SCHEMA IF NOT EXISTS test_ns_schema_renamed -- fail, disallowed
+       CREATE TABLE abc (
+              a serial,
+              b int UNIQUE
+       );
+ERROR:  CREATE SCHEMA IF NOT EXISTS cannot include schema elements
+LINE 2:        CREATE TABLE abc (
+               ^
+-- @@@ 25
+DROP SCHEMA test_ns_schema_renamed CASCADE;
+NOTICE:  drop cascades to 2 other objects
+DETAIL:  drop cascades to table test_ns_schema_renamed.abc
+drop cascades to view test_ns_schema_renamed.abc_view
+-- @@@ 26
+-- verify that the objects were dropped
+SELECT COUNT(*) FROM pg_class WHERE relnamespace =
+    (SELECT oid FROM pg_namespace WHERE nspname = 'test_ns_schema_renamed');
+ count 
+-------
+     0
+(1 row)
+
+-- @@@ 27
+--
+-- Verify that search_path is set to a safe value during maintenance
+-- commands.
+--
+CREATE SCHEMA test_maint_search_path;
+-- @@@ 28
+SET search_path = test_maint_search_path;
+-- @@@ 29
+CREATE FUNCTION fn(INT) RETURNS INT IMMUTABLE LANGUAGE plpgsql AS $$
+  BEGIN
+    RAISE NOTICE 'current search_path: %', current_setting('search_path');
+    RETURN $1;
+  END;
+$$;
+-- @@@ 30
+CREATE TABLE test_maint(i INT);
+-- @@@ 31
+INSERT INTO test_maint VALUES (1), (2);
+-- @@@ 32
+CREATE MATERIALIZED VIEW test_maint_mv AS SELECT fn(i) FROM test_maint;
+NOTICE:  current search_path: pg_catalog, pg_temp
+NOTICE:  current search_path: pg_catalog, pg_temp
+-- @@@ 33
+-- the following commands should see search_path as pg_catalog, pg_temp
+CREATE INDEX test_maint_idx ON test_maint_search_path.test_maint (fn(i));
+NOTICE:  current search_path: pg_catalog, pg_temp
+NOTICE:  current search_path: pg_catalog, pg_temp
+-- @@@ 34
+REINDEX TABLE test_maint_search_path.test_maint;
+NOTICE:  current search_path: pg_catalog, pg_temp
+NOTICE:  current search_path: pg_catalog, pg_temp
+-- @@@ 35
+ANALYZE test_maint_search_path.test_maint;
+NOTICE:  current search_path: pg_catalog, pg_temp
+NOTICE:  current search_path: pg_catalog, pg_temp
+-- @@@ 36
+VACUUM FULL test_maint_search_path.test_maint;
+NOTICE:  current search_path: pg_catalog, pg_temp
+NOTICE:  current search_path: pg_catalog, pg_temp
+-- @@@ 37
+CLUSTER test_maint_search_path.test_maint USING test_maint_idx;
+NOTICE:  current search_path: pg_catalog, pg_temp
+NOTICE:  current search_path: pg_catalog, pg_temp
+NOTICE:  current search_path: pg_catalog, pg_temp
+NOTICE:  current search_path: pg_catalog, pg_temp
+-- @@@ 38
+REFRESH MATERIALIZED VIEW test_maint_search_path.test_maint_mv;
+NOTICE:  current search_path: pg_catalog, pg_temp
+NOTICE:  current search_path: pg_catalog, pg_temp
+-- @@@ 39
+RESET search_path;
+-- @@@ 40
+DROP SCHEMA test_maint_search_path CASCADE;
+NOTICE:  drop cascades to 3 other objects
+DETAIL:  drop cascades to function test_maint_search_path.fn(integer)
+drop cascades to table test_maint_search_path.test_maint
+drop cascades to materialized view test_maint_search_path.test_maint_mv
+-- @@@ 41

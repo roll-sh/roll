@@ -1,0 +1,49 @@
+-- Test maintenance commands that visit every eligible relation.  Run as a
+-- non-superuser, to skip other users' tables.
+CREATE ROLE regress_maintain;
+-- @@@ 0
+SET ROLE regress_maintain;
+-- @@@ 1
+-- Test database-wide ANALYZE ("use_own_xacts" mode) setting relhassubclass=f
+-- for non-partitioning inheritance, w/ ON COMMIT DELETE ROWS building an
+-- empty index.
+CREATE TEMP TABLE past_inh_db_other (); -- need 2 tables for "use_own_xacts"
+-- @@@ 2
+CREATE TEMP TABLE past_inh_db_parent () ON COMMIT DELETE ROWS;
+-- @@@ 3
+CREATE TEMP TABLE past_inh_db_child () INHERITS (past_inh_db_parent);
+-- @@@ 4
+CREATE INDEX ON past_inh_db_parent ((1));
+-- @@@ 5
+ANALYZE past_inh_db_parent;
+-- @@@ 6
+SELECT reltuples, relhassubclass
+  FROM pg_class WHERE oid = 'past_inh_db_parent'::regclass;
+ reltuples | relhassubclass 
+-----------+----------------
+         0 | t
+(1 row)
+
+-- @@@ 7
+DROP TABLE past_inh_db_child;
+-- @@@ 8
+SET client_min_messages = error; -- hide WARNINGs for other users' tables
+-- @@@ 9
+ANALYZE;
+-- @@@ 10
+RESET client_min_messages;
+-- @@@ 11
+SELECT reltuples, relhassubclass
+  FROM pg_class WHERE oid = 'past_inh_db_parent'::regclass;
+ reltuples | relhassubclass 
+-----------+----------------
+         0 | f
+(1 row)
+
+-- @@@ 12
+DROP TABLE past_inh_db_parent, past_inh_db_other;
+-- @@@ 13
+RESET ROLE;
+-- @@@ 14
+DROP ROLE regress_maintain;
+-- @@@ 15

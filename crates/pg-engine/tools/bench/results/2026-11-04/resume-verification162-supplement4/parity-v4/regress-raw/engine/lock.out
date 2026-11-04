@@ -1,0 +1,386 @@
+--
+-- Test the LOCK statement
+--
+-- directory paths and dlsuffix are passed to us in environment variables
+\getenv libdir PG_LIBDIR
+-- @@@ 0
+\getenv dlsuffix PG_DLSUFFIX
+-- @@@ 1
+\set regresslib :libdir '/regress' :dlsuffix
+-- @@@ 2
+-- Setup
+CREATE SCHEMA lock_schema1;
+-- @@@ 3
+SET search_path = lock_schema1;
+-- @@@ 4
+CREATE TABLE lock_tbl1 (a BIGINT);
+-- @@@ 5
+CREATE TABLE lock_tbl1a (a BIGINT);
+-- @@@ 6
+CREATE VIEW lock_view1 AS SELECT * FROM lock_tbl1;
+-- @@@ 7
+CREATE VIEW lock_view2(a,b) AS SELECT * FROM lock_tbl1, lock_tbl1a;
+-- @@@ 8
+CREATE VIEW lock_view3 AS SELECT * from lock_view2;
+-- @@@ 9
+CREATE VIEW lock_view4 AS SELECT (select a from lock_tbl1a limit 1) from lock_tbl1;
+-- @@@ 10
+CREATE VIEW lock_view5 AS SELECT * from lock_tbl1 where a in (select * from lock_tbl1a);
+-- @@@ 11
+CREATE VIEW lock_view6 AS SELECT * from (select * from lock_tbl1) sub;
+-- @@@ 12
+CREATE ROLE regress_rol_lock1;
+-- @@@ 13
+ALTER ROLE regress_rol_lock1 SET search_path = lock_schema1;
+-- @@@ 14
+GRANT USAGE ON SCHEMA lock_schema1 TO regress_rol_lock1;
+-- @@@ 15
+-- Try all valid lock options; also try omitting the optional TABLE keyword.
+BEGIN TRANSACTION;
+-- @@@ 16
+LOCK TABLE lock_tbl1 IN ACCESS SHARE MODE;
+-- @@@ 17
+LOCK lock_tbl1 IN ROW SHARE MODE;
+-- @@@ 18
+LOCK TABLE lock_tbl1 IN ROW EXCLUSIVE MODE;
+-- @@@ 19
+LOCK TABLE lock_tbl1 IN SHARE UPDATE EXCLUSIVE MODE;
+-- @@@ 20
+LOCK TABLE lock_tbl1 IN SHARE MODE;
+-- @@@ 21
+LOCK lock_tbl1 IN SHARE ROW EXCLUSIVE MODE;
+-- @@@ 22
+LOCK TABLE lock_tbl1 IN EXCLUSIVE MODE;
+-- @@@ 23
+LOCK TABLE lock_tbl1 IN ACCESS EXCLUSIVE MODE;
+-- @@@ 24
+ROLLBACK;
+-- @@@ 25
+-- Try using NOWAIT along with valid options.
+BEGIN TRANSACTION;
+-- @@@ 26
+LOCK TABLE lock_tbl1 IN ACCESS SHARE MODE NOWAIT;
+-- @@@ 27
+LOCK TABLE lock_tbl1 IN ROW SHARE MODE NOWAIT;
+-- @@@ 28
+LOCK TABLE lock_tbl1 IN ROW EXCLUSIVE MODE NOWAIT;
+-- @@@ 29
+LOCK TABLE lock_tbl1 IN SHARE UPDATE EXCLUSIVE MODE NOWAIT;
+-- @@@ 30
+LOCK TABLE lock_tbl1 IN SHARE MODE NOWAIT;
+-- @@@ 31
+LOCK TABLE lock_tbl1 IN SHARE ROW EXCLUSIVE MODE NOWAIT;
+-- @@@ 32
+LOCK TABLE lock_tbl1 IN EXCLUSIVE MODE NOWAIT;
+-- @@@ 33
+LOCK TABLE lock_tbl1 IN ACCESS EXCLUSIVE MODE NOWAIT;
+-- @@@ 34
+ROLLBACK;
+-- @@@ 35
+-- Verify that we can lock views.
+BEGIN TRANSACTION;
+-- @@@ 36
+LOCK TABLE lock_view1 IN EXCLUSIVE MODE;
+-- @@@ 37
+-- lock_view1 and lock_tbl1 are locked.
+select relname from pg_locks l, pg_class c
+ where l.relation = c.oid and relname like '%lock_%' and mode = 'ExclusiveLock'
+ order by relname;
+  relname   
+------------
+ lock_tbl1
+ lock_view1
+(2 rows)
+
+-- @@@ 38
+ROLLBACK;
+-- @@@ 39
+BEGIN TRANSACTION;
+-- @@@ 40
+LOCK TABLE lock_view2 IN EXCLUSIVE MODE;
+-- @@@ 41
+-- lock_view1, lock_tbl1, and lock_tbl1a are locked.
+select relname from pg_locks l, pg_class c
+ where l.relation = c.oid and relname like '%lock_%' and mode = 'ExclusiveLock'
+ order by relname;
+  relname   
+------------
+ lock_tbl1
+ lock_tbl1a
+ lock_view2
+(3 rows)
+
+-- @@@ 42
+ROLLBACK;
+-- @@@ 43
+BEGIN TRANSACTION;
+-- @@@ 44
+LOCK TABLE lock_view3 IN EXCLUSIVE MODE;
+-- @@@ 45
+-- lock_view3, lock_view2, lock_tbl1, and lock_tbl1a are locked recursively.
+select relname from pg_locks l, pg_class c
+ where l.relation = c.oid and relname like '%lock_%' and mode = 'ExclusiveLock'
+ order by relname;
+  relname   
+------------
+ lock_tbl1
+ lock_tbl1a
+ lock_view2
+ lock_view3
+(4 rows)
+
+-- @@@ 46
+ROLLBACK;
+-- @@@ 47
+BEGIN TRANSACTION;
+-- @@@ 48
+LOCK TABLE lock_view4 IN EXCLUSIVE MODE;
+-- @@@ 49
+-- lock_view4, lock_tbl1, and lock_tbl1a are locked.
+select relname from pg_locks l, pg_class c
+ where l.relation = c.oid and relname like '%lock_%' and mode = 'ExclusiveLock'
+ order by relname;
+  relname   
+------------
+ lock_tbl1
+ lock_tbl1a
+ lock_view4
+(3 rows)
+
+-- @@@ 50
+ROLLBACK;
+-- @@@ 51
+BEGIN TRANSACTION;
+-- @@@ 52
+LOCK TABLE lock_view5 IN EXCLUSIVE MODE;
+-- @@@ 53
+-- lock_view5, lock_tbl1, and lock_tbl1a are locked.
+select relname from pg_locks l, pg_class c
+ where l.relation = c.oid and relname like '%lock_%' and mode = 'ExclusiveLock'
+ order by relname;
+  relname   
+------------
+ lock_tbl1
+ lock_tbl1a
+ lock_view5
+(3 rows)
+
+-- @@@ 54
+ROLLBACK;
+-- @@@ 55
+BEGIN TRANSACTION;
+-- @@@ 56
+LOCK TABLE lock_view6 IN EXCLUSIVE MODE;
+-- @@@ 57
+-- lock_view6 an lock_tbl1 are locked.
+select relname from pg_locks l, pg_class c
+ where l.relation = c.oid and relname like '%lock_%' and mode = 'ExclusiveLock'
+ order by relname;
+  relname   
+------------
+ lock_tbl1
+ lock_view6
+(2 rows)
+
+-- @@@ 58
+ROLLBACK;
+-- @@@ 59
+-- Verify that we cope with infinite recursion in view definitions.
+CREATE OR REPLACE VIEW lock_view2 AS SELECT * from lock_view3;
+-- @@@ 60
+BEGIN TRANSACTION;
+-- @@@ 61
+LOCK TABLE lock_view2 IN EXCLUSIVE MODE;
+-- @@@ 62
+ROLLBACK;
+-- @@@ 63
+CREATE VIEW lock_view7 AS SELECT * from lock_view2;
+-- @@@ 64
+BEGIN TRANSACTION;
+-- @@@ 65
+LOCK TABLE lock_view7 IN EXCLUSIVE MODE;
+-- @@@ 66
+ROLLBACK;
+-- @@@ 67
+-- Verify that we can lock a table with inheritance children.
+CREATE TABLE lock_tbl2 (b BIGINT) INHERITS (lock_tbl1);
+-- @@@ 68
+CREATE TABLE lock_tbl3 () INHERITS (lock_tbl2);
+-- @@@ 69
+BEGIN TRANSACTION;
+-- @@@ 70
+LOCK TABLE lock_tbl1 * IN ACCESS EXCLUSIVE MODE;
+-- @@@ 71
+ROLLBACK;
+-- @@@ 72
+-- Child tables are locked without granting explicit permission to do so as
+-- long as we have permission to lock the parent.
+GRANT UPDATE ON TABLE lock_tbl1 TO regress_rol_lock1;
+-- @@@ 73
+SET ROLE regress_rol_lock1;
+-- @@@ 74
+-- fail when child locked directly
+BEGIN;
+-- @@@ 75
+LOCK TABLE lock_tbl2;
+ERROR:  permission denied for table lock_tbl2
+-- @@@ 76
+ROLLBACK;
+-- @@@ 77
+BEGIN;
+-- @@@ 78
+LOCK TABLE lock_tbl1 * IN ACCESS EXCLUSIVE MODE;
+-- @@@ 79
+ROLLBACK;
+-- @@@ 80
+BEGIN;
+-- @@@ 81
+LOCK TABLE ONLY lock_tbl1;
+-- @@@ 82
+ROLLBACK;
+-- @@@ 83
+RESET ROLE;
+-- @@@ 84
+REVOKE UPDATE ON TABLE lock_tbl1 FROM regress_rol_lock1;
+-- @@@ 85
+-- Tables referred to by views are locked without explicit permission to do so
+-- as long as we have permission to lock the view itself.
+SET ROLE regress_rol_lock1;
+-- @@@ 86
+-- fail without permissions on the view
+BEGIN;
+-- @@@ 87
+LOCK TABLE lock_view1;
+ERROR:  permission denied for view lock_view1
+-- @@@ 88
+ROLLBACK;
+-- @@@ 89
+RESET ROLE;
+-- @@@ 90
+GRANT UPDATE ON TABLE lock_view1 TO regress_rol_lock1;
+-- @@@ 91
+SET ROLE regress_rol_lock1;
+-- @@@ 92
+BEGIN;
+-- @@@ 93
+LOCK TABLE lock_view1 IN ACCESS EXCLUSIVE MODE;
+-- @@@ 94
+-- lock_view1 and lock_tbl1 (plus children lock_tbl2 and lock_tbl3) are locked.
+select relname from pg_locks l, pg_class c
+ where l.relation = c.oid and relname like '%lock_%' and mode = 'AccessExclusiveLock'
+ order by relname;
+  relname   
+------------
+ lock_tbl1
+ lock_tbl2
+ lock_tbl3
+ lock_view1
+(4 rows)
+
+-- @@@ 95
+ROLLBACK;
+-- @@@ 96
+RESET ROLE;
+-- @@@ 97
+REVOKE UPDATE ON TABLE lock_view1 FROM regress_rol_lock1;
+-- @@@ 98
+-- Tables referred to by security invoker views require explicit permission to
+-- be locked.
+CREATE VIEW lock_view8 WITH (security_invoker) AS SELECT * FROM lock_tbl1;
+-- @@@ 99
+SET ROLE regress_rol_lock1;
+-- @@@ 100
+-- fail without permissions on the view
+BEGIN;
+-- @@@ 101
+LOCK TABLE lock_view8;
+ERROR:  permission denied for view lock_view8
+-- @@@ 102
+ROLLBACK;
+-- @@@ 103
+RESET ROLE;
+-- @@@ 104
+GRANT UPDATE ON TABLE lock_view8 TO regress_rol_lock1;
+-- @@@ 105
+SET ROLE regress_rol_lock1;
+-- @@@ 106
+-- fail without permissions on the table referenced by the view
+BEGIN;
+-- @@@ 107
+LOCK TABLE lock_view8;
+ERROR:  permission denied for table lock_tbl1
+-- @@@ 108
+ROLLBACK;
+-- @@@ 109
+RESET ROLE;
+-- @@@ 110
+GRANT UPDATE ON TABLE lock_tbl1 TO regress_rol_lock1;
+-- @@@ 111
+BEGIN;
+-- @@@ 112
+LOCK TABLE lock_view8 IN ACCESS EXCLUSIVE MODE;
+-- @@@ 113
+-- lock_view8 and lock_tbl1 (plus children lock_tbl2 and lock_tbl3) are locked.
+select relname from pg_locks l, pg_class c
+ where l.relation = c.oid and relname like '%lock_%' and mode = 'AccessExclusiveLock'
+ order by relname;
+  relname   
+------------
+ lock_tbl1
+ lock_tbl2
+ lock_tbl3
+ lock_view8
+(4 rows)
+
+-- @@@ 114
+ROLLBACK;
+-- @@@ 115
+RESET ROLE;
+-- @@@ 116
+REVOKE UPDATE ON TABLE lock_view8 FROM regress_rol_lock1;
+-- @@@ 117
+--
+-- Clean up
+--
+DROP VIEW lock_view8;
+-- @@@ 118
+DROP VIEW lock_view7;
+-- @@@ 119
+DROP VIEW lock_view6;
+-- @@@ 120
+DROP VIEW lock_view5;
+-- @@@ 121
+DROP VIEW lock_view4;
+-- @@@ 122
+DROP VIEW lock_view3 CASCADE;
+NOTICE:  drop cascades to view lock_view2
+-- @@@ 123
+DROP VIEW lock_view1;
+-- @@@ 124
+DROP TABLE lock_tbl3;
+-- @@@ 125
+DROP TABLE lock_tbl2;
+-- @@@ 126
+DROP TABLE lock_tbl1;
+-- @@@ 127
+DROP TABLE lock_tbl1a;
+-- @@@ 128
+DROP SCHEMA lock_schema1 CASCADE;
+-- @@@ 129
+DROP ROLE regress_rol_lock1;
+-- @@@ 130
+-- atomic ops tests
+RESET search_path;
+-- @@@ 131
+CREATE FUNCTION test_atomic_ops()
+    RETURNS bool
+    AS :'regresslib'
+    LANGUAGE C;
+ERROR:  could not access file "/usr/local/lib/postgresql/regress.so": No such file or directory
+-- @@@ 132
+SELECT test_atomic_ops();
+ERROR:  function test_atomic_ops() does not exist
+LINE 1: SELECT test_atomic_ops();
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 133

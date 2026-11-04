@@ -1,0 +1,24 @@
+{
+  "source": "3997cf00a2a301fed65f00469625ff14f223f227",
+  "status": "STOPPED_FIRST_FAILURE",
+  "overall_exit": 1,
+  "regression": {
+    "actual": "51148/51150",
+    "exact_baseline_rows_and_hunks": "PASS"
+  },
+  "isolation": {
+    "specs": "121/122",
+    "permutations": "1647/1648",
+    "steps": "12234/12238",
+    "known_baseline_difference": true
+  },
+  "first_failure": "dump-version regex false negative on literal PostgreSQL18.6 output",
+  "dump": "NOT RUN",
+  "fullservice": "HELD",
+  "source_acceptance": false,
+  "verified_tested_binaries": {
+    "/home/meszmate/.cache/a162/pgr/resume-3997cf00-r4/roll-engine.bin": "9e876733e089594f98399bf3caebb1c2027a1a1506e606e0e6586841b813ce2d",
+    "/home/meszmate/.cache/a162/iso/resume-3997cf00-r4/roll-engine.bin": "9e876733e089594f98399bf3caebb1c2027a1a1506e606e0e6586841b813ce2d"
+  },
+  "sealed_v3_unchanged": true
+}

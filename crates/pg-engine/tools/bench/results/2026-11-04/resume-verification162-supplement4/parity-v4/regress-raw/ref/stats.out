@@ -1,0 +1,2371 @@
+--
+-- Test cumulative stats system
+--
+-- Must be run after tenk2 has been created (by create_table),
+-- populated (by create_misc) and indexed (by create_index).
+--
+-- conditio sine qua non
+SHOW track_counts;  -- must be on
+ track_counts 
+--------------
+ on
+(1 row)
+
+-- @@@ 0
+-- List of backend types, contexts and objects tracked in pg_stat_io.
+\a
+-- @@@ 1
+SELECT backend_type, object, context FROM pg_stat_io
+  ORDER BY backend_type COLLATE "C", object COLLATE "C", context COLLATE "C";
+backend_type|object|context
+autovacuum launcher|relation|bulkread
+autovacuum launcher|relation|init
+autovacuum launcher|relation|normal
+autovacuum launcher|wal|init
+autovacuum launcher|wal|normal
+autovacuum worker|relation|bulkread
+autovacuum worker|relation|init
+autovacuum worker|relation|normal
+autovacuum worker|relation|vacuum
+autovacuum worker|wal|init
+autovacuum worker|wal|normal
+background worker|relation|bulkread
+background worker|relation|bulkwrite
+background worker|relation|init
+background worker|relation|normal
+background worker|relation|vacuum
+background worker|temp relation|normal
+background worker|wal|init
+background worker|wal|normal
+background writer|relation|init
+background writer|relation|normal
+background writer|wal|init
+background writer|wal|normal
+checkpointer|relation|init
+checkpointer|relation|normal
+checkpointer|wal|init
+checkpointer|wal|normal
+client backend|relation|bulkread
+client backend|relation|bulkwrite
+client backend|relation|init
+client backend|relation|normal
+client backend|relation|vacuum
+client backend|temp relation|normal
+client backend|wal|init
+client backend|wal|normal
+io worker|relation|bulkread
+io worker|relation|bulkwrite
+io worker|relation|init
+io worker|relation|normal
+io worker|relation|vacuum
+io worker|temp relation|normal
+io worker|wal|init
+io worker|wal|normal
+slotsync worker|relation|bulkread
+slotsync worker|relation|bulkwrite
+slotsync worker|relation|init
+slotsync worker|relation|normal
+slotsync worker|relation|vacuum
+slotsync worker|temp relation|normal
+slotsync worker|wal|init
+slotsync worker|wal|normal
+standalone backend|relation|bulkread
+standalone backend|relation|bulkwrite
+standalone backend|relation|init
+standalone backend|relation|normal
+standalone backend|relation|vacuum
+standalone backend|wal|init
+standalone backend|wal|normal
+startup|relation|bulkread
+startup|relation|bulkwrite
+startup|relation|init
+startup|relation|normal
+startup|relation|vacuum
+startup|wal|init
+startup|wal|normal
+walreceiver|wal|init
+walreceiver|wal|normal
+walsender|relation|bulkread
+walsender|relation|bulkwrite
+walsender|relation|init
+walsender|relation|normal
+walsender|relation|vacuum
+walsender|temp relation|normal
+walsender|wal|init
+walsender|wal|normal
+walsummarizer|wal|init
+walsummarizer|wal|normal
+walwriter|wal|init
+walwriter|wal|normal
+(79 rows)
+-- @@@ 2
+\a
+-- @@@ 3
+-- ensure that both seqscan and indexscan plans are allowed
+SET enable_seqscan TO on;
+-- @@@ 4
+SET enable_indexscan TO on;
+-- @@@ 5
+-- for the moment, we don't want index-only scans here
+SET enable_indexonlyscan TO off;
+-- @@@ 6
+-- not enabled by default, but we want to test it...
+SET track_functions TO 'all';
+-- @@@ 7
+-- record dboid for later use
+SELECT oid AS dboid from pg_database where datname = current_database() \gset
+-- @@@ 8
+-- save counters
+BEGIN;
+-- @@@ 9
+SET LOCAL stats_fetch_consistency = snapshot;
+-- @@@ 10
+CREATE TABLE prevstats AS
+SELECT t.seq_scan, t.seq_tup_read, t.idx_scan, t.idx_tup_fetch,
+       (b.heap_blks_read + b.heap_blks_hit) AS heap_blks,
+       (b.idx_blks_read + b.idx_blks_hit) AS idx_blks,
+       pg_stat_get_snapshot_timestamp() as snap_ts
+  FROM pg_catalog.pg_stat_user_tables AS t,
+       pg_catalog.pg_statio_user_tables AS b
+ WHERE t.relname='tenk2' AND b.relname='tenk2';
+-- @@@ 11
+COMMIT;
+-- @@@ 12
+-- test effects of TRUNCATE on n_live_tup/n_dead_tup counters
+CREATE TABLE trunc_stats_test(id serial);
+-- @@@ 13
+CREATE TABLE trunc_stats_test1(id serial, stuff text);
+-- @@@ 14
+CREATE TABLE trunc_stats_test2(id serial);
+-- @@@ 15
+CREATE TABLE trunc_stats_test3(id serial, stuff text);
+-- @@@ 16
+CREATE TABLE trunc_stats_test4(id serial);
+-- @@@ 17
+-- check that n_live_tup is reset to 0 after truncate
+INSERT INTO trunc_stats_test DEFAULT VALUES;
+-- @@@ 18
+INSERT INTO trunc_stats_test DEFAULT VALUES;
+-- @@@ 19
+INSERT INTO trunc_stats_test DEFAULT VALUES;
+-- @@@ 20
+TRUNCATE trunc_stats_test;
+-- @@@ 21
+-- test involving a truncate in a transaction; 4 ins but only 1 live
+INSERT INTO trunc_stats_test1 DEFAULT VALUES;
+-- @@@ 22
+INSERT INTO trunc_stats_test1 DEFAULT VALUES;
+-- @@@ 23
+INSERT INTO trunc_stats_test1 DEFAULT VALUES;
+-- @@@ 24
+UPDATE trunc_stats_test1 SET id = id + 10 WHERE id IN (1, 2);
+-- @@@ 25
+DELETE FROM trunc_stats_test1 WHERE id = 3;
+-- @@@ 26
+BEGIN;
+-- @@@ 27
+UPDATE trunc_stats_test1 SET id = id + 100;
+-- @@@ 28
+TRUNCATE trunc_stats_test1;
+-- @@@ 29
+INSERT INTO trunc_stats_test1 DEFAULT VALUES;
+-- @@@ 30
+COMMIT;
+-- @@@ 31
+-- use a savepoint: 1 insert, 1 live
+BEGIN;
+-- @@@ 32
+INSERT INTO trunc_stats_test2 DEFAULT VALUES;
+-- @@@ 33
+INSERT INTO trunc_stats_test2 DEFAULT VALUES;
+-- @@@ 34
+SAVEPOINT p1;
+-- @@@ 35
+INSERT INTO trunc_stats_test2 DEFAULT VALUES;
+-- @@@ 36
+TRUNCATE trunc_stats_test2;
+-- @@@ 37
+INSERT INTO trunc_stats_test2 DEFAULT VALUES;
+-- @@@ 38
+RELEASE SAVEPOINT p1;
+-- @@@ 39
+COMMIT;
+-- @@@ 40
+-- rollback a savepoint: this should count 4 inserts and have 2
+-- live tuples after commit (and 2 dead ones due to aborted subxact)
+BEGIN;
+-- @@@ 41
+INSERT INTO trunc_stats_test3 DEFAULT VALUES;
+-- @@@ 42
+INSERT INTO trunc_stats_test3 DEFAULT VALUES;
+-- @@@ 43
+SAVEPOINT p1;
+-- @@@ 44
+INSERT INTO trunc_stats_test3 DEFAULT VALUES;
+-- @@@ 45
+INSERT INTO trunc_stats_test3 DEFAULT VALUES;
+-- @@@ 46
+TRUNCATE trunc_stats_test3;
+-- @@@ 47
+INSERT INTO trunc_stats_test3 DEFAULT VALUES;
+-- @@@ 48
+ROLLBACK TO SAVEPOINT p1;
+-- @@@ 49
+COMMIT;
+-- @@@ 50
+-- rollback a truncate: this should count 2 inserts and produce 2 dead tuples
+BEGIN;
+-- @@@ 51
+INSERT INTO trunc_stats_test4 DEFAULT VALUES;
+-- @@@ 52
+INSERT INTO trunc_stats_test4 DEFAULT VALUES;
+-- @@@ 53
+TRUNCATE trunc_stats_test4;
+-- @@@ 54
+INSERT INTO trunc_stats_test4 DEFAULT VALUES;
+-- @@@ 55
+ROLLBACK;
+-- @@@ 56
+-- do a seqscan
+SELECT count(*) FROM tenk2;
+ count 
+-------
+ 10000
+(1 row)
+
+-- @@@ 57
+-- do an indexscan
+-- make sure it is not a bitmap scan, which might skip fetching heap tuples
+SET enable_bitmapscan TO off;
+-- @@@ 58
+SELECT count(*) FROM tenk2 WHERE unique1 = 1;
+ count 
+-------
+     1
+(1 row)
+
+-- @@@ 59
+RESET enable_bitmapscan;
+-- @@@ 60
+-- ensure pending stats are flushed
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- @@@ 61
+-- check effects
+BEGIN;
+-- @@@ 62
+SET LOCAL stats_fetch_consistency = snapshot;
+-- @@@ 63
+SELECT relname, n_tup_ins, n_tup_upd, n_tup_del, n_live_tup, n_dead_tup
+  FROM pg_stat_user_tables
+ WHERE relname like 'trunc_stats_test%' order by relname;
+      relname      | n_tup_ins | n_tup_upd | n_tup_del | n_live_tup | n_dead_tup 
+-------------------+-----------+-----------+-----------+------------+------------
+ trunc_stats_test  |         3 |         0 |         0 |          0 |          0
+ trunc_stats_test1 |         4 |         2 |         1 |          1 |          0
+ trunc_stats_test2 |         1 |         0 |         0 |          1 |          0
+ trunc_stats_test3 |         4 |         0 |         0 |          2 |          2
+ trunc_stats_test4 |         2 |         0 |         0 |          0 |          2
+(5 rows)
+
+-- @@@ 64
+SELECT st.seq_scan >= pr.seq_scan + 1,
+       st.seq_tup_read >= pr.seq_tup_read + cl.reltuples,
+       st.idx_scan >= pr.idx_scan + 1,
+       st.idx_tup_fetch >= pr.idx_tup_fetch + 1
+  FROM pg_stat_user_tables AS st, pg_class AS cl, prevstats AS pr
+ WHERE st.relname='tenk2' AND cl.relname='tenk2';
+ ?column? | ?column? | ?column? | ?column? 
+----------+----------+----------+----------
+ t        | t        | t        | t
+(1 row)
+
+-- @@@ 65
+SELECT st.heap_blks_read + st.heap_blks_hit >= pr.heap_blks + cl.relpages,
+       st.idx_blks_read + st.idx_blks_hit >= pr.idx_blks + 1
+  FROM pg_statio_user_tables AS st, pg_class AS cl, prevstats AS pr
+ WHERE st.relname='tenk2' AND cl.relname='tenk2';
+ ?column? | ?column? 
+----------+----------
+ t        | t
+(1 row)
+
+-- @@@ 66
+SELECT pr.snap_ts < pg_stat_get_snapshot_timestamp() as snapshot_newer
+FROM prevstats AS pr;
+ snapshot_newer 
+----------------
+ t
+(1 row)
+
+-- @@@ 67
+COMMIT;
+-- @@@ 68
+----
+-- Basic tests for track_functions
+---
+CREATE FUNCTION stats_test_func1() RETURNS VOID LANGUAGE plpgsql AS $$BEGIN END;$$;
+-- @@@ 69
+SELECT 'stats_test_func1()'::regprocedure::oid AS stats_test_func1_oid \gset
+-- @@@ 70
+CREATE FUNCTION stats_test_func2() RETURNS VOID LANGUAGE plpgsql AS $$BEGIN END;$$;
+-- @@@ 71
+SELECT 'stats_test_func2()'::regprocedure::oid AS stats_test_func2_oid \gset
+-- @@@ 72
+-- test that stats are accumulated
+BEGIN;
+-- @@@ 73
+SET LOCAL stats_fetch_consistency = none;
+-- @@@ 74
+SELECT pg_stat_get_function_calls(:stats_test_func1_oid);
+ pg_stat_get_function_calls 
+----------------------------
+                           
+(1 row)
+
+-- @@@ 75
+SELECT pg_stat_get_xact_function_calls(:stats_test_func1_oid);
+ pg_stat_get_xact_function_calls 
+---------------------------------
+                                
+(1 row)
+
+-- @@@ 76
+SELECT stats_test_func1();
+ stats_test_func1 
+------------------
+ 
+(1 row)
+
+-- @@@ 77
+SELECT pg_stat_get_xact_function_calls(:stats_test_func1_oid);
+ pg_stat_get_xact_function_calls 
+---------------------------------
+                               1
+(1 row)
+
+-- @@@ 78
+SELECT stats_test_func1();
+ stats_test_func1 
+------------------
+ 
+(1 row)
+
+-- @@@ 79
+SELECT pg_stat_get_xact_function_calls(:stats_test_func1_oid);
+ pg_stat_get_xact_function_calls 
+---------------------------------
+                               2
+(1 row)
+
+-- @@@ 80
+SELECT pg_stat_get_function_calls(:stats_test_func1_oid);
+ pg_stat_get_function_calls 
+----------------------------
+                          0
+(1 row)
+
+-- @@@ 81
+COMMIT;
+-- @@@ 82
+-- Verify that function stats are not transactional
+-- rolled back savepoint in committing transaction
+BEGIN;
+-- @@@ 83
+SELECT stats_test_func2();
+ stats_test_func2 
+------------------
+ 
+(1 row)
+
+-- @@@ 84
+SAVEPOINT foo;
+-- @@@ 85
+SELECT stats_test_func2();
+ stats_test_func2 
+------------------
+ 
+(1 row)
+
+-- @@@ 86
+ROLLBACK TO SAVEPOINT foo;
+-- @@@ 87
+SELECT pg_stat_get_xact_function_calls(:stats_test_func2_oid);
+ pg_stat_get_xact_function_calls 
+---------------------------------
+                               2
+(1 row)
+
+-- @@@ 88
+SELECT stats_test_func2();
+ stats_test_func2 
+------------------
+ 
+(1 row)
+
+-- @@@ 89
+COMMIT;
+-- @@@ 90
+-- rolled back transaction
+BEGIN;
+-- @@@ 91
+SELECT stats_test_func2();
+ stats_test_func2 
+------------------
+ 
+(1 row)
+
+-- @@@ 92
+ROLLBACK;
+-- @@@ 93
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- @@@ 94
+-- check collected stats
+SELECT funcname, calls FROM pg_stat_user_functions WHERE funcid = :stats_test_func1_oid;
+     funcname     | calls 
+------------------+-------
+ stats_test_func1 |     2
+(1 row)
+
+-- @@@ 95
+SELECT funcname, calls FROM pg_stat_user_functions WHERE funcid = :stats_test_func2_oid;
+     funcname     | calls 
+------------------+-------
+ stats_test_func2 |     4
+(1 row)
+
+-- @@@ 96
+-- check that a rolled back drop function stats leaves stats alive
+BEGIN;
+-- @@@ 97
+SELECT funcname, calls FROM pg_stat_user_functions WHERE funcid = :stats_test_func1_oid;
+     funcname     | calls 
+------------------+-------
+ stats_test_func1 |     2
+(1 row)
+
+-- @@@ 98
+DROP FUNCTION stats_test_func1();
+-- @@@ 99
+-- shouldn't be visible via view
+SELECT funcname, calls FROM pg_stat_user_functions WHERE funcid = :stats_test_func1_oid;
+ funcname | calls 
+----------+-------
+(0 rows)
+
+-- @@@ 100
+-- but still via oid access
+SELECT pg_stat_get_function_calls(:stats_test_func1_oid);
+ pg_stat_get_function_calls 
+----------------------------
+                          2
+(1 row)
+
+-- @@@ 101
+ROLLBACK;
+-- @@@ 102
+SELECT funcname, calls FROM pg_stat_user_functions WHERE funcid = :stats_test_func1_oid;
+     funcname     | calls 
+------------------+-------
+ stats_test_func1 |     2
+(1 row)
+
+-- @@@ 103
+SELECT pg_stat_get_function_calls(:stats_test_func1_oid);
+ pg_stat_get_function_calls 
+----------------------------
+                          2
+(1 row)
+
+-- @@@ 104
+-- check that function dropped in main transaction leaves no stats behind
+BEGIN;
+-- @@@ 105
+DROP FUNCTION stats_test_func1();
+-- @@@ 106
+COMMIT;
+-- @@@ 107
+SELECT funcname, calls FROM pg_stat_user_functions WHERE funcid = :stats_test_func1_oid;
+ funcname | calls 
+----------+-------
+(0 rows)
+
+-- @@@ 108
+SELECT pg_stat_get_function_calls(:stats_test_func1_oid);
+ pg_stat_get_function_calls 
+----------------------------
+                           
+(1 row)
+
+-- @@@ 109
+-- check that function dropped in a subtransaction leaves no stats behind
+BEGIN;
+-- @@@ 110
+SELECT stats_test_func2();
+ stats_test_func2 
+------------------
+ 
+(1 row)
+
+-- @@@ 111
+SAVEPOINT a;
+-- @@@ 112
+SELECT stats_test_func2();
+ stats_test_func2 
+------------------
+ 
+(1 row)
+
+-- @@@ 113
+SAVEPOINT b;
+-- @@@ 114
+DROP FUNCTION stats_test_func2();
+-- @@@ 115
+COMMIT;
+-- @@@ 116
+SELECT funcname, calls FROM pg_stat_user_functions WHERE funcid = :stats_test_func2_oid;
+ funcname | calls 
+----------+-------
+(0 rows)
+
+-- @@@ 117
+SELECT pg_stat_get_function_calls(:stats_test_func2_oid);
+ pg_stat_get_function_calls 
+----------------------------
+                           
+(1 row)
+
+-- @@@ 118
+-- Check that stats for relations are dropped. For that we need to access stats
+-- by oid after the DROP TABLE. Save oids.
+CREATE TABLE drop_stats_test();
+-- @@@ 119
+INSERT INTO drop_stats_test DEFAULT VALUES;
+-- @@@ 120
+SELECT 'drop_stats_test'::regclass::oid AS drop_stats_test_oid \gset
+-- @@@ 121
+CREATE TABLE drop_stats_test_xact();
+-- @@@ 122
+INSERT INTO drop_stats_test_xact DEFAULT VALUES;
+-- @@@ 123
+SELECT 'drop_stats_test_xact'::regclass::oid AS drop_stats_test_xact_oid \gset
+-- @@@ 124
+CREATE TABLE drop_stats_test_subxact();
+-- @@@ 125
+INSERT INTO drop_stats_test_subxact DEFAULT VALUES;
+-- @@@ 126
+SELECT 'drop_stats_test_subxact'::regclass::oid AS drop_stats_test_subxact_oid \gset
+-- @@@ 127
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- @@@ 128
+SELECT pg_stat_get_live_tuples(:drop_stats_test_oid);
+ pg_stat_get_live_tuples 
+-------------------------
+                       1
+(1 row)
+
+-- @@@ 129
+DROP TABLE drop_stats_test;
+-- @@@ 130
+SELECT pg_stat_get_live_tuples(:drop_stats_test_oid);
+ pg_stat_get_live_tuples 
+-------------------------
+                       0
+(1 row)
+
+-- @@@ 131
+SELECT pg_stat_get_xact_tuples_inserted(:drop_stats_test_oid);
+ pg_stat_get_xact_tuples_inserted 
+----------------------------------
+                                0
+(1 row)
+
+-- @@@ 132
+-- check that rollback protects against having stats dropped and that local
+-- modifications don't pose a problem
+SELECT pg_stat_get_live_tuples(:drop_stats_test_xact_oid);
+ pg_stat_get_live_tuples 
+-------------------------
+                       1
+(1 row)
+
+-- @@@ 133
+SELECT pg_stat_get_tuples_inserted(:drop_stats_test_xact_oid);
+ pg_stat_get_tuples_inserted 
+-----------------------------
+                           1
+(1 row)
+
+-- @@@ 134
+SELECT pg_stat_get_xact_tuples_inserted(:drop_stats_test_xact_oid);
+ pg_stat_get_xact_tuples_inserted 
+----------------------------------
+                                0
+(1 row)
+
+-- @@@ 135
+BEGIN;
+-- @@@ 136
+INSERT INTO drop_stats_test_xact DEFAULT VALUES;
+-- @@@ 137
+SELECT pg_stat_get_xact_tuples_inserted(:drop_stats_test_xact_oid);
+ pg_stat_get_xact_tuples_inserted 
+----------------------------------
+                                1
+(1 row)
+
+-- @@@ 138
+DROP TABLE drop_stats_test_xact;
+-- @@@ 139
+SELECT pg_stat_get_xact_tuples_inserted(:drop_stats_test_xact_oid);
+ pg_stat_get_xact_tuples_inserted 
+----------------------------------
+                                0
+(1 row)
+
+-- @@@ 140
+ROLLBACK;
+-- @@@ 141
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- @@@ 142
+SELECT pg_stat_get_live_tuples(:drop_stats_test_xact_oid);
+ pg_stat_get_live_tuples 
+-------------------------
+                       1
+(1 row)
+
+-- @@@ 143
+SELECT pg_stat_get_tuples_inserted(:drop_stats_test_xact_oid);
+ pg_stat_get_tuples_inserted 
+-----------------------------
+                           2
+(1 row)
+
+-- @@@ 144
+-- transactional drop
+SELECT pg_stat_get_live_tuples(:drop_stats_test_xact_oid);
+ pg_stat_get_live_tuples 
+-------------------------
+                       1
+(1 row)
+
+-- @@@ 145
+SELECT pg_stat_get_tuples_inserted(:drop_stats_test_xact_oid);
+ pg_stat_get_tuples_inserted 
+-----------------------------
+                           2
+(1 row)
+
+-- @@@ 146
+BEGIN;
+-- @@@ 147
+INSERT INTO drop_stats_test_xact DEFAULT VALUES;
+-- @@@ 148
+SELECT pg_stat_get_xact_tuples_inserted(:drop_stats_test_xact_oid);
+ pg_stat_get_xact_tuples_inserted 
+----------------------------------
+                                1
+(1 row)
+
+-- @@@ 149
+DROP TABLE drop_stats_test_xact;
+-- @@@ 150
+SELECT pg_stat_get_xact_tuples_inserted(:drop_stats_test_xact_oid);
+ pg_stat_get_xact_tuples_inserted 
+----------------------------------
+                                0
+(1 row)
+
+-- @@@ 151
+COMMIT;
+-- @@@ 152
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- @@@ 153
+SELECT pg_stat_get_live_tuples(:drop_stats_test_xact_oid);
+ pg_stat_get_live_tuples 
+-------------------------
+                       0
+(1 row)
+
+-- @@@ 154
+SELECT pg_stat_get_tuples_inserted(:drop_stats_test_xact_oid);
+ pg_stat_get_tuples_inserted 
+-----------------------------
+                           0
+(1 row)
+
+-- @@@ 155
+-- savepoint rollback (2 levels)
+SELECT pg_stat_get_live_tuples(:drop_stats_test_subxact_oid);
+ pg_stat_get_live_tuples 
+-------------------------
+                       1
+(1 row)
+
+-- @@@ 156
+BEGIN;
+-- @@@ 157
+INSERT INTO drop_stats_test_subxact DEFAULT VALUES;
+-- @@@ 158
+SAVEPOINT sp1;
+-- @@@ 159
+INSERT INTO drop_stats_test_subxact DEFAULT VALUES;
+-- @@@ 160
+SELECT pg_stat_get_xact_tuples_inserted(:drop_stats_test_subxact_oid);
+ pg_stat_get_xact_tuples_inserted 
+----------------------------------
+                                2
+(1 row)
+
+-- @@@ 161
+SAVEPOINT sp2;
+-- @@@ 162
+DROP TABLE drop_stats_test_subxact;
+-- @@@ 163
+ROLLBACK TO SAVEPOINT sp2;
+-- @@@ 164
+SELECT pg_stat_get_xact_tuples_inserted(:drop_stats_test_subxact_oid);
+ pg_stat_get_xact_tuples_inserted 
+----------------------------------
+                                2
+(1 row)
+
+-- @@@ 165
+COMMIT;
+-- @@@ 166
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- @@@ 167
+SELECT pg_stat_get_live_tuples(:drop_stats_test_subxact_oid);
+ pg_stat_get_live_tuples 
+-------------------------
+                       3
+(1 row)
+
+-- @@@ 168
+-- savepoint rolback (1 level)
+SELECT pg_stat_get_live_tuples(:drop_stats_test_subxact_oid);
+ pg_stat_get_live_tuples 
+-------------------------
+                       3
+(1 row)
+
+-- @@@ 169
+BEGIN;
+-- @@@ 170
+SAVEPOINT sp1;
+-- @@@ 171
+DROP TABLE drop_stats_test_subxact;
+-- @@@ 172
+SAVEPOINT sp2;
+-- @@@ 173
+ROLLBACK TO SAVEPOINT sp1;
+-- @@@ 174
+COMMIT;
+-- @@@ 175
+SELECT pg_stat_get_live_tuples(:drop_stats_test_subxact_oid);
+ pg_stat_get_live_tuples 
+-------------------------
+                       3
+(1 row)
+
+-- @@@ 176
+-- and now actually drop
+SELECT pg_stat_get_live_tuples(:drop_stats_test_subxact_oid);
+ pg_stat_get_live_tuples 
+-------------------------
+                       3
+(1 row)
+
+-- @@@ 177
+BEGIN;
+-- @@@ 178
+SAVEPOINT sp1;
+-- @@@ 179
+DROP TABLE drop_stats_test_subxact;
+-- @@@ 180
+SAVEPOINT sp2;
+-- @@@ 181
+RELEASE SAVEPOINT sp1;
+-- @@@ 182
+COMMIT;
+-- @@@ 183
+SELECT pg_stat_get_live_tuples(:drop_stats_test_subxact_oid);
+ pg_stat_get_live_tuples 
+-------------------------
+                       0
+(1 row)
+
+-- @@@ 184
+DROP TABLE trunc_stats_test, trunc_stats_test1, trunc_stats_test2, trunc_stats_test3, trunc_stats_test4;
+-- @@@ 185
+DROP TABLE prevstats;
+-- @@@ 186
+-----
+-- Test that last_seq_scan, last_idx_scan are correctly maintained
+--
+-- Perform test using a temporary table. That way autovacuum etc won't
+-- interfere. To be able to check that timestamps increase, we sleep for 100ms
+-- between tests, assuming that there aren't systems with a coarser timestamp
+-- granularity.
+-----
+BEGIN;
+-- @@@ 187
+CREATE TEMPORARY TABLE test_last_scan(idx_col int primary key, noidx_col int);
+-- @@@ 188
+INSERT INTO test_last_scan(idx_col, noidx_col) VALUES(1, 1);
+-- @@@ 189
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- @@@ 190
+SELECT last_seq_scan, last_idx_scan FROM pg_stat_all_tables WHERE relid = 'test_last_scan'::regclass;
+ last_seq_scan | last_idx_scan 
+---------------+---------------
+               | 
+(1 row)
+
+-- @@@ 191
+COMMIT;
+-- @@@ 192
+SELECT pg_stat_reset_single_table_counters('test_last_scan'::regclass);
+ pg_stat_reset_single_table_counters 
+-------------------------------------
+ 
+(1 row)
+
+-- @@@ 193
+SELECT seq_scan, idx_scan FROM pg_stat_all_tables WHERE relid = 'test_last_scan'::regclass;
+ seq_scan | idx_scan 
+----------+----------
+        0 |        0
+(1 row)
+
+-- @@@ 194
+-- ensure we start out with exactly one index and sequential scan
+BEGIN;
+-- @@@ 195
+SET LOCAL enable_seqscan TO on;
+-- @@@ 196
+SET LOCAL enable_indexscan TO on;
+-- @@@ 197
+SET LOCAL enable_bitmapscan TO off;
+-- @@@ 198
+EXPLAIN (COSTS off) SELECT count(*) FROM test_last_scan WHERE noidx_col = 1;
+            QUERY PLAN            
+----------------------------------
+ Aggregate
+   ->  Seq Scan on test_last_scan
+         Filter: (noidx_col = 1)
+(3 rows)
+
+-- @@@ 199
+SELECT count(*) FROM test_last_scan WHERE noidx_col = 1;
+ count 
+-------
+     1
+(1 row)
+
+-- @@@ 200
+SET LOCAL enable_seqscan TO off;
+-- @@@ 201
+EXPLAIN (COSTS off) SELECT count(*) FROM test_last_scan WHERE idx_col = 1;
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Aggregate
+   ->  Index Scan using test_last_scan_pkey on test_last_scan
+         Index Cond: (idx_col = 1)
+(3 rows)
+
+-- @@@ 202
+SELECT count(*) FROM test_last_scan WHERE idx_col = 1;
+ count 
+-------
+     1
+(1 row)
+
+-- @@@ 203
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- @@@ 204
+COMMIT;
+-- @@@ 205
+-- fetch timestamps from before the next test
+SELECT last_seq_scan AS test_last_seq, last_idx_scan AS test_last_idx
+FROM pg_stat_all_tables WHERE relid = 'test_last_scan'::regclass \gset
+-- @@@ 206
+SELECT pg_sleep(0.1); -- assume a minimum timestamp granularity of 100ms
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- @@@ 207
+-- cause one sequential scan
+BEGIN;
+-- @@@ 208
+SET LOCAL enable_seqscan TO on;
+-- @@@ 209
+SET LOCAL enable_indexscan TO off;
+-- @@@ 210
+SET LOCAL enable_bitmapscan TO off;
+-- @@@ 211
+EXPLAIN (COSTS off) SELECT count(*) FROM test_last_scan WHERE noidx_col = 1;
+            QUERY PLAN            
+----------------------------------
+ Aggregate
+   ->  Seq Scan on test_last_scan
+         Filter: (noidx_col = 1)
+(3 rows)
+
+-- @@@ 212
+SELECT count(*) FROM test_last_scan WHERE noidx_col = 1;
+ count 
+-------
+     1
+(1 row)
+
+-- @@@ 213
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- @@@ 214
+COMMIT;
+-- @@@ 215
+-- check that just sequential scan stats were incremented
+SELECT seq_scan, :'test_last_seq' < last_seq_scan AS seq_ok, idx_scan, :'test_last_idx' = last_idx_scan AS idx_ok
+FROM pg_stat_all_tables WHERE relid = 'test_last_scan'::regclass;
+ seq_scan | seq_ok | idx_scan | idx_ok 
+----------+--------+----------+--------
+        2 | t      |        1 | t
+(1 row)
+
+-- @@@ 216
+-- fetch timestamps from before the next test
+SELECT last_seq_scan AS test_last_seq, last_idx_scan AS test_last_idx
+FROM pg_stat_all_tables WHERE relid = 'test_last_scan'::regclass \gset
+-- @@@ 217
+SELECT pg_sleep(0.1);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- @@@ 218
+-- cause one index scan
+BEGIN;
+-- @@@ 219
+SET LOCAL enable_seqscan TO off;
+-- @@@ 220
+SET LOCAL enable_indexscan TO on;
+-- @@@ 221
+SET LOCAL enable_bitmapscan TO off;
+-- @@@ 222
+EXPLAIN (COSTS off) SELECT count(*) FROM test_last_scan WHERE idx_col = 1;
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Aggregate
+   ->  Index Scan using test_last_scan_pkey on test_last_scan
+         Index Cond: (idx_col = 1)
+(3 rows)
+
+-- @@@ 223
+SELECT count(*) FROM test_last_scan WHERE idx_col = 1;
+ count 
+-------
+     1
+(1 row)
+
+-- @@@ 224
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- @@@ 225
+COMMIT;
+-- @@@ 226
+-- check that just index scan stats were incremented
+SELECT seq_scan, :'test_last_seq' = last_seq_scan AS seq_ok, idx_scan, :'test_last_idx' < last_idx_scan AS idx_ok
+FROM pg_stat_all_tables WHERE relid = 'test_last_scan'::regclass;
+ seq_scan | seq_ok | idx_scan | idx_ok 
+----------+--------+----------+--------
+        2 | t      |        2 | t
+(1 row)
+
+-- @@@ 227
+-- fetch timestamps from before the next test
+SELECT last_seq_scan AS test_last_seq, last_idx_scan AS test_last_idx
+FROM pg_stat_all_tables WHERE relid = 'test_last_scan'::regclass \gset
+-- @@@ 228
+SELECT pg_sleep(0.1);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- @@@ 229
+-- cause one bitmap index scan
+BEGIN;
+-- @@@ 230
+SET LOCAL enable_seqscan TO off;
+-- @@@ 231
+SET LOCAL enable_indexscan TO off;
+-- @@@ 232
+SET LOCAL enable_bitmapscan TO on;
+-- @@@ 233
+EXPLAIN (COSTS off) SELECT count(*) FROM test_last_scan WHERE idx_col = 1;
+                      QUERY PLAN                      
+------------------------------------------------------
+ Aggregate
+   ->  Bitmap Heap Scan on test_last_scan
+         Recheck Cond: (idx_col = 1)
+         ->  Bitmap Index Scan on test_last_scan_pkey
+               Index Cond: (idx_col = 1)
+(5 rows)
+
+-- @@@ 234
+SELECT count(*) FROM test_last_scan WHERE idx_col = 1;
+ count 
+-------
+     1
+(1 row)
+
+-- @@@ 235
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- @@@ 236
+COMMIT;
+-- @@@ 237
+-- check that just index scan stats were incremented
+SELECT seq_scan, :'test_last_seq' = last_seq_scan AS seq_ok, idx_scan, :'test_last_idx' < last_idx_scan AS idx_ok
+FROM pg_stat_all_tables WHERE relid = 'test_last_scan'::regclass;
+ seq_scan | seq_ok | idx_scan | idx_ok 
+----------+--------+----------+--------
+        2 | t      |        3 | t
+(1 row)
+
+-- @@@ 238
+-----
+-- Test reset of some stats for shared table
+-----
+-- This updates the comment of the database currently in use in
+-- pg_shdescription with a fake value, then sets it back to its
+-- original value.
+SELECT shobj_description(d.oid, 'pg_database') as description_before
+  FROM pg_database d WHERE datname = current_database() \gset
+-- @@@ 239
+-- force some stats in pg_shdescription.
+BEGIN;
+-- @@@ 240
+SELECT current_database() as datname \gset
+-- @@@ 241
+COMMENT ON DATABASE :"datname" IS 'This is a test comment';
+-- @@@ 242
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- @@@ 243
+COMMIT;
+-- @@@ 244
+-- check that the stats are reset.
+SELECT (n_tup_ins + n_tup_upd) > 0 AS has_data FROM pg_stat_all_tables
+  WHERE relid = 'pg_shdescription'::regclass;
+ has_data 
+----------
+ t
+(1 row)
+
+-- @@@ 245
+-- stats_reset may not be set for datid=0 and shared objects in
+-- pg_stat_database, so reset once.
+SELECT pg_stat_reset_single_table_counters('pg_shdescription'::regclass);
+ pg_stat_reset_single_table_counters 
+-------------------------------------
+ 
+(1 row)
+
+-- @@@ 246
+SELECT (n_tup_ins + n_tup_upd) > 0 AS has_data FROM pg_stat_all_tables
+  WHERE relid = 'pg_shdescription'::regclass;
+ has_data 
+----------
+ f
+(1 row)
+
+-- @@@ 247
+SELECT stats_reset AS shared_db_reset_before
+  FROM pg_stat_database WHERE datid = 0 \gset
+-- @@@ 248
+-- Second reset for comparison.
+SELECT pg_stat_reset_single_table_counters('pg_shdescription'::regclass);
+ pg_stat_reset_single_table_counters 
+-------------------------------------
+ 
+(1 row)
+
+-- @@@ 249
+SELECT stats_reset > :'shared_db_reset_before'::timestamptz AS has_updated
+  FROM pg_stat_database WHERE datid = 0;
+ has_updated 
+-------------
+ t
+(1 row)
+
+-- @@@ 250
+-- set back comment
+\if :{?description_before}
+-- @@@ 251
+  COMMENT ON DATABASE :"datname" IS :'description_before';
+-- @@@ 252
+\else
+-- @@@ 253
+  COMMENT ON DATABASE :"datname" IS NULL;
+-- @@@ 254
+\endif
+-- @@@ 255
+-----
+-- Test that various stats views are being properly populated
+-----
+-- Test that sessions is incremented when a new session is started in pg_stat_database
+SELECT sessions AS db_stat_sessions FROM pg_stat_database WHERE datname = (SELECT current_database()) \gset
+-- @@@ 256
+\c
+-- @@@ 257
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- @@@ 258
+SELECT sessions > :db_stat_sessions FROM pg_stat_database WHERE datname = (SELECT current_database());
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 259
+-- Test pg_stat_checkpointer checkpointer-related stats, together with pg_stat_wal
+SELECT num_requested AS rqst_ckpts_before FROM pg_stat_checkpointer \gset
+-- @@@ 260
+-- Test pg_stat_wal
+SELECT wal_bytes AS wal_bytes_before FROM pg_stat_wal \gset
+-- @@@ 261
+-- Test pg_stat_get_backend_wal()
+SELECT wal_bytes AS backend_wal_bytes_before from pg_stat_get_backend_wal(pg_backend_pid()) \gset
+-- @@@ 262
+-- Make a temp table so our temp schema exists
+CREATE TEMP TABLE test_stats_temp AS SELECT 17;
+-- @@@ 263
+DROP TABLE test_stats_temp;
+-- @@@ 264
+-- Checkpoint twice: The checkpointer reports stats after reporting completion
+-- of the checkpoint. But after a second checkpoint we'll see at least the
+-- results of the first.
+CHECKPOINT;
+-- @@@ 265
+CHECKPOINT;
+-- @@@ 266
+SELECT num_requested > :rqst_ckpts_before FROM pg_stat_checkpointer;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 267
+SELECT wal_bytes > :wal_bytes_before FROM pg_stat_wal;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 268
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- @@@ 269
+SELECT wal_bytes > :backend_wal_bytes_before FROM pg_stat_get_backend_wal(pg_backend_pid());
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 270
+-- Test pg_stat_get_backend_idset() and some allied functions.
+-- In particular, verify that their notion of backend ID matches
+-- our temp schema index.
+SELECT (current_schemas(true))[1] = ('pg_temp_' || beid::text) AS match
+FROM pg_stat_get_backend_idset() beid
+WHERE pg_stat_get_backend_pid(beid) = pg_backend_pid();
+ match 
+-------
+ t
+(1 row)
+
+-- @@@ 271
+-----
+-- Test that resetting stats works for reset timestamp
+-----
+-- Test that reset_slru with a specified SLRU works.
+SELECT stats_reset AS slru_commit_ts_reset_ts FROM pg_stat_slru WHERE name = 'commit_timestamp' \gset
+-- @@@ 272
+SELECT stats_reset AS slru_notify_reset_ts FROM pg_stat_slru WHERE name = 'notify' \gset
+-- @@@ 273
+SELECT pg_stat_reset_slru('commit_timestamp');
+ pg_stat_reset_slru 
+--------------------
+ 
+(1 row)
+
+-- @@@ 274
+SELECT stats_reset > :'slru_commit_ts_reset_ts'::timestamptz FROM pg_stat_slru WHERE name = 'commit_timestamp';
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 275
+SELECT stats_reset AS slru_commit_ts_reset_ts FROM pg_stat_slru WHERE name = 'commit_timestamp' \gset
+-- @@@ 276
+-- Test that multiple SLRUs are reset when no specific SLRU provided to reset function
+SELECT pg_stat_reset_slru();
+ pg_stat_reset_slru 
+--------------------
+ 
+(1 row)
+
+-- @@@ 277
+SELECT stats_reset > :'slru_commit_ts_reset_ts'::timestamptz FROM pg_stat_slru WHERE name = 'commit_timestamp';
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 278
+SELECT stats_reset > :'slru_notify_reset_ts'::timestamptz FROM pg_stat_slru WHERE name = 'notify';
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 279
+-- Test that reset_shared with archiver specified as the stats type works
+SELECT stats_reset AS archiver_reset_ts FROM pg_stat_archiver \gset
+-- @@@ 280
+SELECT pg_stat_reset_shared('archiver');
+ pg_stat_reset_shared 
+----------------------
+ 
+(1 row)
+
+-- @@@ 281
+SELECT stats_reset > :'archiver_reset_ts'::timestamptz FROM pg_stat_archiver;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 282
+-- Test that reset_shared with bgwriter specified as the stats type works
+SELECT stats_reset AS bgwriter_reset_ts FROM pg_stat_bgwriter \gset
+-- @@@ 283
+SELECT pg_stat_reset_shared('bgwriter');
+ pg_stat_reset_shared 
+----------------------
+ 
+(1 row)
+
+-- @@@ 284
+SELECT stats_reset > :'bgwriter_reset_ts'::timestamptz FROM pg_stat_bgwriter;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 285
+-- Test that reset_shared with checkpointer specified as the stats type works
+SELECT stats_reset AS checkpointer_reset_ts FROM pg_stat_checkpointer \gset
+-- @@@ 286
+SELECT pg_stat_reset_shared('checkpointer');
+ pg_stat_reset_shared 
+----------------------
+ 
+(1 row)
+
+-- @@@ 287
+SELECT stats_reset > :'checkpointer_reset_ts'::timestamptz FROM pg_stat_checkpointer;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 288
+-- Test that reset_shared with recovery_prefetch specified as the stats type works
+SELECT stats_reset AS recovery_prefetch_reset_ts FROM pg_stat_recovery_prefetch \gset
+-- @@@ 289
+SELECT pg_stat_reset_shared('recovery_prefetch');
+ pg_stat_reset_shared 
+----------------------
+ 
+(1 row)
+
+-- @@@ 290
+SELECT stats_reset > :'recovery_prefetch_reset_ts'::timestamptz FROM pg_stat_recovery_prefetch;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 291
+-- Test that reset_shared with slru specified as the stats type works
+SELECT max(stats_reset) AS slru_reset_ts FROM pg_stat_slru \gset
+-- @@@ 292
+SELECT pg_stat_reset_shared('slru');
+ pg_stat_reset_shared 
+----------------------
+ 
+(1 row)
+
+-- @@@ 293
+SELECT max(stats_reset) > :'slru_reset_ts'::timestamptz FROM pg_stat_slru;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 294
+-- Test that reset_shared with wal specified as the stats type works
+SELECT stats_reset AS wal_reset_ts FROM pg_stat_wal \gset
+-- @@@ 295
+SELECT pg_stat_reset_shared('wal');
+ pg_stat_reset_shared 
+----------------------
+ 
+(1 row)
+
+-- @@@ 296
+SELECT stats_reset > :'wal_reset_ts'::timestamptz FROM pg_stat_wal;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 297
+-- Test error case for reset_shared with unknown stats type
+SELECT pg_stat_reset_shared('unknown');
+ERROR:  unrecognized reset target: "unknown"
+HINT:  Target must be "archiver", "bgwriter", "checkpointer", "io", "recovery_prefetch", "slru", or "wal".
+-- @@@ 298
+-- Test that reset works for pg_stat_database
+-- Since pg_stat_database stats_reset starts out as NULL, reset it once first so we have something to compare it to
+SELECT pg_stat_reset();
+ pg_stat_reset 
+---------------
+ 
+(1 row)
+
+-- @@@ 299
+SELECT stats_reset AS db_reset_ts FROM pg_stat_database WHERE datname = (SELECT current_database()) \gset
+-- @@@ 300
+SELECT pg_stat_reset();
+ pg_stat_reset 
+---------------
+ 
+(1 row)
+
+-- @@@ 301
+SELECT stats_reset > :'db_reset_ts'::timestamptz FROM pg_stat_database WHERE datname = (SELECT current_database());
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 302
+----
+-- pg_stat_get_snapshot_timestamp behavior
+----
+BEGIN;
+-- @@@ 303
+SET LOCAL stats_fetch_consistency = snapshot;
+-- @@@ 304
+-- no snapshot yet, return NULL
+SELECT pg_stat_get_snapshot_timestamp();
+ pg_stat_get_snapshot_timestamp 
+--------------------------------
+ 
+(1 row)
+
+-- @@@ 305
+-- any attempt at accessing stats will build snapshot
+SELECT pg_stat_get_function_calls(0);
+ pg_stat_get_function_calls 
+----------------------------
+                           
+(1 row)
+
+-- @@@ 306
+SELECT pg_stat_get_snapshot_timestamp() >= NOW();
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 307
+-- shows NULL again after clearing
+SELECT pg_stat_clear_snapshot();
+ pg_stat_clear_snapshot 
+------------------------
+ 
+(1 row)
+
+-- @@@ 308
+SELECT pg_stat_get_snapshot_timestamp();
+ pg_stat_get_snapshot_timestamp 
+--------------------------------
+ 
+(1 row)
+
+-- @@@ 309
+COMMIT;
+-- @@@ 310
+----
+-- Changing stats_fetch_consistency in a transaction.
+----
+BEGIN;
+-- @@@ 311
+-- Stats filled under the cache mode
+SET LOCAL stats_fetch_consistency = cache;
+-- @@@ 312
+SELECT pg_stat_get_function_calls(0);
+ pg_stat_get_function_calls 
+----------------------------
+                           
+(1 row)
+
+-- @@@ 313
+SELECT pg_stat_get_snapshot_timestamp() IS NOT NULL AS snapshot_ok;
+ snapshot_ok 
+-------------
+ f
+(1 row)
+
+-- @@@ 314
+-- Success in accessing pre-existing snapshot data.
+SET LOCAL stats_fetch_consistency = snapshot;
+-- @@@ 315
+SELECT pg_stat_get_snapshot_timestamp() IS NOT NULL AS snapshot_ok;
+ snapshot_ok 
+-------------
+ f
+(1 row)
+
+-- @@@ 316
+SELECT pg_stat_get_function_calls(0);
+ pg_stat_get_function_calls 
+----------------------------
+                           
+(1 row)
+
+-- @@@ 317
+SELECT pg_stat_get_snapshot_timestamp() IS NOT NULL AS snapshot_ok;
+ snapshot_ok 
+-------------
+ t
+(1 row)
+
+-- @@@ 318
+-- Snapshot cleared.
+SET LOCAL stats_fetch_consistency = none;
+-- @@@ 319
+SELECT pg_stat_get_snapshot_timestamp() IS NOT NULL AS snapshot_ok;
+ snapshot_ok 
+-------------
+ f
+(1 row)
+
+-- @@@ 320
+SELECT pg_stat_get_function_calls(0);
+ pg_stat_get_function_calls 
+----------------------------
+                           
+(1 row)
+
+-- @@@ 321
+SELECT pg_stat_get_snapshot_timestamp() IS NOT NULL AS snapshot_ok;
+ snapshot_ok 
+-------------
+ f
+(1 row)
+
+-- @@@ 322
+ROLLBACK;
+-- @@@ 323
+----
+-- pg_stat_have_stats behavior
+----
+-- fixed-numbered stats exist
+SELECT pg_stat_have_stats('bgwriter', 0, 0);
+ pg_stat_have_stats 
+--------------------
+ t
+(1 row)
+
+-- @@@ 324
+-- unknown stats kinds error out
+SELECT pg_stat_have_stats('zaphod', 0, 0);
+ERROR:  invalid statistics kind: "zaphod"
+-- @@@ 325
+-- db stats have objid 0
+SELECT pg_stat_have_stats('database', :dboid, 1);
+ pg_stat_have_stats 
+--------------------
+ f
+(1 row)
+
+-- @@@ 326
+SELECT pg_stat_have_stats('database', :dboid, 0);
+ pg_stat_have_stats 
+--------------------
+ t
+(1 row)
+
+-- @@@ 327
+-- pg_stat_have_stats returns true for committed index creation
+CREATE table stats_test_tab1 as select generate_series(1,10) a;
+-- @@@ 328
+CREATE index stats_test_idx1 on stats_test_tab1(a);
+-- @@@ 329
+SELECT 'stats_test_idx1'::regclass::oid AS stats_test_idx1_oid \gset
+-- @@@ 330
+SET enable_seqscan TO off;
+-- @@@ 331
+select a from stats_test_tab1 where a = 3;
+ a 
+---
+ 3
+(1 row)
+
+-- @@@ 332
+SELECT pg_stat_have_stats('relation', :dboid, :stats_test_idx1_oid);
+ pg_stat_have_stats 
+--------------------
+ t
+(1 row)
+
+-- @@@ 333
+-- pg_stat_have_stats returns false for dropped index with stats
+SELECT pg_stat_have_stats('relation', :dboid, :stats_test_idx1_oid);
+ pg_stat_have_stats 
+--------------------
+ t
+(1 row)
+
+-- @@@ 334
+DROP index stats_test_idx1;
+-- @@@ 335
+SELECT pg_stat_have_stats('relation', :dboid, :stats_test_idx1_oid);
+ pg_stat_have_stats 
+--------------------
+ f
+(1 row)
+
+-- @@@ 336
+-- pg_stat_have_stats returns false for rolled back index creation
+BEGIN;
+-- @@@ 337
+CREATE index stats_test_idx1 on stats_test_tab1(a);
+-- @@@ 338
+SELECT 'stats_test_idx1'::regclass::oid AS stats_test_idx1_oid \gset
+-- @@@ 339
+select a from stats_test_tab1 where a = 3;
+ a 
+---
+ 3
+(1 row)
+
+-- @@@ 340
+SELECT pg_stat_have_stats('relation', :dboid, :stats_test_idx1_oid);
+ pg_stat_have_stats 
+--------------------
+ t
+(1 row)
+
+-- @@@ 341
+ROLLBACK;
+-- @@@ 342
+SELECT pg_stat_have_stats('relation', :dboid, :stats_test_idx1_oid);
+ pg_stat_have_stats 
+--------------------
+ f
+(1 row)
+
+-- @@@ 343
+-- pg_stat_have_stats returns true for reindex CONCURRENTLY
+CREATE index stats_test_idx1 on stats_test_tab1(a);
+-- @@@ 344
+SELECT 'stats_test_idx1'::regclass::oid AS stats_test_idx1_oid \gset
+-- @@@ 345
+select a from stats_test_tab1 where a = 3;
+ a 
+---
+ 3
+(1 row)
+
+-- @@@ 346
+SELECT pg_stat_have_stats('relation', :dboid, :stats_test_idx1_oid);
+ pg_stat_have_stats 
+--------------------
+ t
+(1 row)
+
+-- @@@ 347
+REINDEX index CONCURRENTLY stats_test_idx1;
+-- @@@ 348
+-- false for previous oid
+SELECT pg_stat_have_stats('relation', :dboid, :stats_test_idx1_oid);
+ pg_stat_have_stats 
+--------------------
+ f
+(1 row)
+
+-- @@@ 349
+-- true for new oid
+SELECT 'stats_test_idx1'::regclass::oid AS stats_test_idx1_oid \gset
+-- @@@ 350
+SELECT pg_stat_have_stats('relation', :dboid, :stats_test_idx1_oid);
+ pg_stat_have_stats 
+--------------------
+ t
+(1 row)
+
+-- @@@ 351
+-- pg_stat_have_stats returns true for a rolled back drop index with stats
+BEGIN;
+-- @@@ 352
+SELECT pg_stat_have_stats('relation', :dboid, :stats_test_idx1_oid);
+ pg_stat_have_stats 
+--------------------
+ t
+(1 row)
+
+-- @@@ 353
+DROP index stats_test_idx1;
+-- @@@ 354
+ROLLBACK;
+-- @@@ 355
+SELECT pg_stat_have_stats('relation', :dboid, :stats_test_idx1_oid);
+ pg_stat_have_stats 
+--------------------
+ t
+(1 row)
+
+-- @@@ 356
+-- put enable_seqscan back to on
+SET enable_seqscan TO on;
+-- @@@ 357
+-- ensure that stats accessors handle NULL input correctly
+SELECT pg_stat_get_replication_slot(NULL);
+ pg_stat_get_replication_slot 
+------------------------------
+ 
+(1 row)
+
+-- @@@ 358
+SELECT pg_stat_get_subscription_stats(NULL);
+ pg_stat_get_subscription_stats 
+--------------------------------
+ 
+(1 row)
+
+-- @@@ 359
+-- Test that the following operations are tracked in pg_stat_io and in
+-- backend stats:
+-- - reads of target blocks into shared buffers
+-- - writes of shared buffers to permanent storage
+-- - extends of relations using shared buffers
+-- - fsyncs done to ensure the durability of data dirtying shared buffers
+-- - shared buffer hits
+-- - WAL writes and fsyncs in IOContext IOCONTEXT_NORMAL
+-- There is no test for blocks evicted from shared buffers, because we cannot
+-- be sure of the state of shared buffers at the point the test is run.
+-- Create a regular table and insert some data to generate IOCONTEXT_NORMAL
+-- extends.
+SELECT pid AS checkpointer_pid FROM pg_stat_activity
+  WHERE backend_type = 'checkpointer' \gset
+-- @@@ 360
+SELECT sum(extends) AS io_sum_shared_before_extends
+  FROM pg_stat_io WHERE context = 'normal' AND object = 'relation' \gset
+-- @@@ 361
+SELECT sum(extends) AS my_io_sum_shared_before_extends
+  FROM pg_stat_get_backend_io(pg_backend_pid())
+  WHERE context = 'normal' AND object = 'relation' \gset
+-- @@@ 362
+SELECT sum(writes) AS writes, sum(fsyncs) AS fsyncs
+  FROM pg_stat_io
+  WHERE object = 'relation' \gset io_sum_shared_before_
+-- @@@ 363
+SELECT sum(writes) AS writes, sum(fsyncs) AS fsyncs
+  FROM pg_stat_get_backend_io(pg_backend_pid())
+  WHERE object = 'relation' \gset my_io_sum_shared_before_
+-- @@@ 364
+SELECT sum(writes) AS writes, sum(fsyncs) AS fsyncs
+  FROM pg_stat_io
+  WHERE context = 'normal' AND object = 'wal' \gset io_sum_wal_normal_before_
+-- @@@ 365
+CREATE TABLE test_io_shared(a int);
+-- @@@ 366
+INSERT INTO test_io_shared SELECT i FROM generate_series(1,100)i;
+-- @@@ 367
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- @@@ 368
+SELECT sum(extends) AS io_sum_shared_after_extends
+  FROM pg_stat_io WHERE context = 'normal' AND object = 'relation' \gset
+-- @@@ 369
+SELECT :io_sum_shared_after_extends > :io_sum_shared_before_extends;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 370
+SELECT sum(extends) AS my_io_sum_shared_after_extends
+  FROM pg_stat_get_backend_io(pg_backend_pid())
+  WHERE context = 'normal' AND object = 'relation' \gset
+-- @@@ 371
+SELECT :my_io_sum_shared_after_extends > :my_io_sum_shared_before_extends;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 372
+-- After a checkpoint, there should be some additional IOCONTEXT_NORMAL writes
+-- and fsyncs in the global stats (usually not for the backend).
+-- See comment above for rationale for two explicit CHECKPOINTs.
+CHECKPOINT;
+-- @@@ 373
+CHECKPOINT;
+-- @@@ 374
+SELECT sum(writes) AS writes, sum(fsyncs) AS fsyncs
+  FROM pg_stat_io
+  WHERE object = 'relation' \gset io_sum_shared_after_
+-- @@@ 375
+SELECT :io_sum_shared_after_writes > :io_sum_shared_before_writes;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 376
+SELECT current_setting('fsync') = 'off'
+  OR :io_sum_shared_after_fsyncs > :io_sum_shared_before_fsyncs;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 377
+SELECT sum(writes) AS writes, sum(fsyncs) AS fsyncs
+  FROM pg_stat_get_backend_io(pg_backend_pid())
+  WHERE object = 'relation' \gset my_io_sum_shared_after_
+-- @@@ 378
+SELECT :my_io_sum_shared_after_writes >= :my_io_sum_shared_before_writes;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 379
+SELECT current_setting('fsync') = 'off'
+  OR :my_io_sum_shared_after_fsyncs >= :my_io_sum_shared_before_fsyncs;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 380
+SELECT sum(writes) AS writes, sum(fsyncs) AS fsyncs
+  FROM pg_stat_io
+  WHERE context = 'normal' AND object = 'wal' \gset io_sum_wal_normal_after_
+-- @@@ 381
+SELECT current_setting('synchronous_commit') = 'on';
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 382
+SELECT :io_sum_wal_normal_after_writes > :io_sum_wal_normal_before_writes;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 383
+SELECT current_setting('fsync') = 'off'
+  OR current_setting('wal_sync_method') IN ('open_sync', 'open_datasync')
+  OR :io_sum_wal_normal_after_fsyncs > :io_sum_wal_normal_before_fsyncs;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 384
+-- Change the tablespace so that the table is rewritten directly, then SELECT
+-- from it to cause it to be read back into shared buffers.
+SELECT sum(reads) AS io_sum_shared_before_reads
+  FROM pg_stat_io WHERE context = 'normal' AND object = 'relation' \gset
+-- @@@ 385
+-- Do this in a transaction to prevent spurious failures due to concurrent accesses to our newly
+-- rewritten table, e.g. by autovacuum.
+BEGIN;
+-- @@@ 386
+ALTER TABLE test_io_shared SET TABLESPACE regress_tblspace;
+-- @@@ 387
+-- SELECT from the table so that the data is read into shared buffers and
+-- context 'normal', object 'relation' reads are counted.
+SELECT COUNT(*) FROM test_io_shared;
+ count 
+-------
+   100
+(1 row)
+
+-- @@@ 388
+COMMIT;
+-- @@@ 389
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- @@@ 390
+SELECT sum(reads) AS io_sum_shared_after_reads
+  FROM pg_stat_io WHERE context = 'normal' AND object = 'relation'  \gset
+-- @@@ 391
+SELECT :io_sum_shared_after_reads > :io_sum_shared_before_reads;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 392
+SELECT sum(hits) AS io_sum_shared_before_hits
+  FROM pg_stat_io WHERE context = 'normal' AND object = 'relation' \gset
+-- @@@ 393
+-- Select from the table again to count hits.
+-- Ensure we generate hits by forcing a nested loop self-join with no
+-- materialize node. The outer side's buffer will stay pinned, preventing its
+-- eviction, while we loop through the inner side and generate hits.
+BEGIN;
+-- @@@ 394
+SET LOCAL enable_nestloop TO on; SET LOCAL enable_mergejoin TO off;
+-- @@@ 395
+SET LOCAL enable_hashjoin TO off; SET LOCAL enable_material TO off;
+-- @@@ 396
+-- ensure plan stays as we expect it to
+EXPLAIN (COSTS OFF) SELECT COUNT(*) FROM test_io_shared t1 INNER JOIN test_io_shared t2 USING (a);
+                QUERY PLAN                 
+-------------------------------------------
+ Aggregate
+   ->  Nested Loop
+         Join Filter: (t1.a = t2.a)
+         ->  Seq Scan on test_io_shared t1
+         ->  Seq Scan on test_io_shared t2
+(5 rows)
+
+-- @@@ 397
+SELECT COUNT(*) FROM test_io_shared t1 INNER JOIN test_io_shared t2 USING (a);
+ count 
+-------
+   100
+(1 row)
+
+-- @@@ 398
+COMMIT;
+-- @@@ 399
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- @@@ 400
+SELECT sum(hits) AS io_sum_shared_after_hits
+  FROM pg_stat_io WHERE context = 'normal' AND object = 'relation' \gset
+-- @@@ 401
+SELECT :io_sum_shared_after_hits > :io_sum_shared_before_hits;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 402
+DROP TABLE test_io_shared;
+-- @@@ 403
+-- Test that the follow IOCONTEXT_LOCAL IOOps are tracked in pg_stat_io:
+-- - eviction of local buffers in order to reuse them
+-- - reads of temporary table blocks into local buffers
+-- - writes of local buffers to permanent storage
+-- - extends of temporary tables
+-- Set temp_buffers to its minimum so that we can trigger writes with fewer
+-- inserted tuples. Do so in a new session in case temporary tables have been
+-- accessed by previous tests in this session.
+\c
+-- @@@ 404
+SET temp_buffers TO 100;
+-- @@@ 405
+CREATE TEMPORARY TABLE test_io_local(a int, b TEXT);
+-- @@@ 406
+SELECT sum(extends) AS extends, sum(evictions) AS evictions, sum(writes) AS writes
+  FROM pg_stat_io
+  WHERE context = 'normal' AND object = 'temp relation' \gset io_sum_local_before_
+-- @@@ 407
+-- Insert tuples into the temporary table, generating extends in the stats.
+-- Insert enough values that we need to reuse and write out dirty local
+-- buffers, generating evictions and writes.
+INSERT INTO test_io_local SELECT generate_series(1, 5000) as id, repeat('a', 200);
+-- @@@ 408
+-- Ensure the table is large enough to exceed our temp_buffers setting.
+SELECT pg_relation_size('test_io_local') / current_setting('block_size')::int8 > 100;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 409
+SELECT sum(reads) AS io_sum_local_before_reads
+  FROM pg_stat_io WHERE context = 'normal' AND object = 'temp relation' \gset
+-- @@@ 410
+-- Read in evicted buffers, generating reads.
+SELECT COUNT(*) FROM test_io_local;
+ count 
+-------
+  5000
+(1 row)
+
+-- @@@ 411
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- @@@ 412
+SELECT sum(evictions) AS evictions,
+       sum(reads) AS reads,
+       sum(writes) AS writes,
+       sum(extends) AS extends
+  FROM pg_stat_io
+  WHERE context = 'normal' AND object = 'temp relation'  \gset io_sum_local_after_
+-- @@@ 413
+SELECT :io_sum_local_after_evictions > :io_sum_local_before_evictions,
+       :io_sum_local_after_reads > :io_sum_local_before_reads,
+       :io_sum_local_after_writes > :io_sum_local_before_writes,
+       :io_sum_local_after_extends > :io_sum_local_before_extends;
+ ?column? | ?column? | ?column? | ?column? 
+----------+----------+----------+----------
+ t        | t        | t        | t
+(1 row)
+
+-- @@@ 414
+-- Change the tablespaces so that the temporary table is rewritten to other
+-- local buffers, exercising a different codepath than standard local buffer
+-- writes.
+ALTER TABLE test_io_local SET TABLESPACE regress_tblspace;
+-- @@@ 415
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- @@@ 416
+SELECT sum(writes) AS io_sum_local_new_tblspc_writes
+  FROM pg_stat_io WHERE context = 'normal' AND object = 'temp relation'  \gset
+-- @@@ 417
+SELECT :io_sum_local_new_tblspc_writes > :io_sum_local_after_writes;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 418
+RESET temp_buffers;
+-- @@@ 419
+-- Test that reuse of strategy buffers and reads of blocks into these reused
+-- buffers while VACUUMing are tracked in pg_stat_io. If there is sufficient
+-- demand for shared buffers from concurrent queries, some buffers may be
+-- pinned by other backends before they can be reused. In such cases, the
+-- backend will evict a buffer from outside the ring and add it to the
+-- ring. This is considered an eviction and not a reuse.
+-- Set wal_skip_threshold smaller than the expected size of
+-- test_io_vac_strategy so that, even if wal_level is minimal, VACUUM FULL will
+-- fsync the newly rewritten test_io_vac_strategy instead of writing it to WAL.
+-- Writing it to WAL will result in the newly written relation pages being in
+-- shared buffers -- preventing us from testing BAS_VACUUM BufferAccessStrategy
+-- reads.
+SET wal_skip_threshold = '1 kB';
+-- @@@ 420
+SELECT sum(reuses) AS reuses, sum(reads) AS reads, sum(evictions) AS evictions
+  FROM pg_stat_io WHERE context = 'vacuum' \gset io_sum_vac_strategy_before_
+-- @@@ 421
+CREATE TABLE test_io_vac_strategy(a int, b int) WITH (autovacuum_enabled = 'false');
+-- @@@ 422
+INSERT INTO test_io_vac_strategy SELECT i, i from generate_series(1, 4500)i;
+-- @@@ 423
+-- Ensure that the next VACUUM will need to perform IO by rewriting the table
+-- first with VACUUM (FULL).
+VACUUM (FULL) test_io_vac_strategy;
+-- @@@ 424
+-- Use the minimum BUFFER_USAGE_LIMIT to cause reuses or evictions with the
+-- smallest table possible.
+VACUUM (PARALLEL 0, BUFFER_USAGE_LIMIT 128) test_io_vac_strategy;
+-- @@@ 425
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- @@@ 426
+SELECT sum(reuses) AS reuses, sum(reads) AS reads, sum(evictions) AS evictions
+  FROM pg_stat_io WHERE context = 'vacuum' \gset io_sum_vac_strategy_after_
+-- @@@ 427
+SELECT :io_sum_vac_strategy_after_reads > :io_sum_vac_strategy_before_reads;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 428
+SELECT (:io_sum_vac_strategy_after_reuses + :io_sum_vac_strategy_after_evictions) >
+  (:io_sum_vac_strategy_before_reuses + :io_sum_vac_strategy_before_evictions);
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 429
+RESET wal_skip_threshold;
+-- @@@ 430
+-- Test that extends done by a CTAS, which uses a BAS_BULKWRITE
+-- BufferAccessStrategy, are tracked in pg_stat_io.
+SELECT sum(extends) AS io_sum_bulkwrite_strategy_extends_before
+  FROM pg_stat_io WHERE context = 'bulkwrite' \gset
+-- @@@ 431
+CREATE TABLE test_io_bulkwrite_strategy AS SELECT i FROM generate_series(1,100)i;
+-- @@@ 432
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- @@@ 433
+SELECT sum(extends) AS io_sum_bulkwrite_strategy_extends_after
+  FROM pg_stat_io WHERE context = 'bulkwrite' \gset
+-- @@@ 434
+SELECT :io_sum_bulkwrite_strategy_extends_after > :io_sum_bulkwrite_strategy_extends_before;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 435
+-- Test IO stats reset
+SELECT pg_stat_have_stats('io', 0, 0);
+ pg_stat_have_stats 
+--------------------
+ t
+(1 row)
+
+-- @@@ 436
+SELECT sum(evictions) + sum(reuses) + sum(extends) + sum(fsyncs) + sum(reads) + sum(writes) + sum(writebacks) + sum(hits) AS io_stats_pre_reset
+  FROM pg_stat_io \gset
+-- @@@ 437
+SELECT sum(evictions) + sum(reuses) + sum(extends) + sum(fsyncs) + sum(reads) + sum(writes) + sum(writebacks) + sum(hits) AS my_io_stats_pre_reset
+  FROM pg_stat_get_backend_io(pg_backend_pid()) \gset
+-- @@@ 438
+SELECT pg_stat_reset_shared('io');
+ pg_stat_reset_shared 
+----------------------
+ 
+(1 row)
+
+-- @@@ 439
+SELECT sum(evictions) + sum(reuses) + sum(extends) + sum(fsyncs) + sum(reads) + sum(writes) + sum(writebacks) + sum(hits) AS io_stats_post_reset
+  FROM pg_stat_io \gset
+-- @@@ 440
+SELECT :io_stats_post_reset < :io_stats_pre_reset;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 441
+SELECT sum(evictions) + sum(reuses) + sum(extends) + sum(fsyncs) + sum(reads) + sum(writes) + sum(writebacks) + sum(hits) AS my_io_stats_post_reset
+  FROM pg_stat_get_backend_io(pg_backend_pid()) \gset
+-- @@@ 442
+-- pg_stat_reset_shared() did not reset backend IO stats
+SELECT :my_io_stats_pre_reset <= :my_io_stats_post_reset;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 443
+-- but pg_stat_reset_backend_stats() does
+SELECT pg_stat_reset_backend_stats(pg_backend_pid());
+ pg_stat_reset_backend_stats 
+-----------------------------
+ 
+(1 row)
+
+-- @@@ 444
+SELECT sum(evictions) + sum(reuses) + sum(extends) + sum(fsyncs) + sum(reads) + sum(writes) + sum(writebacks) + sum(hits) AS my_io_stats_post_backend_reset
+  FROM pg_stat_get_backend_io(pg_backend_pid()) \gset
+-- @@@ 445
+SELECT :my_io_stats_pre_reset > :my_io_stats_post_backend_reset;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 446
+-- Check invalid input for pg_stat_get_backend_io()
+SELECT pg_stat_get_backend_io(NULL);
+ pg_stat_get_backend_io 
+------------------------
+(0 rows)
+
+-- @@@ 447
+SELECT pg_stat_get_backend_io(0);
+ pg_stat_get_backend_io 
+------------------------
+(0 rows)
+
+-- @@@ 448
+-- Auxiliary processes return no data.
+SELECT pg_stat_get_backend_io(:checkpointer_pid);
+ pg_stat_get_backend_io 
+------------------------
+(0 rows)
+
+-- @@@ 449
+-- test BRIN index doesn't block HOT update
+CREATE TABLE brin_hot (
+  id  integer PRIMARY KEY,
+  val integer NOT NULL
+) WITH (autovacuum_enabled = off, fillfactor = 70);
+-- @@@ 450
+INSERT INTO brin_hot SELECT *, 0 FROM generate_series(1, 235);
+-- @@@ 451
+CREATE INDEX val_brin ON brin_hot using brin(val);
+-- @@@ 452
+CREATE FUNCTION wait_for_hot_stats() RETURNS void AS $$
+DECLARE
+  start_time timestamptz := clock_timestamp();
+  updated bool;
+BEGIN
+  -- we don't want to wait forever; loop will exit after 30 seconds
+  FOR i IN 1 .. 300 LOOP
+    SELECT (pg_stat_get_tuples_hot_updated('brin_hot'::regclass::oid) > 0) INTO updated;
+    EXIT WHEN updated;
+
+    -- wait a little
+    PERFORM pg_sleep_for('100 milliseconds');
+    -- reset stats snapshot so we can test again
+    PERFORM pg_stat_clear_snapshot();
+  END LOOP;
+  -- report time waited in postmaster log (where it won't change test output)
+  RAISE log 'wait_for_hot_stats delayed % seconds',
+    EXTRACT(epoch FROM clock_timestamp() - start_time);
+END
+$$ LANGUAGE plpgsql;
+-- @@@ 453
+UPDATE brin_hot SET val = -3 WHERE id = 42;
+-- @@@ 454
+-- We can't just call wait_for_hot_stats() at this point, because we only
+-- transmit stats when the session goes idle, and we probably didn't
+-- transmit the last couple of counts yet thanks to the rate-limiting logic
+-- in pgstat_report_stat().  But instead of waiting for the rate limiter's
+-- timeout to elapse, let's just start a new session.  The old one will
+-- then send its stats before dying.
+\c -
+-- @@@ 455
+SELECT wait_for_hot_stats();
+ wait_for_hot_stats 
+--------------------
+ 
+(1 row)
+
+-- @@@ 456
+SELECT pg_stat_get_tuples_hot_updated('brin_hot'::regclass::oid);
+ pg_stat_get_tuples_hot_updated 
+--------------------------------
+                              1
+(1 row)
+
+-- @@@ 457
+DROP TABLE brin_hot;
+-- @@@ 458
+DROP FUNCTION wait_for_hot_stats();
+-- @@@ 459
+-- Test handling of index predicates - updating attributes in precicates
+-- should not block HOT when summarizing indexes are involved. We update
+-- a row that was not indexed due to the index predicate, and becomes
+-- indexable - the HOT-updated tuple is forwarded to the BRIN index.
+CREATE TABLE brin_hot_2 (a int, b int);
+-- @@@ 460
+INSERT INTO brin_hot_2 VALUES (1, 100);
+-- @@@ 461
+CREATE INDEX ON brin_hot_2 USING brin (b) WHERE a = 2;
+-- @@@ 462
+UPDATE brin_hot_2 SET a = 2;
+-- @@@ 463
+EXPLAIN (COSTS OFF) SELECT * FROM brin_hot_2 WHERE a = 2 AND b = 100;
+            QUERY PLAN             
+-----------------------------------
+ Seq Scan on brin_hot_2
+   Filter: ((a = 2) AND (b = 100))
+(2 rows)
+
+-- @@@ 464
+SELECT COUNT(*) FROM brin_hot_2 WHERE a = 2 AND b = 100;
+ count 
+-------
+     1
+(1 row)
+
+-- @@@ 465
+SET enable_seqscan = off;
+-- @@@ 466
+EXPLAIN (COSTS OFF) SELECT * FROM brin_hot_2 WHERE a = 2 AND b = 100;
+                 QUERY PLAN                  
+---------------------------------------------
+ Bitmap Heap Scan on brin_hot_2
+   Recheck Cond: ((b = 100) AND (a = 2))
+   ->  Bitmap Index Scan on brin_hot_2_b_idx
+         Index Cond: (b = 100)
+(4 rows)
+
+-- @@@ 467
+SELECT COUNT(*) FROM brin_hot_2 WHERE a = 2 AND b = 100;
+ count 
+-------
+     1
+(1 row)
+
+-- @@@ 468
+DROP TABLE brin_hot_2;
+-- @@@ 469
+-- Test that updates to indexed columns are still propagated to the
+-- BRIN column.
+-- https://postgr.es/m/05ebcb44-f383-86e3-4f31-0a97a55634cf@enterprisedb.com
+CREATE TABLE brin_hot_3 (a int, filler text) WITH (fillfactor = 10);
+-- @@@ 470
+INSERT INTO brin_hot_3 SELECT 1, repeat(' ', 500) FROM generate_series(1, 20);
+-- @@@ 471
+CREATE INDEX ON brin_hot_3 USING brin (a) WITH (pages_per_range = 1);
+-- @@@ 472
+UPDATE brin_hot_3 SET a = 2;
+-- @@@ 473
+EXPLAIN (COSTS OFF) SELECT * FROM brin_hot_3 WHERE a = 2;
+                 QUERY PLAN                  
+---------------------------------------------
+ Bitmap Heap Scan on brin_hot_3
+   Recheck Cond: (a = 2)
+   ->  Bitmap Index Scan on brin_hot_3_a_idx
+         Index Cond: (a = 2)
+(4 rows)
+
+-- @@@ 474
+SELECT COUNT(*) FROM brin_hot_3 WHERE a = 2;
+ count 
+-------
+    20
+(1 row)
+
+-- @@@ 475
+DROP TABLE brin_hot_3;
+-- @@@ 476
+SET enable_seqscan = on;
+-- @@@ 477
+-- Test that estimation of relation size works with tuples wider than the
+-- relation fillfactor. We create a table with wide inline attributes and
+-- low fillfactor, insert rows and then see how many rows EXPLAIN shows
+-- before running analyze. We disable autovacuum so that it does not
+-- interfere with the test.
+CREATE TABLE table_fillfactor (
+  n char(1000)
+) with (fillfactor=10, autovacuum_enabled=off);
+-- @@@ 478
+INSERT INTO table_fillfactor
+SELECT 'x' FROM generate_series(1,1000);
+-- @@@ 479
+SELECT * FROM check_estimated_rows('SELECT * FROM table_fillfactor');
+ estimated | actual 
+-----------+--------
+      1000 |   1000
+(1 row)
+
+-- @@@ 480
+DROP TABLE table_fillfactor;
+-- @@@ 481
+-- End of Stats Test

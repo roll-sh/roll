@@ -1,0 +1,714 @@
+--
+-- Test large object support
+--
+-- directory paths are passed to us in environment variables
+\getenv abs_srcdir PG_ABS_SRCDIR
+-- @@@ 0
+\getenv abs_builddir PG_ABS_BUILDDIR
+-- @@@ 1
+-- ensure consistent test output regardless of the default bytea format
+SET bytea_output TO escape;
+-- @@@ 2
+-- Test ALTER LARGE OBJECT OWNER
+CREATE ROLE regress_lo_user;
+-- @@@ 3
+SELECT lo_create(42);
+ lo_create 
+-----------
+        42
+(1 row)
+
+-- @@@ 4
+ALTER LARGE OBJECT 42 OWNER TO regress_lo_user;
+-- @@@ 5
+-- Test GRANT, COMMENT as non-superuser
+SET SESSION AUTHORIZATION regress_lo_user;
+-- @@@ 6
+GRANT SELECT ON LARGE OBJECT 42 TO public;
+-- @@@ 7
+COMMENT ON LARGE OBJECT 42 IS 'the ultimate answer';
+-- @@@ 8
+RESET SESSION AUTHORIZATION;
+-- @@@ 9
+-- Test psql's \lo_list et al (we assume no other LOs exist yet)
+\lo_list
+               Large objects
+ ID |      Owner      |     Description     
+----+-----------------+---------------------
+ 42 | regress_lo_user | the ultimate answer
+(1 row)
+
+-- @@@ 10
+\lo_list+
+                                  Large objects
+ ID |      Owner      |         Access privileges          |     Description     
+----+-----------------+------------------------------------+---------------------
+ 42 | regress_lo_user | regress_lo_user=rw/regress_lo_user+| the ultimate answer
+    |                 | =r/regress_lo_user                 | 
+(1 row)
+
+-- @@@ 11
+\lo_unlink 42
+-- @@@ 12
+\dl
+      Large objects
+ ID | Owner | Description 
+----+-------+-------------
+(0 rows)
+
+-- @@@ 13
+-- Load a file
+CREATE TABLE lotest_stash_values (loid oid, fd integer);
+-- @@@ 14
+-- lo_creat(mode integer) returns oid
+-- The mode arg to lo_creat is unused, some vestigal holdover from ancient times
+-- returns the large object id
+INSERT INTO lotest_stash_values (loid) SELECT lo_creat(42);
+-- @@@ 15
+-- NOTE: large objects require transactions
+BEGIN;
+-- @@@ 16
+-- lo_open(lobjId oid, mode integer) returns integer
+-- The mode parameter to lo_open uses two constants:
+--   INV_WRITE = 0x20000
+--   INV_READ  = 0x40000
+-- The return value is a file descriptor-like value which remains valid for the
+-- transaction.
+UPDATE lotest_stash_values SET fd = lo_open(loid, CAST(x'20000' | x'40000' AS integer));
+-- @@@ 17
+-- loread/lowrite names are wonky, different from other functions which are lo_*
+-- lowrite(fd integer, data bytea) returns integer
+-- the integer is the number of bytes written
+SELECT lowrite(fd, '
+I wandered lonely as a cloud
+That floats on high o''er vales and hills,
+When all at once I saw a crowd,
+A host, of golden daffodils;
+Beside the lake, beneath the trees,
+Fluttering and dancing in the breeze.
+
+Continuous as the stars that shine
+And twinkle on the milky way,
+They stretched in never-ending line
+Along the margin of a bay:
+Ten thousand saw I at a glance,
+Tossing their heads in sprightly dance.
+
+The waves beside them danced; but they
+Out-did the sparkling waves in glee:
+A poet could not but be gay,
+In such a jocund company:
+I gazed--and gazed--but little thought
+What wealth the show to me had brought:
+
+For oft, when on my couch I lie
+In vacant or in pensive mood,
+They flash upon that inward eye
+Which is the bliss of solitude;
+And then my heart with pleasure fills,
+And dances with the daffodils.
+
+         -- William Wordsworth
+') FROM lotest_stash_values;
+ lowrite 
+---------
+     848
+(1 row)
+
+-- @@@ 18
+-- lo_close(fd integer) returns integer
+-- return value is 0 for success, or <0 for error (actually only -1, but...)
+SELECT lo_close(fd) FROM lotest_stash_values;
+ lo_close 
+----------
+        0
+(1 row)
+
+-- @@@ 19
+END;
+-- @@@ 20
+-- Copy to another large object.
+-- Note: we intentionally don't remove the object created here;
+-- it's left behind to help test pg_dump.
+SELECT lo_from_bytea(0, lo_get(loid)) AS newloid FROM lotest_stash_values
+\gset
+-- @@@ 21
+-- Add a comment to it, as well, for pg_dump/pg_upgrade testing.
+COMMENT ON LARGE OBJECT :newloid IS 'I Wandered Lonely as a Cloud';
+-- @@@ 22
+-- Read out a portion
+BEGIN;
+-- @@@ 23
+UPDATE lotest_stash_values SET fd=lo_open(loid, CAST(x'20000' | x'40000' AS integer));
+-- @@@ 24
+-- lo_lseek(fd integer, offset integer, whence integer) returns integer
+-- offset is in bytes, whence is one of three values:
+--  SEEK_SET (= 0) meaning relative to beginning
+--  SEEK_CUR (= 1) meaning relative to current position
+--  SEEK_END (= 2) meaning relative to end (offset better be negative)
+-- returns current position in file
+SELECT lo_lseek(fd, 104, 0) FROM lotest_stash_values;
+ lo_lseek 
+----------
+      104
+(1 row)
+
+-- @@@ 25
+-- loread/lowrite names are wonky, different from other functions which are lo_*
+-- loread(fd integer, len integer) returns bytea
+SELECT loread(fd, 28) FROM lotest_stash_values;
+            loread            
+------------------------------
+ A host, of golden daffodils;
+(1 row)
+
+-- @@@ 26
+SELECT lo_lseek(fd, -19, 1) FROM lotest_stash_values;
+ lo_lseek 
+----------
+      113
+(1 row)
+
+-- @@@ 27
+SELECT lowrite(fd, 'n') FROM lotest_stash_values;
+ lowrite 
+---------
+       1
+(1 row)
+
+-- @@@ 28
+SELECT lo_tell(fd) FROM lotest_stash_values;
+ lo_tell 
+---------
+     114
+(1 row)
+
+-- @@@ 29
+SELECT lo_lseek(fd, -744, 2) FROM lotest_stash_values;
+ lo_lseek 
+----------
+      104
+(1 row)
+
+-- @@@ 30
+SELECT loread(fd, 28) FROM lotest_stash_values;
+            loread            
+------------------------------
+ A host, on golden daffodils;
+(1 row)
+
+-- @@@ 31
+SELECT lo_close(fd) FROM lotest_stash_values;
+ lo_close 
+----------
+        0
+(1 row)
+
+-- @@@ 32
+END;
+-- @@@ 33
+-- Test resource management
+BEGIN;
+-- @@@ 34
+SELECT lo_open(loid, x'40000'::int) from lotest_stash_values;
+ lo_open 
+---------
+       0
+(1 row)
+
+-- @@@ 35
+ABORT;
+-- @@@ 36
+\set filename :abs_builddir '/results/invalid/path'
+-- @@@ 37
+\set dobody 'DECLARE loid oid; BEGIN '
+-- @@@ 38
+\set dobody :dobody 'SELECT tbl.loid INTO loid FROM lotest_stash_values tbl; '
+-- @@@ 39
+\set dobody :dobody 'PERFORM lo_export(loid, ' :'filename' '); '
+-- @@@ 40
+\set dobody :dobody 'EXCEPTION WHEN UNDEFINED_FILE THEN '
+-- @@@ 41
+\set dobody :dobody 'RAISE NOTICE ''could not open file, as expected''; END'
+-- @@@ 42
+DO :'dobody';
+NOTICE:  could not open file, as expected
+-- @@@ 43
+-- Test truncation.
+BEGIN;
+-- @@@ 44
+UPDATE lotest_stash_values SET fd=lo_open(loid, CAST(x'20000' | x'40000' AS integer));
+-- @@@ 45
+SELECT lo_truncate(fd, 11) FROM lotest_stash_values;
+ lo_truncate 
+-------------
+           0
+(1 row)
+
+-- @@@ 46
+SELECT loread(fd, 15) FROM lotest_stash_values;
+     loread     
+----------------
+ \012I wandered
+(1 row)
+
+-- @@@ 47
+SELECT lo_truncate(fd, 10000) FROM lotest_stash_values;
+ lo_truncate 
+-------------
+           0
+(1 row)
+
+-- @@@ 48
+SELECT loread(fd, 10) FROM lotest_stash_values;
+                  loread                  
+------------------------------------------
+ \000\000\000\000\000\000\000\000\000\000
+(1 row)
+
+-- @@@ 49
+SELECT lo_lseek(fd, 0, 2) FROM lotest_stash_values;
+ lo_lseek 
+----------
+    10000
+(1 row)
+
+-- @@@ 50
+SELECT lo_tell(fd) FROM lotest_stash_values;
+ lo_tell 
+---------
+   10000
+(1 row)
+
+-- @@@ 51
+SELECT lo_truncate(fd, 5000) FROM lotest_stash_values;
+ lo_truncate 
+-------------
+           0
+(1 row)
+
+-- @@@ 52
+SELECT lo_lseek(fd, 0, 2) FROM lotest_stash_values;
+ lo_lseek 
+----------
+     5000
+(1 row)
+
+-- @@@ 53
+SELECT lo_tell(fd) FROM lotest_stash_values;
+ lo_tell 
+---------
+    5000
+(1 row)
+
+-- @@@ 54
+SELECT lo_close(fd) FROM lotest_stash_values;
+ lo_close 
+----------
+        0
+(1 row)
+
+-- @@@ 55
+END;
+-- @@@ 56
+-- Test 64-bit large object functions.
+BEGIN;
+-- @@@ 57
+UPDATE lotest_stash_values SET fd = lo_open(loid, CAST(x'20000' | x'40000' AS integer));
+-- @@@ 58
+SELECT lo_lseek64(fd, 4294967296, 0) FROM lotest_stash_values;
+ lo_lseek64 
+------------
+ 4294967296
+(1 row)
+
+-- @@@ 59
+SELECT lowrite(fd, 'offset:4GB') FROM lotest_stash_values;
+ lowrite 
+---------
+      10
+(1 row)
+
+-- @@@ 60
+SELECT lo_tell64(fd) FROM lotest_stash_values;
+ lo_tell64  
+------------
+ 4294967306
+(1 row)
+
+-- @@@ 61
+SELECT lo_lseek64(fd, -10, 1) FROM lotest_stash_values;
+ lo_lseek64 
+------------
+ 4294967296
+(1 row)
+
+-- @@@ 62
+SELECT lo_tell64(fd) FROM lotest_stash_values;
+ lo_tell64  
+------------
+ 4294967296
+(1 row)
+
+-- @@@ 63
+SELECT loread(fd, 10) FROM lotest_stash_values;
+   loread   
+------------
+ offset:4GB
+(1 row)
+
+-- @@@ 64
+SELECT lo_truncate64(fd, 5000000000) FROM lotest_stash_values;
+ lo_truncate64 
+---------------
+             0
+(1 row)
+
+-- @@@ 65
+SELECT lo_lseek64(fd, 0, 2) FROM lotest_stash_values;
+ lo_lseek64 
+------------
+ 5000000000
+(1 row)
+
+-- @@@ 66
+SELECT lo_tell64(fd) FROM lotest_stash_values;
+ lo_tell64  
+------------
+ 5000000000
+(1 row)
+
+-- @@@ 67
+SELECT lo_truncate64(fd, 3000000000) FROM lotest_stash_values;
+ lo_truncate64 
+---------------
+             0
+(1 row)
+
+-- @@@ 68
+SELECT lo_lseek64(fd, 0, 2) FROM lotest_stash_values;
+ lo_lseek64 
+------------
+ 3000000000
+(1 row)
+
+-- @@@ 69
+SELECT lo_tell64(fd) FROM lotest_stash_values;
+ lo_tell64  
+------------
+ 3000000000
+(1 row)
+
+-- @@@ 70
+SELECT lo_close(fd) FROM lotest_stash_values;
+ lo_close 
+----------
+        0
+(1 row)
+
+-- @@@ 71
+END;
+-- @@@ 72
+-- lo_unlink(lobjId oid) returns integer
+-- return value appears to always be 1
+SELECT lo_unlink(loid) from lotest_stash_values;
+ lo_unlink 
+-----------
+         1
+(1 row)
+
+-- @@@ 73
+TRUNCATE lotest_stash_values;
+-- @@@ 74
+\set filename :abs_srcdir '/data/tenk.data'
+-- @@@ 75
+INSERT INTO lotest_stash_values (loid) SELECT lo_import(:'filename');
+-- @@@ 76
+BEGIN;
+-- @@@ 77
+UPDATE lotest_stash_values SET fd=lo_open(loid, CAST(x'20000' | x'40000' AS integer));
+-- @@@ 78
+-- verify length of large object
+SELECT lo_lseek(fd, 0, 2) FROM lotest_stash_values;
+ lo_lseek 
+----------
+   670800
+(1 row)
+
+-- @@@ 79
+-- with the default BLCKSZ, LOBLKSIZE = 2048, so this positions us for a block
+-- edge case
+SELECT lo_lseek(fd, 2030, 0) FROM lotest_stash_values;
+ lo_lseek 
+----------
+     2030
+(1 row)
+
+-- @@@ 80
+-- this should get half of the value from page 0 and half from page 1 of the
+-- large object
+SELECT loread(fd, 36) FROM lotest_stash_values;
+                             loread                              
+-----------------------------------------------------------------
+ AAA\011FBAAAA\011VVVVxx\0122513\01132\0111\0111\0113\01113\0111
+(1 row)
+
+-- @@@ 81
+SELECT lo_tell(fd) FROM lotest_stash_values;
+ lo_tell 
+---------
+    2066
+(1 row)
+
+-- @@@ 82
+SELECT lo_lseek(fd, -26, 1) FROM lotest_stash_values;
+ lo_lseek 
+----------
+     2040
+(1 row)
+
+-- @@@ 83
+SELECT lowrite(fd, 'abcdefghijklmnop') FROM lotest_stash_values;
+ lowrite 
+---------
+      16
+(1 row)
+
+-- @@@ 84
+SELECT lo_lseek(fd, 2030, 0) FROM lotest_stash_values;
+ lo_lseek 
+----------
+     2030
+(1 row)
+
+-- @@@ 85
+SELECT loread(fd, 36) FROM lotest_stash_values;
+                       loread                        
+-----------------------------------------------------
+ AAA\011FBAAAAabcdefghijklmnop1\0111\0113\01113\0111
+(1 row)
+
+-- @@@ 86
+SELECT lo_close(fd) FROM lotest_stash_values;
+ lo_close 
+----------
+        0
+(1 row)
+
+-- @@@ 87
+END;
+-- @@@ 88
+\set filename :abs_builddir '/results/lotest.txt'
+-- @@@ 89
+SELECT lo_export(loid, :'filename') FROM lotest_stash_values;
+ lo_export 
+-----------
+         1
+(1 row)
+
+-- @@@ 90
+\lo_import :filename
+-- @@@ 91
+\set newloid :LASTOID
+-- @@@ 92
+-- just make sure \lo_export does not barf
+\set filename :abs_builddir '/results/lotest2.txt'
+-- @@@ 93
+\lo_export :newloid :filename
+-- @@@ 94
+-- This is a hack to test that export/import are reversible
+-- This uses knowledge about the inner workings of large object mechanism
+-- which should not be used outside it.  This makes it a HACK
+SELECT pageno, data FROM pg_largeobject WHERE loid = (SELECT loid from lotest_stash_values)
+EXCEPT
+SELECT pageno, data FROM pg_largeobject WHERE loid = :newloid;
+ pageno | data 
+--------+------
+(0 rows)
+
+-- @@@ 95
+SELECT lo_unlink(loid) FROM lotest_stash_values;
+ lo_unlink 
+-----------
+         1
+(1 row)
+
+-- @@@ 96
+TRUNCATE lotest_stash_values;
+-- @@@ 97
+\lo_unlink :newloid
+-- @@@ 98
+\set filename :abs_builddir '/results/lotest.txt'
+-- @@@ 99
+\lo_import :filename
+-- @@@ 100
+\set newloid_1 :LASTOID
+-- @@@ 101
+SELECT lo_from_bytea(0, lo_get(:newloid_1)) AS newloid_2
+\gset
+-- @@@ 102
+SELECT fipshash(lo_get(:newloid_1)) = fipshash(lo_get(:newloid_2));
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 103
+SELECT lo_get(:newloid_1, 0, 20);
+                  lo_get                   
+-------------------------------------------
+ 8800\0110\0110\0110\0110\0110\0110\011800
+(1 row)
+
+-- @@@ 104
+SELECT lo_get(:newloid_1, 10, 20);
+                  lo_get                   
+-------------------------------------------
+ \0110\0110\0110\011800\011800\0113800\011
+(1 row)
+
+-- @@@ 105
+SELECT lo_put(:newloid_1, 5, decode('afafafaf', 'hex'));
+ lo_put 
+--------
+ 
+(1 row)
+
+-- @@@ 106
+SELECT lo_get(:newloid_1, 0, 20);
+                     lo_get                      
+-------------------------------------------------
+ 8800\011\257\257\257\2570\0110\0110\0110\011800
+(1 row)
+
+-- @@@ 107
+SELECT lo_put(:newloid_1, 4294967310, 'foo');
+ lo_put 
+--------
+ 
+(1 row)
+
+-- @@@ 108
+SELECT lo_get(:newloid_1);
+ERROR:  large object read request is too large
+-- @@@ 109
+SELECT lo_get(:newloid_1, 4294967294, 100);
+                               lo_get                                
+---------------------------------------------------------------------
+ \000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000foo
+(1 row)
+
+-- @@@ 110
+\lo_unlink :newloid_1
+-- @@@ 111
+\lo_unlink :newloid_2
+-- @@@ 112
+-- This object is left in the database for pg_dump test purposes
+SELECT lo_from_bytea(0, E'\\xdeadbeef') AS newloid
+\gset
+-- @@@ 113
+SET bytea_output TO hex;
+-- @@@ 114
+SELECT lo_get(:newloid);
+   lo_get   
+------------
+ \xdeadbeef
+(1 row)
+
+-- @@@ 115
+-- Create one more object that we leave behind for testing pg_dump/pg_upgrade;
+-- this one intentionally has an OID in the system range
+SELECT lo_create(2121);
+ lo_create 
+-----------
+      2121
+(1 row)
+
+-- @@@ 116
+COMMENT ON LARGE OBJECT 2121 IS 'testing comments';
+-- @@@ 117
+-- Test writes on large objects in read-only transactions
+START TRANSACTION READ ONLY;
+-- @@@ 118
+-- INV_READ ... ok
+SELECT lo_open(2121, x'40000'::int);
+ lo_open 
+---------
+       0
+(1 row)
+
+-- @@@ 119
+-- INV_WRITE ... error
+SELECT lo_open(2121, x'20000'::int);
+ERROR:  cannot execute lo_open(INV_WRITE) in a read-only transaction
+-- @@@ 120
+ROLLBACK;
+-- @@@ 121
+START TRANSACTION READ ONLY;
+-- @@@ 122
+SELECT lo_create(42);
+ERROR:  cannot execute lo_create() in a read-only transaction
+-- @@@ 123
+ROLLBACK;
+-- @@@ 124
+START TRANSACTION READ ONLY;
+-- @@@ 125
+SELECT lo_creat(42);
+ERROR:  cannot execute lo_creat() in a read-only transaction
+-- @@@ 126
+ROLLBACK;
+-- @@@ 127
+START TRANSACTION READ ONLY;
+-- @@@ 128
+SELECT lo_unlink(42);
+ERROR:  cannot execute lo_unlink() in a read-only transaction
+-- @@@ 129
+ROLLBACK;
+-- @@@ 130
+START TRANSACTION READ ONLY;
+-- @@@ 131
+SELECT lowrite(42, 'x');
+ERROR:  cannot execute lowrite() in a read-only transaction
+-- @@@ 132
+ROLLBACK;
+-- @@@ 133
+START TRANSACTION READ ONLY;
+-- @@@ 134
+SELECT lo_import(:'filename');
+ERROR:  cannot execute lo_import() in a read-only transaction
+-- @@@ 135
+ROLLBACK;
+-- @@@ 136
+START TRANSACTION READ ONLY;
+-- @@@ 137
+SELECT lo_truncate(42, 0);
+ERROR:  cannot execute lo_truncate() in a read-only transaction
+-- @@@ 138
+ROLLBACK;
+-- @@@ 139
+START TRANSACTION READ ONLY;
+-- @@@ 140
+SELECT lo_truncate64(42, 0);
+ERROR:  cannot execute lo_truncate64() in a read-only transaction
+-- @@@ 141
+ROLLBACK;
+-- @@@ 142
+START TRANSACTION READ ONLY;
+-- @@@ 143
+SELECT lo_from_bytea(0, 'x');
+ERROR:  cannot execute lo_from_bytea() in a read-only transaction
+-- @@@ 144
+ROLLBACK;
+-- @@@ 145
+START TRANSACTION READ ONLY;
+-- @@@ 146
+SELECT lo_put(42, 0, 'x');
+ERROR:  cannot execute lo_put() in a read-only transaction
+-- @@@ 147
+ROLLBACK;
+-- @@@ 148
+-- Clean up
+DROP TABLE lotest_stash_values;
+-- @@@ 149
+DROP ROLE regress_lo_user;
+-- @@@ 150

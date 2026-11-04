@@ -1,0 +1,424 @@
+--
+-- Tests for functions providing information about partitions
+--
+SELECT * FROM pg_partition_tree(NULL);
+ relid | parentrelid | isleaf | level 
+-------+-------------+--------+-------
+(0 rows)
+
+-- @@@ 0
+SELECT * FROM pg_partition_tree(0);
+ relid | parentrelid | isleaf | level 
+-------+-------------+--------+-------
+(0 rows)
+
+-- @@@ 1
+SELECT * FROM pg_partition_ancestors(NULL);
+ relid 
+-------
+(0 rows)
+
+-- @@@ 2
+SELECT * FROM pg_partition_ancestors(0);
+ relid 
+-------
+(0 rows)
+
+-- @@@ 3
+SELECT pg_partition_root(NULL);
+ pg_partition_root 
+-------------------
+ 
+(1 row)
+
+-- @@@ 4
+SELECT pg_partition_root(0);
+ pg_partition_root 
+-------------------
+ 
+(1 row)
+
+-- @@@ 5
+-- Test table partition trees
+CREATE TABLE ptif_test (a int, b int) PARTITION BY range (a);
+-- @@@ 6
+CREATE TABLE ptif_test0 PARTITION OF ptif_test
+  FOR VALUES FROM (minvalue) TO (0) PARTITION BY list (b);
+-- @@@ 7
+CREATE TABLE ptif_test01 PARTITION OF ptif_test0 FOR VALUES IN (1);
+-- @@@ 8
+CREATE TABLE ptif_test1 PARTITION OF ptif_test
+  FOR VALUES FROM (0) TO (100) PARTITION BY list (b);
+-- @@@ 9
+CREATE TABLE ptif_test11 PARTITION OF ptif_test1 FOR VALUES IN (1);
+-- @@@ 10
+CREATE TABLE ptif_test2 PARTITION OF ptif_test
+  FOR VALUES FROM (100) TO (200);
+-- @@@ 11
+-- This partitioned table should remain with no partitions.
+CREATE TABLE ptif_test3 PARTITION OF ptif_test
+  FOR VALUES FROM (200) TO (maxvalue) PARTITION BY list (b);
+-- @@@ 12
+-- Test pg_partition_root for tables
+SELECT pg_partition_root('ptif_test');
+ pg_partition_root 
+-------------------
+ ptif_test
+(1 row)
+
+-- @@@ 13
+SELECT pg_partition_root('ptif_test0');
+ pg_partition_root 
+-------------------
+ ptif_test
+(1 row)
+
+-- @@@ 14
+SELECT pg_partition_root('ptif_test01');
+ pg_partition_root 
+-------------------
+ ptif_test
+(1 row)
+
+-- @@@ 15
+SELECT pg_partition_root('ptif_test3');
+ pg_partition_root 
+-------------------
+ ptif_test
+(1 row)
+
+-- @@@ 16
+-- Test index partition tree
+CREATE INDEX ptif_test_index ON ONLY ptif_test (a);
+-- @@@ 17
+CREATE INDEX ptif_test0_index ON ONLY ptif_test0 (a);
+-- @@@ 18
+ALTER INDEX ptif_test_index ATTACH PARTITION ptif_test0_index;
+-- @@@ 19
+CREATE INDEX ptif_test01_index ON ptif_test01 (a);
+-- @@@ 20
+ALTER INDEX ptif_test0_index ATTACH PARTITION ptif_test01_index;
+-- @@@ 21
+CREATE INDEX ptif_test1_index ON ONLY ptif_test1 (a);
+-- @@@ 22
+ALTER INDEX ptif_test_index ATTACH PARTITION ptif_test1_index;
+-- @@@ 23
+CREATE INDEX ptif_test11_index ON ptif_test11 (a);
+-- @@@ 24
+ALTER INDEX ptif_test1_index ATTACH PARTITION ptif_test11_index;
+-- @@@ 25
+CREATE INDEX ptif_test2_index ON ptif_test2 (a);
+-- @@@ 26
+ALTER INDEX ptif_test_index ATTACH PARTITION ptif_test2_index;
+-- @@@ 27
+CREATE INDEX ptif_test3_index ON ptif_test3 (a);
+-- @@@ 28
+ALTER INDEX ptif_test_index ATTACH PARTITION ptif_test3_index;
+-- @@@ 29
+-- Test pg_partition_root for indexes
+SELECT pg_partition_root('ptif_test_index');
+ pg_partition_root 
+-------------------
+ ptif_test_index
+(1 row)
+
+-- @@@ 30
+SELECT pg_partition_root('ptif_test0_index');
+ pg_partition_root 
+-------------------
+ ptif_test_index
+(1 row)
+
+-- @@@ 31
+SELECT pg_partition_root('ptif_test01_index');
+ pg_partition_root 
+-------------------
+ ptif_test_index
+(1 row)
+
+-- @@@ 32
+SELECT pg_partition_root('ptif_test3_index');
+ pg_partition_root 
+-------------------
+ ptif_test_index
+(1 row)
+
+-- @@@ 33
+-- List all tables members of the tree
+SELECT relid, parentrelid, level, isleaf
+  FROM pg_partition_tree('ptif_test');
+    relid    | parentrelid | level | isleaf 
+-------------+-------------+-------+--------
+ ptif_test   |             |     0 | f
+ ptif_test0  | ptif_test   |     1 | f
+ ptif_test1  | ptif_test   |     1 | f
+ ptif_test2  | ptif_test   |     1 | t
+ ptif_test3  | ptif_test   |     1 | f
+ ptif_test01 | ptif_test0  |     2 | t
+ ptif_test11 | ptif_test1  |     2 | t
+(7 rows)
+
+-- @@@ 34
+-- List tables from an intermediate level
+SELECT relid, parentrelid, level, isleaf
+  FROM pg_partition_tree('ptif_test0') p
+  JOIN pg_class c ON (p.relid = c.oid);
+    relid    | parentrelid | level | isleaf 
+-------------+-------------+-------+--------
+ ptif_test0  | ptif_test   |     0 | f
+ ptif_test01 | ptif_test0  |     1 | t
+(2 rows)
+
+-- @@@ 35
+-- List from leaf table
+SELECT relid, parentrelid, level, isleaf
+  FROM pg_partition_tree('ptif_test01') p
+  JOIN pg_class c ON (p.relid = c.oid);
+    relid    | parentrelid | level | isleaf 
+-------------+-------------+-------+--------
+ ptif_test01 | ptif_test0  |     0 | t
+(1 row)
+
+-- @@@ 36
+-- List from partitioned table with no partitions
+SELECT relid, parentrelid, level, isleaf
+  FROM pg_partition_tree('ptif_test3') p
+  JOIN pg_class c ON (p.relid = c.oid);
+   relid    | parentrelid | level | isleaf 
+------------+-------------+-------+--------
+ ptif_test3 | ptif_test   |     0 | f
+(1 row)
+
+-- @@@ 37
+-- List all ancestors of root and leaf tables
+SELECT * FROM pg_partition_ancestors('ptif_test01');
+    relid    
+-------------
+ ptif_test01
+ ptif_test0
+ ptif_test
+(3 rows)
+
+-- @@@ 38
+SELECT * FROM pg_partition_ancestors('ptif_test');
+   relid   
+-----------
+ ptif_test
+(1 row)
+
+-- @@@ 39
+-- List all members using pg_partition_root with leaf table reference
+SELECT relid, parentrelid, level, isleaf
+  FROM pg_partition_tree(pg_partition_root('ptif_test01')) p
+  JOIN pg_class c ON (p.relid = c.oid);
+    relid    | parentrelid | level | isleaf 
+-------------+-------------+-------+--------
+ ptif_test   |             |     0 | f
+ ptif_test0  | ptif_test   |     1 | f
+ ptif_test1  | ptif_test   |     1 | f
+ ptif_test2  | ptif_test   |     1 | t
+ ptif_test3  | ptif_test   |     1 | f
+ ptif_test01 | ptif_test0  |     2 | t
+ ptif_test11 | ptif_test1  |     2 | t
+(7 rows)
+
+-- @@@ 40
+-- List all indexes members of the tree
+SELECT relid, parentrelid, level, isleaf
+  FROM pg_partition_tree('ptif_test_index');
+       relid       |   parentrelid    | level | isleaf 
+-------------------+------------------+-------+--------
+ ptif_test_index   |                  |     0 | f
+ ptif_test0_index  | ptif_test_index  |     1 | f
+ ptif_test1_index  | ptif_test_index  |     1 | f
+ ptif_test2_index  | ptif_test_index  |     1 | t
+ ptif_test3_index  | ptif_test_index  |     1 | f
+ ptif_test01_index | ptif_test0_index |     2 | t
+ ptif_test11_index | ptif_test1_index |     2 | t
+(7 rows)
+
+-- @@@ 41
+-- List indexes from an intermediate level
+SELECT relid, parentrelid, level, isleaf
+  FROM pg_partition_tree('ptif_test0_index') p
+  JOIN pg_class c ON (p.relid = c.oid);
+       relid       |   parentrelid    | level | isleaf 
+-------------------+------------------+-------+--------
+ ptif_test0_index  | ptif_test_index  |     0 | f
+ ptif_test01_index | ptif_test0_index |     1 | t
+(2 rows)
+
+-- @@@ 42
+-- List from leaf index
+SELECT relid, parentrelid, level, isleaf
+  FROM pg_partition_tree('ptif_test01_index') p
+  JOIN pg_class c ON (p.relid = c.oid);
+       relid       |   parentrelid    | level | isleaf 
+-------------------+------------------+-------+--------
+ ptif_test01_index | ptif_test0_index |     0 | t
+(1 row)
+
+-- @@@ 43
+-- List from partitioned index with no partitions
+SELECT relid, parentrelid, level, isleaf
+  FROM pg_partition_tree('ptif_test3_index') p
+  JOIN pg_class c ON (p.relid = c.oid);
+      relid       |   parentrelid   | level | isleaf 
+------------------+-----------------+-------+--------
+ ptif_test3_index | ptif_test_index |     0 | f
+(1 row)
+
+-- @@@ 44
+-- List all members using pg_partition_root with leaf index reference
+SELECT relid, parentrelid, level, isleaf
+  FROM pg_partition_tree(pg_partition_root('ptif_test01_index')) p
+  JOIN pg_class c ON (p.relid = c.oid);
+       relid       |   parentrelid    | level | isleaf 
+-------------------+------------------+-------+--------
+ ptif_test_index   |                  |     0 | f
+ ptif_test0_index  | ptif_test_index  |     1 | f
+ ptif_test1_index  | ptif_test_index  |     1 | f
+ ptif_test2_index  | ptif_test_index  |     1 | t
+ ptif_test3_index  | ptif_test_index  |     1 | f
+ ptif_test01_index | ptif_test0_index |     2 | t
+ ptif_test11_index | ptif_test1_index |     2 | t
+(7 rows)
+
+-- @@@ 45
+-- List all ancestors of root and leaf indexes
+SELECT * FROM pg_partition_ancestors('ptif_test01_index');
+       relid       
+-------------------
+ ptif_test01_index
+ ptif_test0_index
+ ptif_test_index
+(3 rows)
+
+-- @@@ 46
+SELECT * FROM pg_partition_ancestors('ptif_test_index');
+      relid      
+-----------------
+ ptif_test_index
+(1 row)
+
+-- @@@ 47
+DROP TABLE ptif_test;
+-- @@@ 48
+-- Table that is not part of any partition tree is not listed.
+CREATE TABLE ptif_normal_table(a int);
+-- @@@ 49
+SELECT relid, parentrelid, level, isleaf
+  FROM pg_partition_tree('ptif_normal_table');
+ relid | parentrelid | level | isleaf 
+-------+-------------+-------+--------
+(0 rows)
+
+-- @@@ 50
+SELECT * FROM pg_partition_ancestors('ptif_normal_table');
+ relid 
+-------
+(0 rows)
+
+-- @@@ 51
+SELECT pg_partition_root('ptif_normal_table');
+ pg_partition_root 
+-------------------
+ 
+(1 row)
+
+-- @@@ 52
+DROP TABLE ptif_normal_table;
+-- @@@ 53
+-- Various partitioning-related functions return empty/NULL if passed relations
+-- of types that cannot be part of a partition tree; for example, views,
+-- materialized views, legacy inheritance children or parents, etc.
+CREATE VIEW ptif_test_view AS SELECT 1;
+-- @@@ 54
+CREATE MATERIALIZED VIEW ptif_test_matview AS SELECT 1;
+-- @@@ 55
+CREATE TABLE ptif_li_parent ();
+-- @@@ 56
+CREATE TABLE ptif_li_child () INHERITS (ptif_li_parent);
+-- @@@ 57
+SELECT * FROM pg_partition_tree('ptif_test_view');
+ relid | parentrelid | isleaf | level 
+-------+-------------+--------+-------
+(0 rows)
+
+-- @@@ 58
+SELECT * FROM pg_partition_tree('ptif_test_matview');
+ relid | parentrelid | isleaf | level 
+-------+-------------+--------+-------
+(0 rows)
+
+-- @@@ 59
+SELECT * FROM pg_partition_tree('ptif_li_parent');
+ relid | parentrelid | isleaf | level 
+-------+-------------+--------+-------
+(0 rows)
+
+-- @@@ 60
+SELECT * FROM pg_partition_tree('ptif_li_child');
+ relid | parentrelid | isleaf | level 
+-------+-------------+--------+-------
+(0 rows)
+
+-- @@@ 61
+SELECT * FROM pg_partition_ancestors('ptif_test_view');
+ relid 
+-------
+(0 rows)
+
+-- @@@ 62
+SELECT * FROM pg_partition_ancestors('ptif_test_matview');
+ relid 
+-------
+(0 rows)
+
+-- @@@ 63
+SELECT * FROM pg_partition_ancestors('ptif_li_parent');
+ relid 
+-------
+(0 rows)
+
+-- @@@ 64
+SELECT * FROM pg_partition_ancestors('ptif_li_child');
+ relid 
+-------
+(0 rows)
+
+-- @@@ 65
+SELECT pg_partition_root('ptif_test_view');
+ pg_partition_root 
+-------------------
+ 
+(1 row)
+
+-- @@@ 66
+SELECT pg_partition_root('ptif_test_matview');
+ pg_partition_root 
+-------------------
+ 
+(1 row)
+
+-- @@@ 67
+SELECT pg_partition_root('ptif_li_parent');
+ pg_partition_root 
+-------------------
+ 
+(1 row)
+
+-- @@@ 68
+SELECT pg_partition_root('ptif_li_child');
+ pg_partition_root 
+-------------------
+ 
+(1 row)
+
+-- @@@ 69
+DROP VIEW ptif_test_view;
+-- @@@ 70
+DROP MATERIALIZED VIEW ptif_test_matview;
+-- @@@ 71
+DROP TABLE ptif_li_parent, ptif_li_child;
+-- @@@ 72

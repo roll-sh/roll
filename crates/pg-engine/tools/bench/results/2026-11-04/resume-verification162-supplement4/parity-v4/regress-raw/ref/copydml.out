@@ -1,0 +1,178 @@
+--
+-- Test cases for COPY (INSERT/UPDATE/DELETE) TO
+--
+create table copydml_test (id serial, t text);
+-- @@@ 0
+insert into copydml_test (t) values ('a');
+-- @@@ 1
+insert into copydml_test (t) values ('b');
+-- @@@ 2
+insert into copydml_test (t) values ('c');
+-- @@@ 3
+insert into copydml_test (t) values ('d');
+-- @@@ 4
+insert into copydml_test (t) values ('e');
+-- @@@ 5
+--
+-- Test COPY (insert/update/delete ...)
+--
+copy (insert into copydml_test (t) values ('f') returning id) to stdout;
+6
+-- @@@ 6
+copy (update copydml_test set t = 'g' where t = 'f' returning id) to stdout;
+6
+-- @@@ 7
+copy (delete from copydml_test where t = 'g' returning id) to stdout;
+6
+-- @@@ 8
+--
+-- Test \copy (insert/update/delete ...)
+--
+\copy (insert into copydml_test (t) values ('f') returning id) to stdout;
+7
+-- @@@ 9
+\copy (update copydml_test set t = 'g' where t = 'f' returning id) to stdout;
+7
+-- @@@ 10
+\copy (delete from copydml_test where t = 'g' returning id) to stdout;
+7
+-- @@@ 11
+-- Error cases
+copy (insert into copydml_test default values) to stdout;
+ERROR:  COPY query must have a RETURNING clause
+-- @@@ 12
+copy (update copydml_test set t = 'g') to stdout;
+ERROR:  COPY query must have a RETURNING clause
+-- @@@ 13
+copy (delete from copydml_test) to stdout;
+ERROR:  COPY query must have a RETURNING clause
+-- @@@ 14
+create rule qqq as on insert to copydml_test do instead nothing;
+-- @@@ 15
+copy (insert into copydml_test default values) to stdout;
+ERROR:  DO INSTEAD NOTHING rules are not supported for COPY
+-- @@@ 16
+drop rule qqq on copydml_test;
+-- @@@ 17
+create rule qqq as on insert to copydml_test do also delete from copydml_test;
+-- @@@ 18
+copy (insert into copydml_test default values) to stdout;
+ERROR:  DO ALSO rules are not supported for COPY
+-- @@@ 19
+drop rule qqq on copydml_test;
+-- @@@ 20
+create rule qqq as on insert to copydml_test do instead (delete from copydml_test; delete from copydml_test);
+-- @@@ 21
+copy (insert into copydml_test default values) to stdout;
+ERROR:  multi-statement DO INSTEAD rules are not supported for COPY
+-- @@@ 22
+drop rule qqq on copydml_test;
+-- @@@ 23
+create rule qqq as on insert to copydml_test where new.t <> 'f' do instead delete from copydml_test;
+-- @@@ 24
+copy (insert into copydml_test default values) to stdout;
+ERROR:  conditional DO INSTEAD rules are not supported for COPY
+-- @@@ 25
+drop rule qqq on copydml_test;
+-- @@@ 26
+create rule qqq as on update to copydml_test do instead nothing;
+-- @@@ 27
+copy (update copydml_test set t = 'f') to stdout;
+ERROR:  DO INSTEAD NOTHING rules are not supported for COPY
+-- @@@ 28
+drop rule qqq on copydml_test;
+-- @@@ 29
+create rule qqq as on update to copydml_test do also delete from copydml_test;
+-- @@@ 30
+copy (update copydml_test set t = 'f') to stdout;
+ERROR:  DO ALSO rules are not supported for COPY
+-- @@@ 31
+drop rule qqq on copydml_test;
+-- @@@ 32
+create rule qqq as on update to copydml_test do instead (delete from copydml_test; delete from copydml_test);
+-- @@@ 33
+copy (update copydml_test set t = 'f') to stdout;
+ERROR:  multi-statement DO INSTEAD rules are not supported for COPY
+-- @@@ 34
+drop rule qqq on copydml_test;
+-- @@@ 35
+create rule qqq as on update to copydml_test where new.t <> 'f' do instead delete from copydml_test;
+-- @@@ 36
+copy (update copydml_test set t = 'f') to stdout;
+ERROR:  conditional DO INSTEAD rules are not supported for COPY
+-- @@@ 37
+drop rule qqq on copydml_test;
+-- @@@ 38
+create rule qqq as on delete to copydml_test do instead nothing;
+-- @@@ 39
+copy (delete from copydml_test) to stdout;
+ERROR:  DO INSTEAD NOTHING rules are not supported for COPY
+-- @@@ 40
+drop rule qqq on copydml_test;
+-- @@@ 41
+create rule qqq as on delete to copydml_test do also insert into copydml_test default values;
+-- @@@ 42
+copy (delete from copydml_test) to stdout;
+ERROR:  DO ALSO rules are not supported for COPY
+-- @@@ 43
+drop rule qqq on copydml_test;
+-- @@@ 44
+create rule qqq as on delete to copydml_test do instead (insert into copydml_test default values; insert into copydml_test default values);
+-- @@@ 45
+copy (delete from copydml_test) to stdout;
+ERROR:  multi-statement DO INSTEAD rules are not supported for COPY
+-- @@@ 46
+drop rule qqq on copydml_test;
+-- @@@ 47
+create rule qqq as on delete to copydml_test where old.t <> 'f' do instead insert into copydml_test default values;
+-- @@@ 48
+copy (delete from copydml_test) to stdout;
+ERROR:  conditional DO INSTEAD rules are not supported for COPY
+-- @@@ 49
+drop rule qqq on copydml_test;
+-- @@@ 50
+create rule qqq as on insert to copydml_test do instead notify copydml_test;
+-- @@@ 51
+copy (insert into copydml_test default values) to stdout;
+ERROR:  COPY query must not be a utility command
+-- @@@ 52
+drop rule qqq on copydml_test;
+-- @@@ 53
+-- triggers
+create function qqq_trig() returns trigger as $$
+begin
+if tg_op in ('INSERT', 'UPDATE') then
+    raise notice '% % %', tg_when, tg_op, new.id;
+    return new;
+else
+    raise notice '% % %', tg_when, tg_op, old.id;
+    return old;
+end if;
+end
+$$ language plpgsql;
+-- @@@ 54
+create trigger qqqbef before insert or update or delete on copydml_test
+    for each row execute procedure qqq_trig();
+-- @@@ 55
+create trigger qqqaf after insert or update or delete on copydml_test
+    for each row execute procedure qqq_trig();
+-- @@@ 56
+copy (insert into copydml_test (t) values ('f') returning id) to stdout;
+NOTICE:  BEFORE INSERT 8
+8
+NOTICE:  AFTER INSERT 8
+-- @@@ 57
+copy (update copydml_test set t = 'g' where t = 'f' returning id) to stdout;
+NOTICE:  BEFORE UPDATE 8
+8
+NOTICE:  AFTER UPDATE 8
+-- @@@ 58
+copy (delete from copydml_test where t = 'g' returning id) to stdout;
+NOTICE:  BEFORE DELETE 8
+8
+NOTICE:  AFTER DELETE 8
+-- @@@ 59
+drop table copydml_test;
+-- @@@ 60
+drop function qqq_trig();
+-- @@@ 61

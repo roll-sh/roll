@@ -1,0 +1,696 @@
+--
+-- BOOLEAN
+--
+--
+-- sanity check - if this fails go insane!
+--
+SELECT 1 AS one;
+ one 
+-----
+   1
+(1 row)
+
+-- @@@ 0
+-- ******************testing built-in type bool********************
+-- check bool input syntax
+SELECT true AS true;
+ true 
+------
+ t
+(1 row)
+
+-- @@@ 1
+SELECT false AS false;
+ false 
+-------
+ f
+(1 row)
+
+-- @@@ 2
+SELECT bool 't' AS true;
+ true 
+------
+ t
+(1 row)
+
+-- @@@ 3
+SELECT bool '   f           ' AS false;
+ false 
+-------
+ f
+(1 row)
+
+-- @@@ 4
+SELECT bool 'true' AS true;
+ true 
+------
+ t
+(1 row)
+
+-- @@@ 5
+SELECT bool 'test' AS error;
+ERROR:  invalid input syntax for type boolean: "test"
+LINE 1: SELECT bool 'test' AS error;
+                    ^
+-- @@@ 6
+SELECT bool 'false' AS false;
+ false 
+-------
+ f
+(1 row)
+
+-- @@@ 7
+SELECT bool 'foo' AS error;
+ERROR:  invalid input syntax for type boolean: "foo"
+LINE 1: SELECT bool 'foo' AS error;
+                    ^
+-- @@@ 8
+SELECT bool 'y' AS true;
+ true 
+------
+ t
+(1 row)
+
+-- @@@ 9
+SELECT bool 'yes' AS true;
+ true 
+------
+ t
+(1 row)
+
+-- @@@ 10
+SELECT bool 'yeah' AS error;
+ERROR:  invalid input syntax for type boolean: "yeah"
+LINE 1: SELECT bool 'yeah' AS error;
+                    ^
+-- @@@ 11
+SELECT bool 'n' AS false;
+ false 
+-------
+ f
+(1 row)
+
+-- @@@ 12
+SELECT bool 'no' AS false;
+ false 
+-------
+ f
+(1 row)
+
+-- @@@ 13
+SELECT bool 'nay' AS error;
+ERROR:  invalid input syntax for type boolean: "nay"
+LINE 1: SELECT bool 'nay' AS error;
+                    ^
+-- @@@ 14
+SELECT bool 'on' AS true;
+ true 
+------
+ t
+(1 row)
+
+-- @@@ 15
+SELECT bool 'off' AS false;
+ false 
+-------
+ f
+(1 row)
+
+-- @@@ 16
+SELECT bool 'of' AS false;
+ false 
+-------
+ f
+(1 row)
+
+-- @@@ 17
+SELECT bool 'o' AS error;
+ERROR:  invalid input syntax for type boolean: "o"
+LINE 1: SELECT bool 'o' AS error;
+                    ^
+-- @@@ 18
+SELECT bool 'on_' AS error;
+ERROR:  invalid input syntax for type boolean: "on_"
+LINE 1: SELECT bool 'on_' AS error;
+                    ^
+-- @@@ 19
+SELECT bool 'off_' AS error;
+ERROR:  invalid input syntax for type boolean: "off_"
+LINE 1: SELECT bool 'off_' AS error;
+                    ^
+-- @@@ 20
+SELECT bool '1' AS true;
+ true 
+------
+ t
+(1 row)
+
+-- @@@ 21
+SELECT bool '11' AS error;
+ERROR:  invalid input syntax for type boolean: "11"
+LINE 1: SELECT bool '11' AS error;
+                    ^
+-- @@@ 22
+SELECT bool '0' AS false;
+ false 
+-------
+ f
+(1 row)
+
+-- @@@ 23
+SELECT bool '000' AS error;
+ERROR:  invalid input syntax for type boolean: "000"
+LINE 1: SELECT bool '000' AS error;
+                    ^
+-- @@@ 24
+SELECT bool '' AS error;
+ERROR:  invalid input syntax for type boolean: ""
+LINE 1: SELECT bool '' AS error;
+                    ^
+-- @@@ 25
+-- Also try it with non-error-throwing API
+SELECT pg_input_is_valid('true', 'bool');
+ pg_input_is_valid 
+-------------------
+ t
+(1 row)
+
+-- @@@ 26
+SELECT pg_input_is_valid('asdf', 'bool');
+ pg_input_is_valid 
+-------------------
+ f
+(1 row)
+
+-- @@@ 27
+SELECT * FROM pg_input_error_info('junk', 'bool');
+                    message                    | detail | hint | sql_error_code 
+-----------------------------------------------+--------+------+----------------
+ invalid input syntax for type boolean: "junk" |        |      | 22P02
+(1 row)
+
+-- @@@ 28
+-- and, or, not in qualifications
+SELECT bool 't' or bool 'f' AS true;
+ true 
+------
+ t
+(1 row)
+
+-- @@@ 29
+SELECT bool 't' and bool 'f' AS false;
+ false 
+-------
+ f
+(1 row)
+
+-- @@@ 30
+SELECT not bool 'f' AS true;
+ true 
+------
+ t
+(1 row)
+
+-- @@@ 31
+SELECT bool 't' = bool 'f' AS false;
+ false 
+-------
+ f
+(1 row)
+
+-- @@@ 32
+SELECT bool 't' <> bool 'f' AS true;
+ true 
+------
+ t
+(1 row)
+
+-- @@@ 33
+SELECT bool 't' > bool 'f' AS true;
+ true 
+------
+ t
+(1 row)
+
+-- @@@ 34
+SELECT bool 't' >= bool 'f' AS true;
+ true 
+------
+ t
+(1 row)
+
+-- @@@ 35
+SELECT bool 'f' < bool 't' AS true;
+ true 
+------
+ t
+(1 row)
+
+-- @@@ 36
+SELECT bool 'f' <= bool 't' AS true;
+ true 
+------
+ t
+(1 row)
+
+-- @@@ 37
+-- explicit casts to/from text
+SELECT 'TrUe'::text::boolean AS true, 'fAlse'::text::boolean AS false;
+ true | false 
+------+-------
+ t    | f
+(1 row)
+
+-- @@@ 38
+SELECT '    true   '::text::boolean AS true,
+       '     FALSE'::text::boolean AS false;
+ true | false 
+------+-------
+ t    | f
+(1 row)
+
+-- @@@ 39
+SELECT true::boolean::text AS true, false::boolean::text AS false;
+ true | false 
+------+-------
+ true | false
+(1 row)
+
+-- @@@ 40
+SELECT '  tru e '::text::boolean AS invalid;    -- error
+ERROR:  invalid input syntax for type boolean: "  tru e "
+-- @@@ 41
+SELECT ''::text::boolean AS invalid;            -- error
+ERROR:  invalid input syntax for type boolean: ""
+-- @@@ 42
+CREATE TABLE BOOLTBL1 (f1 bool);
+-- @@@ 43
+INSERT INTO BOOLTBL1 (f1) VALUES (bool 't');
+-- @@@ 44
+INSERT INTO BOOLTBL1 (f1) VALUES (bool 'True');
+-- @@@ 45
+INSERT INTO BOOLTBL1 (f1) VALUES (bool 'true');
+-- @@@ 46
+-- BOOLTBL1 should be full of true's at this point
+SELECT BOOLTBL1.* FROM BOOLTBL1;
+ f1 
+----
+ t
+ t
+ t
+(3 rows)
+
+-- @@@ 47
+SELECT BOOLTBL1.*
+   FROM BOOLTBL1
+   WHERE f1 = bool 'true';
+ f1 
+----
+ t
+ t
+ t
+(3 rows)
+
+-- @@@ 48
+SELECT BOOLTBL1.*
+   FROM BOOLTBL1
+   WHERE f1 <> bool 'false';
+ f1 
+----
+ t
+ t
+ t
+(3 rows)
+
+-- @@@ 49
+SELECT BOOLTBL1.*
+   FROM BOOLTBL1
+   WHERE booleq(bool 'false', f1);
+ f1 
+----
+(0 rows)
+
+-- @@@ 50
+INSERT INTO BOOLTBL1 (f1) VALUES (bool 'f');
+-- @@@ 51
+SELECT BOOLTBL1.*
+   FROM BOOLTBL1
+   WHERE f1 = bool 'false';
+ f1 
+----
+ f
+(1 row)
+
+-- @@@ 52
+CREATE TABLE BOOLTBL2 (f1 bool);
+-- @@@ 53
+INSERT INTO BOOLTBL2 (f1) VALUES (bool 'f');
+-- @@@ 54
+INSERT INTO BOOLTBL2 (f1) VALUES (bool 'false');
+-- @@@ 55
+INSERT INTO BOOLTBL2 (f1) VALUES (bool 'False');
+-- @@@ 56
+INSERT INTO BOOLTBL2 (f1) VALUES (bool 'FALSE');
+-- @@@ 57
+-- This is now an invalid expression
+-- For pre-v6.3 this evaluated to false - thomas 1997-10-23
+INSERT INTO BOOLTBL2 (f1)
+   VALUES (bool 'XXX');
+ERROR:  invalid input syntax for type boolean: "XXX"
+LINE 2:    VALUES (bool 'XXX');
+                        ^
+-- @@@ 58
+-- BOOLTBL2 should be full of false's at this point
+SELECT BOOLTBL2.* FROM BOOLTBL2;
+ f1 
+----
+ f
+ f
+ f
+ f
+(4 rows)
+
+-- @@@ 59
+SELECT BOOLTBL1.*, BOOLTBL2.*
+   FROM BOOLTBL1, BOOLTBL2
+   WHERE BOOLTBL2.f1 <> BOOLTBL1.f1;
+ f1 | f1 
+----+----
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+(12 rows)
+
+-- @@@ 60
+SELECT BOOLTBL1.*, BOOLTBL2.*
+   FROM BOOLTBL1, BOOLTBL2
+   WHERE boolne(BOOLTBL2.f1,BOOLTBL1.f1);
+ f1 | f1 
+----+----
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+(12 rows)
+
+-- @@@ 61
+SELECT BOOLTBL1.*, BOOLTBL2.*
+   FROM BOOLTBL1, BOOLTBL2
+   WHERE BOOLTBL2.f1 = BOOLTBL1.f1 and BOOLTBL1.f1 = bool 'false';
+ f1 | f1 
+----+----
+ f  | f
+ f  | f
+ f  | f
+ f  | f
+(4 rows)
+
+-- @@@ 62
+SELECT BOOLTBL1.*, BOOLTBL2.*
+   FROM BOOLTBL1, BOOLTBL2
+   WHERE BOOLTBL2.f1 = BOOLTBL1.f1 or BOOLTBL1.f1 = bool 'true'
+   ORDER BY BOOLTBL1.f1, BOOLTBL2.f1;
+ f1 | f1 
+----+----
+ f  | f
+ f  | f
+ f  | f
+ f  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+ t  | f
+(16 rows)
+
+-- @@@ 63
+--
+-- SQL syntax
+-- Try all combinations to ensure that we get nothing when we expect nothing
+-- - thomas 2000-01-04
+--
+SELECT f1
+   FROM BOOLTBL1
+   WHERE f1 IS TRUE;
+ f1 
+----
+ t
+ t
+ t
+(3 rows)
+
+-- @@@ 64
+SELECT f1
+   FROM BOOLTBL1
+   WHERE f1 IS NOT FALSE;
+ f1 
+----
+ t
+ t
+ t
+(3 rows)
+
+-- @@@ 65
+SELECT f1
+   FROM BOOLTBL1
+   WHERE f1 IS FALSE;
+ f1 
+----
+ f
+(1 row)
+
+-- @@@ 66
+SELECT f1
+   FROM BOOLTBL1
+   WHERE f1 IS NOT TRUE;
+ f1 
+----
+ f
+(1 row)
+
+-- @@@ 67
+SELECT f1
+   FROM BOOLTBL2
+   WHERE f1 IS TRUE;
+ f1 
+----
+(0 rows)
+
+-- @@@ 68
+SELECT f1
+   FROM BOOLTBL2
+   WHERE f1 IS NOT FALSE;
+ f1 
+----
+(0 rows)
+
+-- @@@ 69
+SELECT f1
+   FROM BOOLTBL2
+   WHERE f1 IS FALSE;
+ f1 
+----
+ f
+ f
+ f
+ f
+(4 rows)
+
+-- @@@ 70
+SELECT f1
+   FROM BOOLTBL2
+   WHERE f1 IS NOT TRUE;
+ f1 
+----
+ f
+ f
+ f
+ f
+(4 rows)
+
+-- @@@ 71
+--
+-- Tests for BooleanTest
+--
+CREATE TABLE BOOLTBL3 (d text, b bool, o int);
+-- @@@ 72
+INSERT INTO BOOLTBL3 (d, b, o) VALUES ('true', true, 1);
+-- @@@ 73
+INSERT INTO BOOLTBL3 (d, b, o) VALUES ('false', false, 2);
+-- @@@ 74
+INSERT INTO BOOLTBL3 (d, b, o) VALUES ('null', null, 3);
+-- @@@ 75
+SELECT
+    d,
+    b IS TRUE AS istrue,
+    b IS NOT TRUE AS isnottrue,
+    b IS FALSE AS isfalse,
+    b IS NOT FALSE AS isnotfalse,
+    b IS UNKNOWN AS isunknown,
+    b IS NOT UNKNOWN AS isnotunknown
+FROM booltbl3 ORDER BY o;
+   d   | istrue | isnottrue | isfalse | isnotfalse | isunknown | isnotunknown 
+-------+--------+-----------+---------+------------+-----------+--------------
+ true  | t      | f         | f       | t          | f         | t
+ false | f      | t         | t       | f          | f         | t
+ null  | f      | t         | f       | t          | t         | f
+(3 rows)
+
+-- @@@ 76
+-- Test to make sure short-circuiting and NULL handling is
+-- correct. Use a table as source to prevent constant simplification
+-- from interfering.
+CREATE TABLE booltbl4(isfalse bool, istrue bool, isnul bool);
+-- @@@ 77
+INSERT INTO booltbl4 VALUES (false, true, null);
+-- @@@ 78
+\pset null '(null)'
+-- @@@ 79
+-- AND expression need to return null if there's any nulls and not all
+-- of the value are true
+SELECT istrue AND isnul AND istrue FROM booltbl4;
+ ?column? 
+----------
+ (null)
+(1 row)
+
+-- @@@ 80
+SELECT istrue AND istrue AND isnul FROM booltbl4;
+ ?column? 
+----------
+ (null)
+(1 row)
+
+-- @@@ 81
+SELECT isnul AND istrue AND istrue FROM booltbl4;
+ ?column? 
+----------
+ (null)
+(1 row)
+
+-- @@@ 82
+SELECT isfalse AND isnul AND istrue FROM booltbl4;
+ ?column? 
+----------
+ f
+(1 row)
+
+-- @@@ 83
+SELECT istrue AND isfalse AND isnul FROM booltbl4;
+ ?column? 
+----------
+ f
+(1 row)
+
+-- @@@ 84
+SELECT isnul AND istrue AND isfalse FROM booltbl4;
+ ?column? 
+----------
+ f
+(1 row)
+
+-- @@@ 85
+-- OR expression need to return null if there's any nulls and none
+-- of the value is true
+SELECT isfalse OR isnul OR isfalse FROM booltbl4;
+ ?column? 
+----------
+ (null)
+(1 row)
+
+-- @@@ 86
+SELECT isfalse OR isfalse OR isnul FROM booltbl4;
+ ?column? 
+----------
+ (null)
+(1 row)
+
+-- @@@ 87
+SELECT isnul OR isfalse OR isfalse FROM booltbl4;
+ ?column? 
+----------
+ (null)
+(1 row)
+
+-- @@@ 88
+SELECT isfalse OR isnul OR istrue FROM booltbl4;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 89
+SELECT istrue OR isfalse OR isnul FROM booltbl4;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 90
+SELECT isnul OR istrue OR isfalse FROM booltbl4;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 91
+-- Casts
+SELECT 0::boolean;
+ bool 
+------
+ f
+(1 row)
+
+-- @@@ 92
+SELECT 1::boolean;
+ bool 
+------
+ t
+(1 row)
+
+-- @@@ 93
+SELECT 2::boolean;
+ bool 
+------
+ t
+(1 row)
+
+-- @@@ 94
+--
+-- Clean up
+-- Many tables are retained by the regression test, but these do not seem
+--  particularly useful so just get rid of them for now.
+--  - thomas 1997-11-30
+--
+DROP TABLE  BOOLTBL1;
+-- @@@ 95
+DROP TABLE  BOOLTBL2;
+-- @@@ 96
+DROP TABLE  BOOLTBL3;
+-- @@@ 97
+DROP TABLE  BOOLTBL4;
+-- @@@ 98

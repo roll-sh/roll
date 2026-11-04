@@ -1,0 +1,6 @@
+ref_status=ok
+engine_status=ok
+ref_secs=1.8
+engine_secs=4.1
+restarted=false
+resumes=0

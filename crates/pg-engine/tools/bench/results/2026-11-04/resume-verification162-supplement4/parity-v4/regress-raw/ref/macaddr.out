@@ -1,0 +1,220 @@
+--
+-- macaddr
+--
+CREATE TABLE macaddr_data (a int, b macaddr);
+-- @@@ 0
+INSERT INTO macaddr_data VALUES (1, '08:00:2b:01:02:03');
+-- @@@ 1
+INSERT INTO macaddr_data VALUES (2, '08-00-2b-01-02-03');
+-- @@@ 2
+INSERT INTO macaddr_data VALUES (3, '08002b:010203');
+-- @@@ 3
+INSERT INTO macaddr_data VALUES (4, '08002b-010203');
+-- @@@ 4
+INSERT INTO macaddr_data VALUES (5, '0800.2b01.0203');
+-- @@@ 5
+INSERT INTO macaddr_data VALUES (6, '0800-2b01-0203');
+-- @@@ 6
+INSERT INTO macaddr_data VALUES (7, '08002b010203');
+-- @@@ 7
+INSERT INTO macaddr_data VALUES (8, '0800:2b01:0203'); -- invalid
+ERROR:  invalid input syntax for type macaddr: "0800:2b01:0203"
+LINE 1: INSERT INTO macaddr_data VALUES (8, '0800:2b01:0203');
+                                            ^
+-- @@@ 8
+INSERT INTO macaddr_data VALUES (9, 'not even close'); -- invalid
+ERROR:  invalid input syntax for type macaddr: "not even close"
+LINE 1: INSERT INTO macaddr_data VALUES (9, 'not even close');
+                                            ^
+-- @@@ 9
+INSERT INTO macaddr_data VALUES (10, '08:00:2b:01:02:04');
+-- @@@ 10
+INSERT INTO macaddr_data VALUES (11, '08:00:2b:01:02:02');
+-- @@@ 11
+INSERT INTO macaddr_data VALUES (12, '08:00:2a:01:02:03');
+-- @@@ 12
+INSERT INTO macaddr_data VALUES (13, '08:00:2c:01:02:03');
+-- @@@ 13
+INSERT INTO macaddr_data VALUES (14, '08:00:2a:01:02:04');
+-- @@@ 14
+SELECT * FROM macaddr_data;
+ a  |         b         
+----+-------------------
+  1 | 08:00:2b:01:02:03
+  2 | 08:00:2b:01:02:03
+  3 | 08:00:2b:01:02:03
+  4 | 08:00:2b:01:02:03
+  5 | 08:00:2b:01:02:03
+  6 | 08:00:2b:01:02:03
+  7 | 08:00:2b:01:02:03
+ 10 | 08:00:2b:01:02:04
+ 11 | 08:00:2b:01:02:02
+ 12 | 08:00:2a:01:02:03
+ 13 | 08:00:2c:01:02:03
+ 14 | 08:00:2a:01:02:04
+(12 rows)
+
+-- @@@ 15
+CREATE INDEX macaddr_data_btree ON macaddr_data USING btree (b);
+-- @@@ 16
+CREATE INDEX macaddr_data_hash ON macaddr_data USING hash (b);
+-- @@@ 17
+SELECT a, b, trunc(b) FROM macaddr_data ORDER BY 2, 1;
+ a  |         b         |       trunc       
+----+-------------------+-------------------
+ 12 | 08:00:2a:01:02:03 | 08:00:2a:00:00:00
+ 14 | 08:00:2a:01:02:04 | 08:00:2a:00:00:00
+ 11 | 08:00:2b:01:02:02 | 08:00:2b:00:00:00
+  1 | 08:00:2b:01:02:03 | 08:00:2b:00:00:00
+  2 | 08:00:2b:01:02:03 | 08:00:2b:00:00:00
+  3 | 08:00:2b:01:02:03 | 08:00:2b:00:00:00
+  4 | 08:00:2b:01:02:03 | 08:00:2b:00:00:00
+  5 | 08:00:2b:01:02:03 | 08:00:2b:00:00:00
+  6 | 08:00:2b:01:02:03 | 08:00:2b:00:00:00
+  7 | 08:00:2b:01:02:03 | 08:00:2b:00:00:00
+ 10 | 08:00:2b:01:02:04 | 08:00:2b:00:00:00
+ 13 | 08:00:2c:01:02:03 | 08:00:2c:00:00:00
+(12 rows)
+
+-- @@@ 18
+SELECT b <  '08:00:2b:01:02:04' FROM macaddr_data WHERE a = 1; -- true
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 19
+SELECT b >  '08:00:2b:01:02:04' FROM macaddr_data WHERE a = 1; -- false
+ ?column? 
+----------
+ f
+(1 row)
+
+-- @@@ 20
+SELECT b >  '08:00:2b:01:02:03' FROM macaddr_data WHERE a = 1; -- false
+ ?column? 
+----------
+ f
+(1 row)
+
+-- @@@ 21
+SELECT b <= '08:00:2b:01:02:04' FROM macaddr_data WHERE a = 1; -- true
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 22
+SELECT b >= '08:00:2b:01:02:04' FROM macaddr_data WHERE a = 1; -- false
+ ?column? 
+----------
+ f
+(1 row)
+
+-- @@@ 23
+SELECT b =  '08:00:2b:01:02:03' FROM macaddr_data WHERE a = 1; -- true
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 24
+SELECT b <> '08:00:2b:01:02:04' FROM macaddr_data WHERE a = 1; -- true
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 25
+SELECT b <> '08:00:2b:01:02:03' FROM macaddr_data WHERE a = 1; -- false
+ ?column? 
+----------
+ f
+(1 row)
+
+-- @@@ 26
+SELECT ~b                       FROM macaddr_data;
+     ?column?      
+-------------------
+ f7:ff:d4:fe:fd:fc
+ f7:ff:d4:fe:fd:fc
+ f7:ff:d4:fe:fd:fc
+ f7:ff:d4:fe:fd:fc
+ f7:ff:d4:fe:fd:fc
+ f7:ff:d4:fe:fd:fc
+ f7:ff:d4:fe:fd:fc
+ f7:ff:d4:fe:fd:fb
+ f7:ff:d4:fe:fd:fd
+ f7:ff:d5:fe:fd:fc
+ f7:ff:d3:fe:fd:fc
+ f7:ff:d5:fe:fd:fb
+(12 rows)
+
+-- @@@ 27
+SELECT  b & '00:00:00:ff:ff:ff' FROM macaddr_data;
+     ?column?      
+-------------------
+ 00:00:00:01:02:03
+ 00:00:00:01:02:03
+ 00:00:00:01:02:03
+ 00:00:00:01:02:03
+ 00:00:00:01:02:03
+ 00:00:00:01:02:03
+ 00:00:00:01:02:03
+ 00:00:00:01:02:04
+ 00:00:00:01:02:02
+ 00:00:00:01:02:03
+ 00:00:00:01:02:03
+ 00:00:00:01:02:04
+(12 rows)
+
+-- @@@ 28
+SELECT  b | '01:02:03:04:05:06' FROM macaddr_data;
+     ?column?      
+-------------------
+ 09:02:2b:05:07:07
+ 09:02:2b:05:07:07
+ 09:02:2b:05:07:07
+ 09:02:2b:05:07:07
+ 09:02:2b:05:07:07
+ 09:02:2b:05:07:07
+ 09:02:2b:05:07:07
+ 09:02:2b:05:07:06
+ 09:02:2b:05:07:06
+ 09:02:2b:05:07:07
+ 09:02:2f:05:07:07
+ 09:02:2b:05:07:06
+(12 rows)
+
+-- @@@ 29
+DROP TABLE macaddr_data;
+-- @@@ 30
+-- test non-error-throwing API for some core types
+SELECT pg_input_is_valid('08:00:2b:01:02:ZZ', 'macaddr');
+ pg_input_is_valid 
+-------------------
+ f
+(1 row)
+
+-- @@@ 31
+SELECT * FROM pg_input_error_info('08:00:2b:01:02:ZZ', 'macaddr');
+                          message                           | detail | hint | sql_error_code 
+------------------------------------------------------------+--------+------+----------------
+ invalid input syntax for type macaddr: "08:00:2b:01:02:ZZ" |        |      | 22P02
+(1 row)
+
+-- @@@ 32
+SELECT pg_input_is_valid('08:00:2b:01:02:', 'macaddr');
+ pg_input_is_valid 
+-------------------
+ f
+(1 row)
+
+-- @@@ 33
+SELECT * FROM pg_input_error_info('08:00:2b:01:02:', 'macaddr');
+                         message                          | detail | hint | sql_error_code 
+----------------------------------------------------------+--------+------+----------------
+ invalid input syntax for type macaddr: "08:00:2b:01:02:" |        |      | 22P02
+(1 row)
+
+-- @@@ 34

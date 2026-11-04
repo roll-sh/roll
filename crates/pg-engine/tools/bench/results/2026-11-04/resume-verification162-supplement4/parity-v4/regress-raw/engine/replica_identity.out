@@ -1,0 +1,374 @@
+CREATE TABLE test_replica_identity (
+       id serial primary key,
+       keya text not null,
+       keyb text not null,
+       nonkey text,
+       CONSTRAINT test_replica_identity_unique_defer UNIQUE (keya, keyb) DEFERRABLE,
+       CONSTRAINT test_replica_identity_unique_nondefer UNIQUE (keya, keyb)
+) ;
+-- @@@ 0
+CREATE TABLE test_replica_identity_othertable (id serial primary key);
+-- @@@ 1
+CREATE TABLE test_replica_identity_t3 (id serial constraint pk primary key deferrable);
+-- @@@ 2
+CREATE INDEX test_replica_identity_keyab ON test_replica_identity (keya, keyb);
+-- @@@ 3
+CREATE UNIQUE INDEX test_replica_identity_keyab_key ON test_replica_identity (keya, keyb);
+-- @@@ 4
+CREATE UNIQUE INDEX test_replica_identity_nonkey ON test_replica_identity (keya, nonkey);
+-- @@@ 5
+CREATE INDEX test_replica_identity_hash ON test_replica_identity USING hash (nonkey);
+-- @@@ 6
+CREATE UNIQUE INDEX test_replica_identity_expr ON test_replica_identity (keya, keyb, (3));
+-- @@@ 7
+CREATE UNIQUE INDEX test_replica_identity_partial ON test_replica_identity (keya, keyb) WHERE keyb != '3';
+-- @@@ 8
+-- default is 'd'/DEFAULT for user created tables
+SELECT relreplident FROM pg_class WHERE oid = 'test_replica_identity'::regclass;
+ relreplident 
+--------------
+ d
+(1 row)
+
+-- @@@ 9
+-- but 'none' for system tables
+SELECT relreplident FROM pg_class WHERE oid = 'pg_class'::regclass;
+ relreplident 
+--------------
+ n
+(1 row)
+
+-- @@@ 10
+SELECT relreplident FROM pg_class WHERE oid = 'pg_constraint'::regclass;
+ relreplident 
+--------------
+ n
+(1 row)
+
+-- @@@ 11
+----
+-- Make sure we detect ineligible indexes
+----
+-- fail, not unique
+ALTER TABLE test_replica_identity REPLICA IDENTITY USING INDEX test_replica_identity_keyab;
+ERROR:  cannot use non-unique index "test_replica_identity_keyab" as replica identity
+-- @@@ 12
+-- fail, not a candidate key, nullable column
+ALTER TABLE test_replica_identity REPLICA IDENTITY USING INDEX test_replica_identity_nonkey;
+ERROR:  index "test_replica_identity_nonkey" cannot be used as replica identity because column "nonkey" is nullable
+-- @@@ 13
+-- fail, hash indexes cannot do uniqueness
+ALTER TABLE test_replica_identity REPLICA IDENTITY USING INDEX test_replica_identity_hash;
+ERROR:  cannot use non-unique index "test_replica_identity_hash" as replica identity
+-- @@@ 14
+-- fail, expression index
+ALTER TABLE test_replica_identity REPLICA IDENTITY USING INDEX test_replica_identity_expr;
+ERROR:  cannot use expression index "test_replica_identity_expr" as replica identity
+-- @@@ 15
+-- fail, partial index
+ALTER TABLE test_replica_identity REPLICA IDENTITY USING INDEX test_replica_identity_partial;
+ERROR:  cannot use partial index "test_replica_identity_partial" as replica identity
+-- @@@ 16
+-- fail, not our index
+ALTER TABLE test_replica_identity REPLICA IDENTITY USING INDEX test_replica_identity_othertable_pkey;
+ERROR:  "test_replica_identity_othertable_pkey" is not an index for table "test_replica_identity"
+-- @@@ 17
+-- fail, deferrable
+ALTER TABLE test_replica_identity REPLICA IDENTITY USING INDEX test_replica_identity_unique_defer;
+ERROR:  cannot use non-immediate index "test_replica_identity_unique_defer" as replica identity
+-- @@@ 18
+-- fail, deferrable
+ALTER TABLE test_replica_identity_t3 REPLICA IDENTITY USING INDEX pk;
+ERROR:  cannot use non-immediate index "pk" as replica identity
+-- @@@ 19
+SELECT relreplident FROM pg_class WHERE oid = 'test_replica_identity'::regclass;
+ relreplident 
+--------------
+ d
+(1 row)
+
+-- @@@ 20
+----
+-- Make sure index cases succeed
+----
+-- succeed, primary key
+ALTER TABLE test_replica_identity REPLICA IDENTITY USING INDEX test_replica_identity_pkey;
+-- @@@ 21
+SELECT relreplident FROM pg_class WHERE oid = 'test_replica_identity'::regclass;
+ relreplident 
+--------------
+ i
+(1 row)
+
+-- @@@ 22
+\d test_replica_identity
+                            Table "public.test_replica_identity"
+ Column |  Type   | Collation | Nullable |                      Default                      
+--------+---------+-----------+----------+---------------------------------------------------
+ id     | integer |           | not null | nextval('test_replica_identity_id_seq'::regclass)
+ keya   | text    |           | not null | 
+ keyb   | text    |           | not null | 
+ nonkey | text    |           |          | 
+Indexes:
+    "test_replica_identity_pkey" PRIMARY KEY, btree (id) REPLICA IDENTITY
+    "test_replica_identity_expr" UNIQUE, btree (keya, keyb, (3))
+    "test_replica_identity_hash" hash (nonkey)
+    "test_replica_identity_keyab" btree (keya, keyb)
+    "test_replica_identity_keyab_key" UNIQUE, btree (keya, keyb)
+    "test_replica_identity_nonkey" UNIQUE, btree (keya, nonkey)
+    "test_replica_identity_partial" UNIQUE, btree (keya, keyb) WHERE keyb <> '3'::text
+    "test_replica_identity_unique_defer" UNIQUE CONSTRAINT, btree (keya, keyb) DEFERRABLE
+    "test_replica_identity_unique_nondefer" UNIQUE CONSTRAINT, btree (keya, keyb)
+
+-- @@@ 23
+-- succeed, nondeferrable unique constraint over nonnullable cols
+ALTER TABLE test_replica_identity REPLICA IDENTITY USING INDEX test_replica_identity_unique_nondefer;
+-- @@@ 24
+-- succeed unique index over nonnullable cols
+ALTER TABLE test_replica_identity REPLICA IDENTITY USING INDEX test_replica_identity_keyab_key;
+-- @@@ 25
+ALTER TABLE test_replica_identity REPLICA IDENTITY USING INDEX test_replica_identity_keyab_key;
+-- @@@ 26
+SELECT relreplident FROM pg_class WHERE oid = 'test_replica_identity'::regclass;
+ relreplident 
+--------------
+ i
+(1 row)
+
+-- @@@ 27
+\d test_replica_identity
+                            Table "public.test_replica_identity"
+ Column |  Type   | Collation | Nullable |                      Default                      
+--------+---------+-----------+----------+---------------------------------------------------
+ id     | integer |           | not null | nextval('test_replica_identity_id_seq'::regclass)
+ keya   | text    |           | not null | 
+ keyb   | text    |           | not null | 
+ nonkey | text    |           |          | 
+Indexes:
+    "test_replica_identity_pkey" PRIMARY KEY, btree (id)
+    "test_replica_identity_expr" UNIQUE, btree (keya, keyb, (3))
+    "test_replica_identity_hash" hash (nonkey)
+    "test_replica_identity_keyab" btree (keya, keyb)
+    "test_replica_identity_keyab_key" UNIQUE, btree (keya, keyb) REPLICA IDENTITY
+    "test_replica_identity_nonkey" UNIQUE, btree (keya, nonkey)
+    "test_replica_identity_partial" UNIQUE, btree (keya, keyb) WHERE keyb <> '3'::text
+    "test_replica_identity_unique_defer" UNIQUE CONSTRAINT, btree (keya, keyb) DEFERRABLE
+    "test_replica_identity_unique_nondefer" UNIQUE CONSTRAINT, btree (keya, keyb)
+
+-- @@@ 28
+SELECT count(*) FROM pg_index WHERE indrelid = 'test_replica_identity'::regclass AND indisreplident;
+ count 
+-------
+     1
+(1 row)
+
+-- @@@ 29
+----
+-- Make sure non index cases work
+----
+ALTER TABLE test_replica_identity REPLICA IDENTITY DEFAULT;
+-- @@@ 30
+SELECT relreplident FROM pg_class WHERE oid = 'test_replica_identity'::regclass;
+ relreplident 
+--------------
+ d
+(1 row)
+
+-- @@@ 31
+SELECT count(*) FROM pg_index WHERE indrelid = 'test_replica_identity'::regclass AND indisreplident;
+ count 
+-------
+     0
+(1 row)
+
+-- @@@ 32
+ALTER TABLE test_replica_identity REPLICA IDENTITY FULL;
+-- @@@ 33
+SELECT relreplident FROM pg_class WHERE oid = 'test_replica_identity'::regclass;
+ relreplident 
+--------------
+ f
+(1 row)
+
+-- @@@ 34
+\d+ test_replica_identity
+                                                Table "public.test_replica_identity"
+ Column |  Type   | Collation | Nullable |                      Default                      | Storage  | Stats target | Description 
+--------+---------+-----------+----------+---------------------------------------------------+----------+--------------+-------------
+ id     | integer |           | not null | nextval('test_replica_identity_id_seq'::regclass) | plain    |              | 
+ keya   | text    |           | not null |                                                   | extended |              | 
+ keyb   | text    |           | not null |                                                   | extended |              | 
+ nonkey | text    |           |          |                                                   | extended |              | 
+Indexes:
+    "test_replica_identity_pkey" PRIMARY KEY, btree (id)
+    "test_replica_identity_expr" UNIQUE, btree (keya, keyb, (3))
+    "test_replica_identity_hash" hash (nonkey)
+    "test_replica_identity_keyab" btree (keya, keyb)
+    "test_replica_identity_keyab_key" UNIQUE, btree (keya, keyb)
+    "test_replica_identity_nonkey" UNIQUE, btree (keya, nonkey)
+    "test_replica_identity_partial" UNIQUE, btree (keya, keyb) WHERE keyb <> '3'::text
+    "test_replica_identity_unique_defer" UNIQUE CONSTRAINT, btree (keya, keyb) DEFERRABLE
+    "test_replica_identity_unique_nondefer" UNIQUE CONSTRAINT, btree (keya, keyb)
+Not-null constraints:
+    "test_replica_identity_id_not_null" NOT NULL "id"
+    "test_replica_identity_keya_not_null" NOT NULL "keya"
+    "test_replica_identity_keyb_not_null" NOT NULL "keyb"
+Replica Identity: FULL
+
+-- @@@ 35
+ALTER TABLE test_replica_identity REPLICA IDENTITY NOTHING;
+-- @@@ 36
+SELECT relreplident FROM pg_class WHERE oid = 'test_replica_identity'::regclass;
+ relreplident 
+--------------
+ n
+(1 row)
+
+-- @@@ 37
+---
+-- Test that ALTER TABLE rewrite preserves nondefault replica identity
+---
+-- constraint variant
+CREATE TABLE test_replica_identity2 (id int UNIQUE NOT NULL);
+-- @@@ 38
+ALTER TABLE test_replica_identity2 REPLICA IDENTITY USING INDEX test_replica_identity2_id_key;
+-- @@@ 39
+\d test_replica_identity2
+       Table "public.test_replica_identity2"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ id     | integer |           | not null | 
+Indexes:
+    "test_replica_identity2_id_key" UNIQUE CONSTRAINT, btree (id) REPLICA IDENTITY
+
+-- @@@ 40
+ALTER TABLE test_replica_identity2 ALTER COLUMN id TYPE bigint;
+-- @@@ 41
+\d test_replica_identity2
+      Table "public.test_replica_identity2"
+ Column |  Type  | Collation | Nullable | Default 
+--------+--------+-----------+----------+---------
+ id     | bigint |           | not null | 
+Indexes:
+    "test_replica_identity2_id_key" UNIQUE CONSTRAINT, btree (id) REPLICA IDENTITY
+
+-- @@@ 42
+-- straight index variant
+CREATE TABLE test_replica_identity3 (id int NOT NULL);
+-- @@@ 43
+CREATE UNIQUE INDEX test_replica_identity3_id_key ON test_replica_identity3 (id);
+-- @@@ 44
+ALTER TABLE test_replica_identity3 REPLICA IDENTITY USING INDEX test_replica_identity3_id_key;
+-- @@@ 45
+\d test_replica_identity3
+       Table "public.test_replica_identity3"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ id     | integer |           | not null | 
+Indexes:
+    "test_replica_identity3_id_key" UNIQUE, btree (id) REPLICA IDENTITY
+
+-- @@@ 46
+ALTER TABLE test_replica_identity3 ALTER COLUMN id TYPE bigint;
+-- @@@ 47
+\d test_replica_identity3
+      Table "public.test_replica_identity3"
+ Column |  Type  | Collation | Nullable | Default 
+--------+--------+-----------+----------+---------
+ id     | bigint |           | not null | 
+Indexes:
+    "test_replica_identity3_id_key" UNIQUE, btree (id) REPLICA IDENTITY
+
+-- @@@ 48
+-- ALTER TABLE DROP NOT NULL is not allowed for columns part of an index
+-- used as replica identity.
+ALTER TABLE test_replica_identity3 ALTER COLUMN id DROP NOT NULL;
+ERROR:  column "id" is in index used as replica identity
+-- @@@ 49
+-- but it's OK when the identity is FULL
+ALTER TABLE test_replica_identity3 REPLICA IDENTITY FULL;
+-- @@@ 50
+ALTER TABLE test_replica_identity3 ALTER COLUMN id DROP NOT NULL;
+-- @@@ 51
+--
+-- Test that replica identity can be set on an index that's not yet valid.
+-- (This matches the way pg_dump will try to dump a partitioned table.)
+--
+CREATE TABLE test_replica_identity4(id integer NOT NULL) PARTITION BY LIST (id);
+-- @@@ 52
+CREATE TABLE test_replica_identity4_1(id integer NOT NULL);
+-- @@@ 53
+ALTER TABLE ONLY test_replica_identity4
+  ATTACH PARTITION test_replica_identity4_1 FOR VALUES IN (1);
+-- @@@ 54
+ALTER TABLE ONLY test_replica_identity4
+  ADD CONSTRAINT test_replica_identity4_pkey PRIMARY KEY (id);
+-- @@@ 55
+ALTER TABLE ONLY test_replica_identity4
+  REPLICA IDENTITY USING INDEX test_replica_identity4_pkey;
+-- @@@ 56
+ALTER TABLE ONLY test_replica_identity4_1
+  ADD CONSTRAINT test_replica_identity4_1_pkey PRIMARY KEY (id);
+-- @@@ 57
+\d+ test_replica_identity4
+                    Partitioned table "public.test_replica_identity4"
+ Column |  Type   | Collation | Nullable | Default | Storage | Stats target | Description 
+--------+---------+-----------+----------+---------+---------+--------------+-------------
+ id     | integer |           | not null |         | plain   |              | 
+Partition key: LIST (id)
+Indexes:
+    "test_replica_identity4_pkey" PRIMARY KEY, btree (id) INVALID REPLICA IDENTITY
+Not-null constraints:
+    "test_replica_identity4_id_not_null" NOT NULL "id"
+Partitions: test_replica_identity4_1 FOR VALUES IN (1)
+
+-- @@@ 58
+ALTER INDEX test_replica_identity4_pkey
+  ATTACH PARTITION test_replica_identity4_1_pkey;
+-- @@@ 59
+\d+ test_replica_identity4
+                    Partitioned table "public.test_replica_identity4"
+ Column |  Type   | Collation | Nullable | Default | Storage | Stats target | Description 
+--------+---------+-----------+----------+---------+---------+--------------+-------------
+ id     | integer |           | not null |         | plain   |              | 
+Partition key: LIST (id)
+Indexes:
+    "test_replica_identity4_pkey" PRIMARY KEY, btree (id) REPLICA IDENTITY
+Not-null constraints:
+    "test_replica_identity4_id_not_null" NOT NULL "id"
+Partitions: test_replica_identity4_1 FOR VALUES IN (1)
+
+-- @@@ 60
+-- Dropping the primary key is not allowed if that would leave the replica
+-- identity as nullable
+CREATE TABLE test_replica_identity5 (a int not null, b int, c int,
+	PRIMARY KEY (b, c));
+-- @@@ 61
+CREATE UNIQUE INDEX test_replica_identity5_a_b_key ON test_replica_identity5 (a, b);
+-- @@@ 62
+ALTER TABLE test_replica_identity5 REPLICA IDENTITY USING INDEX test_replica_identity5_a_b_key;
+-- @@@ 63
+ALTER TABLE test_replica_identity5 DROP CONSTRAINT test_replica_identity5_pkey;
+-- @@@ 64
+ALTER TABLE test_replica_identity5 ALTER b SET NOT NULL;
+-- @@@ 65
+ALTER TABLE test_replica_identity5 DROP CONSTRAINT test_replica_identity5_pkey;
+ERROR:  constraint "test_replica_identity5_pkey" of relation "test_replica_identity5" does not exist
+-- @@@ 66
+ALTER TABLE test_replica_identity5 ALTER b DROP NOT NULL;
+ERROR:  column "b" is in index used as replica identity
+-- @@@ 67
+DROP TABLE test_replica_identity;
+-- @@@ 68
+DROP TABLE test_replica_identity2;
+-- @@@ 69
+DROP TABLE test_replica_identity3;
+-- @@@ 70
+DROP TABLE test_replica_identity4;
+-- @@@ 71
+DROP TABLE test_replica_identity5;
+-- @@@ 72
+DROP TABLE test_replica_identity_othertable;
+-- @@@ 73
+DROP TABLE test_replica_identity_t3;
+-- @@@ 74

@@ -1,0 +1,509 @@
+--
+-- CREATE_TYPE
+--
+-- directory path and dlsuffix are passed to us in environment variables
+\getenv libdir PG_LIBDIR
+-- @@@ 0
+\getenv dlsuffix PG_DLSUFFIX
+-- @@@ 1
+\set regresslib :libdir '/regress' :dlsuffix
+-- @@@ 2
+--
+-- Test the "old style" approach of making the I/O functions first,
+-- with no explicit shell type creation.
+--
+CREATE FUNCTION widget_in(cstring)
+   RETURNS widget
+   AS :'regresslib'
+   LANGUAGE C STRICT IMMUTABLE;
+NOTICE:  type "widget" is not yet defined
+DETAIL:  Creating a shell type definition.
+ERROR:  could not access file "/usr/local/lib/postgresql/regress.so": No such file or directory
+-- @@@ 3
+CREATE FUNCTION widget_out(widget)
+   RETURNS cstring
+   AS :'regresslib'
+   LANGUAGE C STRICT IMMUTABLE;
+ERROR:  type widget does not exist
+LINE 1: CREATE FUNCTION widget_out(widget)
+                                   ^
+-- @@@ 4
+CREATE FUNCTION int44in(cstring)
+   RETURNS city_budget
+   AS :'regresslib'
+   LANGUAGE C STRICT IMMUTABLE;
+NOTICE:  type "city_budget" is not yet defined
+DETAIL:  Creating a shell type definition.
+ERROR:  could not access file "/usr/local/lib/postgresql/regress.so": No such file or directory
+-- @@@ 5
+CREATE FUNCTION int44out(city_budget)
+   RETURNS cstring
+   AS :'regresslib'
+   LANGUAGE C STRICT IMMUTABLE;
+ERROR:  type city_budget does not exist
+LINE 1: CREATE FUNCTION int44out(city_budget)
+                                 ^
+-- @@@ 6
+CREATE TYPE widget (
+   internallength = 24,
+   input = widget_in,
+   output = widget_out,
+   typmod_in = numerictypmodin,
+   typmod_out = numerictypmodout,
+   alignment = double
+);
+ERROR:  type "widget" does not exist
+HINT:  Create the type as a shell type, then create its I/O functions, then do a full CREATE TYPE.
+-- @@@ 7
+CREATE TYPE city_budget (
+   internallength = 16,
+   input = int44in,
+   output = int44out,
+   element = int4,
+   category = 'x',   -- just to verify the system will take it
+   preferred = true  -- ditto
+);
+ERROR:  type "city_budget" does not exist
+HINT:  Create the type as a shell type, then create its I/O functions, then do a full CREATE TYPE.
+-- @@@ 8
+-- Test creation and destruction of shell types
+CREATE TYPE shell;
+-- @@@ 9
+CREATE TYPE shell;   -- fail, type already present
+ERROR:  type "shell" already exists
+-- @@@ 10
+DROP TYPE shell;
+-- @@@ 11
+DROP TYPE shell;     -- fail, type not exist
+ERROR:  type "shell" does not exist
+-- @@@ 12
+-- also, let's leave one around for purposes of pg_dump testing
+CREATE TYPE myshell;
+-- @@@ 13
+--
+-- Test type-related default values (broken in releases before PG 7.2)
+--
+-- This part of the test also exercises the "new style" approach of making
+-- a shell type and then filling it in.
+--
+CREATE TYPE int42;
+-- @@@ 14
+CREATE TYPE text_w_default;
+-- @@@ 15
+-- Make dummy I/O routines using the existing internal support for int4, text
+CREATE FUNCTION int42_in(cstring)
+   RETURNS int42
+   AS 'int4in'
+   LANGUAGE internal STRICT IMMUTABLE;
+NOTICE:  return type int42 is only a shell
+-- @@@ 16
+CREATE FUNCTION int42_out(int42)
+   RETURNS cstring
+   AS 'int4out'
+   LANGUAGE internal STRICT IMMUTABLE;
+NOTICE:  argument type int42 is only a shell
+LINE 1: CREATE FUNCTION int42_out(int42)
+                                  ^
+-- @@@ 17
+CREATE FUNCTION text_w_default_in(cstring)
+   RETURNS text_w_default
+   AS 'textin'
+   LANGUAGE internal STRICT IMMUTABLE;
+NOTICE:  return type text_w_default is only a shell
+-- @@@ 18
+CREATE FUNCTION text_w_default_out(text_w_default)
+   RETURNS cstring
+   AS 'textout'
+   LANGUAGE internal STRICT IMMUTABLE;
+NOTICE:  argument type text_w_default is only a shell
+LINE 1: CREATE FUNCTION text_w_default_out(text_w_default)
+                                           ^
+-- @@@ 19
+CREATE TYPE int42 (
+   internallength = 4,
+   input = int42_in,
+   output = int42_out,
+   alignment = int4,
+   default = 42,
+   passedbyvalue
+);
+-- @@@ 20
+CREATE TYPE text_w_default (
+   internallength = variable,
+   input = text_w_default_in,
+   output = text_w_default_out,
+   alignment = int4,
+   default = 'zippo'
+);
+-- @@@ 21
+CREATE TABLE default_test (f1 text_w_default, f2 int42);
+-- @@@ 22
+INSERT INTO default_test DEFAULT VALUES;
+-- @@@ 23
+SELECT * FROM default_test;
+  f1   | f2 
+-------+----
+ zippo | 42
+(1 row)
+
+-- @@@ 24
+-- We need a shell type to test some CREATE TYPE failure cases with
+CREATE TYPE bogus_type;
+-- @@@ 25
+-- invalid: non-lowercase quoted identifiers
+CREATE TYPE bogus_type (
+	"Internallength" = 4,
+	"Input" = int42_in,
+	"Output" = int42_out,
+	"Alignment" = int4,
+	"Default" = 42,
+	"Passedbyvalue"
+);
+WARNING:  type attribute "Internallength" not recognized
+LINE 2:  "Internallength" = 4,
+         ^
+WARNING:  type attribute "Input" not recognized
+LINE 3:  "Input" = int42_in,
+         ^
+WARNING:  type attribute "Output" not recognized
+LINE 4:  "Output" = int42_out,
+         ^
+WARNING:  type attribute "Alignment" not recognized
+LINE 5:  "Alignment" = int4,
+         ^
+WARNING:  type attribute "Default" not recognized
+LINE 6:  "Default" = 42,
+         ^
+WARNING:  type attribute "Passedbyvalue" not recognized
+LINE 7:  "Passedbyvalue"
+         ^
+ERROR:  type input function must be specified
+-- @@@ 26
+-- invalid: input/output function incompatibility
+CREATE TYPE bogus_type (INPUT = array_in,
+    OUTPUT = array_out,
+    ELEMENT = int,
+    INTERNALLENGTH = 32);
+ERROR:  type input function array_in must return type bogus_type
+-- @@@ 27
+DROP TYPE bogus_type;
+-- @@@ 28
+-- It no longer is possible to issue CREATE TYPE without making a shell first
+CREATE TYPE bogus_type (INPUT = array_in,
+    OUTPUT = array_out,
+    ELEMENT = int,
+    INTERNALLENGTH = 32);
+ERROR:  type "bogus_type" does not exist
+HINT:  Create the type as a shell type, then create its I/O functions, then do a full CREATE TYPE.
+-- @@@ 29
+-- Test stand-alone composite type
+CREATE TYPE default_test_row AS (f1 text_w_default, f2 int42);
+-- @@@ 30
+CREATE FUNCTION get_default_test() RETURNS SETOF default_test_row AS '
+  SELECT * FROM default_test;
+' LANGUAGE SQL;
+-- @@@ 31
+SELECT * FROM get_default_test();
+  f1   | f2 
+-------+----
+ zippo | 42
+(1 row)
+
+-- @@@ 32
+-- Test comments
+COMMENT ON TYPE bad IS 'bad comment';
+ERROR:  type "bad" does not exist
+-- @@@ 33
+COMMENT ON TYPE default_test_row IS 'good comment';
+-- @@@ 34
+COMMENT ON TYPE default_test_row IS NULL;
+-- @@@ 35
+COMMENT ON COLUMN default_test_row.nope IS 'bad comment';
+ERROR:  column "nope" of relation "default_test_row" does not exist
+-- @@@ 36
+COMMENT ON COLUMN default_test_row.f1 IS 'good comment';
+-- @@@ 37
+COMMENT ON COLUMN default_test_row.f1 IS NULL;
+-- @@@ 38
+-- Check shell type create for existing types
+CREATE TYPE text_w_default;		-- should fail
+ERROR:  type "text_w_default" already exists
+-- @@@ 39
+DROP TYPE default_test_row CASCADE;
+NOTICE:  drop cascades to function get_default_test()
+-- @@@ 40
+DROP TABLE default_test;
+-- @@@ 41
+-- Check dependencies are established when creating a new type
+CREATE TYPE base_type;
+-- @@@ 42
+CREATE FUNCTION base_fn_in(cstring) RETURNS base_type AS 'boolin'
+    LANGUAGE internal IMMUTABLE STRICT;
+NOTICE:  return type base_type is only a shell
+-- @@@ 43
+CREATE FUNCTION base_fn_out(base_type) RETURNS cstring AS 'boolout'
+    LANGUAGE internal IMMUTABLE STRICT;
+NOTICE:  argument type base_type is only a shell
+LINE 1: CREATE FUNCTION base_fn_out(base_type) RETURNS cstring AS 'b...
+                                    ^
+-- @@@ 44
+CREATE TYPE base_type(INPUT = base_fn_in, OUTPUT = base_fn_out);
+-- @@@ 45
+DROP FUNCTION base_fn_in(cstring); -- error
+ERROR:  cannot drop function base_fn_in(cstring) because other objects depend on it
+DETAIL:  type base_type depends on function base_fn_in(cstring)
+function base_fn_out(base_type) depends on type base_type
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+-- @@@ 46
+DROP FUNCTION base_fn_out(base_type); -- error
+ERROR:  cannot drop function base_fn_out(base_type) because other objects depend on it
+DETAIL:  type base_type depends on function base_fn_out(base_type)
+function base_fn_in(cstring) depends on type base_type
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+-- @@@ 47
+DROP TYPE base_type; -- error
+ERROR:  cannot drop type base_type because other objects depend on it
+DETAIL:  function base_fn_in(cstring) depends on type base_type
+function base_fn_out(base_type) depends on type base_type
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+-- @@@ 48
+DROP TYPE base_type CASCADE;
+NOTICE:  drop cascades to 2 other objects
+DETAIL:  drop cascades to function base_fn_in(cstring)
+drop cascades to function base_fn_out(base_type)
+-- @@@ 49
+-- Check usage of typmod with a user-defined type
+-- (we have borrowed numeric's typmod functions)
+CREATE TEMP TABLE mytab (foo widget(42,13,7));     -- should fail
+ERROR:  type "widget" does not exist
+LINE 1: CREATE TEMP TABLE mytab (foo widget(42,13,7));
+                                     ^
+-- @@@ 50
+CREATE TEMP TABLE mytab (foo widget(42,13));
+ERROR:  type "widget" does not exist
+LINE 1: CREATE TEMP TABLE mytab (foo widget(42,13));
+                                     ^
+-- @@@ 51
+SELECT format_type(atttypid,atttypmod) FROM pg_attribute
+WHERE attrelid = 'mytab'::regclass AND attnum > 0;
+ERROR:  relation "mytab" does not exist
+LINE 2: WHERE attrelid = 'mytab'::regclass AND attnum > 0;
+                         ^
+-- @@@ 52
+-- might as well exercise the widget type while we're here
+INSERT INTO mytab VALUES ('(1,2,3)'), ('(-44,5.5,12)');
+ERROR:  relation "mytab" does not exist
+LINE 1: INSERT INTO mytab VALUES ('(1,2,3)'), ('(-44,5.5,12)');
+                    ^
+-- @@@ 53
+TABLE mytab;
+ERROR:  relation "mytab" does not exist
+LINE 1: TABLE mytab;
+              ^
+-- @@@ 54
+-- and test format_type() a bit more, too
+select format_type('varchar'::regtype, 42);
+      format_type      
+-----------------------
+ character varying(38)
+(1 row)
+
+-- @@@ 55
+select format_type('bpchar'::regtype, null);
+ format_type 
+-------------
+ character
+(1 row)
+
+-- @@@ 56
+-- this behavior difference is intentional
+select format_type('bpchar'::regtype, -1);
+ format_type 
+-------------
+ bpchar
+(1 row)
+
+-- @@@ 57
+-- Test non-error-throwing APIs using widget, which still throws errors
+SELECT pg_input_is_valid('(1,2,3)', 'widget');
+ERROR:  type "widget" does not exist
+-- @@@ 58
+SELECT pg_input_is_valid('(1,2)', 'widget');  -- hard error expected
+ERROR:  type "widget" does not exist
+-- @@@ 59
+SELECT pg_input_is_valid('{"(1,2,3)"}', 'widget[]');
+ERROR:  type "widget[]" does not exist
+-- @@@ 60
+SELECT pg_input_is_valid('{"(1,2)"}', 'widget[]');  -- hard error expected
+ERROR:  type "widget[]" does not exist
+-- @@@ 61
+SELECT pg_input_is_valid('("(1,2,3)")', 'mytab');
+ERROR:  type "mytab" does not exist
+-- @@@ 62
+SELECT pg_input_is_valid('("(1,2)")', 'mytab');  -- hard error expected
+ERROR:  type "mytab" does not exist
+-- @@@ 63
+-- Test creation of an operator over a user-defined type
+CREATE FUNCTION pt_in_widget(point, widget)
+   RETURNS bool
+   AS :'regresslib'
+   LANGUAGE C STRICT;
+ERROR:  type widget does not exist
+LINE 1: CREATE FUNCTION pt_in_widget(point, widget)
+                                            ^
+-- @@@ 64
+CREATE OPERATOR <% (
+   leftarg = point,
+   rightarg = widget,
+   procedure = pt_in_widget,
+   commutator = >% ,
+   negator = >=%
+);
+ERROR:  type "widget" does not exist
+-- @@@ 65
+SELECT point '(1,2)' <% widget '(0,0,3)' AS t,
+       point '(1,2)' <% widget '(0,0,1)' AS f;
+ERROR:  type "widget" does not exist
+LINE 1: SELECT point '(1,2)' <% widget '(0,0,3)' AS t,
+                                ^
+-- @@@ 66
+-- exercise city_budget type
+CREATE TABLE city (
+	name		name,
+	location 	box,
+	budget 		city_budget
+);
+ERROR:  type "city_budget" does not exist
+LINE 4:  budget   city_budget
+                  ^
+-- @@@ 67
+INSERT INTO city VALUES
+('Podunk', '(1,2),(3,4)', '100,127,1000'),
+('Gotham', '(1000,34),(1100,334)', '123456,127,-1000,6789');
+ERROR:  relation "city" does not exist
+LINE 1: INSERT INTO city VALUES
+                    ^
+-- @@@ 68
+TABLE city;
+ERROR:  relation "city" does not exist
+LINE 1: TABLE city;
+              ^
+-- @@@ 69
+--
+-- Test CREATE/ALTER TYPE using a type that's compatible with varchar,
+-- so we can re-use those support functions
+--
+CREATE TYPE myvarchar;
+-- @@@ 70
+CREATE FUNCTION myvarcharin(cstring, oid, integer) RETURNS myvarchar
+LANGUAGE internal IMMUTABLE PARALLEL SAFE STRICT AS 'varcharin';
+NOTICE:  return type myvarchar is only a shell
+-- @@@ 71
+CREATE FUNCTION myvarcharout(myvarchar) RETURNS cstring
+LANGUAGE internal IMMUTABLE PARALLEL SAFE STRICT AS 'varcharout';
+NOTICE:  argument type myvarchar is only a shell
+LINE 1: CREATE FUNCTION myvarcharout(myvarchar) RETURNS cstring
+                                     ^
+-- @@@ 72
+CREATE FUNCTION myvarcharsend(myvarchar) RETURNS bytea
+LANGUAGE internal STABLE PARALLEL SAFE STRICT AS 'varcharsend';
+NOTICE:  argument type myvarchar is only a shell
+LINE 1: CREATE FUNCTION myvarcharsend(myvarchar) RETURNS bytea
+                                      ^
+-- @@@ 73
+CREATE FUNCTION myvarcharrecv(internal, oid, integer) RETURNS myvarchar
+LANGUAGE internal STABLE PARALLEL SAFE STRICT AS 'varcharrecv';
+NOTICE:  return type myvarchar is only a shell
+-- @@@ 74
+-- fail, it's still a shell:
+ALTER TYPE myvarchar SET (storage = extended);
+ERROR:  type "myvarchar" is only a shell
+-- @@@ 75
+CREATE TYPE myvarchar (
+    input = myvarcharin,
+    output = myvarcharout,
+    alignment = integer,
+    storage = main
+);
+-- @@@ 76
+-- want to check updating of a domain over the target type, too
+CREATE DOMAIN myvarchardom AS myvarchar;
+-- @@@ 77
+ALTER TYPE myvarchar SET (storage = plain);  -- not allowed
+ERROR:  cannot change type's storage to PLAIN
+-- @@@ 78
+ALTER TYPE myvarchar SET (storage = extended);
+-- @@@ 79
+ALTER TYPE myvarchar SET (
+    send = myvarcharsend,
+    receive = myvarcharrecv,
+    typmod_in = varchartypmodin,
+    typmod_out = varchartypmodout,
+    -- these are bogus, but it's safe as long as we don't use the type:
+    analyze = ts_typanalyze,
+    subscript = raw_array_subscript_handler
+);
+-- @@@ 80
+SELECT typinput, typoutput, typreceive, typsend, typmodin, typmodout,
+       typanalyze, typsubscript, typstorage
+FROM pg_type WHERE typname = 'myvarchar';
+  typinput   |  typoutput   |  typreceive   |    typsend    |    typmodin     |    typmodout     |  typanalyze   |        typsubscript         | typstorage 
+-------------+--------------+---------------+---------------+-----------------+------------------+---------------+-----------------------------+------------
+ myvarcharin | myvarcharout | myvarcharrecv | myvarcharsend | varchartypmodin | varchartypmodout | ts_typanalyze | raw_array_subscript_handler | x
+(1 row)
+
+-- @@@ 81
+SELECT typinput, typoutput, typreceive, typsend, typmodin, typmodout,
+       typanalyze, typsubscript, typstorage
+FROM pg_type WHERE typname = '_myvarchar';
+ typinput | typoutput | typreceive |  typsend   |    typmodin     |    typmodout     |    typanalyze    |      typsubscript       | typstorage 
+----------+-----------+------------+------------+-----------------+------------------+------------------+-------------------------+------------
+ array_in | array_out | array_recv | array_send | varchartypmodin | varchartypmodout | array_typanalyze | array_subscript_handler | x
+(1 row)
+
+-- @@@ 82
+SELECT typinput, typoutput, typreceive, typsend, typmodin, typmodout,
+       typanalyze, typsubscript, typstorage
+FROM pg_type WHERE typname = 'myvarchardom';
+ typinput  |  typoutput   | typreceive  |    typsend    | typmodin | typmodout |  typanalyze   | typsubscript | typstorage 
+-----------+--------------+-------------+---------------+----------+-----------+---------------+--------------+------------
+ domain_in | myvarcharout | domain_recv | myvarcharsend | -        | -         | ts_typanalyze | -            | x
+(1 row)
+
+-- @@@ 83
+SELECT typinput, typoutput, typreceive, typsend, typmodin, typmodout,
+       typanalyze, typsubscript, typstorage
+FROM pg_type WHERE typname = '_myvarchardom';
+ typinput | typoutput | typreceive |  typsend   | typmodin | typmodout |    typanalyze    |      typsubscript       | typstorage 
+----------+-----------+------------+------------+----------+-----------+------------------+-------------------------+------------
+ array_in | array_out | array_recv | array_send | -        | -         | array_typanalyze | array_subscript_handler | x
+(1 row)
+
+-- @@@ 84
+-- ensure dependencies are straight
+DROP FUNCTION myvarcharsend(myvarchar);  -- fail
+ERROR:  cannot drop function myvarcharsend(myvarchar) because other objects depend on it
+DETAIL:  type myvarchar depends on function myvarcharsend(myvarchar)
+function myvarcharin(cstring,oid,integer) depends on type myvarchar
+function myvarcharout(myvarchar) depends on type myvarchar
+function myvarcharrecv(internal,oid,integer) depends on type myvarchar
+type myvarchardom depends on function myvarcharsend(myvarchar)
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+-- @@@ 85
+DROP TYPE myvarchar;  -- fail
+ERROR:  cannot drop type myvarchar because other objects depend on it
+DETAIL:  function myvarcharin(cstring,oid,integer) depends on type myvarchar
+function myvarcharout(myvarchar) depends on type myvarchar
+function myvarcharsend(myvarchar) depends on type myvarchar
+function myvarcharrecv(internal,oid,integer) depends on type myvarchar
+type myvarchardom depends on type myvarchar
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+-- @@@ 86
+DROP TYPE myvarchar CASCADE;
+NOTICE:  drop cascades to 5 other objects
+DETAIL:  drop cascades to function myvarcharin(cstring,oid,integer)
+drop cascades to function myvarcharout(myvarchar)
+drop cascades to function myvarcharsend(myvarchar)
+drop cascades to function myvarcharrecv(internal,oid,integer)
+drop cascades to type myvarchardom
+-- @@@ 87

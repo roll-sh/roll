@@ -1,0 +1,1042 @@
+-- directory paths and dlsuffix are passed to us in environment variables
+\getenv libdir PG_LIBDIR
+-- @@@ 0
+\getenv dlsuffix PG_DLSUFFIX
+-- @@@ 1
+\set regresslib :libdir '/regress' :dlsuffix
+-- @@@ 2
+-- Function to assist with verifying EXPLAIN which includes costs.  A series
+-- of bool flags allows control over which portions are masked out
+CREATE FUNCTION explain_mask_costs(query text, do_analyze bool,
+    hide_costs bool, hide_row_est bool, hide_width bool) RETURNS setof text
+LANGUAGE plpgsql AS
+$$
+DECLARE
+    ln text;
+    analyze_str text;
+BEGIN
+    IF do_analyze = true THEN
+        analyze_str := 'on';
+    ELSE
+        analyze_str := 'off';
+    END IF;
+
+    -- avoid jit related output by disabling it
+    SET LOCAL jit = 0;
+
+    FOR ln IN
+        EXECUTE format('explain (analyze %s, costs on, summary off, timing off, buffers off) %s',
+            analyze_str, query)
+    LOOP
+        IF hide_costs = true THEN
+            ln := regexp_replace(ln, 'cost=\d+\.\d\d\.\.\d+\.\d\d', 'cost=N..N');
+        END IF;
+
+        IF hide_row_est = true THEN
+            -- don't use 'g' so that we leave the actual rows intact
+            ln := regexp_replace(ln, 'rows=\d+', 'rows=N');
+        END IF;
+
+        IF hide_width = true THEN
+            ln := regexp_replace(ln, 'width=\d+', 'width=N');
+        END IF;
+
+        RETURN NEXT ln;
+    END LOOP;
+END;
+$$;
+-- @@@ 3
+--
+-- num_nulls()
+--
+SELECT num_nonnulls(NULL);
+ num_nonnulls 
+--------------
+            0
+(1 row)
+
+-- @@@ 4
+SELECT num_nonnulls('1');
+ num_nonnulls 
+--------------
+            1
+(1 row)
+
+-- @@@ 5
+SELECT num_nonnulls(NULL::text);
+ num_nonnulls 
+--------------
+            0
+(1 row)
+
+-- @@@ 6
+SELECT num_nonnulls(NULL::text, NULL::int);
+ num_nonnulls 
+--------------
+            0
+(1 row)
+
+-- @@@ 7
+SELECT num_nonnulls(1, 2, NULL::text, NULL::point, '', int8 '9', 1.0 / NULL);
+ num_nonnulls 
+--------------
+            4
+(1 row)
+
+-- @@@ 8
+SELECT num_nonnulls(VARIADIC '{1,2,NULL,3}'::int[]);
+ num_nonnulls 
+--------------
+            3
+(1 row)
+
+-- @@@ 9
+SELECT num_nonnulls(VARIADIC '{"1","2","3","4"}'::text[]);
+ num_nonnulls 
+--------------
+            4
+(1 row)
+
+-- @@@ 10
+SELECT num_nonnulls(VARIADIC ARRAY(SELECT CASE WHEN i <> 40 THEN i END FROM generate_series(1, 100) i));
+ num_nonnulls 
+--------------
+           99
+(1 row)
+
+-- @@@ 11
+SELECT num_nulls(NULL);
+ num_nulls 
+-----------
+         1
+(1 row)
+
+-- @@@ 12
+SELECT num_nulls('1');
+ num_nulls 
+-----------
+         0
+(1 row)
+
+-- @@@ 13
+SELECT num_nulls(NULL::text);
+ num_nulls 
+-----------
+         1
+(1 row)
+
+-- @@@ 14
+SELECT num_nulls(NULL::text, NULL::int);
+ num_nulls 
+-----------
+         2
+(1 row)
+
+-- @@@ 15
+SELECT num_nulls(1, 2, NULL::text, NULL::point, '', int8 '9', 1.0 / NULL);
+ num_nulls 
+-----------
+         3
+(1 row)
+
+-- @@@ 16
+SELECT num_nulls(VARIADIC '{1,2,NULL,3}'::int[]);
+ num_nulls 
+-----------
+         1
+(1 row)
+
+-- @@@ 17
+SELECT num_nulls(VARIADIC '{"1","2","3","4"}'::text[]);
+ num_nulls 
+-----------
+         0
+(1 row)
+
+-- @@@ 18
+SELECT num_nulls(VARIADIC ARRAY(SELECT CASE WHEN i <> 40 THEN i END FROM generate_series(1, 100) i));
+ num_nulls 
+-----------
+         1
+(1 row)
+
+-- @@@ 19
+-- special cases
+SELECT num_nonnulls(VARIADIC NULL::text[]);
+ num_nonnulls 
+--------------
+             
+(1 row)
+
+-- @@@ 20
+SELECT num_nonnulls(VARIADIC '{}'::int[]);
+ num_nonnulls 
+--------------
+            0
+(1 row)
+
+-- @@@ 21
+SELECT num_nulls(VARIADIC NULL::text[]);
+ num_nulls 
+-----------
+          
+(1 row)
+
+-- @@@ 22
+SELECT num_nulls(VARIADIC '{}'::int[]);
+ num_nulls 
+-----------
+         0
+(1 row)
+
+-- @@@ 23
+-- should fail, one or more arguments is required
+SELECT num_nonnulls();
+ERROR:  function num_nonnulls() does not exist
+LINE 1: SELECT num_nonnulls();
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 24
+SELECT num_nulls();
+ERROR:  function num_nulls() does not exist
+LINE 1: SELECT num_nulls();
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 25
+--
+-- canonicalize_path()
+--
+CREATE FUNCTION test_canonicalize_path(text)
+   RETURNS text
+   AS :'regresslib'
+   LANGUAGE C STRICT IMMUTABLE;
+ERROR:  could not access file "/usr/local/lib/postgresql/regress.so": No such file or directory
+-- @@@ 26
+SELECT test_canonicalize_path('/');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('/');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 27
+SELECT test_canonicalize_path('/./abc/def/');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('/./abc/def/');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 28
+SELECT test_canonicalize_path('/./../abc/def');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('/./../abc/def');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 29
+SELECT test_canonicalize_path('/./../../abc/def/');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('/./../../abc/def/');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 30
+SELECT test_canonicalize_path('/abc/.././def/ghi');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('/abc/.././def/ghi');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 31
+SELECT test_canonicalize_path('/abc/./../def/ghi//');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('/abc/./../def/ghi//');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 32
+SELECT test_canonicalize_path('/abc/def/../..');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('/abc/def/../..');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 33
+SELECT test_canonicalize_path('/abc/def/../../..');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('/abc/def/../../..');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 34
+SELECT test_canonicalize_path('/abc/def/../../../../ghi/jkl');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('/abc/def/../../../../ghi/jkl'...
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 35
+SELECT test_canonicalize_path('.');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('.');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 36
+SELECT test_canonicalize_path('./');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('./');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 37
+SELECT test_canonicalize_path('./abc/..');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('./abc/..');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 38
+SELECT test_canonicalize_path('abc/../');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('abc/../');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 39
+SELECT test_canonicalize_path('abc/../def');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('abc/../def');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 40
+SELECT test_canonicalize_path('..');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('..');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 41
+SELECT test_canonicalize_path('../abc/def');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('../abc/def');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 42
+SELECT test_canonicalize_path('../abc/..');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('../abc/..');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 43
+SELECT test_canonicalize_path('../abc/../def');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('../abc/../def');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 44
+SELECT test_canonicalize_path('../abc/../../def/ghi');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('../abc/../../def/ghi');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 45
+SELECT test_canonicalize_path('./abc/./def/.');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('./abc/./def/.');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 46
+SELECT test_canonicalize_path('./abc/././def/.');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('./abc/././def/.');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 47
+SELECT test_canonicalize_path('./abc/./def/.././ghi/../../../jkl/mno');
+ERROR:  function test_canonicalize_path(unknown) does not exist
+LINE 1: SELECT test_canonicalize_path('./abc/./def/.././ghi/../../.....
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 48
+--
+-- pg_log_backend_memory_contexts()
+--
+-- Memory contexts are logged and they are not returned to the function.
+-- Furthermore, their contents can vary depending on the timing. However,
+-- we can at least verify that the code doesn't fail, and that the
+-- permissions are set properly.
+--
+SELECT pg_log_backend_memory_contexts(pg_backend_pid());
+ pg_log_backend_memory_contexts 
+--------------------------------
+ t
+(1 row)
+
+-- @@@ 49
+SELECT pg_log_backend_memory_contexts(pid) FROM pg_stat_activity
+  WHERE backend_type = 'checkpointer';
+ pg_log_backend_memory_contexts 
+--------------------------------
+ t
+(1 row)
+
+-- @@@ 50
+CREATE ROLE regress_log_memory;
+-- @@@ 51
+SELECT has_function_privilege('regress_log_memory',
+  'pg_log_backend_memory_contexts(integer)', 'EXECUTE'); -- no
+ has_function_privilege 
+------------------------
+ f
+(1 row)
+
+-- @@@ 52
+GRANT EXECUTE ON FUNCTION pg_log_backend_memory_contexts(integer)
+  TO regress_log_memory;
+-- @@@ 53
+SELECT has_function_privilege('regress_log_memory',
+  'pg_log_backend_memory_contexts(integer)', 'EXECUTE'); -- yes
+ has_function_privilege 
+------------------------
+ t
+(1 row)
+
+-- @@@ 54
+SET ROLE regress_log_memory;
+-- @@@ 55
+SELECT pg_log_backend_memory_contexts(pg_backend_pid());
+ pg_log_backend_memory_contexts 
+--------------------------------
+ t
+(1 row)
+
+-- @@@ 56
+RESET ROLE;
+-- @@@ 57
+REVOKE EXECUTE ON FUNCTION pg_log_backend_memory_contexts(integer)
+  FROM regress_log_memory;
+-- @@@ 58
+DROP ROLE regress_log_memory;
+-- @@@ 59
+--
+-- Test some built-in SRFs
+--
+-- The outputs of these are variable, so we can't just print their results
+-- directly, but we can at least verify that the code doesn't fail.
+--
+select setting as segsize
+from pg_settings where name = 'wal_segment_size'
+\gset
+-- @@@ 60
+select count(*) > 0 as ok from pg_ls_waldir();
+ ok 
+----
+ t
+(1 row)
+
+-- @@@ 61
+-- Test ProjectSet as well as FunctionScan
+select count(*) > 0 as ok from (select pg_ls_waldir()) ss;
+ ok 
+----
+ t
+(1 row)
+
+-- @@@ 62
+-- Test not-run-to-completion cases.
+select * from pg_ls_waldir() limit 0;
+ name | size | modification 
+------+------+--------------
+(0 rows)
+
+-- @@@ 63
+select count(*) > 0 as ok from (select * from pg_ls_waldir() limit 1) ss;
+ ok 
+----
+ t
+(1 row)
+
+-- @@@ 64
+select (w).size = :segsize as ok
+from (select pg_ls_waldir() w) ss where length((w).name) = 24 limit 1;
+ ok 
+----
+ t
+(1 row)
+
+-- @@@ 65
+select count(*) >= 0 as ok from pg_ls_archive_statusdir();
+ ok 
+----
+ t
+(1 row)
+
+-- @@@ 66
+select count(*) >= 0 as ok from pg_ls_summariesdir();
+ ok 
+----
+ t
+(1 row)
+
+-- @@@ 67
+-- pg_read_file()
+select length(pg_read_file('postmaster.pid')) > 20;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 68
+select length(pg_read_file('postmaster.pid', 1, 20));
+ length 
+--------
+     20
+(1 row)
+
+-- @@@ 69
+-- Test missing_ok
+select pg_read_file('does not exist'); -- error
+ERROR:  could not open file "does not exist" for reading: No such file or directory
+-- @@@ 70
+select pg_read_file('does not exist', true) IS NULL; -- ok
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 71
+-- Test invalid argument
+select pg_read_file('does not exist', 0, -1); -- error
+ERROR:  requested length cannot be negative
+-- @@@ 72
+select pg_read_file('does not exist', 0, -1, true); -- error
+ERROR:  requested length cannot be negative
+-- @@@ 73
+-- pg_read_binary_file()
+select length(pg_read_binary_file('postmaster.pid')) > 20;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 74
+select length(pg_read_binary_file('postmaster.pid', 1, 20));
+ length 
+--------
+     20
+(1 row)
+
+-- @@@ 75
+-- Test missing_ok
+select pg_read_binary_file('does not exist'); -- error
+ERROR:  could not open file "does not exist" for reading: No such file or directory
+-- @@@ 76
+select pg_read_binary_file('does not exist', true) IS NULL; -- ok
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 77
+-- Test invalid argument
+select pg_read_binary_file('does not exist', 0, -1); -- error
+ERROR:  requested length cannot be negative
+-- @@@ 78
+select pg_read_binary_file('does not exist', 0, -1, true); -- error
+ERROR:  requested length cannot be negative
+-- @@@ 79
+-- pg_stat_file()
+select size > 20, isdir from pg_stat_file('postmaster.pid');
+ ?column? | isdir 
+----------+-------
+ t        | f
+(1 row)
+
+-- @@@ 80
+-- pg_ls_dir()
+select * from (select pg_ls_dir('.') a) a where a = 'base' limit 1;
+  a   
+------
+ base
+(1 row)
+
+-- @@@ 81
+-- Test missing_ok (second argument)
+select pg_ls_dir('does not exist', false, false); -- error
+ERROR:  could not open directory "does not exist": No such file or directory
+-- @@@ 82
+select pg_ls_dir('does not exist', true, false); -- ok
+ pg_ls_dir 
+-----------
+(0 rows)
+
+-- @@@ 83
+-- Test include_dot_dirs (third argument)
+select count(*) = 1 as dot_found
+  from pg_ls_dir('.', false, true) as ls where ls = '.';
+ dot_found 
+-----------
+ t
+(1 row)
+
+-- @@@ 84
+select count(*) = 1 as dot_found
+  from pg_ls_dir('.', false, false) as ls where ls = '.';
+ dot_found 
+-----------
+ f
+(1 row)
+
+-- @@@ 85
+-- pg_timezone_names()
+select * from (select (pg_timezone_names()).name) ptn where name='UTC' limit 1;
+ name 
+------
+ UTC
+(1 row)
+
+-- @@@ 86
+-- pg_tablespace_databases()
+select count(*) > 0 from
+  (select pg_tablespace_databases(oid) as pts from pg_tablespace
+   where spcname = 'pg_default') pts
+  join pg_database db on pts.pts = db.oid;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 87
+--
+-- Test replication slot directory functions
+--
+CREATE ROLE regress_slot_dir_funcs;
+-- @@@ 88
+-- Not available by default.
+SELECT has_function_privilege('regress_slot_dir_funcs',
+  'pg_ls_logicalsnapdir()', 'EXECUTE');
+ has_function_privilege 
+------------------------
+ f
+(1 row)
+
+-- @@@ 89
+SELECT has_function_privilege('regress_slot_dir_funcs',
+  'pg_ls_logicalmapdir()', 'EXECUTE');
+ has_function_privilege 
+------------------------
+ f
+(1 row)
+
+-- @@@ 90
+SELECT has_function_privilege('regress_slot_dir_funcs',
+  'pg_ls_replslotdir(text)', 'EXECUTE');
+ has_function_privilege 
+------------------------
+ f
+(1 row)
+
+-- @@@ 91
+GRANT pg_monitor TO regress_slot_dir_funcs;
+-- @@@ 92
+-- Role is now part of pg_monitor, so these are available.
+SELECT has_function_privilege('regress_slot_dir_funcs',
+  'pg_ls_logicalsnapdir()', 'EXECUTE');
+ has_function_privilege 
+------------------------
+ t
+(1 row)
+
+-- @@@ 93
+SELECT has_function_privilege('regress_slot_dir_funcs',
+  'pg_ls_logicalmapdir()', 'EXECUTE');
+ has_function_privilege 
+------------------------
+ t
+(1 row)
+
+-- @@@ 94
+SELECT has_function_privilege('regress_slot_dir_funcs',
+  'pg_ls_replslotdir(text)', 'EXECUTE');
+ has_function_privilege 
+------------------------
+ t
+(1 row)
+
+-- @@@ 95
+DROP ROLE regress_slot_dir_funcs;
+-- @@@ 96
+--
+-- Test adding a support function to a subject function
+--
+CREATE FUNCTION my_int_eq(int, int) RETURNS bool
+  LANGUAGE internal STRICT IMMUTABLE PARALLEL SAFE
+  AS $$int4eq$$;
+-- @@@ 97
+-- By default, planner does not think that's selective
+EXPLAIN (COSTS OFF)
+SELECT * FROM tenk1 a JOIN tenk1 b ON a.unique1 = b.unique1
+WHERE my_int_eq(a.unique2, 42);
+                  QUERY PLAN                  
+----------------------------------------------
+ Hash Join
+   Hash Cond: (b.unique1 = a.unique1)
+   ->  Seq Scan on tenk1 b
+   ->  Hash
+         ->  Seq Scan on tenk1 a
+               Filter: my_int_eq(unique2, 42)
+(6 rows)
+
+-- @@@ 98
+-- With support function that knows it's int4eq, we get a different plan
+CREATE FUNCTION test_support_func(internal)
+    RETURNS internal
+    AS :'regresslib', 'test_support_func'
+    LANGUAGE C STRICT;
+ERROR:  could not access file "/usr/local/lib/postgresql/regress.so": No such file or directory
+-- @@@ 99
+ALTER FUNCTION my_int_eq(int, int) SUPPORT test_support_func;
+ERROR:  function test_support_func(internal) does not exist
+-- @@@ 100
+EXPLAIN (COSTS OFF)
+SELECT * FROM tenk1 a JOIN tenk1 b ON a.unique1 = b.unique1
+WHERE my_int_eq(a.unique2, 42);
+                  QUERY PLAN                  
+----------------------------------------------
+ Hash Join
+   Hash Cond: (b.unique1 = a.unique1)
+   ->  Seq Scan on tenk1 b
+   ->  Hash
+         ->  Seq Scan on tenk1 a
+               Filter: my_int_eq(unique2, 42)
+(6 rows)
+
+-- @@@ 101
+-- Also test non-default rowcount estimate
+CREATE FUNCTION my_gen_series(int, int) RETURNS SETOF integer
+  LANGUAGE internal STRICT IMMUTABLE PARALLEL SAFE
+  AS $$generate_series_int4$$
+  SUPPORT test_support_func;
+ERROR:  function test_support_func(internal) does not exist
+-- @@@ 102
+EXPLAIN (COSTS OFF)
+SELECT * FROM tenk1 a JOIN my_gen_series(1,1000) g ON a.unique1 = g;
+ERROR:  function my_gen_series(integer, integer) does not exist
+LINE 2: SELECT * FROM tenk1 a JOIN my_gen_series(1,1000) g ON a.uniq...
+                                   ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 103
+EXPLAIN (COSTS OFF)
+SELECT * FROM tenk1 a JOIN my_gen_series(1,10) g ON a.unique1 = g;
+ERROR:  function my_gen_series(integer, integer) does not exist
+LINE 2: SELECT * FROM tenk1 a JOIN my_gen_series(1,10) g ON a.unique...
+                                   ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 104
+--
+-- Test the SupportRequestRows support function for generate_series_timestamp()
+--
+-- Ensure the row estimate matches the actual rows
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(TIMESTAMPTZ '2024-02-01', TIMESTAMPTZ '2024-03-01', INTERVAL '1 day') g(s);$$,
+true, true, false, true);
+                                     explain_mask_costs                                      
+---------------------------------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=30 width=N) (actual rows=30.00 loops=1)
+(1 row)
+
+-- @@@ 105
+-- As above but with generate_series_timestamp
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(TIMESTAMP '2024-02-01', TIMESTAMP '2024-03-01', INTERVAL '1 day') g(s);$$,
+true, true, false, true);
+                                     explain_mask_costs                                      
+---------------------------------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=30 width=N) (actual rows=30.00 loops=1)
+(1 row)
+
+-- @@@ 106
+-- As above but with generate_series_timestamptz_at_zone()
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(TIMESTAMPTZ '2024-02-01', TIMESTAMPTZ '2024-03-01', INTERVAL '1 day', 'UTC') g(s);$$,
+true, true, false, true);
+                                     explain_mask_costs                                      
+---------------------------------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=30 width=N) (actual rows=30.00 loops=1)
+(1 row)
+
+-- @@@ 107
+-- Ensure the estimated and actual row counts match when the range isn't
+-- evenly divisible by the step
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(TIMESTAMPTZ '2024-02-01', TIMESTAMPTZ '2024-03-01', INTERVAL '7 day') g(s);$$,
+true, true, false, true);
+                                    explain_mask_costs                                     
+-------------------------------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=5 width=N) (actual rows=5.00 loops=1)
+(1 row)
+
+-- @@@ 108
+-- Ensure the estimates match when step is decreasing
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(TIMESTAMPTZ '2024-03-01', TIMESTAMPTZ '2024-02-01', INTERVAL '-1 day') g(s);$$,
+true, true, false, true);
+                                     explain_mask_costs                                      
+---------------------------------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=30 width=N) (actual rows=30.00 loops=1)
+(1 row)
+
+-- @@@ 109
+-- Ensure an empty range estimates 1 row
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(TIMESTAMPTZ '2024-03-01', TIMESTAMPTZ '2024-02-01', INTERVAL '1 day') g(s);$$,
+true, true, false, true);
+                                    explain_mask_costs                                     
+-------------------------------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=1 width=N) (actual rows=0.00 loops=1)
+(1 row)
+
+-- @@@ 110
+-- Ensure we get the default row estimate for infinity values
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(TIMESTAMPTZ '-infinity', TIMESTAMPTZ 'infinity', INTERVAL '1 day') g(s);$$,
+false, true, false, true);
+                        explain_mask_costs                         
+-------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=1000 width=N)
+(1 row)
+
+-- @@@ 111
+-- Ensure the row estimate behaves correctly when step size is zero.
+-- We expect generate_series_timestamp() to throw the error rather than in
+-- the support function.
+SELECT * FROM generate_series(TIMESTAMPTZ '2024-02-01', TIMESTAMPTZ '2024-03-01', INTERVAL '0 day') g(s);
+ERROR:  step size cannot equal zero
+-- @@@ 112
+--
+-- Test the SupportRequestRows support function for generate_series_numeric()
+--
+-- Ensure the row estimate matches the actual rows
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(1.0, 25.0) g(s);$$,
+true, true, false, true);
+                                     explain_mask_costs                                      
+---------------------------------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=25 width=N) (actual rows=25.00 loops=1)
+(1 row)
+
+-- @@@ 113
+-- As above but with non-default step
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(1.0, 25.0, 2.0) g(s);$$,
+true, true, false, true);
+                                     explain_mask_costs                                      
+---------------------------------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=13 width=N) (actual rows=13.00 loops=1)
+(1 row)
+
+-- @@@ 114
+-- Ensure the estimates match when step is decreasing
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(25.0, 1.0, -1.0) g(s);$$,
+true, true, false, true);
+                                     explain_mask_costs                                      
+---------------------------------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=25 width=N) (actual rows=25.00 loops=1)
+(1 row)
+
+-- @@@ 115
+-- Ensure an empty range estimates 1 row
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(25.0, 1.0, 1.0) g(s);$$,
+true, true, false, true);
+                                    explain_mask_costs                                     
+-------------------------------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=1 width=N) (actual rows=0.00 loops=1)
+(1 row)
+
+-- @@@ 116
+-- Ensure we get the default row estimate for error cases (infinity/NaN values
+-- and zero step size)
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series('-infinity'::NUMERIC, 'infinity'::NUMERIC, 1.0) g(s);$$,
+false, true, false, true);
+                        explain_mask_costs                         
+-------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=1000 width=N)
+(1 row)
+
+-- @@@ 117
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(1.0, 25.0, 'NaN'::NUMERIC) g(s);$$,
+false, true, false, true);
+                        explain_mask_costs                         
+-------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=1000 width=N)
+(1 row)
+
+-- @@@ 118
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(25.0, 2.0, 0.0) g(s);$$,
+false, true, false, true);
+                        explain_mask_costs                         
+-------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=1000 width=N)
+(1 row)
+
+-- @@@ 119
+-- Test functions for control data
+SELECT count(*) > 0 AS ok FROM pg_control_checkpoint();
+ ok 
+----
+ t
+(1 row)
+
+-- @@@ 120
+SELECT count(*) > 0 AS ok FROM pg_control_init();
+ ok 
+----
+ t
+(1 row)
+
+-- @@@ 121
+SELECT count(*) > 0 AS ok FROM pg_control_recovery();
+ ok 
+----
+ t
+(1 row)
+
+-- @@@ 122
+SELECT count(*) > 0 AS ok FROM pg_control_system();
+ ok 
+----
+ t
+(1 row)
+
+-- @@@ 123
+-- pg_split_walfile_name, pg_walfile_name & pg_walfile_name_offset
+SELECT * FROM pg_split_walfile_name(NULL);
+ segment_number | timeline_id 
+----------------+-------------
+                |            
+(1 row)
+
+-- @@@ 124
+SELECT * FROM pg_split_walfile_name('invalid');
+ERROR:  invalid WAL file name "invalid"
+-- @@@ 125
+SELECT segment_number > 0 AS ok_segment_number, timeline_id
+  FROM pg_split_walfile_name('000000010000000100000000');
+ ok_segment_number | timeline_id 
+-------------------+-------------
+ t                 |           1
+(1 row)
+
+-- @@@ 126
+SELECT segment_number > 0 AS ok_segment_number, timeline_id
+  FROM pg_split_walfile_name('ffffffFF00000001000000af');
+ ok_segment_number | timeline_id 
+-------------------+-------------
+ t                 |  4294967295
+(1 row)
+
+-- @@@ 127
+SELECT setting::int8 AS segment_size
+FROM pg_settings
+WHERE name = 'wal_segment_size'
+\gset
+-- @@@ 128
+SELECT segment_number, file_offset
+FROM pg_walfile_name_offset('0/0'::pg_lsn + :segment_size),
+     pg_split_walfile_name(file_name);
+ segment_number | file_offset 
+----------------+-------------
+              1 |           0
+(1 row)
+
+-- @@@ 129
+SELECT segment_number, file_offset
+FROM pg_walfile_name_offset('0/0'::pg_lsn + :segment_size + 1),
+     pg_split_walfile_name(file_name);
+ segment_number | file_offset 
+----------------+-------------
+              1 |           1
+(1 row)
+
+-- @@@ 130
+SELECT segment_number, file_offset = :segment_size - 1
+FROM pg_walfile_name_offset('0/0'::pg_lsn + :segment_size - 1),
+     pg_split_walfile_name(file_name);
+ segment_number | ?column? 
+----------------+----------
+              0 | t
+(1 row)
+
+-- @@@ 131
+-- pg_current_logfile
+CREATE ROLE regress_current_logfile;
+-- @@@ 132
+-- not available by default
+SELECT has_function_privilege('regress_current_logfile',
+  'pg_current_logfile()', 'EXECUTE');
+ has_function_privilege 
+------------------------
+ f
+(1 row)
+
+-- @@@ 133
+GRANT pg_monitor TO regress_current_logfile;
+-- @@@ 134
+-- role has privileges of pg_monitor and can execute the function
+SELECT has_function_privilege('regress_current_logfile',
+  'pg_current_logfile()', 'EXECUTE');
+ has_function_privilege 
+------------------------
+ t
+(1 row)
+
+-- @@@ 135
+DROP ROLE regress_current_logfile;
+-- @@@ 136
+-- pg_column_toast_chunk_id
+CREATE TABLE test_chunk_id (a TEXT, b TEXT STORAGE EXTERNAL);
+-- @@@ 137
+INSERT INTO test_chunk_id VALUES ('x', repeat('x', 8192));
+-- @@@ 138
+SELECT t.relname AS toastrel FROM pg_class c
+  LEFT JOIN pg_class t ON c.reltoastrelid = t.oid
+  WHERE c.relname = 'test_chunk_id'
+\gset
+-- @@@ 139
+SELECT pg_column_toast_chunk_id(a) IS NULL,
+  pg_column_toast_chunk_id(b) IN (SELECT chunk_id FROM pg_toast.:toastrel)
+  FROM test_chunk_id;
+ ?column? | ?column? 
+----------+----------
+ t        | t
+(1 row)
+
+-- @@@ 140
+DROP TABLE test_chunk_id;
+-- @@@ 141
+DROP FUNCTION explain_mask_costs(text, bool, bool, bool, bool);
+-- @@@ 142
+-- test stratnum translation support functions
+SELECT gist_translate_cmptype_common(7);
+ gist_translate_cmptype_common 
+-------------------------------
+                             3
+(1 row)
+
+-- @@@ 143
+SELECT gist_translate_cmptype_common(3);
+ gist_translate_cmptype_common 
+-------------------------------
+                            18
+(1 row)
+
+-- @@@ 144
+-- relpath tests
+CREATE FUNCTION test_relpath()
+    RETURNS void
+    AS :'regresslib'
+    LANGUAGE C;
+ERROR:  could not access file "/usr/local/lib/postgresql/regress.so": No such file or directory
+-- @@@ 145
+SELECT test_relpath();
+ERROR:  function test_relpath() does not exist
+LINE 1: SELECT test_relpath();
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- @@@ 146
+-- pg_replication_origin.roname limit
+SELECT pg_replication_origin_create('regress_' || repeat('a', 505));
+ERROR:  replication origin name is too long
+DETAIL:  Replication origin names must be no longer than 512 bytes.
+-- @@@ 147

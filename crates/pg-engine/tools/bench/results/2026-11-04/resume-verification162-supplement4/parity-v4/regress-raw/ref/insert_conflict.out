@@ -1,0 +1,1148 @@
+--
+-- insert...on conflict do unique index inference
+--
+create table insertconflicttest(key int4, fruit text);
+-- @@@ 0
+-- These things should work through a view, as well
+create view insertconflictview as select * from insertconflicttest;
+-- @@@ 1
+--
+-- Test unique index inference with operator class specifications and
+-- named collations
+--
+create unique index op_index_key on insertconflicttest(key, fruit text_pattern_ops);
+-- @@@ 2
+create unique index collation_index_key on insertconflicttest(key, fruit collate "C");
+-- @@@ 3
+create unique index both_index_key on insertconflicttest(key, fruit collate "C" text_pattern_ops);
+-- @@@ 4
+create unique index both_index_expr_key on insertconflicttest(key, lower(fruit) collate "C" text_pattern_ops);
+-- @@@ 5
+-- fails
+explain (costs off) insert into insertconflicttest values(0, 'Crowberry') on conflict (key) do nothing;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 6
+explain (costs off) insert into insertconflicttest values(0, 'Crowberry') on conflict (fruit) do nothing;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 7
+-- succeeds
+explain (costs off) insert into insertconflicttest values(0, 'Crowberry') on conflict (key, fruit) do nothing;
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Insert on insertconflicttest
+   Conflict Resolution: NOTHING
+   Conflict Arbiter Indexes: op_index_key, collation_index_key, both_index_key
+   ->  Result
+(4 rows)
+
+-- @@@ 8
+explain (costs off) insert into insertconflicttest values(0, 'Crowberry') on conflict (fruit, key, fruit, key) do nothing;
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Insert on insertconflicttest
+   Conflict Resolution: NOTHING
+   Conflict Arbiter Indexes: op_index_key, collation_index_key, both_index_key
+   ->  Result
+(4 rows)
+
+-- @@@ 9
+explain (costs off) insert into insertconflicttest values(0, 'Crowberry') on conflict (lower(fruit), key, lower(fruit), key) do nothing;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Insert on insertconflicttest
+   Conflict Resolution: NOTHING
+   Conflict Arbiter Indexes: both_index_expr_key
+   ->  Result
+(4 rows)
+
+-- @@@ 10
+explain (costs off) insert into insertconflictview values(0, 'Crowberry') on conflict (lower(fruit), key, lower(fruit), key) do nothing;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Insert on insertconflicttest
+   Conflict Resolution: NOTHING
+   Conflict Arbiter Indexes: both_index_expr_key
+   ->  Result
+(4 rows)
+
+-- @@@ 11
+explain (costs off) insert into insertconflicttest values(0, 'Crowberry') on conflict (key, fruit) do update set fruit = excluded.fruit
+  where exists (select 1 from insertconflicttest ii where ii.key = excluded.key);
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Insert on insertconflicttest
+   Conflict Resolution: UPDATE
+   Conflict Arbiter Indexes: op_index_key, collation_index_key, both_index_key
+   Conflict Filter: EXISTS(SubPlan 1)
+   ->  Result
+   SubPlan 1
+     ->  Index Only Scan using both_index_expr_key on insertconflicttest ii
+           Index Cond: (key = excluded.key)
+(8 rows)
+
+-- @@@ 12
+-- Neither collation nor operator class specifications are required --
+-- supplying them merely *limits* matches to indexes with matching opclasses
+-- used for relevant indexes
+explain (costs off) insert into insertconflicttest values(0, 'Crowberry') on conflict (key, fruit text_pattern_ops) do nothing;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Insert on insertconflicttest
+   Conflict Resolution: NOTHING
+   Conflict Arbiter Indexes: op_index_key, both_index_key
+   ->  Result
+(4 rows)
+
+-- @@@ 13
+-- Okay, arbitrates using both index where text_pattern_ops opclass does and
+-- does not appear.
+explain (costs off) insert into insertconflicttest values(0, 'Crowberry') on conflict (key, fruit collate "C") do nothing;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Insert on insertconflicttest
+   Conflict Resolution: NOTHING
+   Conflict Arbiter Indexes: collation_index_key, both_index_key
+   ->  Result
+(4 rows)
+
+-- @@@ 14
+-- Okay, but only accepts the single index where both opclass and collation are
+-- specified
+explain (costs off) insert into insertconflicttest values(0, 'Crowberry') on conflict (fruit collate "C" text_pattern_ops, key) do nothing;
+                 QUERY PLAN                 
+--------------------------------------------
+ Insert on insertconflicttest
+   Conflict Resolution: NOTHING
+   Conflict Arbiter Indexes: both_index_key
+   ->  Result
+(4 rows)
+
+-- @@@ 15
+-- Okay, but only accepts the single index where both opclass and collation are
+-- specified (plus expression variant)
+explain (costs off) insert into insertconflicttest values(0, 'Crowberry') on conflict (lower(fruit) collate "C", key, key) do nothing;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Insert on insertconflicttest
+   Conflict Resolution: NOTHING
+   Conflict Arbiter Indexes: both_index_expr_key
+   ->  Result
+(4 rows)
+
+-- @@@ 16
+-- Attribute appears twice, while not all attributes/expressions on attributes
+-- appearing within index definition match in terms of both opclass and
+-- collation.
+--
+-- Works because every attribute in inference specification needs to be
+-- satisfied once or more by cataloged index attribute, and as always when an
+-- attribute in the cataloged definition has a non-default opclass/collation,
+-- it still satisfied some inference attribute lacking any particular
+-- opclass/collation specification.
+--
+-- The implementation is liberal in accepting inference specifications on the
+-- assumption that multiple inferred unique indexes will prevent problematic
+-- cases.  It rolls with unique indexes where attributes redundantly appear
+-- multiple times, too (which is not tested here).
+explain (costs off) insert into insertconflicttest values(0, 'Crowberry') on conflict (fruit, key, fruit text_pattern_ops, key) do nothing;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Insert on insertconflicttest
+   Conflict Resolution: NOTHING
+   Conflict Arbiter Indexes: op_index_key, both_index_key
+   ->  Result
+(4 rows)
+
+-- @@@ 17
+explain (costs off) insert into insertconflicttest values(0, 'Crowberry') on conflict (lower(fruit) collate "C" text_pattern_ops, key, key) do nothing;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Insert on insertconflicttest
+   Conflict Resolution: NOTHING
+   Conflict Arbiter Indexes: both_index_expr_key
+   ->  Result
+(4 rows)
+
+-- @@@ 18
+drop index op_index_key;
+-- @@@ 19
+drop index collation_index_key;
+-- @@@ 20
+drop index both_index_key;
+-- @@@ 21
+drop index both_index_expr_key;
+-- @@@ 22
+--
+-- Make sure that cross matching of attribute opclass/collation does not occur
+--
+create unique index cross_match on insertconflicttest(lower(fruit) collate "C", upper(fruit) text_pattern_ops);
+-- @@@ 23
+-- fails:
+explain (costs off) insert into insertconflicttest values(0, 'Crowberry') on conflict (lower(fruit) text_pattern_ops, upper(fruit) collate "C") do nothing;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 24
+-- works:
+explain (costs off) insert into insertconflicttest values(0, 'Crowberry') on conflict (lower(fruit) collate "C", upper(fruit) text_pattern_ops) do nothing;
+               QUERY PLAN                
+-----------------------------------------
+ Insert on insertconflicttest
+   Conflict Resolution: NOTHING
+   Conflict Arbiter Indexes: cross_match
+   ->  Result
+(4 rows)
+
+-- @@@ 25
+drop index cross_match;
+-- @@@ 26
+--
+-- Single key tests
+--
+create unique index key_index on insertconflicttest(key);
+-- @@@ 27
+--
+-- Explain tests
+--
+explain (costs off) insert into insertconflicttest values (0, 'Bilberry') on conflict (key) do update set fruit = excluded.fruit;
+              QUERY PLAN               
+---------------------------------------
+ Insert on insertconflicttest
+   Conflict Resolution: UPDATE
+   Conflict Arbiter Indexes: key_index
+   ->  Result
+(4 rows)
+
+-- @@@ 28
+-- Should display qual actually attributable to internal sequential scan:
+explain (costs off) insert into insertconflicttest values (0, 'Bilberry') on conflict (key) do update set fruit = excluded.fruit where insertconflicttest.fruit != 'Cawesh';
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Insert on insertconflicttest
+   Conflict Resolution: UPDATE
+   Conflict Arbiter Indexes: key_index
+   Conflict Filter: (insertconflicttest.fruit <> 'Cawesh'::text)
+   ->  Result
+(5 rows)
+
+-- @@@ 29
+-- With EXCLUDED.* expression in scan node:
+explain (costs off) insert into insertconflicttest values(0, 'Crowberry') on conflict (key) do update set fruit = excluded.fruit where excluded.fruit != 'Elderberry';
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Insert on insertconflicttest
+   Conflict Resolution: UPDATE
+   Conflict Arbiter Indexes: key_index
+   Conflict Filter: (excluded.fruit <> 'Elderberry'::text)
+   ->  Result
+(5 rows)
+
+-- @@@ 30
+-- Does the same, but JSON format shows "Conflict Arbiter Index" as JSON array:
+explain (costs off, format json) insert into insertconflicttest values (0, 'Bilberry') on conflict (key) do update set fruit = excluded.fruit where insertconflicttest.fruit != 'Lime' returning *;
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ [                                                                     +
+   {                                                                   +
+     "Plan": {                                                         +
+       "Node Type": "ModifyTable",                                     +
+       "Operation": "Insert",                                          +
+       "Parallel Aware": false,                                        +
+       "Async Capable": false,                                         +
+       "Relation Name": "insertconflicttest",                          +
+       "Alias": "insertconflicttest",                                  +
+       "Disabled": false,                                              +
+       "Conflict Resolution": "UPDATE",                                +
+       "Conflict Arbiter Indexes": ["key_index"],                      +
+       "Conflict Filter": "(insertconflicttest.fruit <> 'Lime'::text)",+
+       "Plans": [                                                      +
+         {                                                             +
+           "Node Type": "Result",                                      +
+           "Parent Relationship": "Outer",                             +
+           "Parallel Aware": false,                                    +
+           "Async Capable": false,                                     +
+           "Disabled": false                                           +
+         }                                                             +
+       ]                                                               +
+     }                                                                 +
+   }                                                                   +
+ ]
+(1 row)
+
+-- @@@ 31
+-- Fails (no unique index inference specification, required for do update variant):
+insert into insertconflicttest values (1, 'Apple') on conflict do update set fruit = excluded.fruit;
+ERROR:  ON CONFLICT DO UPDATE requires inference specification or constraint name
+LINE 1: ...nsert into insertconflicttest values (1, 'Apple') on conflic...
+                                                             ^
+HINT:  For example, ON CONFLICT (column_name).
+-- @@@ 32
+-- inference succeeds:
+insert into insertconflicttest values (1, 'Apple') on conflict (key) do update set fruit = excluded.fruit;
+-- @@@ 33
+insert into insertconflicttest values (2, 'Orange') on conflict (key, key, key) do update set fruit = excluded.fruit;
+-- @@@ 34
+-- Succeed, since multi-assignment does not involve subquery:
+insert into insertconflicttest
+values (1, 'Apple'), (2, 'Orange')
+on conflict (key) do update set (fruit, key) = (excluded.fruit, excluded.key);
+-- @@@ 35
+-- Give good diagnostic message when EXCLUDED.* spuriously referenced from
+-- RETURNING:
+insert into insertconflicttest values (1, 'Apple') on conflict (key) do update set fruit = excluded.fruit RETURNING excluded.fruit;
+ERROR:  invalid reference to FROM-clause entry for table "excluded"
+LINE 1: ...y) do update set fruit = excluded.fruit RETURNING excluded.f...
+                                                             ^
+DETAIL:  There is an entry for table "excluded", but it cannot be referenced from this part of the query.
+-- @@@ 36
+-- Only suggest <table>.* column when inference element misspelled:
+insert into insertconflicttest values (1, 'Apple') on conflict (keyy) do update set fruit = excluded.fruit;
+ERROR:  column "keyy" does not exist
+LINE 1: ...nsertconflicttest values (1, 'Apple') on conflict (keyy) do ...
+                                                             ^
+HINT:  Perhaps you meant to reference the column "insertconflicttest.key" or the column "excluded.key".
+-- @@@ 37
+-- Have useful HINT for EXCLUDED.* RTE within UPDATE:
+insert into insertconflicttest values (1, 'Apple') on conflict (key) do update set fruit = excluded.fruitt;
+ERROR:  column excluded.fruitt does not exist
+LINE 1: ... 'Apple') on conflict (key) do update set fruit = excluded.f...
+                                                             ^
+HINT:  Perhaps you meant to reference the column "excluded.fruit".
+-- @@@ 38
+-- inference fails:
+insert into insertconflicttest values (3, 'Kiwi') on conflict (key, fruit) do update set fruit = excluded.fruit;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 39
+insert into insertconflicttest values (4, 'Mango') on conflict (fruit, key) do update set fruit = excluded.fruit;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 40
+insert into insertconflicttest values (5, 'Lemon') on conflict (fruit) do update set fruit = excluded.fruit;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 41
+insert into insertconflicttest values (6, 'Passionfruit') on conflict (lower(fruit)) do update set fruit = excluded.fruit;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 42
+-- Check the target relation can be aliased
+insert into insertconflicttest AS ict values (6, 'Passionfruit') on conflict (key) do update set fruit = excluded.fruit; -- ok, no reference to target table
+-- @@@ 43
+insert into insertconflicttest AS ict values (6, 'Passionfruit') on conflict (key) do update set fruit = ict.fruit; -- ok, alias
+-- @@@ 44
+insert into insertconflicttest AS ict values (6, 'Passionfruit') on conflict (key) do update set fruit = insertconflicttest.fruit; -- error, references aliased away name
+ERROR:  invalid reference to FROM-clause entry for table "insertconflicttest"
+LINE 1: ...onfruit') on conflict (key) do update set fruit = insertconf...
+                                                             ^
+HINT:  Perhaps you meant to reference the table alias "ict".
+-- @@@ 45
+-- Check helpful hint when qualifying set column with target table
+insert into insertconflicttest values (3, 'Kiwi') on conflict (key, fruit) do update set insertconflicttest.fruit = 'Mango';
+ERROR:  column "insertconflicttest" of relation "insertconflicttest" does not exist
+LINE 1: ...3, 'Kiwi') on conflict (key, fruit) do update set insertconf...
+                                                             ^
+HINT:  SET target columns cannot be qualified with the relation name.
+-- @@@ 46
+drop index key_index;
+-- @@@ 47
+--
+-- Composite key tests
+--
+create unique index comp_key_index on insertconflicttest(key, fruit);
+-- @@@ 48
+-- inference succeeds:
+insert into insertconflicttest values (7, 'Raspberry') on conflict (key, fruit) do update set fruit = excluded.fruit;
+-- @@@ 49
+insert into insertconflicttest values (8, 'Lime') on conflict (fruit, key) do update set fruit = excluded.fruit;
+-- @@@ 50
+-- inference fails:
+insert into insertconflicttest values (9, 'Banana') on conflict (key) do update set fruit = excluded.fruit;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 51
+insert into insertconflicttest values (10, 'Blueberry') on conflict (key, key, key) do update set fruit = excluded.fruit;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 52
+insert into insertconflicttest values (11, 'Cherry') on conflict (key, lower(fruit)) do update set fruit = excluded.fruit;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 53
+insert into insertconflicttest values (12, 'Date') on conflict (lower(fruit), key) do update set fruit = excluded.fruit;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 54
+drop index comp_key_index;
+-- @@@ 55
+--
+-- Partial index tests, no inference predicate specified
+--
+create unique index part_comp_key_index on insertconflicttest(key, fruit) where key < 5;
+-- @@@ 56
+create unique index expr_part_comp_key_index on insertconflicttest(key, lower(fruit)) where key < 5;
+-- @@@ 57
+-- inference fails:
+insert into insertconflicttest values (13, 'Grape') on conflict (key, fruit) do update set fruit = excluded.fruit;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 58
+insert into insertconflicttest values (14, 'Raisin') on conflict (fruit, key) do update set fruit = excluded.fruit;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 59
+insert into insertconflicttest values (15, 'Cranberry') on conflict (key) do update set fruit = excluded.fruit;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 60
+insert into insertconflicttest values (16, 'Melon') on conflict (key, key, key) do update set fruit = excluded.fruit;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 61
+insert into insertconflicttest values (17, 'Mulberry') on conflict (key, lower(fruit)) do update set fruit = excluded.fruit;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 62
+insert into insertconflicttest values (18, 'Pineapple') on conflict (lower(fruit), key) do update set fruit = excluded.fruit;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 63
+drop index part_comp_key_index;
+-- @@@ 64
+drop index expr_part_comp_key_index;
+-- @@@ 65
+--
+-- Expression index tests
+--
+create unique index expr_key_index on insertconflicttest(lower(fruit));
+-- @@@ 66
+-- inference succeeds:
+insert into insertconflicttest values (20, 'Quince') on conflict (lower(fruit)) do update set fruit = excluded.fruit;
+-- @@@ 67
+insert into insertconflicttest values (21, 'Pomegranate') on conflict (lower(fruit), lower(fruit)) do update set fruit = excluded.fruit;
+-- @@@ 68
+-- inference fails:
+insert into insertconflicttest values (22, 'Apricot') on conflict (upper(fruit)) do update set fruit = excluded.fruit;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 69
+insert into insertconflicttest values (23, 'Blackberry') on conflict (fruit) do update set fruit = excluded.fruit;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 70
+drop index expr_key_index;
+-- @@@ 71
+--
+-- Expression index tests (with regular column)
+--
+create unique index expr_comp_key_index on insertconflicttest(key, lower(fruit));
+-- @@@ 72
+create unique index tricky_expr_comp_key_index on insertconflicttest(key, lower(fruit), upper(fruit));
+-- @@@ 73
+-- inference succeeds:
+insert into insertconflicttest values (24, 'Plum') on conflict (key, lower(fruit)) do update set fruit = excluded.fruit;
+-- @@@ 74
+insert into insertconflicttest values (25, 'Peach') on conflict (lower(fruit), key) do update set fruit = excluded.fruit;
+-- @@@ 75
+-- Should not infer "tricky_expr_comp_key_index" index:
+explain (costs off) insert into insertconflicttest values (26, 'Fig') on conflict (lower(fruit), key, lower(fruit), key) do update set fruit = excluded.fruit;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Insert on insertconflicttest
+   Conflict Resolution: UPDATE
+   Conflict Arbiter Indexes: expr_comp_key_index
+   ->  Result
+(4 rows)
+
+-- @@@ 76
+-- inference fails:
+insert into insertconflicttest values (27, 'Prune') on conflict (key, upper(fruit)) do update set fruit = excluded.fruit;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 77
+insert into insertconflicttest values (28, 'Redcurrant') on conflict (fruit, key) do update set fruit = excluded.fruit;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 78
+insert into insertconflicttest values (29, 'Nectarine') on conflict (key) do update set fruit = excluded.fruit;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 79
+drop index expr_comp_key_index;
+-- @@@ 80
+drop index tricky_expr_comp_key_index;
+-- @@@ 81
+--
+-- Non-spurious duplicate violation tests
+--
+create unique index key_index on insertconflicttest(key);
+-- @@@ 82
+create unique index fruit_index on insertconflicttest(fruit);
+-- @@@ 83
+-- succeeds, since UPDATE happens to update "fruit" to existing value:
+insert into insertconflicttest values (26, 'Fig') on conflict (key) do update set fruit = excluded.fruit;
+-- @@@ 84
+-- fails, since UPDATE is to row with key value 26, and we're updating "fruit"
+-- to a value that happens to exist in another row ('peach'):
+insert into insertconflicttest values (26, 'Peach') on conflict (key) do update set fruit = excluded.fruit;
+ERROR:  duplicate key value violates unique constraint "fruit_index"
+DETAIL:  Key (fruit)=(Peach) already exists.
+-- @@@ 85
+-- succeeds, since "key" isn't repeated/referenced in UPDATE, and "fruit"
+-- arbitrates that statement updates existing "Fig" row:
+insert into insertconflicttest values (25, 'Fig') on conflict (fruit) do update set fruit = excluded.fruit;
+-- @@@ 86
+drop index key_index;
+-- @@@ 87
+drop index fruit_index;
+-- @@@ 88
+--
+-- Test partial unique index inference
+--
+create unique index partial_key_index on insertconflicttest(key) where fruit like '%berry';
+-- @@@ 89
+-- Succeeds
+insert into insertconflicttest values (23, 'Blackberry') on conflict (key) where fruit like '%berry' do update set fruit = excluded.fruit;
+-- @@@ 90
+insert into insertconflicttest as t values (23, 'Blackberry') on conflict (key) where fruit like '%berry' and t.fruit = 'inconsequential' do nothing;
+-- @@@ 91
+insert into insertconflictview as t values (23, 'Blackberry') on conflict (key) where fruit like '%berry' and t.fruit = 'inconsequential' do nothing;
+-- @@@ 92
+-- fails
+insert into insertconflicttest values (23, 'Blackberry') on conflict (key) do update set fruit = excluded.fruit;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 93
+insert into insertconflicttest values (23, 'Blackberry') on conflict (key) where fruit like '%berry' or fruit = 'consequential' do nothing;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 94
+insert into insertconflicttest values (23, 'Blackberry') on conflict (fruit) where fruit like '%berry' do update set fruit = excluded.fruit;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 95
+drop index partial_key_index;
+-- @@@ 96
+--
+-- Test that wholerow references to ON CONFLICT's EXCLUDED work
+--
+create unique index plain on insertconflicttest(key);
+-- @@@ 97
+-- Succeeds, updates existing row:
+insert into insertconflicttest as i values (23, 'Jackfruit') on conflict (key) do update set fruit = excluded.fruit
+  where i.* != excluded.* returning *;
+ key |   fruit   
+-----+-----------
+  23 | Jackfruit
+(1 row)
+
+-- @@@ 98
+-- No update this time, though:
+insert into insertconflicttest as i values (23, 'Jackfruit') on conflict (key) do update set fruit = excluded.fruit
+  where i.* != excluded.* returning *;
+ key | fruit 
+-----+-------
+(0 rows)
+
+-- @@@ 99
+-- Predicate changed to require match rather than non-match, so updates once more:
+insert into insertconflicttest as i values (23, 'Jackfruit') on conflict (key) do update set fruit = excluded.fruit
+  where i.* = excluded.* returning *;
+ key |   fruit   
+-----+-----------
+  23 | Jackfruit
+(1 row)
+
+-- @@@ 100
+-- Assign:
+insert into insertconflicttest as i values (23, 'Avocado') on conflict (key) do update set fruit = excluded.*::text
+  returning *;
+ key |    fruit     
+-----+--------------
+  23 | (23,Avocado)
+(1 row)
+
+-- @@@ 101
+-- deparse whole row var in WHERE and SET clauses:
+explain (costs off) insert into insertconflicttest as i values (23, 'Avocado') on conflict (key) do update set fruit = excluded.fruit where excluded.* is null;
+               QUERY PLAN                
+-----------------------------------------
+ Insert on insertconflicttest i
+   Conflict Resolution: UPDATE
+   Conflict Arbiter Indexes: plain
+   Conflict Filter: (excluded.* IS NULL)
+   ->  Result
+(5 rows)
+
+-- @@@ 102
+explain (costs off) insert into insertconflicttest as i values (23, 'Avocado') on conflict (key) do update set fruit = excluded.*::text;
+            QUERY PLAN             
+-----------------------------------
+ Insert on insertconflicttest i
+   Conflict Resolution: UPDATE
+   Conflict Arbiter Indexes: plain
+   ->  Result
+(4 rows)
+
+-- @@@ 103
+drop index plain;
+-- @@@ 104
+-- Cleanup
+drop view insertconflictview;
+-- @@@ 105
+drop table insertconflicttest;
+-- @@@ 106
+--
+-- Verify that EXCLUDED does not allow system column references. These
+-- do not make sense because EXCLUDED isn't an already stored tuple
+-- (and thus doesn't have a ctid etc).
+--
+create table syscolconflicttest(key int4, data text);
+-- @@@ 107
+insert into syscolconflicttest values (1);
+-- @@@ 108
+insert into syscolconflicttest values (1) on conflict (key) do update set data = excluded.ctid::text;
+ERROR:  column excluded.ctid does not exist
+LINE 1: ...values (1) on conflict (key) do update set data = excluded.c...
+                                                             ^
+-- @@@ 109
+drop table syscolconflicttest;
+-- @@@ 110
+--
+-- Previous tests all managed to not test any expressions requiring
+-- planner preprocessing ...
+--
+create table insertconflict (a bigint, b bigint);
+-- @@@ 111
+create unique index insertconflicti1 on insertconflict(coalesce(a, 0));
+-- @@@ 112
+create unique index insertconflicti2 on insertconflict(b)
+  where coalesce(a, 1) > 0;
+-- @@@ 113
+insert into insertconflict values (1, 2)
+on conflict (coalesce(a, 0)) do nothing;
+-- @@@ 114
+insert into insertconflict values (1, 2)
+on conflict (b) where coalesce(a, 1) > 0 do nothing;
+-- @@@ 115
+insert into insertconflict values (1, 2)
+on conflict (b) where coalesce(a, 1) > 1 do nothing;
+-- @@@ 116
+drop table insertconflict;
+-- @@@ 117
+--
+-- test insertion through view
+--
+create table insertconflict (f1 int primary key, f2 text);
+-- @@@ 118
+create view insertconflictv as
+  select * from insertconflict with cascaded check option;
+-- @@@ 119
+insert into insertconflictv values (1,'foo')
+  on conflict (f1) do update set f2 = excluded.f2;
+-- @@@ 120
+select * from insertconflict;
+ f1 | f2  
+----+-----
+  1 | foo
+(1 row)
+
+-- @@@ 121
+insert into insertconflictv values (1,'bar')
+  on conflict (f1) do update set f2 = excluded.f2;
+-- @@@ 122
+select * from insertconflict;
+ f1 | f2  
+----+-----
+  1 | bar
+(1 row)
+
+-- @@@ 123
+drop view insertconflictv;
+-- @@@ 124
+drop table insertconflict;
+-- @@@ 125
+-- ******************************************************************
+-- *                                                                *
+-- * Test inheritance (example taken from tutorial)                 *
+-- *                                                                *
+-- ******************************************************************
+create table cities (
+	name		text,
+	population	float8,
+	altitude	int		-- (in ft)
+);
+-- @@@ 126
+create table capitals (
+	state		char(2)
+) inherits (cities);
+-- @@@ 127
+-- Create unique indexes.  Due to a general limitation of inheritance,
+-- uniqueness is only enforced per-relation.  Unique index inference
+-- specification will do the right thing, though.
+create unique index cities_names_unique on cities (name);
+-- @@@ 128
+create unique index capitals_names_unique on capitals (name);
+-- @@@ 129
+-- prepopulate the tables.
+insert into cities values ('San Francisco', 7.24E+5, 63);
+-- @@@ 130
+insert into cities values ('Las Vegas', 2.583E+5, 2174);
+-- @@@ 131
+insert into cities values ('Mariposa', 1200, 1953);
+-- @@@ 132
+insert into capitals values ('Sacramento', 3.694E+5, 30, 'CA');
+-- @@@ 133
+insert into capitals values ('Madison', 1.913E+5, 845, 'WI');
+-- @@@ 134
+-- Tests proper for inheritance:
+select * from capitals;
+    name    | population | altitude | state 
+------------+------------+----------+-------
+ Sacramento |     369400 |       30 | CA
+ Madison    |     191300 |      845 | WI
+(2 rows)
+
+-- @@@ 135
+-- Succeeds:
+insert into cities values ('Las Vegas', 2.583E+5, 2174) on conflict do nothing;
+-- @@@ 136
+insert into capitals values ('Sacramento', 4664.E+5, 30, 'CA') on conflict (name) do update set population = excluded.population;
+-- @@@ 137
+-- Wrong "Sacramento", so do nothing:
+insert into capitals values ('Sacramento', 50, 2267, 'NE') on conflict (name) do nothing;
+-- @@@ 138
+select * from capitals;
+    name    | population | altitude | state 
+------------+------------+----------+-------
+ Madison    |     191300 |      845 | WI
+ Sacramento |  466400000 |       30 | CA
+(2 rows)
+
+-- @@@ 139
+insert into cities values ('Las Vegas', 5.83E+5, 2001) on conflict (name) do update set population = excluded.population, altitude = excluded.altitude;
+-- @@@ 140
+select tableoid::regclass, * from cities;
+ tableoid |     name      | population | altitude 
+----------+---------------+------------+----------
+ cities   | San Francisco |     724000 |       63
+ cities   | Mariposa      |       1200 |     1953
+ cities   | Las Vegas     |     583000 |     2001
+ capitals | Madison       |     191300 |      845
+ capitals | Sacramento    |  466400000 |       30
+(5 rows)
+
+-- @@@ 141
+insert into capitals values ('Las Vegas', 5.83E+5, 2222, 'NV') on conflict (name) do update set population = excluded.population;
+-- @@@ 142
+-- Capitals will contain new capital, Las Vegas:
+select * from capitals;
+    name    | population | altitude | state 
+------------+------------+----------+-------
+ Madison    |     191300 |      845 | WI
+ Sacramento |  466400000 |       30 | CA
+ Las Vegas  |     583000 |     2222 | NV
+(3 rows)
+
+-- @@@ 143
+-- Cities contains two instances of "Las Vegas", since unique constraints don't
+-- work across inheritance:
+select tableoid::regclass, * from cities;
+ tableoid |     name      | population | altitude 
+----------+---------------+------------+----------
+ cities   | San Francisco |     724000 |       63
+ cities   | Mariposa      |       1200 |     1953
+ cities   | Las Vegas     |     583000 |     2001
+ capitals | Madison       |     191300 |      845
+ capitals | Sacramento    |  466400000 |       30
+ capitals | Las Vegas     |     583000 |     2222
+(6 rows)
+
+-- @@@ 144
+-- This only affects "cities" version of "Las Vegas":
+insert into cities values ('Las Vegas', 5.86E+5, 2223) on conflict (name) do update set population = excluded.population, altitude = excluded.altitude;
+-- @@@ 145
+select tableoid::regclass, * from cities;
+ tableoid |     name      | population | altitude 
+----------+---------------+------------+----------
+ cities   | San Francisco |     724000 |       63
+ cities   | Mariposa      |       1200 |     1953
+ cities   | Las Vegas     |     586000 |     2223
+ capitals | Madison       |     191300 |      845
+ capitals | Sacramento    |  466400000 |       30
+ capitals | Las Vegas     |     583000 |     2222
+(6 rows)
+
+-- @@@ 146
+-- clean up
+drop table capitals;
+-- @@@ 147
+drop table cities;
+-- @@@ 148
+-- Make sure a table named excluded is handled properly
+create table excluded(key int primary key, data text);
+-- @@@ 149
+insert into excluded values(1, '1');
+-- @@@ 150
+-- error, ambiguous
+insert into excluded values(1, '2') on conflict (key) do update set data = excluded.data RETURNING *;
+ERROR:  table reference "excluded" is ambiguous
+LINE 1: ...es(1, '2') on conflict (key) do update set data = excluded.d...
+                                                             ^
+-- @@@ 151
+-- ok, aliased
+insert into excluded AS target values(1, '2') on conflict (key) do update set data = excluded.data RETURNING *;
+ key | data 
+-----+------
+   1 | 2
+(1 row)
+
+-- @@@ 152
+-- ok, aliased
+insert into excluded AS target values(1, '2') on conflict (key) do update set data = target.data RETURNING *;
+ key | data 
+-----+------
+   1 | 2
+(1 row)
+
+-- @@@ 153
+-- make sure excluded isn't a problem in returning clause
+insert into excluded values(1, '2') on conflict (key) do update set data = 3 RETURNING excluded.*;
+ key | data 
+-----+------
+   1 | 3
+(1 row)
+
+-- @@@ 154
+-- clean up
+drop table excluded;
+-- @@@ 155
+-- check that references to columns after dropped columns are handled correctly
+create table dropcol(key int primary key, drop1 int, keep1 text, drop2 numeric, keep2 float);
+-- @@@ 156
+insert into dropcol(key, drop1, keep1, drop2, keep2) values(1, 1, '1', '1', 1);
+-- @@@ 157
+-- set using excluded
+insert into dropcol(key, drop1, keep1, drop2, keep2) values(1, 2, '2', '2', 2) on conflict(key)
+    do update set drop1 = excluded.drop1, keep1 = excluded.keep1, drop2 = excluded.drop2, keep2 = excluded.keep2
+    where excluded.drop1 is not null and excluded.keep1 is not null and excluded.drop2 is not null and excluded.keep2 is not null
+          and dropcol.drop1 is not null and dropcol.keep1 is not null and dropcol.drop2 is not null and dropcol.keep2 is not null
+    returning *;
+ key | drop1 | keep1 | drop2 | keep2 
+-----+-------+-------+-------+-------
+   1 |     2 | 2     |     2 |     2
+(1 row)
+
+-- @@@ 158
+;
+-- @@@ 159
+-- set using existing table
+insert into dropcol(key, drop1, keep1, drop2, keep2) values(1, 3, '3', '3', 3) on conflict(key)
+    do update set drop1 = dropcol.drop1, keep1 = dropcol.keep1, drop2 = dropcol.drop2, keep2 = dropcol.keep2
+    returning *;
+ key | drop1 | keep1 | drop2 | keep2 
+-----+-------+-------+-------+-------
+   1 |     2 | 2     |     2 |     2
+(1 row)
+
+-- @@@ 160
+;
+-- @@@ 161
+alter table dropcol drop column drop1, drop column drop2;
+-- @@@ 162
+-- set using excluded
+insert into dropcol(key, keep1, keep2) values(1, '4', 4) on conflict(key)
+    do update set keep1 = excluded.keep1, keep2 = excluded.keep2
+    where excluded.keep1 is not null and excluded.keep2 is not null
+          and dropcol.keep1 is not null and dropcol.keep2 is not null
+    returning *;
+ key | keep1 | keep2 
+-----+-------+-------
+   1 | 4     |     4
+(1 row)
+
+-- @@@ 163
+;
+-- @@@ 164
+-- set using existing table
+insert into dropcol(key, keep1, keep2) values(1, '5', 5) on conflict(key)
+    do update set keep1 = dropcol.keep1, keep2 = dropcol.keep2
+    returning *;
+ key | keep1 | keep2 
+-----+-------+-------
+   1 | 4     |     4
+(1 row)
+
+-- @@@ 165
+;
+-- @@@ 166
+DROP TABLE dropcol;
+-- @@@ 167
+-- check handling of regular btree constraint along with gist constraint
+create table twoconstraints (f1 int unique, f2 box,
+                             exclude using gist(f2 with &&));
+-- @@@ 168
+insert into twoconstraints values(1, '((0,0),(1,1))');
+-- @@@ 169
+insert into twoconstraints values(1, '((2,2),(3,3))');  -- fail on f1
+ERROR:  duplicate key value violates unique constraint "twoconstraints_f1_key"
+DETAIL:  Key (f1)=(1) already exists.
+-- @@@ 170
+insert into twoconstraints values(2, '((0,0),(1,2))');  -- fail on f2
+ERROR:  conflicting key value violates exclusion constraint "twoconstraints_f2_excl"
+DETAIL:  Key (f2)=((1,2),(0,0)) conflicts with existing key (f2)=((1,1),(0,0)).
+-- @@@ 171
+insert into twoconstraints values(2, '((0,0),(1,2))')
+  on conflict on constraint twoconstraints_f1_key do nothing;  -- fail on f2
+ERROR:  conflicting key value violates exclusion constraint "twoconstraints_f2_excl"
+DETAIL:  Key (f2)=((1,2),(0,0)) conflicts with existing key (f2)=((1,1),(0,0)).
+-- @@@ 172
+insert into twoconstraints values(2, '((0,0),(1,2))')
+  on conflict on constraint twoconstraints_f2_excl do nothing;  -- do nothing
+-- @@@ 173
+select * from twoconstraints;
+ f1 |     f2      
+----+-------------
+  1 | (1,1),(0,0)
+(1 row)
+
+-- @@@ 174
+drop table twoconstraints;
+-- @@@ 175
+-- check handling of self-conflicts at various isolation levels
+create table selfconflict (f1 int primary key, f2 int);
+-- @@@ 176
+begin transaction isolation level read committed;
+-- @@@ 177
+insert into selfconflict values (1,1), (1,2) on conflict do nothing;
+-- @@@ 178
+commit;
+-- @@@ 179
+begin transaction isolation level repeatable read;
+-- @@@ 180
+insert into selfconflict values (2,1), (2,2) on conflict do nothing;
+-- @@@ 181
+commit;
+-- @@@ 182
+begin transaction isolation level serializable;
+-- @@@ 183
+insert into selfconflict values (3,1), (3,2) on conflict do nothing;
+-- @@@ 184
+commit;
+-- @@@ 185
+begin transaction isolation level read committed;
+-- @@@ 186
+insert into selfconflict values (4,1), (4,2) on conflict(f1) do update set f2 = 0;
+ERROR:  ON CONFLICT DO UPDATE command cannot affect row a second time
+HINT:  Ensure that no rows proposed for insertion within the same command have duplicate constrained values.
+-- @@@ 187
+commit;
+-- @@@ 188
+begin transaction isolation level repeatable read;
+-- @@@ 189
+insert into selfconflict values (5,1), (5,2) on conflict(f1) do update set f2 = 0;
+ERROR:  ON CONFLICT DO UPDATE command cannot affect row a second time
+HINT:  Ensure that no rows proposed for insertion within the same command have duplicate constrained values.
+-- @@@ 190
+commit;
+-- @@@ 191
+begin transaction isolation level serializable;
+-- @@@ 192
+insert into selfconflict values (6,1), (6,2) on conflict(f1) do update set f2 = 0;
+ERROR:  ON CONFLICT DO UPDATE command cannot affect row a second time
+HINT:  Ensure that no rows proposed for insertion within the same command have duplicate constrained values.
+-- @@@ 193
+commit;
+-- @@@ 194
+select * from selfconflict;
+ f1 | f2 
+----+----
+  1 |  1
+  2 |  1
+  3 |  1
+(3 rows)
+
+-- @@@ 195
+drop table selfconflict;
+-- @@@ 196
+-- check ON CONFLICT handling with partitioned tables
+create table parted_conflict_test (a int unique, b char) partition by list (a);
+-- @@@ 197
+create table parted_conflict_test_1 partition of parted_conflict_test (b unique) for values in (1, 2);
+-- @@@ 198
+-- no indexes required here
+insert into parted_conflict_test values (1, 'a') on conflict do nothing;
+-- @@@ 199
+-- index on a required, which does exist in parent
+insert into parted_conflict_test values (1, 'a') on conflict (a) do nothing;
+-- @@@ 200
+insert into parted_conflict_test values (1, 'a') on conflict (a) do update set b = excluded.b;
+-- @@@ 201
+-- targeting partition directly will work
+insert into parted_conflict_test_1 values (1, 'a') on conflict (a) do nothing;
+-- @@@ 202
+insert into parted_conflict_test_1 values (1, 'b') on conflict (a) do update set b = excluded.b;
+-- @@@ 203
+-- index on b required, which doesn't exist in parent
+insert into parted_conflict_test values (2, 'b') on conflict (b) do update set a = excluded.a;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 204
+-- targeting partition directly will work
+insert into parted_conflict_test_1 values (2, 'b') on conflict (b) do update set a = excluded.a;
+-- @@@ 205
+-- should see (2, 'b')
+select * from parted_conflict_test order by a;
+ a | b 
+---+---
+ 2 | b
+(1 row)
+
+-- @@@ 206
+-- now check that DO UPDATE works correctly for target partition with
+-- different attribute numbers
+create table parted_conflict_test_2 (b char, a int unique);
+-- @@@ 207
+alter table parted_conflict_test attach partition parted_conflict_test_2 for values in (3);
+-- @@@ 208
+truncate parted_conflict_test;
+-- @@@ 209
+insert into parted_conflict_test values (3, 'a') on conflict (a) do update set b = excluded.b;
+-- @@@ 210
+insert into parted_conflict_test values (3, 'b') on conflict (a) do update set b = excluded.b;
+-- @@@ 211
+-- should see (3, 'b')
+select * from parted_conflict_test order by a;
+ a | b 
+---+---
+ 3 | b
+(1 row)
+
+-- @@@ 212
+-- case where parent will have a dropped column, but the partition won't
+alter table parted_conflict_test drop b, add b char;
+-- @@@ 213
+create table parted_conflict_test_3 partition of parted_conflict_test for values in (4);
+-- @@@ 214
+truncate parted_conflict_test;
+-- @@@ 215
+insert into parted_conflict_test (a, b) values (4, 'a') on conflict (a) do update set b = excluded.b;
+-- @@@ 216
+insert into parted_conflict_test (a, b) values (4, 'b') on conflict (a) do update set b = excluded.b where parted_conflict_test.b = 'a';
+-- @@@ 217
+-- should see (4, 'b')
+select * from parted_conflict_test order by a;
+ a | b 
+---+---
+ 4 | b
+(1 row)
+
+-- @@@ 218
+-- case with multi-level partitioning
+create table parted_conflict_test_4 partition of parted_conflict_test for values in (5) partition by list (a);
+-- @@@ 219
+create table parted_conflict_test_4_1 partition of parted_conflict_test_4 for values in (5);
+-- @@@ 220
+truncate parted_conflict_test;
+-- @@@ 221
+insert into parted_conflict_test (a, b) values (5, 'a') on conflict (a) do update set b = excluded.b;
+-- @@@ 222
+insert into parted_conflict_test (a, b) values (5, 'b') on conflict (a) do update set b = excluded.b where parted_conflict_test.b = 'a';
+-- @@@ 223
+-- should see (5, 'b')
+select * from parted_conflict_test order by a;
+ a | b 
+---+---
+ 5 | b
+(1 row)
+
+-- @@@ 224
+-- test with multiple rows
+truncate parted_conflict_test;
+-- @@@ 225
+insert into parted_conflict_test (a, b) values (1, 'a'), (2, 'a'), (4, 'a') on conflict (a) do update set b = excluded.b where excluded.b = 'b';
+-- @@@ 226
+insert into parted_conflict_test (a, b) values (1, 'b'), (2, 'c'), (4, 'b') on conflict (a) do update set b = excluded.b where excluded.b = 'b';
+-- @@@ 227
+-- should see (1, 'b'), (2, 'a'), (4, 'b')
+select * from parted_conflict_test order by a;
+ a | b 
+---+---
+ 1 | b
+ 2 | a
+ 4 | b
+(3 rows)
+
+-- @@@ 228
+drop table parted_conflict_test;
+-- @@@ 229
+-- test behavior of inserting a conflicting tuple into an intermediate
+-- partitioning level
+create table parted_conflict (a int primary key, b text) partition by range (a);
+-- @@@ 230
+create table parted_conflict_1 partition of parted_conflict for values from (0) to (1000) partition by range (a);
+-- @@@ 231
+create table parted_conflict_1_1 partition of parted_conflict_1 for values from (0) to (500);
+-- @@@ 232
+insert into parted_conflict values (40, 'forty');
+-- @@@ 233
+insert into parted_conflict_1 values (40, 'cuarenta')
+  on conflict (a) do update set b = excluded.b;
+-- @@@ 234
+drop table parted_conflict;
+-- @@@ 235
+-- same thing, but this time try to use an index that's created not in the
+-- partition
+create table parted_conflict (a int, b text) partition by range (a);
+-- @@@ 236
+create table parted_conflict_1 partition of parted_conflict for values from (0) to (1000) partition by range (a);
+-- @@@ 237
+create table parted_conflict_1_1 partition of parted_conflict_1 for values from (0) to (500);
+-- @@@ 238
+create unique index on only parted_conflict_1 (a);
+-- @@@ 239
+create unique index on only parted_conflict (a);
+-- @@@ 240
+alter index parted_conflict_a_idx attach partition parted_conflict_1_a_idx;
+-- @@@ 241
+insert into parted_conflict values (40, 'forty');
+-- @@@ 242
+insert into parted_conflict_1 values (40, 'cuarenta')
+  on conflict (a) do update set b = excluded.b;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+-- @@@ 243
+drop table parted_conflict;
+-- @@@ 244
+-- test whole-row Vars in ON CONFLICT expressions
+create table parted_conflict (a int, b text, c int) partition by range (a);
+-- @@@ 245
+create table parted_conflict_1 (drp text, c int, a int, b text);
+-- @@@ 246
+alter table parted_conflict_1 drop column drp;
+-- @@@ 247
+create unique index on parted_conflict (a, b);
+-- @@@ 248
+alter table parted_conflict attach partition parted_conflict_1 for values from (0) to (1000);
+-- @@@ 249
+truncate parted_conflict;
+-- @@@ 250
+insert into parted_conflict values (50, 'cincuenta', 1);
+-- @@@ 251
+insert into parted_conflict values (50, 'cincuenta', 2)
+  on conflict (a, b) do update set (a, b, c) = row(excluded.*)
+  where parted_conflict = (50, text 'cincuenta', 1) and
+        excluded = (50, text 'cincuenta', 2);
+-- @@@ 252
+-- should see (50, 'cincuenta', 2)
+select * from parted_conflict order by a;
+ a  |     b     | c 
+----+-----------+---
+ 50 | cincuenta | 2
+(1 row)
+
+-- @@@ 253
+-- test with statement level triggers
+create or replace function parted_conflict_update_func() returns trigger as $$
+declare
+    r record;
+begin
+ for r in select * from inserted loop
+	raise notice 'a = %, b = %, c = %', r.a, r.b, r.c;
+ end loop;
+ return new;
+end;
+$$ language plpgsql;
+-- @@@ 254
+create trigger parted_conflict_update
+    after update on parted_conflict
+    referencing new table as inserted
+    for each statement
+    execute procedure parted_conflict_update_func();
+-- @@@ 255
+truncate parted_conflict;
+-- @@@ 256
+insert into parted_conflict values (0, 'cero', 1);
+-- @@@ 257
+insert into parted_conflict values(0, 'cero', 1)
+  on conflict (a,b) do update set c = parted_conflict.c + 1;
+NOTICE:  a = 0, b = cero, c = 2
+-- @@@ 258
+drop table parted_conflict;
+-- @@@ 259
+drop function parted_conflict_update_func();
+-- @@@ 260

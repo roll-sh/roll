@@ -1,0 +1,1016 @@
+--
+-- VACUUM
+--
+CREATE TABLE vactst (i INT);
+-- @@@ 0
+INSERT INTO vactst VALUES (1);
+-- @@@ 1
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 2
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 3
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 4
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 5
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 6
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 7
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 8
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 9
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 10
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 11
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 12
+INSERT INTO vactst VALUES (0);
+-- @@@ 13
+SELECT count(*) FROM vactst;
+ count 
+-------
+  2049
+(1 row)
+
+-- @@@ 14
+DELETE FROM vactst WHERE i != 0;
+-- @@@ 15
+SELECT * FROM vactst;
+ i 
+---
+ 0
+(1 row)
+
+-- @@@ 16
+VACUUM FULL vactst;
+-- @@@ 17
+UPDATE vactst SET i = i + 1;
+-- @@@ 18
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 19
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 20
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 21
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 22
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 23
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 24
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 25
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 26
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 27
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 28
+INSERT INTO vactst SELECT * FROM vactst;
+-- @@@ 29
+INSERT INTO vactst VALUES (0);
+-- @@@ 30
+SELECT count(*) FROM vactst;
+ count 
+-------
+  2049
+(1 row)
+
+-- @@@ 31
+DELETE FROM vactst WHERE i != 0;
+-- @@@ 32
+VACUUM (FULL) vactst;
+-- @@@ 33
+DELETE FROM vactst;
+-- @@@ 34
+SELECT * FROM vactst;
+ i 
+---
+(0 rows)
+
+-- @@@ 35
+VACUUM (FULL, FREEZE) vactst;
+-- @@@ 36
+VACUUM (ANALYZE, FULL) vactst;
+-- @@@ 37
+CREATE TABLE vaccluster (i INT PRIMARY KEY);
+-- @@@ 38
+ALTER TABLE vaccluster CLUSTER ON vaccluster_pkey;
+-- @@@ 39
+CLUSTER vaccluster;
+-- @@@ 40
+CREATE FUNCTION do_analyze() RETURNS VOID VOLATILE LANGUAGE SQL
+	AS 'ANALYZE pg_am';
+-- @@@ 41
+CREATE FUNCTION wrap_do_analyze(c INT) RETURNS INT IMMUTABLE LANGUAGE SQL
+	AS 'SELECT $1 FROM public.do_analyze()';
+-- @@@ 42
+CREATE INDEX ON vaccluster(wrap_do_analyze(i));
+-- @@@ 43
+INSERT INTO vaccluster VALUES (1), (2);
+-- @@@ 44
+ANALYZE vaccluster;
+ERROR:  ANALYZE cannot be executed from VACUUM or ANALYZE
+CONTEXT:  SQL function "do_analyze" statement 1
+SQL function "wrap_do_analyze" statement 1
+-- @@@ 45
+-- Test ANALYZE in transaction, where the transaction surrounding
+-- analyze performed modifications. This tests for the bug at
+-- https://postgr.es/m/c7988239-d42c-ddc4-41db-171b23b35e4f%40ssinger.info
+-- (which hopefully is unlikely to be reintroduced), but also seems
+-- independently worthwhile to cover.
+INSERT INTO vactst SELECT generate_series(1, 300);
+-- @@@ 46
+DELETE FROM vactst WHERE i % 7 = 0; -- delete a few rows outside
+-- @@@ 47
+BEGIN;
+-- @@@ 48
+INSERT INTO vactst SELECT generate_series(301, 400);
+-- @@@ 49
+DELETE FROM vactst WHERE i % 5 <> 0; -- delete a few rows inside
+-- @@@ 50
+ANALYZE vactst;
+-- @@@ 51
+COMMIT;
+-- @@@ 52
+-- Test ANALYZE setting relhassubclass=f for non-partitioning inheritance
+BEGIN;
+-- @@@ 53
+CREATE TABLE past_inh_parent ();
+-- @@@ 54
+CREATE TABLE past_inh_child () INHERITS (past_inh_parent);
+-- @@@ 55
+INSERT INTO past_inh_child DEFAULT VALUES;
+-- @@@ 56
+INSERT INTO past_inh_child DEFAULT VALUES;
+-- @@@ 57
+ANALYZE past_inh_parent;
+-- @@@ 58
+SELECT reltuples, relhassubclass
+  FROM pg_class WHERE oid = 'past_inh_parent'::regclass;
+ reltuples | relhassubclass 
+-----------+----------------
+         0 | t
+(1 row)
+
+-- @@@ 59
+DROP TABLE past_inh_child;
+-- @@@ 60
+ANALYZE past_inh_parent;
+-- @@@ 61
+SELECT reltuples, relhassubclass
+  FROM pg_class WHERE oid = 'past_inh_parent'::regclass;
+ reltuples | relhassubclass 
+-----------+----------------
+         0 | f
+(1 row)
+
+-- @@@ 62
+COMMIT;
+-- @@@ 63
+-- Test ANALYZE setting relhassubclass=f for partitioning
+BEGIN;
+-- @@@ 64
+CREATE TABLE past_parted (i int) PARTITION BY LIST(i);
+-- @@@ 65
+CREATE TABLE past_part PARTITION OF past_parted FOR VALUES IN (1);
+-- @@@ 66
+INSERT INTO past_parted VALUES (1),(1);
+-- @@@ 67
+ANALYZE past_parted;
+-- @@@ 68
+DROP TABLE past_part;
+-- @@@ 69
+SELECT reltuples, relhassubclass
+  FROM pg_class WHERE oid = 'past_parted'::regclass;
+ reltuples | relhassubclass 
+-----------+----------------
+         2 | t
+(1 row)
+
+-- @@@ 70
+ANALYZE past_parted;
+-- @@@ 71
+SELECT reltuples, relhassubclass
+  FROM pg_class WHERE oid = 'past_parted'::regclass;
+ reltuples | relhassubclass 
+-----------+----------------
+         0 | f
+(1 row)
+
+-- @@@ 72
+COMMIT;
+-- @@@ 73
+VACUUM FULL pg_am;
+-- @@@ 74
+VACUUM FULL pg_class;
+-- @@@ 75
+VACUUM FULL pg_database;
+-- @@@ 76
+VACUUM FULL vaccluster;
+ERROR:  ANALYZE cannot be executed from VACUUM or ANALYZE
+CONTEXT:  SQL function "do_analyze" statement 1
+SQL function "wrap_do_analyze" statement 1
+-- @@@ 77
+VACUUM FULL vactst;
+-- @@@ 78
+VACUUM (DISABLE_PAGE_SKIPPING) vaccluster;
+-- @@@ 79
+-- PARALLEL option
+CREATE TABLE pvactst (i INT, a INT[], p POINT) with (autovacuum_enabled = off);
+-- @@@ 80
+INSERT INTO pvactst SELECT i, array[1,2,3], point(i, i+1) FROM generate_series(1,1000) i;
+-- @@@ 81
+CREATE INDEX btree_pvactst ON pvactst USING btree (i);
+-- @@@ 82
+CREATE INDEX hash_pvactst ON pvactst USING hash (i);
+-- @@@ 83
+CREATE INDEX brin_pvactst ON pvactst USING brin (i);
+-- @@@ 84
+CREATE INDEX gin_pvactst ON pvactst USING gin (a);
+-- @@@ 85
+CREATE INDEX gist_pvactst ON pvactst USING gist (p);
+-- @@@ 86
+CREATE INDEX spgist_pvactst ON pvactst USING spgist (p);
+-- @@@ 87
+CREATE TABLE pvactst2 (i INT) WITH (autovacuum_enabled = off);
+-- @@@ 88
+INSERT INTO pvactst2 SELECT generate_series(1, 1000);
+-- @@@ 89
+CREATE INDEX ON pvactst2 (i);
+-- @@@ 90
+CREATE INDEX ON pvactst2 (i);
+-- @@@ 91
+-- VACUUM invokes parallel index cleanup
+SET min_parallel_index_scan_size to 0;
+-- @@@ 92
+VACUUM (PARALLEL 2) pvactst;
+-- @@@ 93
+-- VACUUM invokes parallel bulk-deletion
+UPDATE pvactst SET i = i WHERE i < 1000;
+-- @@@ 94
+VACUUM (PARALLEL 2) pvactst;
+-- @@@ 95
+UPDATE pvactst SET i = i WHERE i < 1000;
+-- @@@ 96
+VACUUM (PARALLEL 0) pvactst; -- disable parallel vacuum
+-- @@@ 97
+VACUUM (PARALLEL -1) pvactst; -- error
+ERROR:  parallel workers for vacuum must be between 0 and 1024
+LINE 1: VACUUM (PARALLEL -1) pvactst;
+                ^
+-- @@@ 98
+VACUUM (PARALLEL 2, INDEX_CLEANUP FALSE) pvactst;
+-- @@@ 99
+VACUUM (PARALLEL 2, FULL TRUE) pvactst; -- error, cannot use both PARALLEL and FULL
+ERROR:  VACUUM FULL cannot be performed in parallel
+-- @@@ 100
+VACUUM (PARALLEL) pvactst; -- error, cannot use PARALLEL option without parallel degree
+ERROR:  parallel option requires a value between 0 and 1024
+LINE 1: VACUUM (PARALLEL) pvactst;
+                ^
+-- @@@ 101
+-- Test parallel vacuum using the minimum maintenance_work_mem with and without
+-- dead tuples.
+SET maintenance_work_mem TO 64;
+-- @@@ 102
+VACUUM (PARALLEL 2) pvactst2;
+-- @@@ 103
+DELETE FROM pvactst2 WHERE i < 1000;
+-- @@@ 104
+VACUUM (PARALLEL 2) pvactst2;
+-- @@@ 105
+RESET maintenance_work_mem;
+-- @@@ 106
+-- Test different combinations of parallel and full options for temporary tables
+CREATE TEMPORARY TABLE tmp (a int PRIMARY KEY);
+-- @@@ 107
+CREATE INDEX tmp_idx1 ON tmp (a);
+-- @@@ 108
+VACUUM (PARALLEL 1, FULL FALSE) tmp; -- parallel vacuum disabled for temp tables
+WARNING:  disabling parallel option of vacuum on "tmp" --- cannot vacuum temporary tables in parallel
+-- @@@ 109
+VACUUM (PARALLEL 0, FULL TRUE) tmp; -- can specify parallel disabled (even though that's implied by FULL)
+-- @@@ 110
+RESET min_parallel_index_scan_size;
+-- @@@ 111
+DROP TABLE pvactst;
+-- @@@ 112
+DROP TABLE pvactst2;
+-- @@@ 113
+-- INDEX_CLEANUP option
+CREATE TABLE no_index_cleanup (i INT PRIMARY KEY, t TEXT);
+-- @@@ 114
+-- Use uncompressed data stored in toast.
+CREATE INDEX no_index_cleanup_idx ON no_index_cleanup(t);
+-- @@@ 115
+ALTER TABLE no_index_cleanup ALTER COLUMN t SET STORAGE EXTERNAL;
+-- @@@ 116
+INSERT INTO no_index_cleanup(i, t) VALUES (generate_series(1,30),
+    repeat('1234567890',269));
+-- @@@ 117
+-- index cleanup option is ignored if VACUUM FULL
+VACUUM (INDEX_CLEANUP TRUE, FULL TRUE) no_index_cleanup;
+-- @@@ 118
+VACUUM (FULL TRUE) no_index_cleanup;
+-- @@@ 119
+-- Toast inherits the value from its parent table.
+ALTER TABLE no_index_cleanup SET (vacuum_index_cleanup = false);
+-- @@@ 120
+DELETE FROM no_index_cleanup WHERE i < 15;
+-- @@@ 121
+-- Nothing is cleaned up.
+VACUUM no_index_cleanup;
+-- @@@ 122
+-- Both parent relation and toast are cleaned up.
+ALTER TABLE no_index_cleanup SET (vacuum_index_cleanup = true);
+-- @@@ 123
+VACUUM no_index_cleanup;
+-- @@@ 124
+ALTER TABLE no_index_cleanup SET (vacuum_index_cleanup = auto);
+-- @@@ 125
+VACUUM no_index_cleanup;
+-- @@@ 126
+-- Parameter is set for both the parent table and its toast relation.
+INSERT INTO no_index_cleanup(i, t) VALUES (generate_series(31,60),
+    repeat('1234567890',269));
+-- @@@ 127
+DELETE FROM no_index_cleanup WHERE i < 45;
+-- @@@ 128
+-- Only toast index is cleaned up.
+ALTER TABLE no_index_cleanup SET (vacuum_index_cleanup = off,
+    toast.vacuum_index_cleanup = yes);
+-- @@@ 129
+VACUUM no_index_cleanup;
+-- @@@ 130
+-- Only parent is cleaned up.
+ALTER TABLE no_index_cleanup SET (vacuum_index_cleanup = true,
+    toast.vacuum_index_cleanup = false);
+-- @@@ 131
+VACUUM no_index_cleanup;
+-- @@@ 132
+-- Test some extra relations.
+VACUUM (INDEX_CLEANUP FALSE) vaccluster;
+-- @@@ 133
+VACUUM (INDEX_CLEANUP AUTO) vactst; -- index cleanup option is ignored if no indexes
+-- @@@ 134
+VACUUM (INDEX_CLEANUP FALSE, FREEZE TRUE) vaccluster;
+-- @@@ 135
+-- TRUNCATE option
+CREATE TEMP TABLE vac_truncate_test(i INT NOT NULL, j text)
+	WITH (vacuum_truncate=true, autovacuum_enabled=false);
+-- @@@ 136
+INSERT INTO vac_truncate_test VALUES (1, NULL), (NULL, NULL);
+ERROR:  null value in column "i" of relation "vac_truncate_test" violates not-null constraint
+DETAIL:  Failing row contains (null, null).
+-- @@@ 137
+VACUUM (TRUNCATE FALSE, DISABLE_PAGE_SKIPPING) vac_truncate_test;
+-- @@@ 138
+SELECT pg_relation_size('vac_truncate_test') > 0;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 139
+SET vacuum_truncate = false;
+-- @@@ 140
+VACUUM (DISABLE_PAGE_SKIPPING) vac_truncate_test;
+-- @@@ 141
+SELECT pg_relation_size('vac_truncate_test') = 0;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 142
+VACUUM (TRUNCATE FALSE, FULL TRUE) vac_truncate_test;
+-- @@@ 143
+ALTER TABLE vac_truncate_test RESET (vacuum_truncate);
+-- @@@ 144
+INSERT INTO vac_truncate_test VALUES (1, NULL), (NULL, NULL);
+ERROR:  null value in column "i" of relation "vac_truncate_test" violates not-null constraint
+DETAIL:  Failing row contains (null, null).
+-- @@@ 145
+VACUUM (DISABLE_PAGE_SKIPPING) vac_truncate_test;
+-- @@@ 146
+SELECT pg_relation_size('vac_truncate_test') > 0;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 147
+RESET vacuum_truncate;
+-- @@@ 148
+VACUUM (TRUNCATE FALSE, DISABLE_PAGE_SKIPPING) vac_truncate_test;
+-- @@@ 149
+SELECT pg_relation_size('vac_truncate_test') > 0;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 150
+VACUUM (DISABLE_PAGE_SKIPPING) vac_truncate_test;
+-- @@@ 151
+SELECT pg_relation_size('vac_truncate_test') = 0;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- @@@ 152
+DROP TABLE vac_truncate_test;
+-- @@@ 153
+-- partitioned table
+CREATE TABLE vacparted (a int, b char) PARTITION BY LIST (a);
+-- @@@ 154
+CREATE TABLE vacparted1 PARTITION OF vacparted FOR VALUES IN (1);
+-- @@@ 155
+INSERT INTO vacparted VALUES (1, 'a');
+-- @@@ 156
+UPDATE vacparted SET b = 'b';
+-- @@@ 157
+VACUUM (ANALYZE) vacparted;
+-- @@@ 158
+VACUUM (FULL) vacparted;
+-- @@@ 159
+VACUUM (FREEZE) vacparted;
+-- @@@ 160
+-- check behavior with duplicate column mentions
+VACUUM ANALYZE vacparted(a,b,a);
+ERROR:  column "a" of relation "vacparted" appears more than once
+-- @@@ 161
+ANALYZE vacparted(a,b,b);
+ERROR:  column "b" of relation "vacparted" appears more than once
+-- @@@ 162
+-- partitioned table with index
+CREATE TABLE vacparted_i (a int primary key, b varchar(100))
+  PARTITION BY HASH (a);
+-- @@@ 163
+CREATE TABLE vacparted_i1 PARTITION OF vacparted_i
+  FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+-- @@@ 164
+CREATE TABLE vacparted_i2 PARTITION OF vacparted_i
+  FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+-- @@@ 165
+INSERT INTO vacparted_i SELECT i, 'test_'|| i from generate_series(1,10) i;
+-- @@@ 166
+VACUUM (ANALYZE) vacparted_i;
+-- @@@ 167
+VACUUM (FULL) vacparted_i;
+-- @@@ 168
+VACUUM (FREEZE) vacparted_i;
+-- @@@ 169
+SELECT relname, relhasindex FROM pg_class
+  WHERE relname LIKE 'vacparted_i%' AND relkind IN ('p','r')
+  ORDER BY relname;
+   relname    | relhasindex 
+--------------+-------------
+ vacparted_i  | t
+ vacparted_i1 | t
+ vacparted_i2 | t
+(3 rows)
+
+-- @@@ 170
+DROP TABLE vacparted_i;
+-- @@@ 171
+-- multiple tables specified
+VACUUM vaccluster, vactst;
+-- @@@ 172
+VACUUM vacparted, does_not_exist;
+ERROR:  relation "does_not_exist" does not exist
+-- @@@ 173
+VACUUM (FREEZE) vacparted, vaccluster, vactst;
+-- @@@ 174
+VACUUM (FREEZE) does_not_exist, vaccluster;
+ERROR:  relation "does_not_exist" does not exist
+-- @@@ 175
+VACUUM ANALYZE vactst, vacparted (a);
+-- @@@ 176
+VACUUM ANALYZE vactst (does_not_exist), vacparted (b);
+ERROR:  column "does_not_exist" of relation "vactst" does not exist
+-- @@@ 177
+VACUUM FULL vacparted, vactst;
+-- @@@ 178
+VACUUM FULL vactst, vacparted (a, b), vaccluster (i);
+ERROR:  ANALYZE option must be specified when a column list is provided
+-- @@@ 179
+ANALYZE vactst, vacparted;
+-- @@@ 180
+ANALYZE vacparted (b), vactst;
+-- @@@ 181
+ANALYZE vactst, does_not_exist, vacparted;
+ERROR:  relation "does_not_exist" does not exist
+-- @@@ 182
+ANALYZE vactst (i), vacparted (does_not_exist);
+ERROR:  column "does_not_exist" of relation "vacparted" does not exist
+-- @@@ 183
+ANALYZE vactst, vactst;
+-- @@@ 184
+BEGIN;  -- ANALYZE behaves differently inside a transaction block
+-- @@@ 185
+ANALYZE vactst, vactst;
+-- @@@ 186
+COMMIT;
+-- @@@ 187
+--
+-- Tests for ANALYZE ONLY / VACUUM ONLY on partitioned tables
+--
+CREATE TABLE only_parted (a int, b text) PARTITION BY LIST (a);
+-- @@@ 188
+CREATE TABLE only_parted1 PARTITION OF only_parted FOR VALUES IN (1);
+-- @@@ 189
+INSERT INTO only_parted VALUES (1, 'a');
+-- @@@ 190
+-- Ensure only the partitioned table is analyzed
+ANALYZE ONLY only_parted;
+-- @@@ 191
+SELECT relname, last_analyze IS NOT NULL AS analyzed, last_vacuum IS NOT NULL AS vacuumed
+  FROM pg_stat_user_tables
+  WHERE relid IN ('only_parted'::regclass, 'only_parted1'::regclass)
+  ORDER BY relname;
+   relname    | analyzed | vacuumed 
+--------------+----------+----------
+ only_parted  | t        | f
+ only_parted1 | f        | f
+(2 rows)
+
+-- @@@ 192
+-- Ensure partitioned table and the partitions are analyzed
+ANALYZE only_parted;
+-- @@@ 193
+SELECT relname, last_analyze IS NOT NULL AS analyzed, last_vacuum IS NOT NULL AS vacuumed
+  FROM pg_stat_user_tables
+  WHERE relid IN ('only_parted'::regclass, 'only_parted1'::regclass)
+  ORDER BY relname;
+   relname    | analyzed | vacuumed 
+--------------+----------+----------
+ only_parted  | t        | f
+ only_parted1 | t        | f
+(2 rows)
+
+-- @@@ 194
+DROP TABLE only_parted;
+-- @@@ 195
+-- VACUUM ONLY on a partitioned table does nothing, ensure we get a warning.
+VACUUM ONLY vacparted;
+WARNING:  VACUUM ONLY of partitioned table "vacparted" has no effect
+-- @@@ 196
+-- Try ANALYZE ONLY with a column list
+ANALYZE ONLY vacparted(a,b);
+-- @@@ 197
+--
+-- Tests for VACUUM ONLY / ANALYZE ONLY on inheritance tables
+--
+CREATE TABLE only_inh_parent (a int primary key, b TEXT);
+-- @@@ 198
+CREATE TABLE only_inh_child () INHERITS (only_inh_parent);
+-- @@@ 199
+INSERT INTO only_inh_child(a,b) VALUES (1, 'aaa'), (2, 'bbb'), (3, 'ccc');
+-- @@@ 200
+-- Ensure only parent is analyzed
+ANALYZE ONLY only_inh_parent;
+-- @@@ 201
+SELECT relname, last_analyze IS NOT NULL AS analyzed, last_vacuum IS NOT NULL AS vacuumed
+  FROM pg_stat_user_tables
+  WHERE relid IN ('only_inh_parent'::regclass, 'only_inh_child'::regclass)
+  ORDER BY relname;
+     relname     | analyzed | vacuumed 
+-----------------+----------+----------
+ only_inh_child  | f        | f
+ only_inh_parent | t        | f
+(2 rows)
+
+-- @@@ 202
+-- Ensure the parent and child are analyzed
+ANALYZE only_inh_parent;
+-- @@@ 203
+SELECT relname, last_analyze IS NOT NULL AS analyzed, last_vacuum IS NOT NULL AS vacuumed
+  FROM pg_stat_user_tables
+  WHERE relid IN ('only_inh_parent'::regclass, 'only_inh_child'::regclass)
+  ORDER BY relname;
+     relname     | analyzed | vacuumed 
+-----------------+----------+----------
+ only_inh_child  | t        | f
+ only_inh_parent | t        | f
+(2 rows)
+
+-- @@@ 204
+-- Ensure only the parent is vacuumed
+VACUUM ONLY only_inh_parent;
+-- @@@ 205
+SELECT relname, last_analyze IS NOT NULL AS analyzed, last_vacuum IS NOT NULL AS vacuumed
+  FROM pg_stat_user_tables
+  WHERE relid IN ('only_inh_parent'::regclass, 'only_inh_child'::regclass)
+  ORDER BY relname;
+     relname     | analyzed | vacuumed 
+-----------------+----------+----------
+ only_inh_child  | t        | f
+ only_inh_parent | t        | t
+(2 rows)
+
+-- @@@ 206
+-- Ensure parent and child are vacuumed
+VACUUM only_inh_parent;
+-- @@@ 207
+SELECT relname, last_analyze IS NOT NULL AS analyzed, last_vacuum IS NOT NULL AS vacuumed
+  FROM pg_stat_user_tables
+  WHERE relid IN ('only_inh_parent'::regclass, 'only_inh_child'::regclass)
+  ORDER BY relname;
+     relname     | analyzed | vacuumed 
+-----------------+----------+----------
+ only_inh_child  | t        | t
+ only_inh_parent | t        | t
+(2 rows)
+
+-- @@@ 208
+DROP TABLE only_inh_parent CASCADE;
+NOTICE:  drop cascades to table only_inh_child
+-- @@@ 209
+-- parenthesized syntax for ANALYZE
+ANALYZE (VERBOSE) does_not_exist;
+ERROR:  relation "does_not_exist" does not exist
+-- @@@ 210
+ANALYZE (nonexistent-arg) does_not_exist;
+ERROR:  syntax error at or near "arg"
+LINE 1: ANALYZE (nonexistent-arg) does_not_exist;
+                             ^
+-- @@@ 211
+ANALYZE (nonexistentarg) does_not_exit;
+ERROR:  unrecognized ANALYZE option "nonexistentarg"
+LINE 1: ANALYZE (nonexistentarg) does_not_exit;
+                 ^
+-- @@@ 212
+-- ensure argument order independence, and that SKIP_LOCKED on non-existing
+-- relation still errors out.  Suppress WARNING messages caused by concurrent
+-- autovacuums.
+SET client_min_messages TO 'ERROR';
+-- @@@ 213
+ANALYZE (SKIP_LOCKED, VERBOSE) does_not_exist;
+ERROR:  relation "does_not_exist" does not exist
+-- @@@ 214
+ANALYZE (VERBOSE, SKIP_LOCKED) does_not_exist;
+ERROR:  relation "does_not_exist" does not exist
+-- @@@ 215
+-- SKIP_LOCKED option
+VACUUM (SKIP_LOCKED) vactst;
+-- @@@ 216
+VACUUM (SKIP_LOCKED, FULL) vactst;
+-- @@@ 217
+ANALYZE (SKIP_LOCKED) vactst;
+-- @@@ 218
+RESET client_min_messages;
+-- @@@ 219
+-- ensure VACUUM and ANALYZE don't have a problem with serializable
+SET default_transaction_isolation = serializable;
+-- @@@ 220
+VACUUM vactst;
+-- @@@ 221
+ANALYZE vactst;
+-- @@@ 222
+RESET default_transaction_isolation;
+-- @@@ 223
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+-- @@@ 224
+ANALYZE vactst;
+-- @@@ 225
+COMMIT;
+-- @@@ 226
+-- PROCESS_TOAST option
+CREATE TABLE vac_option_tab (a INT, t TEXT);
+-- @@@ 227
+INSERT INTO vac_option_tab SELECT a, 't' || a FROM generate_series(1, 10) AS a;
+-- @@@ 228
+ALTER TABLE vac_option_tab ALTER COLUMN t SET STORAGE EXTERNAL;
+-- @@@ 229
+-- Check the number of vacuums done on table vac_option_tab and on its
+-- toast relation, to check that PROCESS_TOAST and PROCESS_MAIN work on
+-- what they should.
+CREATE VIEW vac_option_tab_counts AS
+  SELECT CASE WHEN c.relname IS NULL
+    THEN 'main' ELSE 'toast' END as rel,
+  s.vacuum_count
+  FROM pg_stat_all_tables s
+  LEFT JOIN pg_class c ON s.relid = c.reltoastrelid
+  WHERE c.relname = 'vac_option_tab' OR s.relname = 'vac_option_tab'
+  ORDER BY rel;
+-- @@@ 230
+VACUUM (PROCESS_TOAST TRUE) vac_option_tab;
+-- @@@ 231
+SELECT * FROM vac_option_tab_counts;
+  rel  | vacuum_count 
+-------+--------------
+ main  |            1
+ toast |            1
+(2 rows)
+
+-- @@@ 232
+VACUUM (PROCESS_TOAST FALSE) vac_option_tab;
+-- @@@ 233
+SELECT * FROM vac_option_tab_counts;
+  rel  | vacuum_count 
+-------+--------------
+ main  |            2
+ toast |            1
+(2 rows)
+
+-- @@@ 234
+VACUUM (PROCESS_TOAST FALSE, FULL) vac_option_tab; -- error
+ERROR:  PROCESS_TOAST required with VACUUM FULL
+-- @@@ 235
+-- PROCESS_MAIN option
+-- Only the toast table is processed.
+VACUUM (PROCESS_MAIN FALSE) vac_option_tab;
+-- @@@ 236
+SELECT * FROM vac_option_tab_counts;
+  rel  | vacuum_count 
+-------+--------------
+ main  |            2
+ toast |            2
+(2 rows)
+
+-- @@@ 237
+-- Nothing is processed.
+VACUUM (PROCESS_MAIN FALSE, PROCESS_TOAST FALSE) vac_option_tab;
+-- @@@ 238
+SELECT * FROM vac_option_tab_counts;
+  rel  | vacuum_count 
+-------+--------------
+ main  |            2
+ toast |            2
+(2 rows)
+
+-- @@@ 239
+-- Check if the filenodes nodes have been updated as wanted after FULL.
+SELECT relfilenode AS main_filenode FROM pg_class
+  WHERE relname = 'vac_option_tab' \gset
+-- @@@ 240
+SELECT t.relfilenode AS toast_filenode FROM pg_class c, pg_class t
+  WHERE c.reltoastrelid = t.oid AND c.relname = 'vac_option_tab' \gset
+-- @@@ 241
+-- Only the toast relation is processed.
+VACUUM (PROCESS_MAIN FALSE, FULL) vac_option_tab;
+-- @@@ 242
+SELECT relfilenode = :main_filenode AS is_same_main_filenode
+  FROM pg_class WHERE relname = 'vac_option_tab';
+ is_same_main_filenode 
+-----------------------
+ t
+(1 row)
+
+-- @@@ 243
+SELECT t.relfilenode = :toast_filenode AS is_same_toast_filenode
+  FROM pg_class c, pg_class t
+  WHERE c.reltoastrelid = t.oid AND c.relname = 'vac_option_tab';
+ is_same_toast_filenode 
+------------------------
+ f
+(1 row)
+
+-- @@@ 244
+-- BUFFER_USAGE_LIMIT option
+VACUUM (BUFFER_USAGE_LIMIT '512 kB') vac_option_tab;
+-- @@@ 245
+ANALYZE (BUFFER_USAGE_LIMIT '512 kB') vac_option_tab;
+-- @@@ 246
+-- try disabling the buffer usage limit
+VACUUM (BUFFER_USAGE_LIMIT 0) vac_option_tab;
+-- @@@ 247
+ANALYZE (BUFFER_USAGE_LIMIT 0) vac_option_tab;
+-- @@@ 248
+-- value exceeds max size error
+VACUUM (BUFFER_USAGE_LIMIT 16777220) vac_option_tab;
+ERROR:  BUFFER_USAGE_LIMIT option must be 0 or between 128 kB and 16777216 kB
+-- @@@ 249
+-- value is less than min size error
+VACUUM (BUFFER_USAGE_LIMIT 120) vac_option_tab;
+ERROR:  BUFFER_USAGE_LIMIT option must be 0 or between 128 kB and 16777216 kB
+-- @@@ 250
+-- integer overflow error
+VACUUM (BUFFER_USAGE_LIMIT 10000000000) vac_option_tab;
+ERROR:  BUFFER_USAGE_LIMIT option must be 0 or between 128 kB and 16777216 kB
+HINT:  Value exceeds integer range.
+-- @@@ 251
+-- incompatible with VACUUM FULL error
+VACUUM (BUFFER_USAGE_LIMIT '512 kB', FULL) vac_option_tab;
+ERROR:  BUFFER_USAGE_LIMIT cannot be specified for VACUUM FULL
+-- @@@ 252
+-- SKIP_DATABASE_STATS option
+VACUUM (SKIP_DATABASE_STATS) vactst;
+-- @@@ 253
+-- ONLY_DATABASE_STATS option
+VACUUM (ONLY_DATABASE_STATS);
+-- @@@ 254
+VACUUM (ONLY_DATABASE_STATS) vactst;  -- error
+ERROR:  ONLY_DATABASE_STATS cannot be specified with a list of tables
+-- @@@ 255
+DROP VIEW vac_option_tab_counts;
+-- @@@ 256
+DROP TABLE vac_option_tab;
+-- @@@ 257
+DROP TABLE vaccluster;
+-- @@@ 258
+DROP TABLE vactst;
+-- @@@ 259
+DROP TABLE vacparted;
+-- @@@ 260
+DROP TABLE no_index_cleanup;
+-- @@@ 261
+-- relation ownership, WARNING logs generated as all are skipped.
+CREATE TABLE vacowned (a int);
+-- @@@ 262
+CREATE TABLE vacowned_parted (a int) PARTITION BY LIST (a);
+-- @@@ 263
+CREATE TABLE vacowned_part1 PARTITION OF vacowned_parted FOR VALUES IN (1);
+-- @@@ 264
+CREATE TABLE vacowned_part2 PARTITION OF vacowned_parted FOR VALUES IN (2);
+-- @@@ 265
+CREATE ROLE regress_vacuum;
+-- @@@ 266
+SET ROLE regress_vacuum;
+-- @@@ 267
+-- Simple table
+VACUUM vacowned;
+WARNING:  permission denied to vacuum "vacowned", skipping it
+-- @@@ 268
+ANALYZE vacowned;
+WARNING:  permission denied to analyze "vacowned", skipping it
+-- @@@ 269
+VACUUM (ANALYZE) vacowned;
+WARNING:  permission denied to vacuum "vacowned", skipping it
+-- @@@ 270
+-- Catalog
+VACUUM pg_catalog.pg_class;
+WARNING:  permission denied to vacuum "pg_class", skipping it
+-- @@@ 271
+ANALYZE pg_catalog.pg_class;
+WARNING:  permission denied to analyze "pg_class", skipping it
+-- @@@ 272
+VACUUM (ANALYZE) pg_catalog.pg_class;
+WARNING:  permission denied to vacuum "pg_class", skipping it
+-- @@@ 273
+-- Shared catalog
+VACUUM pg_catalog.pg_authid;
+WARNING:  permission denied to vacuum "pg_authid", skipping it
+-- @@@ 274
+ANALYZE pg_catalog.pg_authid;
+WARNING:  permission denied to analyze "pg_authid", skipping it
+-- @@@ 275
+VACUUM (ANALYZE) pg_catalog.pg_authid;
+WARNING:  permission denied to vacuum "pg_authid", skipping it
+-- @@@ 276
+-- Partitioned table and its partitions, nothing owned by other user.
+-- Relations are not listed in a single command to test ownership
+-- independently.
+VACUUM vacowned_parted;
+WARNING:  permission denied to vacuum "vacowned_parted", skipping it
+WARNING:  permission denied to vacuum "vacowned_part1", skipping it
+WARNING:  permission denied to vacuum "vacowned_part2", skipping it
+-- @@@ 277
+VACUUM vacowned_part1;
+WARNING:  permission denied to vacuum "vacowned_part1", skipping it
+-- @@@ 278
+VACUUM vacowned_part2;
+WARNING:  permission denied to vacuum "vacowned_part2", skipping it
+-- @@@ 279
+ANALYZE vacowned_parted;
+WARNING:  permission denied to analyze "vacowned_parted", skipping it
+WARNING:  permission denied to analyze "vacowned_part1", skipping it
+WARNING:  permission denied to analyze "vacowned_part2", skipping it
+-- @@@ 280
+ANALYZE vacowned_part1;
+WARNING:  permission denied to analyze "vacowned_part1", skipping it
+-- @@@ 281
+ANALYZE vacowned_part2;
+WARNING:  permission denied to analyze "vacowned_part2", skipping it
+-- @@@ 282
+VACUUM (ANALYZE) vacowned_parted;
+WARNING:  permission denied to vacuum "vacowned_parted", skipping it
+WARNING:  permission denied to vacuum "vacowned_part1", skipping it
+WARNING:  permission denied to vacuum "vacowned_part2", skipping it
+-- @@@ 283
+VACUUM (ANALYZE) vacowned_part1;
+WARNING:  permission denied to vacuum "vacowned_part1", skipping it
+-- @@@ 284
+VACUUM (ANALYZE) vacowned_part2;
+WARNING:  permission denied to vacuum "vacowned_part2", skipping it
+-- @@@ 285
+RESET ROLE;
+-- @@@ 286
+-- Partitioned table and one partition owned by other user.
+ALTER TABLE vacowned_parted OWNER TO regress_vacuum;
+-- @@@ 287
+ALTER TABLE vacowned_part1 OWNER TO regress_vacuum;
+-- @@@ 288
+SET ROLE regress_vacuum;
+-- @@@ 289
+VACUUM vacowned_parted;
+WARNING:  permission denied to vacuum "vacowned_part2", skipping it
+-- @@@ 290
+VACUUM vacowned_part1;
+-- @@@ 291
+VACUUM vacowned_part2;
+WARNING:  permission denied to vacuum "vacowned_part2", skipping it
+-- @@@ 292
+ANALYZE vacowned_parted;
+WARNING:  permission denied to analyze "vacowned_part2", skipping it
+-- @@@ 293
+ANALYZE vacowned_part1;
+-- @@@ 294
+ANALYZE vacowned_part2;
+WARNING:  permission denied to analyze "vacowned_part2", skipping it
+-- @@@ 295
+VACUUM (ANALYZE) vacowned_parted;
+WARNING:  permission denied to vacuum "vacowned_part2", skipping it
+-- @@@ 296
+VACUUM (ANALYZE) vacowned_part1;
+-- @@@ 297
+VACUUM (ANALYZE) vacowned_part2;
+WARNING:  permission denied to vacuum "vacowned_part2", skipping it
+-- @@@ 298
+RESET ROLE;
+-- @@@ 299
+-- Only one partition owned by other user.
+ALTER TABLE vacowned_parted OWNER TO CURRENT_USER;
+-- @@@ 300
+SET ROLE regress_vacuum;
+-- @@@ 301
+VACUUM vacowned_parted;
+WARNING:  permission denied to vacuum "vacowned_parted", skipping it
+WARNING:  permission denied to vacuum "vacowned_part2", skipping it
+-- @@@ 302
+VACUUM vacowned_part1;
+-- @@@ 303
+VACUUM vacowned_part2;
+WARNING:  permission denied to vacuum "vacowned_part2", skipping it
+-- @@@ 304
+ANALYZE vacowned_parted;
+WARNING:  permission denied to analyze "vacowned_parted", skipping it
+WARNING:  permission denied to analyze "vacowned_part2", skipping it
+-- @@@ 305
+ANALYZE vacowned_part1;
+-- @@@ 306
+ANALYZE vacowned_part2;
+WARNING:  permission denied to analyze "vacowned_part2", skipping it
+-- @@@ 307
+VACUUM (ANALYZE) vacowned_parted;
+WARNING:  permission denied to vacuum "vacowned_parted", skipping it
+WARNING:  permission denied to vacuum "vacowned_part2", skipping it
+-- @@@ 308
+VACUUM (ANALYZE) vacowned_part1;
+-- @@@ 309
+VACUUM (ANALYZE) vacowned_part2;
+WARNING:  permission denied to vacuum "vacowned_part2", skipping it
+-- @@@ 310
+RESET ROLE;
+-- @@@ 311
+-- Only partitioned table owned by other user.
+ALTER TABLE vacowned_parted OWNER TO regress_vacuum;
+-- @@@ 312
+ALTER TABLE vacowned_part1 OWNER TO CURRENT_USER;
+-- @@@ 313
+SET ROLE regress_vacuum;
+-- @@@ 314
+VACUUM vacowned_parted;
+WARNING:  permission denied to vacuum "vacowned_part1", skipping it
+WARNING:  permission denied to vacuum "vacowned_part2", skipping it
+-- @@@ 315
+VACUUM vacowned_part1;
+WARNING:  permission denied to vacuum "vacowned_part1", skipping it
+-- @@@ 316
+VACUUM vacowned_part2;
+WARNING:  permission denied to vacuum "vacowned_part2", skipping it
+-- @@@ 317
+ANALYZE vacowned_parted;
+WARNING:  permission denied to analyze "vacowned_part1", skipping it
+WARNING:  permission denied to analyze "vacowned_part2", skipping it
+-- @@@ 318
+ANALYZE vacowned_part1;
+WARNING:  permission denied to analyze "vacowned_part1", skipping it
+-- @@@ 319
+ANALYZE vacowned_part2;
+WARNING:  permission denied to analyze "vacowned_part2", skipping it
+-- @@@ 320
+VACUUM (ANALYZE) vacowned_parted;
+WARNING:  permission denied to vacuum "vacowned_part1", skipping it
+WARNING:  permission denied to vacuum "vacowned_part2", skipping it
+-- @@@ 321
+VACUUM (ANALYZE) vacowned_part1;
+WARNING:  permission denied to vacuum "vacowned_part1", skipping it
+-- @@@ 322
+VACUUM (ANALYZE) vacowned_part2;
+WARNING:  permission denied to vacuum "vacowned_part2", skipping it
+-- @@@ 323
+RESET ROLE;
+-- @@@ 324
+DROP TABLE vacowned;
+-- @@@ 325
+DROP TABLE vacowned_parted;
+-- @@@ 326
+DROP ROLE regress_vacuum;
+-- @@@ 327
