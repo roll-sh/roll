@@ -1,0 +1,41 @@
+04:20 record a163_knn_time_interval
+04:29 recorded: 197 lines
+04:29 start release
+04:48 release: 444 passed 2 failed test golden ... FAILED test golden_wire ... FAILED 
+04:48 start debug
+05:31 debug: 444 passed 2 failed test golden ... FAILED test golden_wire ... FAILED 
+05:31 start difftest
+05:33 difftest: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 66.13s
+05:33 start iso
+05:36 iso: | specs | 139 | | specs matching | 138 (99.3%) | | permutations | 1806 | 
+05:36 start regress
+05:36 regress: 
+05:36 start pgdump
+05:36 pgdump: test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s 
+05:36 start contrib
+05:36 contrib: 
+05:36 steps done: release debug difftest iso regress pgdump contrib
+05:50 dist: built 14f0c608
+05:50 D: record a163_index_row_size
+05:58 D: recorded 237 lines
+06:08 D release: 203 passed 2 failed test golden ... FAILED test golden_wire ... FAILED 
+06:29 D debug: 203 passed 2 failed test golden ... FAILED test golden_wire ... FAILED 
+06:31 D clippy: 18 lines; in changed files: 
+06:31 start regress
+06:32 regress: 
+06:32 start pgdump
+06:32 pgdump: test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s 
+06:32 start contrib
+06:32 contrib: 
+06:32 steps done: regress pgdump contrib
+06:32 F: at cf27eed0 2 changed files
+06:48 F release: 202 passed 0 failed 
+07:07 F debug: 202 passed 0 failed 
+07:07 F clippy: 18 lines; in changed files: 
+07:07 start regress
+07:32 regress: | units compared | 51150 | | units matching | 51148 (**100.0%**) | | units matching, excluding by-design | 100.0% (51148/51150) | | class | units | % of differing | ## Gap categories, ranked by units affected 
+07:32 start pgdump
+07:32 pgdump: test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s 
+07:32 start contrib
+07:33 contrib: | btree_gist | 32 | 29 | 616 | 613 | 99.5% | 32/32 | | pg_trgm | 4 | 4 | 261 | 261 | 100.0% | 4/4 | | citext | 3 | 3 | 544 | 544 | 100.0% | 3/3 | | bloom | 1 | 1 | 58 | 58 | 100.0% | 1/1 | | pgvector | 14 | 14 | 915 | 915 | 100.0% | 14/14 | | pg_trgm | 187 | 187 |  | | citext | 502 | 502 |  | | bloom | 58 | 58 |  | 
+07:33 steps done: regress pgdump contrib
