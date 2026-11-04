@@ -2567,6 +2567,13 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
     Ok(out.into_rows())
 }
 
+/// Whether a whole generation of cacheable catalog `table` (`rows_cacheable`) reads the
+/// relation or function maps: all but pg_namespace's. (Only a hint: an entry not read yet is
+/// read when first used.)
+fn reads_relations(table: SysTable) -> bool {
+    table != SysTable::PgNamespace
+}
+
 /// `table`'s rows, all of them, cut into chunks along their parts (`part` of each) as they are
 /// generated (`sysrows::Out`): a whole catalog's rows aren't all held as rows at once.
 fn rows_generated_chunked(
@@ -2575,8 +2582,13 @@ fn rows_generated_chunked(
     part: &dyn Fn(&Row) -> super::sysrows::PartKey,
 ) -> Result<Vec<Arc<RowChunk>>> {
     GENERATED.with(|c| c.set(c.get() + 1));
-    // (Every relation is read: the stored maps' groups at once, on several threads.)
-    ctx.catalog().read_relations();
+    // (Every relation is read: the stored maps' groups at once, on several threads. Only for
+    // the catalogs made from the relations and functions: a database's first read of
+    // pg_namespace, which every statistics view reads, parsed every relation's entry, 130 ms
+    // at 10,000 tables.)
+    if reads_relations(table) {
+        ctx.catalog().read_relations();
+    }
     let mut out = Out::chunked(part);
     generate(table, ctx, None, &mut out)?;
     Ok(out.into_chunks())

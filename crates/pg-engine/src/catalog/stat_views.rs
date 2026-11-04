@@ -11,7 +11,7 @@ use crate::exec::ExecCtx;
 use crate::exec::Row;
 use crate::exec::pgstat::{self, TabEntry};
 use crate::types::Value;
-use std::collections::{HashMap, HashSet};
+use crate::exec::fasthash::{HashMap, HashSet};
 
 fn oid_of(v: &Value) -> u32 {
     match v {
@@ -150,7 +150,7 @@ fn index_owner(ctx: &ExecCtx, ix: u32) -> Option<u32> {
 /// every index; iterating the catalog's indexes read every index entry.) `scan`: from every
 /// index entry instead (what debug builds check the lists against).
 fn indexes_of(ctx: &ExecCtx, of: &HashSet<u32>, scan: bool) -> HashMap<u32, Vec<u32>> {
-    let mut out: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut out: HashMap<u32, Vec<u32>> = HashMap::default();
     for r in super::static_rows::rows(SysTable::PgIndex).iter() {
         let (ix, rel) = (super::static_rows::oid_at(r, 0), super::static_rows::oid_at(r, 1));
         if of.contains(&rel) {
@@ -216,14 +216,19 @@ pub fn rows_of(table: SysTable, ctx: &ExecCtx, sel: &StatSel) -> Result<Vec<Row>
         Shape::IoSequences => b"S",
         _ => b"rtm",
     };
-    let names: HashMap<u32, Value> = (rows(SysTable::PgNamespace, ctx)?.into_iter())
-        .map(|r| (oid_of(&r[0]), r.get(1).cloned().unwrap_or(Value::Null)))
+    // Each namespace's name and whether the view shows its relations (decided once: per
+    // relation it cloned the name, 20% of a whole view's generation).
+    let names: HashMap<u32, (Value, bool)> = (rows(SysTable::PgNamespace, ctx)?.into_iter())
+        .map(|r| {
+            let s = r.get(1).cloned().unwrap_or(Value::Null);
+            let shown = part_keeps(part, &s) && sel.schema.as_deref().is_none_or(|w| s.as_str() == Some(w));
+            (oid_of(&r[0]), (s, shown))
+        })
         .collect();
-    let schema_of = |nsp: u32| names.get(&nsp).cloned().unwrap_or(Value::Null);
-    let shown = |nsp: u32| {
-        let s = schema_of(nsp);
-        part_keeps(part, &s) && sel.schema.as_deref().is_none_or(|w| s.as_str() == Some(w))
-    };
+    let schema_of = |nsp: u32| names.get(&nsp).map_or(Value::Null, |n| n.0.clone());
+    // (A relation of a namespace that doesn't exist: its schemaname is NULL.)
+    let null_shown = part_keeps(part, &Value::Null) && sel.schema.is_none();
+    let shown = |nsp: u32| names.get(&nsp).map_or(null_shown, |n| n.1);
     let keep = ClassKeep { kinds, schema: Some(&shown) };
     let all = keys(ctx, pick, keep)?;
     let mut rels: Vec<&ClassKey> = (all.iter())
@@ -237,7 +242,7 @@ pub fn rows_of(table: SysTable, ctx: &ExecCtx, sel: &StatSel) -> Result<Vec<Row>
         of.extend(rels.iter().map(|k| k.toast).filter(|&t| t != 0));
     }
     let ixs = match shape {
-        Shape::IoSequences => HashMap::new(),
+        Shape::IoSequences => HashMap::default(),
         _ => indexes_of(ctx, &of, false),
     };
     let fetch = |oid: u32| pgstat::fetch_table(ctx, oid);
@@ -245,7 +250,7 @@ pub fn rows_of(table: SysTable, ctx: &ExecCtx, sel: &StatSel) -> Result<Vec<Row>
     let mut out = Vec::with_capacity(rels.len());
     if indexes {
         // Their indexes' names (an index pg_class doesn't show isn't joined).
-        let mut ixnames: HashMap<u32, Value> = HashMap::new();
+        let mut ixnames: HashMap<u32, Value> = HashMap::default();
         let wanted = |ix: u32| sel.indexrelid.is_none_or(|w| w == ix);
         if narrow {
             for ix in rels.iter().flat_map(|k| ixs.get(&k.oid).into_iter().flatten()).copied().filter(|&i| wanted(i)) {
