@@ -372,15 +372,16 @@ export class DemoAutomations {
       if (last) this.automations.set(a.id, { ...this.automations.get(a.id)!, last_run: { id: last.id, status: last.status, at: last.created_at } });
     }
     // It finishes on its own a little later, so the run detail moves while you watch.
-    this.host.after(24_000, () => this.finishWaiting(live.id, "done"));
+    this.host.after(24_000, () => this.finishWaiting(live.id, "done", "Fixed: the queue test waited on a timer; it now waits on the event."));
   }
 
-  private finishWaiting(rid: string, status: "done" | "failed") {
+  private finishWaiting(rid: string, status: "done" | "failed", summary?: string) {
     const r = this.runs.get(rid);
     if (!r || isRunFinal(r.status)) return;
     const w = r.steps.find((s) => s.status === "waiting");
     if (!w) return;
-    this.patchStep(rid, w.id, { status: "succeeded", finished_at: Date.now(), output: { status, thread: r.threads[0]?.thread ?? null, summary: "Fixed: the queue test waited on a timer; it now waits on the event." } }, { status: "running" });
+    const said = summary ?? (status === "done" ? "The agent finished; its work is in its worktree, ready to review." : "The agent stopped with an error.");
+    this.patchStep(rid, w.id, { status: "succeeded", finished_at: Date.now(), output: { status, thread: r.threads.at(-1)?.thread ?? null, summary: said } }, { status: "running" });
     this.log(rid, w.id, `The thread is ${status}`);
     this.host.after(600, () => void this.advance(rid));
   }

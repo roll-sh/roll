@@ -1,8 +1,9 @@
 "use client";
 
 /**
- * A `notify` step's notices (the `notice` stream event) as calm toasts in the surface's top-right
- * corner (T3's toasts: 360px, glass, sliding in from the edge, the newest on top). Each closes by
+ * A `notify` step's notices (the `notice` stream event) as calm toasts (T3's toasts: 360px, glass,
+ * sliding in from the edge) in the surface's bottom-right corner, so they never cover the side
+ * panel's tools; the newest nearest the corner. Each closes by
  * itself after a while unless the pointer is on it; its link and its run are one click away.
  */
 
@@ -24,7 +25,7 @@ export function Notices() {
   const dismiss = (id: string) => setShown((s) => s.filter((x) => x.id !== id));
   if (!shown.length) return null;
   return (
-    <ol className="pointer-events-none absolute top-14 right-3 z-[60] flex w-[min(360px,calc(100%-1.5rem))] flex-col gap-2" aria-label="Notices" aria-live="polite">
+    <ol className="pointer-events-none absolute right-3 bottom-16 z-[60] flex w-[min(360px,calc(100%-1.5rem))] flex-col-reverse gap-2" aria-label="Notices" aria-live="polite">
       {shown.map((n) => (
         <Toast key={n.id} notice={n} onDismiss={() => dismiss(n.id)} />
       ))}

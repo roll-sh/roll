@@ -828,7 +828,12 @@ function useStepSummary(s: Step, schema: Schema): string {
     else if (target.type === "any_online") parts.push("on any online machine");
     else if (target.type === "project_machine") parts.push("on the project's machine");
   }
-  if (typeof c.model === "string") parts.push(c.model);
+  if (typeof c.model === "string") {
+    // The model's name as the machines' providers say it ("Opus 5.5"), else its id.
+    let name: string | undefined;
+    for (const r of client.data.machines.values()) name ??= r.value.info?.providers.flatMap((p) => p.models).find((m) => m.id === c.model)?.name;
+    parts.push(name ?? c.model);
+  }
   if (c.worktree === true) parts.push("worktree");
   if (c.land === true) parts.push("queued to land");
   if (Array.isArray(c.until) && c.until.length) parts.push(`until ${c.until.join(" or ")}`);
