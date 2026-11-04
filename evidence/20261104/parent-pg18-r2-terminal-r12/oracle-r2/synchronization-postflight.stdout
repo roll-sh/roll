@@ -1,0 +1,23 @@
+2026-11-04T20:32:13+00:00
+  File: /home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/target
+  Size: 4096      	Blocks: 8          IO Block: 4096   directory
+Device: 9,2	Inode: 28704772    Links: 2
+Access: (0775/drwxrwxr-x)  Uid: ( 1000/meszmate)   Gid: ( 1000/meszmate)
+Access: 2026-11-04 21:30:48.197481352 +0100
+Modify: 2026-11-04 21:30:48.197481352 +0100
+Change: 2026-11-04 21:30:48.197481352 +0100
+ Birth: 2026-11-04 21:30:48.197481352 +0100
+  File: /home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/target/.heavy.lock
+  Size: 0         	Blocks: 0          IO Block: 4096   regular empty file
+Device: 9,2	Inode: 28704774    Links: 1
+Access: (0664/-rw-rw-r--)  Uid: ( 1000/meszmate)   Gid: ( 1000/meszmate)
+Access: 2026-11-04 21:30:48.197481352 +0100
+Modify: 2026-11-04 21:30:48.197481352 +0100
+Change: 2026-11-04 21:30:48.197481352 +0100
+ Birth: 2026-11-04 21:30:48.197481352 +0100
+total 8
+drwxrwxr-x 2 meszmate meszmate 4096 Nov  4 21:30 .
+drwxrwxr-x 8 meszmate meszmate 4096 Nov  4 21:30 ..
+-rw-rw-r-- 1 meszmate meszmate    0 Nov  4 21:30 .heavy.lock
+4
+2

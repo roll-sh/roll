@@ -1,0 +1,3 @@
+\set ON_ERROR_STOP on
+CREATE DATABASE planner_generic TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';
+CREATE DATABASE planner_parallel TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';

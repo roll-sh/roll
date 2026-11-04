@@ -1,0 +1,690 @@
+2026-11-04T20:30:51.390200626Z ********************************************************************************
+2026-11-04T20:30:51.390274699Z WARNING: POSTGRES_HOST_AUTH_METHOD has been set to "trust". This will allow
+2026-11-04T20:30:51.390280949Z          anyone with access to the Postgres port to access your database without
+2026-11-04T20:30:51.390284951Z          a password, even if POSTGRES_PASSWORD is set. See PostgreSQL
+2026-11-04T20:30:51.390288679Z          documentation about "trust":
+2026-11-04T20:30:51.390292524Z          https://www.postgresql.org/docs/current/auth-trust.html
+2026-11-04T20:30:51.390296094Z          In Docker's default configuration, this is effectively any other
+2026-11-04T20:30:51.390299802Z          container on the same system.
+2026-11-04T20:30:51.390303318Z 
+2026-11-04T20:30:51.390306608Z          It is not recommended to use POSTGRES_HOST_AUTH_METHOD=trust. Replace
+2026-11-04T20:30:51.390310131Z          it with "-e POSTGRES_PASSWORD=password" instead to set a password in
+2026-11-04T20:30:51.390313941Z          "docker run".
+2026-11-04T20:30:51.390317502Z ********************************************************************************
+2026-11-04T20:30:51.908627733Z sh: locale: not found
+2026-11-04T20:30:51.908724008Z 2026-11-04 20:30:51.908 UTC [44] WARNING:  no usable system locales were found
+2026-11-04T20:30:52.425769222Z initdb: warning: enabling "trust" authentication for local connections
+2026-11-04T20:30:52.425861116Z initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+2026-11-04T20:30:52.733779546Z 2026-11-04 20:30:52.733 UTC [1] DEBUG:  00000: registering background worker "logical replication launcher"
+2026-11-04T20:30:52.733827423Z 2026-11-04 20:30:52.733 UTC [1] LOCATION:  RegisterBackgroundWorker, bgworker.c:979
+2026-11-04T20:30:52.734081159Z 2026-11-04 20:30:52.734 UTC [1] DEBUG:  00000: mmap(25165824) with MAP_HUGETLB failed, huge pages disabled: Out of memory
+2026-11-04T20:30:52.734118778Z 2026-11-04 20:30:52.734 UTC [1] LOCATION:  CreateAnonymousSegment, pg_shmem.c:626
+2026-11-04T20:30:52.739525801Z 2026-11-04 20:30:52.739 UTC [1] LOG:  00000: starting PostgreSQL 18.6 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+2026-11-04T20:30:52.739548770Z 2026-11-04 20:30:52.739 UTC [1] LOCATION:  PostmasterMain, postmaster.c:1103
+2026-11-04T20:30:52.739552270Z 2026-11-04 20:30:52.739 UTC [1] LOG:  00000: listening on IPv4 address "127.0.0.1", port 5432
+2026-11-04T20:30:52.739555372Z 2026-11-04 20:30:52.739 UTC [1] LOCATION:  ListenServerPort, pqcomm.c:662
+2026-11-04T20:30:52.740171106Z 2026-11-04 20:30:52.740 UTC [1] LOG:  00000: listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-11-04T20:30:52.740177422Z 2026-11-04 20:30:52.740 UTC [1] LOCATION:  ListenServerPort, pqcomm.c:658
+2026-11-04T20:30:52.741361775Z 2026-11-04 20:30:52.741 UTC [1] DEBUG:  00000: updating PMState from PM_INIT to PM_STARTUP
+2026-11-04T20:30:52.741371078Z 2026-11-04 20:30:52.741 UTC [1] LOCATION:  UpdatePMState, postmaster.c:3253
+2026-11-04T20:30:52.743529155Z 2026-11-04 20:30:52.743 UTC [76] LOG:  00000: database system was shut down at 2026-11-04 20:30:52 UTC
+2026-11-04T20:30:52.743560490Z 2026-11-04 20:30:52.743 UTC [76] LOCATION:  StartupXLOG, xlog.c:5510
+2026-11-04T20:30:52.743617191Z 2026-11-04 20:30:52.743 UTC [76] DEBUG:  00000: checkpoint record is at 0/1765EB8
+2026-11-04T20:30:52.743623848Z 2026-11-04 20:30:52.743 UTC [76] LOCATION:  InitWalRecovery, xlogrecovery.c:798
+2026-11-04T20:30:52.743627910Z 2026-11-04 20:30:52.743 UTC [76] DEBUG:  00000: redo record is at 0/1765EB8; shutdown true
+2026-11-04T20:30:52.743631976Z 2026-11-04 20:30:52.743 UTC [76] LOCATION:  InitWalRecovery, xlogrecovery.c:898
+2026-11-04T20:30:52.743635836Z 2026-11-04 20:30:52.743 UTC [76] DEBUG:  00000: next transaction ID: 753; next OID: 13690
+2026-11-04T20:30:52.743640053Z 2026-11-04 20:30:52.743 UTC [76] LOCATION:  InitWalRecovery, xlogrecovery.c:902
+2026-11-04T20:30:52.743644067Z 2026-11-04 20:30:52.743 UTC [76] DEBUG:  00000: next MultiXactId: 1; next MultiXactOffset: 0
+2026-11-04T20:30:52.743648057Z 2026-11-04 20:30:52.743 UTC [76] LOCATION:  InitWalRecovery, xlogrecovery.c:906
+2026-11-04T20:30:52.743651934Z 2026-11-04 20:30:52.743 UTC [76] DEBUG:  00000: oldest unfrozen transaction ID: 745, in database 1
+2026-11-04T20:30:52.743655973Z 2026-11-04 20:30:52.743 UTC [76] LOCATION:  InitWalRecovery, xlogrecovery.c:909
+2026-11-04T20:30:52.743659747Z 2026-11-04 20:30:52.743 UTC [76] DEBUG:  00000: oldest MultiXactId: 1, in database 1
+2026-11-04T20:30:52.743663672Z 2026-11-04 20:30:52.743 UTC [76] LOCATION:  InitWalRecovery, xlogrecovery.c:912
+2026-11-04T20:30:52.743667502Z 2026-11-04 20:30:52.743 UTC [76] DEBUG:  00000: commit timestamp Xid oldest/newest: 0/0
+2026-11-04T20:30:52.743671701Z 2026-11-04 20:30:52.743 UTC [76] LOCATION:  InitWalRecovery, xlogrecovery.c:915
+2026-11-04T20:30:52.743688427Z 2026-11-04 20:30:52.743 UTC [76] DEBUG:  00000: transaction ID wrap limit is 2147484392, limited by database with OID 1
+2026-11-04T20:30:52.743715239Z 2026-11-04 20:30:52.743 UTC [76] LOCATION:  SetTransactionIdLimit, varsup.c:454
+2026-11-04T20:30:52.743722608Z 2026-11-04 20:30:52.743 UTC [76] DEBUG:  00000: MultiXactId wrap limit is 2147483648, limited by database with OID 1
+2026-11-04T20:30:52.743730441Z 2026-11-04 20:30:52.743 UTC [76] LOCATION:  SetMultiXactIdLimit, multixact.c:2599
+2026-11-04T20:30:52.743878628Z 2026-11-04 20:30:52.743 UTC [76] DEBUG:  00000: starting up replication slots
+2026-11-04T20:30:52.743899147Z 2026-11-04 20:30:52.743 UTC [76] LOCATION:  StartupReplicationSlots, slot.c:2204
+2026-11-04T20:30:52.743904394Z 2026-11-04 20:30:52.743 UTC [76] DEBUG:  00000: xmin required by slots: data 0, catalog 0
+2026-11-04T20:30:52.743908682Z 2026-11-04 20:30:52.743 UTC [76] LOCATION:  ProcArraySetReplicationSlotXmin, procarray.c:3957
+2026-11-04T20:30:52.744716885Z 2026-11-04 20:30:52.744 UTC [76] DEBUG:  00000: MultiXactId wrap limit is 2147483648, limited by database with OID 1
+2026-11-04T20:30:52.744724100Z 2026-11-04 20:30:52.744 UTC [76] LOCATION:  SetMultiXactIdLimit, multixact.c:2599
+2026-11-04T20:30:52.744728369Z 2026-11-04 20:30:52.744 UTC [76] DEBUG:  00000: MultiXact member stop limit is now 4294914944 based on MultiXact 1
+2026-11-04T20:30:52.744732441Z 2026-11-04 20:30:52.744 UTC [76] LOCATION:  SetOffsetVacuumLimit, multixact.c:2971
+2026-11-04T20:30:52.747828716Z 2026-11-04 20:30:52.747 UTC [1] DEBUG:  00000: updating PMState from PM_STARTUP to PM_RUN
+2026-11-04T20:30:52.747861129Z 2026-11-04 20:30:52.747 UTC [1] LOCATION:  UpdatePMState, postmaster.c:3253
+2026-11-04T20:30:52.747866844Z 2026-11-04 20:30:52.747 UTC [1] LOG:  00000: database system is ready to accept connections
+2026-11-04T20:30:52.747871296Z 2026-11-04 20:30:52.747 UTC [1] LOCATION:  process_pm_child_exit, postmaster.c:2331
+2026-11-04T20:30:52.748460118Z 2026-11-04 20:30:52.748 UTC [1] DEBUG:  00000: starting background worker process "logical replication launcher"
+2026-11-04T20:30:52.748467790Z 2026-11-04 20:30:52.748 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:52.748979832Z 2026-11-04 20:30:52.748 UTC [78] DEBUG:  00000: autovacuum launcher started
+2026-11-04T20:30:52.748998949Z 2026-11-04 20:30:52.748 UTC [78] LOCATION:  AutoVacLauncherMain, autovacuum.c:384
+2026-11-04T20:30:52.749115476Z 2026-11-04 20:30:52.749 UTC [79] DEBUG:  00000: logical replication launcher started
+2026-11-04T20:30:52.749121977Z 2026-11-04 20:30:52.749 UTC [79] LOCATION:  ApplyLauncherMain, launcher.c:1134
+2026-11-04T20:30:55.537469226Z 2026-11-04 20:30:55.537 UTC [130] DEBUG:  00000: building index "pg_toast_16407_index" on table "pg_toast_16407" serially
+2026-11-04T20:30:55.537485088Z 2026-11-04 20:30:55.537 UTC [130] LOCATION:  index_build, index.c:3063
+2026-11-04T20:30:55.537636894Z 2026-11-04 20:30:55.537 UTC [130] DEBUG:  00000: index "pg_toast_16407_index" can safely use deduplication
+2026-11-04T20:30:55.537645851Z 2026-11-04 20:30:55.537 UTC [130] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:30:55.547772299Z 2026-11-04 20:30:55.547 UTC [130] DEBUG:  00000: building index "ci_i" on table "ci" serially
+2026-11-04T20:30:55.547809734Z 2026-11-04 20:30:55.547 UTC [130] LOCATION:  index_build, index.c:3063
+2026-11-04T20:30:55.550015340Z 2026-11-04 20:30:55.549 UTC [130] ERROR:  54000: index row size 2896 exceeds btree version 4 maximum 2704 for index "ci_i"
+2026-11-04T20:30:55.550046824Z 2026-11-04 20:30:55.549 UTC [130] DETAIL:  Index row references tuple (3,45) in relation "ci".
+2026-11-04T20:30:55.550053359Z 2026-11-04 20:30:55.549 UTC [130] HINT:  Values larger than 1/3 of a buffer page cannot be indexed.
+2026-11-04T20:30:55.550057981Z 	Consider a function index of an MD5 hash of the value, or use full text indexing.
+2026-11-04T20:30:55.550062427Z 2026-11-04 20:30:55.549 UTC [130] LOCATION:  _bt_check_third_page, nbtutils.c:4231
+2026-11-04T20:30:55.550066443Z 2026-11-04 20:30:55.549 UTC [130] STATEMENT:  CREATE INDEX ci_i ON ci(k) INCLUDE(payload);
+2026-11-04T20:30:55.550740826Z 2026-11-04 20:30:55.550 UTC [130] DEBUG:  42P01: relation "ci_i" does not exist
+2026-11-04T20:30:55.550748605Z 2026-11-04 20:30:55.550 UTC [130] LOCATION:  RangeVarGetRelidExtended, namespace.c:636
+2026-11-04T20:30:55.676150672Z 2026-11-04 20:30:55.676 UTC [137] DEBUG:  00000: building index "pg_toast_16417_index" on table "pg_toast_16417" serially
+2026-11-04T20:30:55.676183270Z 2026-11-04 20:30:55.676 UTC [137] LOCATION:  index_build, index.c:3063
+2026-11-04T20:30:55.676382541Z 2026-11-04 20:30:55.676 UTC [137] DEBUG:  00000: index "pg_toast_16417_index" can safely use deduplication
+2026-11-04T20:30:55.676405108Z 2026-11-04 20:30:55.676 UTC [137] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:30:55.691389585Z 2026-11-04 20:30:55.691 UTC [137] DEBUG:  00000: building index "ci_i" on table "ci" serially
+2026-11-04T20:30:55.691427560Z 2026-11-04 20:30:55.691 UTC [137] LOCATION:  index_build, index.c:3063
+2026-11-04T20:30:55.693110585Z 2026-11-04 20:30:55.693 UTC [137] ERROR:  54000: index row size 2896 exceeds btree version 4 maximum 2704 for index "ci_i"
+2026-11-04T20:30:55.693130616Z 2026-11-04 20:30:55.693 UTC [137] DETAIL:  Index row references tuple (1,115) in relation "ci".
+2026-11-04T20:30:55.693136478Z 2026-11-04 20:30:55.693 UTC [137] HINT:  Values larger than 1/3 of a buffer page cannot be indexed.
+2026-11-04T20:30:55.693141011Z 	Consider a function index of an MD5 hash of the value, or use full text indexing.
+2026-11-04T20:30:55.693145636Z 2026-11-04 20:30:55.693 UTC [137] LOCATION:  _bt_check_third_page, nbtutils.c:4231
+2026-11-04T20:30:55.693149918Z 2026-11-04 20:30:55.693 UTC [137] STATEMENT:  CREATE INDEX ci_i ON ci(k DESC) INCLUDE(payload);
+2026-11-04T20:30:55.693958639Z 2026-11-04 20:30:55.693 UTC [137] DEBUG:  42P01: relation "ci_i" does not exist
+2026-11-04T20:30:55.693973379Z 2026-11-04 20:30:55.693 UTC [137] LOCATION:  RangeVarGetRelidExtended, namespace.c:636
+2026-11-04T20:30:55.841234275Z 2026-11-04 20:30:55.841 UTC [144] DEBUG:  00000: building index "pg_toast_16427_index" on table "pg_toast_16427" serially
+2026-11-04T20:30:55.841279465Z 2026-11-04 20:30:55.841 UTC [144] LOCATION:  index_build, index.c:3063
+2026-11-04T20:30:55.841313137Z 2026-11-04 20:30:55.841 UTC [144] DEBUG:  00000: index "pg_toast_16427_index" can safely use deduplication
+2026-11-04T20:30:55.841319502Z 2026-11-04 20:30:55.841 UTC [144] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:30:55.851685917Z 2026-11-04 20:30:55.851 UTC [144] DEBUG:  00000: building index "ci_i" on table "ci" serially
+2026-11-04T20:30:55.851717891Z 2026-11-04 20:30:55.851 UTC [144] LOCATION:  index_build, index.c:3063
+2026-11-04T20:30:55.853136009Z 2026-11-04 20:30:55.853 UTC [144] ERROR:  54000: index row size 2816 exceeds btree version 4 maximum 2704 for index "ci_i"
+2026-11-04T20:30:55.853155735Z 2026-11-04 20:30:55.853 UTC [144] DETAIL:  Index row references tuple (32,80) in relation "ci".
+2026-11-04T20:30:55.853161092Z 2026-11-04 20:30:55.853 UTC [144] HINT:  Values larger than 1/3 of a buffer page cannot be indexed.
+2026-11-04T20:30:55.853165485Z 	Consider a function index of an MD5 hash of the value, or use full text indexing.
+2026-11-04T20:30:55.853170434Z 2026-11-04 20:30:55.853 UTC [144] LOCATION:  _bt_check_third_page, nbtutils.c:4231
+2026-11-04T20:30:55.853174559Z 2026-11-04 20:30:55.853 UTC [144] STATEMENT:  CREATE INDEX ci_i ON ci(k) INCLUDE(payload);
+2026-11-04T20:30:55.853843443Z 2026-11-04 20:30:55.853 UTC [144] DEBUG:  42P01: relation "ci_i" does not exist
+2026-11-04T20:30:55.853861202Z 2026-11-04 20:30:55.853 UTC [144] LOCATION:  RangeVarGetRelidExtended, namespace.c:636
+2026-11-04T20:30:55.984362100Z 2026-11-04 20:30:55.984 UTC [151] DEBUG:  00000: building index "pg_toast_16435_index" on table "pg_toast_16435" serially
+2026-11-04T20:30:55.984394847Z 2026-11-04 20:30:55.984 UTC [151] LOCATION:  index_build, index.c:3063
+2026-11-04T20:30:55.984487466Z 2026-11-04 20:30:55.984 UTC [151] DEBUG:  00000: index "pg_toast_16435_index" can safely use deduplication
+2026-11-04T20:30:55.984505876Z 2026-11-04 20:30:55.984 UTC [151] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:30:55.995367153Z 2026-11-04 20:30:55.995 UTC [151] DEBUG:  00000: building index "ci_i" on table "ci" serially
+2026-11-04T20:30:55.995395868Z 2026-11-04 20:30:55.995 UTC [151] LOCATION:  index_build, index.c:3063
+2026-11-04T20:30:55.997389814Z 2026-11-04 20:30:55.997 UTC [151] ERROR:  54000: index row requires 8320 bytes, maximum size is 8191
+2026-11-04T20:30:55.997405250Z 2026-11-04 20:30:55.997 UTC [151] LOCATION:  index_form_tuple_context, indextuple.c:207
+2026-11-04T20:30:55.997409104Z 2026-11-04 20:30:55.997 UTC [151] STATEMENT:  CREATE INDEX ci_i ON ci(k) INCLUDE(payload);
+2026-11-04T20:30:55.998461049Z 2026-11-04 20:30:55.998 UTC [151] DEBUG:  42P01: relation "ci_i" does not exist
+2026-11-04T20:30:55.998490681Z 2026-11-04 20:30:55.998 UTC [151] LOCATION:  RangeVarGetRelidExtended, namespace.c:636
+2026-11-04T20:30:58.161425731Z 2026-11-04 20:30:58.161 UTC [158] DEBUG:  00000: building index "pg_toast_16443_index" on table "pg_toast_16443" serially
+2026-11-04T20:30:58.161465481Z 2026-11-04 20:30:58.161 UTC [158] LOCATION:  index_build, index.c:3063
+2026-11-04T20:30:58.161503897Z 2026-11-04 20:30:58.161 UTC [158] DEBUG:  00000: index "pg_toast_16443_index" can safely use deduplication
+2026-11-04T20:30:58.161510127Z 2026-11-04 20:30:58.161 UTC [158] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:30:58.176181661Z 2026-11-04 20:30:58.176 UTC [158] DEBUG:  00000: building index "ci_i" on table "ci" serially
+2026-11-04T20:30:58.176204854Z 2026-11-04 20:30:58.176 UTC [158] LOCATION:  index_build, index.c:3063
+2026-11-04T20:30:58.178443896Z 2026-11-04 20:30:58.178 UTC [158] ERROR:  23505: could not create unique index "ci_i"
+2026-11-04T20:30:58.178475337Z 2026-11-04 20:30:58.178 UTC [158] DETAIL:  Key (k)=(1) is duplicated.
+2026-11-04T20:30:58.178481508Z 2026-11-04 20:30:58.178 UTC [158] LOCATION:  comparetup_index_btree_tiebreak, tuplesortvariants.c:1686
+2026-11-04T20:30:58.178486081Z 2026-11-04 20:30:58.178 UTC [158] STATEMENT:  CREATE UNIQUE INDEX ci_i ON ci(k) INCLUDE(payload);
+2026-11-04T20:30:58.179577711Z 2026-11-04 20:30:58.179 UTC [158] DEBUG:  42P01: relation "ci_i" does not exist
+2026-11-04T20:30:58.179586650Z 2026-11-04 20:30:58.179 UTC [158] LOCATION:  RangeVarGetRelidExtended, namespace.c:636
+2026-11-04T20:30:58.337164929Z 2026-11-04 20:30:58.337 UTC [165] DEBUG:  00000: building index "pg_toast_16451_index" on table "pg_toast_16451" serially
+2026-11-04T20:30:58.337189782Z 2026-11-04 20:30:58.337 UTC [165] LOCATION:  index_build, index.c:3063
+2026-11-04T20:30:58.337329811Z 2026-11-04 20:30:58.337 UTC [165] DEBUG:  00000: index "pg_toast_16451_index" can safely use deduplication
+2026-11-04T20:30:58.337344646Z 2026-11-04 20:30:58.337 UTC [165] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:30:58.353697076Z 2026-11-04 20:30:58.353 UTC [165] DEBUG:  00000: building index "ci_i" on table "ci" serially
+2026-11-04T20:30:58.353719581Z 2026-11-04 20:30:58.353 UTC [165] LOCATION:  index_build, index.c:3063
+2026-11-04T20:30:58.356223523Z 2026-11-04 20:30:58.356 UTC [165] ERROR:  54000: index row requires 8320 bytes, maximum size is 8191
+2026-11-04T20:30:58.356244938Z 2026-11-04 20:30:58.356 UTC [165] LOCATION:  index_form_tuple_context, indextuple.c:207
+2026-11-04T20:30:58.356248170Z 2026-11-04 20:30:58.356 UTC [165] STATEMENT:  CREATE UNIQUE INDEX ci_i ON ci(k) INCLUDE(payload);
+2026-11-04T20:30:58.357563847Z 2026-11-04 20:30:58.357 UTC [165] DEBUG:  42P01: relation "ci_i" does not exist
+2026-11-04T20:30:58.357579279Z 2026-11-04 20:30:58.357 UTC [165] LOCATION:  RangeVarGetRelidExtended, namespace.c:636
+2026-11-04T20:30:58.465674654Z 2026-11-04 20:30:58.465 UTC [172] DEBUG:  00000: building index "pg_toast_16459_index" on table "pg_toast_16459" serially
+2026-11-04T20:30:58.465708095Z 2026-11-04 20:30:58.465 UTC [172] LOCATION:  index_build, index.c:3063
+2026-11-04T20:30:58.465786371Z 2026-11-04 20:30:58.465 UTC [172] DEBUG:  00000: index "pg_toast_16459_index" can safely use deduplication
+2026-11-04T20:30:58.465838419Z 2026-11-04 20:30:58.465 UTC [172] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:30:58.474048442Z 2026-11-04 20:30:58.474 UTC [172] DEBUG:  00000: building index "ci_i" on table "ci" serially
+2026-11-04T20:30:58.474070816Z 2026-11-04 20:30:58.474 UTC [172] LOCATION:  index_build, index.c:3063
+2026-11-04T20:30:58.475311515Z 2026-11-04 20:30:58.475 UTC [172] ERROR:  23505: could not create unique index "ci_i"
+2026-11-04T20:30:58.475331877Z 2026-11-04 20:30:58.475 UTC [172] DETAIL:  Key (k)=(1) is duplicated.
+2026-11-04T20:30:58.475337005Z 2026-11-04 20:30:58.475 UTC [172] LOCATION:  comparetup_index_btree_tiebreak, tuplesortvariants.c:1686
+2026-11-04T20:30:58.475341618Z 2026-11-04 20:30:58.475 UTC [172] STATEMENT:  CREATE UNIQUE INDEX ci_i ON ci(k) INCLUDE(payload);
+2026-11-04T20:30:58.476052702Z 2026-11-04 20:30:58.476 UTC [172] DEBUG:  42P01: relation "ci_i" does not exist
+2026-11-04T20:30:58.476064360Z 2026-11-04 20:30:58.476 UTC [172] LOCATION:  RangeVarGetRelidExtended, namespace.c:636
+2026-11-04T20:30:58.609847095Z 2026-11-04 20:30:58.609 UTC [179] DEBUG:  00000: building index "pg_toast_16466_index" on table "pg_toast_16466" with request for 2 parallel workers
+2026-11-04T20:30:58.609880682Z 2026-11-04 20:30:58.609 UTC [179] LOCATION:  index_build, index.c:3068
+2026-11-04T20:30:58.610096100Z 2026-11-04 20:30:58.610 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 179"
+2026-11-04T20:30:58.610120581Z 2026-11-04 20:30:58.610 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:58.610128432Z 2026-11-04 20:30:58.610 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 179"
+2026-11-04T20:30:58.610136959Z 2026-11-04 20:30:58.610 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:58.610150179Z 2026-11-04 20:30:58.610 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 179"
+2026-11-04T20:30:58.610156998Z 2026-11-04 20:30:58.610 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:58.610822415Z 2026-11-04 20:30:58.610 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 179"
+2026-11-04T20:30:58.610836346Z 2026-11-04 20:30:58.610 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:58.616229154Z 2026-11-04 20:30:58.616 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 179"
+2026-11-04T20:30:58.616270544Z 2026-11-04 20:30:58.616 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:58.616278995Z 2026-11-04 20:30:58.616 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 180) exited with exit code 0
+2026-11-04T20:30:58.616287509Z 2026-11-04 20:30:58.616 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:58.620184511Z 2026-11-04 20:30:58.620 UTC [179] DEBUG:  00000: index "pg_toast_16466_index" can safely use deduplication
+2026-11-04T20:30:58.620218852Z 2026-11-04 20:30:58.620 UTC [179] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:30:58.624777069Z 2026-11-04 20:30:58.624 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 179"
+2026-11-04T20:30:58.624814611Z 2026-11-04 20:30:58.624 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:58.624820053Z 2026-11-04 20:30:58.624 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 181) exited with exit code 0
+2026-11-04T20:30:58.624823859Z 2026-11-04 20:30:58.624 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:58.639383955Z 2026-11-04 20:30:58.639 UTC [179] DEBUG:  00000: building index "ci_i" on table "ci" with request for 2 parallel workers
+2026-11-04T20:30:58.639415516Z 2026-11-04 20:30:58.639 UTC [179] LOCATION:  index_build, index.c:3068
+2026-11-04T20:30:58.639551782Z 2026-11-04 20:30:58.639 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 179"
+2026-11-04T20:30:58.639573419Z 2026-11-04 20:30:58.639 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:58.639578711Z 2026-11-04 20:30:58.639 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 179"
+2026-11-04T20:30:58.639583222Z 2026-11-04 20:30:58.639 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:58.639587354Z 2026-11-04 20:30:58.639 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 179"
+2026-11-04T20:30:58.639591617Z 2026-11-04 20:30:58.639 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:58.640103494Z 2026-11-04 20:30:58.640 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 179"
+2026-11-04T20:30:58.640111693Z 2026-11-04 20:30:58.640 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:58.647034962Z 2026-11-04 20:30:58.646 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 179"
+2026-11-04T20:30:58.647066903Z 2026-11-04 20:30:58.646 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:58.647072643Z 2026-11-04 20:30:58.646 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 183) exited with exit code 0
+2026-11-04T20:30:58.647077404Z 2026-11-04 20:30:58.646 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:58.648467262Z 2026-11-04 20:30:58.648 UTC [179] ERROR:  54000: index row size 2896 exceeds btree version 4 maximum 2704 for index "ci_i"
+2026-11-04T20:30:58.648493552Z 2026-11-04 20:30:58.648 UTC [179] DETAIL:  Index row references tuple (3,45) in relation "ci".
+2026-11-04T20:30:58.648498998Z 2026-11-04 20:30:58.648 UTC [179] HINT:  Values larger than 1/3 of a buffer page cannot be indexed.
+2026-11-04T20:30:58.648503659Z 	Consider a function index of an MD5 hash of the value, or use full text indexing.
+2026-11-04T20:30:58.648508171Z 2026-11-04 20:30:58.648 UTC [179] LOCATION:  _bt_check_third_page, nbtutils.c:4231
+2026-11-04T20:30:58.648512552Z 2026-11-04 20:30:58.648 UTC [179] STATEMENT:  CREATE INDEX ci_i ON ci(k) INCLUDE(payload);
+2026-11-04T20:30:58.653050750Z 2026-11-04 20:30:58.652 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 179"
+2026-11-04T20:30:58.653075077Z 2026-11-04 20:30:58.652 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:58.653077450Z 2026-11-04 20:30:58.652 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 182) exited with exit code 0
+2026-11-04T20:30:58.653079431Z 2026-11-04 20:30:58.652 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:58.654561366Z 2026-11-04 20:30:58.654 UTC [179] DEBUG:  42P01: relation "ci_i" does not exist
+2026-11-04T20:30:58.654588104Z 2026-11-04 20:30:58.654 UTC [179] LOCATION:  RangeVarGetRelidExtended, namespace.c:636
+2026-11-04T20:30:58.765164609Z 2026-11-04 20:30:58.765 UTC [190] DEBUG:  00000: building index "pg_toast_16476_index" on table "pg_toast_16476" with request for 2 parallel workers
+2026-11-04T20:30:58.765190672Z 2026-11-04 20:30:58.765 UTC [190] LOCATION:  index_build, index.c:3068
+2026-11-04T20:30:58.765352889Z 2026-11-04 20:30:58.765 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 190"
+2026-11-04T20:30:58.765377000Z 2026-11-04 20:30:58.765 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:58.765385661Z 2026-11-04 20:30:58.765 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 190"
+2026-11-04T20:30:58.765393407Z 2026-11-04 20:30:58.765 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:58.765400535Z 2026-11-04 20:30:58.765 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 190"
+2026-11-04T20:30:58.765408479Z 2026-11-04 20:30:58.765 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:58.765785936Z 2026-11-04 20:30:58.765 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 190"
+2026-11-04T20:30:58.765794687Z 2026-11-04 20:30:58.765 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:58.770422860Z 2026-11-04 20:30:58.770 UTC [190] DEBUG:  00000: index "pg_toast_16476_index" can safely use deduplication
+2026-11-04T20:30:58.770457546Z 2026-11-04 20:30:58.770 UTC [190] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:30:58.773381955Z 2026-11-04 20:30:58.773 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 190"
+2026-11-04T20:30:58.773403253Z 2026-11-04 20:30:58.773 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:58.773408701Z 2026-11-04 20:30:58.773 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 191) exited with exit code 0
+2026-11-04T20:30:58.773413416Z 2026-11-04 20:30:58.773 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:58.773417571Z 2026-11-04 20:30:58.773 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 190"
+2026-11-04T20:30:58.773421689Z 2026-11-04 20:30:58.773 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:58.773425936Z 2026-11-04 20:30:58.773 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 192) exited with exit code 0
+2026-11-04T20:30:58.773430298Z 2026-11-04 20:30:58.773 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:58.782899751Z 2026-11-04 20:30:58.782 UTC [190] DEBUG:  00000: building index "ci_i" on table "ci" with request for 2 parallel workers
+2026-11-04T20:30:58.782931282Z 2026-11-04 20:30:58.782 UTC [190] LOCATION:  index_build, index.c:3068
+2026-11-04T20:30:58.783017680Z 2026-11-04 20:30:58.782 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 190"
+2026-11-04T20:30:58.783038766Z 2026-11-04 20:30:58.782 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:58.783044412Z 2026-11-04 20:30:58.782 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 190"
+2026-11-04T20:30:58.783049214Z 2026-11-04 20:30:58.782 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:58.783053384Z 2026-11-04 20:30:58.782 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 190"
+2026-11-04T20:30:58.783057644Z 2026-11-04 20:30:58.782 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:58.783383888Z 2026-11-04 20:30:58.783 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 190"
+2026-11-04T20:30:58.783391826Z 2026-11-04 20:30:58.783 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:58.787350648Z 2026-11-04 20:30:58.787 UTC [190] ERROR:  54000: index row size 2896 exceeds btree version 4 maximum 2704 for index "ci_i"
+2026-11-04T20:30:58.787386539Z 2026-11-04 20:30:58.787 UTC [190] DETAIL:  Index row references tuple (1,115) in relation "ci".
+2026-11-04T20:30:58.787395911Z 2026-11-04 20:30:58.787 UTC [190] HINT:  Values larger than 1/3 of a buffer page cannot be indexed.
+2026-11-04T20:30:58.787404731Z 	Consider a function index of an MD5 hash of the value, or use full text indexing.
+2026-11-04T20:30:58.787411885Z 2026-11-04 20:30:58.787 UTC [190] LOCATION:  _bt_check_third_page, nbtutils.c:4231
+2026-11-04T20:30:58.787418097Z 2026-11-04 20:30:58.787 UTC [190] STATEMENT:  CREATE INDEX ci_i ON ci(k DESC) INCLUDE(payload);
+2026-11-04T20:30:58.789321629Z 2026-11-04 20:30:58.789 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 190"
+2026-11-04T20:30:58.789332621Z 2026-11-04 20:30:58.789 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:58.789334302Z 2026-11-04 20:30:58.789 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 194) exited with exit code 0
+2026-11-04T20:30:58.789335718Z 2026-11-04 20:30:58.789 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:58.789606107Z 2026-11-04 20:30:58.789 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 190"
+2026-11-04T20:30:58.789624420Z 2026-11-04 20:30:58.789 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:58.789630064Z 2026-11-04 20:30:58.789 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 193) exited with exit code 0
+2026-11-04T20:30:58.789635038Z 2026-11-04 20:30:58.789 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:58.790530209Z 2026-11-04 20:30:58.790 UTC [190] DEBUG:  42P01: relation "ci_i" does not exist
+2026-11-04T20:30:58.790549004Z 2026-11-04 20:30:58.790 UTC [190] LOCATION:  RangeVarGetRelidExtended, namespace.c:636
+2026-11-04T20:30:58.948568569Z 2026-11-04 20:30:58.948 UTC [201] DEBUG:  00000: building index "pg_toast_16486_index" on table "pg_toast_16486" with request for 2 parallel workers
+2026-11-04T20:30:58.948603614Z 2026-11-04 20:30:58.948 UTC [201] LOCATION:  index_build, index.c:3068
+2026-11-04T20:30:58.948866697Z 2026-11-04 20:30:58.948 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 201"
+2026-11-04T20:30:58.948885907Z 2026-11-04 20:30:58.948 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:58.948890282Z 2026-11-04 20:30:58.948 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 201"
+2026-11-04T20:30:58.948893901Z 2026-11-04 20:30:58.948 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:58.948897075Z 2026-11-04 20:30:58.948 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 201"
+2026-11-04T20:30:58.948900229Z 2026-11-04 20:30:58.948 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:58.949443438Z 2026-11-04 20:30:58.949 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 201"
+2026-11-04T20:30:58.949452632Z 2026-11-04 20:30:58.949 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:58.956456468Z 2026-11-04 20:30:58.956 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 201"
+2026-11-04T20:30:58.956480640Z 2026-11-04 20:30:58.956 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:58.956483428Z 2026-11-04 20:30:58.956 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 202) exited with exit code 0
+2026-11-04T20:30:58.956485816Z 2026-11-04 20:30:58.956 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:58.957986929Z 2026-11-04 20:30:58.957 UTC [201] DEBUG:  00000: index "pg_toast_16486_index" can safely use deduplication
+2026-11-04T20:30:58.958013831Z 2026-11-04 20:30:58.957 UTC [201] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:30:58.962164745Z 2026-11-04 20:30:58.962 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 201"
+2026-11-04T20:30:58.962186219Z 2026-11-04 20:30:58.962 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:58.962189516Z 2026-11-04 20:30:58.962 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 203) exited with exit code 0
+2026-11-04T20:30:58.962192184Z 2026-11-04 20:30:58.962 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:58.982172445Z 2026-11-04 20:30:58.982 UTC [201] DEBUG:  00000: building index "ci_i" on table "ci" with request for 2 parallel workers
+2026-11-04T20:30:58.982201503Z 2026-11-04 20:30:58.982 UTC [201] LOCATION:  index_build, index.c:3068
+2026-11-04T20:30:58.982317639Z 2026-11-04 20:30:58.982 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 201"
+2026-11-04T20:30:58.982337483Z 2026-11-04 20:30:58.982 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:58.982340641Z 2026-11-04 20:30:58.982 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 201"
+2026-11-04T20:30:58.982343983Z 2026-11-04 20:30:58.982 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:58.982350934Z 2026-11-04 20:30:58.982 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 201"
+2026-11-04T20:30:58.982355037Z 2026-11-04 20:30:58.982 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:58.982980630Z 2026-11-04 20:30:58.982 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 201"
+2026-11-04T20:30:58.982999701Z 2026-11-04 20:30:58.982 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:58.989917298Z 2026-11-04 20:30:58.989 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 201"
+2026-11-04T20:30:58.989946614Z 2026-11-04 20:30:58.989 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:58.989950603Z 2026-11-04 20:30:58.989 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 204) exited with exit code 0
+2026-11-04T20:30:58.989954090Z 2026-11-04 20:30:58.989 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:58.992046279Z 2026-11-04 20:30:58.991 UTC [201] ERROR:  54000: index row size 2816 exceeds btree version 4 maximum 2704 for index "ci_i"
+2026-11-04T20:30:58.992067734Z 2026-11-04 20:30:58.991 UTC [201] DETAIL:  Index row references tuple (32,80) in relation "ci".
+2026-11-04T20:30:58.992072950Z 2026-11-04 20:30:58.991 UTC [201] HINT:  Values larger than 1/3 of a buffer page cannot be indexed.
+2026-11-04T20:30:58.992078093Z 	Consider a function index of an MD5 hash of the value, or use full text indexing.
+2026-11-04T20:30:58.992085619Z 2026-11-04 20:30:58.991 UTC [201] LOCATION:  _bt_check_third_page, nbtutils.c:4231
+2026-11-04T20:30:58.992093355Z 2026-11-04 20:30:58.991 UTC [201] STATEMENT:  CREATE INDEX ci_i ON ci(k) INCLUDE(payload);
+2026-11-04T20:30:58.996797542Z 2026-11-04 20:30:58.996 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 201"
+2026-11-04T20:30:58.996834523Z 2026-11-04 20:30:58.996 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:58.996839256Z 2026-11-04 20:30:58.996 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 205) exited with exit code 0
+2026-11-04T20:30:58.996843756Z 2026-11-04 20:30:58.996 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:58.998332464Z 2026-11-04 20:30:58.998 UTC [201] DEBUG:  42P01: relation "ci_i" does not exist
+2026-11-04T20:30:58.998364905Z 2026-11-04 20:30:58.998 UTC [201] LOCATION:  RangeVarGetRelidExtended, namespace.c:636
+2026-11-04T20:30:59.077201133Z 2026-11-04 20:30:59.077 UTC [212] DEBUG:  00000: building index "pg_toast_16494_index" on table "pg_toast_16494" with request for 2 parallel workers
+2026-11-04T20:30:59.077246795Z 2026-11-04 20:30:59.077 UTC [212] LOCATION:  index_build, index.c:3068
+2026-11-04T20:30:59.077429017Z 2026-11-04 20:30:59.077 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 212"
+2026-11-04T20:30:59.077450217Z 2026-11-04 20:30:59.077 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:59.077455524Z 2026-11-04 20:30:59.077 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 212"
+2026-11-04T20:30:59.077460100Z 2026-11-04 20:30:59.077 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:59.077469884Z 2026-11-04 20:30:59.077 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 212"
+2026-11-04T20:30:59.077474149Z 2026-11-04 20:30:59.077 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:59.078278177Z 2026-11-04 20:30:59.078 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 212"
+2026-11-04T20:30:59.078292697Z 2026-11-04 20:30:59.078 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:59.083534601Z 2026-11-04 20:30:59.083 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 212"
+2026-11-04T20:30:59.083569851Z 2026-11-04 20:30:59.083 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:59.083575722Z 2026-11-04 20:30:59.083 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 213) exited with exit code 0
+2026-11-04T20:30:59.083580847Z 2026-11-04 20:30:59.083 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:59.086493700Z 2026-11-04 20:30:59.086 UTC [212] DEBUG:  00000: index "pg_toast_16494_index" can safely use deduplication
+2026-11-04T20:30:59.086502484Z 2026-11-04 20:30:59.086 UTC [212] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:30:59.090045574Z 2026-11-04 20:30:59.089 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 212"
+2026-11-04T20:30:59.090083302Z 2026-11-04 20:30:59.089 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:59.090091965Z 2026-11-04 20:30:59.089 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 214) exited with exit code 0
+2026-11-04T20:30:59.090099824Z 2026-11-04 20:30:59.089 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:59.104833424Z 2026-11-04 20:30:59.104 UTC [212] DEBUG:  00000: building index "ci_i" on table "ci" with request for 2 parallel workers
+2026-11-04T20:30:59.104855598Z 2026-11-04 20:30:59.104 UTC [212] LOCATION:  index_build, index.c:3068
+2026-11-04T20:30:59.104999065Z 2026-11-04 20:30:59.104 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 212"
+2026-11-04T20:30:59.105020170Z 2026-11-04 20:30:59.104 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:59.105025811Z 2026-11-04 20:30:59.104 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 212"
+2026-11-04T20:30:59.105030474Z 2026-11-04 20:30:59.104 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:59.105048881Z 2026-11-04 20:30:59.104 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 212"
+2026-11-04T20:30:59.105053769Z 2026-11-04 20:30:59.104 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:59.105599465Z 2026-11-04 20:30:59.105 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 212"
+2026-11-04T20:30:59.105614153Z 2026-11-04 20:30:59.105 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:59.106637289Z 2026-11-04 20:30:59.106 UTC [212] ERROR:  54000: index row requires 8320 bytes, maximum size is 8191
+2026-11-04T20:30:59.106662637Z 2026-11-04 20:30:59.106 UTC [212] LOCATION:  index_form_tuple_context, indextuple.c:207
+2026-11-04T20:30:59.106670518Z 2026-11-04 20:30:59.106 UTC [212] STATEMENT:  CREATE INDEX ci_i ON ci(k) INCLUDE(payload);
+2026-11-04T20:30:59.107681316Z 2026-11-04 20:30:59.107 UTC [216] FATAL:  57P01: terminating background worker "parallel worker" due to administrator command
+2026-11-04T20:30:59.107697300Z 2026-11-04 20:30:59.107 UTC [216] LOCATION:  ProcessInterrupts, postgres.c:3342
+2026-11-04T20:30:59.107820697Z 2026-11-04 20:30:59.107 UTC [215] FATAL:  57P01: terminating background worker "parallel worker" due to administrator command
+2026-11-04T20:30:59.107832655Z 2026-11-04 20:30:59.107 UTC [215] LOCATION:  ProcessInterrupts, postgres.c:3342
+2026-11-04T20:30:59.110308475Z 2026-11-04 20:30:59.110 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 212"
+2026-11-04T20:30:59.110332808Z 2026-11-04 20:30:59.110 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:59.110337764Z 2026-11-04 20:30:59.110 UTC [1] LOG:  00000: background worker "parallel worker" (PID 216) exited with exit code 1
+2026-11-04T20:30:59.110342137Z 2026-11-04 20:30:59.110 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:59.110791000Z 2026-11-04 20:30:59.110 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 212"
+2026-11-04T20:30:59.110802705Z 2026-11-04 20:30:59.110 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:59.110809899Z 2026-11-04 20:30:59.110 UTC [1] LOG:  00000: background worker "parallel worker" (PID 215) exited with exit code 1
+2026-11-04T20:30:59.110818178Z 2026-11-04 20:30:59.110 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:59.111856719Z 2026-11-04 20:30:59.111 UTC [212] DEBUG:  42P01: relation "ci_i" does not exist
+2026-11-04T20:30:59.111867784Z 2026-11-04 20:30:59.111 UTC [212] LOCATION:  RangeVarGetRelidExtended, namespace.c:636
+2026-11-04T20:30:59.224674737Z 2026-11-04 20:30:59.224 UTC [223] DEBUG:  00000: building index "pg_toast_16502_index" on table "pg_toast_16502" with request for 2 parallel workers
+2026-11-04T20:30:59.224706701Z 2026-11-04 20:30:59.224 UTC [223] LOCATION:  index_build, index.c:3068
+2026-11-04T20:30:59.224927306Z 2026-11-04 20:30:59.224 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 223"
+2026-11-04T20:30:59.224948545Z 2026-11-04 20:30:59.224 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:59.224953357Z 2026-11-04 20:30:59.224 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 223"
+2026-11-04T20:30:59.224957673Z 2026-11-04 20:30:59.224 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:59.224966119Z 2026-11-04 20:30:59.224 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 223"
+2026-11-04T20:30:59.224970621Z 2026-11-04 20:30:59.224 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:59.225497408Z 2026-11-04 20:30:59.225 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 223"
+2026-11-04T20:30:59.225518273Z 2026-11-04 20:30:59.225 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:59.231242395Z 2026-11-04 20:30:59.231 UTC [223] DEBUG:  00000: index "pg_toast_16502_index" can safely use deduplication
+2026-11-04T20:30:59.231273568Z 2026-11-04 20:30:59.231 UTC [223] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:30:59.234084476Z 2026-11-04 20:30:59.233 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 223"
+2026-11-04T20:30:59.234120671Z 2026-11-04 20:30:59.233 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:59.234129540Z 2026-11-04 20:30:59.234 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 225) exited with exit code 0
+2026-11-04T20:30:59.234137279Z 2026-11-04 20:30:59.234 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:59.234441136Z 2026-11-04 20:30:59.234 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 223"
+2026-11-04T20:30:59.234466147Z 2026-11-04 20:30:59.234 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:59.234474411Z 2026-11-04 20:30:59.234 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 224) exited with exit code 0
+2026-11-04T20:30:59.234482213Z 2026-11-04 20:30:59.234 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:59.244779900Z 2026-11-04 20:30:59.244 UTC [223] DEBUG:  00000: building index "ci_i" on table "ci" with request for 2 parallel workers
+2026-11-04T20:30:59.244810824Z 2026-11-04 20:30:59.244 UTC [223] LOCATION:  index_build, index.c:3068
+2026-11-04T20:30:59.244937296Z 2026-11-04 20:30:59.244 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 223"
+2026-11-04T20:30:59.244963565Z 2026-11-04 20:30:59.244 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:59.244972334Z 2026-11-04 20:30:59.244 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 223"
+2026-11-04T20:30:59.244980426Z 2026-11-04 20:30:59.244 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:59.244987799Z 2026-11-04 20:30:59.244 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 223"
+2026-11-04T20:30:59.244995100Z 2026-11-04 20:30:59.244 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:59.245434307Z 2026-11-04 20:30:59.245 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 223"
+2026-11-04T20:30:59.245442185Z 2026-11-04 20:30:59.245 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:59.246264966Z 2026-11-04 20:30:59.246 UTC [223] ERROR:  23505: could not create unique index "ci_i"
+2026-11-04T20:30:59.246293215Z 2026-11-04 20:30:59.246 UTC [223] DETAIL:  Key (k)=(1) is duplicated.
+2026-11-04T20:30:59.246300472Z 2026-11-04 20:30:59.246 UTC [223] LOCATION:  comparetup_index_btree_tiebreak, tuplesortvariants.c:1686
+2026-11-04T20:30:59.246307545Z 2026-11-04 20:30:59.246 UTC [223] STATEMENT:  CREATE UNIQUE INDEX ci_i ON ci(k) INCLUDE(payload);
+2026-11-04T20:30:59.246665477Z 2026-11-04 20:30:59.246 UTC [226] ERROR:  55000: could not map dynamic shared memory segment
+2026-11-04T20:30:59.246675229Z 2026-11-04 20:30:59.246 UTC [226] LOCATION:  ParallelWorkerMain, parallel.c:1353
+2026-11-04T20:30:59.247028830Z 2026-11-04 20:30:59.246 UTC [227] ERROR:  55000: could not map dynamic shared memory segment
+2026-11-04T20:30:59.247050502Z 2026-11-04 20:30:59.246 UTC [227] LOCATION:  ParallelWorkerMain, parallel.c:1353
+2026-11-04T20:30:59.253702641Z 2026-11-04 20:30:59.253 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 223"
+2026-11-04T20:30:59.253731308Z 2026-11-04 20:30:59.253 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:59.253739198Z 2026-11-04 20:30:59.253 UTC [1] LOG:  00000: background worker "parallel worker" (PID 226) exited with exit code 1
+2026-11-04T20:30:59.253746675Z 2026-11-04 20:30:59.253 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:59.253753253Z 2026-11-04 20:30:59.253 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 223"
+2026-11-04T20:30:59.253760714Z 2026-11-04 20:30:59.253 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:59.253767873Z 2026-11-04 20:30:59.253 UTC [1] LOG:  00000: background worker "parallel worker" (PID 227) exited with exit code 1
+2026-11-04T20:30:59.253774700Z 2026-11-04 20:30:59.253 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:59.255319104Z 2026-11-04 20:30:59.255 UTC [223] DEBUG:  42P01: relation "ci_i" does not exist
+2026-11-04T20:30:59.255332596Z 2026-11-04 20:30:59.255 UTC [223] LOCATION:  RangeVarGetRelidExtended, namespace.c:636
+2026-11-04T20:30:59.409207845Z 2026-11-04 20:30:59.409 UTC [234] DEBUG:  00000: building index "pg_toast_16510_index" on table "pg_toast_16510" with request for 2 parallel workers
+2026-11-04T20:30:59.409228679Z 2026-11-04 20:30:59.409 UTC [234] LOCATION:  index_build, index.c:3068
+2026-11-04T20:30:59.409920929Z 2026-11-04 20:30:59.409 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 234"
+2026-11-04T20:30:59.409938096Z 2026-11-04 20:30:59.409 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:59.409940763Z 2026-11-04 20:30:59.409 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 234"
+2026-11-04T20:30:59.409950333Z 2026-11-04 20:30:59.409 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:59.409952472Z 2026-11-04 20:30:59.409 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 234"
+2026-11-04T20:30:59.409954595Z 2026-11-04 20:30:59.409 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:59.410322859Z 2026-11-04 20:30:59.410 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 234"
+2026-11-04T20:30:59.410328970Z 2026-11-04 20:30:59.410 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:59.417272359Z 2026-11-04 20:30:59.417 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 234"
+2026-11-04T20:30:59.417298772Z 2026-11-04 20:30:59.417 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:59.417301532Z 2026-11-04 20:30:59.417 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 235) exited with exit code 0
+2026-11-04T20:30:59.417304075Z 2026-11-04 20:30:59.417 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:59.417908461Z 2026-11-04 20:30:59.417 UTC [234] DEBUG:  00000: index "pg_toast_16510_index" can safely use deduplication
+2026-11-04T20:30:59.417916403Z 2026-11-04 20:30:59.417 UTC [234] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:30:59.419849821Z 2026-11-04 20:30:59.419 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 234"
+2026-11-04T20:30:59.419861500Z 2026-11-04 20:30:59.419 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:59.419863913Z 2026-11-04 20:30:59.419 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 236) exited with exit code 0
+2026-11-04T20:30:59.419866413Z 2026-11-04 20:30:59.419 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:59.432245934Z 2026-11-04 20:30:59.432 UTC [234] DEBUG:  00000: building index "ci_i" on table "ci" with request for 2 parallel workers
+2026-11-04T20:30:59.432268601Z 2026-11-04 20:30:59.432 UTC [234] LOCATION:  index_build, index.c:3068
+2026-11-04T20:30:59.433063011Z 2026-11-04 20:30:59.432 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 234"
+2026-11-04T20:30:59.433076653Z 2026-11-04 20:30:59.432 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:59.433080002Z 2026-11-04 20:30:59.432 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 234"
+2026-11-04T20:30:59.433082851Z 2026-11-04 20:30:59.432 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:59.433085477Z 2026-11-04 20:30:59.432 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 234"
+2026-11-04T20:30:59.433088117Z 2026-11-04 20:30:59.432 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:59.433090797Z 2026-11-04 20:30:59.432 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 234"
+2026-11-04T20:30:59.433102213Z 2026-11-04 20:30:59.432 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:59.435800872Z 2026-11-04 20:30:59.435 UTC [234] ERROR:  54000: index row requires 8320 bytes, maximum size is 8191
+2026-11-04T20:30:59.435836304Z 2026-11-04 20:30:59.435 UTC [234] LOCATION:  index_form_tuple_context, indextuple.c:207
+2026-11-04T20:30:59.435839608Z 2026-11-04 20:30:59.435 UTC [234] STATEMENT:  CREATE UNIQUE INDEX ci_i ON ci(k) INCLUDE(payload);
+2026-11-04T20:30:59.437994233Z 2026-11-04 20:30:59.436 GMT [238] FATAL:  terminating background worker "parallel worker" due to administrator command
+2026-11-04T20:30:59.438017697Z 2026-11-04 20:30:59.436 GMT [237] FATAL:  terminating background worker "parallel worker" due to administrator command
+2026-11-04T20:30:59.439698400Z 2026-11-04 20:30:59.439 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 234"
+2026-11-04T20:30:59.439713395Z 2026-11-04 20:30:59.439 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:59.439716629Z 2026-11-04 20:30:59.439 UTC [1] LOG:  00000: background worker "parallel worker" (PID 237) exited with exit code 1
+2026-11-04T20:30:59.439719492Z 2026-11-04 20:30:59.439 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:59.439875718Z 2026-11-04 20:30:59.439 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 234"
+2026-11-04T20:30:59.439886527Z 2026-11-04 20:30:59.439 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:59.440005267Z 2026-11-04 20:30:59.439 UTC [1] LOG:  00000: background worker "parallel worker" (PID 238) exited with exit code 1
+2026-11-04T20:30:59.440015388Z 2026-11-04 20:30:59.439 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:59.441035466Z 2026-11-04 20:30:59.440 UTC [234] DEBUG:  42P01: relation "ci_i" does not exist
+2026-11-04T20:30:59.441047949Z 2026-11-04 20:30:59.440 UTC [234] LOCATION:  RangeVarGetRelidExtended, namespace.c:636
+2026-11-04T20:30:59.525507743Z 2026-11-04 20:30:59.525 UTC [245] DEBUG:  00000: building index "pg_toast_16518_index" on table "pg_toast_16518" with request for 2 parallel workers
+2026-11-04T20:30:59.525533131Z 2026-11-04 20:30:59.525 UTC [245] LOCATION:  index_build, index.c:3068
+2026-11-04T20:30:59.525709608Z 2026-11-04 20:30:59.525 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 245"
+2026-11-04T20:30:59.525733016Z 2026-11-04 20:30:59.525 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:59.525741285Z 2026-11-04 20:30:59.525 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 245"
+2026-11-04T20:30:59.525748638Z 2026-11-04 20:30:59.525 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:59.525754529Z 2026-11-04 20:30:59.525 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 245"
+2026-11-04T20:30:59.525761071Z 2026-11-04 20:30:59.525 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:59.526164351Z 2026-11-04 20:30:59.526 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 245"
+2026-11-04T20:30:59.526177950Z 2026-11-04 20:30:59.526 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:59.531585985Z 2026-11-04 20:30:59.531 UTC [245] DEBUG:  00000: index "pg_toast_16518_index" can safely use deduplication
+2026-11-04T20:30:59.531619505Z 2026-11-04 20:30:59.531 UTC [245] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:30:59.531811195Z 2026-11-04 20:30:59.531 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 245"
+2026-11-04T20:30:59.531826379Z 2026-11-04 20:30:59.531 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:59.531830276Z 2026-11-04 20:30:59.531 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 247) exited with exit code 0
+2026-11-04T20:30:59.531833602Z 2026-11-04 20:30:59.531 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:59.535426066Z 2026-11-04 20:30:59.535 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 245"
+2026-11-04T20:30:59.535457601Z 2026-11-04 20:30:59.535 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:59.535463383Z 2026-11-04 20:30:59.535 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 246) exited with exit code 0
+2026-11-04T20:30:59.535468296Z 2026-11-04 20:30:59.535 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:59.544054280Z 2026-11-04 20:30:59.544 UTC [245] DEBUG:  00000: building index "ci_i" on table "ci" with request for 2 parallel workers
+2026-11-04T20:30:59.544072854Z 2026-11-04 20:30:59.544 UTC [245] LOCATION:  index_build, index.c:3068
+2026-11-04T20:30:59.544164931Z 2026-11-04 20:30:59.544 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 245"
+2026-11-04T20:30:59.544174705Z 2026-11-04 20:30:59.544 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:59.544176672Z 2026-11-04 20:30:59.544 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 245"
+2026-11-04T20:30:59.544178553Z 2026-11-04 20:30:59.544 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:30:59.544180040Z 2026-11-04 20:30:59.544 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 245"
+2026-11-04T20:30:59.544181570Z 2026-11-04 20:30:59.544 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:59.544524195Z 2026-11-04 20:30:59.544 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 245"
+2026-11-04T20:30:59.544531750Z 2026-11-04 20:30:59.544 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:30:59.545439144Z 2026-11-04 20:30:59.545 UTC [245] ERROR:  23505: could not create unique index "ci_i"
+2026-11-04T20:30:59.545443761Z 2026-11-04 20:30:59.545 UTC [245] DETAIL:  Key (k)=(1) is duplicated.
+2026-11-04T20:30:59.545445415Z 2026-11-04 20:30:59.545 UTC [245] LOCATION:  comparetup_index_btree_tiebreak, tuplesortvariants.c:1686
+2026-11-04T20:30:59.545455363Z 2026-11-04 20:30:59.545 UTC [245] STATEMENT:  CREATE UNIQUE INDEX ci_i ON ci(k) INCLUDE(payload);
+2026-11-04T20:30:59.546300835Z 2026-11-04 20:30:59.546 UTC [249] FATAL:  57P01: terminating background worker "parallel worker" due to administrator command
+2026-11-04T20:30:59.546313278Z 2026-11-04 20:30:59.546 UTC [249] LOCATION:  ProcessInterrupts, postgres.c:3342
+2026-11-04T20:30:59.547761935Z 2026-11-04 20:30:59.547 UTC [248] FATAL:  57P01: terminating background worker "parallel worker" due to administrator command
+2026-11-04T20:30:59.547775826Z 2026-11-04 20:30:59.547 UTC [248] LOCATION:  ProcessInterrupts, postgres.c:3342
+2026-11-04T20:30:59.548415773Z 2026-11-04 20:30:59.548 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 245"
+2026-11-04T20:30:59.548421334Z 2026-11-04 20:30:59.548 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:59.548424081Z 2026-11-04 20:30:59.548 UTC [1] LOG:  00000: background worker "parallel worker" (PID 249) exited with exit code 1
+2026-11-04T20:30:59.548426970Z 2026-11-04 20:30:59.548 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:59.552102450Z 2026-11-04 20:30:59.552 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 245"
+2026-11-04T20:30:59.552125920Z 2026-11-04 20:30:59.552 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:30:59.552129772Z 2026-11-04 20:30:59.552 UTC [1] LOG:  00000: background worker "parallel worker" (PID 248) exited with exit code 1
+2026-11-04T20:30:59.552132817Z 2026-11-04 20:30:59.552 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:30:59.553492289Z 2026-11-04 20:30:59.553 UTC [245] DEBUG:  42P01: relation "ci_i" does not exist
+2026-11-04T20:30:59.553501638Z 2026-11-04 20:30:59.553 UTC [245] LOCATION:  RangeVarGetRelidExtended, namespace.c:636
+2026-11-04T20:30:59.687490657Z 2026-11-04 20:30:59.687 UTC [256] DEBUG:  00000: building index "pg_toast_16525_index" on table "pg_toast_16525" serially
+2026-11-04T20:30:59.687518399Z 2026-11-04 20:30:59.687 UTC [256] LOCATION:  index_build, index.c:3063
+2026-11-04T20:30:59.687686050Z 2026-11-04 20:30:59.687 UTC [256] DEBUG:  00000: index "pg_toast_16525_index" can safely use deduplication
+2026-11-04T20:30:59.687701139Z 2026-11-04 20:30:59.687 UTC [256] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:30:59.688477531Z 2026-11-04 20:30:59.688 UTC [256] DEBUG:  00000: CREATE TABLE / PRIMARY KEY will create implicit index "cs_pkey" for table "cs"
+2026-11-04T20:30:59.688496825Z 2026-11-04 20:30:59.688 UTC [256] LOCATION:  DefineIndex, indexcmds.c:1211
+2026-11-04T20:30:59.688982591Z 2026-11-04 20:30:59.688 UTC [256] DEBUG:  00000: building index "cs_pkey" on table "cs" serially
+2026-11-04T20:30:59.688996009Z 2026-11-04 20:30:59.688 UTC [256] LOCATION:  index_build, index.c:3063
+2026-11-04T20:30:59.689045739Z 2026-11-04 20:30:59.689 UTC [256] DEBUG:  00000: index "cs_pkey" can safely use deduplication
+2026-11-04T20:30:59.689054188Z 2026-11-04 20:30:59.689 UTC [256] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:30:59.690423618Z 2026-11-04 20:30:59.690 UTC [256] DEBUG:  00000: building index "cs_i" on table "cs" serially
+2026-11-04T20:30:59.690443803Z 2026-11-04 20:30:59.690 UTC [256] LOCATION:  index_build, index.c:3063
+2026-11-04T20:30:59.700348036Z 2026-11-04 20:30:59.700 UTC [256] ERROR:  54000: index row size 2816 exceeds btree version 4 maximum 2704 for index "cs_i"
+2026-11-04T20:30:59.700371971Z 2026-11-04 20:30:59.700 UTC [256] DETAIL:  Index row references tuple (0,2) in relation "cs".
+2026-11-04T20:30:59.700376710Z 2026-11-04 20:30:59.700 UTC [256] HINT:  Values larger than 1/3 of a buffer page cannot be indexed.
+2026-11-04T20:30:59.700379973Z 	Consider a function index of an MD5 hash of the value, or use full text indexing.
+2026-11-04T20:30:59.700383238Z 2026-11-04 20:30:59.700 UTC [256] LOCATION:  _bt_check_third_page, nbtutils.c:4231
+2026-11-04T20:30:59.700386229Z 2026-11-04 20:30:59.700 UTC [256] STATEMENT:  INSERT INTO cs VALUES (2, cs_text(2800));
+2026-11-04T20:30:59.704044490Z 2026-11-04 20:30:59.703 UTC [256] ERROR:  54000: index row size 2816 exceeds btree version 4 maximum 2704 for index "cs_i"
+2026-11-04T20:30:59.704078396Z 2026-11-04 20:30:59.703 UTC [256] DETAIL:  Index row references tuple (0,4) in relation "cs".
+2026-11-04T20:30:59.704085120Z 2026-11-04 20:30:59.703 UTC [256] HINT:  Values larger than 1/3 of a buffer page cannot be indexed.
+2026-11-04T20:30:59.704089810Z 	Consider a function index of an MD5 hash of the value, or use full text indexing.
+2026-11-04T20:30:59.704094410Z 2026-11-04 20:30:59.703 UTC [256] LOCATION:  _bt_check_third_page, nbtutils.c:4231
+2026-11-04T20:30:59.704098400Z 2026-11-04 20:30:59.703 UTC [256] STATEMENT:  INSERT INTO cs VALUES (2, 'small'), (3, cs_text(2800));
+2026-11-04T20:30:59.716873457Z 2026-11-04 20:30:59.716 UTC [256] ERROR:  54000: index row size 2816 exceeds btree version 4 maximum 2704 for index "cs_i"
+2026-11-04T20:30:59.716912979Z 2026-11-04 20:30:59.716 UTC [256] DETAIL:  Index row references tuple (0,6) in relation "cs".
+2026-11-04T20:30:59.716922052Z 2026-11-04 20:30:59.716 UTC [256] HINT:  Values larger than 1/3 of a buffer page cannot be indexed.
+2026-11-04T20:30:59.716929549Z 	Consider a function index of an MD5 hash of the value, or use full text indexing.
+2026-11-04T20:30:59.716937216Z 2026-11-04 20:30:59.716 UTC [256] LOCATION:  _bt_check_third_page, nbtutils.c:4231
+2026-11-04T20:30:59.716943697Z 2026-11-04 20:30:59.716 UTC [256] STATEMENT:  UPDATE cs SET payload=cs_text(2800) WHERE id=1;
+2026-11-04T20:30:59.722575271Z 2026-11-04 20:30:59.722 UTC [256] ERROR:  54000: index row size 2816 exceeds btree version 4 maximum 2704 for index "cs_i"
+2026-11-04T20:30:59.722608331Z 2026-11-04 20:30:59.722 UTC [256] DETAIL:  Index row references tuple (0,7) in relation "cs".
+2026-11-04T20:30:59.722614092Z 2026-11-04 20:30:59.722 UTC [256] HINT:  Values larger than 1/3 of a buffer page cannot be indexed.
+2026-11-04T20:30:59.722618750Z 	Consider a function index of an MD5 hash of the value, or use full text indexing.
+2026-11-04T20:30:59.722634971Z 2026-11-04 20:30:59.722 UTC [256] LOCATION:  _bt_check_third_page, nbtutils.c:4231
+2026-11-04T20:30:59.722638984Z 2026-11-04 20:30:59.722 UTC [256] STATEMENT:  INSERT INTO cs VALUES (1, cs_text(2800)) ON CONFLICT(id) DO UPDATE SET payload=EXCLUDED.payload;
+2026-11-04T20:30:59.726843590Z 2026-11-04 20:30:59.726 UTC [256] ERROR:  54000: index row size 2816 exceeds btree version 4 maximum 2704 for index "cs_i"
+2026-11-04T20:30:59.726872177Z 2026-11-04 20:30:59.726 UTC [256] DETAIL:  Index row references tuple (0,8) in relation "cs".
+2026-11-04T20:30:59.726875919Z 2026-11-04 20:30:59.726 UTC [256] HINT:  Values larger than 1/3 of a buffer page cannot be indexed.
+2026-11-04T20:30:59.726878665Z 	Consider a function index of an MD5 hash of the value, or use full text indexing.
+2026-11-04T20:30:59.726881487Z 2026-11-04 20:30:59.726 UTC [256] LOCATION:  _bt_check_third_page, nbtutils.c:4231
+2026-11-04T20:30:59.726883992Z 2026-11-04 20:30:59.726 UTC [256] STATEMENT:  INSERT INTO cs VALUES (5, cs_text(2800)) ON CONFLICT DO NOTHING;
+2026-11-04T20:30:59.873038140Z 2026-11-04 20:30:59.872 UTC [263] DEBUG:  00000: building index "pg_toast_16540_index" on table "pg_toast_16540" serially
+2026-11-04T20:30:59.873074483Z 2026-11-04 20:30:59.872 UTC [263] LOCATION:  index_build, index.c:3063
+2026-11-04T20:30:59.873081069Z 2026-11-04 20:30:59.872 UTC [263] DEBUG:  00000: index "pg_toast_16540_index" can safely use deduplication
+2026-11-04T20:30:59.873085935Z 2026-11-04 20:30:59.872 UTC [263] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:30:59.873509250Z 2026-11-04 20:30:59.873 UTC [263] DEBUG:  00000: CREATE TABLE / PRIMARY KEY will create implicit index "cs_pkey" for table "cs"
+2026-11-04T20:30:59.873532679Z 2026-11-04 20:30:59.873 UTC [263] LOCATION:  DefineIndex, indexcmds.c:1211
+2026-11-04T20:30:59.873836045Z 2026-11-04 20:30:59.873 UTC [263] DEBUG:  00000: building index "cs_pkey" on table "cs" serially
+2026-11-04T20:30:59.873848426Z 2026-11-04 20:30:59.873 UTC [263] LOCATION:  index_build, index.c:3063
+2026-11-04T20:30:59.873884218Z 2026-11-04 20:30:59.873 UTC [263] DEBUG:  00000: index "cs_pkey" can safely use deduplication
+2026-11-04T20:30:59.873893696Z 2026-11-04 20:30:59.873 UTC [263] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:30:59.874736542Z 2026-11-04 20:30:59.874 UTC [263] DEBUG:  00000: building index "cs_i" on table "cs" serially
+2026-11-04T20:30:59.874748810Z 2026-11-04 20:30:59.874 UTC [263] LOCATION:  index_build, index.c:3063
+2026-11-04T20:30:59.883564227Z 2026-11-04 20:30:59.883 UTC [263] ERROR:  54000: index row requires 8320 bytes, maximum size is 8191
+2026-11-04T20:30:59.883597735Z 2026-11-04 20:30:59.883 UTC [263] LOCATION:  index_form_tuple_context, indextuple.c:207
+2026-11-04T20:30:59.883603329Z 2026-11-04 20:30:59.883 UTC [263] STATEMENT:  INSERT INTO cs VALUES (2, cs_text(8300));
+2026-11-04T20:30:59.891210446Z 2026-11-04 20:30:59.890 UTC [263] ERROR:  54000: index row requires 8320 bytes, maximum size is 8191
+2026-11-04T20:30:59.891246647Z 2026-11-04 20:30:59.890 UTC [263] LOCATION:  index_form_tuple_context, indextuple.c:207
+2026-11-04T20:30:59.891277893Z 2026-11-04 20:30:59.890 UTC [263] STATEMENT:  INSERT INTO cs VALUES (2, 'small'), (3, cs_text(8300));
+2026-11-04T20:30:59.899288087Z 2026-11-04 20:30:59.899 UTC [263] ERROR:  54000: index row requires 8320 bytes, maximum size is 8191
+2026-11-04T20:30:59.899304772Z 2026-11-04 20:30:59.899 UTC [263] LOCATION:  index_form_tuple_context, indextuple.c:207
+2026-11-04T20:30:59.899306631Z 2026-11-04 20:30:59.899 UTC [263] STATEMENT:  UPDATE cs SET payload=cs_text(8300) WHERE id=1;
+2026-11-04T20:30:59.903220772Z 2026-11-04 20:30:59.903 UTC [263] ERROR:  54000: index row requires 8320 bytes, maximum size is 8191
+2026-11-04T20:30:59.903236340Z 2026-11-04 20:30:59.903 UTC [263] LOCATION:  index_form_tuple_context, indextuple.c:207
+2026-11-04T20:30:59.903239591Z 2026-11-04 20:30:59.903 UTC [263] STATEMENT:  INSERT INTO cs VALUES (1, cs_text(8300)) ON CONFLICT(id) DO UPDATE SET payload=EXCLUDED.payload;
+2026-11-04T20:30:59.906818074Z 2026-11-04 20:30:59.906 UTC [263] ERROR:  54000: index row requires 8320 bytes, maximum size is 8191
+2026-11-04T20:30:59.906838223Z 2026-11-04 20:30:59.906 UTC [263] LOCATION:  index_form_tuple_context, indextuple.c:207
+2026-11-04T20:30:59.906843331Z 2026-11-04 20:30:59.906 UTC [263] STATEMENT:  INSERT INTO cs VALUES (5, cs_text(8300)) ON CONFLICT DO NOTHING;
+2026-11-04T20:31:00.051652907Z 2026-11-04 20:31:00.051 UTC [270] DEBUG:  00000: building index "pg_toast_16554_index" on table "pg_toast_16554" serially
+2026-11-04T20:31:00.051688386Z 2026-11-04 20:31:00.051 UTC [270] LOCATION:  index_build, index.c:3063
+2026-11-04T20:31:00.051913217Z 2026-11-04 20:31:00.051 UTC [270] DEBUG:  00000: index "pg_toast_16554_index" can safely use deduplication
+2026-11-04T20:31:00.051934204Z 2026-11-04 20:31:00.051 UTC [270] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:31:00.154037896Z 2026-11-04 20:31:00.153 UTC [270] DEBUG:  00000: building index "ce_i" on table "ce" serially
+2026-11-04T20:31:00.154058953Z 2026-11-04 20:31:00.153 UTC [270] LOCATION:  index_build, index.c:3063
+2026-11-04T20:31:00.365324411Z 2026-11-04 20:31:00.365 UTC [277] DEBUG:  00000: building index "pg_toast_16560_index" on table "pg_toast_16560" with request for 2 parallel workers
+2026-11-04T20:31:00.365352387Z 2026-11-04 20:31:00.365 UTC [277] LOCATION:  index_build, index.c:3068
+2026-11-04T20:31:00.365535759Z 2026-11-04 20:31:00.365 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 277"
+2026-11-04T20:31:00.365549446Z 2026-11-04 20:31:00.365 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:31:00.365552561Z 2026-11-04 20:31:00.365 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 277"
+2026-11-04T20:31:00.365554905Z 2026-11-04 20:31:00.365 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:31:00.365556897Z 2026-11-04 20:31:00.365 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 277"
+2026-11-04T20:31:00.365559197Z 2026-11-04 20:31:00.365 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:31:00.366015848Z 2026-11-04 20:31:00.365 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 277"
+2026-11-04T20:31:00.366028632Z 2026-11-04 20:31:00.365 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:31:00.371456080Z 2026-11-04 20:31:00.371 UTC [277] DEBUG:  00000: index "pg_toast_16560_index" can safely use deduplication
+2026-11-04T20:31:00.371482798Z 2026-11-04 20:31:00.371 UTC [277] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:31:00.372466046Z 2026-11-04 20:31:00.372 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 277"
+2026-11-04T20:31:00.372476082Z 2026-11-04 20:31:00.372 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:31:00.372477693Z 2026-11-04 20:31:00.372 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 278) exited with exit code 0
+2026-11-04T20:31:00.372479233Z 2026-11-04 20:31:00.372 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:31:00.374133106Z 2026-11-04 20:31:00.374 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 277"
+2026-11-04T20:31:00.374151783Z 2026-11-04 20:31:00.374 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:31:00.374154643Z 2026-11-04 20:31:00.374 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 279) exited with exit code 0
+2026-11-04T20:31:00.374157169Z 2026-11-04 20:31:00.374 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:31:00.426295569Z 2026-11-04 20:31:00.426 UTC [277] DEBUG:  00000: building index "ce_i" on table "ce" with request for 2 parallel workers
+2026-11-04T20:31:00.426315232Z 2026-11-04 20:31:00.426 UTC [277] LOCATION:  index_build, index.c:3068
+2026-11-04T20:31:00.426422904Z 2026-11-04 20:31:00.426 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 277"
+2026-11-04T20:31:00.426440691Z 2026-11-04 20:31:00.426 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:31:00.426445004Z 2026-11-04 20:31:00.426 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 277"
+2026-11-04T20:31:00.426448694Z 2026-11-04 20:31:00.426 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:31:00.426452059Z 2026-11-04 20:31:00.426 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 277"
+2026-11-04T20:31:00.426455462Z 2026-11-04 20:31:00.426 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:31:00.426885209Z 2026-11-04 20:31:00.426 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 277"
+2026-11-04T20:31:00.426894611Z 2026-11-04 20:31:00.426 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:31:00.443009494Z 2026-11-04 20:31:00.442 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 277"
+2026-11-04T20:31:00.443041117Z 2026-11-04 20:31:00.442 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:31:00.443046087Z 2026-11-04 20:31:00.442 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 281) exited with exit code 0
+2026-11-04T20:31:00.443061192Z 2026-11-04 20:31:00.442 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:31:00.443175334Z 2026-11-04 20:31:00.443 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 277"
+2026-11-04T20:31:00.443199717Z 2026-11-04 20:31:00.443 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:31:00.443206028Z 2026-11-04 20:31:00.443 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 280) exited with exit code 0
+2026-11-04T20:31:00.443210801Z 2026-11-04 20:31:00.443 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:31:00.608946118Z 2026-11-04 20:31:00.608 UTC [288] DEBUG:  00000: building index "pg_toast_16566_index" on table "pg_toast_16566" serially
+2026-11-04T20:31:00.608966072Z 2026-11-04 20:31:00.608 UTC [288] LOCATION:  index_build, index.c:3063
+2026-11-04T20:31:00.608990110Z 2026-11-04 20:31:00.608 UTC [288] DEBUG:  00000: index "pg_toast_16566_index" can safely use deduplication
+2026-11-04T20:31:00.608992467Z 2026-11-04 20:31:00.608 UTC [288] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:31:00.742928533Z 2026-11-04 20:31:00.742 UTC [288] DEBUG:  00000: building index "ce_i" on table "ce" serially
+2026-11-04T20:31:00.742950475Z 2026-11-04 20:31:00.742 UTC [288] LOCATION:  index_build, index.c:3063
+2026-11-04T20:31:00.766261446Z 2026-11-04 20:31:00.766 UTC [288] ERROR:  54000: index row size 3920 exceeds btree version 4 maximum 2704 for index "ce_i"
+2026-11-04T20:31:00.766290177Z 2026-11-04 20:31:00.766 UTC [288] DETAIL:  Index row references tuple (0,1) in relation "ce".
+2026-11-04T20:31:00.766293205Z 2026-11-04 20:31:00.766 UTC [288] HINT:  Values larger than 1/3 of a buffer page cannot be indexed.
+2026-11-04T20:31:00.766295184Z 	Consider a function index of an MD5 hash of the value, or use full text indexing.
+2026-11-04T20:31:00.766297663Z 2026-11-04 20:31:00.766 UTC [288] LOCATION:  _bt_check_third_page, nbtutils.c:4231
+2026-11-04T20:31:00.766300191Z 2026-11-04 20:31:00.766 UTC [288] STATEMENT:  CREATE INDEX ce_i ON ce(k) INCLUDE(p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15);
+2026-11-04T20:31:00.773583703Z 2026-11-04 20:31:00.773 UTC [288] DEBUG:  42P01: relation "ce_i" does not exist
+2026-11-04T20:31:00.773605047Z 2026-11-04 20:31:00.773 UTC [288] LOCATION:  RangeVarGetRelidExtended, namespace.c:636
+2026-11-04T20:31:00.898689130Z 2026-11-04 20:31:00.898 UTC [295] DEBUG:  00000: building index "pg_toast_16572_index" on table "pg_toast_16572" with request for 2 parallel workers
+2026-11-04T20:31:00.898723194Z 2026-11-04 20:31:00.898 UTC [295] LOCATION:  index_build, index.c:3068
+2026-11-04T20:31:00.898938942Z 2026-11-04 20:31:00.898 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 295"
+2026-11-04T20:31:00.898954426Z 2026-11-04 20:31:00.898 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:31:00.898958904Z 2026-11-04 20:31:00.898 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 295"
+2026-11-04T20:31:00.898975966Z 2026-11-04 20:31:00.898 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:31:00.898979881Z 2026-11-04 20:31:00.898 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 295"
+2026-11-04T20:31:00.898983502Z 2026-11-04 20:31:00.898 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:31:00.899591093Z 2026-11-04 20:31:00.899 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 295"
+2026-11-04T20:31:00.899601871Z 2026-11-04 20:31:00.899 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:31:00.904807745Z 2026-11-04 20:31:00.904 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 295"
+2026-11-04T20:31:00.904828376Z 2026-11-04 20:31:00.904 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:31:00.904832453Z 2026-11-04 20:31:00.904 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 296) exited with exit code 0
+2026-11-04T20:31:00.904836208Z 2026-11-04 20:31:00.904 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:31:00.908096491Z 2026-11-04 20:31:00.907 UTC [295] DEBUG:  00000: index "pg_toast_16572_index" can safely use deduplication
+2026-11-04T20:31:00.908127086Z 2026-11-04 20:31:00.907 UTC [295] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:31:00.912159424Z 2026-11-04 20:31:00.911 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 295"
+2026-11-04T20:31:00.912188350Z 2026-11-04 20:31:00.911 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:31:00.912194827Z 2026-11-04 20:31:00.911 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 297) exited with exit code 0
+2026-11-04T20:31:00.912199815Z 2026-11-04 20:31:00.911 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:31:01.073086321Z 2026-11-04 20:31:01.072 UTC [295] DEBUG:  00000: building index "ce_i" on table "ce" with request for 2 parallel workers
+2026-11-04T20:31:01.073125492Z 2026-11-04 20:31:01.072 UTC [295] LOCATION:  index_build, index.c:3068
+2026-11-04T20:31:01.073220989Z 2026-11-04 20:31:01.073 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 295"
+2026-11-04T20:31:01.073228396Z 2026-11-04 20:31:01.073 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:31:01.073230522Z 2026-11-04 20:31:01.073 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 295"
+2026-11-04T20:31:01.073233035Z 2026-11-04 20:31:01.073 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:31:01.073260924Z 2026-11-04 20:31:01.073 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 295"
+2026-11-04T20:31:01.073281514Z 2026-11-04 20:31:01.073 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:31:01.074164155Z 2026-11-04 20:31:01.074 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 295"
+2026-11-04T20:31:01.074185574Z 2026-11-04 20:31:01.074 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:31:01.101107197Z 2026-11-04 20:31:01.100 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 295"
+2026-11-04T20:31:01.101131175Z 2026-11-04 20:31:01.100 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:31:01.101133437Z 2026-11-04 20:31:01.101 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 298) exited with exit code 0
+2026-11-04T20:31:01.101135576Z 2026-11-04 20:31:01.101 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:31:01.105006881Z 2026-11-04 20:31:01.104 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 295"
+2026-11-04T20:31:01.105027234Z 2026-11-04 20:31:01.104 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:31:01.105029852Z 2026-11-04 20:31:01.104 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 299) exited with exit code 0
+2026-11-04T20:31:01.105031880Z 2026-11-04 20:31:01.104 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:31:01.115481716Z 2026-11-04 20:31:01.115 UTC [295] ERROR:  54000: index row size 3920 exceeds btree version 4 maximum 2704 for index "ce_i"
+2026-11-04T20:31:01.115503535Z 2026-11-04 20:31:01.115 UTC [295] DETAIL:  Index row references tuple (0,1) in relation "ce".
+2026-11-04T20:31:01.115507534Z 2026-11-04 20:31:01.115 UTC [295] HINT:  Values larger than 1/3 of a buffer page cannot be indexed.
+2026-11-04T20:31:01.115510255Z 	Consider a function index of an MD5 hash of the value, or use full text indexing.
+2026-11-04T20:31:01.115513309Z 2026-11-04 20:31:01.115 UTC [295] LOCATION:  _bt_check_third_page, nbtutils.c:4231
+2026-11-04T20:31:01.115516247Z 2026-11-04 20:31:01.115 UTC [295] STATEMENT:  CREATE INDEX ce_i ON ce(k) INCLUDE(p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15);
+2026-11-04T20:31:01.126522562Z 2026-11-04 20:31:01.126 UTC [295] DEBUG:  42P01: relation "ce_i" does not exist
+2026-11-04T20:31:01.126550533Z 2026-11-04 20:31:01.126 UTC [295] LOCATION:  RangeVarGetRelidExtended, namespace.c:636
+2026-11-04T20:31:01.365364700Z 2026-11-04 20:31:01.365 UTC [313] DEBUG:  00000: building index "pg_toast_16578_index" on table "pg_toast_16578" serially
+2026-11-04T20:31:01.365398304Z 2026-11-04 20:31:01.365 UTC [313] LOCATION:  index_build, index.c:3063
+2026-11-04T20:31:01.365506321Z 2026-11-04 20:31:01.365 UTC [313] DEBUG:  00000: index "pg_toast_16578_index" can safely use deduplication
+2026-11-04T20:31:01.365528965Z 2026-11-04 20:31:01.365 UTC [313] LOCATION:  _bt_allequalimage, nbtutils.c:4294
+2026-11-04T20:31:06.223683212Z 2026-11-04 20:31:06.223 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 327"
+2026-11-04T20:31:06.223712791Z 2026-11-04 20:31:06.223 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:31:06.223716511Z 2026-11-04 20:31:06.223 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 327"
+2026-11-04T20:31:06.223720325Z 2026-11-04 20:31:06.223 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:31:06.223730986Z 2026-11-04 20:31:06.223 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 327"
+2026-11-04T20:31:06.223733303Z 2026-11-04 20:31:06.223 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:31:06.224173906Z 2026-11-04 20:31:06.224 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 327"
+2026-11-04T20:31:06.224189893Z 2026-11-04 20:31:06.224 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:31:06.337982327Z 2026-11-04 20:31:06.337 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 327"
+2026-11-04T20:31:06.338011511Z 2026-11-04 20:31:06.337 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:31:06.338013990Z 2026-11-04 20:31:06.337 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 328) exited with exit code 0
+2026-11-04T20:31:06.338016245Z 2026-11-04 20:31:06.337 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:31:06.338454090Z 2026-11-04 20:31:06.338 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 327"
+2026-11-04T20:31:06.338469144Z 2026-11-04 20:31:06.338 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:31:06.338472694Z 2026-11-04 20:31:06.338 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 329) exited with exit code 0
+2026-11-04T20:31:06.338475768Z 2026-11-04 20:31:06.338 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:31:06.340644018Z 2026-11-04 20:31:06.340 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 327"
+2026-11-04T20:31:06.340659331Z 2026-11-04 20:31:06.340 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:31:06.340662132Z 2026-11-04 20:31:06.340 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 327"
+2026-11-04T20:31:06.340665179Z 2026-11-04 20:31:06.340 UTC [1] LOCATION:  BackgroundWorkerStateChange, bgworker.c:410
+2026-11-04T20:31:06.340667856Z 2026-11-04 20:31:06.340 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 327"
+2026-11-04T20:31:06.340670603Z 2026-11-04 20:31:06.340 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:31:06.340969596Z 2026-11-04 20:31:06.340 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 327"
+2026-11-04T20:31:06.340990057Z 2026-11-04 20:31:06.340 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:31:06.520128389Z 2026-11-04 20:31:06.520 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 327"
+2026-11-04T20:31:06.520163177Z 2026-11-04 20:31:06.520 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:31:06.520172076Z 2026-11-04 20:31:06.520 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 330) exited with exit code 0
+2026-11-04T20:31:06.520179916Z 2026-11-04 20:31:06.520 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:31:06.521293031Z 2026-11-04 20:31:06.521 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 327"
+2026-11-04T20:31:06.521306963Z 2026-11-04 20:31:06.521 UTC [1] LOCATION:  ForgetBackgroundWorker, bgworker.c:447
+2026-11-04T20:31:06.521310160Z 2026-11-04 20:31:06.521 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 331) exited with exit code 0
+2026-11-04T20:31:06.521313149Z 2026-11-04 20:31:06.521 UTC [1] LOCATION:  LogChildExit, postmaster.c:2814

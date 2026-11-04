@@ -1,0 +1,28 @@
+{
+  "tag": "verify-version-tcp-02",
+  "argv": [
+    "docker",
+    "exec",
+    "t3-d4020b98-combined-pg18-oracles-r2",
+    "psql",
+    "-h",
+    "127.0.0.1",
+    "-X",
+    "-At",
+    "-v",
+    "ON_ERROR_STOP=1",
+    "-U",
+    "postgres",
+    "-d",
+    "postgres",
+    "-c",
+    "SELECT version(), current_setting('server_version_num')"
+  ],
+  "shell_rendering": "docker exec t3-d4020b98-combined-pg18-oracles-r2 psql -h 127.0.0.1 -X -At -v ON_ERROR_STOP=1 -U postgres -d postgres -c 'SELECT version(), current_setting('\"'\"'server_version_num'\"'\"')'",
+  "started_utc": "2026-11-04T20:30:53.755113+00:00",
+  "stdin_path": null,
+  "actual_exit": 0,
+  "ended_utc": "2026-11-04T20:30:53.869674+00:00",
+  "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/009-verify-version-tcp-02.stdout",
+  "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/009-verify-version-tcp-02.stderr"
+}

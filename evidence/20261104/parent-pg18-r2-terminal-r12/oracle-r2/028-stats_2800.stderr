@@ -1,0 +1,40 @@
+psql:<stdin>:20: ERROR:  54000: index row size 2816 exceeds btree version 4 maximum 2704 for index "cs_i"
+DETAIL:  Index row references tuple (0,2) in relation "cs".
+HINT:  Values larger than 1/3 of a buffer page cannot be indexed.
+Consider a function index of an MD5 hash of the value, or use full text indexing.
+SCHEMA NAME:  public
+TABLE NAME:  cs
+CONSTRAINT NAME:  cs_i
+LOCATION:  _bt_check_third_page, nbtutils.c:4231
+psql:<stdin>:29: ERROR:  54000: index row size 2816 exceeds btree version 4 maximum 2704 for index "cs_i"
+DETAIL:  Index row references tuple (0,4) in relation "cs".
+HINT:  Values larger than 1/3 of a buffer page cannot be indexed.
+Consider a function index of an MD5 hash of the value, or use full text indexing.
+SCHEMA NAME:  public
+TABLE NAME:  cs
+CONSTRAINT NAME:  cs_i
+LOCATION:  _bt_check_third_page, nbtutils.c:4231
+psql:<stdin>:51: ERROR:  54000: index row size 2816 exceeds btree version 4 maximum 2704 for index "cs_i"
+DETAIL:  Index row references tuple (0,6) in relation "cs".
+HINT:  Values larger than 1/3 of a buffer page cannot be indexed.
+Consider a function index of an MD5 hash of the value, or use full text indexing.
+SCHEMA NAME:  public
+TABLE NAME:  cs
+CONSTRAINT NAME:  cs_i
+LOCATION:  _bt_check_third_page, nbtutils.c:4231
+psql:<stdin>:64: ERROR:  54000: index row size 2816 exceeds btree version 4 maximum 2704 for index "cs_i"
+DETAIL:  Index row references tuple (0,7) in relation "cs".
+HINT:  Values larger than 1/3 of a buffer page cannot be indexed.
+Consider a function index of an MD5 hash of the value, or use full text indexing.
+SCHEMA NAME:  public
+TABLE NAME:  cs
+CONSTRAINT NAME:  cs_i
+LOCATION:  _bt_check_third_page, nbtutils.c:4231
+psql:<stdin>:77: ERROR:  54000: index row size 2816 exceeds btree version 4 maximum 2704 for index "cs_i"
+DETAIL:  Index row references tuple (0,8) in relation "cs".
+HINT:  Values larger than 1/3 of a buffer page cannot be indexed.
+Consider a function index of an MD5 hash of the value, or use full text indexing.
+SCHEMA NAME:  public
+TABLE NAME:  cs
+CONSTRAINT NAME:  cs_i
+LOCATION:  _bt_check_third_page, nbtutils.c:4231

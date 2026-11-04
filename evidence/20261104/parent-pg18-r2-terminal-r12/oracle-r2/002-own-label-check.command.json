@@ -1,0 +1,20 @@
+{
+  "tag": "own-label-check",
+  "argv": [
+    "docker",
+    "ps",
+    "-a",
+    "--filter",
+    "label=agent.worktree=t3-d4020b98",
+    "--no-trunc",
+    "--format",
+    "{{json .}}"
+  ],
+  "shell_rendering": "docker ps -a --filter label=agent.worktree=t3-d4020b98 --no-trunc --format '{{json .}}'",
+  "started_utc": "2026-11-04T20:30:48.417307+00:00",
+  "stdin_path": null,
+  "actual_exit": 0,
+  "ended_utc": "2026-11-04T20:30:48.481712+00:00",
+  "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/002-own-label-check.stdout",
+  "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/002-own-label-check.stderr"
+}

@@ -1,0 +1,94 @@
+-- CACHE-ONLY / NOT RUN. psql18 extended-protocol control, not SQL PREPARE.
+-- Capture actual PG18.6 identity and engine source before running after pinned terminal.
+CREATE TABLE p171_parallel AS SELECT g AS a FROM generate_series(1,3000000) g;
+SELECT 3000000
+ANALYZE p171_parallel;
+ANALYZE
+SET max_parallel_workers_per_gather=0;
+SET
+SELECT a FROM p171_parallel WHERE a % 3000000=0 \parse p171_workers
+
+SET max_parallel_workers_per_gather=2;
+SET
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT parallel_workers_to_launch AS before_plan, parallel_workers_launched AS before_launch
+FROM pg_stat_database WHERE datname=current_database() \gset
+\bind_named p171_workers
+\g
+    a    
+---------
+ 3000000
+(1 row)
+
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT parallel_workers_to_launch-:before_plan AS planned_delta,
+       parallel_workers_launched-:before_launch AS launched_delta
+FROM pg_stat_database WHERE datname=current_database();
+ planned_delta | launched_delta 
+---------------+----------------
+             2 |              2
+(1 row)
+
+EXPLAIN SELECT a FROM p171_parallel WHERE a % 3000000=0;
+                                    QUERY PLAN                                     
+-----------------------------------------------------------------------------------
+ Gather  (cost=1000.00..34526.00 rows=15000 width=4)
+   Workers Planned: 2
+   ->  Parallel Seq Scan on p171_parallel  (cost=0.00..32026.00 rows=6250 width=4)
+         Filter: ((a % 3000000) = 0)
+(4 rows)
+
+SET parallel_setup_cost=1000000000;
+SET
+SELECT a FROM p171_parallel WHERE a % 3000000=0 \parse p171_setup
+
+RESET parallel_setup_cost;
+RESET
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT parallel_workers_to_launch AS before_plan, parallel_workers_launched AS before_launch
+FROM pg_stat_database WHERE datname=current_database() \gset
+\bind_named p171_setup
+\g
+    a    
+---------
+ 3000000
+(1 row)
+
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT parallel_workers_to_launch-:before_plan AS planned_delta,
+       parallel_workers_launched-:before_launch AS launched_delta
+FROM pg_stat_database WHERE datname=current_database();
+ planned_delta | launched_delta 
+---------------+----------------
+             2 |              2
+(1 row)
+
+EXPLAIN SELECT a FROM p171_parallel WHERE a % 3000000=0;
+                                    QUERY PLAN                                     
+-----------------------------------------------------------------------------------
+ Gather  (cost=1000.00..34526.00 rows=15000 width=4)
+   Workers Planned: 2
+   ->  Parallel Seq Scan on p171_parallel  (cost=0.00..32026.00 rows=6250 width=4)
+         Filter: ((a % 3000000) = 0)
+(4 rows)
+

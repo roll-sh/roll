@@ -1,0 +1,32 @@
+{
+  "tag": "include_8300_w2",
+  "argv": [
+    "docker",
+    "exec",
+    "-i",
+    "-e",
+    "PGCLIENTENCODING=UTF8",
+    "t3-d4020b98-combined-pg18-oracles-r2",
+    "psql",
+    "-h",
+    "127.0.0.1",
+    "-X",
+    "-a",
+    "-v",
+    "ON_ERROR_STOP=1",
+    "-U",
+    "postgres",
+    "-d",
+    "include_8300_w2",
+    "-f",
+    "-"
+  ],
+  "shell_rendering": "docker exec -i -e PGCLIENTENCODING=UTF8 t3-d4020b98-combined-pg18-oracles-r2 psql -h 127.0.0.1 -X -a -v ON_ERROR_STOP=1 -U postgres -d include_8300_w2 -f -",
+  "started_utc": "2026-11-04T20:30:59.004547+00:00",
+  "stdin_path": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/include_8300_w2.sql",
+  "stdin_sha256": "0624efeb93176e0c4f862f4d562602242bc52af69d30882c2a0a4b7e9cbe1a82",
+  "actual_exit": 0,
+  "ended_utc": "2026-11-04T20:30:59.118893+00:00",
+  "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/024-include_8300_w2.stdout",
+  "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/024-include_8300_w2.stderr"
+}

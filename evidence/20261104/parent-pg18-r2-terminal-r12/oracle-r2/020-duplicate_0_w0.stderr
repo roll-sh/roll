@@ -1,0 +1,6 @@
+psql:<stdin>:23: ERROR:  23505: could not create unique index "ci_i"
+DETAIL:  Key (k)=(1) is duplicated.
+SCHEMA NAME:  public
+TABLE NAME:  ci
+CONSTRAINT NAME:  ci_i
+LOCATION:  comparetup_index_btree_tiebreak, tuplesortvariants.c:1686

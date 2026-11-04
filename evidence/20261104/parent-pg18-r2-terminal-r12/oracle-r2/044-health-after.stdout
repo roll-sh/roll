@@ -1,0 +1,7 @@
+2026-11-04T20:31:07+00:00
+Filesystem         1B-blocks          Used    Available Use% Mounted on
+/dev/md2       1869804793856 1536921337856 237827108864  87% /
+some avg10=3.02 avg60=7.61 avg300=12.06 total=21401673968
+full avg10=0.00 avg60=0.00 avg300=0.00 total=0
+4
+2

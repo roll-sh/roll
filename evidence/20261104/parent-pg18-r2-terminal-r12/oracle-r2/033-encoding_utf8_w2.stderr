@@ -1,0 +1,8 @@
+psql:<stdin>:37: ERROR:  54000: index row size 3920 exceeds btree version 4 maximum 2704 for index "ce_i"
+DETAIL:  Index row references tuple (0,1) in relation "ce".
+HINT:  Values larger than 1/3 of a buffer page cannot be indexed.
+Consider a function index of an MD5 hash of the value, or use full text indexing.
+SCHEMA NAME:  public
+TABLE NAME:  ce
+CONSTRAINT NAME:  ce_i
+LOCATION:  _bt_check_third_page, nbtutils.c:4231

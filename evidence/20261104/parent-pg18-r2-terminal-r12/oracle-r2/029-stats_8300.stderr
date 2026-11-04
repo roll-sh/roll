@@ -1,0 +1,10 @@
+psql:<stdin>:20: ERROR:  54000: index row requires 8320 bytes, maximum size is 8191
+LOCATION:  index_form_tuple_context, indextuple.c:207
+psql:<stdin>:29: ERROR:  54000: index row requires 8320 bytes, maximum size is 8191
+LOCATION:  index_form_tuple_context, indextuple.c:207
+psql:<stdin>:51: ERROR:  54000: index row requires 8320 bytes, maximum size is 8191
+LOCATION:  index_form_tuple_context, indextuple.c:207
+psql:<stdin>:64: ERROR:  54000: index row requires 8320 bytes, maximum size is 8191
+LOCATION:  index_form_tuple_context, indextuple.c:207
+psql:<stdin>:77: ERROR:  54000: index row requires 8320 bytes, maximum size is 8191
+LOCATION:  index_form_tuple_context, indextuple.c:207

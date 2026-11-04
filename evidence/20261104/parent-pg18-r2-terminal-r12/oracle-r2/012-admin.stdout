@@ -1,0 +1,65 @@
+\set ON_ERROR_STOP on
+\set VERBOSITY verbose
+\pset pager off
+Pager usage is off.
+\pset format unaligned
+Output format is unaligned.
+\pset tuples_only on
+SET client_encoding='UTF8';
+SET
+SET statement_timeout='60s';
+SET
+SELECT version();
+PostgreSQL 18.6 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+SHOW server_version_num;
+180006
+SELECT name,setting,unit,source FROM pg_settings WHERE name IN ('shared_buffers','maintenance_work_mem','max_parallel_workers','max_parallel_maintenance_workers','max_worker_processes','autovacuum','data_directory','lc_collate','lc_ctype','log_min_messages','max_connections');
+autovacuum|on||default
+data_directory|/tmp/pg18-reference-data||override
+log_min_messages|debug1||command line
+maintenance_work_mem|65536|kB|default
+max_connections|12||command line
+max_parallel_maintenance_workers|2||default
+max_parallel_workers|8||default
+max_worker_processes|8||default
+shared_buffers|2048|8kB|command line
+CREATE DATABASE minimum_asc_w0 TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';
+CREATE DATABASE
+CREATE DATABASE minimum_desc_w0 TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';
+CREATE DATABASE
+CREATE DATABASE include_2800_w0 TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';
+CREATE DATABASE
+CREATE DATABASE include_8300_w0 TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';
+CREATE DATABASE
+CREATE DATABASE duplicate_2800_w0 TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';
+CREATE DATABASE
+CREATE DATABASE duplicate_8300_w0 TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';
+CREATE DATABASE
+CREATE DATABASE duplicate_0_w0 TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';
+CREATE DATABASE
+CREATE DATABASE minimum_asc_w2 TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';
+CREATE DATABASE
+CREATE DATABASE minimum_desc_w2 TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';
+CREATE DATABASE
+CREATE DATABASE include_2800_w2 TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';
+CREATE DATABASE
+CREATE DATABASE include_8300_w2 TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';
+CREATE DATABASE
+CREATE DATABASE duplicate_2800_w2 TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';
+CREATE DATABASE
+CREATE DATABASE duplicate_8300_w2 TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';
+CREATE DATABASE
+CREATE DATABASE duplicate_0_w2 TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';
+CREATE DATABASE
+CREATE DATABASE stats_2800 TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';
+CREATE DATABASE
+CREATE DATABASE stats_8300 TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';
+CREATE DATABASE
+CREATE DATABASE encoding_latin1_w0 TEMPLATE template0 ENCODING 'LATIN1' LOCALE 'C';
+CREATE DATABASE
+CREATE DATABASE encoding_latin1_w2 TEMPLATE template0 ENCODING 'LATIN1' LOCALE 'C';
+CREATE DATABASE
+CREATE DATABASE encoding_utf8_w0 TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';
+CREATE DATABASE
+CREATE DATABASE encoding_utf8_w2 TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';
+CREATE DATABASE

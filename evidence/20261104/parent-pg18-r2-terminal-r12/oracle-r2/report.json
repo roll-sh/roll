@@ -1,0 +1,4987 @@
+{
+  "job": {
+    "evidence_job_id": "combined-pg18-oracles-r2",
+    "backing_thread_id": "thread:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Adelegate-task%3Apg-resume-20261104-combined-pg18-oracles-r1",
+    "started_utc": "2026-11-04T20:30:48.251624+00:00",
+    "container_name": "t3-d4020b98-combined-pg18-oracles-r2",
+    "image_id": "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5",
+    "process_group": 375268,
+    "pid": 375269,
+    "internal_deadline_seconds": 550,
+    "outer_process_group_deadline_seconds": 580,
+    "free_bytes_before": 238172377088,
+    "container_id": "af69410964739cc260180a9231ccc4bf0e2a5b66ada669de07a72d169fa56d7b",
+    "verified_version": "PostgreSQL 18.6 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit|180006",
+    "verified_psql_version": "psql (PostgreSQL) 18.6",
+    "fixture_exits": {
+      "minimum_asc_w0": 0,
+      "minimum_desc_w0": 0,
+      "include_2800_w0": 0,
+      "include_8300_w0": 0,
+      "duplicate_2800_w0": 0,
+      "duplicate_8300_w0": 0,
+      "duplicate_0_w0": 0,
+      "minimum_asc_w2": 0,
+      "minimum_desc_w2": 0,
+      "include_2800_w2": 0,
+      "include_8300_w2": 0,
+      "duplicate_2800_w2": 0,
+      "duplicate_8300_w2": 0,
+      "duplicate_0_w2": 0,
+      "stats_2800": 0,
+      "stats_8300": 0,
+      "encoding_latin1_w0": 0,
+      "encoding_latin1_w2": 0,
+      "encoding_utf8_w0": 0,
+      "encoding_utf8_w2": 0
+    },
+    "planner_exits": {
+      "171-parse-bind-generic": 0,
+      "171-parse-bind-parallel": 0
+    },
+    "capture_completed": true,
+    "container_remove_actual_exit": 0,
+    "container_absence_confirmed": true,
+    "ended_utc": "2026-11-04T20:31:07.473864+00:00",
+    "elapsed_seconds": 19.222294576931745,
+    "runner_actual_exit": 0
+  },
+  "command_count": 44,
+  "assertion_count": 311,
+  "failed_assertions": [
+    {
+      "name": "minimum_asc_w0 detail estimated=true",
+      "actual": "Index row references tuple (3,45) in relation \"ci\".",
+      "expected": "Index row references tuple (1906703067,17643) in relation \"ci\".",
+      "pass": false
+    },
+    {
+      "name": "include_2800_w0 detail estimated=true",
+      "actual": "Index row references tuple (32,80) in relation \"ci\".",
+      "expected": "Index row references tuple (1904608731,56300) in relation \"ci\".",
+      "pass": false
+    },
+    {
+      "name": "minimum_asc_w2 detail estimated=true",
+      "actual": "Index row references tuple (3,45) in relation \"ci\".",
+      "expected": "Index row references tuple (1906703067,17643) in relation \"ci\".",
+      "pass": false
+    },
+    {
+      "name": "include_2800_w2 detail estimated=true",
+      "actual": "Index row references tuple (32,80) in relation \"ci\".",
+      "expected": "Index row references tuple (1904608731,56300) in relation \"ci\".",
+      "pass": false
+    }
+  ],
+  "observations": {
+    "minimum_asc_w0": {
+      "kind": "build",
+      "psql_actual_exit": 0,
+      "results": [
+        {
+          "tag": "minimum_asc_w0",
+          "sqlstate": "54000",
+          "error": true
+        }
+      ],
+      "errors": [
+        {
+          "sqlstate": "54000",
+          "message": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+          "raw": "psql:<stdin>:23: ERROR:  54000: index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"\nDETAIL:  Index row references tuple (3,45) in relation \"ci\".\nHINT:  Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.\nSCHEMA NAME:  public\nTABLE NAME:  ci\nCONSTRAINT NAME:  ci_i\nLOCATION:  _bt_check_third_page, nbtutils.c:4231",
+          "detail": "Index row references tuple (3,45) in relation \"ci\".",
+          "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+          "schema": "public",
+          "table": "ci",
+          "constraint": "ci_i",
+          "location": "_bt_check_third_page, nbtutils.c:4231"
+        }
+      ],
+      "observations": [
+        {
+          "tag": "settings",
+          "server_encoding": "UTF8",
+          "client_encoding": "UTF8",
+          "max_parallel_maintenance_workers": "0",
+          "max_parallel_workers": "1024",
+          "max_worker_processes": "8",
+          "min_parallel_table_scan_size": "0",
+          "min_parallel_index_scan_size": "0",
+          "maintenance_work_mem": "128MB"
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(3,45)",
+          "key": -20,
+          "actual_payload_bytes": 2880,
+          "payload_characters": 2880,
+          "heap_stored_payload_bytes": 2880
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(1,115)",
+          "key": -10,
+          "actual_payload_bytes": 3000,
+          "payload_characters": 3000,
+          "heap_stored_payload_bytes": 3000
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,2)",
+          "key": 2,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,1)",
+          "key": 9000,
+          "actual_payload_bytes": 2800,
+          "payload_characters": 2800,
+          "heap_stored_payload_bytes": 2800
+        },
+        {
+          "tag": "prebuild_count",
+          "count": 6000
+        },
+        {
+          "tag": "postbuild",
+          "count": 6000,
+          "index_exists": false
+        }
+      ],
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/014-minimum_asc_w0.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/014-minimum_asc_w0.stderr",
+      "engine_comparisons": [
+        {
+          "estimated": "false",
+          "engine_error": {
+            "sqlstate": "54000",
+            "message": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            "detail": "Index row references tuple (3,45) in relation \"ci\".",
+            "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing."
+          }
+        },
+        {
+          "estimated": "true",
+          "engine_error": {
+            "sqlstate": "54000",
+            "message": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            "detail": "Index row references tuple (1906703067,17643) in relation \"ci\".",
+            "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing."
+          }
+        }
+      ]
+    },
+    "minimum_desc_w0": {
+      "kind": "build",
+      "psql_actual_exit": 0,
+      "results": [
+        {
+          "tag": "minimum_desc_w0",
+          "sqlstate": "54000",
+          "error": true
+        }
+      ],
+      "errors": [
+        {
+          "sqlstate": "54000",
+          "message": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+          "raw": "psql:<stdin>:23: ERROR:  54000: index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"\nDETAIL:  Index row references tuple (1,115) in relation \"ci\".\nHINT:  Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.\nSCHEMA NAME:  public\nTABLE NAME:  ci\nCONSTRAINT NAME:  ci_i\nLOCATION:  _bt_check_third_page, nbtutils.c:4231",
+          "detail": "Index row references tuple (1,115) in relation \"ci\".",
+          "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+          "schema": "public",
+          "table": "ci",
+          "constraint": "ci_i",
+          "location": "_bt_check_third_page, nbtutils.c:4231"
+        }
+      ],
+      "observations": [
+        {
+          "tag": "settings",
+          "server_encoding": "UTF8",
+          "client_encoding": "UTF8",
+          "max_parallel_maintenance_workers": "0",
+          "max_parallel_workers": "1024",
+          "max_worker_processes": "8",
+          "min_parallel_table_scan_size": "0",
+          "min_parallel_index_scan_size": "0",
+          "maintenance_work_mem": "128MB"
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,1)",
+          "key": -9000,
+          "actual_payload_bytes": 2800,
+          "payload_characters": 2800,
+          "heap_stored_payload_bytes": 2800
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(3,45)",
+          "key": 10,
+          "actual_payload_bytes": 3000,
+          "payload_characters": 3000,
+          "heap_stored_payload_bytes": 3000
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(1,115)",
+          "key": 20,
+          "actual_payload_bytes": 2880,
+          "payload_characters": 2880,
+          "heap_stored_payload_bytes": 2880
+        },
+        {
+          "tag": "prebuild_count",
+          "count": 6000
+        },
+        {
+          "tag": "postbuild",
+          "count": 6000,
+          "index_exists": false
+        }
+      ],
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/015-minimum_desc_w0.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/015-minimum_desc_w0.stderr",
+      "engine_comparisons": [
+        {
+          "estimated": "false",
+          "engine_error": {
+            "sqlstate": "54000",
+            "message": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            "detail": "Index row references tuple (1,115) in relation \"ci\".",
+            "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing."
+          }
+        },
+        {
+          "estimated": "true",
+          "engine_error": {
+            "sqlstate": "54000",
+            "message": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            "detail": "Index row references tuple (1,115) in relation \"ci\".",
+            "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing."
+          }
+        }
+      ]
+    },
+    "include_2800_w0": {
+      "kind": "build",
+      "psql_actual_exit": 0,
+      "results": [
+        {
+          "tag": "include_2800_w0",
+          "sqlstate": "54000",
+          "error": true
+        }
+      ],
+      "errors": [
+        {
+          "sqlstate": "54000",
+          "message": "index row size 2816 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+          "raw": "psql:<stdin>:23: ERROR:  54000: index row size 2816 exceeds btree version 4 maximum 2704 for index \"ci_i\"\nDETAIL:  Index row references tuple (32,80) in relation \"ci\".\nHINT:  Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.\nSCHEMA NAME:  public\nTABLE NAME:  ci\nCONSTRAINT NAME:  ci_i\nLOCATION:  _bt_check_third_page, nbtutils.c:4231",
+          "detail": "Index row references tuple (32,80) in relation \"ci\".",
+          "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+          "schema": "public",
+          "table": "ci",
+          "constraint": "ci_i",
+          "location": "_bt_check_third_page, nbtutils.c:4231"
+        }
+      ],
+      "observations": [
+        {
+          "tag": "settings",
+          "server_encoding": "UTF8",
+          "client_encoding": "UTF8",
+          "max_parallel_maintenance_workers": "0",
+          "max_parallel_workers": "1024",
+          "max_worker_processes": "8",
+          "min_parallel_table_scan_size": "0",
+          "min_parallel_index_scan_size": "0",
+          "maintenance_work_mem": "128MB"
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,1)",
+          "key": 1,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,2)",
+          "key": 2,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(32,80)",
+          "key": 6000,
+          "actual_payload_bytes": 2800,
+          "payload_characters": 2800,
+          "heap_stored_payload_bytes": 2800
+        },
+        {
+          "tag": "prebuild_count",
+          "count": 6000
+        },
+        {
+          "tag": "postbuild",
+          "count": 6000,
+          "index_exists": false
+        }
+      ],
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/016-include_2800_w0.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/016-include_2800_w0.stderr",
+      "engine_comparisons": [
+        {
+          "estimated": "false",
+          "engine_error": {
+            "sqlstate": "54000",
+            "message": "index row size 2816 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            "detail": "Index row references tuple (32,80) in relation \"ci\".",
+            "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing."
+          }
+        },
+        {
+          "estimated": "true",
+          "engine_error": {
+            "sqlstate": "54000",
+            "message": "index row size 2816 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            "detail": "Index row references tuple (1904608731,56300) in relation \"ci\".",
+            "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing."
+          }
+        }
+      ]
+    },
+    "include_8300_w0": {
+      "kind": "build",
+      "psql_actual_exit": 0,
+      "results": [
+        {
+          "tag": "include_8300_w0",
+          "sqlstate": "54000",
+          "error": true
+        }
+      ],
+      "errors": [
+        {
+          "sqlstate": "54000",
+          "message": "index row requires 8320 bytes, maximum size is 8191",
+          "raw": "psql:<stdin>:23: ERROR:  54000: index row requires 8320 bytes, maximum size is 8191\nLOCATION:  index_form_tuple_context, indextuple.c:207",
+          "location": "index_form_tuple_context, indextuple.c:207"
+        }
+      ],
+      "observations": [
+        {
+          "tag": "settings",
+          "server_encoding": "UTF8",
+          "client_encoding": "UTF8",
+          "max_parallel_maintenance_workers": "0",
+          "max_parallel_workers": "1024",
+          "max_worker_processes": "8",
+          "min_parallel_table_scan_size": "0",
+          "min_parallel_index_scan_size": "0",
+          "maintenance_work_mem": "128MB"
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,1)",
+          "key": 1,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,2)",
+          "key": 2,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(32,80)",
+          "key": 6000,
+          "actual_payload_bytes": 8300,
+          "payload_characters": 8300,
+          "heap_stored_payload_bytes": 8300
+        },
+        {
+          "tag": "prebuild_count",
+          "count": 6000
+        },
+        {
+          "tag": "postbuild",
+          "count": 6000,
+          "index_exists": false
+        }
+      ],
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/017-include_8300_w0.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/017-include_8300_w0.stderr",
+      "engine_comparisons": [
+        {
+          "estimated": "false",
+          "engine_error": {
+            "sqlstate": "54000",
+            "message": "index row requires 8320 bytes, maximum size is 8191",
+            "detail": null,
+            "hint": null
+          }
+        },
+        {
+          "estimated": "true",
+          "engine_error": {
+            "sqlstate": "54000",
+            "message": "index row requires 8320 bytes, maximum size is 8191",
+            "detail": null,
+            "hint": null
+          }
+        }
+      ]
+    },
+    "duplicate_2800_w0": {
+      "kind": "build",
+      "psql_actual_exit": 0,
+      "results": [
+        {
+          "tag": "duplicate_2800_w0",
+          "sqlstate": "23505",
+          "error": true
+        }
+      ],
+      "errors": [
+        {
+          "sqlstate": "23505",
+          "message": "could not create unique index \"ci_i\"",
+          "raw": "psql:<stdin>:23: ERROR:  23505: could not create unique index \"ci_i\"\nDETAIL:  Key (k)=(1) is duplicated.\nSCHEMA NAME:  public\nTABLE NAME:  ci\nCONSTRAINT NAME:  ci_i\nLOCATION:  comparetup_index_btree_tiebreak, tuplesortvariants.c:1686",
+          "detail": "Key (k)=(1) is duplicated.",
+          "schema": "public",
+          "table": "ci",
+          "constraint": "ci_i",
+          "location": "comparetup_index_btree_tiebreak, tuplesortvariants.c:1686"
+        }
+      ],
+      "observations": [
+        {
+          "tag": "settings",
+          "server_encoding": "UTF8",
+          "client_encoding": "UTF8",
+          "max_parallel_maintenance_workers": "0",
+          "max_parallel_workers": "1024",
+          "max_worker_processes": "8",
+          "min_parallel_table_scan_size": "0",
+          "min_parallel_index_scan_size": "0",
+          "maintenance_work_mem": "128MB"
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,1)",
+          "key": 1,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,2)",
+          "key": 1,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(32,80)",
+          "key": 6000,
+          "actual_payload_bytes": 2800,
+          "payload_characters": 2800,
+          "heap_stored_payload_bytes": 2800
+        },
+        {
+          "tag": "prebuild_count",
+          "count": 6000
+        },
+        {
+          "tag": "postbuild",
+          "count": 6000,
+          "index_exists": false
+        }
+      ],
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/018-duplicate_2800_w0.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/018-duplicate_2800_w0.stderr",
+      "engine_comparisons": [
+        {
+          "estimated": "false",
+          "engine_error": {
+            "sqlstate": "23505",
+            "message": "could not create unique index \"ci_i\"",
+            "detail": "Key (k)=(1) is duplicated.",
+            "hint": null
+          }
+        },
+        {
+          "estimated": "true",
+          "engine_error": {
+            "sqlstate": "23505",
+            "message": "could not create unique index \"ci_i\"",
+            "detail": "Key (k)=(1) is duplicated.",
+            "hint": null
+          }
+        }
+      ]
+    },
+    "duplicate_8300_w0": {
+      "kind": "build",
+      "psql_actual_exit": 0,
+      "results": [
+        {
+          "tag": "duplicate_8300_w0",
+          "sqlstate": "54000",
+          "error": true
+        }
+      ],
+      "errors": [
+        {
+          "sqlstate": "54000",
+          "message": "index row requires 8320 bytes, maximum size is 8191",
+          "raw": "psql:<stdin>:23: ERROR:  54000: index row requires 8320 bytes, maximum size is 8191\nLOCATION:  index_form_tuple_context, indextuple.c:207",
+          "location": "index_form_tuple_context, indextuple.c:207"
+        }
+      ],
+      "observations": [
+        {
+          "tag": "settings",
+          "server_encoding": "UTF8",
+          "client_encoding": "UTF8",
+          "max_parallel_maintenance_workers": "0",
+          "max_parallel_workers": "1024",
+          "max_worker_processes": "8",
+          "min_parallel_table_scan_size": "0",
+          "min_parallel_index_scan_size": "0",
+          "maintenance_work_mem": "128MB"
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,1)",
+          "key": 1,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,2)",
+          "key": 1,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(32,80)",
+          "key": 6000,
+          "actual_payload_bytes": 8300,
+          "payload_characters": 8300,
+          "heap_stored_payload_bytes": 8300
+        },
+        {
+          "tag": "prebuild_count",
+          "count": 6000
+        },
+        {
+          "tag": "postbuild",
+          "count": 6000,
+          "index_exists": false
+        }
+      ],
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/019-duplicate_8300_w0.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/019-duplicate_8300_w0.stderr",
+      "engine_comparisons": [
+        {
+          "estimated": "false",
+          "engine_error": {
+            "sqlstate": "54000",
+            "message": "index row requires 8320 bytes, maximum size is 8191",
+            "detail": null,
+            "hint": null
+          }
+        },
+        {
+          "estimated": "true",
+          "engine_error": {
+            "sqlstate": "54000",
+            "message": "index row requires 8320 bytes, maximum size is 8191",
+            "detail": null,
+            "hint": null
+          }
+        }
+      ]
+    },
+    "duplicate_0_w0": {
+      "kind": "build",
+      "psql_actual_exit": 0,
+      "results": [
+        {
+          "tag": "duplicate_0_w0",
+          "sqlstate": "23505",
+          "error": true
+        }
+      ],
+      "errors": [
+        {
+          "sqlstate": "23505",
+          "message": "could not create unique index \"ci_i\"",
+          "raw": "psql:<stdin>:23: ERROR:  23505: could not create unique index \"ci_i\"\nDETAIL:  Key (k)=(1) is duplicated.\nSCHEMA NAME:  public\nTABLE NAME:  ci\nCONSTRAINT NAME:  ci_i\nLOCATION:  comparetup_index_btree_tiebreak, tuplesortvariants.c:1686",
+          "detail": "Key (k)=(1) is duplicated.",
+          "schema": "public",
+          "table": "ci",
+          "constraint": "ci_i",
+          "location": "comparetup_index_btree_tiebreak, tuplesortvariants.c:1686"
+        }
+      ],
+      "observations": [
+        {
+          "tag": "settings",
+          "server_encoding": "UTF8",
+          "client_encoding": "UTF8",
+          "max_parallel_maintenance_workers": "0",
+          "max_parallel_workers": "1024",
+          "max_worker_processes": "8",
+          "min_parallel_table_scan_size": "0",
+          "min_parallel_index_scan_size": "0",
+          "maintenance_work_mem": "128MB"
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,1)",
+          "key": 1,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,2)",
+          "key": 1,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_count",
+          "count": 6000
+        },
+        {
+          "tag": "postbuild",
+          "count": 6000,
+          "index_exists": false
+        }
+      ],
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/020-duplicate_0_w0.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/020-duplicate_0_w0.stderr",
+      "engine_comparisons": [
+        {
+          "estimated": "false",
+          "engine_error": {
+            "sqlstate": "23505",
+            "message": "could not create unique index \"ci_i\"",
+            "detail": "Key (k)=(1) is duplicated.",
+            "hint": null
+          }
+        },
+        {
+          "estimated": "true",
+          "engine_error": {
+            "sqlstate": "23505",
+            "message": "could not create unique index \"ci_i\"",
+            "detail": "Key (k)=(1) is duplicated.",
+            "hint": null
+          }
+        }
+      ]
+    },
+    "minimum_asc_w2": {
+      "kind": "build",
+      "psql_actual_exit": 0,
+      "results": [
+        {
+          "tag": "minimum_asc_w2",
+          "sqlstate": "54000",
+          "error": true
+        }
+      ],
+      "errors": [
+        {
+          "sqlstate": "54000",
+          "message": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+          "raw": "psql:<stdin>:23: ERROR:  54000: index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"\nDETAIL:  Index row references tuple (3,45) in relation \"ci\".\nHINT:  Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.\nSCHEMA NAME:  public\nTABLE NAME:  ci\nCONSTRAINT NAME:  ci_i\nLOCATION:  _bt_check_third_page, nbtutils.c:4231",
+          "detail": "Index row references tuple (3,45) in relation \"ci\".",
+          "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+          "schema": "public",
+          "table": "ci",
+          "constraint": "ci_i",
+          "location": "_bt_check_third_page, nbtutils.c:4231"
+        }
+      ],
+      "observations": [
+        {
+          "tag": "settings",
+          "server_encoding": "UTF8",
+          "client_encoding": "UTF8",
+          "max_parallel_maintenance_workers": "2",
+          "max_parallel_workers": "1024",
+          "max_worker_processes": "8",
+          "min_parallel_table_scan_size": "0",
+          "min_parallel_index_scan_size": "0",
+          "maintenance_work_mem": "128MB"
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(3,45)",
+          "key": -20,
+          "actual_payload_bytes": 2880,
+          "payload_characters": 2880,
+          "heap_stored_payload_bytes": 2880
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(1,115)",
+          "key": -10,
+          "actual_payload_bytes": 3000,
+          "payload_characters": 3000,
+          "heap_stored_payload_bytes": 3000
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,2)",
+          "key": 2,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,1)",
+          "key": 9000,
+          "actual_payload_bytes": 2800,
+          "payload_characters": 2800,
+          "heap_stored_payload_bytes": 2800
+        },
+        {
+          "tag": "prebuild_count",
+          "count": 6000
+        },
+        {
+          "tag": "postbuild",
+          "count": 6000,
+          "index_exists": false
+        }
+      ],
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/021-minimum_asc_w2.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/021-minimum_asc_w2.stderr",
+      "engine_comparisons": [
+        {
+          "estimated": "false",
+          "engine_error": {
+            "sqlstate": "54000",
+            "message": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            "detail": "Index row references tuple (3,45) in relation \"ci\".",
+            "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing."
+          }
+        },
+        {
+          "estimated": "true",
+          "engine_error": {
+            "sqlstate": "54000",
+            "message": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            "detail": "Index row references tuple (1906703067,17643) in relation \"ci\".",
+            "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing."
+          }
+        }
+      ]
+    },
+    "minimum_desc_w2": {
+      "kind": "build",
+      "psql_actual_exit": 0,
+      "results": [
+        {
+          "tag": "minimum_desc_w2",
+          "sqlstate": "54000",
+          "error": true
+        }
+      ],
+      "errors": [
+        {
+          "sqlstate": "54000",
+          "message": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+          "raw": "psql:<stdin>:23: ERROR:  54000: index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"\nDETAIL:  Index row references tuple (1,115) in relation \"ci\".\nHINT:  Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.\nSCHEMA NAME:  public\nTABLE NAME:  ci\nCONSTRAINT NAME:  ci_i\nLOCATION:  _bt_check_third_page, nbtutils.c:4231",
+          "detail": "Index row references tuple (1,115) in relation \"ci\".",
+          "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+          "schema": "public",
+          "table": "ci",
+          "constraint": "ci_i",
+          "location": "_bt_check_third_page, nbtutils.c:4231"
+        }
+      ],
+      "observations": [
+        {
+          "tag": "settings",
+          "server_encoding": "UTF8",
+          "client_encoding": "UTF8",
+          "max_parallel_maintenance_workers": "2",
+          "max_parallel_workers": "1024",
+          "max_worker_processes": "8",
+          "min_parallel_table_scan_size": "0",
+          "min_parallel_index_scan_size": "0",
+          "maintenance_work_mem": "128MB"
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,1)",
+          "key": -9000,
+          "actual_payload_bytes": 2800,
+          "payload_characters": 2800,
+          "heap_stored_payload_bytes": 2800
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(3,45)",
+          "key": 10,
+          "actual_payload_bytes": 3000,
+          "payload_characters": 3000,
+          "heap_stored_payload_bytes": 3000
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(1,115)",
+          "key": 20,
+          "actual_payload_bytes": 2880,
+          "payload_characters": 2880,
+          "heap_stored_payload_bytes": 2880
+        },
+        {
+          "tag": "prebuild_count",
+          "count": 6000
+        },
+        {
+          "tag": "postbuild",
+          "count": 6000,
+          "index_exists": false
+        }
+      ],
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/022-minimum_desc_w2.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/022-minimum_desc_w2.stderr",
+      "engine_comparisons": [
+        {
+          "estimated": "false",
+          "engine_error": {
+            "sqlstate": "54000",
+            "message": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            "detail": "Index row references tuple (1,115) in relation \"ci\".",
+            "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing."
+          }
+        },
+        {
+          "estimated": "true",
+          "engine_error": {
+            "sqlstate": "54000",
+            "message": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            "detail": "Index row references tuple (1,115) in relation \"ci\".",
+            "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing."
+          }
+        }
+      ]
+    },
+    "include_2800_w2": {
+      "kind": "build",
+      "psql_actual_exit": 0,
+      "results": [
+        {
+          "tag": "include_2800_w2",
+          "sqlstate": "54000",
+          "error": true
+        }
+      ],
+      "errors": [
+        {
+          "sqlstate": "54000",
+          "message": "index row size 2816 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+          "raw": "psql:<stdin>:23: ERROR:  54000: index row size 2816 exceeds btree version 4 maximum 2704 for index \"ci_i\"\nDETAIL:  Index row references tuple (32,80) in relation \"ci\".\nHINT:  Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.\nSCHEMA NAME:  public\nTABLE NAME:  ci\nCONSTRAINT NAME:  ci_i\nLOCATION:  _bt_check_third_page, nbtutils.c:4231",
+          "detail": "Index row references tuple (32,80) in relation \"ci\".",
+          "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+          "schema": "public",
+          "table": "ci",
+          "constraint": "ci_i",
+          "location": "_bt_check_third_page, nbtutils.c:4231"
+        }
+      ],
+      "observations": [
+        {
+          "tag": "settings",
+          "server_encoding": "UTF8",
+          "client_encoding": "UTF8",
+          "max_parallel_maintenance_workers": "2",
+          "max_parallel_workers": "1024",
+          "max_worker_processes": "8",
+          "min_parallel_table_scan_size": "0",
+          "min_parallel_index_scan_size": "0",
+          "maintenance_work_mem": "128MB"
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,1)",
+          "key": 1,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,2)",
+          "key": 2,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(32,80)",
+          "key": 6000,
+          "actual_payload_bytes": 2800,
+          "payload_characters": 2800,
+          "heap_stored_payload_bytes": 2800
+        },
+        {
+          "tag": "prebuild_count",
+          "count": 6000
+        },
+        {
+          "tag": "postbuild",
+          "count": 6000,
+          "index_exists": false
+        }
+      ],
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/023-include_2800_w2.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/023-include_2800_w2.stderr",
+      "engine_comparisons": [
+        {
+          "estimated": "false",
+          "engine_error": {
+            "sqlstate": "54000",
+            "message": "index row size 2816 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            "detail": "Index row references tuple (32,80) in relation \"ci\".",
+            "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing."
+          }
+        },
+        {
+          "estimated": "true",
+          "engine_error": {
+            "sqlstate": "54000",
+            "message": "index row size 2816 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            "detail": "Index row references tuple (1904608731,56300) in relation \"ci\".",
+            "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing."
+          }
+        }
+      ]
+    },
+    "include_8300_w2": {
+      "kind": "build",
+      "psql_actual_exit": 0,
+      "results": [
+        {
+          "tag": "include_8300_w2",
+          "sqlstate": "54000",
+          "error": true
+        }
+      ],
+      "errors": [
+        {
+          "sqlstate": "54000",
+          "message": "index row requires 8320 bytes, maximum size is 8191",
+          "raw": "psql:<stdin>:23: ERROR:  54000: index row requires 8320 bytes, maximum size is 8191\nLOCATION:  index_form_tuple_context, indextuple.c:207",
+          "location": "index_form_tuple_context, indextuple.c:207"
+        }
+      ],
+      "observations": [
+        {
+          "tag": "settings",
+          "server_encoding": "UTF8",
+          "client_encoding": "UTF8",
+          "max_parallel_maintenance_workers": "2",
+          "max_parallel_workers": "1024",
+          "max_worker_processes": "8",
+          "min_parallel_table_scan_size": "0",
+          "min_parallel_index_scan_size": "0",
+          "maintenance_work_mem": "128MB"
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,1)",
+          "key": 1,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,2)",
+          "key": 2,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(32,80)",
+          "key": 6000,
+          "actual_payload_bytes": 8300,
+          "payload_characters": 8300,
+          "heap_stored_payload_bytes": 8300
+        },
+        {
+          "tag": "prebuild_count",
+          "count": 6000
+        },
+        {
+          "tag": "postbuild",
+          "count": 6000,
+          "index_exists": false
+        }
+      ],
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/024-include_8300_w2.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/024-include_8300_w2.stderr",
+      "engine_comparisons": [
+        {
+          "estimated": "false",
+          "engine_error": {
+            "sqlstate": "54000",
+            "message": "index row requires 8320 bytes, maximum size is 8191",
+            "detail": null,
+            "hint": null
+          }
+        },
+        {
+          "estimated": "true",
+          "engine_error": {
+            "sqlstate": "54000",
+            "message": "index row requires 8320 bytes, maximum size is 8191",
+            "detail": null,
+            "hint": null
+          }
+        }
+      ]
+    },
+    "duplicate_2800_w2": {
+      "kind": "build",
+      "psql_actual_exit": 0,
+      "results": [
+        {
+          "tag": "duplicate_2800_w2",
+          "sqlstate": "23505",
+          "error": true
+        }
+      ],
+      "errors": [
+        {
+          "sqlstate": "23505",
+          "message": "could not create unique index \"ci_i\"",
+          "raw": "psql:<stdin>:23: ERROR:  23505: could not create unique index \"ci_i\"\nDETAIL:  Key (k)=(1) is duplicated.\nSCHEMA NAME:  public\nTABLE NAME:  ci\nCONSTRAINT NAME:  ci_i\nLOCATION:  comparetup_index_btree_tiebreak, tuplesortvariants.c:1686",
+          "detail": "Key (k)=(1) is duplicated.",
+          "schema": "public",
+          "table": "ci",
+          "constraint": "ci_i",
+          "location": "comparetup_index_btree_tiebreak, tuplesortvariants.c:1686"
+        }
+      ],
+      "observations": [
+        {
+          "tag": "settings",
+          "server_encoding": "UTF8",
+          "client_encoding": "UTF8",
+          "max_parallel_maintenance_workers": "2",
+          "max_parallel_workers": "1024",
+          "max_worker_processes": "8",
+          "min_parallel_table_scan_size": "0",
+          "min_parallel_index_scan_size": "0",
+          "maintenance_work_mem": "128MB"
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,1)",
+          "key": 1,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,2)",
+          "key": 1,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(32,80)",
+          "key": 6000,
+          "actual_payload_bytes": 2800,
+          "payload_characters": 2800,
+          "heap_stored_payload_bytes": 2800
+        },
+        {
+          "tag": "prebuild_count",
+          "count": 6000
+        },
+        {
+          "tag": "postbuild",
+          "count": 6000,
+          "index_exists": false
+        }
+      ],
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/025-duplicate_2800_w2.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/025-duplicate_2800_w2.stderr",
+      "engine_comparisons": [
+        {
+          "estimated": "false",
+          "engine_error": {
+            "sqlstate": "23505",
+            "message": "could not create unique index \"ci_i\"",
+            "detail": "Key (k)=(1) is duplicated.",
+            "hint": null
+          }
+        },
+        {
+          "estimated": "true",
+          "engine_error": {
+            "sqlstate": "23505",
+            "message": "could not create unique index \"ci_i\"",
+            "detail": "Key (k)=(1) is duplicated.",
+            "hint": null
+          }
+        }
+      ]
+    },
+    "duplicate_8300_w2": {
+      "kind": "build",
+      "psql_actual_exit": 0,
+      "results": [
+        {
+          "tag": "duplicate_8300_w2",
+          "sqlstate": "54000",
+          "error": true
+        }
+      ],
+      "errors": [
+        {
+          "sqlstate": "54000",
+          "message": "index row requires 8320 bytes, maximum size is 8191",
+          "raw": "psql:<stdin>:23: ERROR:  54000: index row requires 8320 bytes, maximum size is 8191\nLOCATION:  index_form_tuple_context, indextuple.c:207",
+          "location": "index_form_tuple_context, indextuple.c:207"
+        }
+      ],
+      "observations": [
+        {
+          "tag": "settings",
+          "server_encoding": "UTF8",
+          "client_encoding": "UTF8",
+          "max_parallel_maintenance_workers": "2",
+          "max_parallel_workers": "1024",
+          "max_worker_processes": "8",
+          "min_parallel_table_scan_size": "0",
+          "min_parallel_index_scan_size": "0",
+          "maintenance_work_mem": "128MB"
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,1)",
+          "key": 1,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,2)",
+          "key": 1,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(32,80)",
+          "key": 6000,
+          "actual_payload_bytes": 8300,
+          "payload_characters": 8300,
+          "heap_stored_payload_bytes": 8300
+        },
+        {
+          "tag": "prebuild_count",
+          "count": 6000
+        },
+        {
+          "tag": "postbuild",
+          "count": 6000,
+          "index_exists": false
+        }
+      ],
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/026-duplicate_8300_w2.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/026-duplicate_8300_w2.stderr",
+      "engine_comparisons": [
+        {
+          "estimated": "false",
+          "engine_error": {
+            "sqlstate": "54000",
+            "message": "index row requires 8320 bytes, maximum size is 8191",
+            "detail": null,
+            "hint": null
+          }
+        },
+        {
+          "estimated": "true",
+          "engine_error": {
+            "sqlstate": "54000",
+            "message": "index row requires 8320 bytes, maximum size is 8191",
+            "detail": null,
+            "hint": null
+          }
+        }
+      ]
+    },
+    "duplicate_0_w2": {
+      "kind": "build",
+      "psql_actual_exit": 0,
+      "results": [
+        {
+          "tag": "duplicate_0_w2",
+          "sqlstate": "23505",
+          "error": true
+        }
+      ],
+      "errors": [
+        {
+          "sqlstate": "23505",
+          "message": "could not create unique index \"ci_i\"",
+          "raw": "psql:<stdin>:23: ERROR:  23505: could not create unique index \"ci_i\"\nDETAIL:  Key (k)=(1) is duplicated.\nSCHEMA NAME:  public\nTABLE NAME:  ci\nCONSTRAINT NAME:  ci_i\nLOCATION:  comparetup_index_btree_tiebreak, tuplesortvariants.c:1686",
+          "detail": "Key (k)=(1) is duplicated.",
+          "schema": "public",
+          "table": "ci",
+          "constraint": "ci_i",
+          "location": "comparetup_index_btree_tiebreak, tuplesortvariants.c:1686"
+        }
+      ],
+      "observations": [
+        {
+          "tag": "settings",
+          "server_encoding": "UTF8",
+          "client_encoding": "UTF8",
+          "max_parallel_maintenance_workers": "2",
+          "max_parallel_workers": "1024",
+          "max_worker_processes": "8",
+          "min_parallel_table_scan_size": "0",
+          "min_parallel_index_scan_size": "0",
+          "maintenance_work_mem": "128MB"
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,1)",
+          "key": 1,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_rows",
+          "ctid": "(0,2)",
+          "key": 1,
+          "actual_payload_bytes": 5,
+          "payload_characters": 5,
+          "heap_stored_payload_bytes": 6
+        },
+        {
+          "tag": "prebuild_count",
+          "count": 6000
+        },
+        {
+          "tag": "postbuild",
+          "count": 6000,
+          "index_exists": false
+        }
+      ],
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/027-duplicate_0_w2.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/027-duplicate_0_w2.stderr",
+      "engine_comparisons": [
+        {
+          "estimated": "false",
+          "engine_error": {
+            "sqlstate": "23505",
+            "message": "could not create unique index \"ci_i\"",
+            "detail": "Key (k)=(1) is duplicated.",
+            "hint": null
+          }
+        },
+        {
+          "estimated": "true",
+          "engine_error": {
+            "sqlstate": "23505",
+            "message": "could not create unique index \"ci_i\"",
+            "detail": "Key (k)=(1) is duplicated.",
+            "hint": null
+          }
+        }
+      ]
+    },
+    "stats_2800": {
+      "kind": "stats",
+      "psql_actual_exit": 0,
+      "results": [
+        {
+          "tag": "stats_2800_single",
+          "sqlstate": "54000",
+          "error": true
+        },
+        {
+          "tag": "stats_2800_multi",
+          "sqlstate": "54000",
+          "error": true
+        },
+        {
+          "tag": "stats_2800_small",
+          "sqlstate": "00000",
+          "error": false
+        },
+        {
+          "tag": "stats_2800_update",
+          "sqlstate": "54000",
+          "error": true
+        },
+        {
+          "tag": "stats_2800_upsert",
+          "sqlstate": "54000",
+          "error": true
+        },
+        {
+          "tag": "stats_2800_speculative",
+          "sqlstate": "54000",
+          "error": true
+        }
+      ],
+      "errors": [
+        {
+          "sqlstate": "54000",
+          "message": "index row size 2816 exceeds btree version 4 maximum 2704 for index \"cs_i\"",
+          "raw": "psql:<stdin>:20: ERROR:  54000: index row size 2816 exceeds btree version 4 maximum 2704 for index \"cs_i\"\nDETAIL:  Index row references tuple (0,2) in relation \"cs\".\nHINT:  Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.\nSCHEMA NAME:  public\nTABLE NAME:  cs\nCONSTRAINT NAME:  cs_i\nLOCATION:  _bt_check_third_page, nbtutils.c:4231",
+          "detail": "Index row references tuple (0,2) in relation \"cs\".",
+          "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+          "schema": "public",
+          "table": "cs",
+          "constraint": "cs_i",
+          "location": "_bt_check_third_page, nbtutils.c:4231"
+        },
+        {
+          "sqlstate": "54000",
+          "message": "index row size 2816 exceeds btree version 4 maximum 2704 for index \"cs_i\"",
+          "raw": "psql:<stdin>:29: ERROR:  54000: index row size 2816 exceeds btree version 4 maximum 2704 for index \"cs_i\"\nDETAIL:  Index row references tuple (0,4) in relation \"cs\".\nHINT:  Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.\nSCHEMA NAME:  public\nTABLE NAME:  cs\nCONSTRAINT NAME:  cs_i\nLOCATION:  _bt_check_third_page, nbtutils.c:4231",
+          "detail": "Index row references tuple (0,4) in relation \"cs\".",
+          "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+          "schema": "public",
+          "table": "cs",
+          "constraint": "cs_i",
+          "location": "_bt_check_third_page, nbtutils.c:4231"
+        },
+        {
+          "sqlstate": "54000",
+          "message": "index row size 2816 exceeds btree version 4 maximum 2704 for index \"cs_i\"",
+          "raw": "psql:<stdin>:51: ERROR:  54000: index row size 2816 exceeds btree version 4 maximum 2704 for index \"cs_i\"\nDETAIL:  Index row references tuple (0,6) in relation \"cs\".\nHINT:  Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.\nSCHEMA NAME:  public\nTABLE NAME:  cs\nCONSTRAINT NAME:  cs_i\nLOCATION:  _bt_check_third_page, nbtutils.c:4231",
+          "detail": "Index row references tuple (0,6) in relation \"cs\".",
+          "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+          "schema": "public",
+          "table": "cs",
+          "constraint": "cs_i",
+          "location": "_bt_check_third_page, nbtutils.c:4231"
+        },
+        {
+          "sqlstate": "54000",
+          "message": "index row size 2816 exceeds btree version 4 maximum 2704 for index \"cs_i\"",
+          "raw": "psql:<stdin>:64: ERROR:  54000: index row size 2816 exceeds btree version 4 maximum 2704 for index \"cs_i\"\nDETAIL:  Index row references tuple (0,7) in relation \"cs\".\nHINT:  Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.\nSCHEMA NAME:  public\nTABLE NAME:  cs\nCONSTRAINT NAME:  cs_i\nLOCATION:  _bt_check_third_page, nbtutils.c:4231",
+          "detail": "Index row references tuple (0,7) in relation \"cs\".",
+          "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+          "schema": "public",
+          "table": "cs",
+          "constraint": "cs_i",
+          "location": "_bt_check_third_page, nbtutils.c:4231"
+        },
+        {
+          "sqlstate": "54000",
+          "message": "index row size 2816 exceeds btree version 4 maximum 2704 for index \"cs_i\"",
+          "raw": "psql:<stdin>:77: ERROR:  54000: index row size 2816 exceeds btree version 4 maximum 2704 for index \"cs_i\"\nDETAIL:  Index row references tuple (0,8) in relation \"cs\".\nHINT:  Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.\nSCHEMA NAME:  public\nTABLE NAME:  cs\nCONSTRAINT NAME:  cs_i\nLOCATION:  _bt_check_third_page, nbtutils.c:4231",
+          "detail": "Index row references tuple (0,8) in relation \"cs\".",
+          "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+          "schema": "public",
+          "table": "cs",
+          "constraint": "cs_i",
+          "location": "_bt_check_third_page, nbtutils.c:4231"
+        }
+      ],
+      "observations": [
+        {
+          "tag": "stats",
+          "boundary": "initial",
+          "counters": [
+            1,
+            0,
+            0,
+            1,
+            0,
+            1
+          ]
+        },
+        {
+          "tag": "state",
+          "boundary": "initial",
+          "count": 1,
+          "rows": [
+            {
+              "id": 1,
+              "payload": "small"
+            }
+          ]
+        },
+        {
+          "tag": "stats",
+          "boundary": "single",
+          "counters": [
+            2,
+            0,
+            0,
+            1,
+            1,
+            2
+          ]
+        },
+        {
+          "tag": "state",
+          "boundary": "single",
+          "count": 1,
+          "rows": [
+            {
+              "id": 1,
+              "payload": "small"
+            }
+          ]
+        },
+        {
+          "tag": "stats",
+          "boundary": "multi",
+          "counters": [
+            4,
+            0,
+            0,
+            1,
+            3,
+            4
+          ]
+        },
+        {
+          "tag": "state",
+          "boundary": "multi",
+          "count": 1,
+          "rows": [
+            {
+              "id": 1,
+              "payload": "small"
+            }
+          ]
+        },
+        {
+          "tag": "stats",
+          "boundary": "small",
+          "counters": [
+            5,
+            0,
+            0,
+            2,
+            3,
+            5
+          ]
+        },
+        {
+          "tag": "state",
+          "boundary": "small",
+          "count": 2,
+          "rows": [
+            {
+              "id": 1,
+              "payload": "small"
+            },
+            {
+              "id": 2,
+              "payload": "small"
+            }
+          ]
+        },
+        {
+          "tag": "stats",
+          "boundary": "before_update",
+          "counters": [
+            5,
+            0,
+            0,
+            2,
+            3,
+            5
+          ]
+        },
+        {
+          "tag": "state",
+          "boundary": "before_update",
+          "count": 2,
+          "rows": [
+            {
+              "id": 1,
+              "payload": "small"
+            },
+            {
+              "id": 2,
+              "payload": "small"
+            }
+          ]
+        },
+        {
+          "tag": "stats",
+          "boundary": "update",
+          "counters": [
+            5,
+            1,
+            0,
+            2,
+            4,
+            5
+          ]
+        },
+        {
+          "tag": "state",
+          "boundary": "update",
+          "count": 2,
+          "rows": [
+            {
+              "id": 1,
+              "payload": "small"
+            },
+            {
+              "id": 2,
+              "payload": "small"
+            }
+          ]
+        },
+        {
+          "tag": "stats",
+          "boundary": "before_upsert",
+          "counters": [
+            5,
+            1,
+            0,
+            2,
+            4,
+            5
+          ]
+        },
+        {
+          "tag": "state",
+          "boundary": "before_upsert",
+          "count": 2,
+          "rows": [
+            {
+              "id": 1,
+              "payload": "small"
+            },
+            {
+              "id": 2,
+              "payload": "small"
+            }
+          ]
+        },
+        {
+          "tag": "stats",
+          "boundary": "upsert",
+          "counters": [
+            5,
+            2,
+            0,
+            2,
+            5,
+            5
+          ]
+        },
+        {
+          "tag": "state",
+          "boundary": "upsert",
+          "count": 2,
+          "rows": [
+            {
+              "id": 1,
+              "payload": "small"
+            },
+            {
+              "id": 2,
+              "payload": "small"
+            }
+          ]
+        },
+        {
+          "tag": "stats",
+          "boundary": "before_speculative",
+          "counters": [
+            5,
+            2,
+            0,
+            2,
+            5,
+            5
+          ]
+        },
+        {
+          "tag": "state",
+          "boundary": "before_speculative",
+          "count": 2,
+          "rows": [
+            {
+              "id": 1,
+              "payload": "small"
+            },
+            {
+              "id": 2,
+              "payload": "small"
+            }
+          ]
+        },
+        {
+          "tag": "stats",
+          "boundary": "speculative",
+          "counters": [
+            6,
+            2,
+            0,
+            2,
+            6,
+            6
+          ]
+        },
+        {
+          "tag": "state",
+          "boundary": "speculative",
+          "count": 2,
+          "rows": [
+            {
+              "id": 1,
+              "payload": "small"
+            },
+            {
+              "id": 2,
+              "payload": "small"
+            }
+          ]
+        }
+      ],
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/028-stats_2800.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/028-stats_2800.stderr",
+      "deltas": {
+        "single": [
+          1,
+          0,
+          0,
+          0,
+          1,
+          1
+        ],
+        "multi": [
+          2,
+          0,
+          0,
+          0,
+          2,
+          2
+        ],
+        "small": [
+          1,
+          0,
+          0,
+          1,
+          0,
+          1
+        ],
+        "update": [
+          0,
+          1,
+          0,
+          0,
+          1,
+          0
+        ],
+        "upsert": [
+          0,
+          1,
+          0,
+          0,
+          1,
+          0
+        ],
+        "speculative": [
+          1,
+          0,
+          0,
+          0,
+          1,
+          1
+        ]
+      }
+    },
+    "stats_8300": {
+      "kind": "stats",
+      "psql_actual_exit": 0,
+      "results": [
+        {
+          "tag": "stats_8300_single",
+          "sqlstate": "54000",
+          "error": true
+        },
+        {
+          "tag": "stats_8300_multi",
+          "sqlstate": "54000",
+          "error": true
+        },
+        {
+          "tag": "stats_8300_small",
+          "sqlstate": "00000",
+          "error": false
+        },
+        {
+          "tag": "stats_8300_update",
+          "sqlstate": "54000",
+          "error": true
+        },
+        {
+          "tag": "stats_8300_upsert",
+          "sqlstate": "54000",
+          "error": true
+        },
+        {
+          "tag": "stats_8300_speculative",
+          "sqlstate": "54000",
+          "error": true
+        }
+      ],
+      "errors": [
+        {
+          "sqlstate": "54000",
+          "message": "index row requires 8320 bytes, maximum size is 8191",
+          "raw": "psql:<stdin>:20: ERROR:  54000: index row requires 8320 bytes, maximum size is 8191\nLOCATION:  index_form_tuple_context, indextuple.c:207",
+          "location": "index_form_tuple_context, indextuple.c:207"
+        },
+        {
+          "sqlstate": "54000",
+          "message": "index row requires 8320 bytes, maximum size is 8191",
+          "raw": "psql:<stdin>:29: ERROR:  54000: index row requires 8320 bytes, maximum size is 8191\nLOCATION:  index_form_tuple_context, indextuple.c:207",
+          "location": "index_form_tuple_context, indextuple.c:207"
+        },
+        {
+          "sqlstate": "54000",
+          "message": "index row requires 8320 bytes, maximum size is 8191",
+          "raw": "psql:<stdin>:51: ERROR:  54000: index row requires 8320 bytes, maximum size is 8191\nLOCATION:  index_form_tuple_context, indextuple.c:207",
+          "location": "index_form_tuple_context, indextuple.c:207"
+        },
+        {
+          "sqlstate": "54000",
+          "message": "index row requires 8320 bytes, maximum size is 8191",
+          "raw": "psql:<stdin>:64: ERROR:  54000: index row requires 8320 bytes, maximum size is 8191\nLOCATION:  index_form_tuple_context, indextuple.c:207",
+          "location": "index_form_tuple_context, indextuple.c:207"
+        },
+        {
+          "sqlstate": "54000",
+          "message": "index row requires 8320 bytes, maximum size is 8191",
+          "raw": "psql:<stdin>:77: ERROR:  54000: index row requires 8320 bytes, maximum size is 8191\nLOCATION:  index_form_tuple_context, indextuple.c:207",
+          "location": "index_form_tuple_context, indextuple.c:207"
+        }
+      ],
+      "observations": [
+        {
+          "tag": "stats",
+          "boundary": "initial",
+          "counters": [
+            1,
+            0,
+            0,
+            1,
+            0,
+            1
+          ]
+        },
+        {
+          "tag": "state",
+          "boundary": "initial",
+          "count": 1,
+          "rows": [
+            {
+              "id": 1,
+              "payload": "small"
+            }
+          ]
+        },
+        {
+          "tag": "stats",
+          "boundary": "single",
+          "counters": [
+            2,
+            0,
+            0,
+            1,
+            1,
+            2
+          ]
+        },
+        {
+          "tag": "state",
+          "boundary": "single",
+          "count": 1,
+          "rows": [
+            {
+              "id": 1,
+              "payload": "small"
+            }
+          ]
+        },
+        {
+          "tag": "stats",
+          "boundary": "multi",
+          "counters": [
+            4,
+            0,
+            0,
+            1,
+            3,
+            4
+          ]
+        },
+        {
+          "tag": "state",
+          "boundary": "multi",
+          "count": 1,
+          "rows": [
+            {
+              "id": 1,
+              "payload": "small"
+            }
+          ]
+        },
+        {
+          "tag": "stats",
+          "boundary": "small",
+          "counters": [
+            5,
+            0,
+            0,
+            2,
+            3,
+            5
+          ]
+        },
+        {
+          "tag": "state",
+          "boundary": "small",
+          "count": 2,
+          "rows": [
+            {
+              "id": 1,
+              "payload": "small"
+            },
+            {
+              "id": 2,
+              "payload": "small"
+            }
+          ]
+        },
+        {
+          "tag": "stats",
+          "boundary": "before_update",
+          "counters": [
+            5,
+            0,
+            0,
+            2,
+            3,
+            5
+          ]
+        },
+        {
+          "tag": "state",
+          "boundary": "before_update",
+          "count": 2,
+          "rows": [
+            {
+              "id": 1,
+              "payload": "small"
+            },
+            {
+              "id": 2,
+              "payload": "small"
+            }
+          ]
+        },
+        {
+          "tag": "stats",
+          "boundary": "update",
+          "counters": [
+            5,
+            1,
+            0,
+            2,
+            4,
+            5
+          ]
+        },
+        {
+          "tag": "state",
+          "boundary": "update",
+          "count": 2,
+          "rows": [
+            {
+              "id": 1,
+              "payload": "small"
+            },
+            {
+              "id": 2,
+              "payload": "small"
+            }
+          ]
+        },
+        {
+          "tag": "stats",
+          "boundary": "before_upsert",
+          "counters": [
+            5,
+            1,
+            0,
+            2,
+            4,
+            5
+          ]
+        },
+        {
+          "tag": "state",
+          "boundary": "before_upsert",
+          "count": 2,
+          "rows": [
+            {
+              "id": 1,
+              "payload": "small"
+            },
+            {
+              "id": 2,
+              "payload": "small"
+            }
+          ]
+        },
+        {
+          "tag": "stats",
+          "boundary": "upsert",
+          "counters": [
+            5,
+            2,
+            0,
+            2,
+            5,
+            5
+          ]
+        },
+        {
+          "tag": "state",
+          "boundary": "upsert",
+          "count": 2,
+          "rows": [
+            {
+              "id": 1,
+              "payload": "small"
+            },
+            {
+              "id": 2,
+              "payload": "small"
+            }
+          ]
+        },
+        {
+          "tag": "stats",
+          "boundary": "before_speculative",
+          "counters": [
+            5,
+            2,
+            0,
+            2,
+            5,
+            5
+          ]
+        },
+        {
+          "tag": "state",
+          "boundary": "before_speculative",
+          "count": 2,
+          "rows": [
+            {
+              "id": 1,
+              "payload": "small"
+            },
+            {
+              "id": 2,
+              "payload": "small"
+            }
+          ]
+        },
+        {
+          "tag": "stats",
+          "boundary": "speculative",
+          "counters": [
+            6,
+            2,
+            0,
+            2,
+            6,
+            6
+          ]
+        },
+        {
+          "tag": "state",
+          "boundary": "speculative",
+          "count": 2,
+          "rows": [
+            {
+              "id": 1,
+              "payload": "small"
+            },
+            {
+              "id": 2,
+              "payload": "small"
+            }
+          ]
+        }
+      ],
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/029-stats_8300.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/029-stats_8300.stderr",
+      "deltas": {
+        "single": [
+          1,
+          0,
+          0,
+          0,
+          1,
+          1
+        ],
+        "multi": [
+          2,
+          0,
+          0,
+          0,
+          2,
+          2
+        ],
+        "small": [
+          1,
+          0,
+          0,
+          1,
+          0,
+          1
+        ],
+        "update": [
+          0,
+          1,
+          0,
+          0,
+          1,
+          0
+        ],
+        "upsert": [
+          0,
+          1,
+          0,
+          0,
+          1,
+          0
+        ],
+        "speculative": [
+          1,
+          0,
+          0,
+          0,
+          1,
+          1
+        ]
+      }
+    },
+    "encoding_latin1_w0": {
+      "kind": "encoding",
+      "psql_actual_exit": 0,
+      "results": [
+        {
+          "tag": "encoding_latin1_w0",
+          "sqlstate": "00000",
+          "error": false
+        }
+      ],
+      "errors": [],
+      "observations": [
+        {
+          "tag": "settings",
+          "server_encoding": "LATIN1",
+          "client_encoding": "UTF8",
+          "max_parallel_maintenance_workers": "0",
+          "max_parallel_workers": "1024",
+          "max_worker_processes": "8",
+          "min_parallel_table_scan_size": "0",
+          "min_parallel_index_scan_size": "0",
+          "maintenance_work_mem": "128MB"
+        },
+        {
+          "tag": "encoding_prebuild",
+          "server_encoding": "LATIN1",
+          "client_encoding": "UTF8",
+          "octet_length": 120,
+          "length": 120,
+          "ctid": "(0,1)",
+          "key": 1
+        },
+        {
+          "tag": "column_storage",
+          "column": "p0",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p1",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p2",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p3",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p4",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p5",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p6",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p7",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p8",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p9",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p10",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p11",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p12",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p13",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p14",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p15",
+          "storage": "p"
+        },
+        {
+          "tag": "prebuild_count",
+          "count": 6000
+        },
+        {
+          "tag": "postbuild",
+          "count": 6000,
+          "index_exists": true
+        }
+      ],
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/030-encoding_latin1_w0.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/030-encoding_latin1_w0.stderr"
+    },
+    "encoding_latin1_w2": {
+      "kind": "encoding",
+      "psql_actual_exit": 0,
+      "results": [
+        {
+          "tag": "encoding_latin1_w2",
+          "sqlstate": "00000",
+          "error": false
+        }
+      ],
+      "errors": [],
+      "observations": [
+        {
+          "tag": "settings",
+          "server_encoding": "LATIN1",
+          "client_encoding": "UTF8",
+          "max_parallel_maintenance_workers": "2",
+          "max_parallel_workers": "1024",
+          "max_worker_processes": "8",
+          "min_parallel_table_scan_size": "0",
+          "min_parallel_index_scan_size": "0",
+          "maintenance_work_mem": "128MB"
+        },
+        {
+          "tag": "encoding_prebuild",
+          "server_encoding": "LATIN1",
+          "client_encoding": "UTF8",
+          "octet_length": 120,
+          "length": 120,
+          "ctid": "(0,1)",
+          "key": 1
+        },
+        {
+          "tag": "column_storage",
+          "column": "p0",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p1",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p2",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p3",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p4",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p5",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p6",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p7",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p8",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p9",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p10",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p11",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p12",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p13",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p14",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p15",
+          "storage": "p"
+        },
+        {
+          "tag": "prebuild_count",
+          "count": 6000
+        },
+        {
+          "tag": "postbuild",
+          "count": 6000,
+          "index_exists": true
+        }
+      ],
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/031-encoding_latin1_w2.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/031-encoding_latin1_w2.stderr"
+    },
+    "encoding_utf8_w0": {
+      "kind": "encoding",
+      "psql_actual_exit": 0,
+      "results": [
+        {
+          "tag": "encoding_utf8_w0",
+          "sqlstate": "54000",
+          "error": true
+        }
+      ],
+      "errors": [
+        {
+          "sqlstate": "54000",
+          "message": "index row size 3920 exceeds btree version 4 maximum 2704 for index \"ce_i\"",
+          "raw": "psql:<stdin>:37: ERROR:  54000: index row size 3920 exceeds btree version 4 maximum 2704 for index \"ce_i\"\nDETAIL:  Index row references tuple (0,1) in relation \"ce\".\nHINT:  Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.\nSCHEMA NAME:  public\nTABLE NAME:  ce\nCONSTRAINT NAME:  ce_i\nLOCATION:  _bt_check_third_page, nbtutils.c:4231",
+          "detail": "Index row references tuple (0,1) in relation \"ce\".",
+          "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+          "schema": "public",
+          "table": "ce",
+          "constraint": "ce_i",
+          "location": "_bt_check_third_page, nbtutils.c:4231"
+        }
+      ],
+      "observations": [
+        {
+          "tag": "settings",
+          "server_encoding": "UTF8",
+          "client_encoding": "UTF8",
+          "max_parallel_maintenance_workers": "0",
+          "max_parallel_workers": "1024",
+          "max_worker_processes": "8",
+          "min_parallel_table_scan_size": "0",
+          "min_parallel_index_scan_size": "0",
+          "maintenance_work_mem": "128MB"
+        },
+        {
+          "tag": "encoding_prebuild",
+          "server_encoding": "UTF8",
+          "client_encoding": "UTF8",
+          "octet_length": 240,
+          "length": 120,
+          "ctid": "(0,1)",
+          "key": 1
+        },
+        {
+          "tag": "column_storage",
+          "column": "p0",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p1",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p2",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p3",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p4",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p5",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p6",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p7",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p8",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p9",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p10",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p11",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p12",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p13",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p14",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p15",
+          "storage": "p"
+        },
+        {
+          "tag": "prebuild_count",
+          "count": 6000
+        },
+        {
+          "tag": "postbuild",
+          "count": 6000,
+          "index_exists": false
+        }
+      ],
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/032-encoding_utf8_w0.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/032-encoding_utf8_w0.stderr"
+    },
+    "encoding_utf8_w2": {
+      "kind": "encoding",
+      "psql_actual_exit": 0,
+      "results": [
+        {
+          "tag": "encoding_utf8_w2",
+          "sqlstate": "54000",
+          "error": true
+        }
+      ],
+      "errors": [
+        {
+          "sqlstate": "54000",
+          "message": "index row size 3920 exceeds btree version 4 maximum 2704 for index \"ce_i\"",
+          "raw": "psql:<stdin>:37: ERROR:  54000: index row size 3920 exceeds btree version 4 maximum 2704 for index \"ce_i\"\nDETAIL:  Index row references tuple (0,1) in relation \"ce\".\nHINT:  Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.\nSCHEMA NAME:  public\nTABLE NAME:  ce\nCONSTRAINT NAME:  ce_i\nLOCATION:  _bt_check_third_page, nbtutils.c:4231",
+          "detail": "Index row references tuple (0,1) in relation \"ce\".",
+          "hint": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+          "schema": "public",
+          "table": "ce",
+          "constraint": "ce_i",
+          "location": "_bt_check_third_page, nbtutils.c:4231"
+        }
+      ],
+      "observations": [
+        {
+          "tag": "settings",
+          "server_encoding": "UTF8",
+          "client_encoding": "UTF8",
+          "max_parallel_maintenance_workers": "2",
+          "max_parallel_workers": "1024",
+          "max_worker_processes": "8",
+          "min_parallel_table_scan_size": "0",
+          "min_parallel_index_scan_size": "0",
+          "maintenance_work_mem": "128MB"
+        },
+        {
+          "tag": "encoding_prebuild",
+          "server_encoding": "UTF8",
+          "client_encoding": "UTF8",
+          "octet_length": 240,
+          "length": 120,
+          "ctid": "(0,1)",
+          "key": 1
+        },
+        {
+          "tag": "column_storage",
+          "column": "p0",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p1",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p2",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p3",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p4",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p5",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p6",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p7",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p8",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p9",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p10",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p11",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p12",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p13",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p14",
+          "storage": "p"
+        },
+        {
+          "tag": "column_storage",
+          "column": "p15",
+          "storage": "p"
+        },
+        {
+          "tag": "prebuild_count",
+          "count": 6000
+        },
+        {
+          "tag": "postbuild",
+          "count": 6000,
+          "index_exists": false
+        }
+      ],
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/033-encoding_utf8_w2.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/033-encoding_utf8_w2.stderr"
+    },
+    "171-parse-bind-generic": {
+      "psql_actual_exit": 0,
+      "raw_errors": "",
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/035-171-parse-bind-generic.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/035-171-parse-bind-generic.stderr",
+      "stdin_sha256": "95f51126182f5dbd95750b09b77e664f73cf9089d9cd7e793ae3fc99c5584fcd",
+      "returned_ones": 6,
+      "generic_custom_plan_counts": [
+        [
+          1,
+          5
+        ]
+      ]
+    },
+    "171-parse-bind-parallel": {
+      "psql_actual_exit": 0,
+      "raw_errors": "",
+      "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/037-171-parse-bind-parallel.stdout",
+      "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/037-171-parse-bind-parallel.stderr",
+      "stdin_sha256": "5c6cad4a10c8b59420038ca15b12d7a713364c037ac32336d53ccf84f7220220",
+      "returned_3000000": 2,
+      "planned_launched_deltas": [
+        [
+          2,
+          2
+        ],
+        [
+          2,
+          2
+        ]
+      ],
+      "gather_plans": 2,
+      "workers_planned_2": 2
+    }
+  },
+  "assertions": [
+    {
+      "name": "sealed engine raw log hash unchanged",
+      "actual": "33e6449fcf7ca0da96145f94053527697d3db3eec7a660e377c7bc9f52d3a8e8",
+      "expected": "33e6449fcf7ca0da96145f94053527697d3db3eec7a660e377c7bc9f52d3a8e8",
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w0 psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w0 one result",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w0 one error",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w0 engine trace found estimated=false",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w0 sqlstate estimated=false",
+      "actual": "54000",
+      "expected": "54000",
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w0 message estimated=false",
+      "actual": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "expected": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w0 detail estimated=false",
+      "actual": "Index row references tuple (3,45) in relation \"ci\".",
+      "expected": "Index row references tuple (3,45) in relation \"ci\".",
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w0 hint estimated=false",
+      "actual": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "expected": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w0 engine trace found estimated=true",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w0 sqlstate estimated=true",
+      "actual": "54000",
+      "expected": "54000",
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w0 message estimated=true",
+      "actual": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "expected": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w0 detail estimated=true",
+      "actual": "Index row references tuple (3,45) in relation \"ci\".",
+      "expected": "Index row references tuple (1906703067,17643) in relation \"ci\".",
+      "pass": false
+    },
+    {
+      "name": "minimum_asc_w0 hint estimated=true",
+      "actual": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "expected": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w0 6000 prebuild",
+      "actual": [
+        6000
+      ],
+      "expected": [
+        6000
+      ],
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w0 selected payload bytes",
+      "actual": [
+        2880
+      ],
+      "expected": [
+        2880
+      ],
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w0 selected physical tid",
+      "actual": [
+        "(3,45)"
+      ],
+      "expected": [
+        "(3,45)"
+      ],
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w0 psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w0 one result",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w0 one error",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w0 engine trace found estimated=false",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w0 sqlstate estimated=false",
+      "actual": "54000",
+      "expected": "54000",
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w0 message estimated=false",
+      "actual": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "expected": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w0 detail estimated=false",
+      "actual": "Index row references tuple (1,115) in relation \"ci\".",
+      "expected": "Index row references tuple (1,115) in relation \"ci\".",
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w0 hint estimated=false",
+      "actual": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "expected": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w0 engine trace found estimated=true",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w0 sqlstate estimated=true",
+      "actual": "54000",
+      "expected": "54000",
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w0 message estimated=true",
+      "actual": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "expected": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w0 detail estimated=true",
+      "actual": "Index row references tuple (1,115) in relation \"ci\".",
+      "expected": "Index row references tuple (1,115) in relation \"ci\".",
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w0 hint estimated=true",
+      "actual": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "expected": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w0 6000 prebuild",
+      "actual": [
+        6000
+      ],
+      "expected": [
+        6000
+      ],
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w0 selected payload bytes",
+      "actual": [
+        2880
+      ],
+      "expected": [
+        2880
+      ],
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w0 selected physical tid",
+      "actual": [
+        "(1,115)"
+      ],
+      "expected": [
+        "(1,115)"
+      ],
+      "pass": true
+    },
+    {
+      "name": "include_2800_w0 psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "include_2800_w0 one result",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "include_2800_w0 one error",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "include_2800_w0 engine trace found estimated=false",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "include_2800_w0 sqlstate estimated=false",
+      "actual": "54000",
+      "expected": "54000",
+      "pass": true
+    },
+    {
+      "name": "include_2800_w0 message estimated=false",
+      "actual": "index row size 2816 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "expected": "index row size 2816 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "pass": true
+    },
+    {
+      "name": "include_2800_w0 detail estimated=false",
+      "actual": "Index row references tuple (32,80) in relation \"ci\".",
+      "expected": "Index row references tuple (32,80) in relation \"ci\".",
+      "pass": true
+    },
+    {
+      "name": "include_2800_w0 hint estimated=false",
+      "actual": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "expected": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "pass": true
+    },
+    {
+      "name": "include_2800_w0 engine trace found estimated=true",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "include_2800_w0 sqlstate estimated=true",
+      "actual": "54000",
+      "expected": "54000",
+      "pass": true
+    },
+    {
+      "name": "include_2800_w0 message estimated=true",
+      "actual": "index row size 2816 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "expected": "index row size 2816 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "pass": true
+    },
+    {
+      "name": "include_2800_w0 detail estimated=true",
+      "actual": "Index row references tuple (32,80) in relation \"ci\".",
+      "expected": "Index row references tuple (1904608731,56300) in relation \"ci\".",
+      "pass": false
+    },
+    {
+      "name": "include_2800_w0 hint estimated=true",
+      "actual": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "expected": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "pass": true
+    },
+    {
+      "name": "include_2800_w0 6000 prebuild",
+      "actual": [
+        6000
+      ],
+      "expected": [
+        6000
+      ],
+      "pass": true
+    },
+    {
+      "name": "include_8300_w0 psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "include_8300_w0 one result",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "include_8300_w0 one error",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "include_8300_w0 engine trace found estimated=false",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "include_8300_w0 sqlstate estimated=false",
+      "actual": "54000",
+      "expected": "54000",
+      "pass": true
+    },
+    {
+      "name": "include_8300_w0 message estimated=false",
+      "actual": "index row requires 8320 bytes, maximum size is 8191",
+      "expected": "index row requires 8320 bytes, maximum size is 8191",
+      "pass": true
+    },
+    {
+      "name": "include_8300_w0 detail estimated=false",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "include_8300_w0 hint estimated=false",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "include_8300_w0 engine trace found estimated=true",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "include_8300_w0 sqlstate estimated=true",
+      "actual": "54000",
+      "expected": "54000",
+      "pass": true
+    },
+    {
+      "name": "include_8300_w0 message estimated=true",
+      "actual": "index row requires 8320 bytes, maximum size is 8191",
+      "expected": "index row requires 8320 bytes, maximum size is 8191",
+      "pass": true
+    },
+    {
+      "name": "include_8300_w0 detail estimated=true",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "include_8300_w0 hint estimated=true",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "include_8300_w0 6000 prebuild",
+      "actual": [
+        6000
+      ],
+      "expected": [
+        6000
+      ],
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w0 psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w0 one result",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w0 one error",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w0 engine trace found estimated=false",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w0 sqlstate estimated=false",
+      "actual": "23505",
+      "expected": "23505",
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w0 message estimated=false",
+      "actual": "could not create unique index \"ci_i\"",
+      "expected": "could not create unique index \"ci_i\"",
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w0 detail estimated=false",
+      "actual": "Key (k)=(1) is duplicated.",
+      "expected": "Key (k)=(1) is duplicated.",
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w0 hint estimated=false",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w0 engine trace found estimated=true",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w0 sqlstate estimated=true",
+      "actual": "23505",
+      "expected": "23505",
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w0 message estimated=true",
+      "actual": "could not create unique index \"ci_i\"",
+      "expected": "could not create unique index \"ci_i\"",
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w0 detail estimated=true",
+      "actual": "Key (k)=(1) is duplicated.",
+      "expected": "Key (k)=(1) is duplicated.",
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w0 hint estimated=true",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w0 6000 prebuild",
+      "actual": [
+        6000
+      ],
+      "expected": [
+        6000
+      ],
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w0 psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w0 one result",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w0 one error",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w0 engine trace found estimated=false",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w0 sqlstate estimated=false",
+      "actual": "54000",
+      "expected": "54000",
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w0 message estimated=false",
+      "actual": "index row requires 8320 bytes, maximum size is 8191",
+      "expected": "index row requires 8320 bytes, maximum size is 8191",
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w0 detail estimated=false",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w0 hint estimated=false",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w0 engine trace found estimated=true",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w0 sqlstate estimated=true",
+      "actual": "54000",
+      "expected": "54000",
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w0 message estimated=true",
+      "actual": "index row requires 8320 bytes, maximum size is 8191",
+      "expected": "index row requires 8320 bytes, maximum size is 8191",
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w0 detail estimated=true",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w0 hint estimated=true",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w0 6000 prebuild",
+      "actual": [
+        6000
+      ],
+      "expected": [
+        6000
+      ],
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w0 psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w0 one result",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w0 one error",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w0 engine trace found estimated=false",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w0 sqlstate estimated=false",
+      "actual": "23505",
+      "expected": "23505",
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w0 message estimated=false",
+      "actual": "could not create unique index \"ci_i\"",
+      "expected": "could not create unique index \"ci_i\"",
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w0 detail estimated=false",
+      "actual": "Key (k)=(1) is duplicated.",
+      "expected": "Key (k)=(1) is duplicated.",
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w0 hint estimated=false",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w0 engine trace found estimated=true",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w0 sqlstate estimated=true",
+      "actual": "23505",
+      "expected": "23505",
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w0 message estimated=true",
+      "actual": "could not create unique index \"ci_i\"",
+      "expected": "could not create unique index \"ci_i\"",
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w0 detail estimated=true",
+      "actual": "Key (k)=(1) is duplicated.",
+      "expected": "Key (k)=(1) is duplicated.",
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w0 hint estimated=true",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w0 6000 prebuild",
+      "actual": [
+        6000
+      ],
+      "expected": [
+        6000
+      ],
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w2 psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w2 one result",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w2 one error",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w2 engine trace found estimated=false",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w2 sqlstate estimated=false",
+      "actual": "54000",
+      "expected": "54000",
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w2 message estimated=false",
+      "actual": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "expected": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w2 detail estimated=false",
+      "actual": "Index row references tuple (3,45) in relation \"ci\".",
+      "expected": "Index row references tuple (3,45) in relation \"ci\".",
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w2 hint estimated=false",
+      "actual": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "expected": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w2 engine trace found estimated=true",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w2 sqlstate estimated=true",
+      "actual": "54000",
+      "expected": "54000",
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w2 message estimated=true",
+      "actual": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "expected": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w2 detail estimated=true",
+      "actual": "Index row references tuple (3,45) in relation \"ci\".",
+      "expected": "Index row references tuple (1906703067,17643) in relation \"ci\".",
+      "pass": false
+    },
+    {
+      "name": "minimum_asc_w2 hint estimated=true",
+      "actual": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "expected": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w2 6000 prebuild",
+      "actual": [
+        6000
+      ],
+      "expected": [
+        6000
+      ],
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w2 selected payload bytes",
+      "actual": [
+        2880
+      ],
+      "expected": [
+        2880
+      ],
+      "pass": true
+    },
+    {
+      "name": "minimum_asc_w2 selected physical tid",
+      "actual": [
+        "(3,45)"
+      ],
+      "expected": [
+        "(3,45)"
+      ],
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w2 psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w2 one result",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w2 one error",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w2 engine trace found estimated=false",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w2 sqlstate estimated=false",
+      "actual": "54000",
+      "expected": "54000",
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w2 message estimated=false",
+      "actual": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "expected": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w2 detail estimated=false",
+      "actual": "Index row references tuple (1,115) in relation \"ci\".",
+      "expected": "Index row references tuple (1,115) in relation \"ci\".",
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w2 hint estimated=false",
+      "actual": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "expected": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w2 engine trace found estimated=true",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w2 sqlstate estimated=true",
+      "actual": "54000",
+      "expected": "54000",
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w2 message estimated=true",
+      "actual": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "expected": "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w2 detail estimated=true",
+      "actual": "Index row references tuple (1,115) in relation \"ci\".",
+      "expected": "Index row references tuple (1,115) in relation \"ci\".",
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w2 hint estimated=true",
+      "actual": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "expected": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w2 6000 prebuild",
+      "actual": [
+        6000
+      ],
+      "expected": [
+        6000
+      ],
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w2 selected payload bytes",
+      "actual": [
+        2880
+      ],
+      "expected": [
+        2880
+      ],
+      "pass": true
+    },
+    {
+      "name": "minimum_desc_w2 selected physical tid",
+      "actual": [
+        "(1,115)"
+      ],
+      "expected": [
+        "(1,115)"
+      ],
+      "pass": true
+    },
+    {
+      "name": "include_2800_w2 psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "include_2800_w2 one result",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "include_2800_w2 one error",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "include_2800_w2 engine trace found estimated=false",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "include_2800_w2 sqlstate estimated=false",
+      "actual": "54000",
+      "expected": "54000",
+      "pass": true
+    },
+    {
+      "name": "include_2800_w2 message estimated=false",
+      "actual": "index row size 2816 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "expected": "index row size 2816 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "pass": true
+    },
+    {
+      "name": "include_2800_w2 detail estimated=false",
+      "actual": "Index row references tuple (32,80) in relation \"ci\".",
+      "expected": "Index row references tuple (32,80) in relation \"ci\".",
+      "pass": true
+    },
+    {
+      "name": "include_2800_w2 hint estimated=false",
+      "actual": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "expected": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "pass": true
+    },
+    {
+      "name": "include_2800_w2 engine trace found estimated=true",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "include_2800_w2 sqlstate estimated=true",
+      "actual": "54000",
+      "expected": "54000",
+      "pass": true
+    },
+    {
+      "name": "include_2800_w2 message estimated=true",
+      "actual": "index row size 2816 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "expected": "index row size 2816 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+      "pass": true
+    },
+    {
+      "name": "include_2800_w2 detail estimated=true",
+      "actual": "Index row references tuple (32,80) in relation \"ci\".",
+      "expected": "Index row references tuple (1904608731,56300) in relation \"ci\".",
+      "pass": false
+    },
+    {
+      "name": "include_2800_w2 hint estimated=true",
+      "actual": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "expected": "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+      "pass": true
+    },
+    {
+      "name": "include_2800_w2 6000 prebuild",
+      "actual": [
+        6000
+      ],
+      "expected": [
+        6000
+      ],
+      "pass": true
+    },
+    {
+      "name": "include_8300_w2 psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "include_8300_w2 one result",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "include_8300_w2 one error",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "include_8300_w2 engine trace found estimated=false",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "include_8300_w2 sqlstate estimated=false",
+      "actual": "54000",
+      "expected": "54000",
+      "pass": true
+    },
+    {
+      "name": "include_8300_w2 message estimated=false",
+      "actual": "index row requires 8320 bytes, maximum size is 8191",
+      "expected": "index row requires 8320 bytes, maximum size is 8191",
+      "pass": true
+    },
+    {
+      "name": "include_8300_w2 detail estimated=false",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "include_8300_w2 hint estimated=false",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "include_8300_w2 engine trace found estimated=true",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "include_8300_w2 sqlstate estimated=true",
+      "actual": "54000",
+      "expected": "54000",
+      "pass": true
+    },
+    {
+      "name": "include_8300_w2 message estimated=true",
+      "actual": "index row requires 8320 bytes, maximum size is 8191",
+      "expected": "index row requires 8320 bytes, maximum size is 8191",
+      "pass": true
+    },
+    {
+      "name": "include_8300_w2 detail estimated=true",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "include_8300_w2 hint estimated=true",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "include_8300_w2 6000 prebuild",
+      "actual": [
+        6000
+      ],
+      "expected": [
+        6000
+      ],
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w2 psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w2 one result",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w2 one error",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w2 engine trace found estimated=false",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w2 sqlstate estimated=false",
+      "actual": "23505",
+      "expected": "23505",
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w2 message estimated=false",
+      "actual": "could not create unique index \"ci_i\"",
+      "expected": "could not create unique index \"ci_i\"",
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w2 detail estimated=false",
+      "actual": "Key (k)=(1) is duplicated.",
+      "expected": "Key (k)=(1) is duplicated.",
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w2 hint estimated=false",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w2 engine trace found estimated=true",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w2 sqlstate estimated=true",
+      "actual": "23505",
+      "expected": "23505",
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w2 message estimated=true",
+      "actual": "could not create unique index \"ci_i\"",
+      "expected": "could not create unique index \"ci_i\"",
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w2 detail estimated=true",
+      "actual": "Key (k)=(1) is duplicated.",
+      "expected": "Key (k)=(1) is duplicated.",
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w2 hint estimated=true",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "duplicate_2800_w2 6000 prebuild",
+      "actual": [
+        6000
+      ],
+      "expected": [
+        6000
+      ],
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w2 psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w2 one result",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w2 one error",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w2 engine trace found estimated=false",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w2 sqlstate estimated=false",
+      "actual": "54000",
+      "expected": "54000",
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w2 message estimated=false",
+      "actual": "index row requires 8320 bytes, maximum size is 8191",
+      "expected": "index row requires 8320 bytes, maximum size is 8191",
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w2 detail estimated=false",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w2 hint estimated=false",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w2 engine trace found estimated=true",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w2 sqlstate estimated=true",
+      "actual": "54000",
+      "expected": "54000",
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w2 message estimated=true",
+      "actual": "index row requires 8320 bytes, maximum size is 8191",
+      "expected": "index row requires 8320 bytes, maximum size is 8191",
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w2 detail estimated=true",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w2 hint estimated=true",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "duplicate_8300_w2 6000 prebuild",
+      "actual": [
+        6000
+      ],
+      "expected": [
+        6000
+      ],
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w2 psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w2 one result",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w2 one error",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w2 engine trace found estimated=false",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w2 sqlstate estimated=false",
+      "actual": "23505",
+      "expected": "23505",
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w2 message estimated=false",
+      "actual": "could not create unique index \"ci_i\"",
+      "expected": "could not create unique index \"ci_i\"",
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w2 detail estimated=false",
+      "actual": "Key (k)=(1) is duplicated.",
+      "expected": "Key (k)=(1) is duplicated.",
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w2 hint estimated=false",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w2 engine trace found estimated=true",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w2 sqlstate estimated=true",
+      "actual": "23505",
+      "expected": "23505",
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w2 message estimated=true",
+      "actual": "could not create unique index \"ci_i\"",
+      "expected": "could not create unique index \"ci_i\"",
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w2 detail estimated=true",
+      "actual": "Key (k)=(1) is duplicated.",
+      "expected": "Key (k)=(1) is duplicated.",
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w2 hint estimated=true",
+      "actual": null,
+      "expected": null,
+      "pass": true
+    },
+    {
+      "name": "duplicate_0_w2 6000 prebuild",
+      "actual": [
+        6000
+      ],
+      "expected": [
+        6000
+      ],
+      "pass": true
+    },
+    {
+      "name": "stats_2800 psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "stats_2800 single source asserted delta",
+      "actual": [
+        1,
+        0,
+        0,
+        0,
+        1,
+        1
+      ],
+      "expected": [
+        1,
+        0,
+        0,
+        0,
+        1,
+        1
+      ],
+      "pass": true
+    },
+    {
+      "name": "stats_2800 single retained state count",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "stats_2800 single rows remain small",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "stats_2800 multi source asserted delta",
+      "actual": [
+        2,
+        0,
+        0,
+        0,
+        2,
+        2
+      ],
+      "expected": [
+        2,
+        0,
+        0,
+        0,
+        2,
+        2
+      ],
+      "pass": true
+    },
+    {
+      "name": "stats_2800 multi retained state count",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "stats_2800 multi rows remain small",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "stats_2800 small source asserted delta",
+      "actual": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        1
+      ],
+      "expected": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        1
+      ],
+      "pass": true
+    },
+    {
+      "name": "stats_2800 small retained state count",
+      "actual": 2,
+      "expected": 2,
+      "pass": true
+    },
+    {
+      "name": "stats_2800 small rows remain small",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "stats_2800 update INSERT counters unchanged",
+      "actual": [
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0
+      ],
+      "pass": true
+    },
+    {
+      "name": "stats_2800 update retained state count",
+      "actual": 2,
+      "expected": 2,
+      "pass": true
+    },
+    {
+      "name": "stats_2800 update rows remain small",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "stats_2800 upsert INSERT counters unchanged",
+      "actual": [
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0
+      ],
+      "pass": true
+    },
+    {
+      "name": "stats_2800 upsert retained state count",
+      "actual": 2,
+      "expected": 2,
+      "pass": true
+    },
+    {
+      "name": "stats_2800 upsert rows remain small",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "stats_2800 speculative source asserted delta",
+      "actual": [
+        1,
+        0,
+        0,
+        0,
+        1,
+        1
+      ],
+      "expected": [
+        1,
+        0,
+        0,
+        0,
+        1,
+        1
+      ],
+      "pass": true
+    },
+    {
+      "name": "stats_2800 speculative retained state count",
+      "actual": 2,
+      "expected": 2,
+      "pass": true
+    },
+    {
+      "name": "stats_2800 speculative rows remain small",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "stats_2800 statement SQLSTATEs",
+      "actual": [
+        "54000",
+        "54000",
+        "00000",
+        "54000",
+        "54000",
+        "54000"
+      ],
+      "expected": [
+        "54000",
+        "54000",
+        "00000",
+        "54000",
+        "54000",
+        "54000"
+      ],
+      "pass": true
+    },
+    {
+      "name": "stats_8300 psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "stats_8300 single source asserted delta",
+      "actual": [
+        1,
+        0,
+        0,
+        0,
+        1,
+        1
+      ],
+      "expected": [
+        1,
+        0,
+        0,
+        0,
+        1,
+        1
+      ],
+      "pass": true
+    },
+    {
+      "name": "stats_8300 single retained state count",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "stats_8300 single rows remain small",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "stats_8300 multi source asserted delta",
+      "actual": [
+        2,
+        0,
+        0,
+        0,
+        2,
+        2
+      ],
+      "expected": [
+        2,
+        0,
+        0,
+        0,
+        2,
+        2
+      ],
+      "pass": true
+    },
+    {
+      "name": "stats_8300 multi retained state count",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "stats_8300 multi rows remain small",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "stats_8300 small source asserted delta",
+      "actual": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        1
+      ],
+      "expected": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        1
+      ],
+      "pass": true
+    },
+    {
+      "name": "stats_8300 small retained state count",
+      "actual": 2,
+      "expected": 2,
+      "pass": true
+    },
+    {
+      "name": "stats_8300 small rows remain small",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "stats_8300 update INSERT counters unchanged",
+      "actual": [
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0
+      ],
+      "pass": true
+    },
+    {
+      "name": "stats_8300 update retained state count",
+      "actual": 2,
+      "expected": 2,
+      "pass": true
+    },
+    {
+      "name": "stats_8300 update rows remain small",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "stats_8300 upsert INSERT counters unchanged",
+      "actual": [
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0
+      ],
+      "pass": true
+    },
+    {
+      "name": "stats_8300 upsert retained state count",
+      "actual": 2,
+      "expected": 2,
+      "pass": true
+    },
+    {
+      "name": "stats_8300 upsert rows remain small",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "stats_8300 speculative source asserted delta",
+      "actual": [
+        1,
+        0,
+        0,
+        0,
+        1,
+        1
+      ],
+      "expected": [
+        1,
+        0,
+        0,
+        0,
+        1,
+        1
+      ],
+      "pass": true
+    },
+    {
+      "name": "stats_8300 speculative retained state count",
+      "actual": 2,
+      "expected": 2,
+      "pass": true
+    },
+    {
+      "name": "stats_8300 speculative rows remain small",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "stats_8300 statement SQLSTATEs",
+      "actual": [
+        "54000",
+        "54000",
+        "00000",
+        "54000",
+        "54000",
+        "54000"
+      ],
+      "expected": [
+        "54000",
+        "54000",
+        "00000",
+        "54000",
+        "54000",
+        "54000"
+      ],
+      "pass": true
+    },
+    {
+      "name": "encoding_latin1_w0 psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "encoding_latin1_w0 database encoding",
+      "actual": "LATIN1",
+      "expected": "LATIN1",
+      "pass": true
+    },
+    {
+      "name": "encoding_latin1_w0 client encoding",
+      "actual": "UTF8",
+      "expected": "UTF8",
+      "pass": true
+    },
+    {
+      "name": "encoding_latin1_w0 all16 PLAIN",
+      "actual": [
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p"
+      ],
+      "expected": [
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p"
+      ],
+      "pass": true
+    },
+    {
+      "name": "encoding_latin1_w0 length",
+      "actual": 120,
+      "expected": 120,
+      "pass": true
+    },
+    {
+      "name": "encoding_latin1_w0 octet length",
+      "actual": 120,
+      "expected": 120,
+      "pass": true
+    },
+    {
+      "name": "encoding_latin1_w0 build result",
+      "actual": [
+        "00000"
+      ],
+      "expected": [
+        "00000"
+      ],
+      "pass": true
+    },
+    {
+      "name": "encoding_latin1_w2 psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "encoding_latin1_w2 database encoding",
+      "actual": "LATIN1",
+      "expected": "LATIN1",
+      "pass": true
+    },
+    {
+      "name": "encoding_latin1_w2 client encoding",
+      "actual": "UTF8",
+      "expected": "UTF8",
+      "pass": true
+    },
+    {
+      "name": "encoding_latin1_w2 all16 PLAIN",
+      "actual": [
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p"
+      ],
+      "expected": [
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p"
+      ],
+      "pass": true
+    },
+    {
+      "name": "encoding_latin1_w2 length",
+      "actual": 120,
+      "expected": 120,
+      "pass": true
+    },
+    {
+      "name": "encoding_latin1_w2 octet length",
+      "actual": 120,
+      "expected": 120,
+      "pass": true
+    },
+    {
+      "name": "encoding_latin1_w2 build result",
+      "actual": [
+        "00000"
+      ],
+      "expected": [
+        "00000"
+      ],
+      "pass": true
+    },
+    {
+      "name": "encoding_utf8_w0 psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "encoding_utf8_w0 database encoding",
+      "actual": "UTF8",
+      "expected": "UTF8",
+      "pass": true
+    },
+    {
+      "name": "encoding_utf8_w0 client encoding",
+      "actual": "UTF8",
+      "expected": "UTF8",
+      "pass": true
+    },
+    {
+      "name": "encoding_utf8_w0 all16 PLAIN",
+      "actual": [
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p"
+      ],
+      "expected": [
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p"
+      ],
+      "pass": true
+    },
+    {
+      "name": "encoding_utf8_w0 length",
+      "actual": 120,
+      "expected": 120,
+      "pass": true
+    },
+    {
+      "name": "encoding_utf8_w0 octet length",
+      "actual": 240,
+      "expected": 240,
+      "pass": true
+    },
+    {
+      "name": "encoding_utf8_w0 build result",
+      "actual": [
+        "54000"
+      ],
+      "expected": [
+        "54000"
+      ],
+      "pass": true
+    },
+    {
+      "name": "encoding_utf8_w0 actual error message",
+      "actual": "index row size 3920 exceeds btree version 4 maximum 2704 for index \"ce_i\"",
+      "expected": "index row size 3920 exceeds btree version 4 maximum 2704 for index \"ce_i\"",
+      "pass": true
+    },
+    {
+      "name": "encoding_utf8_w2 psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "encoding_utf8_w2 database encoding",
+      "actual": "UTF8",
+      "expected": "UTF8",
+      "pass": true
+    },
+    {
+      "name": "encoding_utf8_w2 client encoding",
+      "actual": "UTF8",
+      "expected": "UTF8",
+      "pass": true
+    },
+    {
+      "name": "encoding_utf8_w2 all16 PLAIN",
+      "actual": [
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p"
+      ],
+      "expected": [
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p"
+      ],
+      "pass": true
+    },
+    {
+      "name": "encoding_utf8_w2 length",
+      "actual": 120,
+      "expected": 120,
+      "pass": true
+    },
+    {
+      "name": "encoding_utf8_w2 octet length",
+      "actual": 240,
+      "expected": 240,
+      "pass": true
+    },
+    {
+      "name": "encoding_utf8_w2 build result",
+      "actual": [
+        "54000"
+      ],
+      "expected": [
+        "54000"
+      ],
+      "pass": true
+    },
+    {
+      "name": "encoding_utf8_w2 actual error message",
+      "actual": "index row size 3920 exceeds btree version 4 maximum 2704 for index \"ce_i\"",
+      "expected": "index row size 3920 exceeds btree version 4 maximum 2704 for index \"ce_i\"",
+      "pass": true
+    },
+    {
+      "name": "171-parse-bind-generic one whole file invocation",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "171-parse-bind-generic actual psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "171-parse-bind-generic six b=1",
+      "actual": 6,
+      "expected": 6,
+      "pass": true
+    },
+    {
+      "name": "171-parse-bind-generic generic/custom",
+      "actual": [
+        [
+          1,
+          5
+        ]
+      ],
+      "expected": [
+        [
+          1,
+          5
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "name": "171-parse-bind-parallel one whole file invocation",
+      "actual": 1,
+      "expected": 1,
+      "pass": true
+    },
+    {
+      "name": "171-parse-bind-parallel actual psql exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "171-parse-bind-parallel two named statements return one a=3000000 each",
+      "actual": 2,
+      "expected": 2,
+      "pass": true
+    },
+    {
+      "name": "171-parse-bind-parallel planned/launched deltas",
+      "actual": [
+        [
+          2,
+          2
+        ],
+        [
+          2,
+          2
+        ]
+      ],
+      "expected": [
+        [
+          2,
+          2
+        ],
+        [
+          2,
+          2
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "name": "171-parse-bind-parallel Gather plans",
+      "actual": 2,
+      "expected": 2,
+      "pass": true
+    },
+    {
+      "name": "171-parse-bind-parallel Workers Planned2",
+      "actual": 2,
+      "expected": 2,
+      "pass": true
+    },
+    {
+      "name": "container removal actual exit",
+      "actual": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "name": "container confirmed absent",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "R1 postflight93 all unchanged",
+      "actual": true,
+      "expected": true,
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes admin.sql",
+      "actual": "077fb324aa25a4150857868afe7124f683aec2303f9355e6af128ed801d544c5",
+      "expected": "077fb324aa25a4150857868afe7124f683aec2303f9355e6af128ed801d544c5",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes duplicate_0_w0.sql",
+      "actual": "8272e0b533c70ddc2f5e10683c7dee7525d205ed048c3d44fa5c7b6c5d61421d",
+      "expected": "8272e0b533c70ddc2f5e10683c7dee7525d205ed048c3d44fa5c7b6c5d61421d",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes duplicate_0_w2.sql",
+      "actual": "6c0462e6772ed96c2c5f9454a87856727c8c5f1f758e9634d24254065357091f",
+      "expected": "6c0462e6772ed96c2c5f9454a87856727c8c5f1f758e9634d24254065357091f",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes duplicate_2800_w0.sql",
+      "actual": "3dd1af4bfbefbf395df7e624eac4f4c085b4bed7b697aff236d20eef9bc24e45",
+      "expected": "3dd1af4bfbefbf395df7e624eac4f4c085b4bed7b697aff236d20eef9bc24e45",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes duplicate_2800_w2.sql",
+      "actual": "cf095dba03af5d540b55cb06fae3e7df59a2d533f5590a4d0b6a62e0a6291bba",
+      "expected": "cf095dba03af5d540b55cb06fae3e7df59a2d533f5590a4d0b6a62e0a6291bba",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes duplicate_8300_w0.sql",
+      "actual": "9c13bbed498a19b166200b255517d3a997f938d62842763b794be2be2439cde3",
+      "expected": "9c13bbed498a19b166200b255517d3a997f938d62842763b794be2be2439cde3",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes duplicate_8300_w2.sql",
+      "actual": "791de984dd771d2119d130880444a4c2bbd62318e98fd8e7fe758b531031a096",
+      "expected": "791de984dd771d2119d130880444a4c2bbd62318e98fd8e7fe758b531031a096",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes encoding_latin1_w0.sql",
+      "actual": "c2006c3986e507fb4b83d9895af331426ecdd711abf022bf06630066a33706f0",
+      "expected": "c2006c3986e507fb4b83d9895af331426ecdd711abf022bf06630066a33706f0",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes encoding_latin1_w2.sql",
+      "actual": "256f884de67558b0968cf19b0db935155cb377fba553a4933054c9a95286dc94",
+      "expected": "256f884de67558b0968cf19b0db935155cb377fba553a4933054c9a95286dc94",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes encoding_utf8_w0.sql",
+      "actual": "53705315b51b2e5c18decd742d73206bac8133fa7f2e5e4f59efc08914580817",
+      "expected": "53705315b51b2e5c18decd742d73206bac8133fa7f2e5e4f59efc08914580817",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes encoding_utf8_w2.sql",
+      "actual": "8ab698ef398533b91cd417fbf35817dbe35f2712df05404f2d1ca9781edbfb00",
+      "expected": "8ab698ef398533b91cd417fbf35817dbe35f2712df05404f2d1ca9781edbfb00",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes include_2800_w0.sql",
+      "actual": "417fdf270973e3ec35ea58357cbcbdf1dc07cf1146f10d5b4c4ac850ba917d38",
+      "expected": "417fdf270973e3ec35ea58357cbcbdf1dc07cf1146f10d5b4c4ac850ba917d38",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes include_2800_w2.sql",
+      "actual": "668f75932b4f01f2f6a7e4f55e86448c122346981dd477fb912480833b29d86b",
+      "expected": "668f75932b4f01f2f6a7e4f55e86448c122346981dd477fb912480833b29d86b",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes include_8300_w0.sql",
+      "actual": "6a01cba36088bb27311d355397948a4b1a35f3e837c06e2c3535a882a63899c2",
+      "expected": "6a01cba36088bb27311d355397948a4b1a35f3e837c06e2c3535a882a63899c2",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes include_8300_w2.sql",
+      "actual": "0624efeb93176e0c4f862f4d562602242bc52af69d30882c2a0a4b7e9cbe1a82",
+      "expected": "0624efeb93176e0c4f862f4d562602242bc52af69d30882c2a0a4b7e9cbe1a82",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes minimum_asc_w0.sql",
+      "actual": "7004212af7f4913f85da0d565188dda7098fc0650869b4efb60044d3c487d753",
+      "expected": "7004212af7f4913f85da0d565188dda7098fc0650869b4efb60044d3c487d753",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes minimum_asc_w2.sql",
+      "actual": "9ed11fc06d49cbf733d7ba025576bffeef64953593a1258863939093fa032a16",
+      "expected": "9ed11fc06d49cbf733d7ba025576bffeef64953593a1258863939093fa032a16",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes minimum_desc_w0.sql",
+      "actual": "d050a79f4298c5f1fe4fcd33dd11b2dc03022302127bdc8df961fca493d269de",
+      "expected": "d050a79f4298c5f1fe4fcd33dd11b2dc03022302127bdc8df961fca493d269de",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes minimum_desc_w2.sql",
+      "actual": "b3c1380ff07066663e0b5c714a420a7be19864d587690d7149eb5927e16c5091",
+      "expected": "b3c1380ff07066663e0b5c714a420a7be19864d587690d7149eb5927e16c5091",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes stats_2800.sql",
+      "actual": "66084d12460f9e22e40506b423c787ebb89665c9793077e1d95d6916142ac565",
+      "expected": "66084d12460f9e22e40506b423c787ebb89665c9793077e1d95d6916142ac565",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes stats_8300.sql",
+      "actual": "0aef73edfa275aade2eb93dc97d09e65bbb121b2702ae21f15b2208c6a6b2693",
+      "expected": "0aef73edfa275aade2eb93dc97d09e65bbb121b2702ae21f15b2208c6a6b2693",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes 171-parse-bind-generic.sql",
+      "actual": "95f51126182f5dbd95750b09b77e664f73cf9089d9cd7e793ae3fc99c5584fcd",
+      "expected": "95f51126182f5dbd95750b09b77e664f73cf9089d9cd7e793ae3fc99c5584fcd",
+      "pass": true
+    },
+    {
+      "name": "frozen SQL bytes 171-parse-bind-parallel.sql",
+      "actual": "5c6cad4a10c8b59420038ca15b12d7a713364c037ac32336d53ccf84f7220220",
+      "expected": "5c6cad4a10c8b59420038ca15b12d7a713364c037ac32336d53ccf84f7220220",
+      "pass": true
+    }
+  ],
+  "scope_limit": "Only requested PostgreSQL reference outcomes. Original setting2 alone is not worker proof. Planner launched_delta is independent actual worker evidence. No broader engine parity, source acceptance, performance or TOAST closure."
+}

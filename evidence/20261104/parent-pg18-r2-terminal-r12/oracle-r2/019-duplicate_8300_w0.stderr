@@ -1,0 +1,2 @@
+psql:<stdin>:23: ERROR:  54000: index row requires 8320 bytes, maximum size is 8191
+LOCATION:  index_form_tuple_context, indextuple.c:207

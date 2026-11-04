@@ -1,0 +1,56 @@
+\set ON_ERROR_STOP on
+\pset pager off
+Pager usage is off.
+SELECT version();
+                                         version                                         
+-----------------------------------------------------------------------------------------
+ PostgreSQL 18.6 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+(1 row)
+
+SELECT name,setting,unit,source FROM pg_settings WHERE name IN ('max_parallel_workers','max_worker_processes','max_parallel_workers_per_gather','parallel_setup_cost','parallel_tuple_cost','min_parallel_table_scan_size','min_parallel_index_scan_size','seq_page_cost','random_page_cost','plan_cache_mode','track_counts','track_activities','stats_fetch_consistency','compute_query_id','shared_buffers','maintenance_work_mem','max_connections','statement_timeout') ORDER BY name;
+              name               | setting | unit |    source    
+---------------------------------+---------+------+--------------
+ compute_query_id                | auto    |      | default
+ maintenance_work_mem            | 65536   | kB   | default
+ max_connections                 | 12      |      | command line
+ max_parallel_workers            | 8       |      | default
+ max_parallel_workers_per_gather | 2       |      | default
+ max_worker_processes            | 8       |      | default
+ min_parallel_index_scan_size    | 64      | 8kB  | default
+ min_parallel_table_scan_size    | 1024    | 8kB  | default
+ parallel_setup_cost             | 1000    |      | default
+ parallel_tuple_cost             | 0.1     |      | default
+ plan_cache_mode                 | auto    |      | default
+ random_page_cost                | 4       |      | default
+ seq_page_cost                   | 1       |      | default
+ shared_buffers                  | 2048    | 8kB  | command line
+ statement_timeout               | 0       | ms   | default
+ stats_fetch_consistency         | cache   |      | default
+ track_activities                | on      |      | default
+ track_counts                    | on      |      | default
+(18 rows)
+
+SELECT backend_type,count(*) FROM pg_stat_activity GROUP BY backend_type ORDER BY backend_type;
+         backend_type         | count 
+------------------------------+-------
+ autovacuum launcher          |     1
+ background writer            |     1
+ checkpointer                 |     1
+ client backend               |     1
+ io worker                    |     3
+ logical replication launcher |     1
+ walwriter                    |     1
+(7 rows)
+
+SELECT current_setting('max_parallel_workers')::int >= 2 AND current_setting('max_worker_processes')::int >= 2 AND NOT EXISTS(SELECT FROM pg_stat_activity WHERE backend_type='parallel worker') AS two_configured_workers_no_active_parallel_workers;
+ two_configured_workers_no_active_parallel_workers 
+---------------------------------------------------
+ t
+(1 row)
+
+SELECT parallel_workers_to_launch,parallel_workers_launched FROM pg_stat_database WHERE datname=current_database();
+ parallel_workers_to_launch | parallel_workers_launched 
+----------------------------+---------------------------
+                          0 |                         0
+(1 row)
+

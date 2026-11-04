@@ -1,0 +1,24 @@
+{
+  "evidence_job_id": "combined-pg18-oracles-r2",
+  "current_backing_thread_id": "thread:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Adelegate-task%3Apg-resume-20261104-combined-pg18-oracles-r1",
+  "task_id_decoded_from_backing_thread": "command:mcp:9e5a6feb-d435-4514-ac9d-07c1b03b444b:delegate-task:pg-resume-20261104-combined-pg18-oracles-r1",
+  "new_delegation_created": false,
+  "launch_started_utc": "2026-11-04T20:30:48.192814+00:00",
+  "argv": [
+    "taskset",
+    "-c",
+    "4-7,22-25",
+    "/home/meszmate/.cache/a163/heavy-bg.sh",
+    "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/terminal.log",
+    "timeout",
+    "--signal=TERM",
+    "--kill-after=8s",
+    "580s",
+    "python3",
+    "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/run.py"
+  ],
+  "shell_rendering": "taskset -c 4-7,22-25 /home/meszmate/.cache/a163/heavy-bg.sh /home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/terminal.log timeout --signal=TERM --kill-after=8s 580s python3 /home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/run.py",
+  "runner_sha256": "eed269777ccffa54918b9a239d243156ab5cb0ef35d3b041a8fccdb4c467dbc8",
+  "wrapper_bg_sha256": "6b89e35cb4bac89a27918d6fb12fc31a90b34675f9fee1e0cff9e12b72e82110",
+  "wrapper_heavy_sha256": "6cf1127d5a598b761abd4744d2fec5a38eeb7f9fb1313f58eee94954c616f937"
+}

@@ -1,0 +1,126 @@
+[
+  {
+    "name": "minimum_asc_w0",
+    "db": "minimum_asc_w0",
+    "kind": "build",
+    "workers": 0
+  },
+  {
+    "name": "minimum_desc_w0",
+    "db": "minimum_desc_w0",
+    "kind": "build",
+    "workers": 0
+  },
+  {
+    "name": "include_2800_w0",
+    "db": "include_2800_w0",
+    "kind": "build",
+    "workers": 0
+  },
+  {
+    "name": "include_8300_w0",
+    "db": "include_8300_w0",
+    "kind": "build",
+    "workers": 0
+  },
+  {
+    "name": "duplicate_2800_w0",
+    "db": "duplicate_2800_w0",
+    "kind": "build",
+    "workers": 0
+  },
+  {
+    "name": "duplicate_8300_w0",
+    "db": "duplicate_8300_w0",
+    "kind": "build",
+    "workers": 0
+  },
+  {
+    "name": "duplicate_0_w0",
+    "db": "duplicate_0_w0",
+    "kind": "build",
+    "workers": 0
+  },
+  {
+    "name": "minimum_asc_w2",
+    "db": "minimum_asc_w2",
+    "kind": "build",
+    "workers": 2
+  },
+  {
+    "name": "minimum_desc_w2",
+    "db": "minimum_desc_w2",
+    "kind": "build",
+    "workers": 2
+  },
+  {
+    "name": "include_2800_w2",
+    "db": "include_2800_w2",
+    "kind": "build",
+    "workers": 2
+  },
+  {
+    "name": "include_8300_w2",
+    "db": "include_8300_w2",
+    "kind": "build",
+    "workers": 2
+  },
+  {
+    "name": "duplicate_2800_w2",
+    "db": "duplicate_2800_w2",
+    "kind": "build",
+    "workers": 2
+  },
+  {
+    "name": "duplicate_8300_w2",
+    "db": "duplicate_8300_w2",
+    "kind": "build",
+    "workers": 2
+  },
+  {
+    "name": "duplicate_0_w2",
+    "db": "duplicate_0_w2",
+    "kind": "build",
+    "workers": 2
+  },
+  {
+    "name": "stats_2800",
+    "db": "stats_2800",
+    "kind": "stats",
+    "length": 2800
+  },
+  {
+    "name": "stats_8300",
+    "db": "stats_8300",
+    "kind": "stats",
+    "length": 8300
+  },
+  {
+    "name": "encoding_latin1_w0",
+    "db": "encoding_latin1_w0",
+    "kind": "encoding",
+    "workers": 0,
+    "encoding": "LATIN1"
+  },
+  {
+    "name": "encoding_latin1_w2",
+    "db": "encoding_latin1_w2",
+    "kind": "encoding",
+    "workers": 2,
+    "encoding": "LATIN1"
+  },
+  {
+    "name": "encoding_utf8_w0",
+    "db": "encoding_utf8_w0",
+    "kind": "encoding",
+    "workers": 0,
+    "encoding": "UTF8"
+  },
+  {
+    "name": "encoding_utf8_w2",
+    "db": "encoding_utf8_w2",
+    "kind": "encoding",
+    "workers": 2,
+    "encoding": "UTF8"
+  }
+]

@@ -1,0 +1,45 @@
+{
+  "utc": "2026-11-04T20:36:41.713722+00:00",
+  "r1_entries_unchanged_verified": 93,
+  "r2_entries_verified": 194,
+  "closed_membership": true,
+  "commands": 44,
+  "verified_version": "PostgreSQL 18.6 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit|180006",
+  "verified_psql": "psql (PostgreSQL) 18.6",
+  "fixture_count": 20,
+  "planner_controls": 2,
+  "all_capture_exits_zero": true,
+  "comparison_count": 311,
+  "failed_comparisons": [
+    {
+      "name": "minimum_asc_w0 detail estimated=true",
+      "actual": "Index row references tuple (3,45) in relation \"ci\".",
+      "expected": "Index row references tuple (1906703067,17643) in relation \"ci\".",
+      "pass": false
+    },
+    {
+      "name": "include_2800_w0 detail estimated=true",
+      "actual": "Index row references tuple (32,80) in relation \"ci\".",
+      "expected": "Index row references tuple (1904608731,56300) in relation \"ci\".",
+      "pass": false
+    },
+    {
+      "name": "minimum_asc_w2 detail estimated=true",
+      "actual": "Index row references tuple (3,45) in relation \"ci\".",
+      "expected": "Index row references tuple (1906703067,17643) in relation \"ci\".",
+      "pass": false
+    },
+    {
+      "name": "include_2800_w2 detail estimated=true",
+      "actual": "Index row references tuple (32,80) in relation \"ci\".",
+      "expected": "Index row references tuple (1904608731,56300) in relation \"ci\".",
+      "pass": false
+    }
+  ],
+  "container_removal_exit": 0,
+  "container_absent_parent_confirmed": true,
+  "task_identity_correction": "Actual R2 follow-up task is node:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Athread-send%3Apg-resume-20261104-combined-pg18-oracles-r2; worker decoded original backing thread, not R2 task identity",
+  "source_acceptance": false,
+  "broad_parity": false,
+  "performance_acceptance": false
+}

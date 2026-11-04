@@ -1,0 +1,144 @@
+\set ON_ERROR_STOP on
+\set VERBOSITY verbose
+\pset pager off
+Pager usage is off.
+\pset format unaligned
+Output format is unaligned.
+\pset tuples_only on
+SET client_encoding='UTF8';
+SET
+SET statement_timeout='60s';
+SET
+CREATE FUNCTION cs_text(n int) RETURNS text LANGUAGE sql IMMUTABLE AS $$
+SELECT left(string_agg(md5(g::text), '' ORDER BY g), n)
+FROM generate_series(1, (n+31)/32) g $$;
+CREATE FUNCTION
+CREATE TABLE cs(id int PRIMARY KEY, payload text) WITH (autovacuum_enabled=off);
+CREATE TABLE
+CREATE INDEX cs_i ON cs(id) INCLUDE(payload);
+CREATE INDEX
+INSERT INTO cs VALUES (1, 'small');
+INSERT 0 1
+SELECT pg_stat_force_next_flush();
+
+SELECT pg_stat_clear_snapshot();
+
+SELECT json_build_object('tag','stats','boundary','initial','counters',json_build_array(n_tup_ins,n_tup_upd,n_tup_del,n_live_tup,n_dead_tup,n_ins_since_vacuum)) FROM pg_stat_user_tables WHERE relname='cs';
+{"tag" : "stats", "boundary" : "initial", "counters" : [1, 0, 0, 1, 0, 1]}
+SELECT json_build_object('tag','state','boundary','initial','count',count(*),'rows',json_agg(json_build_object('id',id,'payload',payload) ORDER BY id)) FROM cs;
+{"tag" : "state", "boundary" : "initial", "count" : 1, "rows" : [{"id" : 1, "payload" : "small"}]}
+\echo BEGIN_RESULT stats_8300_single
+BEGIN_RESULT stats_8300_single
+\set ON_ERROR_STOP off
+INSERT INTO cs VALUES (2, cs_text(8300));
+\echo RESULT stats_8300_single :SQLSTATE :ERROR
+RESULT stats_8300_single 54000 true
+\set ON_ERROR_STOP on
+SELECT pg_stat_force_next_flush();
+
+SELECT pg_stat_clear_snapshot();
+
+SELECT json_build_object('tag','stats','boundary','single','counters',json_build_array(n_tup_ins,n_tup_upd,n_tup_del,n_live_tup,n_dead_tup,n_ins_since_vacuum)) FROM pg_stat_user_tables WHERE relname='cs';
+{"tag" : "stats", "boundary" : "single", "counters" : [2, 0, 0, 1, 1, 2]}
+SELECT json_build_object('tag','state','boundary','single','count',count(*),'rows',json_agg(json_build_object('id',id,'payload',payload) ORDER BY id)) FROM cs;
+{"tag" : "state", "boundary" : "single", "count" : 1, "rows" : [{"id" : 1, "payload" : "small"}]}
+\echo BEGIN_RESULT stats_8300_multi
+BEGIN_RESULT stats_8300_multi
+\set ON_ERROR_STOP off
+INSERT INTO cs VALUES (2, 'small'), (3, cs_text(8300));
+\echo RESULT stats_8300_multi :SQLSTATE :ERROR
+RESULT stats_8300_multi 54000 true
+\set ON_ERROR_STOP on
+SELECT pg_stat_force_next_flush();
+
+SELECT pg_stat_clear_snapshot();
+
+SELECT json_build_object('tag','stats','boundary','multi','counters',json_build_array(n_tup_ins,n_tup_upd,n_tup_del,n_live_tup,n_dead_tup,n_ins_since_vacuum)) FROM pg_stat_user_tables WHERE relname='cs';
+{"tag" : "stats", "boundary" : "multi", "counters" : [4, 0, 0, 1, 3, 4]}
+SELECT json_build_object('tag','state','boundary','multi','count',count(*),'rows',json_agg(json_build_object('id',id,'payload',payload) ORDER BY id)) FROM cs;
+{"tag" : "state", "boundary" : "multi", "count" : 1, "rows" : [{"id" : 1, "payload" : "small"}]}
+\echo BEGIN_RESULT stats_8300_small
+BEGIN_RESULT stats_8300_small
+\set ON_ERROR_STOP off
+INSERT INTO cs VALUES (2, 'small');
+INSERT 0 1
+\echo RESULT stats_8300_small :SQLSTATE :ERROR
+RESULT stats_8300_small 00000 false
+\set ON_ERROR_STOP on
+SELECT pg_stat_force_next_flush();
+
+SELECT pg_stat_clear_snapshot();
+
+SELECT json_build_object('tag','stats','boundary','small','counters',json_build_array(n_tup_ins,n_tup_upd,n_tup_del,n_live_tup,n_dead_tup,n_ins_since_vacuum)) FROM pg_stat_user_tables WHERE relname='cs';
+{"tag" : "stats", "boundary" : "small", "counters" : [5, 0, 0, 2, 3, 5]}
+SELECT json_build_object('tag','state','boundary','small','count',count(*),'rows',json_agg(json_build_object('id',id,'payload',payload) ORDER BY id)) FROM cs;
+{"tag" : "state", "boundary" : "small", "count" : 2, "rows" : [{"id" : 1, "payload" : "small"}, {"id" : 2, "payload" : "small"}]}
+SELECT pg_stat_force_next_flush();
+
+SELECT pg_stat_clear_snapshot();
+
+SELECT json_build_object('tag','stats','boundary','before_update','counters',json_build_array(n_tup_ins,n_tup_upd,n_tup_del,n_live_tup,n_dead_tup,n_ins_since_vacuum)) FROM pg_stat_user_tables WHERE relname='cs';
+{"tag" : "stats", "boundary" : "before_update", "counters" : [5, 0, 0, 2, 3, 5]}
+SELECT json_build_object('tag','state','boundary','before_update','count',count(*),'rows',json_agg(json_build_object('id',id,'payload',payload) ORDER BY id)) FROM cs;
+{"tag" : "state", "boundary" : "before_update", "count" : 2, "rows" : [{"id" : 1, "payload" : "small"}, {"id" : 2, "payload" : "small"}]}
+\echo BEGIN_RESULT stats_8300_update
+BEGIN_RESULT stats_8300_update
+\set ON_ERROR_STOP off
+UPDATE cs SET payload=cs_text(8300) WHERE id=1;
+\echo RESULT stats_8300_update :SQLSTATE :ERROR
+RESULT stats_8300_update 54000 true
+\set ON_ERROR_STOP on
+SELECT pg_stat_force_next_flush();
+
+SELECT pg_stat_clear_snapshot();
+
+SELECT json_build_object('tag','stats','boundary','update','counters',json_build_array(n_tup_ins,n_tup_upd,n_tup_del,n_live_tup,n_dead_tup,n_ins_since_vacuum)) FROM pg_stat_user_tables WHERE relname='cs';
+{"tag" : "stats", "boundary" : "update", "counters" : [5, 1, 0, 2, 4, 5]}
+SELECT json_build_object('tag','state','boundary','update','count',count(*),'rows',json_agg(json_build_object('id',id,'payload',payload) ORDER BY id)) FROM cs;
+{"tag" : "state", "boundary" : "update", "count" : 2, "rows" : [{"id" : 1, "payload" : "small"}, {"id" : 2, "payload" : "small"}]}
+SELECT pg_stat_force_next_flush();
+
+SELECT pg_stat_clear_snapshot();
+
+SELECT json_build_object('tag','stats','boundary','before_upsert','counters',json_build_array(n_tup_ins,n_tup_upd,n_tup_del,n_live_tup,n_dead_tup,n_ins_since_vacuum)) FROM pg_stat_user_tables WHERE relname='cs';
+{"tag" : "stats", "boundary" : "before_upsert", "counters" : [5, 1, 0, 2, 4, 5]}
+SELECT json_build_object('tag','state','boundary','before_upsert','count',count(*),'rows',json_agg(json_build_object('id',id,'payload',payload) ORDER BY id)) FROM cs;
+{"tag" : "state", "boundary" : "before_upsert", "count" : 2, "rows" : [{"id" : 1, "payload" : "small"}, {"id" : 2, "payload" : "small"}]}
+\echo BEGIN_RESULT stats_8300_upsert
+BEGIN_RESULT stats_8300_upsert
+\set ON_ERROR_STOP off
+INSERT INTO cs VALUES (1, cs_text(8300)) ON CONFLICT(id) DO UPDATE SET payload=EXCLUDED.payload;
+\echo RESULT stats_8300_upsert :SQLSTATE :ERROR
+RESULT stats_8300_upsert 54000 true
+\set ON_ERROR_STOP on
+SELECT pg_stat_force_next_flush();
+
+SELECT pg_stat_clear_snapshot();
+
+SELECT json_build_object('tag','stats','boundary','upsert','counters',json_build_array(n_tup_ins,n_tup_upd,n_tup_del,n_live_tup,n_dead_tup,n_ins_since_vacuum)) FROM pg_stat_user_tables WHERE relname='cs';
+{"tag" : "stats", "boundary" : "upsert", "counters" : [5, 2, 0, 2, 5, 5]}
+SELECT json_build_object('tag','state','boundary','upsert','count',count(*),'rows',json_agg(json_build_object('id',id,'payload',payload) ORDER BY id)) FROM cs;
+{"tag" : "state", "boundary" : "upsert", "count" : 2, "rows" : [{"id" : 1, "payload" : "small"}, {"id" : 2, "payload" : "small"}]}
+SELECT pg_stat_force_next_flush();
+
+SELECT pg_stat_clear_snapshot();
+
+SELECT json_build_object('tag','stats','boundary','before_speculative','counters',json_build_array(n_tup_ins,n_tup_upd,n_tup_del,n_live_tup,n_dead_tup,n_ins_since_vacuum)) FROM pg_stat_user_tables WHERE relname='cs';
+{"tag" : "stats", "boundary" : "before_speculative", "counters" : [5, 2, 0, 2, 5, 5]}
+SELECT json_build_object('tag','state','boundary','before_speculative','count',count(*),'rows',json_agg(json_build_object('id',id,'payload',payload) ORDER BY id)) FROM cs;
+{"tag" : "state", "boundary" : "before_speculative", "count" : 2, "rows" : [{"id" : 1, "payload" : "small"}, {"id" : 2, "payload" : "small"}]}
+\echo BEGIN_RESULT stats_8300_speculative
+BEGIN_RESULT stats_8300_speculative
+\set ON_ERROR_STOP off
+INSERT INTO cs VALUES (5, cs_text(8300)) ON CONFLICT DO NOTHING;
+\echo RESULT stats_8300_speculative :SQLSTATE :ERROR
+RESULT stats_8300_speculative 54000 true
+\set ON_ERROR_STOP on
+SELECT pg_stat_force_next_flush();
+
+SELECT pg_stat_clear_snapshot();
+
+SELECT json_build_object('tag','stats','boundary','speculative','counters',json_build_array(n_tup_ins,n_tup_upd,n_tup_del,n_live_tup,n_dead_tup,n_ins_since_vacuum)) FROM pg_stat_user_tables WHERE relname='cs';
+{"tag" : "stats", "boundary" : "speculative", "counters" : [6, 2, 0, 2, 6, 6]}
+SELECT json_build_object('tag','state','boundary','speculative','count',count(*),'rows',json_agg(json_build_object('id',id,'payload',payload) ORDER BY id)) FROM cs;
+{"tag" : "state", "boundary" : "speculative", "count" : 2, "rows" : [{"id" : 1, "payload" : "small"}, {"id" : 2, "payload" : "small"}]}

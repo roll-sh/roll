@@ -1,0 +1,50 @@
+{
+  "container_name": "t3-d4020b98-combined-pg18-oracles-r2",
+  "container_id": "af69410964739cc260180a9231ccc4bf0e2a5b66ada669de07a72d169fa56d7b",
+  "image_id": "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5",
+  "host_config": {
+    "AutoRemove": true,
+    "Memory": 536870912,
+    "MemorySwap": 536870912,
+    "NanoCpus": 2000000000,
+    "CpusetCpus": "4-7,22-25",
+    "NetworkMode": "none",
+    "PortBindings": {},
+    "Tmpfs": {
+      "/var/lib/postgresql": "rw,size=1m"
+    },
+    "Binds": null
+  },
+  "mounts": [],
+  "container_config": {
+    "Cmd": [
+      "-c",
+      "exec nice -n 19 docker-entrypoint.sh postgres -c shared_buffers=16MB -c max_connections=12 -c log_min_messages=debug1 -c log_error_verbosity=verbose -c log_line_prefix='%m [%p] ' -c listen_addresses=127.0.0.1 "
+    ],
+    "Entrypoint": [
+      "/bin/sh"
+    ],
+    "Env": [
+      "PGDATA=/tmp/pg18-reference-data",
+      "POSTGRES_HOST_AUTH_METHOD=trust",
+      "POSTGRES_INITDB_ARGS=--locale=C --encoding=UTF8",
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "GOSU_VERSION=1.19",
+      "LANG=en_US.utf8",
+      "PG_MAJOR=18",
+      "PG_VERSION=18.6",
+      "PG_SHA256=555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f",
+      "DOCKER_PG_LLVM_DEPS=llvm21-dev \t\tclang21"
+    ],
+    "Labels": {
+      "agent.evidence": "combined-pg18-oracles-r2",
+      "agent.worktree": "t3-d4020b98"
+    }
+  },
+  "process_affinity_sample_paths": [
+    "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/001-identity-health.stdout",
+    "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/011-postgres-cpu-identity.stdout",
+    "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/038-postgres-resource-after.stdout"
+  ],
+  "synchronization_postflight": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/synchronization-postflight.stdout"
+}

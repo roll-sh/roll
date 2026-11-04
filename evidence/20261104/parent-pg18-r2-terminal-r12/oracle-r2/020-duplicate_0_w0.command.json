@@ -1,0 +1,32 @@
+{
+  "tag": "duplicate_0_w0",
+  "argv": [
+    "docker",
+    "exec",
+    "-i",
+    "-e",
+    "PGCLIENTENCODING=UTF8",
+    "t3-d4020b98-combined-pg18-oracles-r2",
+    "psql",
+    "-h",
+    "127.0.0.1",
+    "-X",
+    "-a",
+    "-v",
+    "ON_ERROR_STOP=1",
+    "-U",
+    "postgres",
+    "-d",
+    "duplicate_0_w0",
+    "-f",
+    "-"
+  ],
+  "shell_rendering": "docker exec -i -e PGCLIENTENCODING=UTF8 t3-d4020b98-combined-pg18-oracles-r2 psql -h 127.0.0.1 -X -a -v ON_ERROR_STOP=1 -U postgres -d duplicate_0_w0 -f -",
+  "started_utc": "2026-11-04T20:30:58.391058+00:00",
+  "stdin_path": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/duplicate_0_w0.sql",
+  "stdin_sha256": "8272e0b533c70ddc2f5e10683c7dee7525d205ed048c3d44fa5c7b6c5d61421d",
+  "actual_exit": 0,
+  "ended_utc": "2026-11-04T20:30:58.505547+00:00",
+  "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/020-duplicate_0_w0.stdout",
+  "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/020-duplicate_0_w0.stderr"
+}

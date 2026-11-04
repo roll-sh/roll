@@ -1,0 +1,14 @@
+{
+  "historical_wrapper_target_observed_absent": true,
+  "exact_authorized_recreation_paths": [
+    "/home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/target",
+    "/home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/target/.heavy.lock"
+  ],
+  "authorization": "User clarification: unchanged heavy.sh synchronization metadata only; no inference about disappearance",
+  "global_slots": 4,
+  "global_jobs": 2,
+  "nice": 19,
+  "taskset": "4-7,22-25",
+  "no_cargo_invocation": true,
+  "no_CARGO_TARGET_DIR_change": true
+}

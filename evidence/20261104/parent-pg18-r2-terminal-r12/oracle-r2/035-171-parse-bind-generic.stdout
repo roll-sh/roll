@@ -1,0 +1,61 @@
+-- CACHE-ONLY / NOT RUN. Parse ONCE at seq_page_cost500; six binds after RESET.
+CREATE TABLE p171_generic(a int,b text);
+CREATE TABLE
+INSERT INTO p171_generic SELECT g,g::text FROM generate_series(1,100) g;
+INSERT 0 100
+ANALYZE p171_generic;
+ANALYZE
+SET seq_page_cost=500;
+SET
+SELECT b FROM p171_generic WHERE a=$1 \parse p171_generic_plan
+
+RESET seq_page_cost;
+RESET
+\bind_named p171_generic_plan 1
+\g
+ b 
+---
+ 1
+(1 row)
+
+\bind_named p171_generic_plan 1
+\g
+ b 
+---
+ 1
+(1 row)
+
+\bind_named p171_generic_plan 1
+\g
+ b 
+---
+ 1
+(1 row)
+
+\bind_named p171_generic_plan 1
+\g
+ b 
+---
+ 1
+(1 row)
+
+\bind_named p171_generic_plan 1
+\g
+ b 
+---
+ 1
+(1 row)
+
+\bind_named p171_generic_plan 1
+\g
+ b 
+---
+ 1
+(1 row)
+
+SELECT generic_plans,custom_plans FROM pg_prepared_statements WHERE name='p171_generic_plan';
+ generic_plans | custom_plans 
+---------------+--------------
+             1 |            5
+(1 row)
+

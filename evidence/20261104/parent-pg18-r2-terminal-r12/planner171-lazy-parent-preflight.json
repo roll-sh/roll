@@ -1,0 +1,20 @@
+{
+  "time": "2026-11-04T20:34:25.549387+00:00",
+  "status": "BOUNDED PARENT STATIC PREFLIGHT; NOT INDEPENDENT REVIEW OR RUNTIME ACCEPTANCE",
+  "patch_sha256": "7dc538928f33e5a3bf3f671e159ea7466c8ea15075ff0afbe4d609999ab0b47e",
+  "observations": [
+    "BoundQuery construction is restored to lazy parent behavior; eager costed(), ScanEst and duplicate seq formula removed",
+    "Session::plan_cost cache miss computes fresh paths::describe(ctx,s).total under existing eligibility and parallel threshold guards",
+    "Arc pointer cache check, OnceLock writes, planning_charge and original EXPLAIN fallback remain in their original first-use context",
+    "One-shot Gather discovery and exec/parallel_part remain unchanged by proposal",
+    "Foreign tables are excluded; no new cache generations"
+  ],
+  "unresolved": [
+    "Unapplied/uncompiled; Option typing, net source bytes and actual runtime require later verification",
+    "Existing explain::total_and_gathers serial-bound assertion failure remains unattributed; shortcut success cannot close it",
+    "Must retain both exact red fixtures and compare c861 before repair after root PG terminal",
+    "After repair rerun exact bounded regressions plus failed logical_apply cases before full gate decisions"
+  ],
+  "source_acceptance": false,
+  "hold": "PG reference terminal then coordinated baseline, before source repair"
+}

@@ -1,0 +1,1 @@
+{"argv": ["bash", "-c", "date -u --iso-8601=seconds; stat /home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/target /home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/target/.heavy.lock; ls -la /home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/target; cat /tmp/pg-engine-heavy.lock.slots /tmp/pg-engine-heavy.lock.jobs"], "exit": 0}

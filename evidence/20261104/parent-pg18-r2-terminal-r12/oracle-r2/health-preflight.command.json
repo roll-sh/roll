@@ -1,0 +1,1 @@
+{"argv": ["bash", "-c", "date -u --iso-8601=seconds; df -B1 /home/meszmate/.cache; free -b; cat /proc/pressure/cpu; cat /proc/pressure/memory; ps -eo pid,ppid,pgid,ni,comm,args"], "exit": 0}

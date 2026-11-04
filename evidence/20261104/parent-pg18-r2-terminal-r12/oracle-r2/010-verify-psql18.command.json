@@ -1,0 +1,17 @@
+{
+  "tag": "verify-psql18",
+  "argv": [
+    "docker",
+    "exec",
+    "t3-d4020b98-combined-pg18-oracles-r2",
+    "psql",
+    "--version"
+  ],
+  "shell_rendering": "docker exec t3-d4020b98-combined-pg18-oracles-r2 psql --version",
+  "started_utc": "2026-11-04T20:30:53.870782+00:00",
+  "stdin_path": null,
+  "actual_exit": 0,
+  "ended_utc": "2026-11-04T20:30:53.985244+00:00",
+  "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/010-verify-psql18.stdout",
+  "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r2/010-verify-psql18.stderr"
+}

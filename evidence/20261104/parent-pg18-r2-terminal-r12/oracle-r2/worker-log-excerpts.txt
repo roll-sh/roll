@@ -1,0 +1,212 @@
+2026-11-04T20:30:52.515798040Z 2026-11-04 20:30:52.515 UTC [50] DEBUG:  00000: starting background worker process "logical replication launcher"
+2026-11-04T20:30:52.614663932Z 2026-11-04 20:30:52.614 UTC [50] LOG:  00000: background worker "logical replication launcher" (PID 59) exited with exit code 1
+2026-11-04T20:30:52.748460118Z 2026-11-04 20:30:52.748 UTC [1] DEBUG:  00000: starting background worker process "logical replication launcher"
+2026-11-04T20:30:55.537469226Z 2026-11-04 20:30:55.537 UTC [130] DEBUG:  00000: building index "pg_toast_16407_index" on table "pg_toast_16407" serially
+2026-11-04T20:30:55.547772299Z 2026-11-04 20:30:55.547 UTC [130] DEBUG:  00000: building index "ci_i" on table "ci" serially
+2026-11-04T20:30:55.676150672Z 2026-11-04 20:30:55.676 UTC [137] DEBUG:  00000: building index "pg_toast_16417_index" on table "pg_toast_16417" serially
+2026-11-04T20:30:55.691389585Z 2026-11-04 20:30:55.691 UTC [137] DEBUG:  00000: building index "ci_i" on table "ci" serially
+2026-11-04T20:30:55.841234275Z 2026-11-04 20:30:55.841 UTC [144] DEBUG:  00000: building index "pg_toast_16427_index" on table "pg_toast_16427" serially
+2026-11-04T20:30:55.851685917Z 2026-11-04 20:30:55.851 UTC [144] DEBUG:  00000: building index "ci_i" on table "ci" serially
+2026-11-04T20:30:55.984362100Z 2026-11-04 20:30:55.984 UTC [151] DEBUG:  00000: building index "pg_toast_16435_index" on table "pg_toast_16435" serially
+2026-11-04T20:30:55.995367153Z 2026-11-04 20:30:55.995 UTC [151] DEBUG:  00000: building index "ci_i" on table "ci" serially
+2026-11-04T20:30:58.161425731Z 2026-11-04 20:30:58.161 UTC [158] DEBUG:  00000: building index "pg_toast_16443_index" on table "pg_toast_16443" serially
+2026-11-04T20:30:58.176181661Z 2026-11-04 20:30:58.176 UTC [158] DEBUG:  00000: building index "ci_i" on table "ci" serially
+2026-11-04T20:30:58.337164929Z 2026-11-04 20:30:58.337 UTC [165] DEBUG:  00000: building index "pg_toast_16451_index" on table "pg_toast_16451" serially
+2026-11-04T20:30:58.353697076Z 2026-11-04 20:30:58.353 UTC [165] DEBUG:  00000: building index "ci_i" on table "ci" serially
+2026-11-04T20:30:58.465674654Z 2026-11-04 20:30:58.465 UTC [172] DEBUG:  00000: building index "pg_toast_16459_index" on table "pg_toast_16459" serially
+2026-11-04T20:30:58.474048442Z 2026-11-04 20:30:58.474 UTC [172] DEBUG:  00000: building index "ci_i" on table "ci" serially
+2026-11-04T20:30:58.609847095Z 2026-11-04 20:30:58.609 UTC [179] DEBUG:  00000: building index "pg_toast_16466_index" on table "pg_toast_16466" with request for 2 parallel workers
+2026-11-04T20:30:58.610096100Z 2026-11-04 20:30:58.610 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 179"
+2026-11-04T20:30:58.610128432Z 2026-11-04 20:30:58.610 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 179"
+2026-11-04T20:30:58.610150179Z 2026-11-04 20:30:58.610 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 179"
+2026-11-04T20:30:58.610822415Z 2026-11-04 20:30:58.610 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 179"
+2026-11-04T20:30:58.616229154Z 2026-11-04 20:30:58.616 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 179"
+2026-11-04T20:30:58.616278995Z 2026-11-04 20:30:58.616 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 180) exited with exit code 0
+2026-11-04T20:30:58.624777069Z 2026-11-04 20:30:58.624 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 179"
+2026-11-04T20:30:58.624820053Z 2026-11-04 20:30:58.624 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 181) exited with exit code 0
+2026-11-04T20:30:58.639383955Z 2026-11-04 20:30:58.639 UTC [179] DEBUG:  00000: building index "ci_i" on table "ci" with request for 2 parallel workers
+2026-11-04T20:30:58.639551782Z 2026-11-04 20:30:58.639 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 179"
+2026-11-04T20:30:58.639578711Z 2026-11-04 20:30:58.639 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 179"
+2026-11-04T20:30:58.639587354Z 2026-11-04 20:30:58.639 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 179"
+2026-11-04T20:30:58.640103494Z 2026-11-04 20:30:58.640 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 179"
+2026-11-04T20:30:58.647034962Z 2026-11-04 20:30:58.646 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 179"
+2026-11-04T20:30:58.647072643Z 2026-11-04 20:30:58.646 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 183) exited with exit code 0
+2026-11-04T20:30:58.653050750Z 2026-11-04 20:30:58.652 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 179"
+2026-11-04T20:30:58.653077450Z 2026-11-04 20:30:58.652 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 182) exited with exit code 0
+2026-11-04T20:30:58.765164609Z 2026-11-04 20:30:58.765 UTC [190] DEBUG:  00000: building index "pg_toast_16476_index" on table "pg_toast_16476" with request for 2 parallel workers
+2026-11-04T20:30:58.765352889Z 2026-11-04 20:30:58.765 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 190"
+2026-11-04T20:30:58.765385661Z 2026-11-04 20:30:58.765 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 190"
+2026-11-04T20:30:58.765400535Z 2026-11-04 20:30:58.765 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 190"
+2026-11-04T20:30:58.765785936Z 2026-11-04 20:30:58.765 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 190"
+2026-11-04T20:30:58.773381955Z 2026-11-04 20:30:58.773 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 190"
+2026-11-04T20:30:58.773408701Z 2026-11-04 20:30:58.773 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 191) exited with exit code 0
+2026-11-04T20:30:58.773417571Z 2026-11-04 20:30:58.773 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 190"
+2026-11-04T20:30:58.773425936Z 2026-11-04 20:30:58.773 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 192) exited with exit code 0
+2026-11-04T20:30:58.782899751Z 2026-11-04 20:30:58.782 UTC [190] DEBUG:  00000: building index "ci_i" on table "ci" with request for 2 parallel workers
+2026-11-04T20:30:58.783017680Z 2026-11-04 20:30:58.782 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 190"
+2026-11-04T20:30:58.783044412Z 2026-11-04 20:30:58.782 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 190"
+2026-11-04T20:30:58.783053384Z 2026-11-04 20:30:58.782 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 190"
+2026-11-04T20:30:58.783383888Z 2026-11-04 20:30:58.783 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 190"
+2026-11-04T20:30:58.789321629Z 2026-11-04 20:30:58.789 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 190"
+2026-11-04T20:30:58.789334302Z 2026-11-04 20:30:58.789 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 194) exited with exit code 0
+2026-11-04T20:30:58.789606107Z 2026-11-04 20:30:58.789 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 190"
+2026-11-04T20:30:58.789630064Z 2026-11-04 20:30:58.789 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 193) exited with exit code 0
+2026-11-04T20:30:58.948568569Z 2026-11-04 20:30:58.948 UTC [201] DEBUG:  00000: building index "pg_toast_16486_index" on table "pg_toast_16486" with request for 2 parallel workers
+2026-11-04T20:30:58.948866697Z 2026-11-04 20:30:58.948 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 201"
+2026-11-04T20:30:58.948890282Z 2026-11-04 20:30:58.948 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 201"
+2026-11-04T20:30:58.948897075Z 2026-11-04 20:30:58.948 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 201"
+2026-11-04T20:30:58.949443438Z 2026-11-04 20:30:58.949 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 201"
+2026-11-04T20:30:58.956456468Z 2026-11-04 20:30:58.956 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 201"
+2026-11-04T20:30:58.956483428Z 2026-11-04 20:30:58.956 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 202) exited with exit code 0
+2026-11-04T20:30:58.962164745Z 2026-11-04 20:30:58.962 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 201"
+2026-11-04T20:30:58.962189516Z 2026-11-04 20:30:58.962 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 203) exited with exit code 0
+2026-11-04T20:30:58.982172445Z 2026-11-04 20:30:58.982 UTC [201] DEBUG:  00000: building index "ci_i" on table "ci" with request for 2 parallel workers
+2026-11-04T20:30:58.982317639Z 2026-11-04 20:30:58.982 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 201"
+2026-11-04T20:30:58.982340641Z 2026-11-04 20:30:58.982 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 201"
+2026-11-04T20:30:58.982350934Z 2026-11-04 20:30:58.982 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 201"
+2026-11-04T20:30:58.982980630Z 2026-11-04 20:30:58.982 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 201"
+2026-11-04T20:30:58.989917298Z 2026-11-04 20:30:58.989 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 201"
+2026-11-04T20:30:58.989950603Z 2026-11-04 20:30:58.989 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 204) exited with exit code 0
+2026-11-04T20:30:58.996797542Z 2026-11-04 20:30:58.996 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 201"
+2026-11-04T20:30:58.996839256Z 2026-11-04 20:30:58.996 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 205) exited with exit code 0
+2026-11-04T20:30:59.077201133Z 2026-11-04 20:30:59.077 UTC [212] DEBUG:  00000: building index "pg_toast_16494_index" on table "pg_toast_16494" with request for 2 parallel workers
+2026-11-04T20:30:59.077429017Z 2026-11-04 20:30:59.077 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 212"
+2026-11-04T20:30:59.077455524Z 2026-11-04 20:30:59.077 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 212"
+2026-11-04T20:30:59.077469884Z 2026-11-04 20:30:59.077 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 212"
+2026-11-04T20:30:59.078278177Z 2026-11-04 20:30:59.078 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 212"
+2026-11-04T20:30:59.083534601Z 2026-11-04 20:30:59.083 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 212"
+2026-11-04T20:30:59.083575722Z 2026-11-04 20:30:59.083 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 213) exited with exit code 0
+2026-11-04T20:30:59.090045574Z 2026-11-04 20:30:59.089 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 212"
+2026-11-04T20:30:59.090091965Z 2026-11-04 20:30:59.089 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 214) exited with exit code 0
+2026-11-04T20:30:59.104833424Z 2026-11-04 20:30:59.104 UTC [212] DEBUG:  00000: building index "ci_i" on table "ci" with request for 2 parallel workers
+2026-11-04T20:30:59.104999065Z 2026-11-04 20:30:59.104 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 212"
+2026-11-04T20:30:59.105025811Z 2026-11-04 20:30:59.104 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 212"
+2026-11-04T20:30:59.105048881Z 2026-11-04 20:30:59.104 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 212"
+2026-11-04T20:30:59.105599465Z 2026-11-04 20:30:59.105 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 212"
+2026-11-04T20:30:59.107681316Z 2026-11-04 20:30:59.107 UTC [216] FATAL:  57P01: terminating background worker "parallel worker" due to administrator command
+2026-11-04T20:30:59.107820697Z 2026-11-04 20:30:59.107 UTC [215] FATAL:  57P01: terminating background worker "parallel worker" due to administrator command
+2026-11-04T20:30:59.110308475Z 2026-11-04 20:30:59.110 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 212"
+2026-11-04T20:30:59.110337764Z 2026-11-04 20:30:59.110 UTC [1] LOG:  00000: background worker "parallel worker" (PID 216) exited with exit code 1
+2026-11-04T20:30:59.110791000Z 2026-11-04 20:30:59.110 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 212"
+2026-11-04T20:30:59.110809899Z 2026-11-04 20:30:59.110 UTC [1] LOG:  00000: background worker "parallel worker" (PID 215) exited with exit code 1
+2026-11-04T20:30:59.224674737Z 2026-11-04 20:30:59.224 UTC [223] DEBUG:  00000: building index "pg_toast_16502_index" on table "pg_toast_16502" with request for 2 parallel workers
+2026-11-04T20:30:59.224927306Z 2026-11-04 20:30:59.224 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 223"
+2026-11-04T20:30:59.224953357Z 2026-11-04 20:30:59.224 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 223"
+2026-11-04T20:30:59.224966119Z 2026-11-04 20:30:59.224 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 223"
+2026-11-04T20:30:59.225497408Z 2026-11-04 20:30:59.225 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 223"
+2026-11-04T20:30:59.234084476Z 2026-11-04 20:30:59.233 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 223"
+2026-11-04T20:30:59.234129540Z 2026-11-04 20:30:59.234 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 225) exited with exit code 0
+2026-11-04T20:30:59.234441136Z 2026-11-04 20:30:59.234 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 223"
+2026-11-04T20:30:59.234474411Z 2026-11-04 20:30:59.234 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 224) exited with exit code 0
+2026-11-04T20:30:59.244779900Z 2026-11-04 20:30:59.244 UTC [223] DEBUG:  00000: building index "ci_i" on table "ci" with request for 2 parallel workers
+2026-11-04T20:30:59.244937296Z 2026-11-04 20:30:59.244 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 223"
+2026-11-04T20:30:59.244972334Z 2026-11-04 20:30:59.244 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 223"
+2026-11-04T20:30:59.244987799Z 2026-11-04 20:30:59.244 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 223"
+2026-11-04T20:30:59.245434307Z 2026-11-04 20:30:59.245 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 223"
+2026-11-04T20:30:59.253702641Z 2026-11-04 20:30:59.253 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 223"
+2026-11-04T20:30:59.253739198Z 2026-11-04 20:30:59.253 UTC [1] LOG:  00000: background worker "parallel worker" (PID 226) exited with exit code 1
+2026-11-04T20:30:59.253753253Z 2026-11-04 20:30:59.253 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 223"
+2026-11-04T20:30:59.253767873Z 2026-11-04 20:30:59.253 UTC [1] LOG:  00000: background worker "parallel worker" (PID 227) exited with exit code 1
+2026-11-04T20:30:59.409207845Z 2026-11-04 20:30:59.409 UTC [234] DEBUG:  00000: building index "pg_toast_16510_index" on table "pg_toast_16510" with request for 2 parallel workers
+2026-11-04T20:30:59.409920929Z 2026-11-04 20:30:59.409 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 234"
+2026-11-04T20:30:59.409940763Z 2026-11-04 20:30:59.409 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 234"
+2026-11-04T20:30:59.409952472Z 2026-11-04 20:30:59.409 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 234"
+2026-11-04T20:30:59.410322859Z 2026-11-04 20:30:59.410 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 234"
+2026-11-04T20:30:59.417272359Z 2026-11-04 20:30:59.417 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 234"
+2026-11-04T20:30:59.417301532Z 2026-11-04 20:30:59.417 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 235) exited with exit code 0
+2026-11-04T20:30:59.419849821Z 2026-11-04 20:30:59.419 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 234"
+2026-11-04T20:30:59.419863913Z 2026-11-04 20:30:59.419 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 236) exited with exit code 0
+2026-11-04T20:30:59.432245934Z 2026-11-04 20:30:59.432 UTC [234] DEBUG:  00000: building index "ci_i" on table "ci" with request for 2 parallel workers
+2026-11-04T20:30:59.433063011Z 2026-11-04 20:30:59.432 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 234"
+2026-11-04T20:30:59.433080002Z 2026-11-04 20:30:59.432 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 234"
+2026-11-04T20:30:59.433085477Z 2026-11-04 20:30:59.432 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 234"
+2026-11-04T20:30:59.433090797Z 2026-11-04 20:30:59.432 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 234"
+2026-11-04T20:30:59.437994233Z 2026-11-04 20:30:59.436 GMT [238] FATAL:  terminating background worker "parallel worker" due to administrator command
+2026-11-04T20:30:59.438017697Z 2026-11-04 20:30:59.436 GMT [237] FATAL:  terminating background worker "parallel worker" due to administrator command
+2026-11-04T20:30:59.439698400Z 2026-11-04 20:30:59.439 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 234"
+2026-11-04T20:30:59.439716629Z 2026-11-04 20:30:59.439 UTC [1] LOG:  00000: background worker "parallel worker" (PID 237) exited with exit code 1
+2026-11-04T20:30:59.439875718Z 2026-11-04 20:30:59.439 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 234"
+2026-11-04T20:30:59.440005267Z 2026-11-04 20:30:59.439 UTC [1] LOG:  00000: background worker "parallel worker" (PID 238) exited with exit code 1
+2026-11-04T20:30:59.525507743Z 2026-11-04 20:30:59.525 UTC [245] DEBUG:  00000: building index "pg_toast_16518_index" on table "pg_toast_16518" with request for 2 parallel workers
+2026-11-04T20:30:59.525709608Z 2026-11-04 20:30:59.525 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 245"
+2026-11-04T20:30:59.525741285Z 2026-11-04 20:30:59.525 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 245"
+2026-11-04T20:30:59.525754529Z 2026-11-04 20:30:59.525 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 245"
+2026-11-04T20:30:59.526164351Z 2026-11-04 20:30:59.526 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 245"
+2026-11-04T20:30:59.531811195Z 2026-11-04 20:30:59.531 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 245"
+2026-11-04T20:30:59.531830276Z 2026-11-04 20:30:59.531 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 247) exited with exit code 0
+2026-11-04T20:30:59.535426066Z 2026-11-04 20:30:59.535 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 245"
+2026-11-04T20:30:59.535463383Z 2026-11-04 20:30:59.535 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 246) exited with exit code 0
+2026-11-04T20:30:59.544054280Z 2026-11-04 20:30:59.544 UTC [245] DEBUG:  00000: building index "ci_i" on table "ci" with request for 2 parallel workers
+2026-11-04T20:30:59.544164931Z 2026-11-04 20:30:59.544 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 245"
+2026-11-04T20:30:59.544176672Z 2026-11-04 20:30:59.544 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 245"
+2026-11-04T20:30:59.544180040Z 2026-11-04 20:30:59.544 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 245"
+2026-11-04T20:30:59.544524195Z 2026-11-04 20:30:59.544 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 245"
+2026-11-04T20:30:59.546300835Z 2026-11-04 20:30:59.546 UTC [249] FATAL:  57P01: terminating background worker "parallel worker" due to administrator command
+2026-11-04T20:30:59.547761935Z 2026-11-04 20:30:59.547 UTC [248] FATAL:  57P01: terminating background worker "parallel worker" due to administrator command
+2026-11-04T20:30:59.548415773Z 2026-11-04 20:30:59.548 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 245"
+2026-11-04T20:30:59.548424081Z 2026-11-04 20:30:59.548 UTC [1] LOG:  00000: background worker "parallel worker" (PID 249) exited with exit code 1
+2026-11-04T20:30:59.552102450Z 2026-11-04 20:30:59.552 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 245"
+2026-11-04T20:30:59.552129772Z 2026-11-04 20:30:59.552 UTC [1] LOG:  00000: background worker "parallel worker" (PID 248) exited with exit code 1
+2026-11-04T20:30:59.687490657Z 2026-11-04 20:30:59.687 UTC [256] DEBUG:  00000: building index "pg_toast_16525_index" on table "pg_toast_16525" serially
+2026-11-04T20:30:59.688982591Z 2026-11-04 20:30:59.688 UTC [256] DEBUG:  00000: building index "cs_pkey" on table "cs" serially
+2026-11-04T20:30:59.690423618Z 2026-11-04 20:30:59.690 UTC [256] DEBUG:  00000: building index "cs_i" on table "cs" serially
+2026-11-04T20:30:59.873038140Z 2026-11-04 20:30:59.872 UTC [263] DEBUG:  00000: building index "pg_toast_16540_index" on table "pg_toast_16540" serially
+2026-11-04T20:30:59.873836045Z 2026-11-04 20:30:59.873 UTC [263] DEBUG:  00000: building index "cs_pkey" on table "cs" serially
+2026-11-04T20:30:59.874736542Z 2026-11-04 20:30:59.874 UTC [263] DEBUG:  00000: building index "cs_i" on table "cs" serially
+2026-11-04T20:31:00.051652907Z 2026-11-04 20:31:00.051 UTC [270] DEBUG:  00000: building index "pg_toast_16554_index" on table "pg_toast_16554" serially
+2026-11-04T20:31:00.154037896Z 2026-11-04 20:31:00.153 UTC [270] DEBUG:  00000: building index "ce_i" on table "ce" serially
+2026-11-04T20:31:00.365324411Z 2026-11-04 20:31:00.365 UTC [277] DEBUG:  00000: building index "pg_toast_16560_index" on table "pg_toast_16560" with request for 2 parallel workers
+2026-11-04T20:31:00.365535759Z 2026-11-04 20:31:00.365 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 277"
+2026-11-04T20:31:00.365552561Z 2026-11-04 20:31:00.365 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 277"
+2026-11-04T20:31:00.365556897Z 2026-11-04 20:31:00.365 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 277"
+2026-11-04T20:31:00.366015848Z 2026-11-04 20:31:00.365 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 277"
+2026-11-04T20:31:00.372466046Z 2026-11-04 20:31:00.372 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 277"
+2026-11-04T20:31:00.372477693Z 2026-11-04 20:31:00.372 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 278) exited with exit code 0
+2026-11-04T20:31:00.374133106Z 2026-11-04 20:31:00.374 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 277"
+2026-11-04T20:31:00.374154643Z 2026-11-04 20:31:00.374 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 279) exited with exit code 0
+2026-11-04T20:31:00.426295569Z 2026-11-04 20:31:00.426 UTC [277] DEBUG:  00000: building index "ce_i" on table "ce" with request for 2 parallel workers
+2026-11-04T20:31:00.426422904Z 2026-11-04 20:31:00.426 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 277"
+2026-11-04T20:31:00.426445004Z 2026-11-04 20:31:00.426 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 277"
+2026-11-04T20:31:00.426452059Z 2026-11-04 20:31:00.426 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 277"
+2026-11-04T20:31:00.426885209Z 2026-11-04 20:31:00.426 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 277"
+2026-11-04T20:31:00.443009494Z 2026-11-04 20:31:00.442 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 277"
+2026-11-04T20:31:00.443046087Z 2026-11-04 20:31:00.442 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 281) exited with exit code 0
+2026-11-04T20:31:00.443175334Z 2026-11-04 20:31:00.443 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 277"
+2026-11-04T20:31:00.443206028Z 2026-11-04 20:31:00.443 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 280) exited with exit code 0
+2026-11-04T20:31:00.608946118Z 2026-11-04 20:31:00.608 UTC [288] DEBUG:  00000: building index "pg_toast_16566_index" on table "pg_toast_16566" serially
+2026-11-04T20:31:00.742928533Z 2026-11-04 20:31:00.742 UTC [288] DEBUG:  00000: building index "ce_i" on table "ce" serially
+2026-11-04T20:31:00.898689130Z 2026-11-04 20:31:00.898 UTC [295] DEBUG:  00000: building index "pg_toast_16572_index" on table "pg_toast_16572" with request for 2 parallel workers
+2026-11-04T20:31:00.898938942Z 2026-11-04 20:31:00.898 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 295"
+2026-11-04T20:31:00.898958904Z 2026-11-04 20:31:00.898 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 295"
+2026-11-04T20:31:00.898979881Z 2026-11-04 20:31:00.898 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 295"
+2026-11-04T20:31:00.899591093Z 2026-11-04 20:31:00.899 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 295"
+2026-11-04T20:31:00.904807745Z 2026-11-04 20:31:00.904 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 295"
+2026-11-04T20:31:00.904832453Z 2026-11-04 20:31:00.904 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 296) exited with exit code 0
+2026-11-04T20:31:00.912159424Z 2026-11-04 20:31:00.911 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 295"
+2026-11-04T20:31:00.912194827Z 2026-11-04 20:31:00.911 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 297) exited with exit code 0
+2026-11-04T20:31:01.073086321Z 2026-11-04 20:31:01.072 UTC [295] DEBUG:  00000: building index "ce_i" on table "ce" with request for 2 parallel workers
+2026-11-04T20:31:01.073220989Z 2026-11-04 20:31:01.073 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 295"
+2026-11-04T20:31:01.073230522Z 2026-11-04 20:31:01.073 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 295"
+2026-11-04T20:31:01.073260924Z 2026-11-04 20:31:01.073 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 295"
+2026-11-04T20:31:01.074164155Z 2026-11-04 20:31:01.074 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 295"
+2026-11-04T20:31:01.101107197Z 2026-11-04 20:31:01.100 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 295"
+2026-11-04T20:31:01.101133437Z 2026-11-04 20:31:01.101 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 298) exited with exit code 0
+2026-11-04T20:31:01.105006881Z 2026-11-04 20:31:01.104 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 295"
+2026-11-04T20:31:01.105029852Z 2026-11-04 20:31:01.104 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 299) exited with exit code 0
+2026-11-04T20:31:01.365364700Z 2026-11-04 20:31:01.365 UTC [313] DEBUG:  00000: building index "pg_toast_16578_index" on table "pg_toast_16578" serially
+2026-11-04T20:31:06.223683212Z 2026-11-04 20:31:06.223 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 327"
+2026-11-04T20:31:06.223716511Z 2026-11-04 20:31:06.223 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 327"
+2026-11-04T20:31:06.223730986Z 2026-11-04 20:31:06.223 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 327"
+2026-11-04T20:31:06.224173906Z 2026-11-04 20:31:06.224 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 327"
+2026-11-04T20:31:06.337982327Z 2026-11-04 20:31:06.337 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 327"
+2026-11-04T20:31:06.338013990Z 2026-11-04 20:31:06.337 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 328) exited with exit code 0
+2026-11-04T20:31:06.338454090Z 2026-11-04 20:31:06.338 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 327"
+2026-11-04T20:31:06.338472694Z 2026-11-04 20:31:06.338 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 329) exited with exit code 0
+2026-11-04T20:31:06.340644018Z 2026-11-04 20:31:06.340 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 327"
+2026-11-04T20:31:06.340662132Z 2026-11-04 20:31:06.340 UTC [1] DEBUG:  00000: registering background worker "parallel worker for PID 327"
+2026-11-04T20:31:06.340667856Z 2026-11-04 20:31:06.340 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 327"
+2026-11-04T20:31:06.340969596Z 2026-11-04 20:31:06.340 UTC [1] DEBUG:  00000: starting background worker process "parallel worker for PID 327"
+2026-11-04T20:31:06.520128389Z 2026-11-04 20:31:06.520 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 327"
+2026-11-04T20:31:06.520172076Z 2026-11-04 20:31:06.520 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 330) exited with exit code 0
+2026-11-04T20:31:06.521293031Z 2026-11-04 20:31:06.521 UTC [1] DEBUG:  00000: unregistering background worker "parallel worker for PID 327"
+2026-11-04T20:31:06.521310160Z 2026-11-04 20:31:06.521 UTC [1] DEBUG:  00000: background worker "parallel worker" (PID 331) exited with exit code 0

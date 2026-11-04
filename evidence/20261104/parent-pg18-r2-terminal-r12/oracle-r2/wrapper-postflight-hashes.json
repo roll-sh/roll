@@ -1,0 +1,12 @@
+{
+  "/home/meszmate/.cache/a163/heavy-bg.sh": {
+    "current_sha256": "6b89e35cb4bac89a27918d6fb12fc31a90b34675f9fee1e0cff9e12b72e82110",
+    "copy_sha256": "6b89e35cb4bac89a27918d6fb12fc31a90b34675f9fee1e0cff9e12b72e82110",
+    "match": true
+  },
+  "/home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/crates/pg-engine/tools/heavy.sh": {
+    "current_sha256": "6cf1127d5a598b761abd4744d2fec5a38eeb7f9fb1313f58eee94954c616f937",
+    "copy_sha256": "6cf1127d5a598b761abd4744d2fec5a38eeb7f9fb1313f58eee94954c616f937",
+    "match": true
+  }
+}
