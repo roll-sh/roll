@@ -488,6 +488,7 @@ impl Ddl<'_, '_> {
             parent: 0,
             clustered: false,
             replident: false,
+            not_ready: false,
         };
         if let Some(a) = &made_am {
             self.cat.rel_am.insert(oid, a.oid);
@@ -500,13 +501,15 @@ impl Ddl<'_, '_> {
             let sess = self.ctx.sess;
             let _progress = super::idxprogress::command(&sess.index_progress, if s.concurrent { 2 } else { 1 });
             // DefineIndex commits the index before it builds it concurrently: a build
-            // that fails leaves it there, INVALID.
+            // that fails leaves it there, INVALID, and (failing in index_concurrently_build,
+            // before the phase that marks it ready) not ready for inserts.
             if s.concurrent
                 && !t.temporary
                 && let Some(e) = self.index_duplicate(&t, &ix)?
             {
                 self.cat.put_index(Index {
                     valid: false,
+                    not_ready: true,
                     ..ix.clone()
                 });
                 self.save()?;

@@ -365,6 +365,7 @@ all of it (round 9's seeds too with `GUARD_SEEDS`).
 |---|---|---|---|---|
 | 2026-11-03 | `251924c1` / `ed0c85fe` (release) | 70,215 | 0 | 37 lines: round 7's binary domain-array element oid (seeds 7024, 7087-7145, 8032, 8132), Bind's result-format check before the custom plan (7063, 08P01 vs 22003) |
 | 2026-11-03, `tools/difftest-guard.sh`, rounds 6-9 | `847fbdba` / `1f676b8a` | 93,717 | 3 lines, one case (seed 9014 #82: a generic plan's Index Only Scan where PostgreSQL has a Bitmap Heap Scan), not reproducible from its reduced case on either binary: background VACUUM timing (both servers' autovacuum visits a seed's tables at random points), so round 9's tables no longer autovacuum | 6: agent 145's result-type check (0A000, seeds 9060, 9061, 9067, 9090) and binary array dimensions (54000, seed 9073) |
+| 2026-11-03, rounds 6-9 (head with round 9's tables not autovacuuming) | `1f676b8a` / `5386239f` (agent 154's batch execution 86c04b88, agent 148's COPY flush bd7ba755) | 93,717 | 0 | 7: COPY's sequence values after a late duplicate (seeds 9010, 9093, 9119), and plans of seeds 9017, 9046 (the autovacuum change) |
 
 ## Round 9 (agent 156)
 
@@ -373,14 +374,15 @@ wrong_error 17, missing_error 4, eval_error 1, error_message 3, error_detail 40.
 below reproduces on `251924c1` too: the grammar found them, no recent push caused them.
 Routed through the coordinator 2026-11-03.
 
-- **Plan cache (agent 145).** A generic plan is never chosen:
+- **Plan cache (now agent 159, OLTP, with agent 155's custom-plan design; the CoerceViaIO
+  folding rule is part of it).** A generic plan is never chosen:
   `CREATE TABLE r9s (id int PRIMARY KEY, g int, v int, t text, x numeric)`, 2,885 rows
   (`SELECT i, 1, NULL, (ARRAY['a', 'a b'])[i % 8 + 1] || 1 FROM generate_series(1, 2885) i`),
   ANALYZE, `PREPARE r9p (text) AS SELECT id, g FROM r9s WHERE id = ANY ($1::int[]) ORDER BY id`,
   executed with `'{50,100,NULL}'`, `'{2999,1}'`, `'{}'`, `'{1,2,3}'`, `'{50,100,NULL}'` twice:
   pg_prepared_statements' generic / custom plans 0 / 6, PostgreSQL 1 / 5 (EXPLAIN EXECUTE shows
   the literal where PostgreSQL shows `$1`); over SQL and the extended protocol, 12 of 150 seeds.
-- **Parameter types (agent 145).** `PREPARE p AS SELECT id FROM r9s WHERE id BETWEEN $1 AND
+- **Parameter types (now agent 159, with the plan cache item).** `PREPARE p AS SELECT id FROM r9s WHERE id BETWEEN $1 AND
   $1 + $2` fails 42725 "operator is not unique: unknown + unknown"; PostgreSQL types `$1` from
   BETWEEN first. Also over the protocol (an untyped Parse).
 - **Result type (agent 145; fixed by `1f676b8a`, gone from seeds 9060, 9061, 9067, 9090).**
@@ -390,8 +392,9 @@ Routed through the coordinator 2026-11-03.
 - **Binary arrays (agent 145; fixed by `1f676b8a`, gone from seed 9073).** A binary int4[]
   parameter whose header is garbage: 08P01 or 22P03 where PostgreSQL reports 54000 "number of array dimensions (N) exceeds the maximum
   allowed (6)".
-- **COPY's buffered rows (agent 148).** PostgreSQL checks unique keys when it flushes 1,000
-  buffered rows; the engine row by row. `CREATE TABLE r9c (id int PRIMARY KEY, a int, b text,
+- **COPY's buffered rows (agent 148; fixed by bd7ba755, re-probed on `5386239f`: 1101, 1001
+  and, with the trigger, 1051, as PostgreSQL).** PostgreSQL checks unique keys when it flushes
+  1,000 buffered rows; the engine checked row by row. `CREATE TABLE r9c (id int PRIMARY KEY, a int, b text,
   s serial)`, a COPY of 1,100 lines whose line 1,050 repeats key 5, then `SELECT
   nextval('r9c_s_seq')`: 1051, PostgreSQL 1101 (line 900: 901, PostgreSQL 1001). With a BEFORE
   ROW trigger (no buffering) both say 1051.
@@ -409,7 +412,8 @@ Routed through the coordinator 2026-11-03.
   correlation in pg_stats and pg_stats_ext_exprs differs in the second or third digit on fully
   sampled tables (the grammar compares it to one decimal, and not at all after an UPDATE moved
   rows); a failed `CREATE UNIQUE INDEX CONCURRENTLY` leaves `indisready` true (PostgreSQL false;
-  later inserts behave alike).
+  later inserts behave alike; agent 144's, fixed in 882a7498, which on 2026-11-03 is on
+  `wip/a144` only, not on the shared branch).
 - **EXPLAIN (planner's deparse, agent 155; more than an hour, not fixed here).** A sort key
   under a written COLLATE: PostgreSQL's planner turns the CollateExpr into a RelabelType, and a
   key that matches an output column (relabelling stripped) shows that column, otherwise the
@@ -1236,7 +1240,9 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
 ## Open
 
 - **Round 8 seeds, found, not fixed** (agent 147; re-routed to the current owners by agent 156 on
-  2026-11-03, all re-probed on `ed0c85fe`, reproducers below):
+  2026-11-03, all re-probed on `ed0c85fe`, reproducers below). Owners as of 2026-11-03's end:
+  executor agent 160, OLTP and protocol agent 159, planner agent 155, catalog agent 146, index
+  access agent 144, bulk writes agent 148, size models agent 161:
   - Planner (agent 155), under a small work_mem (seeds 8018, 8023, 8026, 8035, 8049, 8130):
     `SET work_mem = '64kB'` over `r8big (id int PRIMARY KEY, k int, s text)` filled with
     `SELECT i, (i * 7919) % 97, md5(i::text) FROM generate_series(1, 3020) i` and analysed:
@@ -1328,7 +1334,8 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
     side's first row first when its startup cost is below the hash's total: an empty outer side
     builds nothing); its statement trigger then never fires (seed 5069). Agent 112's area
     (`exec/nodes.rs` HashJoinNode, whose parallel probe pipeline a first-row peek would bypass).
-    Still on `ed0c85fe`, minimised (agent 156, routed to agent 154): `CREATE TABLE t1 (id int4
+    Still on `ed0c85fe`, minimised (agent 156; now the planner's, agent 155: the DML row mark on
+    the pulled-up view, not the executor): `CREATE TABLE t1 (id int4
     PRIMARY KEY, g int GENERATED ALWAYS AS (1) STORED); CREATE VIEW v0 AS SELECT concat('B',
     jsonb_array_length('{"a": 2.50}')) AS c0 FROM generate_series(1, 1) s1 (g); DELETE FROM t1 x
     USING v0 u` fails 22023 where PostgreSQL deletes nothing.

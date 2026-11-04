@@ -2445,6 +2445,7 @@ impl Ddl<'_, '_> {
                         parent: 0,
                         clustered: false,
                         replident: false,
+                        not_ready: false,
                     };
                     for c in &cols {
                         if matches!(t.columns[*c].ty, DataType::Json | DataType::Xid) {
@@ -2782,6 +2783,7 @@ impl Ddl<'_, '_> {
             parent: 0,
             clustered: false,
             replident: false,
+            not_ready: false,
         };
         t.indexes.push(ix_oid);
         let con_oid = self.cat.alloc_con_oid(x.deferrable);
@@ -5735,6 +5737,7 @@ impl Ddl<'_, '_> {
                     {
                         let x = crate::catalog::Index {
                             replident: Some(*i) == chosen,
+                            not_ready: false,
                             ..(**x).clone()
                         };
                         self.cat.put_index(x);
@@ -9514,6 +9517,7 @@ impl Ddl<'_, '_> {
                                 name: copy_name,
                                 id: tt.new_index_id(oid),
                                 valid: false,
+                                not_ready: true,
                                 ..ix.clone()
                             };
                             tt.indexes.push(oid);
@@ -9526,7 +9530,7 @@ impl Ddl<'_, '_> {
                     }
                     self.clear_index_entries(&t, &ix)?;
                     self.build_index(&t, &ix)?;
-                    self.cat.put_index(Index { valid: true, ..ix });
+                    self.cat.put_index(Index { valid: true, not_ready: false, ..ix });
                 }
                 // The valid ones are rebuilt too: their expressions are computed.
                 self.evaluate_index_exprs(&t, Some(&valid))?;

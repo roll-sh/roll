@@ -191,7 +191,16 @@ impl Database {
                     // What `open_upgrades` brought up to date is stored now: later commits
                     // write only what they change.
                     c.open_upgrades();
-                    let w = persist::changed(&stored, &c)?;
+                    let mut w = persist::changed(&stored, &c)?;
+                    // (A header stored before the tables index counted temporary tables:
+                    // counted once, and the header stored with the count.)
+                    if c.tables.ix().rows.temporary < 0 {
+                        let n = c.tables.values().filter(|t| t.temporary).count() as i64;
+                        c.tables.parts_mut().1.rows.temporary = n;
+                        if w.is_empty() {
+                            w = persist::header_writes(&c)?;
+                        }
+                    }
                     if !w.is_empty() {
                         store.commit(w, |_| Ok(()))?;
                     }
@@ -213,7 +222,14 @@ impl Database {
         )));
         catalog.freeze();
         let version = catalog.version;
-        let temp_leftovers = catalog.tables.values().any(|t| t.temporary);
+        // (Counted by the tables map's index, `RelRows::temporary`: a scan of every table
+        // parsed them all at the open, 0.6 s and 470 MB at 100,000 tables, which catalog
+        // format 4 reads on demand.)
+        debug_assert!(
+            catalog.tables.len() > 2_000
+                || (catalog.tables.ix().rows.temporary > 0) == catalog.tables.values().any(|t| t.temporary)
+        );
+        let temp_leftovers = catalog.tables.ix().rows.temporary > 0;
         static INSTANCES: AtomicU64 = AtomicU64::new(1);
         Ok(Arc::new(Database {
             name: name.to_string(),
@@ -2648,6 +2664,38 @@ impl Txn {
         let own = self.snap_own(start, end, &st);
         let src = self.toast_source(start, end, st.ts, mark, OwnVals::Snap(&st));
         TxnScan::new(own.into_iter().collect(), self.lower(start, end, st.ts, mark), src)
+    }
+
+    /// `it` (a forward `scan_snap` at snapshot `s`) over [start, end) instead, its store
+    /// sources keeping their places (`storage::Scan::reseek`): the next of ascending lookups
+    /// reads on in the blocks the last one read. False: not such a scan (spilled writes, range
+    /// deletions of ours, another snapshot): make a new one. `it` keeps reading rows as stored
+    /// if it did.
+    pub fn reseek_snap(&self, it: &mut TxnScan, start: &[u8], end: &[u8], s: &Snap) -> bool {
+        self.catch_up(s);
+        let st = s.st.borrow();
+        if st.mark < self.journal_base || !st.prev.is_empty() || self.runs.is_some() {
+            return false;
+        }
+        let mark = st.mark as u64;
+        if !self.own_excluded(start, end, mark).is_empty() {
+            return false;
+        }
+        let Lower::Store(store) = &mut it.inner.lower else {
+            return false;
+        };
+        if !store.reseek(start, end, st.ts) {
+            return false;
+        }
+        let o = &mut it.inner;
+        o.upper = self.mem_in(start, end).collect::<Vec<_>>().into_iter().map(Ok as BufFn);
+        o.upper_head = None;
+        o.upper_done = false;
+        o.lower_head = None;
+        o.lower_done = false;
+        it.src = self.toast_source(start, end, st.ts, mark, OwnVals::Now);
+        it.reader = None;
+        true
     }
 
     /// Scan [start, end) in descending key order, as of the snapshot `s` (None: the

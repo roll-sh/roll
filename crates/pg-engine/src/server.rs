@@ -1413,7 +1413,8 @@ fn activity_state(s: &Session) -> &'static str {
 /// pg_stat_activity after a statement: the backend's state, and its application_name as
 /// the statement left it (SET application_name reports itself: pgstat_report_appname).
 fn statement_done_activity(engine: &Engine, pid: i32, s: &Session) {
-    let app = s.state.settings.borrow().show("application_name").ok();
+    let settings = s.state.settings.borrow();
+    let app = &settings.hot().application_name;
     let idle = s.status() == TxnStatus::Idle;
     let (xid, xmin) = s.activity_xids();
     let now = crate::types::datetime::Clock::system().now;
@@ -1428,8 +1429,8 @@ fn statement_done_activity(engine: &Engine, pid: i32, s: &Session) {
         }
         a.backend_xid = xid;
         a.backend_xmin = xmin;
-        if let Some(app) = app {
-            a.application_name = app;
+        if a.application_name != *app {
+            a.application_name.clone_from(app);
         }
     });
 }
@@ -1442,8 +1443,7 @@ fn start_activity(engine: &Engine, pid: i32, s: &Session, state: &str, sql: Opti
     // pgstat_report_activity keeps track_activity_query_size - 1 bytes of the text, cut at a
     // character boundary (pg_mbcliplen): pgAdmin's dashboard shows the clipped text.
     let sql = sql.map(|mut q| {
-        let size = s.state.settings.borrow().get_str("track_activity_query_size").and_then(|v| v.parse::<usize>().ok());
-        let max = size.unwrap_or(1024).saturating_sub(1);
+        let max = s.state.settings.borrow().hot().activity_query_size.saturating_sub(1);
         if q.len() > max {
             let mut n = max;
             while !q.is_char_boundary(n) {

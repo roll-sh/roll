@@ -388,6 +388,23 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                 }
                 nd::add(need.map(<[bool]>::to_vec), ex)
             })();
+            // (Over a table scan, the Sort PostgreSQL has below its WindowAgg runs as one,
+            // within work_mem, and the window reads it a partition at a time.)
+            let over_scan = {
+                let mut p: &Plan = input;
+                loop {
+                    match p {
+                        Plan::Project { input, .. } | Plan::Filter { input, .. } => p = input,
+                        Plan::Scan(s) => break s.index.is_none() && !matches!(s.access, crate::sql::plan::Access::Index { .. }),
+                        _ => break false,
+                    }
+                }
+            };
+            if over_scan && let Some(keys) = super::window::sort_keys_for(calls, ctx) {
+                let sort = Arc::new(Plan::Sort { input: input.clone(), keys: keys.clone() });
+                let node = super::window::WindowNode::new(open_need(&sort, need, ctx)?, calls.clone());
+                return Ok(Box::new(node.presorted(&keys).holding(sort)));
+            }
             let node = super::window::WindowNode::new(open_need(input, need, ctx)?, calls.clone());
             Box::new(match &**input {
                 Plan::Sort { keys, .. } => node.presorted(keys),
@@ -3807,7 +3824,11 @@ struct NestLoopNode {
     nright: usize,
     right: Option<Rc<Vec<Row>>>,
     right_matched: Vec<bool>,
-    cur: Option<(Row, Rc<Vec<Row>>, usize, bool)>,
+    /// The outer row, its inner rows (with the next one's place) and whether one matched.
+    cur: Option<(Row, InnerRows, bool)>,
+    /// A parameterized inner side kept open across outer rows and rescanned for each
+    /// (`streams`), once opened.
+    inner: Option<BoxNode>,
     unmatched_right: Option<usize>,
     memo: Option<Memoize>,
     /// A RIGHT / FULL join whose right side reads only an enclosing query's values: run
@@ -3824,7 +3845,45 @@ struct NestLoopNode {
     stage: Option<Arc<super::pipe::Stage>>,
 }
 
+/// A nested loop's inner rows for one outer row: collected (a Material's, a memo's, a
+/// fixed or unparameterized side's), or read from the inner node as the join asks, under
+/// the outer row's parameters.
+enum InnerRows {
+    Rows(Rc<Vec<Row>>, usize),
+    Stream(Rc<Row>),
+}
+
 impl NestLoopNode {
+    /// Whether the inner side is read as ExecNestLoop reads it: rescanned per outer row
+    /// (ExecReScan with the new parameters) and its rows taken as the join asks, not
+    /// collected first. A parameterized side without a memo (Memoize collects) whose plan
+    /// can rescan; not under EXPLAIN ANALYZE (each open counts a loop) or outside a
+    /// running statement (collecting runs it as one).
+    fn streams(&self, ctx: &ExecCtx) -> bool {
+        !self.params.is_empty()
+            && self.memo.is_none()
+            && !self.fixed
+            && !ctx.instrumented()
+            && ctx.snapshot().is_some()
+            && ctx.temp_cleanup.active()
+            && super::scan::rescans(&self.right_plan)
+    }
+
+    /// The inner node read again for the outer row whose parameters are `p`: rescanned,
+    /// or opened (the first time, or when it can't rescan).
+    fn open_inner(&mut self, p: &Rc<Row>, ctx: &ExecCtx) -> Result<()> {
+        if let Some(n) = self.inner.as_mut()
+            && ctx.with_outer(p.clone(), || n.rescan(ctx))?
+        {
+            return Ok(());
+        }
+        // (The last one goes first: its scan's marks are made as it ends.)
+        self.inner = None;
+        let need = self.keep.as_ref().map(|k| (self.nleft..self.nleft + self.nright).map(|i| k.get(i).copied().unwrap_or(false)).collect());
+        self.inner = Some(ctx.with_outer(p.clone(), || open_need(&self.right_plan, need, ctx))?);
+        Ok(())
+    }
+
     fn new(
         kind: JoinKind,
         left: BoxNode,
@@ -3849,6 +3908,7 @@ impl NestLoopNode {
             right: None,
             right_matched: Vec::new(),
             cur: None,
+            inner: None,
             unmatched_right: None,
             memo: None,
             fixed,
@@ -4058,9 +4118,14 @@ impl NestLoopNode {
                     },
                 };
                 match next {
+                    Some(l) if self.streams(ctx) => {
+                        let p = Rc::new(eval_all(&self.params, &l, ctx)?);
+                        self.open_inner(&p, ctx)?;
+                        self.cur = Some((l, InnerRows::Stream(p), false));
+                    }
                     Some(l) => {
                         let rows = self.right_rows(&l, ctx)?;
-                        self.cur = Some((l, rows, 0, false));
+                        self.cur = Some((l, InnerRows::Rows(rows, 0), false));
                     }
                     None => {
                         self.flush(ctx);
@@ -4075,16 +4140,32 @@ impl NestLoopNode {
                     }
                 }
             }
-            let (l, rows, i, matched) = self.cur.as_mut().unwrap();
-            while *i < rows.len() {
+            let (l, rows, matched) = self.cur.as_mut().unwrap();
+            loop {
                 ctx.check()?;
-                let j = *i;
-                *i += 1;
-                let pair = Pair(l, &rows[j]);
+                let streamed;
+                let (j, r) = match rows {
+                    InnerRows::Rows(rows, i) => {
+                        let Some(r) = rows.get(*i) else { break };
+                        *i += 1;
+                        (*i - 1, r)
+                    }
+                    InnerRows::Stream(p) => {
+                        let n = self.inner.as_mut().expect("an inner side open");
+                        match ctx.with_outer(p.clone(), || n.next(ctx))? {
+                            Some(r) => {
+                                streamed = r;
+                                (usize::MAX, &streamed)
+                            }
+                            None => break,
+                        }
+                    }
+                };
+                let pair = Pair(l, r);
                 let early = self.cond_kernel.as_ref().and_then(|k| k.passes(&pair));
                 let combined = match early {
                     Some(false) => None,
-                    _ => Some(concat_rows(l, &rows[j])),
+                    _ => Some(concat_rows(l, r)),
                 };
                 let ok = match (&self.cond, early, &combined) {
                     (_, Some(b), _) => b,
@@ -4114,7 +4195,7 @@ impl NestLoopNode {
                     _ => return Ok(Some(Item::Row(combined, level))),
                 }
             }
-            let Some((l, _, _, matched)) = self.cur.take() else {
+            let Some((l, _, matched)) = self.cur.take() else {
                 continue;
             };
             if !matched {

@@ -134,6 +134,7 @@ fn read_sys_indexes(t: SysTable) -> Vec<Arc<Index>> {
             parent: 0,
             clustered: false,
             replident: false,
+            not_ready: false,
         }));
     }
     out

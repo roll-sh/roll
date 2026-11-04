@@ -1,0 +1,97 @@
+> CREATE TABLE a146_st (id int PRIMARY KEY, a text, b int UNIQUE)
+-- CREATE TABLE
+
+> CREATE INDEX a146_st_a ON a146_st (a)
+-- CREATE INDEX
+
+> CREATE TABLE a146_st_noix (x int)
+-- CREATE TABLE
+
+> CREATE TABLE a146_st_part (k int) PARTITION BY RANGE (k)
+-- CREATE TABLE
+
+> CREATE TABLE a146_st_p1 PARTITION OF a146_st_part FOR VALUES FROM (0) TO (10)
+-- CREATE TABLE
+
+> CREATE MATERIALIZED VIEW a146_st_mv AS SELECT 1 AS one
+-- SELECT 1
+
+> SELECT relname, schemaname, idx_scan IS NULL AS no_index, idx_tup_fetch IS NULL AS no_fetch, n_tup_ins >= 0 AS counted
+>   FROM pg_stat_user_tables WHERE relname LIKE 'a146_st%' ORDER BY relname
+relname:name | schemaname:name | no_index:bool | no_fetch:bool | counted:bool
+a146_st | public | f | f | t
+a146_st_mv | public | t | t | t
+a146_st_noix | public | t | t | t
+a146_st_p1 | public | t | t | t
+a146_st_part | public | t | t | t
+-- SELECT 5
+
+> SELECT relname, idx_scan IS NULL FROM pg_stat_user_tables WHERE relname = 'a146_st'
+relname:name | ?column?:bool
+a146_st | f
+-- SELECT 1
+
+> SELECT relname, idx_scan IS NULL FROM pg_stat_user_tables WHERE relname = 'a146_st_noix'
+relname:name | ?column?:bool
+a146_st_noix | t
+-- SELECT 1
+
+> SELECT count(*) FROM pg_stat_user_tables WHERE relname = 'a146_no_such_table'
+count:int8
+0
+-- SELECT 1
+
+> SELECT count(*) FROM pg_stat_user_tables WHERE schemaname = 'public' AND relname = 'a146_st_part'
+count:int8
+1
+-- SELECT 1
+
+> SELECT relname, schemaname FROM pg_stat_sys_tables WHERE relname = 'pg_class'
+relname:name | schemaname:name
+pg_class | pg_catalog
+-- SELECT 1
+
+> SELECT count(*) FROM pg_stat_all_tables WHERE relname = 'pg_class' AND schemaname = 'pg_catalog'
+count:int8
+1
+-- SELECT 1
+
+> SELECT relname, indexrelname, idx_scan >= 0, idx_tup_read >= 0, idx_tup_fetch >= 0
+>   FROM pg_stat_user_indexes WHERE relname = 'a146_st' ORDER BY indexrelname
+relname:name | indexrelname:name | ?column?:bool | ?column?:bool | ?column?:bool
+a146_st | a146_st_a | t | t | t
+a146_st | a146_st_b_key | t | t | t
+a146_st | a146_st_pkey | t | t | t
+-- SELECT 3
+
+> SELECT relname, indexrelname FROM pg_stat_user_indexes WHERE relname LIKE 'a146_st%' ORDER BY 1, 2
+relname:name | indexrelname:name
+a146_st | a146_st_a
+a146_st | a146_st_b_key
+a146_st | a146_st_pkey
+-- SELECT 3
+
+> SELECT relname, indexrelname FROM pg_stat_all_indexes WHERE schemaname = 'pg_catalog' AND relname = 'pg_class' ORDER BY 2
+relname:name | indexrelname:name
+pg_class | pg_class_oid_index
+pg_class | pg_class_relname_nsp_index
+pg_class | pg_class_tblspc_relfilenode_index
+-- SELECT 3
+
+> SELECT relname, indexrelname FROM pg_stat_sys_indexes WHERE relname = 'pg_namespace' ORDER BY 2
+relname:name | indexrelname:name
+pg_namespace | pg_namespace_nspname_index
+pg_namespace | pg_namespace_oid_index
+-- SELECT 2
+
+> SELECT count(*) > 0 FROM pg_stat_sys_indexes WHERE schemaname = 'pg_toast'
+?column?:bool
+t
+-- SELECT 1
+
+> DROP MATERIALIZED VIEW a146_st_mv
+-- DROP MATERIALIZED VIEW
+
+> DROP TABLE a146_st, a146_st_noix, a146_st_part
+-- DROP TABLE
+

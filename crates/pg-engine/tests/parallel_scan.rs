@@ -425,8 +425,11 @@ fn parallel_lookups_match_serial_inner() {
     let (before, after) = (0..9, 9..LOOKUP_QUERIES.len());
     let workers = |s: &mut Session, n: u32| s.query(&format!("SET max_parallel_workers_per_gather = {n}")).unwrap();
     workers(&mut s, 0);
+    let rescans = pg_engine::exec::scan::INDEX_RESCANS.load(std::sync::atomic::Ordering::Relaxed);
     let mut serial = run(&mut s, before.clone());
     let stat_serial = index_stats(&mut s);
+    // (The serial nested loops rescan their inner index scans per outer row.)
+    assert!(pg_engine::exec::scan::INDEX_RESCANS.load(std::sync::atomic::Ordering::Relaxed) > rescans + 1000);
     workers(&mut s, 2);
     let (looked, scans) = (pg_engine::exec::lookup::started(), pg_engine::exec::parscan::started());
     let mut parallel = run(&mut s, before);
@@ -877,6 +880,18 @@ const VECTOR_QUERIES: &[&str] = &[
     "SELECT ok, count(*) FROM v WHERE ok IS NOT NULL AND (c = 'cd' OR t IS NULL) GROUP BY ok",
     "SELECT count(*), sum(big), sum(x) FROM v WHERE big > 500",
     "SELECT t, count(*) FROM v WHERE t NOT IN ('k1', 'k5') GROUP BY t",
+    // = ANY / <> ALL of arrays: strings, bpchar, NULL items, integers and numerics.
+    "SELECT c, count(*), sum(b) FROM v WHERE c = ANY ('{ab,cd}'::bpchar[]) GROUP BY c",
+    "SELECT t, count(*) FROM v WHERE t = ANY (ARRAY['k3', NULL, 'k7']) GROUP BY t",
+    "SELECT count(*), sum(id) FROM v WHERE t <> ALL ('{k1,k2}') AND a = ANY ('{1,3,NULL}'::int[])",
+    "SELECT a, count(*) FROM v WHERE x = ANY ('{1.0000,2.5,33.3333}'::numeric[]) OR b <> ALL ('{1000003,2000006}'::int8[]) GROUP BY a",
+    "SELECT a, count(*), sum(x) FROM v WHERE a IN (1, 3, 5) AND id <> ALL (ARRAY[7, NULL]) GROUP BY a",
+    // LIKE over a text column (NULLs, NOT, _ and %), an escape ending the pattern (an error
+    // at the first row with text left), a char(n) column cast to unbounded bpchar.
+    "SELECT t, count(*) FROM v WHERE t LIKE 'k1%' GROUP BY t",
+    "SELECT count(*), sum(id) FROM v WHERE t NOT LIKE '%3' AND t LIKE 'k_'",
+    "SELECT count(*) FROM v WHERE t LIKE 'k1\\'",
+    "SELECT c, count(*) FROM v WHERE c::bpchar IN ('ab', 'zz') GROUP BY c",
 ];
 
 #[test]

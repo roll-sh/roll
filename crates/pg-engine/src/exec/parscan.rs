@@ -329,28 +329,38 @@ impl<'a> Pre<'a> {
         }
     }
 
-    /// Whether decoded row `r` gives nothing: the filter rejects it, or the probe finds no
-    /// candidate for it.
+    /// What decoded row `r` comes to: `DROP` when it gives nothing (the filter rejects it,
+    /// or the probe finds no candidate for it), `PASSED` when the scan's whole filter holds
+    /// for it (the row path needn't check it again), `ROW` when the row path decides.
     #[inline]
-    fn drops(&self, r: usize) -> bool {
+    fn fate(&self, r: usize) -> u8 {
         use super::vector::Tri;
-        !self.odd[r]
-            && match self.tri[r] {
-                Tri::F | Tri::N => true,
-                Tri::T => self.probe.is_some_and(|p| self.plan.misses(p, &self.cols, r)),
-                Tri::Out => false,
-            }
+        if self.odd[r] {
+            return ROW;
+        }
+        match self.tri[r] {
+            Tri::F | Tri::N => DROP,
+            Tri::T if self.probe.is_some_and(|p| self.plan.misses(p, &self.cols, r)) => DROP,
+            Tri::T if self.plan.filter.is_some() => PASSED,
+            Tri::T | Tri::Out => ROW,
+        }
     }
 
-    /// The rows of `rows` it drops, into `skip` (`Reader::next_row_with`).
-    fn mark(&mut self, b: &RowBatch, rows: std::ops::Range<usize>, skip: &mut Vec<bool>) {
+    /// What each row of `rows` comes to (`fate`), into `skip` (`Reader::next_row_with`).
+    fn mark(&mut self, b: &RowBatch, rows: std::ops::Range<usize>, skip: &mut Vec<u8>) {
         self.decode(b, rows.clone());
         skip.clear();
-        skip.extend((0..rows.len()).map(|r| self.drops(r)));
-        let n = skip.iter().filter(|s| **s).count();
+        skip.extend((0..rows.len()).map(|r| self.fate(r)));
+        let n = skip.iter().filter(|s| **s == DROP).count();
         self.off = !self.worth(rows.len(), n as u64);
     }
 }
+
+/// A fill's row as a `Pre` marked it: left to the row path, dropped, or passed by the
+/// scan's whole filter.
+const ROW: u8 = 0;
+const DROP: u8 = 1;
+const PASSED: u8 = 2;
 
 /// A chunk's rows by reference, `left` more at most (an inline scan's slice of it), the
 /// batch kept from slice to slice.
@@ -361,8 +371,8 @@ struct Reader<'c> {
     left: usize,
     /// The chunk has no row left.
     done: bool,
-    /// Which rows of `batch` from `skip_from` on a `Pre` drops.
-    skip: Vec<bool>,
+    /// What each row of `batch` from `skip_from` on comes to (`Pre::fate`).
+    skip: Vec<u8>,
     skip_from: usize,
 }
 
@@ -403,12 +413,14 @@ impl<'c> Reader<'c> {
     }
 
     fn next_row(&mut self) -> Option<Result<(&[u8], &[u8])>> {
-        self.next_row_with(None, &mut 0)
+        self.next_row_with(None, &mut 0, &mut false)
     }
 
     /// `next_row`, a fill's rows first offered a batch at a time to `pre` (`Pre`): the
-    /// rows it drops are passed over, counted in `skipped`.
-    fn next_row_with(&mut self, mut pre: Option<&mut Pre<'_>>, skipped: &mut u32) -> Option<Result<(&[u8], &[u8])>> {
+    /// rows it drops are passed over, counted in `skipped`; `passed`: the row returned
+    /// passed the scan's whole filter there.
+    fn next_row_with(&mut self, mut pre: Option<&mut Pre<'_>>, skipped: &mut u32, passed: &mut bool) -> Option<Result<(&[u8], &[u8])>> {
+        *passed = false;
         if self.left == 0 {
             return None;
         }
@@ -432,7 +444,9 @@ impl<'c> Reader<'c> {
                         self.skip_from = i;
                         pre.mark(self.batch, i..self.batch.len(), &mut self.skip);
                     }
-                    if self.skip[i - self.skip_from] {
+                    let fate = self.skip[i - self.skip_from];
+                    *passed = fate == PASSED;
+                    if fate == DROP {
                         self.batch.advance();
                         self.left -= 1;
                         *skipped += 1;
@@ -968,7 +982,8 @@ fn run_rows(
             false => None,
         };
         let mut dropped = 0u32;
-        while let Some(r) = scan.next_row_with(pre.as_mut().filter(|p| !p.off), &mut dropped) {
+        let mut passed = false;
+        while let Some(r) = scan.next_row_with(pre.as_mut().filter(|p| !p.off), &mut dropped, &mut passed) {
             n = n.wrapping_add(1);
             if n % 1024 == 1023 && stopped() {
                 return false;
@@ -1000,6 +1015,7 @@ fn run_rows(
                     lazy.read(d, key, bytes).and_then(|lz| {
                         let done = match (&d.filter, d.filtered) {
                             (_, false) => true,
+                            (Some(_), true) if passed => true,
                             (Some(f), true) => match f.passes(&lz) {
                                 Some(true) => true,
                                 Some(false) => return Ok(None),
@@ -1032,7 +1048,7 @@ fn run_rows(
             } else {
                 match (&d.filter, in_place) {
                     (Some(f), true) => {
-                        let made = lazy.read(d, key, bytes).and_then(|lz| match f.passes(&lz) {
+                        let made = lazy.read(d, key, bytes).and_then(|lz| match if passed { Some(true) } else { f.passes(&lz) } {
                             Some(false) => Ok(None),
                             pass => Ok(Some((lz.into_row()?, pass.is_some()))),
                         });
@@ -1057,6 +1073,7 @@ fn run_rows(
                         };
                         let done = match (&d.filter, d.filtered) {
                             (_, false) => true,
+                            (Some(_), true) if passed => true,
                             (Some(f), true) => match f.passes(&row) {
                                 Some(true) => true,
                                 Some(false) => continue,
@@ -1197,7 +1214,7 @@ fn work_partial(
             for (r, i) in run.enumerate() {
                 use super::vector::Tri;
                 read += 1;
-                if pre.drops(r) {
+                if pre.fate(r) == DROP {
                     taken += 1;
                     continue;
                 }
