@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "ce3bf1b5c310f95fcb67a9f1528eaf9f7adbabe9605e662b297532b6e90c9236",
-    "bytes": 17881
+    "sha256": "67d042ebffe81971d588c2a892f0218a51feecb165ebd4aba74e479a5ff093a5",
+    "bytes": 18572
   },
   "baseline171-v1/RESTORED.txt": {
     "sha256": "2ad11b1db92238f171853cadc56294d550edeed718924b1b46054ccb24969691",
@@ -772,8 +772,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "e7f5ee492c5162a4a626fc106b2546895e7019ba228f56dcd21f8366e69d67bf",
-    "bytes": 35469
+    "sha256": "7a2bf9accac4aca65f1f517f70bf3eb165158fbe72b7f89b825a91ae39beb24f",
+    "bytes": 36775
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -1026,6 +1026,34 @@
   "focused171-lazy-v1/wrapper.log": {
     "sha256": "ba6322e432cd8351de522e4d1ba66d1644e49a7763847ad2153b7129e675e88f",
     "bytes": 1645
+  },
+  "full171-lazy-v1/affinity-observation-debug-build.json": {
+    "sha256": "0ea4e923294bf501444eff41a8385efb8e5f99b1e47baf001e2a1236ca36b4e1",
+    "bytes": 2236
+  },
+  "full171-lazy-v1/disk-before-debug-test.json": {
+    "sha256": "3b7ace71210be77b6ecf45db5cc6c25f6dd99bf0ba6efb9315e687a6be9669ca",
+    "bytes": 134
+  },
+  "full171-lazy-v1/initial.status": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  "full171-lazy-v1/source.txt": {
+    "sha256": "78174d17a36dd2b5d156154ad2a3f9a0b63682b00cd81be8f3e76329a7b55bcb",
+    "bytes": 41
+  },
+  "full171-lazy-v1/startup-controls.json": {
+    "sha256": "7532222d0d9ece4c85740603b578864bd5481861b785ee7d30b22a0cb6b1c339",
+    "bytes": 466
+  },
+  "full171-lazy-v1/toolchain.txt": {
+    "sha256": "db19261270b0428d1cffd44795917261238eab88402716d4f372b5b1c1350a6d",
+    "bytes": 232
+  },
+  "full171-lazy-v1/tree.txt": {
+    "sha256": "63c6acfff48b73fbc9798cc5dec5f150392097ad0d46985d69cca92fc94f4d60",
+    "bytes": 41
   },
   "green165r2/a165_cursor_edges.out": {
     "sha256": "d5645e686147eee401fe7c0fbaea659eb0cbfd9dfb5107538dc4f08c11c3caa6",
@@ -1967,6 +1995,38 @@
     "sha256": "afc925795bcc33c12ed2392ed9684d81b83ca8966227c4341577501c2064dd21",
     "bytes": 2064
   },
+  "runners/full171-count-reconciliation.json": {
+    "sha256": "101fb18a72367139b1061fa36d16ad09a09d377524a8d12a73bc03891fa9087a",
+    "bytes": 2688
+  },
+  "runners/full171-expected-per-binary.json": {
+    "sha256": "c15366c34bd82ae5d873832d89e4aeef7e7003855eedf72cc1f68702a519d297",
+    "bytes": 3290
+  },
+  "runners/full171-frozen.sha256": {
+    "sha256": "7277d3ac776431615cb2dbdac34f9ad52da8f6ed9e60e167130db39f4e6fd8c3",
+    "bytes": 1414
+  },
+  "runners/full171-inherited-environment.json": {
+    "sha256": "884fb84bbba9fecb4ba3532867eb09eb7eb978e18635eef1da124b123d213d9e",
+    "bytes": 362
+  },
+  "runners/full171-lazy-v1.sh": {
+    "sha256": "827dbaaea8ec1a89c7249966ef936d3bb008295e536de0a4b52a4f69483bedf2",
+    "bytes": 4952
+  },
+  "runners/full171-plan.json": {
+    "sha256": "a9bf186e1ef5a8085e75e981872d1ee7fc4029242a6c413a474047905cd29787",
+    "bytes": 1950
+  },
+  "runners/full171-preflight.py": {
+    "sha256": "c4b991fb5a8049d9c82aaa2d1c4b702c433649fe6fb735853e0e227eecd78f0d",
+    "bytes": 3815
+  },
+  "runners/full171-stage-audit.py": {
+    "sha256": "0f8c2bbecd004bb3908e26f3048412147cbd73410cae91ea611f6f7b0a818650",
+    "bytes": 3194
+  },
   "runners/green165r2.sh": {
     "sha256": "5725dc31c990eb7651fb1809738593f0d7c3aa012a639d3bf520d5fe9799ba7f",
     "bytes": 1610
@@ -2067,9 +2127,17 @@
     "sha256": "140a43315172371d61b74d57d2fbaa07985e1c22817f2376097f2eb4209f8e4d",
     "bytes": 5102
   },
+  "runners/planner171-review-r2-erratum.md": {
+    "sha256": "f1f405cc6c6b0d74304389c82c18224c96bedfc5490ce522681d5cfe77b37bfd",
+    "bytes": 672
+  },
   "runners/planner171-source-review-r1-result.json": {
     "sha256": "b72299ebcc9f5c7e1fce5ea068038b2a6a6900f98f78fb850d857986e26a6c89",
     "bytes": 8019
+  },
+  "runners/planner171-source-review-r2-result.json": {
+    "sha256": "8dcf02c35268e85b5648063d81be6ad978c21f02060e35b424ab30f7ef5773dd",
+    "bytes": 15149
   },
   "runners/probe165-low.sh": {
     "sha256": "f2947f7831a9cbc3c4b2b6af3317993e4bbc7cabe17fbda9932bbde10eca451f",

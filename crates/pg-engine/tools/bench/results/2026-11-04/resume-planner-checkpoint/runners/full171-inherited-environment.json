@@ -1,0 +1,13 @@
+{
+  "inherited_test_config_keys": [],
+  "blocker_keys": [],
+  "explicitly_unset_before_gate": [
+    "GOLDEN_FILTER",
+    "GOLDEN_RECORD"
+  ],
+  "default_crash_config": {
+    "CRASH_SEEDS": "unset;source default [1]",
+    "CRASH_ROUNDS": "unset;source default3"
+  },
+  "scope": "ordinary default test suite only;no configuredstress/diagnostic/SSI/storageprobe"
+}

@@ -18,6 +18,16 @@ def git(*args, data=None, env=None):
 readme = '''# Recovery and OLTP165 review checkpoint (2026-11-04)
 
 
+171FULLGATE LAUNCH: exactcleancac0933b,source/tree/frozenrunner/map/toolchain/startup
+controls captured. No inheritedtestoverrides;explicitgoldenunsets;ordinarydefault
+crashtests only,no configuredstress/probes/services. c861455actualmaps plusONLYkept7→8/
+parallel9→10 givesfrozen457/0/18/61DEBUGandRELEASE. NoCargochanges. ONEfailfastpipeline:
+unfiltereddebug/release,releasealltargetClippy14warningmultiset,distartifact,pnpm--unit
+EXECUTEDvsSKIP.30GiBfloorbeforeeverystage,no sourcechanges/retries. Currentpartialraw
+outputs excludeduntilcompleted. No fullgreenuntilall5commands+independentaudit.
+StaticR2 noHIGH/MEDIUM;3LOWsretained;pendingfocusedproseSTALEas7commandsalreadygreen.
+
+
 LATEST171 LAZYCANDIDATEcac0933b isownerremote-backed/newbranch;netc861productiononly
 session/mod.rs+sql/paths.rs,tests2existingfiles,all4paths122+/1-. Exact7dc53892proposal
 appliedafterPG/correctedcontrols;removesParseprefill/ScanEst,usesfreshdescribeonlyat
@@ -420,6 +430,10 @@ for campaign in ('lazy171-candidate', 'focused171-lazy-v1'):
 sources['focused171-lazy-v1/wrapper.log'] = str(D / 'focused171-lazy-v1-wrapper.log')
 for name in ('focused171-lazy-v1.sh', 'focused171-lazy-v1-plan.json', 'focused171-lazy-v1-frozen.sha256', 'audit171-focused-terminal.py', 'PLANNER171-LAZY-HANDOFF.md'):
     sources['runners/' + name] = str(D / name)
+for name in ('full171-lazy-v1.sh', 'full171-stage-audit.py', 'full171-preflight.py', 'full171-plan.json', 'full171-expected-per-binary.json', 'full171-count-reconciliation.json', 'full171-inherited-environment.json', 'full171-frozen.sha256', 'planner171-source-review-r2-result.json', 'planner171-review-r2-erratum.md'):
+    sources['runners/' + name] = str(D / name)
+for name in ('source.txt', 'tree.txt', 'initial.status', 'startup-controls.json', 'toolchain.txt', 'disk-before-debug-test.json', 'affinity-observation-debug-build.json'):
+    sources['full171-lazy-v1/' + name] = str(D / 'full171-lazy-v1' / name)
 for name, source in sources.items():
     files[name] = Path(source).read_bytes()
 files['manifest.json'] = (json.dumps({name: {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}

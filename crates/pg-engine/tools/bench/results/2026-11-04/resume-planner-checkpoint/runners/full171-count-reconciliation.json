@@ -1,0 +1,80 @@
+{
+  "source": "cac0933bc4eb5ef87674889542cab271de4615d0",
+  "tree": "bd48e5074887125072d7c23cb09c78fe6fe15c0b",
+  "baseline": "c8618834caf45bc0a34cf9985c07f9bc13b498ef",
+  "baseline_map": "ind165-v3-expected-per-binary.json;actualc861debug+release map exact",
+  "only_test_changes": {
+    "tests/kept_plans.rs": {
+      "before": [
+        "kept_plans_follow_values_sizes_and_ddl",
+        "extended_custom_plans_run_the_generic_binding",
+        "kept_plans_serve_literals_of_any_length",
+        "kept_plans_follow_size_changes_across_sessions",
+        "bind_plans_before_checking_result_formats",
+        "plpgsql_custom_plans_as_the_generic_plan",
+        "custom_plans_from_the_analysis"
+      ],
+      "after": [
+        "kept_plans_follow_values_sizes_and_ddl",
+        "extended_custom_plans_run_the_generic_binding",
+        "kept_plans_serve_literals_of_any_length",
+        "kept_plans_follow_size_changes_across_sessions",
+        "bind_plans_before_checking_result_formats",
+        "plpgsql_custom_plans_as_the_generic_plan",
+        "custom_plans_from_the_analysis",
+        "generic_cost_uses_choice_context_after_parse"
+      ],
+      "added": [
+        "generic_cost_uses_choice_context_after_parse"
+      ],
+      "removed": []
+    },
+    "tests/parallel_scan.rs": {
+      "before": [
+        "parallel_scans_match_serial",
+        "parallel_joins_match_serial",
+        "split_keys_cover_in_order",
+        "parallel_lookups_match_serial",
+        "parallel_scans_of_modelled_heaps",
+        "numeric_topk_matches_serial",
+        "parallel_fetches_match_serial",
+        "bitmap_quals_on_entries",
+        "vector_batches_match_rows"
+      ],
+      "after": [
+        "parallel_scans_match_serial",
+        "parallel_joins_match_serial",
+        "split_keys_cover_in_order",
+        "parallel_lookups_match_serial",
+        "parallel_scans_of_modelled_heaps",
+        "numeric_topk_matches_serial",
+        "parallel_fetches_match_serial",
+        "bitmap_quals_on_entries",
+        "vector_batches_match_rows",
+        "parallel_workers_use_execution_context_after_parse"
+      ],
+      "added": [
+        "parallel_workers_use_execution_context_after_parse"
+      ],
+      "removed": []
+    }
+  },
+  "Cargo_changes": [],
+  "net_paths": [
+    "crates/pg-engine/src/session/mod.rs",
+    "crates/pg-engine/src/sql/paths.rs",
+    "crates/pg-engine/tests/kept_plans.rs",
+    "crates/pg-engine/tests/parallel_scan.rs"
+  ],
+  "expected": {
+    "passed": 457,
+    "failed": 0,
+    "ignored": 18,
+    "summaries": 61
+  },
+  "unfiltered_commands": [
+    "cargo test -p pg-engine",
+    "cargo test --release -p pg-engine"
+  ],
+  "other_default_test_counts_unchanged": true
+}

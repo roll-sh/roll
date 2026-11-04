@@ -1,0 +1,83 @@
+{
+  "source": "cac0933bc4eb5ef87674889542cab271de4615d0",
+  "tree": "bd48e5074887125072d7c23cb09c78fe6fe15c0b",
+  "commands": [
+    {
+      "stage": "debug-test",
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "pg-engine"
+      ],
+      "profile": "test/debug",
+      "expected": {
+        "passed": 457,
+        "failed": 0,
+        "ignored": 18,
+        "summaries": 61
+      }
+    },
+    {
+      "stage": "release-test",
+      "argv": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "pg-engine"
+      ],
+      "profile": "release",
+      "expected": {
+        "passed": 457,
+        "failed": 0,
+        "ignored": 18,
+        "summaries": 61
+      }
+    },
+    {
+      "stage": "clippy",
+      "argv": [
+        "cargo",
+        "clippy",
+        "--release",
+        "-p",
+        "pg-engine",
+        "--all-targets",
+        "--message-format=json"
+      ],
+      "warning_map": "historicalc86114 message/path MULTISET"
+    },
+    {
+      "stage": "build",
+      "argv": [
+        "cargo",
+        "build",
+        "--profile",
+        "dist",
+        "-p",
+        "pg-engine",
+        "--bin",
+        "roll-engine"
+      ],
+      "profile": "dist inheritsrelease/fatLTO/codegenunits1"
+    },
+    {
+      "stage": "postgres-unit",
+      "argv": [
+        "pnpm",
+        "test:pg",
+        "--unit"
+      ],
+      "classification": "stampSKIP orEXECUTED24/0/0/5;notengine/serviceacceptance"
+    }
+  ],
+  "default_test_config": "no inheritedoverrides;GOLDEN_FILTER/GOLDEN_RECORDexplicitlyunset;normaldefaultcrashtestseeds[1]/rounds3only",
+  "disk_floor_gib": 30,
+  "before_each_stage": true,
+  "stop_on_command_or_audit_failure": true,
+  "no_retry": true,
+  "no_source_edits": true,
+  "housekeeping_affinity": "heavy/wrapperhousekeepingunrestricted;compute taskset8-13,18-19/nice19/jobs2/threads2;sampledcontrolsnotlifetimeclaim",
+  "integration_performance_service_acceptance": false
+}

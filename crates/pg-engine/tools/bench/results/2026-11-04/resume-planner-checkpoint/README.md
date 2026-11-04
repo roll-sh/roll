@@ -1,6 +1,16 @@
 # Recovery and OLTP165 review checkpoint (2026-11-04)
 
 
+171FULLGATE LAUNCH: exactcleancac0933b,source/tree/frozenrunner/map/toolchain/startup
+controls captured. No inheritedtestoverrides;explicitgoldenunsets;ordinarydefault
+crashtests only,no configuredstress/probes/services. c861455actualmaps plusONLYkept7→8/
+parallel9→10 givesfrozen457/0/18/61DEBUGandRELEASE. NoCargochanges. ONEfailfastpipeline:
+unfiltereddebug/release,releasealltargetClippy14warningmultiset,distartifact,pnpm--unit
+EXECUTEDvsSKIP.30GiBfloorbeforeeverystage,no sourcechanges/retries. Currentpartialraw
+outputs excludeduntilcompleted. No fullgreenuntilall5commands+independentaudit.
+StaticR2 noHIGH/MEDIUM;3LOWsretained;pendingfocusedproseSTALEas7commandsalreadygreen.
+
+
 LATEST171 LAZYCANDIDATEcac0933b isownerremote-backed/newbranch;netc861productiononly
 session/mod.rs+sql/paths.rs,tests2existingfiles,all4paths122+/1-. Exact7dc53892proposal
 appliedafterPG/correctedcontrols;removesParseprefill/ScanEst,usesfreshdescribeonlyat

@@ -1,0 +1,110 @@
+{
+  "review": "planner171-source-review-r2",
+  "date": "2026-11-04",
+  "reviewer": "claude-opus-5-5 (independent static review sub-agent)",
+  "mode": "STATIC committed objects only",
+  "inputs": {
+    "shared_root": "/home/meszmate/worktrees/roll/t3-d4020b98",
+    "shared_root_head": "fe7b0023c9df19a6dae1e6067ba8454998db48c5",
+    "shared_root_status": "clean before and after",
+    "candidate": "cac0933bc4eb5ef87674889542cab271de4615d0",
+    "candidate_tree": "bd48e5074887125072d7c23cb09c78fe6fe15c0b (verified)",
+    "candidate_parent": "a6fe3e4e626b0552c14320c18211886d1b16ad38 (verified)",
+    "remote_ref": "origin wip/a171-lazy-cost-resume-20261104 = cac0933b (verified via ls-remote)",
+    "net_base": "c8618834caf45bc0a34cf9985c07f9bc13b498ef",
+    "net_diff_sha256": "274ed69ae8433cdae5d37bb3c1e598efccc888db3cb98e7707ef762b65bf9178 (git diff c8618834 cac0933b; byte-identical to lazy171-candidate/net-c861-candidate.patch)",
+    "net_files": "session/mod.rs (+4/-1), sql/paths.rs (+47), tests/kept_plans.rs (+19), tests/parallel_scan.rs (+52); 122+/1-",
+    "restored_blob_check": "binder/dml.rs, binder/mod.rs, binder/select.rs, plan.rs, paths/syscat.rs: c8618834 blob == cac0933b blob. exec/parallel_part.rs (3c861b33) and engine.rs (b7e28a03): identical across c8618834, a6fe3e4e, cac0933b",
+    "files_read": [
+      "session_planner/planner171-source-review-r1-result.json sha256 b72299eb... (full)",
+      "session_planner/lazy171-candidate/source-scope-audit.json sha256 27c8bf74...",
+      "session_planner/lazy171-candidate/net-c861-candidate.patch sha256 274ed69a...",
+      "session_planner/check171-chosen-v1/debug-test.log (a6fe full-gate failure messages only)",
+      "git objects at cac0933b: session/mod.rs, sql/paths.rs, sql/paths/parallel.rs, sql/explain.rs, sql/binder/optimize.rs, sql/plan.rs, exec/parallel_part.rs, tests/kept_plans.rs, tests/parallel_scan.rs, tests/logical_apply.rs",
+      "git diff c8618834..a6fe3e4e (the deleted eager delta)"
+    ],
+    "not_read": "applied-a6fe-correction.patch body, candidate-backup.json, root-level copy of R1 (same content assumed; not needed), parallel171-v2/runtime, combined-pg18-oracles-r2, owner worktree"
+  },
+  "limits": "No builds, tests, rustfmt, merge-tree, services, probes or children. No source/index/ref/worktree/target edits. Scratch was only /tmp/r2* extracts and was deleted. All runtime facts are owner/parent audit claims passed in the brief, not reproduced here. No green, readiness or performance claim.",
+  "summary": "No HIGH or MEDIUM findings. Both R1 MEDIUMs are resolved in source: binder bytes are back to c8618834, nothing is costed at Parse/bind, and the only new production path is a lazy shortcut on Session::plan_cost's original cache miss. That shortcut uses the same paths::describe EXPLAIN uses for the scan node, under the ctx of the call that needs the cost, with the same 1.02*setup and debug_parallel_query guard as total_and_gathers. Three LOWs, one of which matters for interpreting gates: the candidate has no debug check that planned_total equals EXPLAIN, and check_cost_estimate's early return hides any mismatch, so a passing gate is not evidence of equivalence.",
+  "findings": [
+    {
+      "severity": "LOW",
+      "kind": "verification gap (new versus a6fe; parent had no shortcut to check)",
+      "verdict": "CONFIRMED (static)",
+      "where": "crates/pg-engine/src/session/mod.rs:1948-1951 and check_cost_estimate at session/mod.rs:4040-4058",
+      "summary": "Nothing asserts that planned_total's Some(total) equals total_and_gathers' (total, no Gathers). a6fe's costed() debug assertion was deleted with costed. check_cost_estimate returns early whenever plan_cost_estimate (explain::estimate) != cost and treats that as 'estimate changed meanwhile', so a planned_total that diverges from EXPLAIN passes debug builds silently.",
+      "failure_scenario": "Some lone-scan shape where EXPLAIN adds cost above the scan node, e.g. an InitPlan charge from finding 2. planned_total returns describe's lower total, plan_cost_estimate returns the higher EXPLAIN total, check_cost_estimate returns before asserting, and the full gate stays green while generic-vs-custom choices differ from EXPLAIN/PG.",
+      "recommendation": "Add a #[cfg(debug_assertions)] check in the Some arm: (t, found) = total_and_gathers(&bq.plan, ctx); assert found.is_empty() and |t-total| <= 1e-9*max(|t|,1). Re-read describe (or skip) when the table's size changed between the two reads, so a concurrent writer does not reproduce the a6fe parallel_apply race (see dispositions)."
+    },
+    {
+      "severity": "LOW",
+      "kind": "eligibility guard hole (carried unchanged from a6fe's guard; R1 did not flag it)",
+      "verdict": "PLAUSIBLE (reachability not verified)",
+      "where": "crates/pg-engine/src/sql/paths.rs:6575-6584",
+      "summary": "The sub-select walk covers filter, Access::Index quals and IndexBounds eq/any/lower/upper. It skips IndexBounds.order (KNN ordering keys that describe passes to index_path_ob for gist/spgist/native AMs) and skip.bounds.",
+      "failure_scenario": "A gist KNN plan whose root is a lone ordered Index scan, with ORDER BY p <-> (SELECT point '(0,0)') and no LIMIT, under a prepared statement. EXPLAIN charges the InitPlan, describe does not, and the costs differ (masked by finding 1). This only happens if the engine keeps such a scan as the root without a Sort/Limit.",
+      "recommendation": "Also walk b.order[*].expr (and skip.bounds, if it can hold user expressions), or reject when b.order is non-empty."
+    },
+    {
+      "severity": "LOW",
+      "kind": "docs/hygiene",
+      "verdict": "CONFIRMED (static)",
+      "where": "session/mod.rs:1943-1944; tests/kept_plans.rs:311-312; tests/parallel_scan.rs:948-949",
+      "summary": "The plan_cost comment '(One EXPLAIN tree gives the cost and the Gathers ...)' no longer holds on the shortcut arm. Each new test is preceded by two blank lines; default rustfmt (blank_lines_upper_bound=1, and no rustfmt.toml in the tree) would collapse them, so `cargo fmt --check` would flag both test files if the gate enforces it.",
+      "failure_scenario": "A fmt-check gate fails on test files only. A reader assumes that every plan_cost miss builds an EXPLAIN tree.",
+      "recommendation": "Reword the comment to name the lone-scan shortcut, and drop one blank line in each test file. Neither change affects behaviour."
+    }
+  ],
+  "equivalence_analysis": {
+    "scan_node_cost": "For a non-foreign Scan with current_of None, explain::Builder::scan (explain.rs ~11650) calls paths::describe(self.ctx, s), and planned_scan sets n.total_cost = d.total. planned_total calls the same describe(ctx, s) with the same ctx. A path-est-vs-EXPLAIN mismatch, which is what a6fe's est field risked, therefore cannot happen for the scan node.",
+    "above_scan": "Only column-only Projects are allowed. A non-false gating qual (column-free, non-volatile, e.g. $1 IS NULL) produces a Result whose total_cost = child.total_cost (explain gate), so it matches. Constant false/NULL quals become Plan::Empty in optimize.rs (~485-530, including constraint exclusion via excl/part_excl), so they never reach the lone-Scan shape. No partial path is considered when gating quals or marks exist.",
+    "gather_guard": "total_and_gathers returns (serial total, []) iff par is enabled, !debug_parallel_query and max_node_cost*1.02 < setup. With max_workers == 0 it builds the tree with par None, so there are no Gathers. planned_total returns Some iff (max_workers == 0) or (!debug_parallel_query and total*1.02 < setup). For a lone scan under pass-through projects, max_node_cost == scan total, so the conditions match. Other cases (unsafe hazard, below min_parallel sizes) fall back to total_and_gathers, which is conservative.",
+    "settings_and_estimates": "Read at the plan_cost call: ParCfg::read, describe's Planner::new, rel_size/allvisfrac and index_infos all come from that call's ctx, so they reflect SET/RESET, table growth and visibility as of the choice (same timing as parent). Parameters: generic plans keep Param exprs, and the estimation path reads no ctx.params (R1 check, still true). Custom plans bind values as constants and both arms see the same ScanPlan.",
+    "excluded_shapes": "foreign/fdw, sample, mark, current_of, limit, part, part_excl, phv_quals, bitmap/tid/tidrange/unplanned access, non-Col projections, and Subquery in filter/index quals/bounds (but not order, see finding 2). Partitions and inheritance members sit under an Append anyway.",
+    "caching_errors_gathers": "Unchanged from parent. bq.cost and bq.gathers are OnceLocks set only on plan_cost's existing miss, keyed by Arc::ptr_eq on bq.plan, and `let _ = set` keeps an earlier parallel_part::start get_or_init. planning_charge and the SearchPath/bound cache are untouched. Neither arm can error (describe returns Option, with fallback). The Some arm sets gathers = of_explain(plan, []) = [], which is what total_and_gathers would return under the same guard. Plans executed without plan_cost (no params) still discover Gathers at first parallel_part::start. No new generation key and no Gather hook.",
+    "side_effects": "Both arms call ParCfg::read (set_work_mem thread-local), as before. When describe runs and the guard then rejects (expensive scan under workers), the shortcut adds one describe call before the full EXPLAIN tree. That is extra cost only, with no semantic effect, and I make no performance claim."
+  },
+  "prior_objection_dispositions": [
+    {
+      "r1": "MEDIUM 1: Gathers frozen at Parse under workers=0 / high setup",
+      "disposition": "RESOLVED IN SOURCE. Binder bytes equal c8618834, so there is no costed() call at bind. Parse caches an uncosted BoundQuery as parent does, and parallel_part.rs/engine.rs are identical. Runtime proof is owner-reported only: fixture v2 passes 2/2 on c8618834 and fails (0/0 launched) on a6fe. The cac0933b focused run is pending, and I make no green claim."
+    },
+    {
+      "r1": "MEDIUM 2: generic cost frozen at Parse (seq_page_cost=500 then RESET gives 0/6)",
+      "disposition": "RESOLVED IN SOURCE. planned_total runs only on plan_cost's miss for the 6th bind's generic plan, under that call's settings, so it yields 2.25 < 7.25. Owner-reported: c8618834 passes 1/5, a6fe fails 0/6, PG18.6 gives 1/5. The cac0933b run is pending."
+    },
+    {
+      "r1": "LOW 3: ScanEst foreign seq formula drift",
+      "disposition": "RESOLVED BY DELETION. There is no ScanEst and no duplicate cost_seqscan. describe handles rel.fdw itself, and foreign/fdw scans are excluded anyway."
+    },
+    {
+      "r1": "LOW 4: docs/debug coverage",
+      "disposition": "MOSTLY RESOLVED. The BoundQuery gathers/cost docs are accurate again (parent bytes), the Debug-hidden est field is gone, and no EXPLAIN tree is built per bind in debug builds. Replaced by new LOW finding 1: the shortcut has no equivalence assertion."
+    },
+    {
+      "r1": "Known separately: custom ANY EXPLAIN and public custom '=' IN discrepancies",
+      "disposition": "Out of scope and untouched by this net diff."
+    }
+  ],
+  "retained_failures": [
+    "a6fe compiled generic fixture fails (0/6). c8618834 passes the same fixture (1/5). Owner/parent evidence.",
+    "Original parallel fixture omitted Engine::register_backend: c8618834 failed it 2/0 at baseline, fully preserved at a776. Not production attribution.",
+    "Corrected fixture v2 e7d41432 / patch sha 837459d0: c8618834 passes both 2/2, a6fe fails both 0/0 with correct rows and current Gather 2.",
+    "a6fe full gate FAILED (exit 101), partial 305 pass / 2 fail / 9 ignored over 33 summaries: logical_apply::parallel_apply (binder/mod.rs:227 'planned cost 107.1375 isn't EXPLAIN's 111.1375', ordered t_pkey Index scan for SELECT id, v FROM t ORDER BY id) and prepared_stream_without_two_phase_cleans_up (existing explain.rs:20183 'serial bound' assert). No later stages ran. Second cause formally UNATTRIBUTED."
+  ],
+  "static_hypothesis_on_a6fe_gate_failures": "Unproven. Both failing tests run against a table that logical apply grows concurrently. a6fe's bind-time debug code read table sizes twice: est at path choice, then total_and_gathers. total_and_gathers' existing assert also reads them twice (serial tree, then full tree). The 4.0 delta equals random_page_cost, consistent with one extra heap page between the reads. cac0933b removes both bind-time call sites, and on eligible scans it skips total_and_gathers entirely, so its exposure is at or below parent's. However the parent's serial-bound assert stays racy under concurrent writers, which would be a pre-existing latent flake. Because the first assertion was deleted, the candidate passing these tests would show those call sites are gone, not that any divergence was fixed.",
+  "test_strength": {
+    "kept_plans::generic_cost_uses_choice_context_after_parse": "Discriminates R1 MEDIUM 2. ext() does not re-Parse a named statement that already exists, and RESET leaves the bound-cache key unchanged, so bind 6 reuses the Parse-time BoundQuery. It exercises the planned_total arm (Seq + filter + Col projection, 2.25*1.02 < 1000). Limit: it asserts only the choice (1,5), and any generic cost in [0, 7.25) passes, so it does not check the numeric value.",
+    "parallel_scan::parallel_workers_use_execution_context_after_parse": "Discriminates R1 MEDIUM 1 for both workers and setup. It also checks that current EXPLAIN shows a Gather, checks the rows, and has correct backend register/unregister. Limit: there are no parameters, so plan_cost and planned_total never run. It proves the eager regression is gone, not that the new arm is correct. The second scenario inherits workers=2 from the first, which is intended.",
+    "not_covered": "planned_total vs EXPLAIN equivalence, totals near 1.02*setup, debug_parallel_query with workers 0/2, index-only scans with changing visibility, index scans with bounds, parameterised prepared statements whose Gathers are fixed by plan_cost and then settings change (parent behaviour, unchanged), KNN order keys."
+  },
+  "recommended_bounded_checks": [
+    "Focused cac0933b run of both new tests plus the full kept_plans and parallel_scan binaries (already authorized and pending). Report pass/fail as observed.",
+    "One-off debug-only equivalence assertion (finding 1) applied in a scratch checkout, run against kept_plans, parallel_scan, the prepared/plan-cache SQL goldens and plpgsql cached-plan tests. Any mismatch should be recorded with its plan shape.",
+    "Repeat logical_apply::parallel_apply and prepared_stream_without_two_phase_cleans_up N times on cac0933b and on c8618834, to separate a pre-existing concurrent-writer flake from the candidate.",
+    "PG18.6 oracle Parse/RESET pairs: (a) index-only scan with VACUUM between Parse and bind 6, (b) seq scan whose total is about 0.97-1.0 of parallel_setup_cost with workers=2. Compare generic/custom counts.",
+    "`cargo fmt --check -p pg-engine`, limited to the two test files."
+  ],
+  "acceptance": "None. This is source review only. No execution, readiness or performance acceptance."
+}
