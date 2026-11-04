@@ -12,6 +12,13 @@
   --accent: #4c8dff;
   --ok: #3ddc84;
   --danger: #ff3b30;
+  /* The agents surface (T3 Code's look, wave 6): raised cards and the composer, a user turn, the
+     hairline round floating things, and their soft shadows. Only the agents surface uses these. */
+  --raised: #101010;
+  --message: #1c1c1c;
+  --outline: rgb(255 255 255 / 7%);
+  --float-shadow: 0 14px 32px -18px rgb(0 0 0 / 75%);
+  --pop-shadow: 0 18px 44px -18px rgb(0 0 0 / 80%);
   color-scheme: dark;
 }
 
@@ -25,6 +32,11 @@
     --panel-2: #f4f4f4;
     --line: #ebebeb;
     --line-2: #dcdcdc;
+    --raised: #ffffff;
+    --message: #ececee;
+    --outline: rgb(0 0 0 / 8%);
+    --float-shadow: 0 1px 2px rgb(0 0 0 / 5%), 0 8px 24px -16px rgb(0 0 0 / 18%);
+    --pop-shadow: 0 16px 40px -18px rgb(0 0 0 / 35%);
     color-scheme: light;
   }
 }
@@ -41,6 +53,11 @@
   --color-accent: var(--accent);
   --color-ok: var(--ok);
   --color-danger: var(--danger);
+  --color-raised: var(--raised);
+  --color-message: var(--message);
+  --color-outline: var(--outline);
+  --shadow-float: var(--float-shadow);
+  --shadow-pop: var(--pop-shadow);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
