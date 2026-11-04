@@ -1,0 +1,19 @@
+{
+  "observed_utc": "2026-11-04T12:23:34.200109+00:00",
+  "parent_head_before_checkpoint": "d599cf05ce3e3c7e7c1ba4831ac0bddd1a8ab3bc",
+  "thread_id": "ef773c6d-b273-413f-96df-4136f8b05569",
+  "canonical_trail": "~/.cache/pg-engine-sol-resume/decisions.tsv",
+  "trail_source_lines": [
+    163,
+    180
+  ],
+  "source_acceptance": false,
+  "full_service_acceptance": false,
+  "performance_acceptance": false,
+  "notes": [
+    "Point-in-time receipt; owner jobs continue independently.",
+    "Copied verification audit retains first failed parity attempt; bounded repaired retry remains pending.",
+    "Owner raw source logs are on the recorded evidence refs; this receipt does not replace them.",
+    "Storage proof-debug is a genuine failed result: 2 passed, 2 failed."
+  ]
+}
