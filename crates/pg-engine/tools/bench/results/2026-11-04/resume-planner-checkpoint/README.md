@@ -16,8 +16,9 @@ debug suite did pass all three modes; its completed log is exported separately. 
 
 Historical matrix m0/m1 contain partial campaigns and lack raw pgbench output and a
 complete current-source gate set. They cannot establish a performance regression or gain.
-Old baseline/pre footprint outputs do not verify baeee87a. New runner scripts are retained
-locally and are not reported as executed until their individual exit logs exist.
+Old baseline/pre footprint outputs do not verify baeee87a. Runner snapshots are exported for review. Only completed commands with individual exit
+logs are reported as executed: check165 remains in progress; check171 and bench165 have
+not started. The frozen benchmark plan precedes every new measurement.
 
 Planner171 recovered at 5c312235 with six dirty SQL files; their exact snapshot is ec5b9f39.
 An earlier cargo check succeeded, but the log lacks sufficient source identity to accept

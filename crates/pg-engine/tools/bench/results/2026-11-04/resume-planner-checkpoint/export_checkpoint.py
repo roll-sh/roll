@@ -33,8 +33,9 @@ debug suite did pass all three modes; its completed log is exported separately. 
 
 Historical matrix m0/m1 contain partial campaigns and lack raw pgbench output and a
 complete current-source gate set. They cannot establish a performance regression or gain.
-Old baseline/pre footprint outputs do not verify baeee87a. New runner scripts are retained
-locally and are not reported as executed until their individual exit logs exist.
+Old baseline/pre footprint outputs do not verify baeee87a. Runner snapshots are exported for review. Only completed commands with individual exit
+logs are reported as executed: check165 remains in progress; check171 and bench165 have
+not started. The frozen benchmark plan precedes every new measurement.
 
 Planner171 recovered at 5c312235 with six dirty SQL files; their exact snapshot is ec5b9f39.
 An earlier cargo check succeeded, but the log lacks sufficient source identity to accept
@@ -53,6 +54,16 @@ The still-running release-suite output is excluded, not reported as a finished c
 '''
 files = {'README.md': readme.encode(), 'export_checkpoint.py': Path(__file__).read_bytes()}
 sources = {
+    'runners/check165.sh': str(D / 'check165.sh'),
+    'runners/check171.sh': str(D / 'check171.sh'),
+    'runners/bench165.sh': str(D / 'bench165.sh'),
+    'runners/BENCH-PLAN.md': str(D / 'BENCH-PLAN.md'),
+    'runners/matrix.sh': '/home/meszmate/.cache/a165/scripts/matrix.sh',
+    'runners/conn1000.sh': '/home/meszmate/.cache/a165/scripts/conn1000.sh',
+    'runners/footprint.sh': '/home/meszmate/.cache/a165/scripts/footprint.sh',
+    'runners/jobA.sh': '/home/meszmate/.cache/a165/scripts/jobA.sh',
+    'runners/jobB.sh': '/home/meszmate/.cache/a165/scripts/jobB.sh',
+    'runners/jobB-original-false-success.sh': str(D / 'jobB-original-false-success.sh'),
     'oltp165/debug-complete.log': str(D / 'check165/debug-test.log'),
     'oltp165/debug.command': str(D / 'check165/debug-test.command'),
     'oltp165/debug-summary.json': str(D / 'check165/debug-summary.json'),
