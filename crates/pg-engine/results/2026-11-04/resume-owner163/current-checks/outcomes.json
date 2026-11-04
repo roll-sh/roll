@@ -1,0 +1,21 @@
+{
+  "source_head": "4c5496833385eb2df038b465b30f7bab4e71595f",
+  "production_source": "cf27eed0",
+  "build": "exit0",
+  "focused": {
+    "lib_passed": 184,
+    "lib_failed": 0,
+    "lib_ignored": [
+      "ext::vector::tests::kernel_speed",
+      "ext::vector::tests::reference_fixture"
+    ],
+    "big_tables_passed": 15,
+    "deep_input_passed": 3,
+    "goldens_passed": 3,
+    "golden_runtime_seconds": 1188.92
+  },
+  "clippy": "exit0,existingwarnings",
+  "pg_dump": "PASS:authority14817/0completeplans",
+  "pg_e2e": "DEFERRED to parent single combined run",
+  "acceptance": "parent independentreview+combinedsource/service+perf/footprint pending;no newperformanceclaims"
+}
