@@ -381,6 +381,9 @@ pub struct SessionState {
     pub temp: Arc<crate::exec::spill::TempUsage>,
     /// The current transaction used temporary objects (XACT_FLAGS_ACCESSEDTEMPNAMESPACE).
     pub temp_used: std::cell::Cell<bool>,
+    /// The search path less the schemas a role may not use (`exec::usable_path`), for the
+    /// catalog version, role, database owner and path it was worked out for.
+    pub usable_path_memo: std::cell::RefCell<Option<UsablePath>>,
     /// The failing statement committed part of its work in transactions of its own (a
     /// CREATE INDEX CONCURRENTLY whose build failed leaves the index, INVALID): its
     /// implicit transaction commits when it fails.
@@ -578,6 +581,7 @@ impl SessionState {
             pgstat: RefCell::new(crate::exec::pgstat::Pending::new_session()),
             temp: Arc::default(),
             temp_used: std::cell::Cell::new(false),
+            usable_path_memo: Default::default(),
             commit_on_error: std::cell::Cell::new(false),
             temp_ever: std::cell::Cell::new(false),
             overexplain: std::cell::Cell::new(false),
@@ -938,6 +942,9 @@ impl Drop for SessionState {
         crate::exec::pgstat::session_ends(self);
     }
 }
+
+/// `SessionState::usable_path_memo`: (catalog version, role, database owner, path, usable part).
+pub type UsablePath = (u64, u32, u32, crate::catalog::names::SearchPath, crate::catalog::names::SearchPath);
 
 /// A running COPY's progress as pg_stat_get_progress_info('COPY') reports it.
 #[derive(Clone, Debug, Default)]

@@ -445,6 +445,7 @@ impl Database {
             stmt_catalog: None,
             read_catalog: None,
             locks_held: hashbrown::HashMap::new(),
+            table_used: false,
             lock_journal: Vec::new(),
             fast_slot: std::sync::OnceLock::new(),
             row_locks: Vec::new(),
@@ -929,6 +930,10 @@ pub struct Txn {
     read_catalog: Option<Arc<Catalog>>,
     /// Heavyweight locks held, by key and mode, with the subtransaction depth that took them.
     locks_held: hashbrown::HashMap<HeldLock, usize>,
+    /// Something went to the lock manager's main table (a lock off the fast path, a row lock,
+    /// a key holder, its transaction id's lock): its end releases there. Without it, a
+    /// transaction holding only fast-path locks ends without the main table's mutex.
+    table_used: bool,
     /// The order they were taken in (released by ROLLBACK TO in reverse).
     lock_journal: Vec<HeldLock>,
     /// Its backend's fast-path slot for weak relation locks (`locks::FastSlot`), once looked up.
@@ -1270,7 +1275,13 @@ impl Txn {
     /// transaction from its first lock or snapshot on.
     fn hold_own_xact_lock(&mut self) {
         if !self.xact_locks.contains(&self.id) {
-            self.db.locks.hold_xact_lock(self.id, self.id, self.lock_proc(), self.xid);
+            match self.fast() {
+                Some(slot) if self.xid == 0 => self.db.locks.hold_xact_fast(slot, self.id),
+                _ => {
+                    self.table_used = true;
+                    self.db.locks.hold_xact_lock(self.id, self.id, self.lock_proc(), self.xid);
+                }
+            }
             self.xact_locks.push(self.id);
         }
     }
@@ -1720,6 +1731,7 @@ impl Txn {
                 self.log = Some(Box::default());
             }
             // Its transaction lock, held until it ends (what waiting for it waits on).
+            self.table_used = true;
             self.db.locks.hold_xact_lock(self.id, self.id, self.lock_proc(), self.xid);
             if self.sxact {
                 self.db.ssi.set_xid(self.id, self.xid);
@@ -2845,16 +2857,14 @@ impl Txn {
                 what,
             )?;
         if got {
+            self.table_used |= !fast;
             self.lock_journal.push(k.clone());
             self.locks_held.insert(k, self.savepoints.len());
             // A new lock may have waited for DDL that then committed: the statement reads the
             // catalog as it is now (LockRelationOid's AcceptInvalidationMessages).
             self.accept_catalog();
             // Its own lock (the virtual transaction id's), which waiting for it waits on.
-            if !self.xact_locks.contains(&self.id) {
-                self.db.locks.hold_xact_lock(self.id, self.id, self.lock_proc(), self.xid);
-                self.xact_locks.push(self.id);
-            }
+            self.hold_own_xact_lock();
         }
         Ok(got)
     }
@@ -3025,6 +3035,7 @@ impl Txn {
             let holder = self.holder();
             let xid = self.cur_xid();
             let proc = self.lock_proc();
+            self.table_used = true;
             if self.db.locks.hold_compact_unique_key(key, self.id, proc, holder, xid, row_key) {
                 // (As `lock` and `hold_unique_key` do: the transaction's own lock, which
                 // waiting for it waits on, and its subtransaction's.)
@@ -3080,6 +3091,7 @@ impl Txn {
             }
         }
         let kh = locks::KeyHolder { holder, xid, token, row, row_key: row_key.map(<[u8]>::to_vec) };
+        self.table_used = true;
         self.db.locks.set_key_holder(key, self.id, kh);
     }
 
@@ -3105,6 +3117,7 @@ impl Txn {
             }
         }
         let kh = locks::KeyHolder { holder, xid, token, row: Some(row), row_key: Some(row_key.to_vec()) };
+        self.table_used = true;
         self.db.locks.add_excl_entry(con, &key, row_key, self.id, kh);
         Ok(())
     }
@@ -3174,6 +3187,7 @@ impl Txn {
     /// Row `key` (locked by this transaction) is being updated or deleted by it.
     pub fn row_modified(&mut self, key: &[u8]) {
         let holder = self.holder();
+        self.table_used = true;
         self.db.locks.mark_row_modified(key, self.id, holder);
     }
 
@@ -3218,6 +3232,7 @@ impl Txn {
         // with the (sub)transaction, not listed here.
         let mut compacted = false;
         let compact = (self.row_locks.len() >= bulklocks::compact_after()).then_some(&mut compacted);
+        self.table_used = true;
         let got = self.db.locks.lock_row(
             key,
             &tuple,
@@ -3829,8 +3844,13 @@ impl Txn {
         if self.locks_held.is_empty() && self.row_locks.is_empty() && self.xact_locks.is_empty() {
             return;
         }
-        if let Some(s) = self.fast() {
-            self.db.locks.release_fast_owner(s, self.id);
+        let moved = self.fast().is_some_and(|s| self.db.locks.release_fast_owner(s, self.id));
+        // (Only fast-path locks and its own lock there: nothing to release in the main table.)
+        if !std::mem::take(&mut self.table_used) && !moved && !self.prepared && self.row_locks.is_empty() {
+            self.locks_held.clear();
+            self.xact_locks.clear();
+            self.lock_journal.clear();
+            return;
         }
         let mut keys: Vec<Vec<u8>> = self.locks_held.drain().map(|((k, _), _)| k).collect();
         keys.sort();

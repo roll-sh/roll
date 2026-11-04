@@ -446,6 +446,15 @@ fn usable_path(catalog: &Catalog, sess: &SessionState, path: &mut crate::catalog
         return me;
     }
     let db_owner = sess.db_owner(catalog);
+    // (Worked out once per catalog version, role and path: every statement filters it.)
+    if let Some((v, r, o, from, to)) = &*sess.usable_path_memo.borrow()
+        && (*v, *r, *o) == (catalog.version, me, db_owner)
+        && Arc::ptr_eq(from, path)
+    {
+        *path = to.clone();
+        return me;
+    }
+    let from = path.clone();
     let usable = |s: &String| match catalog.schema_by_name(s) {
         Some(sc) => {
             sc.name.starts_with("pg_temp")
@@ -460,6 +469,7 @@ fn usable_path(catalog: &Catalog, sess: &SessionState, path: &mut crate::catalog
     if !path.iter().all(usable) {
         *path = path.iter().filter(|s| usable(s)).cloned().collect();
     }
+    *sess.usable_path_memo.borrow_mut() = Some((catalog.version, me, db_owner, from, path.clone()));
     me
 }
 
