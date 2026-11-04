@@ -1,0 +1,11 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a640c14a8f76f8ea4/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 47s
+     Running tests/twophase.rs (/home/meszmate/.cache/a165/target/debug/deps/twophase-18d9b42732dd9092)
+
+running 3 tests
+test prepared_role_changes_finish_after_a_restart ... ok
+test prepared_finish_preserves_reused_backend_lock_owners ... ok
+test prepared_transactions_survive_a_restart ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.29s
+

@@ -26,7 +26,8 @@ jobB's final HEAVY-EXIT 0 is FALSE SUCCESS: every cargo step failed on a missing
 import. Its debug/release failure logs are preserved. baeee87a fixes only that import;
 complete current-source debug validation has now passed446tests,0failed,18ignored.
 The complete release suite also passed446tests,0failed,18ignored across60summaries.
-Release all-target Clippy exited0 with warnings; dist build, PostgreSQL and footprint/performance gates remain pending.
+Release all-target Clippy exited0 with warnings; dist build was cancelled as SUPERSEDED after independent review found correctness blockers.
+PostgreSQL and footprint/performance gates remain pending; no old-candidate timing is authorized.
 PostgreSQL18.6 recording of a165_cursor_stream succeeded: nonempty 397-line expected output.
 The other two golden tests return early in recording mode: this is recording evidence,
 not itself a successful embedded/wire/shuffled comparison. The subsequent complete
@@ -51,10 +52,42 @@ Owner backups were checked with ls-remote: baeee87a wip/a165-resume-20261104,
 63f7c0b4 wip/a172-resume-20261104. Shared branch and parent/main worktrees were not mutated.
 
 The manifest records exact hashes of every exported artifact. This checkpoint includes the completed debug-suite output and exact testedtree.
-Completed release output, command and summary are included. The still-running dist output is excluded.
+Completed release output, command and summary are included. Superseded dist output is retained
+with explicit status. Review regression tests failed the old source for leaked prepared locks,
+repeated cursor effects, and 6,000,768 retained key bytes. First focused corrected lock matrix
+passed, cursor check failed default SRF scrollability, and fail-fast prevented the memory check.
+The first timestamp fixture was invalid on both PG and engine, so it establishes no timestamp
+coverage; the corrected refcursor fixture was freshly recorded on PG18.6 and has no ERROR rows.
+A follow-up trace identified a Join-with-FromCall representation of Function Scan. Its temporary
+trace was removed, default scrollability corrected, and green165v2 is still in progress.
+Completed outputs only are included; no source acceptance is inferred.
 '''
 files = {'README.md': readme.encode(), 'export_checkpoint.py': Path(__file__).read_bytes()}
 sources = {
+    'runners/review165.sh': str(D / 'review165.sh'),
+    'runners/probe165.sh': str(D / 'probe165.sh'),
+    'runners/green165v2.sh': str(D / 'green165v2.sh'),
+    'oltp165/SUPERSEDED.json': str(D / 'check165/SUPERSEDED.json'),
+    'oltp165/dist-superseded.log': str(D / 'check165/build.log'),
+    'review165/exits.tsv': str(D / 'review165/exits.tsv'),
+    'review165/head.txt': str(D / 'review165/head.txt'),
+    'review165/red-source.patch': str(D / 'review165/red-source.patch'),
+    'review165/red-lock.log': str(D / 'review165/red-lock.log'),
+    'review165/red-cursor.log': str(D / 'review165/red-cursor.log'),
+    'review165/red-memory.log': str(D / 'review165/red-memory.log'),
+    'review165/red-replay.actual': str(D / 'review165/red-replay.actual'),
+    'review165/green-lock.log': str(D / 'review165/green-lock.log'),
+    'review165/green-cursor.log': str(D / 'review165/green-cursor.log'),
+    'review165/reference-replay-invalid-timestamp.out': str(D / 'review165/reference-replay.out'),
+    'review165/stream-before.sha256': str(D / 'review165/stream-before.sha256'),
+    'probe165/head.txt': str(D / 'probe165/head.txt'),
+    'probe165/source.patch': str(D / 'probe165/source.patch'),
+    'probe165/exits.tsv': str(D / 'probe165/exits.tsv'),
+    'probe165/record.log': str(D / 'probe165/record.log'),
+    'probe165/record.command': str(D / 'probe165/record.command'),
+    'probe165/cursor.log': str(D / 'probe165/cursor.log'),
+    'probe165/corrected-reference-replay.sql': W + '/crates/pg-engine/tests/sql/a165_cursor_replay.sql',
+    'probe165/corrected-reference-replay.out': W + '/crates/pg-engine/tests/sql/a165_cursor_replay.out',
     'runners/audit-footprint.py': str(D / 'audit-footprint.py'),
     'oltp165/release-complete.log': str(D / 'check165/release-test.log'),
     'oltp165/release.command': str(D / 'check165/release-test.command'),

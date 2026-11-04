@@ -1,0 +1,10 @@
+{
+  "stage": "dist-build",
+  "status": "SUPERSEDED",
+  "reason": "Parent independent review found correctness blockers; cancel owned obsolete dist build before editing. Completed debug/release/Clippy retained; pnpm and timings not run.",
+  "terminated_pids": [
+    342030,
+    2906904,
+    2907252
+  ]
+}

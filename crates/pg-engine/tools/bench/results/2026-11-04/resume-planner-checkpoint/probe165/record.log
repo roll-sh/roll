@@ -1,0 +1,12 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a640c14a8f76f8ea4/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 35.96s
+     Running tests/golden.rs (/home/meszmate/.cache/a165/target/debug/deps/golden-9749ad749af5ca1c)
+
+running 3 tests
+test golden_shuffled ... ok
+test golden_wire ... ok
+recorded /home/meszmate/roll/.claude/worktrees/agent-a640c14a8f76f8ea4/crates/pg-engine/tests/sql/a165_cursor_replay.sql
+test golden ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+

@@ -1,0 +1,24 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a640c14a8f76f8ea4/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.39s
+     Running tests/twophase.rs (/home/meszmate/.cache/a165/target/debug/deps/twophase-18d9b42732dd9092)
+
+running 1 test
+
+thread '<unnamed>' (3304257) panicked at crates/pg-engine/tests/twophase.rs:217:17:
+assertion `left == right` failed: COMMIT, strong=false
+  left: ["2"]
+ right: ["0"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'prepared_finish_preserves_reused_backend_lock_owners' (3304256) panicked at crates/pg-engine/tests/twophase.rs:52:79:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+test prepared_finish_preserves_reused_backend_lock_owners ... FAILED
+
+failures:
+
+failures:
+    prepared_finish_preserves_reused_backend_lock_owners
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.13s
+
+error: test failed, to rerun pass `-p pg-engine --test twophase`

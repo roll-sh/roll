@@ -17,7 +17,7 @@ run() {
   test "$status" -eq 0
   if [[ "$name" == *test* ]]; then
     grep -q 'test result: ok' "$ev/$name.log"
-    ! grep -Eq '^error|test result: FAILED|panicked at' "$ev/$name.log"
+    if grep -Eq '^error|test result: FAILED|panicked at' "$ev/$name.log"; then return 1; fi
   fi
   test "$(git -C "$wt" rev-parse HEAD)" = "$(cat "$ev/source.txt")"
   git -C "$wt" diff --binary > "$ev/current.patch"

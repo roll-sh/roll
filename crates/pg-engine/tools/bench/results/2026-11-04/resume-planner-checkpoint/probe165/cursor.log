@@ -1,0 +1,527 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running tests/golden.rs (/home/meszmate/.cache/a165/target/debug/deps/golden-9749ad749af5ca1c)
+
+running 3 tests
+A165 DEFAULT CURSOR PLAN: Join {
+    kind: Inner,
+    left: One,
+    right: Project {
+        input: PlCall {
+            func: Function {
+                oid: 16384,
+                schema: 2200,
+                name: "a165_notice",
+                args: [],
+                ret: Int4,
+                returns_set: true,
+                language: "plpgsql",
+                body: "\nbegin\n  raise notice 'stable function ran';\n  return next 1;\n  return next 2;\nend ",
+                volatility: 's',
+                strict: false,
+                defaults: [],
+                out_cols: [],
+                owner: 10,
+                security_definer: false,
+                procedure: false,
+                modes: [],
+                agg: None,
+                cost: 0.0,
+                rows: 0.0,
+                parallel: 'u',
+                leakproof: false,
+                config: [],
+                arg_domains: [],
+                ret_domain: None,
+                out_domains: [],
+                sql_body: None,
+                atomic_returns: [],
+                probin: None,
+                support: 0,
+                window: false,
+                trftypes: [],
+            },
+            args: [],
+            ncols: 1,
+            coll: None,
+            scan: true,
+        },
+        exprs: [
+            #0,
+        ],
+    },
+    cond: None,
+    hash: None,
+    params: [],
+    nleft: 0,
+    nright: 1,
+    meta: JoinMeta {
+        kept: [],
+        method: None,
+        material: false,
+        inner_unique: false,
+        rows: None,
+        semi: None,
+        indexed: false,
+        scansel: None,
+        swapped: false,
+        presorted: false,
+        unique_outer: false,
+        unique_inner: false,
+        hash_buckets: None,
+        hash_inner: None,
+        outer_first: false,
+        memoize: None,
+        pushed: [],
+        merge_dirs: [],
+        from_call: Some(
+            FromCall {
+                def: a165_notice([]),
+                call: None,
+                schema: "public",
+                alias: "a165_notice",
+                cols: [
+                    "a165_notice",
+                ],
+                rows: 1000.0,
+                cost: 100.0,
+                width: 4,
+            },
+        ),
+        hash_swapped: [],
+        ec_written: [],
+        semi_carried: 0,
+        key_flipped: [],
+        written_kind: None,
+        phv_eval: false,
+        phv_join: false,
+        lifted_by: 0,
+        alias_cols: 0,
+        tlist: [],
+        explicit: false,
+        bound: 0,
+        bound_pushed: [],
+        phv_outer_width: None,
+        lateral_sub: false,
+        lateral_held: false,
+        lateral_flat: false,
+        fdw_alt: _,
+        par_alt: _,
+        par_alt_cost: _,
+        ord_alt: _,
+        ord_alt_start: _,
+    },
+}
+A165 DEFAULT CURSOR PLAN: Join {
+    kind: Inner,
+    left: One,
+    right: Project {
+        input: PlCall {
+            func: Function {
+                oid: 16384,
+                schema: 2200,
+                name: "a165_notice",
+                args: [],
+                ret: Int4,
+                returns_set: true,
+                language: "plpgsql",
+                body: "\nbegin\n  raise notice 'stable function ran';\n  return next 1;\n  return next 2;\nend ",
+                volatility: 's',
+                strict: false,
+                defaults: [],
+                out_cols: [],
+                owner: 10,
+                security_definer: false,
+                procedure: false,
+                modes: [],
+                agg: None,
+                cost: 0.0,
+                rows: 0.0,
+                parallel: 'u',
+                leakproof: false,
+                config: [],
+                arg_domains: [],
+                ret_domain: None,
+                out_domains: [],
+                sql_body: None,
+                atomic_returns: [],
+                probin: None,
+                support: 0,
+                window: false,
+                trftypes: [],
+            },
+            args: [],
+            ncols: 1,
+            coll: None,
+            scan: true,
+        },
+        exprs: [
+            #0,
+        ],
+    },
+    cond: None,
+    hash: None,
+    params: [],
+    nleft: 0,
+    nright: 1,
+    meta: JoinMeta {
+        kept: [],
+        method: None,
+        material: false,
+        inner_unique: false,
+        rows: None,
+        semi: None,
+        indexed: false,
+        scansel: None,
+        swapped: false,
+        presorted: false,
+        unique_outer: false,
+        unique_inner: false,
+        hash_buckets: None,
+        hash_inner: None,
+        outer_first: false,
+        memoize: None,
+        pushed: [],
+        merge_dirs: [],
+        from_call: Some(
+            FromCall {
+                def: a165_notice([]),
+                call: None,
+                schema: "public",
+                alias: "a165_notice",
+                cols: [
+                    "a165_notice",
+                ],
+                rows: 1000.0,
+                cost: 100.0,
+                width: 4,
+            },
+        ),
+        hash_swapped: [],
+        ec_written: [],
+        semi_carried: 0,
+        key_flipped: [],
+        written_kind: None,
+        phv_eval: false,
+        phv_join: false,
+        lifted_by: 0,
+        alias_cols: 0,
+        tlist: [],
+        explicit: false,
+        bound: 0,
+        bound_pushed: [],
+        phv_outer_width: None,
+        lateral_sub: false,
+        lateral_held: false,
+        lateral_flat: false,
+        fdw_alt: _,
+        par_alt: _,
+        par_alt_cost: _,
+        ord_alt: _,
+        ord_alt_start: _,
+    },
+}
+
+thread '<unnamed>' (3499198) panicked at crates/pg-engine/tests/golden.rs:191:9:
+1 of 1 golden files differ:
+
+a165_cursor_replay.sql:
+   > fetch backward all from d
+ - a165_notice:int4
+ + ERROR 55000: cursor can only scan forward
+ - 1
+ + HINT: Declare it with SCROLL option to enable backward scan.
+ - 2
+ + 
+ - -- FETCH 2
+ + > rollback
+ - 
+ + -- ROLLBACK
+ - > rollback
+ + 
+ - -- ROLLBACK
+ + > begin
+ - 
+ + -- BEGIN
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'golden' (3499196) panicked at crates/pg-engine/tests/golden.rs:147:10:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+test golden ... FAILED
+A165 DEFAULT CURSOR PLAN: Join {
+    kind: Inner,
+    left: One,
+    right: Project {
+        input: PlCall {
+            func: Function {
+                oid: 16384,
+                schema: 2200,
+                name: "a165_notice",
+                args: [],
+                ret: Int4,
+                returns_set: true,
+                language: "plpgsql",
+                body: "\nbegin\n  raise notice 'stable function ran';\n  return next 1;\n  return next 2;\nend ",
+                volatility: 's',
+                strict: false,
+                defaults: [],
+                out_cols: [],
+                owner: 10,
+                security_definer: false,
+                procedure: false,
+                modes: [],
+                agg: None,
+                cost: 0.0,
+                rows: 0.0,
+                parallel: 'u',
+                leakproof: false,
+                config: [],
+                arg_domains: [],
+                ret_domain: None,
+                out_domains: [],
+                sql_body: None,
+                atomic_returns: [],
+                probin: None,
+                support: 0,
+                window: false,
+                trftypes: [],
+            },
+            args: [],
+            ncols: 1,
+            coll: None,
+            scan: true,
+        },
+        exprs: [
+            #0,
+        ],
+    },
+    cond: None,
+    hash: None,
+    params: [],
+    nleft: 0,
+    nright: 1,
+    meta: JoinMeta {
+        kept: [],
+        method: None,
+        material: false,
+        inner_unique: false,
+        rows: None,
+        semi: None,
+        indexed: false,
+        scansel: None,
+        swapped: false,
+        presorted: false,
+        unique_outer: false,
+        unique_inner: false,
+        hash_buckets: None,
+        hash_inner: None,
+        outer_first: false,
+        memoize: None,
+        pushed: [],
+        merge_dirs: [],
+        from_call: Some(
+            FromCall {
+                def: a165_notice([]),
+                call: None,
+                schema: "public",
+                alias: "a165_notice",
+                cols: [
+                    "a165_notice",
+                ],
+                rows: 1000.0,
+                cost: 100.0,
+                width: 4,
+            },
+        ),
+        hash_swapped: [],
+        ec_written: [],
+        semi_carried: 0,
+        key_flipped: [],
+        written_kind: None,
+        phv_eval: false,
+        phv_join: false,
+        lifted_by: 0,
+        alias_cols: 0,
+        tlist: [],
+        explicit: false,
+        bound: 0,
+        bound_pushed: [],
+        phv_outer_width: None,
+        lateral_sub: false,
+        lateral_held: false,
+        lateral_flat: false,
+        fdw_alt: _,
+        par_alt: _,
+        par_alt_cost: _,
+        ord_alt: _,
+        ord_alt_start: _,
+    },
+}
+
+thread 'golden_shuffled' (3499197) panicked at crates/pg-engine/tests/golden.rs:373:9:
+GOLDEN_SHUFFLE_SEED=2579: 1 of 1 golden files differ in this order:
+
+a165_cursor_replay.sql (file 1 of the order, after ; differs alone too):
+   > fetch backward all from d
+ - a165_notice:int4
+ + ERROR 55000: cursor can only scan forward
+ - 1
+ + HINT: Declare it with SCROLL option to enable backward scan.
+ - 2
+ + 
+ - -- FETCH 2
+ + > rollback
+ - 
+ + -- ROLLBACK
+ - > rollback
+ + 
+ - -- ROLLBACK
+ + > begin
+ - 
+ + -- BEGIN
+
+test golden_shuffled ... FAILED
+A165 DEFAULT CURSOR PLAN: Join {
+    kind: Inner,
+    left: One,
+    right: Project {
+        input: PlCall {
+            func: Function {
+                oid: 16385,
+                schema: 2200,
+                name: "a165_notice",
+                args: [],
+                ret: Int4,
+                returns_set: true,
+                language: "plpgsql",
+                body: "\nbegin\n  raise notice 'stable function ran';\n  return next 1;\n  return next 2;\nend ",
+                volatility: 's',
+                strict: false,
+                defaults: [],
+                out_cols: [],
+                owner: 10,
+                security_definer: false,
+                procedure: false,
+                modes: [],
+                agg: None,
+                cost: 0.0,
+                rows: 0.0,
+                parallel: 'u',
+                leakproof: false,
+                config: [],
+                arg_domains: [],
+                ret_domain: None,
+                out_domains: [],
+                sql_body: None,
+                atomic_returns: [],
+                probin: None,
+                support: 0,
+                window: false,
+                trftypes: [],
+            },
+            args: [],
+            ncols: 1,
+            coll: None,
+            scan: true,
+        },
+        exprs: [
+            #0,
+        ],
+    },
+    cond: None,
+    hash: None,
+    params: [],
+    nleft: 0,
+    nright: 1,
+    meta: JoinMeta {
+        kept: [],
+        method: None,
+        material: false,
+        inner_unique: false,
+        rows: None,
+        semi: None,
+        indexed: false,
+        scansel: None,
+        swapped: false,
+        presorted: false,
+        unique_outer: false,
+        unique_inner: false,
+        hash_buckets: None,
+        hash_inner: None,
+        outer_first: false,
+        memoize: None,
+        pushed: [],
+        merge_dirs: [],
+        from_call: Some(
+            FromCall {
+                def: a165_notice([]),
+                call: None,
+                schema: "public",
+                alias: "a165_notice",
+                cols: [
+                    "a165_notice",
+                ],
+                rows: 1000.0,
+                cost: 100.0,
+                width: 4,
+            },
+        ),
+        hash_swapped: [],
+        ec_written: [],
+        semi_carried: 0,
+        key_flipped: [],
+        written_kind: None,
+        phv_eval: false,
+        phv_join: false,
+        lifted_by: 0,
+        alias_cols: 0,
+        tlist: [],
+        explicit: false,
+        bound: 0,
+        bound_pushed: [],
+        phv_outer_width: None,
+        lateral_sub: false,
+        lateral_held: false,
+        lateral_flat: false,
+        fdw_alt: _,
+        par_alt: _,
+        par_alt_cost: _,
+        ord_alt: _,
+        ord_alt_start: _,
+    },
+}
+
+thread 'golden_wire' (3499285) panicked at crates/pg-engine/tests/golden.rs:191:9:
+1 of 1 golden files differ:
+
+a165_cursor_replay.sql:
+   > fetch backward all from d
+ - a165_notice:int4
+ + ERROR 55000: cursor can only scan forward
+ - 1
+ + HINT: Declare it with SCROLL option to enable backward scan.
+ - 2
+ + 
+ - -- FETCH 2
+ + > rollback
+ - 
+ + -- ROLLBACK
+ - > rollback
+ + 
+ - -- ROLLBACK
+ + > begin
+ - 
+ + -- BEGIN
+
+test golden_wire ... FAILED
+
+failures:
+
+failures:
+    golden
+    golden_shuffled
+    golden_wire
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
+
+error: test failed, to rerun pass `-p pg-engine --test golden`

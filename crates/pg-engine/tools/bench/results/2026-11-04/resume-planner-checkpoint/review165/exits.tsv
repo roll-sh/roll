@@ -1,0 +1,6 @@
+record	0
+red-lock	101
+red-cursor	101
+red-memory	101
+green-lock	0
+green-cursor	101

@@ -1,0 +1,20 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a640c14a8f76f8ea4/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.38s
+     Running tests/memory_load.rs (/home/meszmate/.cache/a165/target/debug/deps/memory_load-69b55974dfbde33f)
+
+running 1 test
+streamed cursor retained 6000768 bytes after 98000 additional rows
+
+thread 'streaming_cursor_bounds_keys_and_backward_work' (3305144) panicked at crates/pg-engine/tests/memory_load.rs:329:5:
+cursor retained row keys: 6000768 bytes
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test streaming_cursor_bounds_keys_and_backward_work ... FAILED
+
+failures:
+
+failures:
+    streaming_cursor_bounds_keys_and_backward_work
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 9.30s
+
+error: test failed, to rerun pass `-p pg-engine --test memory_load`

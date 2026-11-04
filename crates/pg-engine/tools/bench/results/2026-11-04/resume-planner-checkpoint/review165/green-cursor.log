@@ -1,0 +1,92 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a640c14a8f76f8ea4/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.87s
+     Running tests/golden.rs (/home/meszmate/.cache/a165/target/debug/deps/golden-9749ad749af5ca1c)
+
+running 3 tests
+
+thread '<unnamed>' (3349958) panicked at crates/pg-engine/tests/golden.rs:191:9:
+1 of 2 golden files differ:
+
+a165_cursor_replay.sql:
+   > fetch backward all from d
+ - a165_notice:int4
+ + ERROR 55000: cursor can only scan forward
+ - 1
+ + HINT: Declare it with SCROLL option to enable backward scan.
+ - 2
+ + 
+ - -- FETCH 2
+ + > rollback
+ - 
+ + -- ROLLBACK
+ - > rollback
+ + 
+ - -- ROLLBACK
+ + > begin
+ - 
+ + -- BEGIN
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'golden' (3349956) panicked at crates/pg-engine/tests/golden.rs:147:10:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+test golden ... FAILED
+
+thread 'golden_shuffled' (3349957) panicked at crates/pg-engine/tests/golden.rs:373:9:
+GOLDEN_SHUFFLE_SEED=2579: 1 of 2 golden files differ in this order:
+
+a165_cursor_replay.sql (file 1 of the order, after ; differs alone too):
+   > fetch backward all from d
+ - a165_notice:int4
+ + ERROR 55000: cursor can only scan forward
+ - 1
+ + HINT: Declare it with SCROLL option to enable backward scan.
+ - 2
+ + 
+ - -- FETCH 2
+ + > rollback
+ - 
+ + -- ROLLBACK
+ - > rollback
+ + 
+ - -- ROLLBACK
+ + > begin
+ - 
+ + -- BEGIN
+
+test golden_shuffled ... FAILED
+
+thread 'golden_wire' (3349974) panicked at crates/pg-engine/tests/golden.rs:191:9:
+1 of 2 golden files differ:
+
+a165_cursor_replay.sql:
+   > fetch backward all from d
+ - a165_notice:int4
+ + ERROR 55000: cursor can only scan forward
+ - 1
+ + HINT: Declare it with SCROLL option to enable backward scan.
+ - 2
+ + 
+ - -- FETCH 2
+ + > rollback
+ - 
+ + -- ROLLBACK
+ - > rollback
+ + 
+ - -- ROLLBACK
+ + > begin
+ - 
+ + -- BEGIN
+
+test golden_wire ... FAILED
+
+failures:
+
+failures:
+    golden
+    golden_shuffled
+    golden_wire
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s
+
+error: test failed, to rerun pass `-p pg-engine --test golden`
