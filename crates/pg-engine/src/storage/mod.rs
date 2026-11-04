@@ -3359,6 +3359,44 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn point_fetch_ranges_include_mvcc_versions_cold_and_hot() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path(), StoreOptions { sync: false, ..Default::default() }).unwrap();
+        let prefix = keys::index_prefix(7, 0);
+        let mut key = prefix.clone();
+        key.extend_from_slice(&1u64.to_be_bytes());
+        let value = Bytes::from_static(b"account-balance");
+        let ts = s.commit(vec![(key.clone(), Some(value.clone()))], |_| Ok(())).unwrap();
+        let _pin = s.pin(ts);
+        assert_eq!(s.get_version_raw(&key, ts).unwrap(), Some((ts, Some(value.clone()))));
+        let expected = vec![(key.clone(), value)];
+        let mut narrow_end = key.clone();
+        narrow_end.push(0);
+        let mut narrow = s.scan_raw(&key, &narrow_end, ts);
+        assert!(narrow.rows.is_none(), "cold scan must use merging cursors");
+        let cold: Vec<_> = narrow.by_ref().map(Result::unwrap).collect();
+        let mut correct = s.scan_raw(&key, &keys::prefix_end(&key), ts);
+        assert!(correct.rows.is_none(), "correct cold scan must use merging cursors");
+        assert_eq!(correct.by_ref().map(Result::unwrap).collect::<Vec<_>>(), expected);
+        let whole_end = keys::prefix_end(&prefix);
+        for _ in 0..8 {
+            assert_eq!(s.scan_raw(&prefix, &whole_end, ts).map(Result::unwrap).collect::<Vec<_>>(), expected);
+        }
+        let mut promoted = s.scan_raw(&key, &narrow_end, ts);
+        assert!(promoted.rows.is_some(), "promoted scan must use hot version chains");
+        let hot: Vec<_> = promoted.by_ref().map(Result::unwrap).collect();
+        assert_eq!(hot, expected);
+        let mut correct = s.scan_raw(&key, &keys::prefix_end(&key), ts);
+        assert!(correct.rows.is_some(), "correct promoted scan must use hot version chains");
+        assert_eq!(correct.by_ref().map(Result::unwrap).collect::<Vec<_>>(), expected);
+        assert_eq!(s.get_version_raw(&key, ts).unwrap().map(|r| r.0), Some(ts));
+        eprintln!("endpoint proof ts={ts} cold={cold:?} hot={hot:?} merging_before=true hot_after=true");
+        // User-key bounds with an appended zero exclude physical timestamp suffixes.
+        // prefix_end must work on both paths; the narrower range is a negative control.
+        assert!(cold.is_empty());
+    }
+
     /// A scan sought to other ranges (`Scan::reseek`), forward, backward, across files and
     /// memtables, over deletions and newer versions, gives what a new scan of each gives.
     #[test]

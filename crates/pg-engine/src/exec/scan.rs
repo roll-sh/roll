@@ -3428,9 +3428,8 @@ impl ScanNode {
         let txn = ctx.txn.borrow();
         let mut out = Vec::with_capacity(keys.len());
         for k in keys {
-            // (The smallest key past `k`: user keys are prefix-free.)
-            let mut end = k.clone();
-            end.push(0);
+            // Include the timestamp suffix of every physical version of this user key.
+            let end = prefix_end(k);
             let kept = self.fscan.take().and_then(|mut it| txn.reseek_snap(&mut it, k, &end, &snap).then_some(it));
             let mut it = kept.unwrap_or_else(|| Box::new(txn.scan_snap(k, &end, &snap)));
             out.push(match it.next() {
