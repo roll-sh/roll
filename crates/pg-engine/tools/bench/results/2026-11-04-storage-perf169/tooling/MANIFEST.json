@@ -1,0 +1,35 @@
+{
+  "phase": "tooling",
+  "closed": true,
+  "scope": "every bundle file except this manifest; no files may be added",
+  "files": {
+    "PLAN-v4.md": {
+      "sha256": "5388c674db1864a2f1e63f9357903ac17a8f403eaf5633effd1c16c58d023b6b",
+      "bytes": 687
+    },
+    "build-affinity-adjustment.json": {
+      "sha256": "75d299299cc16a2387665b51a61419d22f1be9971cef226920abb6e6f846ef61",
+      "bytes": 25066
+    },
+    "launch-v4.py": {
+      "sha256": "4f37be0a6e6057e50e87f85c207cc861e981bb21ffda7b73bbe1846d130e53fb",
+      "bytes": 2411
+    },
+    "perf-capability.log": {
+      "sha256": "ef34d1b8c9e222a705d307d27d4d7c3741cc95796f387ac2d623f1ee05ebfceb",
+      "bytes": 724
+    },
+    "perf-tools.json": {
+      "sha256": "a5ac24fdc3fadf47955417522c50bc5e3848f1fe0a77fceccc3e1ecdce9b2c7a",
+      "bytes": 1219
+    },
+    "preflight-issues.log": {
+      "sha256": "0c641ce5a1fd07d72864c9c058a6b2fe70fc114f625e584cb4d1ee874fec4c4d",
+      "bytes": 969
+    },
+    "seal-v3.py": {
+      "sha256": "7934cf98155431890e52a470dbb95dfe0e96db211365157c36a2a6fe81606f93",
+      "bytes": 4243
+    }
+  }
+}
