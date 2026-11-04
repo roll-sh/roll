@@ -1,0 +1,50 @@
+{
+  "tested_head": "3997cf00a2a301fed65f00469625ff14f223f227",
+  "production_candidate": "6493cf49a1e29a1914270c530956504faa6bb0e4",
+  "source_gates": {
+    "build": "0",
+    "release": "0",
+    "debug": "0",
+    "clippy": "0",
+    "postgres-unit": "0",
+    "dtbuild": "0",
+    "COMPLETE": "0"
+  },
+  "parity_gates": {
+    "phase-controls": "0",
+    "tap-audit-controls": "0",
+    "array-base": "0",
+    "array-current": "0",
+    "smoke": "0",
+    "pair-base": "0",
+    "pair-current": "START"
+  },
+  "summaries": {
+    "release": {
+      "passed": 451,
+      "failed": 0,
+      "ignored": 18,
+      "summaries": 60
+    },
+    "debug": {
+      "passed": 451,
+      "failed": 0,
+      "ignored": 18,
+      "summaries": 60
+    },
+    "clippy": {
+      "exit": 0,
+      "warning_headings": 18,
+      "zero_warning_claim": false
+    },
+    "postgres-unit": {
+      "exit": 0,
+      "full_service_result": false
+    }
+  },
+  "source_complete": true,
+  "parity_complete": false,
+  "full_service_complete": false,
+  "fdw_performance": "INCONCLUSIVE: no accepted new timing",
+  "global_postgres_superiority": false
+}

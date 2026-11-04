@@ -1,0 +1,7 @@
+9000-9149 seeds=25 statements=2000 queries=1691 both_error=502 plan_runs=309 oracle_runs=347 secs=23 missing_error=2 wrong_error=2 eval_error=6 error_message=10 error_detail=35
+9000-9149 seeds=1 statements=74 queries=58 both_error=23 plan_runs=6 oracle_runs=15 secs=1 eval_error=1 error_detail=3
+9000-9149 seeds=1 statements=35 queries=28 both_error=9 plan_runs=4 oracle_runs=6 secs=0 error_detail=1
+9000-9149 seeds=1 statements=40 queries=32 both_error=12 plan_runs=6 oracle_runs=6 secs=1 eval_error=2 error_detail=2
+9000-9149 seeds=1 statements=98 queries=61 both_error=13 plan_runs=14 oracle_runs=20 secs=2 eval_error=1 error_detail=2
+9000-9149 seeds=1 statements=10 queries=8 both_error=1 plan_runs=1 oracle_runs=0 secs=1
+9000-9149 seeds=1 statements=5 queries=2 both_error=2 plan_runs=1 oracle_runs=0 secs=0

@@ -1,0 +1,3 @@
+ok 1 # SKIP missing dependency
+ok 2
+1..2

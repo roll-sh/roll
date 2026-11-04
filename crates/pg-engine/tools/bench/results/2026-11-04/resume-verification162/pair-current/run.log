@@ -1,0 +1,141 @@
+
+running 1 test
+test run ...   [wrong_error] seed 9000 #4: 42P22 vs 42P21
+  [wrong_rows] seed 9000 #25: 3 vs 3 rows
+  [wrong_rows] seed 9000 #110: 11 vs 8 rows
+seed 9000: 3.0s
+  [wrong_rows] seed 9001 #84: 1 vs 1 rows
+seed 9001: 2.8s
+seed 9002: 2.6s
+  [wrong_rows] seed 9003 #78: 9 vs 6 rows
+seed 9003: 2.7s
+  [wrong_rows] seed 9004 #133: 9 vs 6 rows
+seed 9004: 3.0s
+  [wrong_rows] seed 9005 #129: 3 vs 3 rows
+seed 9005: 3.0s
+  [wrong_rows] seed 9006 #21: 15 vs 3 rows
+  [wrong_rows] seed 9006 #90: 8 vs 12 rows
+  [wrong_rows] seed 9006 #134: 2 vs 2 rows
+seed 9006: 3.0s
+  [wrong_rows] seed 9007 #115: 2 vs 2 rows
+seed 9007: 1.8s
+  [wrong_rows] seed 9008 #49: 8 vs 10 rows
+seed 9008: 3.1s
+  [wrong_rows] seed 9009 #96: 5 vs 5 rows
+seed 9009: 2.4s
+  [wrong_rows] seed 9010 #35: 3 vs 3 rows
+  [error_detail] seed 9010 #44: 42703
+seed 9010: 2.7s
+seed 9011: 2.9s
+seed 9012: 2.9s
+  [error_detail] seed 9013 #52: 42P01
+seed 9013: 3.1s
+seed 9014: 3.0s
+seed 9015: 3.0s
+  [error_message] seed 9016 #149: extra data after last expected column | unexpected default marker in COPY data
+seed 9016: 2.6s
+seed 9017: 2.9s
+seed 9018: 3.0s
+  [wrong_rows] seed 9019 #37: 2 vs 2 rows
+seed 9019: 2.7s
+  [wrong_rows] seed 9020 #33: 3 vs 3 rows
+  [wrong_rows] seed 9020 #34: 3 vs 3 rows
+  [wrong_rows] seed 9020 #90: 1 vs 1 rows
+seed 9020: 2.5s
+  [wrong_rows] seed 9021 #127: 1 vs 1 rows
+seed 9021: 2.1s
+seed 9022: 2.5s
+  [wrong_rows] seed 9023 #46: 3 vs 3 rows
+  [wrong_rows] seed 9023 #95: 1 vs 1 rows
+  [wrong_rows] seed 9023 #95: 1 vs 1 rows
+seed 9023: 3.4s
+  [wrong_rows] seed 9024 #113: 2 vs 2 rows
+seed 9024: 3.1s
+  [error_detail] seed 9025 #3: 23505
+  [wrong_rows] seed 9025 #77: 2 vs 2 rows
+seed 9025: 1.9s
+seed 9026: 2.6s
+  [error_detail] seed 9027 #123: 23P01
+seed 9027: 2.4s
+seed 9028: 3.0s
+  [error_message] seed 9029 #0: subquery uses ungrouped column "t2.c" from outer query | subquery uses ungrouped column "t1.e" from outer query
+  [wrong_rows] seed 9029 #20: 5 vs 5 rows
+  [error_detail] seed 9029 #24: 23505
+  [wrong_rows] seed 9029 #95: 13 vs 10 rows
+seed 9029: 1.7s
+  [wrong_rows] seed 9030 #59: 2 vs 2 rows
+  [wrong_rows] seed 9030 #141: 1 vs 1 rows
+seed 9030: 3.0s
+seed 9031: 2.7s
+  [wrong_rows] seed 9032 #45: 5 vs 4 rows
+seed 9032: 2.6s
+  [wrong_rows] seed 9033 #160: 15 vs 12 rows
+seed 9033: 3.1s
+seed 9034: 3.3s
+seed 9035: 2.8s
+  [wrong_rows] seed 9036 #34: 2 vs 2 rows
+  [wrong_rows] seed 9036 #35: 2 vs 2 rows
+  [error_detail] seed 9036 #103: 42703
+seed 9036: 1.8s
+seed 9037: 3.7s
+seed 9038: 3.2s
+  [error_detail] seed 9039 #122: 23P01
+seed 9039: 3.2s
+  [error_detail] seed 9040 #5: 23505
+seed 9040: 1.8s
+  [error_detail] seed 9041 #0: 0A000
+seed 9041: 3.1s
+  [error_detail] seed 9042 #65: 42725
+seed 9042: 3.3s
+seed 9043: 1.9s
+seed 9044: 1.9s
+seed 9045: 3.8s
+seed 9046: 3.6s
+  [wrong_rows] seed 9047 #10: 3 vs 3 rows
+seed 9047: 2.9s
+seed 9048: 3.7s
+seed 9049: 3.2s
+  [error_detail] seed 9050 #0: 0A000
+seed 9050: 2.9s
+  [error_detail] seed 9051 #0: 23505
+seed 9051: 2.7s
+  [wrong_rows] seed 9052 #112: 11 vs 8 rows
+  [wrong_rows] seed 9052 #133: 11 vs 8 rows
+seed 9052: 3.6s
+seed 9053: 1.8s
+  [wrong_rows] seed 9054 #87: 2 vs 2 rows
+seed 9054: 3.4s
+  [wrong_rows] seed 9055 #22: 2 vs 2 rows
+seed 9055: 3.4s
+seed 9056: 4.4s
+  [wrong_rows] seed 9057 #52: 13 vs 10 rows
+  [wrong_rows] seed 9057 #54: 13 vs 10 rows
+seed 9057: 3.7s
+seed 9058: 3.2s
+seed 9059: 3.2s
+  [wrong_rows] seed 9060 #32: 1 vs 1 rows
+  [wrong_rows] seed 9060 #125: 2 vs 2 rows
+  [wrong_rows] seed 9060 #127: 1 vs 1 rows
+seed 9060: 3.3s
+seed 9061: 1.6s
+seed 9062: 3.3s
+seed 9063: 2.0s
+  [wrong_rows] seed 9064 #70: 3 vs 3 rows
+  [eval_error] seed 9064 #105: 22P02: invalid input syntax for type integer: "{"b": 2}" vs ok
+  [wrong_rows] seed 9064 #122: 1 vs 1 rows
+seed 9064: 3.5s
+seed 9065: 1.9s
+seed 9066: 3.2s
+  [wrong_rows] seed 9067 #8: 2 vs 2 rows
+seed 9067: 1.8s
+  [error_detail] seed 9068 #115: 42703
+  [error_detail] seed 9068 #146: 23505
+seed 9068: 3.1s
+seed 9069: 1.7s
+seed 9070: 2.0s
+  [error_detail] seed 9071 #19: 23505
+  [error_detail] seed 9071 #44: 23505
+seed 9071: 3.0s
+  [wrong_rows] seed 9072 #147: 2 vs 2 rows
+  [wrong_rows] seed 9072 #159: 3 vs 3 rows
+seed 9072: 1.9s

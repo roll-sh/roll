@@ -1,0 +1,20 @@
+{
+  "status": "PASS",
+  "cases": [
+    {
+      "name": "early-failure",
+      "expected_exit": 1,
+      "actual_exit": 1
+    },
+    {
+      "name": "pipeline-failure",
+      "expected_exit": 1,
+      "actual_exit": 1
+    },
+    {
+      "name": "success",
+      "expected_exit": 0,
+      "actual_exit": 0
+    }
+  ]
+}

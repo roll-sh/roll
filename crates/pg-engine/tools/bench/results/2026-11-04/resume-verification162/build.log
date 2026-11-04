@@ -1,0 +1,13 @@
+    Blocking waiting for file lock on package cache
+   Compiling syn v3.0.9
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v2.0.21
+   Compiling tokio-macros v2.7.2
+   Compiling clap_derive v4.6.7
+   Compiling serde v1.0.229
+   Compiling clap v4.6.7
+   Compiling tokio v1.53.3
+   Compiling pg_query v18.0.0 (https://github.com/pganalyze/pg_query.rs?rev=ad0c87ed59c84ec6b42c970bb42d7985b7b5878b#ad0c87ed)
+   Compiling thiserror v2.0.21
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-acb216a1743adeadc/crates/pg-engine)
+    Finished `release` profile [optimized] target(s) in 9m 14s

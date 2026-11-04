@@ -1,0 +1,63 @@
+{
+  "status": "FAIL",
+  "issues": [
+    "001_basic.pl: summary reports 51 passed, 45 failed",
+    "002_pg_dump.pl: summary reports 6934 passed, 7675 failed",
+    "004_pg_dump_parallel.pl: summary reports 0 passed, 4 failed",
+    "005_pg_dump_filterfile.pl: summary reports 35 passed, 73 failed",
+    "001_basic.pl: 45 failed TAP results",
+    "002_pg_dump.pl: 7675 failed TAP results",
+    "004_pg_dump_parallel.pl: 4 failed TAP results",
+    "005_pg_dump_filterfile.pl: 73 failed TAP results"
+  ],
+  "suites": {
+    "001_basic.pl": {
+      "path": "/home/meszmate/.cache/a166/resume-pgdump/tap-001_basic.pl.out",
+      "expected": 96,
+      "passed": 51,
+      "failed": 45,
+      "plans": [
+        96
+      ],
+      "issues": [
+        "45 failed TAP results"
+      ]
+    },
+    "002_pg_dump.pl": {
+      "path": "/home/meszmate/.cache/a166/resume-pgdump/tap-002_pg_dump.pl.out",
+      "expected": 14609,
+      "passed": 6934,
+      "failed": 7675,
+      "plans": [
+        14609
+      ],
+      "issues": [
+        "7675 failed TAP results"
+      ]
+    },
+    "004_pg_dump_parallel.pl": {
+      "path": "/home/meszmate/.cache/a166/resume-pgdump/tap-004_pg_dump_parallel.pl.out",
+      "expected": 4,
+      "passed": 0,
+      "failed": 4,
+      "plans": [
+        4
+      ],
+      "issues": [
+        "4 failed TAP results"
+      ]
+    },
+    "005_pg_dump_filterfile.pl": {
+      "path": "/home/meszmate/.cache/a166/resume-pgdump/tap-005_pg_dump_filterfile.pl.out",
+      "expected": 108,
+      "passed": 35,
+      "failed": 73,
+      "plans": [
+        108
+      ],
+      "issues": [
+        "73 failed TAP results"
+      ]
+    }
+  }
+}
