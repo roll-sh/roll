@@ -1,0 +1,25 @@
+{
+  "tested_source": "3997cf00a2a301fed65f00469625ff14f223f227",
+  "engine_binary": "/home/meszmate/.cache/a162/pgr/resume-3997cf00-r4/roll-engine-pinned.bin",
+  "engine_sha256": "9e876733e089594f98399bf3caebb1c2027a1a1506e606e0e6586841b813ce2d",
+  "engine_version": "pg-engine 0.1.0 (release build)",
+  "build_commands": "same clean3997cf00 release build and subsequent release dtbuild recorded in parent status.tsv; cargo may relink; this exact binary copied before corrected checks",
+  "fixtures": {
+    "pgr": {
+      "original": "/home/meszmate/.cache/a162/pgr/src-repo",
+      "destination": "/home/meszmate/.cache/a162/pgr/resume-3997cf00-r4/src-repo",
+      "source_commit": "724edf9bde9d356724ad384a2e196edc3c9f80f7",
+      "tag": "REL_18_6",
+      "files": 1776,
+      "canonical_paths_within_allowed_root": true
+    },
+    "iso": {
+      "original": "/home/meszmate/.cache/a162/iso/src-repo",
+      "destination": "/home/meszmate/.cache/a162/iso/resume-3997cf00-r4/src-repo",
+      "source_commit": "724edf9bde9d356724ad384a2e196edc3c9f80f7",
+      "tag": "REL_18_6",
+      "files": 297,
+      "canonical_paths_within_allowed_root": true
+    }
+  }
+}

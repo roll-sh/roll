@@ -1,0 +1,8 @@
+{
+  "check-parity.sh": "77210bcd32b5e48bbe5aa18a51f88ad08e60343c8519d5ae73e7087e8c11ad04",
+  "parity-status.tsv": "a53eb5ac27b823adb6a7643ab68201dc0000f391b266f9fe7e58c45f33a8c616",
+  "parity-job-v3.log": "fe4069410fa0cc0aaeeca462442e09196730189f8588303de12024987494b65a",
+  "regress.log": "4d7a45dbda9b2c4534a72bf09fb9c30311d53dc66e670c4bffc5ea11bfc6dc57",
+  "regress-report/REPORT.md": "e71af79733bb7745ffce78aaac36c08ed7a3d1e225f9e75b984d5ba06854ebc5",
+  "regress-report/results.tsv": "9ee558c398beb428e79805de0b010122a056a4a048225a84aecbb89ec82dc669"
+}
