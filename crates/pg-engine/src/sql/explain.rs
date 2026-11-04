@@ -18268,9 +18268,13 @@ struct Render<'r> {
 }
 
 impl Render<'_> {
+    fn scale_rescans(&self, value: u64) -> u64 {
+        value * self.rescans.0 / self.rescans.1
+    }
+
     fn stats(&self, key: Option<usize>) -> Option<NodeStats> {
         let mut s = self.instr?.get(key?)?;
-        let scale = |v| v * self.rescans.0 / self.rescans.1;
+        let scale = |v| self.scale_rescans(v);
         s.loops = scale(s.loops * self.procs);
         s.rows = scale(s.rows);
         s.removed = scale(s.removed);
@@ -18356,8 +18360,14 @@ impl Render<'_> {
         let total: u64 = list
             .iter()
             .map(|r| match r {
-                Removed::Scan(k) => self.stats(Some(*k)).map_or(0, |s| s.removed),
-                Removed::Diff(k) => self.stats(Some(*k)).map_or(0, |s| s.rows.saturating_sub(st.rows)),
+                Removed::Scan(k) => self
+                    .instr
+                    .and_then(|i| i.get(*k))
+                    .map_or(0, |s| self.scale_rescans(s.removed)),
+                Removed::Diff(k) => self
+                    .instr
+                    .and_then(|i| i.get(*k))
+                    .map_or(0, |s| self.scale_rescans(s.rows).saturating_sub(st.rows)),
             })
             .sum();
         (total as f64 / st.loops as f64).round()
