@@ -994,8 +994,12 @@ fn reordered_heaps_through_batches_inner() {
         "CREATE TABLE r (id int, g int, x numeric(10, 2), d date, t text); \
          INSERT INTO r SELECT i, i % 23, (i % 4000) / 40.0, date '2024-01-01' + i % 150, 'r' || (i % 300) \
          FROM generate_series(1, 90000) i; \
-         DELETE FROM r WHERE id % 3 = 0; VACUUM r; \
-         INSERT INTO r SELECT i, i % 23, CASE WHEN i % 17 = 0 THEN NULL ELSE (i % 4000) / 40.0 END, \
+         DELETE FROM r WHERE id % 3 = 0",
+    )
+    .unwrap();
+    s.query("VACUUM r").unwrap();
+    s.query(
+        "INSERT INTO r SELECT i, i % 23, CASE WHEN i % 17 = 0 THEN NULL ELSE (i % 4000) / 40.0 END, \
          CASE WHEN i % 19 = 0 THEN NULL ELSE date '2024-01-01' + i % 150 END, 'r' || (i % 300) \
          FROM generate_series(90001, 120000) i; \
          CREATE TABLE q (k int PRIMARY KEY, w int); INSERT INTO q SELECT k, k % 4 FROM generate_series(0, 15) k; \

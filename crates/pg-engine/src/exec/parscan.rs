@@ -873,12 +873,15 @@ type Item = (Row, u8, bool, u32);
 pub enum Piece {
     Row(Row, u8, bool, u32),
     Part(super::partial::Part),
+    /// Rows read in chunk order, independently of carried aggregate states.
+    Read(u64),
 }
 
 enum Msg {
     Rows(Vec<Item>),
     Seg(super::partial::Seg),
     Err(Error),
+    Read(u64),
     /// The chunk's end, after this many dropped rows.
     Done(u32, u32),
 }
@@ -1262,7 +1265,16 @@ fn work_partial<'s>(
     // (Rows read and not counted in a part yet.)
     let mut read = 0u64;
     let send_part = |pa: &mut Partials, read: &mut u64| {
-        pa.read(std::mem::take(read));
+        let read = std::mem::take(read);
+        if carried {
+            // Aggregate states may span chunks; their statistics must still reach the
+            // coordinator in chunk order, before a later chunk's error stops the scan.
+            if read != 0 && out.send(Msg::Read(read)).is_err() {
+                return false;
+            }
+        } else {
+            pa.read(read);
+        }
         match pa.take() {
             Some(p) => out.send(Msg::Seg(Seg::Part(p))).is_ok(),
             None => true,
@@ -1354,8 +1366,7 @@ fn work_partial<'s>(
     }
     scratch.flush(&d.stages);
     if carried {
-        pa.read(read);
-        return true;
+        return read == 0 || out.send(Msg::Read(read)).is_ok();
     }
     send_part(pa, &mut read) && out.send(Msg::Done(0, 0)).is_ok()
 }
@@ -1609,6 +1620,7 @@ impl ParScan {
                 return Ok(None);
             };
             match rx.recv() {
+                Ok(Msg::Read(read)) => return Ok(Some(Piece::Read(read))),
                 Ok(Msg::Rows(rows)) => self.batch = rows.into_iter(),
                 Ok(Msg::Seg(Seg::Part(p))) => return Ok(Some(Piece::Part(p))),
                 Ok(Msg::Seg(Seg::Rows(rows))) => self.seg = rows.into_iter(),
