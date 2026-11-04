@@ -1,7 +1,95 @@
 {
   "README.md": {
-    "sha256": "318996049fd056e8fdbcc562e321933bebfc72787a44bee519a6d997e04d239a",
-    "bytes": 15661
+    "sha256": "dbdc18c88ab0bc0ad3525f09982a06683236f0e35921dfcebeed59ac351d3bd6",
+    "bytes": 16159
+  },
+  "baseline171-v1/RESTORED.txt": {
+    "sha256": "2ad11b1db92238f171853cadc56294d550edeed718924b1b46054ccb24969691",
+    "bytes": 76
+  },
+  "baseline171-v1/TERMINAL.json": {
+    "sha256": "b9f6af8860831a86bd24ce05b7192d5b18e38439394318071ebf92d498166163",
+    "bytes": 1274
+  },
+  "baseline171-v1/affinity-observation.json": {
+    "sha256": "9521998ad8985755c149e771bd13d8e8b41c61e004d956b3261659907c8b0ab5",
+    "bytes": 1472
+  },
+  "baseline171-v1/current-fixtures.patch": {
+    "sha256": "2a0032bd6b5c33d0a79bf798c59a8010e92aadc9c9e5e93de7e5be76a68d4725",
+    "bytes": 4309
+  },
+  "baseline171-v1/exits.tsv": {
+    "sha256": "bcff860f936e02b54aa4a382e1223bee5c0792eae2de27267325bf038f7cb676",
+    "bytes": 23
+  },
+  "baseline171-v1/frozen.sha256": {
+    "sha256": "60ea223f6f637cb6ed50c28eeafbc58b7c930022f7213e72c796366cbc0764fe",
+    "bytes": 477
+  },
+  "baseline171-v1/generic-binary.json": {
+    "sha256": "f056e0d79e3eaa686796b543ce07f17de4917cb5c0f04db44eac8792b67cecc0",
+    "bytes": 198
+  },
+  "baseline171-v1/generic.command": {
+    "sha256": "4098bf2cd2983e9df21cb1b9afad8be107ee8619e8aecec93cf0f198c39aa952",
+    "bytes": 110
+  },
+  "baseline171-v1/generic.log": {
+    "sha256": "fb216985887a768f04323ed67f283135d971b49a46cdd5f317124cfd3290aa55",
+    "bytes": 529
+  },
+  "baseline171-v1/original.patch": {
+    "sha256": "2a0032bd6b5c33d0a79bf798c59a8010e92aadc9c9e5e93de7e5be76a68d4725",
+    "bytes": 4309
+  },
+  "baseline171-v1/parallel-binary.json": {
+    "sha256": "1b9d5e61257237c75cecce2c83c6cd69cf12264f6fd0d483c152490d07a2f764",
+    "bytes": 201
+  },
+  "baseline171-v1/parallel.command": {
+    "sha256": "d6cd522123e31329e3febe1f1e0d5ac523fcf516c01330fad28bbc354af7bd88",
+    "bytes": 119
+  },
+  "baseline171-v1/parallel.log": {
+    "sha256": "3bec9ba90f819a4b00b858bb7b74b09da0a0eb445210a7651eff1c51ac276445",
+    "bytes": 1737
+  },
+  "baseline171-v1/parent-transition.patch": {
+    "sha256": "41c73f9564d1b8bcacc4f950ae620e6675720aa95022f80192e3851a03c9735d",
+    "bytes": 8993
+  },
+  "baseline171-v1/restored-production.patch": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  "baseline171-v1/restored.patch": {
+    "sha256": "2a0032bd6b5c33d0a79bf798c59a8010e92aadc9c9e5e93de7e5be76a68d4725",
+    "bytes": 4309
+  },
+  "baseline171-v1/source.patch": {
+    "sha256": "cab943d8401f48d81e3f1021e1c4b0261f0d06166d32c687ce2a29ace44061ad",
+    "bytes": 13302
+  },
+  "baseline171-v1/source.txt": {
+    "sha256": "a36a26eadbd75e4b630d095448cd3c1ca88372c4637c068f4a5544ecd267f519",
+    "bytes": 123
+  },
+  "baseline171-v1/startup-controls.json": {
+    "sha256": "6b9fc02d1cb5e3b6f4d57e83c249622a86d1466ad544c7c119f7067d655d9d9b",
+    "bytes": 149
+  },
+  "baseline171-v1/testpatch.sha256": {
+    "sha256": "41630bcc193ca344c619de95a1bf0749848bd26d51f9827fb0510f79daebef28",
+    "bytes": 65
+  },
+  "baseline171-v1/tree.txt": {
+    "sha256": "3f11c2416910b5a26ed91ec4f5d98d79612d273b94cdadf8d3f70e998630891e",
+    "bytes": 41
+  },
+  "baseline171-v1/wrapper.log": {
+    "sha256": "6429a24b692d2a5bc9d224e947725d3c32798d0d2c27252c0d76619567294939",
+    "bytes": 329
   },
   "bytea165compare/RESTORED": {
     "sha256": "cfeb0d7a74ac20eb1d46d347c00db409be5f9c5b47ca77e388b2e494a65d91c3",
@@ -684,8 +772,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "9195354188d0c86b5e7d087827828d881f78898f2a777cb65d8f48d98aea8c38",
-    "bytes": 32102
+    "sha256": "ac02455cb3438ae261e6c1767c1d5cb1cfcae9ccc6d68b1d2a47991a5d974ea4",
+    "bytes": 32898
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -1474,6 +1562,10 @@
   "runners/audit165-v3-terminal.py": {
     "sha256": "db687d1b4d303bc178e1f8e7b834df5e8679ac5f658dd82b1738f4ed6e47a2d3",
     "bytes": 4051
+  },
+  "runners/baseline171-v1.sh": {
+    "sha256": "d09c1ad3b53acfc0b0af8ced1d05d55b644500748dbc1997eb9e57a4d82e1149",
+    "bytes": 4191
   },
   "runners/bench165.sh": {
     "sha256": "f56096e85527276f097b77d81b7ab8c72112cf894a3516afd4ee2917399dfd7d",

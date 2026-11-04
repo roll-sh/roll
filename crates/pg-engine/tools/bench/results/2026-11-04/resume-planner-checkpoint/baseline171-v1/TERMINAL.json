@@ -1,0 +1,47 @@
+{
+  "status": "FAILED baseline;STOP before repair",
+  "head_unchanged": "a6fe3e4e626b0552c14320c18211886d1b16ad38",
+  "tested_production": "c8618834caf45bc0a34cf9985c07f9bc13b498ef",
+  "effective_tested_tree": "490f86ac7e46272cdbb981049c9bcfc4a02b401a",
+  "fixturepatch_sha256": "2a0032bd6b5c33d0a79bf798c59a8010e92aadc9c9e5e93de7e5be76a68d4725",
+  "generic": {
+    "exit": 0,
+    "passed": 1,
+    "failed": 0,
+    "actual_generic_custom": [
+      1,
+      5
+    ]
+  },
+  "parallel": {
+    "exit": 101,
+    "passed": 0,
+    "failed": 1,
+    "workers_actual_planned_launched": [
+      2,
+      0
+    ],
+    "setup_actual_planned_launched": [
+      2,
+      0
+    ],
+    "expected": [
+      2,
+      2
+    ],
+    "both_current_explain": "Gather2",
+    "returned_rows": "correctone row"
+  },
+  "owned_pids_absent": [
+    592237,
+    592242,
+    592266,
+    592579,
+    592947
+  ],
+  "restoration": "byte-exacta6feproduction+unchangedfixturepatch;HEAD/indexunchanged",
+  "original_restored_patch_sha256": "2a0032bd6b5c33d0a79bf798c59a8010e92aadc9c9e5e93de7e5be76a68d4725",
+  "production_repair": "NOTAPPLIED",
+  "attribution": "No cause established for baselinelaunch0;existing explainserial-bound assertion remainsunattributed",
+  "later_checks": "NOTRUN after baselineFAIL"
+}

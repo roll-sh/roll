@@ -1,0 +1,28 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-ad5ff4bf47e789536/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.72s
+     Running tests/parallel_scan.rs (/home/meszmate/.cache/a171/target/debug/deps/parallel_scan-e11614aaa9489d66)
+
+running 1 test
+workers current EXPLAIN: [[Text("Gather  (cost=1000.00..34525.00 rows=15000 width=4)")], [Text("  Workers Planned: 2")], [Text("  ->  Parallel Seq Scan on p171_parallel  (cost=0.00..32025.00 rows=6250 width=4)")], [Text("        Filter: ((a % 3000000) = 0)")]]
+workers: worker to_launch/launched delta=(2, 0)
+setup current EXPLAIN: [[Text("Gather  (cost=1000.00..34525.00 rows=15000 width=4)")], [Text("  Workers Planned: 2")], [Text("  ->  Parallel Seq Scan on p171_parallel  (cost=0.00..32025.00 rows=6250 width=4)")], [Text("        Filter: ((a % 3000000) = 0)")]]
+setup: worker to_launch/launched delta=(2, 0)
+
+thread '<unnamed>' (646265) panicked at crates/pg-engine/tests/parallel_scan.rs:995:5:
+assertion `left == right` failed: actual worker launches follow settings at first execution
+  left: [(2, 0), (2, 0)]
+ right: [(2, 2), (2, 2)]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'parallel_workers_use_execution_context_after_parse' (646264) panicked at crates/pg-engine/tests/parallel_scan.rs:143:10:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+test parallel_workers_use_execution_context_after_parse ... FAILED
+
+failures:
+
+failures:
+    parallel_workers_use_execution_context_after_parse
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 40.30s
+
+error: test failed, to rerun pass `-p pg-engine --test parallel_scan`

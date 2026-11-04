@@ -1,6 +1,14 @@
 # Recovery and OLTP165 review checkpoint (2026-11-04)
 
 
+LATEST171: boundedc861parentproduction control genericPASSED1/5; parallelbehavioral
+FAILED101 withplanned/launched2/0inBOTHsetting-change cases (expected2/2). Current
+EXPLAINGather2/correctrow. a6fehad0/0;baselinealso launched0,unattributed. Scoped
+transition restored byte-exacta6fe+originalfixturepatch;allownedjobsgone. STOP before
+repair asauthorizedconditionrequires. Session-onlyproposal remainsNOTAPPLIED;no
+furtherfocused/fullgates run. Originalserial-boundassertion remainsunattributed.
+
+
 171 UPDATE: fulla6fe FAILEDdebug101,partial305pass/2fail/9ignored/33summaries;
 release/Clippy/dist/unitNOTRUN. Separateboundedbehavioralreds reachedassertions:
 generic0/6versus1/5;both Parse/Bindparallelsettingcases0/0workers versus2/2despite

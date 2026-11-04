@@ -1,0 +1,212 @@
+diff --git a/crates/pg-engine/src/sql/binder/dml.rs b/crates/pg-engine/src/sql/binder/dml.rs
+index aeb27677..fe0f425a 100644
+--- a/crates/pg-engine/src/sql/binder/dml.rs
++++ b/crates/pg-engine/src/sql/binder/dml.rs
+@@ -2422,7 +2422,6 @@ impl Binder<'_, '_> {
+                     reltarget: Default::default(),
+                     fdw: None,
+                     rtindex: Default::default(),
+-                    est: Default::default(),
+                 };
+                 let mut scan = scan;
+                 if self.dml_inh {
+@@ -2797,7 +2796,6 @@ impl Binder<'_, '_> {
+                     reltarget: Default::default(),
+                     fdw: None,
+                     rtindex: Default::default(),
+-                    est: Default::default(),
+                 };
+                 if inh {
+                     // (Through a view: its relation's name in the view, not the MERGE's
+diff --git a/crates/pg-engine/src/sql/binder/mod.rs b/crates/pg-engine/src/sql/binder/mod.rs
+index 4491e1e4..d4442208 100644
+--- a/crates/pg-engine/src/sql/binder/mod.rs
++++ b/crates/pg-engine/src/sql/binder/mod.rs
+@@ -149,8 +149,7 @@ impl Analyzed {
+             param_domains: self.param_domains.clone(),
+             gathers: Default::default(),
+             cost: Default::default(),
+-        }
+-        .costed(ctx))
++        })
+     }
+ 
+     /// `plan`, once.
+@@ -167,8 +166,7 @@ impl Analyzed {
+             param_domains: self.param_domains,
+             gathers: Default::default(),
+             cost: Default::default(),
+-        }
+-        .costed(ctx))
++        })
+     }
+ 
+     /// The plan, planned, with the range table entries it hides.
+@@ -214,29 +212,6 @@ impl Analyzed {
+ }
+ 
+ impl BoundQuery {
+-    /// The plan's cost and Gathers, where the planner's chosen path gives them
+-    /// (`paths::planned_total`: a lone scan EXPLAIN places no Gather over), so neither a
+-    /// custom plan's costing (`Session::plan_cost`) nor its execution's Gathers
+-    /// (`parallel_part::start`) builds the plan's EXPLAIN tree.
+-    fn costed(self, ctx: &ExecCtx) -> BoundQuery {
+-        if let Some(total) = crate::sql::paths::planned_total(&self.plan, ctx) {
+-            // (Debug builds: it is EXPLAIN's, with no Gather.)
+-            #[cfg(debug_assertions)]
+-            {
+-                let (t, found) = crate::sql::explain::total_and_gathers(&self.plan, ctx);
+-                assert!(
+-                    found.is_empty() && (t - total).abs() <= 1e-9 * t.abs().max(1.0),
+-                    "planned cost {total} isn't EXPLAIN's {t} ({} Gathers) for {:?}",
+-                    found.len(),
+-                    self.plan
+-                );
+-            }
+-            let _ = self.cost.set((self.plan.clone(), total));
+-            let _ = self.gathers.set((self.plan.clone(), Arc::from(Vec::new())));
+-        }
+-        self
+-    }
+-
+     /// Check the privileges the statement needs, as the current user.
+     pub fn check_perms(&self, ctx: &ExecCtx) -> Result<()> {
+         perms::check(&self.perms, ctx)
+diff --git a/crates/pg-engine/src/sql/binder/select.rs b/crates/pg-engine/src/sql/binder/select.rs
+index 43224c64..f6cb374f 100644
+--- a/crates/pg-engine/src/sql/binder/select.rs
++++ b/crates/pg-engine/src/sql/binder/select.rs
+@@ -4818,7 +4818,6 @@ impl Binder<'_, '_> {
+                     reltarget: Default::default(),
+                     fdw: None,
+                     rtindex: crate::sql::plan::RtIndex(self.cur_rtindex),
+-                    est: Default::default(),
+                 };
+                 let mut scan = scan;
+                 if !colnames.is_empty() {
+@@ -4934,7 +4933,6 @@ impl Binder<'_, '_> {
+                             reltarget: Default::default(),
+                             fdw: None,
+                             rtindex: Default::default(),
+-                            est: Default::default(),
+                         }))
+                     }
+                     None if self.view_stack.contains(&v.oid) => {
+diff --git a/crates/pg-engine/src/sql/paths.rs b/crates/pg-engine/src/sql/paths.rs
+index 7e86972b..6e083cd4 100644
+--- a/crates/pg-engine/src/sql/paths.rs
++++ b/crates/pg-engine/src/sql/paths.rs
+@@ -4041,7 +4041,6 @@ fn to_bitmap(rel: &Rel, b: &BPath) -> BitmapQual {
+ /// Record path `p` in the scan.
+ fn apply(rel: &Rel, s: &mut ScanPlan, p: &Path) {
+     s.params = crate::sql::plan::ScanParams(rel.params.clone());
+-    s.est = crate::sql::plan::ScanEst(Some((p.startup, p.total)));
+     match &p.kind {
+         PathKind::Seq => {
+             s.index = None;
+@@ -6132,11 +6131,6 @@ impl Planner<'_, '_> {
+         {
+             s.access = Access::Seq;
+             s.index = None;
+-            // (cost_seqscan, as `paths` costs it.)
+-            let total = rel.qual_startup
+-                + self.g.seq_page_cost * rel.size.pages
+-                + (seq_cpu_tuple_cost(&self.cat, &rel.table) + rel.qual_cost) * rel.size.tuples;
+-            s.est = crate::sql::plan::ScanEst(Some((rel.qual_startup, total)));
+             return false;
+         }
+         let path = self.choose(&rel, want, width);
+@@ -6550,57 +6544,6 @@ pub fn plan_query_limited(ctx: &ExecCtx, plan: &mut Plan, lim: Option<(f64, f64)
+     plan_level(ctx, plan, &vec![true; w], lim)
+ }
+ 
+-/// The plan's total cost as EXPLAIN shows it, from the cost the planner kept with the path
+-/// it chose (`ScanPlan::est`), where that is the plan's: a lone scan of a table, under
+-/// projections of its columns, with no sub-select in its expressions, over which EXPLAIN
+-/// places no Gather (it places them itself: none when the scan costs less than
+-/// parallel_setup_cost, with add_path's fuzz, as `explain::total_and_gathers` bounds it).
+-/// None otherwise: EXPLAIN's estimate (`explain::estimate`) is the cost. Prepared statements'
+-/// custom plans are costed so every execution (`Session::plan_cost`).
+-pub fn planned_total(plan: &Plan, ctx: &ExecCtx) -> Option<f64> {
+-    let mut p = plan;
+-    while let Plan::Project { input, exprs } = p {
+-        if !exprs.iter().all(|e| matches!(e, Expr::Col(..))) {
+-            return None;
+-        }
+-        p = input;
+-    }
+-    let Plan::Scan(s) = p else {
+-        return None;
+-    };
+-    let (_, total) = s.est.0?;
+-    if !matches!(s.access, Access::Seq | Access::Index { .. })
+-        || s.table.is_foreign()
+-        || s.sample.is_some()
+-        || s.mark.is_some()
+-        || s.current_of.is_some()
+-        || s.limit.is_some()
+-        || s.fdw.is_some()
+-        || s.part.is_some()
+-        || s.part_excl.is_some()
+-        || !s.phv_quals.is_empty()
+-    {
+-        return None;
+-    }
+-    let mut sub = false;
+-    let mut look = |e: &Expr| e.walk(&mut |x| sub |= matches!(x, Expr::Subquery(_)));
+-    s.filter.iter().for_each(&mut look);
+-    if let Access::Index { quals, .. } = &s.access {
+-        quals.iter().for_each(|q| look(&q.expr));
+-    }
+-    if let Some((_, b)) = &s.index {
+-        b.eq.iter().chain(&b.any).chain(b.lower.as_ref().map(|l| &l.0)).chain(b.upper.as_ref().map(|u| &u.0)).for_each(&mut look);
+-    }
+-    if sub {
+-        return None;
+-    }
+-    let cfg = parallel::ParCfg::read(ctx);
+-    if cfg.max_workers > 0 && (parallel::debug_parallel_query(ctx) || total * 1.02 >= cfg.setup_cost) {
+-        return None;
+-    }
+-    Some(total)
+-}
+-
+ /// A locked relation of the level on the nullable side of an outer join, as planning
+ /// (reduce_outer_joins, then make_outerjoininfo) finds it: its lock's strength.
+ pub fn nullable_side_lock(ctx: &ExecCtx, plan: &Plan) -> Option<crate::sql::plan::RowMark> {
+diff --git a/crates/pg-engine/src/sql/paths/syscat.rs b/crates/pg-engine/src/sql/paths/syscat.rs
+index 290cf676..9905410d 100644
+--- a/crates/pg-engine/src/sql/paths/syscat.rs
++++ b/crates/pg-engine/src/sql/paths/syscat.rs
+@@ -407,7 +407,6 @@ fn stand_in_scan(table: Arc<Table>, filter: Option<Expr>) -> ScanPlan {
+         reltarget: Default::default(),
+         fdw: None,
+         rtindex: Default::default(),
+-        est: Default::default(),
+     }
+ }
+ 
+diff --git a/crates/pg-engine/src/sql/plan.rs b/crates/pg-engine/src/sql/plan.rs
+index 9c86966d..02865ec6 100644
+--- a/crates/pg-engine/src/sql/plan.rs
++++ b/crates/pg-engine/src/sql/plan.rs
+@@ -227,19 +227,6 @@ pub struct ScanPlan {
+     /// known): the FROM items, join and subquery entries in parse order, then the relations of
+     /// subqueries pulled up (a foreign join's remote SQL names relations `r<index>`).
+     pub rtindex: RtIndex,
+-    /// The (startup, total) cost of the access path the planner chose for it
+-    /// (`sql::paths` `apply`), EXPLAIN's for the scan node; None when no path was costed.
+-    pub est: ScanEst,
+-}
+-
+-/// `ScanPlan::est`. Not part of its Debug text.
+-#[derive(Clone, Copy, Default)]
+-pub struct ScanEst(pub Option<(f64, f64)>);
+-
+-impl std::fmt::Debug for ScanEst {
+-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+-        f.write_str("_")
+-    }
+ }
+ 
+ /// `ScanPlan::rtindex`. Not part of its Debug text.

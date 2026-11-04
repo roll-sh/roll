@@ -1,0 +1,1 @@
+a6fe plus exact original fixture patch restored; terminal runner status=101
