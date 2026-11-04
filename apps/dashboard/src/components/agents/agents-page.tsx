@@ -13,7 +13,7 @@ import type { AgentsServices } from "@/lib/agents-services";
 import { isNewAgentKey, setAgentsView, useAgentsSurface, type AgentsView } from "@/lib/agents-surface";
 import { ALL, applyView, isPinned, pinKey, pinnedConversations, pinOf, viewStorageKey, type Pin as PinRec } from "@/lib/agents-views";
 import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
-import { useOwnerSettings } from "@/lib/owner-settings";
+import { useModelPrefsSync, useOwnerSettings } from "@/lib/owner-settings";
 import { useMarkState, useMarkStateValue } from "../mark-state";
 import { AddMachineDialog, AddMachinePaths } from "./add-machine";
 import { AgentsCanvas, type CanvasHandle } from "./agents-canvas";
@@ -193,6 +193,8 @@ export function AgentsSurface({
   );
 
   const prefs = useOwnerSettings(services?.settings, client.owner, data.settings?.revision ?? 0);
+  // The model picker's favourites and recent models follow the owner (a share's replay has no services).
+  useModelPrefsSync(prefs, services ? prefs.save : null);
   const ctx: AgentsCtx = useMemo(
     () => ({ client, owner: client.owner, demo, openThread, close, startNew, focus, services, sandboxes, phone, prefs }),
     [client, demo, openThread, close, startNew, focus, services, sandboxes, phone, prefs],

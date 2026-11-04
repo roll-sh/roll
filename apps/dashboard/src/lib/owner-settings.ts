@@ -2,13 +2,15 @@
  * The owner's agents settings: what follows the user to every device (docs/code/agents.md,
  * "Owner settings"), T3 Code's client settings that roll has a use for (`ClientSettingsSchema` in
  * `packages/contracts/src/settings.ts` there): notifications, the send key, what a message to a
- * running thread does, confirming deletes, and what new threads start with. roll keeps them as an
+ * running thread does, confirming deletes, what new threads start with, and the model picker's
+ * favourite and recent models (T3's `favorites`; `agents-models.ts`). roll keeps them as an
  * opaque document per owner (`GET`/`PUT …/settings`, `AgentsServices.settings`); this module is
  * their schema. Keys it doesn't know (a newer dashboard's) are kept as they are.
  */
 
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { SettingsConflict, type ProviderId, type SendMode, type ThreadDefaults } from "./agents-api";
+import { MAX_FAVORITES, MAX_RECENT, modelKeys, modelPrefs, type ModelKey } from "./agents-models";
 import type { AgentsServices } from "./agents-services";
 
 /** T3's `notificationMode`: when an agent needs you or finishes while the page isn't in front. */
@@ -25,9 +27,24 @@ export interface OwnerSettings {
   confirm_delete: boolean;
   /** What new threads start with, after their project's and machine's defaults. */
   defaults: ThreadDefaults;
+  /** The model picker's favourites (`provider:model`); `null` until a device first syncs them. */
+  favorite_models: ModelKey[] | null;
+  /** Its recently picked models, newest first; `null` the same way. */
+  recent_models: ModelKey[] | null;
 }
 
-export const DEFAULT_OWNER_SETTINGS: OwnerSettings = { notifications: "off", send: "enter", follow_up: "queue", confirm_delete: true, defaults: {} };
+export const DEFAULT_OWNER_SETTINGS: OwnerSettings = {
+  notifications: "off",
+  send: "enter",
+  follow_up: "queue",
+  confirm_delete: true,
+  defaults: {},
+  favorite_models: null,
+  recent_models: null,
+};
+
+/** What "Restore defaults" puts back: everything but the model picker's lists. */
+export const RESTORABLE = ["notifications", "send", "follow_up", "confirm_delete", "defaults"] as const satisfies readonly (keyof OwnerSettings)[];
 
 const one = <T extends string>(v: unknown, of: readonly T[], def: T): T => (of.includes(v as T) ? (v as T) : def);
 const RUNTIME = ["full_access", "auto_edit", "ask"] as const;
@@ -61,6 +78,8 @@ export function parseOwnerSettings(doc: unknown): OwnerSettings {
     follow_up: one(d.follow_up, ["queue", "steer"], DEFAULT_OWNER_SETTINGS.follow_up),
     confirm_delete: typeof d.confirm_delete === "boolean" ? d.confirm_delete : DEFAULT_OWNER_SETTINGS.confirm_delete,
     defaults: parseDefaults(d.defaults),
+    favorite_models: Array.isArray(d.favorite_models) ? modelKeys(d.favorite_models, MAX_FAVORITES) : null,
+    recent_models: Array.isArray(d.recent_models) ? modelKeys(d.recent_models, MAX_RECENT) : null,
   };
 }
 
@@ -181,4 +200,23 @@ export function useOwnerSettings(docs: Docs | undefined, owner: string, announce
     await store.save(patch);
   }, [store]);
   return { ...state, save };
+}
+
+/**
+ * Keeps the model picker's favourites and recent models (`modelPrefs`) in the owner's settings:
+ * once they've loaded, the owner's copy replaces this browser's, or (never synced) this browser's
+ * go there; every change in the picker is saved through roll too.
+ */
+export function useModelPrefsSync(state: OwnerSettingsState, save: ((patch: Partial<OwnerSettings>) => Promise<void>) | null): void {
+  const { loaded, error } = state;
+  const favorites = state.settings.favorite_models;
+  const recent = state.settings.recent_models;
+  const key = favorites === null && recent === null ? null : JSON.stringify([favorites, recent]);
+  useEffect(() => {
+    if (!loaded || error || !save) return;
+    const remote = key === null ? null : { favorites: favorites ?? [], recent: recent ?? [] };
+    return modelPrefs.connect(remote, { save: (p) => save({ favorite_models: [...p.favorites], recent_models: [...p.recent] }) });
+    // `key` stands for the two lists.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, error, key, save]);
 }

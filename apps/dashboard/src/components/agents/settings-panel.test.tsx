@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Command, Machine, MachineSettings, Reply } from "@/lib/agents-api";
 import { setActiveClient } from "@/lib/agents-client";
 import { agentsSurface, resetAgentsSurface, viewFromHash, hashFor } from "@/lib/agents-surface";
+import { modelPrefs } from "@/lib/agents-models";
+import { DEFAULT_OWNER_SETTINGS, parseOwnerSettings } from "@/lib/owner-settings";
 import { machine, machineConfig, provider } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents, type AgentsHarness } from "@/test/agents-render";
 import { MarkStateProvider } from "../mark-state";
@@ -247,6 +249,45 @@ describe("the owner's agents settings", () => {
     await waitFor(() => expect(services.settings.save).toHaveBeenLastCalledWith("acme", expect.objectContaining({ send: "enter", confirm_delete: true, favorites: ["claude/opus"] }), 4));
   });
 
+  it("keeps the model picker's favourites and recent models with them: this browser's go there once, then roll's copy wins", async () => {
+    localStorage.clear();
+    modelPrefs.reset();
+    modelPrefs.setFavorite("claude:claude-opus-5-5", true);
+    modelPrefs.used("claude:claude-sonnet-5");
+    const services = fakeServices();
+    await services.settings.save("acme", { send: "enter" });
+    owner(services);
+    await userEvent.keyboard("{Meta>},{/Meta}");
+    // Never synced: this browser's are kept by roll (the migration from before).
+    await waitFor(() =>
+      expect(services.settings.save).toHaveBeenLastCalledWith(
+        "acme",
+        expect.objectContaining({ send: "enter", favorite_models: ["claude:claude-opus-5-5"], recent_models: ["claude:claude-sonnet-5"] }),
+        1,
+      ),
+    );
+    // A pick in the picker goes there too.
+    modelPrefs.setFavorite("codex:gpt-5.5-codex", true);
+    await waitFor(() => expect(services.settings.save).toHaveBeenLastCalledWith("acme", expect.objectContaining({ favorite_models: ["claude:claude-opus-5-5", "codex:gpt-5.5-codex"] }), 2));
+    expect(JSON.parse(localStorage.getItem("roll:agents:favorite-models") ?? "[]")).toEqual(["claude:claude-opus-5-5", "codex:gpt-5.5-codex"]);
+    modelPrefs.reset();
+  });
+
+  it("another device's favourites replace this browser's cached ones", async () => {
+    localStorage.clear();
+    modelPrefs.reset();
+    modelPrefs.setFavorite("claude:claude-haiku-5", true);
+    const services = fakeServices();
+    await services.settings.save("acme", { favorite_models: ["codex:gpt-5.5"], recent_models: [] });
+    owner(services);
+    await userEvent.keyboard("{Meta>},{/Meta}");
+    await waitFor(() => expect(modelPrefs.get().favorites).toEqual(["codex:gpt-5.5"]));
+    // The owner's copy loaded over the cache: nothing to save back.
+    expect(services.settings.save).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(localStorage.getItem("roll:agents:favorite-models") ?? "[]")).toEqual(["codex:gpt-5.5"]);
+    modelPrefs.reset();
+  });
+
   it("says why a save failed", async () => {
     const services = fakeServices({ settings: { save: vi.fn(async () => Promise.reject(new Error("roll is down"))) } });
     owner(services);
@@ -256,10 +297,38 @@ describe("the owner's agents settings", () => {
   });
 });
 
+describe("the model picker's lists follow the owner", () => {
+  it("connects: never synced takes this browser's, then the owner's copy wins, except over a save on its way", async () => {
+    localStorage.clear();
+    modelPrefs.reset();
+    modelPrefs.setFavorite("claude:claude-opus-5-5", true);
+    const saved: unknown[] = [];
+    let release = () => {};
+    const link = { save: vi.fn((p: unknown) => new Promise<void>((done) => ((release = done), saved.push(p)))) };
+    const off = modelPrefs.connect(null, link);
+    expect(saved).toEqual([{ favorites: ["claude:claude-opus-5-5"], recent: [] }]);
+    // The owner's older copy coming back while that save is on its way doesn't undo it.
+    modelPrefs.connect({ favorites: [], recent: [] }, link);
+    expect(modelPrefs.get().favorites).toEqual(["claude:claude-opus-5-5"]);
+    release();
+    await Promise.resolve();
+    await Promise.resolve();
+    modelPrefs.connect({ favorites: ["codex:gpt-5.5"], recent: ["codex:gpt-5.5"] }, link);
+    expect(modelPrefs.get()).toEqual({ favorites: ["codex:gpt-5.5"], recent: ["codex:gpt-5.5"] });
+    expect(link.save).toHaveBeenCalledTimes(1);
+    // Let go: changes stay in this browser.
+    off();
+    modelPrefs.used("claude:claude-sonnet-5");
+    expect(link.save).toHaveBeenCalledTimes(1);
+    expect(parseOwnerSettings({ favorite_models: ["codex:gpt-5.5", "bad", 7], recent_models: "x" })).toMatchObject({ favorite_models: ["codex:gpt-5.5"], recent_models: null });
+    modelPrefs.reset();
+  });
+});
+
 describe("what the settings change", () => {
   it("the send key: with ⌘/Ctrl+Enter, Enter breaks the line", async () => {
     const onSubmit = vi.fn(async () => {});
-    const h = agentsHarness({ ctx: { prefs: { settings: { notifications: "off", send: "mod_enter", follow_up: "queue", confirm_delete: true, defaults: {} }, revision: 1, loaded: true, error: null, save: vi.fn() } } });
+    const h = agentsHarness({ ctx: { prefs: { settings: { ...DEFAULT_OWNER_SETTINGS, send: "mod_enter" }, revision: 1, loaded: true, error: null, save: vi.fn() } } });
     renderAgents(<Composer mode={{ kind: "new", project: { ...projectFixture(), settings: { auto_pull: false, defaults: {}, scripts: [] } }, machine: machine() }} onSubmit={onSubmit} />, h);
     const box = screen.getByRole("textbox", { name: "Message" });
     await userEvent.type(box, "line one{Enter}line two");
@@ -274,7 +343,7 @@ describe("what the settings change", () => {
     const m = machine({
       info: { ...machine().info!, providers: [provider(), provider({ id: "codex", name: "Codex", models: [] })], settings: machineConfig({ defaults: { runtime_mode: "ask" } }) },
     });
-    const prefs = { settings: { notifications: "off" as const, send: "enter" as const, follow_up: "queue" as const, confirm_delete: true, defaults: { provider: "codex", interaction_mode: "plan" as const } }, revision: 1, loaded: true, error: null, save: vi.fn() };
+    const prefs = { settings: { ...DEFAULT_OWNER_SETTINGS, defaults: { provider: "codex", interaction_mode: "plan" as const } }, revision: 1, loaded: true, error: null, save: vi.fn() };
     renderAgents(<Composer mode={{ kind: "new", project: projectFixture(), machine: m }} onSubmit={onSubmit} />, agentsHarness({ ctx: { prefs } }));
     expect(screen.getByRole("button", { name: /^Model: Codex/ })).toBeInTheDocument();
     await userEvent.type(screen.getByRole("textbox", { name: "Message" }), "go{Enter}");

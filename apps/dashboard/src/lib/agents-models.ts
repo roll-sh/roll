@@ -4,9 +4,12 @@
  * (MIT): favourites first in a provider's list; a search across every provider that ranks exact
  * names, then prefixes, word starts, substrings and (3+ letters) fuzzy matches, favourites boosted.
  *
- * T3 keeps favourites in its server settings so they follow the user. Here they're kept in this
- * browser (localStorage) for now; `modelPrefs` is the one seam to move to an owner-level record.
- * T3 has no recent list (only a sticky last pick); roll keeps the last few picked.
+ * T3 keeps favourites in its server settings so they follow the user; roll keeps them in the owner's
+ * agents settings (`owner-settings.ts`, synced through roll), with this browser's localStorage as
+ * the cache for offline and before they load. `modelPrefs.connect` links the two: an owner that
+ * has never had them synced gets this browser's (the migration from before), and from then on the
+ * owner's copy wins and every change is saved there too. T3 has no recent list (only a sticky last
+ * pick); roll keeps the last few picked.
  */
 
 import { useSyncExternalStore } from "react";
@@ -38,10 +41,25 @@ const EMPTY: ModelPrefs = { favorites: [], recent: [] };
 let cached: ModelPrefs | null = null;
 const listeners = new Set<() => void>();
 
+/** Where changes go besides this browser: the owner's settings, while connected. */
+export interface ModelPrefsLink {
+  save(next: ModelPrefs): Promise<unknown>;
+}
+
+let link: ModelPrefsLink | null = null;
+/** Saves on their way: the owner's copy that comes back meanwhile is older than this browser's. */
+let pending = 0;
+
+const same = (a: ModelPrefs, b: ModelPrefs) => a.favorites.join("\n") === b.favorites.join("\n") && a.recent.join("\n") === b.recent.join("\n");
+
+/** A list from a synced record, checked like the local one. */
+export function modelKeys(v: unknown, max: number): ModelKey[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && parseModelKey(x) !== null).slice(0, max) : [];
+}
+
 function readList(key: string, max: number): ModelKey[] {
   try {
-    const v: unknown = JSON.parse(localStorage.getItem(key) ?? "[]");
-    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && parseModelKey(x) !== null).slice(0, max) : [];
+    return modelKeys(JSON.parse(localStorage.getItem(key) ?? "[]"), max);
   } catch {
     return [];
   }
@@ -53,8 +71,20 @@ function read(): ModelPrefs {
   return cached;
 }
 
-function write(next: ModelPrefs) {
+/** Keeps `next` here (and in the owner's settings, when connected and `sync`). */
+function write(next: ModelPrefs, sync = true) {
   cached = next;
+  if (sync && link) {
+    pending++;
+    void link
+      .save(next)
+      .catch(() => {
+        // Kept in this browser; the owner's copy wins again once it loads.
+      })
+      .finally(() => {
+        pending--;
+      });
+  }
   try {
     localStorage.setItem(FAVORITES, JSON.stringify(next.favorites));
     localStorage.setItem(RECENT, JSON.stringify(next.recent));
@@ -92,12 +122,32 @@ export const modelPrefs = {
     if (p.recent[0] === key) return;
     write({ ...p, recent: [key, ...p.recent.filter((k) => k !== key)].slice(0, MAX_RECENT) });
   },
-  /** Forget what was read (tests clear localStorage between cases). */
+  /**
+   * Follow the owner's settings: `remote` is what they hold (`null`: they've never had model
+   * preferences, so this browser's go there, once). Returns how to let go.
+   */
+  connect(remote: ModelPrefs | null, to: ModelPrefsLink): () => void {
+    link = to;
+    const local = read();
+    if (remote === null) {
+      if (local.favorites.length || local.recent.length) write(local);
+    } else if (pending === 0 && !same(remote, local)) {
+      write({ favorites: remote.favorites.slice(0, MAX_FAVORITES), recent: remote.recent.slice(0, MAX_RECENT) }, false);
+    }
+    return () => {
+      if (link === to) link = null;
+    };
+  },
+  /** Forget what was read and any link (tests clear localStorage between cases). */
   reset() {
     cached = null;
+    link = null;
+    pending = 0;
     for (const l of listeners) l();
   },
 };
+
+export { MAX_FAVORITES };
 
 export function useModelPrefs(): ModelPrefs {
   return useSyncExternalStore(modelPrefs.subscribe, modelPrefs.get, () => EMPTY);

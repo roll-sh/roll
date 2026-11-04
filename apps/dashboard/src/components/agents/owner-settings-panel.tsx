@@ -13,7 +13,7 @@ import { useMemo, useState, useSyncExternalStore } from "react";
 import { reachable, type ProviderInfo } from "@/lib/agents-api";
 import { setAgentsView } from "@/lib/agents-surface";
 import { desktop } from "@/lib/desktop";
-import { DEFAULT_OWNER_SETTINGS, type NotifyMode, type OwnerSettings } from "@/lib/owner-settings";
+import { DEFAULT_OWNER_SETTINGS, RESTORABLE, type NotifyMode, type OwnerSettings } from "@/lib/owner-settings";
 import { DefaultsRows } from "./machine-settings";
 import { SaveState, SettingRow, SettingsPage, SettingsSection, useSearching, type Setting } from "./settings-ui";
 import { MachineIcon } from "./shared";
@@ -42,7 +42,7 @@ const S = {
   mode: { id: "new.mode", title: "Plan first", section: "New threads", terms: ["interaction mode", "plan mode"] },
   workspace: { id: "new.workspace", title: "Workspace", section: "New threads", terms: ["worktree", "checkout"] },
   keyboard: { id: "keyboard", title: "Keyboard shortcuts", section: "Keyboard", terms: ["keys", "hotkeys", "keybindings", "shortcut"] },
-  restore: { id: "restore", title: "Restore defaults", section: "General", description: "Put every setting on this page back.", terms: ["reset"] },
+  restore: { id: "restore", title: "Restore defaults", section: "General", description: "Put every setting on this page back (favourite models stay).", terms: ["reset"] },
 } satisfies Record<string, Setting>;
 
 const NOTIFY: { value: NotifyMode; label: string }[] = [
@@ -206,7 +206,10 @@ export function OwnerSettingsPanel({ onClose }: { onClose: () => void }) {
           </dl>
         </SettingRow>
       </SettingsSection>
-      <Restore disabled={disabled || !Object.keys(DEFAULT_OWNER_SETTINGS).some((k) => changed(k as keyof OwnerSettings))} onRestore={() => save(DEFAULT_OWNER_SETTINGS)} />
+      <Restore
+        disabled={disabled || !RESTORABLE.some(changed)}
+        onRestore={() => save(Object.fromEntries(RESTORABLE.map((k) => [k, DEFAULT_OWNER_SETTINGS[k]])) as Partial<OwnerSettings>)}
+      />
     </SettingsPage>
   );
 }
