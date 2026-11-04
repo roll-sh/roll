@@ -25,7 +25,8 @@ pub use orchestrator::Host;
 pub enum Outbound {
     Entity(Box<Stamped>),
     Delta(Delta),
-    /// `MachineInfo` changed (after `provider.refresh`): send `hello` again.
+    /// `MachineInfo` changed (a provider's probe answered, the settings changed): send `hello`
+    /// again.
     Info(MachineInfo),
 }
 
