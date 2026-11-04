@@ -686,6 +686,10 @@ async fn start_code(
     if code_control::github::enable_from_env(&code)? {
         info!("roll code: GitHub App configured");
     }
+    // Slack and Discord for the agents, when ROLL_SLACK_* / ROLL_DISCORD_* are set (docs/code/chatops.md).
+    if code_control::chatops::enable_from_env(&code)? {
+        info!("roll code: chat ops configured");
+    }
     // Checks and previews: containers, with previews branching roll Postgres and Redis.
     let previews = code_preview::Previews::new(
         code_preview::PreviewConfig {

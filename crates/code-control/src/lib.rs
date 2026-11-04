@@ -6,6 +6,7 @@ pub mod agents;
 pub mod ai;
 pub mod api;
 pub mod broken;
+pub mod chatops;
 pub mod checkout;
 pub mod cluster;
 pub mod db;
@@ -420,6 +421,8 @@ pub struct Code {
     pub sandboxes: agents::sandbox::Sandboxes,
     /// roll code automations: the trigger and step registry and the engine's state here.
     pub automations: agents::automations::Automations,
+    /// Chat ops' platforms (Slack, Discord), once [`chatops::enable`] ran.
+    pub(crate) chat: std::sync::OnceLock<Arc<chatops::Chat>>,
 }
 
 /// The databases a [`Code`] runs on: code-store's, code-control's, and the cluster's tables
@@ -523,7 +526,9 @@ impl Code {
             agents: agents::Agents::default(),
             sandboxes,
             automations: agents::automations::Automations::default(),
+            chat: std::sync::OnceLock::new(),
         });
+        chatops::register(&code);
         code.clean_worktrees();
         code.clean_indexes();
         if let Some(cfg) = code.config.cluster.clone() {

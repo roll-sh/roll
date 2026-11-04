@@ -147,6 +147,7 @@ pub fn router(code: Arc<Code>) -> Router {
         .merge(crate::review::api::routes())
         .merge(crate::ai::api::routes())
         .merge(crate::agents::api::routes())
+        .merge(crate::chatops::api::routes())
         // Writes carry file contents (base64 for binary): room for a file of MAX_WRITE_FILE.
         // The webhook route sets its own limit.
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY))

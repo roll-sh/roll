@@ -34,6 +34,11 @@ pub(crate) async fn pr_comment(code: &Code, hub: &Hub, r: &RepoRow, link: &Link,
         return Ok(());
     }
     let Some(cmd) = commands::parse(e.comment.body.as_deref().unwrap_or("")) else { return Ok(()) };
+    // A plain `@roll …` is the owner's automations' when one listens for it (chatops::github),
+    // so it isn't answered twice; the reviewer keeps its own commands (review, fix, …).
+    if matches!(cmd, commands::Command::Ask(_)) && crate::chatops::anyone_listens(code, &r.owner_id, crate::chatops::github::SOURCE, "comment.mention") {
+        return Ok(());
+    }
     let Some(change) = super::sync::change_by_pr(code, &r.id, e.issue.number)? else { return Ok(()) };
     let c = code.change_or_404(&change)?;
     if !can_write(hub, link, &user.login).await {

@@ -22,6 +22,7 @@ code-review.workspace = true
 code-cluster.workspace = true
 code-sql.workspace = true
 code-github.workspace = true
+code-chat.workspace = true
 code-store.workspace = true
 comrak.workspace = true
 croner.workspace = true

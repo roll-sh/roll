@@ -142,6 +142,7 @@ code-cluster = { path = "crates/code-cluster" }
 code-store = { path = "crates/code-store" }
 code-git = { path = "crates/code-git" }
 code-github = { path = "crates/code-github" }
+code-chat = { path = "crates/code-chat" }
 code-control = { path = "crates/code-control" }
 code-preview = { path = "crates/code-preview" }
 code-index = { path = "crates/code-index" }

@@ -1527,6 +1527,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "code-chat"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "hex",
+ "hmac 0.12.1",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "code-cluster"
 version = "0.1.0"
 dependencies = [
@@ -1563,7 +1580,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
- "chrono-tz",
+ "code-chat",
  "code-cluster",
  "code-git",
  "code-github",
@@ -1572,7 +1589,6 @@ dependencies = [
  "code-sql",
  "code-store",
  "comrak",
- "croner",
  "diffy",
  "futures",
  "getrandom 0.4.3",

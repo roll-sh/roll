@@ -397,6 +397,74 @@ impl GitHub {
         .await
     }
 
+    /// Add labels to an issue or pull request (the ones it has stay).
+    pub async fn add_labels(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        labels: &[String],
+    ) -> Result<Vec<Label>> {
+        let path = repo_path(owner, repo, &format!("/issues/{number}/labels"));
+        self.send_json(
+            Who::Installation(installation),
+            Method::POST,
+            &path,
+            &json!({ "labels": labels }),
+        )
+        .await
+    }
+
+    /// Take a label off an issue or pull request; one it doesn't have is fine.
+    pub async fn remove_label(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        label: &str,
+    ) -> Result<()> {
+        let path = repo_path(
+            owner,
+            repo,
+            &format!("/issues/{number}/labels/{}", percent_encode(label)),
+        );
+        match self
+            .execute(Who::Installation(installation), Method::DELETE, &path, None)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) if e.status() == Some(404) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Set a commit status; `state` is `pending`, `success`, `failure` or `error`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_status(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        sha: &str,
+        state: &str,
+        context: &str,
+        description: Option<&str>,
+        target_url: Option<&str>,
+    ) -> Result<Value> {
+        let path = repo_path(owner, repo, &format!("/statuses/{}", percent_encode(sha)));
+        let mut body = json!({ "state": state, "context": context });
+        if let Some(d) = description {
+            body["description"] = json!(d);
+        }
+        if let Some(u) = target_url {
+            body["target_url"] = json!(u);
+        }
+        self.send_json(Who::Installation(installation), Method::POST, &path, &body)
+            .await
+    }
+
     // ── pull requests ──
 
     pub async fn pull_request(
@@ -446,6 +514,49 @@ impl GitHub {
         );
         self.list(Who::Installation(installation), &path, None)
             .await
+    }
+
+    /// Open a pull request from `head` (a branch of the same repository) into `base`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_pull_request(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        title: &str,
+        head: &str,
+        base: &str,
+        body: &str,
+        draft: bool,
+    ) -> Result<PullRequest> {
+        let path = repo_path(owner, repo, "/pulls");
+        self.send_json(
+            Who::Installation(installation),
+            Method::POST,
+            &path,
+            &json!({ "title": title, "head": head, "base": base, "body": body, "draft": draft }),
+        )
+        .await
+    }
+
+    /// The open pull request from branch `head` of this repository, if there is one.
+    pub async fn open_pull_request_from(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        head: &str,
+    ) -> Result<Option<PullRequest>> {
+        let path = repo_path(
+            owner,
+            repo,
+            &format!(
+                "/pulls?state=open&head={}&per_page=1",
+                percent_encode(&format!("{owner}:{head}"))
+            ),
+        );
+        let prs: Vec<PullRequest> = self.get(Who::Installation(installation), &path).await?;
+        Ok(prs.into_iter().next())
     }
 
     pub async fn close_pull_request(

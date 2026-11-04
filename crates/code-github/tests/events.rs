@@ -27,6 +27,7 @@ fn every_pull_request_action() {
         ("edited", PullRequestAction::Edited),
         ("ready_for_review", PullRequestAction::ReadyForReview),
         ("converted_to_draft", PullRequestAction::ConvertedToDraft),
+        ("review_requested", PullRequestAction::ReviewRequested),
     ] {
         let Event::PullRequest(pr) = Event::parse("pull_request", &with_action("pull_request_opened", action)).unwrap() else {
             panic!("{action}")
@@ -36,9 +37,38 @@ fn every_pull_request_action() {
         assert_eq!(d.github_pr, pr.number);
         assert!(!d.head_sha.is_empty() && !d.head_ref.is_empty());
     }
-    for ignored in ["labeled", "unlabeled", "assigned", "review_requested", "locked", "auto_merge_enabled", "enqueued"] {
+    for ignored in ["labeled", "unlabeled", "assigned", "locked", "auto_merge_enabled", "enqueued"] {
         assert!(matches!(Event::parse("pull_request", &with_action("pull_request_opened", ignored)).unwrap(), Event::Ignored { .. }), "{ignored}");
     }
+}
+
+#[test]
+fn review_requests_checks_and_statuses() {
+    let mut v = fixture("pull_request_opened");
+    v["action"] = "review_requested".into();
+    v["requested_reviewer"] = serde_json::json!({ "login": "ada", "id": 5, "type": "User" });
+    let Event::PullRequest(pr) = Event::parse("pull_request", &serde_json::to_vec(&v).unwrap()).unwrap() else { panic!() };
+    assert_eq!(pr.requested_reviewer.as_deref(), Some("ada"));
+    v.as_object_mut().unwrap().remove("requested_reviewer");
+    v["requested_team"] = serde_json::json!({ "slug": "core", "name": "Core" });
+    let Event::PullRequest(pr) = Event::parse("pull_request", &serde_json::to_vec(&v).unwrap()).unwrap() else { panic!() };
+    assert_eq!(pr.requested_reviewer.as_deref(), Some("core"));
+
+    let body = serde_json::to_vec(&fixture("check_run_completed")).unwrap();
+    let e = Event::parse("check_run", &body).unwrap();
+    assert_eq!(e.installation_id(), Some(42));
+    assert_eq!(e.repository().map(|r| r.full_name.as_str()), Some("acme/app"));
+    let Event::CheckRun(c) = e else { panic!() };
+    assert_eq!(c.check_run.conclusion.as_deref(), Some("failure"));
+    assert_eq!(c.check_run.pull_requests[0].number, 7);
+    assert_eq!(c.check_run.check_suite.unwrap().head_branch.as_deref(), Some("fix-login"));
+    // Only completed runs matter.
+    assert!(matches!(Event::parse("check_run", &with_action("check_run_completed", "created")).unwrap(), Event::Ignored { .. }));
+
+    let e = Event::parse("status", &serde_json::to_vec(&fixture("status_failure")).unwrap()).unwrap();
+    assert_eq!(e.installation_id(), Some(42));
+    let Event::Status(s) = e else { panic!() };
+    assert_eq!((s.state.as_str(), s.context.as_str(), s.branches[0].name.as_str()), ("failure", "ci/build", "main"));
 }
 
 #[test]

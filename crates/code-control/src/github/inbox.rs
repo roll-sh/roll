@@ -146,7 +146,7 @@ pub(crate) async fn process(code: &Arc<Code>, repo_id: &str, id: &str, expected:
     let _one = lock.lock().await;
     let now = code.db.sql().now_ms()?;
     let until = now + claim_ms(&hub);
-    let row: Option<(String, String, i64)> = code.db.write(|c| {
+    let row: Option<(String, String, i64, String)> = code.db.write(|c| {
         let n = c.execute(
             "UPDATE github_inbox SET next_at = ?, attempts = attempts + 1 WHERE id = ? AND repo_id = ? AND state = 'pending' AND next_at = ?",
             params![until, id, repo_id, expected],
@@ -154,9 +154,9 @@ pub(crate) async fn process(code: &Arc<Code>, repo_id: &str, id: &str, expected:
         if n == 0 {
             return Ok(None);
         }
-        c.query_row("SELECT event, payload, attempts FROM github_inbox WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()
+        c.query_row("SELECT event, payload, attempts, receipt FROM github_inbox WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()
     })?;
-    let Some((event, payload, attempts)) = row else { return Ok(()) };
+    let Some((event, payload, attempts, receipt)) = row else { return Ok(()) };
     hub.inbox_started.fetch_add(1, Ordering::SeqCst);
     // The claim is renewed while the part runs (a push can take a while), so it only lapses
     // when this node stops: then another node takes the part within a claim's length.
@@ -164,7 +164,7 @@ pub(crate) async fn process(code: &Arc<Code>, repo_id: &str, id: &str, expected:
         while hub.inbox_hang.load(Ordering::SeqCst) {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        super::sync::handle_for_repo(code, repo_id, &event, payload.as_bytes()).await
+        super::sync::handle_for_repo(code, repo_id, &event, payload.as_bytes(), &receipt).await
     };
     let mut work = std::pin::pin!(work);
     let mut until = until;

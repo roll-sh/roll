@@ -88,6 +88,9 @@ pub struct Issue {
     pub updated_at: Option<String>,
     #[serde(default)]
     pub closed_at: Option<String>,
+    /// The author's relation to the repository (see [`Review::author_association`]).
+    #[serde(default)]
+    pub author_association: Option<String>,
 }
 
 impl Issue {
@@ -143,6 +146,9 @@ pub struct Comment {
     pub html_url: Option<String>,
     #[serde(default)]
     pub created_at: Option<String>,
+    /// The author's relation to the repository (see [`Review::author_association`]).
+    #[serde(default)]
+    pub author_association: Option<String>,
 }
 
 /// A pull request review (`pull_request_review` webhooks, `POST …/pulls/{n}/reviews`).

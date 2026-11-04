@@ -1,0 +1,23 @@
+{
+  "id": 6805126730,
+  "sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e",
+  "name": "acme/app",
+  "target_url": "https://ci.example.com/acme/app/builds/91",
+  "context": "ci/build",
+  "description": "The build failed",
+  "state": "failure",
+  "branches": [
+    { "name": "main", "commit": { "sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e" } }
+  ],
+  "repository": {
+    "id": 1296269,
+    "name": "app",
+    "full_name": "acme/app",
+    "owner": { "login": "acme", "id": 1, "type": "Organization" },
+    "private": true,
+    "default_branch": "main",
+    "html_url": "https://github.com/acme/app"
+  },
+  "installation": { "id": 42 },
+  "sender": { "login": "ci-bot", "id": 9, "type": "User" }
+}
