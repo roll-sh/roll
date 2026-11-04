@@ -143,7 +143,10 @@ async fn follow_ownership(code: Weak<Code>, mut rx: mpsc::UnboundedReceiver<Owne
                 code.agents.kick_owner(&key[AGENTS_KEY.len()..]);
             }
             // Its sandboxes are reconciled here now.
-            Ownership::Acquired { key, .. } if key.starts_with(AGENTS_KEY) => code.kick_sandboxes(&key[AGENTS_KEY.len()..]),
+            Ownership::Acquired { key, .. } if key.starts_with(AGENTS_KEY) => {
+                code.kick_sandboxes(&key[AGENTS_KEY.len()..]);
+                code.wake_automations(&key[AGENTS_KEY.len()..]);
+            }
             Ownership::Acquired { key, epoch } if is_repo_key(&key) => {
                 tracing::debug!(repo = %key, epoch, "took a repo");
                 code.acquired(&key);
@@ -215,7 +218,8 @@ impl Code {
         // (their reconciler runs here; on any doubt, busy).
         if let Some(owner) = repo_id.strip_prefix(AGENTS_KEY) {
             return self.agents.connected_owners().iter().any(|o| o == owner)
-                || !matches!(crate::agents::sandbox::store::live_count(self.db.sql(), owner), Ok(0));
+                || !matches!(crate::agents::sandbox::store::live_count(self.db.sql(), owner), Ok(0))
+                || self.automations_busy(owner);
         }
         let r = match self.db.repo_by_id(repo_id) {
             Ok(Some(r)) => r,
@@ -305,6 +309,12 @@ impl Code {
     /// gone start over), the GitHub import or mirror, and the code index. Idempotent.
     pub(crate) async fn resume_repo(self: &Arc<Self>, repo_id: &str) {
         if !self.owns_repo(repo_id) {
+            return;
+        }
+        // An owner's agents (a kick from a node with automation work for them).
+        if let Some(owner) = repo_id.strip_prefix(AGENTS_KEY) {
+            self.kick_sandboxes(owner);
+            self.wake_automations(owner);
             return;
         }
         let r = match self.db.repo_by_id(repo_id) {

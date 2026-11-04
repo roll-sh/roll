@@ -657,6 +657,34 @@ pub fn tools() -> Vec<Value> {
             &["owner", "thread"],
             false,
         ),
+        // Automations (docs/code/automations.md): mapped onto /v1/code/agents/{owner}/automations.
+        tool("list_agent_automations", "List automations", "The owner's automations: triggers, filters, steps, enabled, the last run.", json!({ "owner": owner.clone() }), &["owner"], true),
+        tool(
+            "save_agent_automation",
+            "Save an automation",
+            "Create an automation (without automation) or replace one's definition. spec is an AutomationSpec: {name, trigger: {type: manual|schedule|interval|webhook|code|agent|integration, …}, filters?, steps: [{id, kind, config}], defaults?, concurrency?, rate_limit?, run_as?}; GET …/automations/catalog lists the kinds. The owner's: agent tokens can't.",
+            json!({ "owner": owner.clone(), "automation": s("An automation id (aut_…) to replace"), "spec": json!({ "type": "object", "description": "The AutomationSpec" }), "revision": int("Only over this revision") }),
+            &["owner", "spec"],
+            false,
+        ),
+        tool(
+            "run_agent_automation",
+            "Run an automation",
+            "Run an automation now; input is event.data.input in its templates, and the same key is the same run. Agent tokens may when the automation allows agents.",
+            json!({ "owner": owner.clone(), "automation": s("An automation id (aut_…) or name"), "input": json!({ "description": "Any JSON" }), "key": s("Idempotency key") }),
+            &["owner", "automation"],
+            false,
+        ),
+        tool(
+            "list_agent_automation_runs",
+            "List automation runs",
+            "Runs of the owner's automations (or one's), newest first, with their steps' status.",
+            json!({ "owner": owner.clone(), "automation": s("An automation id (aut_…) or name"), "status": json!({ "type": "string", "enum": ["queued", "running", "waiting", "succeeded", "failed", "cancelled", "skipped"] }), "limit": int("At most this many (default 20, at most 200)") }),
+            &["owner"],
+            true,
+        ),
+        tool("get_agent_automation_run", "Read an automation run", "A run with its steps (status, output, log) and the event it ran for.", json!({ "owner": owner.clone(), "run": s("A run id (arn_…)") }), &["owner", "run"], true),
+        tool("cancel_agent_automation_run", "Cancel an automation run", "Cancel a run going on. The owner's.", json!({ "owner": owner, "run": s("A run id (arn_…)") }), &["owner", "run"], false),
     ]
 }
 
@@ -810,6 +838,18 @@ impl Call<'_> {
             return Err(r.error());
         }
         r.body["id"].as_str().map(str::to_string).ok_or_else(|| fail(format!("{s} has no id")))
+    }
+
+    /// An automation's id, from its id or its name.
+    async fn automation_id(&self, owner: &str, a: &str) -> std::result::Result<String, Outcome> {
+        if a.starts_with("aut_") {
+            return Ok(a.to_string());
+        }
+        let r = self.get(&format!("/v1/code/agents/{}/automations", seg(owner))).await;
+        if !r.ok() {
+            return Err(r.error());
+        }
+        r.body.as_array().into_iter().flatten().find(|x| x["name"].as_str() == Some(a)).and_then(|x| x["id"].as_str().map(str::to_string)).ok_or_else(|| fail(format!("no automation named {a:?}")))
     }
 
     fn owner<'v>(&self, args: &'v Value) -> std::result::Result<&'v str, Outcome> {
@@ -1085,6 +1125,47 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
                 r.error()
             }
         }
+        "list_agent_automations" => {
+            let owner = c.owner(args)?;
+            pass(c.get(&format!("/v1/code/agents/{}/automations", seg(owner))).await)
+        }
+        "save_agent_automation" => {
+            let owner = c.owner(args)?;
+            let mut spec = args.get("spec").cloned().filter(Value::is_object).ok_or_else(|| fail("spec must be an object (an AutomationSpec)"))?;
+            let base = format!("/v1/code/agents/{}/automations", seg(owner));
+            match str_arg(args, "automation") {
+                Some(id) => {
+                    if let Some(r) = args.get("revision").filter(|r| !r.is_null()) {
+                        spec["revision"] = r.clone();
+                    }
+                    let id = c.automation_id(owner, id).await?;
+                    pass(c.api(Method::PUT, &format!("{base}/{}", seg(&id)), Some(spec)).await)
+                }
+                None => pass(c.post(&base, spec).await),
+            }
+        }
+        "run_agent_automation" => {
+            let owner = c.owner(args)?;
+            let a = str_arg(args, "automation").ok_or_else(|| fail("automation is required (aut_… or its name)"))?;
+            let id = c.automation_id(owner, a).await?;
+            let body = json!({ "input": args.get("input").cloned().unwrap_or(Value::Null), "key": opt(args, "key") });
+            pass(c.post(&format!("/v1/code/agents/{}/automations/{}/run", seg(owner), seg(&id)), body).await)
+        }
+        "list_agent_automation_runs" => {
+            let owner = c.owner(args)?;
+            let automation = match str_arg(args, "automation") {
+                Some(a) => Some(c.automation_id(owner, a).await?),
+                None => None,
+            };
+            let q = query(&[("automation", automation), ("status", opt(args, "status")), ("limit", Some(opt(args, "limit").unwrap_or_else(|| "20".into())))]);
+            pass(c.get(&format!("/v1/code/agents/{}/automations/runs{q}", seg(owner))).await)
+        }
+        "get_agent_automation_run" | "cancel_agent_automation_run" => {
+            let owner = c.owner(args)?;
+            let run = str_arg(args, "run").ok_or_else(|| fail("run is required (arn_…)"))?;
+            let path = format!("/v1/code/agents/{}/automations/runs/{}", seg(owner), seg(run));
+            pass(if name == "get_agent_automation_run" { c.get(&path).await } else { c.post(&format!("{path}/cancel"), json!({})).await })
+        }
         other => fail(format!("unknown tool {other}")),
     })
 }
@@ -1222,7 +1303,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_closed_schema() {
         let tools = tools();
-        assert_eq!(tools.len(), 31);
+        assert_eq!(tools.len(), 37);
         for t in &tools {
             assert_eq!(t["inputSchema"]["type"], "object", "{}", t["name"]);
             assert_eq!(t["inputSchema"]["additionalProperties"], false, "{}", t["name"]);

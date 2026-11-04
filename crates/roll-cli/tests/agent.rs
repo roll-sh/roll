@@ -467,3 +467,63 @@ async fn sigterm_parks_a_waiting_run_and_the_answer_resumes_it_after_a_restart()
     let status = tokio::task::spawn_blocking(move || wait_for(&mut daemon, Duration::from_secs(10))).await.unwrap().expect("stopped");
     assert!(status.success(), "{status:?}");
 }
+
+/// `roll agent automation …` drives the automation routes: create from a file, list, get,
+/// disable and enable, run (waiting for the run, exit 1 unless it succeeded), runs, show,
+/// test, catalog, delete; an unknown automation name fails with exit 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn automation_commands_drive_the_routes() {
+    let e = env().await;
+    let spec = e.dir.path().join("spec.json");
+    std::fs::write(&spec, json!({ "name": "Hello", "trigger": { "type": "manual" }, "steps": [{ "id": "hi", "kind": "notify", "config": { "title": "hi {{event.data.input.who}}" } }] }).to_string()).unwrap();
+    let spec = spec.to_str().unwrap().to_string();
+    let a = |args: &[&str]| {
+        let mut v = vec!["agent", "automation", "--owner", "acme"];
+        v.extend_from_slice(args);
+        v.into_iter().map(str::to_string).collect::<Vec<_>>()
+    };
+    let run = |args: Vec<String>| {
+        let e = &e;
+        async move {
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            e.run(&refs).await
+        }
+    };
+    let out = run(a(&["create", &spec])).await;
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("created aut_"), "{}", String::from_utf8_lossy(&out.stdout));
+    let out = run(a(&["list"])).await;
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Hello"), "{}", String::from_utf8_lossy(&out.stdout));
+    let mut json_args = vec!["--json".to_string()];
+    json_args.extend(a(&["get", "Hello"]));
+    let got: Value = serde_json::from_slice(&run(json_args).await.stdout).unwrap();
+    assert_eq!(got["name"], "Hello");
+    for c in ["disable", "enable"] {
+        assert!(run(a(&[c, "Hello"])).await.status.success(), "{c}");
+    }
+    let out = run(a(&["run", "Hello", "--input", r#"{"who":"ada"}"#, "--wait"])).await;
+    assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let printed = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(printed.contains("succeeded"), "{printed}");
+    let rid = printed.split_whitespace().next().unwrap().to_string();
+    let mut json_args = vec!["--json".to_string()];
+    json_args.extend(a(&["runs", "--automation", "Hello"]));
+    let runs: Value = serde_json::from_slice(&run(json_args).await.stdout).unwrap();
+    assert_eq!(runs[0]["id"], rid.as_str());
+    let out = run(a(&["show", &rid])).await;
+    assert!(String::from_utf8_lossy(&out.stdout).contains("hi"), "{}", String::from_utf8_lossy(&out.stdout));
+    let event = e.dir.path().join("event.json");
+    std::fs::write(&event, json!({ "source": "manual", "kind": "run", "data": { "input": { "who": "bo" } } }).to_string()).unwrap();
+    let mut json_args = vec!["--json".to_string()];
+    json_args.extend(a(&["test", &spec, event.to_str().unwrap()]));
+    let tested: Value = serde_json::from_slice(&run(json_args).await.stdout).unwrap();
+    assert_eq!(tested["steps"][0]["config"]["title"], "hi bo");
+    let cat: Value = serde_json::from_slice(&run(a(&["catalog"])).await.stdout).unwrap();
+    assert!(cat["steps"].as_array().unwrap().iter().any(|s| s["kind"] == "agent.start"));
+    let out = run(a(&["get", "Nope"])).await;
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no automation named"), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(run(a(&["delete", "Hello"])).await.status.success());
+    let out = run(a(&["list"])).await;
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("Hello"));
+}

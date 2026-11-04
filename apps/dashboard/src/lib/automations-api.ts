@@ -369,6 +369,8 @@ export interface EventInfo {
   kind: string;
   title: string;
   fields: string[];
+  /** A realistic `event.data`, for "Test" and autocomplete. */
+  sample: unknown;
 }
 
 export interface TriggerInfo {
@@ -690,7 +692,7 @@ export const noticeD = obj<Notice>({
   at: int,
 });
 
-const eventInfoD = obj<EventInfo>({ kind: str, title: str, fields: strs });
+const eventInfoD = obj<EventInfo>({ kind: str, title: str, fields: strs, sample: json });
 export const catalogD = obj<Catalog>({
   triggers: array(
     obj<TriggerInfo>({

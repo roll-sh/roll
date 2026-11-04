@@ -224,6 +224,28 @@ thing but not do it, 404 one who can't see it (docs/code/http-api.md).
 | `thread.publish` links the change to the thread's work item (`PATCH /v1/code/changes/{id}` `work_item`): the item goes to `review`, lists the change, and is `done` once the change lands through the queue; another item, an unknown one, a non-string or a landed change refused | `agents_code.rs::publishing_does_the_threads_work_item` |
 | auto-pull of a roll code project: turning it on (`project.update`, with a fetch grant) pulls at once; a change landing on the default branch is pulled by itself (the relay sends `project.pull` with a fetch-only grant; the grant is never written down); a checkout with local changes is skipped and left as it is; `project.pull` by hand answers `pulled`; agent tokens can't change settings or pull (403) | `agents_code.rs::roll_code_projects_with_auto_pull_follow_their_default_branch`, `code-control/src/agents/policy.rs::agents_drive_threads_but_never_reach_past_them` |
 
+### Automations (`agents/automations/api.rs`, docs/code/automations.md)
+
+| Route | Statuses | Tests |
+| --- | --- | --- |
+| `GET /v1/code/agents/{owner}/automations` | 200 (deleted ones left out), 401, 404 | `automations.rs::automations_are_saved_checked_and_listed`, `routes.rs::automation_routes_follow_the_auth_matrix` |
+| `POST /v1/code/agents/{owner}/automations` | 201 (a webhook trigger's secret once), 400 (where: name, steps, kinds, templates, secrets outside a webhook's headers, cron, intervals, code events, sources, filters, URLs), 401, 403, 422 (no ROLL_SECRET_KEY for a webhook) | `automations.rs::automations_are_saved_checked_and_listed`, `automations.rs::inbound_webhooks_are_signed_and_idempotent`, `routes.rs::automation_routes_follow_the_auth_matrix` |
+| `GET /v1/code/agents/{owner}/automations/catalog` | 200: every built-in trigger and step kind with a JSON Schema | `automations.rs::automations_are_saved_checked_and_listed`, `routes.rs::automation_routes_follow_the_auth_matrix` |
+| `POST /v1/code/agents/{owner}/automations/test` | 200: the trigger's and filters' verdicts, configs filled in, an unknown kind's error; runs nothing | `automations.rs::dry_runs_fill_templates_in`, `routes.rs::automation_routes_follow_the_auth_matrix` |
+| `GET /v1/code/agents/{owner}/automations/runs` | 200 newest first, `automation`/`status`/`limit`/`before` | `automations.rs::agent_events_start_runs_once`, `automations.rs::two_nodes_never_run_a_run_twice`, `routes.rs::automation_routes_follow_the_auth_matrix` |
+| `GET /v1/code/agents/{owner}/automations/runs/{run}` | 200 `{run, event}`, 404 | `automations.rs::a_run_starts_an_agent_waits_for_it_and_notifies`, `routes.rs::automation_routes_follow_the_auth_matrix` |
+| `POST /v1/code/agents/{owner}/automations/runs/{run}/cancel` | 200 (steps cancelled; a final run as it is), 403 agents, 404 | `automations.rs::concurrency_cancel_and_retry`, `routes.rs::automation_routes_follow_the_auth_matrix` |
+| `POST /v1/code/agents/{owner}/automations/runs/{run}/retry` | 200 (on from the failed step, earlier steps kept), 403 agents, 404, 409 | `automations.rs::concurrency_cancel_and_retry`, `routes.rs::automation_routes_follow_the_auth_matrix` |
+| `GET /v1/code/agents/{owner}/automations/{id}` | 200 (secret names only), 404 | `automations.rs::automations_are_saved_checked_and_listed`, `automations.rs::webhooks_retry_and_secrets_stay_sealed`, `routes.rs::automation_routes_follow_the_auth_matrix` |
+| `PUT /v1/code/agents/{owner}/automations/{id}` | 200, 409 a stale `revision` with `current`, 400, 403 | `automations.rs::automations_are_saved_checked_and_listed`, `routes.rs::automation_routes_follow_the_auth_matrix` |
+| `DELETE /v1/code/agents/{owner}/automations/{id}` | 204 (runs going on cancelled), 403, 404 | `automations.rs::automations_are_saved_checked_and_listed`, `routes.rs::automation_routes_follow_the_auth_matrix` |
+| `POST /v1/code/agents/{owner}/automations/{id}/enable` / `POST /v1/code/agents/{owner}/automations/{id}/disable` | 200, 403, 404; a disabled webhook answers 409 | `automations.rs::automations_are_saved_checked_and_listed`, `automations.rs::inbound_webhooks_are_signed_and_idempotent`, `routes.rs::automation_routes_follow_the_auth_matrix` |
+| `POST /v1/code/agents/{owner}/automations/{id}/run` | 202 a new run, 200 the same `key`'s, 401, 403 (agents unless `allow_agents`; other owners) | `automations.rs::a_run_starts_an_agent_waits_for_it_and_notifies`, `automations.rs::rate_limits_and_agent_tokens`, `routes.rs::automation_routes_follow_the_auth_matrix` |
+| `GET /v1/code/agents/{owner}/automations/{id}/runs` | 200, 404 | `routes.rs::automation_routes_follow_the_auth_matrix` |
+| `PUT /v1/code/agents/{owner}/automations/{id}/secrets/{name}` / `DELETE /v1/code/agents/{owner}/automations/{id}/secrets/{name}` | 204, 400 name or value, 403, 404, 422 (no ROLL_SECRET_KEY, over 20); never returned | `automations.rs::webhooks_retry_and_secrets_stay_sealed`, `routes.rs::automation_routes_follow_the_auth_matrix` |
+| `POST /v1/code/agents/{owner}/automations/{id}/webhook/secret` | 200 a new secret once (the old one refused), 404 not a webhook | `automations.rs::inbound_webhooks_are_signed_and_idempotent`, `routes.rs::automation_routes_follow_the_auth_matrix` |
+| `POST /v1/code/agents/{owner}/automations/{id}/webhook` | no token; 202 `{event, duplicate}` (roll's signature with a 5-minute window, or GitHub's), 401 bad or stale signature, 404, 409 disabled | `automations.rs::inbound_webhooks_are_signed_and_idempotent`, `routes.rs::automation_routes_follow_the_auth_matrix` |
+
 ### Behaviours across routes
 
 | Behaviour | Tests |
@@ -343,6 +365,13 @@ envelope `{event, delivery, webhook, repo{id, full_name, default_branch, visibil
 | `create_agent_project` | the repo is created (visibility) and `project.add` clones it with a fetch grant | `mcp.rs::agent_tools_work_in_roll_code_like_their_routes` |
 | `claim_agent_work` | the next work item claimed as the agent and set on the thread; `work: null` when none is left; an unknown thread "not found" | `mcp.rs::agent_tools_work_in_roll_code_like_their_routes` |
 
+| `list_agent_automations` | the owner's automations | `mcp.rs::automation_tools_map_onto_their_routes` |
+| `save_agent_automation` | creates, or replaces by id over a revision | `mcp.rs::automation_tools_map_onto_their_routes` |
+| `run_agent_automation` | by id or name, with `input` and `key`; an agent only when `allow_agents` | `mcp.rs::automation_tools_map_onto_their_routes` |
+| `list_agent_automation_runs` | newest first, by automation | `mcp.rs::automation_tools_map_onto_their_routes` |
+| `get_agent_automation_run` | the run and its event | `mcp.rs::automation_tools_map_onto_their_routes` |
+| `cancel_agent_automation_run` | the owner's; an agent is refused | `mcp.rs::automation_tools_map_onto_their_routes` |
+
 ### Protocol
 
 | Behaviour | Tests |
@@ -457,6 +486,27 @@ binary that doesn't exist, so no provider runs.
 | `roll agent status` | not logged in (exit 1), accepted (`--json`), revoked (exit 1) | `roll-cli/tests/agent.rs::login_up_status_and_logout`, `roll-cli/tests/agent.rs::a_revoked_machine_stops_up_with_a_clear_error` |
 | `roll agent logout` | revokes the machine with its own token (`DELETE /v1/code/agents/connect`) and deletes the file | `roll-cli/tests/agent.rs::login_up_status_and_logout` |
 | `ROLL_AGENT_FAKE=1 roll agent up` (tests only) | the `fake` provider's scripted turn: text streamed in steps, a command approval, `ROLL_DEMO.md` written once accepted (with its diff), nothing when declined | `agent-host/src/provider/fake.rs::demo_turns_stream_ask_and_write_the_file_once_accepted`, `pnpm test:agents` (end to end) |
+| `roll agent automation` (`list`, `get`, `create`, `update`, `delete`, `enable`, `disable`, `run [--wait]`, `runs`, `show`, `cancel`, `retry`, `set-secret`, `remove-secret`, `rotate-webhook-secret`, `catalog`, `test`) | an owner's automations by id or name through `/v1/code/agents/{owner}/automations…` (`--token`/ROLL_CODE_TOKEN); `run --wait` exits 1 unless the run succeeded; an unknown name exits 1 | `roll-cli/tests/agent.rs::automation_commands_drive_the_routes` |
+
+## Automations (`code-control/tests/automations.rs`, `src/agents/automations/*` unit tests, docs/code/automations.md)
+
+| Behaviour | Tests |
+| --- | --- |
+| a run starts an agent on a machine by name in a project by id, waits for it (woken by its records), notifies; outputs feed later templates; the run lists its thread; command ids made from the run and step; the same `key` is the same run; run and notice events on the stream | `automations.rs::a_run_starts_an_agent_waits_for_it_and_notifies` |
+| a repo project cloned onto any online machine once; message (steer), publish, archive go to the run's thread | `automations.rs::agent_steps_clone_message_publish_and_settle` |
+| outgoing webhooks: retried with backoff on a 5xx, not on a 4xx; the same `X-Roll-Delivery` per attempt; signed with a secret; secrets in headers; secret values never returned | `automations.rs::webhooks_retry_and_secrets_stay_sealed`, `automations.rs::concurrency_cancel_and_retry` |
+| inbound webhooks: roll's and GitHub's signatures, the replay window, a redelivery recorded once, disabled | `automations.rs::inbound_webhooks_are_signed_and_idempotent`, `code-control/src/agents/automations/triggers.rs::signatures` |
+| agent events from the mirror's write: `thread.done`, filters, a replay recorded once; transitions only | `automations.rs::agent_events_start_runs_once`, `code-control/src/agents/automations/triggers.rs::agent_events_fire_on_transitions_only` |
+| roll code events from the deliveries' write, only for the named repos | `automations.rs::code_events_start_runs` |
+| concurrency `skip`, `queue`, `cancel_previous`; cancel; retry from the failed step | `automations.rs::concurrency_cancel_and_retry` |
+| rate limits; agent tokens and `allow_agents`; `event.data.by` | `automations.rs::rate_limits_and_agent_tokens` |
+| a run parked on a delay resumes after a restart and runs its remaining steps once | `automations.rs::runs_resume_after_a_restart` |
+| two nodes on one control database: every run worked on once | `automations.rs::two_nodes_never_run_a_run_twice` |
+| schedules: cron in a time zone (daylight saving), intervals on a grid, bad ones refused | `code-control/src/agents/automations/schedule.rs::cron_in_a_time_zone`, `code-control/src/agents/automations/schedule.rs::intervals_keep_their_grid`, `code-control/src/agents/automations/schedule.rs::bad_schedules` |
+| templates: paths, pipes, typed single expressions, bounded output, secrets only where allowed | `code-control/src/agents/automations/template.rs::paths_fill_in`, `code-control/src/agents/automations/template.rs::pipes`, `code-control/src/agents/automations/template.rs::single_expressions_keep_their_type`, `code-control/src/agents/automations/template.rs::bad_templates_are_refused`, `code-control/src/agents/automations/template.rs::output_is_bounded`, `code-control/src/agents/automations/template.rs::secrets_only_where_allowed` |
+| filters: every op, `not`, roll code's globs, save-time checks | `code-control/src/agents/automations/filter.rs::every_op`, `code-control/src/agents/automations/filter.rs::checks` |
+| approval rules decide in order (commands, files, tools) | `code-control/src/agents/automations/steps.rs::rules_decide_in_order` |
+| wire types and fixtures shared with the dashboard | `agent-proto/tests/automations.rs::fixtures`, `agent-proto/tests/automations.rs::every_variant_is_sampled`, `agent-proto/tests/automations.rs::every_built_in_config_parses_as_its_type`, `agent-proto/tests/automations.rs::defaults_fill_in` |
 
 ## Merge queue (`code-control/tests/queue.rs`, fake runner)
 
@@ -999,6 +1049,8 @@ jsdom (`vitest.config.mts` projects `node` and `dom`, setup in `src/test/`).
 
 | Area | Tests |
 | --- | --- |
+| automations: every `automation*.json` fixture decodes strictly and keeps every field, built-in step configs decode as their kind's, every trigger sampled; the client calls the routes; the stream's automation, automation_removed, automation_run and notice events | `src/lib/automations-api.test.ts`, `src/lib/agents-api.test.ts` |
+| the automations demo: believable automations and runs that decode as the relay's, runs moving through their steps with events, cancel, retry, secret names only | `src/lib/automations-demo.test.ts` |
 | API client: paths, encoding, methods, bodies, token getter, `before`, `ApiError`, non-JSON errors, 404 and 401 hooks, 409 conflicts, 204 claim, blobs | `src/lib/code-api.test.ts` |
 | event stream: parsing (comments, CRLF, multi-line, ids), dispatch, token header, reconnects, unsubscribe | `src/lib/sse.test.ts`, `src/lib/code-api.test.ts` |
 | live rate, pulse throttle, feed batching | `src/lib/live-rate.test.ts` |

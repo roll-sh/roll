@@ -173,7 +173,43 @@ pub fn record_event(c: &Conn<'_>, owner_id: &str, e: &NewEvent) -> code_sql::Res
     super::store::insert_event(c, owner_id, e)
 }
 
+/// Have a run looked at now (inside an integration's write: a reply that the run's waiting step
+/// handles). Call [`Code::wake_automations`] after the commit. Whether the run is going.
+pub fn wake_run(c: &Conn<'_>, run_id: &str) -> code_sql::Result<bool> {
+    let n = c.execute(
+        "UPDATE automation_runs SET next_at = ? WHERE id = ? AND status IN ('queued', 'running', 'waiting') AND status <> 'queued'",
+        code_sql::params![code_sql::now_ms(), run_id],
+    )?;
+    Ok(n > 0)
+}
+
+/// Whether an enabled automation of the owner listens for `kind` of `source` (inside a write).
+pub fn listens(c: &Conn<'_>, owner_id: &str, source: &str, kind: &str) -> code_sql::Result<bool> {
+    c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM automation_listens WHERE owner_id = ? AND source = ? AND (kind = ? OR kind = '*'))",
+        code_sql::params![owner_id, source, kind],
+        |r| r.get::<_, bool>(0),
+    )
+}
+
 impl Code {
+    /// Create an automation for an owner server-side (an integration's built-in one), with the
+    /// checks `POST …/automations` makes. `by` is who it's from (`linear`, …).
+    pub async fn create_automation(&self, owner_id: &str, spec: agent_proto::automation::AutomationSpec, by: &str) -> Result<agent_proto::automation::AutomationSaved> {
+        self.start_automations();
+        let name = super::super::store::owner_name(self.db.sql(), owner_id)?.ok_or_else(|| crate::Error::NotFound(format!("owner {owner_id}")))?;
+        let owner = OwnerRef { id: owner_id.to_string(), name };
+        let checked = super::defs::check(self, &owner, &spec)?;
+        match super::defs::create(self, &owner, by, checked).await? {
+            super::defs::Saved::Done { row, webhook_secret } => {
+                self.wake_automations(owner_id);
+                Ok(agent_proto::automation::AutomationSaved { automation: super::defs::view(self, &row), webhook_secret })
+            }
+            super::defs::Saved::TooMany => Err(crate::Error::Unprocessable(format!("an owner has at most {} automations", agent_proto::automation::limits::AUTOMATIONS))),
+            _ => Err(crate::Error::Conflict("the automation wasn't saved".into())),
+        }
+    }
+
     /// Record an event in `owner_id`'s inbox, durably, and wake the engine. `None` if its key
     /// was recorded before (a redelivery): nothing runs twice.
     pub fn automation_event(&self, owner_id: &str, e: NewEvent) -> Result<Option<AutomationEventId>> {

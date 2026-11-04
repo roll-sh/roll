@@ -431,6 +431,9 @@ pub struct Mirroring {
     pub changed: Vec<Mirrored>,
     /// Records not kept because the machine (or its owner) is over [`Quota`].
     pub refused: u32,
+    /// Agent events went into the owner's automation inbox, or runs waiting on a thread were
+    /// woken: wake the engine.
+    pub automated: bool,
 }
 
 /// How much of a machine's records the relay keeps: records and their size (characters of
@@ -466,6 +469,9 @@ pub fn mirror(db: &code_sql::Db, owner_id: &str, machine_id: &str, items: &[Stam
         }
         let (mut records, mut size): (i64, i64) = c.query_row("SELECT records, size FROM agent_machines WHERE id = ?", [machine_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         let mut owner_size: i64 = c.query_row("SELECT COALESCE(SUM(size), 0) FROM agent_machines WHERE owner_id = ? AND revoked_at IS NULL", [owner_id], |r| r.get(0))?;
+        // Automations listening for agent events, or runs waiting on threads (automations).
+        let listening = super::automations::triggers::agents_listen(c, owner_id)?;
+        let mut automated = false;
         // What goes in: (record, the record to store, its JSON).
         let mut keep: Vec<(&Stamped, Entity, String)> = Vec::new();
         let mut refused = 0;
@@ -479,6 +485,16 @@ pub fn mirror(db: &code_sql::Db, owner_id: &str, machine_id: &str, items: &[Stam
                 .optional()?;
             if held.is_some_and(|(h, _)| (h.max(0) as u64) >= s.seq) {
                 continue;
+            }
+            if listening {
+                let old: Option<Entity> = match held {
+                    Some(_) => c
+                        .query_row("SELECT json FROM agent_entities WHERE machine_id = ? AND kind = ? AND id = ?", [machine_id, kind_str(&s.entity), s.entity.id()], |r| r.get::<_, String>(0))
+                        .optional()?
+                        .and_then(|j| serde_json::from_str(&j).ok()),
+                    None => None,
+                };
+                automated |= super::automations::triggers::record_agent_events(c, owner_id, machine_id, old.as_ref(), &s.entity, s.seq)?;
             }
             // What roll code knows about a thread is the relay's: it goes over the daemon's.
             let mut entity = s.entity.clone();
@@ -525,7 +541,7 @@ pub fn mirror(db: &code_sql::Db, owner_id: &str, machine_id: &str, items: &[Stam
             "UPDATE agent_machines SET seq = CASE WHEN seq < ? THEN ? ELSE seq END, last_seen = ?, records = ?, size = ? WHERE id = ?",
             params![ack as i64, ack as i64, now, records.max(0), size.max(0), machine_id],
         )?;
-        Ok(Some(Mirroring { ack, changed, refused }))
+        Ok(Some(Mirroring { ack, changed, refused, automated }))
     })
 }
 

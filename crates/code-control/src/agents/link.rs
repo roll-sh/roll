@@ -171,6 +171,9 @@ async fn run(code: &Arc<Code>, machine: &MachineRow, socket: &mut WebSocket, mut
                         let quota = code.agents.quota();
                         match store::mirror(code.db.sql(), &machine.owner_id, &machine.id, &items, quota) {
                             Ok(Some(m)) => {
+                                if m.automated {
+                                    code.wake_automations(&machine.owner_id);
+                                }
                                 for e in m.changed {
                                     let _ = hub.events.send(Arc::new(StreamEvent::Entity(Box::new(e))));
                                 }

@@ -15,6 +15,7 @@ axum = { workspace = true, features = ["ws"] }
 base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
 code-git.workspace = true
 code-index.workspace = true
 code-review.workspace = true
@@ -23,6 +24,7 @@ code-sql.workspace = true
 code-github.workspace = true
 code-store.workspace = true
 comrak.workspace = true
+croner.workspace = true
 diffy.workspace = true
 futures.workspace = true
 getrandom.workspace = true

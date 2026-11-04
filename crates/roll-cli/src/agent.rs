@@ -39,6 +39,8 @@ pub enum Agent {
     Status,
     /// Remove this machine from roll and forget its token.
     Logout,
+    /// The owner's automations: triggers, filters and steps that run agents (docs/code/automations.md).
+    Automation(crate::automation::Automation),
 }
 
 /// What `login` stores.
@@ -115,6 +117,7 @@ pub async fn run(api: &str, json_out: bool, cmd: Agent) -> anyhow::Result<()> {
         Agent::Up => up(api).await,
         Agent::Status => status(json_out).await,
         Agent::Logout => logout(json_out).await,
+        Agent::Automation(a) => crate::automation::run(api, json_out, a).await,
     }
 }
 

@@ -1,4 +1,5 @@
 mod agent;
+mod automation;
 mod code;
 mod stream;
 mod tasks;

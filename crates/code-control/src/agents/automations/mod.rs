@@ -15,11 +15,17 @@
 //!   commands route, the sandboxes route, landing), so wakes, grants, policy and cluster routing
 //!   are the API's own, and daemon commands are idempotent by ids made from the run and step.
 
+pub mod api;
 pub mod context;
+pub(crate) mod defs;
+pub(crate) mod engine;
 pub mod filter;
 pub mod registry;
+mod schedule;
+mod steps;
 pub(crate) mod store;
 pub mod template;
+pub(crate) mod triggers;
 
 pub use context::{ApiAnswer, HttpAnswer, HttpError, Secret, StepContext};
 pub use registry::{NewEvent, OwnerRef, Registry, StepKind, StepOutcome, TriggerSource, record_event};
@@ -28,6 +34,14 @@ pub use store::SCHEMA;
 use crate::review::apps::{PublicOnly, check_url, literal_private_host};
 use crate::{Caller, Code, Error, Result};
 use parking_lot::Mutex;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
+
+/// Register every integration's triggers and steps (called once, when the engine starts on this
+/// node). Integrations: add one line here.
+pub(crate) fn register_integrations(_code: &std::sync::Arc<Code>) {}
 
 /// Call tokens (one API call of a step, as its automation) start with this.
 pub const TOKEN_PREFIX: &str = "rlr_";
@@ -40,13 +54,45 @@ pub struct Automations {
     /// The outgoing HTTP client (built on first use).
     http: Mutex<Option<reqwest::Client>>,
     /// Wakes the engine (a new event, a run to look at).
-    pub(crate) wake: tokio::sync::Notify,
+    pub(crate) wake: Arc<tokio::sync::Notify>,
+    /// The engine runs on this node.
+    pub(crate) started: AtomicBool,
+    /// Runs being worked on here.
+    pub(crate) working: Mutex<HashSet<String>>,
+    /// Owners kicked lately (their lease holder works on them).
+    kicks: engine::Kicks,
+    /// How often the engine looks when nothing wakes it, in ms (0: [`engine::TICK`]).
+    tick_ms: AtomicU64,
+}
+
+impl Automations {
+    pub(crate) fn tick(&self) -> Duration {
+        match self.tick_ms.load(Ordering::Relaxed) {
+            0 => engine::TICK,
+            ms => Duration::from_millis(ms),
+        }
+    }
+
+    /// How often the engine looks when nothing wakes it (tests shorten it).
+    pub fn set_tick(&self, d: Duration) {
+        self.tick_ms.store(d.as_millis().max(1) as u64, Ordering::Relaxed);
+        self.wake.notify_one();
+    }
+
+    pub(crate) fn kick_due(&self, owner: &str) -> bool {
+        self.kicks.due(owner)
+    }
 }
 
 impl Code {
-    /// Have the engine look at `owner_id`'s inbox and runs now.
-    pub fn wake_automations(&self, _owner_id: &str) {
+    /// Have the engine look at `owner_id`'s inbox and runs now: here, or (in a cluster) on the
+    /// node serving the owner's agents.
+    pub fn wake_automations(&self, owner_id: &str) {
+        self.start_automations();
         self.automations.wake.notify_one();
+        if !self.serves_automations(owner_id) && self.automations.kick_due(owner_id) {
+            self.kick_owner(&format!("{}{owner_id}", crate::cluster::AGENTS_KEY));
+        }
     }
 
     /// The caller a step's call token stands for: the owner, as `automation:<id>` (or

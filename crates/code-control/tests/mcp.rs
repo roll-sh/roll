@@ -12,19 +12,20 @@ use serde_json::{Value, json};
 const MCP: &str = "/v1/code/mcp";
 
 /// The tools docs/code/mcp.md lists.
-const TOOLS: [&str; 31] = [
+const TOOLS: [&str; 37] = [
     "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "create_change", "revise_change", "land", "get_change",
     "list_changes", "claim_work", "heartbeat_work", "release_work", "complete_work", "list_work", "create_work", "comment", "review", "queue_status",
     "request_ai_review", "list_agent_machines", "list_agent_threads", "create_agent_thread", "send_agent_message", "respond_agent_request",
-    "interrupt_agent_thread", "publish_agent_thread", "create_agent_project", "claim_agent_work",
+    "interrupt_agent_thread", "publish_agent_thread", "create_agent_project", "claim_agent_work", "list_agent_automations", "save_agent_automation",
+    "run_agent_automation", "list_agent_automation_runs", "get_agent_automation_run", "cancel_agent_automation_run",
 ];
-/// The agents tools (not repo-scoped: `agent_tools_drive_a_machine_like_their_routes` and
-/// `agent_tools_work_in_roll_code_like_their_routes`).
-const AGENT_TOOLS: usize = 9;
+/// The agents tools (not repo-scoped: `agent_tools_drive_a_machine_like_their_routes`,
+/// `agent_tools_work_in_roll_code_like_their_routes` and `automation_tools_map_onto_their_routes`).
+const AGENT_TOOLS: usize = 15;
 /// The ones that only read (`readOnlyHint`).
-const READ_ONLY: [&str; 13] = [
+const READ_ONLY: [&str; 16] = [
     "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "get_change", "list_changes", "list_work", "queue_status",
-    "list_agent_machines", "list_agent_threads",
+    "list_agent_machines", "list_agent_threads", "list_agent_automations", "list_agent_automation_runs", "get_agent_automation_run",
 ];
 
 struct Client<'a> {
@@ -1286,4 +1287,43 @@ async fn agent_tools_work_in_roll_code_like_their_routes() {
     let (_, state) = a.req("GET", "/v1/code/agents/acme/state", None, root).await;
     let thread = state["entities"].as_array().unwrap().iter().find(|m| m["entity"]["id"] == "thr_a").unwrap();
     assert_eq!(thread["entity"]["work"]["id"], item["id"], "{thread}");
+}
+
+/// The automation tools map onto their routes: save, list, run (an agent only when the
+/// automation allows agents), list runs, read and cancel a run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn automation_tools_map_onto_their_routes() {
+    let a = app(Some("root"));
+    let root = Some("root");
+    a.req("POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" })), root).await;
+    let mut tokens = Vec::new();
+    for name in ["me", "agent:bot"] {
+        let (_, t) = a.req("POST", "/v1/code/owners/acme/tokens", Some(json!({ "name": name })), root).await;
+        tokens.push(t["token"].as_str().unwrap().to_string());
+    }
+    let mut owner = Client::new(&a, Some(&tokens[0]));
+    owner.initialize("2025-11-25").await;
+    let spec = json!({ "name": "Hello", "trigger": { "type": "manual" }, "steps": [{ "id": "d", "kind": "delay", "config": { "seconds": 60 } }] });
+    let saved = owner.tool("save_agent_automation", json!({ "owner": "acme", "spec": spec })).await;
+    let id = saved["automation"]["id"].as_str().unwrap().to_string();
+    let mut renamed = spec.clone();
+    renamed["name"] = json!("Hello again");
+    let saved = owner.tool("save_agent_automation", json!({ "owner": "acme", "automation": id, "spec": renamed, "revision": 1 })).await;
+    assert_eq!(saved["automation"]["revision"], 2);
+    let listed = owner.tool("list_agent_automations", json!({ "owner": "acme" })).await;
+    assert_eq!(listed["items"][0]["name"], "Hello again", "{listed}");
+    let run = owner.tool("run_agent_automation", json!({ "owner": "acme", "automation": "Hello again", "input": { "x": 1 }, "key": "k" })).await;
+    let rid = run["id"].as_str().unwrap().to_string();
+    let runs = owner.tool("list_agent_automation_runs", json!({ "owner": "acme", "automation": id })).await;
+    assert_eq!(runs["items"][0]["id"], rid.as_str(), "{runs}");
+    let detail = owner.tool("get_agent_automation_run", json!({ "owner": "acme", "run": rid })).await;
+    assert_eq!(detail["event"]["data"]["input"]["x"], 1);
+    let mut agent = Client::new(&a, Some(&tokens[1]));
+    agent.initialize("2025-11-25").await;
+    let err = agent.tool_err("run_agent_automation", json!({ "owner": "acme", "automation": id })).await;
+    assert!(err.contains("allow_agents"), "{err}");
+    let err = agent.tool_err("cancel_agent_automation_run", json!({ "owner": "acme", "run": rid })).await;
+    assert!(err.contains("agent"), "{err}");
+    let cancelled = owner.tool("cancel_agent_automation_run", json!({ "owner": "acme", "run": rid })).await;
+    assert_eq!(cancelled["status"], "cancelled");
 }

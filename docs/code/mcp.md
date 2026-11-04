@@ -72,6 +72,12 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
 | `publish_agent_thread` | commit and push a thread's branch; in a roll code repo it becomes a change, and `land` sends it to landing (the answer's `landing` says landed, queued, blocked or conflict) | `POST …/commands` (`thread.publish`) |
 | `create_agent_project` | create a roll code repo and clone it onto a machine as a project | `POST /agents/{owner}/machines/{m}/projects` |
 | `claim_agent_work` | give a thread a work item: a given one, or the next one claimed from a repo (`work: null` when none) | `POST /agents/{owner}/threads/{t}/work` |
+| `list_agent_automations` | the owner's automations (docs/code/automations.md) | `GET /agents/{owner}/automations` |
+| `save_agent_automation` | create an automation, or replace one's definition (by id, over a `revision`) | `POST /agents/{owner}/automations`, `PUT …/automations/{id}` |
+| `run_agent_automation` | run one now (by id or name) with `input` and an idempotency `key`; agents only when it allows agents | `POST …/automations/{id}/run` |
+| `list_agent_automation_runs` | runs, newest first (of one automation, by status) | `GET …/automations/runs` |
+| `get_agent_automation_run` | a run's steps (status, output, log) and its event | `GET …/automations/runs/{run}` |
+| `cancel_agent_automation_run` | cancel a run going on (the owner's) | `POST …/automations/runs/{run}/cancel` |
 
 The agents tools (docs/code/agents.md) take `owner`, and a `machine` by id (`mch_…`) or name.
 Commands take an optional `id`, the idempotency key (a fresh one by default). Whatever the

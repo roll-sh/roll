@@ -93,13 +93,13 @@ CREATE INDEX IF NOT EXISTS automation_runs_owner ON automation_runs (owner_id, c
 CREATE INDEX IF NOT EXISTS automation_runs_due ON automation_runs (next_at);
 CREATE INDEX IF NOT EXISTS automation_runs_of ON automation_runs (automation_id, created_at);
 CREATE TABLE IF NOT EXISTS automation_threads (
-    -- Threads runs started: their records wake the run, and the canvas tags them.
+    -- Threads runs started or follow: their records wake the run (the canvas tags the started ones).
     machine_id TEXT NOT NULL,
     thread TEXT NOT NULL,
     owner_id TEXT NOT NULL,
     run_id TEXT NOT NULL,
     automation_id TEXT NOT NULL,
-    PRIMARY KEY (machine_id, thread)
+    PRIMARY KEY (machine_id, thread, run_id)
 );
 CREATE INDEX IF NOT EXISTS automation_threads_run ON automation_threads (run_id);
 CREATE TABLE IF NOT EXISTS automation_tokens (
@@ -139,6 +139,15 @@ pub(crate) fn insert_event(c: &Conn<'_>, owner_id: &str, e: &NewEvent) -> code_s
         params![id.as_str(), owner_id, key, e.source, e.kind, e.automation.as_ref().map(|a| a.as_str()), data, summary, code_sql::now_ms()],
     )?;
     Ok((n > 0).then_some(id))
+}
+
+/// A run follows a thread: the thread's records wake it.
+pub(crate) fn follow(db: &code_sql::Db, machine: &str, thread: &str, owner_id: &str, run: &str, automation: &str) -> code_sql::Result<()> {
+    db.execute(
+        "INSERT INTO automation_threads (machine_id, thread, owner_id, run_id, automation_id) VALUES (?, ?, ?, ?, ?) ON CONFLICT (machine_id, thread, run_id) DO NOTHING",
+        params![machine, thread, owner_id, run, automation],
+    )
+    .map(|_| ())
 }
 
 pub(crate) fn insert_token(db: &code_sql::Db, hash: &str, owner_id: &str, automation_id: &str, name: &str, expires_at: i64) -> code_sql::Result<()> {

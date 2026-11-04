@@ -833,3 +833,81 @@ async fn agent_grants_follow_the_auth_matrix() {
     assert_eq!(call(a, "DELETE", &format!("{base}/machines/{mid}"), None, Some(ADMIN)).await, StatusCode::NO_CONTENT);
     assert_eq!(git_refs(a, "priv", "git-upload-pack", &push).await, UNAUTHORIZED);
 }
+
+/// The automation routes (`agents/automations/api.rs`): reading them (lists, runs, the catalog,
+/// dry runs) is the owner's tokens', agents included, and 404 to everyone else; changing
+/// automations and their secrets, cancelling and retrying runs is Code::manages (403 agents and
+/// other owners, 401 anonymous and bad tokens); running one by hand too, unless it allows
+/// agents. The webhook ingress takes no token (its signature is the credential).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn automation_routes_follow_the_auth_matrix() {
+    let w = world().await;
+    let a = &w.a;
+    let base = "/v1/code/agents/acme/automations";
+    let spec = json!({ "name": "n", "trigger": { "type": "manual" }, "steps": [{ "id": "t", "kind": "notify", "config": { "title": "x" } }] });
+    let (s, v) = a.req("POST", base, Some(spec.clone()), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let id = v["automation"]["id"].as_str().unwrap().to_string();
+    let open = { let mut o = spec.clone(); o["allow_agents"] = json!(true); o };
+    let (_, v) = a.req("POST", base, Some(open), Some(ADMIN)).await;
+    let open_id = v["automation"]["id"].as_str().unwrap().to_string();
+    let test = json!({ "automation": spec, "event": { "source": "manual", "kind": "run" } });
+    let reads: Vec<(&str, String, Option<Value>, StatusCode)> = vec![
+        ("GET", base.to_string(), None, OK),
+        ("GET", format!("{base}/catalog"), None, OK),
+        ("POST", format!("{base}/test"), Some(test), OK),
+        ("GET", format!("{base}/runs"), None, OK),
+        ("GET", format!("{base}/runs/arn_nope"), None, NOT_FOUND),
+        ("GET", format!("{base}/{id}"), None, OK),
+        ("GET", format!("{base}/{id}/runs"), None, OK),
+    ];
+    let writes: Vec<(&str, String, Option<Value>, StatusCode)> = vec![
+        ("POST", base.to_string(), Some(spec.clone()), StatusCode::CREATED),
+        ("PUT", format!("{base}/{id}"), Some(spec.clone()), OK),
+        ("POST", format!("{base}/{id}/disable"), None, OK),
+        ("POST", format!("{base}/{id}/enable"), None, OK),
+        ("PUT", format!("{base}/{id}/secrets/TOKEN"), Some(json!({ "value": "v" })), StatusCode::UNPROCESSABLE_ENTITY),
+        ("DELETE", format!("{base}/{id}/secrets/TOKEN"), None, StatusCode::NO_CONTENT),
+        ("POST", format!("{base}/{id}/webhook/secret"), None, NOT_FOUND),
+        ("POST", format!("{base}/runs/arn_nope/cancel"), None, NOT_FOUND),
+        ("POST", format!("{base}/runs/arn_nope/retry"), None, NOT_FOUND),
+        ("POST", format!("{base}/{id}/run"), Some(json!({})), StatusCode::ACCEPTED),
+    ];
+    for (who, token) in [("admin", Some(ADMIN)), ("owner", Some(w.acme.as_str()))] {
+        for (m, p, b, want) in reads.iter().chain(&writes) {
+            assert_eq!(call(a, m, p, b.as_ref(), token).await, *want, "{who}: {m} {p}");
+        }
+    }
+    // Agents read, and run only what allows them.
+    for (m, p, b, want) in &reads {
+        assert_eq!(call(a, m, p, b.as_ref(), Some(&w.agent)).await, *want, "agent: {m} {p}");
+    }
+    for (m, p, b, _) in &writes {
+        assert_eq!(call(a, m, p, b.as_ref(), Some(&w.agent)).await, FORBIDDEN, "agent: {m} {p}");
+    }
+    assert_eq!(call(a, "POST", &format!("{base}/{open_id}/run"), Some(&json!({})), Some(&w.agent)).await, StatusCode::ACCEPTED);
+    let denied = StatusCode::UNAUTHORIZED;
+    for (who, token, read, write) in [
+        ("review app", Some(w.app_in.as_str()), NOT_FOUND, FORBIDDEN),
+        ("another owner", Some(w.other.as_str()), NOT_FOUND, FORBIDDEN),
+        ("anonymous", None, NOT_FOUND, denied),
+        ("revoked", Some(w.revoked.as_str()), denied, denied),
+        ("garbage", Some("hunter2"), denied, denied),
+    ] {
+        for (m, p, b, _) in &reads {
+            assert_eq!(call(a, m, p, b.as_ref(), token).await, read, "{who}: {m} {p}");
+        }
+        for (m, p, b, _) in &writes {
+            assert_eq!(call(a, m, p, b.as_ref(), token).await, write, "{who}: {m} {p}");
+        }
+    }
+    // The ingress: no token; not a webhook automation (404), and unsigned for one (401: no secret
+    // key on this server makes webhooks unavailable, 422 at creation).
+    for token in [None, Some(w.acme.as_str())] {
+        assert_eq!(call(a, "POST", &format!("{base}/{id}/webhook"), Some(&json!({})), token).await, NOT_FOUND);
+    }
+    let hook = json!({ "name": "h", "trigger": { "type": "webhook" }, "steps": [{ "id": "t", "kind": "notify", "config": { "title": "x" } }] });
+    assert_eq!(call(a, "POST", base, Some(&hook), Some(ADMIN)).await, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(call(a, "DELETE", &format!("{base}/{id}"), None, Some(&w.agent)).await, FORBIDDEN);
+    assert_eq!(call(a, "DELETE", &format!("{base}/{id}"), None, Some(&w.acme)).await, StatusCode::NO_CONTENT);
+}

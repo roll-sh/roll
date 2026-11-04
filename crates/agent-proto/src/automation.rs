@@ -834,13 +834,16 @@ pub struct TriggerInfo {
     pub needs_setup: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EventInfo {
     pub kind: String,
     pub title: String,
     /// Fields of `event.data` worth filtering on, as dotted paths.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<String>,
+    /// A realistic `event.data`, for dry runs ("Test") and the builder's autocomplete.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub sample: Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

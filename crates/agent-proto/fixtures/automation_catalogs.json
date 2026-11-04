@@ -12,7 +12,11 @@
             "fields": [
               "input",
               "by"
-            ]
+            ],
+            "sample": {
+              "by": "acme",
+              "input": {}
+            }
           }
         ]
       },

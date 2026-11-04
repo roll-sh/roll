@@ -127,3 +127,87 @@ Integrations plug in through `registry.rs`, without the engine knowing them:
 An integration's own credentials (OAuth tokens, API keys) are its own to keep, sealed with
 `ROLL_SECRET_KEY` and never returned or logged; an automation's secrets (`PUT …/secrets/{name}`) are
 for steps that call out (`webhook`). Provider credentials are never touched (docs/code/agents.md).
+
+## Steps
+
+| Kind | Does | Output |
+| --- | --- | --- |
+| `agent.start` | starts a thread. Targets: `machine` (id or name), `sandbox` (a new one of a size, deleted when the run ends unless `keep`), `any_online` (a connected machine with the project; a repo project is cloned onto one if none has it), `project_machine`. The project is `id` or `repo` (cloned with `project.add {clone}` when the machine has none). Every `thread.create` field: provider, model, effort, runtime and interaction mode, worktree, title, prompt, orchestrator. Unset fields come from the automation's `defaults`, then the project's. | `machine`, `project`, `thread`, `sandbox` |
+| `agent.wait` | until the thread is `done`, `failed`, `waiting` (on you) or `settled`, at most `timeout_s` (`on_timeout: continue` makes a timeout an outcome) | `outcome`, `thread`, `run`, `status`, `error`, `message` (the agent's last text), `change` |
+| `agent.message` | `message.send`, queue or steer | `thread`, `run` |
+| `agent.respond` | answers pending approvals by rules (action, command glob, files glob, tool glob → decision; else `otherwise`) and questions (answers by id or header, or the first option); the rest are left for the owner | `answered`, `left` |
+| `agent.publish` | `thread.publish`, `land` sends it to landing (the merge queue on `queue` repos) | `branch`, `commit`, `change`, `url`, `landing` |
+| `agent.script` | runs a project script in a terminal (the thread's worktree, or the project's checkout) | `terminal`, `machine` |
+| `agent.settle` | settle, archive or un-settle | `thread`, `action` |
+| `webhook` | an HTTP request to a public address (`review::apps::PublicOnly`, no redirects, the literal-host check, 30 s, answers read up to 1 MiB); signed with one of the automation's secrets like roll's own webhooks; `X-Roll-Delivery` and `Idempotency-Key` are the step's idempotency key, the same on every attempt. 5xx, 429, 408 and network errors are retried, other statuses fail. It is a step, not a delivery queue: its answer feeds later steps, and the engine's retries are its redelivery. | `status`, `headers`, `body` |
+| `notify` | a `notice` on the owner's stream (a toast on every open device) | `id` |
+| `delay` | waits, durably | — |
+
+Steps without a thread say which by `thread` (a template); unset, the run's latest thread. A step's
+`when` filters decide whether it runs; `on_error: continue` lets the run go on (later steps see
+`steps.<id>.error`); `retry {attempts, backoff_s}` (×2 each time, an hour at most) and `timeout_s`
+override the kind's own.
+
+When a run ends (succeeded, failed or cancelled), each step that kept state gets its `cleanup`
+(`agent.start` deletes a sandbox it made unless `keep`). A run cancelled while a step is in the
+middle of an attempt stops at that step's next write; what the attempt did is kept.
+
+## Runs
+
+- **Concurrency.** `parallel` (at most 20 at once, the rest queue), `skip` (recorded as `skipped`),
+  `queue` (one at a time, in order), `cancel_previous` (the runs going on are cancelled first).
+- **Rate limit.** At most `max` runs start per `per_s` seconds (unset: 100 an hour); past it, runs
+  are recorded as `skipped` with the reason. It also stops loops (an automation started by agent
+  events that starts agents).
+- **By hand.** `POST …/run` makes a `manual` event for the automation (`event.data.input`,
+  `event.data.by`), whatever its trigger; its filters still apply (a run they refuse is `skipped`,
+  so the owner sees why). The same `key` is the same run.
+- **Cancel and retry.** Cancelling stops a run and cleans up; retrying a failed or cancelled run
+  goes on from the step that stopped it, its attempts starting over, earlier steps kept.
+- **Waits** park the run (`waiting`, `next_at`): records of a thread the run started or follows wake
+  it at once, in the mirror's own write; `next_at` is the safety net.
+- **Stream.** Every change of a run is an `automation_run` event (the whole run, with a cursor);
+  automations are `automation` and `automation_removed` events. An automation's `last_run` is
+  updated without an event, so live status comes from `automation_run`.
+
+## The catalog
+
+`GET …/automations/catalog` lists every trigger source and step kind with JSON Schemas, for the
+builder. Configs are `{type: "object", properties, required}`, in display order; a string's
+`format` picks its widget: `template` (one line), `template-long` (prompts, bodies), `roll-thread`,
+`roll-target`, `roll-project`, `roll-model`, `roll-secret`. A trigger's `events[].fields` are the
+`event.data` paths worth filtering on and `sample` a realistic `event.data`; a step's `output` its
+`steps.<id>.…` fields.
+
+## For integrations
+
+Besides the traits (above):
+
+- `registry::wake_run(conn, run_id)`: have a run looked at now, inside the integration's own
+  write (a reply that the run's waiting step handles); `Code::wake_automations(owner)` after the
+  commit.
+- `registry::listens(conn, owner, source, kind)`: whether an enabled automation listens.
+- `StepContext::command(machine, part, Command)`: a daemon command as the automation, with an
+  idempotent id (`part` unique per side effect); `follow_thread(machine, thread)`: be woken by a
+  thread the run didn't start.
+- `Code::automation_api(owner, automation, run_as, method, path, body)`: the API as an automation
+  outside a step (a Slack button answering a request).
+- `Code::create_automation(owner_id, spec, by)`: an integration's built-in automation, with the
+  route's checks.
+- Register in `automations::register_integrations` (one line per integration), called when the
+  engine starts on a node.
+
+## Surfaces
+
+- Routes: docs/code/http-api.md, "Automations"; the auth matrix in `routes.rs`.
+- `roll agent automation --owner <owner> …` (an owner token in `--token` or ROLL_CODE_TOKEN):
+  `list`, `get`, `create`, `update`, `delete`, `enable`, `disable`, `run [--input] [--key]
+  [--wait]`, `runs`, `show`, `cancel`, `retry`, `set-secret` (the value from stdin),
+  `remove-secret`, `rotate-webhook-secret`, `catalog`, `test`.
+- MCP tools, mapped onto the routes: `list_agent_automations`, `save_agent_automation`,
+  `run_agent_automation`, `list_agent_automation_runs`, `get_agent_automation_run`,
+  `cancel_agent_automation_run`.
+- The dashboard: `lib/automations-api.ts` (types, decoders, client; `createAgentsApi().automations`)
+  and `lib/automations-demo.ts` (the demo's automations and runs, in memory).
+
+Tests: docs/code/test-coverage.md, "Automations".

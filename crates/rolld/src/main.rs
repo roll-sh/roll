@@ -677,6 +677,7 @@ async fn start_code(
         info!(backend = b, "roll code: sandboxes on");
     }
     code.start_sandboxes();
+    code.start_automations();
     match &code.config.review.hosted {
         Some(h) => info!(provider = %h.provider, "roll code: hosted reviewer configured"),
         None => info!("roll code: no hosted reviewer (owners can bring their own key)"),

@@ -301,12 +301,12 @@ pub fn notices() -> Vec<Notice> {
 pub fn catalog() -> Catalog {
     Catalog {
         triggers: vec![
-            TriggerInfo { source: "manual".into(), title: "By hand".into(), description: "Run it from the dashboard, the CLI or MCP.".into(), events: vec![EventInfo { kind: "run".into(), title: "Run".into(), fields: vec!["input".into(), "by".into()] }], config: json!(null), needs_setup: false },
+            TriggerInfo { source: "manual".into(), title: "By hand".into(), description: "Run it from the dashboard, the CLI or MCP.".into(), events: vec![EventInfo { kind: "run".into(), title: "Run".into(), fields: vec!["input".into(), "by".into()], sample: json!({ "by": "acme", "input": {} }) }], config: json!(null), needs_setup: false },
             TriggerInfo {
                 source: "linear".into(),
                 title: "Linear".into(),
                 description: "Issues and comments in Linear.".into(),
-                events: vec![EventInfo { kind: "issue.created".into(), title: "Issue created".into(), fields: vec!["issue.title".into(), "issue.labels".into()] }],
+                events: vec![EventInfo { kind: "issue.created".into(), title: "Issue created".into(), fields: vec!["issue.title".into(), "issue.labels".into()], sample: json!(null) }],
                 config: json!({ "type": "object", "properties": { "team": { "type": "string" } } }),
                 needs_setup: true,
             },

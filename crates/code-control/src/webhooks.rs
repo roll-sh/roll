@@ -350,19 +350,24 @@ impl Promises {
     }
 }
 
-/// Whether the repo has an active webhook for `kind` (read on `c`).
+/// Whether the repo has an active webhook for `kind`, or an automation of its owner listens
+/// for it (read on `c`).
 fn hooked_on(c: &Conn<'_>, repo_id: &str, kind: &str) -> code_sql::Result<bool> {
-    c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM repo_webhooks WHERE repo_id = ? AND active = 1 AND events LIKE ?)",
-        params![repo_id, format!("%\"{kind}\"%")],
-        |r| r.get::<_, i64>(0),
-    )
-    .map(|n| n != 0)
+    let hooked = c
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM repo_webhooks WHERE repo_id = ? AND active = 1 AND events LIKE ?)",
+            params![repo_id, format!("%\"{kind}\"%")],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n != 0)?;
+    Ok(hooked || crate::agents::automations::triggers::code_listens(c, repo_id, kind)?)
 }
 
 /// Queue a `kind` event's deliveries to the repo's active webhooks for it (read on `c`, inside
-/// a write). Returns how many.
-fn insert_hook_deliveries(c: &Conn<'_>, r: &RepoRow, kind: &str, data: &Value) -> code_sql::Result<usize> {
+/// a write), and record it in the owner's automation inbox when an automation listens for it
+/// (`event_id`: the event's own id, its idempotency key there). Returns how many deliveries.
+fn insert_hook_deliveries(c: &Conn<'_>, r: &RepoRow, kind: &str, data: &Value, event_id: &str) -> code_sql::Result<usize> {
+    crate::agents::automations::triggers::record_code_event(c, r, kind, data, event_id)?;
     let hooks = hooks_on(c, &r.id)?;
     let (at, t) = (crate::db::now_ms(), now());
     let rows: Vec<Vec<code_sql::Value>> = hooks
@@ -497,12 +502,15 @@ impl Code {
                 return Ok(0);
             }
             match &repo {
-                Some(r) => insert_hook_deliveries(c, r, kind, data),
+                Some(r) => insert_hook_deliveries(c, r, kind, data, id),
                 None => Ok(0),
             }
         })?;
         if n > 0 {
             self.kick_deliveries();
+        }
+        if let Some(r) = &repo {
+            self.wake_automations(&r.owner_id);
         }
         Ok(n)
     }
@@ -739,6 +747,14 @@ impl Code {
             let mut rows: Vec<Vec<code_sql::Value>> = Vec::new();
             let (at, t) = (crate::db::now_ms(), now());
             for ((seq, l), data) in page.iter().zip(&data) {
+                // Automations listening for landings: in the same write that moves the cursor.
+                if let Some(Some(r)) = repos.get(l.repo.as_str()) {
+                    let d = match data {
+                        Some(d) => d.clone(),
+                        None => self.landed_json(l),
+                    };
+                    crate::agents::automations::triggers::record_code_event(c, r, "landed", &d, &format!("landed:{seq}"))?;
+                }
                 let (Some(Some(r)), Some(hs)) = (repos.get(l.repo.as_str()), hooks.get(l.repo.as_str())) else { continue };
                 for h in hs.iter().filter(|h| *seq > h.since_seq) {
                     // A webhook made after the data was read (between the two reads above).
@@ -765,11 +781,13 @@ impl Code {
         Ok(out)
     }
 
-    /// Of `repos`, those with an active webhook for landings.
+    /// Of `repos`, those with an active webhook for landings (or an automation listening).
     fn landed_hook_repos<'a>(&self, repos: impl Iterator<Item = &'a str>) -> Result<BTreeSet<String>> {
         let mut out = BTreeSet::new();
         for r in repos {
-            if self.db.webhooks(r)?.iter().any(|h| h.active && h.events.iter().any(|e| e == "landed")) {
+            if self.db.webhooks(r)?.iter().any(|h| h.active && h.events.iter().any(|e| e == "landed"))
+                || self.db.sql().read(|c| crate::agents::automations::triggers::code_listens(c, r, "landed"))?
+            {
                 out.insert(r.to_string());
             }
         }
@@ -795,9 +813,11 @@ impl Code {
             return Ok(());
         }
         let Some(r) = self.db.repo_by_id(repo_id)? else { return Ok(()) };
-        if self.db.write(|c| insert_hook_deliveries(c, &r, kind, data))? > 0 {
+        let event_id = new_id("ev");
+        if self.db.write(|c| insert_hook_deliveries(c, &r, kind, data, &event_id))? > 0 {
             self.kick_deliveries();
         }
+        self.wake_automations(&r.owner_id);
         Ok(())
     }
 

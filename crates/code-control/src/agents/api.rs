@@ -53,6 +53,7 @@ pub fn routes() -> Router<Arc<Code>> {
         .route("/v1/code/agents/{owner}/shares", get(share::list))
         .route("/v1/code/agents/{owner}/shares/{id}", delete(share::revoke))
         .merge(super::sandbox::api::routes())
+        .merge(super::automations::api::routes())
 }
 
 // ── who may do what ──
@@ -426,9 +427,21 @@ impl Stream {
                 evs.push(d.event(kind));
             }
         }
+        // Automations and their runs (docs/code/automations.md).
+        let automations = super::automations::defs::after(db, &self.owner_id, self.high, store::PAGE)?;
+        let more_automations = (automations.len() as i64 == store::PAGE).then(|| automations.last().map_or(0, |a| a.cursor));
+        for a in &automations {
+            evs.push(match a.deleted_at {
+                Some(_) => StreamEvent::AutomationRemoved { cursor: a.cursor, automation: agent_proto::AutomationId(a.id.clone()) },
+                None => StreamEvent::Automation { cursor: a.cursor, automation: Box::new(super::automations::defs::view(&self.code, a)) },
+            });
+        }
+        let runs = super::automations::engine::runs_after(db, &self.owner_id, self.high, store::PAGE)?;
+        let more_runs = (runs.len() as i64 == store::PAGE).then(|| runs.last().map_or(0, |r| r.cursor));
+        evs.extend(runs.into_iter().map(|r| StreamEvent::AutomationRun { cursor: r.cursor, run: Box::new(r) }));
         evs.sort_by_key(|e| cursor_of(e).unwrap_or(0));
-        // A full page ends where its last row is; the other table's rows past it come next time.
-        let limit = [more_entities, more_machines.then(|| machines.last().map_or(0, |m| m.cursor))].into_iter().flatten().min();
+        // A full page ends where its last row is; the other tables' rows past it come next time.
+        let limit = [more_entities, more_machines.then(|| machines.last().map_or(0, |m| m.cursor)), more_automations, more_runs].into_iter().flatten().min();
         let mut high = self.high;
         for ev in evs {
             let c = cursor_of(&ev).unwrap_or(0);

@@ -242,6 +242,37 @@ impl StepContext {
         }
     }
 
+    /// Have the run woken by this thread's records too (a thread an earlier run, or someone
+    /// else, started), without listing it as started by the run.
+    pub fn follow_thread(&mut self, machine: &MachineId, thread: &ThreadId) {
+        if let Err(e) = store::follow(self.code.db.sql(), machine.as_str(), thread.as_str(), &self.owner.id, self.run.as_str(), self.automation.as_str()) {
+            self.log(LogLevel::Warn, format!("following {thread}: {e}"));
+        }
+    }
+
+    /// Send a command to one of the owner's machines as the automation (`POST
+    /// …/machines/{machine}/commands`), with the id [`command_id`](Self::command_id)`(part)`: make
+    /// `part` unique per side effect, and a repeated attempt is answered from the daemon's
+    /// receipt. Offline, timeouts and internal errors are `Err(Retry)`; refusals `Err(Fail)`.
+    pub async fn command(&self, machine: &str, part: &str, command: agent_proto::Command) -> Result<agent_proto::Reply, super::StepOutcome> {
+        use super::StepOutcome;
+        use agent_proto::{ErrorCode as E, Reply};
+        let path = format!("/v1/code/agents/{}/machines/{}/commands", enc(&self.owner.name), enc(machine));
+        let a = self.api(Method::POST, &path, Some(json!({ "id": self.command_id(part), "command": command }))).await;
+        match serde_json::from_value::<Reply>(a.body.clone()) {
+            Ok(Reply::Error(e)) => match e.code {
+                E::MachineOffline | E::Timeout | E::Internal => Err(StepOutcome::Retry(e.message)),
+                E::Conflict if e.message.contains("partly") => {
+                    Err(StepOutcome::Fail(format!("{} (the machine restarted while it ran; look at the canvas before running it again)", e.message)))
+                }
+                _ => Err(StepOutcome::Fail(e.message)),
+            },
+            Ok(r) if a.ok() => Ok(r),
+            _ if a.transient() => Err(StepOutcome::Retry(a.error())),
+            _ => Err(StepOutcome::Fail(a.error())),
+        }
+    }
+
     /// An HTTP request to a public address: http(s) only, no credentials in the URL, private
     /// and loopback addresses refused (also when a name resolves to one, through
     /// `review::apps::PublicOnly`) unless the server allows private webhooks
@@ -255,17 +286,37 @@ impl StepContext {
     /// request (in a cluster, to the node that serves it). The token made for the call works for
     /// this call only and is looked up like every token.
     pub async fn api(&self, method: Method, path: &str, body: Option<Value>) -> ApiAnswer {
-        let name = match &self.run_as {
+        let router = self.router.get_or_init(|| crate::api::router(self.code.clone())).clone();
+        self.code.automation_call(&router, &self.owner, &self.automation, self.run_as.as_deref(), method, path, body).await
+    }
+}
+
+fn enc(s: &str) -> String {
+    percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
+}
+
+impl Code {
+    /// Call roll's API as an automation outside a step (an integration acting for a run: a
+    /// Slack button answering a request, a Linear reply steering a thread), like
+    /// [`StepContext::api`].
+    pub async fn automation_api(self: &Arc<Self>, owner: &OwnerRef, automation: &AutomationId, run_as: Option<&str>, method: Method, path: &str, body: Option<Value>) -> ApiAnswer {
+        let router = crate::api::router(self.clone());
+        self.automation_call(&router, owner, automation, run_as, method, path, body).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn automation_call(&self, router: &axum::Router, owner: &OwnerRef, automation: &AutomationId, run_as: Option<&str>, method: Method, path: &str, body: Option<Value>) -> ApiAnswer {
+        let name = match run_as {
             Some(a) => format!("agent:{a}"),
-            None => format!("automation:{}", self.automation),
+            None => format!("automation:{automation}"),
         };
         let token = format!("{TOKEN_PREFIX}{}", crate::agents::api::random_hex(32));
         let hash = hash_token(&token);
         let expires = code_sql::now_ms() + TOKEN_TTL_MS;
-        if let Err(e) = store::insert_token(self.code.db.sql(), &hash, &self.owner.id, self.automation.as_str(), &name, expires) {
+        if let Err(e) = store::insert_token(self.db.sql(), &hash, &owner.id, automation.as_str(), &name, expires) {
             return ApiAnswer { status: StatusCode::SERVICE_UNAVAILABLE, body: json!({ "error": format!("recording the run's token: {e}") }) };
         }
-        let router = self.router.get_or_init(|| crate::api::router(self.code.clone())).clone();
+        let router = router.clone();
         let mut b = Request::builder().method(method).uri(path).header(header::AUTHORIZATION, format!("Bearer {token}"));
         let req = match body {
             Some(v) => {
@@ -285,7 +336,7 @@ impl StepContext {
             },
             Err(e) => ApiAnswer { status: StatusCode::BAD_REQUEST, body: json!({ "error": e.to_string() }) },
         };
-        if let Err(e) = store::delete_token(self.code.db.sql(), &hash) {
+        if let Err(e) = store::delete_token(self.db.sql(), &hash) {
             tracing::warn!(error = %e, "dropping an automation's call token (it expires by itself)");
         }
         answer
