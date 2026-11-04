@@ -18,7 +18,7 @@ def git(*args, data=None, env=None):
 readme = '''# Recovery and OLTP165 review checkpoint (2026-11-04)
 
 
-171FULLGATE UPDATE: DEBUG completed457/0/18/61,command0+stageaudit0,60actualbinaryhashes. RELEASE is active;laterstagesNOTCOMPLETE. Active release raw excluded. No fullpipelinepass.
+171FULLGATE UPDATE: DEBUG andRELEASE eachcompleted457/0/18/61,eachcommand0+stageaudit0,60actualbinaryhashes/profile. Clippy is active;dist/unitNOTCOMPLETE. Active laterstage raw excluded. No fullpipelinepass.
 
 171FULLGATE LAUNCH: exactcleancac0933b,source/tree/frozenrunner/map/toolchain/startup
 controls captured. No inheritedtestoverrides;explicitgoldenunsets;ordinarydefault
@@ -440,6 +440,9 @@ sources['runners/audit171-full-terminal.py'] = str(D / 'audit171-full-terminal.p
 sources['full171-lazy-v1/affinity-observation-debug-golden.json'] = str(D / 'full171-lazy-v1/affinity-observation-debug-golden.json')
 # Completed debug stage only; release output is active and intentionally excluded.
 for name in ('debug-test.command', 'debug-test.log', 'debug-test-audit.log', 'debug-test-summary.json', 'debug-test-binaries.json', 'debug-test-completion.json'):
+    sources['full171-lazy-v1/' + name] = str(D / 'full171-lazy-v1' / name)
+# Completed release stage and closed process samples; active later-stage raw excluded.
+for name in ('release-test.command', 'release-test.log', 'release-test-audit.log', 'release-test-summary.json', 'release-test-binaries.json', 'release-test-completion.json', 'disk-before-release-test.json', 'affinity-observation-release-build.json', 'affinity-observation-release-tests.json'):
     sources['full171-lazy-v1/' + name] = str(D / 'full171-lazy-v1' / name)
 for name, source in sources.items():
     files[name] = Path(source).read_bytes()

@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "327fb1a378373e9de72c03a45f8f892071a0c058f2eb0cb3d430c6babcf32c1c",
-    "bytes": 18755
+    "sha256": "2ffa4528bfe5d95550a2e77fc95cc1af6c495f11c28a49be012b9f6299665480",
+    "bytes": 18782
   },
   "baseline171-v1/RESTORED.txt": {
     "sha256": "2ad11b1db92238f171853cadc56294d550edeed718924b1b46054ccb24969691",
@@ -772,8 +772,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "5e52f52a79821c71b8b417748317635c103fddf2bb518b41938e298d8a9ec717",
-    "bytes": 37497
+    "sha256": "e9b914d64730146d9f2ce9f6c7108dcd3581c782f4015312aa79243040995b37",
+    "bytes": 37980
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -1035,6 +1035,14 @@
     "sha256": "c8cfe7f0140f350d34c28e3c27bd212e087ef2c487869c5e038b2680797d6897",
     "bytes": 4810
   },
+  "full171-lazy-v1/affinity-observation-release-build.json": {
+    "sha256": "9aa43972f5ab129f20feb8540f49a9863d0381dc25d5834d04690f6134acac00",
+    "bytes": 2122
+  },
+  "full171-lazy-v1/affinity-observation-release-tests.json": {
+    "sha256": "c8543dcbb436b82a89109393d4dcfffda529b3ffa2845de473f5ec52e801046f",
+    "bytes": 1921
+  },
   "full171-lazy-v1/debug-test-audit.log": {
     "sha256": "e0cd2a3735867ab91821c5791525506c194d756946af2f4daaf295f55be06e41",
     "bytes": 83
@@ -1063,9 +1071,37 @@
     "sha256": "3b7ace71210be77b6ecf45db5cc6c25f6dd99bf0ba6efb9315e687a6be9669ca",
     "bytes": 134
   },
+  "full171-lazy-v1/disk-before-release-test.json": {
+    "sha256": "e390f2ab2bef03dd2b0b01953ea207f09da8b36c6d62ff89706ad46c2469407e",
+    "bytes": 134
+  },
   "full171-lazy-v1/initial.status": {
     "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "bytes": 0
+  },
+  "full171-lazy-v1/release-test-audit.log": {
+    "sha256": "afa5e4defc450c8a3be48e3ba288a663ceaa8f05047abe710aa64204d347c907",
+    "bytes": 85
+  },
+  "full171-lazy-v1/release-test-binaries.json": {
+    "sha256": "22664b1467b59de6c6b400b02508f075079bc1ccbb3799a669800e626f18d58f",
+    "bytes": 14625
+  },
+  "full171-lazy-v1/release-test-completion.json": {
+    "sha256": "7f3c220fcadb4ccdf0523abdc2a042632e001f3bc20005dde345ee0f930c1e10",
+    "bytes": 417
+  },
+  "full171-lazy-v1/release-test-summary.json": {
+    "sha256": "90320f7be8f7a342ad2c77e0035b22c70c25207f65ee47ec6e7e85d1885ebb32",
+    "bytes": 4017
+  },
+  "full171-lazy-v1/release-test.command": {
+    "sha256": "71a6025a4acfc80b9d5ef058f083ab8feef2ac79b82048d5d6534c9385b0d572",
+    "bytes": 35
+  },
+  "full171-lazy-v1/release-test.log": {
+    "sha256": "072aa0b5f7d008afcb14ac2830013aff69cf87844778a9d90c8b0a78e98bc2fc",
+    "bytes": 44418
   },
   "full171-lazy-v1/source.txt": {
     "sha256": "78174d17a36dd2b5d156154ad2a3f9a0b63682b00cd81be8f3e76329a7b55bcb",
@@ -1848,8 +1884,8 @@
     "bytes": 4776
   },
   "runners/PLANNER171-LAZY-HANDOFF.md": {
-    "sha256": "2be3d52e62f1898bed30404d3e67f4665900d0543d247e71ef6bd2336f02cb3a",
-    "bytes": 3744
+    "sha256": "0ef2ecc3470b76ee2d95c985902727a718a6948ed9826951176a2baabd71d1c6",
+    "bytes": 4363
   },
   "runners/R3-CASE-MATRIX.md": {
     "sha256": "bab38282c8248db553c43a488f9557d875c95d9a507fb231bf1238c68fbe21bf",
