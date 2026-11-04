@@ -166,7 +166,7 @@ export function useInboxActions() {
   );
 
   const toastEl = toast && (
-    <div role="status" className="rise fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-1/2 z-[70] flex -translate-x-1/2 items-center gap-3 rounded-lg border border-line bg-panel px-3 py-2 text-[12.5px] shadow-float">
+    <div role="status" className="rise fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-1/2 z-[70] flex -translate-x-1/2 items-center gap-3 rounded-lg border border-outline px-3 py-2 text-[12.5px] shadow-pop inset-shadow-highlight glass">
       <span className={toast.error ? "text-danger" : "text-fg"}>{toast.text}</span>
       {toast.undo && (
         <button
@@ -300,10 +300,10 @@ export function ThreadsSidebar({ data, open, setOpen, phone, openThread }: { dat
       {open && (
         <aside
           aria-label="Threads"
-          className={`sidebar-in flex min-h-0 flex-col bg-bg ${phone ? "absolute inset-0 z-30" : "relative w-[268px] shrink-0 border-r border-line"}`}
+          className={`sidebar-in flex min-h-0 flex-col bg-bg ${phone ? "absolute inset-0 z-30" : "relative w-[268px] shrink-0"}`}
         >
           <div className="flex h-10 shrink-0 items-center gap-2 pr-1.5 pl-3">
-            <h3 className="text-[12.5px] font-semibold tracking-[-0.01em]">Threads</h3>
+            <h3 className="text-[12.5px] font-[590] tracking-[-0.01em]">Threads</h3>
             <span className="font-mono text-[11px] text-subtle">{active}</span>
             <span className="ml-auto flex items-center">
               {startNew && !readOnly && (
@@ -466,7 +466,7 @@ function ThreadRow({ row, selected, onPick, now, actions }: { row: InboxRow; sel
     <div
       role="treeitem"
       aria-selected={selected}
-      className={`group/r relative flex h-8 items-center rounded-md transition-colors ${selected ? "bg-panel-2 text-fg" : "hover:bg-panel-2/60"} ${menu ? "bg-panel-2/60" : ""}`}
+      className={`group/r relative flex h-[30px] items-center rounded-md transition-colors duration-150 ${selected ? "bg-fg/[0.07] text-fg inset-shadow-highlight" : "hover:bg-fg/[0.04]"} ${menu ? "bg-fg/[0.04]" : ""}`}
     >
       <button type="button" onClick={() => onPick(t.id)} className="flex h-full min-w-0 flex-1 items-center gap-2 pr-1 pl-2.5 text-left" title={t.title}>
         <span className="grid size-3 shrink-0 place-items-center">
@@ -476,12 +476,12 @@ function ThreadRow({ row, selected, onPick, now, actions }: { row: InboxRow; sel
             <span aria-hidden className={`size-1.5 rounded-full ${row.status ? STATUS_DOT[row.status] : "bg-line-2"}`} />
           )}
         </span>
-        <span className={`min-w-0 flex-1 truncate text-[13px] ${selected ? "text-fg" : quiet ? "text-muted" : "text-fg"}`}>{t.title}</span>
+        <span className={`min-w-0 flex-1 truncate text-[13px] tracking-[-0.005em] ${selected ? "font-[510] text-fg" : quiet ? "text-muted" : "text-soft"}`}>{t.title}</span>
         {row.status && <span className="sr-only">{rowStatusLabel[row.status]}</span>}
       </button>
       <span className={`flex shrink-0 items-center gap-1 pr-2 font-mono text-[10.5px] text-subtle ${actions.readOnly ? "" : "group-hover/r:hidden"} ${menu ? "hidden" : ""}`}>
         {pill && (
-          <span className={`rounded-full px-1.5 py-px font-sans text-[10.5px] ${pill === "failed" ? "bg-danger/12 text-danger" : pill === "waiting" ? "bg-accent/15 text-accent" : "bg-panel-2 text-muted"}`}>
+          <span className={`rounded-full px-1.5 py-px font-sans text-[10.5px] ${pill === "failed" ? "bg-danger/12 text-danger" : pill === "waiting" ? "bg-accent/15 text-accent" : "bg-fg/[0.06] text-muted"}`}>
             {rowStatusLabel[pill]}
           </span>
         )}
@@ -638,9 +638,9 @@ export function SnoozeDialog({ onSnooze, onClose, presets = false }: { onSnooze:
     done(until);
   };
   return (
-    <div className="fade-in fixed inset-0 z-[60] grid place-items-center bg-black/50 p-4" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
-      <form role="dialog" aria-modal aria-label={presets ? "Snooze" : "Custom snooze"} onSubmit={submit} className="sheet-in w-full max-w-[380px] rounded-xl border border-line bg-panel p-4 shadow-pop">
-        <h2 className="text-[15px] font-semibold tracking-[-0.02em]">{presets ? "Snooze" : "Custom snooze"}</h2>
+    <div className="fade-in fixed inset-0 z-[60] grid place-items-center bg-(--scrim) p-4 backdrop-blur-[2px]" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
+      <form role="dialog" aria-modal aria-label={presets ? "Snooze" : "Custom snooze"} onSubmit={submit} className="sheet-in w-full max-w-[380px] rounded-xl border border-line-2 bg-sheet p-4 shadow-sheet inset-shadow-highlight">
+        <h2 className="text-[15px] font-[590] tracking-[-0.02em]">{presets ? "Snooze" : "Custom snooze"}</h2>
         <p className="mt-1 text-[12.5px] text-muted">Choose when snoozed threads return to your inbox.</p>
         {presets && (
           <div className="mt-3 grid gap-px">
