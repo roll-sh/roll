@@ -1,0 +1,10 @@
+{
+  "pgbench-limiter-candidate-profile.perf.data": {
+    "bytes": 1608486,
+    "sha256": "b64e4067a88739f2338f52f7aa4b018d8ebdce02ecef02cca3c943a8227eb196"
+  },
+  "pgbench-limiter-baseline-profile.perf.data": {
+    "bytes": 1828618,
+    "sha256": "342aaf06f3aaba38ae227b9592171a86e26154386cd4eb123375eadd00fbada0"
+  }
+}
