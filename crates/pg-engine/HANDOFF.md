@@ -7450,3 +7450,10 @@ qualifying indexed updates, filter-only row updates and UPDATE of the changed ve
 GIN oversized-key order currently uses `Value::cmp_total`, as in the existing per-row
 check; reference coverage here establishes byte/C ordering. Collation-sensitive error
 precedence has not been validated, and accumulation-flush ordering remains unmodelled.
+
+The initial measured-INCLUDE fixture failed during its optional VACUUM setup, before
+CREATE INDEX, on the 8300-byte raw row: HeapPacker::push subtract overflow at relsize.rs591,
+called by measure_rows_with's heap_pages. This failure and a targeted backtrace remain
+sealed, with no baseline attribution yet. The fixture uses the bulk insert's asserted
+unmodelled heap state directly; both 2816/8320 index error expectations are unchanged.
+This avoids the unrelated setup operation, without fixing or accepting the VACUUM gap.

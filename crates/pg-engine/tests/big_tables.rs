@@ -674,7 +674,9 @@ fn measured_serial_include_size() {
         for (len, expected) in [(2800, "index row size 2816 exceeds btree version 4 maximum 2704"), (8300, "index row requires 8320 bytes, maximum size is 8191")] {
             s.query("CREATE TABLE mi (k int, payload text)").unwrap();
             s.query(&format!("INSERT INTO mi SELECT g, CASE WHEN g=6000 THEN mi_text({len}) ELSE 'small' END FROM generate_series(1,6000) g")).unwrap();
-            s.query("VACUUM mi").unwrap();
+            // The bulk insert already leaves this heap unmodelled. VACUUM of the
+            // 8300-byte raw row hits a separately recorded HeapPacker overflow before
+            // CREATE INDEX; it is not needed to enter the measured build callback.
             let result = s.query("SELECT oid FROM pg_class WHERE relname='mi'").unwrap();
             let pg_engine::types::Value::Oid(oid) = result[0].rows[0][0] else { panic!("table oid") };
             assert!(pg_engine::exec::sizing::is_estimated(oid, &s.state.db));
