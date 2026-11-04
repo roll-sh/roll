@@ -5510,6 +5510,116 @@ tsvector 5,038 / 700. CPU over the nine builds 99 s against 20 s, peak RSS 1.56 
 decodes only the index's columns in the build pass now, and agent 151 has the size models'
 first-build cost.
 
+## Index access, round 6 (round 25, agent 163)
+
+HANDOFF.md's "Index access at index cost, round 6" has what changed. Engine against PostgreSQL
+18.6 in containers on both sides (`tools/bench/run.sh` with `ENGINE_DOCKER=1`, both servers on
+cores 28-31 at the same CPU weight, the host network, `--cache-mb 2048` and `shared_buffers=2GB`;
+each side's CPU from its cgroup, its peak memory the engine process's RSS and PostgreSQL's
+cgroup anon + shmem). Engines built with `--profile dist`; "base" is `21e3863f` (origin's head
+when the round started: 151's models, 149's scan batches, 145's plan fixes, 148's
+key-column-only build reads), "after" the round's first batch on it. Each run is a fresh engine
+process on one data directory (`access-load` and `access-builds-load`, loaded once); two rounds,
+the order PostgreSQL, base, after, then after, base, PostgreSQL. The access suite is 60
+queries a case after 5 warm-ups (ms: the mean of the rounds' medians; cpu: the server's CPU ms
+per query, background threads included). The builds (`access-builds`, new in
+`tools/bench/access.rs`: one 1M-row table with a column for each access method) run after the
+suite, in a fresh process: no measure of the table kept from its load's VACUUM.
+
+| case | PostgreSQL ms (cpu) | base ms (cpu) | after ms (cpu) | after / PostgreSQL time |
+|---|---:|---:|---:|---:|
+| que_fetch | 0.320 (0.27) | 0.241 (0.51) | 0.233 (0.53) | 0.73 |
+| oban_fetch | 0.519 (0.52) | 1.087 (2.22) | 1.095 (2.27) | 2.11 |
+| graphile_fetch | 0.401 (0.38) | 0.928 (1.06) | 0.905 (0.93) | 2.26 |
+| solid_queue_fetch | 0.338 (0.27) | 0.245 (0.26) | 0.280 (0.29) | 0.83 |
+| keyset_page | 0.324 (0.25) | 0.616 (0.58) | 0.599 (0.62) | 1.85 |
+| keyset_page_desc | 0.298 (0.23) | 0.528 (0.48) | 0.381 (0.36) | 1.28 |
+| order_desc_limit | 0.239 (0.18) | 0.291 (0.27) | 0.341 (0.31) | 1.42 |
+| max_id | 0.270 (0.23) | 0.503 (0.55) | 0.361 (0.38) | 1.34 |
+| cat_limit | 0.256 (0.22) | 0.387 (0.32) | 0.418 (0.43) | 1.64 |
+| any_lookup | 0.300 (0.26) | 0.746 (0.64) | 0.463 (0.48) | 1.54 |
+| nested_loop | 0.545 (0.60) | 0.885 (0.94) | 0.881 (0.86) | 1.62 |
+| exists_limit | 0.318 (0.27) | 0.482 (0.46) | 0.455 (0.46) | 1.43 |
+| gist_box | 0.170 (0.17) | 0.236 (0.26) | 0.222 (0.23) | 1.30 |
+| trgm_gin_like | 0.421 (0.45) | 0.235 (0.21) | 0.275 (0.31) | 0.65 |
+| trgm_gist_like | 8.612 (8.91) | 0.246 (0.23) | 0.253 (0.22) | 0.03 |
+| trgm_gin_sim | 4.655 (4.81) | 0.653 (0.78) | 0.663 (0.76) | 0.14 |
+| trgm_gin_word | 0.939 (1.05) | 0.510 (0.52) | 0.533 (0.52) | 0.57 |
+| gin_array | 0.288 (0.42) | 0.651 (0.84) | 0.670 (0.85) | 2.32 |
+| gin_array_overlap | 0.334 (0.43) | 0.924 (1.35) | 0.829 (1.20) | 2.48 |
+| gin_jsonb | 0.809 (0.87) | 0.684 (0.65) | 0.676 (0.66) | 0.84 |
+| gin_jsonb_exists | 0.456 (0.50) | 1.171 (1.16) | 1.043 (1.07) | 2.29 |
+| gin_jsonb_path | 0.420 (0.42) | 1.097 (1.10) | 0.899 (0.85) | 2.14 |
+| gin_tsvector | 0.342 (0.29) | 0.601 (0.59) | 0.494 (0.46) | 1.45 |
+| gin_tsvector_and | 2.671 (2.60) | 7.264 (7.15) | 6.467 (6.64) | 2.42 |
+| skip_scan | 0.339 (0.27) | 1.220 (0.85) | 0.583 (0.60) | 1.72 |
+| gist_point_box | 0.283 (0.23) | 0.206 (0.21) | 0.213 (0.21) | 0.75 |
+| gist_point_knn | 0.303 (0.28) | 0.412 (0.39) | 0.413 (0.39) | 1.36 |
+| gist_point_circle | 0.382 (0.36) | 1.006 (1.08) | 0.790 (0.87) | 2.07 |
+| gist_box_knn | 0.362 (0.34) | 0.406 (0.42) | 0.480 (0.54) | 1.33 |
+| gist_circle_knn | 0.287 (0.28) | 0.464 (0.46) | 0.508 (0.49) | 1.77 |
+| gist_polygon_knn | 0.245 (0.23) | 0.549 (0.57) | 0.676 (0.70) | 2.75 |
+| btree_gist_knn | 0.328 (0.31) | 0.207 (0.18) | 0.219 (0.19) | 0.67 |
+| trgm_gist_knn | 59.924 (60.31) | 1.043 (1.12) | 1.052 (1.14) | 0.02 |
+| char_eq | 0.308 (0.26) | 0.569 (0.56) | 0.515 (0.50) | 1.67 |
+| char_correlated | 0.410 (0.38) | 1.181 (1.18) | 1.209 (1.22) | 2.95 |
+| brin_range | 1.970 (2.25) | 3.115 (3.07) | 3.000 (3.18) | 1.52 |
+| booking_insert | 0.177 (0.17) | 0.278 (0.48) | 0.327 (0.64) | 1.85 |
+| booking2_insert | 0.261 (0.24) | 0.319 (0.72) | 0.328 (0.78) | 1.26 |
+| booking_bulk | 72.3 (74.3) | 3,127 (3,271) | **37.4 (69.8)** | **0.52** |
+| booking_loop | 87.0 (88.0) | 212 (380) | 240 (459) | 2.76 |
+
+Most of the lookup cases' differences between base and after are run-to-run spread, not the
+change: user-space instructions of the engine process over 1,000 queries (perf stat, two
+alternating runs a binary) are within 0.3% for order_desc_limit (750 / 751 M), gist_box_knn
+(1,958 / 1,959 M), max_id and any_lookup. Those the change touches: gin_tsvector_and 44.9 ->
+32.2 M instructions a query, gin_jsonb_exists 6.55 -> 4.72 M (-28% each), and booking_bulk.
+booking_loop's 212 / 240 ms are the same in a focused run of four alternating rounds (229 /
+224 ms). Over the suite's two rounds the servers' CPU was 30.3 s (PostgreSQL), 442 s (base,
+booking_bulk's 393 s of it) and 67.5 s (after, booking_loop's 55 s of it); peak memory 1,525 MB
+(PostgreSQL, shared_buffers touched), 351 MB and 408 MB.
+
+Index builds (CREATE INDEX over 1M rows, then DROP INDEX; s, and the server's CPU s):
+
+| index | PostgreSQL s (cpu) | base s (cpu) | after s (cpu) | after / PostgreSQL time | engine peak MB base / after |
+|---|---:|---:|---:|---:|---:|
+| btree int | 0.325 (0.55) | 1.736 (4.22) | 1.068 (2.71) | 3.29 | 612 / 598 |
+| btree text | 0.478 (0.79) | 1.710 (4.60) | 1.051 (2.69) | 2.20 | 740 / 774 |
+| hash int | 1.353 (1.38) | 2.921 (5.76) | 1.396 (2.72) | 1.03 | 701 / 714 |
+| BRIN timestamptz | 0.115 (0.28) | 2.533 (4.97) | 0.974 (1.95) | 8.47 | 645 / 669 |
+| GiST box | 4.372 (4.34) | 4.142 (8.18) | **1.151 (2.30)** | **0.26** | 728 / 659 |
+| GiST point | 1.056 (1.05) | 3.862 (7.59) | 1.104 (2.16) | 1.04 | 789 / 683 |
+| SP-GiST point | 3.345 (3.33) | 3.290 (6.48) | **1.893 (3.72)** | **0.57** | 801 / 695 |
+| SP-GiST text | 3.109 (3.08) | 3.385 (6.65) | **1.087 (2.18)** | **0.35** | 824 / 676 |
+| GIN int[] | 0.347 (0.79) | 4.521 (8.84) | 1.414 (2.83) | 4.08 | 876 / 666 |
+| GIN jsonb | 1.014 (2.67) | 7.024 (13.52) | 3.173 (6.27) | 3.13 | 954 / 648 |
+| GIN jsonb_path_ops | 0.512 (1.30) | 6.885 (11.54) | 3.495 (6.90) | 6.82 | 994 / 640 |
+| GIN tsvector | 0.491 (1.26) | 4.714 (9.28) | 1.389 (1.60) | 2.83 | 1,150 / 649 |
+
+CPU over the twelve builds and two rounds: 41.6 s PostgreSQL, 183 s base, 76.1 s after (2.4x
+less; 1.8x PostgreSQL's). Peak memory over the builds: 1,588 MB PostgreSQL, 1,153 MB base,
+781 MB after. With the table's measure kept (the same builds right after a VACUUM in the same
+process, release build): BRIN 0.38 s, GIN tsvector 0.82 s, GiST point 0.59 s.
+
+Index-only `count(*)` over TPC-H SF1's lineitem (6M rows, `enable_seqscan = off`, a fresh
+engine): 0.79 s, then 0.63 s (round 5's 50 s doesn't reproduce on this head: no per-entry heap
+check or point read shows in the profile); PostgreSQL 0.11 s with two workers. `l_shipdate < '1995-01-01'` (2.75M entries) 1.06-1.14 s against 0.047 s.
+The engine reads the index on one thread; its profile is per-entry executor work (`ScanNode::
+emit`, the aggregate's per-row call, the pending statistics counts, now batched).
+
+Footprint gate and pgbench (`tools/bench/scoreboard.sh quick`, `SB_ONLY=pgbench`, scale 1,
+the same cores, base then after; the after run overlapped another agent's build, which moved
+PostgreSQL's numbers as much): fresh data directory 3.03 MB both, idle CPU over 5 minutes
+0.02 / 0.03 s, 100 idle sessions 30.9 / 30.9 MB. select-only with 8 clients, CPU per
+transaction: base 0.0450 / 0.0461 ms (PostgreSQL in the same rounds 0.0411 / 0.0395), after
+0.0472 / 0.0465 ms (PostgreSQL 0.0420 / 0.0410): engine / PostgreSQL 1.10-1.17 before,
+1.12-1.13 after. Peak memory 51-69 MB before, 52-71 MB after (PostgreSQL 122-130 MB).
+
+Sizes the engine reports for indexes of a table too big to model (1M rows) aren't
+PostgreSQL's (an accepted internal difference, for the size models): BRIN relpages 2,745
+against 3 (pg_relation_size 3 / 3), GIN 7,211 against 1,474 (pg_relation_size 2 against
+1,474), hash 2,745 against 4,098 (pg_relation_size 10 against 4,098).
+
 ## XML: the tree, input checks and building (round 21, agent 107)
 
 `tools/bench/xml.sh` measures every XML entry point against the reference on one document

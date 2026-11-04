@@ -3940,9 +3940,10 @@ impl InsertNode {
         };
         let mut at_flush = false;
         let r = self.insert(src, ctx).map_err(|e| {
+            // (And an index entry too big, `rowsize`: its index insertion is the flush's too.)
             if c.multi
                 && !e.stacked
-                && (e.code == code::UNIQUE_VIOLATION || e.code == code::EXCLUSION_VIOLATION)
+                && (e.code == code::UNIQUE_VIOLATION || e.code == code::EXCLUSION_VIOLATION || e.code == code::PROGRAM_LIMIT_EXCEEDED)
             {
                 at_flush = true;
                 frames.borrow_mut()[n] = Frame::Copy {
