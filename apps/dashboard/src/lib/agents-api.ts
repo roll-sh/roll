@@ -185,6 +185,8 @@ export interface Thread {
   worktree: Worktree | null;
   status: ThreadStatus;
   lineage: Lineage | null;
+  /** An orchestrator: its agent plans the goal it was given and hands the parts to subagents. */
+  orchestrator: boolean;
   active_run: RunId | null;
   queued: QueuedMessage[];
   run_count: number;
@@ -522,6 +524,8 @@ export type Command =
       title?: string;
       prompt?: string;
       attachments?: Attachment[];
+      /** Start an orchestrator: `prompt` is a goal it plans and delegates to subagents. */
+      orchestrator?: boolean;
     }
   | {
       type: "thread.configure";
@@ -849,6 +853,7 @@ const threadD = obj<Thread>({
   worktree: opt(obj<Worktree>({ path: str, branch: str, base: str })),
   status: literal("idle", "starting", "running", "waiting", "error"),
   lineage: opt(obj<Lineage>({ parent: str, relation: literal("fork", "subagent"), root: str, from_run: opt(str) })),
+  orchestrator: withDefault(bool, () => false),
   active_run: opt(str),
   queued: vec(obj<QueuedMessage>({ id: str, text: str, attachments: vec(attachmentD), at: int })),
   run_count: int,
@@ -1067,6 +1072,7 @@ export const commandD: Decoder<Command> = tagged("type", {
       title: optional(str),
       prompt: optional(str),
       attachments: optional(array(attachmentD)),
+      orchestrator: optional(bool),
     }),
   ),
   "thread.configure": cmd<"thread.configure">(

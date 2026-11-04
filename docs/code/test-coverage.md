@@ -1138,6 +1138,7 @@ login tests drive a fake `roll` process (`apps/desktop/test/fake-roll.mjs`).
 | interrupting the parent ends its sync wait and stops all its tasks | `agent-host/tests/mcp.rs::interrupting_the_parent_ends_its_sync_wait_and_stops_its_tasks` |
 | child approvals are requests on the child (not the parent), end a sync wait with `pending_request`, the node waits; answered on the canvas the task finishes; a timed-out wait leaves the task running | `agent-host/tests/mcp.rs::child_approvals_are_requests_on_the_child_and_end_a_sync_wait` |
 | delegation limits: unknown provider or model, mode escalation, `max_children`, delegating without a running turn; narrowed modes; worktree children from the caller's HEAD; `task_send` follow-ups run in the same child and wake again | `agent-host/tests/mcp.rs::limits_providers_models_modes_worktrees_and_follow_ups`, `agent-host/src/orchestrator/tasks.rs` tests, `agent-host/src/config.rs` tests |
+| orchestrators (`thread.create {orchestrator}`, "Orchestrate" on the canvas): the flag on the thread and kept by a fork, the run records only the goal, its sessions get the orchestrator's instructions, its tasks the subagent's, a plain thread only how delegation works; its tasks' results wake it | `agent-host/tests/mcp.rs::an_orchestrator_is_told_to_plan_and_delegate_and_its_tasks_to_do_the_work`, `agent-host/src/orchestrator/instructions.rs` tests |
 
 ## Agents end to end (`pnpm test:agents`, `scripts/agents-e2e.mjs`)
 

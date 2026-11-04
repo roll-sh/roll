@@ -77,6 +77,7 @@
       "root": "thr_0000000000000001",
       "from_run": "run_0011223344556677"
     },
+    "orchestrator": true,
     "active_run": "run_0011223344556677",
     "queued": [
       {

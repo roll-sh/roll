@@ -324,6 +324,7 @@ async fn command_ids_are_idempotent() {
         title: Some("Once".into()),
         prompt: Some("hi".into()),
         attachments: Vec::new(),
+        orchestrator: false,
     };
     let (a, b) = tokio::join!(
         w.host.run("same".into(), "owner".into(), create.clone()),
@@ -656,6 +657,7 @@ async fn accepting_a_plan_leaves_plan_mode() {
             title: None,
             prompt: Some("plan the refactor".into()),
             attachments: Vec::new(),
+            orchestrator: false,
         })
         .await
     else {
@@ -914,6 +916,7 @@ async fn a_checkout_an_agent_works_in_is_never_pulled_under_it() {
         title: None,
         prompt: Some("work".into()),
         attachments: Vec::new(),
+        orchestrator: false,
     })
     .await
     {

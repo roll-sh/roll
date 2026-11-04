@@ -376,7 +376,7 @@ impl Host {
             fork: None,
             env: self.config.provider(&t.provider).env,
             mcp: vec![self.mcp.session_server(&t.id)],
-            instructions: None,
+            instructions: Some(super::instructions::for_thread(t)),
         };
         // A fork's first session settles how it gets its parent's conversation.
         let settling = cfg.resume.is_none() && matches!(rt.private.transfer, Some(super::Transfer::Pending { .. }));

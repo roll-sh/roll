@@ -67,6 +67,7 @@ export function thread(over: Partial<Thread> = {}): Thread {
     worktree: null,
     status: "idle",
     lineage: null,
+    orchestrator: false,
     active_run: null,
     queued: [],
     run_count: 0,

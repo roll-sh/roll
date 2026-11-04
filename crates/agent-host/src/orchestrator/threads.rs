@@ -21,6 +21,7 @@ pub(crate) struct NewThread {
     pub interaction_mode: InteractionMode,
     pub worktree: bool,
     pub title: Option<String>,
+    pub orchestrator: bool,
 }
 
 impl Host {
@@ -52,6 +53,7 @@ impl Host {
             worktree,
             status: ThreadStatus::Idle,
             lineage: None,
+            orchestrator: spec.orchestrator,
             active_run: None,
             queued: Vec::new(),
             run_count: 0,
@@ -218,6 +220,8 @@ impl Host {
                 root: s.lineage.as_ref().map_or(s.id.clone(), |l| l.root.clone()),
                 from_run: from.map(|r| r.id.clone()),
             }),
+            // A fork of an orchestrator goes on orchestrating.
+            orchestrator: s.orchestrator,
             active_run: None,
             queued: Vec::new(),
             run_count: 0,

@@ -96,6 +96,7 @@ impl World {
                 title: None,
                 prompt: prompt.map(String::from),
                 attachments: Vec::new(),
+                orchestrator: false,
             })
             .await;
         let Reply::Created { id } = reply else { panic!("thread.create: {reply:?}") };

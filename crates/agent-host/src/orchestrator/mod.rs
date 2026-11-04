@@ -17,6 +17,7 @@
 //!   reply again (also after a restart), and a command a crash cut short never runs twice.
 
 mod handoff;
+mod instructions;
 mod projects;
 mod queries;
 mod runs;
@@ -500,6 +501,7 @@ impl Host {
                 title,
                 prompt,
                 attachments,
+                orchestrator,
             } => {
                 let spec = threads::NewThread {
                     project,
@@ -510,6 +512,7 @@ impl Host {
                     interaction_mode,
                     worktree,
                     title,
+                    orchestrator,
                 };
                 self.thread_create(spec, prompt, attachments).await
             }

@@ -501,6 +501,7 @@ impl Host {
                 root: parent.lineage.as_ref().map_or(caller.clone(), |l| l.root.clone()),
                 from_run: Some(parent_run.clone()),
             }),
+            orchestrator: false,
             active_run: None,
             queued: Vec::new(),
             run_count: 0,

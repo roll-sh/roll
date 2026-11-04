@@ -622,6 +622,7 @@ async fn non_git_projects_run_without_checkpoints_or_diffs() {
             title: None,
             prompt: None,
             attachments: Vec::new(),
+            orchestrator: false,
         })
         .await;
     assert!(is_err(&worktree, ErrorCode::Invalid));

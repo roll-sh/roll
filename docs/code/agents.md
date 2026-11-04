@@ -305,6 +305,21 @@ server (`docs/orchestration-v2/orchestrator-mcp-server.md` there), ported in
   logged in, and a model must be one it lists.
 - Tasks survive as records: the node and the child thread. Who is waiting and which results were
   delivered is memory only; a restart interrupts every run anyway.
+- **Instructions** (T3's `orchestrationInstructions.ts`; `orchestrator/instructions.rs`). Every
+  session is told how delegation works (Claude: `--append-system-prompt`; Codex:
+  `additionalContext`; ACP: in front of its first prompt): when to use `delegate_task` rather than
+  its own subagent tool, `orchestrator_capabilities` first, end the turn instead of polling. A
+  delegated thread is also told it is a subagent: do the work itself and report back. The text only
+  depends on what the thread is, so it never breaks a provider's prompt cache.
+- **Orchestrators** ("Orchestrate" in the command palette and the canvas's prompt bar).
+  `thread.create {orchestrator: true}` starts a thread whose prompt is a goal for agents
+  (`Thread.orchestrator`; a fork of one is one too). Its sessions are told to look at the project,
+  plan, tell the user the plan, hand each part to a subagent (`worktree: true` for parts that edit
+  files), end the turn, check each result as it wakes it, and sum up at the end. Nothing else
+  differs: it is an ordinary thread with the same MCP, limits and modes, its run records only the
+  user's goal, and its tasks are ordinary subagents on the canvas under it. T3 has no such role
+  (its threads delegate when the user asks them to); roll adds it so a goal typed outside any
+  conversation becomes agents on the canvas.
 
 ## Machines, login and tokens
 

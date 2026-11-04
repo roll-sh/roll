@@ -342,6 +342,11 @@ pub struct Thread {
     pub status: ThreadStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<Lineage>,
+    /// An orchestrator: its agent plans the work and hands the parts to subagents through roll's
+    /// orchestrator MCP instead of doing it itself ("Orchestrate" on the canvas). The daemon
+    /// gives its sessions the orchestrator's instructions.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub orchestrator: bool,
     /// The run being worked on, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_run: Option<RunId>,
@@ -373,6 +378,11 @@ pub struct Thread {
     pub updated_at: Millis,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<Millis>,
+}
+
+/// For `skip_serializing_if`: a flag that's off isn't written, so records without it read the same.
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// A thread's roll code change.
@@ -1036,6 +1046,10 @@ pub enum Command {
         prompt: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<Attachment>,
+        /// Start an orchestrator ([`Thread::orchestrator`]): the prompt is a goal it plans and
+        /// delegates to subagents.
+        #[serde(default, skip_serializing_if = "is_false")]
+        orchestrator: bool,
     },
     /// Change what future runs use. Switching provider hands the conversation over with a
     /// summary (T3's provider handoff).
