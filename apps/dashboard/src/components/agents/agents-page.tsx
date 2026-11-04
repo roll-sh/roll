@@ -13,7 +13,7 @@ import { setAgentsView, useAgentsSurface, type AgentsView } from "@/lib/agents-s
 import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
 import { useMarkState } from "../mark-state";
 import { AddMachineDialog, AddMachinePaths } from "./add-machine";
-import { AgentsCanvas, type CanvasHandle } from "./agents-canvas";
+import { AgentsCanvas, type CanvasHandle, type OrderSync } from "./agents-canvas";
 import { Menu } from "./menu";
 import { NewAgent } from "./new-agent";
 import { MachineNode, ProjectNode, RequestNode, SubagentNode, ThreadNode } from "./nodes";
@@ -21,7 +21,7 @@ import { RequestCard } from "./request-card";
 import { useSandboxes } from "./sandbox";
 import { Conversation, IconButton } from "./session";
 import { TerminalNode } from "./terminal";
-import { AgentsContext, useAgentsSnapshot, useHold, useMarkDriver, type AgentsCtx } from "./use-agents";
+import { AgentsContext, useAgents, useAgentsSnapshot, useHold, useMarkDriver, type AgentsCtx } from "./use-agents";
 import { useAgentsConnection } from "./use-connection";
 
 /** Threads whose detail the canvas follows besides the open one, so their subagents show. */
@@ -305,6 +305,8 @@ function CanvasView({
   visible: boolean;
 }) {
   const graph = useMemo(() => deriveGraph(data, { showArchived }), [data, showArchived]);
+  const { services, owner } = useAgents();
+  const sync = useOrderSync(services?.canvas, owner, data.canvas?.revision ?? 0);
   // Show a node asked for before the canvas had it (a deep link, a new sandbox).
   useEffect(() => {
     const k = pendingFocus.current;
@@ -331,7 +333,43 @@ function CanvasView({
         return <TerminalNode terminal={data.terminals.get(n.id)!.value} machine={machineOf(n)} />;
     }
   };
-  return <AgentsCanvas ref={canvasRef} graph={graph} storageKey={storageKey} render={render} defaultSize={defaultSize} active={visible} />;
+  return <AgentsCanvas ref={canvasRef} graph={graph} storageKey={storageKey} sync={sync} render={render} defaultSize={defaultSize} active={visible} />;
+}
+
+/**
+ * The canvas's order kept by roll (`{ order }`), so every device shows the same. A drop is what
+ * the user wants now, so the last writer wins. Another device's save arrives as a newer
+ * `revision` on the stream and loads again (our own saves come back as revisions we know).
+ */
+function useOrderSync(canvas: AgentsServices["canvas"] | undefined, owner: string, revision: number): OrderSync | undefined {
+  const known = useRef(0);
+  const [stale, setStale] = useState(0);
+  useEffect(() => {
+    if (revision > known.current) setStale(revision);
+  }, [revision]);
+  return useMemo<OrderSync | undefined>(
+    () =>
+      canvas && {
+        load: async () => {
+          const saved = await canvas.load(owner);
+          if (!saved) return null;
+          known.current = Math.max(known.current, saved.revision);
+          const doc = saved.doc as { order?: unknown } | null;
+          return doc?.order ?? null;
+        },
+        save: (order) => {
+          canvas
+            .save(owner, { order })
+            .then((r) => (known.current = Math.max(known.current, r.revision)))
+            .catch(() => {
+              // Kept on this device; the next drop tries again.
+            });
+        },
+      },
+    // `stale` makes a new sync, which the canvas loads again.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [canvas, owner, stale],
+  );
 }
 
 function defaultSize(n: GraphNode): Size {

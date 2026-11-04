@@ -101,6 +101,28 @@ describe("the agents in the header", () => {
   });
 });
 
+describe("the canvas order across devices", () => {
+  it("a card moved here is saved to roll; another device's save loads here", async () => {
+    localStorage.clear();
+    const h = setup();
+    const services = conn.services!;
+    await userEvent.keyboard("{Meta>}j{/Meta}");
+    await vi.waitFor(() => expect(services.canvas.load).toHaveBeenCalledWith("acme"));
+    const card = screen.getByRole("button", { name: "Thread Upgrade to Next 16.4" });
+    const kids = () => JSON.parse(localStorage.getItem("roll:agents:order:acme") ?? "{}")["p:prj_1"];
+    card.focus();
+    // It's the second of the project's two threads: up makes it the first.
+    await userEvent.keyboard("{Alt>}{ArrowUp}{/Alt}");
+    const mine = kids();
+    expect(mine).toEqual(["t:thr_2", "t:thr_1"]);
+    expect(services.canvas.save).toHaveBeenLastCalledWith("acme", { order: { "p:prj_1": mine } });
+    // Another device puts them the other way round; its save comes in on the stream.
+    const { revision } = await services.canvas.save("acme", { order: { "p:prj_1": [...mine].reverse() } });
+    act(() => h.client.enqueue({ type: "canvas", cursor: 50, revision, updated_at: 1 }));
+    await vi.waitFor(() => expect(kids()).toEqual([...mine].reverse()));
+  });
+});
+
 describe("a new agent", () => {
   it("starts in the asked-for project, else the last used, else where the newest thread is", () => {
     const a = project({ id: "prj_a" });

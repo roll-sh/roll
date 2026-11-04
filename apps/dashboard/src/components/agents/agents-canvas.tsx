@@ -85,8 +85,8 @@ export const AgentsCanvas = forwardRef<
   const syncRef = useRef(sync);
   syncRef.current = sync;
 
+  useEffect(() => setOrderState(loadOrder(storageKey)), [storageKey]);
   useEffect(() => {
-    setOrderState(loadOrder(storageKey));
     let live = true;
     syncRef.current
       ?.load()
@@ -100,7 +100,8 @@ export const AgentsCanvas = forwardRef<
     return () => {
       live = false;
     };
-  }, [storageKey]);
+    // A new `sync` (another device saved) loads again.
+  }, [storageKey, sync]);
 
   const setOrder = useCallback(
     (next: Order) => {
