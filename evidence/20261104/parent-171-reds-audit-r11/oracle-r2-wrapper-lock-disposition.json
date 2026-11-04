@@ -1,0 +1,13 @@
+{
+  "utc": "2026-11-04T20:26:27.061580+00:00",
+  "decision": "Unchanged mandatory heavy wrapper may recreate only fixed historical lock directory and target/.heavy.lock",
+  "reason": "Existing wrapper authorization includes necessary synchronization metadata; no Cargo/build target allocation",
+  "limits": [
+    "No Cargo invocation",
+    "No build artifacts",
+    "No CARGO_TARGET_DIR change",
+    "No wrapper/global-slot/job changes",
+    "No cleanup"
+  ],
+  "observation": "Worker reports historical wrapper target directory absent; cause unverified"
+}
