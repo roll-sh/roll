@@ -1,0 +1,7 @@
+{
+  "head": "2bc84a5a554287de1afbce96a23aa596ce381fd0",
+  "tree": "13d1ba3f7252e54df34c399cdf106784d3a22ca6",
+  "status": "",
+  "time_utc": "2026-11-04T11:25:58.286293+00:00",
+  "note": "Future-use wrapper repairs only. Original frozen timing evidence and scripts remain unchanged. sh -n passed; no additional bulk measurements or acceptance. step stops at Docker/SQL failure, bulk propagates failure instead of masking it with sed, crun fails fast. No current source test HEAD changed."
+}
