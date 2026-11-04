@@ -25,7 +25,8 @@ OLTP165 recovered clean at 6fde4096. jobA failed (including an executable-copy f
 jobB's final HEAVY-EXIT 0 is FALSE SUCCESS: every cargo step failed on a missing AtomicU64
 import. Its debug/release failure logs are preserved. baeee87a fixes only that import;
 complete current-source debug validation has now passed446tests,0failed,18ignored.
-The release/clippy/build/PostgreSQL checks and footprint/performance gates remain pending.
+The complete release suite also passed446tests,0failed,18ignored across60summaries.
+Release all-target Clippy exited0 with warnings; dist build, PostgreSQL and footprint/performance gates remain pending.
 PostgreSQL18.6 recording of a165_cursor_stream succeeded: nonempty 397-line expected output.
 The other two golden tests return early in recording mode: this is recording evidence,
 not itself a successful embedded/wire/shuffled comparison. The subsequent complete
@@ -50,10 +51,16 @@ Owner backups were checked with ls-remote: baeee87a wip/a165-resume-20261104,
 63f7c0b4 wip/a172-resume-20261104. Shared branch and parent/main worktrees were not mutated.
 
 The manifest records exact hashes of every exported artifact. This checkpoint includes the completed debug-suite output and exact testedtree.
-The still-running release-suite output is excluded, not reported as a finished check.
+Completed release output, command and summary are included. The still-running dist output is excluded.
 '''
 files = {'README.md': readme.encode(), 'export_checkpoint.py': Path(__file__).read_bytes()}
 sources = {
+    'runners/audit-footprint.py': str(D / 'audit-footprint.py'),
+    'oltp165/release-complete.log': str(D / 'check165/release-test.log'),
+    'oltp165/release.command': str(D / 'check165/release-test.command'),
+    'oltp165/release-summary.json': str(D / 'check165/release-summary.json'),
+    'oltp165/clippy-complete.log': str(D / 'check165/clippy.log'),
+    'oltp165/clippy.command': str(D / 'check165/clippy.command'),
     'runners/check165.sh': str(D / 'check165.sh'),
     'runners/check171.sh': str(D / 'check171.sh'),
     'runners/bench165.sh': str(D / 'bench165.sh'),

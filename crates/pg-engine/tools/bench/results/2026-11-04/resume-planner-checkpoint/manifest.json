@@ -1,11 +1,11 @@
 {
   "README.md": {
-    "sha256": "9075c2f55868941cb3ed52fe74d9d59566f79bad66cab1b848d3d46227e85e43",
-    "bytes": 2598
+    "sha256": "4f7e58858bcf076825351648f2d6680948ac1c7d2b5ab98237d29376bae80bd0",
+    "bytes": 2728
   },
   "export_checkpoint.py": {
-    "sha256": "69910fcf8c8cd075b39952a4c5efb9cef6b64306c79982ad50f9a14ae5b9ae5f",
-    "bytes": 7005
+    "sha256": "9a78197c9051d323267aadb96ea43ee420e8f5e4fef46b14f1323f7e3695243b",
+    "bytes": 7558
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -22,6 +22,14 @@
   "fdw172/contrib-base.log": {
     "sha256": "414bfbf97451483a9ca786a92585064a0b096fe9f311faddc01f0c8709b1a91f",
     "bytes": 739
+  },
+  "oltp165/clippy-complete.log": {
+    "sha256": "6d815fe201f69f1de2d870fec48d2957ede85c3dcf24109b52d3a603c64c8d4a",
+    "bytes": 11460
+  },
+  "oltp165/clippy.command": {
+    "sha256": "1b86d70e59e973e8d8af181830282fc52041d009cee30d84e2d7169430dd0de1",
+    "bytes": 51
   },
   "oltp165/debug-complete.log": {
     "sha256": "7e4b0e57578e6c1c5a905b7c82e1017f305674d99cdf588b374b5ce06908fb89",
@@ -87,6 +95,18 @@
     "sha256": "e602a79df119d8795d1db228d6d29ad90dd5a9465bb6a8bf82a8226b7ee7b98c",
     "bytes": 279
   },
+  "oltp165/release-complete.log": {
+    "sha256": "b427e6b21b44ff629c6f0f3529d2a8c3e5104570ee5ae6889284b446dd052e93",
+    "bytes": 37127
+  },
+  "oltp165/release-summary.json": {
+    "sha256": "b9fbb263ac6b4ea8ca7edacbd71573a6d6189a0075e9966bf44f1c528bcb3046",
+    "bytes": 210
+  },
+  "oltp165/release.command": {
+    "sha256": "1ab4b6b574ab0a947d6e458995e864ac91fc71f65f60614f41ed8a0f637d4a2b",
+    "bytes": 50
+  },
   "oltp165/test-debug-failed.log": {
     "sha256": "c716a6de87fda4587ce406b8e1a64b5a46cf93331eca5b944a34477f1ce302c4",
     "bytes": 1303
@@ -107,9 +127,13 @@
     "sha256": "d6b9bc53b55af8be29c09ffbcbab84fedbaf093334579e25e702600b3d9bf5ef",
     "bytes": 2467
   },
+  "runners/audit-footprint.py": {
+    "sha256": "037523cd44c6ed24ae24da6ffa204a9fb35f0fa9c17a25013eeed8ea02f56c43",
+    "bytes": 1287
+  },
   "runners/bench165.sh": {
-    "sha256": "23e411ab262e6bcf4ece7d5ae233be0604407a684830013cf56959a79a2903a0",
-    "bytes": 2295
+    "sha256": "003dfc53f04a446b4dba05df5b3f5ceab0c935ac4fc68bc3b263e3df56964b8d",
+    "bytes": 2445
   },
   "runners/check165.sh": {
     "sha256": "d9b3607782107795dedfa1d934f9f3112b9088e6c78ff159731e55df51a3c7ad",
