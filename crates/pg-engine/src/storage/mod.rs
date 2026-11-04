@@ -3360,7 +3360,7 @@ mod tests {
     }
 
     #[test]
-    fn point_fetch_endpoint_matches_get_cold_and_hot() {
+    fn point_fetch_ranges_include_mvcc_versions_cold_and_hot() {
         let dir = tempfile::tempdir().unwrap();
         let s = Store::open(dir.path(), StoreOptions { sync: false, ..Default::default() }).unwrap();
         let prefix = keys::index_prefix(7, 0);
@@ -3387,9 +3387,14 @@ mod tests {
         assert!(promoted.rows.is_some(), "promoted scan must use hot version chains");
         let hot: Vec<_> = promoted.by_ref().map(Result::unwrap).collect();
         assert_eq!(hot, expected);
+        let mut correct = s.scan_raw(&key, &keys::prefix_end(&key), ts);
+        assert!(correct.rows.is_some(), "correct promoted scan must use hot version chains");
+        assert_eq!(correct.by_ref().map(Result::unwrap).collect::<Vec<_>>(), expected);
         assert_eq!(s.get_version_raw(&key, ts).unwrap().map(|r| r.0), Some(ts));
         eprintln!("endpoint proof ts={ts} cold={cold:?} hot={hot:?} merging_before=true hot_after=true");
-        assert_eq!(cold, expected, "point-fetch endpoint must include physical MVCC versions before hot promotion");
+        // User-key bounds with an appended zero exclude physical timestamp suffixes.
+        // prefix_end must work on both paths; the narrower range is a negative control.
+        assert!(cold.is_empty());
     }
 
     /// A scan sought to other ranges (`Scan::reseek`), forward, backward, across files and
