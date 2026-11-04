@@ -4774,6 +4774,17 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   1,648), pg_dump_tap 14,817 / 14,817. `tools/difftest-guard.sh <base> <head>` runs the guard.
   Those worker checks included the held monitoring commit. The parent integrates the
   round8 fixes without it and runs combined verification in `~/.cache/pg-engine-sol-resume/`.
+  Round 26, agent 162 (difftest round 10 and the guard): a grammar for seeds from 10000 on
+  (`difftest/round10.rs`): nested loops rescanning parameterized index scans (NULL and empty
+  outer sides, LIMIT, LATERAL, semi- and anti-joins, rows and loops read off EXPLAIN ANALYZE
+  by `r10an`), custom against generic plans with STABLE casts of text parameters, untyped
+  parameters and re-plans after DDL, batch filters, group keys and hash-join probes over
+  NULL-heavy, overflowing and collated data, queue tables drained by two sessions, statistics
+  views over many tables. Its findings and routes (a semi-join's nested loop and a
+  GroupAggregate under a LIMIT reading past what PostgreSQL reads, STABLE casts in custom
+  plans): tests/difftest/STATUS.md, "Round 10". Engine fixes: ANALYZE's n_dead_tup from the
+  heap model's dead versions, an INSERT failing on a unique key counted, binary array_recv's
+  header checks in its order (golden `a162_stats_dead`).
 - **Backend-status recovery** (2026-11-01, base `f350cef4`):
   `pg_stat_get_backend_subxact` reads the same raw backend-status snapshot as the other
   backend accessors, `pg_stat_get_activity`, `pg_stat_get_backend_idset`, database backend
