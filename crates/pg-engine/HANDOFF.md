@@ -3522,6 +3522,17 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   CPU, and footprint gate remains HELD. Combined service verification remains pending.
   The runtime `current_setting` bad-OID evaluation-order mismatch also occurs in the
   retained shared baseline and remains open. No round 10 performance claim is accepted.
+  Follow-up on `0925007d`: `a166_lazy_keys_count` adds a PostgreSQL 18.6-recorded INNER
+  hash join with build-side volatile DDL. The engine's natural plan prefetches the first
+  outer row. A controlled Rust test asserts that metadata, flips only `outer_first` on a
+  cloned plan, and observes one cold restricted generation with the recorded false result
+  in debug and release. This tests the node contract, not naturally selected execution order.
+  All four a166 goldens pass in all three modes. The plain count query generates no whole
+  catalog, but cached rows can give the same result. Neither it nor the two bounded plan
+  probes proves a `count_rest` call after DDL. The fix retains node-open catalog visibility;
+  it does not establish statement-start visibility for a node opened after nested DDL.
+  Raw plans, the failed first counter gate, and final checks are in
+  `results/2026-11-04/resume-owner166/followup-keys/`.
 - **Client libraries** (round 17, agent 38; round 18, agent 51): drivers' and ORMs' own test
   suites against the engine and against PostgreSQL 18.6, test by test: `tests/clients/`
   (runner, per-suite scripts, `STATUS.md` with the per-suite counts and every difference

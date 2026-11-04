@@ -1,0 +1,20 @@
+START debug 2026-11-04T14:13:50.432143+00:00
+{"name": "debug", "exit": 101, "validated": false, "summaries": [["FAILED", "0", "1", "0"]], "sha256": "ba55ef7fbe5b29d7620137d8a03a21d6bcca00d4b4b553965c7ec842abab1112"}
+inner hash join did not generate restricted catalog rows
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test lazy_catalog_restricts_keys_and_counts_without_full_generation ... FAILED
+
+failures:
+
+failures:
+    lazy_catalog_restricts_keys_and_counts_without_full_generation
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+error: test failed, to rerun pass `-p pg-engine --test catalog_lazy_snapshot`
+Traceback (most recent call last):
+  File "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_followup/gate1.py", line 37, in <module>
+    assert rc==0 and ok,'FAILED '+name
+           ^^^^^^^^^^^^
+AssertionError: FAILED debug
+HEAVY-EXIT 1

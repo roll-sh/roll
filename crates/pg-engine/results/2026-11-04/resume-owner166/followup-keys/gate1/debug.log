@@ -1,0 +1,19 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.28s
+     Running tests/catalog_lazy_snapshot.rs (/home/meszmate/.cache/a166/target-debug/debug/deps/catalog_lazy_snapshot-8a963b1982316b56)
+
+running 1 test
+
+thread 'lazy_catalog_restricts_keys_and_counts_without_full_generation' (1616464) panicked at crates/pg-engine/tests/catalog_lazy_snapshot.rs:24:13:
+inner hash join did not generate restricted catalog rows
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test lazy_catalog_restricts_keys_and_counts_without_full_generation ... FAILED
+
+failures:
+
+failures:
+    lazy_catalog_restricts_keys_and_counts_without_full_generation
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+error: test failed, to rerun pass `-p pg-engine --test catalog_lazy_snapshot`

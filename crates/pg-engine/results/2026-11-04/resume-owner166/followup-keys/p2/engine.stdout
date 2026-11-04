@@ -1,0 +1,33 @@
+SET
+SET
+SET
+SET
+SET
+SET
+SET
+SET
+SET
+SET
+CREATE TABLE
+CREATE FUNCTION
+Aggregate
+  ->  Hash Join
+        Hash Cond: (c.relnamespace = (a166_make_keys()))
+        ->  Seq Scan on pg_class c
+              Filter: (relkind = ANY ('{r,v}'::"char"[]))
+        ->  Hash
+              ->  Result
+f
+1
+CREATE TABLE
+INSERT 0 1
+CREATE FUNCTION
+Aggregate
+  ->  Subquery Scan on c
+        Filter: (ANY (c.n = (hashed SubPlan 1).col1))
+        ->  Aggregate
+              ->  Seq Scan on pg_class
+        SubPlan 1
+          ->  Result
+1
+t

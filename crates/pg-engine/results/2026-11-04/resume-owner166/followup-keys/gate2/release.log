@@ -1,0 +1,24 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine)
+    Finished `release` profile [optimized + debuginfo] target(s) in 7.07s
+     Running tests/catalog_lazy_snapshot.rs (/home/meszmate/.cache/a166/target-release/release/deps/catalog_lazy_snapshot-c8d36388a5e7ba1d)
+
+running 1 test
+natural Hash Join outer_first=true; controlled clone outer_first=false
+controlled inner join restricted generations: 1
+plain count query whole catalog generations: 0
+test controlled_catalog_restriction_and_plain_count_generation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/golden.rs (/home/meszmate/.cache/a166/target-release/release/deps/golden-2eda3d10d9a54b46)
+
+running 3 tests
+4 golden files match in a shuffled order (seed 2579)
+test golden_shuffled ... ok
+4 golden files match
+test golden ... ok
+4 golden files match
+test golden_wire ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+
