@@ -1,0 +1,23 @@
+{
+  "utc": "2026-11-04T21:18:45.986491+00:00",
+  "candidate": "cac0933bc4eb5ef87674889542cab271de4615d0",
+  "review": "session_planner/planner171-source-review-r2-result.json",
+  "review_scope": "Static; no HIGH/MEDIUM; both prior MEDIUMs fixed",
+  "runtime_prose_correction": "Reviewer pending-focused statements superseded by parent audit of all seven focused commands",
+  "retained_low_findings": [
+    "No debug equivalence assertion; adding repeated-size-read assertions can race concurrent growth",
+    "Unconfirmed Subquery omission in nearest-neighbour order keys/skip bounds",
+    "Stale one-EXPLAIN comment and double-blank-line formatting nits"
+  ],
+  "decision": "Run exact clean candidate full standalone gates without source expansion; no acceptance yet",
+  "expected_debug_release_each": [
+    457,
+    0,
+    18,
+    61
+  ],
+  "map_delta": "Only kept_plans7to8 andparallel_scan9to10 overc861455map",
+  "ordinary_suite_scope": "Unmodified default cargo suite only; no separately configured crash stress or seed14 diagnostic, SSI or storage probes",
+  "earlier_serial_bound_cause": "UNATTRIBUTED",
+  "service_integration_performance_acceptance": false
+}
