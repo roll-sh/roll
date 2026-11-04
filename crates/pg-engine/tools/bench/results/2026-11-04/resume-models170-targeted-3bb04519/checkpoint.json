@@ -1,0 +1,7 @@
+{
+  "head": "3bb04519be5a02bc6a041395a3a122a644a994d8",
+  "tree": "60958310c764b51ea572371fe2dea82902f85df9",
+  "status": "",
+  "time_utc": "2026-11-04T13:15:42.544504+00:00",
+  "note": "PARTIAL CHECKPOINT exact3bb04519. index-progress3/3, maintenance3/3, own engine golden3/3, models-kept4/big-tables6, build all PASS. Expected outputs unchanged. Full debug currently running; release/clippy/crash/unit pending. No performance/resource acceptance or cap lift."
+}
