@@ -505,6 +505,11 @@ struct ExNode {
     /// A WindowAgg: the window calls it computes (their positions among the node's
     /// calls) and how each is shown.
     win_calls: Vec<(usize, String)>,
+    /// A WindowAgg: its place among the WindowAggs over one input, from the bottom (the
+    /// executor's tuplestore counts, `NodeStats::winstore`).
+    win_seq: usize,
+    /// A CTE Scan: its CTE's id (its tuplestore's counters, `exec::cte_key`).
+    cte_id: Option<usize>,
     /// An Append member's columns as a node above names them (a set operation's sort).
     out_names: Vec<String>,
     /// A nested loop whose inner side the executor reads once and keeps (no Materialize
@@ -6073,7 +6078,12 @@ impl Builder<'_, '_> {
                             let t = self.show(f, &names, Cx::Scan);
                             n.details.push(Detail::Text("Filter", t));
                             let cat = self.ctx.catalog();
-                            let vars = |_: usize| None;
+                            // (The catalog's columns with their statistics: initdb's, or an
+                            // ANALYZE of the catalog's.)
+                            let stand_in = crate::sql::paths::sys_table(*table);
+                            let vars = |i: usize| {
+                                (i < stand_in.columns.len()).then(|| costs::VarRef::column(stand_in.clone(), i, tuples))
+                            };
                             let est = costs::Est {
                                 cat: &cat,
                                 fmt: self.ctx.fmt(),
@@ -9119,6 +9129,9 @@ impl Builder<'_, '_> {
                     "WorkTable Scan"
                 });
                 self.target(&mut n, Some("CTE Name"), Some(name), None, &refname);
+                if let Plan::CteScan { id, .. } = &**p {
+                    n.cte_id = Some(*id);
+                }
                 // cost_ctescan: two tuple costs per row (the tuplestore, the scan).
                 let work_key = match &**p {
                     Plan::WorkScan { id, .. } => Some(format!("\u{1}{id}")),
@@ -15222,7 +15235,7 @@ impl Builder<'_, '_> {
             refer(&cur.output)
         };
         let mut done_out: Vec<String> = Vec::new();
-        for wi in sequence {
+        for (si, wi) in sequence.into_iter().enumerate() {
             let w = &wins[wi];
             let spec = specs[wi].take().unwrap_or_default();
             let mut need: Vec<String> = Vec::new();
@@ -15274,6 +15287,7 @@ impl Builder<'_, '_> {
                 sorted = need;
             }
             let mut n = ExNode::new("WindowAgg");
+            n.win_seq = si;
             n.details.push(Detail::Text("Window", spec));
             n.win_calls = call_win
                 .iter()
@@ -18803,6 +18817,22 @@ impl Render<'_> {
         }
         // A tuplestore's storage (show_windowagg_info / show_material_info): in memory,
         // or on disk past work_mem.
+        // (A CTE Scan's, its CTE's tuplestore, and a Recursive Union's two, as the executor
+        // counted them.)
+        let cte = match (executed, n.node_type, n.cte_id) {
+            (true, "CTE Scan", Some(id)) => self.instr.and_then(|i| i.get(crate::exec::cte_key(id))).and_then(|s| s.material),
+            (true, "Recursive Union", _) => self.stats(n.key).and_then(|s| s.material),
+            _ => None,
+        };
+        if let Some((disk, b)) = cte {
+            let (kind, kb) = (if disk { "Disk" } else { "Memory" }, b.div_ceil(1024));
+            if text {
+                self.w.prop("Storage", &format!("{kind}  Maximum Storage: {kb}kB"), true);
+            } else {
+                self.w.prop("Storage", kind, false);
+                self.w.prop("Maximum Storage", &kb.to_string(), true);
+            }
+        }
         if executed && matches!(n.node_type, "WindowAgg" | "Materialize") {
             let rows = self.stats(n.key).map_or(0, |s| s.rows / s.loops.max(1));
             let bytes = rows * (n.width as u64 + 40);
@@ -18812,8 +18842,11 @@ impl Render<'_> {
             } else {
                 17.max(bytes / 1024 + 9)
             };
-            // (A Materialize the executor counted as PostgreSQL's tuplestore.)
-            let ran = (n.node_type == "Materialize").then(|| self.stats(n.key).and_then(|s| s.material)).flatten();
+            // (A Materialize or WindowAgg the executor counted as PostgreSQL's tuplestore.)
+            let ran = self.stats(n.key).and_then(|s| match n.node_type {
+                "Materialize" => s.material,
+                _ => s.winstore.get(n.win_seq).copied().flatten(),
+            });
             let (disk, kb) = ran.map_or((disk, kb), |(d, b)| (d, b.div_ceil(1024)));
             let kind = if disk { "Disk" } else { "Memory" };
             if text {

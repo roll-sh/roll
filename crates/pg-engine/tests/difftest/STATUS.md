@@ -363,6 +363,7 @@ the two counts fixed below. Found:
   sum(i.v / (o.id - 30)) FROM r10o o JOIN r10i i ON i.k = o.k WHERE o.id < 40 GROUP BY o.id
   ORDER BY o.id LIMIT 5` fails 22012, PostgreSQL returns five rows (its GroupAggregate shows
   `actual rows=5`, its outer Index Scan 6 rows; the engine's 39 and 39).
+  Both still so on `75f83bc0`, after agent 160's nested-loop rescans (0bb7ddd1).
 - **Plan cache (agent 159, with agent 155's custom-plan design): STABLE casts of text
   parameters.** PostgreSQL's custom plan reduces `$1::int[]` (a CoerceViaIO) to the output
   function's constant and the STABLE input function, shown `('{1}'::cstring)::integer[]`; the
@@ -519,11 +520,13 @@ Routed through the coordinator 2026-11-03.
 - Round 8's small-work_mem hash-or-sort choice again (r8big, HashSetOp vs SetOp).
 - Re-probed on `31066020` (agent 162, 2026-11-03, reproducers above): still open, with the
   same owners: the plan cache (0 / 6 against 1 / 5; EXPLAIN EXECUTE's literal), BETWEEN's
-  parameter types (42725), `arr @> '{2}'` (15 rows against 1,000), `n_distinct = 50` (-0.5385
-  against 50), the sort keys under COLLATE, the partitioned top-N, seed 5069's `DELETE ... USING
-  v0` (22023), round 6's domain comparison in EXPLAIN. `SELECT max(id), min(id), max(v) FROM
-  r9s WHERE id < 100` and round 8's `SELECT DISTINCT k, length(s) ... ORDER BY` under 64 kB
-  agree on these reduced shapes. indisready: agent 144's 21e3863f, on the branch since.
+  parameter types (42725), `arr @> '{2}'` (15 rows against 1,000), the sort keys under
+  COLLATE, the partitioned top-N, seed 5069's `DELETE ... USING v0` (22023), round 6's domain
+  comparison in EXPLAIN; all still so on `75f83bc0` (after agent 159's custom plans from the
+  Parse's analysis, 363366c2). `SELECT max(id), min(id), max(v) FROM r9s WHERE id < 100` and
+  round 8's `SELECT DISTINCT k, length(s) ... ORDER BY` under 64 kB agree on these reduced
+  shapes. Agree on `75f83bc0`: `n_distinct = 50` (-0.5385 on `31066020`; agent 146's catalog
+  round 9), indisready (agent 144's 21e3863f).
 
 ## Round 8 grammar (agent 147)
 

@@ -149,7 +149,7 @@ fn stat_index(c: &FnCtx, rel: Rel) -> Result<Value> {
         Value::Int8(s.internal as i64),
         Value::Int8(s.leaf as i64),
         Value::Int8(s.empty as i64),
-        Value::Int8(0),
+        Value::Int8(s.deleted as i64),
         Value::Float8(round2(density)),
         Value::Float8(round2(fragmentation)),
     ])))

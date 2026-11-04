@@ -30,9 +30,9 @@ fn count_catalog_scan(table: crate::catalog::system::SysTable, path: Option<&cra
 pub fn open(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
     // (Taken first: a mask is for this node alone, whatever happens next.)
     let mut need = ctx.need.take();
-    // (Under EXPLAIN ANALYZE a join is told what its parent reads all the same: its
-    // sides' Sorts count their tuples by it.)
-    if need.is_none() && matches!(**plan, Plan::Join { .. } | Plan::Project { .. } | Plan::Filter { .. }) {
+    // (Under EXPLAIN ANALYZE a join or a window is told what its parent reads all the
+    // same: the Sorts below count their tuples by it.)
+    if need.is_none() && matches!(**plan, Plan::Join { .. } | Plan::Project { .. } | Plan::Filter { .. } | Plan::Window { .. }) {
         need = ctx.logical_need.take();
     }
     let mut node = crate::stack::guard(|| open_node(plan, need.as_deref(), ctx))?;
@@ -49,7 +49,7 @@ pub fn open(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
 pub fn open_need(plan: &Arc<Plan>, need: Option<Vec<bool>>, ctx: &ExecCtx) -> Result<BoxNode> {
     if !ctx.instrumented() {
         ctx.need.set(need.map(Rc::from));
-    } else if matches!(**plan, Plan::Sort { .. } | Plan::Join { .. } | Plan::Project { .. } | Plan::Filter { .. }) {
+    } else if matches!(**plan, Plan::Sort { .. } | Plan::Join { .. } | Plan::Project { .. } | Plan::Filter { .. } | Plan::Window { .. }) {
         ctx.logical_need.set(need.map(Rc::from));
     }
     open(plan, ctx)
@@ -402,10 +402,10 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             };
             if over_scan && let Some(keys) = super::window::sort_keys_for(calls, ctx) {
                 let sort = Arc::new(Plan::Sort { input: input.clone(), keys: keys.clone() });
-                let node = super::window::WindowNode::new(open_need(&sort, need, ctx)?, calls.clone());
-                return Ok(Box::new(node.presorted(&keys).holding(sort)));
+                let node = super::window::WindowNode::new(open_need(&sort, need.clone(), ctx)?, calls.clone());
+                return Ok(Box::new(node.presorted(&keys).holding(sort).counted(plan, input, need, ctx)));
             }
-            let node = super::window::WindowNode::new(open_need(input, need, ctx)?, calls.clone());
+            let node = super::window::WindowNode::new(open_need(input, need.clone(), ctx)?, calls.clone()).counted(plan, input, need, ctx);
             Box::new(match &**input {
                 Plan::Sort { keys, .. } => node.presorted(keys),
                 _ => node,
@@ -592,7 +592,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                 let state = if p.writes() {
                     let st = Rc::new(RefCell::new(CteState {
                         node: None,
-                        rows: Vec::new(),
+                        store: CteState::store(p, ctx),
                         dml: Some(p.clone()),
                     }));
                     dml.push(st.clone());
@@ -600,7 +600,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                 } else {
                     Rc::new(RefCell::new(CteState {
                         node: Some(open(p, ctx)?),
-                        rows: Vec::new(),
+                        store: CteState::store(p, ctx),
                         dml: None,
                     }))
                 };
@@ -633,7 +633,9 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                 .get(id)
                 .cloned()
                 .ok_or_else(|| crate::error::internal(format!("CTE {id} not materialised")))?;
-            Box::new(CteScanNode { state, i: 0 })
+            let instr = ctx.instr.borrow().clone();
+            let slot = state.borrow_mut().store.reader();
+            Box::new(CteScanNode { state, slot, instr, id: *id })
         }
         Plan::Recursive {
             id,
@@ -649,6 +651,17 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             seen: HashMap::default(),
             working: Vec::new(),
             produced: None,
+            acct: ctx.instr.borrow().clone().map(|instr| {
+                let allowed = super::workmem::work_mem(ctx);
+                Box::new(RecursiveAcct {
+                    key: Arc::as_ptr(plan) as usize,
+                    instr,
+                    types: crate::sql::paths::analyzejoins::col_types(base),
+                    tables: [super::workmem::StoreMem::new(allowed, false), super::workmem::StoreMem::new(allowed, false)],
+                    held: [Vec::new(), Vec::new()],
+                    started: false,
+                })
+            }),
         }),
         Plan::WorkScan { id, .. } => {
             let rows = ctx.work.borrow().get(id).cloned().unwrap_or_default();
@@ -5514,12 +5527,19 @@ impl Node for RightSemiNode {
 pub struct CteState {
     /// Rows not produced yet come from here; `None` once exhausted (or computed up front).
     node: Option<BoxNode>,
-    rows: Vec<Row>,
+    /// The rows produced so far (the CTE's tuplestore: on disk past work_mem).
+    store: super::tuplestore::Tuplestore,
     /// A data-modifying CTE not started yet.
     dml: Option<Arc<Plan>>,
 }
 
 impl CteState {
+    /// The tuplestore of CTE `p`'s rows (ExecInitCteScan's leader makes it randomAccess,
+    /// then sets its scan's flags, without EXEC_FLAG_BACKWARD, before a row is stored).
+    fn store(p: &Plan, ctx: &ExecCtx) -> super::tuplestore::Tuplestore {
+        super::tuplestore::Tuplestore::new(crate::sql::paths::analyzejoins::col_types(p), false, ctx)
+    }
+
     pub(super) fn release(&mut self) {
         self.node.take();
     }
@@ -5618,27 +5638,49 @@ impl Node for WithNode {
 
 struct CteScanNode {
     state: Rc<RefCell<CteState>>,
-    i: usize,
+    /// Its read pointer in the CTE's tuplestore.
+    slot: usize,
+    instr: Option<Rc<super::Instr>>,
+    /// The CTE's id: its scans' Storage line is counted under `super::cte_key(id)`.
+    id: usize,
 }
 
 impl Node for CteScanNode {
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
         let mut st = self.state.borrow_mut();
-        if self.i >= st.rows.len() {
-            st.start(ctx)?;
-            let Some(node) = st.node.as_mut() else {
-                return Ok(None);
-            };
-            match node.next(ctx)? {
-                Some(r) => st.rows.push(r),
-                None => {
-                    st.node = None;
-                    return Ok(None);
-                }
+        if let Some(r) = st.store.read(self.slot, ctx)? {
+            return Ok(Some(r));
+        }
+        st.start(ctx)?;
+        let next = match st.node.as_mut() {
+            Some(node) => node.next(ctx)?,
+            None => None,
+        };
+        match next {
+            Some(r) => {
+                st.store.put(r.clone(), Some(self.slot), ctx)?;
+                Ok(Some(r))
+            }
+            None => {
+                st.node = None;
+                Ok(None)
             }
         }
-        self.i += 1;
-        Ok(Some(st.rows[self.i - 1].clone()))
+    }
+}
+
+impl Drop for CteScanNode {
+    fn drop(&mut self) {
+        let Ok(mut st) = self.state.try_borrow_mut() else { return };
+        st.store.close_reader(self.slot);
+        // (Every CTE Scan of it shows the store's figures as they are by now.)
+        if let Some(instr) = &self.instr {
+            let (disk, bytes) = st.store.stats();
+            instr.update(super::cte_key(self.id), |s| {
+                let (d0, b0) = s.material.unwrap_or_default();
+                s.material = Some((d0 || disk, b0.max(bytes)));
+            });
+        }
     }
 }
 
@@ -5656,16 +5698,66 @@ struct RecursiveNode {
     /// The current iteration's recursive term, read a row at a time (so a LIMIT above stops
     /// even an iteration that never ends).
     produced: Option<BoxNode>,
+    /// Under EXPLAIN ANALYZE: its two tuplestores as PostgreSQL's would hold them.
+    acct: Option<Box<RecursiveAcct>>,
+}
+
+/// A Recursive Union's working and intermediate tables (nodeRecursiveunion.c), counted as
+/// tuplestores (`workmem::StoreMem`): what EXPLAIN ANALYZE's "Storage" line shows.
+struct RecursiveAcct {
+    key: usize,
+    instr: Rc<super::Instr>,
+    types: Vec<crate::types::DataType>,
+    /// The working table, then the intermediate one, and the t_lens of the rows each holds
+    /// in memory.
+    tables: [super::workmem::StoreMem; 2],
+    held: [Vec<i64>; 2],
+    /// The recursive term has started (the base rows are the first working table).
+    started: bool,
+}
+
+impl RecursiveAcct {
+    /// show_recursive_union_info: the bigger table's storage type, the two tables' bytes.
+    fn record(&self) {
+        let (wd, wb) = self.tables[0].stats();
+        let (id, ib) = self.tables[1].stats();
+        let disk = if wb > ib { wd } else { id };
+        let bytes = (wb + ib) as u64;
+        self.instr.update(self.key, |s| {
+            let (d0, b0) = s.material.unwrap_or_default();
+            s.material = Some((d0 || disk, b0.max(bytes)));
+        });
+    }
+}
+
+impl Drop for RecursiveNode {
+    fn drop(&mut self) {
+        if let Some(a) = &self.acct {
+            a.record();
+        }
+    }
 }
 
 impl RecursiveNode {
     /// Keep a new row (UNION drops duplicates); it joins the next working table.
-    fn keep(&mut self, r: Row) -> Option<Row> {
+    fn keep(&mut self, r: Row, ctx: &ExecCtx) -> Option<Row> {
         if !self.all {
             if self.seen.contains_key(&r) {
                 return None;
             }
             self.seen.insert(r.clone(), ());
+        }
+        if let Some(a) = self.acct.as_deref_mut() {
+            let t = usize::from(a.started);
+            let tlen = super::workmem::minimal_tuple_len(&r, &a.types, ctx);
+            if a.tables[t].disk.is_none() {
+                a.held[t].push(tlen);
+            }
+            if a.tables[t].put(tlen) {
+                for l in a.held[t].drain(..) {
+                    a.tables[t].dumped(l);
+                }
+            }
         }
         self.working.push(r.clone());
         Some(r)
@@ -5677,7 +5769,7 @@ impl Node for RecursiveNode {
         loop {
             if let Some(base) = self.base.as_mut() {
                 match base.next(ctx)? {
-                    Some(r) => match self.keep(r) {
+                    Some(r) => match self.keep(r, ctx) {
                         Some(r) => return Ok(Some(r)),
                         None => continue,
                     },
@@ -5687,7 +5779,7 @@ impl Node for RecursiveNode {
             }
             if let Some(p) = self.produced.as_mut() {
                 match p.next(ctx)? {
-                    Some(r) => match self.keep(r) {
+                    Some(r) => match self.keep(r, ctx) {
                         Some(r) => return Ok(Some(r)),
                         None => continue,
                     },
@@ -5706,6 +5798,17 @@ impl Node for RecursiveNode {
                     code::QUERY_CANCELED,
                     "canceling statement due to statement timeout",
                 ));
+            }
+            // (The intermediate table becomes the working one; the old working table,
+            // cleared, the next intermediate.)
+            if let Some(a) = self.acct.as_deref_mut() {
+                if a.started {
+                    a.tables[0].clear();
+                    a.held[0].clear();
+                    a.tables.swap(0, 1);
+                    a.held.swap(0, 1);
+                }
+                a.started = true;
             }
             ctx.work
                 .borrow_mut()

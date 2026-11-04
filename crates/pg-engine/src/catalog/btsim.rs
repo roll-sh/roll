@@ -107,24 +107,53 @@ impl Key {
     /// `atts`: per-attribute encodings; `sizes[k]`: the MAXALIGNed index tuple size
     /// holding the first k+1 attributes.
     pub fn new(atts: &[Vec<u8>], sizes: &[usize]) -> Key {
-        let len: usize = atts.iter().map(Vec::len).sum();
-        let mut buf = Vec::with_capacity(2 + 2 * (atts.len() + sizes.len()) + len);
-        buf.push(atts.len() as u8);
-        buf.push(sizes.len() as u8);
-        let mut end = 0u16;
-        for a in atts {
-            end += a.len() as u16;
-            buf.extend_from_slice(&end.to_le_bytes());
-        }
-        for &z in sizes {
-            buf.extend_from_slice(&(z as u16).to_le_bytes());
-        }
-        for a in atts {
-            buf.extend_from_slice(a);
-        }
-        Key::wrap(&buf)
+        debug_assert_eq!(atts.len(), sizes.len());
+        Key::build_in(&mut Vec::new(), atts.len(), |i, buf| {
+            buf.extend_from_slice(&atts[i]);
+            sizes[i]
+        })
     }
 }
+
+impl Key {
+    /// A key of `natts` attributes encoded in `buf` (scratch space, cleared first; the key
+    /// is the only allocation): `att(i, buf)` appends attribute i's encoding to `buf` and
+    /// returns the MAXALIGNed size of an index tuple holding attributes 0..=i (`new`'s
+    /// `sizes`).
+    ///
+    /// An attribute's encoding longer than `ATT_MAX` keeps its first bytes and a hash of the
+    /// rest (a value that long is compressed in a PostgreSQL index tuple, whose size `att`
+    /// gives as it is): the key's bytes stay within its u16 offsets for any number of
+    /// attributes, equal values stay equal, and only values alike in their first
+    /// `ATT_MAX` bytes order by hash. Sizes past u16 (a tuple PostgreSQL rejects) are capped.
+    pub fn build_in(buf: &mut Vec<u8>, natts: usize, mut att: impl FnMut(usize, &mut Vec<u8>) -> usize) -> Key {
+        let natts = natts.min(u8::MAX as usize);
+        let head = 2 + 4 * natts;
+        buf.clear();
+        buf.resize(head, 0);
+        (buf[0], buf[1]) = (natts as u8, natts as u8);
+        for i in 0..natts {
+            let start = buf.len();
+            let size = att(i, buf).min(u16::MAX as usize) as u16;
+            if buf.len() - start > ATT_MAX {
+                use std::hash::Hasher;
+                // (SipHash with fixed keys: the same in every process, kept images too.)
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                h.write(&buf[start + ATT_MAX - 8..]);
+                buf.truncate(start + ATT_MAX - 8);
+                buf.extend_from_slice(&h.finish().to_be_bytes());
+            }
+            let end = (buf.len() - head) as u16;
+            buf[2 + 2 * i..4 + 2 * i].copy_from_slice(&end.to_le_bytes());
+            buf[2 + 2 * (natts + i)..4 + 2 * (natts + i)].copy_from_slice(&size.to_le_bytes());
+        }
+        Key::wrap(buf)
+    }
+}
+
+/// The bytes a key keeps of one attribute's encoding (`Key::build_in`): INDEX_MAX_KEYS (32)
+/// of them fit the key's u16 offsets.
+const ATT_MAX: usize = 1800;
 
 impl std::ops::Deref for Key {
     type Target = KeyBytes;
@@ -492,6 +521,8 @@ pub struct BtPageStats {
     pub empty: u64,
     pub leaf_free: u64,
     pub fragments: u64,
+    /// Pages VACUUM deleted (`delete_empty_pages`).
+    pub deleted: u64,
     pub items: u64,
     pub item_bytes: u64,
     pub free: u64,
@@ -513,6 +544,56 @@ pub struct Btree {
     /// The leaf the last insertion went to: the next one checks it first (keys added in
     /// order, a run of equal keys), skipping the descent when the leaf's own bounds hold it.
     last_leaf: u32,
+    /// Where a scan from the start finds its first entry not LP_DEAD (`DeadHead`).
+    head: DeadHead,
+    /// Deleted pages (`delete_empty_pages`) by block, with the next xid when they were
+    /// deleted (their safexid: recyclable once every transaction is past it). A deleted
+    /// page without one (kept across a restart) is recyclable.
+    safexids: std::collections::HashMap<u32, u64>,
+    /// The index's free space map, once a VACUUM found a deleted page recyclable: splits
+    /// take their new pages from it before extending the file (_bt_allocbuf).
+    fsm: Option<Box<super::heapsim::Fsm>>,
+    /// Deleted pages not in the free space map at the last VACUUM's scan of the index
+    /// (the metapage's btm_last_cleanup_num_delpages).
+    pending_delpages: u32,
+}
+
+/// A queue's index (rows inserted at one end, deleted at the other: `DELETE ... WHERE id =
+/// (SELECT min(id) ...)`) has a run of leaves holding only LP_DEAD entries at its start until
+/// VACUUM; a scan from the start marking what it passes (`kill`) walked every one of them.
+/// This remembers (leftmost leaf, a leaf L) such that every leaf before L along the chain
+/// holds no entry that isn't LP_DEAD (packed: leftmost << 32 | L; 0 unknown). Entries only
+/// become LP_DEAD while it holds, except through an insertion into a leaf with none live
+/// (`insert` forgets it then) and VACUUM's rewritten posting lists (`vacuum_scan` forgets
+/// it). An atomic: walks under the models' read lock (`kill_needed`) move it on too.
+#[derive(Debug, Default)]
+struct DeadHead(std::sync::atomic::AtomicU64);
+
+impl Clone for DeadHead {
+    fn clone(&self) -> DeadHead {
+        DeadHead(std::sync::atomic::AtomicU64::new(self.0.load(std::sync::atomic::Ordering::Relaxed)))
+    }
+}
+
+impl DeadHead {
+    fn get(&self, leftmost: u32) -> Option<u32> {
+        let v = self.0.load(std::sync::atomic::Ordering::Relaxed);
+        (v != 0 && (v >> 32) as u32 == leftmost).then_some(v as u32)
+    }
+
+    fn set(&self, leftmost: u32, at: u32) {
+        self.0.store((leftmost as u64) << 32 | at as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn forget(&self) {
+        self.0.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// What `kill_walk` does at an entry not LP_DEAD that it passes.
+enum Pass {
+    Go,
+    Mark,
 }
 
 impl Btree {
@@ -524,7 +605,22 @@ impl Btree {
             tuples: 0,
             sizes: Default::default(),
             last_leaf: 0,
+            head: DeadHead::default(),
+            safexids: Default::default(),
+            fsm: None,
+            pending_delpages: 0,
         }
+    }
+
+    /// The free space map's pages.
+    pub fn fsm_blocks(&self) -> u32 {
+        self.fsm.as_ref().map_or(0, |f| f.blocks())
+    }
+
+    /// _bt_vacuum_needs_cleanup: a VACUUM that removed no entries still scans the index
+    /// when the pages deleted but not yet free to reuse are more than 5% of it.
+    pub fn needs_cleanup(&self) -> bool {
+        self.pending_delpages > 0 && self.pending_delpages > self.nblocks() / 20
     }
 
     /// About the bytes the model holds (pages, items and their keys, pivots), for memory
@@ -549,7 +645,12 @@ impl Btree {
     pub fn page_stats(&self) -> BtPageStats {
         let mut s = BtPageStats { root: self.root.unwrap_or(0), ..Default::default() };
         for (b, p) in self.pages.iter().enumerate().skip(1) {
-            let Some(p) = p else { continue };
+            let Some(p) = p else {
+                // (A deleted page: pgstattuple counts it free, P_IGNORE.)
+                s.deleted += 1;
+                s.free += BLCKSZ as u64;
+                continue;
+            };
             let free = p.free() + ITEM_ID;
             s.free += free as u64;
             s.items += p.nitems() as u64;
@@ -590,6 +691,16 @@ impl Btree {
     }
 
     fn alloc(&mut self, p: BPage) -> u32 {
+        // (A deleted page the free space map has, else a new one: _bt_allocbuf.)
+        if let Some(b) = self.fsm.as_mut().and_then(|f| f.get_free_index_page())
+            && self.pages.get(b as usize).is_some_and(Option::is_none)
+            && b != 0
+        {
+            self.pages[b as usize] = Some(p);
+            self.safexids.remove(&b);
+            self.sizes.bump();
+            return b;
+        }
         self.pages.push(Some(p));
         self.sizes.bump();
         self.pages.len() as u32 - 1
@@ -682,6 +793,9 @@ impl Btree {
             }
         };
         self.last_leaf = blk;
+        if self.pages[blk as usize].as_ref().is_some_and(|p| p.items.live() == 0) {
+            self.head.forget();
+        }
         let nkey = self.opts.nkey;
         // (_bt_doinsert bypasses uniqueness for NULLs only when they are distinct.)
         let checking = self.opts.unique
@@ -1341,14 +1455,45 @@ impl Btree {
         all_dead: &dyn Fn(Tid) -> bool,
         mut seen: Option<&mut Vec<Tid>>,
     ) {
+        let mut marks: Vec<(u32, usize)> = Vec::new();
+        self.kill_walk(lo, hi, &mut |blk, i, tids| {
+            if let Some(seen) = seen.as_deref_mut() {
+                seen.extend(tids.iter());
+            }
+            if tids.iter().all(all_dead) {
+                marks.push((blk, i));
+            }
+            Pass::Go
+        });
+        for (blk, i) in marks {
+            if let Some(p) = self.pages.get_mut(blk as usize).and_then(|p| p.as_mut()) {
+                p.items.set_dead(i);
+            }
+        }
+    }
+
+    /// `kill`'s and `kill_needed`'s walk: down to the leaf where `lo` starts, then right
+    /// along the leaves until past `hi`, calling `each(leaf, item, its TIDs)` for every
+    /// entry in range not LP_DEAD already, in index order, until it says `Mark` (an entry
+    /// to mark found: the walk stops). Leaves with no entry that isn't LP_DEAD are passed
+    /// whole; a walk from the start begins past the run of them there (`DeadHead`).
+    /// Returns whether `each` said `Mark`.
+    fn kill_walk(
+        &self,
+        lo: Option<&[u8]>,
+        hi: Option<&[u8]>,
+        each: &mut dyn FnMut(u32, usize, leaf::Tids) -> Pass,
+    ) -> bool {
+        // (An empty bound is below every key: a scan of the whole index has one.)
+        let lo = lo.filter(|l| !l.is_empty());
         let nkey = self.opts.nkey;
         let Some(mut blk) = self.root else {
-            return;
+            return false;
         };
         // Down to the leaf where `lo` starts (pivots compare as their kept attributes).
         loop {
             let Some(p) = self.pages.get(blk as usize).and_then(|p| p.as_ref()) else {
-                return;
+                return false;
             };
             if p.leaf {
                 break;
@@ -1359,41 +1504,67 @@ impl Btree {
             };
             blk = p.inner[i].1;
         }
+        // From the start: past the leaves known to hold only LP_DEAD entries, when that
+        // walk wouldn't have stopped in them (their keys are at most the first one's of
+        // the leaf it goes to: below `hi` when that is).
+        let leftmost = lo.is_none().then_some(blk);
+        if let Some(l) = leftmost
+            && let Some(at) = self.head.get(l)
+            && let Some(p) = self.pages.get(at as usize).and_then(|p| p.as_ref())
+            && p.leaf
+            && hi.is_none_or(|hi| !p.items.is_empty() && p.items.get(0).key.key_bytes(nkey) < hi)
+        {
+            blk = at;
+        }
         // Then right along the leaves until past `hi`. (A storage key goes on with the
         // row's key: an entry is past `lo` when some row key puts it there.)
         // (Once a leaf has an item past `lo`, every item after it is.)
         let mut lo = lo;
+        let mut dead_run = leftmost.is_some();
         loop {
-            let Some(p) = self.pages.get_mut(blk as usize).and_then(|p| p.as_mut()) else {
-                return;
+            let Some(p) = self.pages.get(blk as usize).and_then(|p| p.as_ref()) else {
+                return false;
             };
+            if dead_run && (p.items.live() > 0 || p.right.is_none()) {
+                dead_run = false;
+                if let Some(l) = leftmost
+                    && self.head.get(l) != Some(blk)
+                {
+                    self.head.set(l, blk);
+                }
+            }
             let from = lo.map_or(0, |l| first_above(&p.items, l, nkey));
             if from < p.items.len() {
                 lo = None;
             }
             let last = p.items.len().saturating_sub(1);
             let whole = hi.is_none_or(|hi| p.items.last().is_none_or(|l| l.key.key_bytes(nkey) < hi));
-            for i in from..p.items.len() {
-                let it = p.items.get(i);
-                if !whole
-                    && (!it.dead || i == last)
-                    && hi.is_some_and(|hi| it.key.key_bytes(nkey) >= hi)
-                {
-                    return;
+            if p.items.live() == 0 {
+                // (Every entry LP_DEAD: the walk would only stop at the last, past `hi`.)
+                if from < p.items.len() && !whole {
+                    return false;
                 }
-                if it.dead {
-                    continue;
-                }
-                if let Some(seen) = seen.as_deref_mut() {
-                    seen.extend(it.tids.iter());
-                }
-                if it.tids.iter().all(all_dead) {
-                    p.items.set_dead(i);
+            } else {
+                for i in from..p.items.len() {
+                    let it = p.items.get(i);
+                    if !whole
+                        && (!it.dead || i == last)
+                        && hi.is_some_and(|hi| it.key.key_bytes(nkey) >= hi)
+                    {
+                        return false;
+                    }
+                    if it.dead {
+                        continue;
+                    }
+                    match each(blk, i, it.tids) {
+                        Pass::Go => {}
+                        Pass::Mark => return true,
+                    }
                 }
             }
             match p.right {
                 Some(r) => blk = r,
-                None => return,
+                None => return false,
             }
         }
     }
@@ -1445,65 +1616,69 @@ impl Btree {
         all_dead: &dyn Fn(Tid) -> bool,
         mut seen: Option<&mut Vec<Tid>>,
     ) -> bool {
-        let nkey = self.opts.nkey;
-        let Some(mut blk) = self.root else {
-            return false;
-        };
-        // Down to the leaf where `lo` starts (pivots compare as their kept attributes).
-        loop {
-            let Some(p) = self.pages.get(blk as usize).and_then(|p| p.as_ref()) else {
-                return false;
-            };
-            if p.leaf {
-                break;
+        self.kill_walk(lo, hi, &mut |_, _, tids| {
+            if let Some(seen) = seen.as_deref_mut() {
+                seen.extend(tids.iter());
             }
-            let i = match lo {
-                None => 0,
-                Some(lo) => child_for(&p.inner, lo, nkey),
-            };
-            blk = p.inner[i].1;
-        }
-        // Then right along the leaves until past `hi`. (A storage key goes on with the
-        // row's key: an entry is past `lo` when some row key puts it there.)
-        let mut lo = lo;
-        loop {
-            let Some(p) = self.pages.get(blk as usize).and_then(|p| p.as_ref()) else {
-                return false;
-            };
-            let from = lo.map_or(0, |l| first_above(&p.items, l, nkey));
-            if from < p.items.len() {
-                lo = None;
-            }
-            let last = p.items.len().saturating_sub(1);
-            let whole = hi.is_none_or(|hi| p.items.last().is_none_or(|l| l.key.key_bytes(nkey) < hi));
-            for i in from..p.items.len() {
-                let it = p.items.get(i);
-                if !whole
-                    && (!it.dead || i == last)
-                    && hi.is_some_and(|hi| it.key.key_bytes(nkey) >= hi)
-                {
-                    return false;
-                }
-                if it.dead {
-                    continue;
-                }
-                if let Some(seen) = seen.as_deref_mut() {
-                    seen.extend(it.tids.iter());
-                }
-                if it.tids.iter().all(all_dead) {
-                    return true;
-                }
-            }
-            match p.right {
-                Some(r) => blk = r,
-                None => return false,
-            }
-        }
+            if tids.iter().all(all_dead) { Pass::Mark } else { Pass::Go }
+        })
     }
 
     /// VACUUM's bulk delete: entries pointing at removed heap tuples go (pages stay).
     /// `tuples` becomes the heap TIDs left, as btvacuumscan counts them.
     pub fn bulk_delete(&mut self, dead: &crate::exec::fasthash::HashSet<Tid>) -> usize {
+        self.vacuum_scan(Some(dead), &|_| false, 0)
+    }
+
+    /// btvacuumscan, from btbulkdelete (`dead`: the heap TIDs whose entries go, each page's
+    /// packed in place, `bulk_delete`'s) or btvacuumcleanup (None, when `needs_cleanup`):
+    /// the leaves left empty are deleted (`delete_empty_pages`, their safexid `next_xid`),
+    /// and deleted pages whose safexid is `removable` are recorded in the free space map,
+    /// those deleted earlier as the scan meets them, those it deleted at its end in the
+    /// order it deleted them, until one isn't (_bt_pendingfsm_finalize). Returns the heap
+    /// TIDs removed.
+    pub fn vacuum_scan(
+        &mut self,
+        dead: Option<&crate::exec::fasthash::HashSet<Tid>>,
+        removable: &dyn Fn(u64) -> bool,
+        next_xid: u64,
+    ) -> usize {
+        // (Pages go: the hint names none of them.)
+        self.head.forget();
+        let mut free = 0u32;
+        let recyclable = |safexids: &std::collections::HashMap<u32, u64>, b: u32| safexids.get(&b).is_none_or(|&x| removable(x));
+        for b in 1..self.pages.len() as u32 {
+            if self.pages[b as usize].is_none() && recyclable(&self.safexids, b) {
+                self.fsm.get_or_insert_default().record_free_index_page(b);
+                free += 1;
+            }
+        }
+        let removed = match dead {
+            Some(dead) => self.remove_tids(dead),
+            None => 0,
+        };
+        // (Those deleted now share their safexid: they go to the map together, or none.)
+        let now = removable(next_xid);
+        for b in self.delete_empty_pages() {
+            self.safexids.insert(b, next_xid);
+            if now {
+                self.fsm.get_or_insert_default().record_free_index_page(b);
+                free += 1;
+            }
+        }
+        if free > 0
+            && let Some(f) = self.fsm.as_mut()
+        {
+            f.vacuum_all();
+        }
+        let deleted = self.pages.iter().skip(1).filter(|p| p.is_none()).count() as u32;
+        self.pending_delpages = deleted - free.min(deleted);
+        removed
+    }
+
+    /// The entries pointing at removed heap tuples go (pages stay). `tuples` becomes the
+    /// heap TIDs left, as btvacuumscan counts them.
+    fn remove_tids(&mut self, dead: &crate::exec::fasthash::HashSet<Tid>) -> usize {
         let mut removed = 0;
         let mut left = 0;
         for p in self.pages.iter_mut().flatten() {
@@ -1522,6 +1697,85 @@ impl Btree {
         }
         self.tuples = left;
         removed
+    }
+
+    /// VACUUM's page deletion (btvacuumpage's attempt_pagedel, _bt_pagedel), in block
+    /// order: a leaf left without items goes unless it is the rightmost on its level, or the
+    /// rightmost of its parent's children without being the only one. An only child goes
+    /// with its parent, and so on up to the first ancestor with other children
+    /// (_bt_lock_subtree_parent: none of them may be the root or the rightmost on its
+    /// level). The ancestor's downlink to the top of what goes now leads to that page's
+    /// right sibling, whose own downlink goes (its key space reaches down to the deleted
+    /// page's), and each deleted page's left sibling links past it. Their blocks stay in the
+    /// file, deleted (None, as the metapage: `page_stats` counts them), and aren't reused.
+    /// Returns the pages deleted, in the order they went.
+    fn delete_empty_pages(&mut self) -> Vec<u32> {
+        let n = self.pages.len();
+        // Each page's parent with its downlink's place, and its left sibling.
+        let mut parent: Vec<Option<(u32, usize)>> = vec![None; n];
+        let mut left: Vec<Option<u32>> = vec![None; n];
+        for (b, p) in self.pages.iter().enumerate() {
+            let Some(p) = p else { continue };
+            for (i, (_, c)) in p.inner.iter().enumerate() {
+                parent[*c as usize] = Some((b as u32, i));
+            }
+            if let Some(r) = p.right {
+                left[r as usize] = Some(b as u32);
+            }
+        }
+        fn live(pages: &[Option<BPage>], b: u32) -> &BPage {
+            pages[b as usize].as_ref().expect("btree page")
+        }
+        let mut deleted = Vec::new();
+        for b in 1..n as u32 {
+            if !self.pages[b as usize].as_ref().is_some_and(|p| p.leaf && p.items.is_empty() && p.right.is_some())
+                || Some(b) == self.root
+            {
+                continue;
+            }
+            // Up to the parent that keeps a downlink: (it, the downlink's place).
+            let mut chain = vec![b];
+            let keeper = loop {
+                let top = *chain.last().expect("chain");
+                let Some((pb, i)) = parent[top as usize] else { break None };
+                let pp = live(&self.pages, pb);
+                if i + 1 < pp.inner.len() {
+                    break Some((pb, i));
+                }
+                if pp.inner.len() > 1 || pp.right.is_none() || Some(pb) == self.root {
+                    break None;
+                }
+                chain.push(pb);
+            };
+            let Some((kp, i)) = keeper else { continue };
+            let top = *chain.last().expect("chain");
+            let rs = live(&self.pages, top).right.expect("not rightmost");
+            let k = self.page(kp);
+            debug_assert_eq!(k.inner[i + 1].1, rs, "the right sibling's downlink follows");
+            let (gone, _) = k.inner.remove(i + 1);
+            k.used -= gone.size;
+            k.inner[i].1 = rs;
+            parent[rs as usize] = Some((kp, i));
+            for (j, (_, c)) in self.page(kp).inner.iter().enumerate().skip(i + 1) {
+                parent[*c as usize] = Some((kp, j));
+            }
+            for c in chain.iter().copied() {
+                let r = live(&self.pages, c).right;
+                if let Some(l) = left[c as usize] {
+                    self.page(l).right = r;
+                }
+                if let Some(r) = r {
+                    left[r as usize] = left[c as usize];
+                }
+                self.pages[c as usize] = None;
+                parent[c as usize] = None;
+                deleted.push(c);
+            }
+        }
+        if !deleted.is_empty() {
+            self.sizes.bump();
+        }
+        deleted
     }
 }
 
@@ -2169,9 +2423,10 @@ impl Btree {
         put(out, self.pages.len() as u64);
         put(out, self.root.map_or(0, |r| r as u64 + 1));
         put(out, self.tuples as u64);
-        for p in self.pages.iter().skip(1) {
+        for (b, p) in self.pages.iter().enumerate().skip(1) {
             let Some(p) = p else {
-                put(out, 0);
+                // (A deleted page; 16: one the free space map has.)
+                put(out, if self.fsm.as_ref().is_some_and(|f| f.records_free(b as u32)) { 16 } else { 0 });
                 continue;
             };
             let flags = 1 | (p.leaf as u64) << 1 | (p.right.is_some() as u64) << 2 | (p.high.is_some() as u64) << 3;
@@ -2230,9 +2485,13 @@ impl Btree {
         let tuples = get(b)? as usize;
         let mut pages = Vec::with_capacity(n);
         pages.push(None);
-        for _ in 1..n {
+        let mut free = Vec::new();
+        for i in 1..n {
             let flags = get(b)?;
             if flags & 1 == 0 {
+                if flags & 16 != 0 {
+                    free.push(i as u32);
+                }
                 pages.push(None);
                 continue;
             }
@@ -2278,7 +2537,19 @@ impl Btree {
             }
             pages.push(Some(p));
         }
-        Some(Btree { opts, pages, root, tuples, sizes: Default::default(), last_leaf: 0 })
+        let mut t = Btree { pages, root, tuples, ..Btree::new(opts) };
+        // (Deleted pages: those in the free space map back in it; the rest wait for a
+        // VACUUM, recyclable by then.)
+        let deleted = t.pages.iter().skip(1).filter(|p| p.is_none()).count() as u32;
+        if !free.is_empty() {
+            let f = t.fsm.get_or_insert_default();
+            for &blk in &free {
+                f.record_free_index_page(blk);
+            }
+            f.vacuum_all();
+        }
+        t.pending_delpages = deleted - free.len() as u32;
+        Some(t)
     }
 }
 
@@ -2364,5 +2635,168 @@ mod tests {
         assert!(w.holds());
         drop(b);
         assert!(!w.holds());
+    }
+
+    /// Keys of any length (a 100 kB text key, many attributes of it) fit the key's u16
+    /// offsets: equal values give equal keys, values that differ past their kept bytes
+    /// still differ, and sizes past u16 are capped (no panic, no wrapped length).
+    #[test]
+    fn long_keys_fit() {
+        let big = |c: u8, n: usize| vec![c; n];
+        let a = Key::new(&[big(7, 100_000), big(8, 70_000), big(9, 10)], &[2712, 70_016, 80_000]);
+        let b = Key::new(&[big(7, 100_000), big(8, 70_000), big(9, 10)], &[2712, 70_016, 80_000]);
+        let mut other = big(7, 100_000);
+        other[99_999] = 6;
+        let c = Key::new(&[other, big(8, 70_000), big(9, 10)], &[2712, 70_016, 80_000]);
+        assert!(a.as_bytes().len() < 1 << 16);
+        assert_eq!(a.as_bytes(), b.as_bytes());
+        assert_ne!(a.as_bytes(), c.as_bytes());
+        assert_eq!(a.size(), u16::MAX as usize);
+        let many: Vec<Vec<u8>> = (0..32).map(|i| big(i, 5_000)).collect();
+        let k = Key::new(&many, &[64; 32]);
+        assert_eq!(Key::from_bytes(k.as_bytes()).map(|x| x.as_bytes().to_vec()), Some(k.as_bytes().to_vec()));
+    }
+
+    /// VACUUM deletes the leaves it empties (and parents left without children) the way
+    /// _bt_pagedel does: afterwards every downlink and sibling link leads to a live page,
+    /// each level's chain holds its pages in key order, every remaining entry is found by
+    /// a descent, the deleted blocks are counted and kept, and inserts into the deleted
+    /// key space go to the right sibling that took it over.
+    #[test]
+    fn vacuum_deletes_emptied_pages() {
+        let opts = BtreeOpts { nkey: 1, unique: true, nulls_not_distinct: false, dedup: false, fillfactor: 90 };
+        let mut b = Btree::new(opts);
+        let hint = InsertHint { unchanged: false, dead: &|_| false };
+        // (Wide keys: three levels from a few thousand entries.)
+        let key = |i: u32| {
+            let mut a = i.to_be_bytes().to_vec();
+            a.resize(300, 7);
+            Key::new(&[a], &[312])
+        };
+        let tid = |i: u32| (i / 20, (i % 20) as u16 + 1);
+        for i in 0..6000 {
+            b.insert(key(i), tid(i), &hint);
+        }
+        assert!(b.height() >= 2, "three levels");
+        let check = |b: &Btree, present: &dyn Fn(u32) -> bool| {
+            for (blk, p) in b.pages.iter().enumerate() {
+                let Some(p) = p else { continue };
+                for (_, c) in &p.inner {
+                    assert!(b.pages[*c as usize].is_some(), "downlink from {blk} to a deleted page");
+                }
+                if let Some(r) = p.right {
+                    assert!(b.pages[r as usize].is_some(), "right link from {blk} to a deleted page");
+                }
+            }
+            // The leaf level from its leftmost page: every live leaf once, keys ascending.
+            let mut blk = b.root.expect("root");
+            while !b.pages[blk as usize].as_ref().expect("page").leaf {
+                blk = b.pages[blk as usize].as_ref().expect("page").inner[0].1;
+            }
+            let (mut seen, mut keys) = (0, Vec::new());
+            let mut cur = Some(blk);
+            while let Some(c) = cur {
+                let p = b.pages[c as usize].as_ref().expect("page");
+                seen += 1;
+                keys.extend(p.items.iter().map(|it| it.key.as_bytes().to_vec()));
+                cur = p.right;
+            }
+            assert_eq!(seen, b.pages.iter().flatten().filter(|p| p.leaf).count(), "leaves on the chain");
+            assert!(keys.windows(2).all(|w| w[0] < w[1]), "keys in order");
+            for i in 0..9000 {
+                let k = key(i);
+                assert_eq!(b.postings(k.key_bytes(1)).is_empty(), !present(i), "entry {i} found by a descent");
+            }
+            let s = b.page_stats();
+            assert_eq!(s.deleted as usize, b.pages.iter().skip(1).filter(|p| p.is_none()).count());
+        };
+        // Most of the start, a stretch in the middle, a few scattered leaves.
+        let gone = |i: u32| i < 2500 || (3000..4200).contains(&i) || (i / 10) % 37 == 3;
+        let dead: crate::exec::fasthash::HashSet<Tid> = (0..6000).filter(|&i| gone(i)).map(tid).collect();
+        let blocks = b.nblocks();
+        b.bulk_delete(&dead);
+        assert_eq!(b.nblocks(), blocks, "deleted blocks stay in the file");
+        let deleted = b.page_stats().deleted;
+        assert!(deleted > 50, "pages deleted: {deleted}");
+        check(&b, &|i| i < 6000 && !gone(i));
+        // Back into the deleted key space, and past the end.
+        for i in (0..2500).step_by(3).chain(6000..9000) {
+            b.insert(key(i), tid(i), &hint);
+        }
+        check(&b, &|i| (i < 6000 && !gone(i)) || (i < 2500 && i % 3 == 0) || (6000..9000).contains(&i));
+        assert_eq!(b.page_stats().deleted, deleted, "deleted pages aren't reused before a VACUUM frees them");
+        assert_eq!(b.fsm_blocks(), 0);
+        // A VACUUM once every transaction is past their safexid: into the free space map,
+        // which splits then take their pages from instead of extending the file.
+        assert!(b.needs_cleanup());
+        b.vacuum_scan(None, &|_| true, 0);
+        assert_eq!(b.fsm_blocks(), 3, "the free space map's three levels");
+        assert!(!b.needs_cleanup());
+        // (Kept across a restart: the map's pages, the deleted pages in it.)
+        let mut img = Vec::new();
+        b.write_image(&mut img);
+        let mut b = Btree::read_image(&mut &img[..]).expect("image");
+        assert_eq!((b.fsm_blocks(), b.page_stats().deleted), (3, deleted));
+        let blocks = b.nblocks();
+        for i in (3000..4200).step_by(2) {
+            b.insert(key(i), tid(i), &hint);
+        }
+        let reused = deleted - b.page_stats().deleted;
+        assert!(reused > 0, "pages reused");
+        assert_eq!(b.nblocks(), blocks, "no new pages while deleted ones are free");
+        check(&b, &|i| {
+            (i < 6000 && !gone(i)) || (i < 2500 && i % 3 == 0) || (6000..9000).contains(&i) || ((3000..4200).contains(&i) && i % 2 == 0)
+        });
+    }
+
+    /// A queue's index: entries added at the end, the head's killed as scans from the start
+    /// pass them. Walks starting past the dead head (`DeadHead`) mark and return what a
+    /// walk from the leftmost leaf does, with an upper bound or not, as the head grows, and
+    /// after an insertion into it or a VACUUM.
+    #[test]
+    fn dead_head_walks_match_full_walks() {
+        let opts = BtreeOpts { nkey: 1, unique: true, nulls_not_distinct: false, dedup: false, fillfactor: 90 };
+        let (mut a, mut b) = (Btree::new(opts.clone()), Btree::new(opts));
+        let hint = InsertHint { unchanged: false, dead: &|_| false };
+        let key = |i: u32| Key::new(&[i.to_be_bytes().to_vec()], &[16]);
+        let tid = |i: u32| (i / 200, (i % 200) as u16 + 1);
+        let marks = |t: &Btree| -> Vec<bool> {
+            t.pages.iter().flatten().filter(|p| p.leaf).flat_map(|p| p.items.iter().map(|it| it.dead).collect::<Vec<_>>()).collect()
+        };
+        let (mut next, mut head) = (0u32, 0u32);
+        for round in 0..300u32 {
+            for _ in 0..60 {
+                a.insert(key(next), tid(next), &hint);
+                b.insert(key(next), tid(next), &hint);
+                next += 1;
+            }
+            head = (head + 50).min(next);
+            let dead = |t: Tid| t < tid(head);
+            if round % 37 == 5 {
+                // (Back into the head: a key below every live one.)
+                a.insert(key(head / 2), (u32::MAX, 1), &hint);
+                b.insert(key(head / 2), (u32::MAX, 1), &hint);
+            }
+            if round % 101 == 77 {
+                let gone: crate::exec::fasthash::HashSet<Tid> = (0..head / 2).map(tid).collect();
+                a.bulk_delete(&gone);
+                b.bulk_delete(&gone);
+            }
+            let hi = (round % 3 == 0).then(|| (head + 7).to_be_bytes().to_vec());
+            b.head.forget();
+            let (mut sa, mut sb) = (Vec::new(), Vec::new());
+            assert_eq!(
+                a.kill_needed(None, hi.as_deref(), &dead, Some(&mut sa)),
+                b.kill_needed(None, hi.as_deref(), &dead, Some(&mut sb))
+            );
+            assert_eq!(sa, sb, "kill_needed's entries, round {round}");
+            b.head.forget();
+            let (mut sa, mut sb) = (Vec::new(), Vec::new());
+            a.kill(None, hi.as_deref(), &dead, Some(&mut sa));
+            b.kill(None, hi.as_deref(), &dead, Some(&mut sb));
+            assert_eq!(sa, sb, "kill's entries, round {round}");
+            assert_eq!(marks(&a), marks(&b), "marks, round {round}");
+        }
+        assert!(a.head.0.load(std::sync::atomic::Ordering::Relaxed) != 0, "a dead head was found");
     }
 }

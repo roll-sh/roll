@@ -28,6 +28,18 @@ pub struct WindowNode {
     /// The Sort the executor put under it (`sort_keys_for`): kept while its node runs, which
     /// is counted by its address.
     sort: Option<std::sync::Arc<crate::sql::plan::Plan>>,
+    /// EXPLAIN ANALYZE: each WindowAgg's tuplestore as PostgreSQL's would hold it (`Store`).
+    store: Option<Stores>,
+}
+
+/// What EXPLAIN ANALYZE counts of the windows' tuplestores: the input's column types, the
+/// columns PostgreSQL's input target list keeps, and each window's store (bottom first).
+struct Stores {
+    /// The WindowAgg nodes' counters: the plan's own, and its input's (the lower ones').
+    keys: [usize; 2],
+    types: Vec<DataType>,
+    keep: Option<Vec<bool>>,
+    wins: Vec<super::workmem::WinStore>,
 }
 
 impl WindowNode {
@@ -41,7 +53,28 @@ impl WindowNode {
             pending: None,
             started: false,
             sort: None,
+            store: None,
         }
+    }
+
+    /// Under EXPLAIN ANALYZE: count the tuplestores of `plan`'s WindowAgg nodes, over
+    /// `input`, whose columns `keep` marks.
+    pub fn counted(
+        mut self,
+        plan: &std::sync::Arc<crate::sql::plan::Plan>,
+        input: &std::sync::Arc<crate::sql::plan::Plan>,
+        keep: Option<Vec<bool>>,
+        ctx: &ExecCtx,
+    ) -> Self {
+        if ctx.instrumented() {
+            self.store = Some(Stores {
+                keys: [std::sync::Arc::as_ptr(plan) as usize, std::sync::Arc::as_ptr(input) as usize],
+                types: crate::sql::paths::analyzejoins::col_types(input),
+                keep,
+                wins: Vec::new(),
+            });
+        }
+        self
     }
 
     /// It reads the output of `sort`, a Sort the executor made for it.
@@ -123,12 +156,38 @@ impl Node for WindowNode {
 
 impl WindowNode {
     /// The calls' results for `rows`, appended to them, in the order they come out.
-    fn compute(&self, rows: Vec<Row>, ctx: &ExecCtx) -> Result<Vec<Row>> {
+    fn compute(&mut self, rows: Vec<Row>, ctx: &ExecCtx) -> Result<Vec<Row>> {
         let n = rows.len();
         // (Row i's results at i * k.., one array for all rows.)
         let k = self.calls.len();
         let mut results: Vec<Value> = vec![Value::Null; n * k];
-        let order = run_windows(&self.calls, &rows, &mut results, &self.presorted, ctx)?;
+        let order = run_windows(&self.calls, &rows, &mut results, &self.presorted, self.store.as_mut(), ctx)?;
+        if let Some(st) = &self.store
+            && let Some(instr) = ctx.instr.borrow().clone()
+        {
+            let mut stats = [None; 4];
+            for (s, w) in stats.iter_mut().zip(&st.wins) {
+                let (d, b) = w.stats();
+                *s = Some((d, b as u64));
+            }
+            for key in st.keys {
+                instr.update(key, |s| {
+                    for (x, y) in s.winstore.iter_mut().zip(stats) {
+                        if let Some((d, b)) = y {
+                            let (d0, b0) = x.unwrap_or_default();
+                            *x = Some((d0 || d, b0.max(b)));
+                        }
+                    }
+                });
+            }
+            // (The Sort the executor made shows as PostgreSQL's, whose counters are its
+            // input's.)
+            if let Some(sp) = &self.sort
+                && let Some(sort) = instr.get(std::sync::Arc::as_ptr(sp) as usize).and_then(|s| s.sort)
+            {
+                instr.update(st.keys[1], |s| s.sort = Some(sort));
+            }
+        }
         let mut out = Vec::with_capacity(n);
         let mut rows: Vec<Option<Row>> = rows.into_iter().map(Some).collect();
         for i in order {
@@ -142,11 +201,12 @@ impl WindowNode {
 }
 
 /// The keys of the Sort PostgreSQL puts under its WindowAgg (partition keys, then order
-/// keys), when the calls have one window with partition keys compared bytewise: the
+/// keys), when the calls have one window whose partition keys (if any) compare bytewise: the
 /// executor then sorts its input as a Sort node does (work_mem, spilling where tuplesort
-/// would) and reads it a partition at a time (`streamed_partitions`).
+/// would: the order of equal keys is tuplesort's, and EXPLAIN ANALYZE's Sort line its) and,
+/// with partition keys, reads it a partition at a time (`streamed_partitions`).
 pub(super) fn sort_keys_for(calls: &[WindowCall], ctx: &ExecCtx) -> Option<Vec<SortKey>> {
-    let keys = window_keys(calls, ctx)?.0;
+    let keys = window_keys(calls, true, ctx)?.0;
     if keys.iter().any(|k| k.coll.is_some()) {
         return None;
     }
@@ -159,7 +219,7 @@ pub(super) fn sort_keys_for(calls: &[WindowCall], ctx: &ExecCtx) -> Option<Vec<S
             out.push(k.clone());
         }
     }
-    Some(out)
+    (!out.is_empty()).then_some(out)
 }
 
 /// The partition keys to read the input a partition at a time by, when that computes what
@@ -168,7 +228,7 @@ pub(super) fn sort_keys_for(calls: &[WindowCall], ctx: &ExecCtx) -> Option<Vec<S
 /// on its partition and order keys already, so nothing is sorted and each partition's
 /// results are its own. None: the whole input at once.
 fn streamed_partitions(calls: &[WindowCall], presorted: &[String], ctx: &ExecCtx) -> Option<Vec<NeedKey>> {
-    let (keys, need) = window_keys(calls, ctx)?;
+    let (keys, need) = window_keys(calls, false, ctx)?;
     if presorted.len() < need.len() || presorted[..need.len()] != need[..] {
         return None;
     }
@@ -177,8 +237,8 @@ fn streamed_partitions(calls: &[WindowCall], presorted: &[String], ctx: &ExecCtx
 
 /// The calls' one window's partition keys (as `NeedKey`s) and the `key_repr`s of what its
 /// input must be sorted on (partition keys, then order keys); None when the calls have
-/// several windows or the window no partition keys.
-fn window_keys(calls: &[WindowCall], ctx: &ExecCtx) -> Option<(Vec<NeedKey>, Vec<String>)> {
+/// several windows, or the window no partition keys unless `unpartitioned`.
+fn window_keys(calls: &[WindowCall], unpartitioned: bool, ctx: &ExecCtx) -> Option<(Vec<NeedKey>, Vec<String>)> {
     use crate::sql::binder::optimize::pseudo_constant;
     let first = calls.first()?;
     let spec = |c: &WindowCall| {
@@ -191,7 +251,7 @@ fn window_keys(calls: &[WindowCall], ctx: &ExecCtx) -> Option<(Vec<NeedKey>, Vec
         return None;
     }
     let part_exprs: Vec<crate::sql::expr::Expr> = first.partition_by.iter().filter(|e| !pseudo_constant(e)).cloned().collect();
-    if part_exprs.is_empty() {
+    if part_exprs.is_empty() && !unpartitioned {
         return None;
     }
     let mut need: Vec<String> = Vec::new();
@@ -276,6 +336,7 @@ fn run_windows(
     rows: &[Row],
     results: &mut [Value],
     presorted: &[String],
+    mut store: Option<&mut Stores>,
     ctx: &ExecCtx,
 ) -> Result<Vec<usize>> {
     use crate::sql::binder::optimize::pseudo_constant;
@@ -354,7 +415,9 @@ fn run_windows(
     let mut sorted: Vec<String> = presorted.to_vec();
     // (No window's results yet: rows that are the same are the same in every way.)
     let mut first = true;
-    for wi in sequence {
+    // (The calls of the windows computed so far: the tuples of a WindowAgg above carry them.)
+    let mut done: Vec<usize> = Vec::new();
+    for (si, wi) in sequence.into_iter().enumerate() {
         let call0 = &calls[wins[wi].1[0]];
         let part_exprs: Vec<&crate::sql::expr::Expr> = call0
             .partition_by
@@ -521,9 +584,183 @@ fn run_windows(
                 results[i * calls.len() + ci] = v;
             }
         }
+        if let Some(st) = store.as_deref_mut() {
+            let w = Win { si, calls: &wins[wi].1, done: &done, parts: &parts, peers: &peers, okeys: &okeys };
+            count_store(st, &w, calls, rows, results, ctx)?;
+        }
+        done.extend_from_slice(&wins[wi].1);
         first = false;
     }
     Ok(order)
+}
+
+/// One window of `run_windows`, as `count_store` reads it.
+struct Win<'a> {
+    /// Its place among the WindowAggs (bottom first), its calls, and those below it.
+    si: usize,
+    calls: &'a [usize],
+    done: &'a [usize],
+    parts: &'a [Vec<usize>],
+    peers: &'a [Option<Vec<(usize, usize)>>],
+    okeys: &'a [Vec<Value>],
+}
+
+/// A lag / lead / nth_value offset that is a constant (get_fn_expr_arg_stable), else None.
+fn const_offset(call: &WindowCall, arg: usize, default: Option<i64>) -> Option<i64> {
+    match call.args.get(arg) {
+        None => default,
+        Some(crate::sql::expr::Expr::Const(v, _)) => v.as_i64(),
+        Some(_) => None,
+    }
+}
+
+/// EXPLAIN ANALYZE: window `w`'s tuplestore over its partitions (`workmem::WinStore`):
+/// before each row's trim, the rows nodeWindowAgg.c has spooled (spool_tuples: to the frame
+/// tail an aggregate or a frame pointer reads one past, the whole partition for a row count)
+/// and the oldest of its read pointers (the current row, the frame head and tail pointers,
+/// the aggregates' and each function's mark).
+fn count_store(st: &mut Stores, w: &Win, calls: &[WindowCall], rows: &[Row], results: &[Value], ctx: &ExecCtx) -> Result<()> {
+    use crate::sql::plan::Frame;
+    let frameless = |c: &WindowCall| {
+        matches!(
+            c.func,
+            WinFunc::Builtin(WinKind::RowNumber | WinKind::Rank | WinKind::DenseRank | WinKind::PercentRank | WinKind::CumeDist | WinKind::Ntile)
+        )
+    };
+    // (optimize_window_clauses: functions that ignore the frame get ROWS UNBOUNDED PRECEDING.)
+    let mut wc = calls[w.calls[0]].clone();
+    if w.calls.iter().all(|&c| frameless(&calls[c])) {
+        wc.frame = Frame {
+            unit: FrameUnit::Rows,
+            start: FrameBound::UnboundedPreceding,
+            end: FrameBound::CurrentRow,
+            exclude: FrameExclude::NoOthers,
+            between: false,
+        };
+    }
+    let f = wc.frame.clone();
+    let ordered = !wc.order_by.is_empty();
+    let ranged = f.unit != FrameUnit::Rows;
+    let offset = |b: &FrameBound| matches!(b, FrameBound::Preceding(_) | FrameBound::Following(_));
+    let head_ptr = ranged && (matches!(f.start, FrameBound::CurrentRow) && ordered || offset(&f.start));
+    let tail_ptr = ranged && (matches!(f.end, FrameBound::CurrentRow) && ordered || offset(&f.end));
+    let excl = f.exclude != FrameExclude::NoOthers;
+    let aggs = w.calls.iter().any(|&c| matches!(calls[c].func, WinFunc::Agg(_)));
+    let agg_mark = aggs && (!matches!(f.start, FrameBound::UnboundedPreceding) || excl);
+    let builtins: Vec<(WinKind, &WindowCall)> = w
+        .calls
+        .iter()
+        .filter_map(|&c| match &calls[c].func {
+            WinFunc::Builtin(k) => Some((*k, &calls[c])),
+            WinFunc::Agg(_) => None,
+        })
+        .collect();
+    while st.wins.len() <= w.si {
+        st.wins.push(super::workmem::WinStore::new(super::workmem::work_mem(ctx), !builtins.is_empty() || agg_mark));
+    }
+    let keep = st.keep.clone();
+    let kept = |c: usize| keep.as_ref().is_none_or(|k| k.get(c).copied().unwrap_or(false));
+    let mut types: Vec<DataType> = st.types.iter().enumerate().filter(|(c, _)| kept(*c)).map(|(_, t)| t.clone()).collect();
+    types.extend(w.done.iter().map(|&d| calls[d].ty.clone()));
+    let offsets = (
+        offset(&f.start).then(|| match &f.start {
+            FrameBound::Preceding(e) | FrameBound::Following(e) => offset_value(e, ctx, f.unit, true),
+            _ => unreachable!(),
+        }).transpose()?,
+        offset(&f.end).then(|| match &f.end {
+            FrameBound::Preceding(e) | FrameBound::Following(e) => offset_value(e, ctx, f.unit, false),
+            _ => unreachable!(),
+        }).transpose()?,
+    );
+    for (part, pp) in w.parts.iter().zip(w.peers) {
+        let m = part.len();
+        let peers = pp.as_deref().unwrap_or_default();
+        let tlens: Vec<i64> = part
+            .iter()
+            .map(|&i| {
+                let mut vals: Vec<Value> = rows[i].iter().enumerate().filter(|(c, _)| kept(*c)).map(|(_, v)| v.clone()).collect();
+                vals.extend(w.done.iter().map(|&d| results[i * calls.len() + d].clone()));
+                super::workmem::minimal_tuple_len(&vals, &types, ctx)
+            })
+            .collect();
+        let frames: Vec<(usize, usize)> =
+            (0..m).map(|r| frame_of(&wc, r, m, peers, part, w.okeys, &offsets, ctx)).collect::<Result<_>>()?;
+        // (update_frametailpos: what it spools for row r.)
+        let tail_spool = |r: usize| match &f.end {
+            FrameBound::UnboundedFollowing => m,
+            FrameBound::CurrentRow if !ranged => r + 1,
+            FrameBound::CurrentRow if !ordered => m,
+            FrameBound::Preceding(_) | FrameBound::Following(_) if !ranged => frames[r].1,
+            _ => frames[r].1 + 1,
+        };
+        let (mut spool, mut oldest) = (vec![0usize; m], vec![0usize; m]);
+        let mut marks = vec![0usize; builtins.len()];
+        for r in 0..m {
+            let (s, e) = frames[r];
+            let (mut sp, mut old) = (r + 1, r + 1);
+            if tail_ptr {
+                sp = sp.max(tail_spool(r));
+                old = old.min(e + 1);
+            }
+            if head_ptr {
+                old = old.min(s + 1);
+            }
+            if aggs {
+                // (The aggregates read rows up to one past the frame's end.)
+                sp = sp.max(e + 1);
+                old = old.min((e + 1).min(m));
+                if agg_mark {
+                    old = old.min(s);
+                }
+            }
+            for ((kind, c), mark) in builtins.iter().zip(marks.iter_mut()) {
+                let mut set = |p: usize| *mark = (*mark).max(p);
+                match kind {
+                    WinKind::RowNumber | WinKind::Rank | WinKind::DenseRank => set(r),
+                    WinKind::PercentRank | WinKind::CumeDist => {
+                        sp = m;
+                        set(r);
+                    }
+                    WinKind::Ntile => sp = m,
+                    WinKind::Lag | WinKind::Lead => {
+                        if let Some(k) = const_offset(c, 1, Some(1)) {
+                            let t = if *kind == WinKind::Lag { r as i64 - k } else { r as i64 + k };
+                            sp = sp.max((t + 1).clamp(0, m as i64) as usize);
+                            if (0..m as i64).contains(&t) {
+                                set(t as usize);
+                            }
+                        }
+                    }
+                    WinKind::FirstValue => {
+                        sp = sp.max(s + 1);
+                        if s < e {
+                            set(s);
+                        }
+                    }
+                    WinKind::LastValue => {
+                        sp = sp.max(tail_spool(r));
+                        if s < e {
+                            set(if excl { s } else { e - 1 });
+                        }
+                    }
+                    WinKind::NthValue => {
+                        if let Some(n) = const_offset(c, 1, None).filter(|n| *n > 0) {
+                            let a = s + n as usize - 1;
+                            sp = sp.max(a + 1);
+                            if a < e {
+                                set(if excl { s } else { a });
+                            }
+                        }
+                    }
+                }
+                old = old.min(*mark);
+            }
+            spool[r] = sp.min(m);
+            oldest[r] = old;
+        }
+        st.wins[w.si].partition(&tlens, |r| spool[r], |r| oldest[r]);
+    }
+    Ok(())
 }
 
 fn cmp_keys(a: &[Value], b: &[Value], keys: &[SortKey], ctx: &ExecCtx) -> Result<Ordering> {

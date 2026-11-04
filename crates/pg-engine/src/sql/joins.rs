@@ -797,6 +797,37 @@ fn eq(a: &Value, b: &Value) -> bool {
         && crate::exec::agg::cmp_rows(std::slice::from_ref(a), std::slice::from_ref(b)).is_eq()
 }
 
+/// The positions of an MCV list's non-null values sorted by value, then position: kept per
+/// thread for the lists statistics slots share (`costs::slot_values`), by the list's address
+/// with a `Weak` to it, so a list freed and another made at its address isn't taken for it.
+fn sorted_order(v: &std::sync::Arc<Vec<Value>>, cmp1: &dyn Fn(&Value, &Value) -> std::cmp::Ordering) -> std::sync::Arc<Vec<usize>> {
+    type Orders = std::collections::HashMap<usize, (std::sync::Weak<Vec<Value>>, std::sync::Arc<Vec<usize>>)>;
+    thread_local! {
+        static ORDERS: std::cell::RefCell<Orders> = std::cell::RefCell::new(Orders::new());
+    }
+    let key = std::sync::Arc::as_ptr(v) as usize;
+    let hit = ORDERS.with(|m| {
+        m.borrow()
+            .get(&key)
+            .filter(|(w, _)| w.upgrade().is_some_and(|a| std::sync::Arc::ptr_eq(&a, v)))
+            .map(|(_, o)| o.clone())
+    });
+    if let Some(o) = hit {
+        return o;
+    }
+    let mut order: Vec<usize> = (0..v.len()).filter(|&j| !v[j].is_null()).collect();
+    order.sort_by(|&x, &y| cmp1(&v[x], &v[y]).then(x.cmp(&y)));
+    let order = std::sync::Arc::new(order);
+    ORDERS.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() >= 256 {
+            m.clear();
+        }
+        m.insert(key, (std::sync::Arc::downgrade(v), order.clone()));
+    });
+    order
+}
+
 /// One side of an equality join clause: its variable (if a column with statistics can
 /// stand for it), or a known distinct count.
 #[derive(Clone)]
@@ -838,18 +869,33 @@ pub fn eqjoinsel_inner(cat: &Catalog, fmt: &FormatCtx, a: &JoinVar, b: &JoinVar)
             let mut has2 = vec![false; v2.len()];
             let mut matchprodfreq = 0.0;
             let mut nmatches = 0.0;
+            // Each of the first list's values takes the first unmatched equal value of the
+            // second (PostgreSQL's nested loop): found by binary search over the second list
+            // sorted by value, then position, when the lists are long and of one kind of
+            // value, so that the order is a total one. The same matches, summed in the same
+            // order.
+            let kind = v1.iter().chain(v2.iter()).find(|x| !x.is_null()).map(std::mem::discriminant);
+            let sorted = v1.len() * v2.len() > 256
+                && kind.is_some_and(|k| v1.iter().chain(v2.iter()).all(|y| y.is_null() || std::mem::discriminant(y) == k));
+            let cmp1 = |x: &Value, y: &Value| crate::exec::agg::cmp_rows(std::slice::from_ref(x), std::slice::from_ref(y));
+            let order = if sorted { sorted_order(&v2, &cmp1) } else { Default::default() };
+            let first_equal = |i: usize, has2: &[bool]| -> Option<usize> {
+                if !sorted {
+                    return (0..v2.len()).find(|&j| !has2[j] && eq(&v1[i], &v2[j]));
+                }
+                if v1[i].is_null() {
+                    return None;
+                }
+                let lo = order.partition_point(|&j| cmp1(&v2[j], &v1[i]).is_lt());
+                order[lo..].iter().take_while(|&&j| cmp1(&v2[j], &v1[i]).is_eq()).find(|&&j| !has2[j]).copied()
+            };
             for i in 0..v1.len() {
-                for j in 0..v2.len() {
-                    if has2[j] {
-                        continue;
-                    }
-                    if eq(&v1[i], &v2[j]) {
-                        has1[i] = true;
-                        has2[j] = true;
-                        matchprodfreq = f1[i].mul_add(f2[j], matchprodfreq);
-                        nmatches += 1.0;
-                        break;
-                    }
+                if let Some(j) = first_equal(i, &has2) {
+                    debug_assert_eq!(Some(j), (0..v2.len()).find(|&k| !has2[k] && eq(&v1[i], &v2[k])), "eqjoinsel's MCV match");
+                    has1[i] = true;
+                    has2[j] = true;
+                    matchprodfreq = f1[i].mul_add(f2[j], matchprodfreq);
+                    nmatches += 1.0;
                 }
             }
             let matchprodfreq: f64 = matchprodfreq.clamp(0.0, 1.0);

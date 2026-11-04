@@ -507,6 +507,89 @@ fn statistic_row(rel: u32, st: &super::ColStats) -> Row {
     row
 }
 
+/// initdb's statistics of system catalog `rel`'s column `attnum` (PostgreSQL 18.6's
+/// pg_statistic of a fresh cluster, `data/pg_statistic.tsv`), which the planner reads until
+/// an ANALYZE of the catalog stores its own in `Catalog::colstats`.
+pub fn initdb_colstats(rel: u32, attnum: i16) -> Option<&'static super::ColStats> {
+    static STATS: std::sync::OnceLock<std::collections::HashMap<(u32, i16), super::ColStats>> = std::sync::OnceLock::new();
+    STATS
+        .get_or_init(|| {
+            super::static_rows::rows(SysTable::PgStatistic)
+                .iter()
+                .filter(|s| s[2] == Value::Bool(false))
+                .map(|s| {
+                    let st = colstats_of_row(s);
+                    ((super::static_rows::oid_at(s, 0), st.attnum), st)
+                })
+                .collect()
+        })
+        .get(&(rel, attnum))
+}
+
+/// A pg_statistic row as `ColStats` (`statistic_row`'s inverse).
+fn colstats_of_row(s: &[Value]) -> super::ColStats {
+    let fmt = crate::types::text::FormatCtx::default();
+    let f4 = |v: &Value| match v {
+        Value::Float4(f) => *f,
+        _ => 0.0,
+    };
+    let slots = (0..5)
+        .filter_map(|i| {
+            let Value::Int2(kind) = s[6 + i] else { return None };
+            if kind == 0 {
+                return None;
+            }
+            let numbers = match &s[21 + i] {
+                Value::Array(a) => Some(a.items.iter().map(f4).collect()),
+                _ => None,
+            };
+            let values = match &s[26 + i] {
+                Value::Array(a) => Some((
+                    a.elem.clone(),
+                    a.items.iter().map(|v| crate::types::text::format_value(v, &a.elem, &fmt)).collect(),
+                )),
+                _ => None,
+            };
+            Some(super::StatSlot {
+                kind,
+                op: super::static_rows::oid_at(s, 11 + i),
+                coll: super::static_rows::oid_at(s, 16 + i),
+                numbers,
+                values,
+                parsed: Default::default(),
+            })
+        })
+        .collect();
+    super::ColStats {
+        attnum: match s[1] {
+            Value::Int2(a) => a,
+            _ => 0,
+        },
+        inherit: s[2] == Value::Bool(true),
+        nullfrac: f4(&s[3]),
+        width: match s[4] {
+            Value::Int4(w) => w,
+            _ => 0,
+        },
+        distinct: f4(&s[5]),
+        slots,
+    }
+}
+
+/// pg_statistic's rows of system catalogs: initdb's, each replaced by the catalog's own
+/// ANALYZE's (`Catalog::colstats`) where it has one for the column.
+fn catalog_statistic_rows(cat: &Catalog) -> Vec<Row> {
+    let mut out = Vec::new();
+    for s in super::static_rows::rows(SysTable::PgStatistic).iter() {
+        let rel = super::static_rows::oid_at(s, 0);
+        let own = cat
+            .colstats
+            .get(&rel)
+            .and_then(|all| all.iter().find(|st| Value::Int2(st.attnum) == s[1] && Value::Bool(st.inherit) == s[2]));
+        out.push(own.map_or_else(|| s.clone(), |st| statistic_row(rel, st)));
+    }
+    out
+}
 fn opt_bytes(b: &Option<Vec<u8>>) -> Value {
     b.as_ref().map_or(N, |b| Value::Bytea(b.as_slice().into()))
 }
@@ -1535,6 +1618,7 @@ pub fn generated_rows_count() -> u64 {
 /// address), the current and session user (and the session's login name), the search path,
 /// the session's temporary schema (when it has one) and the settings' values (`Settings::values_key`: equal for
 /// sessions whose settings are equal). (The cache is its database's.)
+#[derive(Clone)]
 struct SysRowsKey {
     table: u32,
     cat: std::sync::Weak<Catalog>,
@@ -1554,6 +1638,36 @@ pub use super::sysrows::{Out, RowChunk, SysRows};
 #[derive(Default)]
 pub struct SysRowsCache {
     entries: std::collections::VecDeque<(SysRowsKey, Arc<SysRows>, Option<Arc<Catalog>>)>,
+    /// The keys some session is generating rows for now: the others wanting them wait
+    /// (`rows_shared`). 100 sessions starting on a database just opened each made a copy
+    /// of pg_attribute's rows at once.
+    generating: Vec<SysRowsKey>,
+}
+
+/// Signalled when a generation `SysRowsCache::generating` lists ends.
+static GENERATED_SIGNAL: parking_lot::Condvar = parking_lot::Condvar::new();
+
+thread_local! {
+    /// This thread is generating shared rows: rows it needs meanwhile (an information_schema
+    /// view's query of pg_class) are generated without waiting, so two generations never
+    /// wait for each other.
+    static GENERATING_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A claimed generation, released (waking the sessions waiting for it) when dropped.
+struct GenerateClaim<'a> {
+    cache: &'a parking_lot::Mutex<SysRowsCache>,
+    key: SysRowsKey,
+}
+
+impl Drop for GenerateClaim<'_> {
+    fn drop(&mut self) {
+        GENERATING_HERE.with(|g| g.set(false));
+        let mut c = self.cache.lock();
+        c.generating.retain(|k| !k.same(&self.key));
+        drop(c);
+        GENERATED_SIGNAL.notify_all();
+    }
 }
 
 /// How many generated catalogs a database keeps: every cacheable catalog under a couple of
@@ -1738,9 +1852,27 @@ pub fn rows_shared(table: SysTable, ctx: &ExecCtx) -> Result<Arc<SysRows>> {
     debug_assert!(rows_cacheable(table));
     let key = rows_key(table, ctx);
     let cache = &ctx.sess.db.sys_rows;
+    let mut claim = None;
     let (hit, base) = {
-        let c = cache.lock();
-        let hit = c.entries.iter().find(|(k, ..)| k.same(&key)).map(|(_, r, _)| r.clone());
+        let mut c = cache.lock();
+        // (While another session generates these rows, wait for them: at most 10 s.)
+        let nested = GENERATING_HERE.with(|g| g.get());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut hit;
+        loop {
+            hit = c.entries.iter().find(|(k, ..)| k.same(&key)).map(|(_, r, _)| r.clone());
+            if hit.is_some() || nested || !c.generating.iter().any(|k| k.same(&key)) {
+                break;
+            }
+            if GENERATED_SIGNAL.wait_until(&mut c, deadline).timed_out() {
+                break;
+            }
+        }
+        if hit.is_none() && !nested {
+            c.generating.push(key.clone());
+            GENERATING_HERE.with(|g| g.set(true));
+            claim = Some(GenerateClaim { cache, key: key.clone() });
+        }
         // (Rows of an earlier version, and that version, to splice this one's from.)
         let base = (hit.is_none() && super::sysdelta::kept(table))
             .then(|| {
@@ -1822,6 +1954,8 @@ pub fn rows_shared(table: SysTable, ctx: &ExecCtx) -> Result<Arc<SysRows>> {
         c.entries.pop_front();
     }
     c.entries.push_back((key, rows.clone(), held));
+    drop(c);
+    drop(claim);
     Ok(rows)
 }
 
@@ -2347,6 +2481,11 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                     && let Some(n) = cat.filenodes.get(&super::static_rows::oid_at(&r, 0))
                 {
                     r[7] = o(*n);
+                }
+                // An ANALYZE of the catalog counted it.
+                if let Some(st) = cat.relstats.get(&super::static_rows::oid_at(&r, 0)) {
+                    r[9] = i4(st.pages as i64);
+                    r[10] = Value::Float4(st.tuples as f32);
                 }
                 out.push(r);
             }
@@ -3325,9 +3464,10 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
             }
         }
         PgStatistic => {
-            out.extend(super::static_rows::rows(table).iter().cloned());
+            // (initdb's rows, a catalog's ANALYZE replacing them, then every other.)
+            out.extend(catalog_statistic_rows(cat));
             for (rel, rows) in &cat.colstats {
-                for st in rows {
+                for st in rows.iter().filter(|st| st.inherit || initdb_colstats(*rel, st.attnum).is_none()) {
                     out.push(statistic_row(*rel, st));
                 }
             }
@@ -3502,7 +3642,7 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
             let classes = super::static_rows::rows(PgClass);
             let attrs = super::static_rows::rows(PgAttribute);
             let at = super::static_rows::oid_at;
-            for s in super::static_rows::rows(PgStatistic).iter() {
+            for s in catalog_statistic_rows(cat).iter() {
                 let Some(class) = classes.iter().find(|c| at(c, 0) == at(s, 0)) else {
                     continue;
                 };

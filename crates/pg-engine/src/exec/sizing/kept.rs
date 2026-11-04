@@ -36,10 +36,32 @@ fn key(oid: u32) -> Vec<u8> {
 /// order, its out-of-line values, the heap's shape (`Heap::read_shape`), and its btree
 /// indexes as their pages were.
 pub(super) struct Restore {
-    pub rows: Vec<(Vec<u8>, usize, Option<Tid>)>,
+    pub rows: KeptRows,
     pub exts: Vec<(Vec<u8>, Vec<NewExt>)>,
     pub shape: Vec<u8>,
     pub btrees: HashMap<u32, Btree>,
+}
+
+/// A record's rows (key, tuple length, TID), their keys in one buffer: decoding makes no
+/// allocation per row.
+#[derive(Default)]
+pub(super) struct KeptRows {
+    keys: Vec<u8>,
+    /// Per row: where its key ends in `keys`, its tuple length, its TID.
+    rows: Vec<(u32, u32, Tid)>,
+}
+
+impl KeptRows {
+    fn key(&self, i: usize) -> &[u8] {
+        let start = if i == 0 { 0 } else { self.rows[i - 1].0 as usize };
+        &self.keys[start..self.rows[i].0 as usize]
+    }
+
+    /// The heap model the rows give (`heapsim::restored`).
+    pub fn restored(&self, fillfactor: usize) -> (Heap, bool, Vec<Tid>) {
+        let rows = (0..self.rows.len()).map(|i| (self.key(i), self.rows[i].1 as usize, Some(self.rows[i].2)));
+        heapsim::restored_from(fillfactor, self.rows.len(), self.keys.len(), rows)
+    }
 }
 
 /// The table's definition as far as its models depend on it (and a little more: a rename
@@ -215,7 +237,7 @@ fn lay_out(db: &Database, oid: u32, building: Building<'_>) {
     let cat = db.catalog();
     let Some(t) = cat.tables.get(&oid) else { return };
     let Some((r, h)) = record(db, &cat, t) else { return };
-    let (mut heap, moved, _) = heapsim::restored(heap_fillfactor(t), r.rows);
+    let (mut heap, moved, _) = r.rows.restored(heap_fillfactor(t));
     if moved || heap.read_shape(&r.shape).is_none() {
         return;
     }
@@ -391,13 +413,18 @@ impl<'a> Rd<'a> {
         let d = (z >> 1) as i64 ^ -((z & 1) as i64);
         u64::try_from(prev as i64 + d).ok()
     }
-    fn suffix(&mut self, prev: &[u8]) -> Option<Vec<u8>> {
+    /// A key stored as its shared prefix with the previous key (the last `prev` bytes of
+    /// `keys`) and the rest, appended to `keys`.
+    fn suffix_into(&mut self, keys: &mut Vec<u8>, prev: usize) -> Option<()> {
         let shared = self.get()? as usize;
         let n = self.get()? as usize;
-        let mut b = Vec::with_capacity(shared + n);
-        b.extend_from_slice(prev.get(..shared)?);
-        b.extend_from_slice(self.take(n)?);
-        Some(b)
+        if shared > prev {
+            return None;
+        }
+        let start = keys.len() - prev;
+        keys.extend_from_within(start..start + shared);
+        keys.extend_from_slice(self.take(n)?);
+        Some(())
     }
 }
 
@@ -422,23 +449,27 @@ fn decode(v: &[u8], node: u32, token: u64, ff: usize) -> Option<Restore> {
         return None;
     }
     let n = r.get()? as usize;
-    let mut rows: Vec<(Vec<u8>, usize, Option<Tid>)> = Vec::with_capacity(n);
+    let mut rows = KeptRows { keys: Vec::new(), rows: Vec::with_capacity(n) };
     let mut exts = Vec::new();
     let mut pb = 0u64;
-    for _ in 0..n {
+    let mut prev = 0;
+    for i in 0..n {
         pb = r.delta(pb)?;
         let off = u16::try_from(r.get()?).ok()?;
-        let len = r.get()? as usize;
-        let k = r.suffix(rows.last().map_or(&[][..], |x| &x.0[..]))?;
+        let len = u32::try_from(r.get()?).ok()?;
+        let start = rows.keys.len();
+        r.suffix_into(&mut rows.keys, prev)?;
+        prev = rows.keys.len() - start;
+        let end = u32::try_from(rows.keys.len()).ok()?;
+        rows.rows.push((end, len, (u32::try_from(pb).ok()?, off)));
         let mut e = Vec::new();
         for _ in 0..r.get()? {
             let (col, bytes, sig) = (r.get()? as usize, r.get()? as usize, r.get()?);
             e.push(NewExt { col, bytes, sig });
         }
         if !e.is_empty() {
-            exts.push((k.clone(), e));
+            exts.push((rows.key(i).to_vec(), e));
         }
-        rows.push((k, len, Some((u32::try_from(pb).ok()?, off))));
     }
     let n = r.get()? as usize;
     let shape = r.take(n)?.to_vec();

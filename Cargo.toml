@@ -72,6 +72,8 @@ crossbeam-skiplist = "0.1"
 hashbrown = "0.17"
 # The roll-engine server's allocator (pg-engine allocates per row and per value).
 mimalloc = { version = "0.1", default-features = false }
+# roll-engine raises its open-file limit at startup (getrlimit / setrlimit).
+libc = "0.2"
 tempfile = "3"
 # ICU4X: pg-engine's `icu4x` fallback where ICU4C 78.1 (crates/pg-icu) can't be built
 icu_collator = "2.3"

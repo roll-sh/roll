@@ -129,6 +129,114 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Planner, round 9 (2026-11-03, agent 155)
+
+HANDOFF.md, "Planner round 9", has what changed. Setup:
+- release builds on the host under `nice -n 19`: base `e73340f4` and batch 1, rebased on
+  `847fbdba`;
+- PostgreSQL 18.6 (`a155-pg`, the pinned image, `shared_buffers=1GB`, host network);
+- clients in a helper container of the pinned image;
+- the machine shared, at load 9-40;
+- not yet the container-on-both-sides method of 847fbdba (`run.sh ENGINE_DOCKER=1`, dist
+  build), so the engine/PostgreSQL ratios below are biased against the engine.
+The schema is `tools/bench/plans/apps.setup.sql`: pgbench scale 10, 200 tables with keys,
+foreign keys and comments in two schemas (1,640 pg_class rows), and the job-queue tables at
+10,000 rows. The statements are `plans/apps.sql`; TPC-H is SF1.
+
+**Liquibase's column check** (Keycloak, Metabase), warm, psql's timing:
+
+| | base | batch 1 | PostgreSQL | batch 1 / PostgreSQL |
+|---|---:|---:|---:|---:|
+| a call | 92-112 ms | 3.2-4.2 ms | 2.0-2.2 ms | 1.6-1.9 |
+
+The plan is PostgreSQL's: a semi join (HashAggregate of pg_namespace ⋈ pg_class, then
+pg_attribute's index), where base ran a SubPlan per pg_attribute row (10,325 loops).
+
+**pg_class estimates at 2,000 tables** (8,415 pg_class rows, 2,068 of kind 'r'):
+
+| `pg_class WHERE relkind = 'r'` | base | batch 1 | PostgreSQL |
+|---|---:|---:|---:|
+| before ANALYZE | 42 | 1,379 (initdb's statistics) | 1,132 |
+| after `ANALYZE pg_class` | 42 | 2,068 | 2,068 |
+
+pgwatch's table_stats_approx over apps now has PostgreSQL's Hash Join, where base had a
+Nested Loop over an estimate of 8.
+
+ANALYZE costs, apps database (two runs each):
+
+| | base | batch 1 | PostgreSQL | batch 1 / PostgreSQL |
+|---|---:|---:|---:|---:|
+| `ANALYZE pg_class` | 1.0-1.3 ms (stored nothing) | 8.1-8.7 ms | 8.6 ms | 0.95-1.0 |
+| database-wide `ANALYZE` | 0.98-2.1 s | 1.2-2.0 s | 0.31-0.65 s | 3.1-3.9 |
+
+The catalogs add about 0.25 s warm.
+
+**Planning per statement.** `tools/bench/plancpu.py` measures it two ways:
+- EXPLAIN CPU: server CPU per `EXPLAIN <statement>` over pgbench `-M simple` / `-M
+  extended`, about 0.6 s of server CPU a cell, two rounds. Geometric mean of the 16 apps
+  statements, engine / PostgreSQL:
+
+  | | base | batch 1 (initdb catalog statistics) | batch 1 (catalogs analyzed) |
+  |---|---:|---:|---:|
+  | simple protocol | 1.78 / 1.81 | 1.77 / 2.12 | 1.90 / 2.00 |
+  | extended protocol | 2.49 / 2.53 | 1.79 / 1.71 | 1.78 / 1.72 |
+
+  The extended protocol gains about 30% because EXPLAIN's query is no longer bound at Parse
+  as well as at Execute. pgjdbc's getColumns went from 12.2 to 6.7-7.0 ms (PostgreSQL 2.0
+  ms), getImportedKeys from 30-32 to 20-21 ms (PostgreSQL 7.7 ms), Kysely's getTables from
+  3.4-3.8 to 1.8-2.2 ms (PostgreSQL 1.2 ms).
+
+  Over the simple protocol, catalog statistics cost the large catalog joins 10-30% more
+  planning than base, because base estimated those columns with defaults. getColumns with
+  the catalogs analyzed takes 8.1-8.7 ms against base's 6.5-6.6 ms. Before the MCV change,
+  with the catalogs analyzed, eqjoinsel's O(n²) MCV matching was half of it (11-12 ms).
+- `--summary`: each server's own `EXPLAIN (SUMMARY)` Planning Time, the median of the last
+  20 of 30 in a session. These are elapsed times, and on this machine their spread between
+  rounds (up to 2x on one cell) is larger than the change between builds. The geometric
+  mean over apps is 2.3-3.5 for every build. TPC-H, batch 1, simple protocol: 2.97,
+  ranging from q03 at 1.07 to q15 at 10.8 (its view).
+- CPU of EXPLAINing plancmp's 89 queries, each engine restarted then warmed once,
+  interleaved:
+
+  | | base | batch 1 | PostgreSQL |
+  |---|---:|---:|---:|
+  | run 1 / run 2, round 1 | 240 / 290 ms | 180 / 190 ms | 144-177 ms |
+  | run 1 / run 2, round 2 | 210 / 210 ms | 220 / 200 ms | 155-171 ms |
+
+  Peak memory was 1,619-1,663 MB for both builds. Without the warm run, a restarted engine's
+  first run pays its heap-model restore (up to 7.7 s once).
+
+**Plan shapes and results.** plancmp is 77 / 89 at the defaults and 81 / 89 serial,
+unchanged. All 22 TPC-H result hashes equal PostgreSQL's.
+
+**pgbench** (scale 10, 4 clients, 20 s, `-M prepared`, base / batch 1 on the same data,
+interleaved twice; engine CPU per transaction from /proc):
+
+| | round 1 | round 2 |
+|---|---|---|
+| select-only | 16,436 / 16,095 tps, 207 / 213 us | 14,916 / 15,327 tps, 238 / 231 us |
+| tpcb-like | 3,164 / 3,006 tps, 1,068 / 1,107 us | 2,863 / 3,049 tps, 1,139 / 1,111 us |
+
+Peak RSS was 253-339 MB, alike for both builds; the differences are within the rounds'
+spread. Prepared pgbench statements are rarely planned, so this batch's planner changes
+barely run on that path.
+
+**Footprint gate** (fresh engines, host-run, `bench idle --mem-pid`), base / batch 1:
+- idle CPU over 5 minutes after one query: 20 / 10 ms;
+- 100 idle sessions: 42.2 + 100 × 325 kB / 42.7 + 100 × 329 kB of RSS;
+- the fresh data directory: 64 / 64 kB before the first database is opened.
+Initdb's catalog statistics are static data, and a catalog's are stored only by an ANALYZE
+of it.
+
+**Where planning goes now** (perf, release with frame pointers, pgjdbc and TPC-H joins).
+The cost is spread thinly:
+- allocation, 10-15%;
+- `Expr` / `JP` / `IClause` / `ColInfo` clones and drops, 10-15%;
+- join search bookkeeping (`enforced_of`, `needed_above_in`, `side_ec`, `var_of`);
+- EXPLAIN's builder re-planning scans for estimates (`estimate_in`, `describe_need`,
+  `partial_scans`).
+No single function takes more than 5%. HANDOFF has the next steps.
+
 ## postgres_fdw, round 6 (2026-11-03, agent 153)
 
 What changed: HANDOFF.md's postgres_fdw "Round 25 (agent 153)". A level locking local relations
@@ -7302,6 +7410,97 @@ partition at a time; fresh engine per run (data and block cache warm on disk, `-
 
 Engine / PostgreSQL: 1.8x the time, 0.15x the memory (it was 2.3x / 0.70x).
 
+## Query memory, round 3 (round 25, agent 164)
+
+HANDOFF.md, "Query memory, round 3", has what changed. Both servers in containers on cores
+24-27 (`tools/bench/run.sh` with `ENGINE_DOCKER=1`, host network, the engine built with
+`--profile dist` and bind-mounted, `--cache-mb 2048`; PostgreSQL 18.6 with run.sh's
+settings, `shared_buffers=2GB`), CPU and anon + shmem from each container's cgroup, the
+bench client on cores 8-11. `base` is `3df0c607` (round 2's end); `new` is this round on
+`73edecba` (so its TPC-H column includes agent 160's executor round 9 too). Engines alternated
+(base, new, base, new), each a fresh container; the machine had other agents' builds on it
+(load 11-15), so only alternated pairs are compared. The numbers are copied from the run logs,
+which went with the scratch directory.
+
+### The analytic window query (2M rows, 1,000 partitions; three alternated pairs, 3 reps each)
+
+| | min s | CPU s | peak MB | temp MB |
+|---|---:|---:|---:|---:|
+| PostgreSQL | 1.75 | 1.76 | 976 | 149 |
+| base | 2.59-2.66 | 2.72-2.77 | 272-282 | 149 |
+| new | 2.21-2.24 | 2.31-2.36 | 247-249 | 149 |
+
+Rows hashed equal to PostgreSQL's. Engine / PostgreSQL: 1.27x the time (was 1.50x), 0.25x
+the memory. Profile of `base` (perf in a helper container, flat): writing runs 9% in
+`encode_value`, 78% of it on loading the value (rows reached in sorted order, each a vector
+of its own), dropping those rows 7%; after packing: `encode_value` 3%, drops 3%. What's left:
+decoding runs read back (12%, twice: the intermediate merge pass at 4 MB and the final one),
+run sorting (~10%), the window and the aggregate above (~10%).
+
+### TPC-H SF1 (one rep each, fresh servers, all 22 results hashed equal to PostgreSQL's)
+
+| | wall s | CPU s | peak MB | temp MB |
+|---|---:|---:|---:|---:|
+| PostgreSQL | 14.0 | 32.2 | 1,690 | 84 |
+| base | 21.4, 21.7 | 47.8, 49.1 | 1,715 | 35 |
+| new | 20.0, 19.7 | 45.3, 44.8 | 1,716 | 35 |
+
+Engine / PostgreSQL: 1.41x CPU, 1.02x peak.
+
+**Where the peak comes from** (base, a fresh engine per cache size, 2 reps, CPU of both):
+
+| --cache-mb | peak MB | CPU s | sum of medians s |
+|---:|---:|---:|---:|
+| 2048 | 1,718 | 88.2 | 18.9 |
+| 1024 | 1,509 | 131.4 | 29.6 |
+| 512 | 1,038 | 189.8 | 43.1 |
+
+Per query at 512 against 2048 (CPU s): q01 4.36 / 4.32 (a sequential scan of lineitem
+costs no more uncached), q06 2.47 / 1.72, q09 22.59 / 4.89, q07 6.60 / 1.63, q17 6.69 /
+1.90, q21 6.05 / 2.54, q02 2.83 / 1.05, q11 1.78 / 0.23, q20 1.57 / 0.39: the cost is index
+lookups and joins reading blocks the cache no longer holds, a 16 kB block decompressed and
+decoded per row fetched.
+
+**Bulk admission** (new, a knob for the experiment only, not kept: the share of the cache a
+bulk read may fill; 2 reps): 100 % 1,715 MB, 114.0 s CPU; 25 % 1,729 MB, 116.8 s; 0 %
+1,732 MB, 117.7 s. Keeping big sequential scans out of the cache (PostgreSQL's ring) doesn't
+lower the peak: lineitem comes in through q04 / q21's lookups by l_orderkey and q17 / q20's by
+l_partkey, as PostgreSQL's shared buffers take it in at q03 (its peak goes 115 MB after q01,
+1,342 MB after q03). PostgreSQL's lineitem is 879 MB of heap, the engine's decoded blocks
+about 970 MB.
+
+### The burst (`bench burst`, scale 2, 20 s per size; PostgreSQL restarted first)
+
+| sessions | PostgreSQL ops/s | new ops/s | PostgreSQL µs CPU / op | new µs CPU / op | PostgreSQL peak MB | new peak MB |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 3,324 | 2,954 | 1,161 | 1,227 | 183 | 212 |
+| 50 | 3,488 | 2,575 | 1,140 | 1,444 | 318 | 329 |
+| 100 | 2,884 | 2,084 | 1,374 | 1,753 | 462 | 455 |
+| 200 | 2,522 | 1,723 | 1,564 | 2,003 | 750 | 712 |
+
+At 200 sessions: 0.68x the operations, 1.28x CPU per operation, 0.95x the memory (an earlier
+pass, less loaded: 1,994 / 2,891 ops/s, 1,660 / 1,341 µs). `base` can't run 200 sessions in a
+container: its 1,024 open files ran out (HANDOFF: seven descriptors per connection) and the
+clients hung; the open-file limit raised, `new` does.
+
+### pgbench (scale 10, 8 clients, 30 s, prepared; alternated twice)
+
+| | select-only µs CPU / txn | select-only peak MB | tpcb-like µs CPU / txn | tpcb-like peak MB |
+|---|---:|---:|---:|---:|
+| PostgreSQL | 49.1 | 326 | 341 | 346 |
+| base | 56.6, 56.3 | 218, 194 | 500, 486 | 319, 322 |
+| new | 52.0, 54.7 | 199, 195 | 485, 507 | 322, 385 |
+
+Within the runs' spread: no change.
+
+### memory_load, the footprint gate
+
+`many_sessions_stay_bounded` (100 sessions on a database just opened, bound 120 MB), nine
+release runs +42.9 to +48.1 MB, five debug runs +45.9 to +48.8 MB (round 2: release +50-62,
+debug up to +126).
+Footprint gate (scoreboard quick, connect): idle CPU 0.025 s / 5 min (PostgreSQL 0.525),
+100 idle sessions 30.7 MB (211), fresh data directory 3.03 MB (38.9): pass.
+
 ## Size models, round 4 (round 24, agent 151)
 
 HANDOFF.md, "Size models, round 4", has what changed. Release builds unless stated, scale 10
@@ -7372,7 +7571,7 @@ primary key, live allocations after the first statement): 46.9 MB (round 3) -> 3
 (round 3: 0.29-0.35 s).
 
 **Page counts against PostgreSQL 18.6** (round 2's mixed workload with mw1's row count as a
-parameter, script `~/.cache/a151/scripts/mw.py` as described in round 2: pages per fork and
+parameter, script `tools/bench/sizing/mw.py` since round 5, as described in round 2: pages per fork and
 four EXPLAINs before and after a clean restart, 300 inserts into each table with their
 ctids, VACUUM of both, the same report, 500 more inserts and an UPDATE of every 97th row with
 their ctids, the report again): at 60,000 and at 300,000 rows everything matches PostgreSQL,
@@ -7382,6 +7581,90 @@ too. Round 3 left `mw1_k` 485 / 487 and `mw1_v` 3,696 / 3,706 at 300,000 rows an
 after-VACUUM checks found `mw1_pkey` 1,785 / 1,784 and mw2's index reltuples (now equal).
 Still different, outside these checks: pgstatindex's empty / deleted leaf pages after a
 VACUUM empties btree pages (the model doesn't delete or recycle them).
+
+## Size models, round 5 (round 24, agent 161)
+
+HANDOFF.md, "Size models, round 5", has what changed.
+
+**The scripts** (`tools/bench/sizing/`, replacing agent 151's deleted `~/.cache/a151/scripts`):
+
+- `lift.sh <label> <pg|engine> [checks]`: one server, fresh, in a container (the engine as
+  run.sh's `ENGINE_DOCKER`: the dist binary bind-mounted, the same cpuset, CPU weight and
+  slice as PostgreSQL's), CPU from its cgroup's `cpu.stat`, peak anon + shmem sampled every
+  0.5 s. Checks: `bulk` (`pgbench -i -s $SCALE` a phase at a time: COPY g, VACUUM v,
+  primary key p; then CREATE INDEX on bid, DELETE of every tenth row, VACUUM, a clean
+  restart and the first statement's `\timing`), `pgbench` (select-only, simple-update,
+  tpcb-like at $CLIENTS clients, $SECS s, `-M prepared`), `apply` (agent 152's apply-like
+  statements, `apply.sql`, on `extra_setup.sql`'s tables), `skip` (agent 144's skip scan,
+  `count(*) FROM skip_t WHERE ts = K` on index (g, ts) over 1M rows, the median of 10).
+- `liftcmp.sh <out> [checks]`: the lift table: PostgreSQL, the engine at its limit and the
+  engine with `ROLL_MODEL_MAX_VERSIONS` lifted, `$ROUNDS` interleaved rounds, one row per
+  check (CPU ms per transaction for the pgbench checks, else CPU s; peak MB).
+- `mw.py`: the page-count workload (round 2's mixed workload, mw1's row count as a
+  parameter), against a reference container or an engine it starts; diff the two outputs.
+- `ROLL_MODEL_MAX_VERSIONS` (new, read once at start): the engine's model limit, so one
+  binary measures both columns. run.sh's `ENGINE_ENV` passes it into the container.
+
+**The lift table** (`liftcmp.sh`, 2 interleaved rounds, scale 10 = 1M accounts, engine and
+PostgreSQL 18.6 in containers on cores 8-11, clients on 0-3, the dist build of b5aeaf72, other
+agents' builds running at nice 19; CPU s, or CPU ms per transaction; peak anon + shmem MB):
+
+| check | 400k | lifted | PostgreSQL | round 4: 400k / lifted |
+|---|---|---|---|---|
+| COPY 1M (g) | 1.89 / 2.53 s | 2.04 / 2.22 s | 0.83 / 0.79 s | 1.77 / 2.66 |
+| VACUUM (v) | 0.35 / 0.35 s | 0.51 / 0.20 s | 0.15 / 0.17 s | 0.67 / 0.76 |
+| primary key (p) | 0.66 / 0.78 s | 2.62 / 2.61 s | 0.58 / 0.52 s | 0.77 / 1.66 |
+| CREATE INDEX (bid) | 1.06 / 1.52 s | 1.20 / 1.19 s | 0.40 / 0.43 s | 0.91 / 1.68 |
+| DELETE 10% | 0.61 / 0.69 s | 0.81 / 1.15 s | 0.15 / 0.16 s | 0.98 / 1.44 |
+| VACUUM after DELETE | 0.92 / 0.98 s | 0.38 / 0.39 s | 0.27 / 0.26 s | |
+| first statement after restart | 9 / 13 ms | 246 / 240 ms | 2.1 / 1.6 ms | 20 / 310 |
+| select-only c8 | 0.051 / 0.057 ms, 391 / 370 MB | 0.051 / 0.050 ms, 338 / 545 MB | 0.042 / 0.053 ms, 246 / 246 MB | |
+| simple-update c8 | 0.246 / 0.280 ms, 254 / 218 MB | 0.325 / 0.264 ms, 339 / 345 MB | 0.191 / 0.242 ms, 274 / 264 MB | 0.24 / 0.30 |
+| tpcb-like c8 | 0.452 / 0.603 ms, 250 / 262 MB | 0.468 / 0.560 ms, 388 / 372 MB | 0.275 / 0.329 ms, 277 / 263 MB | 0.49 / 0.56 |
+| apply-like c8, after a warm-up | 0.324 / 0.393 ms, 202 / 219 MB | 0.356 / 0.417 ms, 391 / 398 MB | 0.240 / 0.257 ms, 342 / 320 MB | 3.80 / 4.11 (no warm-up) |
+| skip scan, warm | 1.27 / 1.82 ms | 1.15 / 1.30 ms | 0.64 / 0.27 ms | 1.2 / 2.0 |
+
+The rounds moved by up to 30% between identical runs (the machine's load), so read the
+pairs, not single cells. Lifted, COPY, VACUUM, CREATE INDEX, tpcb-like, the apply-like mix and
+the skip scan are at the 400k numbers or below them; the primary key (4x), DELETE, the first
+statement after a restart, simple-update and the peaks are not, so the limit stays.
+Round 4's apply-like row measured the setup's million-row load being written out (the first
+20 s after `extra_setup.sql`: 4.0 ms per transaction; the runs after it 0.33-0.35 ms on the
+host): `lift.sh` warms up first now, and the engine is then within 1.3-1.5x of PostgreSQL.
+The lifted primary key is 1.3 s of CPU in a release build on the host and 2.6-2.7 s in the
+dist build, on the host too (`profphase.sh`-style runs of the same phase): the dist build's
+profile spends it in the build's unique-key set and point reads of the store, which the
+release build's doesn't show. Not explained yet.
+
+**Host profiles** (release with line tables, engine on 8-11 under nice 19, pgbench on 0-3,
+the same binary both ways; CPU of the engine process):
+
+| | 400k | lifted |
+|---|---|---|
+| simple-update c8, ms CPU / txn (round 1 / this round's build) | 0.369 / 0.301 | 0.416 / 0.327 |
+| model code's own samples, simple-update | 2.1% / 2.0% | 8.5% / 7.3% |
+| COPY (g), s CPU (round 1 / this round's build) | 2.20 / 2.19 | 2.89 / 2.29 |
+| primary key (p), s CPU (round 1 / this round's build) | 0.77 / 0.75 | 1.53 / 1.31 |
+| DELETE 10%, s CPU | | 1.09 (KeyMap::find 9.6%: two lookups a row, one since) |
+
+Round 1 is the tree before KeyMap's slot hashes and bounded forward search, the one-pass
+model of index builds and the GiST check; "this round's build" has them. What is left in the
+lifted primary key is the serial build itself: big (estimated) tables build in `parbuild`'s
+workers, modelled ones read their rows on one thread and check unique keys in a hash set.
+
+**The apply-like mix's steady state** (host, release, 8 clients): 0.33-0.35 ms of engine CPU
+per transaction; the models are 0.9% of its samples (agent 149 measured 37% in the dead
+head's walks before this round); the rest is the executor's and storage's.
+
+**tpcb-like at 32 clients** (scale 10, the 400k limit, host release): model code 3.0% of the
+on-CPU samples, `scanned_pages` 0.44% of it, the parking_lot slow paths 0.2%. The off-CPU
+(sched_switch) recording didn't unwind past the futex calls, so its attribution is open.
+
+**Page counts against PostgreSQL 18.6** (`mw.py`, STATS=1): at 60,000 rows every line matches
+(pages per fork, ctids, EXPLAIN costs, pgstatindex, reltuples), before and after a restart.
+At 300,000 rows everything matches but mw1_pkey's pgstatindex after the VACUUM: deleted_pages
+162 on both (before this round the model deleted none), leaf pages 1,613 + 1 empty against
+1,614 + 0 (with PostgreSQL's autovacuum off too).
 
 ## Where it is still slower, and why
 

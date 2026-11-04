@@ -156,6 +156,15 @@ impl std::fmt::Debug for FormatCtx {
 /// when the mantissa is even, which Postgres doesn't: such a result (rare) is found again
 /// by `shortest_digits_slow`.
 fn shortest_digits(v: f64, single: bool) -> (String, i32) {
+    let (digits, exp) = ryu_digits(v, single);
+    if is_midpoint(v, single, &digits, exp) {
+        return shortest_digits_slow(v, single);
+    }
+    (digits, exp)
+}
+
+/// Ryu's shortest digits of `v` (positive, finite, nonzero) and their decimal exponent.
+fn ryu_digits(v: f64, single: bool) -> (String, i32) {
     let mut buf = ryu::Buffer::new();
     let s = if single { buf.format_finite(v as f32) } else { buf.format_finite(v) };
     let (mant, e) = match s.split_once('e') {
@@ -172,9 +181,6 @@ fn shortest_digits(v: f64, single: bool) -> (String, i32) {
     let end = digits.trim_end_matches('0').len();
     digits.truncate(end);
     digits.drain(..z);
-    if is_midpoint(v, single, &digits, exp) {
-        return shortest_digits_slow(v, single);
-    }
     (digits, exp)
 }
 
@@ -220,6 +226,11 @@ fn shortest_digits_slow(v: f64, single: bool) -> (String, i32) {
 /// Whether `digits` × 10^(exp - digits + 1) is exactly the midpoint between `v` (positive)
 /// and one of its neighbouring floats.
 fn is_midpoint(v: f64, single: bool, digits: &str, exp: i32) -> bool {
+    is_midpoint_with(v, single, digits, exp, true)
+}
+
+/// `is_midpoint`; `quick`: rule out by divisibility first (tests compare it without).
+fn is_midpoint_with(v: f64, single: bool, digits: &str, exp: i32, quick: bool) -> bool {
     use num_bigint::BigUint;
     let (m, e, min_mant, min_e): (u64, i32, u64, i32) = if single {
         let b = (v as f32).to_bits();
@@ -242,10 +253,19 @@ fn is_midpoint(v: f64, single: bool, digits: &str, exp: i32) -> bool {
     if e < 2 && !digits.ends_with('5') {
         return false;
     }
+    let k = exp - (digits.len() as i32 - 1);
+    // (n * 10^k for k < 0 is a dyadic midpoint only if 5^-k divides n: n's 17 digits can't
+    // hold a factor past 5^24, and most decimals have none, so nothing big is computed.)
+    if quick
+        && k < 0
+        && let Ok(small) = digits.parse::<u64>()
+        && (-k > 27 || !small.is_multiple_of(5u64.pow((-k) as u32)))
+    {
+        return false;
+    }
     let Ok(n) = digits.parse::<BigUint>() else {
         return false;
     };
-    let k = exp - (digits.len() as i32 - 1);
     // n * 10^k == odd * 2^p ?
     let equals = |odd: u64, p: i32| {
         let ten = BigUint::from(10u32);
@@ -2414,6 +2434,33 @@ pub fn format_interval(i: &Interval, ctx: &FormatCtx) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The divisibility check never rules out a midpoint the exact comparison finds.
+    #[test]
+    fn midpoint_quick_check_agrees() {
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut vals: Vec<f64> = (1..20_000).map(|i| i as f64 / 7.0).chain((1..20_000).map(|i| (i as f64) * 0.5)).collect();
+        vals.extend((1..2_000).map(|i| (i as f64) / 1024.0 + 0.5f64.powi(30)));
+        for _ in 0..60_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let v = f64::from_bits(x >> 1);
+            if v.is_finite() && v != 0.0 {
+                vals.push(v);
+            }
+        }
+        for v in vals {
+            for single in [false, true] {
+                let v = if single { (v as f32) as f64 } else { v };
+                if !v.is_finite() || v == 0.0 {
+                    continue;
+                }
+                let (d, e) = super::ryu_digits(v, single);
+                assert_eq!(super::is_midpoint_with(v, single, &d, e, true), super::is_midpoint_with(v, single, &d, e, false), "{v:e} {single}");
+            }
+        }
+    }
+
     use super::*;
 
     /// Ryu's digits (`shortest_digits`) against the search by formatting

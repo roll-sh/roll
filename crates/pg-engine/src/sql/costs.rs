@@ -146,10 +146,19 @@ pub fn col_stats(cat: &Catalog, table: u32, col: usize) -> Option<&ColStats> {
             .as_ref();
     }
     // (A partitioned table has only its inherited statistics: those, for its Append.)
-    let all = cat.colstats.get(&table)?;
+    // A system catalog's column has initdb's until an ANALYZE of the catalog.
+    let initdb = || {
+        (table < crate::catalog::FIRST_USER_OID)
+            .then(|| crate::catalog::system::initdb_colstats(table, col as i16 + 1))
+            .flatten()
+    };
+    let Some(all) = cat.colstats.get(&table) else {
+        return initdb();
+    };
     all.iter()
         .find(|s| s.attnum as usize == col + 1 && !s.inherit)
         .or_else(|| all.iter().find(|s| s.attnum as usize == col + 1 && s.inherit))
+        .or_else(initdb)
 }
 
 /// The statistics of a variable (a column, or an index expression).
