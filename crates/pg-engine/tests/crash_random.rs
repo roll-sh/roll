@@ -765,7 +765,7 @@ fn recovery_oracle_rejects_partial_and_lost_acknowledged_transactions() {
         let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
         let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             settle(&mut s, dir.path(), seed);
-        })).err().expect("the recovery oracle accepted deliberately broken recovered state");
+        })).expect_err("the recovery oracle accepted deliberately broken recovered state");
         let message = failure.downcast_ref::<String>().map(String::as_str)
             .or_else(|| failure.downcast_ref::<&str>().copied()).unwrap();
         assert!(message.contains(if partial { "partial transaction" } else { "txlog against the steps logged as committed" }), "{message}");
