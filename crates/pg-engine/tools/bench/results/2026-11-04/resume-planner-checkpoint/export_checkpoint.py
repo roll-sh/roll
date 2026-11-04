@@ -20,6 +20,19 @@ readme = '''# Recovery and OLTP165 review checkpoint (2026-11-04)
 Evidence only. No source candidate is accepted and no performance advantage is claimed.
 Only completed command outputs are exported. Ongoing diagnostic probe output is excluded.
 
+Current owner sourcec8618834 follows completedab3 verification with a7line pgstat slot
+ownership guard and2backend-lifecycle regressions. Engine::connect callers can overlap
+the samePID: oldsession cleanup removed the newslot, so its idle count stayed0after10.5s,
+expected1; endingnewsession flushed1. Actualred101 retained. NormalwirePIDreuse reachability
+is not claimed. Arc::ptr_eq now removes only the registeredslot owned by the ending session.
+Focused corrected lifecycle2/prepared4/idle-statistics1/end-monitoring1 allpassed.
+Frozen fullv3 expected455/0/18/61 reconciles ab3's453/18/60 plus ONLY2tests/newbinary.
+Fullv3 isactive; partial full outputs excluded. Current sourceacceptance remainsHELD.
+Afterab3 terminal/rawexport, futurelaunch assessment identified heavy.sh has noaffinity.
+v3 usesexisting taskset8-13,18-19, startupchecks nice19/jobs2/testthreads<=2 andaffinity.
+Observed4focuseddescendantprocesses/12threads allwithin thataffinity; existingglobal4slots/
+2jobs andexistinga165target unchanged. Oldfullv2 affinity0-35 limitation remains recorded.
+
 OLTP165 recovered at 6fde4096. jobA failed; jobB was FALSE SUCCESS: every cargo
 step failed compilation on missing AtomicU64, despite final HEAVY-EXIT0. Original wrappers
 and failed logs are retained. baeee87a fixes that import. Its full debug and release
@@ -263,7 +276,7 @@ sources = {
     'fdw172/contrib-base.log': '/home/meszmate/.cache/a172/contrib-base.log',
     'fdw172/REPORT.md': '/home/meszmate/.cache/a172/contrib/run-base/report/REPORT.md',
 }
-for campaign in ('embedded165v2', 'embedded165v3', 'green165r2', 'green165r2v2', 'check165r2-runner-error', 'check165r2', 'red165r3', 'green165r3', 'check165r3', 'focus165ind', 'bytea165compare'):
+for campaign in ('embedded165v2', 'embedded165v3', 'green165r2', 'green165r2v2', 'check165r2-runner-error', 'check165r2', 'red165r3', 'green165r3', 'check165r3', 'focus165ind', 'bytea165compare', 'probe165-low'):
     for artifact in sorted((D / campaign).iterdir()):
         if artifact.is_file():
             sources[campaign + '/' + artifact.name] = str(artifact)
@@ -277,6 +290,11 @@ for name in ('build.command', 'build.log', 'engine.sha256', 'postgres-unit.comma
     sources['check165ind-v2/' + name] = str(D / 'check165ind-v2' / name)
 sources['check165ind-v2/wrapper.log'] = str(D / 'check165ind-v2-wrapper.log')
 sources['runners/audit165-terminal.py'] = str(D / 'audit165-terminal.py')
+for name in ('a165_independent_low.rs', 'probe165-low.sh', 'ind165-future-launch-controls.json', 'c8618834-slot-ownership.patch', 'check165ind-v3.sh', 'ind165-v3-expected-per-binary.json', 'ind165-v3-count-reconciliation.json', 'ind165-v3-frozen-runner.sha256'):
+    sources['runners/' + name] = str(D / name)
+sources['probe165-low/wrapper.log'] = str(D / 'probe165-low-wrapper.log')
+for name in ('source.txt', 'tree.txt', 'initial.status', 'startup-controls.json', 'affinity-observation-focused.json', 'lifecycle.command', 'lifecycle.log', 'prepared.command', 'prepared.log', 'statistics.command', 'statistics.log', 'end-monitoring.command', 'end-monitoring.log', 'focused-completed-exits.tsv'):
+    sources['check165ind-v3/' + name] = str(D / 'check165ind-v3' / name)
 for name, source in sources.items():
     files[name] = Path(source).read_bytes()
 files['manifest.json'] = (json.dumps({name: {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}

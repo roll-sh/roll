@@ -1,0 +1,5 @@
+STARTUP-CONTROLS-PASS affinity8-13,18-19 nice19 jobs2 testthreads<=2
+locks	0
+slot	101
+/home/meszmate/roll/.claude/worktrees/agent-a640c14a8f76f8ea4/crates/pg-engine/tests/a165_independent_low.rs: OK
+HEAVY-EXIT 101

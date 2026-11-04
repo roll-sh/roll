@@ -1,0 +1,13 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a640c14a8f76f8ea4/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 37.30s
+     Running tests/backend_lifecycle.rs (/home/meszmate/.cache/a165/target/debug/deps/backend_lifecycle-27b1e530a6c9893d)
+
+running 2 tests
+test fast_own_transaction_waiters ... snapshot=true blocked=true locks=["virtualxid | ExclusiveLock | t", "relation | ShareUpdateExclusiveLock | t", "virtualxid | ExclusiveLock | t", "virtualxid | ShareLock | f"]
+snapshot=false blocked=true locks=["relation | RowExclusiveLock | t", "virtualxid | ExclusiveLock | t", "relation | ShareUpdateExclusiveLock | t", "virtualxid | ExclusiveLock | t", "virtualxid | ShareLock | f"]
+ok
+test same_pid_old_session_end_preserves_new_idle_statistics ... same_pid_idle_seen=["1"]
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.83s
+

@@ -3,6 +3,19 @@
 Evidence only. No source candidate is accepted and no performance advantage is claimed.
 Only completed command outputs are exported. Ongoing diagnostic probe output is excluded.
 
+Current owner sourcec8618834 follows completedab3 verification with a7line pgstat slot
+ownership guard and2backend-lifecycle regressions. Engine::connect callers can overlap
+the samePID: oldsession cleanup removed the newslot, so its idle count stayed0after10.5s,
+expected1; endingnewsession flushed1. Actualred101 retained. NormalwirePIDreuse reachability
+is not claimed. Arc::ptr_eq now removes only the registeredslot owned by the ending session.
+Focused corrected lifecycle2/prepared4/idle-statistics1/end-monitoring1 allpassed.
+Frozen fullv3 expected455/0/18/61 reconciles ab3's453/18/60 plus ONLY2tests/newbinary.
+Fullv3 isactive; partial full outputs excluded. Current sourceacceptance remainsHELD.
+Afterab3 terminal/rawexport, futurelaunch assessment identified heavy.sh has noaffinity.
+v3 usesexisting taskset8-13,18-19, startupchecks nice19/jobs2/testthreads<=2 andaffinity.
+Observed4focuseddescendantprocesses/12threads allwithin thataffinity; existingglobal4slots/
+2jobs andexistinga165target unchanged. Oldfullv2 affinity0-35 limitation remains recorded.
+
 OLTP165 recovered at 6fde4096. jobA failed; jobB was FALSE SUCCESS: every cargo
 step failed compilation on missing AtomicU64, despite final HEAVY-EXIT0. Original wrappers
 and failed logs are retained. baeee87a fixes that import. Its full debug and release

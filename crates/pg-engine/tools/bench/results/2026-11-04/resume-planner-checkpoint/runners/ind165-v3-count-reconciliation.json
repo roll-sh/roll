@@ -1,0 +1,26 @@
+{
+  "predecessor": "ab3f64b8dd92203123f6777ae4a6028d3a3aae67",
+  "source": "c8618834caf45bc0a34cf9985c07f9bc13b498ef",
+  "predecessor_summary": {
+    "passed": 453,
+    "failed": 0,
+    "ignored": 18,
+    "summaries": 60
+  },
+  "source_delta": [
+    "exec/pgstat.rs ownership-guard only",
+    "tests/backend_lifecycle.rs new: fast_own_transaction_waiters, same_pid_old_session_end_preserves_new_idle_statistics"
+  ],
+  "new_binary": [
+    2,
+    0,
+    0
+  ],
+  "successor_summary": {
+    "passed": 455,
+    "failed": 0,
+    "ignored": 18,
+    "summaries": 61
+  },
+  "frozen_before_launch": true
+}
