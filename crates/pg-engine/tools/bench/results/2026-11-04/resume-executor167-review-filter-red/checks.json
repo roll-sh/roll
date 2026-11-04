@@ -1,0 +1,49 @@
+[
+  {
+    "name": "golden",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "pg-engine",
+      "--test",
+      "golden"
+    ],
+    "env": {
+      "GOLDEN_FILTER": "a167_"
+    },
+    "source_before": {
+      "head": "fe9842b3d6665ef194eaa923eefbff35c6b3ed69",
+      "tree": "b57eb92cb37e9f85bdb3d8c7eb953beb5698663e",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "fe9842b3d6665ef194eaa923eefbff35c6b3ed69",
+      "tree": "b57eb92cb37e9f85bdb3d8c7eb953beb5698663e",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 101,
+    "expected_summary": false,
+    "test_summaries": [
+      "test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.98s"
+    ],
+    "fatal_lines": [
+      "failures:",
+      "failures:",
+      "test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.98s",
+      "error: test failed, to rerun pass `-p pg-engine --test golden`"
+    ],
+    "elapsed_s": 35.4160270690918,
+    "log_sha256": "81f7f18af215b23aade8b598a78bb1afaee51c17b05861bfe8c61a1fc145e34d",
+    "binaries": {
+      "/home/meszmate/.cache/a167/target/debug/deps/golden-9749ad749af5ca1c": {
+        "sha256": "7cc8ae583a7c53575ff5182a9c9c01e925edcefe87ce9e931fc01b4c2fa40968",
+        "bytes": 321375192
+      }
+    },
+    "passed_tests": 0,
+    "pass": false
+  }
+]

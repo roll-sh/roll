@@ -1,0 +1,18 @@
+{
+  "head": "c1594cc6c9fac649ee76a86d711e1bf880871f08",
+  "tree": "58ff6a42818f23863213a7f3a14b8d13abfde466",
+  "status": "?? crates/pg-engine/tests/sql/a167_subplan_varied.sql",
+  "binary": "/home/meszmate/.cache/a167/target/debug/deps/golden-9749ad749af5ca1c",
+  "binary_sha256": "e7a9bfce8af8a25d8563044a661cf49cfd093b71a7d71b3abfc2bf25309bfab8",
+  "effective_cpus": [
+    4,
+    5,
+    6,
+    7,
+    22,
+    23,
+    24,
+    25
+  ],
+  "note": "Retained binary built and verified at clean c1594cc6; only new runtime SQL fixture added, production unchanged."
+}

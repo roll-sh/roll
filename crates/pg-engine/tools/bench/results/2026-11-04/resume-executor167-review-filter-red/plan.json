@@ -1,0 +1,45 @@
+{
+  "worktree": "/home/meszmate/roll/.claude/worktrees/agent-a6193f5e45a7ae4f1",
+  "head": "fe9842b3d6665ef194eaa923eefbff35c6b3ed69",
+  "output": "/home/meszmate/.cache/pg-engine-resume-20261104/execution_models/a167-review-repair2",
+  "env": {
+    "TMPDIR": "/home/meszmate/.cache/a167/tmp",
+    "CARGO_TARGET_DIR": "/home/meszmate/.cache/a167/target",
+    "CARGO_BUILD_JOBS": "2",
+    "RUST_TEST_THREADS": "2"
+  },
+  "stages": [
+    {
+      "name": "golden",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "pg-engine",
+        "--test",
+        "golden"
+      ],
+      "expect": "^test result: ok\\.",
+      "env": {
+        "GOLDEN_FILTER": "a167_"
+      }
+    },
+    {
+      "name": "reordered",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "pg-engine",
+        "--test",
+        "parallel_scan",
+        "reordered_heaps_through_batches",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "expect": "^test result: ok\\. 1 passed;",
+      "env": {}
+    }
+  ]
+}
