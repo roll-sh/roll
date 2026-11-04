@@ -1,0 +1,103 @@
+1532:             .flatten();
+1533:         let unpinned = std::collections::HashSet::new();
+1534:         let scan = self.ctx.txn.borrow().scan(&start, &crate::storage::keys::prefix_end(&start));
+1535:         for r in scan {
+1536:             self.ctx.check()?;
+1537:             let (dkey, bytes) = r?;
+1538:             rows += 1;
+1539:             if let Some(old) = frozen {
+1540:                 let x = crate::exec::scan::row_xmin(&bytes)?;
+1541:                 if x >= old {
+1542:                     oldest_xmin = oldest_xmin.min(x);
+1543:                 }
+1544:                 xmins = (xmins.0.min(x), xmins.1.max(x));
+1545:             }
+1546:             if let Some(p) = &progress
+1547:                 && rows.is_multiple_of(per_page)
+1548:             {
+1549:                 if p.command.load(std::sync::atomic::Ordering::Relaxed) == crate::session::state::Progress::VACUUM {
+1550:                     p.set(2, (rows / per_page) as i64);
+1551:                 }
+1552:                 self.vacuum_delay_point(1)?;
+1553:             }
+1554:             let stored = match modelled {
+1555:                 None if kept_live.is_none() => {
+1556:                     crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(&bytes)?, &types, &virt_mask)
+1557:                 }
+1558:                 _ => None,
+1559:             };
+1560:             may_toast |= stored.is_none_or(|len| len > crate::exec::sizing::TOAST_THRESHOLD);
+1561:             if let Some(floor) = toast_frozen {
+1562:                 let x = crate::exec::scan::row_xmin(&bytes)?;
+1563:                 if x >= floor
+1564:                     && x < oldest_toast
+1565:                     && stored.is_none_or(|len| len > crate::exec::sizing::TOAST_THRESHOLD)
+1566:                     && !crate::exec::sizing::layout(t, &crate::exec::scan::decode_table_row(t, &bytes)?, self.ctx, &unpinned)
+1567:                         .1
+1568:                         .is_empty()
+1569:                 {
+1570:                     oldest_toast = x;
+1571:                 }
+1572:             }
+1573:             let mut row = match &need {
+1574:                 Some(need) if modelled.is_some() || stored.is_some() || kept_live.is_some() => {
+1575:                     crate::exec::scan::decode_table_row_need(t, &bytes, need)?
+1576:                 }
+1577:                 _ => crate::exec::scan::decode_table_row(t, &bytes)?,
+1578:             };
+1579:             for ix in &mut ixs {
+1580:                 let Some(mut vals) = super::table::index_values(&ix.bix, &row, self)? else {
+1581:                     continue;
+1582:                 };
+1583:                 if let Some(f) = each.as_mut() {
+1584:                     f(&dkey, &vals, &row)?;
+1585:                 }
+1586:                 ix.tuples += 1;
+1587:                 if let Some(keys) = &mut ix.btree_keys {
+1588:                     keys.push((crate::exec::sizing::btree_key(t, &ix.bix, vals, &row, self.ctx), dkey.clone()));
+1589:                 } else if ix.modelled.is_none() {
+1590:                     let mut sort = super::table::key_bytes(&vals);
+1591:                     vals.extend(ix.bix.index.include.iter().map(|&i| row[i].clone()));
+1592:                     let prefix = key_prefix(&sort);
+1593:                     // (A key of up to 16 bytes is its prefix: keys are prefix-free, so equal
+1594:                     // prefixes are equal keys, and no copy of it is kept to compare.)
+1595:                     if sort.len() <= 16 {
+1596:                         sort = Vec::new();
+1597:                     }
+1598:                     ix.keys.push((prefix, sort, relsize::index_tuple(&ix.types, &vals, &text)));
+1599:                 }
+1600:             }
+1601:             if modelled.is_none() && kept_live.is_none() {
+1602:                 if let Some(len) = stored {
+1603:                     // (Debug builds check it against the size of the row decoded.)
+1604:                     #[cfg(debug_assertions)]
+1605:                     {
+1606:                         let mut full = crate::exec::scan::decode_table_row(t, &bytes)?;
+1607:                         for &i in &virt {
+1608:                             if i < full.len() {
+1609:                                 full[i] = Value::Null;
+1610:                             }
+1611:                         }
+1612:                         debug_assert_eq!(relsize::heap_tuple_of_len(len), relsize::heap_tuple(&types, &full, &text));
+1613:                     }
+1614:                     sizes.push(relsize::heap_tuple_of_len(len));
+1615:                     continue;
+1616:                 }
+1617:                 for &i in &virt {
+1618:                     if i < row.len() {
+1619:                         row[i] = Value::Null;
+1620:                     }
+1621:                 }
+1622:                 sizes.push(relsize::heap_tuple(&types, &row, &text));
+1623:             }
+1624:         }
+1625:         if let Some(old) = frozen {
+1626:             self.measured_xmin.set(Some((t.oid, old, oldest_xmin, toast_frozen.map(|f| (f, oldest_toast)))));
+1627:         }
+1628:         let (modelled, live) = match modelled {
+1629:             Some(n) => (Some(n), n),
+1630:             None => (None, kept_live.unwrap_or_else(|| relsize::heap_pages(sizes.into_iter()))),
+1631:         };
+1632:         if whole {
+1633:             let m = crate::txn::unchanged::Measured { ts: snap, armed: 0, layout, rows, live, xmin: xmins, may_toast };
+1634:             let db = &self.ctx.sess.db;

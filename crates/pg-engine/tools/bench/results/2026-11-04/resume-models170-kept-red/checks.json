@@ -1,0 +1,49 @@
+[
+  {
+    "name": "kept",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "pg-engine",
+      "--lib",
+      "exec::sizing::kept::tests::",
+      "--",
+      "--nocapture"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "ea4093f7128ddf79544fb790cfc63996ffc424a7",
+      "tree": "f3d4e72473cbe194070d8d27e158a69acb260995",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "ea4093f7128ddf79544fb790cfc63996ffc424a7",
+      "tree": "f3d4e72473cbe194070d8d27e158a69acb260995",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 101,
+    "expected_summary": false,
+    "test_summaries": [
+      "test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 189 filtered out; finished in 0.46s"
+    ],
+    "fatal_lines": [
+      "failures:",
+      "failures:",
+      "test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 189 filtered out; finished in 0.46s",
+      "error: test failed, to rerun pass `-p pg-engine --lib`"
+    ],
+    "elapsed_s": 52.64158606529236,
+    "log_sha256": "cfe0660aeb1147d9b6aab05fa13241237cda425c1389e87b3a13aaf3eaf343d3",
+    "binaries": {
+      "/home/meszmate/.cache/a170/target/debug/deps/pg_engine-357a2b04731fc140": {
+        "sha256": "f0ecaeecb6a8f27f3450fe61b9bb95f71b32d04a2de035be3b208d8983ae25fa",
+        "bytes": 318181320
+      }
+    },
+    "passed_tests": 0,
+    "pass": false
+  }
+]

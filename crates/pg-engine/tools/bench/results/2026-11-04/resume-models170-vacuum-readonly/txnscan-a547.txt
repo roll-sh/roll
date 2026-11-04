@@ -1,0 +1,24 @@
+4280: }
+4281: 
+4282: impl Iterator for TxnScan {
+4283:     type Item = Result<(Vec<u8>, Bytes)>;
+4284: 
+4285:     fn next(&mut self) -> Option<Self::Item> {
+4286:         let item = self.inner.next()?;
+4287:         if !self.resolve {
+4288:             return Some(item);
+4289:         }
+4290:         // (The rows' values in their order, through one cursor: `toast::Reader`.)
+4291:         Some(item.and_then(|(k, v)| match &self.src {
+4292:             Some(s) if crate::storage::toast::has_external(&v) && crate::storage::toast::is_row_key(&k) => {
+4293:                 let r = self.reader.get_or_insert_with(|| toast::Reader::new(s.clone()));
+4294:                 r.splice(&k, &v, None).map(|v| (k, v))
+4295:             }
+4296:             _ => Ok((k, v)),
+4297:         }))
+4298:     }
+4299: }
+4300: 
+4301: #[cfg(test)]
+4302: mod tests {
+4303:     #[test]

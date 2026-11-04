@@ -1,0 +1,29 @@
+{
+  "source": {
+    "head": "b9e2786a1445770577a986b28861141d006f2d6b",
+    "tree": "3a54115b9155b8a6f79e578a29cbc3d504e28833",
+    "status": "",
+    "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "artifacts": {
+    "/home/meszmate/.cache/a170/target/release/deps/golden-09a38f0445a85626": {
+      "sha256": "584c51bac7b5ba63d308e599e095be760b116ad95140c03dcece707b17fdbc6f",
+      "bytes": 85788872,
+      "mtime_ns": 1793794839409349031,
+      "stage": "golden-current"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/big_tables-e6d66b06b95b54b5": {
+      "sha256": "fa364ef3d4ffb52e016c46acef7a57010f3d5f119e5d259cb174d440cc543616",
+      "bytes": 85427880,
+      "mtime_ns": 1793795181213683321,
+      "stage": "models-current"
+    },
+    "/home/meszmate/.cache/a170/target/release/deps/models_kept-93c836dcaab9ad5a": {
+      "sha256": "1323b58d7a6fd03ed6172dc830bbc140ae3874b2769473023759a9fe22b4be69",
+      "bytes": 85108936,
+      "mtime_ns": 1793795179549701262,
+      "stage": "models-current"
+    }
+  },
+  "limitation": "Hashes captured after completed stages; original execution logs retain source pin and binary paths."
+}

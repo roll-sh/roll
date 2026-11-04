@@ -1,0 +1,96 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+     Running tests/big_tables.rs (/home/meszmate/.cache/a163/target/debug/deps/big_tables-56871ac7816feb9b)
+
+running 1 test
+measured serial INCLUDE: estimated=true heap_model=false workers=0: index row size 2816 exceeds btree version 4 maximum 2704 for index "mi_i"
+
+thread 'measured_serial_include_size' (3284650) panicked at crates/pg-engine/src/catalog/relsize.rs:591:9:
+attempt to subtract with overflow
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/panicking.rs:80:14
+   2: core::panicking::panic_const::panic_const_sub_overflow
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/panicking.rs:175:17
+   3: <pg_engine::catalog::relsize::HeapPacker>::push
+             at ./src/catalog/relsize.rs:591:9
+   4: pg_engine::catalog::relsize::heap_pages::<alloc::vec::into_iter::IntoIter<usize>>
+             at ./src/catalog/relsize.rs:544:11
+   5: <pg_engine::session::ddl::Ddl>::measure_rows_with::{closure#21}
+             at ./src/session/ddl/vacuum.rs:1630:56
+   6: <core::option::Option<i32>>::unwrap_or_else::<<pg_engine::session::ddl::Ddl>::measure_rows_with::{closure#21}>
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/option.rs:1065:21
+   7: <pg_engine::session::ddl::Ddl>::measure_rows_with
+             at ./src/session/ddl/vacuum.rs:1630:38
+   8: <pg_engine::session::ddl::Ddl>::measure_rows
+             at ./src/session/ddl/vacuum.rs:1387:17
+   9: <pg_engine::session::ddl::Ddl>::measure_quiet
+             at ./src/session/ddl/vacuum.rs:887:22
+  10: measure
+             at ./src/session/ddl/vacuum.rs:794:22
+  11: vacuum
+             at ./src/session/ddl/vacuum.rs:508:46
+  12: run
+             at ./src/session/ddl/mod.rs:435:38
+  13: pg_engine::session::ddl::execute
+             at ./src/session/ddl/mod.rs:162:23
+  14: <pg_engine::session::Session>::dispatch::{closure#18}::{closure#0}
+             at ./src/session/mod.rs:1599:49
+  15: with_ctx_path<alloc::string::String, pg_engine::session::{impl#6}::dispatch::{closure#18}::{closure_env#0}>
+             at ./src/session/mod.rs:1056:17
+  16: <pg_engine::session::Session>::with_ctx::<alloc::string::String, <pg_engine::session::Session>::dispatch::{closure#18}::{closure#0}>
+             at ./src/session/mod.rs:984:14
+  17: <pg_engine::session::Session>::dispatch::{closure#18}
+             at ./src/session/mod.rs:1599:26
+  18: pg_engine::session::ddl::run_top_level::<core::result::Result<alloc::string::String, pg_engine::error::Error>, <pg_engine::session::Session>::dispatch::{closure#18}>
+             at ./src/session/ddl/mod.rs:88:5
+  19: dispatch
+             at ./src/session/mod.rs:1598:27
+  20: <pg_engine::session::Session>::execute_statement
+             at ./src/session/mod.rs:1372:22
+  21: <pg_engine::session::Session>::execute_with_inner::{closure#0}
+             at ./src/session/mod.rs:1339:36
+  22: grow<core::result::Result<pg_engine::session::Outcome, pg_engine::error::Error>, pg_engine::session::{impl#6}::execute_with_inner::{closure_env#0}>
+             at ./src/stack.rs:320:16
+  23: execute_with_inner
+             at ./src/session/mod.rs:1339:9
+  24: <pg_engine::session::Session>::execute_with
+             at ./src/session/mod.rs:1311:22
+  25: <pg_engine::session::Session>::execute
+             at ./src/session/mod.rs:1188:14
+  26: run_batch
+             at ./src/session/mod.rs:1253:24
+  27: <pg_engine::session::Session>::query_copy_here
+             at ./src/session/mod.rs:1239:22
+  28: <pg_engine::session::Session>::query_copy::{closure#0}
+             at ./src/session/mod.rs:1215:36
+  29: grow<core::result::Result<alloc::vec::Vec<pg_engine::session::QueryResult, alloc::alloc::Global>, pg_engine::error::Error>, pg_engine::session::{impl#6}::query_copy::{closure_env#0}>
+             at ./src/stack.rs:320:16
+  30: query_copy
+             at ./src/session/mod.rs:1215:9
+  31: <pg_engine::session::Session>::query
+             at ./src/session/mod.rs:1193:14
+  32: {closure#0}
+             at ./tests/big_tables.rs:677:15
+  33: pg_engine::exec::sizing::with_max_versions::<(), big_tables::measured_serial_include_size::{closure#0}>
+             at ./src/exec/sizing.rs:60:5
+  34: measured_serial_include_size
+             at ./tests/big_tables.rs:670:5
+  35: big_tables::measured_serial_include_size::{closure#0}
+             at ./tests/big_tables.rs:667:34
+  36: <big_tables::measured_serial_include_size::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/ops/function.rs:250:5
+  37: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+test measured_serial_include_size ... FAILED
+
+failures:
+
+failures:
+    measured_serial_include_size
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.62s
+
+error: test failed, to rerun pass `-p pg-engine --test big_tables`

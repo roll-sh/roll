@@ -1,0 +1,186 @@
+[
+  {
+    "stage": "existing-owned",
+    "argv": [
+      "docker",
+      "ps",
+      "-aq",
+      "--filter",
+      "name=^/a167170-resume-reference$"
+    ],
+    "env": null,
+    "exit": 0,
+    "expected_exit": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "stage": "image",
+    "argv": [
+      "docker",
+      "image",
+      "inspect",
+      "sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
+    ],
+    "env": null,
+    "exit": 0,
+    "expected_exit": 0,
+    "sha256": "40df7e9f9995ec3f5c9695b548a2f7239d1cb6458a5b9c492e22dfec2497c02b"
+  },
+  {
+    "stage": "create",
+    "argv": [
+      "docker",
+      "run",
+      "--rm",
+      "-d",
+      "--name",
+      "a167170-resume-reference",
+      "--label",
+      "agent.worktree=agent-a6193f5e45a7ae4f1",
+      "--label",
+      "agent.task=resume-execution-models-narrow-reference",
+      "--memory",
+      "512m",
+      "--cpus",
+      "2",
+      "--cpuset-cpus",
+      "4-7,22-25",
+      "-p",
+      "127.0.0.1:53345:5432",
+      "-e",
+      "POSTGRES_PASSWORD=pw",
+      "--entrypoint",
+      "/bin/nice",
+      "sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873",
+      "-n",
+      "19",
+      "docker-entrypoint.sh",
+      "postgres"
+    ],
+    "env": null,
+    "exit": 0,
+    "expected_exit": 0,
+    "sha256": "7e01a80d096d7cf0b040daaa1a6422c955a733d896c201db7594977538156d72"
+  },
+  {
+    "stage": "inspect",
+    "argv": [
+      "docker",
+      "inspect",
+      "a167170-resume-reference"
+    ],
+    "env": null,
+    "exit": 0,
+    "expected_exit": 0,
+    "sha256": "89f03e871d682f11de68ff3de956e2b4723e5e478dcd92647e8a676c35711706"
+  },
+  {
+    "stage": "version",
+    "argv": [
+      "docker",
+      "exec",
+      "a167170-resume-reference",
+      "psql",
+      "-U",
+      "postgres",
+      "-At",
+      "-c",
+      "SELECT version()"
+    ],
+    "env": null,
+    "exit": 0,
+    "expected_exit": 0,
+    "sha256": "0f37c16b74ded4679bd176522cf6fa3071ff40a66eac0e1f6c2b03f8e4959350"
+  },
+  {
+    "stage": "weighted-record",
+    "argv": [
+      "/home/meszmate/.cache/a167/target/debug/deps/golden-9749ad749af5ca1c",
+      "golden",
+      "--exact",
+      "--nocapture"
+    ],
+    "env": {
+      "GOLDEN_RECORD": "127.0.0.1:53345",
+      "GOLDEN_PASSWORD": "pw",
+      "GOLDEN_FILTER": "a167_subplan_weighted"
+    },
+    "exit": 0,
+    "expected_exit": 0,
+    "sha256": "1358eeae65226e9b073915823a68869a32f030bf92ea66ba35a076775f9320de"
+  },
+  {
+    "stage": "vacuum-reference",
+    "argv": [
+      "docker",
+      "exec",
+      "-i",
+      "a167170-resume-reference",
+      "psql",
+      "-U",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1"
+    ],
+    "env": null,
+    "exit": 0,
+    "expected_exit": 0,
+    "sha256": "2ccf8c22bc8ee686b0c9a5b35b080052aa369f2222bb6f2a4e2e70af4926e0b2"
+  },
+  {
+    "stage": "include-ascii2800",
+    "argv": [
+      "docker",
+      "exec",
+      "a167170-resume-reference",
+      "psql",
+      "-U",
+      "postgres",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-v",
+      "VERBOSITY=verbose",
+      "-c",
+      "CREATE INDEX ON vt_ascii2800 (k) INCLUDE (payload)"
+    ],
+    "env": null,
+    "exit": 1,
+    "expected_exit": 1,
+    "sha256": "b926788c6fdd85f3e7f4465aac3089ef3fdf796502e9f2c6fa664d54a28b3c77"
+  },
+  {
+    "stage": "include-ascii8300",
+    "argv": [
+      "docker",
+      "exec",
+      "a167170-resume-reference",
+      "psql",
+      "-U",
+      "postgres",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-v",
+      "VERBOSITY=verbose",
+      "-c",
+      "CREATE INDEX ON vt_ascii8300 (k) INCLUDE (payload)"
+    ],
+    "env": null,
+    "exit": 1,
+    "expected_exit": 1,
+    "sha256": "823119c8a7c3f571923815ca5911594510a53fd8e18b18b217418fa87fa384fd"
+  },
+  {
+    "stage": "cleanup",
+    "argv": [
+      "docker",
+      "rm",
+      "-f",
+      "a167170-resume-reference"
+    ],
+    "env": null,
+    "exit": 0,
+    "expected_exit": 0,
+    "sha256": "97a86e5b8d7ddf231bae014ba94a64dece124250a11c801781a457330d9417a1"
+  }
+]
