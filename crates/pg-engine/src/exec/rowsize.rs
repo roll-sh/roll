@@ -118,7 +118,8 @@ fn gin_entries(bix: &BoundIndex, vals: &[Value], ctx: &ExecCtx) -> Result<()> {
     let one = bix.keys.len() == 1;
     for (i, v) in vals.iter().enumerate() {
         let (Value::Array(a), Some(c)) = (v, bix.index.columns.get(i)) else { continue };
-        if c.opclass != GIN_ARRAY_OPS || type_layout(&a.elem).0 > 0 {
+        // (0: the type's default, array_ops for an array.)
+        if !matches!(c.opclass, 0 | GIN_ARRAY_OPS) || type_layout(&a.elem).0 > 0 {
             continue;
         }
         let mut big: Vec<&Value> = a.items.iter().filter(|e| !e.is_null() && !surely_small(std::slice::from_ref(*e))).collect();
