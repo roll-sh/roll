@@ -1,0 +1,44 @@
+START proof-debug 2026-11-04T12:21:43Z
+proof-debug EXIT 0
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/storage_read_once.rs (/home/meszmate/.cache/a169/target/debug/deps/storage_read_once-9b7f7627769b5249)
+
+running 1 test
+test one_pass_reads_skip_admission_reuse_cached_blocks_and_restore_on_unwind ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+START proof-debug-summary 2026-11-04T12:21:44Z
+proof-debug-summary EXIT 0
+proof-debug.log [('ok', '4', '0', '0'), ('ok', '1', '0', '0')]
+START storage-debug 2026-11-04T12:21:44Z
+storage-debug EXIT 0
+test storage::tests::lone_linked_runs_go_to_l1 ... ok
+test storage::tests::mvcc_reads ... ok
+test storage::tests::ingested_commits_and_crash_recovery ... ok
+test storage::tests::reverse_scan_matches_forward ... ok
+test storage::tests::scans_step_over_deleted_runs_once ... ok
+test storage::tests::snapshots_survive_compaction ... ok
+test storage::tests::range_deletions_and_crash_recovery ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 164 filtered out; finished in 1.95s
+
+START storage-debug-summary 2026-11-04T12:22:36Z
+storage-debug-summary EXIT 0
+storage-debug.log [('ok', '28', '0', '0')]
+START integrations-debug 2026-11-04T12:22:36Z
+integrations-debug EXIT 0
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 31.11s
+
+     Running tests/txn_spill.rs (/home/meszmate/.cache/a169/target/debug/deps/txn_spill-93e1f591ebaf5956)
+
+running 1 test
+test spilled_transactions_read_like_buffered_ones ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.44s
+
+/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-reviewed-fixed.sh: line 27: ne: command not found
+HEAVY-EXIT 127

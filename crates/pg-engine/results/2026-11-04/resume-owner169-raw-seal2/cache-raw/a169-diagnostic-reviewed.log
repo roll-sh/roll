@@ -1,0 +1,34 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a76932e8127f6d35b/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.19s
+     Running tests/storage_linked_gc.rs (/home/meszmate/.cache/a169/target/debug/deps/storage_linked_gc-cc17f010b275031f)
+
+running 4 tests
+direct L1 stage=before crash, manifest={"flushed_ts":0,"l0":[],"l1":[{"commit_ts":2,"entries":2000,"first_key":"6230303030fffffffffffffffd","id":4,"last_key":"6231393939fffffffffffffffd","max_ts":2,"min_ts":2,"size":6162}],"last_ts":2,"next_id":5}
+direct L1 stage=after crash, manifest={"flushed_ts":3,"l0":[{"entries":1,"first_key":"6230303034fffffffffffffffc","id":8,"last_key":"6230303034fffffffffffffffc","max_ts":3,"min_ts":3,"size":99},{"entries":1,"first_key":"6130303030fffffffffffffffe","id":7,"last_key":"6130303030fffffffffffffffe","max_ts":1,"min_ts":1,"size":100}],"l1":[{"commit_ts":2,"entries":2000,"first_key":"6230303030fffffffffffffffd","id":4,"last_key":"6231393939fffffffffffffffd","max_ts":2,"min_ts":2,"size":6162}],"last_ts":3,"next_id":9}
+direct L1 stage=after pinned compact, manifest={"flushed_ts":4,"l0":[],"l1":[{"entries":2004,"first_key":"6130303030fffffffffffffffe","id":11,"last_key":"62fffffffffffffffb","max_ts":4,"min_ts":1,"size":6400}],"last_ts":4,"next_id":12}
+
+thread 'direct_l1_replay_barrier_preserves_tombstones_snapshots_and_wal_order' (3080451) panicked at crates/pg-engine/tests/storage_linked_gc.rs:130:13:
+assertion `left == right` failed: stage=after pinned compact, ts=2
+  left: None
+ right: Some((2, None))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test direct_l1_replay_barrier_preserves_tombstones_snapshots_and_wal_order ... FAILED
+test clean_close_rewrites_direct_linked_l1_for_prelinked_readers ... ok
+test linked_tombstones_preserve_snapshots_and_conflicts_until_gc ... ok
+
+thread 'fresh_transaction_sink_honors_store_compression_policy' (3080534) panicked at crates/pg-engine/tests/storage_linked_gc.rs:191:13:
+assertion `left == right` failed: compress=true,meta={"commit_ts":2,"entries":107,"first_key":"7a7a7a7a7a7a7a7a31383933fffffffffffffffd","id":7,"last_key":"7a7a7a7a7a7a7a7a31393939fffffffffffffffd","max_ts":2,"min_ts":2,"size":10679}
+  left: false
+ right: true
+test fresh_transaction_sink_honors_store_compression_policy ... FAILED
+
+failures:
+
+failures:
+    direct_l1_replay_barrier_preserves_tombstones_snapshots_and_wal_order
+    fresh_transaction_sink_honors_store_compression_policy
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+error: test failed, to rerun pass `-p pg-engine --test storage_linked_gc`
+HEAVY-EXIT 101

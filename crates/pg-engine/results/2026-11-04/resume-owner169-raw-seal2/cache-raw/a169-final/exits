@@ -1,0 +1,14 @@
+proof-debug EXIT 0
+proof-debug-summary EXIT 0
+storage-debug EXIT 0
+storage-debug-summary EXIT 0
+integrations-debug EXIT 0
+integrations-debug-summary EXIT 0
+proof-release EXIT 0
+proof-release-summary EXIT 0
+crash-release EXIT 0
+crash-release-summary EXIT 0
+storage-release EXIT 0
+storage-release-summary EXIT 0
+clippy EXIT 0
+build EXIT 0

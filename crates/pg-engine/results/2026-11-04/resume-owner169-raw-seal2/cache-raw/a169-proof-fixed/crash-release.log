@@ -1,0 +1,11 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a76932e8127f6d35b/crates/pg-engine)
+    Finished `release` profile [optimized] target(s) in 4.96s
+     Running tests/crash_random.rs (/home/meszmate/.cache/a169/target/release/deps/crash_random-4b8f70c02654e372)
+
+running 2 tests
+test crash_random_child ... ok
+test random_crashes has been running for over 60 seconds
+test random_crashes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 226.64s
+

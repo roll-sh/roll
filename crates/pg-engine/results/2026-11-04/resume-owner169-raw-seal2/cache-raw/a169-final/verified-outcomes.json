@@ -1,0 +1,57 @@
+{
+  "utc": "2026-11-04T13:06:29.925408+00:00",
+  "source_head": "79746f3174996b8047c4c0c30db87f345418b162",
+  "gates": "PASS:all14recordedcommands0,expectedtestcounts+noignored,sourceSHAunchanged",
+  "test_counts": {
+    "proof-debug": [
+      4,
+      1
+    ],
+    "storage-debug": [
+      29
+    ],
+    "integrations-debug": [
+      15,
+      2,
+      1,
+      4,
+      1
+    ],
+    "proof-release": [
+      4,
+      1,
+      1
+    ],
+    "crash-release": [
+      2
+    ],
+    "storage-release": [
+      29
+    ]
+  },
+  "crashes": {
+    "seeds": 30,
+    "rounds": 4,
+    "status": "PASS"
+  },
+  "clippy": "exit0;one newtest-onlyuseless_vecwarning retained",
+  "service": "DEFERRED to parentcombined;prior168/166failuresremainFAILED",
+  "independentreview": "r3 noHIGH/MEDIUM",
+  "remaining": [
+    "compression COPY/init/CREATEINDEX comparison",
+    "footprint",
+    "combinedservice"
+  ],
+  "binary": {
+    "source_head": "79746f3174996b8047c4c0c30db87f345418b162",
+    "binary": "/home/meszmate/.cache/a169/target/release/roll-engine",
+    "sha256": "899b7e3d135dada0e7b4dd8a4271dec82c2e9b141d3759accac0809a9e66742a",
+    "bytes": 86895160,
+    "build_command": "cargo build --release -p pg-engine --bin roll-engine",
+    "build_exit": 0,
+    "build_log": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/build.log",
+    "profile": "release",
+    "performance_footprint": "HELD;not measured",
+    "source_checksums_unchanged": true
+  }
+}

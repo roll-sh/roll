@@ -1,0 +1,109 @@
+START proof-debug 2026-11-04T12:31:50Z
+proof-debug EXIT 0
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/storage_read_once.rs (/home/meszmate/.cache/a169/target/debug/deps/storage_read_once-9b7f7627769b5249)
+
+running 1 test
+test one_pass_reads_skip_admission_reuse_cached_blocks_and_restore_on_unwind ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+START proof-debug-summary 2026-11-04T12:32:33Z
+proof-debug-summary EXIT 0
+proof-debug.log [('ok', '4', '0', '0'), ('ok', '1', '0', '0')]
+START storage-debug 2026-11-04T12:32:33Z
+storage-debug EXIT 0
+test storage::tests::lone_linked_runs_go_to_l1 ... ok
+test storage::tests::mvcc_reads ... ok
+test storage::tests::ingested_commits_and_crash_recovery ... ok
+test storage::tests::reverse_scan_matches_forward ... ok
+test storage::tests::scans_step_over_deleted_runs_once ... ok
+test storage::tests::snapshots_survive_compaction ... ok
+test storage::tests::range_deletions_and_crash_recovery ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 164 filtered out; finished in 2.25s
+
+START storage-debug-summary 2026-11-04T12:33:25Z
+storage-debug-summary EXIT 0
+storage-debug.log [('ok', '29', '0', '0')]
+START integrations-debug 2026-11-04T12:33:25Z
+integrations-debug EXIT 0
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.74s
+
+     Running tests/txn_spill.rs (/home/meszmate/.cache/a169/target/debug/deps/txn_spill-93e1f591ebaf5956)
+
+running 1 test
+test spilled_transactions_read_like_buffered_ones ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.77s
+
+START integrations-debug-summary 2026-11-04T12:34:34Z
+integrations-debug-summary EXIT 0
+integrations-debug.log [('ok', '15', '0', '0'), ('ok', '2', '0', '0'), ('ok', '1', '0', '0'), ('ok', '4', '0', '0'), ('ok', '1', '0', '0')]
+START proof-release 2026-11-04T12:34:34Z
+proof-release EXIT 0
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/txn_spill.rs (/home/meszmate/.cache/a169/target/release/deps/txn_spill-cf6b8ac933a4e2c5)
+
+running 1 test
+test spilled_transactions_read_like_buffered_ones ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.21s
+
+START proof-release-summary 2026-11-04T12:41:45Z
+proof-release-summary EXIT 0
+proof-release.log [('ok', '4', '0', '0'), ('ok', '1', '0', '0'), ('ok', '1', '0', '0')]
+START crash-release 2026-11-04T12:41:45Z
+crash-release EXIT 0
+    Finished `release` profile [optimized] target(s) in 5.10s
+     Running tests/crash_random.rs (/home/meszmate/.cache/a169/target/release/deps/crash_random-4b8f70c02654e372)
+
+running 2 tests
+test crash_random_child ... ok
+test random_crashes has been running for over 60 seconds
+test random_crashes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 203.92s
+
+START crash-release-summary 2026-11-04T12:45:14Z
+crash-release-summary EXIT 0
+crash-release.log [('ok', '2', '0', '0')]
+START storage-release 2026-11-04T12:45:14Z
+storage-release EXIT 0
+test storage::tests::lone_linked_runs_go_to_l1 ... ok
+test storage::tests::mvcc_reads ... ok
+test storage::tests::ingested_commits_and_crash_recovery ... ok
+test storage::tests::reverse_scan_matches_forward ... ok
+test storage::tests::scans_step_over_deleted_runs_once ... ok
+test storage::tests::snapshots_survive_compaction ... ok
+test storage::tests::range_deletions_and_crash_recovery ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 164 filtered out; finished in 0.46s
+
+START storage-release-summary 2026-11-04T12:52:38Z
+storage-release-summary EXIT 0
+storage-release.log [('ok', '29', '0', '0')]
+START clippy 2026-11-04T12:52:38Z
+clippy EXIT 0
+  --> crates/pg-engine/tests/storage_linked_gc.rs:76:71
+   |
+76 |         let value = if i == 4 || i == 6 { vec![0] } else { [&[1][..], &vec![b'v'; 80]].concat() };
+   |                                                                       ^^^^^^^^^^^^^^^ help: you can use a slice directly: `&[b'v'; 80]`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#useless_vec
+   = note: `#[warn(clippy::useless_vec)]` on by default
+
+warning: `pg-engine` (test "storage_linked_gc") generated 1 warning (run `cargo clippy --fix --test "storage_linked_gc" -p pg-engine -- ` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 25.00s
+START build 2026-11-04T12:53:03Z
+build EXIT 0
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a76932e8127f6d35b/crates/pg-engine)
+    Finished `release` profile [optimized] target(s) in 7m 41s
+SOURCE-UNCHANGED
+pg-e2e DEFERRED: parent verification owns one final combined run; prior168/166 failures remain FAILED
+HEAVY-EXIT 0

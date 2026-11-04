@@ -1,0 +1,13 @@
+START proof-debug 2026-11-04T12:10:10Z
+proof-debug EXIT 101
+ right: true
+
+
+failures:
+    direct_l1_replay_barrier_preserves_tombstones_snapshots_and_wal_order
+    fresh_transaction_sink_honors_store_compression_policy
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+error: test failed, to rerun pass `-p pg-engine --test storage_linked_gc`
+HEAVY-EXIT 1

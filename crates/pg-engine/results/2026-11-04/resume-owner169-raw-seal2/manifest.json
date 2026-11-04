@@ -1,0 +1,892 @@
+{
+  "utc": "2026-11-04T13:06:31.441473+00:00",
+  "owner": 169,
+  "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+  "head_observed": "79746f3174996b8047c4c0c30db87f345418b162",
+  "scope": "new sibling sealed raw evidence only; no source/index/HEAD/worktree mutation",
+  "files": [
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/pinned-checks/a169-checks/integrations-release.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/pinned-checks/a169-checks/integrations-release.log",
+      "bytes": 2317,
+      "sha256": "20711befdb7a0ff91389937fa2a286a4bbb3f9d36045afcfed3667be6f14a1f7",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "0504a6be75102731a1146febae47b313c2c3850c"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/pinned-checks/a169-checks/sst-release.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/pinned-checks/a169-checks/sst-release.log",
+      "bytes": 501,
+      "sha256": "d560c18d22564b2fae7ef23691eab2421336f8f084d1deaf16eded813f4ec22b",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "6b1fcea305e78b28d357d53fb05249f30c7d1c65"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/pinned-checks/a169-checks/storage-release.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/pinned-checks/a169-checks/storage-release.log",
+      "bytes": 2062,
+      "sha256": "2ba7c2399ab8676f3d5ae57b850eaf1f2031f41e7a10e587a5fa555ffdadc298",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "2f78826246d99b3d80a4646b052319adb97668fd"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/pinned-checks/a169-diagnose.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/pinned-checks/a169-diagnose.log",
+      "bytes": 1272,
+      "sha256": "39c33563dc9ca5448b1c495acaa163c342beffbc259661055c69ade6ae4c0902",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "1aa465e0316133c8cb8917dec66363655dcf0bb9"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/pinned-checks/a169-proof/proof-release.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/pinned-checks/a169-proof/proof-release.log",
+      "bytes": 996,
+      "sha256": "f31952912f1f025eaffb57afb596bebc27cf3da21190087144d86cbbc2b28705",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "f9bb44ef2a837582dbb659281ab4a7b586a112ff"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/pinned-checks/a169-proof-fixed/build.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/pinned-checks/a169-proof-fixed/build.log",
+      "bytes": 509,
+      "sha256": "84b2a24c4a536fa53426203a80233e59ccdb55df3876cf04008f67cf32b81c5d",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "dab174c2d5c2e96ce58d00673b666a55176fac08"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/pinned-checks/a169-proof-fixed/clippy.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/pinned-checks/a169-proof-fixed/clippy.log",
+      "bytes": 16294,
+      "sha256": "26043ca5ff3bb90f7a20f5590ae8173ea67354bfbb7c4d35b8f71f5275aaafff",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "4077e60191d0ceee102aa442d51df295fcd27b58"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/pinned-checks/a169-proof-fixed/crash-release.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/pinned-checks/a169-proof-fixed/crash-release.log",
+      "bytes": 517,
+      "sha256": "dde4905f501cab5586c56ade1cc1337b31bae9e182d3f53342a79a22f5992cf2",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "990680568f3af7b7ce0a4538eca086b3ff0b68da"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/pinned-checks/a169-proof-fixed/focused-debug.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/pinned-checks/a169-proof-fixed/focused-debug.log",
+      "bytes": 8454,
+      "sha256": "9b6e37368ad2145f5b902f50324584c1fbb08398114d65622d8447f22077058e",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "f8f4a5048940d2a5da0e9903bb71bd98e9bc098e"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/pinned-checks/a169-proof-fixed/proof-debug.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/pinned-checks/a169-proof-fixed/proof-debug.log",
+      "bytes": 2821,
+      "sha256": "9fd99ca5cb3b0918110f3e37c035a0c42d0fd45a274264e2ed1de47c11884fef",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "a9f9fef71138156a6abd12dad0eb1da7ed86670e"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/pinned-checks/a169-proof-fixed/proof-release.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/pinned-checks/a169-proof-fixed/proof-release.log",
+      "bytes": 801,
+      "sha256": "1d7947e944fbdea9e2daa95f586e68e4518cc269fe767e0febd00c435e8fa912",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "08599a4f5fabd51cb8c9a86784d9ec96e49daaa7"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/pinned-checks/a169-proof-fixed/repl-release.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/pinned-checks/a169-proof-fixed/repl-release.log",
+      "bytes": 348,
+      "sha256": "36c97c90169fb2ab7e92e27de200b358ef3c25eec33b0af1cea08d5fba771455",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "4bab30da6ac20d40c64dbfeb7ee2d5a692ea425e"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/pinned-checks/a169-proof-fixed.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/pinned-checks/a169-proof-fixed.log",
+      "bytes": 2578,
+      "sha256": "300dae9b7adce388a6e14a137521faf72ff7796af23f1eec48b195e4b45f2424",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "8052902f5632cc3d05507b06e87269689305698d"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/pinned-checks/a169-proof.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/pinned-checks/a169-proof.log",
+      "bytes": 549,
+      "sha256": "75e40eac9248ddc837502906d67a08488d590c90f69985cfec0722f36ae3c5b4",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "9a0c2e2eb5bf37277fed324407592d360d884127"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/pinned-checks/a169-targeted-fixed.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/pinned-checks/a169-targeted-fixed.log",
+      "bytes": 1221,
+      "sha256": "2555f6d46cfe89e4024ad31be4b679e9a9fb071456f700186e18ad2d4def9860",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "1a3f96a6faf34cd280636b8a41566f079b235257"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/pinned-checks/a169-targeted.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/pinned-checks/a169-targeted.log",
+      "bytes": 297,
+      "sha256": "e5deaf52b62b7225ac899a139b50d0fc99aeb6cbf477a7fe1a2a764cc0f5a2a2",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "0d2194e189642b1641d5ae4c6ab24d93e7b20adb"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/reviewed-checks/a169-diagnostic-reviewed.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/reviewed-checks/a169-diagnostic-reviewed.log",
+      "bytes": 2703,
+      "sha256": "61816d446c1aeec93200831901f3b746e806228b533e31e11495ba0bc382283b",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "02489f4ec479588e03133aee49b23b80a832d20d"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/reviewed-checks/a169-final/integrations-debug-summary.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/reviewed-checks/a169-final/integrations-debug-summary.log",
+      "bytes": 140,
+      "sha256": "beafee6cc81d61b53c8873f059a8d22155fdb0dbe90cdd54a1880be1c08647a4",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "a801c7c94ad605c03133f324cfe3b6d60a6378bd"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/reviewed-checks/a169-final/integrations-debug.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/reviewed-checks/a169-final/integrations-debug.log",
+      "bytes": 2320,
+      "sha256": "cc7fc2647c58abbf65cc8f3e3263dc4a7898f1fc08e6c9395092fb7e0dec4891",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "6bd1a55027ca9ad9f6faa1022b4d5955a34f80c3"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/reviewed-checks/a169-final/proof-debug-summary.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/reviewed-checks/a169-final/proof-debug-summary.log",
+      "bytes": 63,
+      "sha256": "0c038c49d1adc51fbf740d2f066be452b5de17e7fa77710c47f4aafa37efe857",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "b26f55c7d355a9cee9fe3f3fa87829c33758d2b7"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/reviewed-checks/a169-final/proof-debug.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/reviewed-checks/a169-final/proof-debug.log",
+      "bytes": 1031,
+      "sha256": "1bc2ba0b841fffe3dd6a69a127980bad17a3a272f710fb8bd782953469c12bc9",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "ffc1d336161577766d335082fc1cbb5218d48f17"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/reviewed-checks/a169-final/proof-release.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/reviewed-checks/a169-final/proof-release.log",
+      "bytes": 111,
+      "sha256": "a3a73aa72b16e24805e1b1ac1409312c13658d37cf8997c8fba8b7608454ac18",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "2e2ef5619f25e9866259d1ff6c4f18461e5461f1"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/reviewed-checks/a169-final/storage-debug-summary.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/reviewed-checks/a169-final/storage-debug-summary.log",
+      "bytes": 43,
+      "sha256": "d83e4182f306f90cfa8a9ca7616ec732391c23ab9f57d4b1dcadfe1c35ecb4ec",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "cc797b30c0aa716e9b761c4bc11080324156cef5"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/reviewed-checks/a169-final/storage-debug.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/reviewed-checks/a169-final/storage-debug.log",
+      "bytes": 2155,
+      "sha256": "a79ba83865a7c333e8c6b19e617409fd2b3be68d58c2fc52102e2d0557d9137a",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "a3a26f76784f68f9b2f8f1e4d0feed98abf0a7fc"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/reviewed-checks/a169-final.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/reviewed-checks/a169-final.log",
+      "bytes": 2001,
+      "sha256": "624aa6cc9d955ba897fc5242cee8ef31c8f40352c8a9763a1a536c232524a203",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "7a3eb2366ffea6f993938a5006b1b20a18cc7d2e"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/reviewed-checks/a169-reviewed/proof-debug.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/reviewed-checks/a169-reviewed/proof-debug.log",
+      "bytes": 1617,
+      "sha256": "38806e2d836a104604398bb7dad691730e0e26c9da02d10efa56109fe02bf268",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "f3643b639b33ebe56d00369358753db204f0e8cb"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/reviewed-checks/a169-reviewed-fixed/integrations-debug.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/reviewed-checks/a169-reviewed-fixed/integrations-debug.log",
+      "bytes": 2319,
+      "sha256": "2c11a6aecdef36789718dcd74787a80ce8926740c5f8a0ff0b69492f920325bb",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "5d7c8afa1f87faf1bd5e65004f7284240bc7ec21"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/reviewed-checks/a169-reviewed-fixed/proof-debug-summary.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/reviewed-checks/a169-reviewed-fixed/proof-debug-summary.log",
+      "bytes": 63,
+      "sha256": "0c038c49d1adc51fbf740d2f066be452b5de17e7fa77710c47f4aafa37efe857",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "b26f55c7d355a9cee9fe3f3fa87829c33758d2b7"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/reviewed-checks/a169-reviewed-fixed/proof-debug.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/reviewed-checks/a169-reviewed-fixed/proof-debug.log",
+      "bytes": 1030,
+      "sha256": "c79a60b7deac27d2a63ab307b515178f25b3231f8e633860305f970d1fc102d6",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "dcb9dc00803a4e5bcb09ebf0e323e2faf0bafd39"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/reviewed-checks/a169-reviewed-fixed/storage-debug-summary.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/reviewed-checks/a169-reviewed-fixed/storage-debug-summary.log",
+      "bytes": 43,
+      "sha256": "d9a975896a5e0460dc4136aa7818315c9f61be7c5fca505244f3226e8318fb5b",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "4f6adcaa83c9936051fddee2299e47d0004e7df1"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/reviewed-checks/a169-reviewed-fixed/storage-debug.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/reviewed-checks/a169-reviewed-fixed/storage-debug.log",
+      "bytes": 2071,
+      "sha256": "639e651e77ff6d83f4f158fe3dc6698d5f033e1e8670d0de30ff7e078e0336d2",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "133948b3ce6d9b094c6bd706377b850edbe9421c"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/reviewed-checks/a169-reviewed-fixed.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/reviewed-checks/a169-reviewed-fixed.log",
+      "bytes": 1870,
+      "sha256": "a539315fac9b4e9d13bc340a20539f4e04cc03c2ffeadcf9e51eee2800d67b4d",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "66108615d109e4a79368076368722f8f2d2f153e"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner169/reviewed-checks/a169-reviewed.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/reviewed-checks/a169-reviewed.log",
+      "bytes": 405,
+      "sha256": "1fe885fd035953fe7255db8daf0249d555f3421796ca16881b0553c9e3af714b",
+      "audited_commit": "7f46c72245c4dbde2db428a45d046e5f37118ef8",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "ed21607f2274cf2b370e11f43551e7ac53d63fcf"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-checks/integrations-release.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-checks/integrations-release.log",
+      "bytes": 2317,
+      "sha256": "20711befdb7a0ff91389937fa2a286a4bbb3f9d36045afcfed3667be6f14a1f7",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "0504a6be75102731a1146febae47b313c2c3850c"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-checks/sst-release.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-checks/sst-release.log",
+      "bytes": 501,
+      "sha256": "d560c18d22564b2fae7ef23691eab2421336f8f084d1deaf16eded813f4ec22b",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "6b1fcea305e78b28d357d53fb05249f30c7d1c65"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-checks/storage-release.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-checks/storage-release.log",
+      "bytes": 2062,
+      "sha256": "2ba7c2399ab8676f3d5ae57b850eaf1f2031f41e7a10e587a5fa555ffdadc298",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "2f78826246d99b3d80a4646b052319adb97668fd"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-diagnose.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-diagnose.log",
+      "bytes": 1272,
+      "sha256": "39c33563dc9ca5448b1c495acaa163c342beffbc259661055c69ade6ae4c0902",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "1aa465e0316133c8cb8917dec66363655dcf0bb9"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-diagnostic-reviewed.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-diagnostic-reviewed.log",
+      "bytes": 2703,
+      "sha256": "61816d446c1aeec93200831901f3b746e806228b533e31e11495ba0bc382283b",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "02489f4ec479588e03133aee49b23b80a832d20d"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/build.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final/build.log",
+      "bytes": 174,
+      "sha256": "68ad0c66f182757e338d5b8b60e8f77940ffc576f36df84f1410566754838dbb",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "706f85e8175148077ce7a5056bf9f8d471844f7b"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/clippy.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final/clippy.log",
+      "bytes": 11741,
+      "sha256": "406dfdea2410e499c32a007ca2777866a96ccd292fc188df5bd86676bc53f332",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "94777ae58fd7a6d36ac905952a0d20ed3e927256"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/crash-release-summary.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final/crash-release-summary.log",
+      "bytes": 42,
+      "sha256": "44c7699ef857d036105ec4e5aaaf961c064d3b3d1ba7080009c363e89c1be260",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "1fee047c14e538cfcbb8637b7756a4c4c4bd4bae"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/crash-release.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final/crash-release.log",
+      "bytes": 517,
+      "sha256": "b741658e6a0b267140eb5c1d72f580b9e4bf117c31d5f4cdcf3e9b15cb632c94",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "48b39bf575e18572354aa1fd44d3ac32701aa187"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/integrations-debug-summary.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final/integrations-debug-summary.log",
+      "bytes": 140,
+      "sha256": "beafee6cc81d61b53c8873f059a8d22155fdb0dbe90cdd54a1880be1c08647a4",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "a801c7c94ad605c03133f324cfe3b6d60a6378bd"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/integrations-debug.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final/integrations-debug.log",
+      "bytes": 2320,
+      "sha256": "cc7fc2647c58abbf65cc8f3e3263dc4a7898f1fc08e6c9395092fb7e0dec4891",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "6bd1a55027ca9ad9f6faa1022b4d5955a34f80c3"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/proof-debug-summary.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final/proof-debug-summary.log",
+      "bytes": 63,
+      "sha256": "0c038c49d1adc51fbf740d2f066be452b5de17e7fa77710c47f4aafa37efe857",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "b26f55c7d355a9cee9fe3f3fa87829c33758d2b7"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/proof-debug.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final/proof-debug.log",
+      "bytes": 1031,
+      "sha256": "1bc2ba0b841fffe3dd6a69a127980bad17a3a272f710fb8bd782953469c12bc9",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "ffc1d336161577766d335082fc1cbb5218d48f17"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/proof-release-summary.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final/proof-release-summary.log",
+      "bytes": 88,
+      "sha256": "8b0893cc77d60e579d4558bc21095b8b2ccf57402547f815d69b987e12c45713",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "14d15a2ea58d156a9987b32559fffca2d41518f1"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/proof-release.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final/proof-release.log",
+      "bytes": 1301,
+      "sha256": "5c7225ab776048f2641d81fb51e3325ed91d55db672bbfd79f595709201b049a",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "58b2241a00a0ec6b6c5824aef1d42249c73350cd"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/storage-debug-summary.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final/storage-debug-summary.log",
+      "bytes": 43,
+      "sha256": "d83e4182f306f90cfa8a9ca7616ec732391c23ab9f57d4b1dcadfe1c35ecb4ec",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "cc797b30c0aa716e9b761c4bc11080324156cef5"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/storage-debug.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final/storage-debug.log",
+      "bytes": 2155,
+      "sha256": "a79ba83865a7c333e8c6b19e617409fd2b3be68d58c2fc52102e2d0557d9137a",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "a3a26f76784f68f9b2f8f1e4d0feed98abf0a7fc"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/storage-release-summary.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final/storage-release-summary.log",
+      "bytes": 45,
+      "sha256": "9b8c9a4f22fcc7399038c25428f85a73d5bda29c8ff1a6ecbb34e4911aa6e6b9",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "42a94cbbb5d2d83b24def9f64ca9e2aad6b849b7"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/storage-release.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final/storage-release.log",
+      "bytes": 2146,
+      "sha256": "280b46626d552b828d272713cf90d44d0161839dd7a299ab67e1bfb6afc6048f",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "dc672987253491601b74bebe68c4c2c43b9521c2"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final.log",
+      "bytes": 4955,
+      "sha256": "e35c8c7c3a1434a94849bb8e13d91d9f2c6fdc11aed44678dfa744324b32d717",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "e18f1fbd9addcbb6dd11c22c81a5fee06503910e"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-proof/proof-release.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-proof/proof-release.log",
+      "bytes": 996,
+      "sha256": "f31952912f1f025eaffb57afb596bebc27cf3da21190087144d86cbbc2b28705",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "f9bb44ef2a837582dbb659281ab4a7b586a112ff"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-proof-fixed/build.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-proof-fixed/build.log",
+      "bytes": 572,
+      "sha256": "fcb8ccb1013317357be828941addf966207f7ca8139e4c6e46ee45ade8b458cc",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "5ad4dee1aa5b89710180eeae811f86e37ab7e0ba"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-proof-fixed/clippy.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-proof-fixed/clippy.log",
+      "bytes": 16294,
+      "sha256": "26043ca5ff3bb90f7a20f5590ae8173ea67354bfbb7c4d35b8f71f5275aaafff",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "4077e60191d0ceee102aa442d51df295fcd27b58"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-proof-fixed/crash-release.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-proof-fixed/crash-release.log",
+      "bytes": 517,
+      "sha256": "dde4905f501cab5586c56ade1cc1337b31bae9e182d3f53342a79a22f5992cf2",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "990680568f3af7b7ce0a4538eca086b3ff0b68da"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-proof-fixed/focused-debug.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-proof-fixed/focused-debug.log",
+      "bytes": 8454,
+      "sha256": "9b6e37368ad2145f5b902f50324584c1fbb08398114d65622d8447f22077058e",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "f8f4a5048940d2a5da0e9903bb71bd98e9bc098e"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-proof-fixed/proof-debug.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-proof-fixed/proof-debug.log",
+      "bytes": 2821,
+      "sha256": "9fd99ca5cb3b0918110f3e37c035a0c42d0fd45a274264e2ed1de47c11884fef",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "a9f9fef71138156a6abd12dad0eb1da7ed86670e"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-proof-fixed/proof-release.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-proof-fixed/proof-release.log",
+      "bytes": 801,
+      "sha256": "1d7947e944fbdea9e2daa95f586e68e4518cc269fe767e0febd00c435e8fa912",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "08599a4f5fabd51cb8c9a86784d9ec96e49daaa7"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-proof-fixed/repl-release.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-proof-fixed/repl-release.log",
+      "bytes": 348,
+      "sha256": "36c97c90169fb2ab7e92e27de200b358ef3c25eec33b0af1cea08d5fba771455",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "4bab30da6ac20d40c64dbfeb7ee2d5a692ea425e"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-proof-fixed.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-proof-fixed.log",
+      "bytes": 3177,
+      "sha256": "654e1fea03edb1326e64571a3ebf682a7c3c4388ebee605ee85d71d8572106de",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "976e30ec74e2bd9113c8c9b286cb3388e86a2e31"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-proof.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-proof.log",
+      "bytes": 549,
+      "sha256": "75e40eac9248ddc837502906d67a08488d590c90f69985cfec0722f36ae3c5b4",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "9a0c2e2eb5bf37277fed324407592d360d884127"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-reviewed/proof-debug.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-reviewed/proof-debug.log",
+      "bytes": 1617,
+      "sha256": "38806e2d836a104604398bb7dad691730e0e26c9da02d10efa56109fe02bf268",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "f3643b639b33ebe56d00369358753db204f0e8cb"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-reviewed-fixed/integrations-debug.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-reviewed-fixed/integrations-debug.log",
+      "bytes": 2319,
+      "sha256": "2c11a6aecdef36789718dcd74787a80ce8926740c5f8a0ff0b69492f920325bb",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "5d7c8afa1f87faf1bd5e65004f7284240bc7ec21"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-reviewed-fixed/proof-debug-summary.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-reviewed-fixed/proof-debug-summary.log",
+      "bytes": 63,
+      "sha256": "0c038c49d1adc51fbf740d2f066be452b5de17e7fa77710c47f4aafa37efe857",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "b26f55c7d355a9cee9fe3f3fa87829c33758d2b7"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-reviewed-fixed/proof-debug.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-reviewed-fixed/proof-debug.log",
+      "bytes": 1030,
+      "sha256": "c79a60b7deac27d2a63ab307b515178f25b3231f8e633860305f970d1fc102d6",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "dcb9dc00803a4e5bcb09ebf0e323e2faf0bafd39"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-reviewed-fixed/storage-debug-summary.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-reviewed-fixed/storage-debug-summary.log",
+      "bytes": 43,
+      "sha256": "d9a975896a5e0460dc4136aa7818315c9f61be7c5fca505244f3226e8318fb5b",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "4f6adcaa83c9936051fddee2299e47d0004e7df1"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-reviewed-fixed/storage-debug.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-reviewed-fixed/storage-debug.log",
+      "bytes": 2071,
+      "sha256": "639e651e77ff6d83f4f158fe3dc6698d5f033e1e8670d0de30ff7e078e0336d2",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "133948b3ce6d9b094c6bd706377b850edbe9421c"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-reviewed-fixed.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-reviewed-fixed.log",
+      "bytes": 1870,
+      "sha256": "a539315fac9b4e9d13bc340a20539f4e04cc03c2ffeadcf9e51eee2800d67b4d",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "66108615d109e4a79368076368722f8f2d2f153e"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-reviewed.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-reviewed.log",
+      "bytes": 405,
+      "sha256": "1fe885fd035953fe7255db8daf0249d555f3421796ca16881b0553c9e3af714b",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "ed21607f2274cf2b370e11f43551e7ac53d63fcf"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-targeted-fixed.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-targeted-fixed.log",
+      "bytes": 1221,
+      "sha256": "2555f6d46cfe89e4024ad31be4b679e9a9fb071456f700186e18ad2d4def9860",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "1a3f96a6faf34cd280636b8a41566f079b235257"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-targeted.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-targeted.log",
+      "bytes": 297,
+      "sha256": "e5deaf52b62b7225ac899a139b50d0fc99aeb6cbf477a7fe1a2a764cc0f5a2a2",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "0d2194e189642b1641d5ae4c6ab24d93e7b20adb"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/binary-identity.json",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final/binary-identity.json",
+      "bytes": 545,
+      "sha256": "2cc7e8c136a5a70497450516d1ca06357078b5aa2d312c109ac83636fcd97462",
+      "prior_status": "NEW-FINAL-METADATA",
+      "git_blob": "4004ff1c87ce18edb1040fb0cc1bf9d60ae12671"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/exits",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final/exits",
+      "bytes": 337,
+      "sha256": "ac087072e90467e79643241cc765fa2a9c9af3ce7473dd522878e28fd1d83c62",
+      "prior_status": "NEW-FINAL-METADATA",
+      "git_blob": "4181f282f98bd4c47f88ac654b0080cb0333239a"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/source-diff",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final/source-diff",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "prior_status": "NEW-FINAL-METADATA",
+      "git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/source-head",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final/source-head",
+      "bytes": 41,
+      "sha256": "a7157fd61db28c5d049736c7b0da15ccef63c4bf48ecff32b5ea84170b1ea9a5",
+      "prior_status": "NEW-FINAL-METADATA",
+      "git_blob": "36affe5428b4fe81d172c659f19f7662d29f6066"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/source-sha256",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final/source-sha256",
+      "bytes": 266722,
+      "sha256": "e6904420e89d1807a2e161c340320d35645815d1e1e12738778659d1a796d2de",
+      "prior_status": "NEW-FINAL-METADATA",
+      "git_blob": "8f82295cfed0a5e98aa5b8364b493b795d7c1130"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/source-status",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final/source-status",
+      "bytes": 29,
+      "sha256": "2c487ddc8e279154b0df9d97f39898d6bd3c64b54cc0fdb95ac0acdf132c00eb",
+      "prior_status": "NEW-FINAL-METADATA",
+      "git_blob": "791616d7607d5fd521968747e8ecebc0e7742435"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/verified-outcomes.json",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/cache-raw/a169-final/verified-outcomes.json",
+      "bytes": 1473,
+      "sha256": "4cad81860a46bd7e97be02b27b6b3180b68a29f8aa9f1a662aac3bdbce277370",
+      "prior_status": "NEW-FINAL-METADATA",
+      "git_blob": "ef13ee8da1ae41c313d118a11594c560853be6c2"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/false-all-raw.exit",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/false-all-raw.exit",
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "573541ac9702dd3969c9bc859d2b91ec1f7e6e56"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/false-all-raw.json",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/false-all-raw.json",
+      "bytes": 62,
+      "sha256": "49fff89d250c75e477e7fa043d6d50ff2a1356405b90c732ab841b3ffa1f39c7",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "0c4168762106fb07e3e38e6d47ca73adc3901cc4"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/false-all-raw.stderr",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/false-all-raw.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/false-all-raw.stdout",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/false-all-raw.stdout",
+      "bytes": 91,
+      "sha256": "728d9a8c45e5046c9dfdc21f54194b374d0df4033516cb5b1aeebc3f25ba2bd3",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "fcb19130ae0de6008dba31cd45d9e78234206222"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/false-has-compressed.exit",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/false-has-compressed.exit",
+      "bytes": 2,
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "d00491fd7e5bb6fa28c517a0bb32b8b506539d4d"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/false-has-compressed.json",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/false-has-compressed.json",
+      "bytes": 61,
+      "sha256": "6f039c908e6af62e836b2e75dd734549729a8e0a0d3975e0d16514cdbdd364b6",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "814609480a9872c0187145e87cafbc640320dcb3"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/false-has-compressed.stderr",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/false-has-compressed.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/false-has-compressed.stdout",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/false-has-compressed.stdout",
+      "bytes": 91,
+      "sha256": "d311f2c63c38213f2bdbedfa8aa45a8e5d0a7606d168630332478470ba5bd464",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "7b4dafde150d46479e1f50a728e7ed6a44f404e5"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/outcomes.json",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/outcomes.json",
+      "bytes": 2771,
+      "sha256": "0e7ef7f9956c413190f23ef9b027c9e6c226c14ea589f9765caf1f20e1b72d55",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "cd725b39c9b4430f10f82c23c1c2b10d99c9bf47"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/true-all-compressed.exit",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/true-all-compressed.exit",
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "573541ac9702dd3969c9bc859d2b91ec1f7e6e56"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/true-all-compressed.json",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/true-all-compressed.json",
+      "bytes": 59,
+      "sha256": "5f8d2627d1394e9472e1f074fe1f8cee173728a5efbccb6d19a6bc81cb683ecc",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "f389f0849f808c22ef41a891a7986fe3a2eb229f"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/true-all-compressed.stderr",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/true-all-compressed.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/true-all-compressed.stdout",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/true-all-compressed.stdout",
+      "bytes": 88,
+      "sha256": "4b6a323bba9c3021c415d98d802d77c200d1fc0f858489868a0f50c951fc0bb9",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "a3e8a793a8066b32cd9fdbdf7b03b9e2d5e08dde"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/true-all-raw.exit",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/true-all-raw.exit",
+      "bytes": 2,
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "d00491fd7e5bb6fa28c517a0bb32b8b506539d4d"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/true-all-raw.json",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/true-all-raw.json",
+      "bytes": 61,
+      "sha256": "7ea30a079a6f7c012952d53e2ae60d5dad924cd9f858de088ff2d4fbc6a90fa6",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "a04747153641cb4054a2df278b11e9e33cddaced"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/true-all-raw.stderr",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/true-all-raw.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/true-all-raw.stdout",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/true-all-raw.stdout",
+      "bytes": 91,
+      "sha256": "cb525b04a7e54b740769396cbe96e1cfa34df1f891aa4893bf38f5718543dcfe",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "1564ecb48ec44b9188a8b068f3274444e5b4f0e7"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/true-mixed.exit",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/true-mixed.exit",
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "573541ac9702dd3969c9bc859d2b91ec1f7e6e56"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/true-mixed.json",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/true-mixed.json",
+      "bytes": 60,
+      "sha256": "23a9a0f85f2321cc3c9f22e583bf4287e1317f0d390c1ea3d3a5301c737117e6",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "28e4e11b30fd67a4f17a0134bcdad8c4820f4fee"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/true-mixed.stderr",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/true-mixed.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-controls/true-mixed.stdout",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/true-mixed.stdout",
+      "bytes": 89,
+      "sha256": "aafc7d9840ce3d5905bcdb77962841341dffc73a9c9b60385d6072553e8247e4",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "f17de737cb399fcc0db0411d0397a02ec15374d9"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/compression-policy-control.py",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner169-raw-seal2/compression-controls/compression-policy-control.py",
+      "bytes": 423,
+      "sha256": "9ea22c37ffdec70c7235ec1968f420a5d59645388aea0495b1a9c09743054e17",
+      "prior_status": "NEW-CONTROL",
+      "git_blob": "80bd998b16e6eaa37b469a6447911d0ce75b371a"
+    }
+  ],
+  "manifest_excludes_itself": true
+}

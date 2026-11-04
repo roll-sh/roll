@@ -1,0 +1,12 @@
+{
+  "source_head": "79746f3174996b8047c4c0c30db87f345418b162",
+  "binary": "/home/meszmate/.cache/a169/target/release/roll-engine",
+  "sha256": "899b7e3d135dada0e7b4dd8a4271dec82c2e9b141d3759accac0809a9e66742a",
+  "bytes": 86895160,
+  "build_command": "cargo build --release -p pg-engine --bin roll-engine",
+  "build_exit": 0,
+  "build_log": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-final/build.log",
+  "profile": "release",
+  "performance_footprint": "HELD;not measured",
+  "source_checksums_unchanged": true
+}

@@ -1,0 +1,249 @@
+    Checking pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a76932e8127f6d35b/crates/pg-engine)
+warning: length comparison to zero
+    --> crates/pg-engine/src/sql/binder/expr.rs:3325:45
+     |
+3325 |             && args[k + 1..].iter().any(|a| super::fold::candidates_in(std::slice::from_ref(a)).len() > 0)
+     |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: using `!is_empty` is clearer and more explicit: `!super::fold::candidates_in(std::slice::from_ref(a)).is_empty()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#len_zero
+     = note: `#[warn(clippy::len_zero)]` on by default
+
+warning: this loop could be written as a `while let` loop
+   --> crates/pg-engine/src/sql/binder/fold.rs:189:9
+    |
+189 | /         loop {
+190 | |             match top {
+191 | |                 Plan::Limit { input, .. } | Plan::Sort { input, .. } | Plan::LockRows { input, .. } | Plan::Distinct { input, .. ...
+192 | |                     later.extend(exprs(top));
+...   |
+197 | |         }
+    | |_________^ help: try: `while let Plan::Limit { input, .. } | Plan::Sort { input, .. } | Plan::LockRows { input, .. } | Plan::Distinct { input, .. } = top { .. }`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#while_let_loop
+    = note: `#[warn(clippy::while_let_loop)]` on by default
+
+warning: the `Err`-variant returned from this function is very large
+    --> crates/pg-engine/src/sql/binder/optimize.rs:3458:88
+     |
+3458 |   fn push_lateral_union(cat: &Catalog, right: Plan, parts: &[Expr], nonnull: &[bool]) -> std::result::Result<Plan, Plan> {
+     |                                                                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+    ::: crates/pg-engine/src/sql/plan.rs:1385:5
+     |
+1385 | /     SysScan {
+1386 | |         table: SysTable,
+1387 | |         filter: Option<Expr>,
+1388 | |         /// The access path the planner chose for it, when not a sequential scan (or
+...    |
+1395 | |         mark: Option<(RowMark, Wait)>,
+1396 | |     },
+     | |_____- the variant `SysScan` contains at least 131 bytes
+...
+1494 | /     Limit {
+1495 | |         input: Arc<Plan>,
+1496 | |         limit: Option<Expr>,
+1497 | |         offset: Option<Expr>,
+1498 | |         with_ties: Option<Vec<SortKey>>,
+1499 | |     },
+     | |_____- the largest variant contains at least 224 bytes
+...
+1543 | /     Join {
+1544 | |         kind: JoinKind,
+1545 | |         left: Arc<Plan>,
+1546 | |         right: Arc<Plan>,
+...    |
+1553 | |         meta: Box<JoinMeta>,
+1554 | |     },
+     | |_____- the variant `Join` contains at least 209 bytes
+     |
+     = help: try reducing the size of `sql::plan::Plan`, for example by boxing large elements or replacing it with `Box<sql::plan::Plan>`
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#result_large_err
+     = note: `#[warn(clippy::result_large_err)]` on by default
+
+warning: the loop variable `j` is used to index `rkeys`
+    --> crates/pg-engine/src/sql/paths/joinpath/partitionwise.rs:1318:18
+     |
+1318 |         for j in 0..lkeys.len() {
+     |                  ^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_range_loop
+     = note: `#[warn(clippy::needless_range_loop)]` on by default
+help: consider using an iterator and enumerate()
+     |
+1318 -         for j in 0..lkeys.len() {
+1318 +         for (j, <item>) in rkeys.iter().enumerate().take(lkeys.len()) {
+     |
+
+warning: this `if` statement can be collapsed
+    --> crates/pg-engine/src/sql/explain.rs:9840:32
+     |
+9840 |                           } else if o.ends_with(".ctid") || (o.ends_with(".tableoid") && !dummy) {
+     |  ________________________________^
+9841 | |                             if !ident.contains(o) {
+9842 | |                                 ident.push(o.clone());
+9843 | |                             }
+9844 | |                         }
+     | |_________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#collapsible_if
+     = note: `#[warn(clippy::collapsible_if)]` on by default
+help: collapse nested if block
+     |
+9840 ~                         } else if (o.ends_with(".ctid") || (o.ends_with(".tableoid") && !dummy)) {
+9841 ~                             && !ident.contains(o) {
+9842 |                                 ident.push(o.clone());
+9843 ~                             }
+     |
+
+warning: float has excessive precision
+  --> crates/pg-engine/src/sql/func/math.rs:78:21
+   |
+78 |     const P0: f64 = 1.87595182427177009643;
+   |                     ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#excessive_precision
+   = note: `#[warn(clippy::excessive_precision)]` on by default
+help: consider changing the type or truncating it to
+   |
+78 -     const P0: f64 = 1.87595182427177009643;
+78 +     const P0: f64 = 1.875_951_824_271_77;
+   |
+
+warning: float has excessive precision
+  --> crates/pg-engine/src/sql/func/math.rs:79:22
+   |
+79 |     const P1: f64 = -1.88497979543377169875;
+   |                      ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#excessive_precision
+help: consider changing the type or truncating it to
+   |
+79 -     const P1: f64 = -1.88497979543377169875;
+79 +     const P1: f64 = -1.884_979_795_433_771_7;
+   |
+
+warning: float has excessive precision
+  --> crates/pg-engine/src/sql/func/math.rs:80:21
+   |
+80 |     const P2: f64 = 1.621429720105354466140;
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#excessive_precision
+help: consider changing the type or truncating it to
+   |
+80 -     const P2: f64 = 1.621429720105354466140;
+80 +     const P2: f64 = 1.621_429_720_105_354_5;
+   |
+
+warning: float has excessive precision
+  --> crates/pg-engine/src/sql/func/math.rs:81:22
+   |
+81 |     const P3: f64 = -0.758397934778766047437;
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#excessive_precision
+help: consider changing the type or truncating it to
+   |
+81 -     const P3: f64 = -0.758397934778766047437;
+81 +     const P3: f64 = -0.758_397_934_778_766;
+   |
+
+warning: float has excessive precision
+  --> crates/pg-engine/src/sql/func/math.rs:82:21
+   |
+82 |     const P4: f64 = 0.145996192886612446982;
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#excessive_precision
+help: consider changing the type or truncating it to
+   |
+82 -     const P4: f64 = 0.145996192886612446982;
+82 +     const P4: f64 = 0.145_996_192_886_612_45;
+   |
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+   --> crates/pg-engine/src/storage/sst.rs:791:53
+    |
+791 |             let (shared, unshared, vl) = entry_head(&raw, &mut pos)?;
+    |                                                     ^^^^ help: change this to: `raw`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_borrow
+    = note: `#[warn(clippy::needless_borrow)]` on by default
+
+warning: items after a test module
+    --> crates/pg-engine/src/types/json.rs:946:1
+     |
+ 946 |   mod tests {
+     |   ^^^^^^^^^
+...
+ 985 | / pub fn set_element(
+ 986 | |     root: Option<&Jsonb>,
+ 987 | |     path: &[String],
+ 988 | |     value: Jsonb,
+ 989 | |     expect_array: bool,
+ 990 | | ) -> crate::error::Result<Jsonb> {
+     | |________________________________^
+...
+1006 |   fn path_index(path: &[String], level: usize) -> crate::error::Result<i64> {
+     |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1017 | / fn set_level(
+1018 | |     cur: &Jsonb,
+1019 | |     path: &[String],
+1020 | |     level: usize,
+1021 | |     value: Jsonb,
+1022 | | ) -> crate::error::Result<Jsonb> {
+     | |________________________________^
+...
+1080 |   fn create_path(path: &[String], level: usize, value: Jsonb) -> crate::error::Result<Jsonb> {
+     |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#items_after_test_module
+     = note: `#[warn(clippy::items_after_test_module)]` on by default
+     = help: move the items to before the test module was defined
+
+warning: items after a test module
+    --> crates/pg-engine/src/types/text.rs:2436:1
+     |
+2436 | mod tests {
+     | ^^^^^^^^^
+...
+2633 | fn parse_vector(s: &str, int2: bool) -> Result<Vec<Value>> {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#items_after_test_module
+     = help: move the items to before the test module was defined
+
+warning: `pg-engine` (lib) generated 11 warnings (run `cargo clippy --fix --lib -p pg-engine -- ` to apply 8 suggestions)
+warning: `pg-engine` (lib test) generated 13 warnings (11 duplicates) (run `cargo clippy --fix --lib -p pg-engine --tests -- ` to apply 2 suggestions)
+warning: useless use of `format!`
+   --> crates/pg-engine/tests/difftest/round8.rs:874:103
+    |
+874 | ...PARED 'r8none{k}'"), format!("\\s2 BEGIN"), "SELECT 1".into()]).clone());
+    |                         ^^^^^^^^^^^^^^^^^^^^^ help: consider using `.to_string()`: `"\\s2 BEGIN".to_string()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#useless_format
+    = note: `#[warn(clippy::useless_format)]` on by default
+
+warning: `pg-engine` (test "difftest") generated 1 warning (run `cargo clippy --fix --test "difftest" -p pg-engine -- ` to apply 1 suggestion)
+warning: using `chunks_exact` with a constant chunk size
+   --> crates/pg-engine/tools/bench/bench.rs:836:40
+    |
+836 |             for (i, digit) in raw[8..].chunks_exact(2).enumerate() {
+    |                                        ^^^^^^^^^^^^^^^ help: consider using `as_chunks` instead: `as_chunks::<2>().0.iter()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#chunks_exact_to_as_chunks
+    = note: `#[warn(clippy::chunks_exact_to_as_chunks)]` on by default
+
+warning: `pg-engine` (example "bench") generated 1 warning (run `cargo clippy --fix --example "bench" -p pg-engine -- ` to apply 1 suggestion)
+warning: useless use of `vec!`
+  --> crates/pg-engine/tests/storage_linked_gc.rs:76:71
+   |
+76 |         let value = if i == 4 || i == 6 { vec![0] } else { [&[1][..], &vec![b'v'; 80]].concat() };
+   |                                                                       ^^^^^^^^^^^^^^^ help: you can use a slice directly: `&[b'v'; 80]`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#useless_vec
+   = note: `#[warn(clippy::useless_vec)]` on by default
+
+warning: `pg-engine` (test "storage_linked_gc") generated 1 warning (run `cargo clippy --fix --test "storage_linked_gc" -p pg-engine -- ` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 25.00s
