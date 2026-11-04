@@ -125,7 +125,8 @@ impl Runs {
         std::fs::create_dir_all(&self.dir)?;
         let id = self.next_id;
         self.next_id += 1;
-        let mut w = SstWriter::create_temp(&self.dir, id)?;
+        // (Compressed: a run its commit links goes to L1 as it is when it is alone there.)
+        let mut w = SstWriter::create_run(&self.dir, id)?;
         let mut val = Vec::new();
         let mut segs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         let mut seg: Option<(&[u8], &[u8])> = None;

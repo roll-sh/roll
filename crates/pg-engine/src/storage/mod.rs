@@ -13,6 +13,7 @@ pub mod discard;
 pub mod fileio;
 mod hot;
 pub mod keys;
+pub mod point;
 pub mod rdel;
 pub mod row;
 pub mod sst;
@@ -39,6 +40,8 @@ const SPILL_DIR: &str = "spill";
 
 /// Spilled runs linked into their commits as they were (`Store::link_run`; tests check).
 pub static LINKED_RUNS: AtomicU64 = AtomicU64::new(0);
+/// Linked runs that went straight to L1 (`Store::alone_at_bottom`; tests check).
+pub static LINKED_TO_L1: AtomicU64 = AtomicU64::new(0);
 
 /// The table a key is of, for `Store::untouched`: its first 4 bytes, a range deletion's
 /// marker's those of the range's start.
@@ -254,7 +257,7 @@ pub struct View {
     l1: Vec<Arc<SstReader>>,
     /// The committed range deletions (`rdel`), each hiding what it covers from readers at or
     /// past its ts.
-    rdels: Arc<Vec<rdel::RangeDel>>,
+    rdels: Arc<rdel::RangeDels>,
 }
 
 impl View {
@@ -440,7 +443,7 @@ impl Store {
         let store = Arc::new(Store {
             dir: dir.to_path_buf(),
             opts,
-            view: RwLock::new(Arc::new(View { mem, imm, l0, l1, rdels: Arc::new(Vec::new()) })),
+            view: RwLock::new(Arc::new(View { mem, imm, l0, l1, rdels: Arc::default() })),
             commit: Mutex::new(CommitState { wal }),
             manifest: Mutex::new(Manifest {
                 next_id,
@@ -696,7 +699,7 @@ impl View {
             imm: Vec::new(),
             l0: files,
             l1: Vec::new(),
-            rdels: Arc::new(rdels),
+            rdels: Arc::new(rdel::RangeDels::new(rdels)),
         })
     }
 
@@ -712,53 +715,9 @@ impl View {
 
     /// (ts, value) of the newest version of `key` at or before `ts`; a tombstone has value None.
     pub fn get_version(&self, key: &[u8], ts: u64) -> Result<Option<(u64, Option<Bytes>)>> {
-        let hit = self.get_version_raw(key, ts)?;
-        Ok(match hit {
-            Some((vts, _)) if !self.rdels.is_empty() => match rdel::covering(&self.rdels, key, vts, ts) {
-                Some(r) => Some((r.ts, None)),
-                None => hit,
-            },
-            _ => hit,
-        })
-    }
-
-    /// `get_version` before range deletions.
-    fn get_version_raw(&self, key: &[u8], ts: u64) -> Result<Option<(u64, Option<Bytes>)>> {
-        let view = self;
         let seek = mvcc_key(key, ts);
-        let mem_get = |m: &Memtable| {
-            m.map
-                .range::<[u8], _>((Bound::Included(seek.as_slice()), Bound::Unbounded))
-                .next()
-                .filter(|e| user_key(e.key()) == key)
-                .map(|e| (key_ts(e.key()), e.value().clone()))
-        };
-        if let Some(hit) = mem_get(&view.mem) {
-            return Ok(Some(hit));
-        }
-        for f in &view.imm {
-            let hit = match f {
-                Frozen::Mem(m) => mem_get(m),
-                Frozen::Sst(s) => sst_get(s, key, &seek)?,
-            };
-            if hit.is_some() {
-                return Ok(hit);
-            }
-        }
-        for sst in view.l0.iter() {
-            if let Some(hit) = sst_get(sst, key, &seek)? {
-                return Ok(Some(hit));
-            }
-        }
-        let i = view
-            .l1
-            .partition_point(|s| user_key(&s.meta.last_key) < key);
-        if let Some(sst) = view.l1.get(i)
-            && let Some(hit) = sst_get(sst, key, &seek)?
-        {
-            return Ok(Some(hit));
-        }
-        Ok(None)
+        let hit = point::newest(self, key, &seek, true, &mut [], &mut sst::BlockPos::default())?;
+        Ok(point::deleted_by_range(self, key, hit, ts))
     }
 }
 
@@ -795,90 +754,33 @@ impl Store {
 
     fn get_versions_with(&self, keys: &[&[u8]], ts: u64, resolve: bool) -> Result<Vec<Option<(u64, Option<Bytes>)>>> {
         debug_assert!(keys.windows(2).all(|w| w[0] < w[1]));
-        let view = self.view();
-        let mut out: Vec<Option<(u64, Option<Bytes>)>> = vec![None; keys.len()];
-        // The keys no source has answered yet (the hot ranges' first: `hot`).
-        let mut left: Vec<usize> = match self.hot.get_many(keys, ts) {
-            Some(hot) => {
-                let mut left = Vec::new();
-                for (i, h) in hot.into_iter().enumerate() {
-                    match h {
-                        Some(v) => out[i] = v,
-                        None => left.push(i),
-                    }
-                }
-                left
-            }
-            None => (0..keys.len()).collect(),
+        // (The keys are rows an index or a bitmap named: the last level holds the ones no
+        // newer source had, so its bloom filters would only cost.)
+        let mut r = self.point_reader(ts, false);
+        keys.iter().map(|k| self.get_with(&mut r, k, resolve)).collect()
+    }
+
+    /// A reader of single keys at `ts` (`point::PointReader`: blocks kept from key to key),
+    /// over the sources as they are now: made once the snapshot's commits are visible.
+    /// `bloom_last`: keys that may not exist (the last level's bloom filters checked too).
+    pub fn point_reader(&self, ts: u64, bloom_last: bool) -> point::PointReader {
+        point::PointReader::new(self.view(), ts, bloom_last)
+    }
+
+    /// `get_version` of `key` through `r` (at its snapshot), the hot ranges first; with a
+    /// row's out-of-line values put back when `resolve`.
+    pub fn get_with(&self, r: &mut point::PointReader, key: &[u8], resolve: bool) -> Result<Option<(u64, Option<Bytes>)>> {
+        let ts = r.ts();
+        let hit = match self.hot.get(key, ts) {
+            Some(hit) => hit,
+            None => r.get_raw(key)?,
         };
-        let seeks: Vec<Vec<u8>> = keys.iter().map(|k| mvcc_key(k, ts)).collect();
-        let mut found = Vec::new();
-        let mem_get = |m: &Memtable, left: &mut Vec<usize>, out: &mut Vec<Option<(u64, Option<Bytes>)>>| {
-            if m.is_empty() {
-                return;
+        match hit {
+            Some((vts, Some(v))) if resolve && toast::has_external(&v) => {
+                Ok(Some((vts, Some(toast::resolve(r.view(), key, v, ts)?))))
             }
-            left.retain(|&i| {
-                let hit = m
-                    .map
-                    .range::<[u8], _>((Bound::Included(seeks[i].as_slice()), Bound::Unbounded))
-                    .next()
-                    .filter(|e| user_key(e.key()) == keys[i]);
-                match hit {
-                    Some(e) => {
-                        out[i] = Some((key_ts(e.key()), e.value().clone()));
-                        false
-                    }
-                    None => true,
-                }
-            });
-        };
-        mem_get(&view.mem, &mut left, &mut out);
-        // Files in age order: the frozen ones, then L0's, then L1 (one level).
-        let files = view
-            .imm
-            .iter()
-            .map(|f| match f {
-                Frozen::Mem(m) => Err(m),
-                Frozen::Sst(s) => Ok(std::slice::from_ref(s)),
-            })
-            .chain(view.l0.iter().map(|s| Ok(std::slice::from_ref(s))))
-            .chain((!view.l1.is_empty()).then_some(Ok(view.l1.as_slice())));
-        for f in files {
-            if left.is_empty() {
-                break;
-            }
-            match f {
-                Err(m) => mem_get(m, &mut left, &mut out),
-                Ok(ssts) => {
-                    // (The keys are rows' an index or a bitmap named: the last level holds
-                    // the ones no newer source had, so its bloom filters would only cost.)
-                    let last = std::ptr::eq(ssts, view.l1.as_slice());
-                    ssts_get(ssts, keys, &seeks, &left, !last, &mut found)?;
-                    for (i, hit) in found.drain(..) {
-                        out[i] = Some(hit);
-                    }
-                    left.retain(|&i| out[i].is_none());
-                }
-            }
+            other => Ok(other),
         }
-        if !view.rdels.is_empty() {
-            for (k, o) in keys.iter().zip(out.iter_mut()) {
-                if let Some((vts, _)) = o
-                    && let Some(r) = rdel::covering(&view.rdels, k, *vts, ts)
-                {
-                    *o = Some((r.ts, None));
-                }
-            }
-        }
-        // (Rows with their out-of-line values put back.)
-        for (i, o) in out.iter_mut().enumerate().filter(|_| resolve) {
-            if let Some((_, Some(v))) = o
-                && toast::has_external(v)
-            {
-                *v = toast::resolve(&view, keys[i], v.clone(), ts)?;
-            }
-        }
-        Ok(out)
     }
 
     /// Ascending scan of user keys in [start, end) at snapshot `ts`, rows with their
@@ -1401,11 +1303,30 @@ impl Store {
                 Err(e) => return fail(&files, e),
             }
         }
+        // (Linked runs no other source holds keys of go to L1 at once: written once, never
+        // compacted. L1 changes under `bg` only; when busy, they go to L0 as the others.)
+        let bg = if linked.is_empty() { None } else { self.bg.try_lock() };
         {
             let mut m = self.manifest.lock();
             let mut next = m.clone();
-            for f in &files {
-                next.l0.insert(l0_place(&next.l0, &f.meta), f.meta.clone());
+            let cur = self.view.read().clone();
+            let mut bottom = Vec::with_capacity(files.len());
+            for i in 0..files.len() {
+                bottom.push(match bg.is_some() {
+                    true => match self.alone_at_bottom(&cur, &files, i) {
+                        Ok(b) => b,
+                        Err(e) => return fail(&files, e),
+                    },
+                    false => false,
+                });
+            }
+            for (f, b) in files.iter().zip(&bottom) {
+                if *b {
+                    let at = next.l1.partition_point(|s| s.last_key < f.meta.first_key);
+                    next.l1.insert(at, f.meta.clone());
+                } else {
+                    next.l0.insert(l0_place(&next.l0, &f.meta), f.meta.clone());
+                }
             }
             next.last_ts = ts;
             next.next_id = self.next_id.load(Ordering::Relaxed);
@@ -1416,7 +1337,17 @@ impl Store {
             // (Handed out before its versions can be read: `last_assigned_ts`.)
             self.assigned.store(ts, Ordering::Release);
             let mut v = self.view.write();
-            let mut imm: Vec<Frozen> = files.into_iter().map(Frozen::Sst).collect();
+            let mut l1 = v.l1.clone();
+            let mut imm: Vec<Frozen> = Vec::new();
+            for (f, b) in files.into_iter().zip(bottom) {
+                if b {
+                    let at = l1.partition_point(|s| s.meta.last_key < f.meta.first_key);
+                    l1.insert(at, f);
+                    LINKED_TO_L1.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    imm.push(Frozen::Sst(f));
+                }
+            }
             imm.extend(v.imm.iter().cloned());
             let rdels = rdel::noted(&v.rdels, markers.iter().map(|(k, v)| (k.as_slice(), v.as_deref())), ts)
                 .map_or_else(|| v.rdels.clone(), Arc::new);
@@ -1424,12 +1355,42 @@ impl Store {
                 mem: v.mem.clone(),
                 imm,
                 l0: v.l0.clone(),
-                l1: v.l1.clone(),
+                l1,
                 rdels,
             });
         }
+        drop(bg);
         self.made_durable(ts);
         Ok(())
+    }
+
+    /// Whether `files[i]`, a commit's linked run, can go to L1 as it is: compressed, not
+    /// much bigger than compaction's files, and no other source of `view` nor other file
+    /// of the commit holds a key in its range (so every older version of its keys, none,
+    /// is below it, and a key's versions in L1 stay in one file). Under the commit lock and
+    /// `bg`.
+    fn alone_at_bottom(&self, view: &View, files: &[Arc<SstReader>], i: usize) -> Result<bool> {
+        let f = &files[i];
+        if f.meta.commit_ts.is_none() || f.meta.size > 2 * self.opts.target_file_bytes || !f.first_block_compressed()? {
+            return Ok(false);
+        }
+        let (lo, hi) = (user_key(&f.meta.first_key), user_key(&f.meta.last_key));
+        let meets = |s: &SstReader| user_key(&s.meta.last_key) >= lo && user_key(&s.meta.first_key) <= hi;
+        let frozen = view.imm.iter().filter_map(|x| match x {
+            Frozen::Sst(s) => Some(s),
+            Frozen::Mem(_) => None,
+        });
+        if files.iter().enumerate().any(|(j, g)| j != i && meets(g))
+            || frozen.chain(&view.l0).chain(&view.l1).any(|s| meets(s))
+        {
+            return Ok(false);
+        }
+        Ok(!view.memtables().any(|m| {
+            m.map
+                .range::<[u8], _>((Bound::Included(lo), Bound::Unbounded))
+                .next()
+                .is_some_and(|e| user_key(e.key()) <= hi)
+        }))
     }
 
     /// A transaction's spilled run (`txn::spill`) made a file of its commit at `ts`: moved
@@ -1503,7 +1464,7 @@ impl Store {
                 imm: v.imm.clone(),
                 l0: v.l0.clone(),
                 l1: v.l1.clone(),
-                rdels: Arc::new(list),
+                rdels: Arc::new(rdel::RangeDels::new(list)),
             });
         }
         Ok(())
@@ -1776,7 +1737,7 @@ impl Store {
                 continue;
             }
             // (Deleted with its range before anyone still reading: its older versions too.)
-            if !view.rdels.is_empty() && rdel::covering(&view.rdels, uk, ts, horizon).is_some() {
+            if !view.rdels.is_empty() && view.rdels.covering(uk, ts, horizon).is_some() {
                 merge.sources[i].advance();
                 continue;
             }
@@ -1793,7 +1754,7 @@ impl Store {
                 }
             }
             // Only split between user keys: a key's versions all in one L1 file, as point
-            // reads look for them (`sst_get` of the one file whose range has the key).
+            // reads look for them (`point::newest` reads the one file whose range has the key).
             if first_version
                 && writer
                     .as_ref()
@@ -1902,77 +1863,6 @@ impl Store {
     pub fn memory_bytes(&self) -> usize {
         self.view().memtables().map(|m| m.bytes()).sum()
     }
-}
-
-fn sst_get(sst: &SstReader, key: &[u8], seek: &[u8]) -> Result<Option<(u64, Option<Bytes>)>> {
-    if key < user_key(&sst.meta.first_key)
-        || key > user_key(&sst.meta.last_key)
-        || !sst.may_contain(key)
-    {
-        return Ok(None);
-    }
-    let mut b = sst.find_block(seek);
-    let mut pos = sst::BlockPos::default();
-    while b < sst.block_count() {
-        let block = sst.block(b)?;
-        block.seek(seek, &mut pos);
-        if pos.index() < block.len() {
-            let k = pos.key();
-            if user_key(k) == key {
-                return Ok(Some((key_ts(k), block.value(&pos))));
-            }
-            return Ok(None);
-        }
-        b += 1;
-    }
-    Ok(None)
-}
-
-/// `sst_get` of the keys `left` picks (ascending) over non-overlapping files in key
-/// order (one L0 file, or L1), each block read once for every key in it: the hits, by
-/// key index, go to `found`.
-fn ssts_get(
-    ssts: &[Arc<SstReader>],
-    keys: &[&[u8]],
-    seeks: &[Vec<u8>],
-    left: &[usize],
-    bloom: bool,
-    found: &mut Vec<(usize, (u64, Option<Bytes>))>,
-) -> Result<()> {
-    let mut file = 0;
-    let mut cur: Option<(usize, usize, Arc<sst::Block>)> = None;
-    let mut pos = sst::BlockPos::default();
-    for &i in left {
-        let (key, seek) = (keys[i], seeks[i].as_slice());
-        while file < ssts.len() && user_key(&ssts[file].meta.last_key) < key {
-            file += 1;
-        }
-        let Some(sst) = ssts.get(file) else { break };
-        if key < user_key(&sst.meta.first_key) || bloom && !sst.may_contain(key) {
-            continue;
-        }
-        let mut b = sst.find_block(seek);
-        while b < sst.block_count() {
-            let block = match &cur {
-                Some((f, bi, blk)) if *f == file && *bi == b => blk.clone(),
-                _ => {
-                    let blk = sst.block(b)?;
-                    cur = Some((file, b, blk.clone()));
-                    blk
-                }
-            };
-            block.seek(seek, &mut pos);
-            if pos.index() < block.len() {
-                let k = pos.key();
-                if user_key(k) == key {
-                    found.push((i, (key_ts(k), block.value(&pos))));
-                }
-                break;
-            }
-            b += 1;
-        }
-    }
-    Ok(())
 }
 
 // ── merging iteration ──
@@ -2418,13 +2308,13 @@ pub struct Scan {
     newer: Option<Vec<u8>>,
     /// No snapshot older than this can read (the store's gc horizon as the scan began).
     horizon: u64,
-    /// The range deletions that can hide something here (`rdel::relevant`).
-    rdels: Box<[rdel::RangeDel]>,
+    /// The range deletions that can hide something here (`RangeDels::relevant`).
+    rdels: rdel::RangeDels,
     _view: Arc<View>,
     /// Rows come with their out-of-line values put back (`Store::scan`; `toast`).
     resolve: bool,
     /// The rows of a hot range's chains (`hot`), read already: no merge.
-    rows: Option<Box<std::vec::IntoIter<(Vec<u8>, Bytes)>>>,
+    rows: Option<Box<std::vec::IntoIter<(Bytes, Bytes)>>>,
     /// Where the scan started, while it has stepped over only deleted keys (`dead`: a hint
     /// is recorded at its first live key past `dead::MIN_DEAD` of them); None: not looked for.
     dead: Option<(Arc<dead::DeadRanges>, Vec<u8>)>,
@@ -2458,7 +2348,7 @@ fn sources(view: &View, start: &[u8], end: &[u8]) -> Vec<Cursor> {
 }
 
 impl Scan {
-    fn of_rows(view: Arc<View>, rows: Vec<(Vec<u8>, Bytes)>, ts: u64) -> Scan {
+    fn of_rows(view: Arc<View>, rows: Vec<(Bytes, Bytes)>, ts: u64) -> Scan {
         Scan {
             merge: Merge::new(Vec::new(), Vec::new()),
             ts,
@@ -2470,7 +2360,7 @@ impl Scan {
             _view: view,
             resolve: false,
             rows: Some(Box::new(rows.into_iter())),
-            rdels: Box::default(),
+            rdels: Default::default(),
             dead: None,
             dead_run: 0,
         }
@@ -2478,8 +2368,7 @@ impl Scan {
 
     fn new(view: Arc<View>, start: Vec<u8>, end: Vec<u8>, ts: u64, horizon: u64) -> Scan {
         let sources = sources(&view, &start, &end);
-        let rdels = rdel::relevant(&view.rdels, &start, &end, ts);
-        let rdels = rdels.into_boxed_slice();
+        let rdels = rdel::RangeDels::new(view.rdels.relevant(&start, &end, ts));
         Scan {
             merge: Merge::new(sources, end),
             ts,
@@ -2502,13 +2391,11 @@ impl Scan {
         if ranges.is_empty() {
             return self;
         }
-        let mut l = std::mem::take(&mut self.rdels).into_vec();
-        l.extend(ranges.iter().map(|(s, e)| rdel::RangeDel {
+        self.rdels = self.rdels.with(ranges.iter().map(|(s, e)| rdel::RangeDel {
             start: s.clone(),
             end: e.clone(),
             ts: rdel::ALL,
         }));
-        self.rdels = l.into_boxed_slice();
         self
     }
 
@@ -2596,7 +2483,7 @@ impl Scan {
                 continue;
             }
             if !self.rdels.is_empty()
-                && let Some(r) = rdel::covering(&self.rdels, uk, ts, self.ts)
+                && let Some(r) = self.rdels.covering(uk, ts, self.ts)
             {
                 // Deleted with its range; a range left out whole is passed at once. (One the
                 // transaction left out itself isn't deleted for others: no hint from it.)
@@ -2625,10 +2512,17 @@ impl Scan {
     /// back, and a hot range's rows, are pushed owned.
     pub fn fill_batch(&mut self, batch: &mut batch::RowBatch, max: usize) -> Result<()> {
         let target = batch.len() + max;
-        if self.rows.is_some() {
+        if let Some(rows) = &mut self.rows {
+            // (A hot range's rows, their keys shared with its chains: none copied.)
             while batch.len() < target {
-                let Some(r) = self.next() else { break };
-                let (k, v) = r?;
+                let Some((k, v)) = rows.next() else { break };
+                if self.rdels.holds(&k) {
+                    continue;
+                }
+                let v = match self.resolve && toast::has_external(&v) {
+                    true => toast::resolve(&self._view, &k, v, self.ts)?,
+                    false => v,
+                };
                 batch.push(&k, v);
             }
             return Ok(());
@@ -2708,14 +2602,14 @@ impl Iterator for Scan {
             // reader's own, `excluding`, can cover one.)
             let (k, v) = loop {
                 let (k, v) = rows.next()?;
-                if !self.rdels.iter().any(|r| r.contains(&k)) {
+                if !self.rdels.holds(&k) {
                     break (k, v);
                 }
             };
             if self.resolve && toast::has_external(&v) {
-                return Some(toast::resolve(&self._view, &k, v, self.ts).map(|v| (k, v)));
+                return Some(toast::resolve(&self._view, &k, v, self.ts).map(|v| (k.to_vec(), v)));
             }
-            return Some(Ok((k, v)));
+            return Some(Ok((k.to_vec(), v)));
         }
         let i = match self.position() {
             Ok(Some(i)) => i,
@@ -2897,7 +2791,7 @@ pub struct RevScan {
     ts: u64,
     /// The next user key's entries already read: its first (oldest) one is held here.
     pending: Option<RawEntry>,
-    rdels: Vec<rdel::RangeDel>,
+    rdels: rdel::RangeDels,
     _view: Arc<View>,
     /// Rows come with their out-of-line values put back (`Store::scan_rev`; `toast`).
     resolve: bool,
@@ -2931,7 +2825,7 @@ impl RevScan {
         if !view.l1.is_empty() {
             sources.push(level(view.l1.clone()));
         }
-        let rdels = rdel::relevant(&view.rdels, &start, &end, ts);
+        let rdels = rdel::RangeDels::new(view.rdels.relevant(&start, &end, ts));
         RevScan {
             sources,
             ts,
@@ -2944,7 +2838,7 @@ impl RevScan {
 
     /// `Scan::excluding`.
     pub fn excluding(mut self, ranges: &[(Vec<u8>, Vec<u8>)]) -> RevScan {
-        self.rdels.extend(ranges.iter().map(|(s, e)| rdel::RangeDel {
+        self.rdels = self.rdels.with(ranges.iter().map(|(s, e)| rdel::RangeDel {
             start: s.clone(),
             end: e.clone(),
             ts: rdel::ALL,
@@ -3003,7 +2897,7 @@ impl Iterator for RevScan {
                 }
             }
             if let Some((t, Some(v))) = chosen
-                && rdel::covering(&self.rdels, &uk, t, self.ts).is_none()
+                && self.rdels.covering(&uk, t, self.ts).is_none()
             {
                 if self.resolve && toast::has_external(&v) {
                     return Some(toast::resolve(&self._view, &uk, v, self.ts).map(|v| (uk, v)));
@@ -3265,6 +3159,70 @@ mod tests {
             |_| Ok(()),
         )
         .unwrap()
+    }
+
+    /// A linked run whose keys no other source holds goes to L1 as it is (written once);
+    /// one overlapping a file's or a memtable's keys, or not compressed, goes to L0. Reads,
+    /// older snapshots and a crash's recovery see them all as the commit's.
+    #[test]
+    fn lone_linked_runs_go_to_l1() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = || StoreOptions { memtable_bytes: 1 << 20, sync: false, background: false, ..Default::default() };
+        let mut s = Store::open(dir.path(), o()).unwrap();
+        // (Two files: what lies between them is no file's.)
+        put(&s, "a0005", Some("old"));
+        s.flush_memtables().unwrap();
+        put(&s, "c0001", Some("old"));
+        s.flush_memtables().unwrap();
+        put(&s, "d0001", Some("mem"));
+        let before = s.visible_ts();
+        let spill = dir.path().join(SPILL_DIR);
+        std::fs::create_dir_all(&spill).unwrap();
+        let val = |p: &str, i: u32| format!("{p}{i}-{}", "v".repeat(30));
+        let mut id = 1000;
+        let mut run = |p: &str, n: u32, compress: bool| -> Arc<SstReader> {
+            id += 1;
+            let mut w = if compress { SstWriter::create_run(&spill, id) } else { SstWriter::create_temp(&spill, id) }.unwrap();
+            for i in 0..n {
+                // (A run's value: tag 1, present; every 9th a deletion, tag 0.)
+                let v: Vec<u8> = if i % 9 == 4 { vec![0] } else { [&[1u8][..], val(p, i).as_bytes()].concat() };
+                w.add(&mvcc_key(format!("{p}{i:04}").as_bytes(), 3), Some(&v)).unwrap();
+            }
+            Arc::new(SstReader::open(&spill, w.finish().unwrap(), s.opts.cache.clone()).unwrap())
+        };
+        // b: alone; a: overlaps a file; d: overlaps the memtable; e: not compressed.
+        let linked = vec![run("b", 3000, true), run("a", 50, true), run("d", 50, true), run("e", 50, false)];
+        let to_l1 = LINKED_TO_L1.load(Ordering::Relaxed);
+        let ts = s
+            .commit_sorted(0, &mut std::iter::empty::<Result<(Vec<u8>, Option<Bytes>)>>(), |_, _| Ok(()), &|_, _| Ok(()), |_| {}, linked)
+            .unwrap();
+        assert_eq!(LINKED_TO_L1.load(Ordering::Relaxed) - to_l1, 1);
+        let check = |s: &Store| {
+            for (p, n) in [("b", 3000u32), ("a", 50), ("d", 50), ("e", 50)] {
+                for i in (0..n).filter(|i| i % 7 == 0 || *i < 6) {
+                    let k = format!("{p}{i:04}");
+                    let want = (i % 9 != 4).then(|| val(p, i));
+                    let got = s.get(k.as_bytes(), ts).unwrap().map(|v| String::from_utf8(v.to_vec()).unwrap());
+                    assert_eq!(got, want, "{k}");
+                    assert_eq!(s.get_version(k.as_bytes(), ts).unwrap().map(|v| v.0), Some(ts), "{k}");
+                }
+            }
+            assert_eq!(s.get(b"c0001", ts).unwrap().as_deref(), Some(&b"old"[..]));
+            let bs = scan_all(s, ts).iter().filter(|(k, _)| k.starts_with('b')).count();
+            assert_eq!(bs, (0..3000).filter(|i| i % 9 != 4).count());
+        };
+        check(&s);
+        assert!(s.view().l1.iter().any(|f| f.meta.commit_ts == Some(ts) && f.meta.first_key.starts_with(b"b")));
+        // (Older snapshots see none of it.)
+        assert_eq!(s.get(b"b0001", before).unwrap(), None);
+        assert_eq!(s.get(b"d0001", before).unwrap().as_deref(), Some(&b"mem"[..]));
+        // A crash: the WAL's commits replayed around the run.
+        drop(s);
+        s = Store::open(dir.path(), o()).unwrap();
+        check(&s);
+        s.flush_memtables().unwrap();
+        s.compact().unwrap();
+        check(&s);
     }
 
     #[test]

@@ -2723,6 +2723,30 @@ impl Txn {
         }
     }
 
+    /// `get_snap` through `r`, a point reader (`storage::point::PointReader`) the caller
+    /// keeps between calls: a key falling in a block the reader holds is read there, with no
+    /// lookup in the block cache (a nested loop's inner side by a unique key, keys
+    /// ascending). `r` is made again when it is of another snapshot than `s`'s now (None:
+    /// none yet). `bloom_last`: keys that may not exist.
+    pub fn get_snap_with(
+        &self,
+        key: &[u8],
+        s: &Snap,
+        r: &mut Option<crate::storage::point::PointReader>,
+        bloom_last: bool,
+    ) -> Result<Option<Bytes>> {
+        self.catch_up(s);
+        let st = s.st.borrow();
+        if let Some(v) = self.snap_get(key, &st)? {
+            return self.resolve_own(key, v, Some(&st), st.ts);
+        }
+        let r = match r {
+            Some(r) if r.ts() == st.ts => r,
+            _ => r.insert(self.db.store.point_reader(st.ts, bloom_last)),
+        };
+        Ok(self.db.store.get_with(r, key, true)?.and_then(|(_, v)| v))
+    }
+
     /// `get_snap` of each of `keys` (any order), the store's reads made together
     /// (`Store::get_versions`).
     pub fn get_many_snap(&self, keys: &[Vec<u8>], s: &Snap) -> Result<Vec<Option<Bytes>>> {
