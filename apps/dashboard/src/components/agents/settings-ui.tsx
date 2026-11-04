@@ -79,7 +79,7 @@ export function SettingsPage({
         </IconButton>
       </div>
       <div className={cn("shrink-0 px-4 pt-3 pb-1", !search && "hidden")}>
-        <label className="flex h-8 items-center gap-2 rounded-lg border border-line bg-panel px-2.5 text-[13px] focus-within:border-line-2">
+        <label className="flex h-8 items-center gap-2 rounded-lg border border-line-2 bg-panel-2 px-2.5 text-[13px] transition-colors focus-within:border-line-3">
           <Search className="size-3.5 shrink-0 text-subtle" aria-hidden />
           <input
             ref={box}
@@ -119,10 +119,10 @@ export function SettingsSection({ title, ids, action, children }: { title: strin
   return (
     <section className="mb-6" aria-label={title}>
       <div className="mb-2 flex items-center gap-2 px-0.5">
-        <h3 className="flex-1 text-[12px] font-medium text-muted">{title}</h3>
+        <h3 className="flex-1 text-[12px] font-medium text-soft">{title}</h3>
         {action}
       </div>
-      <div className="divide-y divide-line overflow-hidden rounded-xl border border-line bg-panel">{children}</div>
+      <div className="divide-y divide-line overflow-hidden rounded-xl border border-line-2 bg-raised shadow-card inset-shadow-highlight">{children}</div>
     </section>
   );
 }
@@ -175,13 +175,14 @@ export function SettingRow({
 /** A quiet tag after a row's title. */
 export function Note({ children, title }: { children: ReactNode; title?: string }) {
   return (
-    <span className="rounded border border-line px-1 py-px text-[10.5px] text-subtle" title={title}>
+    <span className="rounded border border-line-2 bg-panel-2 px-1 py-px text-[10.5px] text-subtle" title={title}>
       {children}
     </span>
   );
 }
 
-export const field = "h-8 min-w-0 rounded-lg border border-line-2 bg-bg px-2.5 text-[13px] text-fg outline-none placeholder:text-subtle hover:border-subtle focus:border-subtle disabled:opacity-60";
+export const field =
+  "h-8 min-w-0 rounded-lg border border-line-2 bg-panel-2 px-2.5 text-[13px] text-fg outline-none transition-colors placeholder:text-faint hover:border-line-3 focus:border-line-3 disabled:opacity-60";
 
 /**
  * A text setting saved when it's left or Enter is pressed (T3's inputs), shown as `value` until
@@ -238,10 +239,10 @@ export function TextField({
 
 /** What saving is doing, for a page's footer line. */
 export function SaveState({ saving, error, offline }: { saving: boolean; error: string | null; offline?: string | null }) {
-  if (offline) return <p className="mb-4 rounded-lg border border-line bg-panel px-3 py-2 text-[12px] text-subtle">{offline}</p>;
+  if (offline) return <p className="mb-4 rounded-lg border border-line-2 bg-raised px-3 py-2 text-[12px] text-subtle">{offline}</p>;
   if (!saving && !error) return null;
   return (
-    <p role={error ? "alert" : "status"} className={cn("mb-4 rounded-lg border px-3 py-2 text-[12px]", error ? "border-danger/40 text-danger" : "border-line text-subtle")}>
+    <p role={error ? "alert" : "status"} className={cn("mb-4 rounded-lg border px-3 py-2 text-[12px]", error ? "border-danger/40 bg-danger/5 text-danger" : "border-line-2 bg-raised text-subtle")}>
       {error ?? <span className="shimmer">Saving…</span>}
     </p>
   );

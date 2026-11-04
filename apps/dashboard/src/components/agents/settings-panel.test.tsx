@@ -6,7 +6,7 @@ import { setActiveClient } from "@/lib/agents-client";
 import { agentsSurface, resetAgentsSurface, viewFromHash, hashFor } from "@/lib/agents-surface";
 import { modelPrefs } from "@/lib/agents-models";
 import { DEFAULT_OWNER_SETTINGS, parseOwnerSettings } from "@/lib/owner-settings";
-import { machine, machineConfig, provider } from "@/test/agents";
+import { machine, machineConfig, project, provider } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents, type AgentsHarness } from "@/test/agents-render";
 import { MarkStateProvider } from "../mark-state";
 import { AgentsControl } from "./agents-control";
@@ -329,7 +329,7 @@ describe("what the settings change", () => {
   it("the send key: with ⌘/Ctrl+Enter, Enter breaks the line", async () => {
     const onSubmit = vi.fn(async () => {});
     const h = agentsHarness({ ctx: { prefs: { settings: { ...DEFAULT_OWNER_SETTINGS, send: "mod_enter" }, revision: 1, loaded: true, error: null, save: vi.fn() } } });
-    renderAgents(<Composer mode={{ kind: "new", project: { ...projectFixture(), settings: { auto_pull: false, defaults: {}, scripts: [] } }, machine: machine() }} onSubmit={onSubmit} />, h);
+    renderAgents(<Composer mode={{ kind: "new", project: projectFixture(), machine: machine() }} onSubmit={onSubmit} />, h);
     const box = screen.getByRole("textbox", { name: "Message" });
     await userEvent.type(box, "line one{Enter}line two");
     expect(onSubmit).not.toHaveBeenCalled();
@@ -352,5 +352,5 @@ describe("what the settings change", () => {
 });
 
 function projectFixture() {
-  return { id: "prj_1", name: "roll", path: "/Users/ada/src/roll", repo: null, git: null, settings: { auto_pull: false, defaults: {}, scripts: [] }, pull: null, created_at: 1, updated_at: 1 };
+  return project({ repo: null });
 }

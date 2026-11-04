@@ -266,7 +266,7 @@ export function MachineSettingsPanel({ machine, onClose }: { machine: Machine; o
 function OwnerLink() {
   if (useSearching()) return null;
   return (
-    <button type="button" onClick={() => setAgentsView({ kind: "settings", target: "owner" })} className="flex w-full items-center gap-2 rounded-xl border border-line px-3.5 py-3 text-left text-[13px] text-muted transition hover:border-line-2 hover:text-fg">
+    <button type="button" onClick={() => setAgentsView({ kind: "settings", target: "owner" })} className="flex w-full items-center gap-2 rounded-xl border border-line-2 bg-raised px-3.5 py-3 text-left text-[13px] text-muted shadow-card inset-shadow-highlight transition hover:border-line-3 hover:text-fg">
       <span className="flex-1">Your agents settings: notifications, the send key, defaults on every machine</span>
       <ChevronRight className="size-4" />
     </button>
@@ -453,7 +453,7 @@ function ProviderCard({ ctx, base, info }: { ctx: Ctx; base: ProviderBase; info:
         </button>
       </div>
       {expanded && (
-        <div className="mx-3.5 mb-3 divide-y divide-line rounded-lg border border-line bg-bg">
+        <div className="mx-3.5 mb-3 divide-y divide-line overflow-hidden rounded-lg border border-line-2 bg-panel-2">
           <SettingRow
             s={S.binary(base)}
             onReset={p.binary !== undefined && ctx.editable ? () => ctx.save(withProvider(ctx.set, base.id, { binary: undefined })) : null}
@@ -489,8 +489,8 @@ function ProviderCard({ ctx, base, info }: { ctx: Ctx; base: ProviderBase; info:
   );
 }
 
-const chip = "inline-flex max-w-full items-center gap-1 rounded-md border border-line bg-panel py-0.5 pr-0.5 pl-1.5 font-mono text-[11.5px]";
-const smallBtn = "flex h-8 shrink-0 items-center gap-1 rounded-lg border border-line-2 px-2.5 text-[12px] hover:bg-fg/[0.06] disabled:opacity-50";
+const chip = "inline-flex max-w-full items-center gap-1 rounded-md border border-line-2 bg-raised py-0.5 pr-0.5 pl-1.5 font-mono text-[11.5px]";
+const smallBtn = "flex h-8 shrink-0 items-center gap-1 rounded-lg border border-line-2 bg-raised px-2.5 text-[12px] shadow-card transition-colors hover:bg-fg/[0.06] disabled:opacity-50";
 
 function Remove({ label, onClick, disabled }: { label: string; onClick: () => void; disabled?: boolean }) {
   return (
@@ -554,7 +554,7 @@ function EnvEditor({ base, env, disabled, configPath, onChange }: { base: Provid
   return (
     <div className="mt-2 space-y-2">
       {(rows.length > 0 || fromFile.length > 0) && (
-        <ul className="divide-y divide-line overflow-hidden rounded-lg border border-line" aria-label={`${base.name} environment`}>
+        <ul className="divide-y divide-line overflow-hidden rounded-lg border border-line-2 bg-raised" aria-label={`${base.name} environment`}>
           {fromFile.map((n) => (
             <li key={n} className="flex items-center gap-2 px-2.5 py-1.5 font-mono text-[12px]" title="Set in config.toml on the machine; its value never leaves it">
               <Lock className="size-3 shrink-0 text-subtle" aria-hidden />
@@ -706,7 +706,7 @@ export function DefaultsRows({
         onReset={defaults.provider && !disabled ? () => patch({ provider: undefined, model: undefined, effort: undefined }) : null}
         control={
           installed.length > 0 ? (
-            <span className="rounded-lg border border-line-2 bg-bg px-1">
+            <span className="rounded-lg border border-line-2 bg-panel-2 px-1">
               <ModelPicker
                 providers={installed}
                 side="bottom"

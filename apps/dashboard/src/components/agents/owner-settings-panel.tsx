@@ -198,7 +198,7 @@ export function OwnerSettingsPanel({ onClose }: { onClose: () => void }) {
             {KEYS.map(([k, what]) => (
               <div key={k} className="contents">
                 <dt>
-                  <kbd className="rounded border border-line-2 bg-bg px-1.5 py-0.5 font-mono text-[11px] text-muted">{k}</kbd>
+                  <kbd className="rounded border border-line-2 bg-panel-2 px-1.5 py-0.5 font-mono text-[11px] text-muted">{k}</kbd>
                 </dt>
                 <dd className="text-muted">{what}</dd>
               </div>

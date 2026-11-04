@@ -166,7 +166,7 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
           {scripts.length > 0 && (
             <ul className="mt-2.5 space-y-2" aria-label="Scripts">
               {scripts.map((s) => (
-                <li key={s.id} className="space-y-1.5 rounded-lg border border-line bg-bg p-2">
+                <li key={s.id} className="space-y-1.5 rounded-lg border border-line-2 bg-panel-2 p-2">
                   <div className="flex items-center gap-1.5">
                     <Select
                       label="Script icon"
