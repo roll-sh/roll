@@ -19,8 +19,9 @@ export default defineConfig({
     ...(devOrigins.length > 0 ? { allowedHosts: devOrigins } : {}),
   },
   resolve: { tsconfigPaths: true },
-  // Native bindings load from node_modules at runtime instead of being bundled.
-  ssr: { external: ["@resvg/resvg-js"] },
+  // Native bindings load from node_modules at runtime instead of being bundled (or pre-bundled in dev).
+  ssr: { external: ["@resvg/resvg-js"], optimizeDeps: { exclude: ["@resvg/resvg-js"] } },
+  optimizeDeps: { exclude: ["@resvg/resvg-js"] },
   plugins: [
     tanstackStart({
       // Git smart HTTP (`roll.sh/owner/repo.git/…`) is proxied to rolld by server routes under
