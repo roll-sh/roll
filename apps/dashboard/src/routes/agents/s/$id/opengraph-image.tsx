@@ -16,7 +16,7 @@ const DOT: Record<ShareCard["marks"][number], string> = { text: "#3b3b3b", tool:
 const OS: Record<string, string> = { macos: "macOS", linux: "Linux", windows: "Windows" };
 
 const logo = `data:image/svg+xml;base64,${Buffer.from(horizonSvg({ color: FG, size: 96 })).toString("base64")}`;
-/** Geist Regular, the face Next's image renderer drew these with. */
+/** Geist Regular, the one face the card is drawn with (satori picks it for every weight). */
 const font = Buffer.from(geistTtf.slice(geistTtf.indexOf(",") + 1), "base64");
 
 /** The link preview: Horizon, the thread's title, who ran it where, and a dot per step. */
@@ -48,7 +48,7 @@ async function render(c: ShareCard | null) {
         <span style={{ fontSize: 24, color: SUBTLE }}>keep the code rolling</span>
       </div>
     </div>,
-    { width: OG_IMAGE.width, height: OG_IMAGE.height, fonts: [{ name: "sans serif", data: font, weight: 400, style: "normal" }] },
+    { width: OG_IMAGE.width, height: OG_IMAGE.height, fonts: [{ name: "geist", data: font, weight: 400, style: "normal" }] },
   );
   return new Resvg(svg, { fitTo: { mode: "width", value: OG_IMAGE.width } }).render().asPng();
 }
@@ -60,8 +60,9 @@ export const Route = createFileRoute("/agents/s/$id/opengraph-image")({
       GET: async ({ params: { id } }) => {
         const share = await fetchShare(id).catch(() => null);
         const png = await render(share && shareCard(share));
+        // Revalidated on every use: a revoked share's card goes generic at once.
         return new Response(new Uint8Array(png), {
-          headers: { "content-type": OG_IMAGE.type, "cache-control": "public, immutable, no-transform, max-age=31536000" },
+          headers: { "content-type": OG_IMAGE.type, "cache-control": "public, max-age=0, must-revalidate" },
         });
       },
     },
