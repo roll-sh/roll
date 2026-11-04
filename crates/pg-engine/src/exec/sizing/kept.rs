@@ -839,6 +839,83 @@ mod tests {
         }
     }
 
+    // Unrun: short individual values avoid index compression; their combined size
+    // fits in LATIN1 but exceeds 2704 in UTF8. No PG size/layout oracle is claimed.
+    #[test]
+    fn combined_index_worker_database_encoding() {
+        use crate::exec::rowsize::observe;
+        for encoding in ["LATIN1", "UTF8"] {
+            for workers in [0, 2] {
+                with_max_versions(20000, || {
+                    let dir = tempfile::tempdir().unwrap();
+                    let eng = Engine::open(EngineOptions { data_dir: dir.path().into(), sync: false, ..Default::default() }).unwrap();
+                    let mut admin = eng.connect(1, "postgres", "postgres", "encoding-build-admin").unwrap();
+                    admin.query(&format!("CREATE DATABASE ce_db TEMPLATE template0 ENCODING '{encoding}' LOCALE 'C'")).unwrap();
+                    let mut s = eng.connect(2, "ce_db", "postgres", "encoding-build-test").unwrap();
+                    s.query(&format!("SET max_parallel_maintenance_workers={workers};
+                        SET max_parallel_workers=1024; SET min_parallel_table_scan_size=0;
+                        SET maintenance_work_mem='128MB'")).unwrap();
+                    assert_eq!(s.query("SHOW server_encoding").unwrap()[0].rows, vec![vec![Value::text(encoding)]]);
+                    let columns = (0..16).map(|i| format!("p{i} text")).collect::<Vec<_>>().join(", ");
+                    let include = (0..16).map(|i| format!("p{i}")).collect::<Vec<_>>().join(", ");
+                    let payload = vec!["repeat('é', 120)"; 16].join(", ");
+                    s.query(&format!("CREATE TABLE ce(k int, {columns}) WITH (parallel_workers=2);
+                        INSERT INTO ce SELECT g, {payload} FROM generate_series(1,6000) g")).unwrap();
+                    let t = s.state.db.catalog().tables.values().find(|t| t.name == "ce").unwrap().clone();
+                    assert!(!is_estimated(t.oid, &s.state.db));
+                    assert!(heap_writes(t.oid, &s.state.db).is_some());
+                    let bytes = if encoding == "LATIN1" { 120 } else { 240 };
+                    assert_eq!(s.query("SELECT octet_length(p0), length(p0) FROM ce WHERE k=1").unwrap()[0].rows,
+                        vec![vec![Value::Int4(bytes), Value::Int4(120)]]);
+                    let leader_encoding = crate::types::collation::database_encoding();
+                    let (result, trace) = observe::capture(workers == 2, || s.query(&format!("CREATE INDEX ce_i ON ce(k) INCLUDE({include})")));
+                    eprintln!("combined_index_worker_database_encoding encoding={encoding} workers={workers}: {trace:#?}");
+                    assert_eq!(crate::types::collation::database_encoding(), leader_encoding);
+                    assert_eq!(trace.identity.as_ref().map(|i| i.2.as_str()), Some("ce_i"));
+                    assert!(trace.gate_error.is_none(), "{trace:#?}");
+                    if workers == 0 {
+                        assert_eq!(trace.spawned, 0);
+                        assert!(trace.participants.is_empty());
+                        assert_eq!((trace.serial_rows, trace.serial_validated), (6000, 6000));
+                    } else {
+                        assert_eq!((trace.requested, trace.reserved, trace.spawned), (2, 2, 2));
+                        assert!(trace.model);
+                        assert_eq!(trace.serial_rows, 0, "parallel build fell back: {trace:#?}");
+                        assert_eq!(trace.participants.len(), 3);
+                        let threads: std::collections::BTreeSet<_> = trace.participants.values().map(|p| &p.thread).collect();
+                        let chunks: std::collections::BTreeSet<_> = trace.participants.values().map(|p| p.chunks[0]).collect();
+                        assert_eq!(threads.len(), 3, "participants must run on distinct threads: {trace:#?}");
+                        assert_eq!(chunks.len(), 3, "participants must own distinct first chunks: {trace:#?}");
+                        assert_eq!(trace.participants.values().map(|p| p.validated).sum::<usize>(), 6000);
+                        for id in 0..=2 {
+                            let p = &trace.participants[&id];
+                            assert!(p.rows > 0, "participant {id}: {trace:#?}");
+                            assert_eq!(p.validated, p.rows, "participant {id}: {trace:#?}");
+                            assert_eq!(p.model_returns, p.rows, "modeled early return must follow validation: {trace:#?}");
+                            assert_eq!(p.expanded_text, 240);
+                            assert!(!p.coordinator_aborted && p.error.is_none(), "{trace:#?}");
+                            assert_eq!(p.minimum.is_some(), encoding == "UTF8", "participant {id}: {trace:#?}");
+                            if id > 0 {
+                                assert!(p.thread.contains("roll-build-"), "{trace:#?}");
+                            }
+                        }
+                    }
+                    if encoding == "LATIN1" {
+                        result.unwrap_or_else(|e| panic!("LATIN1 index must fit: {e:?}; trace: {trace:#?}"));
+                        assert!(trace.minimum.is_none());
+                    } else {
+                        let error = match result {
+                            Err(e) => e,
+                            Ok(rows) => panic!("UTF8 control must exceed the limit: {rows:?}; trace: {trace:#?}"),
+                        };
+                        assert_eq!(error.code, "54000");
+                        assert!(error.message.contains("exceeds btree version 4 maximum 2704"), "{error:?}; trace: {trace:#?}");
+                    }
+                });
+            }
+        }
+    }
+
     fn size_failure_stats(s: &mut Session) -> Vec<i64> {
         s.query("SELECT pg_stat_force_next_flush()").unwrap();
         s.query("SELECT pg_stat_clear_snapshot()").unwrap();

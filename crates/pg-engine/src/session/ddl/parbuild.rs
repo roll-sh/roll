@@ -379,13 +379,16 @@ impl Ddl<'_, '_> {
         let chunks = Mutex::new(chunks);
         let stop = AtomicBool::new(false);
         let done = AtomicU64::new(0);
+        let catalog = self.ctx.catalog();
         let gathered: Vec<Result<Gathered>> = std::thread::scope(|s| {
             let (plan, chunks, stop, report) = (&plan, &chunks, &stop, (progress, &done));
+            let catalog = &catalog;
             let handles: Vec<_> = (0..got)
                 .filter_map(|i| {
                     let handle = std::thread::Builder::new()
                         .name(format!("roll-build-{i}"))
                         .spawn_scoped(s, move || {
+                            let _default = crate::types::collation::scoped_default(catalog);
                             let r = plan.run(chunks, stop, &|| Ok(()), report, i + 1);
                             #[cfg(test)]
                             if let (Some(o), Err(e)) = (&plan.observed, &r) {

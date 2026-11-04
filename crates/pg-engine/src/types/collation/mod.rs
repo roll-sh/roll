@@ -522,6 +522,11 @@ pub fn note_default(cat: &crate::catalog::Catalog) {
     });
 }
 
+/// Use a captured catalog's database default on this thread until the guard drops.
+pub(crate) fn scoped_default(cat: &crate::catalog::Catalog) -> crate::scoped::RefGuard<Option<Arc<DbDefault>>> {
+    crate::scoped::set_ref(&DEFAULT, cat.db_locale.clone(), "collation::DEFAULT")
+}
+
 /// The default collation of the database whose statement runs on this thread (libc C when
 /// none has run).
 pub fn default() -> Arc<Collation> {
