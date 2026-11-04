@@ -52,21 +52,22 @@ pub fn form_error(size: usize) -> Error {
     )
 }
 
-/// A btree entry's tuple size: its key values `vals` and INCLUDE columns' of `row`.
-fn btree_size(t: &Table, bix: &BoundIndex, vals: &[Value], row: &[Value], ctx: &ExecCtx) -> Option<usize> {
-    let include = bix.index.include.iter().map(|&i| row.get(i).cloned().unwrap_or(Value::Null));
-    let all: Vec<Value> = vals.iter().cloned().chain(include).collect();
-    if surely_small(&all)
-        && !bix.keys.iter().any(|k| matches!(k.ty(), DataType::Bpchar(_)))
-        && !bix.index.include.iter().any(|&i| matches!(t.columns[i].ty, DataType::Bpchar(_)))
-    {
+/// The expanded key and INCLUDE values, in attribute order. None means the conservative
+/// bound proves this tuple smaller than every btree limit.
+pub(crate) fn btree_size(types: &[DataType], all: &[Value], fmt: &crate::types::text::FormatCtx) -> Option<usize> {
+    if surely_small(all) && !types.iter().any(|ty| matches!(ty, DataType::Bpchar(_))) {
         return None;
     }
+    let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, fmt);
+    Some(index_tuple(types, all, &text))
+}
+
+fn btree_size_of(t: &Table, bix: &BoundIndex, vals: &[Value], row: &[Value], ctx: &ExecCtx) -> Option<usize> {
+    let include = bix.index.include.iter().map(|&i| row.get(i).cloned().unwrap_or(Value::Null));
+    let all: Vec<Value> = vals.iter().cloned().chain(include).collect();
     let mut types: Vec<DataType> = bix.keys.iter().map(|k| k.ty()).collect();
     types.extend(bix.index.include.iter().map(|&i| t.columns[i].ty.clone()));
-    let fmt = ctx.fmt();
-    let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, fmt);
-    Some(index_tuple(&types, &all, &text))
+    btree_size(&types, &all, ctx.fmt())
 }
 
 /// The checks as an entry of `vals` is formed (index_form_tuple, GinFormTuple), before its
@@ -75,7 +76,7 @@ fn btree_size(t: &Table, bix: &BoundIndex, vals: &[Value], row: &[Value], ctx: &
 pub fn on_form(t: &Table, bix: &BoundIndex, vals: Option<&[Value]>, row: &[Value], ctx: &ExecCtx) -> Result<()> {
     let Some(vals) = vals else { return Ok(()) };
     match bix.index.method.as_str() {
-        "btree" => match btree_size(t, bix, vals, row, ctx) {
+        "btree" => match btree_size_of(t, bix, vals, row, ctx) {
             Some(n) if n > INDEX_SIZE_MASK => Err(form_error(n)),
             _ => Ok(()),
         },
@@ -91,19 +92,9 @@ pub fn on_insert(t: &Table, bix: &BoundIndex, vals: Option<&[Value]>, row: &[Val
     if bix.index.method != "btree" {
         return Ok(());
     }
-    match btree_size(t, bix, vals, row, ctx) {
+    match btree_size_of(t, bix, vals, row, ctx) {
         Some(n) if n > BT_MAX_ITEM => Err(btree_error(t, bix, n, tid(), ctx)),
         _ => Ok(()),
-    }
-}
-
-/// Whether a btree entry of `vals` is past BTMaxItemSize (its size), for a build's check in
-/// index order (`btree_error`).
-pub fn btree_oversized(t: &Table, bix: &BoundIndex, vals: &[Value], row: &[Value], ctx: &ExecCtx) -> Result<Option<usize>> {
-    match btree_size(t, bix, vals, row, ctx) {
-        Some(n) if n > INDEX_SIZE_MASK => Err(form_error(n)),
-        Some(n) if n > BT_MAX_ITEM => Ok(Some(n)),
-        _ => Ok(None),
     }
 }
 
@@ -176,8 +167,8 @@ fn gin_form_error(bix: &BoundIndex, vals: &[Value], ctx: &ExecCtx) -> Option<Gin
 }
 
 
-/// Size validation shared by serial construction and concurrent-build preflight. Tuple
-/// formation runs for every heap row; page limits are reported after uniqueness.
+/// Size validation shared by serial construction, parallel participants and concurrent
+/// preflight. Formation runs for every heap row; page limits follow global uniqueness.
 #[derive(Default)]
 pub struct BuildSizes {
     btree: Option<(Vec<u8>, usize, Vec<u8>)>,
@@ -186,24 +177,57 @@ pub struct BuildSizes {
 
 impl BuildSizes {
     pub fn row(&mut self, t: &Table, bix: &BoundIndex, vals: &[Value], row: &[Value], dkey: &[u8], ctx: &ExecCtx) -> Result<()> {
-        if bix.index.method == "gin" {
-            if let Some(e) = gin_form_error(bix, vals, ctx)
-                && self.gin.as_ref().is_none_or(|first| e.precedes(first))
-            {
-                self.gin = Some(e);
+        match bix.index.method.as_str() {
+            "btree" => self.btree_row(
+                btree_size_of(t, bix, vals, row, ctx),
+                || crate::exec::scan::index_entry_key(t, &bix.index, vals, dkey, &bix.colls),
+                dkey,
+            ),
+            "gin" => {
+                self.keep_gin(gin_form_error(bix, vals, ctx));
+                Ok(())
             }
-        } else {
-            on_form(t, bix, Some(vals), row, ctx)?;
+            _ => on_form(t, bix, Some(vals), row, ctx),
         }
-        if bix.index.method == "btree"
-            && let Some(n) = btree_oversized(t, bix, vals, row, ctx)?
+    }
+
+    pub(crate) fn btree_row(&mut self, size: Option<usize>, entry_key: impl FnOnce() -> Vec<u8>, dkey: &[u8]) -> Result<()> {
+        match size {
+            Some(n) if n > INDEX_SIZE_MASK => Err(form_error(n)),
+            Some(n) if n > BT_MAX_ITEM => {
+                self.keep_btree(Some((entry_key(), n, dkey.to_vec())));
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn keep_btree(&mut self, candidate: Option<(Vec<u8>, usize, Vec<u8>)>) {
+        if let Some(candidate) = candidate
+            && self.btree.as_ref().is_none_or(|first| candidate.0 < first.0)
         {
-            let k = crate::exec::scan::index_entry_key(t, &bix.index, vals, dkey, &bix.colls);
-            if self.btree.as_ref().is_none_or(|first| k < first.0) {
-                self.btree = Some((k, n, dkey.to_vec()));
-            }
+            self.btree = Some(candidate);
         }
-        Ok(())
+    }
+
+    fn keep_gin(&mut self, candidate: Option<GinFormError>) {
+        if let Some(candidate) = candidate
+            && self.gin.as_ref().is_none_or(|first| candidate.precedes(first))
+        {
+            self.gin = Some(candidate);
+        }
+    }
+
+    /// Reduce every participant, including the leader, without formatting an error or
+    /// finishing before the global unique check.
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.keep_btree(other.btree);
+        self.keep_gin(other.gin);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn candidate(&self) -> &Option<observe::Candidate> {
+        &self.btree
     }
 
     pub fn finish(self, t: &Table, bix: &BoundIndex, ctx: &ExecCtx) -> Result<()> {

@@ -799,6 +799,21 @@ mod tests {
                 assert_ne!(winner.0, 0, "leader must be included without overriding a worker winner");
                 assert_eq!(trace.minimum.as_ref(), Some(winner.1));
                 assert_eq!(winner.1.1, 2896);
+                // Use the actual participants' full encoded keys, sizes and data keys.
+                // Both reduction orders must retain the same candidate's own fields.
+                for reverse in [false, true] {
+                    let mut order = candidates.clone();
+                    if reverse {
+                        order.reverse();
+                    }
+                    let mut reduced = crate::exec::rowsize::BuildSizes::default();
+                    for (_, c) in order {
+                        let mut part = crate::exec::rowsize::BuildSizes::default();
+                        part.btree_row(Some(c.1), || c.0.clone(), &c.2).unwrap();
+                        reduced.merge(part);
+                    }
+                    assert_eq!(reduced.candidate().as_ref(), Some(winner.1));
+                }
                 assert_eq!(trace.participants[&winner.0].minimum.as_ref(), Some(winner.1));
             }
         }

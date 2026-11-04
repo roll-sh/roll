@@ -4,7 +4,7 @@
 //! entries; the sorted entries go in as linked runs (`Txn::put_index_runs`), and a unique
 //! index's duplicates are found merging them, the one reported the serial build's (the key
 //! whose second row comes first in the table's order). Only for an index of plain columns
-//! without a predicate on a table too big to model (`Ddl::measures_in_build`).
+//! without a predicate, using either measured tuple sizes or model keys.
 
 use super::Ddl;
 use super::vacuum::RowMeasure;
@@ -82,9 +82,7 @@ struct Gathered {
     parts: Vec<(usize, Part)>,
     /// A modelled table's keys with their data keys.
     model: Vec<(Key, Vec<u8>)>,
-    /// The first entry in index order past a btree's third of a page (`rowsize`): its key,
-    /// size and row's data key.
-    oversized: Option<(Vec<u8>, usize, Vec<u8>)>,
+    sizes: crate::exec::rowsize::BuildSizes,
 }
 
 /// What every participant needs, shared.
@@ -116,12 +114,34 @@ impl Plan<'_> {
         if let Some(o) = &self.observed {
             o.row(_participant);
         }
+        let stored = if self.model {
+            None
+        } else {
+            crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(bytes)?, &self.types, &self.virt_mask)
+        };
+        let mut row = if self.model || stored.is_some() {
+            crate::exec::scan::decode_table_row_need(self.t, bytes, &self.need)?
+        } else {
+            crate::exec::scan::decode_table_row(self.t, bytes)?
+        };
+        let vals: Vec<Value> = self.cols.iter().map(|&i| row[i].clone()).collect();
+        let k = crate::exec::scan::index_entry_key(self.t, self.ix, &vals, dkey, self.colls);
+        let checked = !self.check_nulls || !vals.iter().any(Value::is_null);
+        let all: Vec<Value> = vals.iter().cloned().chain(self.ix.include.iter().map(|&i| row[i].clone())).collect();
+        #[cfg(test)]
+        let expanded = all.iter().filter_map(|v| if let Value::Text(s) = v { Some(s.len()) } else { None }).max().unwrap_or(0);
+        #[cfg(test)]
+        if let Some(o) = &self.observed {
+            o.expanded(_participant, expanded);
+        }
+        let size = crate::exec::rowsize::btree_size(&self.ix_types, &all, &self.fmt);
+        g.sizes.btree_row(size, || k.clone(), dkey)?;
+        #[cfg(test)]
+        if let Some(o) = &self.observed {
+            o.validated(_participant, g.sizes.candidate(), expanded);
+        }
+        g.entries.push(&k, dkey.len().saturating_sub(8), checked);
         if self.model {
-            let row = crate::exec::scan::decode_table_row_need(self.t, bytes, &self.need)?;
-            let vals: Vec<Value> = self.cols.iter().map(|&i| row[i].clone()).collect();
-            let k = crate::exec::scan::index_entry_key(self.t, self.ix, &vals, dkey, self.colls);
-            let checked = !self.check_nulls || !vals.iter().any(Value::is_null);
-            g.entries.push(&k, dkey.len().saturating_sub(8), checked);
             let ty = |n: usize| self.ix_types.get(n).cloned();
             let key = crate::exec::sizing::index_key_of(self.t, self.ix, &ty, self.colls, vals, &row, &self.fmt);
             g.model.push((key, dkey.to_vec()));
@@ -131,34 +151,13 @@ impl Plan<'_> {
             }
             return Ok(());
         }
-        let stored = crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(bytes)?, &self.types, &self.virt_mask);
-        let mut row = match stored {
-            Some(_) => crate::exec::scan::decode_table_row_need(self.t, bytes, &self.need)?,
-            None => crate::exec::scan::decode_table_row(self.t, bytes)?,
-        };
-        let mut vals: Vec<Value> = self.cols.iter().map(|&i| row[i].clone()).collect();
-        let k = crate::exec::scan::index_entry_key(self.t, self.ix, &vals, dkey, self.colls);
-        let checked = !self.check_nulls || !vals.iter().any(Value::is_null);
-        g.entries.push(&k, dkey.len().saturating_sub(8), checked);
         let mut sort = super::table::key_bytes(&vals);
-        vals.extend(self.ix.include.iter().map(|&i| row[i].clone()));
         let prefix = super::vacuum::key_prefix(&sort);
         if sort.len() <= 16 {
             sort = Vec::new();
         }
-        let size = relsize::index_tuple(&self.ix_types, &vals, &text);
-        if size > crate::exec::rowsize::INDEX_SIZE_MASK {
-            return Err(crate::exec::rowsize::form_error(size));
-        }
-        if size > crate::exec::rowsize::BT_MAX_ITEM && g.oversized.as_ref().is_none_or(|o| k < o.0) {
-            g.oversized = Some((k.clone(), size, dkey.to_vec()));
-        }
-        #[cfg(test)]
-        if let Some(o) = &self.observed {
-            let expanded = vals.iter().filter_map(|v| if let Value::Text(s) = v { Some(s.len()) } else { None }).max().unwrap_or(0);
-            o.validated(_participant, &g.oversized, expanded);
-        }
-        g.keys.push((prefix, sort, size));
+        let exact = size.unwrap_or_else(|| relsize::index_tuple(&self.ix_types, &all, &text));
+        g.keys.push((prefix, sort, exact));
         match stored {
             Some(len) => part.sizes.push(relsize::heap_tuple_of_len(len)),
             None => {
@@ -211,12 +210,7 @@ impl Plan<'_> {
                     }
                 }
                 let (dkey, bytes) = r?;
-                let r = self.row(&mut g, &mut part, &dkey, &bytes, _participant);
-                #[cfg(test)]
-                if let (Some(o), Err(e)) = (&self.observed, &r) {
-                    o.error(_participant, e);
-                }
-                r?;
+                self.row(&mut g, &mut part, &dkey, &bytes, _participant)?;
             }
             g.parts.push((n, part));
             #[cfg(test)]
@@ -391,6 +385,10 @@ impl Ddl<'_, '_> {
                         .name(format!("roll-build-{i}"))
                         .spawn_scoped(s, move || {
                             let r = plan.run(chunks, stop, &|| Ok(()), report, i + 1);
+                            #[cfg(test)]
+                            if let (Some(o), Err(e)) = (&plan.observed, &r) {
+                                o.error(i + 1, e);
+                            }
                             if r.is_err() {
                                 stop.store(true, Ordering::Relaxed);
                             }
@@ -405,6 +403,10 @@ impl Ddl<'_, '_> {
                 })
                 .collect();
             let lead = plan.run(chunks, stop, &|| self.ctx.check(), report, 0);
+            #[cfg(test)]
+            if let (Some(o), Err(e)) = (&plan.observed, &lead) {
+                o.error(0, e);
+            }
             if lead.is_err() {
                 stop.store(true, Ordering::Relaxed);
             }
@@ -417,19 +419,15 @@ impl Ddl<'_, '_> {
         let mut keys = Vec::new();
         let mut sorted = Vec::new();
         let mut model_keys = Vec::new();
-        let mut oversized: Option<(Vec<u8>, usize, Vec<u8>)> = None;
+        let mut sizes = crate::exec::rowsize::BuildSizes::default();
         for (_participant, g) in gathered.into_iter().enumerate() {
             let g = g?;
             #[cfg(test)]
-            let candidate = g.oversized.clone();
-            if let Some(o) = g.oversized
-                && oversized.as_ref().is_none_or(|m| o.0 < m.0)
-            {
-                oversized = Some(o);
-            }
+            let candidate = g.sizes.candidate().clone();
+            sizes.merge(g.sizes);
             #[cfg(test)]
             if let Some(o) = &plan.observed {
-                o.folded(_participant, &candidate, &oversized);
+                o.folded(_participant, &candidate, sizes.candidate());
             }
             parts.extend(g.parts);
             keys.push(g.keys);
@@ -439,10 +437,7 @@ impl Ddl<'_, '_> {
         if ix.unique {
             self.unique_check(t, bix, ix, &sorted)?;
         }
-        if let Some((_, n, dkey)) = oversized {
-            let tid = crate::exec::dml::row_tid(t, &dkey, self.ctx);
-            return Err(crate::exec::rowsize::btree_error(t, bix, n, tid, self.ctx));
-        }
+        sizes.finish(t, bix, self.ctx)?;
         parts.sort_by_key(|p| p.0);
         let rows = parts.iter().map(|p| p.1.rows).sum();
         if model {

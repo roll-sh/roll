@@ -160,6 +160,12 @@ impl Observer {
         self.state.lock().unwrap().trace.participants.entry(id).or_default().rows += 1;
     }
 
+    pub(crate) fn expanded(&self, id: usize, bytes: usize) {
+        let mut s = self.state.lock().unwrap();
+        let p = s.trace.participants.entry(id).or_default();
+        p.expanded_text = p.expanded_text.max(bytes);
+    }
+
     pub(crate) fn validated(&self, id: usize, minimum: &Option<Candidate>, expanded_text: usize) {
         let mut s = self.state.lock().unwrap();
         let p = s.trace.participants.entry(id).or_default();
