@@ -818,6 +818,8 @@ impl Block {
                     _ => None,
                 };
             }
+            // (The value field of the value kept: a linked run's has lost its tag.)
+            let vl = value.map_or(0, |v| v.len() + 1);
             let ts = *ts.get_or_insert_with(|| {
                 <[u8; 8]>::try_from(&key[klen.saturating_sub(8)..]).unwrap_or([0xFF; 8])
             });
@@ -1124,7 +1126,7 @@ impl SstReader {
             Some(ts) => Block::decode_linked(&raw, ts)?,
             None => Block::decode(raw)?,
         });
-        if fill {
+        if fill && !super::in_read_once() {
             let size = block.mem_bytes();
             // (A bulk read's block takes only room the cache has free: it evicts nothing.)
             if super::in_bulk_read() {

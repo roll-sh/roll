@@ -975,6 +975,34 @@ fn same_shape(a: &Expr, b: &Expr) -> Option<bool> {
             }
             all.then_some(true)
         }
+        // (A cast and a relabeling to one type print alike: `(e)::t`.)
+        (Cast(x, _, t, _) | Relabel(x, t), Cast(y, _, u, _) | Relabel(y, u)) if t == u => same_shape(x, y),
+        // (`{v:?}::{typname}`: values of another variant print otherwise; those whose Debug
+        // is their value compare by it.)
+        (Const(v, t), Const(w, u)) => {
+            use crate::types::Value as V;
+            if std::mem::discriminant(v) != std::mem::discriminant(w) {
+                return Some(false);
+            }
+            let same = match (v, w) {
+                (V::Null, V::Null) => true,
+                (V::Bool(a), V::Bool(b)) => a == b,
+                (V::Int2(a), V::Int2(b)) => a == b,
+                (V::Int4(a), V::Int4(b)) => a == b,
+                (V::Int8(a), V::Int8(b)) => a == b,
+                (V::Oid(a), V::Oid(b)) => a == b,
+                (V::Char(a), V::Char(b)) => a == b,
+                (V::Text(a), V::Text(b)) => a == b,
+                _ => return None,
+            };
+            if !same {
+                Some(false)
+            } else if t == u {
+                Some(true)
+            } else {
+                None
+            }
+        }
         _ => match (lead(a), lead(b)) {
             (Some(x), Some(y)) if x != y => Some(false),
             _ => None,

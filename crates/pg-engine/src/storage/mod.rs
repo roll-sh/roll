@@ -9,6 +9,7 @@ pub mod batch;
 pub mod cache;
 pub mod cols;
 mod dead;
+pub mod discard;
 pub mod fileio;
 mod hot;
 pub mod keys;
@@ -206,6 +207,25 @@ enum Frozen {
 thread_local! {
     /// This thread is reading in bulk (`bulk_read`).
     static BULK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// This thread reads what it won't read again (`read_once`).
+    static ONCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` reading blocks it won't read again: those not in the block cache are used and
+/// dropped, never cached (a one-pass read of the change stream: `repl::decode`).
+pub fn read_once<R>(f: impl FnOnce() -> R) -> R {
+    struct Back(bool);
+    impl Drop for Back {
+        fn drop(&mut self) {
+            ONCE.with(|b| b.set(self.0));
+        }
+    }
+    let _back = Back(ONCE.with(|b| b.replace(true)));
+    f()
+}
+
+pub(crate) fn in_read_once() -> bool {
+    ONCE.with(|b| b.get())
 }
 
 /// Run `f` as a bulk read: a block it reads from a file goes into the block cache only
@@ -280,6 +300,8 @@ pub struct Store {
     hot: hot::Hot,
     /// Ranges scans found holding no live row (`dead`).
     dead: Arc<dead::DeadRanges>,
+    /// Ranges no one reads any more, left out of flushes and compactions (`discard`).
+    discard: discard::Discard,
     /// Tables (by the first 4 bytes of their keys) no commit has written since they were
     /// watched (`watch_untouched`), with the last commit ts assigned then.
     untouched: parking_lot::Mutex<HashMap<u32, u64>>,
@@ -440,6 +462,7 @@ impl Store {
             closed: AtomicBool::new(false),
             hot: hot::Hot::default(),
             dead: Arc::default(),
+            discard: Default::default(),
             untouched: Default::default(),
             untouched_any: AtomicBool::new(false),
             sync_assigned: AtomicU64::new(0),
@@ -774,6 +797,7 @@ impl Store {
             return Scan::of_rows(self.view(), rows, ts);
         }
         if let Some(p) = hot::covering(start, end)
+            && !self.discard.claims(&p)
             && self.hot.note_scan(p)
         {
             // (Kept from now on; a failure to read it leaves it to the merging scan.)
@@ -1287,7 +1311,7 @@ impl Store {
             let mut next = m.clone();
             let cur = self.view.read().clone();
             let mut bottom = Vec::with_capacity(files.len());
-            for (i, f) in files.iter().enumerate() {
+            for i in 0..files.len() {
                 bottom.push(match bg.is_some() {
                     true => match self.alone_at_bottom(&cur, &files, i) {
                         Ok(b) => b,
@@ -1569,20 +1593,27 @@ impl Store {
             };
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
             let mut w = SstWriter::create(&self.dir, id, self.opts.compress)?;
+            let mut discarded = self.discard.filter();
             for e in mem.map.iter() {
-                w.add(e.key(), e.value().as_deref())?;
+                if !discarded.drops(user_key(e.key())) {
+                    w.add(e.key(), e.value().as_deref())?;
+                }
             }
-            let meta = w.finish()?;
-            let reader = Arc::new(SstReader::open(
-                &self.dir,
-                meta.clone(),
-                self.opts.cache.clone(),
-            )?);
+            // (Every entry discarded: no file.)
+            let reader = if w.entries() > 0 {
+                let meta = w.finish()?;
+                Some(Arc::new(SstReader::open(&self.dir, meta, self.opts.cache.clone())?))
+            } else {
+                w.abandon();
+                None
+            };
             let flushed_ts = mem.max_ts.load(Ordering::Relaxed);
             {
                 let mut m = self.manifest.lock();
-                let at = l0_place(&m.l0, &meta);
-                m.l0.insert(at, meta);
+                if let Some(r) = &reader {
+                    let at = l0_place(&m.l0, &r.meta);
+                    m.l0.insert(at, r.meta.clone());
+                }
                 m.flushed_ts = m.flushed_ts.max(flushed_ts);
                 m.last_ts = self.visible_ts();
                 m.next_id = self.next_id.load(Ordering::Relaxed);
@@ -1595,8 +1626,10 @@ impl Store {
                     .cloned()
                     .collect();
                 let mut l0 = v.l0.clone();
-                let at = l0.partition_point(|x| x.meta.max_ts > reader.meta.max_ts);
-                l0.insert(at, reader);
+                if let Some(reader) = reader {
+                    let at = l0.partition_point(|x| x.meta.max_ts > reader.meta.max_ts);
+                    l0.insert(at, reader);
+                }
                 *v = Arc::new(View {
                     mem: v.mem.clone(),
                     imm,
@@ -1610,6 +1643,19 @@ impl Store {
             }
             debug!(dir = %self.dir.display(), id, "flushed memtable");
         }
+    }
+
+    /// From now on nobody reads [start, end) (the range of `start` only grows): flushes and
+    /// compactions leave its entries out (`discard`).
+    pub fn discard(&self, start: &[u8], end: Vec<u8>) {
+        self.discard.raise(start, end);
+    }
+
+    /// The discarded ranges and the files (L0, L1), for tests.
+    #[cfg(test)]
+    pub(crate) fn discarded(&self) -> (Vec<(Vec<u8>, Vec<u8>)>, usize, usize) {
+        let v = self.view();
+        (self.discard.ranges(), v.l0.len(), v.l1.len())
     }
 
     /// Freeze the memtable and write it, with every frozen one, to L0 (benches and tests
@@ -1673,6 +1719,7 @@ impl Store {
         let mut cur_user: Vec<u8> = Vec::new();
         let mut started = false;
         let mut kept_old = false;
+        let mut discarded = self.discard.filter();
         while let Some(i) = merge.min()? {
             let (k, v) = merge.sources[i].head().expect("a head entry");
             let uk = user_key(k);
@@ -1683,6 +1730,11 @@ impl Store {
                 cur_user.clear();
                 cur_user.extend_from_slice(uk);
                 kept_old = false;
+            }
+            // (Discarded: no one reads it any more.)
+            if discarded.drops(uk) {
+                merge.sources[i].advance();
+                continue;
             }
             // (Deleted with its range before anyone still reading: its older versions too.)
             if !view.rdels.is_empty() && view.rdels.covering(uk, ts, horizon).is_some() {
@@ -3615,6 +3667,49 @@ mod tests {
     }
 
     /// Compaction rewrites only the L1 files overlapping L0's keys.
+    /// A discarded range's entries leave with the next flush or compaction, unread; the
+    /// rest stay, and reads never consult the list.
+    #[test]
+    fn discarded_ranges_leave_flushes_and_compactions() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path(), StoreOptions { memtable_bytes: 1 << 20, sync: false, background: false, ..Default::default() }).unwrap();
+        let put_range = |s: &Arc<Store>, keys: std::ops::Range<u32>| {
+            let w: Vec<_> = keys.map(|i| (format!("d{i:05}").into_bytes(), Some(Bytes::from_static(b"v")))).collect();
+            s.commit(w, |_| Ok(())).unwrap();
+        };
+        let keys = |s: &Store| -> Vec<String> {
+            s.scan(b"d", b"e", s.visible_ts()).map(|r| String::from_utf8(r.unwrap().0).unwrap()).collect()
+        };
+        // Some in a file, the rest in the memtable.
+        put_range(&s, 0..100);
+        s.flush_memtables().unwrap();
+        put_range(&s, 100..200);
+        s.discard(b"d", b"d00150".to_vec());
+        assert_eq!(keys(&s).len(), 200, "reads don't look at the list");
+        s.flush_memtables().unwrap();
+        let k = keys(&s);
+        assert_eq!((k.len(), k[0].as_str(), k[100].as_str()), (150, "d00000", "d00150"), "the flush left 100..150 out");
+        s.compact().unwrap();
+        assert_eq!(keys(&s).first().map(String::as_str), Some("d00150"), "compaction left the file's out");
+        // Everything in a memtable discarded: no file.
+        let files = s.view().l0.len() + s.view().l1.len();
+        put_range(&s, 150..160);
+        s.discard(b"d", b"d00160".to_vec());
+        s.flush_memtables().unwrap();
+        assert_eq!(s.view().l0.len() + s.view().l1.len(), files);
+        // (The file's older versions of them go with its next compaction, here of a file
+        // whose keys overlap its.)
+        put_range(&s, 170..175);
+        s.flush_memtables().unwrap();
+        s.compact().unwrap();
+        assert_eq!(keys(&s).first().map(String::as_str), Some("d00160"));
+        // A file whose every key is discarded goes unread.
+        s.discard(b"d", b"e".to_vec());
+        s.collect_ranges().unwrap();
+        assert_eq!(s.view().l0.len() + s.view().l1.len(), 0);
+        assert!(keys(&s).is_empty());
+    }
+
     #[test]
     fn compaction_leaves_other_files() {
         let dir = tempfile::tempdir().unwrap();

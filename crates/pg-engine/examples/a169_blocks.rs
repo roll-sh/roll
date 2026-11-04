@@ -16,6 +16,19 @@ fn main() {
             let r = SstReader::open(&dir, meta, cache.clone()).unwrap();
             for b in 0..r.block_count() {
                 let blk = r.block_with(b, false).unwrap();
+                if std::env::var_os("WALK").is_some() {
+                    let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let mut pos = pg_engine::storage::sst::BlockPos::default();
+                        blk.at(0, &mut pos);
+                        while pos.index() < blk.len() {
+                            let _ = blk.value_ref(&pos);
+                            blk.step(&mut pos);
+                        }
+                    }));
+                    if ok.is_err() {
+                        println!("bad: file {} (commit_ts {:?}) block {b} of {}", r.meta.id, r.meta.commit_ts, r.block_count());
+                    }
+                }
                 let p = blk.last_key().unwrap()[..8.min(blk.last_key().unwrap().len())].to_vec();
                 let e = by.entry(p).or_default();
                 e[1] += 1;

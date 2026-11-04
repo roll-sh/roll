@@ -135,16 +135,28 @@ const CHANGE_SIZE: usize = 80;
 const TUPLE_SIZE: usize = 24;
 
 /// ReorderBufferChangeSize: what a change counts against logical_decoding_work_mem. A row
-/// heap_insert TOASTs counts as stored, plus a change per chunk of each value it moves out of
-/// line (the chunks' inserts into the TOAST table come first in PostgreSQL's WAL).
+/// heap_insert TOASTs counts as stored, and before it a change per chunk of each value it
+/// moves out of line (the chunks' inserts into the TOAST table come first in PostgreSQL's
+/// WAL; a multi-insert's, of all its rows, before its first row: `Decoder::run`).
+struct Size {
+    main: usize,
+    chunks: Vec<usize>,
+}
+
+impl Size {
+    fn total(&self) -> usize {
+        self.main + self.chunks.iter().sum::<usize>()
+    }
+}
+
 fn change_size(
     rec: &Rec,
     rels: &HashMap<u32, Arc<RelDesc>>,
     fmt: &crate::types::text::FormatCtx,
     cat: &crate::catalog::Catalog,
-) -> usize {
+) -> Size {
     use crate::exec::sizing;
-    let tuple = |rel: u32, row: &[Value], unchanged: &[usize]| -> usize {
+    let tuple = |rel: u32, row: &[Value], unchanged: &[usize], chunks: &mut Vec<usize>| -> usize {
         let Some(d) = rels.get(&rel) else { return TUPLE_SIZE + 24 };
         let types: Vec<crate::types::DataType> = d.cols.iter().map(|c| c.ty.clone()).collect();
         let n = types.len().min(row.len());
@@ -158,27 +170,37 @@ fn change_size(
         else {
             return TUPLE_SIZE + len;
         };
-        let chunks: usize = exts
-            .iter()
-            .map(|&b| {
-                let (full, rest) = (b / sizing::TOAST_CHUNK_BYTES, b % sizing::TOAST_CHUNK_BYTES);
-                let one = |c: usize| CHANGE_SIZE + TUPLE_SIZE + sizing::toast_chunk_tuple_len(c);
-                full * one(sizing::TOAST_CHUNK_BYTES) + if rest > 0 { one(rest) } else { 0 }
-            })
-            .sum();
-        TUPLE_SIZE + len + chunks
-    };
-    CHANGE_SIZE
-        + match rec {
-            Rec::Insert { rel, new } => tuple(*rel, new, &[]),
-            Rec::Update { rel, old, new, unchanged_toast } => {
-                tuple(*rel, new, unchanged_toast) + old.as_ref().map_or(0, |o| tuple(*rel, &o.0, &[]))
+        let one = |c: usize| CHANGE_SIZE + TUPLE_SIZE + sizing::toast_chunk_tuple_len(c);
+        for b in exts {
+            let (full, rest) = (b / sizing::TOAST_CHUNK_BYTES, b % sizing::TOAST_CHUNK_BYTES);
+            chunks.extend(std::iter::repeat_n(one(sizing::TOAST_CHUNK_BYTES), full));
+            if rest > 0 {
+                chunks.push(one(rest));
             }
-            Rec::Delete { rel, old } => old.as_ref().map_or(0, |o| tuple(*rel, &o.0, &[])),
+        }
+        TUPLE_SIZE + len
+    };
+    let mut chunks = Vec::new();
+    let main = CHANGE_SIZE
+        + match rec {
+            Rec::Insert { rel, new } => tuple(*rel, new, &[], &mut chunks),
+            Rec::Update { rel, old, new, unchanged_toast } => {
+                let old = old.as_ref().map_or(0, |o| {
+                    // (Counted with the old tuple, as before: no chunks are written for it.)
+                    let mut c = Vec::new();
+                    tuple(*rel, &o.0, &[], &mut c) + c.iter().sum::<usize>()
+                });
+                tuple(*rel, new, unchanged_toast, &mut chunks) + old
+            }
+            Rec::Delete { rel, old } => old.as_ref().map_or(0, |o| {
+                let mut c = Vec::new();
+                tuple(*rel, &o.0, &[], &mut c) + c.iter().sum::<usize>()
+            }),
             Rec::Message { prefix, content, .. } => prefix.len() + 1 + content.len(),
             Rec::Truncate { rels, .. } => 4 * rels.len(),
             Rec::Rel(_) | Rec::Abort { .. } => 0,
-        }
+        };
+    Size { main, chunks }
 }
 
 #[derive(Clone, Copy)]
@@ -205,7 +227,13 @@ struct Replay<'c> {
     /// Bytes of the changes replayed at the end (not streamed).
     total: usize,
     began: bool,
+    /// Ever spilled (counted in spill_txns), and spilled since it last streamed
+    /// (RBTXN_IS_SERIALIZED).
     spilled: bool,
+    serialized: bool,
+    /// The multi-insert batch being read, and how many of its rows are still to come.
+    batch: u32,
+    batch_left: usize,
     /// Streamed (RBTXN_IS_STREAMED), its streamed subtransactions, and those found aborted
     /// while streaming (their later changes aren't queued: RBTXN_IS_ABORTED).
     streamed: bool,
@@ -254,6 +282,9 @@ pub struct Decoder<'a> {
     /// (`replay`'s `resume` at their COMMIT PREPARED).
     partly_streamed: HashSet<u64>,
     output_rewrites: bool,
+    /// The change records of the transactions about to be decoded, read in one pass
+    /// (`prefetch`).
+    prefetched: decode::Prefetched,
     /// Counted among the database's decoders (`decode::Shared`).
     _reader: decode::Reader,
 }
@@ -305,8 +336,27 @@ impl<'a> Decoder<'a> {
             looked_up: HashSet::new(),
             partly_streamed: HashSet::new(),
             output_rewrites: st.output_rewrites,
+            prefetched: Default::default(),
             _reader: decode::Shared::reader(db),
         })
+    }
+
+    /// Commit records `ms` are decoded next: the change records of their transactions that
+    /// aren't big are read now, in one pass (`decode::Prefetched`).
+    pub fn prefetch(&mut self, ms: &[Marker]) -> Result<()> {
+        let mut xids: Vec<u64> = ms
+            .iter()
+            .filter(|m| m.kind != Kind::Message && m.end_lsn.saturating_sub(m.first_lsn) <= decode::PREFETCH_ONE)
+            .map(|m| m.xid)
+            .collect();
+        xids.sort_unstable();
+        xids.dedup();
+        // (Decoders sharing their transactions read each once for all: `Shared::txn`.)
+        if xids.len() < 2 || self.ctx.db.log.decoded.shared() {
+            self.prefetched.clear();
+            return Ok(());
+        }
+        self.prefetched.read(&self.ctx.db.store, &xids)
     }
 
     fn emit(&mut self, sink: &mut dyn FnMut(Output) -> Result<()>) -> Result<()> {
@@ -450,7 +500,7 @@ impl<'a> Decoder<'a> {
                 }
                 _ => {}
             }
-            let sz = change_size(&c.rec, &self.ctx.rels, &self.ctx.fmt, &cat);
+            let sz = change_size(&c.rec, &self.ctx.rels, &self.ctx.fmt, &cat).total();
             size += sz;
             if c.sub != 0 {
                 *subs.entry(c.sub).or_default() += sz;
@@ -501,12 +551,19 @@ impl<'a> Decoder<'a> {
         let keep = if self.skip_changes { 0 } else { usize::MAX };
         let db = self.ctx.db;
         // (Decoded once for the database's decoders when it can be kept: `decode::Shared`.)
-        let shared = if keep == 0 { None } else { db.log.decoded.txn(&store, m)? };
-        let changes: Box<dyn Iterator<Item = Result<Cow<Change>>>> = match &shared {
-            Some(cs) => Box::new(cs.iter().map(|c| Ok(Cow::Borrowed(c)))),
-            None => Box::new(decode::changes(&store, &db.log.decoded, m).take(keep).map(|c| c.map(Cow::Owned))),
-        };
-        self.run(t, end, resume, changes, sink)
+        let pre = std::mem::take(&mut self.prefetched);
+        let r = (|| {
+            let pre = Some(&pre).filter(|p| p.has(m.xid));
+            let shared = if keep == 0 { None } else { db.log.decoded.txn(&store, m)? };
+            let changes: Box<dyn Iterator<Item = Result<Cow<Change>>>> = match (&shared, pre.and_then(|p| p.changes(&db.log.decoded, m))) {
+                (Some(cs), _) => Box::new(cs.iter().map(|c| Ok(Cow::Borrowed(c)))),
+                (None, Some(cs)) => Box::new(cs.take(keep).map(|c| c.map(Cow::Owned))),
+                (None, None) => Box::new(decode::changes(&store, &db.log.decoded, m).take(keep).map(|c| c.map(Cow::Owned))),
+            };
+            self.run(t, end, resume, changes, sink)
+        })();
+        self.prefetched = pre;
+        r
     }
 
     fn run<'c>(
@@ -528,8 +585,17 @@ impl<'a> Decoder<'a> {
         }
         let mut st = Replay { mute: resume, ..Replay::default() };
         let cat = self.ctx.db.catalog();
-        for c in changes {
-            let c = c?;
+        let mut changes = changes;
+        // (Read ahead: the rest of a multi-insert batch.)
+        let mut ahead: std::collections::VecDeque<Cow<'c, Change>> = Default::default();
+        loop {
+            let c = match ahead.pop_front() {
+                Some(c) => c,
+                None => match changes.next() {
+                    Some(c) => c?,
+                    None => break,
+                },
+            };
             match &c.rec {
                 Rec::Rel(d) => {
                     // (A changed definition is looked up again: its invalidation.)
@@ -559,11 +625,42 @@ impl<'a> Decoder<'a> {
             if c.sub != 0 && st.dropped.contains(&c.sub) {
                 continue;
             }
-            let sz = change_size(&c.rec, &self.ctx.rels, &self.ctx.fmt, &cat);
-            st.mem += sz;
-            if c.sub != 0 {
-                *st.sub_mem.entry(c.sub).or_default() += sz;
+            let size = change_size(&c.rec, &self.ctx.rels, &self.ctx.fmt, &cat);
+            let sz = size.total();
+            // The TOAST chunks before it: its own, or a multi-insert batch's, all of them
+            // before its first row (heap_multi_insert); until its last row the transaction
+            // has a partial change (RBTXN_HAS_PARTIAL_CHANGE), which doesn't stream.
+            let mut chunks = size.chunks;
+            if c.batch != 0 {
+                if st.batch != c.batch {
+                    st.batch = c.batch;
+                    st.batch_left = 1;
+                    for n in changes.by_ref() {
+                        let n = n?;
+                        let more = n.batch == c.batch;
+                        if more {
+                            chunks.extend(change_size(&n.rec, &self.ctx.rels, &self.ctx.fmt, &cat).chunks);
+                            st.batch_left += 1;
+                        }
+                        ahead.push_back(n);
+                        if !more {
+                            break;
+                        }
+                    }
+                } else {
+                    chunks.clear();
+                }
+                st.batch_left -= 1;
             }
+            let partial = c.batch != 0 && st.batch_left > 0;
+            for ch in chunks {
+                self.count(&mut st, ch, c.sub);
+                if self.over(st.mem) {
+                    // (A partial change: spilled even when streaming.)
+                    self.spill(&mut st);
+                }
+            }
+            self.count(&mut st, size.main, c.sub);
             if !stream {
                 // Spilled to disk past the limit; replayed in order at commit either way.
                 if self.over(st.mem) {
@@ -587,8 +684,17 @@ impl<'a> Decoder<'a> {
                 continue;
             }
             st.queue.push(Queued { c, sz });
-            if self.over(st.mem) {
+            // ReorderBufferProcessPartialChange: complete again after spilling, it streams
+            // at once; then ReorderBufferCheckMemoryLimit.
+            if !partial && st.serialized {
                 self.stream_block(t, &mut st, sink)?;
+            }
+            if self.over(st.mem) {
+                if partial {
+                    self.spill(&mut st);
+                } else {
+                    self.stream_block(t, &mut st, sink)?;
+                }
             }
         }
         self.ctx.write_xid = t.xid;
@@ -637,8 +743,17 @@ impl<'a> Decoder<'a> {
         mem >= self.work_mem || (self.immediate && mem > 0)
     }
 
+    /// A change's size counted (ReorderBufferChangeMemoryUpdate).
+    fn count(&self, st: &mut Replay, sz: usize, sub: u64) {
+        st.mem += sz;
+        if sub != 0 {
+            *st.sub_mem.entry(sub).or_default() += sz;
+        }
+    }
+
     /// ReorderBufferSerializeTXN: what is in memory goes to disk (statistics only here).
     fn spill(&mut self, st: &mut Replay) {
+        st.serialized = true;
         if !st.spilled {
             self.stats.spill_txns += 1;
             st.spilled = true;
@@ -661,6 +776,8 @@ impl<'a> Decoder<'a> {
     /// ReorderBufferStreamTXN: a block of what is queued (`Replay::mute`: only its effects
     /// on what follows).
     fn stream_block(&mut self, t: &TxnInfo, st: &mut Replay, sink: &mut dyn FnMut(Output) -> Result<()>) -> Result<()> {
+        // (What was spilled streams with it: ReorderBufferTruncateTXN.)
+        st.serialized = false;
         if st.mute {
             let found = st.queue.iter().position(|q| q.c.sub != 0 && self.needs_catalog(&q.c.rec));
             for (i, q) in st.queue.drain(..).enumerate() {

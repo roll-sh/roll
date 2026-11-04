@@ -2308,7 +2308,7 @@ impl Session {
             };
             // The query as written types its parameters, before rules rewrite it (an INSERT
             // a DO INSTEAD NOTHING rule drops still has its $n).
-            let used = param_numbers(&stmt);
+            let used = param_numbers(&stmt, sql);
             let max = used.iter().copied().max().unwrap_or(0).max(0) as usize;
             if p.param_types.len() < max {
                 let types = p.param_types.clone();
@@ -2351,7 +2351,7 @@ impl Session {
             *p.stmt = Some(stmt);
         } else if let Some(NodeEnum::CallStmt(c)) = p.stmt.as_ref().and_then(inner).cloned() {
             // CALL: parameter types from the procedure's.
-            let max = max_param(p.stmt.as_ref().unwrap());
+            let max = max_param(p.stmt.as_ref().unwrap(), sql);
             while p.param_types.len() < max {
                 p.param_types.push(DataType::Unknown);
             }
@@ -2402,7 +2402,7 @@ impl Session {
                 // transformCreateTableAsStmt.
                 if let Some(NodeEnum::CreateTableAsStmt(c)) = inner(n)
                     && c.objtype == pb::ObjectType::ObjectMatview as i32
-                    && max_param(q) > 0
+                    && max_param(q, sql) > 0
                 {
                     return Err(Error::new(
                         code::FEATURE_NOT_SUPPORTED,
@@ -2410,14 +2410,18 @@ impl Session {
                     ));
                 }
                 let types = p.param_types.clone();
-                if let Ok(t) = self.with_ctx(&[], |ctx| {
-                    let mut b = Binder::new(ctx, types);
-                    b.unplanned = true;
-                    b.bind_statement(q).map(|bq| bq.params)
-                }) {
+                // (Analysis only types $n here, its errors wait for execution: a query reading
+                // none isn't bound twice, at Parse and when it runs.)
+                if max_param(q, sql) > 0
+                    && let Ok(t) = self.with_ctx(&[], |ctx| {
+                        let mut b = Binder::new(ctx, types);
+                        b.unplanned = true;
+                        b.bind_statement(q).map(|bq| bq.params)
+                    })
+                {
                     p.param_types = t;
                 }
-                let max = max_param(q);
+                let max = max_param(q, sql);
                 while p.param_types.len() < max {
                     p.param_types.push(DataType::Text);
                 }
@@ -3850,15 +3854,19 @@ fn query_tag(plan: &Plan, stmt: &Node, nrows: usize, processed: u64) -> String {
     }
 }
 
-/// Highest `$n` in a statement.
-fn max_param(n: &Node) -> usize {
-    param_numbers(n).into_iter().max().unwrap_or(0).max(0) as usize
+/// Highest `$n` in a statement (parsed from `sql`).
+fn max_param(n: &Node, sql: &str) -> usize {
+    param_numbers(n, sql).into_iter().max().unwrap_or(0).max(0) as usize
 }
 
 /// The `$n` a statement reads. (pg_query's node walker skips some clauses, an INSERT's
 /// VALUES lists among them: the whole tree is read, through its Debug text, scanned as it is
-/// written: a VALUES of 65,535 parameters once made a text of hundreds of megabytes.)
-fn param_numbers(n: &Node) -> std::collections::HashSet<i32> {
+/// written: a VALUES of 65,535 parameters once made a text of hundreds of megabytes.) A text
+/// without a `$` has none: only the lexer's `$n` makes a ParamRef.
+fn param_numbers(n: &Node, sql: &str) -> std::collections::HashSet<i32> {
+    if !sql.contains('$') {
+        return Default::default();
+    }
     const NEEDLE: &str = "ParamRef { number: ";
     struct Scan {
         buf: String,

@@ -106,7 +106,7 @@ impl RangeDels {
     }
 
     /// The newest deletion that hides version `vts` of `uk` from a reader at `read_ts`.
-    pub fn covering(&self, uk: &[u8], vts: u64, read_ts: u64) -> Option<&RangeDel> {
+    pub fn covering<'a>(&'a self, uk: &'a [u8], vts: u64, read_ts: u64) -> Option<&'a RangeDel> {
         self.holding(uk).filter(|r| r.hides(vts, read_ts)).max_by_key(|r| r.ts)
     }
 
@@ -206,10 +206,13 @@ impl Store {
             // (Durable ones only: a file goes on the strength of the marker.)
             let horizon = self.gc_horizon().min(self.visible_ts());
             let live: Vec<RangeDel> = view.rdels.iter().filter(|r| r.ts <= horizon).cloned().collect();
-            if live.is_empty() {
+            // (Discarded ranges hide every version: `discard`. Only whole files go for them.)
+            let discarded: Vec<RangeDel> =
+                self.discard.ranges().into_iter().map(|(start, end)| RangeDel { start, end, ts: ALL }).collect();
+            if live.is_empty() && discarded.is_empty() {
                 return Ok(());
             }
-            let whole = |m: &SstMeta| live.iter().any(|r| covers_file(r, m));
+            let whole = |m: &SstMeta| live.iter().chain(&discarded).any(|r| covers_file(r, m));
             let gone: HashSet<u64> = view
                 .l0
                 .iter()
@@ -297,12 +300,13 @@ impl Store {
 
     /// `f` written again without the entries `live` covers (none left: no file).
     fn rewrite_without(&self, f: &Arc<SstReader>, live: &[RangeDel], horizon: u64) -> Result<Vec<Arc<SstReader>>> {
+        let live = RangeDels::new(live.to_vec());
         let mut merge = Merge::new(vec![Cursor::level_uncached(vec![f.clone()])], Vec::new());
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut w = SstWriter::create(&self.dir, id, self.opts.compress)?;
         while let Some(i) = merge.min()? {
             let (k, v) = merge.sources[i].head().expect("a head entry");
-            if covering(live, user_key(k), key_ts(k), horizon).is_none()
+            if live.covering(user_key(k), key_ts(k), horizon).is_none()
                 && let Err(e) = w.add(k, v)
             {
                 w.abandon();

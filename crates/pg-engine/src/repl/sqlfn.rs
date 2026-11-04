@@ -140,8 +140,6 @@ pub fn create_logical(
             d.two_phase_at = made.lsn;
         }
     })?;
-    // What GC may remove starts here.
-    db.log.gc_upto.fetch_max(0, Ordering::AcqRel);
     Ok(made)
 }
 

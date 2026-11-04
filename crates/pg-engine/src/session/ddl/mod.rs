@@ -1150,10 +1150,14 @@ impl<'c, 'a> Ddl<'c, 'a> {
         }
     }
 
-    /// pg_statistic rows go with their relation and column (RemoveStatistics).
+    /// pg_statistic rows go with their relation and column (RemoveStatistics). (A system
+    /// catalog's, from an ANALYZE of it, stay: its columns don't change.)
     fn prune_colstats(&mut self) {
         let cat = &mut self.cat;
         let live = |rel: &u32, attnum: i16| -> bool {
+            if *rel < crate::catalog::FIRST_USER_OID && crate::catalog::system::SysTable::by_oid(*rel).is_some() {
+                return true;
+            }
             if let Some(t) = cat
                 .tables
                 .get(rel)

@@ -670,6 +670,19 @@ fn unparameterized(p: &Plan) -> Option<Plan> {
     if !params.iter().all(clean_param) {
         return None;
     }
+    // The values of the query levels around the join (`Outer(d, ..)`, d > 1, inside the
+    // inner side's frame: `Rel::shallow_param`) one level nearer once it has no frame (in
+    // the second pass, after the first proved no parameter is left).
+    let shallowing = std::cell::Cell::new(false);
+    let shallow = |e: Expr| -> Option<Expr> {
+        e.transform(&mut |x| {
+            Ok(match x {
+                Expr::Outer(d, k, t) if d > 1 => Expr::Outer(d - 1, k, t),
+                x => x,
+            })
+        })
+        .ok()
+    };
     // Over the join's row: the inner side's columns after the outer side's, each parameter
     // its expression.
     let lift = |e: &Expr, roff: usize| -> Option<Expr> {
@@ -678,19 +691,22 @@ fn unparameterized(p: &Plan) -> Option<Plan> {
             .transform(&mut |x| {
                 Ok(match x {
                     Expr::Outer(1, k, _) if k < params.len() => params[k].clone(),
+                    Expr::Outer(d, k, t) if d > 1 => Expr::Outer(d - 1, k, t),
                     x => x,
                 })
             })
             .ok()
     };
-    // Whether a clause reads a parameter (None: something further out).
+    // Whether a clause reads a parameter (None: a value it can't be lifted with, or a
+    // sub-select reading the levels around).
     let reads_param = |e: &Expr| -> Option<bool> {
         let (mut reads, mut ok) = (false, true);
         e.walk(&mut |x| match x {
             Expr::Outer(1, k, _) if *k < params.len() => reads = true,
-            Expr::Outer(..) => ok = false,
+            Expr::Outer(1, ..) => ok = false,
             _ => {}
         });
+        ok &= !(deep_outer(e) && has_sublink(e));
         ok.then_some(reads)
     };
     let split = |e: &Expr, roff: usize, moved: &mut Vec<Expr>| -> Option<Option<Expr>> {
@@ -704,7 +720,7 @@ fn unparameterized(p: &Plan) -> Option<Plan> {
                 }
                 moved.push(lift(&q, roff)?);
             } else {
-                local.push(q);
+                local.push(if shallowing.get() { shallow(q)? } else { q });
             }
         }
         Some(and_all(local))
@@ -724,6 +740,20 @@ fn unparameterized(p: &Plan) -> Option<Plan> {
                     rhs_scan(s, local)
                 } else {
                     p.clone()
+                })
+            }
+            // A catalog's scan (its path chosen again).
+            Plan::SysScan { table, filter, alias, mark, .. } => {
+                let local = match filter {
+                    Some(f) => split(f, roff, moved)?,
+                    None => None,
+                };
+                Some(Plan::SysScan {
+                    table: *table,
+                    filter: local,
+                    path: None,
+                    alias: alias.clone(),
+                    mark: *mark,
                 })
             }
             Plan::Filter { input, pred } => {
@@ -789,6 +819,10 @@ fn unparameterized(p: &Plan) -> Option<Plan> {
     if moved.is_empty() || reads_any(&r, &reads_param) {
         return None;
     }
+    // Then the inner side again, its values of the levels around one level nearer.
+    shallowing.set(true);
+    moved.clear();
+    let r = strip(right, 0, &split, &reads_param, &mut moved)?;
     let mut parts: Vec<Expr> = Vec::new();
     if let Some(c) = cond {
         conjuncts(c.clone(), &mut parts);
