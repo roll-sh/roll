@@ -1,0 +1,14 @@
+{
+  "status": "PASS",
+  "summaries": 5,
+  "passed": 24,
+  "failed": 0,
+  "ignored": 0,
+  "finished_profiles": [
+    "dev",
+    "dev",
+    "test"
+  ],
+  "pg_engine_execution": false,
+  "service_stack_acceptance": false
+}

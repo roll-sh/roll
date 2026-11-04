@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "cc174276fa74a4ebdd2e151dc0ebdcb6466b261ff2c528ad6c7abe13fe27ad8f",
-    "bytes": 12848
+    "sha256": "ef412d66cc05d71e36d79af53989de9f8d53d51031a0066853e526f5da142df3",
+    "bytes": 13194
   },
   "bytea165compare/RESTORED": {
     "sha256": "cfeb0d7a74ac20eb1d46d347c00db409be5f9c5b47ca77e388b2e494a65d91c3",
@@ -219,6 +219,10 @@
     "sha256": "a7824c2ddab4ed9dd8c18fcfa6d0c761fb592289444e92e4cd8baa3cce29ecd3",
     "bytes": 433
   },
+  "check165ind-v3/TERMINAL.json": {
+    "sha256": "29a64f66b758f22069fbf64641e52620393260649d3b72e781a9af773c88c640",
+    "bytes": 1637
+  },
   "check165ind-v3/affinity-observation-debug.json": {
     "sha256": "7a521b62662986ebf922b26964c793fca5966ad4fb128e087d1b4c8fcc9960bd",
     "bytes": 1468
@@ -226,6 +230,14 @@
   "check165ind-v3/affinity-observation-focused.json": {
     "sha256": "3e774eb0bfc708a1951b2e4b31bfdc017c0b3a1eb8997b1385a3bdd6d57861b2",
     "bytes": 15442
+  },
+  "check165ind-v3/build.command": {
+    "sha256": "a07bb951576e7a8a4b2043e5eec8b2f6254bb57f0a4e9636e781ce351d7f7927",
+    "bytes": 59
+  },
+  "check165ind-v3/build.log": {
+    "sha256": "8072dfe3bf6ee27ac6b95316274568d55b052c1a96de5543c6940f8965cc616b",
+    "bytes": 172
   },
   "check165ind-v3/clippy-completed-exits.tsv": {
     "sha256": "008969b360482999408f346d06b31ef01c94ef23a2497b11e61f33ad75a5924f",
@@ -243,11 +255,19 @@
     "sha256": "d52cab17d1b06a3d8752710f312960c84800b2298b9699f9c7dde0b2be0070f6",
     "bytes": 10548
   },
+  "check165ind-v3/current.status": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
   "check165ind-v3/debug-completed-exits.tsv": {
     "sha256": "42456510f4141f0308ece97274d31ff45cc1354f67baf98a1777ff284b956be5",
     "bytes": 66
   },
   "check165ind-v3/debug-test-summary.json": {
+    "sha256": "bc6bf6b62bea0d9fd5535c474a2d3bb6130082b56156f3e90593a2087b663fe4",
+    "bytes": 4016
+  },
+  "check165ind-v3/debug-test-terminal-audit.json": {
     "sha256": "bc6bf6b62bea0d9fd5535c474a2d3bb6130082b56156f3e90593a2087b663fe4",
     "bytes": 4016
   },
@@ -267,6 +287,14 @@
     "sha256": "faab1b9914e08a9f6d853a6cbf6a6bcc79d5cb838e4afbafa3a92a3f3310c2d7",
     "bytes": 311
   },
+  "check165ind-v3/engine.sha256": {
+    "sha256": "d25039e379a28be6036eaed8a90d34961ee5bc00464c71aa50a4a2db97d2f986",
+    "bytes": 121
+  },
+  "check165ind-v3/exits.tsv": {
+    "sha256": "0221f65ec880fffd454b13d441201478cfee3bef61564bee47637449be3a3334",
+    "bytes": 114
+  },
   "check165ind-v3/focused-completed-exits.tsv": {
     "sha256": "2fca911a4a472fad7d273e6c9e44eddf30ab50ed845b24490f68dcc03f64fcfb",
     "bytes": 53
@@ -283,6 +311,22 @@
     "sha256": "4a1ea7954269d47f2c97f81893f55d1d5f47617eece7e6b0bb1c82183190732a",
     "bytes": 940
   },
+  "check165ind-v3/postgres-unit-status.json": {
+    "sha256": "532e62062756dc948146c542adc6a658b90ca4df36121ca700779d6c565a8497",
+    "bytes": 224
+  },
+  "check165ind-v3/postgres-unit-summary.json": {
+    "sha256": "665bb83dcfdb871fba520db645e95db20020dbf23e7ae74be7b8146a7bdd0e93",
+    "bytes": 220
+  },
+  "check165ind-v3/postgres-unit.command": {
+    "sha256": "99f2cf965ef407eb3f36a6aa3cf858909f5d8f75396abbd47109bb9d94ac2e3e",
+    "bytes": 21
+  },
+  "check165ind-v3/postgres-unit.log": {
+    "sha256": "5eba1dfbc2e84856e4707a932fd96a43cee12224c5b6570dc68515abcc1a51d0",
+    "bytes": 2665
+  },
   "check165ind-v3/prepared.command": {
     "sha256": "3007137b50b74e3b71505b4f2bfe617146ea1c8b7e053bfa8196029ccbde9d5f",
     "bytes": 73
@@ -292,6 +336,10 @@
     "bytes": 637
   },
   "check165ind-v3/release-test-summary.json": {
+    "sha256": "bc6bf6b62bea0d9fd5535c474a2d3bb6130082b56156f3e90593a2087b663fe4",
+    "bytes": 4016
+  },
+  "check165ind-v3/release-test-terminal-audit.json": {
     "sha256": "bc6bf6b62bea0d9fd5535c474a2d3bb6130082b56156f3e90593a2087b663fe4",
     "bytes": 4016
   },
@@ -322,6 +370,10 @@
   "check165ind-v3/tree.txt": {
     "sha256": "c2b95c2af9a34937a758eb5b6dcd2c8638e67fa36371e9cc81b621da9fe4ad12",
     "bytes": 41
+  },
+  "check165ind-v3/wrapper.log": {
+    "sha256": "c8d8e60e598d89268f8b48c8556f48448812c8d19157cc6d9f57d6a97f5e594d",
+    "bytes": 624
   },
   "check165r2-runner-error/exits.tsv": {
     "sha256": "5afdccc0c3a6898bcf901621239b567706c88ec04836a91942b6be918e8e24cb",
@@ -584,8 +636,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "80013cdd05b1d70bfedc1513bce83edd2e85cc723391f3591805418f9e10f9a5",
-    "bytes": 27126
+    "sha256": "a0d575344b4c0e5c82f447ec02cd4f5d4cff905928f42f77833f927e692d0a25",
+    "bytes": 27991
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -1202,6 +1254,10 @@
   "runners/DEFERRED-CURSOR-R4.md": {
     "sha256": "e11a47fe83af96c52e3c57fac0725c752438caacfcf3be0f583934512b165bab",
     "bytes": 1195
+  },
+  "runners/INDEPENDENT165-HANDOFF.md": {
+    "sha256": "2407c9207f7f714d156a686597c8a11b8066489ef2c1f67cd435f5a38ea0c0f2",
+    "bytes": 4776
   },
   "runners/R3-CASE-MATRIX.md": {
     "sha256": "bab38282c8248db553c43a488f9557d875c95d9a507fb231bf1238c68fbe21bf",

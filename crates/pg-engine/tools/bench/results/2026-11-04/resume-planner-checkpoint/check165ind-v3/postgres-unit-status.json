@@ -1,0 +1,7 @@
+{
+  "status": "PASS",
+  "executed_unit_checks": true,
+  "service_stack_acceptance": false,
+  "pg_engine_execution": false,
+  "reason": "--unit explicitly disables Docker e2e; separate final forced service-stack gate held"
+}

@@ -15,9 +15,13 @@ Release all-targetClippy0,same14message/pathdiagnosticmultiset ascompletedab3,no
 Bookkeeping sequencecomparison initiallyFAILED on reversedbench/difftest diagnosticorder;
 firstexport stoppedbeforeGit writes on missingauditfile. Bothfailures retained; no source,
 frozengate orthreshold changed,no gate rerun. Diagnosticmultiplicities match,orderdoesnot.
-Distactive;partialdist/unit outputsexcluded. Current sourceacceptance remainsHELD.
+Distpassed0,binarySHA25663e672d757b7ac4da113a78307ee6908fcdbb275deb4d78ce114a3afd90c2d9c.
+pnpm test:pg --unit EXECUTED PASS0,24tests/5summaries;notpgengine/serviceacceptance.
+All9commands0,ownedwrapper/heavy/runnergone,cleanpinnedc861/tree/frozenhashesverified by
+separateterminalauditor. Fullv3terminalrawexported;parentcombined/resource/service/source
+acceptance remainseparateandheld. INDEPENDENT165-HANDOFF.md records exactsource/limits.
 Incremental staticR2 c861 vsab3 found noHIGH/MEDIUM; didnotrun gates. Its not-runstage
-statement is historical: focused2+4+1+1,fullDEBUG/RELEASE455maps andClippy nowpassed;fullpipelinepending.
+statement is historical: focused2+4+1+1,fullDEBUG/RELEASE455maps,Clippy/dist/unit nowpassed.
 ResidualLOW: new samePIDregistration can displace STILL-LIVE oldslot, delaying its idle
 counts untilflush/end; no wirePIDoverlap claim. Fast-own checks assertblocking/ungranted
 waiter/release but onlyPRINT locktype/mode,do notassertfastpath parity. OtherreviewLOWs

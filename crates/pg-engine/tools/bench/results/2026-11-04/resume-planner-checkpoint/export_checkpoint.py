@@ -32,9 +32,13 @@ Release all-targetClippy0,same14message/pathdiagnosticmultiset ascompletedab3,no
 Bookkeeping sequencecomparison initiallyFAILED on reversedbench/difftest diagnosticorder;
 firstexport stoppedbeforeGit writes on missingauditfile. Bothfailures retained; no source,
 frozengate orthreshold changed,no gate rerun. Diagnosticmultiplicities match,orderdoesnot.
-Distactive;partialdist/unit outputsexcluded. Current sourceacceptance remainsHELD.
+Distpassed0,binarySHA25663e672d757b7ac4da113a78307ee6908fcdbb275deb4d78ce114a3afd90c2d9c.
+pnpm test:pg --unit EXECUTED PASS0,24tests/5summaries;notpgengine/serviceacceptance.
+All9commands0,ownedwrapper/heavy/runnergone,cleanpinnedc861/tree/frozenhashesverified by
+separateterminalauditor. Fullv3terminalrawexported;parentcombined/resource/service/source
+acceptance remainseparateandheld. INDEPENDENT165-HANDOFF.md records exactsource/limits.
 Incremental staticR2 c861 vsab3 found noHIGH/MEDIUM; didnotrun gates. Its not-runstage
-statement is historical: focused2+4+1+1,fullDEBUG/RELEASE455maps andClippy nowpassed;fullpipelinepending.
+statement is historical: focused2+4+1+1,fullDEBUG/RELEASE455maps,Clippy/dist/unit nowpassed.
 ResidualLOW: new samePIDregistration can displace STILL-LIVE oldslot, delaying its idle
 counts untilflush/end; no wirePIDoverlap claim. Fast-own checks assertblocking/ungranted
 waiter/release but onlyPRINT locktype/mode,do notassertfastpath parity. OtherreviewLOWs
@@ -313,8 +317,12 @@ for name in ('debug-test.command', 'debug-test.log', 'debug-test-summary.json', 
 sources['runners/audit165-v3-terminal.py'] = str(D / 'audit165-v3-terminal.py')
 sources['runners/ab3-dist-artifact-preserved.json'] = str(D / 'ab3-dist-artifact-preserved.json')
 sources['runners/clippy-v3-bookkeeping-failure.json'] = str(D / 'clippy-v3-bookkeeping-failure.json')
+sources['runners/INDEPENDENT165-HANDOFF.md'] = str(D / 'INDEPENDENT165-HANDOFF.md')
 for name in ('release-test.command', 'release-test.log', 'release-test-summary.json', 'clippy.command', 'clippy.log', 'clippy-completed-exits.tsv', 'clippy-warning-audit.json'):
     sources['check165ind-v3/' + name] = str(D / 'check165ind-v3' / name)
+for name in ('build.command', 'build.log', 'engine.sha256', 'postgres-unit.command', 'postgres-unit.log', 'postgres-unit-status.json', 'postgres-unit-summary.json', 'exits.tsv', 'current.status', 'TERMINAL.json', 'debug-test-terminal-audit.json', 'release-test-terminal-audit.json'):
+    sources['check165ind-v3/' + name] = str(D / 'check165ind-v3' / name)
+sources['check165ind-v3/wrapper.log'] = str(D / 'check165ind-v3-wrapper.log')
 for name, source in sources.items():
     files[name] = Path(source).read_bytes()
 files['manifest.json'] = (json.dumps({name: {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}

@@ -1,0 +1,49 @@
+{
+  "observed_utc": "2026-11-04T19:22:39.963464+00:00",
+  "source": "c8618834caf45bc0a34cf9985c07f9bc13b498ef",
+  "tree": "df3cf582a5ff3b1554067af296e95d4d9f708df6",
+  "clean": true,
+  "owned_wrapper_heavy_runner_absent": true,
+  "frozen_runner_hashes_match": true,
+  "command_exits": {
+    "lifecycle": "0",
+    "prepared": "0",
+    "statistics": "0",
+    "end-monitoring": "0",
+    "debug-test": "0",
+    "release-test": "0",
+    "clippy": "0",
+    "build": "0",
+    "postgres-unit": "0"
+  },
+  "test_summaries": {
+    "debug-test": {
+      "passed": 455,
+      "failed": 0,
+      "ignored": 18,
+      "summaries": 61
+    },
+    "release-test": {
+      "passed": 455,
+      "failed": 0,
+      "ignored": 18,
+      "summaries": 61
+    }
+  },
+  "engine_sha256": "63e672d757b7ac4da113a78307ee6908fcdbb275deb4d78ce114a3afd90c2d9c",
+  "postgres_unit": {
+    "status": "PASS",
+    "executed_unit_checks": true,
+    "service_stack_acceptance": false,
+    "pg_engine_execution": false,
+    "reason": "--unit explicitly disables Docker e2e; separate final forced service-stack gate held"
+  },
+  "resource_limits": "Startupguard nice19/jobs2/testthreads<=2/affinity8-13,18-19; sampled descendants match, not exhaustive lifetime audit",
+  "resource_evidence": [
+    "startup-controls.json",
+    "affinity-observation-focused.json"
+  ],
+  "source_acceptance": false,
+  "performance_acceptance": false,
+  "remaining": "R2 noHIGH/MEDIUM; older samePIDregistration displacement/fastpath assertion gap and otherLOWs retained. Parent review/integration and combined runtime/resource/service gates remain separate. Earlier focused wire101 preserved."
+}
