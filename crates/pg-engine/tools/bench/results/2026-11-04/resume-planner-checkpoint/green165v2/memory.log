@@ -1,0 +1,10 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a640c14a8f76f8ea4/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.70s
+     Running tests/memory_load.rs (/home/meszmate/.cache/a165/target/debug/deps/memory_load-69b55974dfbde33f)
+
+running 1 test
+streamed cursor retained 0 bytes after 98000 additional rows
+test streaming_cursor_bounds_keys_and_backward_work ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 9.29s
+

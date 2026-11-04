@@ -1,0 +1,940 @@
+diff --git a/crates/pg-engine/src/session/cursor.rs b/crates/pg-engine/src/session/cursor.rs
+index 6993ee43..7c4c444b 100644
+--- a/crates/pg-engine/src/session/cursor.rs
++++ b/crates/pg-engine/src/session/cursor.rs
+@@ -26,16 +26,19 @@ pub struct Cursor {
+     pub rows: Vec<Row>,
+     /// How many of the query's first rows `rows` no longer has (`streams`).
+     base: usize,
+-    /// Running its query again reaches any earlier row as PostgreSQL's executor scanning
+-    /// backward or rewinding does (a scrollable plan, nothing volatile, no row locks, rows as
+-    /// returned): a SCROLL cursor streams too, and moving back runs the query again
+-    /// (ExecutorRewind) up to the row.
++    /// An immutable plain scan may restart once to reach discarded rows. After that
++    /// restart it keeps rows, so backward fetches never rescan each prefix.
+     rerun: bool,
+     /// Its rows are the query's as returned, not under a target list or qual evaluated as
+     /// rows are passed, and it runs no writing query to completion: it may stream.
+     plain: bool,
+     /// A simply updatable cursor: its table and each row's storage key (`WHERE CURRENT OF`).
+     pub keys: Option<(u32, Vec<Arc<[u8]>>)>,
++    /// A streamed cursor keeps only the key at its current position.
++    current_key: Option<Arc<[u8]>>,
++    /// The first multi-scan key identifies duplicate locking references independently
++    /// of whether earlier rows have been discarded.
++    multi_reference: Option<Arc<[u8]>>,
+     /// The executor's position: 0 = before the first row, k = on row k, rows.len()+1 = after
+     /// the last (once the query is known to be done).
+     pub pos: usize,
+@@ -597,6 +600,8 @@ impl Cursor {
+             rerun: false,
+             plain: false,
+             keys: key_table.map(|t| (t, Vec::new())),
++            current_key: None,
++            multi_reference: None,
+             pos: 0,
+             portal_pos: 0,
+             at_start: true,
+@@ -636,7 +641,7 @@ impl Cursor {
+         let mut c = Cursor::new(cols, Vec::new(), key_table, hold, scroll, text, created);
+         c.projected = lazy.project.is_some();
+         c.plain = lazy.project.is_none() && lazy.qual.is_none() && !lazy.fill;
+-        c.rerun = scroll && c.plain && scrollable(&lazy.plan) && !crate::sql::explain::plan_volatile_deep(&lazy.plan);
++        c.rerun = scroll && c.plain && replayable(&lazy.plan);
+         c.lazy = Some(lazy);
+         c
+     }
+@@ -647,7 +652,7 @@ impl Cursor {
+         let projected = self.projected;
+         if let Some((_, keys)) = &mut self.keys {
+             let key = if projected { None } else { r.pop() };
+-            keys.push(match key {
++            let key = match key {
+                 Some(Value::Bytea(k)) => k,
+                 Some(Value::Array(a)) if a.elem == DataType::Bytea => multi_key(&a.items),
+                 Some(v) => {
+@@ -655,7 +660,11 @@ impl Cursor {
+                     Arc::from(&[][..])
+                 }
+                 None => Arc::from(&[][..]),
+-            });
++            };
++            if self.multi_reference.is_none() && key.starts_with(&MULTI_KEY) {
++                self.multi_reference = Some(key.clone());
++            }
++            keys.push(key);
+         }
+         self.rows.push(r);
+     }
+@@ -694,8 +703,9 @@ impl Cursor {
+             let r = ex.coerce(r, ctx)?;
+             self.push_row(r);
+         }
+-        self.rows.drain(..i);
+-        self.base = i;
++        // Retain this prefix and every later row: only the first backward fetch
++        // restarts the query, including FETCH BACKWARD ALL and repeated rewinds.
++        self.rerun = false;
+         Ok(())
+     }
+ 
+@@ -723,11 +733,19 @@ impl Cursor {
+             if i < self.base {
+                 self.rerun_to(ex.as_deref_mut(), ctx, i)?;
+             }
+-            // (The row goes out as it is; those before it go.)
+-            let r = std::mem::take(&mut self.rows[i - self.base]);
+-            self.rows.drain(..=i - self.base);
+-            self.base = i + 1;
+-            return Ok(r);
++            if self.streams() {
++                // Rows and keys use the same base; retain just the current key for
++                // WHERE CURRENT OF after the fetched row has left the portal.
++                let offset = i - self.base;
++                let r = std::mem::take(&mut self.rows[offset]);
++                self.rows.drain(..=offset);
++                if let Some((_, keys)) = &mut self.keys {
++                    self.current_key = Some(keys[offset].clone());
++                    keys.drain(..=offset);
++                }
++                self.base = i + 1;
++                return Ok(r);
++            }
+         }
+         let Some(ex) = ex.filter(|e| e.project.is_some() || e.qual.is_some()) else {
+             return Ok(self.rows[i].clone());
+@@ -747,6 +765,9 @@ impl Cursor {
+                 }
+                 _ => {}
+             }
++            if self.multi_reference.is_none() && keys[i].starts_with(&MULTI_KEY) {
++                self.multi_reference = Some(keys[i].clone());
++            }
+         }
+         let r = ex.coerce(r, ctx)?;
+         self.last = Some(r.clone());
+@@ -1124,7 +1145,12 @@ impl Cursor {
+             while let Some(r) = c.step(ex.as_deref_mut(), ctx, true)? {
+                 rows.push(r);
+                 if let Some((_, k)) = &c.keys {
+-                    keys.push(k[c.pos - 1].clone());
++                    let key = if c.pos <= c.base {
++                        c.current_key.as_ref().expect("streamed current key")
++                    } else {
++                        &k[c.pos - 1 - c.base]
++                    };
++                    keys.push(key.clone());
+                 }
+             }
+             Ok((rows, keys))
+@@ -1134,6 +1160,7 @@ impl Cursor {
+         }
+         self.projected = false;
+         self.last = None;
++        self.current_key = None;
+         self.rows = rows;
+         self.base = 0;
+         self.plain = false;
+@@ -1201,8 +1228,7 @@ impl Cursor {
+         };
+         if *t == 0 {
+             let marked = |k: &[u8]| split_multi_key(k).into_iter().filter(|x| of_table(x)).count();
+-            let any = keys.iter().find(|k| k.starts_with(&MULTI_KEY));
+-            match any.map(|k| marked(k)) {
++            match self.multi_reference.as_ref().map(|k| marked(k)) {
+                 Some(0) => return Err(not_simple()),
+                 None | Some(1) => {}
+                 Some(_) => {
+@@ -1218,13 +1244,17 @@ impl Cursor {
+         } else if self.simple.is_none() && *t != table && !cat.inheritors(*t).contains(&table) {
+             return Err(not_simple());
+         }
+-        if self.pos == 0 || self.pos > keys.len() {
++        if self.pos == 0 || self.pos > self.produced() {
+             return Err(Error::new(
+                 code::INVALID_CURSOR_STATE,
+                 format!("cursor \"{name}\" is not positioned on a row"),
+             ));
+         }
+-        let key = keys[self.pos - 1].clone();
++        let key = if self.pos <= self.base {
++            self.current_key.clone().ok_or_else(|| crate::error::internal("missing cursor current key"))?
++        } else {
++            keys[self.pos - 1 - self.base].clone()
++        };
+         let key: Arc<[u8]> = if key.starts_with(&MULTI_KEY) {
+             match split_multi_key(&key).into_iter().find(|k| of_table(k)) {
+                 Some(k) => Arc::from(k),
+@@ -1240,6 +1270,47 @@ impl Cursor {
+     }
+ }
+ 
++/// Restarting is safe only for immutable expressions over ordinary stored rows.
++/// Function/CTE scans and sorts keep executor state even when their functions are STABLE.
++fn replayable(plan: &Plan) -> bool {
++    let shape = match plan {
++        Plan::Scan(s) => s.mark.is_none() && s.sample.is_none() && !s.table.is_foreign(),
++        Plan::Filter { input, .. } | Plan::Project { input, .. } | Plan::Limit { input, .. } => replayable(input),
++        Plan::Append { inputs, .. } => inputs.iter().all(|p| replayable(p)),
++        _ => false,
++    };
++    if !shape {
++        return false;
++    }
++    let mut exprs = Vec::new();
++    crate::sql::explain::node_exprs(plan, &mut exprs);
++    if let Plan::Scan(s) = plan {
++        fn bounds<'a>(b: &'a crate::sql::plan::IndexBounds, out: &mut Vec<&'a Expr>) {
++            out.extend(&b.eq);
++            out.extend(b.any.as_ref());
++            out.extend(b.lower.iter().map(|(e, _)| e));
++            out.extend(b.upper.iter().map(|(e, _)| e));
++            out.extend(b.order.iter().map(|k| &k.expr));
++            if let Some(skip) = &b.skip {
++                bounds(&skip.bounds, out);
++            }
++        }
++        if let Some((_, b)) = &s.index {
++            bounds(b, &mut exprs);
++        }
++        exprs.extend(s.current_of.as_ref());
++    }
++    exprs.into_iter().all(|e| {
++        let mut safe = e.is_immutable();
++        e.walk(&mut |x| match x {
++            Expr::Subquery(_) => safe = false,
++            Expr::Call(f, ..) if f.oid >= 16384 => safe = false,
++            _ => {}
++        });
++        safe
++    })
++}
++
+ /// Whether a cursor over `plan` is scrollable when declared without [NO] SCROLL: PostgreSQL's
+ /// `ExecSupportsBackwardScan`, read off the plan PostgreSQL would build, and no row locks.
+ pub fn scrollable(plan: &Plan) -> bool {
+@@ -1258,6 +1329,11 @@ pub fn scrollable(plan: &Plan) -> bool {
+                         _ => true,
+                     }
+             }
++            // The binder represents a non-inlined FROM call as a Join carrying
++            // FromCall; EXPLAIN exposes the same node as Function Scan.
++            Plan::Join { meta, .. } if meta.from_call.is_some() => true,
++            Plan::Join { left, right, cond: None, hash: None, nleft: 0, .. }
++                if matches!(&**left, Plan::One) => go(right),
+             Plan::SysScan { .. }
+             | Plan::FunctionScan { .. }
+             | Plan::PlCall { .. }
+diff --git a/crates/pg-engine/src/session/litplan.rs b/crates/pg-engine/src/session/litplan.rs
+index 74c0419f..bae6c734 100644
+--- a/crates/pg-engine/src/session/litplan.rs
++++ b/crates/pg-engine/src/session/litplan.rs
+@@ -329,9 +329,9 @@ impl Session {
+ 
+     /// Bind `generic` (a template with parameters of `types`), and what the planner read
+     /// (None when it failed, or read a column's data).
+-    fn lit_bind(&mut self, generic: &Node, types: Vec<DataType>, path: &[String]) -> (Option<Bound>, Vec<SizeRead>) {
++    fn lit_bind(&mut self, generic: &Node, types: Vec<DataType>, path: &crate::catalog::names::SearchPath) -> (Option<Bound>, Vec<SizeRead>) {
+         let (bound, reads) = crate::sql::literals::recording(|| {
+-            self.with_ctx_path(&[], Some(path.into()), |ctx| {
++            self.with_ctx_path(&[], Some(path.clone()), |ctx| {
+                 let (bq, unplanned) = analyzed_bound(Binder::new(ctx, types).analyze_statement(generic)?, ctx)?;
+                 Ok(Bound { bq, unplanned })
+             })
+@@ -340,9 +340,9 @@ impl Session {
+     }
+ 
+     /// `u`'s statement planned again, and what the planner read.
+-    fn lit_replan(&mut self, u: &Analyzed, path: &[String]) -> (Option<BoundQuery>, Vec<SizeRead>) {
++    fn lit_replan(&mut self, u: &Analyzed, path: &crate::catalog::names::SearchPath) -> (Option<BoundQuery>, Vec<SizeRead>) {
+         let (bound, reads) =
+-            crate::sql::literals::recording(|| self.with_ctx_path(&[], Some(path.into()), |ctx| u.plan(ctx)));
++            crate::sql::literals::recording(|| self.with_ctx_path(&[], Some(path.clone()), |ctx| u.plan(ctx)));
+         (bound.ok().filter(|_| !reads.contains(&SizeRead::Data)), reads)
+     }
+ 
+diff --git a/crates/pg-engine/src/txn/locks.rs b/crates/pg-engine/src/txn/locks.rs
+index d3d2ec6c..bf86ce43 100644
+--- a/crates/pg-engine/src/txn/locks.rs
++++ b/crates/pg-engine/src/txn/locks.rs
+@@ -19,7 +19,7 @@
+ use super::bulklocks::{BulkLocks, row_tag, untag};
+ use crate::error::{Error, Result, code};
+ use parking_lot::{Condvar, Mutex};
+-use std::collections::HashMap;
++use std::collections::{HashMap, HashSet};
+ use std::sync::Arc;
+ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+ use std::time::{Duration, Instant};
+@@ -449,13 +449,18 @@ impl Hold {
+ /// fast-path locks.
+ pub struct FastSlot {
+     proc: u64,
+-    holds: Mutex<Vec<FastHold>>,
++    holds: Mutex<FastHolds>,
+     /// The transaction whose own lock is held here (`hold_xact_fast`), 0 for none: a request
+     /// for that lock moves it to the main table first (VirtualXactLock's transfer).
+     xact: AtomicU64,
+-    /// A hold was moved to the main table since the backend's transaction began: its end
+-    /// releases there too (`release_fast_owner`).
+-    moved: AtomicBool,
++}
++
++#[derive(Default)]
++struct FastHolds {
++    holds: Vec<FastHold>,
++    /// Owners with holds transferred to the main table, protected by the same mutex as
++    /// transfer and release so another transaction on this backend cannot clear them.
++    moved: HashSet<u64>,
+ }
+ 
+ struct FastHold {
+@@ -875,7 +880,7 @@ impl LockManager {
+             slots
+                 .entry(proc)
+                 .or_insert_with(|| {
+-                    Arc::new(FastSlot { proc, holds: Mutex::new(Vec::new()), xact: AtomicU64::new(0), moved: AtomicBool::new(false) })
++                    Arc::new(FastSlot { proc, holds: Mutex::new(FastHolds::default()), xact: AtomicU64::new(0) })
+                 })
+                 .clone(),
+         )
+@@ -884,7 +889,7 @@ impl LockManager {
+     /// Backend `proc` is gone: its slot too.
+     pub fn end_proc(&self, proc: u64) {
+         let Some(slot) = self.fast.slots.write().remove(&proc) else { return };
+-        if !slot.holds.lock().is_empty() {
++        if !slot.holds.lock().holds.is_empty() {
+             // (Not expected: what it still held goes to the main table.)
+             let mut s = self.state.lock();
+             Self::move_slot(&mut s, &slot, None);
+@@ -897,7 +902,8 @@ impl LockManager {
+         if mode > LockMode::RowExclusive || !is_local_relation(key) {
+             return false;
+         }
+-        let mut holds = slot.holds.lock();
++        let mut fast = slot.holds.lock();
++        let holds = &mut fast.holds;
+         if self.fast.strong[fast_partition(key)].load(Ordering::SeqCst) != 0 {
+             return false;
+         }
+@@ -911,7 +917,8 @@ impl LockManager {
+     /// Release one of `owner`'s fast-path holds of `key` in `mode`; false when it has none
+     /// there (it is in the main table).
+     pub fn release_fast(&self, slot: &FastSlot, key: &[u8], owner: u64, mode: LockMode) -> bool {
+-        let mut holds = slot.holds.lock();
++        let mut fast = slot.holds.lock();
++        let holds = &mut fast.holds;
+         let Some(i) = holds.iter().position(|h| h.owner == owner && h.mode == mode && h.key == key) else {
+             return false;
+         };
+@@ -922,15 +929,16 @@ impl LockManager {
+         true
+     }
+ 
+-    /// Release every fast-path hold of `owner`; true when any of the backend's holds moved to
+-    /// the main table meanwhile (they are released there).
++    /// Release every fast-path hold of `owner`; true when any of this owner's holds moved
++    /// to the main table meanwhile (they are released there).
+     pub fn release_fast_owner(&self, slot: &FastSlot, owner: u64) -> bool {
+-        let mut holds = slot.holds.lock();
++        let mut fast = slot.holds.lock();
++        let holds = &mut fast.holds;
+         holds.retain(|h| h.owner != owner);
+         if slot.xact.load(Ordering::Relaxed) == owner {
+             slot.xact.store(0, Ordering::Relaxed);
+         }
+-        slot.moved.swap(false, Ordering::Relaxed)
++        fast.moved.remove(&owner)
+     }
+ 
+     /// Hold transaction `owner`'s own lock (`hold_xact_lock` in Exclusive mode, before its
+@@ -938,7 +946,8 @@ impl LockManager {
+     /// VirtualXactLockTableInsert does: nothing of the main table is locked until another
+     /// backend asks for it (`acquire` moves it there first).
+     pub fn hold_xact_fast(&self, slot: &FastSlot, owner: u64) {
+-        let mut holds = slot.holds.lock();
++        let mut fast = slot.holds.lock();
++        let holds = &mut fast.holds;
+         holds.push(FastHold { key: xact_key(owner), owner, mode: LockMode::Exclusive, count: 1, seq: next_seq() });
+         slot.xact.store(owner, Ordering::Release);
+     }
+@@ -962,21 +971,22 @@ impl LockManager {
+     }
+ 
+     fn move_slot(s: &mut State, slot: &FastSlot, key: Option<&[u8]>) {
+-        let mut holds = slot.holds.lock();
++        let mut fast = slot.holds.lock();
++        let holds = &mut fast.holds;
+         if holds.is_empty() {
+             return;
+         }
+         let moved: Vec<FastHold> = match key {
+             Some(k) if holds.iter().any(|h| h.key == k) => {
+-                let (m, kept) = std::mem::take(&mut *holds).into_iter().partition(|h| h.key == k);
++                let (m, kept) = std::mem::take(holds).into_iter().partition(|h| h.key == k);
+                 *holds = kept;
+                 m
+             }
+             Some(_) => return,
+-            None => std::mem::take(&mut *holds),
++            None => std::mem::take(holds),
+         };
+-        slot.moved.store(true, Ordering::Relaxed);
+         for h in moved {
++            fast.moved.insert(h.owner);
+             let e = s.locks.entry(h.key).or_default();
+             if let Some(x) = e.holds.iter_mut().find(|x| x.owner == h.owner && x.proc == slot.proc && x.mode == h.mode) {
+                 x.count += h.count;
+@@ -1873,6 +1883,9 @@ impl LockManager {
+         if let Some(b) = s.bulk.get_mut(&owner) {
+             b.proc = proc;
+         }
++        for slot in self.fast.slots.read().values() {
++            slot.holds.lock().moved.remove(&owner);
++        }
+     }
+ 
+     /// A prepared transaction's dummy backend is gone (COMMIT / ROLLBACK PREPARED).
+@@ -1952,7 +1965,7 @@ impl LockManager {
+     /// Whether anyone holds a lock (for idle detection and tests).
+     pub fn held_count(&self) -> usize {
+         let s = self.state.lock();
+-        let fast: usize = self.fast.slots.read().values().map(|f| f.holds.lock().len()).sum();
++        let fast: usize = self.fast.slots.read().values().map(|f| f.holds.lock().holds.len()).sum();
+         fast + s.locks.len() + s.rows.len() + s.bulk.values().map(BulkLocks::len).sum::<usize>()
+     }
+ 
+diff --git a/crates/pg-engine/src/txn/twophase.rs b/crates/pg-engine/src/txn/twophase.rs
+index 92b13050..a76c3132 100644
+--- a/crates/pg-engine/src/txn/twophase.rs
++++ b/crates/pg-engine/src/txn/twophase.rs
+@@ -454,6 +454,7 @@ impl Txn {
+     pub fn detach_prepared(&mut self) {
+         self.prepared = true;
+         self.db.locks.transfer(self.id, self.id);
++        self.fast_slot = std::sync::OnceLock::from(None);
+         self.lock_peer = None;
+         if self.sxact {
+             self.db.ssi.detach(self.id);
+diff --git a/crates/pg-engine/tests/memory_load.rs b/crates/pg-engine/tests/memory_load.rs
+index 9a173961..5eac5666 100644
+--- a/crates/pg-engine/tests/memory_load.rs
++++ b/crates/pg-engine/tests/memory_load.rs
+@@ -300,3 +300,46 @@ fn hash_join_spilling_bounds_the_build_heap() {
+     assert!(spilled < 16 << 20, "spilled build used {spilled} bytes");
+     assert!(memory > spilled * 2, "spilling did not bound the build: {spilled} vs {memory}");
+ }
++
++#[test]
++fn streaming_cursor_bounds_keys_and_backward_work() {
++    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
++    let dir = tempfile::tempdir().unwrap();
++    let mut s = common::engine_session(common::open_store(dir.path()), "cursor_memory");
++    for sql in [
++        "CREATE TABLE cm (id int primary key)",
++        "INSERT INTO cm SELECT g FROM generate_series(1, 100000) g",
++        "SET max_parallel_workers_per_gather = 0",
++        "SELECT sum(id) FROM cm",
++        "BEGIN",
++        "DECLARE warm NO SCROLL CURSOR FOR SELECT id FROM cm",
++        "MOVE ALL FROM warm",
++        "CLOSE warm",
++        "DECLARE c NO SCROLL CURSOR FOR SELECT id FROM cm",
++        "MOVE 1000 FROM c",
++    ] {
++        s.query(sql).unwrap();
++    }
++    let before = MINE.with(|m| m.get());
++    for _ in 0..98 {
++        s.query("MOVE 1000 FROM c").unwrap();
++    }
++    let retained = MINE.with(|m| m.get()) - before;
++    eprintln!("streamed cursor retained {retained} bytes after 98000 additional rows");
++    assert!(retained < 1 << 20, "cursor retained row keys: {retained} bytes");
++    // The current key must survive pruning and still target the last fetched row.
++    s.query("UPDATE cm SET id = -id WHERE CURRENT OF c").unwrap();
++    assert_eq!(s.query("SELECT id FROM cm WHERE id < 0").unwrap().pop().unwrap().rows,
++        vec![vec![pg_engine::types::Value::Int4(-99000)]]);
++    s.query("ROLLBACK").unwrap();
++    s.query("BEGIN").unwrap();
++    s.query("DECLARE b SCROLL CURSOR FOR SELECT id FROM cm LIMIT 20000").unwrap();
++    s.query("MOVE ALL FROM b").unwrap();
++    let start = std::time::Instant::now();
++    let r = s.query("FETCH BACKWARD ALL FROM b").unwrap().pop().unwrap();
++    assert_eq!(r.rows.len(), 20000);
++    assert_eq!(r.rows[0], vec![pg_engine::types::Value::Int4(20000)]);
++    assert_eq!(r.rows[19999], vec![pg_engine::types::Value::Int4(1)]);
++    assert!(start.elapsed() < Duration::from_secs(10), "backward fetch rescanned prefixes: {:?}", start.elapsed());
++    s.query("ROLLBACK").unwrap();
++}
+diff --git a/crates/pg-engine/tests/sql/a165_cursor_stream.out b/crates/pg-engine/tests/sql/a165_cursor_stream.out
+index e69de29b..f0591ca0 100644
+--- a/crates/pg-engine/tests/sql/a165_cursor_stream.out
++++ b/crates/pg-engine/tests/sql/a165_cursor_stream.out
+@@ -0,0 +1,397 @@
++> create table a165_cs (a int primary key, b text)
++-- CREATE TABLE
++
++> insert into a165_cs select g, 'r' || g from generate_series(1, 50) g
++-- INSERT 0 50
++
++> begin
++-- BEGIN
++
++> declare n no scroll cursor for select a, b from a165_cs order by a
++-- DECLARE CURSOR
++
++> fetch 3 from n
++a:int4 | b:text
++1 | r1
++2 | r2
++3 | r3
++-- FETCH 3
++
++> fetch next from n
++a:int4 | b:text
++4 | r4
++-- FETCH 1
++
++> move forward 10 in n
++-- MOVE 10
++
++> fetch 2 from n
++a:int4 | b:text
++15 | r15
++16 | r16
++-- FETCH 2
++
++> fetch prior from n
++ERROR 55000: cursor can only scan forward
++HINT: Declare it with SCROLL option to enable backward scan.
++
++> rollback
++-- ROLLBACK
++
++> begin
++-- BEGIN
++
++> declare n no scroll cursor for select a from a165_cs where a > 45
++-- DECLARE CURSOR
++
++> fetch all from n
++a:int4
++46
++47
++48
++49
++50
++-- FETCH 5
++
++> fetch next from n
++a:int4
++-- FETCH 0
++
++> move backward all in n
++ERROR 55000: cursor can only scan forward
++HINT: Declare it with SCROLL option to enable backward scan.
++
++> rollback
++-- ROLLBACK
++
++> begin
++-- BEGIN
++
++> declare n no scroll cursor for select a from a165_cs
++-- DECLARE CURSOR
++
++> fetch 2 from n
++a:int4
++1
++2
++-- FETCH 2
++
++> fetch relative 0 from n
++ERROR 55000: cursor can only scan forward
++HINT: Declare it with SCROLL option to enable backward scan.
++
++> rollback
++-- ROLLBACK
++
++> begin
++-- BEGIN
++
++> declare n no scroll cursor for select a from a165_cs
++-- DECLARE CURSOR
++
++> fetch absolute 3 from n
++a:int4
++3
++-- FETCH 1
++
++> fetch absolute 5 from n
++a:int4
++5
++-- FETCH 1
++
++> fetch absolute 2 from n
++ERROR 55000: cursor can only scan forward
++HINT: Declare it with SCROLL option to enable backward scan.
++
++> rollback
++-- ROLLBACK
++
++> begin
++-- BEGIN
++
++> declare s cursor for select a, b from a165_cs where a <= 10
++-- DECLARE CURSOR
++
++> fetch 3 from s
++a:int4 | b:text
++1 | r1
++2 | r2
++3 | r3
++-- FETCH 3
++
++> fetch prior from s
++a:int4 | b:text
++2 | r2
++-- FETCH 1
++
++> fetch relative 0 from s
++a:int4 | b:text
++2 | r2
++-- FETCH 1
++
++> fetch absolute 7 from s
++a:int4 | b:text
++7 | r7
++-- FETCH 1
++
++> fetch relative -3 from s
++a:int4 | b:text
++4 | r4
++-- FETCH 1
++
++> move backward all in s
++-- MOVE 3
++
++> fetch next from s
++a:int4 | b:text
++1 | r1
++-- FETCH 1
++
++> fetch last from s
++a:int4 | b:text
++10 | r10
++-- FETCH 1
++
++> fetch backward 2 from s
++a:int4 | b:text
++8 | r8
++9 | r9
++-- FETCH 2
++
++> fetch absolute -1 from s
++a:int4 | b:text
++10 | r10
++-- FETCH 1
++
++> fetch absolute 0 from s
++a:int4 | b:text
++-- FETCH 0
++
++> fetch forward all from s
++a:int4 | b:text
++1 | r1
++10 | r10
++2 | r2
++3 | r3
++4 | r4
++5 | r5
++6 | r6
++7 | r7
++8 | r8
++9 | r9
++-- FETCH 10
++
++> fetch backward all from s
++a:int4 | b:text
++1 | r1
++10 | r10
++2 | r2
++3 | r3
++4 | r4
++5 | r5
++6 | r6
++7 | r7
++8 | r8
++9 | r9
++-- FETCH 10
++
++> close s
++-- CLOSE CURSOR
++
++> declare s2 scroll cursor for select a from a165_cs where a between 20 and 24 order by a desc
++-- DECLARE CURSOR
++
++> fetch all from s2
++a:int4
++20
++21
++22
++23
++24
++-- FETCH 5
++
++> fetch first from s2
++a:int4
++24
++-- FETCH 1
++
++> fetch absolute 4 from s2
++a:int4
++21
++-- FETCH 1
++
++> move absolute 0 in s2
++-- MOVE 0
++
++> fetch 2 from s2
++a:int4
++23
++24
++-- FETCH 2
++
++> commit
++-- COMMIT
++
++> begin
++-- BEGIN
++
++> declare u cursor for select a, b from a165_cs where a <= 5
++-- DECLARE CURSOR
++
++> fetch 3 from u
++a:int4 | b:text
++1 | r1
++2 | r2
++3 | r3
++-- FETCH 3
++
++> fetch prior from u
++a:int4 | b:text
++2 | r2
++-- FETCH 1
++
++> update a165_cs set b = 'upd' where current of u
++-- UPDATE 1
++
++> fetch next from u
++a:int4 | b:text
++3 | r3
++-- FETCH 1
++
++> delete from a165_cs where current of u
++-- DELETE 1
++
++> rollback
++-- ROLLBACK
++
++> begin
++-- BEGIN
++
++> declare h scroll cursor with hold for select a from a165_cs where a <= 6
++-- DECLARE CURSOR
++
++> fetch 2 from h
++a:int4
++1
++2
++-- FETCH 2
++
++> commit
++-- COMMIT
++
++> fetch next from h
++a:int4
++3
++-- FETCH 1
++
++> fetch first from h
++a:int4
++1
++-- FETCH 1
++
++> fetch last from h
++a:int4
++6
++-- FETCH 1
++
++> fetch absolute 3 from h
++a:int4
++3
++-- FETCH 1
++
++> close h
++-- CLOSE CURSOR
++
++> begin
++-- BEGIN
++
++> declare h2 no scroll cursor with hold for select a from a165_cs where a <= 6
++-- DECLARE CURSOR
++
++> fetch 2 from h2
++a:int4
++1
++2
++-- FETCH 2
++
++> commit
++-- COMMIT
++
++> fetch all from h2
++a:int4
++3
++4
++5
++6
++-- FETCH 4
++
++> fetch prior from h2
++ERROR 55000: cursor can only scan forward
++HINT: Declare it with SCROLL option to enable backward scan.
++
++> close h2
++-- CLOSE CURSOR
++
++> begin
++-- BEGIN
++
++> declare v scroll cursor for select a, random() < 2 as r from a165_cs where a <= 4
++-- DECLARE CURSOR
++
++> fetch 3 from v
++a:int4 | r:bool
++1 | t
++2 | t
++3 | t
++-- FETCH 3
++
++> fetch prior from v
++a:int4 | r:bool
++2 | t
++-- FETCH 1
++
++> fetch first from v
++a:int4 | r:bool
++1 | t
++-- FETCH 1
++
++> rollback
++-- ROLLBACK
++
++> create function a165_cs_sum() returns bigint language plpgsql as $$
++> declare c cursor for select a from a165_cs; t bigint := 0; r record;
++> begin
++>   for r in c loop t := t + r.a; end loop;
++>   return t;
++> end $$
++-- CREATE FUNCTION
++
++> select a165_cs_sum()
++a165_cs_sum:int8
++1275
++-- SELECT 1
++
++> do $$
++> declare c scroll cursor for select a from a165_cs where a <= 8; x int;
++> begin
++>   open c;
++>   fetch last from c into x; raise notice 'last %', x;
++>   fetch prior from c into x; raise notice 'prior %', x;
++>   move backward all from c;
++>   fetch next from c into x; raise notice 'first %', x;
++>   close c;
++> end $$
++NOTICE 00000: last 8
++CONTEXT: PL/pgSQL function inline_code_block line 5 at RAISE
++NOTICE 00000: prior 7
++CONTEXT: PL/pgSQL function inline_code_block line 6 at RAISE
++NOTICE 00000: first 1
++CONTEXT: PL/pgSQL function inline_code_block line 8 at RAISE
++-- DO
++
++> drop function a165_cs_sum()
++-- DROP FUNCTION
++
++> drop table a165_cs
++-- DROP TABLE
++
+diff --git a/crates/pg-engine/tests/twophase.rs b/crates/pg-engine/tests/twophase.rs
+index 9fb28ec4..013cb299 100644
+--- a/crates/pg-engine/tests/twophase.rs
++++ b/crates/pg-engine/tests/twophase.rs
+@@ -163,3 +163,64 @@ fn prepared_role_changes_finish_after_a_restart() {
+         e.shutdown();
+     });
+ }
++
++/// Finishing a detached prepared transaction must not clear the bookkeeping of a newer
++/// transaction on the same backend. Both pg_locks and a strong waiter can transfer the
++/// newer transaction's fast-path holds before COMMIT/ROLLBACK PREPARED runs elsewhere.
++#[test]
++fn prepared_finish_preserves_reused_backend_lock_owners() {
++    on_thread(|| {
++        for finish in ["COMMIT", "ROLLBACK"] {
++            for strong_waiter in [false, true] {
++                let dir = tempfile::tempdir().unwrap();
++                let e = engine(dir.path(), 5);
++                let mut a = e.connect(1, "postgres", "postgres", "holder").unwrap();
++                let mut finisher = e.connect(2, "postgres", "postgres", "finisher").unwrap();
++                let mut observer = e.connect(3, "postgres", "postgres", "observer").unwrap();
++                let checked = |s: &mut Session, sql: &str| {
++                    let out = run(s, sql);
++                    assert!(!out.contains("ERROR"), "{finish}, strong={strong_waiter}: {out}");
++                };
++                checked(&mut a, "CREATE TABLE t (id int); CREATE TABLE t2 (id int); INSERT INTO t2 VALUES (1)");
++                checked(&mut a, "BEGIN; SELECT * FROM t; PREPARE TRANSACTION 'reuse'; BEGIN; SELECT * FROM t2");
++                let waiter = if strong_waiter {
++                    let e = e.clone();
++                    let waiter = std::thread::Builder::new().stack_size(64 << 20).spawn(move || {
++                        let mut w = e.connect(4, "postgres", "postgres", "waiter").unwrap();
++                        let out = run(&mut w, "SET lock_timeout = '5s'; BEGIN; LOCK TABLE t2 IN ACCESS EXCLUSIVE MODE; COMMIT");
++                        assert!(!out.contains("ERROR"), "{out}");
++                    }).unwrap();
++                    let deadline = std::time::Instant::now() + Duration::from_secs(3);
++                    loop {
++                        // Unlike pg_locks, pg_blocking_pids does not itself transfer every
++                        // fast-path hold: the waiting strong request must do the transfer.
++                        if rows(&mut observer, "SELECT pg_blocking_pids(4)::text") == ["{1}"] {
++                            break;
++                        }
++                        assert!(std::time::Instant::now() < deadline, "strong waiter did not block on backend 1");
++                        std::thread::sleep(Duration::from_millis(10));
++                    }
++                    Some(waiter)
++                } else {
++                    assert_eq!(rows(&mut observer, "SELECT count(*) FROM pg_locks WHERE pid = 1 AND relation = 't2'::regclass AND granted"), ["1"]);
++                    None
++                };
++                checked(&mut finisher, &format!("{finish} PREPARED 'reuse'"));
++                if strong_waiter {
++                    assert_eq!(rows(&mut observer, "SELECT pg_blocking_pids(4)::text"), ["{1}"]);
++                }
++                checked(&mut a, "COMMIT");
++                if let Some(waiter) = waiter {
++                    waiter.join().unwrap();
++                    assert_eq!(rows(&mut observer, "SELECT pg_blocking_pids(4)::text"), ["{}"]);
++                }
++                assert_eq!(rows(&mut observer, "SELECT count(*) FROM pg_locks WHERE pid = 1 AND locktype IN ('relation', 'transactionid', 'virtualxid')"), ["0"], "{finish}, strong={strong_waiter}");
++                checked(&mut observer, "SET statement_timeout = '2s'; CREATE INDEX CONCURRENTLY t2_i ON t2 (id)");
++                checked(&mut observer, "BEGIN; LOCK TABLE t, t2 IN ACCESS EXCLUSIVE MODE NOWAIT; COMMIT");
++                assert_eq!(rows(&mut observer, "SELECT count(*) FROM pg_prepared_xacts"), ["0"]);
++                drop((a, finisher, observer));
++                e.shutdown();
++            }
++        }
++    });
++}

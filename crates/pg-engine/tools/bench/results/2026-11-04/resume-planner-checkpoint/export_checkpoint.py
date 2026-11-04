@@ -59,11 +59,26 @@ passed, cursor check failed default SRF scrollability, and fail-fast prevented t
 The first timestamp fixture was invalid on both PG and engine, so it establishes no timestamp
 coverage; the corrected refcursor fixture was freshly recorded on PG18.6 and has no ERROR rows.
 A follow-up trace identified a Join-with-FromCall representation of Function Scan. Its temporary
-trace was removed, default scrollability corrected, and green165v2 is still in progress.
+trace was removed, default scrollability corrected, and green165v2 completed: lock3/3, cursor3/3 (twofiles), memory1/1 all exit0.
+Streaming retained0additional bytes after98krows; backward20k completed below10s.
+Corrected source is committed as caabeb196e268f5a0fb822e30565e633344058d1,
+remote-confirmed on owner wip/a165-resume-20261104. The exact-source full check165fixed
+job is active; no source acceptance or old-candidate timing is inferred.
 Completed outputs only are included; no source acceptance is inferred.
 '''
 files = {'README.md': readme.encode(), 'export_checkpoint.py': Path(__file__).read_bytes()}
 sources = {
+    'runners/check165fixed.sh': str(D / 'check165fixed.sh'),
+    'green165v2/head.txt': str(D / 'green165v2/head.txt'),
+    'green165v2/source.patch': str(D / 'green165v2/source.patch'),
+    'green165v2/exits.tsv': str(D / 'green165v2/exits.tsv'),
+    'green165v2/lock.command': str(D / 'green165v2/lock.command'),
+    'green165v2/lock.log': str(D / 'green165v2/lock.log'),
+    'green165v2/cursor.command': str(D / 'green165v2/cursor.command'),
+    'green165v2/cursor.log': str(D / 'green165v2/cursor.log'),
+    'green165v2/memory.command': str(D / 'green165v2/memory.command'),
+    'green165v2/memory.log': str(D / 'green165v2/memory.log'),
+    'green165v2/goldens.sha256': str(D / 'green165v2/goldens.sha256'),
     'runners/review165.sh': str(D / 'review165.sh'),
     'runners/probe165.sh': str(D / 'probe165.sh'),
     'runners/green165v2.sh': str(D / 'green165v2.sh'),
@@ -136,12 +151,14 @@ files['manifest.json'] = (json.dumps({name: {'sha256': hashlib.sha256(data).hexd
 with tempfile.TemporaryDirectory(prefix='a165-evidence-') as temp:
     env = dict(os.environ, GIT_INDEX_FILE=temp + '/index')
     head = git('rev-parse', 'HEAD')
-    git('read-tree', head, env=env)
+    previous = git('ls-remote', 'origin', REF).split()
+    # Retain the previous evidence tree: advancing the source HEAD must not put
+    # production changes in this evidence-only checkpoint's first-parent diff.
+    git('read-tree', previous[0] if previous else head, env=env)
     for name, data in files.items():
         blob = git('hash-object', '-w', '--stdin', data=data)
         git('update-index', '--add', '--cacheinfo', '100644', blob, PREFIX + name, env=env)
     tree = git('write-tree', env=env)
-    previous = git('ls-remote', 'origin', REF).split()
     parents = ['-p', previous[0], '-p', head] if previous else ['-p', head]
     commit = git('commit-tree', tree, *parents, data=b'pg-engine: preserve completed OLTP, planner, FDW recovery evidence\n')
     git('push', 'origin', commit + ':' + REF)

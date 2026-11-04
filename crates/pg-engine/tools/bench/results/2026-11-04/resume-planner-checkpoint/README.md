@@ -42,5 +42,9 @@ passed, cursor check failed default SRF scrollability, and fail-fast prevented t
 The first timestamp fixture was invalid on both PG and engine, so it establishes no timestamp
 coverage; the corrected refcursor fixture was freshly recorded on PG18.6 and has no ERROR rows.
 A follow-up trace identified a Join-with-FromCall representation of Function Scan. Its temporary
-trace was removed, default scrollability corrected, and green165v2 is still in progress.
+trace was removed, default scrollability corrected, and green165v2 completed: lock3/3, cursor3/3 (twofiles), memory1/1 all exit0.
+Streaming retained0additional bytes after98krows; backward20k completed below10s.
+Corrected source is committed as caabeb196e268f5a0fb822e30565e633344058d1,
+remote-confirmed on owner wip/a165-resume-20261104. The exact-source full check165fixed
+job is active; no source acceptance or old-candidate timing is inferred.
 Completed outputs only are included; no source acceptance is inferred.
