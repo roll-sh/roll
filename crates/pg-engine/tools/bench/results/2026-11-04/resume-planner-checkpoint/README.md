@@ -102,6 +102,8 @@ release/Clippy/build/unit-stack outputs excluded while active. Exactab3 DEBUG pa
 earlier fullwire101 remains preserved, no causal/performance inference. Release active.
 Observed debugcargo593561/parallel_scan1489244 effectiveaffinity0-35,overlapping149reserved
 4-7,22-25;nice19/jobs2/threads2 enforced, NO CPUisolation claim. No affinity/runnerchange;
+Release cargo1812146/rustc1812721,1812723 also observed nice19 and effectiveaffinity0-35;
+single read-only observation preserved, no mid-run controls changed.
 149timing deferred while overlap persists. Future launch-control assessment held until
 currentfulljobterminal/rawexport. Fullremaining gates pending. Independent exactab3 static review found noHIGH/MEDIUM,
 22paths/cursor exclusionverified;rawresult andcount/reviewer-scopeerratum retained.

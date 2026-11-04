@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "2e8225a56de5995230da9539c448aeb2ee424bd548aef944c0445758c4e17646",
-    "bytes": 9985
+    "sha256": "495c2d94133ea6564bf6c4ae27b3665b7e23b8aff0e7a6e2d59e59121dccee91",
+    "bytes": 10144
   },
   "bytea165compare/RESTORED": {
     "sha256": "cfeb0d7a74ac20eb1d46d347c00db409be5f9c5b47ca77e388b2e494a65d91c3",
@@ -98,6 +98,10 @@
   "check165ind-v2/affinity-observation-debug.json": {
     "sha256": "353f870df69398a58d5c13b340f10c906ede8765c897115c2019af29069b4356",
     "bytes": 4667
+  },
+  "check165ind-v2/affinity-observation-release.json": {
+    "sha256": "26ffd3d1345877066ea87ac78cc255dfb3877fd54205978453b8e599033ce842",
+    "bytes": 14628
   },
   "check165ind-v2/debug-completed-exits.tsv": {
     "sha256": "f08abcdc322c626e258456ce735cd82410657a770f20177d70bae93cba340fc1",
@@ -388,8 +392,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "9a450d7c4edc0440ca7af7abc8f080c2f983099ebf534ad769c2af0f2213e051",
-    "bytes": 21711
+    "sha256": "4e7d2488bf0494b34330ede4b0585fa1592b5d783effbdad83ab01bfa581587a",
+    "bytes": 21907
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",

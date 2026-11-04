@@ -119,6 +119,8 @@ release/Clippy/build/unit-stack outputs excluded while active. Exactab3 DEBUG pa
 earlier fullwire101 remains preserved, no causal/performance inference. Release active.
 Observed debugcargo593561/parallel_scan1489244 effectiveaffinity0-35,overlapping149reserved
 4-7,22-25;nice19/jobs2/threads2 enforced, NO CPUisolation claim. No affinity/runnerchange;
+Release cargo1812146/rustc1812721,1812723 also observed nice19 and effectiveaffinity0-35;
+single read-only observation preserved, no mid-run controls changed.
 149timing deferred while overlap persists. Future launch-control assessment held until
 currentfulljobterminal/rawexport. Fullremaining gates pending. Independent exactab3 static review found noHIGH/MEDIUM,
 22paths/cursor exclusionverified;rawresult andcount/reviewer-scopeerratum retained.
@@ -260,7 +262,7 @@ for campaign in ('embedded165v2', 'embedded165v3', 'green165r2', 'green165r2v2',
             sources[campaign + '/' + artifact.name] = str(artifact)
 for runner in ('embedded165v3.sh', 'green165r2.sh', 'green165r2v2.sh', 'check165r2.sh', 'check165r2-runner-error.sh', 'wrapper-selftest-results.json', 'red165r3.sh', 'green165r3.sh', 'R3-CASE-MATRIX.md', 'check165r3.sh', 'independent165.patch', 'independent165-scope.json', 'independent165-merge-audit.json', 'independent165-candidate.patch', 'DEFERRED-CURSOR-R4.md', 'focus165ind.sh', 'bytea165compare.py', 'check165ind.sh', 'check165ind-v2.sh', 'audit165-summary.py', 'ind165-expected-per-binary.json', 'ind165-test-count-reconciliation.json', 'ind165-frozen-runner.sha256', 'count-map-verification.json', 'count-map-check165fixed.json', 'caab-auditor-selfcheck.json', 'oltp-independent-source-review-r1-result.json', 'independent-review-erratum.md'):
     sources['runners/' + runner] = str(D / runner)
-for name in ('source.txt', 'tree.txt', 'initial.status', 'debug-test.command', 'debug-test.log', 'debug-test-summary.json', 'debug-completed-exits.tsv', 'affinity-observation-debug.json'):
+for name in ('source.txt', 'tree.txt', 'initial.status', 'debug-test.command', 'debug-test.log', 'debug-test-summary.json', 'debug-completed-exits.tsv', 'affinity-observation-debug.json', 'affinity-observation-release.json'):
     sources['check165ind-v2/' + name] = str(D / 'check165ind-v2' / name)
 for name, source in sources.items():
     files[name] = Path(source).read_bytes()
