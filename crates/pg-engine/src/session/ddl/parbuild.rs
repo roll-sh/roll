@@ -103,13 +103,19 @@ struct Plan<'a> {
     /// The table is modelled: each row's key in the index's model is taken (`sizing::
     /// btree_from_build` lays the model out from them) in place of the measure.
     model: bool,
+    #[cfg(test)]
+    observed: Option<std::sync::Arc<crate::exec::rowsize::observe::Observer>>,
 }
 
 impl Plan<'_> {
     /// A row: its entry, and its measure as `measure_rows_with` takes it.
-    fn row(&self, g: &mut Gathered, part: &mut Part, dkey: &[u8], bytes: &[u8]) -> Result<()> {
+    fn row(&self, g: &mut Gathered, part: &mut Part, dkey: &[u8], bytes: &[u8], _participant: usize) -> Result<()> {
         let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, &self.fmt);
         part.rows += 1;
+        #[cfg(test)]
+        if let Some(o) = &self.observed {
+            o.row(_participant);
+        }
         if self.model {
             let row = crate::exec::scan::decode_table_row_need(self.t, bytes, &self.need)?;
             let vals: Vec<Value> = self.cols.iter().map(|&i| row[i].clone()).collect();
@@ -119,6 +125,10 @@ impl Plan<'_> {
             let ty = |n: usize| self.ix_types.get(n).cloned();
             let key = crate::exec::sizing::index_key_of(self.t, self.ix, &ty, self.colls, vals, &row, &self.fmt);
             g.model.push((key, dkey.to_vec()));
+            #[cfg(test)]
+            if let Some(o) = &self.observed {
+                o.model_return(_participant);
+            }
             return Ok(());
         }
         let stored = crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(bytes)?, &self.types, &self.virt_mask);
@@ -143,6 +153,11 @@ impl Plan<'_> {
         if size > crate::exec::rowsize::BT_MAX_ITEM && g.oversized.as_ref().is_none_or(|o| k < o.0) {
             g.oversized = Some((k.clone(), size, dkey.to_vec()));
         }
+        #[cfg(test)]
+        if let Some(o) = &self.observed {
+            let expanded = vals.iter().filter_map(|v| if let Value::Text(s) = v { Some(s.len()) } else { None }).max().unwrap_or(0);
+            o.validated(_participant, &g.oversized, expanded);
+        }
         g.keys.push((prefix, sort, size));
         match stored {
             Some(len) => part.sizes.push(relsize::heap_tuple_of_len(len)),
@@ -166,11 +181,24 @@ impl Plan<'_> {
         stop: &AtomicBool,
         check: &dyn Fn() -> Result<()>,
         progress: (&IndexProgress, &AtomicU64),
+        _participant: usize,
     ) -> Result<Gathered> {
         let mut g = Gathered::default();
+        #[cfg(test)]
+        let mut first = true;
         loop {
+            #[cfg(test)]
+            let next = match &self.observed {
+                Some(o) if first => o.first(_participant, chunks)?,
+                _ => chunks.lock().unwrap().pop_front(),
+            };
+            #[cfg(not(test))]
             let next = chunks.lock().unwrap().pop_front();
             let Some((n, chunk)) = next else { break };
+            #[cfg(test)]
+            if let Some(o) = &self.observed {
+                o.chunk(_participant, n);
+            }
             let mut part = Part::default();
             for (i, r) in chunk.enumerate() {
                 if i % 1024 == 0 {
@@ -183,9 +211,21 @@ impl Plan<'_> {
                     }
                 }
                 let (dkey, bytes) = r?;
-                self.row(&mut g, &mut part, &dkey, &bytes)?;
+                let r = self.row(&mut g, &mut part, &dkey, &bytes, _participant);
+                #[cfg(test)]
+                if let (Some(o), Err(e)) = (&self.observed, &r) {
+                    o.error(_participant, e);
+                }
+                r?;
             }
             g.parts.push((n, part));
+            #[cfg(test)]
+            if first {
+                first = false;
+                if let Some(o) = &self.observed {
+                    o.completed_first(_participant)?;
+                }
+            }
         }
         g.entries.sort();
         // (Each participant's keys sorted here, merged by the leader: `btree_pages_sorted`.)
@@ -292,6 +332,12 @@ impl Ddl<'_, '_> {
         let release = Release(crate::exec::parscan::reserve_workers(workers, pool));
         crate::exec::parscan::count_index_build();
         let got = release.0;
+        #[cfg(test)]
+        let observed = crate::exec::rowsize::observe::current();
+        #[cfg(test)]
+        if let Some(o) = &observed {
+            o.reserve(model, workers, got);
+        }
         let chunks = {
             let txn = self.ctx.txn.borrow();
             let snap = txn.snap();
@@ -331,6 +377,8 @@ impl Ddl<'_, '_> {
             fmt: self.ctx.fmt().clone(),
             check_nulls: ix.unique && !ix.nulls_not_distinct,
             model,
+            #[cfg(test)]
+            observed,
         };
         let chunks = Mutex::new(chunks);
         let stop = AtomicBool::new(false);
@@ -339,19 +387,24 @@ impl Ddl<'_, '_> {
             let (plan, chunks, stop, report) = (&plan, &chunks, &stop, (progress, &done));
             let handles: Vec<_> = (0..got)
                 .filter_map(|i| {
-                    std::thread::Builder::new()
+                    let handle = std::thread::Builder::new()
                         .name(format!("roll-build-{i}"))
                         .spawn_scoped(s, move || {
-                            let r = plan.run(chunks, stop, &|| Ok(()), report);
+                            let r = plan.run(chunks, stop, &|| Ok(()), report, i + 1);
                             if r.is_err() {
                                 stop.store(true, Ordering::Relaxed);
                             }
                             r
                         })
-                        .ok()
+                        .ok();
+                    #[cfg(test)]
+                    if let Some(o) = &plan.observed {
+                        o.spawned(handle.is_some());
+                    }
+                    handle
                 })
                 .collect();
-            let lead = plan.run(chunks, stop, &|| self.ctx.check(), report);
+            let lead = plan.run(chunks, stop, &|| self.ctx.check(), report, 0);
             if lead.is_err() {
                 stop.store(true, Ordering::Relaxed);
             }
@@ -365,12 +418,18 @@ impl Ddl<'_, '_> {
         let mut sorted = Vec::new();
         let mut model_keys = Vec::new();
         let mut oversized: Option<(Vec<u8>, usize, Vec<u8>)> = None;
-        for g in gathered {
+        for (_participant, g) in gathered.into_iter().enumerate() {
             let g = g?;
+            #[cfg(test)]
+            let candidate = g.oversized.clone();
             if let Some(o) = g.oversized
                 && oversized.as_ref().is_none_or(|m| o.0 < m.0)
             {
                 oversized = Some(o);
+            }
+            #[cfg(test)]
+            if let Some(o) = &plan.observed {
+                o.folded(_participant, &candidate, &oversized);
             }
             parts.extend(g.parts);
             keys.push(g.keys);

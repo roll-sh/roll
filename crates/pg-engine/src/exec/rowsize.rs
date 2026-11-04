@@ -10,6 +10,9 @@
 //! one passes 8,152 bytes). Hash entries hold a hash code and SP-GiST's text_ops splits long
 //! values into prefixes: neither fails.
 
+#[cfg(test)]
+pub(crate) mod observe;
+
 use super::ExecCtx;
 use crate::catalog::Table;
 use crate::catalog::relsize::{index_tuple, type_layout};

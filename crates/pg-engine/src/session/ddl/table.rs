@@ -3672,6 +3672,12 @@ impl Ddl<'_, '_> {
 
     /// Fill a new index from the table's rows, checking uniqueness.
     pub(super) fn build_index(&mut self, t: &Table, ix: &Index) -> Result<()> {
+        #[cfg(test)]
+        let observed = crate::exec::rowsize::observe::current();
+        #[cfg(test)]
+        if let Some(o) = &observed {
+            o.identify(t.oid, ix.oid, &ix.name);
+        }
         // (The build reads the table with a sequential scan: pg_stat_*_tables' seq_scan,
         // last_seq_scan and seq_tup_read count it, as heapam_index_build_range_scan's.)
         crate::exec::pgstat::count_seqscan(self.ctx, t.oid);
@@ -3733,7 +3739,12 @@ impl Ddl<'_, '_> {
             crate::exec::pgstat::count_returned(counts, t.oid, 1);
             entries += 1;
             progress.scanned(entries);
-            sizes.row(t, &bix, vals, row, dkey, counts)?;
+            let validation = sizes.row(t, &bix, vals, row, dkey, counts);
+            #[cfg(test)]
+            if let Some(o) = &observed {
+                o.serial(validation.is_ok());
+            }
+            validation?;
             if quad && let Some(v) = vals.first().filter(|v| !v.is_null()) {
                 points += 1;
                 nan |= crate::exec::dml::nan_point(v);

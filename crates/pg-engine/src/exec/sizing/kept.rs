@@ -684,4 +684,123 @@ mod tests {
         let r = s.query("SELECT count(*) FROM ks").unwrap();
         assert_eq!(r.last().unwrap().rows, vec![vec![Value::Int8(1500)]]);
     }
+
+    #[derive(Clone, Copy, Debug)]
+    enum BuildCase {
+        Include(usize),
+        Duplicate(usize),
+        Minimum(bool),
+    }
+
+    fn combined_build_case(case: BuildCase, workers: usize, estimated: bool) -> (crate::error::Error, crate::exec::rowsize::observe::Trace) {
+        use crate::exec::rowsize::observe;
+        with_max_versions(if estimated { 500 } else { 20000 }, || {
+            let dir = tempfile::tempdir().unwrap();
+            let eng = Engine::open(EngineOptions { data_dir: dir.path().into(), sync: false, ..Default::default() }).unwrap();
+            let mut s = eng.connect(1, "postgres", "postgres", "combined-build-test").unwrap();
+            s.query(&format!("SET max_parallel_maintenance_workers={workers};
+                SET max_parallel_workers=2; SET min_parallel_table_scan_size=0;
+                SET maintenance_work_mem='128MB'")).unwrap();
+            s.query("CREATE FUNCTION ci_text(n int) RETURNS text LANGUAGE sql IMMUTABLE AS $$
+                SELECT left(string_agg(md5(g::text), '' ORDER BY g), n)
+                FROM generate_series(1, (n+31)/32) g $$").unwrap();
+            s.query("CREATE TABLE ci(k int, payload text) WITH (parallel_workers=2)").unwrap();
+            let (key, payload, unique, direction) = match case {
+                BuildCase::Include(n) => ("g".into(), format!("CASE WHEN g=6000 THEN ci_text({n}) ELSE 'small' END"), "", ""),
+                BuildCase::Duplicate(n) => ("CASE WHEN g=2 THEN 1 ELSE g END".into(),
+                    format!("CASE WHEN g=6000 THEN ci_text({n}) ELSE 'small' END"), "UNIQUE ", ""),
+                BuildCase::Minimum(desc) => {
+                    let key = "CASE WHEN g=1 THEN 9000 WHEN g=300 THEN -10 WHEN g=600 THEN -20 ELSE g END";
+                    (if desc { format!("-({key})") } else { key.into() },
+                        "CASE WHEN g=1 THEN ci_text(2800) WHEN g=300 THEN ci_text(3000) WHEN g=600 THEN ci_text(2880) ELSE 'small' END".into(),
+                        "", if desc { " DESC" } else { "" })
+                }
+            };
+            s.query(&format!("INSERT INTO ci SELECT {key}, {payload} FROM generate_series(1,6000) g")).unwrap();
+            let t = s.state.db.catalog().tables.values().find(|t| t.name == "ci").unwrap().clone();
+            assert_eq!(is_estimated(t.oid, &s.state.db), estimated);
+            assert_eq!(heap_writes(t.oid, &s.state.db).is_some(), !estimated);
+            let sql = format!("CREATE {unique}INDEX ci_i ON ci(k{direction}) INCLUDE(payload)");
+            let (result, trace) = observe::capture(workers == 2, || s.query(&sql));
+            let error = result.unwrap_err();
+            eprintln!("combined_index_build_validation {case:?} workers={workers} estimated={estimated}: {trace:#?}");
+            assert_eq!(trace.identity.as_ref().map(|i| i.2.as_str()), Some("ci_i"));
+            assert_eq!(trace.outcome.as_ref(), Some(&error));
+            assert!(trace.gate_error.is_none(), "{trace:#?}");
+            if workers == 0 {
+                assert_eq!(trace.spawned, 0);
+                assert!(trace.participants.is_empty());
+                assert!(trace.serial_validated > 0);
+            } else {
+                assert_eq!((trace.requested, trace.reserved, trace.spawned), (2, 2, 2));
+                assert_eq!(trace.model, !estimated);
+                assert_eq!(trace.serial_rows, 0, "parallel build fell back");
+                assert_eq!(trace.participants.len(), 3);
+                let threads: std::collections::BTreeSet<_> = trace.participants.values().map(|p| &p.thread).collect();
+                assert_eq!(threads.len(), 3, "participants must run on distinct threads");
+                let first_chunks: std::collections::BTreeSet<_> = trace.participants.values().map(|p| p.chunks[0]).collect();
+                assert_eq!(first_chunks.len(), 3);
+                for id in 0..=2 {
+                    let p = &trace.participants[&id];
+                    assert!(p.rows > 0 && p.validated > 0, "participant {id}: {p:#?}");
+                    if id > 0 {
+                        assert!(p.thread.contains("roll-build-"), "{p:#?}");
+                    }
+                    if !estimated {
+                        assert!(p.model_returns > 0, "modeled early-return path was not used: {p:#?}");
+                    } else {
+                        assert_eq!(p.model_returns, 0);
+                    }
+                }
+                if error.message.contains("maximum size is 8191") {
+                    assert!(trace.participants.values().any(|p| p.error.as_ref().is_some_and(|e| e.code == error.code && e.message == error.message)
+                        && p.expanded_text >= 8300), "formation failure lost its participant or expanded INCLUDE: {trace:#?}");
+                } else {
+                    assert_eq!(trace.participants.values().map(|p| p.validated).sum::<usize>(), 6000);
+                }
+            }
+            (error, trace)
+        })
+    }
+
+    // Definitions only until the parent runs this existing library-test target.
+    #[test]
+    fn combined_index_build_validation() {
+        for estimated in [false, true] {
+            for (case, code, message) in [
+                (BuildCase::Include(2800), "54000", "index row size 2816 exceeds btree version 4 maximum 2704"),
+                (BuildCase::Include(8300), "54000", "index row requires 8320 bytes, maximum size is 8191"),
+                (BuildCase::Duplicate(8300), "54000", "index row requires 8320 bytes, maximum size is 8191"),
+                (BuildCase::Duplicate(2800), "23505", "could not create unique index"),
+                (BuildCase::Duplicate(0), "23505", "could not create unique index"),
+            ] {
+                let (serial, _) = combined_build_case(case, 0, estimated);
+                let (parallel, trace) = combined_build_case(case, 2, estimated);
+                assert_eq!(serial.code, code);
+                assert!(serial.message.starts_with(message), "{serial:?}");
+                assert_eq!(parallel, serial, "full error fields differ: {case:?}, estimated={estimated}");
+                if matches!(case, BuildCase::Duplicate(2800)) {
+                    assert!(trace.participants.values().any(|p| p.minimum.is_some()), "duplicate must win over a real deferred candidate");
+                }
+                if matches!(case, BuildCase::Include(2800)) {
+                    assert!(trace.participants.values().any(|p| p.expanded_text >= 2800));
+                }
+            }
+            for desc in [false, true] {
+                let case = BuildCase::Minimum(desc);
+                let (serial, _) = combined_build_case(case, 0, estimated);
+                let (parallel, trace) = combined_build_case(case, 2, estimated);
+                assert_eq!(parallel, serial, "full error fields and selected TID differ: {case:?}");
+                assert!(serial.message.starts_with("index row size 2896 exceeds btree version 4 maximum 2704"), "{serial:?}");
+                let candidates: Vec<_> = trace.fold.iter().filter_map(|(id, c)| c.as_ref().map(|c| (*id, c))).collect();
+                assert_eq!(candidates.len(), 3, "all reserved first chunks must own a different candidate: {trace:#?}");
+                let winner = candidates.iter().min_by(|a, b| a.1.0.cmp(&b.1.0)).unwrap();
+                assert_ne!(winner.0, candidates[0].0, "winner must not be first folded");
+                assert_ne!(winner.0, 0, "leader must be included without overriding a worker winner");
+                assert_eq!(trace.minimum.as_ref(), Some(winner.1));
+                assert_eq!(winner.1.1, 2896);
+                assert_eq!(trace.participants[&winner.0].minimum.as_ref(), Some(winner.1));
+            }
+        }
+    }
 }
