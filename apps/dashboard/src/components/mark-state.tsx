@@ -54,3 +54,8 @@ export function useMarkState() {
   if (!ctx) throw new Error("useMarkState must be used inside <MarkStateProvider>");
   return ctx;
 }
+
+/** The shared state for a mark that only shows it (idle outside a provider, as in tests). */
+export function useMarkStateValue() {
+  return useContext(Ctx)?.state ?? "idle";
+}

@@ -12,13 +12,6 @@
   --accent: #4c8dff;
   --ok: #3ddc84;
   --danger: #ff3b30;
-  /* The agents surface (T3 Code's look, wave 6): raised cards and the composer, a user turn, the
-     hairline round floating things, and their soft shadows. Only the agents surface uses these. */
-  --raised: #101010;
-  --message: #1c1c1c;
-  --outline: rgb(255 255 255 / 7%);
-  --float-shadow: 0 14px 32px -18px rgb(0 0 0 / 75%);
-  --pop-shadow: 0 18px 44px -18px rgb(0 0 0 / 80%);
   color-scheme: dark;
 }
 
@@ -32,11 +25,6 @@
     --panel-2: #f4f4f4;
     --line: #ebebeb;
     --line-2: #dcdcdc;
-    --raised: #ffffff;
-    --message: #ececee;
-    --outline: rgb(0 0 0 / 8%);
-    --float-shadow: 0 1px 2px rgb(0 0 0 / 5%), 0 8px 24px -16px rgb(0 0 0 / 18%);
-    --pop-shadow: 0 16px 40px -18px rgb(0 0 0 / 35%);
     color-scheme: light;
   }
 }
@@ -56,10 +44,125 @@
   --color-raised: var(--raised);
   --color-message: var(--message);
   --color-outline: var(--outline);
+  --color-panel-3: var(--panel-3);
+  --color-line-3: var(--line-3);
+  --color-canvas: var(--canvas);
+  --color-sheet: var(--sheet);
+  --color-soft: var(--soft);
+  --color-popover: var(--popover);
+  --color-faint: var(--faint);
   --shadow-float: var(--float-shadow);
   --shadow-pop: var(--pop-shadow);
+  --shadow-card: var(--card-shadow);
+  --shadow-card-hover: var(--card-shadow-hover);
+  --shadow-sheet: var(--sheet-shadow);
+  --inset-shadow-highlight: var(--highlight);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-out-soft: cubic-bezier(0.23, 1, 0.32, 1);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+}
+
+/*
+ * The agents surface (popup, /dashboard/agents, the desktop Agents window): roll's design system
+ * for it, docs/code/agents-design.md. Linear's "inverted L": the chrome (header, threads sidebar)
+ * sits flush on the darkest base, the canvas is an inset rounded panel one step up, cards and the
+ * conversation sheet one step up again, popovers above those. Hairlines at low alpha with a faint
+ * top highlight on raised things, few but deep shadows on what floats. Inside `[data-agents]` the
+ * shared tokens (--bg, --panel, --line, --muted…) take the ladder's values, so every `bg-panel` /
+ * `border-line` in the surface lifts with it; the agents-only tokens live on :root too, because
+ * Base UI popups portal to <body>.
+ *
+ *   bg (base: header, sidebar) < canvas < sheet (side panel, dialogs) < panel = raised (cards,
+ *   composer) < panel-2 = popover (fills, inputs, menus) < panel-3 (pressed, selected)
+ */
+:root {
+  --canvas: #0d0e10;
+  --sheet: #111214;
+  --raised: #141518;
+  --popover: #1a1b1e;
+  --panel-3: #222327;
+  --message: #1d1e22;
+  --soft: #d0d6e0;
+  --faint: #45474d;
+  --outline: rgb(255 255 255 / 8.5%);
+  --line-3: rgb(255 255 255 / 13%);
+  --highlight: inset 0 1px 0 0 rgb(255 255 255 / 5%);
+  --card-shadow: 0 1px 2px rgb(0 0 0 / 35%), 0 8px 20px -12px rgb(0 0 0 / 70%);
+  --card-shadow-hover: 0 1px 2px rgb(0 0 0 / 40%), 0 16px 32px -14px rgb(0 0 0 / 80%);
+  --float-shadow: 0 1px 2px rgb(0 0 0 / 35%), 0 14px 32px -18px rgb(0 0 0 / 75%);
+  --pop-shadow: 0 4px 12px -2px rgb(0 0 0 / 35%), 0 18px 44px -18px rgb(0 0 0 / 80%);
+  --sheet-shadow: 0 24px 72px -20px rgb(0 0 0 / 90%);
+  --scrim: rgb(0 0 0 / 60%);
+  /* The canvas engine reads these opaque (resolveColor drops alpha). */
+  --edge: #2e3035;
+  --dot: #7e828b;
+}
+
+[data-agents] {
+  --bg: #08090a;
+  --fg: #f7f8f8;
+  --muted: #8a8f98;
+  --subtle: #62666d;
+  --panel: #141518;
+  --panel-2: #1a1b1e;
+  --line: rgb(255 255 255 / 5.5%);
+  --line-2: rgb(255 255 255 / 8.5%);
+  background: var(--bg);
+  color: var(--fg);
+}
+
+/* Inside the floating side panel, "the background" is the sheet's own surface. */
+[data-agents] [data-panel] {
+  --bg: var(--sheet);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --canvas: #fafafa;
+    --sheet: #ffffff;
+    --raised: #ffffff;
+    --popover: #ffffff;
+    --panel-3: #e8e8eb;
+    --message: #eeeef0;
+    --soft: #3c3f45;
+    --faint: #b6b8bd;
+    --outline: rgb(16 17 20 / 9%);
+    --line-3: rgb(16 17 20 / 16%);
+    --highlight: inset 0 1px 0 0 rgb(255 255 255 / 0%);
+    --card-shadow: 0 1px 2px rgb(16 17 20 / 5%), 0 4px 12px -6px rgb(16 17 20 / 8%);
+    --card-shadow-hover: 0 1px 2px rgb(16 17 20 / 6%), 0 12px 28px -12px rgb(16 17 20 / 16%);
+    --float-shadow: 0 1px 2px rgb(16 17 20 / 5%), 0 8px 24px -16px rgb(16 17 20 / 18%);
+    --pop-shadow: 0 4px 12px -4px rgb(16 17 20 / 8%), 0 16px 40px -18px rgb(16 17 20 / 26%);
+    --sheet-shadow: 0 1px 2px rgb(16 17 20 / 4%), 0 24px 64px -24px rgb(16 17 20 / 24%);
+    --scrim: rgb(16 17 20 / 28%);
+    --edge: #d2d3d7;
+    --dot: #8d9097;
+  }
+  [data-agents] {
+    --bg: #f1f1f2;
+    --fg: #121316;
+    --muted: #63666d;
+    --subtle: #8f9299;
+    --panel: #ffffff;
+    --panel-2: #f2f2f4;
+    --line: rgb(16 17 20 / 6.5%);
+    --line-2: rgb(16 17 20 / 10%);
+  }
+}
+
+/* Popovers, menus and dialogs: the panel a little see-through over a blur (T3's dropdown-glass). */
+@utility glass {
+  background: color-mix(in srgb, var(--popover) 88%, transparent);
+  -webkit-backdrop-filter: blur(16px) saturate(1.15);
+  backdrop-filter: blur(16px) saturate(1.15);
+}
+
+/* Bars over the canvas (views bar, toolbars): solid enough to read, the dots just showing through. */
+@utility canvas-glass {
+  background: color-mix(in srgb, var(--canvas) 82%, transparent);
+  -webkit-backdrop-filter: blur(12px) saturate(1.1);
+  backdrop-filter: blur(12px) saturate(1.1);
 }
 
 body {
@@ -374,28 +477,30 @@ body {
   }
 }
 
-/* agents: menus pop, the agents popup grows out of the header, its backdrop fades. */
+/* agents motion (docs/code/agents-design.md): popovers scale 0.98 → 1 with a fade in 150 ms;
+   sheets and panels glide on the drawer curve in 240 ms; nothing bounces. */
 @keyframes pop {
   from {
     opacity: 0;
-    transform: translateY(-3px) scale(0.98);
+    transform: translateY(-2px) scale(0.98);
   }
 }
 
 .pop {
-  animation: pop 0.15s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: pop 0.15s var(--ease-out-soft) both;
   transform-origin: top;
 }
 
+/* The agents popup opening over the page. */
 @keyframes sheet-in {
   from {
     opacity: 0;
-    transform: translateY(8px) scale(0.985);
+    transform: translateY(10px) scale(0.985);
   }
 }
 
 .sheet-in {
-  animation: sheet-in 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: sheet-in 0.26s cubic-bezier(0.32, 0.72, 0, 1) both;
 }
 
 @keyframes fade-in {
@@ -412,12 +517,12 @@ body {
 @keyframes panel-in {
   from {
     opacity: 0;
-    transform: translateX(24px);
+    transform: translateX(28px);
   }
 }
 
 .panel-in {
-  animation: panel-in 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: panel-in 0.24s cubic-bezier(0.32, 0.72, 0, 1) both;
 }
 
 /* The agents threads sidebar slides in from the left edge. */
@@ -429,12 +534,27 @@ body {
 }
 
 .sidebar-in {
-  animation: sidebar-in 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: sidebar-in 0.24s cubic-bezier(0.32, 0.72, 0, 1) both;
 }
 
-/* The card whose conversation or settings are open beside the canvas. */
+/* The chrome settles in a beat after the sheet (header, views bar, toolbar). */
+@keyframes chrome-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+.chrome-in {
+  animation: chrome-in 0.3s cubic-bezier(0.32, 0.72, 0, 1) 0.05s both;
+}
+
+/* The card whose conversation or settings are open beside the canvas: an accent hairline and halo. */
 [data-card][data-selected] [data-drag] {
-  border-color: color-mix(in oklab, var(--accent) 55%, transparent);
+  border-color: color-mix(in oklab, var(--accent) 70%, transparent);
+  box-shadow:
+    0 0 0 3px color-mix(in oklab, var(--accent) 16%, transparent),
+    var(--card-shadow-hover);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -442,7 +562,8 @@ body {
   .sheet-in,
   .panel-in,
   .sidebar-in,
-  .fade-in {
+  .fade-in,
+  .chrome-in {
     animation: none;
   }
 }

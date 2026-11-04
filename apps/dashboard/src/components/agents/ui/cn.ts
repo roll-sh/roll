@@ -11,9 +11,10 @@ export function mergeClass<S>(base: string, extra: string | ((state: S) => strin
 
 /**
  * The floating surface every popup shares (T3's `dropdown-glass` and popup shadow) in roll's
- * colours: the panel a little see-through over a blur, a hairline, a soft shadow.
+ * tokens (docs/code/agents-design.md): the popover layer a little see-through over a blur, the
+ * outline hairline, the top highlight and the pop shadow.
  */
-export const glass = "border border-line-2 bg-panel/90 backdrop-blur-xl backdrop-saturate-150 shadow-[0_16px_40px_-18px_rgb(0_0_0/35%)] dark:shadow-[0_18px_44px_-18px_rgb(0_0_0/80%)]";
+export const glass = "border border-outline glass shadow-pop inset-shadow-highlight";
 
 /** How popups grow out of their trigger and go (T3: scale 0.98 and a fade, about 150 ms). */
 export const popupMotion =

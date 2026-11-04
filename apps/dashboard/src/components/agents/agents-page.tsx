@@ -1,6 +1,6 @@
 "use client";
 
-import { DotField, RollLogo, RollMark } from "@roll/brand";
+import { DotField, HorizonMark, RollMark } from "@roll/brand";
 import { Archive, ArrowLeft, MoreHorizontal, PanelRightClose, Pin, PinOff, Plus, Search, Server, Share2, X } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
@@ -13,7 +13,7 @@ import type { AgentsServices } from "@/lib/agents-services";
 import { isNewAgentKey, setAgentsView, useAgentsSurface, type AgentsView } from "@/lib/agents-surface";
 import { ALL, applyView, isPinned, pinKey, pinnedConversations, pinOf, viewStorageKey, type Pin as PinRec } from "@/lib/agents-views";
 import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
-import { useMarkState } from "../mark-state";
+import { useMarkState, useMarkStateValue } from "../mark-state";
 import { AddMachineDialog, AddMachinePaths } from "./add-machine";
 import { AgentsCanvas, type CanvasHandle } from "./agents-canvas";
 import { CommandPalette, type PaletteHost } from "./command-palette";
@@ -65,7 +65,7 @@ export function AgentsPage({ demo = false, owner, focus, fresh = false }: { demo
   }, []);
   const mac = typeof window !== "undefined" && desktop()?.window === "agents" && desktop()?.platform === "darwin";
   return (
-    <div className="h-dvh bg-bg text-fg" data-desktop={mac ? "agents-mac" : undefined}>
+    <div className="h-dvh bg-bg text-fg" data-agents data-desktop={mac ? "agents-mac" : undefined}>
       {client && services ? (
         <AgentsSurface client={client} services={services} demo={demo} chrome="window" focus={focus && !focus.startsWith("t:") ? focus : undefined} />
       ) : (
@@ -75,10 +75,14 @@ export function AgentsPage({ demo = false, owner, focus, fresh = false }: { demo
   );
 }
 
+/** Connecting, or why it can't: the mark thinking (or still) over a line of text. */
 export function CenterNote({ children, shimmer = false }: { children: ReactNode; shimmer?: boolean }) {
   return (
-    <div className="grid h-full place-items-center px-6 text-center text-[13px] text-subtle">
-      <span className={shimmer ? "shimmer" : ""}>{children}</span>
+    <div className="fade-in grid h-full place-items-center px-6 text-center">
+      <div className="flex flex-col items-center gap-4 text-fg">
+        <HorizonMark size={40} state={shimmer ? "thinking" : "error"} label="" />
+        <span className={`text-[13px] ${shimmer ? "shimmer" : "text-muted"}`}>{children}</span>
+      </div>
     </div>
   );
 }
@@ -287,14 +291,21 @@ export function AgentsSurface({
   );
   const end = (
     <>
-      <button onClick={() => startNew()} className="inline-flex h-7 items-center gap-1 rounded-md bg-fg px-2 text-[12px] font-medium text-bg transition hover:opacity-85" title="New agent (⌘N)">
+      <button
+        onClick={() => startNew()}
+        className="ml-1 inline-flex h-7 items-center gap-1.5 rounded-md bg-fg pr-2.5 pl-2 text-[12.5px] font-medium tracking-[-0.01em] text-bg shadow-card inset-shadow-[0_1px_0_rgb(255_255_255/0.25)] transition-[opacity,scale] duration-150 hover:opacity-90 active:scale-[0.97]"
+        title="New agent (⌘N)"
+      >
         <Plus className="size-3.5" strokeWidth={2} />
         <span className="max-sm:sr-only">New agent</span>
       </button>
       {onClose && (
-        <IconButton label="Close (Esc)" onClick={onClose}>
-          <X className="size-4" />
-        </IconButton>
+        <>
+          <span className="mx-1 h-4 w-px bg-line-2" aria-hidden />
+          <IconButton label="Close (Esc)" onClick={onClose}>
+            <X className="size-4" strokeWidth={1.75} />
+          </IconButton>
+        </>
       )}
     </>
   );
@@ -305,39 +316,48 @@ export function AgentsSurface({
         {/* The full window drives the logo itself (in the popup, the header already does). */}
         {chrome === "window" && <MarkDriver client={client} />}
         <div className="flex min-h-0 flex-1 flex-col">
-          <div className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-3" data-drag-region>
-            {chrome === "window" && <WindowHome />}
-            <SidebarToggle open={sidebar} onToggle={() => setSidebar(!sidebar)} />
-            <h2 className="text-[13.5px] font-semibold tracking-[-0.02em]">Agents</h2>
-            <span className="flex min-w-0 items-center gap-2 text-[12px] text-subtle">
+          <header className="chrome-in relative z-10 flex h-12 shrink-0 items-center gap-3 pr-2 pl-2" data-drag-region>
+            <span className="flex shrink-0 items-center gap-2.5">
+              <SidebarToggle open={sidebar} onToggle={() => setSidebar(!sidebar)} />
+              {chrome === "window" ? <WindowHome /> : <HeaderMark />}
+              <h2 className="text-[14px] font-[590] tracking-[-0.02em]">Agents</h2>
+            </span>
+            <span className="h-4 w-px shrink-0 bg-line-2" aria-hidden />
+            <span className="flex min-w-0 items-center gap-2 text-[12.5px] text-muted">
               <span className={`size-1.5 shrink-0 rounded-full ${snap.conn === "live" ? (running ? "pulse-dot bg-accent" : "bg-ok") : snap.conn === "error" ? "bg-danger" : "bg-subtle"}`} aria-hidden />
               <span className="truncate">
                 {snap.conn === "live" ? (running ? `${running} running` : "All idle") : snap.conn === "error" ? (snap.error ?? "Can't reach roll") : "Reconnecting…"}
-                {demo && " · demo"}
               </span>
               {requests.length > 0 && (
-                <button onClick={() => openThread(requests[0].thread)} className="shrink-0 rounded-full bg-accent/15 px-2 py-0.5 text-[11.5px] text-accent hover:bg-accent/25" data-nodrag>
-                  {requests.length} waiting for you
+                <button
+                  onClick={() => openThread(requests[0].thread)}
+                  aria-label={`${requests.length} waiting for you`}
+                  className="inline-flex h-[22px] shrink-0 items-center gap-1.5 rounded-full border border-accent/30 bg-accent/10 pr-2 pl-1 text-[11.5px] font-medium text-accent transition-colors duration-150 hover:bg-accent/20"
+                  data-nodrag
+                >
+                  <span className="grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 font-mono text-[10px] font-semibold text-white tabular-nums">{requests.length}</span>
+                  waiting for you
                 </button>
               )}
+              {demo && <span className="shrink-0 rounded-[5px] border border-line-2 px-1.5 text-[10px] leading-[18px] font-medium tracking-[0.06em] text-subtle uppercase">Demo</span>}
             </span>
-            <span className="ml-auto flex shrink-0 items-center gap-1" data-nodrag>
+            <span className="ml-auto flex shrink-0 items-center gap-0.5 text-muted" data-nodrag>
               <button
                 onClick={() => openPalette()}
-                className="mr-1 flex h-7 items-center gap-2 rounded-lg bg-fg/[0.05] px-2.5 text-[12px] text-subtle transition-colors hover:bg-fg/[0.08] hover:text-fg max-sm:w-7 max-sm:justify-center max-sm:px-0"
+                className="mr-2 flex h-7 w-60 items-center gap-2 rounded-md border border-line bg-fg/[0.03] pr-1 pl-2.5 text-[12.5px] text-subtle inset-shadow-highlight transition-colors duration-150 hover:border-line-2 hover:bg-fg/[0.05] hover:text-muted max-lg:w-44 max-sm:w-7 max-sm:justify-center max-sm:border-0 max-sm:bg-transparent max-sm:px-0"
                 title="Search, run an action, or say what to do (⌘K)"
                 aria-label="Command palette"
               >
-                <Search className="size-3.5 shrink-0" />
-                <span className="max-sm:hidden">Search or ask agents…</span>
-                <kbd className="font-sans text-[11px] text-subtle max-sm:hidden">⌘K</kbd>
+                <Search className="size-3.5 shrink-0" strokeWidth={1.75} />
+                <span className="min-w-0 flex-1 truncate text-left max-sm:hidden">Search or ask agents…</span>
+                <kbd className="rounded-[4px] border border-line-2 bg-fg/[0.04] px-1 font-sans text-[10.5px] leading-[16px] text-subtle max-sm:hidden">⌘K</kbd>
               </button>
               <IconButton label="Add a machine" onClick={() => setAdding(true)}>
-                <Server className="size-4" />
+                <Server className="size-4" strokeWidth={1.75} />
               </IconButton>
               <Menu
                 label="More"
-                trigger={<MoreHorizontal className="size-4" />}
+                trigger={<MoreHorizontal className="size-4" strokeWidth={1.75} />}
                 items={[
                   archived > 0 && { label: `${showArchived ? "Hide" : "Show"} archived (${archived})`, icon: <Archive />, onSelect: () => setShowArchived((s) => !s) },
                   !demo && { label: "Shared links", icon: <Share2 />, onSelect: () => window.location.assign(`/dashboard/agents/shares?owner=${encodeURIComponent(client.owner)}`) },
@@ -345,10 +365,11 @@ export function AgentsSurface({
               />
               {end}
             </span>
-          </div>
+          </header>
           <div className="relative flex min-h-0 flex-1">
             <ThreadsSidebar data={data} open={sidebar} setOpen={setSidebar} phone={phone} openThread={shown.kind === "thread" ? shown.thread : null} />
-            <div className="relative min-h-0 min-w-0 flex-1">
+            {/* The working area: an inset panel one step up from the chrome (Linear's inverted L). */}
+            <div className={`relative min-h-0 min-w-0 flex-1 overflow-hidden bg-canvas ${phone ? "" : "mx-2 mb-2 rounded-xl border border-line"}`}>
               {data.machines.size === 0 && snap.conn !== "connecting" ? (
                 <Empty demo={demo} onCreated={onSandbox} />
               ) : (
@@ -436,7 +457,8 @@ function SidePanel({ phone, label, children }: { phone: boolean; label: string; 
   return (
     <aside
       aria-label={label}
-      className={`panel-in flex min-h-0 flex-col bg-bg ${phone ? "absolute inset-0 z-20" : "relative shrink-0 border-l border-line"}`}
+      data-panel
+      className={`panel-in flex min-h-0 flex-col ${phone ? "absolute inset-0 z-20 bg-sheet" : "relative shrink-0 pr-2 pb-2"}`}
       style={phone ? undefined : { width: `min(${width}px, calc(100% - 320px))` }}
     >
       {!phone && (
@@ -445,10 +467,16 @@ function SidePanel({ phone, label, children }: { phone: boolean; label: string; 
           aria-orientation="vertical"
           aria-label="Resize the panel"
           onPointerDown={onPointerDown}
-          className="absolute inset-y-0 -left-1 z-10 w-2 cursor-col-resize transition-colors hover:bg-accent/20"
-        />
+          className="group/resize absolute inset-y-0 -left-2 z-10 flex w-2 cursor-col-resize justify-center"
+        >
+          <span className="my-auto h-10 w-[3px] rounded-full bg-line-3 opacity-0 transition-[opacity,height,background-color] duration-150 group-hover/resize:h-16 group-hover/resize:bg-accent/70 group-hover/resize:opacity-100" />
+        </div>
       )}
-      {children}
+      {phone ? (
+        children
+      ) : (
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line-2 bg-sheet shadow-sheet inset-shadow-highlight">{children}</div>
+      )}
     </aside>
   );
 }
@@ -458,12 +486,22 @@ function MarkDriver({ client }: { client: AgentsClient }) {
   return null;
 }
 
+/** The popup's logo: the Horizon mark, following the shared state. */
+function HeaderMark() {
+  const state = useMarkStateValue();
+  return (
+    <span className="flex items-center" aria-hidden>
+      <HorizonMark state={state} size={22} label="" />
+    </span>
+  );
+}
+
 /** The full window's way back to the rest of roll. */
 function WindowHome() {
   const { state } = useMarkState();
   return (
-    <Link href="/dashboard" className="mr-1 flex items-center" aria-label="roll" title="Open roll" data-nodrag>
-      <RollLogo state={state} size={16} />
+    <Link href="/dashboard" className="flex items-center" aria-label="roll" title="Open roll" data-nodrag>
+      <HorizonMark state={state} size={22} label="roll" />
     </Link>
   );
 }

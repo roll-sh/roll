@@ -34,10 +34,11 @@ export function Card({
   onClick?: () => void;
   label?: string;
 }) {
-  const border = tone === "busy" ? "border-accent/45" : tone === "error" ? "border-danger/50" : tone === "done" ? "border-ok/45" : "border-line";
+  const border = tone === "busy" ? "border-accent/40" : tone === "error" ? "border-danger/45" : tone === "done" ? "border-ok/40" : "border-line-2";
   return (
     <div
       data-drag
+      data-tone={tone}
       role={onClick ? "button" : undefined}
       tabIndex={onClick ? 0 : undefined}
       aria-label={label}
@@ -53,20 +54,29 @@ export function Card({
           : undefined
       }
       style={{ width }}
-      className={`group/card rounded-xl border bg-panel text-[13px] transition-colors ${border} ${tone === "muted" ? "opacity-60" : ""} ${
-        onClick ? "cursor-pointer hover:border-line-2 focus-visible:outline focus-visible:outline-accent" : "cursor-default"
-      } ${className}`}
+      className={`group/card relative rounded-xl border bg-panel text-[13px] shadow-card inset-shadow-highlight transition-[border-color,box-shadow,opacity] duration-150 ease-out ${border} ${tone === "muted" ? "opacity-60" : ""} ${
+        onClick ? "cursor-pointer hover:shadow-card-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent/70" : "cursor-default"
+      } ${onClick && !tone ? "hover:border-line-3" : ""} ${className}`}
     >
       {children}
     </div>
   );
 }
 
-/** Buttons a card shows while the pointer is on it (always on touch screens and keyboard focus). */
+/** The small tile a machine or project card leads with: its icon on a raised square. */
+function IconTile({ children }: { children: ReactNode }) {
+  return <span className="grid size-6 shrink-0 place-items-center rounded-md border border-line bg-panel-2 text-muted inset-shadow-highlight [&>svg]:size-3.5">{children}</span>;
+}
+
+/**
+ * A card's tools: a small floating toolbar over its top-right corner while the pointer is on it
+ * (always on touch screens, and while one has keyboard focus). It takes no room in the card, so
+ * names never truncate for buttons that aren't showing.
+ */
 function HoverActions({ children, className = "" }: { children: ReactNode; className?: string }) {
   return (
     <div
-      className={`flex items-center gap-0.5 text-subtle opacity-0 transition-opacity duration-150 group-hover/card:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100 ${className}`}
+      className={`pointer-events-none absolute -top-3.5 right-2.5 z-10 flex translate-y-1 items-center gap-0.5 rounded-lg border border-line-2 p-0.5 text-muted opacity-0 shadow-pop inset-shadow-highlight glass transition-[opacity,translate] duration-150 ease-out group-hover/card:pointer-events-auto group-hover/card:translate-y-0 group-hover/card:opacity-100 focus-within:pointer-events-auto focus-within:translate-y-0 focus-within:opacity-100 [@media(hover:none)]:pointer-events-auto [@media(hover:none)]:translate-y-0 [@media(hover:none)]:opacity-100 ${className}`}
       data-nodrag
     >
       {children}
@@ -86,7 +96,7 @@ function Tool({ label, onClick, disabled, launch, children }: { label: string; o
       title={label}
       aria-label={label}
       data-launch={disabled ? undefined : launch}
-      className={`grid size-6 place-items-center rounded-md transition hover:bg-panel-2 hover:text-fg disabled:opacity-30 [&>svg]:size-3.5 ${launch && !disabled ? "cursor-grab active:cursor-grabbing" : ""}`}
+      className={`grid size-6 place-items-center rounded-md transition-colors duration-150 hover:bg-panel-3 hover:text-fg disabled:opacity-30 [&>svg]:size-3.5 [&>svg]:stroke-[1.75] ${launch && !disabled ? "cursor-grab active:cursor-grabbing" : ""}`}
     >
       {children}
     </button>
@@ -142,15 +152,16 @@ export function MachineNode({ machine }: { machine: Machine }) {
     });
   return (
     <Card width={272} tone={state === "offline" ? "muted" : undefined} label={`Machine ${machine.name}`}>
-      <div className="relative flex items-center gap-2 px-3.5 pt-3">
-        <MachineIcon machine={machine} className="size-4 text-muted" />
-        <span className="min-w-0 flex-1 truncate font-medium tracking-[-0.01em]">{machine.name}</span>
+      <div className="flex items-center gap-2.5 px-3 pt-3">
+        <IconTile>
+          <MachineIcon machine={machine} />
+        </IconTile>
+        <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold tracking-[-0.015em]">{machine.name}</span>
         <span className="flex shrink-0 items-center gap-1.5 text-[11px] text-subtle">
           <StatusDot status={machine.online ? "online" : "offline"} />
           <span className={coming(state) ? "shimmer" : ""}>{state}</span>
         </span>
-        {/* Over the status while the pointer is on the card, so the name keeps its room. */}
-        <HoverActions className="pointer-events-none absolute top-2.5 right-2.5 rounded-md bg-panel pl-1 group-hover/card:pointer-events-auto focus-within:pointer-events-auto [@media(hover:none)]:pointer-events-auto">
+        <HoverActions>
           {startNew && reachable(machine) && (
             <Tool label="New agent on this machine (or drag onto the canvas)" launch={`m:${machine.id}`} onClick={() => startNew(undefined, { machine: machine.id })}>
               <Plus />
@@ -174,7 +185,7 @@ export function MachineNode({ machine }: { machine: Machine }) {
           </Tool>
         </HoverActions>
       </div>
-      <div className="space-y-2.5 px-3.5 pt-1 pb-3">
+      <div className="space-y-2.5 px-3 pt-2.5 pb-3">
         {os && <p className="truncate font-mono text-[11px] text-subtle">{os}</p>}
         {!machine.online && !sandbox && (
           <p className="text-[11.5px] text-subtle">
@@ -252,9 +263,11 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
   const stats = projectStats(client.data, project.id);
   return (
     <Card width={256} label={`Project ${project.name}`}>
-      <div className="flex items-center gap-2 px-3.5 pt-3">
-        <Folder className="size-4 text-muted" />
-        <span className="min-w-0 flex-1 truncate font-medium tracking-[-0.01em]">{project.name}</span>
+      <div className="flex items-center gap-2.5 px-3 pt-3">
+        <IconTile>
+          <Folder />
+        </IconTile>
+        <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold tracking-[-0.015em]">{project.name}</span>
         <HoverActions>
           {startNew && (
             <Tool label="New agent here (or drag onto the canvas)" launch={`p:${project.id}`} disabled={!online} onClick={() => startNew(project.id)}>
@@ -270,6 +283,7 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
           </Tool>
           <Menu
             label="Project"
+            className="[&>button]:size-6"
             trigger={<MoreHorizontal className="size-3.5" />}
             items={[
               { label: "Settings", icon: <Settings2 />, onSelect: () => setAgentsView({ kind: "settings", target: `p:${project.id}` }) },
@@ -285,7 +299,7 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
           />
         </HoverActions>
       </div>
-      <div className="flex items-center gap-2 px-3.5 pt-1 pb-3 font-mono text-[11px] text-subtle">
+      <div className="flex items-center gap-2 px-3 pt-2 pb-3 font-mono text-[11px] text-subtle">
         {project.git?.branch && (
           <span className="flex shrink-0 items-center gap-1" title={project.git.dirty ? "Uncommitted changes" : undefined}>
             <GitBranch className="size-3" />
@@ -303,7 +317,7 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
         )}
       </div>
       {stats.threads > 0 && <StatsRows stats={stats} providers={providersFor(client.data, machine?.id)} />}
-      {project.settings.auto_pull && project.pull && <PullLine pull={project.pull} className="mx-3.5 mb-3 -mt-1" />}
+      {project.settings.auto_pull && project.pull && <PullLine pull={project.pull} className="mx-3 mb-3 -mt-1" />}
       {!stats.threads && startNew && online && (
         <div className="px-3 pb-3">
           <button data-nodrag onClick={() => startNew(project.id)} className={`${primary} w-full justify-center`}>
@@ -311,7 +325,7 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
           </button>
         </div>
       )}
-      {error && <p className="px-3.5 pb-3 text-[12px] text-danger">{error}</p>}
+      {error && <p className="px-3 pb-3 text-[12px] text-danger">{error}</p>}
     </Card>
   );
 }
@@ -321,7 +335,7 @@ function StatsRows({ stats, providers }: { stats: ProjectStats; providers: reado
   const landed = stats.changes.filter((c) => c.status === "landed").length;
   const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
   return (
-    <div className="mx-3.5 mb-3 space-y-1 border-t border-line pt-2.5 text-[11px] text-subtle">
+    <div className="mx-3 mb-3 space-y-1 border-t border-line pt-2.5 text-[11px] text-subtle">
       <p className="flex items-center gap-1.5">
         <span className="min-w-0 truncate">
           {plural(stats.threads, "thread", "threads")}
@@ -400,7 +414,7 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
         <div className="mt-1.5 flex items-start gap-2">
           <p className="line-clamp-2 min-w-0 flex-1 text-[13.5px] leading-snug font-medium tracking-[-0.01em]">{thread.title}</p>
           {forkable && (
-            <HoverActions className="-my-0.5">
+            <HoverActions>
               <Tool label="Fork (or drag onto the canvas)" launch={`t:${thread.id}`} onClick={fork}>
                 <GitFork />
               </Tool>

@@ -132,13 +132,14 @@ function Popup({ client, services, error, demo }: Pick<ReturnType<typeof useAgen
   if (!open) return null;
   return createPortal(
     <div className="fixed inset-0 z-50">
-      <div className="fade-in absolute inset-0 bg-black/55 backdrop-blur-[2px]" onMouseDown={hideAgents} aria-hidden />
+      <div className="fade-in absolute inset-0 bg-(--scrim) backdrop-blur-[2px]" onMouseDown={hideAgents} aria-hidden />
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Agents"
         data-surface
-        className="sheet-in absolute inset-0 overflow-hidden bg-bg"
+        data-agents
+        className="sheet-in absolute inset-0 overflow-hidden bg-bg text-fg"
       >
         {client && services ? (
           <AgentsSurface client={client} services={services} demo={demo} chrome="popup" onClose={hideAgents} />

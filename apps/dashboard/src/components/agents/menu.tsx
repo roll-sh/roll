@@ -57,12 +57,16 @@ export function Menu({
         aria-expanded={open}
         aria-label={label}
         title={label}
-        className={`grid size-7 place-items-center rounded-md text-subtle transition hover:bg-panel-2 hover:text-fg ${open ? "bg-panel-2 text-fg" : ""}`}
+        className={`grid size-7 place-items-center rounded-md text-subtle transition-colors duration-150 hover:bg-fg/[0.07] hover:text-fg ${open ? "bg-fg/[0.07] text-fg" : ""}`}
       >
         {trigger}
       </button>
       {open && (
-        <div role="menu" aria-label={label} className={`pop absolute top-full z-50 mt-1.5 min-w-48 rounded-lg border border-line bg-panel p-1 ${align === "end" ? "right-0" : "left-0"}`}>
+        <div
+          role="menu"
+          aria-label={label}
+          className={`pop absolute top-full z-50 mt-1.5 min-w-48 rounded-[10px] border border-outline p-1 shadow-pop inset-shadow-highlight glass ${align === "end" ? "right-0" : "left-0"}`}
+        >
           {shown.map((i) => {
             const asking = armed === i.label;
             return (
@@ -76,11 +80,11 @@ export function Menu({
                   setOpen(false);
                   i.onSelect();
                 }}
-                className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] transition disabled:opacity-35 ${
-                  i.danger ? "text-danger hover:bg-danger/10" : "text-muted hover:bg-panel-2 hover:text-fg"
+                className={`flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-100 disabled:opacity-35 ${
+                  i.danger ? "text-danger hover:bg-danger/10" : "text-fg hover:bg-fg/[0.07]"
                 }`}
               >
-                <span className="grid size-3.5 place-items-center [&>svg]:size-3.5">{i.icon}</span>
+                <span className={`grid size-3.5 place-items-center [&>svg]:size-3.5 [&>svg]:stroke-[1.75] ${i.danger ? "" : "text-muted"}`}>{i.icon}</span>
                 {asking ? i.confirm : i.label}
               </button>
             );

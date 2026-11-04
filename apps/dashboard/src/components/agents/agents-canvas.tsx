@@ -158,15 +158,16 @@ export const AgentsCanvas = forwardRef<
     e.setScene(positions, meta, graph.edges, sz);
   }, [positions, graph, sizeOf]);
 
+  // `all`: everything, however small (the Fit button, `1`). Otherwise readable cards beat seeing
+  // everything: never below READABLE (a phone, 0.55), framed from the top.
   const fit = useCallback(
-    (animate = true) => {
+    (animate = true, all = false) => {
       const e = engine.current;
       if (!e) return;
       const r = bounds(positions, sizeOf);
       const { w, h } = e.viewport;
       if (!r || !w || !h) return;
-      // On a phone, readable cards beat seeing everything: pan from the machines on.
-      e.setView(w < 640 ? fitView(r, w, h, 24, 1, 0.55) : fitView(r, w, h, 64, 1), animate);
+      e.setView(w < 640 ? fitView(r, w, h, 24, 1, all ? 0 : 0.55) : fitView(r, w, h, 64, 1, all ? 0 : READABLE), animate);
     },
     [positions, sizeOf],
   );
@@ -440,7 +441,7 @@ export const AgentsCanvas = forwardRef<
           break;
         case "1":
         case "!":
-          fit(true);
+          fit(true, true);
           break;
         case "ArrowLeft":
           e.panBy(step, 0, true);
@@ -471,7 +472,7 @@ export const AgentsCanvas = forwardRef<
   return (
     <div
       ref={container}
-      className="relative h-full w-full touch-none overflow-hidden overscroll-none bg-bg text-fg select-none"
+      className="relative h-full w-full touch-none overflow-hidden overscroll-none bg-canvas text-fg select-none"
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -489,13 +490,13 @@ export const AgentsCanvas = forwardRef<
       </div>
       {overlay}
       {ghost && <LaunchGhost {...ghost} />}
-      <div className="absolute right-4 bottom-4 flex items-center gap-0.5 rounded-lg border border-line bg-panel/90 p-0.5 text-muted backdrop-blur">
+      <div className="chrome-in absolute right-3 bottom-3 flex items-center gap-0.5 rounded-[10px] border border-line-2 p-0.5 text-muted shadow-pop inset-shadow-highlight glass">
         <ToolButton label="Zoom out (−)" onClick={() => engine.current?.zoomBy(0.8)}>
           <Minus className="size-3.5" />
         </ToolButton>
         <button
           onClick={() => engine.current?.zoomBy(1 / (engine.current?.view.k ?? 1))}
-          className="w-11 rounded-md py-1 text-center font-mono text-[11px] tabular-nums hover:bg-panel-2 hover:text-fg"
+          className="h-7 w-12 rounded-md text-center font-mono text-[11px] tabular-nums transition-colors duration-150 hover:bg-panel-2 hover:text-fg"
           title="Zoom to 100% (0)"
         >
           {Math.round(zoom * 100)}%
@@ -503,7 +504,7 @@ export const AgentsCanvas = forwardRef<
         <ToolButton label="Zoom in (+)" onClick={() => engine.current?.zoomBy(1.25)}>
           <Plus className="size-3.5" />
         </ToolButton>
-        <ToolButton label="Fit everything (1)" onClick={() => fit(true)}>
+        <ToolButton label="Fit everything (1)" onClick={() => fit(true, true)}>
           <Maximize className="size-3.5" />
         </ToolButton>
         {arrangedByUser && (
@@ -546,7 +547,7 @@ function LaunchGhost({ source, from, to, over }: { source: string; from: Point; 
       </svg>
       <div
         role="status"
-        className={`pointer-events-none absolute z-20 rounded-md border border-line-2 bg-panel/95 px-2 py-1 text-[11.5px] whitespace-nowrap shadow-[0_8px_24px_-12px_rgb(0_0_0/0.6)] ${over ? "text-subtle" : "text-fg"}`}
+        className={`pointer-events-none absolute z-20 rounded-md border border-line-2 px-2 py-1 text-[11.5px] whitespace-nowrap shadow-pop glass ${over ? "text-subtle" : "text-fg"}`}
         style={{ left: to.x + 14, top: to.y + 12 }}
       >
         {label}
@@ -554,6 +555,8 @@ function LaunchGhost({ source, from, to, over }: { source: string; from: Point; 
     </>
   );
 }
+/** The smallest zoom an automatic fit goes to on a desktop: cards stay legible. */
+const READABLE = 0.6;
 
 /** Whether `r` (world) shows at all in a `viewport` seen through `v`. */
 function overlaps(r: { x: number; y: number; w: number; h: number }, v: View, viewport: { w: number; h: number }) {
@@ -564,7 +567,7 @@ function overlaps(r: { x: number; y: number; w: number; h: number }, v: View, vi
 
 function ToolButton({ label, onClick, children }: { label: string; onClick: () => void; children: ReactNode }) {
   return (
-    <button onClick={onClick} title={label} aria-label={label} className="grid size-7 place-items-center rounded-md hover:bg-panel-2 hover:text-fg">
+    <button onClick={onClick} title={label} aria-label={label} className="grid size-7 place-items-center rounded-md transition-colors duration-150 hover:bg-panel-2 hover:text-fg [&>svg]:stroke-[1.75]">
       {children}
     </button>
   );

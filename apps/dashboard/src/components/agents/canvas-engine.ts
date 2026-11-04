@@ -78,9 +78,13 @@ export class CanvasEngine {
   private anyBusy = false;
   private drag: { key: string; p: Point } | null = null;
 
-  private ink: RGB = [143, 143, 143];
-  private line: RGB = [46, 46, 46];
+  private ink: RGB = [126, 130, 139];
+  private line: RGB = [46, 48, 53];
   private accent: RGB = [76, 141, 255];
+  /** The canvas itself: what a port's centre is punched out with. */
+  private ground: RGB = [13, 14, 16];
+  /** Dots are fainter on a light canvas (dark ink on white reads stronger). */
+  private dotAlpha = 0.16;
 
   private pointer = { x: -9999, y: -9999, s: 0, active: false };
   private ripples: { x: number; y: number; t0: number }[] = [];
@@ -183,10 +187,14 @@ export class CanvasEngine {
 
   /** Re-read the theme's colours (call after a light/dark switch). */
   refreshColors() {
+    // Opaque tokens (resolveColor drops alpha): --dot, --edge, --canvas; docs/code/agents-design.md.
     const c = this.container;
-    this.ink = resolveColor(cssVar(c, "--muted", "#8f8f8f"));
-    this.line = resolveColor(cssVar(c, "--line-2", "#2e2e2e"));
+    this.ink = resolveColor(cssVar(c, "--dot", "#7e828b"));
+    this.line = resolveColor(cssVar(c, "--edge", "#2e3035"));
     this.accent = resolveColor(cssVar(c, "--accent", "#4c8dff"));
+    this.ground = resolveColor(cssVar(c, "--canvas", "#0d0e10"));
+    const lum = (0.2126 * this.ground[0] + 0.7152 * this.ground[1] + 0.0722 * this.ground[2]) / 255;
+    this.dotAlpha = lum > 0.5 ? 0.22 : 0.17;
     this.kick();
   }
 
@@ -518,7 +526,7 @@ export class CanvasEngine {
           lit = Math.max(lit, wave * 0.35);
         }
         const c = lit > 0.01 ? mixRgb(this.ink, this.accent, Math.min(1, lit)) : this.ink;
-        ctx.fillStyle = rgba(c, Math.min(0.9, 0.16 + boost * 0.5));
+        ctx.fillStyle = rgba(c, Math.min(0.9, this.dotAlpha + boost * 0.5));
         ctx.beginPath();
         ctx.arc(px, py, 0.9 + boost * 1.2, 0, Math.PI * 2);
         ctx.fill();
@@ -541,14 +549,26 @@ export class CanvasEngine {
       const dx = Math.max(24 * k, (p3.x - p0.x) / 2);
       const p1 = { x: p0.x + dx, y: p0.y };
       const p2 = { x: p3.x - dx, y: p3.y };
-      ctx.setLineDash(e.dashed ? [4, 4] : []);
-      ctx.lineWidth = 1;
-      ctx.strokeStyle = e.busy ? rgba(this.accent, 0.45) : rgba(this.line, 1);
+      const stroke = e.busy ? rgba(this.accent, 0.5) : rgba(this.line, 1);
+      ctx.setLineDash(e.dashed ? [3, 4] : []);
+      ctx.lineWidth = 1.25;
+      ctx.strokeStyle = stroke;
       ctx.beginPath();
       ctx.moveTo(p0.x, p0.y);
       ctx.bezierCurveTo(p1.x, p1.y, p2.x, p2.y, p3.x, p3.y);
       ctx.stroke();
       ctx.setLineDash([]);
+      // Ports: a small ring where the edge leaves its parent and meets its child.
+      const pr = Math.max(1.6, 2.75 * Math.min(1, k));
+      for (const q of [p0, p3]) {
+        ctx.beginPath();
+        ctx.arc(q.x, q.y, pr, 0, Math.PI * 2);
+        ctx.fillStyle = rgba(this.ground, 1);
+        ctx.fill();
+        ctx.lineWidth = 1.25;
+        ctx.strokeStyle = stroke;
+        ctx.stroke();
+      }
       if (e.busy && !reduced) {
         // A dot travelling down the edge with a short tail.
         for (let i = 0; i < 4; i++) {
@@ -571,9 +591,9 @@ export class CanvasEngine {
       const sz = this.size.get(key);
       if (!p || !sz) continue;
       const q = scr(p);
-      const pad = 4 + breath * 2;
-      ctx.strokeStyle = rgba(this.accent, 0.18 + breath * 0.27);
-      ctx.lineWidth = 1.5;
+      const pad = 3 + breath * 2.5;
+      ctx.strokeStyle = rgba(this.accent, 0.08 + breath * 0.17);
+      ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.roundRect(q.x - pad, q.y - pad, sz.w * k + pad * 2, sz.h * k + pad * 2, 12 * k + pad);
       ctx.stroke();

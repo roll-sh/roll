@@ -57,7 +57,7 @@ describe("the agents in the header", () => {
     await userEvent.keyboard("{Escape}");
     expect(agentsSurface.get().view).toEqual({ kind: "canvas" });
     expect(within(popup).getByLabelText("Agents canvas")).toBeVisible();
-    expect(within(popup).getByText("1 waiting for you")).toBeInTheDocument();
+    expect(within(popup).getByRole("button", { name: "1 waiting for you" })).toBeInTheDocument();
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("dialog", { name: "Agents" })).toBeNull();
     expect(window.location.hash).toBe("");
