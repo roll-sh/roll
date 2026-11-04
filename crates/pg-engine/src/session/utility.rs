@@ -1062,7 +1062,7 @@ impl Session {
                 ctx.child(&[]).keep(),
             )
             .with_params(params.to_vec())
-            .for_cursor(ctx)?;
+            .for_cursor(ctx, scroll)?;
             Ok(Cursor::new_lazy(
                 bq.cols.clone(),
                 lazy,

@@ -382,3 +382,67 @@ fn default_cursor_stable_qual_releases_retained_rows_on_close() {
     assert!(at100 - closed > 1 << 20, "CLOSE retained cursor rows: {at100} vs {closed}");
     s.query("ROLLBACK").unwrap();
 }
+
+#[test]
+fn selective_cursor_qual_memory_and_close() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = common::engine_session(common::open_store(dir.path()), "cursor_selective_memory");
+    for sql in [
+        "CREATE TABLE cm (id int primary key)",
+        "INSERT INTO cm SELECT g FROM generate_series(1, 100000) g",
+        "CREATE FUNCTION cm_qual(int) RETURNS bool STABLE LANGUAGE plpgsql AS $$ BEGIN RETURN $1 % 100 = 0; END $$",
+        "SET max_parallel_workers_per_gather = 0",
+        "SELECT sum(id) FROM cm",
+        "BEGIN",
+        "DECLARE warm NO SCROLL CURSOR FOR SELECT id FROM cm WHERE cm_qual(id)",
+        "MOVE ALL FROM warm",
+        "CLOSE warm",
+    ] {
+        s.query(sql).unwrap();
+    }
+    let mut measurements = Vec::new();
+    for mode in ["NO SCROLL", ""] {
+        s.query(&format!("DECLARE c {mode} CURSOR FOR SELECT id FROM cm WHERE cm_qual(id)")).unwrap();
+        let before = MINE.with(|m| m.get());
+        let tag = s.query("MOVE ALL FROM c").unwrap().pop().unwrap().tag;
+        assert_eq!(tag, "MOVE 1000");
+        let retained = MINE.with(|m| m.get()) - before;
+        let stored = s.state.cursors.borrow()["c"].rows.len();
+        eprintln!("selective {mode:?} cursor: scanned100000/qualified1000/stored{stored}/retained{retained}bytes");
+        s.query("CLOSE c").unwrap();
+        let closed = MINE.with(|m| m.get()) - before;
+        eprintln!("selective {mode:?} cursor CLOSE: {closed}bytes above opened baseline");
+        measurements.push((stored, retained, closed));
+    }
+    assert_eq!(measurements[0].0, 0, "NO SCROLL retained rejected scan inputs");
+    assert!(measurements[0].1 < 1 << 20, "NO SCROLL retained heap: {:?}", measurements[0]);
+    // Scrollable observable quals currently spool all inputs, including rejected rows.
+    // This is O(scanned), not O(result); CLOSE must release that spool.
+    assert_eq!(measurements[1].0, 100000);
+    assert!(measurements[1].1 - measurements[1].2 > 1 << 20);
+    s.query("ROLLBACK").unwrap();
+}
+
+#[test]
+fn plain_cursor_restarts_after_own_current_writes() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = common::engine_session(common::open_store(dir.path()), "cursor_restart_writes");
+    s.query("CREATE TABLE cw (id int primary key, v text)").unwrap();
+    s.query("INSERT INTO cw VALUES (1, 'one'), (2, 'two'), (3, 'three')").unwrap();
+    for write in ["UPDATE cw SET v = 'changed' WHERE CURRENT OF c", "DELETE FROM cw WHERE CURRENT OF c"] {
+        for sql in ["BEGIN", "DECLARE c CURSOR FOR SELECT * FROM cw", "FETCH 2 FROM c"] {
+            s.query(sql).unwrap();
+        }
+        assert!(s.state.cursors.borrow()["c"].rows.is_empty(), "must exercise discarded rows before first backward fetch");
+        s.query(write).unwrap();
+        let prior = s.query("FETCH PRIOR FROM c").unwrap().pop().unwrap().rows;
+        let next = s.query("FETCH NEXT FROM c").unwrap().pop().unwrap().rows;
+        use pg_engine::types::Value;
+        assert_eq!(prior, vec![vec![Value::Int4(1), Value::text("one")]]);
+        assert_eq!(next, vec![vec![Value::Int4(2), Value::text("two")]]);
+        assert!(!s.state.cursors.borrow()["c"].rows.is_empty(), "restart retains rows for subsequent backward movement");
+        s.query("ROLLBACK").unwrap();
+    }
+}

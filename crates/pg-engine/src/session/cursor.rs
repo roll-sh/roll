@@ -174,10 +174,10 @@ impl Lazy {
     /// Evaluating the query's target list each time a row is passed (as the executor does
     /// scanning back and forth); a query that writes runs to completion at the first fetch
     /// instead.
-    pub fn for_cursor(mut self, ctx: &ExecCtx) -> Result<Lazy> {
+    pub fn for_cursor(mut self, ctx: &ExecCtx, scroll: bool) -> Result<Lazy> {
         if self.plan.writes() {
             self.fill = true;
-        } else {
+        } else if scroll {
             let (plan, exprs) = match split_target(&self.plan) {
                 Some((plan, exprs)) => (plan, Some(exprs)),
                 None => ((*self.plan).clone(), None),
@@ -1344,7 +1344,9 @@ pub fn scrollable(plan: &Plan) -> bool {
             }
             // The binder represents a non-inlined FROM call as a Join carrying
             // FromCall; EXPLAIN exposes the same node as Function Scan.
-            Plan::Join { kind: crate::sql::plan::JoinKind::Inner, meta, .. } if meta.from_call.is_some() => true,
+            Plan::Join { kind, left, meta, .. }
+                if matches!(kind, crate::sql::plan::JoinKind::Inner | crate::sql::plan::JoinKind::Left)
+                    && matches!(&**left, Plan::One) && meta.from_call.is_some() => true,
             Plan::Join { kind: crate::sql::plan::JoinKind::Inner, left, right, cond: None, hash: None, nleft: 0, .. }
                 if matches!(&**left, Plan::One) => go(right),
             Plan::SysScan { .. }
@@ -1881,7 +1883,7 @@ pub fn spi_cursor_stmt(
             };
             let lazy = Lazy::new(ctx, plan, Rc::new(Vec::new()), None, ctx.child(&[]).keep())
                 .with_params(params.iter().map(|p| p.0.clone()).collect())
-                .for_cursor(ctx)?;
+                .for_cursor(ctx, scroll)?;
             let mut c = Cursor::new_lazy(
                 bq.cols.clone(),
                 lazy,
