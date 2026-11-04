@@ -1,0 +1,11 @@
+{
+  "time": "2026-11-04T20:09:37.638412+00:00",
+  "review": "planner171-source-review-r1-result.json",
+  "held": "Two introducedMEDIUM settings/generic-cost timing issues remain regardless pinnedfullpasses",
+  "preferred_minimal_design": "Session-only lazy freshcost helper at existing plan_cost cache miss; restore original gathers fallback without exec/parallel_part.rs hook",
+  "reason": "Avoid cross-owner executor scope and preserve parent first-use timing; one-shot Gather optimization not required for correctness repair",
+  "retire": "Eager BoundQuery costed prefill, ScanEst metadata and duplicate seqformula",
+  "preserve": "OnceLock/planningcharge/Arc/SearchPath ownership, originalEXPLAINfallback, newerFDW/COPY/scanhooks",
+  "execution": "No source edit until originalpinned171 terminal/export; bounded realprotocol Parse/Bind controls required beforefix",
+  "performance": "No timing/performanceclaim"
+}
