@@ -1,0 +1,98 @@
+ok 1 - pg_dump --help exit code 0
+ok 2 - pg_dump --help goes to stdout
+ok 3 - pg_dump --help nothing to stderr
+ok 4 - pg_dump --version exit code 0
+ok 5 - pg_dump --version goes to stdout
+ok 6 - pg_dump --version nothing to stderr
+ok 7 - pg_dump with invalid option nonzero exit code
+ok 8 - pg_dump with invalid option prints error message
+ok 9 - pg_restore --help exit code 0
+ok 10 - pg_restore --help goes to stdout
+ok 11 - pg_restore --help nothing to stderr
+ok 12 - pg_restore --version exit code 0
+ok 13 - pg_restore --version goes to stdout
+ok 14 - pg_restore --version nothing to stderr
+ok 15 - pg_restore with invalid option nonzero exit code
+ok 16 - pg_restore with invalid option prints error message
+ok 17 - pg_dumpall --help exit code 0
+ok 18 - pg_dumpall --help goes to stdout
+ok 19 - pg_dumpall --help nothing to stderr
+ok 20 - pg_dumpall --version exit code 0
+ok 21 - pg_dumpall --version goes to stdout
+ok 22 - pg_dumpall --version nothing to stderr
+ok 23 - pg_dumpall with invalid option nonzero exit code
+ok 24 - pg_dumpall with invalid option prints error message
+ok 25 - pg_dump: too many command-line arguments: exit code not 0
+ok 26 - pg_dump: too many command-line arguments: matches
+ok 27 - pg_restore: too many command-line arguments: exit code not 0
+ok 28 - pg_restore: too many command-line arguments: matches
+ok 29 - pg_dumpall: too many command-line arguments: exit code not 0
+ok 30 - pg_dumpall: too many command-line arguments: matches
+ok 31 - pg_dump: options -s/--schema-only and -a/--data-only cannot be used together: exit code not 0
+ok 32 - pg_dump: options -s/--schema-only and -a/--data-only cannot be used together: matches
+ok 33 - pg_dump: error: options -s/--schema-only and --statistics-only cannot be used together: exit code not 0
+ok 34 - pg_dump: error: options -s/--schema-only and --statistics-only cannot be used together: matches
+ok 35 - pg_dump: error: options -a/--data-only and --statistics-only cannot be used together: exit code not 0
+ok 36 - pg_dump: error: options -a/--data-only and --statistics-only cannot be used together: matches
+ok 37 - pg_dump: options -s/--schema-only and --include-foreign-data cannot be used together: exit code not 0
+ok 38 - pg_dump: options -s/--schema-only and --include-foreign-data cannot be used together: matches
+ok 39 - pg_dump: options --statistics-only and --no-statistics cannot be used together: exit code not 0
+ok 40 - pg_dump: options --statistics-only and --no-statistics cannot be used together: matches
+ok 41 - pg_dump: option --include-foreign-data is not supported with parallel backup: exit code not 0
+ok 42 - pg_dump: option --include-foreign-data is not supported with parallel backup: matches
+ok 43 - pg_restore: error: one of -d/--dbname and -f/--file must be specified: exit code not 0
+ok 44 - pg_restore: error: one of -d/--dbname and -f/--file must be specified: matches
+ok 45 - pg_restore: options -s/--schema-only and -a/--data-only cannot be used together: exit code not 0
+ok 46 - pg_restore: options -s/--schema-only and -a/--data-only cannot be used together: matches
+ok 47 - pg_restore: options -d/--dbname and -f/--file cannot be used together: exit code not 0
+ok 48 - pg_restore: options -d/--dbname and -f/--file cannot be used together: matches
+ok 49 - pg_dump: options -c/--clean and -a/--data-only cannot be used together: exit code not 0
+ok 50 - pg_dump: options -c/--clean and -a/--data-only cannot be used together: matches
+ok 51 - pg_restore: options -c/--clean and -a/--data-only cannot be used together: exit code not 0
+ok 52 - pg_restore: options -c/--clean and -a/--data-only cannot be used together: matches
+ok 53 - pg_dump: option --if-exists requires option -c/--clean: exit code not 0
+ok 54 - pg_dump: option --if-exists requires option -c/--clean: matches
+ok 55 - pg_dump: parallel backup only supported by the directory format: exit code not 0
+ok 56 - pg_dump: parallel backup only supported by the directory format: matches
+ok 57 - pg_dump: -j/--jobs must be in range: exit code not 0
+ok 58 - pg_dump: -j/--jobs must be in range: matches
+ok 59 - pg_dump: invalid output format: exit code not 0
+ok 60 - pg_dump: invalid output format: matches
+ok 61 - pg_restore: -j/--jobs must be in range: exit code not 0
+ok 62 - pg_restore: -j/--jobs must be in range: matches
+ok 63 - pg_restore: cannot specify both --single-transaction and multiple jobs: exit code not 0
+ok 64 - pg_restore: cannot specify both --single-transaction and multiple jobs: matches
+ok 65 - pg_dump: invalid --compress: exit code not 0
+ok 66 - pg_dump: invalid --compress: matches
+ok 67 - pg_dump: invalid compression specification: compression algorithm "none" does not accept a compression level: exit code not 0
+ok 68 - pg_dump: invalid compression specification: compression algorithm "none" does not accept a compression level: matches
+ok 69 - pg_dump: invalid compression specification: must be in range: exit code not 0
+ok 70 - pg_dump: invalid compression specification: must be in range: matches
+ok 71 - pg_dump: compression is not supported by tar archive format: exit code not 0
+ok 72 - pg_dump: compression is not supported by tar archive format: matches
+ok 73 - pg_dump: invalid compression specification: must be an integer: exit code not 0
+ok 74 - pg_dump: invalid compression specification: must be an integer: matches
+ok 75 - pg_dump: --extra-float-digits must be in range: exit code not 0
+ok 76 - pg_dump: --extra-float-digits must be in range: matches
+ok 77 - pg_dump: --rows-per-insert must be in range: exit code not 0
+ok 78 - pg_dump: --rows-per-insert must be in range: matches
+ok 79 - pg_restore: option --if-exists requires option -c/--clean: exit code not 0
+ok 80 - pg_restore: option --if-exists requires option -c/--clean: matches
+ok 81 - pg_dump: unrecognized archive format: exit code not 0
+ok 82 - pg_dump: unrecognized archive format: matches
+ok 83 - pg_dump: --on-conflict-do-nothing requires --inserts, --rows-per-insert, --column-inserts: exit code not 0
+ok 84 - pg_dump: --on-conflict-do-nothing requires --inserts, --rows-per-insert, --column-inserts: matches
+ok 85 - pg_dumpall: options -g/--globals-only and -r/--roles-only cannot be used together: exit code not 0
+ok 86 - pg_dumpall: options -g/--globals-only and -r/--roles-only cannot be used together: matches
+ok 87 - pg_dumpall: options -g/--globals-only and -t/--tablespaces-only cannot be used together: exit code not 0
+ok 88 - pg_dumpall: options -g/--globals-only and -t/--tablespaces-only cannot be used together: matches
+ok 89 - pg_dumpall: options -r/--roles-only and -t/--tablespaces-only cannot be used together: exit code not 0
+ok 90 - pg_dumpall: options -r/--roles-only and -t/--tablespaces-only cannot be used together: matches
+ok 91 - pg_dumpall: option --if-exists requires option -c/--clean: exit code not 0
+ok 92 - pg_dumpall: option --if-exists requires option -c/--clean: matches
+ok 93 - pg_restore: options -C\/--create and -1\/--single-transaction cannot be used together: exit code not 0
+ok 94 - pg_restore: options -C\/--create and -1\/--single-transaction cannot be used together: matches
+ok 95 - pg_dumpall: option --exclude-database cannot be used together with -g/--globals-only: exit code not 0
+ok 96 - pg_dumpall: option --exclude-database cannot be used together with -g/--globals-only: matches
+1..96
+

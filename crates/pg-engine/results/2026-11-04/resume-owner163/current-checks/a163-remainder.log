@@ -1,0 +1,46 @@
+START build 2026-11-04T11:47:49Z
+build EXIT 0
+   Compiling thiserror-impl v2.0.21
+   Compiling pg_query v18.0.0 (https://github.com/pganalyze/pg_query.rs?rev=ad0c87ed59c84ec6b42c970bb42d7985b7b5878b#ad0c87ed)
+   Compiling tokio-macros v2.7.2
+   Compiling tokio v1.53.3
+   Compiling thiserror v2.0.21
+   Compiling clap v4.6.7
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/crates/pg-engine)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 51s
+START focused 2026-11-04T11:50:41Z
+focused EXIT 0
+test golden_shuffled ... ok
+test golden has been running for over 60 seconds
+test golden_wire has been running for over 60 seconds
+test golden ... ok
+test golden_wire ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1188.92s
+
+START clippy 2026-11-04T12:13:53Z
+clippy EXIT 0
+836 |             for (i, digit) in raw[8..].chunks_exact(2).enumerate() {
+    |                                        ^^^^^^^^^^^^^^^ help: consider using `as_chunks` instead: `as_chunks::<2>().0.iter()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#chunks_exact_to_as_chunks
+    = note: `#[warn(clippy::chunks_exact_to_as_chunks)]` on by default
+
+warning: `pg-engine` (example "bench") generated 1 warning (run `cargo clippy --fix --example "bench" -p pg-engine -- ` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.32s
+START pgdump 2026-11-04T12:13:54Z
+pgdump EXIT 0
+test pg_dump_tap has been running for over 60 seconds
+002_pg_dump.pl: 14609 passed, 0 failed
+004_pg_dump_parallel.pl: 4 passed, 0 failed
+005_pg_dump_filterfile.pl: 108 passed, 0 failed
+test pg_dump_tap ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 151.98s
+
+START pgdump-outcomes 2026-11-04T12:16:26Z
+pgdump-outcomes EXIT 0
+{"rows": [{"file": "001_basic.pl", "passed": 96, "failed": 0}, {"file": "002_pg_dump.pl", "passed": 14609, "failed": 0}, {"file": "004_pg_dump_parallel.pl", "passed": 4, "failed": 0}, {"file": "005_pg_dump_filterfile.pl", "passed": 108, "failed": 0}], "passed": 14817, "failed": 0, "expected_passed": 14817}
+TAP GATE PASS: 14817/14817, zero failed
+pg-e2e DEFERRED: parent verification group owns one final combined run; prior a168/a166 failures remain FAILED
+HEAVY-EXIT 0
