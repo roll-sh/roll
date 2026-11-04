@@ -11,7 +11,7 @@ import { ChangeChip, changeStatusLabel, WorkChip } from "./change";
 import { ContextMeter } from "./context-meter";
 import { Menu } from "./menu";
 import { NewProject } from "./project-new";
-import { ProjectSettingsDialog } from "./project-settings";
+import { PullLine } from "./project-settings";
 import { RequestCard } from "./request-card";
 import { SandboxPanel } from "./sandbox";
 import { ago, loginCommand, MachineIcon, modelName, providerName, shortPath, Stat, StatusDot, threadStatusLabel, usageLine } from "./shared";
@@ -241,7 +241,6 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
   // An asleep sandbox counts: what's sent to it wakes it.
   const online = reachable(machine);
   const stats = projectStats(client.data, project.id);
-  const [settings, setSettings] = useState(false);
   return (
     <Card width={256} label={`Project ${project.name}`}>
       <div className="flex items-center gap-2 px-3.5 pt-3">
@@ -264,7 +263,7 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
             label="Project"
             trigger={<MoreHorizontal className="size-3.5" />}
             items={[
-              { label: "Settings", icon: <Settings2 />, onSelect: () => setSettings(true) },
+              { label: "Settings", icon: <Settings2 />, onSelect: () => setAgentsView({ kind: "settings", target: `p:${project.id}` }) },
               {
                 label: "Remove from roll",
                 confirm: "Remove? (the folder stays)",
@@ -295,6 +294,7 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
         )}
       </div>
       {stats.threads > 0 && <StatsRows stats={stats} providers={providersFor(client.data, machine?.id)} />}
+      {project.settings.auto_pull && project.pull && <PullLine pull={project.pull} className="mx-3.5 mb-3 -mt-1" />}
       {!stats.threads && startNew && online && (
         <div className="px-3 pb-3">
           <button data-nodrag onClick={() => startNew(project.id)} className={`${primary} w-full justify-center`}>
@@ -303,7 +303,6 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
         </div>
       )}
       {error && <p className="px-3.5 pb-3 text-[12px] text-danger">{error}</p>}
-      {settings && <ProjectSettingsDialog project={project} machine={machine} onClose={() => setSettings(false)} />}
     </Card>
   );
 }

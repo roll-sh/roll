@@ -1,11 +1,13 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { agentsSurface, resetAgentsSurface } from "@/lib/agents-surface";
 import type { Command, Project, Reply } from "@/lib/agents-api";
 import { Composer } from "./composer";
 import { ProjectNode } from "./nodes";
 import { NewProject } from "./project-new";
 import { ProjectSettingsForm, pullText } from "./project-settings";
+import { SettingsPanel } from "./settings-panel";
 import { machine, mirrored, project, provider, T0 } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents } from "@/test/agents-render";
 
@@ -140,16 +142,21 @@ describe("ProjectSettingsForm", () => {
 });
 
 describe("project settings on the canvas", () => {
-  it("open from the project card's menu and close with Escape", async () => {
+  beforeEach(() => resetAgentsSurface());
+
+  it("open from the project card's menu in the side panel beside the canvas", async () => {
     const p = withSettings({ auto_pull: true });
     const h = agentsHarness({ entities: [mirrored("project", p, 1)] });
     renderAgents(<ProjectNode project={p} machine={machine()} />, h);
     await userEvent.click(screen.getByRole("button", { name: "Project" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
-    const dialog = screen.getByRole("dialog", { name: "roll settings" });
-    expect(within(dialog).getByRole("switch", { name: "Pull merged changes automatically" })).toHaveAttribute("aria-checked", "true");
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(agentsSurface.get().view).toEqual({ kind: "settings", target: `p:${p.id}` });
+    const onClose = vi.fn();
+    renderAgents(<SettingsPanel target={`p:${p.id}`} onClose={onClose} />, h);
+    expect(screen.getByText("Project settings")).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Pull merged changes automatically" })).toHaveAttribute("aria-checked", "true");
+    await userEvent.click(screen.getByRole("button", { name: "Close (Esc)" }));
+    expect(onClose).toHaveBeenCalled();
   });
 
   it("are offered while adding a project: on for a clone, off for a folder", async () => {

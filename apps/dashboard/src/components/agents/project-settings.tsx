@@ -1,8 +1,7 @@
 "use client";
 
 import { ArrowDownToLine, Bug, Check, CircleAlert, FlaskConical, Hammer, ListChecks, Pause, Play, Plus, Settings2, Trash2, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { createPortal } from "react-dom";
+import { useMemo, useState, type ReactNode } from "react";
 import {
   type InteractionMode,
   type Machine,
@@ -359,43 +358,5 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
       </div>
       {error && <p className="px-4 pt-2 text-[12px] text-danger">{error}</p>}
     </form>
-  );
-}
-
-/** The settings in a sheet over the page. Esc or the backdrop closes it. */
-export function ProjectSettingsDialog({ project, machine, onClose }: { project: Project; machine: Machine | undefined; onClose: () => void }) {
-  const panel = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      // Before the surface's own Escape (which would close the popup or the conversation).
-      e.stopPropagation();
-      onClose();
-    };
-    window.addEventListener("keydown", onKey, true);
-    panel.current?.focus({ preventScroll: true });
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose]);
-  if (typeof document === "undefined") return null;
-  return createPortal(
-    <div className="fixed inset-0 z-[60] overflow-y-auto bg-bg/70 backdrop-blur-sm" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div
-        ref={panel}
-        tabIndex={-1}
-        role="dialog"
-        aria-modal="true"
-        aria-label={`${project.name} settings`}
-        className="rise mx-auto my-4 w-[min(560px,calc(100%-1.5rem))] rounded-xl border border-line bg-panel pb-4 outline-none sm:my-16"
-      >
-        <div className="flex items-center gap-2 px-4 pt-4 pb-3">
-          <h2 className="text-lg font-semibold tracking-[-0.04em]">Project settings</h2>
-          <button onClick={onClose} aria-label="Close" className="ml-auto grid size-8 place-items-center rounded-lg text-subtle hover:bg-panel-2 hover:text-fg">
-            <X className="size-4" />
-          </button>
-        </div>
-        <ProjectSettingsForm project={project} machine={machine} onDone={onClose} />
-      </div>
-    </div>,
-    document.body,
   );
 }

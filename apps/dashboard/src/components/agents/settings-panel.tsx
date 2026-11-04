@@ -3,6 +3,7 @@
 import { Folder, X } from "lucide-react";
 import type { ReactNode } from "react";
 import type { Machine, Project } from "@/lib/agents-api";
+import { ProjectSettingsForm } from "./project-settings";
 import { MachineIcon, shortPath } from "./shared";
 import { IconButton } from "./session";
 import { useAgents } from "./use-agents";
@@ -31,6 +32,7 @@ export function SettingsPanel({ target, onClose }: { target: string; onClose: ()
     return (
       <Shell icon={<Folder className="size-4 text-muted" />} title={r.value.name} subtitle="Project settings" onClose={onClose}>
         <ProjectOverview project={r.value} machine={data.machines.get(r.machine)?.value} />
+        <ProjectSettingsForm project={r.value} machine={data.machines.get(r.machine)?.value} />
       </Shell>
     );
   }

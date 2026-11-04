@@ -676,7 +676,7 @@ The surface has three views:
   start, stop and delete, and puts logging a provider in first (a terminal on the canvas running
   the device login). A machine with no projects offers adding one (a folder, a clone of one of the
   owner's roll code repos, or a new repo, with auto-pull offered right there: on for a clone, off
-  for a folder); a project's card has "Settings" in its menu (a sheet over the page: auto-pull and
+  for a folder); a project's card has "Settings" in its menu (in the side panel beside the canvas: auto-pull and
   its last result, new-thread defaults, scripts); a project with no threads offers starting one. Offline
   machines are dimmed with when they were last seen. A sandbox that isn't connected is never
   "offline": it's asleep ("Asleep · wakes when an agent needs it", no Stop), stopped, or waking
