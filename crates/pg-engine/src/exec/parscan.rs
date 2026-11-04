@@ -992,6 +992,7 @@ fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::at
                 if !work_partial(&mut rd, &out, &d, spec, &stopped, &mut scratch, &mut lazy, Some(pa)) {
                     return;
                 }
+                CARRIED_CHUNKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 held = Some(out);
             }
             _ => {
@@ -1005,6 +1006,9 @@ fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::at
 
 /// The groups a worker's carried part (`Spec::free`) holds before it is sent.
 const CARRY_GROUPS: usize = 1 << 16;
+
+/// Chunks whose rows went to a worker's carried part (`Spec::free`; tests: which path ran).
+pub static CARRIED_CHUNKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// One chunk of a scan: its rows (or an aggregating scan's parts) sent to the job's `out`,
 /// on a worker or (`ParScan::inline`) the executor's thread. False: nothing reads them

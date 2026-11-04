@@ -258,6 +258,11 @@ const JOIN_QUERIES: &[&str] = &[
     "SELECT g2, sum(CASE WHEN g2 = 1 THEN v ELSE 0 END), sum(v) FROM (SELECT b.g % 5 AS g2, b.x * 2 AS v FROM big b JOIN dim d ON b.g = d.k) t GROUP BY g2",
     "SELECT n, sum(CASE WHEN n = 'name 1' THEN v END) FROM (SELECT d.name AS n, b.x + 1 AS v FROM big b JOIN dim d ON b.g = d.k) t GROUP BY n",
     "SELECT count(*), sum(e) FROM (SELECT 100000 / (b.id - 419950) AS e FROM big b JOIN dim d ON b.g = d.k) t",
+    // Groupings sorted on their keys (as TPC-H q13's): a worker's part takes the rows of
+    // all its chunks; an outer join's unmatched rows; NULL keys.
+    "SELECT c, count(*) FROM (SELECT b.id % 150000 AS k, count(d.k) AS c FROM big b LEFT JOIN dim d ON b.g = d.k GROUP BY 1) t GROUP BY c ORDER BY 2 DESC, 1",
+    "SELECT k, n, s FROM (SELECT d.k, count(b.id) AS n, sum(b.g) AS s FROM big b RIGHT JOIN dim d ON b.g = d.k + 30 AND b.id % 7 = 0 GROUP BY d.k) t ORDER BY n DESC, k LIMIT 15",
+    "SELECT n, count(*) FROM (SELECT CASE WHEN b.id % 9 = 0 THEN NULL ELSE b.id % 120000 END AS k, count(*) AS n FROM big b JOIN dim d ON b.g = d.k GROUP BY 1) t GROUP BY n ORDER BY n",
 ];
 
 #[test]
@@ -296,8 +301,13 @@ fn parallel_joins_match_serial_inner() {
     let stat_serial = seq_read(&mut s);
     s.query("SET max_parallel_workers_per_gather = 2").unwrap();
     let vrows = pg_engine::exec::parscan::VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed);
+    let carried = pg_engine::exec::parscan::CARRIED_CHUNKS.load(std::sync::atomic::Ordering::Relaxed);
     let parallel = run(&mut s);
     assert!(pg_engine::exec::parscan::pipelined() > before, "join probes ran in the workers");
+    assert!(
+        pg_engine::exec::parscan::CARRIED_CHUNKS.load(std::sync::atomic::Ordering::Relaxed) > carried,
+        "sorted groupings took several chunks a part"
+    );
     assert!(
         pg_engine::exec::parscan::VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed) > vrows,
         "probes looked up from column batches"
@@ -892,6 +902,11 @@ const VECTOR_QUERIES: &[&str] = &[
     "SELECT count(*), sum(id) FROM v WHERE t NOT LIKE '%3' AND t LIKE 'k_'",
     "SELECT count(*) FROM v WHERE t LIKE 'k1\\'",
     "SELECT c, count(*) FROM v WHERE c::bpchar IN ('ab', 'zz') GROUP BY c",
+    // Dates against timestamps and dates (NULL and infinite dates among them).
+    "SELECT ok, count(*), sum(a) FROM v WHERE d >= date '2024-02-01' AND d < date '2024-02-01' + interval '1' month GROUP BY ok",
+    "SELECT count(*), sum(id) FROM v WHERE d < timestamp '2024-01-15 12:00' OR d > timestamp 'infinity' OR d >= 'infinity'::date",
+    "SELECT a, count(*) FROM v WHERE d <> date '2024-01-05' AND d <= date '2024-12-31' GROUP BY a",
+    "SELECT count(*) FROM v WHERE d > timestamp '-infinity' AND d IS NOT NULL",
 ];
 
 #[test]
@@ -930,6 +945,9 @@ fn vector_batches_body() {
     .unwrap();
     s.query("UPDATE v SET t = 'u' || id, x = x + 1 WHERE id % 211 = 0").unwrap();
     s.query("DELETE FROM v WHERE id % 307 = 0").unwrap();
+    s.query("UPDATE v SET d = NULL WHERE id % 401 = 0").unwrap();
+    s.query("UPDATE v SET d = 'infinity' WHERE id % 503 = 0").unwrap();
+    s.query("UPDATE v SET d = '-infinity' WHERE id % 509 = 0").unwrap();
     s.query("SET max_parallel_workers_per_gather = 0").unwrap();
     let run = |s: &mut Session| VECTOR_QUERIES.iter().map(|q| out(s, q)).collect::<Vec<_>>();
     let rows = without_vectors(|| run(&mut s));
