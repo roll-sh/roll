@@ -18322,8 +18322,16 @@ impl Render<'_> {
         for (i, c) in n.initplans.iter().chain(&n.children).chain(&n.subplans).enumerate() {
             let inner = n.inner_cached && i == n.initplans.len() + 1;
             if inner {
-                let outer_rows = n.children.first().and_then(|o| self.stats(o.key)).map_or(0, |s| s.rows);
-                self.rescans = saved * outer_rows;
+                // (Postgres scans it once per outer row; the executor read it once per run of
+                // the join, which runs many times inside a SubPlan: the outer rows of a run.)
+                let raw = |k: Option<usize>| k.and_then(|k| self.instr?.get(k));
+                let outer_rows = raw(n.children.first().and_then(|o| o.key)).map_or(0, |s| s.rows);
+                let reads = raw(c.key).map_or(1, |s| s.loops.max(1));
+                let per = match outer_rows {
+                    0 => 0,
+                    r => ((r + reads / 2) / reads).max(1),
+                };
+                self.rescans = saved * per;
             }
             if n.node_type == "Nested Loop" && i == n.initplans.len() + 1 && c.node_type == "Materialize" {
                 let outer_rows = n.children.first().and_then(|o| self.stats(o.key)).map_or(0, |s| s.rows);

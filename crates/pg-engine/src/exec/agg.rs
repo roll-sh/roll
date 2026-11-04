@@ -2844,8 +2844,8 @@ impl AggNode {
                 .all(|(i, g)| red[i] || (colls.get(i).is_none_or(Option::is_none) && !key_equal_apart(g, proj.as_deref())))
             && (self.groups.is_empty()
                 || self.plan.as_ref().is_some_and(|p| {
-                    let sorted = super::pghash::agg_estimate(p, ctx).sorted;
-                    sorted.is_some_and(|s| (0..self.groups.len()).all(|i| red[i] || s.iter().any(|k| k.0 == i)))
+                    let e = super::pghash::agg_estimate(p, ctx);
+                    e.sorted.as_ref().is_some_and(|s| (0..self.groups.len()).all(|i| red[i] || s.iter().any(|k| k.0 == i)))
                 }));
         let spec = Arc::new(super::partial::Spec { keys, trim, aggs, seq, free });
         Ok(match proj {
