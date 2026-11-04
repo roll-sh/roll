@@ -1,0 +1,7 @@
+{
+  "head": "d9e2279c9d5b55a21add46fe4632aa73e3f3c849",
+  "tree": "3fc7ca2415d8d9e538044696428036c4d195fc7b",
+  "status": "",
+  "time_utc": "2026-11-04T18:58:20.933561+00:00",
+  "note": "Exactd9e2279c focused PASS:3a167golden modes,1reorderedpath,libClippy0 (baselinewarnings accounted separately). InitPlan/CTE red fixed in runtimegolden, correlated54loops preserved. This is NOT full exactsource acceptance: old278crashFAILED101/pgunitNOTRUN remainheld; newfullgates/review/combinedgatespending. L1optionalPGshapehadnoMaterialize, notclosed. No performance/resourceclaim."
+}

@@ -1,0 +1,39 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a6193f5e45a7ae4f1/crates/pg-engine)
+error[E0277]: cannot multiply `u64` by `(u64, u64)`
+     --> crates/pg-engine/src/sql/explain.rs:18362:46
+      |
+18362 |                     .map_or(0, |s| s.removed * self.rescans),
+      |                                              ^ no implementation for `u64 * (u64, u64)`
+      |
+      = help: the trait `Mul<(u64, u64)>` is not implemented for `u64`
+      = help: the following other types implement trait `Mul<Rhs>`:
+                `&u64` implements `Mul<&BigInt>`
+                `&u64` implements `Mul<&BigUint>`
+                `&u64` implements `Mul<BigInt>`
+                `&u64` implements `Mul<BigUint>`
+                `&u64` implements `Mul<u64>`
+                `&u64` implements `Mul`
+                `u64` implements `Mul<&BigInt>`
+                `u64` implements `Mul<&BigUint>`
+              and 4 others
+
+error[E0277]: cannot multiply `u64` by `(u64, u64)`
+     --> crates/pg-engine/src/sql/explain.rs:18366:44
+      |
+18366 |                     .map_or(0, |s| (s.rows * self.rescans).saturating_sub(st.rows)),
+      |                                            ^ no implementation for `u64 * (u64, u64)`
+      |
+      = help: the trait `Mul<(u64, u64)>` is not implemented for `u64`
+      = help: the following other types implement trait `Mul<Rhs>`:
+                `&u64` implements `Mul<&BigInt>`
+                `&u64` implements `Mul<&BigUint>`
+                `&u64` implements `Mul<BigInt>`
+                `&u64` implements `Mul<BigUint>`
+                `&u64` implements `Mul<u64>`
+                `&u64` implements `Mul`
+                `u64` implements `Mul<&BigInt>`
+                `u64` implements `Mul<&BigUint>`
+              and 4 others
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `pg-engine` (lib) due to 2 previous errors

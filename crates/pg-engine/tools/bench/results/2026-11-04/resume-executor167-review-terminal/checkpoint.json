@@ -1,0 +1,7 @@
+{
+  "head": "0595bf7325b0b4cde8d02d9f8e51ebd17b528d05",
+  "tree": "774b978c229b40536e4a0c7286b38e928f2d789c",
+  "status": "",
+  "time_utc": "2026-11-04T16:25:02.869071+00:00",
+  "note": "Exact0595 clean terminal: debug447/release447 each18ignored, releaseparallel10,build,Clippy,crash30(30seeds4rounds),pgunit24 PASS. Every command exit/summary/source/binary captured. Full Docker service intentionally deferred to parent verification group. Weighted-inner review MEDIUM remains; no readiness/performance claim."
+}

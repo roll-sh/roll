@@ -1,0 +1,7 @@
+{
+  "head": "1f17968b285ddcb3f63e13cc7eec4465898014f5",
+  "tree": "3b9db908154e3a919462f3bb45d899a2e642bdd0",
+  "status": "",
+  "time_utc": "2026-11-04T18:46:04.568456+00:00",
+  "note": "UNVALIDATED SOURCE checkpoint.167InitPlan/CTE red and170dropped/COPY red preserved separately. No fullgates claim;167crash30FAILED101/pgunitNOTRUN remains held independently. Combined163/170 HIGH parent-owned. No packer clamp/indexsemantic change or performance claim."
+}

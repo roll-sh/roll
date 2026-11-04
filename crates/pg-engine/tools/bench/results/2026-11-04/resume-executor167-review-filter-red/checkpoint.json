@@ -1,0 +1,7 @@
+{
+  "head": "0595bf7325b0b4cde8d02d9f8e51ebd17b528d05",
+  "tree": "774b978c229b40536e4a0c7286b38e928f2d789c",
+  "status": "",
+  "time_utc": "2026-11-04T14:54:40.561300+00:00",
+  "note": "Compile passed; all3 focused golden modes failed because removed-only instrumentation has zero loops and stats() filtered it out. No expected outputs changed. Next repair must scale raw counters directly."
+}

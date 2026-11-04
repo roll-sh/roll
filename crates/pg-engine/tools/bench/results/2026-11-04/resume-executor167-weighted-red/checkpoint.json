@@ -1,0 +1,7 @@
+{
+  "head": "44f76bef10668da15a91ff6b900bad9dfda4c7f7",
+  "tree": "90ad484d4f9881721f902121f2126d1ecfc61e01",
+  "status": "",
+  "time_utc": "2026-11-04T16:39:59.178105+00:00",
+  "note": "Test-only44f76bef production identical to verified0595 binary. Actual engine red101: inner4.33/Removed4 vsPG18.6 4.00/Removed5, loops3; source remains FAILED. Also scopedPG VACUUM reference and expectedINCLUDE errors, initial containercreate127 unchanged. Ownedreference cleaned. No timing/readiness claim."
+}
