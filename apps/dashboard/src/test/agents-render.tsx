@@ -14,7 +14,8 @@ export interface AgentsHarness {
   /** Every command sent, with its machine. */
   command: Mock<(machine: MachineId, id: string, command: Command) => Promise<Reply>>;
   ctx: AgentsCtx;
-  setExpanded: Mock<(thread: string, open: boolean) => void>;
+  openThread: Mock<(thread: string) => void>;
+  close: Mock<() => void>;
   focus: Mock<(key: string) => void>;
 }
 
@@ -32,10 +33,11 @@ export function agentsHarness(
   client.follow("test", opts.follow ?? []);
   for (const m of opts.machines ?? [machineFixture()]) client.enqueue({ type: "machine", cursor: 1, machine: m });
   for (const e of opts.entities ?? []) client.enqueue({ type: "entity", ...e });
-  const setExpanded = vi.fn();
+  const openThread = vi.fn();
+  const close = vi.fn();
   const focus = vi.fn();
-  const ctx: AgentsCtx = { client, owner: "acme", demo: false, expanded: new Set(), setExpanded, focus, ...opts.ctx };
-  return { client, command, ctx, setExpanded, focus };
+  const ctx: AgentsCtx = { client, owner: "acme", demo: false, openThread, close, focus, ...opts.ctx };
+  return { client, command, ctx, openThread, close, focus };
 }
 
 export function renderAgents(ui: ReactElement, h: AgentsHarness) {

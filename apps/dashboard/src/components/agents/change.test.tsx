@@ -5,7 +5,7 @@ import type { Command, Reply, Thread } from "@/lib/agents-api";
 import { ChangeChip, changeTone, landingNote } from "./change";
 import { ThreadNode } from "./nodes";
 import { hunks } from "./request-card";
-import { ThreadSession } from "./session";
+import { Conversation } from "./session";
 import { machine, mirrored, project, thread } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents } from "@/test/agents-render";
 
@@ -41,7 +41,7 @@ describe("roll code on a thread", () => {
     const t = thread({ change, work });
     const services = fakeServices();
     const h = agentsHarness({ entities: [mirrored("project", inRepo, 1), mirrored("thread", t, 2)], follow: ["thr_1"], ctx: { services } });
-    renderAgents(<ThreadSession thread={t} machine={machine()} />, h);
+    renderAgents(<Conversation thread={t} machine={machine()} />, h);
     expect(screen.getByText("Waiting on 1 required check")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Let go of the work item" }));
     expect(services.releaseWork).toHaveBeenCalledWith("acme", "thr_1");
@@ -61,7 +61,7 @@ describe("roll code on a thread", () => {
           }
         : { type: "ok" };
     const h = agentsHarness({ reply, entities: [mirrored("project", inRepo, 1), mirrored("thread", t, 2)], follow: ["thr_1"], ctx: { services: fakeServices() } });
-    renderAgents(<ThreadSession thread={t} machine={machine()} />, h);
+    renderAgents(<Conversation thread={t} machine={machine()} />, h);
     await userEvent.click(screen.getByRole("button", { name: "Publish as a roll code change" }));
     const form = screen.getByRole("form", { name: "Publish" });
     expect(within(form).getByRole("textbox", { name: "Commit message" })).toHaveValue("Fix the flaky queue test");
@@ -78,19 +78,20 @@ describe("roll code on a thread", () => {
   it("a thread outside a worktree is offered a fork into one before publishing", async () => {
     const t = thread();
     const h = agentsHarness({ reply: () => ({ type: "created", id: "thr_fork" }), entities: [mirrored("project", inRepo, 1), mirrored("thread", t, 2)], follow: ["thr_1"] });
-    renderAgents(<ThreadSession thread={t} machine={machine()} />, h);
+    renderAgents(<Conversation thread={t} machine={machine()} />, h);
     await userEvent.click(screen.getByRole("button", { name: "Publish as a roll code change" }));
     await userEvent.click(screen.getByRole("button", { name: "Fork into a worktree" }));
     expect(h.command).toHaveBeenLastCalledWith("mch_1", expect.any(String), { type: "thread.fork", thread: "thr_1", worktree: true });
-    await waitFor(() => expect(h.setExpanded).toHaveBeenCalledWith("thr_fork", true));
+    await waitFor(() => expect(h.openThread).toHaveBeenCalledWith("thr_fork"));
   });
 
   it("claims the next work item of the project's repo, and says so calmly when there's none", async () => {
     const t = thread();
     const takeWork = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(work);
     const h = agentsHarness({ entities: [mirrored("project", inRepo, 1), mirrored("thread", t, 2)], follow: ["thr_1"], ctx: { services: fakeServices({ takeWork }) } });
-    renderAgents(<ThreadSession thread={t} machine={machine()} />, h);
-    await userEvent.click(screen.getByRole("button", { name: "Take a work item" }));
+    renderAgents(<Conversation thread={t} machine={machine()} />, h);
+    await userEvent.click(screen.getByRole("button", { name: "More" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Take a work item" }));
     await userEvent.click(screen.getByRole("button", { name: "Claim the next in acme/roll" }));
     expect(await screen.findByText("Nothing open to claim in acme/roll.")).toBeInTheDocument();
     expect(takeWork).toHaveBeenLastCalledWith("acme", "thr_1", { repo: "acme/roll" });
@@ -101,22 +102,23 @@ describe("roll code on a thread", () => {
     await waitFor(() => expect(screen.queryByRole("form", { name: "Take a work item" })).not.toBeInTheDocument());
   });
 
-  it("full screen (a phone), the session is a dialog with its own close", async () => {
+  it("on a phone the actions fold into the menu, and the change and composer stay", async () => {
     const t = thread({ change });
-    const h = agentsHarness({ entities: [mirrored("project", inRepo, 1), mirrored("thread", t, 2)], follow: ["thr_1"] });
-    renderAgents(<ThreadSession thread={t} machine={machine()} fullscreen />, h);
-    const sheet = screen.getByRole("dialog", { name: "Thread Fix the flaky queue test" });
-    expect(within(sheet).getByRole("link", { name: "Change 42, blocked" })).toBeInTheDocument();
-    expect(within(sheet).getByRole("textbox", { name: "Message" })).toBeInTheDocument();
-    await userEvent.click(within(sheet).getByRole("button", { name: "Close" }));
-    expect(h.setExpanded).toHaveBeenCalledWith("thr_1", false);
+    const h = agentsHarness({ entities: [mirrored("project", inRepo, 1), mirrored("thread", t, 2)], follow: ["thr_1"], ctx: { phone: true } });
+    renderAgents(<Conversation thread={t} machine={machine()} />, h);
+    const view = screen.getByRole("region", { name: "Thread Fix the flaky queue test" });
+    expect(within(view).getByRole("link", { name: "Change 42, blocked" })).toBeInTheDocument();
+    expect(within(view).getByRole("textbox", { name: "Message" })).toBeInTheDocument();
+    expect(within(view).queryByRole("button", { name: "Publish as a roll code change" })).toBeNull();
+    await userEvent.click(within(view).getByRole("button", { name: "More" }));
+    expect(screen.getByRole("menuitem", { name: "Publish as a change" })).toBeInTheDocument();
   });
 
   it("a fresh fork with no runs isn't stuck loading", () => {
     const t = thread({ run_count: 0 });
-    renderAgents(<ThreadSession thread={t} machine={machine()} />, agentsHarness({ entities: [mirrored("thread", t, 1)], follow: ["thr_1"] }));
-    expect(screen.queryByText("Loading the transcript…")).not.toBeInTheDocument();
-    expect(screen.getByText(/No runs yet/)).toBeInTheDocument();
+    renderAgents(<Conversation thread={t} machine={machine()} />, agentsHarness({ entities: [mirrored("thread", t, 1)], follow: ["thr_1"] }));
+    expect(screen.queryByText("Loading the conversation…")).not.toBeInTheDocument();
+    expect(screen.getByText(/Nothing yet/)).toBeInTheDocument();
   });
 });
 

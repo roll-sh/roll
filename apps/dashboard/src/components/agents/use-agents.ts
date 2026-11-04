@@ -24,15 +24,18 @@ export function useHold(client: AgentsClient | null) {
   useEffect(() => (client ? client.hold() : undefined), [client]);
 }
 
-/** What canvas cards need: the client, the owner, and the canvas' own actions. */
+/** What the cards and the conversation need: the client, the owner, and the surface's own actions. */
 export interface AgentsCtx {
   client: AgentsClient;
   owner: string;
   demo: boolean;
-  /** Open a thread in place (or close it). */
-  setExpanded: (thread: string, open: boolean) => void;
-  expanded: ReadonlySet<string>;
-  /** Pan the canvas to a node (`t:thr_…`, `r:req_…`, …). */
+  /** Show a conversation. */
+  openThread: (thread: string) => void;
+  /** Back to the canvas. */
+  close: () => void;
+  /** The new-agent composer, in a project when given. */
+  startNew?: (project?: string) => void;
+  /** Show the canvas on a node (`m:mch_…`, `x:trm_…`, …); a thread's key opens its conversation. */
   focus: (key: string) => void;
   /** A shared thread's replay (`/agents/s/<id>`): nothing can be sent, only looked at. */
   readOnly?: boolean;
@@ -42,7 +45,7 @@ export interface AgentsCtx {
   services?: AgentsServices;
   /** The owner's sandboxes by machine, and this month's usage (loaded by the canvas). */
   sandboxes?: SandboxesState;
-  /** A phone-sized screen: sessions open full screen instead of in place. */
+  /** A phone-sized screen: tighter bars, one panel at a time. */
   phone?: boolean;
 }
 

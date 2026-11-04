@@ -203,10 +203,10 @@ export function SharesList({ owner: param }: { owner?: string }) {
           </p>
         ) : shares.length === 0 ? (
           <p className="px-5 py-4 text-[13px] text-muted">
-            Nothing shared yet. Open a thread on the{" "}
-            <Link href="/dashboard/agents" className="text-accent hover:underline">
-              canvas
-            </Link>{" "}
+            Nothing shared yet. Open a{" "}
+            <a href="#agents" className="text-accent hover:underline">
+              conversation
+            </a>{" "}
             and use <Share2 className="inline size-3.5" aria-label="Share" /> in its header.
           </p>
         ) : (

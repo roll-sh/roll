@@ -356,3 +356,57 @@ body {
     animation: none;
   }
 }
+
+/* agents: menus pop, the agents popup grows out of the header, its backdrop fades. */
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: translateY(-3px) scale(0.98);
+  }
+}
+
+.pop {
+  animation: pop 0.15s cubic-bezier(0.22, 1, 0.36, 1) both;
+  transform-origin: top;
+}
+
+@keyframes sheet-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+}
+
+.sheet-in {
+  animation: sheet-in 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.fade-in {
+  animation: fade-in 0.2s ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pop,
+  .sheet-in,
+  .fade-in {
+    animation: none;
+  }
+}
+
+/* The desktop app's Agents window on macOS: the bars are the title bar (behind the traffic lights). */
+[data-desktop="agents-mac"] [data-drag-region] {
+  app-region: drag;
+  -webkit-app-region: drag;
+  padding-left: 84px;
+}
+
+[data-desktop="agents-mac"] [data-drag-region] :is(button, a, input, select, textarea, label, [data-nodrag]) {
+  app-region: no-drag;
+  -webkit-app-region: no-drag;
+}

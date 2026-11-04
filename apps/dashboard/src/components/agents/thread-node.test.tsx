@@ -2,7 +2,7 @@ import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { ThreadNode } from "./nodes";
-import { ThreadSession } from "./session";
+import { Conversation } from "./session";
 import { approval, M1, machine, mirrored, node, project, run, thread } from "@/test/agents";
 import { agentsHarness, renderAgents } from "@/test/agents-render";
 
@@ -14,12 +14,11 @@ describe("ThreadNode", () => {
     const card = screen.getByRole("button", { name: "Thread Fix the flaky queue test" });
     expect(within(card).getByText("Waiting to run `cargo test`")).toBeInTheDocument();
     expect(within(card).getByTitle("1 waiting for you")).toHaveTextContent("1");
-    expect(within(card).getByText("Claude Code · Opus 5.5 · high")).toBeInTheDocument();
+    expect(within(card).getByText("Claude Code · Opus 5.5 · 1 queued")).toBeInTheDocument();
     expect(within(card).getByText(/15k tok · \$0\.42/)).toBeInTheDocument();
-    expect(within(card).getByText(/1 queued/)).toBeInTheDocument();
     expect(within(card).getByText("+14")).toBeInTheDocument();
     await userEvent.click(card);
-    expect(h.setExpanded).toHaveBeenCalledWith("thr_1", true);
+    expect(h.openThread).toHaveBeenCalledWith("thr_1");
   });
 
   it("shows the last prompt when idle and the error when it failed", () => {
@@ -31,7 +30,7 @@ describe("ThreadNode", () => {
   });
 });
 
-describe("ThreadSession", () => {
+describe("Conversation", () => {
   const busy = thread({ status: "waiting", active_run: "run_2", run_count: 2, pending_requests: 1, queued: [{ id: "q1", text: "then run clippy", attachments: [], at: 0 }] });
   const entities = [
     mirrored("project", project(), 1),
@@ -49,7 +48,7 @@ describe("ThreadSession", () => {
   it("renders every run's transcript, streaming text and the approval in place", async () => {
     const h = agentsHarness({ entities, follow: ["thr_1"] });
     h.client.enqueue({ type: "delta", machine: M1, delta: { type: "text", thread: "thr_1", node: "nod_c", text: " the claim" } });
-    const { container } = renderAgents(<ThreadSession thread={busy} machine={machine()} />, h);
+    const { container } = renderAgents(<Conversation thread={busy} machine={machine()} />, h);
     expect(screen.getByText("Look at the queue")).toBeInTheDocument();
     expect(screen.getByText("expires")).toBeInTheDocument();
     expect(screen.getByText("Fixing the claim")).toBeInTheDocument();
@@ -66,7 +65,7 @@ describe("ThreadSession", () => {
 
   it("drops queued messages, forks from a run and rolls back to its checkpoint", async () => {
     const h = agentsHarness({ entities: [...entities.slice(0, 2).map((e) => (e.entity.kind === "thread" ? mirrored("thread", { ...busy, status: "idle", active_run: null }, 2) : e)), ...entities.slice(2)], follow: ["thr_1"], reply: (c) => (c.type === "thread.fork" ? { type: "created", id: "thr_2" } : { type: "ok" }) });
-    renderAgents(<ThreadSession thread={{ ...busy, status: "idle", active_run: null }} machine={machine()} />, h);
+    renderAgents(<Conversation thread={{ ...busy, status: "idle", active_run: null }} machine={machine()} />, h);
     await userEvent.click(screen.getByRole("button", { name: "Remove from queue" }));
     expect(h.command.mock.calls.at(-1)?.[2]).toEqual({ type: "message.unqueue", thread: "thr_1", message: "q1" });
 
@@ -74,21 +73,46 @@ describe("ThreadSession", () => {
     await userEvent.click(within(first).getByRole("button", { name: /Fork/ }));
     expect(h.command.mock.calls.at(-1)?.[2]).toEqual({ type: "thread.fork", thread: "thr_1", at: "run_1" });
     await vi_wait();
-    expect(h.setExpanded).toHaveBeenCalledWith("thr_2", true);
+    expect(h.openThread).toHaveBeenCalledWith("thr_2");
 
     await userEvent.click(within(first).getByRole("button", { name: /Roll back to here/ }));
     await userEvent.click(within(first).getByRole("button", { name: "Roll back" }));
     expect(h.command.mock.calls.at(-1)?.[2]).toEqual({ type: "checkpoint.rollback", thread: "thr_1", checkpoint: "chk_1" });
   });
 
-  it("asks before deleting and closes with the button", async () => {
+  it("asks before deleting from the menu, then goes back to the canvas", async () => {
     const h = agentsHarness({ entities, follow: ["thr_1"] });
-    renderAgents(<ThreadSession thread={busy} machine={machine()} />, h);
-    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
-    await userEvent.click(screen.getByRole("button", { name: "Delete thread" }));
+    renderAgents(<Conversation thread={busy} machine={machine()} />, h);
+    await userEvent.click(screen.getByRole("button", { name: "More" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(h.command).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("menuitem", { name: "Delete this thread?" }));
     expect(h.command.mock.calls.at(-1)?.[2]).toEqual({ type: "thread.delete", thread: "thr_1" });
-    await userEvent.click(screen.getByRole("button", { name: "Close (Esc)" }));
-    expect(h.setExpanded).toHaveBeenCalledWith("thr_1", false);
+    await vi_wait();
+    expect(h.close).toHaveBeenCalled();
+  });
+
+  it("switches to another conversation from the title, the ones waiting on you first", async () => {
+    const other = thread({ id: "thr_9", title: "Bump the deps", pending_requests: 1, status: "waiting" });
+    const h = agentsHarness({ entities: [...entities, mirrored("thread", other, 11)], follow: ["thr_1"] });
+    renderAgents(<Conversation thread={busy} machine={machine()} />, h);
+    await userEvent.click(screen.getByRole("button", { name: /Fix the flaky queue test/ }));
+    const list = screen.getByRole("listbox", { name: "Conversations" });
+    const options = within(list).getAllByRole("option");
+    expect(options).toHaveLength(2);
+    expect(within(list).getByRole("option", { selected: true })).toHaveTextContent("Fix the flaky queue test");
+    await userEvent.click(within(list).getByRole("option", { name: /Bump the deps/ }));
+    expect(h.openThread).toHaveBeenCalledWith("thr_9");
+  });
+
+  it("shows the diff beside the transcript", async () => {
+    const h = agentsHarness({ entities, follow: ["thr_1"], reply: (c) => (c.type === "diff.get" ? { type: "diff", files: [], stat: { files: 0, additions: 0, deletions: 0 }, truncated: false } as never : { type: "ok" }) });
+    renderAgents(<Conversation thread={busy} machine={machine()} />, h);
+    await userEvent.click(screen.getByRole("button", { name: "Diff" }));
+    expect(h.command.mock.calls.at(-1)?.[2]).toEqual({ type: "diff.get", thread: "thr_1" });
+    expect(await screen.findByText("No changes yet.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Hide the diff" }));
+    expect(screen.queryByText("No changes yet.")).toBeNull();
   });
 });
 

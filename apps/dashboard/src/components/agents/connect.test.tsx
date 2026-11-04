@@ -33,7 +33,7 @@ describe("ConnectAgents", () => {
     await userEvent.click(screen.getByRole("button", { name: "Connect machine" }));
     expect(agents.approveLogin).toHaveBeenCalledWith("acme", "WXYZ-2345", "ada-mbp");
     expect(await screen.findByText("Connected")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Open the canvas" })).toHaveAttribute("href", "/dashboard/agents?owner=acme");
+    expect(screen.getByRole("link", { name: "Open your agents" })).toHaveAttribute("href", "#agents");
   });
 
   it("says at once when no login is waiting with the code", async () => {

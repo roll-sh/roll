@@ -2,7 +2,6 @@
 
 import { HorizonMark, RollMark } from "@roll/brand";
 import { Check, KeyRound, Laptop } from "lucide-react";
-import Link from "next/link";
 import { useEffect, useState } from "react";
 import { agentsApi, type MintedMachine, type PendingLogin } from "@/lib/agents-api";
 import { ApiError, codeApi, type Owner } from "@/lib/code-api";
@@ -138,12 +137,12 @@ function Approve({ code }: { code: string }) {
           <RollMark size={56} state="success" />
           <div className="space-y-2 text-[13px]">
             <p>
-              The machine is signed in to <span className="font-mono">{owner}</span>. Start it with <code className="font-mono">roll agent up</code> and it appears on the
-              canvas.
+              The machine is signed in to <span className="font-mono">{owner}</span>. Start it with <code className="font-mono">roll agent up</code> and it shows up with
+              your agents.
             </p>
-            <Link href={`/dashboard/agents?owner=${encodeURIComponent(owner)}`} className="text-accent hover:underline">
-              Open the canvas
-            </Link>
+            <a href="#agents" className="text-accent hover:underline">
+              Open your agents
+            </a>
           </div>
         </div>
       </Panel>

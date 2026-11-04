@@ -119,16 +119,16 @@ describe("MachineNode", () => {
     const card = screen.getByLabelText("Machine ada-mbp");
     expect(card.className).toContain("opacity-60");
     expect(within(card).getByText(/Last seen 3 h ago/)).toBeInTheDocument();
-    expect(within(card).queryByRole("button", { name: /Add project/ })).not.toBeInTheDocument();
+    expect(within(card).queryByRole("button", { name: /Add a project/ })).not.toBeInTheDocument();
   });
 
   it("a machine with no projects has one obvious next step", () => {
     const { unmount } = renderAgents(<MachineNode machine={machine()} />, agentsHarness());
-    expect(screen.getByText(/Add a project: a folder here/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Add project" }).className).toContain("bg-fg");
+    const primaryAdd = () => screen.getAllByRole("button", { name: /Add a project/ }).filter((b) => b.className.includes("bg-fg"));
+    expect(primaryAdd()).toHaveLength(1);
     unmount();
     renderAgents(<MachineNode machine={machine()} />, agentsHarness({ entities: [mirrored("project", project(), 1)] }));
-    expect(screen.queryByText(/Add a project: a folder here/)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Add project" }).className).not.toContain("bg-fg");
+    expect(primaryAdd()).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "Add a project" })).toBeInTheDocument();
   });
 });

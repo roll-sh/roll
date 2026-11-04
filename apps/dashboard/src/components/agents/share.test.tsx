@@ -10,7 +10,7 @@ vi.mock("@/lib/agents-api", async (orig) => ({ ...(await orig()), agentsApi: age
 
 import { ShareButton, SharesList } from "./share";
 import { clock, ShareView } from "./share-view";
-import { ThreadSession } from "./session";
+import { Conversation } from "./session";
 
 const view = (s = share()) => render(<ShareView share={s} />, { wrapper: MarkStateProvider });
 
@@ -84,7 +84,7 @@ describe("ShareView", () => {
   });
 });
 
-describe("ThreadSession, read-only", () => {
+describe("Conversation, read-only", () => {
   it("is the transcript alone: no composer, actions or answers", () => {
     const t = thread({ status: "waiting", active_run: "run_1", run_count: 1, pending_requests: 1 });
     const h = agentsHarness({
@@ -92,12 +92,11 @@ describe("ThreadSession, read-only", () => {
       entities: [mirrored("project", project(), 1), mirrored("thread", t, 2), mirrored("run", run({ status: "waiting" }), 3), mirrored("node", node({ type: "request", request: "req_1" }, { id: "nod_d", status: "waiting" }), 4), mirrored("request", approval({ node: "nod_d" }), 5)],
     });
     h.ctx.readOnly = true;
-    renderAgents(<ThreadSession thread={t} machine={machine()} />, h);
+    renderAgents(<Conversation thread={t} machine={machine()} />, h);
     expect(screen.getByText("Run `cargo test -p code-control`")).toBeInTheDocument();
     expect(screen.getByText("Waiting for an answer…")).toBeInTheDocument();
-    for (const name of ["Approve", "Share", "Rename", "Delete", "Fork this thread"]) expect(screen.queryByRole("button", { name })).toBeNull();
+    for (const name of ["Approve", "Share", "More", "Diff", "Fork this conversation"]) expect(screen.queryByRole("button", { name })).toBeNull();
     expect(screen.queryByRole("textbox")).toBeNull();
-    expect(screen.getByRole("button", { name: "Close (Esc)" })).toBeInTheDocument();
   });
 });
 

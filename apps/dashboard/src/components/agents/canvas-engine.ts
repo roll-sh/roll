@@ -6,9 +6,11 @@
  * through `resolveColor` (call `refreshColors` when the theme changes), paused offscreen, a
  * static but state-correct frame under reduced motion, ease-out motion, no flashing.
  *
- * Pointer: drag the background (or anything with space held, or the middle button) to pan; wheel
- * zooms about the cursor and trackpad scrolling pans; pinch zooms (ctrl+wheel, or two touches).
- * Wheel events inside `[data-scroll]` scroll that element instead.
+ * Pointer: drag the background (or anything with space held, or the middle button) to pan. Like
+ * Figma: scrolling pans (two fingers on a trackpad, any direction; shift turns a mouse wheel
+ * sideways), and pinching zooms about the fingers (ctrl+wheel in Chromium and Firefox, gesture
+ * events in Safari, two touches on a touch screen); ⌘/ctrl+wheel zooms with a mouse. Wheel events
+ * inside `[data-scroll]` scroll that element instead.
  */
 
 import { resolveColor } from "@roll/brand";
@@ -85,6 +87,8 @@ export class CanvasEngine {
   private pan: { id: number; x: number; y: number; moved: number } | null = null;
   private touches = new Map<number, { x: number; y: number }>();
   private pinch: { d: number; k: number } | null = null;
+  /** Safari's trackpad pinch: the scale it started at. */
+  private gesture: { k: number } | null = null;
   private space = false;
 
   private ro: ResizeObserver;
@@ -109,6 +113,8 @@ export class CanvasEngine {
         if (!key) continue;
         const el = e.target as HTMLElement;
         const s = { w: el.offsetWidth, h: el.offsetHeight };
+        // Hidden (the canvas is under a conversation): keep the last real size.
+        if (s.w === 0 && s.h === 0) continue;
         const prev = this.size.get(key);
         if (prev && prev.w === s.w && prev.h === s.h) continue;
         this.size.set(key, s);
@@ -136,6 +142,9 @@ export class CanvasEngine {
     container.addEventListener("pointercancel", this.onUp);
     container.addEventListener("pointerleave", this.onLeave);
     container.addEventListener("wheel", this.onWheel, { passive: false });
+    container.addEventListener("gesturestart", this.onGesture as EventListener);
+    container.addEventListener("gesturechange", this.onGesture as EventListener);
+    container.addEventListener("gestureend", this.onGesture as EventListener);
     window.addEventListener("keydown", this.onKey);
     window.addEventListener("keyup", this.onKey);
     document.addEventListener("visibilitychange", this.kick);
@@ -155,6 +164,9 @@ export class CanvasEngine {
     c.removeEventListener("pointercancel", this.onUp);
     c.removeEventListener("pointerleave", this.onLeave);
     c.removeEventListener("wheel", this.onWheel);
+    c.removeEventListener("gesturestart", this.onGesture as EventListener);
+    c.removeEventListener("gesturechange", this.onGesture as EventListener);
+    c.removeEventListener("gestureend", this.onGesture as EventListener);
     window.removeEventListener("keydown", this.onKey);
     window.removeEventListener("keyup", this.onKey);
     document.removeEventListener("visibilitychange", this.kick);
@@ -292,7 +304,7 @@ export class CanvasEngine {
     const target = e.target as HTMLElement;
     // Controls over the canvas (the toolbar, zoom, dialogs) keep their clicks: capturing the
     // pointer for a pan would send the click to the canvas instead.
-    if (e.button !== 1 && target.closest("button, a, input, textarea, select, label, [role=dialog], [data-nodrag]")) return;
+    if (e.button !== 1 && target.closest("button, a, input, textarea, select, label, [role=dialog]:not([data-surface]), [role=menu], [data-nodrag]")) return;
     const onCard = !!target.closest("[data-card]");
     if (!(e.button === 1 || ((e.button === 0 && !onCard) || (this.space && e.button === 0)))) return;
     if (e.button === 1 || this.space) e.preventDefault();
@@ -348,18 +360,33 @@ export class CanvasEngine {
 
   private onWheel = (e: WheelEvent) => {
     const target = e.target as HTMLElement;
-    if (!e.ctrlKey && target.closest("[data-scroll]")) return;
+    if (!e.ctrlKey && !e.metaKey && target.closest("[data-scroll]")) return;
     e.preventDefault();
     const p = this.local(e);
     const lines = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.h : 1;
-    const dx = e.deltaX * lines;
-    const dy = e.deltaY * lines;
-    // Pinch arrives as ctrl+wheel; a mouse wheel moves in whole notches with no sideways part.
-    const mouse = e.deltaMode !== 0 || (dx === 0 && Number.isInteger(dy) && Math.abs(dy) >= 50);
-    if (e.ctrlKey || e.metaKey || mouse) {
-      const f = Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.0015));
+    let dx = e.deltaX * lines;
+    let dy = e.deltaY * lines;
+    if (e.ctrlKey || e.metaKey) {
+      // A pinch sends small, smooth deltas; a ⌘-scrolled mouse wheel whole notches.
+      const f = Math.exp(-Math.max(-60, Math.min(60, dy)) * (Math.abs(dy) < 50 ? 0.012 : 0.0025));
       this.setView(zoomAt(this.view, this.view.k * f, p.x, p.y));
-    } else this.panBy(-dx, -dy);
+      return;
+    }
+    // Windows and Linux send shift+wheel as vertical; macOS already turns it sideways.
+    if (e.shiftKey && dx === 0) [dx, dy] = [dy, 0];
+    this.panBy(-dx, -dy);
+  };
+
+  /** Safari (macOS) pinches as gesture events instead of ctrl+wheel. */
+  private onGesture = (e: Event & { scale?: number; clientX?: number; clientY?: number }) => {
+    e.preventDefault();
+    if (e.type === "gestureend") {
+      this.gesture = null;
+      return;
+    }
+    if (e.type === "gesturestart" || !this.gesture) this.gesture = { k: this.view.k };
+    const p = this.local({ clientX: e.clientX ?? this.w / 2, clientY: e.clientY ?? this.h / 2 });
+    this.setView(zoomAt(this.view, this.gesture.k * (e.scale ?? 1), p.x, p.y));
   };
 
   // ── frames ──

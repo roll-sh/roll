@@ -3,7 +3,6 @@
 import { RollLogo } from "@roll/brand";
 import {
   Activity,
-  Bot,
   ChevronsUpDown,
   Database,
   GitBranch,
@@ -26,14 +25,13 @@ import {
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Suspense, useEffect, useState, type ReactNode } from "react";
-import { Rolling } from "./agents/rolling";
+import { AgentsControl } from "./agents/agents-control";
 import { AskPanel } from "./ask";
 import { useMarkState } from "./mark-state";
 
 const nav = [
   { label: "Overview", icon: LayoutGrid, href: "/dashboard" },
   { label: "Code", icon: GitBranch, href: "/dashboard/code" },
-  { label: "Agents", icon: Bot, href: "/dashboard/agents" },
   { label: "Databases", icon: Database, href: "/dashboard/databases" },
   { label: "Redis", icon: MemoryStick, href: "/dashboard/redis" },
   { label: "Storage", icon: HardDrive, href: "/dashboard/storage" },
@@ -50,8 +48,9 @@ const nav = [
 ];
 
 /**
- * Sidebar, top bar and the ⌘K "Ask roll" palette shared by every dashboard page. `bleed` gives the
- * page the whole area under the top bar (the agents canvas) instead of the centred column.
+ * Sidebar, top bar and the ⌘K "Ask roll" palette shared by every dashboard page. The top bar
+ * holds the agents (running, waiting, "New agent"; ⌘J opens them over the page). `bleed` gives
+ * the page the whole area under the top bar instead of the centred column.
  */
 export function AppShell({ crumb, actions, bleed = false, children }: { crumb: ReactNode; actions?: ReactNode; bleed?: boolean; children: ReactNode }) {
   const { state } = useMarkState();
@@ -103,7 +102,7 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
               <span className="flex-1 truncate text-left">Ask roll…</span>
               <kbd className="rounded border border-line px-1.5 font-mono text-[10px] max-sm:hidden">⌘K</kbd>
             </button>
-            <Rolling />
+            <AgentsControl />
             {actions}
           </header>
 

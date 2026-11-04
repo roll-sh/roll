@@ -87,7 +87,7 @@ export function landingNote(l: Landing): { tone: "ok" | "busy" | "quiet" | "bad"
 
 /** Publish the thread's work as a roll code change (and land it): the message, the land toggle, then what happened. */
 export function PublishForm({ thread, machine, onDone }: { thread: Thread; machine: Machine; onDone: () => void }) {
-  const { client, setExpanded } = useAgents();
+  const { client, openThread } = useAgents();
   const [message, setMessage] = useState(thread.title);
   const [land, setLand] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -106,7 +106,7 @@ export function PublishForm({ thread, machine, onDone }: { thread: Thread; machi
             try {
               const r = await client.run<{ type: "created"; id: string }>(machine.id, { type: "thread.fork", thread: thread.id, worktree: true }, "created");
               onDone();
-              setExpanded(r.id, true);
+              openThread(r.id);
             } catch (err) {
               setError(err instanceof Error ? err.message : String(err));
             } finally {

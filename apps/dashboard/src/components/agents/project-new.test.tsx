@@ -78,11 +78,16 @@ describe("NewProject", () => {
 });
 
 describe("ProjectNode", () => {
-  it("a project with no threads offers starting one first", () => {
-    const { unmount } = renderAgents(<ProjectNode project={project()} machine={machine()} />, agentsHarness());
-    expect(screen.getByRole("button", { name: "Start a thread" }).className).toContain("bg-fg");
+  it("a project with no threads offers starting one first", async () => {
+    const startNew = vi.fn();
+    const { unmount } = renderAgents(<ProjectNode project={project()} machine={machine()} />, agentsHarness({ ctx: { startNew } }));
+    const start = screen.getByRole("button", { name: "Start an agent" });
+    expect(start.className).toContain("bg-fg");
+    await userEvent.click(start);
+    expect(startNew).toHaveBeenCalledWith("prj_1");
     unmount();
-    renderAgents(<ProjectNode project={project()} machine={machine()} />, agentsHarness({ entities: [mirrored("thread", thread(), 1)] }));
-    expect(screen.getByRole("button", { name: "New thread" })).toBeInTheDocument();
+    renderAgents(<ProjectNode project={project()} machine={machine()} />, agentsHarness({ entities: [mirrored("thread", thread(), 1)], ctx: { startNew } }));
+    expect(screen.queryByRole("button", { name: "Start an agent" })).toBeNull();
+    expect(screen.getByRole("button", { name: "New agent here" })).toBeInTheDocument();
   });
 });

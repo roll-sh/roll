@@ -49,8 +49,10 @@ export const AgentsCanvas = forwardRef<
     defaultSize: (node: GraphNode) => Size;
     onEscape?: () => void;
     overlay?: ReactNode;
+    /** Off while something covers the canvas: its keys go to that instead. */
+    active?: boolean;
   }
->(function AgentsCanvas({ graph, storageKey, render, defaultSize, onEscape, overlay }, ref) {
+>(function AgentsCanvas({ graph, storageKey, render, defaultSize, onEscape, overlay, active = true }, ref) {
   const reduced = useReducedMotion();
   const container = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -242,8 +244,8 @@ export const AgentsCanvas = forwardRef<
     const onKey = (ev: KeyboardEvent) => {
       const e = engine.current;
       const el = ev.target as HTMLElement | null;
-      if (!e || ev.metaKey || ev.ctrlKey || ev.altKey) return;
-      if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.closest("[role=dialog], .xterm"))) return;
+      if (!e || !active || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+      if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.closest("[role=dialog]:not([data-surface]), [role=menu], [role=listbox], .xterm"))) return;
       const step = 80;
       switch (ev.key) {
         case "+":
@@ -283,14 +285,14 @@ export const AgentsCanvas = forwardRef<
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [fit, onEscape]);
+  }, [fit, onEscape, active]);
 
   const hasManual = Object.keys(manual).length > 0;
 
   return (
     <div
       ref={container}
-      className="relative h-full w-full touch-none overflow-hidden bg-bg text-fg select-none"
+      className="relative h-full w-full touch-none overflow-hidden overscroll-none bg-bg text-fg select-none"
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}

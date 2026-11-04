@@ -27,11 +27,21 @@ function encode(text: string): string {
 
 const cssVar = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
-/**
- * A PTY on the machine, as a canvas card: xterm.js fed by the stream's terminal deltas (and the
- * scrollback when it opens late), typing sent as `terminal.input`, the size as `terminal.resize`.
- */
+/** A PTY on the machine as a canvas card. */
 export function TerminalNode({ terminal, machine }: { terminal: TerminalRec; machine: Machine | undefined }) {
+  return (
+    <Card width={620} label={`Terminal ${terminal.title}`}>
+      <TerminalView terminal={terminal} machine={machine} className="h-[340px]" />
+    </Card>
+  );
+}
+
+/**
+ * A PTY on the machine: xterm.js fed by the stream's terminal deltas (and the scrollback when it
+ * opens late), typing sent as `terminal.input`, the size as `terminal.resize`. `className` sizes
+ * the screen (the canvas card's is fixed; a conversation's fills its panel).
+ */
+export function TerminalView({ terminal, machine, className = "", bare = false }: { terminal: TerminalRec; machine: Machine | undefined; className?: string; bare?: boolean }) {
   const { client } = useAgents();
   const host = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -120,7 +130,8 @@ export function TerminalNode({ terminal, machine }: { terminal: TerminalRec; mac
   }, [client, mid, terminal.id]);
 
   return (
-    <Card width={620} label={`Terminal ${terminal.title}`}>
+    <>
+      {!bare && (
       <div className="flex items-center gap-2 border-b border-line px-3 py-2 text-[12px]" data-drag>
         <SquareTerminal className="size-3.5 text-subtle" />
         <span className="min-w-0 flex-1 truncate font-mono">{terminal.title}</span>
@@ -135,8 +146,9 @@ export function TerminalNode({ terminal, machine }: { terminal: TerminalRec; mac
           <X className="size-3.5" />
         </button>
       </div>
-      <div ref={host} data-nodrag data-scroll className="h-[340px] cursor-text overflow-hidden bg-bg px-2 py-1.5" />
+      )}
+      <div ref={host} data-nodrag data-scroll className={`cursor-text overflow-hidden bg-bg px-2 py-1.5 ${className}`} />
       {error && <p className="border-t border-line px-3 py-1.5 text-[12px] text-danger">{error}</p>}
-    </Card>
+    </>
   );
 }

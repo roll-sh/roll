@@ -1,7 +1,8 @@
 "use client";
 
 /**
- * A shared thread at `/agents/s/<id>`: the canvas, read-only, with a replay. The page renders the
+ * A shared thread at `/agents/s/<id>`: the conversation, read-only, with a replay (and the canvas
+ * of it and its subagents a click away). The page renders the
  * final frame (what the server sent and what a crawler sees), then rewinds and plays the run
  * back from its records' times (`lib/agents-replay.ts`): threads and nodes appear, text streams,
  * busy edges pulse, approvals wait and get answered. A scrubber, play/pause, steps and speed
@@ -10,7 +11,7 @@
  */
 
 import { HorizonMark, RollLogo, useReducedMotion } from "@roll/brand";
-import { ChevronLeft, ChevronRight, Folder, Pause, Play, RotateCcw, Server } from "lucide-react";
+import { ChevronLeft, ChevronRight, Folder, MessageSquare, Network, Pause, Play, RotateCcw, Server } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Share } from "@/lib/agents-api";
@@ -21,7 +22,7 @@ import { frameAt, realAt, replayAt, shareStats, step, timeline } from "@/lib/age
 import { useMarkState } from "../mark-state";
 import { AgentsCanvas, type CanvasHandle } from "./agents-canvas";
 import { Card, RequestNode, SubagentNode, ThreadNode } from "./nodes";
-import { SESSION_H, SESSION_W, ThreadSession } from "./session";
+import { Conversation, IconButton } from "./session";
 import { AgentsContext, useMarkDriver, type AgentsCtx } from "./use-agents";
 
 export const SPEEDS = [0.5, 1, 2, 4, 8] as const;
@@ -49,7 +50,8 @@ export function ShareView({ share }: { share: Share }) {
   const [ms, setMs] = useState(tl.duration);
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState<(typeof SPEEDS)[number]>(1);
-  const [expanded, setExpandedSet] = useState<ReadonlySet<string>>(() => new Set([share.thread]));
+  // The shared conversation first; the canvas shows it with its forks and subagents.
+  const [open, setOpen] = useState<string | null>(share.thread);
   const canvas = useRef<CanvasHandle>(null);
   const started = useRef(false);
 
@@ -93,23 +95,20 @@ export function ShareView({ share }: { share: Share }) {
   client.show(data);
   useMarkDriver(useMemo(() => ({ data, conn: "live" as const, error: null }), [data]));
 
-  const setExpanded = useCallback((thread: string, open: boolean) => {
-    setExpandedSet((s) => {
-      if (s.has(thread) === open) return s;
-      const next = new Set(s);
-      if (open) next.add(thread);
-      else next.delete(thread);
-      return next;
-    });
-    if (open) setTimeout(() => canvas.current?.focus(`t:${thread}`, 1), 60);
+  const openThread = useCallback((thread: string) => setOpen(thread), []);
+  const close = useCallback(() => setOpen(null), []);
+  const focus = useCallback((key: string) => {
+    if (key.startsWith("t:")) return setOpen(key.slice(2));
+    setOpen(null);
+    setTimeout(() => canvas.current?.focus(key), 60);
   }, []);
-  const focus = useCallback((key: string) => canvas.current?.focus(key), []);
   const ctx: AgentsCtx = useMemo(
-    () => ({ client, owner: share.owner, demo: false, expanded, setExpanded, focus, readOnly: true, now: real }),
-    [client, share.owner, expanded, setExpanded, focus, real],
+    () => ({ client, owner: share.owner, demo: false, openThread, close, focus, readOnly: true, now: real }),
+    [client, share.owner, openThread, close, focus, real],
   );
 
-  const graph = useMemo(() => deriveGraph(data, { expanded }), [data, expanded]);
+  const graph = useMemo(() => deriveGraph(data), [data]);
+  const thread = open ? data.threads.get(open) : undefined;
   const render = (n: GraphNode) => {
     switch (n.kind) {
       case "machine":
@@ -121,7 +120,7 @@ export function ShareView({ share }: { share: Share }) {
       case "thread": {
         const t = data.threads.get(n.id)!.value;
         const m = data.machines.get(n.machine)?.value;
-        return expanded.has(t.id) ? <ThreadSession thread={t} machine={m} /> : <ThreadNode thread={t} machine={m} />;
+        return <ThreadNode thread={t} machine={m} />;
       }
       case "subagent": {
         const node = [...data.nodes.values()].map((x) => x.get(n.id)).find(Boolean)?.value;
@@ -141,7 +140,7 @@ export function ShareView({ share }: { share: Share }) {
         case "project":
           return { w: 260, h: 72 };
         case "thread":
-          return expanded.has(n.id) ? { w: SESSION_W, h: SESSION_H } : { w: 304, h: 118 };
+          return { w: 296, h: 96 };
         case "subagent":
           return { w: 248, h: 84 };
         case "request":
@@ -150,7 +149,7 @@ export function ShareView({ share }: { share: Share }) {
           return { w: 0, h: 0 };
       }
     },
-    [expanded],
+    [],
   );
 
   const busy = [...data.threads.values()].some((r) => ["starting", "running", "waiting"].includes(r.value.status));
@@ -165,14 +164,33 @@ export function ShareView({ share }: { share: Share }) {
       <div className="flex h-dvh flex-col bg-bg text-fg">
         <ShareHeader share={share} stats={stats} />
         <div className="relative min-h-0 flex-1">
-          <AgentsCanvas
-            ref={canvas}
-            graph={graph}
-            storageKey={`share:${share.id}`}
-            render={render}
-            defaultSize={defaultSize}
-            onEscape={() => setExpanded(share.thread, false)}
-          />
+          {thread ? (
+            <Conversation
+              thread={thread.value}
+              machine={data.machines.get(thread.machine)?.value}
+              end={
+                graph.nodes.size > 3 ? (
+                  <IconButton label="The canvas: this thread, its forks and subagents" onClick={close}>
+                    <Network className="size-4" />
+                  </IconButton>
+                ) : undefined
+              }
+            />
+          ) : (
+            <AgentsCanvas
+              ref={canvas}
+              graph={graph}
+              storageKey={`share:${share.id}`}
+              render={render}
+              defaultSize={defaultSize}
+              onEscape={() => setOpen(share.thread)}
+              overlay={
+                <button onClick={() => setOpen(share.thread)} className="absolute top-3 left-3 inline-flex items-center gap-1.5 rounded-lg border border-line bg-panel/90 px-2.5 py-1.5 text-[12px] text-muted backdrop-blur hover:text-fg">
+                  <MessageSquare className="size-3.5" /> Back to the conversation
+                </button>
+              }
+            />
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-3 border-t border-line bg-panel px-4 py-2.5" role="group" aria-label="Replay">
           <div className="flex items-center gap-1">

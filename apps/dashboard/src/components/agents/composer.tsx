@@ -221,7 +221,7 @@ export function Composer({
           ? "Queue a message for when this run ends…"
           : "Steer the running agent…"
         : mode.kind === "new"
-          ? "What should the agent do?"
+          ? "Describe the task. Enter starts it."
           : "Send a follow-up…";
 
   return (
