@@ -6,6 +6,7 @@ import {
   ArrowDown,
   Check,
   ChevronDown,
+  ChevronRight,
   ClipboardList,
   FileDiff as DiffIcon,
   GitBranch,
@@ -19,7 +20,7 @@ import {
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { coming, isBusy, machineState, reachable, type Checkpoint, type Diff, type Machine, type Request, type Run, type Thread } from "@/lib/agents-api";
-import { checkpointsOf, nodeTree, providersFor, runsOf } from "@/lib/agents-store";
+import { checkpointsOf, nodeTree, runsOf } from "@/lib/agents-store";
 import { DiffViewer } from "../code/diff";
 import { input } from "../ui";
 import { ChangeChip, PublishForm, TakeWorkForm, WorkChip } from "./change";
@@ -28,8 +29,9 @@ import { Menu } from "./menu";
 import { useInboxMenu } from "./threads-sidebar";
 import { toFileDiff } from "./request-card";
 import { ShareButton } from "./share";
-import { modelName, providerName, Stat, StatusDot, threadStatusLabel, usageLine } from "./shared";
+import { MachineIcon, Stat, StatusDot, usageLine } from "./shared";
 import { TerminalView } from "./terminal";
+import { orchestration, OrchestratorChip, ProjectMonogram, StatusPill, threadPill } from "./thread-status";
 import { EmptyTranscript, RunView, type TranscriptActions } from "./transcript";
 import { useAgents, usePrefs } from "./use-agents";
 
@@ -212,6 +214,7 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
             ) : (
               <Composer key={thread.id} mode={{ kind: "thread", thread, machine }} autoFocus={!phone} />
             )}
+            <ContextStrip thread={thread} machine={machine} runs={runs} />
             {error && (
               <p className="mt-2 text-[12px] text-danger" role="alert">
                 {error}
@@ -227,6 +230,36 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
 
 function SidePanel({ full, children }: { full: boolean; children: ReactNode }) {
   return <div className={`flex min-h-0 shrink-0 flex-col ${full ? "w-full" : "w-[min(48%,760px)] min-w-[380px] border-l border-line"}`}>{children}</div>;
+}
+
+/**
+ * The plain row under the composer (T3's `ComposerSurface.ContextStrip`): where the thread runs
+ * (the machine, its worktree's branch) and what it has cost and changed so far.
+ */
+function ContextStrip({ thread, machine, runs }: { thread: Thread; machine: Machine | undefined; runs: Run[] }) {
+  const usage = usageLine(thread.usage);
+  const stat = runs.findLast((r) => r.status !== "rolled_back")?.stat ?? null;
+  if (!machine && !thread.worktree && !usage) return null;
+  return (
+    <div className="flex min-w-0 items-center gap-3 overflow-hidden px-2 pt-2 text-[11.5px] whitespace-nowrap text-subtle">
+      {machine && (
+        <span className="flex min-w-0 items-center gap-1" title={`On ${machine.name}`}>
+          <MachineIcon machine={machine} className="size-3 shrink-0" />
+          <span className="truncate">{machine.name}</span>
+        </span>
+      )}
+      {thread.worktree && (
+        <span className="flex min-w-0 items-center gap-1 font-mono" title={`Worktree: ${thread.worktree.path}`}>
+          <GitBranch className="size-3 shrink-0" />
+          <span className="truncate">{thread.worktree.branch}</span>
+        </span>
+      )}
+      <span className="ml-auto flex shrink-0 items-center gap-2 font-mono tabular-nums">
+        {usage}
+        <Stat stat={stat} />
+      </span>
+    </div>
+  );
 }
 
 /** The conversation's bar: back, the title (a switcher to the other conversations), what it runs on, and every action. */
@@ -259,12 +292,12 @@ function TitleBar({
   const state = machine ? machineState(machine) : "offline";
   const sleeping = state === "asleep" ? "Asleep · wakes when an agent needs it" : state === "stopped" ? "Stopped · sending starts it" : coming(state) && machine?.sandbox ? "Waking up…" : null;
   const project = data.projects.get(thread.project)?.value;
-  const providers = providersFor(data, mid);
-  const model = modelName(providers, thread.provider, thread.model);
   const runs = runsOf(data, thread.id);
-  const lastStat = runs.findLast((r) => r.status !== "rolled_back")?.stat ?? null;
+  const lastRun = runs.at(-1);
   const busy = isBusy(thread.status);
-  const usage = usageLine(thread.usage);
+  const pending = [...data.requests.values()].map((r) => r.value).filter((r) => r.thread === thread.id && r.status === "pending");
+  const pill = threadPill(thread, pending, lastRun);
+  const orchestrated = thread.orchestrator ? orchestration(thread, [...data.threads.values()].map((r) => r.value)) : null;
   // Settle, snooze (docs/code/agents.md, "Settling").
   const inboxMenu = useInboxMenu(thread);
   const act = (fn: () => Promise<unknown>) => {
@@ -284,13 +317,21 @@ function TitleBar({
       openThread(r.id);
     });
   const diffOpen = side?.kind === "diff";
+  const terminalOpen = side?.kind === "terminal";
 
   return (
     <div className="shrink-0 border-b border-line">
-      <div className="flex h-12 items-center gap-1.5 px-2 sm:px-3" data-drag-region>
+      <div className="@container/header flex h-[52px] items-center gap-1.5 px-2 sm:px-3" data-drag-region>
         {start}
-        <StatusDot status={thread.status} className="ml-1 shrink-0" />
-        <div className="min-w-0 flex-1 pl-1">
+        {/* T3's breadcrumb: the project, then the conversation (its switcher), then its status. */}
+        {project && (
+          <span className="flex max-w-40 min-w-0 shrink items-center gap-1.5 pl-1 text-[13px] text-muted @max-[26rem]/header:hidden" title={project.name}>
+            <ProjectMonogram name={project.name} className="size-3.5" />
+            <span className="truncate">{project.name}</span>
+            <ChevronRight className="size-3.5 shrink-0 text-faint" aria-hidden />
+          </span>
+        )}
+        <div className="flex min-w-0 flex-1 items-center gap-2">
           {renaming !== null ? (
             <form
               onSubmit={(e) => {
@@ -317,58 +358,28 @@ function TitleBar({
           ) : (
             <Switcher thread={thread} onRename={readOnly ? undefined : () => setRenaming(thread.title)} />
           )}
-          <p className="flex min-w-0 items-center gap-2 truncate text-[11.5px] leading-tight text-subtle">
-            {busy ? <span className="shrink-0 shimmer">{thread.activity ?? threadStatusLabel[thread.status]}</span> : <span className="shrink-0">{threadStatusLabel[thread.status]}</span>}
-            {sleeping && <span className={`shrink-0 ${coming(state) ? "shimmer" : ""}`}>{sleeping}</span>}
-            {!phone && (
-              <>
-                <span className="truncate">
-                  {project?.name && `${project.name} · `}
-                  {providerName(providers, thread.provider)}
-                  {model && ` · ${model}`}
-                  {thread.effort && ` · ${thread.effort}`}
-                </span>
-                {thread.worktree && (
-                  <span className="flex shrink-0 items-center gap-1 font-mono" title={thread.worktree.path}>
-                    <GitBranch className="size-3" />
-                    {thread.worktree.branch}
-                  </span>
-                )}
-                {usage && <span className="shrink-0 font-mono">{usage}</span>}
-                <Stat stat={lastStat} className="shrink-0" />
-              </>
-            )}
-          </p>
+          {pill && <StatusPill pill={pill} className="@max-[22rem]/header:hidden" />}
+          {sleeping && <span className={`shrink-0 truncate text-[11.5px] text-subtle @max-[30rem]/header:hidden ${coming(state) ? "shimmer" : ""}`}>{sleeping}</span>}
         </div>
         {!readOnly && (
-          <div className="flex shrink-0 items-center gap-0.5 text-subtle" data-nodrag>
+          <div className="flex shrink-0 items-center gap-0.5 text-muted" data-nodrag>
             <IconButton label={diffOpen ? "Hide the diff" : "Diff"} onClick={() => setSide((s) => (s?.kind === "diff" ? null : { kind: "diff", run: null }))} active={diffOpen}>
               <DiffIcon className="size-4" />
             </IconButton>
             {!phone && (
-              <>
-                <IconButton label="Terminal in this thread's directory" disabled={!online} onClick={openTerminal} active={side?.kind === "terminal"}>
-                  <SquareTerminal className="size-4" />
-                </IconButton>
-                <IconButton label="Fork this conversation" disabled={!online} onClick={fork}>
-                  <Split className="size-4" />
-                </IconButton>
-                {project?.repo && (
-                  <IconButton label="Publish as a roll code change" disabled={!online || busy} onClick={() => setPanel((p) => (p === "publish" ? null : "publish"))} active={panel === "publish"}>
-                    <Upload className="size-4" />
-                  </IconButton>
-                )}
-                {!demo && <ShareButton thread={thread} />}
-              </>
+              <IconButton label={terminalOpen ? "Hide the terminal" : "Terminal in this thread's directory"} disabled={!online && !terminalOpen} onClick={terminalOpen ? () => setSide(null) : openTerminal} active={terminalOpen}>
+                <SquareTerminal className="size-4" />
+              </IconButton>
             )}
+            {!demo && !phone && <ShareButton thread={thread} />}
             <Menu
               label="More"
               trigger={<MoreHorizontal className="size-4" />}
               items={[
                 { label: "Rename", icon: <Pencil />, onSelect: () => setRenaming(thread.title) },
                 phone && { label: "Terminal", icon: <SquareTerminal />, onSelect: openTerminal, disabled: !online },
-                phone && { label: "Fork", icon: <Split />, onSelect: fork, disabled: !online },
-                phone && !!project?.repo && { label: "Publish as a change", icon: <Upload />, onSelect: () => setPanel("publish"), disabled: !online || busy },
+                { label: "Fork", icon: <Split />, onSelect: fork, disabled: !online },
+                !!project?.repo && { label: "Publish as a change", icon: <Upload />, onSelect: () => setPanel("publish"), disabled: !online || busy },
                 !!services && !thread.work && { label: "Take a work item", icon: <ClipboardList />, onSelect: () => setPanel("work") },
                 ...inboxMenu.items,
                 {
@@ -404,8 +415,9 @@ function TitleBar({
           </span>
         )}
       </div>
-      {(thread.change || thread.work) && (
+      {(thread.change || thread.work || orchestrated) && (
         <div className="flex min-w-0 items-center gap-3 px-4 pb-2.5">
+          {orchestrated && <OrchestratorChip {...orchestrated} />}
           {thread.change && <ChangeChip change={thread.change} />}
           {thread.change?.detail && <span className="min-w-0 truncate text-[11.5px] text-subtle">{thread.change.detail}</span>}
           {thread.work && <WorkChip work={thread.work} className="min-w-0 flex-1" onRelease={readOnly || !services ? undefined : () => act(() => services.releaseWork(owner, thread.id))} />}
@@ -449,7 +461,7 @@ function Switcher({ thread, onRename }: { thread: Thread; onRename?: () => void 
   }, [data.threads, thread.id]);
   if (readOnly && others.length <= 1) return <h2 className="truncate text-[13.5px] leading-tight font-semibold tracking-[-0.02em]">{thread.title}</h2>;
   return (
-    <div ref={box} className="relative min-w-0" data-nodrag>
+    <div ref={box} className="relative flex min-w-0" data-nodrag>
       <button
         onClick={() => setOpen((o) => !o)}
         onDoubleClick={onRename}

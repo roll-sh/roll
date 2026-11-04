@@ -62,7 +62,8 @@ describe("roll code on a thread", () => {
         : { type: "ok" };
     const h = agentsHarness({ reply, entities: [mirrored("project", inRepo, 1), mirrored("thread", t, 2)], follow: ["thr_1"], ctx: { services: fakeServices() } });
     renderAgents(<Conversation thread={t} machine={machine()} />, h);
-    await userEvent.click(screen.getByRole("button", { name: "Publish as a roll code change" }));
+    await userEvent.click(screen.getByRole("button", { name: "More" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Publish as a change" }));
     const form = screen.getByRole("form", { name: "Publish" });
     expect(within(form).getByRole("textbox", { name: "Commit message" })).toHaveValue("Fix the flaky queue test");
     await userEvent.click(within(form).getByRole("checkbox", { name: "and land" }));
@@ -79,7 +80,8 @@ describe("roll code on a thread", () => {
     const t = thread();
     const h = agentsHarness({ reply: () => ({ type: "created", id: "thr_fork" }), entities: [mirrored("project", inRepo, 1), mirrored("thread", t, 2)], follow: ["thr_1"] });
     renderAgents(<Conversation thread={t} machine={machine()} />, h);
-    await userEvent.click(screen.getByRole("button", { name: "Publish as a roll code change" }));
+    await userEvent.click(screen.getByRole("button", { name: "More" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Publish as a change" }));
     await userEvent.click(screen.getByRole("button", { name: "Fork into a worktree" }));
     expect(h.command).toHaveBeenLastCalledWith("mch_1", expect.any(String), { type: "thread.fork", thread: "thr_1", worktree: true });
     await waitFor(() => expect(h.openThread).toHaveBeenCalledWith("thr_fork"));

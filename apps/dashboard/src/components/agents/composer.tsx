@@ -318,9 +318,11 @@ export function Composer({
       data-nodrag
     >
       {asked && (
-        // T3's attached banner: tucked under the card's top edge.
-        <div className="mx-[1.375rem] -mb-4 rounded-t-2xl border border-b-0 border-outline bg-raised px-3.5 pt-3 pb-6 transition-opacity duration-150 starting:opacity-0">
-          <QuestionsPanel flow={flow} />
+        // T3's attached banner: tucked 1rem under the card's top edge (the padding keeps its rows clear), scrolling on its own past 24rem or 40% of the screen.
+        <div className="mx-[1.375rem] -mb-4 rounded-t-2xl border border-b-0 border-outline bg-raised pt-3 pb-5 transition-opacity duration-150 starting:opacity-0">
+          <div className="max-h-[min(24rem,40dvh)] overflow-y-auto overscroll-contain px-3.5 pb-1" data-scroll>
+            <QuestionsPanel flow={flow} />
+          </div>
         </div>
       )}
       <div
@@ -458,9 +460,9 @@ export function Composer({
                       "Submit answers"
                     )
                   ) : (
-                    <>
-                      Next<span className="@max-[28rem]/composer:hidden">&nbsp;question</span>
-                    </>
+                    <span>
+                      Next<span className="@max-[28rem]/composer:hidden"> question</span>
+                    </span>
                   )}
                 </button>
               </span>
