@@ -1,0 +1,7 @@
+{
+  "head": "047c4697e72ce63867257db3668a02c55c77830a",
+  "tree": "02e21166666f10f3c85b3f6b2dda347f61735410",
+  "status": "",
+  "time_utc": "2026-11-04T17:35:35.264844+00:00",
+  "note": "READ-ONLY PREPARATION, no new build/probe or validation. Owner source remains clean047c4697; gates held pending dropped-column and COPY Load proofs after167 terminal. Draft Rust/SQL uncompiled/unexecuted, exact PG expected sizes to be confirmed. Remaining large pre-drop/current-policy toasted recomputation limits held; no performance claim."
+}

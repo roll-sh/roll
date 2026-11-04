@@ -1,0 +1,5 @@
+{"name": "vacuum-toast", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "kept-header", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "toast-existing", "exit": 0, "expected_summary": true, "pass": true}
+BATCH_CHECKS_PASSED
+HEAVY-EXIT 0

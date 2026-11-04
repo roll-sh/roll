@@ -1,0 +1,29 @@
+{
+  "nice": 19,
+  "effective_cpus": [
+    4,
+    5,
+    6,
+    7,
+    22,
+    23,
+    24,
+    25
+  ],
+  "command": [
+    "cargo",
+    "test",
+    "-p",
+    "pg-engine",
+    "--test",
+    "vacuum_toast_measure",
+    "--",
+    "--nocapture"
+  ],
+  "env": {
+    "TMPDIR": "/home/meszmate/.cache/a170/tmp",
+    "CARGO_TARGET_DIR": "/home/meszmate/.cache/a170/target",
+    "CARGO_BUILD_JOBS": "2",
+    "RUST_TEST_THREADS": "2"
+  }
+}
