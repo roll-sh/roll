@@ -23,6 +23,8 @@ def tap(path, expected):
             issues.append(f"line {lineno}: bailout")
         if m := re.fullmatch(r"1\.\.(\d+)(?:\s+#.*)?", line):
             plans.append((lineno, int(m[1])))
+            if re.search(r"\s+#\s*(SKIP|TODO)\b", line, re.I):
+                issues.append(f"line {lineno}: skipped/TODO plan")
         if m := re.match(r"^(not ok|ok)\s+(\d+)(?:\s|$)", line):
             results.append((lineno, int(m[2]), m[1] == "ok"))
             if re.search(r"\s+#\s*(SKIP|TODO)\b", line, re.I):
