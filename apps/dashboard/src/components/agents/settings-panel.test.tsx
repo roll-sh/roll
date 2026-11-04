@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Command, Machine, MachineSettings, Reply } from "@/lib/agents-api";
@@ -6,7 +6,7 @@ import { setActiveClient } from "@/lib/agents-client";
 import { agentsSurface, resetAgentsSurface, viewFromHash, hashFor } from "@/lib/agents-surface";
 import { modelPrefs } from "@/lib/agents-models";
 import { DEFAULT_OWNER_SETTINGS, parseOwnerSettings } from "@/lib/owner-settings";
-import { machine, machineConfig, project, provider } from "@/test/agents";
+import { machine, machineConfig, project, provider, thread } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents, type AgentsHarness } from "@/test/agents-render";
 import { MarkStateProvider } from "../mark-state";
 import { AgentsControl } from "./agents-control";
@@ -336,6 +336,18 @@ describe("what the settings change", () => {
     expect(box).toHaveValue("line one\nline two");
     await userEvent.keyboard("{Control>}{Enter}{/Control}");
     await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ prompt: "line one\nline two" })));
+  });
+
+  it("while a run is going, the owner's Queue swaps what Enter and ⌘/Ctrl+Enter do", async () => {
+    const h = agentsHarness({ ctx: { prefs: { settings: { ...DEFAULT_OWNER_SETTINGS, follow_up: "queue" }, revision: 1, loaded: true, error: null, save: vi.fn() } } });
+    renderAgents(<Composer mode={{ kind: "thread", thread: thread({ status: "running", active_run: "run_1" }), machine: machine() }} />, h);
+    const sent = () => h.command.mock.calls.map((c) => c[2]).at(-1);
+    const box = screen.getByRole("textbox", { name: "Message" });
+    await userEvent.type(box, "after this{Enter}");
+    await waitFor(() => expect(sent()).toMatchObject({ type: "message.send", text: "after this", mode: "queue" }));
+    await userEvent.type(box, "right now");
+    fireEvent.keyDown(box, { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(sent()).toMatchObject({ text: "right now", mode: "steer" }));
   });
 
   it("new threads start from the machine's defaults, then the owner's, after the project's", async () => {

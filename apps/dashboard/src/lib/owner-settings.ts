@@ -36,7 +36,7 @@ export interface OwnerSettings {
 export const DEFAULT_OWNER_SETTINGS: OwnerSettings = {
   notifications: "off",
   send: "enter",
-  follow_up: "queue",
+  follow_up: "steer",
   confirm_delete: true,
   defaults: {},
   favorite_models: null,
