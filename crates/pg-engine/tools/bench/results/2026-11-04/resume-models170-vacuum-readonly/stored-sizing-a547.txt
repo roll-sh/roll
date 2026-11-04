@@ -1,0 +1,50 @@
+723: /// What `relsize::heap_tuple_len` gives the stored row `b` (its encoded values) taken as
+724: /// `types`, the columns `null` stored as nulls (virtual generated ones), without decoding it.
+725: /// None when a value's size needs it decoded: anything but nulls, booleans, fixed-size numbers,
+726: /// dates and timestamps of the column's own type, ASCII text in a text, varchar or char(n)
+727: /// column, jsonb, tsvectors, fixed-size geometric values and arrays of fixed-size elements;
+728: /// and rows shorter than `types` (they get columns added since).
+729: pub fn stored_tuple_len(b: &[u8], types: &[DataType], null: &[bool]) -> Option<usize> {
+730:     use crate::catalog::relsize::{datum_len_at, tuple_header};
+731:     let mut pos = 0;
+732:     let n = get_varint(b, &mut pos).ok()? as usize;
+733:     if n < types.len() {
+734:         return None;
+735:     }
+736:     // Each value: None a null, Some(None) fixed-length, Some(Some(payload)) text.
+737:     let mut vals: Vec<Option<Option<usize>>> = Vec::with_capacity(types.len());
+738:     for (i, ty) in types.iter().enumerate() {
+739:         let t = *b.get(pos)?;
+740:         pos += 1;
+741:         // (The encoded payload's size, for a value of the column's own type.)
+742:         let fixed = |ok: bool, size: usize| ok.then_some(size);
+743:         let skip = match ty {
+744:             _ if t == tag::NULL => 0,
+745:             DataType::Bool => fixed(t == tag::TRUE || t == tag::FALSE, 0)?,
+746:             DataType::Int2 => fixed(t == tag::INT2, 2)?,
+747:             DataType::Int4 | DataType::Date => fixed(t == tag::INT4 && matches!(ty, DataType::Int4) || t == tag::DATE && matches!(ty, DataType::Date), 4)?,
+748:             DataType::Int8 => fixed(t == tag::INT8, 8)?,
+749:             DataType::Float4 => fixed(t == tag::FLOAT4, 4)?,
+750:             DataType::Float8 => fixed(t == tag::FLOAT8, 8)?,
+751:             DataType::Timestamp(_) => fixed(t == tag::TIMESTAMP, 8)?,
+752:             DataType::Timestamptz(_) => fixed(t == tag::TIMESTAMPTZ, 8)?,
+753:             DataType::Text | DataType::Varchar(_) | DataType::Bpchar(_) if t == tag::TEXT => {
+754:                 let len = get_varint(b, &mut pos).ok()? as usize;
+755:                 if !b.get(pos..pos + len)?.is_ascii() {
+756:                     return None;
+757:                 }
+758:                 pos += len;
+759:                 // (A char(n)'s value is stored padded to n characters: `relsize::varlena_payload`.)
+760:                 let payload = match ty {
+761:                     DataType::Bpchar(m) if *m > 4 => len.max((*m - 4) as usize),
+762:                     _ => len,
+763:                 };
+764:                 vals.push((!null.get(i).copied().unwrap_or(false)).then_some(Some(payload)));
+765:                 continue;
+766:             }
+767:             // (Varlenas sized from their stored form: jsonb's text, tsvector's send format,
+768:             // an array of fixed-size elements.)
+769:             DataType::Jsonb | DataType::TsVector | DataType::Array(_) if matches!(t, tag::JSONB | tag::TSVECTOR | tag::ARRAY) => {
+770:                 let payload = match (ty, t) {
+771:                     (DataType::Jsonb, tag::JSONB) => {
+772:                         let len = get_varint(b, &mut pos).ok()? as usize;
