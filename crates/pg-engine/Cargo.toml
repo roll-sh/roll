@@ -26,6 +26,7 @@ icu_provider = { workspace = true, optional = true }
 icu_segmenter = { workspace = true, optional = true }
 md-5.workspace = true
 mimalloc.workspace = true
+libc.workspace = true
 num-bigint.workspace = true
 num-traits.workspace = true
 smallvec.workspace = true

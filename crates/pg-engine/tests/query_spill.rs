@@ -76,6 +76,50 @@ fn assert_no_spill_files(dir: &std::path::Path) {
     }
 }
 
+/// A CTE's tuplestore past work_mem (`exec::tuplestore`): its rows go to a temporary file
+/// and every scan of it reads them back in order, the leading one as they come, a lagging
+/// one or a rescan from the file; the file counts against temp_file_limit, and it's gone
+/// after the statement, an error and a LIMIT.
+#[test]
+fn cte_tuplestore_spills_and_cleans_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "postgres").unwrap();
+    for sql in [
+        "CREATE TABLE ct (g int, s text)",
+        "INSERT INTO ct SELECT g, md5(g::text) FROM generate_series(1, 20000) g",
+        "ANALYZE ct",
+        "SET max_parallel_workers_per_gather = 0",
+    ] {
+        q(&mut s, sql).unwrap();
+    }
+    let queries = [
+        "WITH c AS MATERIALIZED (SELECT g, s FROM ct) SELECT count(*), sum(g), md5(string_agg(s, ',')) FROM c",
+        // (Two scans at different places: a hash join reads one side whole first.)
+        "WITH c AS MATERIALIZED (SELECT g, s FROM ct) SELECT count(*), md5(string_agg(a.s || b.s, ',' ORDER BY a.g)) FROM c a JOIN c b ON a.g = b.g + 7",
+        // (A nested loop rescans the inner one.)
+        "WITH c AS MATERIALIZED (SELECT g, s FROM ct) SELECT count(*), sum(b.g) FROM (SELECT * FROM c LIMIT 3) a, LATERAL (SELECT * FROM c WHERE c.g > 19990 + a.g OFFSET 0) b",
+        "WITH c AS MATERIALIZED (SELECT g, s FROM ct) SELECT (SELECT count(*) FROM c), count(*), min(s) FROM c WHERE g > 10000",
+    ];
+    let in_memory: Vec<Vec<Vec<Value>>> = queries.iter().map(|sql| q(&mut s, sql).unwrap()).collect();
+    q(&mut s, "SET work_mem = '64kB'").unwrap();
+    for (sql, want) in queries.iter().zip(&in_memory) {
+        assert_eq!(&q(&mut s, sql).unwrap(), want, "{sql}");
+        assert_no_spill_files(dir.path());
+    }
+    assert_eq!(q(&mut s, "WITH c AS MATERIALIZED (SELECT g FROM ct) SELECT g FROM c LIMIT 2").unwrap().len(), 2);
+    assert_no_spill_files(dir.path());
+    let e = q(&mut s, "WITH c AS MATERIALIZED (SELECT g, s FROM ct) SELECT count(*) FROM c WHERE 1 / (g - 15000) > 0").unwrap_err();
+    assert!(e.starts_with("22012"), "{e}");
+    assert_no_spill_files(dir.path());
+    q(&mut s, "SET temp_file_limit = '256kB'").unwrap();
+    let e = q(&mut s, "WITH c AS MATERIALIZED (SELECT g, s FROM ct) SELECT count(*) FROM c").unwrap_err();
+    assert!(e.contains("temp_file_limit"), "{e}");
+    assert_no_spill_files(dir.path());
+    drop(s);
+    eng.shutdown();
+}
+
 const QUERIES: &[&str] = &[
     "SELECT md5(string_agg(a::text, ',')) FROM (SELECT a FROM sp ORDER BY t, a) s",
     "SELECT md5(string_agg(a::text, ',')) FROM (SELECT a FROM sp ORDER BY n, a DESC) s",

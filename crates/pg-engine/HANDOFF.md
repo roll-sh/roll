@@ -4250,6 +4250,84 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     contrib pg_stat_statements + auto_explain 1,025 / 1,025; pgbench select-only and
     tpcb-like alternated twice within this machine's noise (65-76 / 72-74 µs, 589-667 /
     572-577 µs per transaction).
+- **Query memory, round 3** (round 25, agent 164; BENCH.md "Query memory, round 3"):
+  - *Tuplestores counted as tuplestore.c counts them* (`exec/workmem.rs` `StoreMem`, now with
+    tuplestore_trim, tuplestore_clear and updatemax's usedDisk). EXPLAIN ANALYZE's `Storage`
+    lines of WindowAgg, CTE Scan and Recursive Union are the executor's counts:
+    - *WindowAgg* (`WinStore`, `window.rs` `count_store`): per partition, the rows nodeWindowAgg.c
+      has spooled before each row's trim (to one past the frame's end for aggregates and
+      RANGE / GROUPS tail pointers, the whole partition for ntile, percent_rank, cume_dist,
+      UNBOUNDED FOLLOWING) and the oldest read pointer (the current row; the frame head and
+      tail pointers; the aggregates' mark at the frame head when it moves or with an
+      exclusion; row_number / rank / dense_rank's at the current row, lag / lead's at their
+      constant offset's row, first_value / last_value / nth_value's in the frame, ntile's and
+      non-constant offsets' at 0); tuplestore_trim's frees and its 1/8 compaction of the
+      pointer array; tuplestore_clear between partitions; on disk past work_mem with no trim
+      until the clear. The tuples are the input's columns the parent and the window read
+      (Window nodes now get the parent's columns under EXPLAIN ANALYZE, `nodes.rs` `open`),
+      an upper WindowAgg's with the lower ones' results; one count per WindowAgg
+      (`NodeStats::winstore`, by `ExNode::win_seq`). The 17 kB PostgreSQL shows where the
+      estimate said Disk 46,875 kB is what it gives now.
+    - *CTE* (`exec/tuplestore.rs`, `CteState::store`): a CTE's rows are a `Tuplestore`: in
+      memory until StoreMem says the file (work_mem), then every row in one temporary file
+      (dumptuples), each CTE Scan reading from its own place (a read pointer: the leading
+      scan takes rows as the CTE makes them and never reads the file; a lagging one or a
+      new scan of it reads the file from its offset). PostgreSQL's file size counts against
+      temp_file_limit and as temp blocks; the leader sets the scan's flags before a row is
+      stored, so no trailing length words. The scans' Storage line is counted under
+      `exec::cte_key(id)` (a scan's own counters can be its Filter's).
+    - *Recursive Union*: its working and intermediate tables are counted (StoreMem each,
+      cleared and swapped per iteration) for show_recursive_union_info's line (the bigger
+      table's type, the sum of both). The rows themselves still stay in memory.
+  - *Windows' Sorts*: the Sort the executor puts under a WindowAgg over a table scan reports
+    its tuplesort stats under PostgreSQL's Sort node (its input's counters); windows without
+    PARTITION BY take that Sort too (it was the window's own in-memory sort, so EXPLAIN
+    showed the estimate and equal keys came in quicksort's order where PostgreSQL's
+    external merge differs).
+  - *Spilling sorts pack their runs* (`extsort.rs` `Packed`): after the first run is written,
+    rows are encoded as they come (one buffer, the keys' values beside it), and each run is
+    sorted (`fastsort::order_with`, the same quicksort order) and written from the buffer.
+    Writing runs from rows spread over the heap was a cache miss per value (78% of
+    `encode_value` on its first load); the run's memory is now about PostgreSQL's tuples.
+    The analytic `window` (2M rows): 2.62-2.69 -> 2.26-2.35 s, 256 -> 233 MB peak.
+  - *Catalog rows generated once per key* (`catalog/system.rs` `rows_shared`): a session
+    wanting rows another session is generating waits for them (at most 10 s; a generation
+    inside another one on the same thread doesn't wait). 100 sessions starting on a database
+    just opened each made a copy of pg_attribute's (in debug builds twice: the splice
+    check), which is what made `memory_load::many_sessions_stay_bounded` swing to +126 MB in
+    debug. Now +43-48 MB release (nine runs) and +46-49 MB debug (five) against the unchanged
+    120 MB bound.
+  - *roll-engine raises RLIMIT_NOFILE to its hard limit* (`bin/roll-engine.rs`): each
+    connection holds seven descriptors (`server.rs` clones its socket for the reader, the
+    writer, the liveness check, the backend registry), so a container's soft limit of 1024
+    ran out near 150 connections: accept failed ("Too many open files") and the 200-session
+    burst hung. (Fewer clones per connection would be the server owner's change.)
+  - *TPC-H peak, measured, not changed* (BENCH): the block cache's bulk admission isn't what
+    fills it. With bulk reads admitted to 0 % or 25 % of the cache (an experiment knob, not
+    kept) the peak stayed 1,729-1,732 MB: lineitem's blocks come in through index lookups
+    (q04 / q21 by l_orderkey, q17 / q20 by l_partkey) like PostgreSQL's shared buffers do.
+    What a smaller cache costs is those lookups, not sequential scans: at 512 MB q01's CPU
+    is unchanged (4.32 / 4.36 s) while q09 goes 4.9 -> 22.6 s, q17 1.9 -> 6.7, q07 1.6 -> 6.6
+    (each miss decompresses and decodes a 16 kB block for one row). So the peak comes down
+    without that cost only with a smaller decoded block (storage, agent 149) or cached rows
+    for point fetches, not with admission policy.
+  - Left: Materialize's rows and a Recursive Union's tables physically spilling (counted
+    only), set operations (in memory as before; HashSetOp doesn't spill in PostgreSQL 18
+    either, sorted SetOp's Sorts would), grouping sets' hashed sets, the two-window Sorts'
+    EXPLAIN lines (estimates: several windows still sort inside the WindowAgg), a Recursive
+    Union's Storage on disk 3 kB over PostgreSQL's, sorts merged in several passes a block
+    under PostgreSQL's Disk, the WorkTable Scan's "Rows Removed by Filter: 0" (missing: the
+    removed count is per loop), the window query (2.3 s against 1.75 s: decoding runs read
+    back, 12 %, and the intermediate merge pass).
+  - Verified (on `73edecba` with this batch): crate tests release and debug (443 passed, 18
+    ignored, none failed; deep_input, memory_load, query_spill's new
+    `cte_tuplestore_spills_and_cleans_up`), clippy (the lib's 10 warnings, none in the
+    changed files), difftest smoke, isolation 121 / 122 (intra-grant-inplace, as before),
+    the full regression suite on a private reference (release) 51,148 / 51,150 with 0 units
+    changed against results.tsv, pg_dump_tap 14,817 / 14,817, contrib pg_stat_statements +
+    auto_explain 1,025 / 1,025, golden `a164_tuplestores` (recorded from PostgreSQL 18.6;
+    in-process, wire, shuffled), TPC-H SF1's 22 hashes equal, the burst at 10-200
+    sessions, pgbench select-only and tpcb-like, the footprint gate (BENCH).
 - **OLTP round 1** (round 22, agent 105; BENCH.md "OLTP round 1"): pgbench and web-app
   transactions.
   - *Hot relation ranges* (`storage/hot.rs`): a relation's key range (8-byte table / index
@@ -6428,6 +6506,9 @@ definitions (from PostgreSQL 18.6's `information_schema.sql`) takes and risks:
   quicksort Memory exact, HashAggregate Memory Usage within 8 kB without by-reference transitions), accepted as
   internal differences; methods and batch counts are PostgreSQL's. A large transaction's
   write buffer (`txn::spill`) has no PostgreSQL counterpart and counts as no temporary file.
+  A CTE's rows are a tuplestore that goes to a temporary file the same way (round 25, agent
+  164, `exec/tuplestore.rs`); WindowAgg and Recursive Union tuplestores are counted for
+  EXPLAIN ANALYZE's Storage lines (their rows stay in memory).
   The subscriber's spool of a streamed transaction (`repl/apply_stream`) stands for the
   apply worker's BufFile: counted and logged since round 23, agent 128 (below).
 - **Virtual transaction ids and proc numbers are PostgreSQL's** (round 23, agent 128). The

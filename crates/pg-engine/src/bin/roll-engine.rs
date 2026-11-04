@@ -183,6 +183,7 @@ fn main() -> anyhow::Result<()> {
     #[cfg(feature = "heapprof")]
     heapprof::start();
     idle::setup();
+    raise_open_files();
     tracing_subscriber::fmt()
         .with_env_filter(
             // (stderr is the server log's, PostgreSQL's lines: the engine's own tracing shows
@@ -412,4 +413,19 @@ mod idle {
 #[cfg(not(target_os = "linux"))]
 mod idle {
     pub fn setup() {}
+}
+
+/// The open-file limit up to its hard limit. One process holds every connection's socket and
+/// every database's files (PostgreSQL's backends each have a table of their own, and its file
+/// descriptors are virtual past max_files_per_process); at a container's usual soft limit of
+/// 1024, a 200-session burst ran it out and accept failed ("Too many open files").
+fn raise_open_files() {
+    let mut l = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: getrlimit / setrlimit read and write the struct passed, nothing else.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut l) == 0 && l.rlim_cur < l.rlim_max {
+            l.rlim_cur = l.rlim_max;
+            libc::setrlimit(libc::RLIMIT_NOFILE, &l);
+        }
+    }
 }

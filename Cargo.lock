@@ -1864,6 +1864,7 @@ dependencies = [
  "icu_provider",
  "icu_segmenter",
  "itoa",
+ "libc",
  "md-5 0.10.6",
  "mimalloc",
  "num-bigint",

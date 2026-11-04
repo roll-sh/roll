@@ -88,6 +88,8 @@ pub struct ExtSort {
     datum: Option<usize>,
     mem: SortMem,
     rows: Vec<Row>,
+    /// Once the first run is written, the rows of the next ones packed as they come.
+    packed: Option<Packed>,
     /// PostgreSQL's bytes on tape of `rows` (writetup_heap / writetup_datum).
     run_pg: i64,
     tapes: Option<Tapes>,
@@ -171,6 +173,7 @@ impl ExtSort {
             types,
             mem: SortMem::new(workmem::work_mem(ctx)),
             rows: Vec::new(),
+            packed: None,
             run_pg: 4,
             tapes: None,
             random,
@@ -191,7 +194,10 @@ impl ExtSort {
             row = n.shrink(row);
             row.extend(keys);
         }
-        self.rows.push(row);
+        match &mut self.packed {
+            Some(p) => p.push(row, &self.cols),
+            None => self.rows.push(row),
+        }
         self.run_pg += tape;
         if self.mem.put(tuplen) {
             self.dump(ctx)?;
@@ -222,11 +228,18 @@ impl ExtSort {
 
     /// dumptuples: the rows so far sorted and written as the next run.
     fn dump(&mut self, ctx: &ExecCtx) -> Result<()> {
+        if let Some(mut p) = self.packed.take() {
+            let r = self.dump_packed(&mut p, ctx);
+            self.packed = Some(p);
+            return r;
+        }
         let rows = std::mem::take(&mut self.rows);
         if rows.is_empty() && self.tapes.is_some() {
             return Ok(());
         }
         let rows = self.sort_run(rows, ctx)?;
+        // (The next runs' rows are packed as they come.)
+        self.packed = Some(Packed::default());
         if self.tapes.is_none() {
             let max = self.mem.tapes.unwrap_or(6);
             self.tapes = Some(Tapes { file: TempFile::create(ctx)?, tapes: Vec::new(), runs: 0, max, pg: Vec::new() });
@@ -241,6 +254,27 @@ impl ExtSort {
         t.tapes[tape].push_back((start, t.file.pos()));
         t.pg[tape] += pg;
         // (Full blocks are written as runs build; partial ones as the tapes are read.)
+        let full: i64 = t.pg.iter().map(|b| b / workmem::TAPE_BLOCK_DATA).sum();
+        t.file.pg_size((full * BLCKSZ) as u64)
+    }
+
+    /// A packed run (`Packed`) sorted as `sort_run` sorts rows, and written.
+    fn dump_packed(&mut self, p: &mut Packed, ctx: &ExecCtx) -> Result<()> {
+        let n = p.ends.len();
+        if n == 0 {
+            return Ok(());
+        }
+        let order = p.order(&self.keys, ctx)?;
+        let pg = std::mem::replace(&mut self.run_pg, 4);
+        let t = self.tapes.as_mut().expect("a run written before");
+        let tape = t.select();
+        let start = t.file.pos();
+        for i in order {
+            t.file.append(p.row(i))?;
+        }
+        p.clear();
+        t.tapes[tape].push_back((start, t.file.pos()));
+        t.pg[tape] += pg;
         let full: i64 = t.pg.iter().map(|b| b / workmem::TAPE_BLOCK_DATA).sum();
         t.file.pg_size((full * BLCKSZ) as u64)
     }
@@ -471,3 +505,59 @@ pub fn bounded_stats(
     (method, ((array + tuples) as u64).div_ceil(1024))
 }
 
+
+/// A run's rows packed as they come in (`spill::put_row`, one buffer) and their keys' values
+/// beside them: the run is sorted by the keys and written in its order without reaching rows
+/// spread over the heap (each a vector of values) again, which was most of a spilling sort's
+/// time, and holds a fraction of their memory.
+#[derive(Default)]
+struct Packed {
+    bytes: Vec<u8>,
+    /// Each row's end in `bytes`.
+    ends: Vec<usize>,
+    /// The keys' values, row by row.
+    keys: Vec<Value>,
+}
+
+impl Packed {
+    fn push(&mut self, row: Row, cols: &[usize]) {
+        self.keys.extend(cols.iter().map(|&c| row[c].clone()));
+        super::spill::put_row(&mut self.bytes, &row);
+        self.ends.push(self.bytes.len());
+    }
+
+    fn row(&self, i: usize) -> &[u8] {
+        &self.bytes[if i == 0 { 0 } else { self.ends[i - 1] }..self.ends[i]]
+    }
+
+    fn clear(&mut self) {
+        self.bytes.clear();
+        self.ends.clear();
+        self.keys.clear();
+    }
+
+    /// The rows' order as `nodes::sort_rows` would sort them (tuplesort's quicksort over
+    /// the rows in the order they came).
+    fn order(&self, keys: &[SortKey], ctx: &ExecCtx) -> Result<Vec<usize>> {
+        let (n, nk) = (self.ends.len(), keys.len());
+        let key = |i: usize, k: usize| &self.keys[i * nk + k];
+        if let Some(o) = super::fastsort::order_with(n, keys, key, |a, b| self.row(a) == self.row(b), None) {
+            return Ok(o);
+        }
+        let mut f = |a: &usize, b: &usize| -> Result<Ordering> {
+            for (k, sk) in keys.iter().enumerate() {
+                match super::nodes::compare_values(key(*a, k), key(*b, k), sk, ctx)? {
+                    Ordering::Equal => {}
+                    o => return Ok(o),
+                }
+            }
+            Ok(Ordering::Equal)
+        };
+        let mut cmp = super::pgsort::Cmp::new(&mut f);
+        let sorted = super::pgsort::tuplesort((0..n).collect(), None, &mut cmp);
+        match cmp.err {
+            Some(e) => Err(e),
+            None => Ok(sorted),
+        }
+    }
+}

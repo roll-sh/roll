@@ -1535,6 +1535,7 @@ pub fn generated_rows_count() -> u64 {
 /// address), the current and session user (and the session's login name), the search path,
 /// the session's temporary schema (when it has one) and the settings' values (`Settings::values_key`: equal for
 /// sessions whose settings are equal). (The cache is its database's.)
+#[derive(Clone)]
 struct SysRowsKey {
     table: u32,
     cat: std::sync::Weak<Catalog>,
@@ -1554,6 +1555,36 @@ pub use super::sysrows::{Out, RowChunk, SysRows};
 #[derive(Default)]
 pub struct SysRowsCache {
     entries: std::collections::VecDeque<(SysRowsKey, Arc<SysRows>, Option<Arc<Catalog>>)>,
+    /// The keys some session is generating rows for now: the others wanting them wait
+    /// (`rows_shared`). 100 sessions starting on a database just opened each made a copy
+    /// of pg_attribute's rows at once.
+    generating: Vec<SysRowsKey>,
+}
+
+/// Signalled when a generation `SysRowsCache::generating` lists ends.
+static GENERATED_SIGNAL: parking_lot::Condvar = parking_lot::Condvar::new();
+
+thread_local! {
+    /// This thread is generating shared rows: rows it needs meanwhile (an information_schema
+    /// view's query of pg_class) are generated without waiting, so two generations never
+    /// wait for each other.
+    static GENERATING_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A claimed generation, released (waking the sessions waiting for it) when dropped.
+struct GenerateClaim<'a> {
+    cache: &'a parking_lot::Mutex<SysRowsCache>,
+    key: SysRowsKey,
+}
+
+impl Drop for GenerateClaim<'_> {
+    fn drop(&mut self) {
+        GENERATING_HERE.with(|g| g.set(false));
+        let mut c = self.cache.lock();
+        c.generating.retain(|k| !k.same(&self.key));
+        drop(c);
+        GENERATED_SIGNAL.notify_all();
+    }
 }
 
 /// How many generated catalogs a database keeps: every cacheable catalog under a couple of
@@ -1738,9 +1769,27 @@ pub fn rows_shared(table: SysTable, ctx: &ExecCtx) -> Result<Arc<SysRows>> {
     debug_assert!(rows_cacheable(table));
     let key = rows_key(table, ctx);
     let cache = &ctx.sess.db.sys_rows;
+    let mut claim = None;
     let (hit, base) = {
-        let c = cache.lock();
-        let hit = c.entries.iter().find(|(k, ..)| k.same(&key)).map(|(_, r, _)| r.clone());
+        let mut c = cache.lock();
+        // (While another session generates these rows, wait for them: at most 10 s.)
+        let nested = GENERATING_HERE.with(|g| g.get());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut hit;
+        loop {
+            hit = c.entries.iter().find(|(k, ..)| k.same(&key)).map(|(_, r, _)| r.clone());
+            if hit.is_some() || nested || !c.generating.iter().any(|k| k.same(&key)) {
+                break;
+            }
+            if GENERATED_SIGNAL.wait_until(&mut c, deadline).timed_out() {
+                break;
+            }
+        }
+        if hit.is_none() && !nested {
+            c.generating.push(key.clone());
+            GENERATING_HERE.with(|g| g.set(true));
+            claim = Some(GenerateClaim { cache, key: key.clone() });
+        }
         // (Rows of an earlier version, and that version, to splice this one's from.)
         let base = (hit.is_none() && super::sysdelta::kept(table))
             .then(|| {
@@ -1822,6 +1871,8 @@ pub fn rows_shared(table: SysTable, ctx: &ExecCtx) -> Result<Arc<SysRows>> {
         c.entries.pop_front();
     }
     c.entries.push_back((key, rows.clone(), held));
+    drop(c);
+    drop(claim);
     Ok(rows)
 }
 
