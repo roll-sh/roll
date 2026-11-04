@@ -1,0 +1,17 @@
+{
+  "utc": "2026-11-04T21:00:51.381087+00:00",
+  "review": "storage_correctness/crash14-diagnostic-review-r3-result.json",
+  "static_verdict": "No certain compile blocker; R1/R2 HIGH/MEDIUM source findings addressed by reviewer",
+  "runtime_authorized": false,
+  "compile_authorized_by_this_disposition": false,
+  "R3_1_decision": "Retain proposed seed14-only/3-round configuration ONLY as bounded diagnostic design; explicitly differs from original seeds1..30/4rounds/threads2 and cannot claim original process-history equivalence. No run scheduled.",
+  "R3_1_limits": [
+    "Process-wide TOAST sequence/catalog versions differ after preceding seeds",
+    "Seed determinism alone does not establish equivalent engine/crash state",
+    "691 remains post-settle parsed journal length, not a verified kill step or guaranteed replay boundary"
+  ],
+  "R3_2": "Retain evidence-order perturbation as unresolved before any runtime: comparison/dumps can precede original row_diff/check observations; move or fully account before execution",
+  "other_findings": "R3-3..9 retained; none warrants changing frozen evidence or original failure attribution",
+  "original_crash101": "OPEN,UNATTRIBUTED,NOTCLEARED",
+  "next": "No crash runtime; future compile or revised diagnostic preparation requires a separately bounded task"
+}

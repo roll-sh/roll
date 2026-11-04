@@ -1,0 +1,39 @@
+{
+  "utc": "2026-11-04T21:00:21.230980+00:00",
+  "evidence_commit": "f4f5165dd3d4ee4eb3264ceefe40ec854e63f9e8",
+  "remote_exact": true,
+  "closed_files": 488,
+  "hashes_verified": 487,
+  "evidence_only_changed_paths": 31,
+  "fixture_patch_sha256": "837459d07862b53d24e2d3d91ced99b32cbdaff87947396fef292b745b8ed8f7",
+  "baseline": {
+    "exit": 0,
+    "cases": [
+      [
+        2,
+        2
+      ],
+      [
+        2,
+        2
+      ]
+    ]
+  },
+  "candidate": {
+    "exit": 101,
+    "cases": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ]
+  },
+  "both_compiled_and_reached_expected_test": true,
+  "restored_production_patch_empty": true,
+  "source_acceptance": false,
+  "next": "Apply exact scoped lazy171repair,commit isolatedsource,focusedchecks only;freshreview/fullgatespending"
+}

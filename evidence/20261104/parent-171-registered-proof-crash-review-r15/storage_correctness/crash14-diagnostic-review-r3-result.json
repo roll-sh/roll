@@ -1,0 +1,139 @@
+{
+  "review": "crash14 diagnostic preparation R3 - fresh independent STATIC review",
+  "reviewer_model": "claude-opus-5-5",
+  "taskId": "NOT_VISIBLE_TO_REVIEW_AGENT (parent holds the delegated taskId)",
+  "date": "2026-11-04",
+  "grants_runtime": false,
+  "grants_compile": false,
+  "acceptance_held": ["readiness", "performance", "source acceptance", "engine/crash/SSI/storage runtime"],
+  "inputs": {
+    "shared_root": "/home/meszmate/worktrees/roll/t3-d4020b98 at fe7b0023c9df19a6dae1e6067ba8454998db48c5, porcelain clean before and after",
+    "artifact_root": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/executor278-crash14-preparation-r3",
+    "sha256sums_entries_verified": 16,
+    "patch_sha256": "21079848cd2fd62b7f35555551622c72f0f27843d5e7650a948ff308da4396ca",
+    "source_manifest_sha256": "62975fa2bb943c0fb47f8ed4c566812d8b47ff53bfd127e107b39ebbb2b60e15",
+    "candidate_crash_random_sha256": "e1cafeb5e497b9614fbd95f92436080d70892181e2c701c71dfa7a9c8c91f177",
+    "candidate_support_sha256": "8aadd6f63697ed57e4a9ae3a7da324b344e4ed453eed6ca1aff3e6e50102f343",
+    "original_crash_random_sha256": "c34df436b23445084c15f579bae1196338274a3b85fc9e695ff4fc0220704b61",
+    "git_objects_read": [
+      "278a28966a8921da90c6ead9cfeb3f332306d788 (tree 95a87e3c, crash_random.rs blob, 882 manifest blobs, src/exec/toast.rs, src/catalog/mod.rs, static grep)",
+      "aa48d3c9be313a6a67810e6d6d69b1f633685823 (weighted-terminal plan.json, crash30.log, execution.json, source.json, terminal-summary.json, live-affinity.json grep)"
+    ],
+    "full_prior_reviews_read": ["independent-review-r1.json (ca002ca6...)", "independent-review-r2.json (28a578b7...)"]
+  },
+  "limitations": [
+    "Static only: no compile, rustfmt, clippy, parser controls, tests, engine, crash, SSI or storage probe, service, container or child run.",
+    "The patch was applied only to a disposable copy under ~/.cache/r3review-scratch.*. Nothing was executed from it, and it was removed.",
+    "One read-only python -I script compared manifest hashes against git cat-file. It wrote nothing outside its own temp directory, which was also removed.",
+    "Did not inspect or snapshot the live 171 owner worktree.",
+    "Compile plausibility is a reading of the code, not a compiler verdict. serde_json/sha2 trait details were taken from R1/R2 plus reading the code, not from rust-src.",
+    "Did not execute assemble-cache.py or seal-cache.py. assemble-cache.py generates crash_random.rs only; the support file is hand-maintained and was checked via patch reproduction."
+  ],
+  "integrity_cleared": [
+    "All 16 R3 SHA256SUMS entries verify. R1 (9 payloads, SHA256SUMS 20d5d29c) and R2 (13 payloads, e59572fc) verify unchanged.",
+    "original/crash_random.rs equals git 278a289:crates/pg-engine/tests/crash_random.rs (c34df436). The tree is 95a87e3c. tests/support does not exist at base.",
+    "The patch applied to a scratch copy of original/ reproduces candidate/ byte for byte (both files).",
+    "The manifest's test_only_changes after_sha256 and after_bytes equal the candidate files (29424 / 30706 bytes).",
+    "All 882 manifest production inputs match 278's tree in mode, blob, byte length and sha256, with 0 mismatches. Scope check: no crates/*/src/*.rs, build.rs, Cargo.toml, Cargo.lock or .cargo path is missing.",
+    "original-failure-plan.json sha256 c4b77baa equals the aa48d3c9 weighted-terminal plan.json object. crash30 used cargo test --release with TMPDIR=/home/meszmate/.cache/a167/tmp.",
+    "The embedded independent-review-r1/r2 JSONs are byte-identical to crash14-diagnostic-review-r1/r2-result.json."
+  ],
+  "prior_objections_cleared_statically": {
+    "R2_HIGH_missing_Model_Debug": "Cleared. The candidate has #[derive(Clone, Default, Debug)], and assemble-cache.py both replaces and asserts it.",
+    "R2_MEDIUM_budgets_digests_markers": "Cleared in design and code. Digest and length are streamed first through HashCount with no full string, then 32 KiB raw-hex chunks, then an end record with complete/dumped_bytes. There is a 1 MiB per-record cap and a 16 MiB per-dump cap. Budgets per process: history 128 MiB, summary 8 MiB, failure 256 MiB, failure-summary 8 MiB, with FAILURE switching on first mismatch or catch. A 4 KiB marker slot is preallocated before the data file. Children never fsync; the parent syncs child markers after exit.",
+    "R2_MEDIUM_after_pass_SQL_and_reset": "Cleared. snapshot() is reachable only from the Err arms of settle()/check(). No SQL runs after a passed check; Ok arms only dump the model or emit an event.",
+    "R2_MEDIUM_binary_source_identity": "Cleared at source level. Both files are include_bytes!'d with correct relative paths. begin() compares sha256 and bytes to the manifest, plus revision and base. There is no hardcoded self-hash, so no circularity. The binary sha is recorded and required to differ from a35916fb. The plan runs a preverified release binary directly with no Cargo at runtime. The envelope carries revision, schema and status.",
+    "R2_LOWMED_signal_assert_before_oracle": "Cleared. The original code().is_none() assertion runs first inside catch_unwind with an unchanged message. Then begin_failure, then record_child_exit (Result), then resume_unwind of the same payload. Image and validate_child_status come only after the oracle passes, and stop as CRASH_DIAGNOSTIC_INCOMPLETE.",
+    "R2_LOWMED_controls": "Cleared. flags() and audit() are pure seams and read_log delegates to flags(). I recomputed every expected value in offline-controls.json by hand and all are correct: digits-only tear gives [t,f] with id 12; empty file gives [] with 0 records valid; empty line gives [false], invalid; NotFound gives []. The controls remain UNRUN.",
+    "R2_LOWMED_medium_provenance": "Cleared as documentation. TMPDIR and release are verified from the sealed object. The historical filesystem is NOT_CAPTURED. begin() checks mountinfo type against CRASH_DIAG_FS_TYPE and rejects tmpfs/ramfs.",
+    "R2_LOW_watchdog_and_panic_hook": "Cleared. A 4-byte child state (started/armed/trigger) is checked after the oracle and image. Pre-arm exits and watchdog triggers are rejected. The panic hook is installed in both parent (begin) and child (child_watchdog), and the original hook is still used for non-diagnostic panics.",
+    "R1_all": "Cleared. Disabled path: every event/debug_dump/journal/comparison/snapshot/record call returns on a cached flag before any work; the kill thread, append_log (with fsync), replay, step and row_diff are unchanged (not in the diff). Kill window: no fsync, model or result dump, or journal re-read after arm, only small unsynced event writes. The primary killer does no I/O, and abort() is unreachable after a successful kill -9. There are 300 s and 5 s watchdogs plus a whole-process-group 20-minute deadline. Snapshots capture ctid/xmin across all three scans plus pg_class indexes, after RESET ALL with a 2 s timeout. Child exit is captured before any copy. Events stay out of the images. Each line is one write_all. The armed Instant is taken on the main thread.",
+    "RNG_order": "Unchanged: at = below(150), then delay = below(20000). There are no new draws, and prepare_child draws nothing."
+  },
+  "compile_plausibility": "No certain compile blocker found. Items walked: the #[path] module and include_bytes paths; json! inline expressions (&String == &str, &&-chains, nested json! with turbofish); FnOnce capture through catch_diagnostic and LocalKey::with; RefCell borrow scope in event(); a partial move of hashed.hash followed by a disjoint capture of hashed.bytes; Dump::flush's &= with a field-disjoint closure; the deferred init of requested_delay_us inside the .env() block; the conditionally initialized retained; serde_json Value == bool / int / &str comparisons; slice-vs-array assert_eq; is_none_or (Rust 1.82+); serde_json::Error to io::Error via ?; inherent Dump::flush versus fmt::Write; a for-expression as a match arm. Each pub fn in the private module is used, so no dead_code. Clippy warnings, if any, look like style lints only.",
+  "findings": [
+    {
+      "id": "R3-1",
+      "severity": "MEDIUM",
+      "category": "evidence-fidelity / undocumented configuration delta",
+      "where": "support/crash14_diagnostic.rs begin(): assert_eq!(seeds, &[14]); assert_eq!(rounds, 3); future-run-plan.md step 8 and parameter sketch (--test-threads=1)",
+      "summary": "The sealed original crash30 ran CRASH_SEEDS=1..30 and CRASH_ROUNDS=4 in ONE parent process, with RUST_TEST_THREADS=2, nice 19 and 8 pinned CPUs (aa48d3c9 execution.json). Seed 14 therefore ran after 13 earlier seeds. R3 hard-asserts seed 14 alone with 3 rounds. No design, disposition, plan or PREPARATION limitation records this difference.",
+      "why_it_matters": "The per-seed data schedule is deterministic (Rng::new(seed, ...), a fresh dir per seed), so round 2 and step 691 are reached identically. The parent process's global engine state differs, though. At 278, exec/toast.rs:29 `static SEQ: AtomicU64` feeds TOAST ValueId.seq (toast.rs:131), which is written to disk by the parent's settle/100-step/50-step work. catalog/mod.rs:4649 has a process-wide catalog version `LAST`. There are about 91 process statics in total. On-disk TOAST ids written by the parent, and anything keyed on catalog version, will differ from the original run. Child processes start fresh in both cases.",
+      "fix": "Add this to the limitations: no in-process seed 1..13 prefix, rounds 4 to 3, test threads 2 to 1, affinity/nice/load not reproduced. Have the parent decide explicitly whether begin() should also accept the original CRASH_SEEDS prefix (for example 1..14, rounds 4, with the diagnostic dir per seed) as the configuration closest to the original. This does not block compiling, but the decision must be made before any runtime."
+    },
+    {
+      "id": "R3-2",
+      "severity": "LOW-MEDIUM",
+      "category": "oracle-message fidelity / timing at failure site",
+      "where": "candidate crash_random.rs check_original: diagnostic::comparison(...) placed BEFORE `if got != want_a { let d = row_diff(...) }`; check(): debug_dump(full_check_input_model) before check_original; settle(): debug_dump(settle_returned_model)",
+      "summary": "On a mismatch, comparison() opens the failure and failure-summary channels: two marker fsyncs plus two directory fsyncs in the parent. It also hashes and hex-dumps two row lists of about 1–2 MB, all before the original row_diff SQL runs. row_diff's per-scan counts and ctid counts are part of the original panic message, so engine background activity in that gap can change the message content (not the verdict). Separately, two full model dumps (format, hash, then dump; no SQL) widen the gap between settle and the target round-2 check.",
+      "fix": "Call comparison after row_diff returns and immediately before panic!. Drop the pre-check full_check_input_model dump, or move it to the Ok path; on failure, original_check_failure_model already covers it. Alternatively, list both as explicit perturbations at the failure site."
+    },
+    {
+      "id": "R3-3",
+      "severity": "LOW",
+      "category": "evidence loss",
+      "where": "query_snapshot / snapshot: catch_diagnostic(|| s.query(sql)) and event kind snapshot_query_panic",
+      "summary": "An engine panic during a failure snapshot query runs with IN_DIAGNOSTIC=true, so the hook prints only the generic tag. The event records no payload, so the engine's panic text is lost.",
+      "fix": "Downcast the payload (&str or String) and include it, bounded, in snapshot_query_panic."
+    },
+    {
+      "id": "R3-4",
+      "severity": "LOW",
+      "category": "budget semantics",
+      "where": "event(): a Record cap or serialization error triggers writer.close(); record_child_exit duplicates stdout_hex/stderr_hex into a summary event",
+      "summary": "One oversized record permanently closes its channel. If any child's stdout+stderr exceeds about 512 KB, the summary event goes over 1 MiB and closes the history summary channel. After that, every later debug_dump aborts at the digest step before the failure switch. Child output is normally small, so this is unlikely.",
+      "fix": "Reject an oversized record (with a marker) without closing the channel, or leave the hex out of the summary duplicate, since the sidecar already holds it."
+    },
+    {
+      "id": "R3-5",
+      "severity": "LOW",
+      "category": "classification",
+      "where": "prepare_child/seed_dir unwraps; child_watchdog expect(...); begin expects/asserts",
+      "summary": "Diagnostic setup failures panic without the CRASH_DIAGNOSTIC_INCOMPLETE tag. In the child, an expect panic exits 101, which the parent reports through the ORIGINAL 'the child failed' oracle message. None of these can pose as the target round-2 parent check failure.",
+      "fix": "In child_watchdog, abort (or exit with a distinct code) instead of expect. In the parent, route setup errors through diagnostic_stop."
+    },
+    {
+      "id": "R3-6",
+      "severity": "LOW",
+      "category": "revision labelling",
+      "where": "REVISION/STATUS constants versus future-run-plan step 2 (format, then regenerate the manifest)",
+      "summary": "rustfmt will change both files, yet the binary will still embed revision 'preparation-r3' and the status 'UNCOMPILED/UNFORMATTED/UNRUN' in every runtime event. A formatted build is not the byte-reviewed R3.",
+      "fix": "Treat formatted bytes as a new revision (bump REVISION, re-review the formatting diff), or rename the field to source_preparation_status. Alternatively, skip formatting, since it is optional for compiling."
+    },
+    {
+      "id": "R3-7",
+      "severity": "LOW",
+      "category": "build provenance",
+      "where": "future-run-plan step 2: 'Build toolchain/flags/dependencies must match the base inputs'",
+      "summary": "The tree has no rust-toolchain file. The original used the rustup 'stable' toolchain, and live-affinity.json shows its path but not its version, so there is nothing to match.",
+      "fix": "Record rustc -vV and cargo -V at compile time. Try to recover the original version read-only from the preserved a359 binary's .comment section; otherwise mark it unknown."
+    },
+    {
+      "id": "R3-8",
+      "severity": "LOW",
+      "category": "runtime plan detail",
+      "where": "future-run-plan steps 7-8",
+      "summary": "If a failure-only snapshot hangs and the deadline kills the group, resume_unwind never runs. The original panic text then exists only in the parent's stderr as printed by the hook (with --nocapture), and the exit becomes a supervisor timeout instead of 101.",
+      "fix": "Stream parent stdout/stderr unbuffered to persistent files inside the budgeted tree. Add 'a snapshot hang converts the exit to a timeout' to the limitations."
+    },
+    {
+      "id": "R3-9",
+      "severity": "INFO",
+      "category": "efficiency",
+      "where": "event(): an unregistered channel after a partial Channel::open failure",
+      "summary": "If Channel::open fails after creating its marker, every later event retries create_new, gets AlreadyExists, and rewrites the fallback marker. In the parent this costs a directory fsync per event. It is self-consistent and outside the kill window.",
+      "fix": "Optional: cache a 'failed' Channel entry."
+    }
+  ],
+  "verdict": {
+    "isolated_compile_preparation": "REASONABLE from a static standpoint. There is no certain compile blocker, and every R1/R2 HIGH and MEDIUM is addressed in source. R3-2..R3-9 can be fixed in a cache-only R4 or accepted explicitly. Neither blocks materializing an isolated workspace plus a release compile without a run, under the parent's separate authorization.",
+    "runtime": "STILL BLOCKED pending: the parent's decision on R3-1 (document it, or allow the original seed prefix), fixing or accepting R3-2, a successful isolated compile with preserved binary hash, separately authorized pure controls, and explicit runtime authorization. Nothing here grants engine/crash runtime, clears the original exit 101, or attributes a cause."
+  },
+  "state_after_review": {
+    "scratch_removed": true,
+    "r3_sha256sums_reverified_after_review": true,
+    "shared_root": "clean at fe7b0023",
+    "files_written": ["storage_correctness/crash14-diagnostic-review-r3-result.json (this file)"]
+  }
+}
