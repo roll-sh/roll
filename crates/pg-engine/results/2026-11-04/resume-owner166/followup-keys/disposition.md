@@ -13,3 +13,11 @@ A counter test can establish count_rest avoids whole catalog generation, with th
 The production fix captures the catalog when the node opens. It does not change the
 preexisting difference between node-open and statement-start catalog visibility for a
 scan constructed after nested DDL. These tests do not establish statement-start semantics.
+
+Gate1 on 55ddc51e FAILED with cargo exit 101: the result was false, but the positive
+restricted-generation assertion failed. Release and Clippy did not run. The attempted
+zero-cost setup was based on an incorrect premise. The engine uses hardcoded planner CPU
+cost constants, so setting the GUCs to zero does not zero its costs. Its selected inner
+hash join reads the first outer row before an observable build, materializing the catalog.
+A controlled-plan test will assert that metadata and change only outer_first on a clone.
+The failing assertion is retained for the controlled path, not weakened on the natural one.
