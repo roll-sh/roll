@@ -1,0 +1,8 @@
+{
+  "status": "PASS",
+  "owned_leftovers_before": 0,
+  "actions": [],
+  "owned_processes_after": [],
+  "containers_created": 0,
+  "existing_client_retained": "a162-dclient"
+}

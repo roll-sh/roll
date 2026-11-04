@@ -1,0 +1,16 @@
+{
+  "status": "PASS",
+  "tested_head": "3997cf00a2a301fed65f00469625ff14f223f227",
+  "actual_dump_binary": "/home/meszmate/.cache/a162/pgdump/resume-3997cf00-dump5/roll-engine.bin",
+  "actual_dump_binary_sha256": "9e876733e089594f98399bf3caebb1c2027a1a1506e606e0e6586841b813ce2d",
+  "rust_summary": "1 passed;0 failed",
+  "tap_count": {
+    "passed": 14817,
+    "failed": 0
+  },
+  "complete_plan_audit": "PASS",
+  "sealed_v4_unchanged": true,
+  "sealed_v3_unchanged": true,
+  "full_service": "HELD",
+  "scope": "remaining strictdump gate only; final combined service acceptance still pending"
+}

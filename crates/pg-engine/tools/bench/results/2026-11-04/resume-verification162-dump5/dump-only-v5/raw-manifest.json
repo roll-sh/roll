@@ -1,0 +1,8 @@
+{
+  "tap-002_pg_dump.pl.out": "1e898ab3936f6c3f129b2bafd370cce0114f2c0b79fcb2f8c24d36fcdca18572",
+  "tap-005_pg_dump_filterfile.pl.out": "e12cb07a939cfd956f57a6f08b24327a45545708a0320922a7da1748eb7acbe2",
+  "tap-001_basic.pl.out": "7c2c40d34c6460d810b4de2c1e2a9fdd37cce22fae6fe05398c425be1d79ba60",
+  "tap-004_pg_dump_parallel.pl.out": "bdcc70df0b53619943f85a90d46b6ac03044e1f5908ec71d3698d25be7caff50",
+  "tap-engine.log": "61c1e794651cb85efe7aaa866bcc5a047917ee023da53765d8c3529bb6cc4f4b",
+  "outcome.json": "19465bd05c03464910b998b018a82814e8c4f846622eb8e4ef3968712e605bb1"
+}

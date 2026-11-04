@@ -1,0 +1,100 @@
+[
+  {
+    "name": "client-mounts",
+    "command": [
+      "docker",
+      "inspect",
+      "--format",
+      "{{json .Mounts}}",
+      "a162-dclient"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "client-cwd",
+    "command": [
+      "docker",
+      "exec",
+      "-w",
+      "/home/meszmate/.cache/a162/pgdump/resume-3997cf00-dump5/tap",
+      "a162-dclient",
+      "sh",
+      "-eu",
+      "-c",
+      "pwd; test -w ."
+    ],
+    "exit": 0
+  },
+  {
+    "name": "pg_dump-version",
+    "command": [
+      "docker",
+      "exec",
+      "-w",
+      "/home/meszmate/.cache/a162/pgdump/resume-3997cf00-dump5/tap",
+      "a162-dclient",
+      "pg_dump",
+      "--version"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "pg_dump-exact-version",
+    "command": [
+      "rg",
+      "-F",
+      "-x",
+      "-q",
+      "pg_dump (PostgreSQL) 18.6"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "pg_restore-version",
+    "command": [
+      "docker",
+      "exec",
+      "-w",
+      "/home/meszmate/.cache/a162/pgdump/resume-3997cf00-dump5/tap",
+      "a162-dclient",
+      "pg_restore",
+      "--version"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "pg_restore-exact-version",
+    "command": [
+      "rg",
+      "-F",
+      "-x",
+      "-q",
+      "pg_restore (PostgreSQL) 18.6"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "psql-version",
+    "command": [
+      "docker",
+      "exec",
+      "-w",
+      "/home/meszmate/.cache/a162/pgdump/resume-3997cf00-dump5/tap",
+      "a162-dclient",
+      "psql",
+      "--version"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "psql-exact-version",
+    "command": [
+      "rg",
+      "-F",
+      "-x",
+      "-q",
+      "psql (PostgreSQL) 18.6"
+    ],
+    "exit": 0
+  }
+]

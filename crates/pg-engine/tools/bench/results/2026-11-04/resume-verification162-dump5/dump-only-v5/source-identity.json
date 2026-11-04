@@ -1,0 +1,15 @@
+{
+  "tested_head": "3997cf00a2a301fed65f00469625ff14f223f227",
+  "engine_binary": "/home/meszmate/.cache/a162/pgr/resume-3997cf00-r4/roll-engine-pinned.bin",
+  "engine_sha256": "9e876733e089594f98399bf3caebb1c2027a1a1506e606e0e6586841b813ce2d",
+  "fixture_root": "/home/meszmate/.cache/a162/pgr/resume-3997cf00-r4/src-repo",
+  "fixture_source_commit": "724edf9bde9d356724ad384a2e196edc3c9f80f7",
+  "fixture_tag": "REL_18_6",
+  "fixture_files_checked": 1776,
+  "dump_root": "/home/meszmate/.cache/a162/pgdump/resume-3997cf00-dump5",
+  "audit_tap_sha256": "ec0ba048b85f05663eb407137e98ddb1385f4be559c1cdd7da3a1e489a7621e3",
+  "count_checker_sha256": "0f4bc35ad3c56afbda4ac5bfef9de8db61905bcca9b885f1c4f4addb09f359a0",
+  "sealed_v4_files": 1046,
+  "runner_sha256": "597df44c9488fcac1032fe43ccc3bcaf583ebb00fec29804f69556d3401d9171",
+  "full_service": "HELD"
+}
