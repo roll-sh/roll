@@ -198,6 +198,15 @@ impl SstWriter {
         Ok(w)
     }
 
+    /// A linkable run (`Store::commit_sorted`'s `linked`): compressed as the store's files
+    /// are, not fsynced (linking does). One that no other source holds keys of goes to L1
+    /// as it is when its commit links it, so its entries are written once.
+    pub fn create_run(dir: &Path, id: u64) -> Result<Self> {
+        let mut w = Self::create(dir, id, true)?;
+        w.sync = false;
+        Ok(w)
+    }
+
     /// Size the bloom filter for about `n` user keys now (a big ingested commit's: 8 bytes
     /// a key less to hold until the end).
     pub fn expect_keys(&mut self, n: usize) {
@@ -758,6 +767,16 @@ impl Block {
     /// with a whole key at every `RESTART`th entry (files written before restarts were
     /// share a prefix there).
     fn decode(raw: Bytes) -> Result<Block> {
+        Block::decode_with(&raw, None)
+    }
+
+    /// `decode` of a block of a linked run (`SstMeta::commit_ts`) in the same pass as what
+    /// `relink` makes of it: every key's version the commit's, the run's values plain ones.
+    fn decode_linked(raw: &[u8], ts: u64) -> Result<Block> {
+        Block::decode_with(raw, Some((!ts).to_be_bytes()))
+    }
+
+    fn decode_with(raw: &[u8], link: Option<[u8; 8]>) -> Result<Block> {
         let bad = || internal("bad sst block");
         let mut restarts: Vec<u64> = Vec::with_capacity(raw.len() / 512 + 1);
         let mut out = Vec::with_capacity(raw.len());
@@ -780,9 +799,25 @@ impl Block {
             let common = shared + key[shared..].iter().zip(suffix).take_while(|(a, b)| a == b).count();
             key.truncate(shared);
             key.extend_from_slice(suffix);
-            let value = (vl > 0).then(|| &raw[pos + unshared..end]);
+            let mut value = (vl > 0).then(|| &raw[pos + unshared..end]);
             pos = end;
             let klen = key.len();
+            if let Some(v) = link {
+                // (User keys are prefix-free: what two keys share ends before either's
+                // version, so no later key's shared bytes reach the version set here.)
+                if klen < 8 || common > klen - 8 {
+                    return Err(bad());
+                }
+                key[klen - 8..].copy_from_slice(&v);
+                // (A run's value: a tag (1: present, 2: a command id follows), then it.)
+                value = match value {
+                    Some([tag, rest @ ..]) if tag & 1 != 0 => Some(match tag & 2 {
+                        0 => rest,
+                        _ => rest.get(4..).unwrap_or_default(),
+                    }),
+                    _ => None,
+                };
+            }
             let ts = *ts.get_or_insert_with(|| {
                 <[u8; 8]>::try_from(&key[klen.saturating_sub(8)..]).unwrap_or([0xFF; 8])
             });
@@ -908,9 +943,11 @@ pub fn set_ts(key: &mut [u8], ts: u64) {
     }
 }
 
-/// A block of a linked run (`SstMeta::commit_ts`) in the store's format: every key's version
+/// A block of a linked run (`SstMeta::commit_ts`) in the store's format (the reference
+/// `Block::decode_linked` is tested against): every key's version
 /// is the commit's, and the run's values (a tag, the command id, the value: `txn::spill`)
 /// are plain ones, a delete a tombstone. (A linked run has one version of each key.)
+#[cfg(test)]
 fn relink(raw: &[u8], ts: u64) -> Result<Bytes> {
     let mut out = Vec::with_capacity(raw.len());
     let (mut key, mut prev) = (Vec::new(), Vec::new());
@@ -1029,6 +1066,15 @@ impl SstReader {
         bloom_bits(h, self.bloom_mod).all(|bit| self.bloom[bit / 8] & (1 << (bit % 8)) != 0)
     }
 
+    /// Whether the file's first block is compressed (what the writer did with them all,
+    /// but for blocks compression didn't shrink).
+    pub fn first_block_compressed(&self) -> Result<bool> {
+        let Some((off, _)) = self.index.at.first() else { return Ok(false) };
+        let mut b = [0u8; 1];
+        self.file.read_exact_at(&mut b, *off)?;
+        Ok(b[0] == 1)
+    }
+
     pub fn block_count(&self) -> usize {
         self.index.at.len()
     }
@@ -1074,11 +1120,10 @@ impl SstReader {
             }
             _ => return Err(internal("unknown block compression")),
         };
-        let raw = match self.meta.commit_ts {
-            Some(ts) => relink(&raw, ts)?,
-            None => raw,
-        };
-        let block = Arc::new(Block::decode(raw)?);
+        let block = Arc::new(match self.meta.commit_ts {
+            Some(ts) => Block::decode_linked(&raw, ts)?,
+            None => Block::decode(raw)?,
+        });
         if fill {
             let size = block.mem_bytes();
             // (A bulk read's block takes only room the cache has free: it evicts nothing.)
@@ -1366,6 +1411,41 @@ mod tests {
             assert_eq!(pos.index(), 0);
             b.seek(&[0xFF], &mut pos);
             assert_eq!(pos.index(), b.len());
+        }
+    }
+
+    /// A linked run's block decoded in one pass reads as the relinked block does.
+    #[test]
+    fn linked_blocks_decode_as_relinked() {
+        let ents: Vec<(Vec<u8>, Option<Vec<u8>>)> = (0..200u32)
+            .map(|i| {
+                let mut k = vec![0, 0, 0x40, 0x41, 0, 0, 0, 0, 0x20, (i / 40) as u8, (i % 40) as u8];
+                k.extend_from_slice(&(!5u64).to_be_bytes());
+                let v = match i % 5 {
+                    0 => Some(vec![1, b'a', (i % 256) as u8]),
+                    1 => Some([&[3u8, 0, 0, 0, 9][..], b"row", &[i as u8]].concat()),
+                    2 => Some(vec![0]),
+                    3 => None,
+                    _ => Some(vec![3, 0, 0, 0, 1]),
+                };
+                (k, v)
+            })
+            .collect();
+        for restart in [RESTART, 3] {
+            let raw = block_bytes(&ents, restart);
+            let one = Block::decode_linked(&raw, 77).unwrap();
+            let two = Block::decode(relink(&raw, 77).unwrap()).unwrap();
+            assert_eq!(one.len(), two.len());
+            let (mut a, mut b) = (BlockPos::default(), BlockPos::default());
+            one.at(0, &mut a);
+            two.at(0, &mut b);
+            while a.index() < one.len() {
+                assert_eq!(a.key(), b.key());
+                assert_eq!(key_ts(a.key()), 77);
+                assert_eq!(one.value_ref(&a), two.value_ref(&b));
+                one.step(&mut a);
+                two.step(&mut b);
+            }
         }
     }
 }
