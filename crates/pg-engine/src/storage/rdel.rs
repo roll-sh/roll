@@ -139,10 +139,13 @@ impl Store {
             // (Durable ones only: a file goes on the strength of the marker.)
             let horizon = self.gc_horizon().min(self.visible_ts());
             let live: Vec<RangeDel> = view.rdels.iter().filter(|r| r.ts <= horizon).cloned().collect();
-            if live.is_empty() {
+            // (Discarded ranges hide every version: `discard`. Only whole files go for them.)
+            let discarded: Vec<RangeDel> =
+                self.discard.ranges().into_iter().map(|(start, end)| RangeDel { start, end, ts: ALL }).collect();
+            if live.is_empty() && discarded.is_empty() {
                 return Ok(());
             }
-            let whole = |m: &SstMeta| live.iter().any(|r| covers_file(r, m));
+            let whole = |m: &SstMeta| live.iter().chain(&discarded).any(|r| covers_file(r, m));
             let gone: HashSet<u64> = view
                 .l0
                 .iter()

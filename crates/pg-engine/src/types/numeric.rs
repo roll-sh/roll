@@ -1462,6 +1462,30 @@ impl std::str::FromStr for Numeric {
 /// numeric_in's grammar (set_var_from_str / set_var_from_non_decimal_integer_str). Err(true)
 /// is "value overflows numeric format", Err(false) a syntax error. Limits beyond the exponent
 /// are checked by `checked`.
+/// `parse_numeric` of `[digits][.digits]` (at least one digit, at most 18, nothing else
+/// after): the value at its scale, as the general parse makes it. None: not that form.
+fn plain_decimal(b: &[u8], neg: bool) -> Option<Numeric> {
+    let mut v: i64 = 0;
+    let (mut ndig, mut scale) = (0u32, 0u32);
+    let mut dp = false;
+    for &c in b {
+        match c {
+            // (18 digits fit an i64; more go the general way.)
+            b'0'..=b'9' if ndig < 18 => {
+                v = v * 10 + (c - b'0') as i64;
+                ndig += 1;
+                scale += dp as u32;
+            }
+            b'.' if !dp => dp = true,
+            _ => return None,
+        }
+    }
+    if ndig == 0 {
+        return None;
+    }
+    Some(Numeric::Finite { int: DecInt::from(if neg { -v } else { v }), scale })
+}
+
 fn parse_numeric(s: &str) -> std::result::Result<Numeric, bool> {
     let b = s.as_bytes();
     let isspace = |c: u8| matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c);
@@ -1541,7 +1565,11 @@ fn parse_numeric(s: &str) -> std::result::Result<Numeric, bool> {
             });
         }
     }
-    // Decimal.
+    // Decimal: plain digits with at most one point and up to 18 of them, the commonest
+    // input (and what servers send), taken as an i64 at its scale.
+    if let Some(n) = plain_decimal(&b[i..], neg) {
+        return Ok(n);
+    }
     let mut have_dp = false;
     if b[i] == b'.' {
         have_dp = true;
@@ -1647,27 +1675,33 @@ impl fmt::Display for Numeric {
             Numeric::PosInf => f.write_str("Infinity"),
             Numeric::NegInf => f.write_str("-Infinity"),
             Numeric::Finite { int, scale } => {
-                let neg = int.is_negative();
-                let digits = int.magnitude_string();
+                // (The digits on the stack when they fit: no allocation for usual values.)
+                let mut buf = [0u8; 72];
+                let owned;
+                let digits = match int.magnitude_digits(&mut buf) {
+                    Some(d) => d,
+                    None => {
+                        owned = int.magnitude_string();
+                        owned.as_str()
+                    }
+                };
                 let scale = *scale as usize;
-                let mut out = String::with_capacity(digits.len() + 3);
-                if neg {
-                    out.push('-');
+                if int.is_negative() {
+                    f.write_str("-")?;
                 }
                 if scale == 0 {
-                    out.push_str(&digits);
+                    f.write_str(digits)
                 } else if digits.len() > scale {
-                    out.push_str(&digits[..digits.len() - scale]);
-                    out.push('.');
-                    out.push_str(&digits[digits.len() - scale..]);
+                    f.write_str(&digits[..digits.len() - scale])?;
+                    f.write_str(".")?;
+                    f.write_str(&digits[digits.len() - scale..])
                 } else {
-                    out.push_str("0.");
+                    f.write_str("0.")?;
                     for _ in 0..scale - digits.len() {
-                        out.push('0');
+                        f.write_str("0")?;
                     }
-                    out.push_str(&digits);
+                    f.write_str(digits)
                 }
-                f.write_str(&out)
             }
         }
     }

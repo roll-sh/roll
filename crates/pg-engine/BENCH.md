@@ -237,6 +237,79 @@ The cost is spread thinly:
   `partial_scans`).
 No single function takes more than 5%. HANDOFF has the next steps.
 
+## postgres_fdw, round 7 (2026-11-03, agent 157)
+
+What changed: HANDOFF.md's postgres_fdw "Round 26 (agent 157)". PostgreSQL's estimates for
+never-analyzed foreign tables and one-group aggregations sent whole (so the engine now picks
+PostgreSQL's plans: it no longer pushes the joins PostgreSQL doesn't push), a cursor's scan
+decoding only the columns read, numeric text without allocations, and common values written
+straight into DataRow messages.
+
+How it was measured: `tools/fdwtraffic/compare.sh` (new), the fdw_traffic workload with both
+servers in containers on cores 4-7 at the same CPU weight, host network, psql on cores 8-9.
+Each server's CPU (`cpu.stat` usage_usec: both ends of its loopback) and peak memory
+(`memory.peak`) come from its container's cgroup. Engines are `--profile dist` builds: base
+`847fbdba`, new = this round. The runs were interleaved (base, new, PostgreSQL, new, base) on a
+loaded machine (load 13-15); the engine columns are the mean of 2 runs, PostgreSQL's is 1 run.
+
+| phase (statements) | PG writes / stmt | engine | PG ms | base ms | new ms | new / PG time | PG CPU ms | base CPU | new CPU | new / PG CPU |
+|---|---|---|---|---|---|---|---|---|---|---|
+| point lookups (500) | 5.00 | **2.00** | 1,213 | 851 | **765** | 0.63 | 402 | 381 | **341** | 0.85 |
+| lookups in one txn (302) | 2.99 | **1.00** | 482 | 308 | **315** | 0.65 | **161** | 162 | 169 | 1.05 |
+| full scans, 20k rows (10) | 205 | **202** | 1,508 | 1,647 | **1,453** | 0.96 | **574** | 769 | 633 | 1.10 |
+| range scans, ~31 rows (200) | 5.00 | **2.00** | 732 | 450 | **452** | 0.62 | **215** | 245 | 232 | 1.08 |
+| foreign joins (100) | 208 | 203 | **11,144** | 1,080 * | 13,966 | 1.25 | **4,387** | 928 * | 6,084 | 1.39 |
+| remote aggregates (100) | 5.00 | **2.00** | 778 | 669 | **613** | 0.79 | 502 | 532 | **483** | 0.96 |
+| local join foreign (5) | 205 | **202** | **440** | 667 | 637 | 1.45 | **162** | 293 | 264 | 1.63 |
+| single-row inserts (300) | 5.00 | **2.00** | 690 | 351 | **398** | 0.58 | 208 | 133 | **150** | 0.72 |
+| direct updates (100) | 3.00 | **2.00** | 217 | 157 | **178** | 0.82 | **81** | 72 | 82 | 1.02 |
+| inherited updates, row trigger (20 x 50) | 56.95 | **51.95** | **408** | 912 | 987 | 2.42 | **141** | 459 | 487 | 3.46 |
+| inherited updates, sent whole (20 x 50) | 3.00 | **2.00** | **33** | 81 | 97 | 2.95 | **16** | 59 | 71 | 4.37 |
+| locked local join foreign (20) | 208 | **205** | **2,568** | 3,341 | 3,080 | 1.20 | **1,086** | 1,566 | 1,431 | 1.32 |
+| locked local join of a foreign join (20) | 214 | 209 | **2,488** | 516 * | 3,458 | 1.39 | **1,034** | 431 * | 1,487 | 1.44 |
+
+\* The base engine pushed these joins down where PostgreSQL doesn't (its never-analyzed
+foreign table estimate, round 6's note), so those cells measured another plan. With
+PostgreSQL's estimates the new engine runs PostgreSQL's plans there (Hash Joins of the
+whole remote tables: 61 MB and 17 MB fetched a phase on both).
+
+Bytes in are the same or fewer on the engine in every phase (point lookups 94 against 120 kB,
+range scans 272 against 282 kB, aggregates 16 against 22 kB). Peak memory over the whole run:
+engine 66-70 MB (new), 68-123 MB (base), PostgreSQL 147 MB.
+
+What moved: the full scans' CPU fell 18% against base (769 -> 633 ms; time 1,647 -> 1,453 ms,
+now ahead of PostgreSQL's 1,508), local join foreign 10% (293 -> 264), aggregates 9%
+(532 -> 483 ms, ahead of PostgreSQL in time and CPU), point lookups 10%. The profile of the
+full scans before: numeric formatting and parsing 11% of the server's CPU (four allocations
+per value out, a digit String in), the remote cursor decoding every column of rows it then
+projected (`full_row`, 13%), vectors grown per row.
+
+Still behind, with where the time goes (perf, dist build, DWARF stacks):
+
+- Remote scans of whole tables (local join foreign 1.45x, foreign joins 1.25x, locked local
+  join 1.20x): the remote server's cursor keeps every row it returns (backward FETCH), about
+  15% of the CPU of a 20k-row scan (`Cursor::visit` re-evaluating the target list per row
+  2-4%, `push_row`, and the rows' drop at commit 6%); `exec::scan` decodes each row into a
+  vector then grows it for the key (`scan_row_rest`, 5%). Both are outside postgres_fdw.
+- Inherited updates (2.4x, 3.0x): per-statement planning of the inheritance tree and the
+  per-row remote UPDATEs' execution on the remote server (the same engine), not the wrapper's
+  traffic (fewer round trips and bytes than PostgreSQL).
+
+pgbench (scale 1, 8 clients, `-M prepared`, 20 s, the engine in a container on cores 4-7,
+four interleaved rounds, both orders, load 13-21): select-only server CPU per transaction base
+46 / 48 / 58 / 58 us, new 44 / 52 / 53 / 60 us (medians 53 and 52.5); TPC-B-like base
+419 / 443 / 443 / 471 us, new 445 / 464 / 493 / 568 us (the 568 at load 21; medians 443 and
+478). Single runs moved 25% at this load, so neither difference is resolved: the only changed
+code these statements run is int4 text output (written into the message, no String) and the
+planner's foreign-table checks (a field test for plain tables). TPC-B-like's higher median
+needs a quieter rerun before it is trusted either way. Peak memory 128-137 MB new, 130-157 MB
+base.
+
+```sh
+tools/heavy.sh cargo build --profile dist -p pg-engine --bin roll-engine   # copy it aside
+SERVER_CPUS=4-7 CLIENT_CPUS=8-9 tools/fdwtraffic/compare.sh <roll-engine> <scratch> <prefix> <port> [pg] [engine]
+```
+
 ## postgres_fdw, round 6 (2026-11-03, agent 153)
 
 What changed: HANDOFF.md's postgres_fdw "Round 25 (agent 153)". A level locking local relations
@@ -6418,6 +6491,87 @@ roll-* specs 17 / 17 on a private reference; a regress subset (subscription, pub
 replica_identity, create_view) on a private reference. The full regress and pg_dump_tap
 runs weren't repeated for this batch: it changes the apply worker, the decoder and a
 sizing helper only the decoder calls, none of which those suites run.
+
+## Replication, round 7 (agent 158)
+
+HANDOFF.md "Round 7 (agent 158)" has what changed. Both servers in containers this round:
+PostgreSQL 18.6 (pinned image) and the engine (a `dist` build in the pinned glibc image,
+`tools/bench/repl/lib.sh` `ENGINE_DOCKER=1`), each on four cores of its own (the engine
+publisher or subscriber on 24-27; a PostgreSQL publisher on 20-23; `pubn.sh`'s subscriber on
+16-19; `apply.sh`'s PostgreSQL subscriber on 24-27 like the engine's), the host network,
+machine load 10-25 from other agents. Base: `5973e109` (origin with agent 151's model commits);
+head: this batch. Rounds interleaved (PostgreSQL, base, head each round).
+
+**Walsenders** (`pubn.sh`, 20,000 pgbench-like transactions, N PostgreSQL subscriptions;
+engine CPU and memory the whole process's, PostgreSQL's the walsenders'; two rounds):
+
+| N | PostgreSQL 18.6 | engine, base | engine, head | head / PostgreSQL CPU, memory |
+|---|---|---|---|---|
+| 1 | 0.93-0.96 s, CPU 0.16-0.18 s, 16 MB | 0.83-1.05 s, CPU 0.24-0.41 s, +37-48 MB | 0.84-1.04 s, CPU 0.12-0.13 s, +1 MB | 0.7-0.8, 0.06 |
+| 4 | 1.25-1.48 s, CPU 0.65-1.35 s, 64 MB | 0.82-0.90 s, CPU 0.73-0.89 s, +47-52 MB | 0.93-1.06 s, CPU 0.54-0.57 s, +32-34 MB | 0.4-0.9, 0.5 |
+| 16 | 3.54-3.82 s, CPU 2.71-3.15 s, 256 MB | 1.56-1.82 s, CPU 2.11-2.64 s, +48-63 MB | 1.69-1.72 s, CPU 2.02-2.06 s, +39-40 MB | 0.65-0.75, 0.15 |
+
+(PostgreSQL's N = 1 CPU had one round of 0.53 s, left out. Round 6's 0.34-0.41 s against
+0.15 s came from a host-run release engine.) Where one walsender went, base (`PERF=` LBR
+stacks, 80,000 transactions): about two thirds `gc_writes`' read-back and tombstones, the
+rest decoding, mostly a store scan per transaction. Head, the same: the one-pass read 26%
+(a quarter of it decompressing blocks, zstd), pgoutput's tuples 17% (timestamptz text 7%),
+sends 12% (one per transaction then: now one per run), change size accounting 3.5%.
+Memory at N = 1: the block cache no longer fills with the stream (the read-back was 15 MB of
+it, the per-transaction scans the rest); at N >= 2 the decoders share each transaction
+(`decode::Shared`) and read through the cache.
+
+**Apply** (`apply.sh`, PostgreSQL 18.6 publisher, 60,000 transactions, two rounds; every
+subscriber ends with the publisher's md5 of every row):
+
+| subscriber | time | CPU | memory | engine / PostgreSQL CPU |
+|---|---|---|---|---|
+| PostgreSQL 18.6 | 2.98-3.06 s | 2.31-2.51 s | apply worker 30 MB | |
+| engine, base | 3.55-3.88 s | 3.24-3.31 s | +47-49 MB | 1.35-1.4 |
+| engine, head | 3.55-4.02 s | 3.13-3.47 s | +43-49 MB | 1.35-1.4 |
+
+(This batch doesn't change apply: base and head are the same there. Round 6's 1.6 was a
+host-run engine before agent 151's models.) The apply thread now (head, LBR stacks): size
+models still about a quarter (`sizing::updated` 15.5%: its btree model insert 6.0%,
+`update_cid` 5.8%; `sizing::index_insert` 11.7%, `inserted_with` 8.8%: inclusive, they
+overlap), the commit 13.7% (`commit_async`: memtable inserts 7.2%, WAL append 3.2%), INSERT's
+unique check scanning the store (`dml::committed_conflict`) 10.8%, row location for UPDATE /
+DELETE 15.5%, the per-change statement wrapper about 3% (was 6%), value input 3%, feedback
+sends 2.6%. Sent to agents 151 (models) and 145 / 149 (commit, unique check).
+
+**pgbench check** (`pgb.sh`, scale 10, `-M prepared`, 8 clients, 20 s, `--cache-mb 2048`,
+engines in containers, four rounds interleaved; CPU per transaction of the engine
+process, VmHWM): select-only base 0.039-0.043 ms, head 0.039-0.042 ms; tpcb-like base
+0.430-0.447 ms, head 0.395-0.454 ms; VmHWM base 371-454 MB, head 433-456 MB. No change beyond the
+rounds' spread (the batch touches no OLTP path; without a slot a commit notes nothing).
+
+**test_decoding** 1,044 / 1,047 (base 1,043, the same reference): stream.sql's multi-insert unit
+matches (a block of 12 changes, then 1, as PostgreSQL's). Left: stats 3 (below).
+
+**Verified** (at 64b0efe3, on 5973e109): crate tests in debug (442 / 442, deep_input and
+logical_apply included) and release (441 / 442: the new discard test, which the hot-range
+change below fixed), clippy without new warnings, the difftest smoke, isolation 121 / 122
+(intra-grant-inplace, as on origin) and test_decoding's specs 2 / 3 (twophase_snapshot, as on
+base), a full regress run on a private reference 51,148 / 51,150 with 0 units changed against
+`results.tsv`, pg_dump_tap 14,817 / 14,817, the side-by-side e2e (`e2e.sh`, every scenario
+identical on the PostgreSQL and engine subscribers of both publishers; no table
+synchronization slot left on either publisher, checked now), the benchmarks above. Then the
+last two changes (a keyspace with a discarded range is never hot; the multi-insert batch kept
+on the transaction, so a COPY's first rows are a batch's too) and a rebase onto 4ac4d685:
+release crate tests, the targeted tests (repl, storage, logical_apply), clippy,
+test_decoding 1,044 / 1,047 and the e2e again (identical).
+
+**test_decoding stats units** (sent to agent 155, planner): three slot-creating function
+scans in one FROM are planned as `Nested Loop (Function Scan s3, Materialize (Nested Loop
+(s1, s2)))`; PostgreSQL 18.6 nests s1 and s2, then s3, so its slots are created a, b, c and
+take those places in pg_replication_slots, the engine's c, a, b:
+
+```sql
+EXPLAIN (COSTS OFF) SELECT 'init' FROM pg_create_logical_replication_slot('a', 'test_decoding') s1,
+  pg_create_logical_replication_slot('b', 'test_decoding') s2, pg_create_logical_replication_slot('c', 'test_decoding') s3;
+-- (with generate_series(1, 1) in their place both nest s1, s2, then s3)
+```
+
 
 ## Size models, round 2 (round 22, agent 126)
 

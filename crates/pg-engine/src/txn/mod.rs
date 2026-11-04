@@ -483,6 +483,7 @@ impl Database {
             exported: false,
             prepared: false,
             log: None,
+            copy_batch: None,
             entry_deletes: Vec::new(),
             entry_deletes_bytes: 0,
             entry_deletes_direct: None,
@@ -1003,6 +1004,9 @@ pub struct Txn {
     /// Its change stream log, while it logs its changes (`repl::log`): decided when it gets
     /// its transaction id.
     pub(crate) log: Option<Box<crate::repl::log::TxnLog>>,
+    /// A COPY's multi-insert in progress: its command and batch (`repl::log::multi_insert`;
+    /// set before the transaction has an id, so not in `log`).
+    pub(crate) copy_batch: Option<(u32, u32)>,
     /// Index entries the running statement deleted, going in together at its end
     /// (`defer_entry_delete`), with about how many bytes they hold.
     entry_deletes: Vec<Vec<u8>>,
@@ -1659,6 +1663,11 @@ impl Txn {
     /// GetCurrentCommandId(true): the command id (as Postgres numbers them) the running
     /// command marks the tuples it writes or locks with, which the next command then
     /// moves past.
+    /// The current command's id, without marking it used.
+    pub fn current_cid(&self) -> u32 {
+        self.pg_cid
+    }
+
     pub fn output_cid(&mut self) -> u32 {
         self.pg_cid_used = true;
         self.pg_cid

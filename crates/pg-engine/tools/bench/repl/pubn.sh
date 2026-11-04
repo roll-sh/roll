@@ -44,7 +44,8 @@ while [ $r -lt "$ROUNDS" ]; do
   r=$((r + 1))
   for n in $NS; do
     if [ "$PUB" = pg ]; then pg_up "$A-rpub" $P_PUB; else eng_up "$A-epub" $P_PUB; fi
-    pg_up "$A-rsub" $P_SUB
+    # (The subscriber on cores of its own: either publisher has its four alone.)
+    CPUS=${SUB_CPUS:-16-19} pg_up "$A-rsub" $P_SUB
     q $P_PUB postgres "$schema CREATE SEQUENCE hist_seq; CREATE PUBLICATION p FOR TABLE acc, hist" >/dev/null
     i=0
     while [ $i -lt "$n" ]; do

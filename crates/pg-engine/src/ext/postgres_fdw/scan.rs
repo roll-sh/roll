@@ -308,7 +308,10 @@ struct ScanNode {
 /// NULL), its ctid as the storage key, then the system columns.
 fn make_row(n: &ScanNode, vals: Vec<Option<String>>, ctx: &ExecCtx) -> Result<Row> {
     let t = &n.table;
-    let mut row = vec![Value::Null; t.columns.len()];
+    // (Room for the key and system columns too: no reallocation per row.)
+    let extra = n.with_key as usize + if n.sys { crate::exec::scan::NUM_SYS_COLS } else { 0 };
+    let mut row = Vec::with_capacity(t.columns.len() + extra);
+    row.resize(t.columns.len(), Value::Null);
     for (k, &i) in n.retrieved.iter().enumerate() {
         if let Some(Some(s)) = vals.get(k) {
             let col = &t.columns[i];

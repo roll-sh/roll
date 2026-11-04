@@ -2,13 +2,22 @@
 """Write the fdw_traffic workload (tests/fdw_traffic.rs, same phases) as a psql script for
 PostgreSQL's postgres_fdw, through the counting proxy on port 53075; then summarize.
 
-usage: pgtraffic.py gen <proxy port> <counters file> > work.sql ; pgtraffic.py sum < psql output
+usage: pgtraffic.py gen <proxy port> <counters file> [<server cgroup dir>] > work.sql
+       pgtraffic.py sum < psql output
+
+PGT_PHASES=<prefix>,<prefix> keeps only the phases whose names start so, PGT_SETUP=0 leaves
+the setup out (for profiles: set up once, then profile the phases).
+
+With a cgroup directory (the server container's, as the psql container sees it), each phase
+also reports the server's CPU (cpu.stat usage_usec: every process of the server, both ends of
+the loopback) and the summary its peak memory (memory.peak).
 """
-import re, sys
+import os, re, sys
 
 # (gen: the proxy's port and the counters file as the psql container sees it.)
 PORT = sys.argv[2] if len(sys.argv) > 2 else "53075"
 COUNTERS = sys.argv[3] if len(sys.argv) > 3 else "/traffic/counters"
+CGROUP = sys.argv[4] if len(sys.argv) > 4 else None
 
 SETUP = [
     "CREATE EXTENSION IF NOT EXISTS postgres_fdw",
@@ -55,14 +64,17 @@ def phases():
 def gen():
     print("\\set QUIET on")
     print("SET compute_query_id = off;")
-    for q in SETUP:
+    for q in SETUP if os.environ.get("PGT_SETUP", "1") == "1" else []:
         print(q + ";")
     print("SELECT 1 FROM ft LIMIT 1;")  # (the connection is made before the first phase)
     print("\\o /dev/null")
+    only = [x for x in os.environ.get("PGT_PHASES", "").split(",") if x]
     for name, sqls in phases():
+        if only and not any(name.startswith(o) for o in only):
+            continue
         print("\\o")
         print("\\echo PHASE %s %d" % (name, len(sqls)))
-        print("\\! cat %s" % COUNTERS + "")
+        print(stats())
         print("\\o /dev/null")
         print("\\timing on")
         for q in sqls:
@@ -70,13 +82,26 @@ def gen():
         print("\\timing off")
     print("\\o")
     print("\\echo PHASE end 0")
-    print("\\! cat %s" % COUNTERS + "")
+    print(stats())
+
+
+def stats():
+    if CGROUP:
+        return "\\! cat %s; grep usage_usec %s/cpu.stat; cat %s/memory.peak" % (COUNTERS, CGROUP, CGROUP)
+    return "\\! cat %s" % COUNTERS
 
 
 def summarize():
-    rows, cur, ms = [], None, 0.0
+    rows, cur, ms, cpu, peak = [], None, 0.0, [], 0
     for line in sys.stdin:
         line = line.strip()
+        m = re.match(r"usage_usec (\d+)$", line)
+        if m:
+            cpu.append(int(m.group(1)))
+            continue
+        if re.match(r"\d+$", line):
+            peak = int(line)
+            continue
         m = re.match(r"PHASE (.*) (\d+)$", line)
         if m:
             cur = (m.group(1), int(m.group(2)))
@@ -89,9 +114,12 @@ def summarize():
         m = re.match(r"Time: ([\d.]+) ms", line)
         if m:
             ms += float(m.group(1))
-    for (name, n, a, _), (_, _, b, t) in zip(rows, rows[1:]):
+    for i, ((name, n, a, _), (_, _, b, t)) in enumerate(zip(rows, rows[1:])):
         d = [y - x for x, y in zip(a, b)]
-        print("%-42s stmts %5d writes %6d (%.2f/stmt) out %9d B in %10d B %9.1f ms" % (name, n, d[0], d[0] / max(n, 1), d[1], d[2], t))
+        c = " cpu %8.1f ms" % ((cpu[i + 1] - cpu[i]) / 1000) if len(cpu) == len(rows) else ""
+        print("%-42s stmts %5d writes %6d (%.2f/stmt) out %9d B in %10d B %9.1f ms%s" % (name, n, d[0], d[0] / max(n, 1), d[1], d[2], t, c))
+    if len(cpu) == len(rows) and rows:
+        print("total %.1f ms, server cpu %.1f ms, server peak memory %.1f MB" % (sum(r[3] for r in rows), (cpu[-1] - cpu[0]) / 1000, peak / 1e6))
 
 
 if __name__ == "__main__":

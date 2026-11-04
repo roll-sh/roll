@@ -3671,6 +3671,9 @@ impl InsertNode {
             && rules.indexes.iter().all(|b| b.index.method == "btree" && !checks_rows(b))
             && model_deferrable(&plan, ctx)
             && !ctx.txn.borrow().sink_open();
+        if copied.is_some_and(|c| c.multi) {
+            crate::repl::log::multi_insert(ctx);
+        }
         let copy_load = match copied {
             Some(c) => Some(super::sizing::CopyLoad::start(&rules.table, c.multi, c.freeze, bulk, ctx)),
             None if plan.copy.is_none() && model_deferrable(&plan, ctx) => {
@@ -3925,8 +3928,9 @@ impl InsertNode {
         };
         if let Some(l) = &self.copy_load {
             let done = l.row_done(raw_len, ctx);
-            if r.is_ok() {
-                done?;
+            if r.is_ok() && done? {
+                // (The next rows are the next multi-insert's.)
+                crate::repl::log::multi_insert(ctx);
             }
         }
         if c.multi && r.is_ok() {

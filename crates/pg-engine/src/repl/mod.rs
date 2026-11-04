@@ -120,14 +120,22 @@ impl Repl {
         db.log.commit_ts.store(self.commit_ts.is_some(), Ordering::Relaxed);
         let on = !self.slots.logical_in(db.oid).is_empty();
         db.log.capture.store(on, Ordering::SeqCst);
-        if !on {
-            // What a crash or the last slot's drop left behind.
-            if let Ok(w) = log::gc_writes(&db.store, u64::MAX)
-                && !w.is_empty()
-            {
-                let _ = db.store.commit(w, |_| Ok(()));
+    }
+
+    /// A database opened, its prepared transactions recovered (their ids running): the
+    /// commit records slots haven't confirmed are tracked again, and what no slot needs is
+    /// discarded.
+    pub fn opened(&self, db: &Database) {
+        if !self.slots.logical_in(db.oid).is_empty() {
+            match log::stored_commits(&db.store) {
+                Ok(found) => db.log.recover_unconfirmed(found),
+                Err(e) => {
+                    tracing::warn!(error = %e, "reading the change stream's commit records failed");
+                    return;
+                }
             }
         }
+        self.slots_changed(db.oid);
     }
 
     pub fn detach(&self, db: &Database) {
@@ -161,24 +169,19 @@ impl Repl {
         } else {
             slots.iter().map(|s| s.data.confirmed_flush).min().unwrap_or(0)
         };
-        self.gc(&db, upto);
-    }
-
-    /// Remove the change stream's records ending at or before `upto` (what every slot of
-    /// the database confirmed), unless done already.
-    pub fn gc(&self, db: &Database, upto: u64) {
-        if upto <= db.log.gc_upto.load(Ordering::Acquire) {
+        // (The oldest running id first: see `DbLog::confirmed`.)
+        let running = db.xids().oldest_running();
+        let (xid, lsn) = db.log.confirmed(upto, running, &self.wal);
+        // A slot made meanwhile may need what its creation found committed: only floors
+        // computed for the slots there are now go.
+        let same = |a: &[slot::Slot], b: &[slot::Slot]| {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.data.name == y.data.name && !y.creating)
+        };
+        if !same(&slots, &self.slots.logical_in(oid)) {
             return;
         }
-        match log::gc_writes(&db.store, upto) {
-            Ok(w) => {
-                if !w.is_empty() && db.store.commit(w, |_| Ok(())).is_err() {
-                    return;
-                }
-                db.log.gc_upto.fetch_max(upto, Ordering::AcqRel);
-            }
-            Err(e) => tracing::warn!(error = %e, "removing confirmed change stream records failed"),
-        }
+        log::discard_below(&db.store, xid, lsn);
+        db.log.forget(upto);
     }
 
     /// CheckLogicalDecodingRequirements.

@@ -228,6 +228,13 @@ impl Xids {
         self.publish(&s);
     }
 
+    /// The oldest id running, or the next one to hand out when none runs (every later
+    /// transaction's is at least this).
+    pub fn oldest_running(&self) -> u64 {
+        let s = self.state.lock();
+        s.running.first().copied().unwrap_or(s.next)
+    }
+
     /// The next id to hand out.
     pub fn next(&self) -> u64 {
         self.state.lock().next
