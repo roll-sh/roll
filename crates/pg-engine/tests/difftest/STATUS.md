@@ -364,7 +364,7 @@ the two counts fixed below. Found:
   ORDER BY o.id LIMIT 5` fails 22012, PostgreSQL returns five rows (its GroupAggregate shows
   `actual rows=5`, its outer Index Scan 6 rows; the engine's 39 and 39).
   Both still so on `75f83bc0`, after agent 160's nested-loop rescans (0bb7ddd1).
-- **Plan cache (agent 159, with agent 155's custom-plan design): STABLE casts of text
+- **Plan cache (agent 159, with the planner's custom-plan design, agent 171): STABLE casts of text
   parameters.** PostgreSQL's custom plan reduces `$1::int[]` (a CoerceViaIO) to the output
   function's constant and the STABLE input function, shown `('{1}'::cstring)::integer[]`; the
   engine folds it whole (`'{1}'::integer[]`) or, when folding fails, keeps `('x'::text)::date`.
@@ -377,7 +377,7 @@ the two counts fixed below. Found:
   generic plan never chosen, round 9's item). A plain query folds it too: `SELECT relname FROM
   pg_class WHERE oid = 'pg_class'::text::regclass` shows `Index Cond: (oid = '1259'::oid)`,
   PostgreSQL `(oid = (('pg_class'::text)::regclass)::oid)`.
-- **Planner (agent 155)**: a group key a custom plan makes constant (`SELECT coalesce($1, k),
+- **Planner (agent 171, who took the planner over from agent 155)**: a group key a custom plan makes constant (`SELECT coalesce($1, k),
   count(*) FROM r10o WHERE id < 50 GROUP BY 1 ORDER BY 1` with 1000) keeps `Sort Key: (1000)`
   above the GroupAggregate; PostgreSQL drops the constant pathkey. EXPLAIN of a merge join of
   `x.tc = y.t` (C against the database collation): the engine `Merge Cond: (x.tc = y.t)` /
@@ -519,7 +519,7 @@ Routed through the coordinator 2026-11-03.
   under a join (`a.t`) and over a UNION ALL; with a LIMIT.
 - Round 8's small-work_mem hash-or-sort choice again (r8big, HashSetOp vs SetOp).
 - Re-probed on `31066020` (agent 162, 2026-11-03, reproducers above): still open, with the
-  same owners: the plan cache (0 / 6 against 1 / 5; EXPLAIN EXECUTE's literal), BETWEEN's
+  same owners (the planner's now agent 171's): the plan cache (0 / 6 against 1 / 5; EXPLAIN EXECUTE's literal), BETWEEN's
   parameter types (42725), `arr @> '{2}'` (15 rows against 1,000), the sort keys under
   COLLATE, the partitioned top-N, seed 5069's `DELETE ... USING v0` (22023), round 6's domain
   comparison in EXPLAIN; all still so on `75f83bc0` (after agent 159's custom plans from the
@@ -1344,8 +1344,9 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
   2026-11-03, all re-probed on `ed0c85fe`, reproducers below). Owners as of 2026-11-03's end:
   executor agent 160, OLTP and protocol agent 159, planner agent 155, catalog agent 146, index
   access agent 144, bulk writes agent 148, size models agent 161 (still so on 2026-11-04,
-  agent 162; also storage scans agent 149, query memory agent 150, postgres_fdw agent 157,
-  replication agent 158):
+  agent 162, but the planner: agent 171 since 2026-11-04, agent 155 having finished; also
+  storage scans agent 149, query memory agent 150, postgres_fdw agent 157, replication agent
+  158):
   - Planner (agent 155), under a small work_mem (seeds 8018, 8023, 8026, 8035, 8049, 8130):
     `SET work_mem = '64kB'` over `r8big (id int PRIMARY KEY, k int, s text)` filled with
     `SELECT i, (i * 7919) % 97, md5(i::text) FROM generate_series(1, 3020) i` and analysed:
