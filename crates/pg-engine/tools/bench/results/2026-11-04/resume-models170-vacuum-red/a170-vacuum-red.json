@@ -1,0 +1,22 @@
+{
+  "worktree": "/home/meszmate/roll/.claude/worktrees/agent-a0718617fe2ff9006",
+  "head": "057da118e264cb43bb57f36d0838cc63fb51c03e",
+  "output": "/home/meszmate/.cache/pg-engine-resume-20261104/execution_models/a170-vacuum-red",
+  "command": [
+    "cargo",
+    "test",
+    "-p",
+    "pg-engine",
+    "--test",
+    "vacuum_toast_measure",
+    "--",
+    "--nocapture"
+  ],
+  "env": {
+    "TMPDIR": "/home/meszmate/.cache/a170/tmp",
+    "CARGO_TARGET_DIR": "/home/meszmate/.cache/a170/target",
+    "CARGO_BUILD_JOBS": "2",
+    "RUST_TEST_THREADS": "2"
+  },
+  "pattern": "attempt to subtract with overflow"
+}

@@ -1,0 +1,91 @@
+You are pg-engine agent 170. You own the heap and btree size models, round 6. pg-engine is roll's in-process PostgreSQL engine, at crates/pg-engine in the roll monorepo. The size models give PostgreSQL's page counts, ctids, free space and visibility maps, and EXPLAIN costs, without PostgreSQL's storage.
+
+**Goal:** application-visible behaviour must be identical to PostgreSQL 18.6, including EXPLAIN output and the ctids, page counts and statistics the models produce. Internals are free to differ. Build natively in Rust, the best way you can.
+
+**The user's goal now is "I want to beat postgres in everything":** throughput, latency and CPU per operation on every workload, against PostgreSQL 18.6 on the same cores. The footprint lead is a gate no change may worsen (tools/bench/scoreboard.sh checks it). For the models this means the model must cost the write and read paths as close to nothing as possible.
+
+**Where it stands** (agent 161's round 5: 450f9651..d119ef44; BENCH "Size models, round 5"; scripts in tools/bench/sizing/, with `ROLL_MODEL_MAX_VERSIONS` and run.sh's `ENGINE_ENV`). The 400k model limit stays. Lifted, it still costs:
+
+| check | 400k | lifted | PostgreSQL |
+|---|---|---|---|
+| primary key build | 0.66–0.78 s | 2.62 s | 0.55 s |
+| first statement after restart | 9–13 ms | 240–246 ms | 2 ms |
+| pgbench peak memory | 220–390 MB | 340–550 MB | 250–280 MB |
+
+DELETE also costs more when lifted. 161 found no explanation for why the lifted primary-key build takes 1.3 s of CPU in release but 2.6 s in dist.
+
+On the write paths, with the limit at 400k:
+- **Replication apply** (agent 158's profile, 60,000 pgbench-like transactions): the models are about a quarter of the apply thread. `sizing::updated` is 15.5% (its btree insert 6.0%, `update_cid` 5.8%), `sizing::index_insert` 11.7% and `inserted_with` 8.8%; these overlap, since they are inclusive. Apply is 1.35–1.4x PostgreSQL's CPU.
+- **tpcb-like at 32 clients:** the models are 3.0% of on-CPU time. Off-CPU attribution is still open.
+
+**Setup**
+- Your worktree starts on main. Run `git fetch origin && git checkout -B work-a170 origin/docs/postgres-architecture-strategy`.
+- Read crates/pg-engine/HANDOFF.md in full, especially the size-model sections for rounds 2–5 and 161's "Not done". Read BENCH "Size models, round 4" and "round 5", and `exec/sizing.rs`, `exec/sizing/kept.rs`, `catalog/keymap.rs`, `heapsim.rs` and `btsim.rs`. Follow every machine rule in HANDOFF.md:
+  - **Low CPU (user's rule):** the machine is shared and the user wants agents to use little CPU. Run every build, test, regress and golden run through tools/heavy.sh. It holds the slots in /tmp/pg-engine-heavy.lock.slots across all agents (the queue is long), runs jobs under `nice -n 19`, and caps CARGO_BUILD_JOBS / RUST_TEST_THREADS from /tmp/pg-engine-heavy.lock.jobs (2).
+  - **Start long heavy jobs detached** with `crates/pg-engine/tools/heavy-bg.sh <log> <command...>`, and wait for its `HEAVY-EXIT` line. Don't wrap heavy.sh in `timeout`.
+  - Batch your checks into as few heavy jobs as possible. Running engines and perf on a build you have doesn't need a slot.
+  - **Never hold unpushed work:** run `crates/pg-engine/tools/wip-push.sh a170` after every meaningful step. Push each verified step right away. Delete `wip/a170` once it has landed.
+  - Don't loop on rebases: if newly arrived commits don't touch your files or signatures you call, rebase once and push without another check.
+  - **Compare with PostgreSQL from containers on both sides:** run.sh's `ENGINE_DOCKER=1`, `--profile dist`, and cgroup CPU, memory and IO. Use `release` for tests.
+  - Put scratch, TMPDIR and CARGO_TARGET_DIR in ~/.cache/a170, and create TMPDIR before building. Never share a cargo target dir between two checkouts.
+  - Run docker as `sg docker -c`, and put ~/.cargo/bin on PATH.
+  - Name your containers a170-…, and remove them with `-v` so no anonymous volumes are left. Never touch roll-engine-ref (not even for scratch databases) or other agents' containers or engines, and leave the `~/.cache/*-resume*` directories alone. Never run docker prune or stop containers you didn't start.
+  - Run PostgreSQL references on the host network (`--network host`), not through a published docker port.
+  - Never use `pkill` or `killall`, including inside containers; kill only exact pids you started. Make wait loops match pids or files (a `pgrep` loop matches its own command line), and stop your own wait loops before you finish. Never end your turn "waiting" on something that isn't a tracked background task.
+  - Use only ports 53400–53419, and check each is free before using it. These ports are inside Linux's ephemeral range; if startup reports "address in use", retry.
+
+**Your list**
+1. **The models' share of writes: replication apply and tpcb.**
+   - Batch the per-row model upkeep per statement or per transaction (`updated`, `index_insert`, `inserted_with`, `update_cid`).
+   - Then re-measure apply (tools/bench/repl/apply.sh against PostgreSQL in containers) and tpcb at 8 and 32 clients.
+2. **Lifting the limit**, in this order:
+   - the lifted primary-key build. Run modelled tables' index-model builds in the parallel build workers, and explain the dist/release gap with a profile of each;
+   - lazy layout at open, so the first statement after a restart doesn't wait for its table's model (240 ms lifted against 9–13 ms);
+   - DELETE's remaining cost;
+   - memory: lifted pgbench peaks at 340–550 MB against PostgreSQL's 250–280. Bring the model's bytes per row down.
+
+   Re-run `tools/bench/sizing/liftcmp.sh`'s table, with peak memory. Lift only when every row is at or below the 400k numbers and memory stays below PostgreSQL's.
+3. **Page counts at several million rows,** against PostgreSQL, once lifted. Also the 300k empty-leaf difference in mw1_pkey (deleted pages equal, one leaf empty in the engine only).
+4. **The lineitem index-only `count(*)`** (about 50 s on a fresh engine). Once lineitem can be modelled, give index-only scans an all-visible answer per range. Agree it with agent 163 (index access) through me.
+
+**Coordination:** route through me (the coordinator); agents can't message each other directly. Owners:
+- 149 scans (it uses your `sizing::Fetcher`);
+- 169 storage internals;
+- 148 bulk writes (CopyLoad / held rows);
+- 163 index access (index-model builds of other types, skip scans);
+- 165 OLTP;
+- 168 crash recovery (kept records must restore consistently with the WAL; coordinate any kept-record change);
+- 167 executor;
+- 155 planner;
+- 162 difftest and the scoreboard.
+
+There's no replication owner right now; you take the models' part of apply.
+
+Name the files you touch in commit messages, and rebase often.
+
+**Verify each batch before pushing:**
+- crate tests in debug and release, including deep_input, `crash_random` seeds 1–30 (it has a known intermittent failure that agent 168 is chasing; report whether yours matches it), models_kept and big_tables;
+- clippy, with no new warnings;
+- difftest smoke;
+- isolation;
+- full pg_regress on a private reference (51,148 / 51,150, 0 units changed);
+- pg_dump_tap 14,817;
+- page counts (main, fsm, vm), ctids and EXPLAIN costs against PostgreSQL 18.6 at 60k and 300k rows, before and after a restart and around VACUUM;
+- pgbench and apply against PostgreSQL in containers with dist;
+- the footprint gate.
+
+**Commit and push each verified step right away.**
+- Push with `git push origin HEAD:docs/postgres-architecture-strategy`. Never force.
+- Before pushing, check that `git diff --stat origin/docs/postgres-architecture-strategy HEAD` lists only your changes.
+- No attribution lines in commit messages.
+- Update HANDOFF.md and BENCH.md "Size models, round 6".
+
+**Working style:** keep your context small.
+- Keep each edit under about 150 lines.
+- Keep tool output short (`| tail`, greps).
+- Run long jobs in the background, with their logs in ~/.cache/a170.
+
+**When you finish:**
+- Remove your target dirs, ~/.cache/a170, your a170- containers and their volumes, and `wip/a170`. Leave no engines or wait loops running.
+- Remove only the docker images you pulled or built yourself, by the exact names or ids you noted when you made them. Never remove images by comparing image lists.
+- Report what changed, the numbers against PostgreSQL, and what's left.

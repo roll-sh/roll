@@ -1,0 +1,38 @@
+{
+  "source": "1b6a80b9918db481d27527511d70ae716b1bdecf",
+  "status": "FOCUSED_PASS_ONLY",
+  "checks": [
+    {
+      "name": "vacuum-toast",
+      "exit": 0,
+      "pass": true,
+      "passed_tests": 5
+    },
+    {
+      "name": "kept-header",
+      "exit": 0,
+      "pass": true,
+      "passed_tests": 2
+    },
+    {
+      "name": "toast-existing",
+      "exit": 0,
+      "pass": true,
+      "passed_tests": 25
+    },
+    {
+      "name": "clippy-lib",
+      "exit": 0,
+      "pass": true,
+      "passed_tests": 0
+    }
+  ],
+  "required_limits": [
+    "New exact-source full build/debug/release/all-targetClippy/crash/unit gates not run",
+    "Independent167crash failure remains held;no rerun",
+    "Combined163/170parallelvalidation parent-owned",
+    "Large already-toasted pre-DROP tuples/currentSTORAGE/COMPRESSION/toasttarget/pinnedexternal-state physical recomputation can still differ;not claimed fixed",
+    "Pre-existingPLAINoversizeINSERTacceptance remainsoutside scope",
+    "No performance/footprint/globalPostgreSQLsuperiority claim"
+  ]
+}

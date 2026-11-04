@@ -1,0 +1,16 @@
+{
+  "worktree": "/home/meszmate/roll/.claude/worktrees/agent-a0718617fe2ff9006",
+  "head": "4b7db3a9b0fb4c97632a192eb858340985f18e10",
+  "output": "/home/meszmate/.cache/pg-engine-resume-20261104/execution_models/a170-r3-red",
+  "command": [
+    "cargo",
+    "test",
+    "-p",
+    "pg-engine",
+    "--test",
+    "vacuum_toast_measure",
+    "--",
+    "--nocapture"
+  ],
+  "pattern": "DROP COLUMN does not rewrite|attempt to subtract with overflow"
+}

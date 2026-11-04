@@ -1,0 +1,17 @@
+SELECT version();
+CREATE FUNCTION mi_text(n int) RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT left(string_agg(md5(g::text), ''), n) FROM generate_series(1, (n+31)/32) g $$;
+CREATE TABLE vt_ascii2800 (k int, payload text);
+INSERT INTO vt_ascii2800 SELECT g, CASE WHEN g=6000 THEN mi_text(2800) ELSE 'small' END FROM generate_series(1,6000) g;
+VACUUM vt_ascii2800;
+SELECT 'ascii2800', pg_relation_size('vt_ascii2800'), count(*), sum(length(payload)), sum(octet_length(payload)) FROM vt_ascii2800;
+SELECT k, length(payload), octet_length(payload), md5(payload), payload = mi_text(2800) FROM vt_ascii2800 WHERE k=6000;
+CREATE TABLE vt_ascii8300 (k int, payload text);
+INSERT INTO vt_ascii8300 SELECT g, CASE WHEN g=6000 THEN mi_text(8300) ELSE 'small' END FROM generate_series(1,6000) g;
+VACUUM vt_ascii8300;
+SELECT 'ascii8300', pg_relation_size('vt_ascii8300'), count(*), sum(length(payload)), sum(octet_length(payload)) FROM vt_ascii8300;
+SELECT k, length(payload), octet_length(payload), md5(payload), payload = mi_text(8300) FROM vt_ascii8300 WHERE k=6000;
+CREATE TABLE vt_utf88300 (k int, payload text);
+INSERT INTO vt_utf88300 SELECT g, CASE WHEN g=6000 THEN mi_text(8298) || 'é' ELSE 'small' END FROM generate_series(1,6000) g;
+VACUUM vt_utf88300;
+SELECT 'utf88300', pg_relation_size('vt_utf88300'), count(*), sum(length(payload)), sum(octet_length(payload)) FROM vt_utf88300;
+SELECT k, length(payload), octet_length(payload), md5(payload), payload = mi_text(8298) || 'é' FROM vt_utf88300 WHERE k=6000;

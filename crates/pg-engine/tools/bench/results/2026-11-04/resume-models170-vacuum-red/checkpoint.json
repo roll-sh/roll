@@ -1,0 +1,7 @@
+{
+  "head": "057da118e264cb43bb57f36d0838cc63fb51c03e",
+  "tree": "009a628bcf3dd8a19a17966be7660eaa35744d1e",
+  "status": "",
+  "time_utc": "2026-11-04T16:43:00.230868+00:00",
+  "note": "Test-only057da118 on c66production. Exactdebugred101,0passed2failed atHeapPacker subtractoverflow, ASCIIstoredfast andUnicodegeneric paths. PG18.6allfixtures33pages/270336mainbytes;count/length/MD5preserved;INCLUDE2816/8320errors retained inreference. Baselineattributionunresolved;noindexproductionchanges/noacceptanceclaim."
+}

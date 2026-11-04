@@ -1,0 +1,33 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a0718617fe2ff9006/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.90s
+     Running tests/vacuum_toast_measure.rs (/home/meszmate/.cache/a170/target/debug/deps/vacuum_toast_measure-1b0b2de39716b05f)
+
+running 5 tests
+
+thread 'copy_load_sizes_combined_toasted_row' (1234210) panicked at crates/pg-engine/src/catalog/relsize.rs:591:9:
+attempt to subtract with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test copy_load_sizes_combined_toasted_row ... FAILED
+
+thread 'copy_load_sizes_main_toasted_row' (1234211) panicked at crates/pg-engine/src/catalog/relsize.rs:591:9:
+attempt to subtract with overflow
+test copy_load_sizes_main_toasted_row ... FAILED
+
+thread 'vacuum_keeps_dropped_stored_column_bytes' (1234340) panicked at crates/pg-engine/tests/vacuum_toast_measure.rs:129:9:
+assertion `left == right` failed: DROP COLUMN does not rewrite old heap tuples
+  left: 33
+ right: 667
+test vacuum_keeps_dropped_stored_column_bytes ... FAILED
+test vacuum_measures_large_ascii_heap ... ok
+test vacuum_measures_large_unicode_heap ... ok
+
+failures:
+
+failures:
+    copy_load_sizes_combined_toasted_row
+    copy_load_sizes_main_toasted_row
+    vacuum_keeps_dropped_stored_column_bytes
+
+test result: FAILED. 2 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.97s
+
+error: test failed, to rerun pass `-p pg-engine --test vacuum_toast_measure`

@@ -1,0 +1,13 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a0718617fe2ff9006/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 51.91s
+     Running tests/vacuum_toast_measure.rs (/home/meszmate/.cache/a170/target/debug/deps/vacuum_toast_measure-1b0b2de39716b05f)
+
+running 5 tests
+test copy_load_sizes_main_toasted_row ... ok
+test copy_load_sizes_combined_toasted_row ... ok
+test vacuum_keeps_dropped_stored_column_bytes ... ok
+test vacuum_measures_large_ascii_heap ... ok
+test vacuum_measures_large_unicode_heap ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
+

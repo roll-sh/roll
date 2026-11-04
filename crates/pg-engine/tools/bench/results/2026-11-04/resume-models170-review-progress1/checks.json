@@ -1,0 +1,212 @@
+[
+  {
+    "name": "index-progress-current",
+    "command": [
+      "cargo",
+      "test",
+      "--release",
+      "-p",
+      "pg-engine",
+      "--test",
+      "golden"
+    ],
+    "env": {
+      "GOLDEN_FILTER": "a148_index_progress"
+    },
+    "source_before": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.33s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 544.1205148696899,
+    "log_sha256": "8602379f2c96fc70be7f5a1fa10af6ed08a79bc616444fe0fb48b7c2530505dd",
+    "binaries": {
+      "/home/meszmate/.cache/a170/target/release/deps/golden-09a38f0445a85626": {
+        "sha256": "892375378d4b53d46603c2576d927896fba4dd9840965c56464fd09f872c0853",
+        "bytes": 85834120
+      }
+    },
+    "passed_tests": 3,
+    "pass": true
+  },
+  {
+    "name": "maintenance-current",
+    "command": [
+      "cargo",
+      "test",
+      "--release",
+      "-p",
+      "pg-engine",
+      "--test",
+      "golden"
+    ],
+    "env": {
+      "GOLDEN_FILTER": "loft_maint"
+    },
+    "source_before": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 0.4712381362915039,
+    "log_sha256": "9dc3b54f03a249f12ab4fb853426dcb6233621eb5d7c679abb87d6f6041828b9",
+    "binaries": {
+      "/home/meszmate/.cache/a170/target/release/deps/golden-09a38f0445a85626": {
+        "sha256": "892375378d4b53d46603c2576d927896fba4dd9840965c56464fd09f872c0853",
+        "bytes": 85834120
+      }
+    },
+    "passed_tests": 3,
+    "pass": true
+  },
+  {
+    "name": "golden-current",
+    "command": [
+      "cargo",
+      "test",
+      "--release",
+      "-p",
+      "pg-engine",
+      "--test",
+      "golden"
+    ],
+    "env": {
+      "GOLDEN_FILTER": "a170_"
+    },
+    "source_before": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.10s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 4.334142208099365,
+    "log_sha256": "6847e68027b42b4de6227fb8abc070d251899f70084b11e7ee57e06164bba1c7",
+    "binaries": {
+      "/home/meszmate/.cache/a170/target/release/deps/golden-09a38f0445a85626": {
+        "sha256": "892375378d4b53d46603c2576d927896fba4dd9840965c56464fd09f872c0853",
+        "bytes": 85834120
+      }
+    },
+    "passed_tests": 3,
+    "pass": true
+  },
+  {
+    "name": "models-current",
+    "command": [
+      "cargo",
+      "test",
+      "--release",
+      "-p",
+      "pg-engine",
+      "--test",
+      "models_kept",
+      "--test",
+      "big_tables"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.35s",
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.07s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 19.54227590560913,
+    "log_sha256": "22909d06c7bfbbd4dcefbef0d0598f9a7091863174441cc2a6b06b0afcd62d45",
+    "binaries": {
+      "/home/meszmate/.cache/a170/target/release/deps/big_tables-e6d66b06b95b54b5": {
+        "sha256": "15e5517eb4d5e7a1f72d27baf01160f44f756c9dcccae9ebfa7dcecd5222c5d2",
+        "bytes": 85476472
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/models_kept-93c836dcaab9ad5a": {
+        "sha256": "021f5390eeb3e75fa48591f5e4482fb7af89ad8e563f85ae0273816522358ac4",
+        "bytes": 85157472
+      }
+    },
+    "passed_tests": 21,
+    "pass": true
+  },
+  {
+    "name": "build",
+    "command": [
+      "cargo",
+      "build",
+      "-p",
+      "pg-engine",
+      "--bin",
+      "roll-engine"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [],
+    "fatal_lines": [],
+    "elapsed_s": 53.707152128219604,
+    "log_sha256": "757083828bb54133804fd69c2a8a82fa46951e8fd0f226d4699bce32e2857036",
+    "binaries": {},
+    "passed_tests": 0,
+    "pass": true
+  }
+]

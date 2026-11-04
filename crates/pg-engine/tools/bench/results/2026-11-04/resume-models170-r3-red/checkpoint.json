@@ -1,0 +1,7 @@
+{
+  "head": "4b7db3a9b0fb4c97632a192eb858340985f18e10",
+  "tree": "2065f62883022dd21a17cd7fd750e57cb4a6ee63",
+  "status": "",
+  "time_utc": "2026-11-04T18:37:28.898872+00:00",
+  "note": "Exact production047+testonly4b7db3a9 FAILED101:2passed3failed. BothCOPYrawsizeoverflow and droppedcolumn directlive regression reproduced versusactualPG18.6. Original raw unchanged; no packerclamp or codefix yet, no broadfullgate. Crash167gap independent and held; no acceptance/performanceclaim."
+}

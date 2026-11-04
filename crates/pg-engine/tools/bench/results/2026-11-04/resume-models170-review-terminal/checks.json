@@ -1,0 +1,1004 @@
+[
+  {
+    "name": "index-progress-current",
+    "command": [
+      "cargo",
+      "test",
+      "--release",
+      "-p",
+      "pg-engine",
+      "--test",
+      "golden"
+    ],
+    "env": {
+      "GOLDEN_FILTER": "a148_index_progress"
+    },
+    "source_before": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.33s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 544.1205148696899,
+    "log_sha256": "8602379f2c96fc70be7f5a1fa10af6ed08a79bc616444fe0fb48b7c2530505dd",
+    "binaries": {
+      "/home/meszmate/.cache/a170/target/release/deps/golden-09a38f0445a85626": {
+        "sha256": "892375378d4b53d46603c2576d927896fba4dd9840965c56464fd09f872c0853",
+        "bytes": 85834120
+      }
+    },
+    "passed_tests": 3,
+    "pass": true
+  },
+  {
+    "name": "maintenance-current",
+    "command": [
+      "cargo",
+      "test",
+      "--release",
+      "-p",
+      "pg-engine",
+      "--test",
+      "golden"
+    ],
+    "env": {
+      "GOLDEN_FILTER": "loft_maint"
+    },
+    "source_before": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 0.4712381362915039,
+    "log_sha256": "9dc3b54f03a249f12ab4fb853426dcb6233621eb5d7c679abb87d6f6041828b9",
+    "binaries": {
+      "/home/meszmate/.cache/a170/target/release/deps/golden-09a38f0445a85626": {
+        "sha256": "892375378d4b53d46603c2576d927896fba4dd9840965c56464fd09f872c0853",
+        "bytes": 85834120
+      }
+    },
+    "passed_tests": 3,
+    "pass": true
+  },
+  {
+    "name": "golden-current",
+    "command": [
+      "cargo",
+      "test",
+      "--release",
+      "-p",
+      "pg-engine",
+      "--test",
+      "golden"
+    ],
+    "env": {
+      "GOLDEN_FILTER": "a170_"
+    },
+    "source_before": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.10s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 4.334142208099365,
+    "log_sha256": "6847e68027b42b4de6227fb8abc070d251899f70084b11e7ee57e06164bba1c7",
+    "binaries": {
+      "/home/meszmate/.cache/a170/target/release/deps/golden-09a38f0445a85626": {
+        "sha256": "892375378d4b53d46603c2576d927896fba4dd9840965c56464fd09f872c0853",
+        "bytes": 85834120
+      }
+    },
+    "passed_tests": 3,
+    "pass": true
+  },
+  {
+    "name": "models-current",
+    "command": [
+      "cargo",
+      "test",
+      "--release",
+      "-p",
+      "pg-engine",
+      "--test",
+      "models_kept",
+      "--test",
+      "big_tables"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.35s",
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.07s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 19.54227590560913,
+    "log_sha256": "22909d06c7bfbbd4dcefbef0d0598f9a7091863174441cc2a6b06b0afcd62d45",
+    "binaries": {
+      "/home/meszmate/.cache/a170/target/release/deps/big_tables-e6d66b06b95b54b5": {
+        "sha256": "15e5517eb4d5e7a1f72d27baf01160f44f756c9dcccae9ebfa7dcecd5222c5d2",
+        "bytes": 85476472
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/models_kept-93c836dcaab9ad5a": {
+        "sha256": "021f5390eeb3e75fa48591f5e4482fb7af89ad8e563f85ae0273816522358ac4",
+        "bytes": 85157472
+      }
+    },
+    "passed_tests": 21,
+    "pass": true
+  },
+  {
+    "name": "build",
+    "command": [
+      "cargo",
+      "build",
+      "-p",
+      "pg-engine",
+      "--bin",
+      "roll-engine"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [],
+    "fatal_lines": [],
+    "elapsed_s": 53.707152128219604,
+    "log_sha256": "757083828bb54133804fd69c2a8a82fa46951e8fd0f226d4699bce32e2857036",
+    "binaries": {},
+    "passed_tests": 0,
+    "pass": true
+  },
+  {
+    "name": "debug",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "pg-engine"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 189 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 23.94s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 38.65s",
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.28s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.69s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s",
+      "test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.47s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.95s",
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.91s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.82s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.16s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.57s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 40.94s",
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.94s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.40s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s",
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 28.71s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 160.08s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.45s",
+      "test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.74s",
+      "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.08s",
+      "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1259.63s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.64s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s",
+      "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.39s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.33s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.87s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s",
+      "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 54.01s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.72s",
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.63s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s",
+      "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 566.89s",
+      "test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 47.97s",
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.84s",
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.08s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.00s",
+      "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.14s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.40s",
+      "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.51s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.15s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.48s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 35.22s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.89s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.80s",
+      "test result: ok. 67 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 54.98s",
+      "test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 86.72s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.80s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 2712.0446197986603,
+    "log_sha256": "a911aa66b83d606982751f4f1613b957943e8879781d993295eb2d71407d412a",
+    "binaries": {
+      "/home/meszmate/.cache/a170/target/debug/deps/pg_engine-357a2b04731fc140": {
+        "sha256": "e9fcc336d3625d751981fedb74ad12ac5069957eeb79a905b4e5a0fa89052a97",
+        "bytes": 318184456
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/roll_engine-36c942a045390944": {
+        "sha256": "a7d18cd6b32cc81ecc419ce34f8fa3e2a825bc4cf787c111460c8cad9264b1b3",
+        "bytes": 8103040
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/app_concurrency-92d70bfa5da59eb5": {
+        "sha256": "beb2855b0213da11a3d598693ecb5bfeaa1ccf573e742d277b57da2b74497457",
+        "bytes": 330392800
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/autovacuum-e5cfc41f3a9d1a2f": {
+        "sha256": "6c53c5aa3f7d4f24511c3b8be792b23466194a73e5d35eff7481b8e5aac5466d",
+        "bytes": 320270848
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/autovacuum_log-cc88b057ec3995ac": {
+        "sha256": "1f67ffdfa1dcdd805da5f32fd51a0ca7f2320233cc15586b958cb63e81f40baa",
+        "bytes": 319865904
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/backend_status-8ca40d8b9f8e324a": {
+        "sha256": "5344c35e34f3c97d3540089c0b6cf8690d3438cbf08b9008d653171d9a818d11",
+        "bytes": 320096840
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/big_tables-b522deff6cca6663": {
+        "sha256": "a401d36edb679f1d3237753c7d7c0b7cab87c93a3913011a3fd468318cf93666",
+        "bytes": 320163320
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/catalog_format-677fddf080a1845a": {
+        "sha256": "60093bd7dc1a5f96d35cf6d0954115921f89de0e0414659458e6f883c480b66a",
+        "bytes": 320063680
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/catalog_storage-fe341eddda31412b": {
+        "sha256": "2a86c63338e64ec05b9e78166359f84f2c9a7f506e39269f7b5c32b799b662ea",
+        "bytes": 320605880
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/compact_locks-d64bfc280149aa29": {
+        "sha256": "8b23b4486f829a07f70a4e1a3cbd9321add105c6e5deead5a2d43edee744338c",
+        "bytes": 319964240
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/connection_log-5e1350e087426c7c": {
+        "sha256": "5e27a7d234e48cf2b664acfba81eda6f5265be29a0c6fd5eeff3846731b29458",
+        "bytes": 327010280
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/crash_async_commit-f7cc2171a2cd7b31": {
+        "sha256": "b1da0704a57fa5f5af2fda697f493b96aaf03a841420349d9f30ddee32b03802",
+        "bytes": 319884088
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/crash_bulk-a829d410e1e83ca6": {
+        "sha256": "1d5a76b600e9dff38a1d50e7ef148c0543d3b4f62ed0d539f47bd5c5b871916c",
+        "bytes": 319891160
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/crash_ctids-b6ce3d36a5b496ca": {
+        "sha256": "fbaffbdebe30dccdb2f2a2d6eee2e44685d2022987b6281cd527d70af9ad3a09",
+        "bytes": 320006464
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/crash_random-77fbe592a79c9577": {
+        "sha256": "274ae800ebf642e270d6b774989a6fc2a5a5dca76862b49d6197e9af5a42cecc",
+        "bytes": 320798984
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/crash_unlogged-afddc046dc91acf4": {
+        "sha256": "5ea2cd798abdb4b2c9fdcc6fc4c1e3b933c7fe9e55513c9a30e031c683955cbe",
+        "bytes": 319853200
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/ddl_scaling-6e4f0e25cd2adb62": {
+        "sha256": "7c0aab02d804637fd71ca8e97c494289926dde898413b22a89beb24f5b2ef427",
+        "bytes": 319898128
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/deep_input-715ba7970e52e240": {
+        "sha256": "5e62f991072a234a7355e27a586b47a3ef31f42b973c79269a6bb6be3fbaf814",
+        "bytes": 316149440
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/deparse_identity-ec592439253f2820": {
+        "sha256": "c5064b8a910470bd29a4aefd6fef9c91e01e1c01270ebd9af0f5843f2c68770e",
+        "bytes": 316104544
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/difftest-9d25e24cdcf0d517": {
+        "sha256": "c25d4efb5756eab7cef4040a4b2c3b2457d1dbd64c1952cfdcc066931bc32f49",
+        "bytes": 325437464
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/drop_storage-1eaa9ef8720fbe64": {
+        "sha256": "f02ffebee78c67a47301fd8a3ba95f81b11833cb3f0c0ddbca4a7a566e3825e7",
+        "bytes": 315632928
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/fdw_loopback-c725df32c306d6f5": {
+        "sha256": "eec9ea8cf5f320a1f6a851ee4dc7abcd5369054914de9c2035508f659f591d03",
+        "bytes": 321211208
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/fdw_traffic-823f8a870c2656f7": {
+        "sha256": "a8c23494126b17a5af7948bde4547b1acf42e0a06c21ef23efac0b4ecfcbe9ea",
+        "bytes": 321207888
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/golden-9749ad749af5ca1c": {
+        "sha256": "03e575b0e26edb0be3a1f34584d402643a9c549dad565a70ed21bcc43cd6e2bf",
+        "bytes": 322023632
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/hba-ddffc139b48b77fc": {
+        "sha256": "22d1b495622210ef602d3f341d540e4b10dfae6f54340cc3c2608a203539b031",
+        "bytes": 326999632
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/heap_order_scan-7484a82692fadb18": {
+        "sha256": "28659073d8f09dbf6dd0174718234750651daa51ed01ef4a2f2906ffd7dd5d49",
+        "bytes": 319825136
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/index_key_format-07bae0d48900490f": {
+        "sha256": "bb261a07f46634e14b46cc3f16ae68aecfd108633378f5a355e95d09626c5b46",
+        "bytes": 319893816
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/kept_plans-b343836d3bffe0ca": {
+        "sha256": "bf5c588fe4b92259d7ff5b50df3459cd449d743fbdee1fe87f33e6c12f67bc59",
+        "bytes": 316130272
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/lifecycle_log-bb0a564abda43801": {
+        "sha256": "fb9789b05382410cfc1de8f5de3c09917276758c84e2b6c1ed10a1558fcc9337",
+        "bytes": 16559088
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/locale-401e777ae16dae7e": {
+        "sha256": "8c243f278b2ebe19297f4443dc8ba711192e3c8204098ad782828e599572f93c",
+        "bytes": 321515912
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/log_collector-418c0eb0abd24880": {
+        "sha256": "5529367e730ec0a4aea2ed6e5ec903bfbe1b194ec52a9a09a223788377b081f6",
+        "bytes": 327230808
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/logical_apply-d31cbaf3a1aa102e": {
+        "sha256": "e3fbdc9a2d7ad0df78c0bd94e555879bb8474cc06f0c6bdff0c00376e4940995",
+        "bytes": 321261272
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/memory_load-69b55974dfbde33f": {
+        "sha256": "354b763938e11f310c331578c4d1535ffaadf8503b612a71aad46472e5efe8d9",
+        "bytes": 321379976
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/models_kept-81be20026cb60eb7": {
+        "sha256": "d4a0b64ecbb2480127453e13fd15e93bdc471214f24b66280c69c07726f76149",
+        "bytes": 320035528
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/outbound-526bfbdd9f7153f1": {
+        "sha256": "e55d766fd9e56ff6cdf786a1e0c6f2c152ac5f564bf58ac443bce90d7e5686c2",
+        "bytes": 321059032
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/parallel_scan-e11614aaa9489d66": {
+        "sha256": "ce8b94682bdf621f33af9403320300945c3ca386947550ee1c30287f97192fb9",
+        "bytes": 320324216
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/pg_contrib-258b3453af5dc7a7": {
+        "sha256": "226184d2b41aaaca9e57438bba01e705670ce9c1fe0f3a90beeafc91dca4a884",
+        "bytes": 10885056
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/pg_dump-24d780157db7d64b": {
+        "sha256": "f55ab0774a6dc2109c3a777c4746d45d8cb78c652d84d796ec89259c20f4301c",
+        "bytes": 8775896
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/pg_isolation-6eb8985d6cd7998d": {
+        "sha256": "2c8e93526beedcec64c88e71d70cdb9a2bdc05e3c529a1d36765f4a5c7ff3c2f",
+        "bytes": 11094256
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/pg_regress-a2d5c2d38c8848c2": {
+        "sha256": "070555dc6c33705ada0eb5dd50136c19914f5ea4bc9fcccd5ec2ae699d2b9326",
+        "bytes": 10856224
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/pgvector_equality-fbc0827d80a3826b": {
+        "sha256": "b027657395fdff2110a9e0f113dfbfcf78c77daf6cea180d4d4aadbed6b32f1e",
+        "bytes": 316052776
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/pgvector_hnsw-baa546f9cc95da0d": {
+        "sha256": "68ae728288cdb2d1aaba1d54377afc2d7a596528a54453e05d8b0469b2f94ee1",
+        "bytes": 316084352
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/pgvector_ivfflat-7523b0d1291ce8d7": {
+        "sha256": "47cad46a771c9f3af790f04723240da49e23e745600859a93277c28b36896a9f",
+        "bytes": 316023200
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/pk_clustered-a19059d2741cd824": {
+        "sha256": "394fdbebe7e7e36d15e55c7a08288edfea68456232f004b63a45adf14992b1f7",
+        "bytes": 320112368
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/poisoned_caches-683250a12b5050a7": {
+        "sha256": "48c634d63dd127a01663cb30ff3d8ba77e1db97b1a0479d3b437bee909545d26",
+        "bytes": 320520008
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/query_spill-f6f3219b0226d2e4": {
+        "sha256": "8fc6c211a9e2ade8e1e3ed61db59df95c1cefae9c660c8fb2aad9600818b1b5d",
+        "bytes": 320262088
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/restart_cost-8d0a529dce76c0e2": {
+        "sha256": "6fa05a1fdb691a30096ff949f9dd10b225c4088f6024b5546efc2eab3063c910",
+        "bytes": 319912208
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/server_files-fdab4093a1a4ea45": {
+        "sha256": "ea4b0820b7421e3eb56b706c562c700beafc14dd11cb48ac7242c1f214aa4017",
+        "bytes": 319962760
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/server_log-393b3c665f66d16d": {
+        "sha256": "0d1bbc2b71dac07390bdd9da4fbb8800c8fbe61f9fa8f883f1dcc2e0c753f6ff",
+        "bytes": 327291440
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/session_state-6844c0d430d70639": {
+        "sha256": "d83cdb2c354e68db590c1bef82bc5f81d8fc95f47488a86ad91d6cc4743db8dd",
+        "bytes": 320589968
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/storage_format-9cce57647af4823f": {
+        "sha256": "cff0cde4a8f56249c3f5fb95e9f704d4d5a952df1075a8c24c028db4ebaadfe6",
+        "bytes": 319981776
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/storage_upgrade_batches-d174698264542c69": {
+        "sha256": "b77f5685cd4ddfbfc9b8b79da8869dd1ee9321ef0b03db8a10b9d5e7ed671b31",
+        "bytes": 319906072
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/stored_filters-1d17c69fc53a16b2": {
+        "sha256": "9650456f122c3dfb2f25098488aa2a0a6160eb3eb7ead9b3f1ea2f472e88d9b2",
+        "bytes": 315647352
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/toast_storage-d0a39e8219b8a0b1": {
+        "sha256": "6c597b1a7be1cf2ed5aeb9c70b2374b6afd1002bb8c1c15c9fdb9696f8bf1423",
+        "bytes": 319832256
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/twophase-18d9b42732dd9092": {
+        "sha256": "3fdd1d44b14e8eee90ff772119abb6e72575df20597208de799b6cdaf49f910c",
+        "bytes": 320197264
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/txn_spill-93e1f591ebaf5956": {
+        "sha256": "323fc34788b4bf369d6764be5e493e0a585e266341f177df6be512b47955d764",
+        "bytes": 319877808
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/wire-1216b25cfa9dada3": {
+        "sha256": "7c6572fbbd9e1c7ebdeab19e1ec9b516dbfbe5fc360e53bc713a4ac6e317e84d",
+        "bytes": 343703760
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/wire_waits-8e56495ecf7aa70b": {
+        "sha256": "b10f71f1b8eac69b236f22dad093d74fc9ac8c55def71bb55f176888ad733e79",
+        "bytes": 328485896
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/xml_memory-dd9dd504153e13db": {
+        "sha256": "79e98a72ef1339d24382a93752721cf5f7d39595f95b574b6b6441fe34c3e4c3",
+        "bytes": 315800912
+      }
+    },
+    "passed_tests": 453,
+    "pass": true
+  },
+  {
+    "name": "release",
+    "command": [
+      "cargo",
+      "test",
+      "--release",
+      "-p",
+      "pg-engine"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 189 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 14.55s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 15.65s",
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.78s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.63s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s",
+      "test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.18s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s",
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.56s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.37s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.12s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.80s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.56s",
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.43s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.02s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s",
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.92s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 26.59s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.42s",
+      "test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s",
+      "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.60s",
+      "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 142.37s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s",
+      "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.03s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.46s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s",
+      "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 77.88s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.41s",
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.30s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s",
+      "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.52s",
+      "test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.54s",
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s",
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.00s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.06s",
+      "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.34s",
+      "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.56s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.86s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.04s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.80s",
+      "test result: ok. 67 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 37.52s",
+      "test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 68.07s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 1213.7065238952637,
+    "log_sha256": "1c08d680a4632f88465c41e207586a4c63d28dd2ca353b3c36fcff95f22d2f6c",
+    "binaries": {
+      "/home/meszmate/.cache/a170/target/release/deps/pg_engine-2ee33b49d98c4a1b": {
+        "sha256": "f358b72df235cff5cd765dc179aed7dba3a36bf5e4cd1ca05aa0938bcef98465",
+        "bytes": 86543800
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/roll_engine-64b94b764774ccc8": {
+        "sha256": "374a28eae6d19aab1a164a63d28b45ec363ae9cad069e0df77e696b1c12959af",
+        "bytes": 1234856
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/app_concurrency-53af60900559ec05": {
+        "sha256": "77168fd0d501c704c291ad485e8cd96bf6ea07682ab979a6016a711d2653bfa7",
+        "bytes": 87107528
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/autovacuum-e0ba51a8f7fb7dbb": {
+        "sha256": "78e6e18c4602e6afc5e1c87a167af38f2c6266848f73933112e7e98f3eb1157d",
+        "bytes": 85407024
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/autovacuum_log-9907570e8f2fce8b": {
+        "sha256": "0c2b20cd96440bb30ffba3cda59c37ea0b27e4a29cb7cb18e7db383074bfc44b",
+        "bytes": 85124656
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/backend_status-f0bb0419a08447cc": {
+        "sha256": "963eb39b2fd2af8ebfa1d471f48eeb56e50f0ca769d0e02445041f60741fe64c",
+        "bytes": 85156936
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/big_tables-e6d66b06b95b54b5": {
+        "sha256": "15e5517eb4d5e7a1f72d27baf01160f44f756c9dcccae9ebfa7dcecd5222c5d2",
+        "bytes": 85476472
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/catalog_format-49f681677072a893": {
+        "sha256": "c21b894ad548c39f2eca902e319a769807fd390d5a655916258afdce9a00991b",
+        "bytes": 85178544
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/catalog_storage-d7cee0c555119146": {
+        "sha256": "5c0b959c85e1e090fc22791f9855f933613cfd377b077eb2fb1ee129607b57b2",
+        "bytes": 85571520
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/compact_locks-0388519ef0875fab": {
+        "sha256": "fac8edcd8751df46543e87ce1afbaa62751dfd75b628a333185da63c1a1ca0d0",
+        "bytes": 85377464
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/connection_log-34a05550fd9cd072": {
+        "sha256": "856a6ad02d186204c4fa66b50e114738eaa9b5b008b7041750e193340398c361",
+        "bytes": 86163440
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/crash_async_commit-1656f7eef470ea3d": {
+        "sha256": "ff2aa708e5fa175bc5a615c5c86a4cdc3206fc4f6532fe219268c86fbd149ba4",
+        "bytes": 85135776
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/crash_bulk-f8c32848ea6d22fa": {
+        "sha256": "ece6d0e05d4c1c61fddb4575716602c8ee5ec88cd07a0077a175c175f7ade994",
+        "bytes": 85135712
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/crash_ctids-8633898123c109e8": {
+        "sha256": "90fca6b4f57454e568bb4041000becd78ef1268b1c5d609aa001eab44bb490f6",
+        "bytes": 85183392
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/crash_random-4b8f70c02654e372": {
+        "sha256": "10aca337eb1759d70e11ee3d8737449602f24e07eba508174a36cf000d3ee61b",
+        "bytes": 85296528
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/crash_unlogged-4648ef1578b760e4": {
+        "sha256": "518aa7620697e2f19ad3bd031a49ea75104509ecbdecc09fa3c219c63db32428",
+        "bytes": 85131296
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/ddl_scaling-08d9955ccbbf776c": {
+        "sha256": "64ef35e0f9b85a610f256cfa92d9cfca83b01431fd30f17af0fb12be8b052053",
+        "bytes": 85076552
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/deep_input-f76cb83b0e76d1d3": {
+        "sha256": "c763bccd370e29b689e1ceb14c970cf76e8b385ccc2fe8b7e009d96921c48377",
+        "bytes": 83865424
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/deparse_identity-86ae2f5fd5b20531": {
+        "sha256": "d00e2131317e55ad01fd240f556ccc9b49274da2ee5ca9710d4b7de94da7bae1",
+        "bytes": 86044296
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/difftest-ecc26c36fb8a8eb6": {
+        "sha256": "e94e0f70b85e2f60568aac73adac69ccaed402b67df559254203b50a9f7d7d95",
+        "bytes": 87896088
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/drop_storage-71a16f8b632fb24d": {
+        "sha256": "206284216e9852e6cb246ee50bf66a3e4ad5ec02395adda43c0b5770c31e8c0a",
+        "bytes": 83780888
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/fdw_loopback-161faac2361b2cf8": {
+        "sha256": "a2f027f2924594edcf0ce44ec14d29761d3130812ac68bb2c2303a8453535b98",
+        "bytes": 85873040
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/fdw_traffic-b7629c3d3e7969da": {
+        "sha256": "fde01b1864e8814ff4cd3c1f804cc821018ab6e838fbbe6596384c74c6aa5c55",
+        "bytes": 85554192
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/golden-09a38f0445a85626": {
+        "sha256": "892375378d4b53d46603c2576d927896fba4dd9840965c56464fd09f872c0853",
+        "bytes": 85834120
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/hba-0645a73224719fff": {
+        "sha256": "98d1e822e69372fb338eef1a6714f5f73d82038761706c0e9f3e3ff76d62d21c",
+        "bytes": 86131272
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/heap_order_scan-f32435ca402ff7a4": {
+        "sha256": "41b5eb7bebcdfa25b212e85f552d7c26ed5b8f2c5c91bc5213d4235fdd00e14b",
+        "bytes": 85110040
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/index_key_format-2eb648260c8f266b": {
+        "sha256": "d3d1c26cc2563836d7418d144093eabf19e3233297437519e0280e6fcf029570",
+        "bytes": 85158136
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/kept_plans-4146d41c7a80568a": {
+        "sha256": "f0323dbedd1f4f965c00d3478a89fcedb03965dc268da4a927a570c74fed278c",
+        "bytes": 83963304
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/lifecycle_log-1386c15adbb8a552": {
+        "sha256": "e7d12795c277f01d66172b5992224f0ae903faae676394ddb2d71f0d6b6864c5",
+        "bytes": 2560912
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/locale-ab4bc19d54ea38ec": {
+        "sha256": "6ecfbd1dc7bc0c73365e358d9b6157cb0f8dfeba05c6c1b430b50a05fc3e5989",
+        "bytes": 85225120
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/log_collector-4b90bcd8e23be475": {
+        "sha256": "a7534044ecd6efd35c276196e01494db93126b94580b0afd32282f70636cfbe9",
+        "bytes": 86253880
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/logical_apply-5cabca0daf9cddc0": {
+        "sha256": "24d73b8bfa15246b4a38c4ffbff000620885cfae87fc73460f35b701765268fe",
+        "bytes": 85696264
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/memory_load-107f75494ef8e80e": {
+        "sha256": "6661dfad6694cd2cbef01ef0007c2c6dc0ca41bebb917fcee90e55a3c04a7c7d",
+        "bytes": 85752488
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/models_kept-93c836dcaab9ad5a": {
+        "sha256": "021f5390eeb3e75fa48591f5e4482fb7af89ad8e563f85ae0273816522358ac4",
+        "bytes": 85157472
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/outbound-80d76e6aae901f6d": {
+        "sha256": "bbee1542dffb6b518af2a2fde726d2012873df036777daf06a7477e8699ce1c0",
+        "bytes": 85590240
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/parallel_scan-8d4ffc131bf0eb77": {
+        "sha256": "e17c29fb1c7cd8dae8a7e44afe2e44216fe0b708923d6a06fb402dca6ba8b486",
+        "bytes": 85302312
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/pg_contrib-d9ad018b247f290b": {
+        "sha256": "ede2ac1171f5e407c9c84f97c5416db42bef2f842e50019325554506a32cd342",
+        "bytes": 1682424
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/pg_dump-c1170fa358fd9edf": {
+        "sha256": "6a98fb2ccd79fba317f12bf1b6eaad8fe378a040c23dcfc432247a1ed25622c0",
+        "bytes": 1331456
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/pg_isolation-69f281102b93bd89": {
+        "sha256": "b8199942e16d0f1ec69901f7c59348135e956cf5fa52748afc9902dc8b884ba3",
+        "bytes": 1670208
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/pg_regress-08878ac11afed4ba": {
+        "sha256": "934cc3acc10741394ead1df195dd7ee2af077a0926fc33d507e54458b491defa",
+        "bytes": 1665736
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/pgvector_equality-15365b2531ddba27": {
+        "sha256": "2a7fa5be321fa1806ad2f2f358ff066411fa3df2db7592ab3b5632b90e067cd1",
+        "bytes": 83841456
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/pgvector_hnsw-c4cdb3b72e440cbc": {
+        "sha256": "b70b87b15dbf4001f0f076ac96fe049a9e85c04f91988c8a6081eb98dca7c317",
+        "bytes": 84051000
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/pgvector_ivfflat-85e7eb7839701e9a": {
+        "sha256": "3736d0c9e67ce5927388aa3814dd58b8a32d2632d5c168a498dfec08b3d15b56",
+        "bytes": 83820232
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/pk_clustered-15995acb38b18db7": {
+        "sha256": "6b0421f6a3349ee1a2dbce9a780d33ec431a09cacd1b5b96ea8e57329c60bffa",
+        "bytes": 85206376
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/poisoned_caches-9ab57f2261545bea": {
+        "sha256": "b8e542918e4b71a4bad6ff0e9dc3a10e684f6f695af861fb33631fb025a4a59b",
+        "bytes": 85501232
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/query_spill-49c62054fec0bfa7": {
+        "sha256": "4eb517551ed9eecc876e48f6c82add60872a0d825e7e794d5e0f422413694654",
+        "bytes": 85294888
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/restart_cost-c120f9de6c1ed2a6": {
+        "sha256": "c82dc985ed3d735332b7fb788a896b59b09b71eb8bf6e8d7c13e577b93cc190c",
+        "bytes": 85274968
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/server_files-8217e649e5d81038": {
+        "sha256": "d4e5b357a6933c15695feee774456c84f563aa9654612ed435dd71d127f90b75",
+        "bytes": 85186960
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/server_log-c6a0d069afb1dbfa": {
+        "sha256": "9406dab4ccb4dfd76de96d27672da754295ead81ca2b40671bf4b3bf6873968a",
+        "bytes": 86207144
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/session_state-fa65ba5373f7e25a": {
+        "sha256": "94d3671fa6d3973c5ee5dd337948f1d076dbb23ee81fcda38b6809ddcaa63877",
+        "bytes": 85609248
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/storage_format-4a5a4ef9a4977d21": {
+        "sha256": "2956b4ffcf689c5aa86081e27334ac9ef89f6b32288d2531b5eebecb9674764c",
+        "bytes": 85180184
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/storage_upgrade_batches-a2081f91e660900b": {
+        "sha256": "ac9e5f0e6a1caf790eed99c613538266d259e9b809d9c6f8e0d164927eb3f1d4",
+        "bytes": 85141640
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/stored_filters-8114e540fa7e3777": {
+        "sha256": "97aebf9688809360c5619e8bf01a604b8087dff898363669e60f9a95bafb5ae7",
+        "bytes": 83783224
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/toast_storage-6a7996ef22ef00b7": {
+        "sha256": "8145798636a291f31ee80f8d2070c5ec4ba38643cb9012619e0b8570a29f1118",
+        "bytes": 85119336
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/twophase-25ba6b6f50cc8dea": {
+        "sha256": "10fa0bfa0bbf83296637db89ef60235e11d25bac799aacd5a0e97378fe87789e",
+        "bytes": 85164576
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/txn_spill-cf6b8ac933a4e2c5": {
+        "sha256": "da1bf9cb1c65cdac1ad3da347c6b14c352ad843dcc88f9ef5ad9d7905176e65a",
+        "bytes": 85131328
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/wire-1083b7004b76e622": {
+        "sha256": "f9375e31c4b05d3f4797eaefb9f9b8bbfa7ed1c9dbf647c41df2422ff4f65058",
+        "bytes": 90875888
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/wire_waits-a17b69befa44a3ae": {
+        "sha256": "1d8cbff91f1ed48d29c6fb7cd4a5a0df03b3487412d4dfa45da215a170f392c9",
+        "bytes": 86972568
+      },
+      "/home/meszmate/.cache/a170/target/release/deps/xml_memory-92e2b19217d5a160": {
+        "sha256": "9210814c540cef2b8238be8512430b4f27b1ea90cf86b74a7392650c893dab7a",
+        "bytes": 83742816
+      }
+    },
+    "passed_tests": 453,
+    "pass": true
+  },
+  {
+    "name": "clippy",
+    "command": [
+      "cargo",
+      "clippy",
+      "-p",
+      "pg-engine",
+      "--all-targets"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [],
+    "fatal_lines": [],
+    "elapsed_s": 20.601292371749878,
+    "log_sha256": "4646b89a885c4f6a46ff02f2b7e2a8c666ebe68eada288fbd86f24c1e784dc14",
+    "binaries": {},
+    "passed_tests": 0,
+    "pass": true
+  },
+  {
+    "name": "crash30",
+    "command": [
+      "cargo",
+      "test",
+      "--release",
+      "-p",
+      "pg-engine",
+      "--test",
+      "crash_random"
+    ],
+    "env": {
+      "CRASH_SEEDS": "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30",
+      "CRASH_ROUNDS": "4"
+    },
+    "source_before": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 200.33s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 200.61216163635254,
+    "log_sha256": "c1559534d6a57fe3288bfe7479bccddcefb04c546bb64a0cb52f87bded33025f",
+    "binaries": {
+      "/home/meszmate/.cache/a170/target/release/deps/crash_random-4b8f70c02654e372": {
+        "sha256": "10aca337eb1759d70e11ee3d8737449602f24e07eba508174a36cf000d3ee61b",
+        "bytes": 85296528
+      }
+    },
+    "passed_tests": 2,
+    "pass": true
+  },
+  {
+    "name": "postgres-unit",
+    "command": [
+      "pnpm",
+      "test:pg",
+      "--unit"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 1.4847421646118164,
+    "log_sha256": "f8c397e846725034d1b1ac59b48a04ef02f204de6b30354796c968559925a6aa",
+    "binaries": {
+      "/home/meszmate/.cache/a170/target/debug/deps/pg_control-a16c6e00e254d8b1": {
+        "sha256": "15a57d1a51ec081c61e4b32c3101466a2c6e8985567e401bee89826aa170a676",
+        "bytes": 34883360
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/pg_proxy-1a9a43652799ec3d": {
+        "sha256": "48a687f26b5f001e7d0d8e6bcbc5a80a2f91f7910ab3e5c84311129b5042415a",
+        "bytes": 11384336
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/pg_storage-13e93ab534b12e61": {
+        "sha256": "57d8c3afc72714065af1155230619725099f3c33a3d163d910da9095c77c4449",
+        "bytes": 55876080
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/roll-4dddcc6a3633d7cd": {
+        "sha256": "01a338b9549e39935ad02ad172a81c52ff9f2bbf4fb0e2eeb21c07db986d9c5b",
+        "bytes": 7217416
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/rolld-a6f5c88189841da0": {
+        "sha256": "40043cf830a286fe6952b2a46791b89e645fa3173fe99b8a9356e0624dac375e",
+        "bytes": 9497544
+      }
+    },
+    "passed_tests": 24,
+    "pass": true
+  }
+]

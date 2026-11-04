@@ -1,0 +1,172 @@
+[
+  {
+    "name": "vacuum-toast",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "pg-engine",
+      "--test",
+      "vacuum_toast_measure",
+      "--",
+      "--nocapture"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "1b6a80b9918db481d27527511d70ae716b1bdecf",
+      "tree": "d7ebff7442a309641d844027b736c107528a241a",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "1b6a80b9918db481d27527511d70ae716b1bdecf",
+      "tree": "d7ebff7442a309641d844027b736c107528a241a",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 52.79911518096924,
+    "log_sha256": "7a96ebfcf71745a2cb58b386f8a3f64a5580e7f5a019cddf321452794ef9c1c5",
+    "binaries": {
+      "/home/meszmate/.cache/a170/target/debug/deps/vacuum_toast_measure-1b0b2de39716b05f": {
+        "sha256": "7983e0ce38403d97b15176f8b0f11ce3d6e14059ef5ef59e4e8abe82621cc57b",
+        "bytes": 319823752
+      }
+    },
+    "passed_tests": 5,
+    "pass": true
+  },
+  {
+    "name": "kept-header",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "pg-engine",
+      "--lib",
+      "exec::sizing::kept::tests::",
+      "--",
+      "--nocapture"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "1b6a80b9918db481d27527511d70ae716b1bdecf",
+      "tree": "d7ebff7442a309641d844027b736c107528a241a",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "1b6a80b9918db481d27527511d70ae716b1bdecf",
+      "tree": "d7ebff7442a309641d844027b736c107528a241a",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 189 filtered out; finished in 0.49s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 28.830373525619507,
+    "log_sha256": "e870dd21fdcf582f691a7113bd7670c760035ff0d7b0e5d98b10eabcc854ec5a",
+    "binaries": {
+      "/home/meszmate/.cache/a170/target/debug/deps/pg_engine-357a2b04731fc140": {
+        "sha256": "443b50d996b05b8111175b4f42c490cd7fb3e3ea94f2a519d68900201d7d89b8",
+        "bytes": 318192096
+      }
+    },
+    "passed_tests": 2,
+    "pass": true
+  },
+  {
+    "name": "toast-existing",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "pg-engine",
+      "--test",
+      "toast_storage",
+      "--test",
+      "models_kept",
+      "--test",
+      "big_tables"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "1b6a80b9918db481d27527511d70ae716b1bdecf",
+      "tree": "d7ebff7442a309641d844027b736c107528a241a",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "1b6a80b9918db481d27527511d70ae716b1bdecf",
+      "tree": "d7ebff7442a309641d844027b736c107528a241a",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.23s",
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.02s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 31.95s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 69.0038001537323,
+    "log_sha256": "339daf41acb24c839094238e39c131ce6a61ec1ebfc4f0515699335bd94edb3a",
+    "binaries": {
+      "/home/meszmate/.cache/a170/target/debug/deps/big_tables-b522deff6cca6663": {
+        "sha256": "10114f68772d788dc163198e22355f6015fd9ac2afb6ebf405ce9f916b926af2",
+        "bytes": 320164752
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/models_kept-81be20026cb60eb7": {
+        "sha256": "6201cdf4a409e421a3a07d5fbf383caea47ae3ac1924d40d368c1aac5d4f830d",
+        "bytes": 320036952
+      },
+      "/home/meszmate/.cache/a170/target/debug/deps/toast_storage-d0a39e8219b8a0b1": {
+        "sha256": "923b2896197c9697b940207adcb8e943ed67b05dea09b90d0a9d522cf0256258",
+        "bytes": 319833720
+      }
+    },
+    "passed_tests": 25,
+    "pass": true
+  },
+  {
+    "name": "clippy-lib",
+    "command": [
+      "cargo",
+      "clippy",
+      "-p",
+      "pg-engine",
+      "--lib"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "1b6a80b9918db481d27527511d70ae716b1bdecf",
+      "tree": "d7ebff7442a309641d844027b736c107528a241a",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "1b6a80b9918db481d27527511d70ae716b1bdecf",
+      "tree": "d7ebff7442a309641d844027b736c107528a241a",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [],
+    "fatal_lines": [],
+    "elapsed_s": 74.92830753326416,
+    "log_sha256": "f2d5ab63c8884ae2c6053932dc29e0344e95559e0c7f18afe829559184a140ab",
+    "binaries": {},
+    "passed_tests": 0,
+    "pass": true
+  }
+]

@@ -1,0 +1,45 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a0718617fe2ff9006/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.62s
+     Running tests/big_tables.rs (/home/meszmate/.cache/a170/target/debug/deps/big_tables-b522deff6cca6663)
+
+running 15 tests
+test copy_past_the_model ... ok
+test analyze_samples_pages_of_big_tables ... ok
+test deferred_entry_deletes ... ok
+test copy_through_the_sink ... ok
+test estimate_kept_across_restart ... ok
+test estimate_rebuilt_with_higher_model_limit ... ok
+test heap_pages_kept_across_restart ... ok
+test index_build_measures_as_analyze ... ok
+test index_only_scans_from_entries ... ok
+test measured_sizes_from_stored_rows ... ok
+test deferred_model_matches ... ok
+test toast_locks_past_the_model ... ok
+test vacuum_keeps_xmins_of_unchanged_tables ... ok
+test parallel_index_builds ... ok
+test vacuum_skips_unchanged_tables ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.23s
+
+     Running tests/models_kept.rs (/home/meszmate/.cache/a170/target/debug/deps/models_kept-81be20026cb60eb7)
+
+running 6 tests
+test kept_models_not_used_when_stale ... ok
+test kept_models_match_models_never_restarted ... ok
+test models_after_a_crash_keep_the_rows_in_place ... ok
+test nulls_not_distinct_cleanup_survives_restart ... ok
+test vacuum_freeze_keeps_page_state_across_restart ... ok
+test kept_sizes_plan_as_the_models_do ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.02s
+
+     Running tests/toast_storage.rs (/home/meszmate/.cache/a170/target/debug/deps/toast_storage-d0a39e8219b8a0b1)
+
+running 4 tests
+test index_fetches_read_only_the_values_they_decode ... ok
+test scans_read_only_the_values_they_decode ... ok
+test values_round_trip_through_writes ... ok
+test vectors_out_of_line ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 31.95s
+

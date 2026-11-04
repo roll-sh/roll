@@ -1,0 +1,22 @@
+{
+  "exit": 101,
+  "expected_exit": 101,
+  "source_after": {
+    "head": "4b7db3a9b0fb4c97632a192eb858340985f18e10",
+    "tree": "2065f62883022dd21a17cd7fd750e57cb4a6ee63",
+    "status": "",
+    "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "source_status": "FAILED",
+  "test_summaries": [
+    "test result: FAILED. 2 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.97s"
+  ],
+  "binaries": {
+    "/home/meszmate/.cache/a170/target/debug/deps/vacuum_toast_measure-1b0b2de39716b05f": {
+      "sha256": "6cde54ca0909e794077d8c4205f9f8001304032c57e86a03c56f4d25fdd1244a",
+      "bytes": 319823440
+    }
+  },
+  "raw_sha256": "79e104f87aa08d8fd6c27fcc6886d68d800201209d3215ece69f77ab6ec5d1b0",
+  "distinguishing_pattern_present": true
+}

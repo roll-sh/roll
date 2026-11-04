@@ -1,0 +1,60 @@
+{
+  "worktree": "/home/meszmate/roll/.claude/worktrees/agent-a0718617fe2ff9006",
+  "head": "047c4697e72ce63867257db3668a02c55c77830a",
+  "output": "/home/meszmate/.cache/pg-engine-resume-20261104/execution_models/a170-vacuum-focused",
+  "env": {
+    "TMPDIR": "/home/meszmate/.cache/a170/tmp",
+    "CARGO_TARGET_DIR": "/home/meszmate/.cache/a170/target",
+    "CARGO_BUILD_JOBS": "2",
+    "RUST_TEST_THREADS": "2"
+  },
+  "stages": [
+    {
+      "name": "vacuum-toast",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "pg-engine",
+        "--test",
+        "vacuum_toast_measure",
+        "--",
+        "--nocapture"
+      ],
+      "expect": "^test result: ok\\. 2 passed;",
+      "env": {}
+    },
+    {
+      "name": "kept-header",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "pg-engine",
+        "--lib",
+        "exec::sizing::kept::tests::",
+        "--",
+        "--nocapture"
+      ],
+      "expect": "^test result: ok\\. 2 passed;",
+      "env": {}
+    },
+    {
+      "name": "toast-existing",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "pg-engine",
+        "--test",
+        "toast_storage",
+        "--test",
+        "models_kept",
+        "--test",
+        "big_tables"
+      ],
+      "expect": "^test result: ok\\.",
+      "env": {}
+    }
+  ]
+}
