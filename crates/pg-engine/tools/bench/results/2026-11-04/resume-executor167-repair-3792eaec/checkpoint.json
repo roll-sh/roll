@@ -1,0 +1,7 @@
+{
+  "head": "3792eaec3ac58e8150080e79731cec2e329e2299",
+  "tree": "8da09c59084e79dcdb2cb323437df0f247475cd3",
+  "status": "",
+  "time_utc": "2026-11-04T12:40:01.552300+00:00",
+  "note": "UNVERIFIED source repair. Original f92d227b failures preserved. Separate carried aggregation states from ordered read counts; split invalid VACUUM fixture. No acceptance."
+}

@@ -1,0 +1,41 @@
+[
+  {
+    "name": "golden",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "pg-engine",
+      "--test",
+      "golden"
+    ],
+    "env": {
+      "GOLDEN_FILTER": "a167_"
+    },
+    "source_before": {
+      "head": "cedf78797a386b796b6a02e7a9b14e656907a266",
+      "tree": "34368bdfc584071d8239077377acac9d110db8e0",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "cedf78797a386b796b6a02e7a9b14e656907a266",
+      "tree": "34368bdfc584071d8239077377acac9d110db8e0",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 101,
+    "expected_summary": false,
+    "test_summaries": [],
+    "fatal_lines": [
+      "error[E0277]: cannot multiply `u64` by `(u64, u64)`",
+      "error[E0277]: cannot multiply `u64` by `(u64, u64)`",
+      "error: could not compile `pg-engine` (lib) due to 2 previous errors"
+    ],
+    "elapsed_s": 11.355680704116821,
+    "log_sha256": "02137aaacd4fed4fa56c34f522978ff4343c06396dc991623547d790925b6ef6",
+    "binaries": {},
+    "passed_tests": 0,
+    "pass": false
+  }
+]

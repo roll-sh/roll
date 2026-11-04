@@ -1,0 +1,7 @@
+{
+  "head": "cedf78797a386b796b6a02e7a9b14e656907a266",
+  "tree": "34368bdfc584071d8239077377acac9d110db8e0",
+  "status": "",
+  "time_utc": "2026-11-04T14:49:52.018167+00:00",
+  "note": "Pinned clean cedf7879 compile exit101: two scalar rescans uses remained after ratio change. No test executed. Historical passing c1594cc6 gates do not validate this source."
+}

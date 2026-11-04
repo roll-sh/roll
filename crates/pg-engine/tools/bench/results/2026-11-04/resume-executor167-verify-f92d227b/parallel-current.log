@@ -1,0 +1,56 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a6193f5e45a7ae4f1/crates/pg-engine)
+    Finished `release` profile [optimized] target(s) in 4.31s
+     Running tests/parallel_scan.rs (/home/meszmate/.cache/a167/target/release/deps/parallel_scan-8d4ffc131bf0eb77)
+
+running 10 tests
+test bitmap_quals_on_entries ... ok
+test numeric_topk_matches_serial ... ok
+test parallel_fetches_match_serial ... ok
+test parallel_joins_match_serial ... FAILED
+test parallel_lookups_match_serial ... ok
+test parallel_scans_match_serial ... FAILED
+test parallel_scans_of_modelled_heaps ... ok
+test split_keys_cover_in_order ... ok
+test reordered_heaps_through_batches ... FAILED
+test vector_batches_match_rows ... ok
+
+failures:
+
+---- parallel_joins_match_serial stdout ----
+
+thread '<unnamed>' (3370364) panicked at crates/pg-engine/tests/parallel_scan.rs:332:5:
+assertion `left == right` failed: [Int8(28), Int8(11134694)] [Int8(56), Int8(22133764)]
+  left: 22133764
+ right: 22269388
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'parallel_joins_match_serial' (3368651) panicked at crates/pg-engine/tests/parallel_scan.rs:143:10:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+
+---- parallel_scans_match_serial stdout ----
+
+thread '<unnamed>' (3376480) panicked at crates/pg-engine/tests/parallel_scan.rs:210:5:
+assertion `left == right` failed: [Int8(32), Int8(11676588)] [Int8(92), Int8(33052992)]
+  left: 32212992
+ right: 32509764
+
+thread 'parallel_scans_match_serial' (3374718) panicked at crates/pg-engine/tests/parallel_scan.rs:143:10:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+
+---- reordered_heaps_through_batches stdout ----
+
+thread '<unnamed>' (3380708) panicked at crates/pg-engine/tests/parallel_scan.rs:1004:6:
+called `Result::unwrap()` on an `Err` value: Error { code: "25001", message: "VACUUM cannot run inside a transaction block", detail: None, hint: None, position: None, severity: Error, context: None, objects: None, stacked: false }
+
+thread 'reordered_heaps_through_batches' (3380295) panicked at crates/pg-engine/tests/parallel_scan.rs:143:10:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+
+
+failures:
+    parallel_joins_match_serial
+    parallel_scans_match_serial
+    reordered_heaps_through_batches
+
+test result: FAILED. 7 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 44.55s
+
+error: test failed, to rerun pass `-p pg-engine --test parallel_scan`

@@ -1,0 +1,7 @@
+{
+  "head": "c1594cc6c9fac649ee76a86d711e1bf880871f08",
+  "tree": "58ff6a42818f23863213a7f3a14b8d13abfde466",
+  "status": "?? crates/pg-engine/tests/sql/a167_subplan_varied.out\n?? crates/pg-engine/tests/sql/a167_subplan_varied.sql",
+  "time_utc": "2026-11-04T14:40:08.529428+00:00",
+  "note": "Productionc1594cc6 retained exact binary; only SQL fixture added. PG18.6 reference exit0, engine exit101: inner loops4 vs3 for outer2+1. Reviewer proposed0/1 pattern actually matches reference here; retain observed result. Effective affinity4-7,22-25. No production edits or acceptance."
+}

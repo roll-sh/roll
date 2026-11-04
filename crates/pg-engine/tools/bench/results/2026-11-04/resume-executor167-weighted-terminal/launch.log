@@ -1,0 +1,6 @@
+{"name": "build", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "debug", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "release", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "clippy", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "crash30", "exit": 101, "expected_summary": false, "pass": false}
+HEAVY-EXIT 101
