@@ -556,13 +556,14 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             lazy: None,
             kfilter: None,
             erb: Default::default(),
+            spare: None,
             run: Default::default(),
             pending: None,
             one_run: false,
             blocks: Default::default(),
             prune_next: 0,
             nblocks: None,
-            last_block: None,
+            fetcher: None,
             fetched,
             batch: FETCH_BATCH_MIN,
             ios_cols: None,
@@ -646,13 +647,14 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             lazy: None,
             kfilter: None,
             erb: Default::default(),
+            spare: None,
             run: Default::default(),
             pending: None,
             one_run: false,
             blocks: Default::default(),
             prune_next: 0,
             nblocks: None,
-            last_block: None,
+            fetcher: None,
             fetched: rows.into_iter().map(|(k, r)| (Vec::new(), k, Some(r))).collect(),
             batch: FETCH_BATCH_MIN,
             ios_cols: None,
@@ -726,13 +728,14 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             lazy: None,
             kfilter: None,
             erb: Default::default(),
+            spare: None,
             run: Default::default(),
             pending: None,
             one_run: false,
             blocks: Default::default(),
             prune_next: 0,
             nblocks: None,
-            last_block: None,
+            fetcher: None,
             fetched: Default::default(),
             batch: FETCH_BATCH_MIN,
             ios_cols: None,
@@ -873,12 +876,13 @@ fn open_scan_as(
         lazy: None,
         kfilter: None,
         erb: Default::default(),
+        spare: None,
         run: Default::default(),
         pending: None,
         blocks: Default::default(),
         prune_next: 0,
         nblocks: None,
-        last_block: None,
+        fetcher: None,
         fetched: Default::default(),
         batch: FETCH_BATCH_MIN,
         ios_cols,
@@ -1732,13 +1736,14 @@ fn dense_bitmap_scan(
         lazy: None,
         kfilter: None,
         erb: Default::default(),
+        spare: None,
         run: Default::default(),
         pending: None,
         one_run: false,
         blocks: Default::default(),
         prune_next: 0,
         nblocks: None,
-        last_block: None,
+        fetcher: None,
         fetched: Default::default(),
         batch: FETCH_BATCH_MIN,
         ios_cols: None,
@@ -2157,6 +2162,9 @@ struct ScanNode {
     kfilter: Option<Option<(super::kernel::K, Option<super::kernel::StoredCmps>)>>,
     /// An index scan's entries read a batch at a time (`next_indexed`).
     erb: crate::storage::batch::RowBatch,
+    /// The last range's store iterator once it ended, for the next range to read on with
+    /// (`Txn::reseek_snap`) instead of a new one.
+    spare: Option<StoreIter>,
     /// Such a scan read by worker threads (`parscan`), once decided (`par_tried`).
     par: Option<super::parscan::ParScan>,
     par_tried: bool,
@@ -2172,8 +2180,9 @@ struct ScanNode {
     blocks: std::collections::VecDeque<Option<u32>>,
     prune_next: u32,
     nblocks: Option<u32>,
-    /// An index or bitmap heap scan: the heap page it last fetched from.
-    last_block: Option<u32>,
+    /// An index or bitmap heap scan's fetches noted for the heap model (pruning on reaching
+    /// another page), once made; None inside: the heap isn't modelled.
+    fetcher: Option<Option<super::sizing::Fetcher>>,
     /// Index entries (entry key, data key) with their rows, fetched ahead a batch at a
     /// time (`fetch_rows`); a bitmap heap scan's have an empty entry key.
     fetched: std::collections::VecDeque<(Vec<u8>, Vec<u8>, Option<bytes::Bytes>)>,
@@ -2328,7 +2337,7 @@ const RB_MAX: usize = 256;
 /// them, read together (`Txn::get_many_snap`). Without a statement snapshot, one at a time
 /// through the transaction's writes as they are now.
 pub(super) fn fetch_rows(keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Vec<Option<bytes::Bytes>>> {
-    if let Some(rows) = fetch_dense(keys, ctx)? {
+    if let Some(rows) = fetch_dense(keys, false, ctx)? {
         return Ok(rows);
     }
     let txn = ctx.txn.borrow();
@@ -2362,8 +2371,10 @@ fn get_sorted(txn: &crate::txn::Txn, keys: &[Vec<u8>], s: &crate::txn::Snap, res
 /// `fetch_rows` of ascending keys of one integer key column (a rowid table's, or an integer
 /// primary key's) close together, as an index's entries in its table's own order fetch them
 /// (an index made after its table's rows, a bulk load's): one range read, its rows matched
-/// to the keys, instead of a lookup each. None: not such keys.
-fn fetch_dense(keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Option<Vec<Option<bytes::Bytes>>>> {
+/// to the keys, instead of a lookup each. None: not such keys. `raw`: read as stored, a batch
+/// at a time; None also when a row has values stored out of line (`fetch_rows` puts them
+/// back).
+fn fetch_dense(keys: &[Vec<u8>], raw: bool, ctx: &ExecCtx) -> Result<Option<Vec<Option<bytes::Bytes>>>> {
     let id = |k: &[u8]| -> Option<i64> {
         let mut pos = 8;
         match crate::storage::keys::decode_index_value(k, &mut pos, &crate::types::DataType::Int8, false)? {
@@ -2372,7 +2383,8 @@ fn fetch_dense(keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Option<Vec<Option<byte
         }
     };
     let (Some(first), Some(last)) = (keys.first(), keys.last()) else { return Ok(None) };
-    if keys.len() < 16 || first[..8.min(first.len())] != last[..8.min(last.len())] || !keys.windows(2).all(|w| w[0] < w[1]) {
+    // (Read as stored, a batch at a time, a range costs no more than a few lookups.)
+    if keys.len() < if raw { 4 } else { 16 } || first[..8.min(first.len())] != last[..8.min(last.len())] || !keys.windows(2).all(|w| w[0] < w[1]) {
         return Ok(None);
     }
     let (Some(a), Some(b)) = (id(first), id(last)) else { return Ok(None) };
@@ -2388,6 +2400,36 @@ fn fetch_dense(keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Option<Vec<Option<byte
     };
     let mut out = Vec::with_capacity(keys.len());
     let mut want = keys.iter().peekable();
+    if raw {
+        // (Rows as stored, a batch at a time by reference: no key made per row.)
+        let mut it = it.raw();
+        let mut b = crate::storage::batch::RowBatch::default();
+        while want.peek().is_some() {
+            b.clear();
+            it.fill_batch(&mut b, keys.len() - out.len())?;
+            if b.is_empty() {
+                break;
+            }
+            for i in 0..b.len() {
+                let k = b.get(i).0;
+                while want.next_if(|w| w.as_slice() < k).is_some() {
+                    out.push(None);
+                }
+                if want.next_if(|w| w.as_slice() == k).is_some() {
+                    // (A row with values stored out of line: they're put back after all.)
+                    if crate::storage::toast::has_external(b.get(i).1) {
+                        return Ok(None);
+                    }
+                    out.push(Some(b.value_bytes(i)));
+                }
+                if want.peek().is_none() {
+                    break;
+                }
+            }
+        }
+        out.resize(keys.len(), None);
+        return Ok(Some(out));
+    }
     for r in it {
         let (k, v) = r?;
         while want.next_if(|w| w.as_slice() < k.as_slice()).is_some() {
@@ -2644,7 +2686,8 @@ impl ScanNode {
         self.skip = bound.skip;
         self.stat = bound.stat;
         self.cur_range = 0;
-        self.iter = None;
+        // (The last range's iterator kept: the new one reads on with it, `seek`.)
+        self.spare = self.iter.take().or(self.spare.take());
         self.rb.clear();
         self.rb_max = RB_MIN;
         self.held = false;
@@ -2655,8 +2698,9 @@ impl ScanNode {
         self.pending = None;
         self.fetched.clear();
         self.batch = FETCH_BATCH_MIN;
-        self.last_block = None;
-        self.toast = None;
+        if let Some(Some(f)) = &mut self.fetcher {
+            f.restart();
+        }
         INDEX_RESCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(true)
     }
@@ -2682,6 +2726,21 @@ impl ScanNode {
     fn seek(&mut self, start: &[u8], end: &[u8], ctx: &ExecCtx) {
         let txn = ctx.txn.borrow();
         let snap = ctx.snapshot();
+        // (The last range's iterator read on over this one, when it can be: its sources keep
+        // their blocks.)
+        if !self.rev
+            && let Some(s) = snap.as_deref()
+            && let Some(StoreIter::Fwd(mut it)) = self.spare.take()
+            && txn.reseek_snap(&mut it, start, end, s)
+        {
+            if self.toast.is_some()
+                && let Some(src) = it.source()
+            {
+                self.toast = Some(std::cell::RefCell::new(crate::txn::toast::Reader::new(src.clone())));
+            }
+            self.iter = Some(StoreIter::Fwd(it));
+            return;
+        }
         self.iter = Some(if self.rev {
             StoreIter::Rev(Box::new(txn.scan_rev(start, end, snap.as_deref())))
         } else {
@@ -2729,6 +2788,7 @@ impl ScanNode {
                     if let Some(kl) = &mut self.kills {
                         kl.sought(&k, if self.rev { &b } else { &a });
                     }
+                    self.spare = self.iter.take();
                     self.seek(&a, &b, ctx)
                 }
                 Err(e) => return Some(Err(e)),
@@ -2917,7 +2977,7 @@ impl ScanNode {
                     self.erb.clear();
                     it.fill_batch(&mut self.erb, want - ents.len())?;
                     if self.erb.is_empty() {
-                        self.iter = None;
+                        self.spare = self.iter.take();
                     }
                     for i in 0..self.erb.len() {
                         let (k, v) = self.erb.get(i);
@@ -2930,7 +2990,7 @@ impl ScanNode {
                         let (k, v) = r?;
                         ents.push((k, v.to_vec()));
                     }
-                    None => self.iter = None,
+                    None => self.spare = self.iter.take(),
                 }
             }
             if ents.is_empty() {
@@ -3063,7 +3123,7 @@ impl ScanNode {
             if !self.rb.is_empty() {
                 return Ok(true);
             }
-            self.iter = None;
+            self.spare = self.iter.take();
         }
     }
 
@@ -3150,7 +3210,7 @@ impl ScanNode {
     /// The scan's range read again from its start.
     fn restart(&mut self) {
         self.cur_range = 0;
-        self.iter = None;
+        self.spare = self.iter.take();
         self.rb.clear();
         self.held = false;
         self.rb_max = RB_MIN;
@@ -3320,6 +3380,13 @@ impl ScanNode {
             .snapshot()
             .filter(|_| self.plan.mark.is_none() && !self.plan.sys && super::sizing::tracked(self.plan.table.oid))
         else {
+            // (Keys close together: one range read a batch at a time, the rows as stored when
+            // none has values out of line.)
+            if ctx.snapshot().is_some()
+                && let Some(rows) = fetch_dense(keys, true, ctx)?
+            {
+                return Ok(rows);
+            }
             return fetch_rows(keys, ctx);
         };
         let txn = ctx.txn.borrow();
@@ -4445,7 +4512,10 @@ impl ScanNode {
         }
         if (self.plan.index.is_some() || self.keys.is_some()) && self.only.is_none() {
             // None also clears the cached block when all-visible pages need no fetch.
-            self.last_block = super::sizing::fetched(self.plan.table.oid, key, self.last_block, ctx);
+            let t = self.plan.table.oid;
+            if let Some(f) = self.fetcher.get_or_insert_with(|| super::sizing::Fetcher::new(t, ctx)) {
+                f.fetched_at(key, stored_tid(bytes));
+            }
         }
         if self.ios {
             let counted = match &mut self.ios_entries {
@@ -5198,13 +5268,14 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
         lazy: None,
         kfilter: None,
         erb: Default::default(),
+        spare: None,
         run: Default::default(),
         pending: None,
         one_run: false,
         blocks: Default::default(),
         prune_next: 0,
         nblocks: None,
-        last_block: None,
+        fetcher: None,
         fetched: Default::default(),
         batch: FETCH_BATCH_MIN,
         ios_cols: None,
