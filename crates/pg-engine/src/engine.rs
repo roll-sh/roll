@@ -209,15 +209,20 @@ pub struct StartupReport {
 }
 
 /// A connected client, for pg_stat_activity and cancel / terminate.
+/// A backend's pg_stat_activity entry (`Backend::activity`, `Engine::activity_slot`). Lock
+/// order: the backends table, then an entry.
+pub type ActivitySlot = Arc<Mutex<Activity>>;
+
 struct Backend {
     secret: i32,
     database: u32,
     cancel: Option<Arc<AtomicBool>>,
-    socket: Option<TcpStream>,
+    socket: Option<Arc<TcpStream>>,
     terminated: Arc<AtomicBool>,
     /// Messages the server loop started reading (`read_counter`).
     reads: Arc<AtomicU64>,
-    activity: Activity,
+    /// Its pg_stat_activity entry, under a lock of its own (`ActivitySlot`).
+    activity: ActivitySlot,
     /// Its proc array slot, once it has one (`assign_proc`).
     proc: Option<Arc<crate::txn::procs::Proc>>,
 }
@@ -656,14 +661,14 @@ impl Engine {
 
     /// Client backends connected (not the engine's own workers).
     pub fn client_backends(&self) -> usize {
-        self.backends.lock().values().filter(|b| b.activity.backend_type.is_none()).count()
+        self.backends.lock().values().filter(|b| b.activity.lock().backend_type.is_none()).count()
     }
 
     /// Immediate shutdown: `message` (quickdie's WARNING) goes to every client backend's
     /// client, whose connection then closes; the process exits next.
     pub fn quit_client_backends(&self, message: &[u8]) {
-        for b in self.backends.lock().values().filter(|b| b.activity.backend_type.is_none()) {
-            if let Some(mut s) = b.socket.as_ref() {
+        for b in self.backends.lock().values().filter(|b| b.activity.lock().backend_type.is_none()) {
+            if let Some(mut s) = b.socket.as_deref() {
                 let _ = std::io::Write::write_all(&mut s, message);
                 let _ = s.shutdown(Shutdown::Both);
             }
@@ -673,7 +678,7 @@ impl Engine {
     /// Fast shutdown: every client backend's session ends ("terminating connection due to
     /// administrator command").
     pub fn terminate_client_backends(&self) {
-        for b in self.backends.lock().values().filter(|b| b.activity.backend_type.is_none()) {
+        for b in self.backends.lock().values().filter(|b| b.activity.lock().backend_type.is_none()) {
             Self::terminate(b);
         }
     }
@@ -989,7 +994,7 @@ impl Engine {
     /// Allocate a backend id and cancel key for a new connection.
     pub fn register_backend(
         &self,
-        socket: Option<TcpStream>,
+        socket: Option<Arc<TcpStream>>,
         client: Option<std::net::SocketAddr>,
     ) -> (i32, i32, Arc<AtomicBool>) {
         let pid = self.next_pid.fetch_add(1, Ordering::Relaxed);
@@ -1014,7 +1019,7 @@ impl Engine {
                 socket,
                 terminated: terminated.clone(),
                 reads: Default::default(),
-                activity,
+                activity: Arc::new(Mutex::new(activity)),
                 proc: None,
             },
         );
@@ -1026,7 +1031,7 @@ impl Engine {
     pub fn assign_proc(&self, pid: i32, kind: crate::txn::procs::ProcKind) -> Arc<crate::txn::procs::Proc> {
         let p = self.procs.assign(kind, pid);
         if let Some(b) = self.backends.lock().get_mut(&pid) {
-            b.activity.proc_number = Some(p.number());
+            b.activity.lock().proc_number = Some(p.number());
             b.proc = Some(p.clone());
         }
         p
@@ -1090,11 +1095,11 @@ impl Engine {
             let b = self.backends.lock();
             let others = b
                 .iter()
-                .filter(|(p, b)| **p != pid && b.activity.user == user)
+                .filter(|(p, b)| **p != pid && b.activity.lock().user == user)
                 .count();
             let db_others = b
                 .iter()
-                .filter(|(p, b)| **p != pid && b.database == entry.oid && b.activity.backend_type.is_none())
+                .filter(|(p, b)| **p != pid && b.database == entry.oid && b.activity.lock().backend_type.is_none())
                 .count();
             (others, db_others)
         };
@@ -1112,20 +1117,27 @@ impl Engine {
         if let Some(b) = self.backends.lock().get_mut(&pid) {
             b.database = entry.oid;
             b.cancel = Some(session.cancel.clone());
-            b.activity.progress = Some(session.state.progress.clone());
-            b.activity.database = dbname.to_string();
-            b.activity.user = user.to_string();
-            b.activity.application_name = application_name.to_string();
-            b.activity.state = "idle".into();
-            b.activity.state_change = Some(crate::types::datetime::Clock::system().now);
+            let mut a = b.activity.lock();
+            a.progress = Some(session.state.progress.clone());
+            a.database = dbname.to_string();
+            a.user = user.to_string();
+            a.application_name = application_name.to_string();
+            a.state = "idle".into();
+            a.state_change = Some(crate::types::datetime::Clock::system().now);
         }
         Ok(session)
+    }
+
+    /// Backend `pid`'s pg_stat_activity entry: its server loop updates it per message under
+    /// the entry's own lock (PgBackendStatus's per-backend slot), not the backends table's.
+    pub fn activity_slot(&self, pid: i32) -> Option<ActivitySlot> {
+        self.backends.lock().get(&pid).map(|b| b.activity.clone())
     }
 
     /// Update what pg_stat_activity shows for a backend.
     pub fn set_activity(&self, pid: i32, f: impl FnOnce(&mut Activity)) {
         if let Some(b) = self.backends.lock().get_mut(&pid) {
-            f(&mut b.activity);
+            f(&mut b.activity.lock());
         }
     }
 
@@ -1144,7 +1156,7 @@ impl Engine {
                 let Some(c) = b.cancel.as_ref() else { return };
                 c.store(true, Ordering::Relaxed);
                 crate::txn::locks::interrupt(c);
-                if !matches!(b.activity.state.as_str(), "active" | "fastpath function call") {
+                if !matches!(b.activity.lock().state.as_str(), "active" | "fastpath function call") {
                     return;
                 }
                 b.reads.clone()
@@ -2164,14 +2176,15 @@ impl Cluster for Engine {
             .values()
             .filter(|b| b.database != 0)
             .map(|b| {
-                let mut a = b.activity.clone();
+                let mut a = b.activity.lock().clone();
                 a.backend_subxacts = b.proc.as_ref().map_or((0, false), |p| p.subxacts());
                 // A parallel worker does the leader's work (the engine runs it on the
                 // leader's thread): what it waits for is what the leader's work does, and a
                 // leader that doesn't take part waits for its workers.
                 if let Some(l) = a.leader_pid.and_then(|l| backends.get(&l)) {
-                    a.wait = l.activity.wait;
-                    a.backend_xmin = l.activity.backend_xmin;
+                    let l = l.activity.lock();
+                    a.wait = l.wait;
+                    a.backend_xmin = l.backend_xmin;
                 } else if a.gathering == Some(false) {
                     a.wait = Some(("IPC", "ExecuteGather"));
                 }
@@ -2185,9 +2198,13 @@ impl Cluster for Engine {
     fn start_parallel_workers(&self, leader: i32, n: usize, max_workers: usize, participating: bool, rels: Arc<[u32]>) -> Vec<i32> {
         let mut backends = self.backends.lock();
         let Some(l) = backends.get_mut(&leader) else { return Vec::new() };
-        l.activity.gathering = Some(participating);
-        let (database, la) = (l.database, l.activity.clone());
-        let running = backends.values().filter(|b| b.activity.leader_pid.is_some()).count();
+        let la = {
+            let mut a = l.activity.lock();
+            a.gathering = Some(participating);
+            a.clone()
+        };
+        let database = l.database;
+        let running = backends.values().filter(|b| b.activity.lock().leader_pid.is_some()).count();
         let now = crate::types::datetime::Clock::system().now;
         let mut pids = Vec::new();
         for _ in 0..n.min(max_workers.saturating_sub(running)) {
@@ -2217,7 +2234,7 @@ impl Cluster for Engine {
                 ..Activity::default()
             };
             let terminated = Arc::new(AtomicBool::new(false));
-            backends.insert(pid, Backend { secret: 0, database, cancel: None, socket: None, terminated, activity, proc: Some(proc), reads: Default::default() });
+            backends.insert(pid, Backend { secret: 0, database, cancel: None, socket: None, terminated, activity: Arc::new(Mutex::new(activity)), proc: Some(proc), reads: Default::default() });
             pids.push(pid);
         }
         pids
@@ -2229,7 +2246,7 @@ impl Cluster for Engine {
             backends.remove(p);
         }
         if let Some(l) = backends.get_mut(&leader) {
-            l.activity.gathering = None;
+            l.activity.lock().gathering = None;
         }
     }
 

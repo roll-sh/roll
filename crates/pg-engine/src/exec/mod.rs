@@ -336,7 +336,7 @@ pub struct ExecCtx<'a> {
     pub(crate) temp_cleanup: Rc<spill::TempCleanup>,
     fmt: FormatCtx,
     pub params: &'a [Value],
-    pub search_path: Vec<String>,
+    pub search_path: crate::catalog::names::SearchPath,
     /// The role whose USAGE privileges `search_path` was filtered by.
     path_role: u32,
     outer: RefCell<Vec<Rc<Row>>>,
@@ -440,13 +440,13 @@ pub struct ExecCtx<'a> {
 
 /// Drop from `path` the schemas the current role may not use: name lookups skip them
 /// (recomputeNamespacePath's ACL_USAGE check); temporary schemas stay.
-fn usable_path(catalog: &Catalog, sess: &SessionState, path: &mut Vec<String>) -> u32 {
+fn usable_path(catalog: &Catalog, sess: &SessionState, path: &mut crate::catalog::names::SearchPath) -> u32 {
     let me = sess.current_role(catalog);
     if catalog.is_superuser(me) {
         return me;
     }
     let db_owner = sess.db_owner(catalog);
-    path.retain(|s| match catalog.schema_by_name(s) {
+    let usable = |s: &String| match catalog.schema_by_name(s) {
         Some(sc) => {
             sc.name.starts_with("pg_temp")
                 || catalog
@@ -456,7 +456,10 @@ fn usable_path(catalog: &Catalog, sess: &SessionState, path: &mut Vec<String>) -
                     != 0
         }
         None => true,
-    });
+    };
+    if !path.iter().all(usable) {
+        *path = path.iter().filter(|s| usable(s)).cloned().collect();
+    }
     me
 }
 
@@ -733,7 +736,7 @@ impl<'a> ExecCtx<'a> {
         txn_time: i64,
         stmt_time: i64,
     ) -> ExecCtx<'a> {
-        Self::with_search_path(txn, sess, params, txn_time, stmt_time, sess.search_path())
+        Self::with_search_path(txn, sess, params, txn_time, stmt_time, sess.shared_search_path())
     }
 
     /// `new`, given the session's search path (`SessionState::search_path`).
@@ -743,12 +746,13 @@ impl<'a> ExecCtx<'a> {
         params: &'a [Value],
         txn_time: i64,
         stmt_time: i64,
-        mut search_path: Vec<String>,
+        search_path: impl Into<crate::catalog::names::SearchPath>,
     ) -> ExecCtx<'a> {
         let settings = sess.settings.borrow();
         let mut fmt = settings.format_ctx();
         drop(settings);
         let catalog = txn.borrow().catalog();
+        let mut search_path = search_path.into();
         let path_role = usable_path(&catalog, sess, &mut search_path);
         let settings = sess.settings.borrow();
         // statement_timeout's deadline: armed with the statement's other waits when it
@@ -817,13 +821,13 @@ impl<'a> ExecCtx<'a> {
     /// earlier in the routine), less the schemas the current role may not use. PL/pgSQL
     /// and SQL functions bind each statement under it, as plancache revalidates a cached
     /// plan whose search_path no longer matches (`SearchPathMatchesCurrentEnvironment`).
-    pub fn session_path(&self) -> Vec<String> {
+    pub fn session_path(&self) -> crate::catalog::names::SearchPath {
         self.session_path_role().0
     }
 
     /// `session_path`, and the role whose privileges it was filtered by.
-    fn session_path_role(&self) -> (Vec<String>, u32) {
-        let mut path = self.sess.search_path();
+    fn session_path_role(&self) -> (crate::catalog::names::SearchPath, u32) {
+        let mut path = self.sess.shared_search_path();
         let role = usable_path(&self.catalog(), self.sess, &mut path);
         (path, role)
     }
@@ -951,7 +955,8 @@ impl<'a> ExecCtx<'a> {
     }
 
     /// A child context (as `child`) that resolves names through `search_path`.
-    pub fn child_with_path<'b>(&'b self, params: &'b [Value], search_path: Vec<String>) -> ExecCtx<'b> {
+    pub fn child_with_path<'b>(&'b self, params: &'b [Value], search_path: impl Into<crate::catalog::names::SearchPath>) -> ExecCtx<'b> {
+        let search_path = search_path.into();
         let mut c = self.child(params);
         c.fmt.names = Some(Arc::new(CatalogNames::new(
             self.catalog(),

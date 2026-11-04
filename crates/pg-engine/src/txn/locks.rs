@@ -267,9 +267,15 @@ pub struct KeyHolder {
 
 /// The lock on relation `rel` of database `db` (LOCKTAG_RELATION).
 pub fn relation_key(db: u32, rel: u32) -> Vec<u8> {
-    let mut k = prefixed(RELATION);
-    k.extend_from_slice(&db.to_be_bytes());
-    k.extend_from_slice(&rel.to_be_bytes());
+    relation_key_bytes(db, rel).to_vec()
+}
+
+/// `relation_key`, on the stack.
+pub fn relation_key_bytes(db: u32, rel: u32) -> [u8; 16] {
+    let mut k = [0u8; 16];
+    k[7] = RELATION;
+    k[8..12].copy_from_slice(&db.to_be_bytes());
+    k[12..].copy_from_slice(&rel.to_be_bytes());
     k
 }
 

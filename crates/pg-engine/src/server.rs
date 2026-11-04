@@ -137,7 +137,7 @@ pub fn set_idle_hook(f: fn()) {
 /// until the client sends something again) and goes on waiting; one waiting past `deadline`
 /// (an idle timeout) fails with `IdleTimeout`.
 struct IdleRead {
-    s: TcpStream,
+    s: Arc<TcpStream>,
     armed: bool,
     deadline: Option<std::time::Instant>,
 }
@@ -155,7 +155,7 @@ impl std::fmt::Display for IdleTimeout {
 impl std::error::Error for IdleTimeout {}
 
 impl IdleRead {
-    fn new(s: TcpStream) -> std::io::Result<IdleRead> {
+    fn new(s: Arc<TcpStream>) -> std::io::Result<IdleRead> {
         if IDLE_HOOK.get().is_some() {
             s.set_read_timeout(Some(IDLE_TRIM))?;
         }
@@ -182,7 +182,7 @@ impl Read for IdleRead {
             self.s.set_read_timeout(self.wait_for())?;
         }
         loop {
-            match self.s.read(buf) {
+            match (&*self.s).read(buf) {
                 Ok(n) => {
                     self.armed = true;
                     return Ok(n);
@@ -215,7 +215,9 @@ impl Read for IdleRead {
 
 struct Conn {
     rd: BufReader<IdleRead>,
-    wr: TcpStream,
+    /// The connection's one socket, which the reader, notices, notifications and the
+    /// backend table share (PostgreSQL's backend has one descriptor per connection).
+    wr: Arc<TcpStream>,
     out: BytesMut,
     /// Where the message being written starts (to drop it if a panic cuts it short).
     partial: Option<usize>,
@@ -225,8 +227,6 @@ struct Conn {
     terminated: Option<Arc<AtomicBool>>,
     /// The backend's count of messages read (`Engine::read_counter`).
     reads: Option<Arc<std::sync::atomic::AtomicU64>>,
-    /// The socket, for what goes out while a statement runs (`WireSink`).
-    live: std::rc::Rc<TcpStream>,
     /// ReadyForQuery went out and no message came since: the session is idle, and its idle
     /// timeouts run (only then: not between the messages of an extended query).
     at_ready: bool,
@@ -360,7 +360,7 @@ impl Conn {
 
     fn flush(&mut self) -> std::io::Result<()> {
         if !self.out.is_empty() {
-            self.wr.write_all(&self.out)?;
+            (&*self.wr).write_all(&self.out)?;
             self.out.clear();
         }
         Ok(())
@@ -700,15 +700,15 @@ fn handle(
     let forked = std::time::Instant::now();
     crate::stack::set_limit(THREAD_STACK - (2 << 20));
     stream.set_nodelay(true)?;
+    let stream = Arc::new(stream);
     let mut c = Conn {
-        rd: BufReader::with_capacity(16 << 10, IdleRead::new(stream.try_clone()?)?),
-        wr: stream.try_clone()?,
+        rd: BufReader::with_capacity(16 << 10, IdleRead::new(stream.clone())?),
+        wr: stream.clone(),
         out: BytesMut::with_capacity(8 << 10),
         partial: None,
         fatal: false,
         terminated: None,
         reads: None,
-        live: std::rc::Rc::new(stream.try_clone()?),
         at_ready: false,
         sent: Vec::new(),
         repl: None,
@@ -720,7 +720,7 @@ fn handle(
     };
     // Notices a statement raises before it waits for a lock go out then, as Postgres
     // flushes each notice: after what the connection had buffered (`Conn::unflushed`).
-    let mut live = stream.try_clone()?;
+    let live = stream.clone();
     crate::exec::set_notice_sink(Some(Box::new(move |ns: &[Error]| {
         let mut b = UNFLUSHED.with(|u| std::mem::take(&mut *u.borrow_mut()));
         if crate::log::active() {
@@ -736,7 +736,7 @@ fn handle(
             let len = (b.len() - at) as i32;
             b[at..at + 4].copy_from_slice(&len.to_be_bytes());
         }
-        let _ = live.write_all(&b);
+        let _ = (&*live).write_all(&b);
     })));
     struct NoSink;
     impl Drop for NoSink {
@@ -754,7 +754,7 @@ fn handle(
         let code = b.i32().map_err(io_err)?;
         match code {
             SSL_REQUEST | GSSENC_REQUEST => {
-                c.wr.write_all(b"N")?;
+                (&*c.wr).write_all(b"N")?;
             }
             CANCEL_REQUEST => {
                 let (pid, secret) = (b.i32().map_err(io_err)?, b.i32().map_err(io_err)?);
@@ -819,7 +819,7 @@ fn handle(
         c.log = crate::log::Conn::new(None, None, true);
     }
     let (pid, secret, terminated) =
-        engine.register_backend(stream.try_clone().ok(), peer);
+        engine.register_backend(Some(stream.clone()), peer);
     let _guard = BackendGuard {
         engine: &engine,
         pid,
@@ -1018,13 +1018,13 @@ fn handle(
     // (process_startup_options' NOTICEs: an application_name truncated.)
     let startup_notices = crate::session::settings::take_name_notices();
     // Notifications for an idle session go straight to the client.
-    let wr = c.wr.try_clone()?;
+    let wr = c.wr.clone();
     s.attach_notifications(Arc::new(move |notes: &[crate::notify::Notification]| {
         let mut b = BytesMut::new();
         for n in notes {
             notification(&mut b, n);
         }
-        (&wr).write_all(&b)
+        (&*wr).write_all(&b)
     }));
 
     c.auth(0, &[]);
@@ -1410,15 +1410,24 @@ fn activity_state(s: &Session) -> &'static str {
     }
 }
 
+/// The backend's pg_stat_activity entry, found once per connection (`Engine::activity_slot`).
+type Act = Option<crate::engine::ActivitySlot>;
+
+fn set_activity(act: &Act, f: impl FnOnce(&mut crate::session::state::Activity)) {
+    if let Some(a) = act {
+        f(&mut a.lock());
+    }
+}
+
 /// pg_stat_activity after a statement: the backend's state, and its application_name as
 /// the statement left it (SET application_name reports itself: pgstat_report_appname).
-fn statement_done_activity(engine: &Engine, pid: i32, s: &Session) {
+fn statement_done_activity(act: &Act, s: &Session) {
     let settings = s.state.settings.borrow();
     let app = &settings.hot().application_name;
     let idle = s.status() == TxnStatus::Idle;
     let (xid, xmin) = s.activity_xids();
     let now = crate::types::datetime::Clock::system().now;
-    engine.set_activity(pid, |a| {
+    set_activity(act, |a| {
         let state = activity_state(s);
         if a.state != state {
             a.state = state.into();
@@ -1437,33 +1446,37 @@ fn statement_done_activity(engine: &Engine, pid: i32, s: &Session) {
 
 /// pg_stat_activity as a statement (or a fastpath call) starts: `state`, its transaction's
 /// start (now, outside a transaction block), and the xmin a snapshot taken now has.
-fn start_activity(engine: &Engine, pid: i32, s: &Session, state: &str, sql: Option<String>) {
+fn start_activity(act: &Act, s: &Session, state: &str, sql: Option<&str>) {
     let now = crate::types::datetime::Clock::system().now;
-    let xmin = s.state.db.xids().current_xmin();
     // pgstat_report_activity keeps track_activity_query_size - 1 bytes of the text, cut at a
     // character boundary (pg_mbcliplen): pgAdmin's dashboard shows the clipped text.
-    let sql = sql.map(|mut q| {
+    let sql = sql.map(|q| {
         let max = s.state.settings.borrow().hot().activity_query_size.saturating_sub(1);
-        if q.len() > max {
-            let mut n = max;
-            while !q.is_char_boundary(n) {
-                n -= 1;
-            }
-            q.truncate(n);
+        let mut n = q.len().min(max);
+        while !q.is_char_boundary(n) {
+            n -= 1;
         }
-        q
+        &q[..n]
     });
-    engine.set_activity(pid, |a| {
+    set_activity(act, |a| {
         if a.state != state {
             a.state = state.into();
             a.state_change = Some(now);
         }
-        if let Some(q) = sql {
-            a.query = q;
+        // (Copied only when it changed: a prepared statement's Bind and Execute name the same.)
+        if let Some(q) = sql
+            && a.query != q
+        {
+            a.query.clear();
+            a.query.push_str(q);
         }
         a.query_start = Some(now);
         a.xact_start.get_or_insert(now);
-        a.backend_xmin.get_or_insert(xmin);
+        // (The xmin is looked up only when the entry has none: in a transaction, every
+        // message but its first keeps it.)
+        if a.backend_xmin.is_none() {
+            a.backend_xmin = Some(s.state.db.xids().current_xmin());
+        }
     });
 }
 
@@ -1478,6 +1491,7 @@ fn message_loop(
     let mut skipping = false;
     // The query of the last Parse, for what the server log says of errors after it.
     let mut last_stmt: Option<String> = None;
+    let act = engine.activity_slot(pid);
     loop {
         c.log_sent(Some(s), pid, last_stmt.as_deref());
         let idle = if std::mem::take(&mut c.at_ready) { s.idle_timeout() } else { None };
@@ -1543,7 +1557,7 @@ fn message_loop(
                         continue;
                     }
                 };
-                start_activity(engine, pid, s, "active", Some(sql.clone()));
+                start_activity(&act, s, "active", Some(&sql));
                 s.start_xact_command();
                 if let Some(mode) = c.repl
                     && (crate::repl::cmd::is_command(&sql) || mode == crate::repl::walsender::Mode::Physical)
@@ -1572,7 +1586,7 @@ fn message_loop(
                         Err(e) => c.error(&e),
                     }
                 }
-                statement_done_activity(engine, pid, s);
+                statement_done_activity(&act, s);
                 c.log_sent(Some(s), pid, Some(&sql));
                 s.finish_xact_command();
                 // A FATAL error (the session terminating itself) ends the session.
@@ -1585,12 +1599,12 @@ fn message_loop(
             b'P' => {
                 let mut b = Body::new(&body);
                 last_stmt = b.cstr().ok().and_then(|_| b.cstr().ok()).map(str::to_string);
-                extended_activity(engine, pid, s, t, &body);
+                extended_activity(&act, s, t, &body);
                 s.start_xact_command();
                 guard(c, s, |c, s| parse_msg(c, s, &body))
             }
             b'B' => {
-                extended_activity(engine, pid, s, t, &body);
+                extended_activity(&act, s, t, &body);
                 s.start_xact_command();
                 guard(c, s, |c, s| bind_msg(c, s, &body))
             }
@@ -1599,7 +1613,7 @@ fn message_loop(
                 guard(c, s, |c, s| describe_msg(c, s, &body))
             }
             b'E' => {
-                extended_activity(engine, pid, s, t, &body);
+                extended_activity(&act, s, t, &body);
                 s.start_xact_command();
                 guard(c, s, |c, s| execute_msg(c, s, &body))
             }
@@ -1612,7 +1626,7 @@ fn message_loop(
                 }
                 send_notices(c, s);
                 send_changed(c, s);
-                statement_done_activity(engine, pid, s);
+                statement_done_activity(&act, s);
                 s.finish_xact_command();
                 ready_for_query(c, s)?;
                 continue;
@@ -1625,13 +1639,13 @@ fn message_loop(
             // Copy messages outside COPY are ignored, as Postgres does.
             b'd' | b'c' | b'f' => continue,
             b'F' => {
-                start_activity(engine, pid, s, "fastpath function call", None);
+                start_activity(&act, s, "fastpath function call", None);
                 let r = guard(c, s, |c, s| fastpath_msg(c, s, &body));
                 send_notices(c, s);
                 if let Err(e) = r {
                     c.error(&e);
                 }
-                statement_done_activity(engine, pid, s);
+                statement_done_activity(&act, s);
                 ready_for_query(c, s)?;
                 continue;
             }
@@ -1666,21 +1680,21 @@ fn message_loop(
 /// pg_stat_activity while extended-protocol messages run (pgstat_report_activity in
 /// exec_parse_message / exec_bind_message / exec_execute_message): active, with the
 /// statement's text, until the Sync's ReadyForQuery.
-fn extended_activity(engine: &Engine, pid: i32, s: &Session, t: u8, body: &[u8]) {
+fn extended_activity(act: &Act, s: &Session, t: u8, body: &[u8]) {
     let mut b = Body::new(body);
     let sql = match t {
-        b'P' => b.cstr().ok().and_then(|_| b.cstr().ok()).map(str::to_string),
+        b'P' => b.cstr().ok().and_then(|_| b.cstr().ok()),
         b'B' => b
             .cstr()
             .ok()
             .and_then(|_| b.cstr().ok())
-            .and_then(|stmt| s.prepared.get(stmt).map(|p| p.sql.clone())),
+            .and_then(|stmt| s.prepared.get(stmt).map(|p| p.sql.as_str())),
         _ => b
             .cstr()
             .ok()
-            .and_then(|portal| s.portals.get(portal).map(|p| p.stmt.sql.clone())),
+            .and_then(|portal| s.portals.get(portal).map(|p| p.stmt.sql.as_str())),
     };
-    start_activity(engine, pid, s, "active", sql);
+    start_activity(act, s, "active", sql);
 }
 
 /// Run one message's work so that an engine panic becomes an ERROR (XX000) for this
@@ -1894,7 +1908,7 @@ fn data_rows(c: &mut Conn, s: &Session, r: &QueryResult, formats: &[i16]) -> Res
 /// the rows as they're made and the rows before an error; memory stays bounded for any
 /// result: a client that stops reading stops the statement, as a full socket does a backend.
 struct WireSink {
-    wr: std::rc::Rc<TcpStream>,
+    wr: Arc<TcpStream>,
     /// The portal's result formats (an Execute's); empty: text, and a simple query's
     /// RowDescription goes out first.
     formats: Vec<i16>,
@@ -1970,7 +1984,7 @@ impl crate::session::RowSink for WireSink {
 
 /// Run `f` (a statement) with its rows streaming to the client (`WireSink`).
 fn streamed<T>(c: &mut Conn, s: &mut Session, formats: &[i16], describe: bool, f: impl FnOnce(&mut Session) -> T) -> T {
-    s.row_sink = Some(Box::new(WireSink { wr: c.live.clone(), formats: formats.to_vec(), describe }));
+    s.row_sink = Some(Box::new(WireSink { wr: c.wr.clone(), formats: formats.to_vec(), describe }));
     let r = c.unflushed(|| f(s));
     s.row_sink = None;
     r

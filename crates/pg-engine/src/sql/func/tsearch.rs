@@ -87,7 +87,7 @@ impl Lookup {
     fn new(c: &FnCtx) -> Lookup {
         Lookup {
             catalog: c.exec.catalog(),
-            search_path: c.exec.search_path.clone(),
+            search_path: c.exec.search_path.to_vec(),
         }
     }
 

@@ -444,7 +444,7 @@ impl Database {
             catalog_base_cat: None,
             stmt_catalog: None,
             read_catalog: None,
-            locks_held: HashMap::new(),
+            locks_held: hashbrown::HashMap::new(),
             lock_journal: Vec::new(),
             fast_slot: std::sync::OnceLock::new(),
             row_locks: Vec::new(),
@@ -850,6 +850,16 @@ pub struct DeferredFk {
 /// A heavyweight lock a transaction holds: its key and mode.
 pub type HeldLock = (Vec<u8>, LockMode);
 
+/// A `HeldLock` looked up by a borrowed key (hashes as the tuple does).
+#[derive(Hash)]
+struct HeldKey<'a>(&'a [u8], LockMode);
+
+impl hashbrown::Equivalent<HeldLock> for HeldKey<'_> {
+    fn equivalent(&self, k: &HeldLock) -> bool {
+        self.0 == k.0.as_slice() && self.1 == k.1
+    }
+}
+
 pub struct Txn {
     /// Lock owner id (every transaction has one).
     pub id: u64,
@@ -918,7 +928,7 @@ pub struct Txn {
     /// lock. (Never older than `stmt_catalog`, which stays the base of its DDL.)
     read_catalog: Option<Arc<Catalog>>,
     /// Heavyweight locks held, by key and mode, with the subtransaction depth that took them.
-    locks_held: HashMap<HeldLock, usize>,
+    locks_held: hashbrown::HashMap<HeldLock, usize>,
     /// The order they were taken in (released by ROLLBACK TO in reverse).
     lock_journal: Vec<HeldLock>,
     /// Its backend's fast-path slot for weak relation locks (`locks::FastSlot`), once looked up.
@@ -2819,10 +2829,11 @@ impl Txn {
         policy: WaitPolicy,
         what: &dyn Fn() -> String,
     ) -> Result<bool> {
-        let k = (key.to_vec(), mode);
-        if self.locks_held.contains_key(&k) {
+        // (Held already: what most statements of a transaction find, without a copy of the key.)
+        if self.locks_held.contains_key(&HeldKey(key, mode)) {
             return Ok(true);
         }
+        let k = (key.to_vec(), mode);
         let fast = self.fast().is_some_and(|s| self.db.locks.acquire_fast(s, key, self.id, mode));
         let got = fast
             || self.db.locks.acquire(
@@ -3178,7 +3189,7 @@ impl Txn {
 
     /// Lock relation `rel` in `mode` (LockRelationOid) until the transaction ends.
     pub fn lock_relation(&mut self, rel: u32, mode: LockMode, policy: WaitPolicy, name: &dyn Fn() -> String) -> Result<bool> {
-        let key = locks::relation_key(self.db.oid, rel);
+        let key = locks::relation_key_bytes(self.db.oid, rel);
         self.lock(&key, mode, policy, &|| format!("relation \"{}\"", name()))
     }
 

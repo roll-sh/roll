@@ -883,6 +883,12 @@ impl SessionState {
 
     /// The search path, with this session's temporary schema first (or where `pg_temp` is).
     pub fn search_path(&self) -> Vec<String> {
+        self.shared_search_path().to_vec()
+    }
+
+    /// `search_path`, shared: the session's copy while its settings, user and role stay
+    /// the same (each statement takes one).
+    pub fn shared_search_path(&self) -> crate::catalog::names::SearchPath {
         // `$user` is the current user (SET ROLE, a SECURITY DEFINER function's owner).
         let cat = self.db.catalog();
         let oid = self.current_role(&cat);

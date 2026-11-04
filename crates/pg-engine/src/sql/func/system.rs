@@ -37,7 +37,7 @@ fn current_schema(_: &[Value], c: &FnCtx) -> Result<Value> {
     let explicit_temp = crate::session::settings::parse_search_path(&raw, "")
         .iter()
         .any(|s| s == "pg_temp");
-    for s in &c.exec.search_path {
+    for s in c.exec.search_path.iter() {
         if (explicit_temp || !s.starts_with("pg_temp")) && cat.schema_by_name(s).is_some() {
             return Ok(text(s.as_str()));
         }
@@ -78,7 +78,7 @@ fn current_schemas(a: &[Value], c: &FnCtx) -> Result<Value> {
             out.push(text("pg_catalog"));
         }
     }
-    for s in &c.exec.search_path {
+    for s in c.exec.search_path.iter() {
         if is_temp(s) && !explicit_temp {
             continue;
         }
