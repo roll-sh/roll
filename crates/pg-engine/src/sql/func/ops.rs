@@ -1465,6 +1465,25 @@ fn p_dt_ge(x: &Value, y: &Value, _: &T) -> Result<Value> {
     Ok(Value::Bool(p_dtcmp(x, y)? != Ordering::Less))
 }
 
+/// A date as `p_instant` compares it with a timestamp (no `Value` made: `exec::vector`).
+pub fn date_instant(d: i32) -> i64 {
+    date_to_ts(d).unwrap_or(datetime::TS_POS_INF)
+}
+
+/// The test of the ordering `f` is when it is a date / timestamp comparison (`p_dt_*`:
+/// operands compared as `p_instant`s).
+pub fn dt_cmp(f: PureFn) -> Option<fn(Ordering) -> bool> {
+    let table: [(PureFn, fn(Ordering) -> bool); 6] = [
+        (p_dt_eq, |o| o == Ordering::Equal),
+        (p_dt_ne, |o| o != Ordering::Equal),
+        (p_dt_lt, |o| o == Ordering::Less),
+        (p_dt_le, |o| o != Ordering::Greater),
+        (p_dt_gt, |o| o == Ordering::Greater),
+        (p_dt_ge, |o| o != Ordering::Less),
+    ];
+    table.iter().find(|(p, _)| std::ptr::fn_addr_eq(*p, f)).map(|(_, t)| *t)
+}
+
 /// numeric's +, − and × (the operators `exec::kernel` computes in an i128).
 pub fn num_op(imp: super::FnImpl) -> Option<crate::exec::kernel::NumOp> {
     use crate::exec::kernel::NumOp;

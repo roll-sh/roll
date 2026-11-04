@@ -31,6 +31,16 @@ pub enum VN {
     Op(NumOp, Box<[VN; 2]>),
 }
 
+/// A row's exact number as `VN::at` gives it (None: `Out`; Some(None): NULL).
+pub type Num = Option<Option<(i128, u32)>>;
+
+/// An operand of a date / timestamp comparison (`VB::Instant`): a date column or a
+/// constant, as a number (None: NULL).
+pub enum Inst {
+    Date(usize),
+    Const(Option<i64>),
+}
+
 /// An operand of a comparison: a column or a constant.
 pub enum Leaf {
     Col(usize, DataType),
@@ -58,6 +68,9 @@ pub enum VB {
     Like { col: usize, pat: Box<crate::sql::func::string::LikePattern>, neg: bool },
     /// `col = ANY (array)` / `col <> ALL (array)` of exact numbers (None: a NULL item).
     NumIn { col: usize, items: Vec<Option<(i128, u32)>>, neg: bool },
+    /// A comparison of dates, or of dates and timestamps (`ts`: as `ops::p_instant`s, a date
+    /// its timestamp; else a date's day number), strict: as integers.
+    Instant { test: fn(Ordering) -> bool, args: Box<[Inst; 2]>, ts: bool },
     /// Any other pure binary call returning bool over fixed-width columns and constants:
     /// each column's value made (no allocation) and `f` called, as `K::Call` calls it.
     Call { f: PureFn, args: Box<[Leaf; 2]>, strict: bool },
@@ -87,6 +100,73 @@ impl VN {
                     return Some(None);
                 };
                 Some(Some(num_op(*op, x, sx, y, sy)?))
+            }
+        }
+    }
+}
+
+impl VN {
+    /// Each row of `sel`'s number into `out` (by row: `at`'s), a column at a time.
+    pub fn eval(&self, b: &ColBatch, sel: &[u32], out: &mut [Num]) {
+        match self {
+            VN::Col(i) => {
+                let Some(c) = col_at(b, *i) else {
+                    return sel.iter().for_each(|&r| out[r as usize] = None);
+                };
+                macro_rules! each {
+                    ($v:expr, $f:expr) => {
+                        for &r in sel {
+                            let r = r as usize;
+                            out[r] = Some(if c.nulls[r] { None } else { Some($f($v[r])) });
+                        }
+                    };
+                }
+                match &c.data {
+                    ColData::I32(v) => each!(v, |x: i32| (x as i128, 0)),
+                    ColData::I64(v) => each!(v, |x: i64| (x as i128, 0)),
+                    ColData::Num(v) => each!(v, |x: (i128, u32)| x),
+                    _ => sel.iter().for_each(|&r| out[r as usize] = None),
+                }
+            }
+            VN::Const(k) => sel.iter().for_each(|&r| out[r as usize] = Some(*k)),
+            VN::Op(op, args) => {
+                args[0].eval(b, sel, out);
+                let mut y = vec![None; out.len()];
+                args[1].eval(b, sel, &mut y);
+                for &r in sel {
+                    let r = r as usize;
+                    // (Both operands before a NULL one: `K::num`'s order.)
+                    out[r] = match (out[r], y[r]) {
+                        (Some(Some((x, sx))), Some(Some((y, sy)))) => num_op(*op, x, sx, y, sy).map(Some),
+                        (Some(_), Some(_)) => Some(None),
+                        _ => None,
+                    };
+                }
+            }
+        }
+    }
+}
+
+impl Inst {
+    fn compile(k: &K, types: &[DataType], ts: bool) -> Option<Inst> {
+        Some(match k {
+            K::Col(i) if matches!(types.get(*i), Some(DataType::Date)) => Inst::Date(*i),
+            K::Const(Value::Null) => Inst::Const(None),
+            K::Const(Value::Date(d)) => Inst::Const(Some(if ts { crate::sql::func::ops::date_instant(*d) } else { *d as i64 })),
+            K::Const(Value::Timestamp(t)) if ts => Inst::Const(Some(*t)),
+            _ => return None,
+        })
+    }
+
+    /// Row `r`'s number (Some(None): NULL; None: not a date column).
+    #[inline]
+    fn at(&self, b: &ColBatch, r: usize, ts: bool) -> Option<Option<i64>> {
+        match self {
+            Inst::Const(k) => Some(*k),
+            Inst::Date(i) => {
+                let c = col_at(b, *i)?;
+                let ColData::Date(v) = &c.data else { return None };
+                Some((!c.nulls[r]).then(|| if ts { crate::sql::func::ops::date_instant(v[r]) } else { v[r] as i64 }))
             }
         }
     }
@@ -254,6 +334,15 @@ impl VB {
                     let k = text_const(k, bp)??;
                     return Some(VB::Str { test, col, k, bp, col_first });
                 }
+                let inst = crate::sql::func::ops::dt_cmp(*f)
+                    .map(|t| (t, true))
+                    .or_else(|| str_cmp(*f).filter(|(_, bp)| !bp).map(|(t, _)| (t, false)));
+                if let (Some((test, ts)), true) = (inst, *strict)
+                    && let (Some(x), Some(y)) = (Inst::compile(&args[0], types, ts), Inst::compile(&args[1], types, ts))
+                    && (matches!(x, Inst::Date(_)) || matches!(y, Inst::Date(_)))
+                {
+                    return Some(VB::Instant { test, args: Box::new([x, y]), ts });
+                }
                 VB::Call { f: *f, args: Box::new([Leaf::compile(&args[0], types)?, Leaf::compile(&args[1], types)?]), strict: *strict }
             }
             K::InList(x, list, neg) => {
@@ -375,9 +464,13 @@ impl VB {
                 }
             }
             VB::NumCmp { test, args } => {
+                let mut x = vec![None; b.len];
+                let mut y = vec![None; b.len];
+                args[0].eval(b, sel, &mut x);
+                args[1].eval(b, sel, &mut y);
                 for &r in sel {
                     let r = r as usize;
-                    out[r] = match (args[0].at(b, r), args[1].at(b, r)) {
+                    out[r] = match (x[r], y[r]) {
                         (Some(Some((x, sx))), Some(Some((y, sy)))) => match scaled_cmp(x, sx, y, sy) {
                             Some(o) if test(o) => Tri::T,
                             Some(_) => Tri::F,
@@ -461,6 +554,17 @@ impl VB {
                     };
                 }
             }
+            VB::Instant { test, args, ts } => {
+                for &r in sel {
+                    let r = r as usize;
+                    out[r] = match (args[0].at(b, r, *ts), args[1].at(b, r, *ts)) {
+                        (Some(Some(x)), Some(Some(y))) if test(x.cmp(&y)) => Tri::T,
+                        (Some(Some(_)), Some(Some(_))) => Tri::F,
+                        (Some(_), Some(_)) => Tri::N,
+                        _ => Tri::Out,
+                    };
+                }
+            }
             VB::Call { f, args, strict } => {
                 for &r in sel {
                     let r = r as usize;
@@ -490,6 +594,10 @@ impl VB {
             VB::Not(a) => a.cols(out),
             VB::IsNull(c, _) | VB::Col(c) | VB::Str { col: c, .. } | VB::StrIn { col: c, .. } | VB::NumIn { col: c, .. } | VB::Like { col: c, .. } => out.push(*c),
             VB::NumCmp { args, .. } => args.iter().for_each(|a| a.cols(out)),
+            VB::Instant { args, .. } => out.extend(args.iter().filter_map(|a| match a {
+                Inst::Date(c) => Some(*c),
+                Inst::Const(_) => None,
+            })),
             VB::Call { args, .. } => out.extend(args.iter().filter_map(|l| match l {
                 Leaf::Col(c, _) => Some(*c),
                 Leaf::Const(_) => None,

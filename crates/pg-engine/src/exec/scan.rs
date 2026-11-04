@@ -3368,6 +3368,7 @@ impl ScanNode {
                     raw: Vec::new(),
                     topk: None,
                     toast: None,
+                    vplan: Default::default(),
                 };
                 let buf = super::parscan::LazyBuf::new(&d);
                 let cmps = d.filter.as_ref().and_then(super::kernel::StoredCmps::of);
@@ -3967,6 +3968,7 @@ impl ScanNode {
             raw: computed.raw,
             topk: computed.topk,
             toast,
+            vplan: Default::default(),
         };
         if inline {
             return Ok(Some(ParScan::start_inline(scans, d)));
@@ -4072,6 +4074,7 @@ impl ScanNode {
             need_raw: None,
             topk: None,
             toast: None,
+            vplan: Default::default(),
         };
         Ok(ParScan::start(scans, workers, pool, d))
     }
@@ -4143,6 +4146,7 @@ impl ScanNode {
             need_raw: None,
             topk: None,
             toast: None,
+            vplan: Default::default(),
         };
         let par = ParScan::start(scans, workers, pool, d);
         // (No worker started: the keys are read here after all.)
