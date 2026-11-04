@@ -1,0 +1,25 @@
+    PID PSR  NI %CPU %MEM COMMAND         COMMAND
+2115308  21  19 1200  0.0 ps              ps -eo pid,psr,ni,pcpu,pmem,comm,args --sort=-pcpu
+2115264  32   0  230  0.0 tsc             /home/work/worktrees/AI-Acquisition-Platform/t3-9a5101c8/node_modules/.bun/@typescript+typescript-linux-x64@7.0.2/node_modules/@typescript/typescript-linux-x64/lib/tsc --noEmit -p tsconfig.json
+2112435  27   0  126  0.2 MainThread      node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/.bin/tsc -p tsconfig.build.json
+2112248   2   0  113  0.2 MainThread      /usr/bin/node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/jest-runner/node_modules/jest-worker/build/processChild.js
+2112259  16   0  109  0.2 MainThread      /usr/bin/node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/jest-runner/node_modules/jest-worker/build/processChild.js
+2112196  11   0  102  0.2 MainThread      /usr/bin/node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/jest-runner/node_modules/jest-worker/build/processChild.js
+2112260   6   0  101  0.2 MainThread      /usr/bin/node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/jest-runner/node_modules/jest-worker/build/processChild.js
+2112311   2   0 99.6  0.2 MainThread      /usr/bin/node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/jest-runner/node_modules/jest-worker/build/processChild.js
+2112277  30   0 99.3  0.2 MainThread      /usr/bin/node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/jest-runner/node_modules/jest-worker/build/processChild.js
+2112278  32   0 99.0  0.2 MainThread      /usr/bin/node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/jest-runner/node_modules/jest-worker/build/processChild.js
+2112195  31   0 95.9  0.2 MainThread      /usr/bin/node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/jest-runner/node_modules/jest-worker/build/processChild.js
+2114082  17   0 94.6  0.1 MainThread      node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/.bin/tsc -p tsconfig.build.json
+2112268  19   0 93.7  0.2 MainThread      /usr/bin/node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/jest-runner/node_modules/jest-worker/build/processChild.js
+2112292   8   0 93.7  0.2 MainThread      /usr/bin/node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/jest-runner/node_modules/jest-worker/build/processChild.js
+2112298   4   0 93.7  0.2 MainThread      /usr/bin/node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/jest-runner/node_modules/jest-worker/build/processChild.js
+2112327  24   0 93.6  0.2 MainThread      /usr/bin/node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/jest-runner/node_modules/jest-worker/build/processChild.js
+2112269  33   0 93.3  0.2 MainThread      /usr/bin/node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/jest-runner/node_modules/jest-worker/build/processChild.js
+2112135  10   0 92.8  0.2 MainThread      node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/.bin/jest --verbose
+2113964  12   0 86.1  0.1 MainThread      /usr/bin/node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/jest-runner/node_modules/jest-worker/build/processChild.js
+2112328  22   0 85.4  0.2 MainThread      /usr/bin/node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/jest-runner/node_modules/jest-worker/build/processChild.js
+2112353  23   0 82.9  0.2 MainThread      /usr/bin/node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/jest-runner/node_modules/jest-worker/build/processChild.js
+2114010  28   0 81.7  0.1 MainThread      /usr/bin/node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/jest-runner/node_modules/jest-worker/build/processChild.js
+2113990  14   0 76.8  0.1 MainThread      /usr/bin/node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/jest-runner/node_modules/jest-worker/build/processChild.js
+2113971   5   0 76.5  0.1 MainThread      /usr/bin/node /home/work/acquisity-cold-email-infra/.claude/worktrees/agent-ae20ea30fe08a2510/node_modules/jest-runner/node_modules/jest-worker/build/processChild.js

@@ -1,0 +1,9 @@
+{
+  "rows": 1000000,
+  "sum_id": 500000500000,
+  "sum_bucket": 499500000,
+  "sum_length": 256000000,
+  "sum_ascii": 70161984,
+  "sha256": "17122cc009eb57b00500fe1e74cda9cfbe808ed874dbb8676e5ca60c7311049c",
+  "bytes": 267778896
+}

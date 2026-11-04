@@ -1,0 +1,10 @@
+{
+  "index-limiter-candidate-profile.perf.data": {
+    "bytes": 829954,
+    "sha256": "fec4690b8c27a9e70f4f204e5579ff1178c6ff7e5ffb0dfe4b5678d35d5f970a"
+  },
+  "index-limiter-baseline-profile.perf.data": {
+    "bytes": 906746,
+    "sha256": "49d596ee550608a07629cdb0ce7bfca11ddda093dfc99c8942874f61b26b5e93"
+  }
+}
