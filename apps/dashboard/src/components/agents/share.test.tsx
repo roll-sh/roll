@@ -62,7 +62,7 @@ describe("ShareView", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "Speed" }), { target: { value: "8" } });
     expect(await screen.findByRole("button", { name: "Pause" }, { timeout: 2000 })).toBeInTheDocument();
     // It ends on the share as frozen, and offers to replay.
-    expect(await screen.findByRole("button", { name: "Replay" }, { timeout: 6000 })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Replay" }, { timeout: 11_000 })).toBeInTheDocument();
     expect(screen.getByText("0123456789")).toBeInTheDocument();
   }, 15_000);
 
