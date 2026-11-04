@@ -1,4 +1,4 @@
-import { createRootRoute, HeadContent, Outlet, Scripts } from "@tanstack/react-router";
+import { createRootRoute, HeadContent, isNotFound, Outlet, Scripts } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import geistMono from "@fontsource-variable/geist-mono/files/geist-mono-latin-wght-normal.woff2?url";
 import geistSans from "@fontsource-variable/geist/files/geist-latin-wght-normal.woff2?url";
@@ -15,7 +15,7 @@ export const Route = createRootRoute({
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       // A page's own title replaces this one; a 404 has none of its own.
-      { title: matches.some((m) => m.status === "notFound") ? titled("Not found") : "roll" },
+      { title: matches.some((m) => isNotFound(m.error)) ? titled("Not found") : "roll" },
       { name: "description", content: "Serverless infrastructure for everything." },
     ],
     links: [
