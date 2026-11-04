@@ -1,0 +1,9 @@
+{"version": "v3", "mode": "failure", "exit": 1, "remaining": ["0000000000000000000000000000000000000000000000000000000000000000"], "calls": [["docker", "stop", "--time", "120", "0000000000000000000000000000000000000000000000000000000000000000"], ["docker", "logs", "0000000000000000000000000000000000000000000000000000000000000000"], ["docker", "rm", "0000000000000000000000000000000000000000000000000000000000000000"]], "error": "{'cleanup_failures': [{'id': '0000000000000000000000000000000000000000000000000000000000000000', 'error': 'Traceback (most recent call last):\\n  File \"/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/runner-v3.py\", line 281, in cleanup\\n    run([\\'docker\\',\\'rm\\',cid],\\'cleanup-remove\\');OWN.remove(cid)\\n    ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \"/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/cleanup-control.py\", line 14, in run\\n    if mode==\\'failure\\' and cmd[1]==\\'rm\\':raise RuntimeError(\\'injected exact-ID Docker removal failure\\')\\n                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\nRuntimeError: injected exact-ID Docker removal failure\\n'}], 'remaining_owned_ids': ['0000000000000000000000000000000000000000000000000000000000000000']}"}
+Traceback (most recent call last):
+  File "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/runner-v3.py", line 281, in cleanup
+    run(['docker','rm',cid],'cleanup-remove');OWN.remove(cid)
+    ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/cleanup-control.py", line 14, in run
+    if mode=='failure' and cmd[1]=='rm':raise RuntimeError('injected exact-ID Docker removal failure')
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: injected exact-ID Docker removal failure

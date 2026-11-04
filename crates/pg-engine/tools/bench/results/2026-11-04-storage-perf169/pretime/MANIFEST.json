@@ -1,0 +1,63 @@
+{
+  "phase": "pretime",
+  "closed": true,
+  "scope": "every bundle file except this manifest; no files may be added",
+  "files": {
+    "CLEANUP-CONTROLS-PASS": {
+      "sha256": "11fc9706f36676ee9caddfe84ea9bac76eedccc7d6110e14848cd3d66d86aee3",
+      "bytes": 131
+    },
+    "LAUNCH.md": {
+      "sha256": "74250d32f50ca60864597e1857b2463fa927454eb0888d3a6dc748c0a872f6cd",
+      "bytes": 513
+    },
+    "PLAN-v2.md": {
+      "sha256": "70c7f6447df5b37629d620fe783f5bea332c0941c637642390304c35ac787550",
+      "bytes": 541
+    },
+    "PLAN-v3.md": {
+      "sha256": "88e79a521892b99988f606a9a6282a1f7b949ff49f6bb7219b2cf76686b2cee1",
+      "bytes": 1025
+    },
+    "cleanup-control-v2-failure.log": {
+      "sha256": "c4c6a422ad7035cea0ba4d542ace9a533a7cfa384cce3b1685ddc2d22727b9fe",
+      "bytes": 1042
+    },
+    "cleanup-control-v3-failure.log": {
+      "sha256": "48a7b1a6b0a8a9da89ff8f157e69874c6e1b88de80765fb336af83b3fd30a433",
+      "bytes": 1924
+    },
+    "cleanup-control-v3-success.log": {
+      "sha256": "8e155e3426e9d3d9d1ed4faff4810f2921241bce8e2a7879d76404476b815fe5",
+      "bytes": 355
+    },
+    "cleanup-control.py": {
+      "sha256": "4720c13580ce6a913763a0221ab690179bc2ef91999bc591001a29781a58fd48",
+      "bytes": 1777
+    },
+    "cleanup-controls.json": {
+      "sha256": "e3e05fa96e5e0b3f5e3c12ee97b2f5b6f6f7d51c7f2d8832f20779e8d9a88d24",
+      "bytes": 2599
+    },
+    "launch-v3.py": {
+      "sha256": "8d2a2177c1cf91b3a67e573688fa55db761e60f4a25b411ad4d7cc17ea320924",
+      "bytes": 1900
+    },
+    "launch.py": {
+      "sha256": "cd801c93597f5b483256685e4b2143466633e7467167b25d72aac27e8237f2c9",
+      "bytes": 1671
+    },
+    "runner-v2.py": {
+      "sha256": "6773c2a2aedb3f8e50063fdd3a5d58c4bb0ce8c0c56385594cbcbddd6bd27b97",
+      "bytes": 21120
+    },
+    "runner-v3.py": {
+      "sha256": "03b3e864fd380cfb2541869f11516d4a2e4bfc81ae87551455a4ad18b4a7bede",
+      "bytes": 21596
+    },
+    "seal-v2.py": {
+      "sha256": "77d3f3e0761116bc85114e1d1e25c7da2d153359601e279144356e7e2c8f7b50",
+      "bytes": 4056
+    }
+  }
+}
