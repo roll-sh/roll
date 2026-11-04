@@ -2,7 +2,8 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Graph, GraphNode } from "@/lib/agents-graph";
-import { AgentsCanvas, type OrderSync } from "./agents-canvas";
+import type { Order } from "@/lib/agents-layout";
+import { AgentsCanvas } from "./agents-canvas";
 
 const node = (key: string, parent: string | null, children: string[] = []): GraphNode => ({
   key,
@@ -26,38 +27,46 @@ const graph: Graph = {
   edges: [],
 };
 
-function canvas(sync?: OrderSync) {
-  return render(
-    <AgentsCanvas graph={graph} storageKey="o" sync={sync} render={(n) => <button data-drag>{n.key}</button>} defaultSize={() => ({ w: 100, h: 40 })} />,
-  );
-}
+const ui = (props: { order?: Order; onOrder?: (o: Order) => void } = {}) => (
+  <AgentsCanvas graph={graph} storageKey="o" {...props} render={(n) => <button data-drag>{n.key}</button>} defaultSize={() => ({ w: 100, h: 40 })} />
+);
 
 const stored = () => JSON.parse(localStorage.getItem("roll:agents:order:o") ?? "null");
 
 beforeEach(() => localStorage.clear());
 
 describe("the canvas remembers how it was arranged", () => {
-  it("⌥↑ / ⌥↓ move a card among its siblings, kept here and synced to roll", async () => {
-    const sync = { load: vi.fn(async () => null), save: vi.fn() };
-    canvas(sync);
+  it("⌥↑ / ⌥↓ move a card among its siblings, kept here when nobody else keeps the order", async () => {
+    render(ui());
     screen.getByRole("button", { name: "c" }).focus();
     await userEvent.keyboard("{Alt>}{ArrowUp}{/Alt}");
     expect(stored()).toEqual({ m: ["a", "c", "b"] });
-    expect(sync.save).toHaveBeenLastCalledWith({ m: ["a", "c", "b"] });
     await userEvent.keyboard("{Alt>}{ArrowUp}{/Alt}");
     expect(stored()).toEqual({ m: ["c", "a", "b"] });
     // The first card can't go further up.
     await userEvent.keyboard("{Alt>}{ArrowUp}{/Alt}");
-    expect(sync.save).toHaveBeenCalledTimes(2);
+    expect(stored()).toEqual({ m: ["c", "a", "b"] });
     await userEvent.click(screen.getByRole("button", { name: "Back to the default order" }));
     expect(stored()).toBeNull();
   });
 
-  it("takes roll's copy over this device's, and forgets free positions from before", async () => {
-    localStorage.setItem("roll:agents:order:o", JSON.stringify({ m: ["b", "a", "c"] }));
+  it("shows the order it's given and hands moves back (a canvas view's, synced through roll)", async () => {
+    const onOrder = vi.fn();
+    const { rerender } = render(ui({ order: { m: ["b", "a", "c"] }, onOrder }));
+    screen.getByRole("button", { name: "c" }).focus();
+    await userEvent.keyboard("{Alt>}{ArrowUp}{/Alt}");
+    expect(onOrder).toHaveBeenLastCalledWith({ m: ["b", "c", "a"] });
+    // Nothing kept here: the caller keeps it.
+    expect(stored()).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Back to the default order" }));
+    expect(onOrder).toHaveBeenLastCalledWith({});
+    rerender(ui({ order: {}, onOrder }));
+    expect(screen.queryByRole("button", { name: "Back to the default order" })).toBeNull();
+  });
+
+  it("forgets free positions from before", async () => {
     localStorage.setItem("roll:agents:positions:o", JSON.stringify({ a: { x: 900, y: 900 } }));
-    canvas({ load: async () => ({ m: ["c", "b", "a"], junk: 4 }), save: vi.fn() });
-    await waitFor(() => expect(stored()).toEqual({ m: ["c", "b", "a"] }));
-    expect(localStorage.getItem("roll:agents:positions:o")).toBeNull();
+    render(ui());
+    await waitFor(() => expect(localStorage.getItem("roll:agents:positions:o")).toBeNull());
   });
 });

@@ -8,10 +8,11 @@
 import { isBusy, isRunning, type MachineId, type Node, type ProjectId, type ProviderId, type Request, type Thread, type ThreadChange } from "./agents-api";
 import { pendingRequests, runsOf, type AgentsData } from "./agents-store";
 
-export type GraphKind = "machine" | "project" | "thread" | "subagent" | "request" | "terminal";
+/** `pin`: a card pinned onto a canvas view (`lib/agents-views.ts` adds them; `deriveGraph` never does). */
+export type GraphKind = "machine" | "project" | "thread" | "subagent" | "request" | "terminal" | "pin";
 
 export interface GraphNode {
-  /** `m:` machine, `p:` project, `t:` thread, `s:` subagent node, `r:` request, `x:` terminal. */
+  /** `m:` machine, `p:` project, `t:` thread, `s:` subagent node, `r:` request, `x:` terminal; `pc:`/`pd:`/`px:` a pinned conversation, diff, terminal. */
   key: string;
   kind: GraphKind;
   /** The record's id. */

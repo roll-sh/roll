@@ -22,7 +22,6 @@ import {
   loadOrder,
   loadView,
   moveTo,
-  parseOrder,
   ROOTS,
   saveOrder,
   saveView,
@@ -36,12 +35,6 @@ import {
 } from "@/lib/agents-layout";
 import { CanvasEngine, type SceneMeta } from "./canvas-engine";
 
-/** Where the order is kept besides this device (roll, so every device shows the same). */
-export interface OrderSync {
-  load: () => Promise<unknown>;
-  save: (order: Order) => void;
-}
-
 export interface CanvasHandle {
   /** Pan (and zoom) so a node is in view; `zoom` sets the scale. */
   focus: (key: string, zoom?: number) => void;
@@ -53,17 +46,21 @@ export interface CanvasHandle {
 /**
  * The canvas: the engine's canvas underneath, the cards in a world layer on top, placed by the
  * tidy layout in the order the user dragged cards into (a card moves among its siblings, so
- * nothing ever overlaps). The order is remembered per owner (and synced through `sync`), the
- * view per device. Keyboard: + / − zoom, 0 is 100 %, 1 fits, arrows pan, ⌥↑ / ⌥↓ move the
+ * nothing ever overlaps). The order is the caller's (`order`, `onOrder`: a canvas view's, synced
+ * through roll), else kept here under `storageKey`; the view (pan and zoom) is remembered per
+ * device under `storageKey`, and a new `storageKey` (another canvas view) goes back to how that
+ * one was framed, or fits it. Keyboard: + / − zoom, 0 is 100 %, 1 fits, arrows pan, ⌥↑ / ⌥↓ move the
  * focused card among its siblings, Escape calls `onEscape`.
  */
 export const AgentsCanvas = forwardRef<
   CanvasHandle,
   {
     graph: Graph;
-    /** Where the order and the view are remembered. */
+    /** Where the view (and an uncontrolled order) is remembered on this device. */
     storageKey: string;
-    sync?: OrderSync;
+    /** The order to show; without it the canvas keeps its own. */
+    order?: Order;
+    onOrder?: (order: Order) => void;
     render: (node: GraphNode) => ReactNode;
     defaultSize: (node: GraphNode) => Size;
     onEscape?: () => void;
@@ -73,47 +70,32 @@ export const AgentsCanvas = forwardRef<
     /** The card whose conversation or settings are open beside it. */
     selected?: string;
   }
->(function AgentsCanvas({ graph, storageKey, sync, render, defaultSize, onEscape, overlay, active = true, selected }, ref) {
+>(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, render, defaultSize, onEscape, overlay, active = true, selected }, ref) {
   const reduced = useReducedMotion();
   const container = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const world = useRef<HTMLDivElement>(null);
   const engine = useRef<CanvasEngine | null>(null);
   const [sizes, setSizes] = useState<Map<string, Size>>(() => new Map());
-  const [order, setOrderState] = useState<Order>({});
+  const [ownOrder, setOwnOrder] = useState<Order>({});
+  const order = shownOrder ?? ownOrder;
   // While a card is dragged: its siblings in the order it would drop into.
   const [preview, setPreview] = useState<{ parent: string; list: string[] } | null>(null);
   const [zoom, setZoom] = useState(1);
   const fitted = useRef(false);
   const viewChanged = useRef<((v: View) => void) | null>(null);
-  const syncRef = useRef(sync);
-  syncRef.current = sync;
-
-  useEffect(() => setOrderState(loadOrder(storageKey)), [storageKey]);
+  const controlled = shownOrder !== undefined;
   useEffect(() => {
-    let live = true;
-    syncRef.current
-      ?.load()
-      .then((doc) => {
-        if (!live || doc === null || doc === undefined) return;
-        const o = parseOrder(doc);
-        saveOrder(storageKey, o);
-        setOrderState(o);
-      })
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
-    // A new `sync` (another device saved) loads again.
-  }, [storageKey, sync]);
+    if (!controlled) setOwnOrder(loadOrder(storageKey));
+  }, [storageKey, controlled]);
 
   const setOrder = useCallback(
     (next: Order) => {
-      setOrderState(next);
+      if (onOrder) return onOrder(next);
+      setOwnOrder(next);
       saveOrder(storageKey, next);
-      syncRef.current?.save(next);
     },
-    [storageKey],
+    [storageKey, onOrder],
   );
 
   useLayoutEffect(() => {
@@ -185,6 +167,17 @@ export const AgentsCanvas = forwardRef<
   // Fit once, when the first layout with measured cards is in; then keep everything in view as
   // work appears, until the user moves the view themselves.
   const following = useRef(true);
+  // Another canvas view: frame it as it was left on this device (or fit it), easing there.
+  const framedKey = useRef(storageKey);
+  const easeIn = useRef(false);
+  useLayoutEffect(() => {
+    if (framedKey.current === storageKey) return;
+    framedKey.current = storageKey;
+    if (!fitted.current) return;
+    fitted.current = false;
+    following.current = true;
+    easeIn.current = true;
+  }, [storageKey]);
   // The stream re-renders constantly; only a change in the overall extent refits.
   const extent = useMemo(() => {
     const r = bounds(positions, sizeOf);
@@ -199,10 +192,12 @@ export const AgentsCanvas = forwardRef<
       const e = engine.current;
       const saved = loadView(storageKey);
       const r = bounds(positions, sizeOf);
+      const animate = easeIn.current;
+      easeIn.current = false;
       if (e && saved && r && overlaps(r, saved, e.viewport)) {
         following.current = false;
-        e.setView(saved, false);
-      } else fit(false);
+        e.setView(saved, animate);
+      } else fit(animate);
       return;
     }
     if (!following.current) return;
@@ -210,7 +205,7 @@ export const AgentsCanvas = forwardRef<
     return () => clearTimeout(t);
     // `fit` changes with every layout; the extent is what matters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [extent, sizes.size > 0]);
+  }, [extent, sizes.size > 0, storageKey]);
   useEffect(() => {
     const c = container.current;
     if (!c) return;

@@ -1,0 +1,514 @@
+/**
+ * Canvas views (docs/code/agents.md, "Canvas"): the canvas as a workspace the owner composes.
+ * "All" is the whole canvas; every other view is a named filter over it (machines, projects,
+ * thread status, providers, a text match) with its own sibling order and its own pinned cards (a
+ * conversation, a diff or a terminal shown big on the canvas beside its thread). All of it is the
+ * owner's canvas document, kept by roll (`AgentsServices.canvas`):
+ *
+ *     { order, pins?, views? }      views: [{ id, name, filter, order?, pins? }]
+ *
+ * `order` is All's, as it always was; a document from before views (`{ order }`) still parses, and
+ * a document without `views` shows the built-in ones. Which view is showing and how it's framed
+ * are per device (`loadCurrentView`, the canvas's own view memory). Pure apart from the
+ * localStorage helpers.
+ */
+
+import { isRunning, MAX_CANVAS, type Thread } from "./agents-api";
+import { keyOf, type Graph, type GraphNode } from "./agents-graph";
+import { parseOrder, withOrder, type Order } from "./agents-layout";
+import type { AgentsData } from "./agents-store";
+
+export type StatusFilter = "running" | "waiting" | "error" | "recent";
+export const STATUS_FILTERS: readonly StatusFilter[] = ["running", "waiting", "error", "recent"];
+export const statusFilterLabel: Record<StatusFilter, string> = { running: "Running", waiting: "Waiting on me", error: "Errors", recent: "Recent" };
+
+/**
+ * What a view shows. Each field narrows it (they all have to match); within a list any entry
+ * matches. Empty or absent: no narrowing.
+ */
+export interface ViewFilter {
+  machines?: string[];
+  projects?: string[];
+  status?: StatusFilter[];
+  providers?: string[];
+  /** Matched, case-insensitively, against a thread's title, its project's name and its machine's name. */
+  text?: string;
+}
+
+export type PinKind = "conversation" | "diff" | "terminal";
+
+/** A card pinned onto a view: a thread's conversation or diff (`id` a thread), or a terminal. */
+export interface Pin {
+  kind: PinKind;
+  id: string;
+  w: number;
+  h: number;
+}
+
+export interface SavedView {
+  /** `v_…`. */
+  id: string;
+  name: string;
+  filter: ViewFilter;
+  order: Order;
+  pins: Pin[];
+}
+
+export interface CanvasDoc {
+  /** All's order. */
+  order: Order;
+  /** All's pins. */
+  pins: Pin[];
+  views: SavedView[];
+}
+
+/** The view everything else is a narrowing of; its id in `CanvasDoc` terms. */
+export const ALL = "all";
+
+/** A view as the canvas shows it (All included). */
+export interface ViewLike {
+  id: string;
+  name: string;
+  filter: ViewFilter;
+  order: Order;
+  pins: readonly Pin[];
+}
+
+// ── bounds (the document stays well under the relay's 64 KiB) ──
+
+export const MAX_VIEWS = 16;
+export const MAX_PINS = 12;
+export const MAX_NAME = 40;
+export const MAX_TEXT = 120;
+const MAX_FILTER_IDS = 16;
+/** Parents whose order a view keeps (All keeps `withOrder`'s). */
+const MAX_VIEW_PARENTS = 120;
+/** What `encodeDoc` aims at: the relay's limit with room to spare. */
+export const DOC_BUDGET = MAX_CANVAS - 4 * 1024;
+
+export const PIN_MIN: Readonly<Record<PinKind, { w: number; h: number }>> = {
+  conversation: { w: 380, h: 320 },
+  diff: { w: 420, h: 280 },
+  terminal: { w: 420, h: 240 },
+};
+export const PIN_MAX = { w: 1600, h: 1200 };
+export const PIN_DEFAULT: Readonly<Record<PinKind, { w: number; h: number }>> = {
+  conversation: { w: 520, h: 600 },
+  diff: { w: 680, h: 520 },
+  terminal: { w: 680, h: 420 },
+};
+
+export const clampPinSize = (kind: PinKind, w: number, h: number) => ({
+  w: Math.round(Math.min(PIN_MAX.w, Math.max(PIN_MIN[kind].w, Number.isFinite(w) ? w : PIN_DEFAULT[kind].w))),
+  h: Math.round(Math.min(PIN_MAX.h, Math.max(PIN_MIN[kind].h, Number.isFinite(h) ? h : PIN_DEFAULT[kind].h))),
+});
+
+/** The built-in views a canvas starts with (until the owner changes the list). Stable ids, so every device agrees before the first save. */
+export const DEFAULT_VIEWS: readonly SavedView[] = [
+  { id: "v_waiting", name: "Waiting on me", filter: { status: ["waiting"] }, order: {}, pins: [] },
+  { id: "v_running", name: "Running", filter: { status: ["running"] }, order: {}, pins: [] },
+];
+
+export const emptyDoc = (): CanvasDoc => ({ order: {}, pins: [], views: DEFAULT_VIEWS.map(copyView) });
+
+function copyView(v: SavedView): SavedView {
+  return { ...v, filter: copyFilter(v.filter), order: { ...v.order }, pins: v.pins.map((p) => ({ ...p })) };
+}
+
+function copyFilter(f: ViewFilter): ViewFilter {
+  const out: ViewFilter = {};
+  for (const k of ["machines", "projects", "status", "providers"] as const) if (f[k]?.length) (out as Record<string, unknown>)[k] = [...f[k]!];
+  if (f.text?.trim()) out.text = f.text;
+  return out;
+}
+
+// ── parsing (anything malformed is dropped, never fatal) ──
+
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const strings = (v: unknown, max: number, len = 200) =>
+  Array.isArray(v) ? [...new Set(v.filter((x): x is string => typeof x === "string" && x.length > 0 && x.length <= len))].slice(0, max) : [];
+
+export function parseFilter(v: unknown): ViewFilter {
+  if (!isObject(v)) return {};
+  const out: ViewFilter = {};
+  for (const k of ["machines", "projects", "providers"] as const) {
+    const list = strings(v[k], MAX_FILTER_IDS);
+    if (list.length) out[k] = list;
+  }
+  const status = strings(v.status, STATUS_FILTERS.length).filter((s): s is StatusFilter => (STATUS_FILTERS as readonly string[]).includes(s));
+  if (status.length) out.status = status;
+  if (typeof v.text === "string" && v.text.trim()) out.text = v.text.slice(0, MAX_TEXT);
+  return out;
+}
+
+export function parsePins(v: unknown): Pin[] {
+  if (!Array.isArray(v)) return [];
+  const out: Pin[] = [];
+  const seen = new Set<string>();
+  for (const p of v) {
+    if (!isObject(p) || typeof p.id !== "string" || !p.id || p.id.length > 200) continue;
+    const kind = p.kind;
+    if (kind !== "conversation" && kind !== "diff" && kind !== "terminal") continue;
+    const key = `${kind}:${p.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ kind, id: p.id, ...clampPinSize(kind, Number(p.w), Number(p.h)) });
+    if (out.length === MAX_PINS) break;
+  }
+  return out;
+}
+
+const cleanName = (s: string) => s.replace(/\s+/g, " ").trim().slice(0, MAX_NAME);
+
+/** The canvas document from roll (or this device). An old `{ order }` document parses; without `views`, the built-in views show. */
+export function parseDoc(v: unknown): CanvasDoc {
+  if (!isObject(v)) return emptyDoc();
+  const views: SavedView[] = [];
+  if (Array.isArray(v.views)) {
+    const ids = new Set<string>();
+    for (const x of v.views) {
+      if (!isObject(x) || typeof x.id !== "string" || !/^v_[A-Za-z0-9_-]{1,32}$/.test(x.id) || ids.has(x.id)) continue;
+      const name = typeof x.name === "string" ? cleanName(x.name) : "";
+      if (!name) continue;
+      ids.add(x.id);
+      views.push({ id: x.id, name, filter: parseFilter(x.filter), order: parseOrder(x.order), pins: parsePins(x.pins) });
+      if (views.length === MAX_VIEWS) break;
+    }
+  }
+  return {
+    order: parseOrder(v.order),
+    pins: parsePins(v.pins),
+    views: Array.isArray(v.views) ? views : DEFAULT_VIEWS.map(copyView),
+  };
+}
+
+const byteLength = (s: string) => new TextEncoder().encode(s).length;
+
+/**
+ * The document as it's saved: empty parts left out, and bounded to `budget` bytes of JSON. Over
+ * it, the arrangements least recently made go first (views' before All's); views and pins are
+ * already bounded in number, so dropping order always gets there.
+ */
+export function encodeDoc(doc: CanvasDoc, budget = DOC_BUDGET): Record<string, unknown> {
+  const order = { ...doc.order } as Record<string, readonly string[]>;
+  const views = doc.views.slice(0, MAX_VIEWS).map((v) => ({ ...v, order: { ...v.order } as Record<string, readonly string[]> }));
+  const build = () => {
+    const out: Record<string, unknown> = { order };
+    if (doc.pins.length) out.pins = doc.pins.slice(0, MAX_PINS);
+    out.views = views.map((v) => {
+      const o: Record<string, unknown> = { id: v.id, name: v.name, filter: copyFilter(v.filter) };
+      if (Object.keys(v.order).length) o.order = v.order;
+      if (v.pins.length) o.pins = v.pins.slice(0, MAX_PINS);
+      return o;
+    });
+    return out;
+  };
+  let out = build();
+  let size = byteLength(JSON.stringify(out));
+  if (size <= budget) return out;
+  // Oldest first: every view's arrangements (each in the order they were made), then All's.
+  const victims: { from: Record<string, readonly string[]>; key: string }[] = [];
+  for (const v of views) for (const key of Object.keys(v.order)) victims.push({ from: v.order, key });
+  for (const key of Object.keys(order)) victims.push({ from: order, key });
+  for (const { from, key } of victims) {
+    if (size <= budget) break;
+    size -= byteLength(JSON.stringify(key)) + byteLength(JSON.stringify(from[key])) + 2;
+    delete from[key];
+  }
+  out = build();
+  // Names and filters are bounded, so this only trims views in a pathological document.
+  while (byteLength(JSON.stringify(out)) > budget && views.length) {
+    views.pop();
+    out = build();
+  }
+  return out;
+}
+
+// ── views ──
+
+export function allView(doc: CanvasDoc): ViewLike {
+  return { id: ALL, name: "All", filter: {}, order: doc.order, pins: doc.pins };
+}
+
+/** Every view in the bar's order, All first. */
+export function viewsOf(doc: CanvasDoc): ViewLike[] {
+  return [allView(doc), ...doc.views];
+}
+
+export function viewById(doc: CanvasDoc, id: string): ViewLike {
+  return (id !== ALL && doc.views.find((v) => v.id === id)) || allView(doc);
+}
+
+export function newViewId(rand: () => number = Math.random): string {
+  let s = "";
+  for (let i = 0; i < 10; i++) s += "abcdefghijklmnopqrstuvwxyz0123456789"[Math.floor(rand() * 36)];
+  return `v_${s}`;
+}
+
+/** The doc with a new view at the end (none past `MAX_VIEWS`: the doc comes back as it was). */
+export function addView(doc: CanvasDoc, name: string, filter: ViewFilter, id = newViewId()): CanvasDoc {
+  const n = cleanName(name);
+  if (!n || doc.views.length >= MAX_VIEWS || doc.views.some((v) => v.id === id)) return doc;
+  return { ...doc, views: [...doc.views, { id, name: n, filter: copyFilter(parseFilter(filter)), order: {}, pins: [] }] };
+}
+
+export function renameView(doc: CanvasDoc, id: string, name: string): CanvasDoc {
+  const n = cleanName(name);
+  if (!n) return doc;
+  return { ...doc, views: doc.views.map((v) => (v.id === id ? { ...v, name: n } : v)) };
+}
+
+export function setViewFilter(doc: CanvasDoc, id: string, filter: ViewFilter): CanvasDoc {
+  return { ...doc, views: doc.views.map((v) => (v.id === id ? { ...v, filter: copyFilter(parseFilter(filter)) } : v)) };
+}
+
+export function deleteView(doc: CanvasDoc, id: string): CanvasDoc {
+  return { ...doc, views: doc.views.filter((v) => v.id !== id) };
+}
+
+/** The view moved to `index` among the saved views (All always comes first). */
+export function moveView(doc: CanvasDoc, id: string, index: number): CanvasDoc {
+  const v = doc.views.find((x) => x.id === id);
+  if (!v) return doc;
+  const rest = doc.views.filter((x) => x.id !== id);
+  rest.splice(Math.max(0, Math.min(rest.length, index)), 0, v);
+  return { ...doc, views: rest };
+}
+
+/** A view's (or All's) order set to `order`. */
+export function setViewOrder(doc: CanvasDoc, id: string, order: Order): CanvasDoc {
+  if (id === ALL) return { ...doc, order };
+  return {
+    ...doc,
+    views: doc.views.map((v) => {
+      if (v.id !== id) return v;
+      // Bounded like All's: the least recently arranged go first.
+      let o: Order = order;
+      const keys = Object.keys(o);
+      if (keys.length > MAX_VIEW_PARENTS) {
+        const last = keys[keys.length - 1];
+        o = withOrder(Object.fromEntries(keys.slice(keys.length - MAX_VIEW_PARENTS).map((k) => [k, o[k]])), last, o[last]);
+      }
+      return { ...v, order: o };
+    }),
+  };
+}
+
+function setPins(doc: CanvasDoc, id: string, fn: (pins: readonly Pin[]) => Pin[]): CanvasDoc {
+  if (id === ALL) return { ...doc, pins: fn(doc.pins) };
+  return { ...doc, views: doc.views.map((v) => (v.id === id ? { ...v, pins: fn(v.pins) } : v)) };
+}
+
+const samePin = (a: Pick<Pin, "kind" | "id">, b: Pick<Pin, "kind" | "id">) => a.kind === b.kind && a.id === b.id;
+
+export function isPinned(view: ViewLike, kind: PinKind, id: string): boolean {
+  return view.pins.some((p) => samePin(p, { kind, id }));
+}
+
+/**
+ * The doc with a card pinned onto a view. `exists` drops pins whose thread or terminal is gone; at
+ * `MAX_PINS` the oldest pin makes room.
+ */
+export function pin(doc: CanvasDoc, view: string, kind: PinKind, id: string, exists: (p: Pin) => boolean = () => true): CanvasDoc {
+  return setPins(doc, view, (pins) => {
+    if (pins.some((p) => samePin(p, { kind, id }))) return [...pins];
+    const kept = pins.filter(exists);
+    return [...kept, { kind, id, ...PIN_DEFAULT[kind] }].slice(-MAX_PINS);
+  });
+}
+
+export function unpin(doc: CanvasDoc, view: string, kind: PinKind, id: string): CanvasDoc {
+  return setPins(doc, view, (pins) => pins.filter((p) => !samePin(p, { kind, id })));
+}
+
+export function resizePin(doc: CanvasDoc, view: string, kind: PinKind, id: string, w: number, h: number): CanvasDoc {
+  return setPins(doc, view, (pins) => pins.map((p) => (samePin(p, { kind, id }) ? { ...p, ...clampPinSize(kind, w, h) } : p)));
+}
+
+// ── what a view shows ──
+
+export const isEmptyFilter = (f: ViewFilter) => !f.machines?.length && !f.projects?.length && !threadFiltered(f);
+/** The filter picks threads (not just machines and projects). */
+const threadFiltered = (f: ViewFilter) => !!(f.status?.length || f.providers?.length || f.text?.trim());
+
+const DAY = 24 * 60 * 60 * 1000;
+
+function statusMatches(t: Thread, s: StatusFilter, now: number): boolean {
+  switch (s) {
+    case "running":
+      return isRunning(t.status);
+    case "waiting":
+      return t.status === "waiting" || t.pending_requests > 0;
+    case "error":
+      return t.status === "error";
+    case "recent":
+      return now - t.updated_at < DAY;
+  }
+}
+
+/** Whether a thread is one the filter picks (machines and projects included). */
+export function threadMatches(data: AgentsData, t: Thread, machine: string, f: ViewFilter, now: number): boolean {
+  if (f.machines?.length && !f.machines.includes(machine)) return false;
+  if (f.projects?.length && !f.projects.includes(t.project)) return false;
+  if (f.status?.length && !f.status.some((s) => statusMatches(t, s, now))) return false;
+  if (f.providers?.length && !f.providers.includes(t.provider)) return false;
+  const q = f.text?.trim().toLowerCase();
+  if (q) {
+    const hay = [t.title, data.projects.get(t.project)?.value.name, data.machines.get(machine)?.value.name];
+    if (!hay.some((s) => s?.toLowerCase().includes(q))) return false;
+  }
+  return true;
+}
+
+/** Threads a view counts (the bar's badge): the ones it picks, archived ones aside. */
+export function countView(data: AgentsData, f: ViewFilter, now: number): number {
+  let n = 0;
+  for (const r of data.threads.values()) if (r.value.archived_at === null && threadMatches(data, r.value, r.machine, f, now)) n++;
+  return n;
+}
+
+/** Threads whose conversation is pinned on the view: their requests are answered inside the card. */
+export function pinnedConversations(view: Pick<ViewLike, "pins">): Set<string> {
+  return new Set(view.pins.filter((p) => p.kind === "conversation").map((p) => p.id));
+}
+
+/** A pinned card's canvas key: `pc:` conversation, `pd:` diff, `px:` terminal. */
+export const pinKey = (p: Pick<Pin, "kind" | "id">) => `${p.kind === "conversation" ? "pc" : p.kind === "diff" ? "pd" : "px"}:${p.id}`;
+
+/** The pin a `pin` node stands for. */
+export function pinOf(view: Pick<ViewLike, "pins">, key: string): Pin | undefined {
+  return view.pins.find((p) => pinKey(p) === key);
+}
+
+/**
+ * The graph a view shows. A filter that picks threads keeps those threads, what they hang off
+ * (their project, machine and parent threads, for context) and their satellites; a filter on
+ * machines or projects alone keeps those whole. Pinned cards always show (with what they hang
+ * off): a pinned conversation or diff as the first child of its thread, a pinned terminal in its
+ * terminal card's place. Cards are only ever children in the tree, so the layout keeps them
+ * apart.
+ */
+export function applyView(graph: Graph, data: AgentsData, view: Pick<ViewLike, "filter" | "pins">, now: number): Graph {
+  const f = view.filter;
+  const pins = view.pins.filter((p) => graph.nodes.has(p.kind === "terminal" ? keyOf.terminal(p.id) : keyOf.thread(p.id)));
+  if (isEmptyFilter(f) && pins.length === 0) return graph;
+
+  const keep = new Set<string>();
+  const withAncestors = (key: string) => {
+    for (let k: string | null = key; k && !keep.has(k); k = graph.nodes.get(k)?.parent ?? null) keep.add(k);
+  };
+  if (isEmptyFilter(f)) for (const k of graph.nodes.keys()) keep.add(k);
+  else {
+    const byThread = threadFiltered(f);
+    for (const n of graph.nodes.values()) {
+      if (n.kind === "thread") {
+        const r = data.threads.get(n.id);
+        if (r && threadMatches(data, r.value, n.machine, f, now)) withAncestors(n.key);
+      } else if (!byThread && (n.kind === "project" ? (!f.machines?.length || f.machines.includes(n.machine)) && (!f.projects?.length || f.projects.includes(n.id)) : n.kind === "machine" && !f.projects?.length && (!f.machines?.length || f.machines.includes(n.id))))
+        withAncestors(n.key);
+    }
+    // Satellites of what's kept (a thread's subagents, requests and terminals; a project's or
+    // machine's terminals when the view isn't about threads).
+    for (const n of graph.nodes.values()) {
+      if (keep.has(n.key) || !n.parent || !keep.has(n.parent)) continue;
+      const parent = graph.nodes.get(n.parent)!;
+      if (n.kind === "subagent" || n.kind === "request" || (n.kind === "terminal" && (parent.kind === "thread" || !byThread))) keep.add(n.key);
+    }
+    // Nested subagents hang off kept subagents.
+    for (const n of graph.nodes.values()) if (n.kind === "subagent" && n.parent && keep.has(n.parent)) keep.add(n.key);
+  }
+  for (const p of pins) withAncestors(p.kind === "terminal" ? keyOf.terminal(p.id) : keyOf.thread(p.id));
+
+  const nodes = new Map<string, GraphNode>();
+  for (const n of graph.nodes.values()) if (keep.has(n.key)) nodes.set(n.key, { ...n, children: n.children.filter((c) => keep.has(c)) });
+
+  // Pins: a conversation or diff first under its thread (the conversation before the diff), a terminal in its own card's place.
+  const sorted = [...pins].sort((a, b) => (a.kind === "conversation" ? 0 : 1) - (b.kind === "conversation" ? 0 : 1));
+  const firsts = new Map<string, string[]>();
+  for (const p of sorted) {
+    const key = pinKey(p);
+    if (p.kind === "terminal") {
+      const t = nodes.get(keyOf.terminal(p.id))!;
+      nodes.delete(t.key);
+      nodes.set(key, { ...t, key, kind: "pin", children: [] });
+      if (t.parent) {
+        const parent = nodes.get(t.parent)!;
+        parent.children = parent.children.map((c) => (c === t.key ? key : c));
+      }
+      continue;
+    }
+    const tk = keyOf.thread(p.id);
+    const t = nodes.get(tk)!;
+    nodes.set(key, { key, kind: "pin", id: p.id, machine: t.machine, parent: tk, children: [], busy: false, relation: null });
+    firsts.set(tk, [...(firsts.get(tk) ?? []), key]);
+  }
+  for (const [tk, list] of firsts) {
+    const t = nodes.get(tk)!;
+    t.children = [...list, ...t.children];
+  }
+
+  const roots = graph.roots.filter((r) => nodes.has(r));
+  const edges = [];
+  for (const n of nodes.values()) if (n.parent && nodes.has(n.parent)) edges.push({ from: n.parent, to: n.key, busy: n.busy, dashed: n.relation === "fork" });
+  return { roots, nodes, edges };
+}
+
+// ── remembered on this device ──
+
+const DOC_KEY = (owner: string) => `roll:agents:canvas:${owner}`;
+const OLD_ORDER_KEY = (owner: string) => `roll:agents:order:${owner}`;
+const CURRENT_KEY = (owner: string) => `roll:agents:current-view:${owner}`;
+
+function read(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function write(key: string, v: string | null) {
+  try {
+    if (v === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, v);
+  } catch {
+    // Private mode or full: it just isn't remembered.
+  }
+}
+
+/** This device's copy of the canvas document (the order from before views counts as one). */
+export function loadDoc(owner: string): CanvasDoc {
+  // Free positions (from before cards only moved among their siblings) made overlaps: forget them.
+  write(`roll:agents:positions:${owner}`, null);
+  const raw = read(DOC_KEY(owner));
+  if (raw) {
+    try {
+      return parseDoc(JSON.parse(raw));
+    } catch {
+      // Fall through to what's there from before.
+    }
+  }
+  try {
+    const old = read(OLD_ORDER_KEY(owner));
+    return parseDoc({ order: old ? JSON.parse(old) : {} });
+  } catch {
+    return emptyDoc();
+  }
+}
+
+export function saveDoc(owner: string, doc: CanvasDoc) {
+  write(DOC_KEY(owner), JSON.stringify(encodeDoc(doc)));
+  write(OLD_ORDER_KEY(owner), null);
+}
+
+/** Which view this device shows (each device keeps its own). */
+export function loadCurrentView(owner: string): string {
+  return read(CURRENT_KEY(owner)) || ALL;
+}
+
+export function saveCurrentView(owner: string, id: string) {
+  write(CURRENT_KEY(owner), id === ALL ? null : id);
+}
+
+/** Where a view's frame (pan and zoom) is remembered on this device: All keeps the canvas's own. */
+export const viewStorageKey = (owner: string, id: string) => (id === ALL ? owner : `${owner}#${id}`);

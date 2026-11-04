@@ -507,7 +507,7 @@ export function IconButton({ label, onClick, disabled, active, children }: { lab
 }
 
 /** The diff of one run (checkpoint before → after) or of the whole thread. */
-function DiffPane({
+export function DiffPane({
   thread,
   machine,
   runs,

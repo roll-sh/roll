@@ -1,0 +1,184 @@
+import { act, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { setActiveClient } from "@/lib/agents-client";
+import { resetAgentsSurface } from "@/lib/agents-surface";
+import { ALL, loadCurrentView, loadDoc, saveCurrentView, saveDoc, addView, parseDoc } from "@/lib/agents-views";
+import { approval, mirrored, node, project, run, thread } from "@/test/agents";
+import { agentsHarness, fakeServices, renderAgents } from "@/test/agents-render";
+import { AgentsSurface } from "./agents-page";
+
+const busy = thread({ status: "running", active_run: "run_1", run_count: 1, activity: "Running `cargo test`", updated_at: Date.now() });
+const waiting = thread({ id: "thr_2", title: "Upgrade to Next 16.4", status: "waiting", pending_requests: 1, active_run: "run_2", run_count: 1, updated_at: Date.now() });
+const entities = [
+  mirrored("project", project(), 1),
+  mirrored("thread", busy, 2),
+  mirrored("thread", waiting, 3),
+  mirrored("run", run(), 4),
+  mirrored("run", run({ id: "run_2", thread: "thr_2", status: "waiting", prompt: "Upgrade Next" }), 5),
+  mirrored("node", node({ type: "request", request: "req_1" }, { id: "nod_9", thread: "thr_2", run: "run_2" }), 6),
+  mirrored("request", approval({ thread: "thr_2", run: "run_2" }), 7),
+];
+
+function setup(services = fakeServices()) {
+  const h = agentsHarness({ entities, follow: ["thr_1", "thr_2"] });
+  renderAgents(<AgentsSurface client={h.client} services={services} demo={false} chrome="popup" />, h);
+  return { h, services };
+}
+
+const tab = (name: RegExp | string) => screen.getByRole("tab", { name });
+const card = (title: string) => screen.queryByRole("button", { name: `Thread ${title}` });
+/** What roll was last asked to keep. */
+const lastSaved = (services: ReturnType<typeof fakeServices>) => (services.canvas.save as unknown as { mock: { calls: [string, Record<string, unknown>][] } }).mock.calls.at(-1)?.[1];
+
+beforeEach(() => {
+  localStorage.clear();
+  resetAgentsSurface();
+});
+afterEach(() => setActiveClient(null));
+
+describe("canvas views", () => {
+  it("starts with All and the built-in views, each counting what it picks, and filters the canvas", async () => {
+    setup();
+    const bar = screen.getByRole("tablist", { name: "Canvas views" });
+    expect(within(bar).getAllByRole("tab").map((t) => t.textContent)).toEqual(["All", "Waiting on me1", "Running1"]);
+    expect(tab("All")).toHaveAttribute("aria-selected", "true");
+    expect(card("Fix the flaky queue test")).toBeInTheDocument();
+    expect(card("Upgrade to Next 16.4")).toBeInTheDocument();
+
+    await userEvent.click(tab(/Waiting on me/));
+    expect(tab(/Waiting on me/)).toHaveAttribute("aria-selected", "true");
+    expect(card("Upgrade to Next 16.4")).toBeInTheDocument();
+    expect(card("Fix the flaky queue test")).toBeNull();
+    // Which view shows is this device's.
+    expect(loadCurrentView("acme")).toBe("v_waiting");
+
+    // [ and ] step through the views; ⌥1 is All.
+    await userEvent.keyboard("]");
+    expect(tab(/Running/)).toHaveAttribute("aria-selected", "true");
+    expect(card("Upgrade to Next 16.4")).toBeNull();
+    await userEvent.keyboard("{Alt>}1{/Alt}");
+    expect(tab("All")).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("saves All's filter as a view, renames it, moves it and deletes it, synced to roll", async () => {
+    const { services } = setup();
+    await userEvent.type(screen.getByRole("textbox", { name: "Filter threads" }), "next");
+    expect(card("Fix the flaky queue test")).toBeNull();
+    expect(card("Upgrade to Next 16.4")).toBeInTheDocument();
+    // ⌥S once nothing is being typed into.
+    screen.getByRole("textbox", { name: "Filter threads" }).blur();
+    await userEvent.keyboard("{Alt>}s{/Alt}");
+    const dialog = screen.getByRole("dialog", { name: "New view" });
+    await userEvent.type(within(dialog).getByRole("textbox", { name: "View name" }), "Next work{Enter}");
+    expect(tab(/Next work/)).toHaveAttribute("aria-selected", "true");
+    // All's filter went into the view.
+    await userEvent.click(tab("All"));
+    expect(screen.getByRole("textbox", { name: "Filter threads" })).toHaveValue("");
+    await waitFor(() => expect(lastSaved(services)).toMatchObject({ views: [{ id: "v_waiting" }, { id: "v_running" }, { name: "Next work", filter: { text: "next" } }] }));
+
+    await userEvent.click(tab(/Next work/));
+    await userEvent.click(screen.getByRole("button", { name: "Next work options" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const name = screen.getByRole("textbox", { name: "View name" });
+    await userEvent.clear(name);
+    await userEvent.type(name, "Frontend{Enter}");
+    await userEvent.click(screen.getByRole("button", { name: "Frontend options" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Move left" }));
+    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["All", "Waiting on me1", "Frontend1", "Running1"]);
+    await userEvent.click(screen.getByRole("button", { name: "Frontend options" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Delete view" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Delete “Frontend”?" }));
+    expect(screen.queryByRole("tab", { name: /Frontend/ })).toBeNull();
+    expect(tab("All")).toHaveAttribute("aria-selected", "true");
+    await waitFor(() => expect((lastSaved(services)!.views as unknown[]).length).toBe(2));
+  });
+
+  it("edits a view's filters as toggles", async () => {
+    setup();
+    await userEvent.click(tab(/Running/));
+    await userEvent.click(screen.getByRole("button", { name: "Running filters" }));
+    const dialog = screen.getByRole("dialog", { name: "View filters" });
+    const status = within(dialog).getByRole("group", { name: "Status" });
+    expect(within(status).getByRole("button", { name: "Running" })).toHaveAttribute("aria-pressed", "true");
+    await userEvent.click(within(status).getByRole("button", { name: "Waiting on me" }));
+    expect(card("Upgrade to Next 16.4")).toBeInTheDocument();
+    expect(card("Fix the flaky queue test")).toBeInTheDocument();
+    await userEvent.click(within(status).getByRole("button", { name: "Running" }));
+    expect(card("Fix the flaky queue test")).toBeNull();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "View filters" })).toBeNull();
+    // Still on the canvas (Escape closed only the editor).
+    expect(screen.getByLabelText("Agents canvas")).toBeInTheDocument();
+  });
+
+  it("says so calmly when a view picks nothing", async () => {
+    const h = agentsHarness({ entities: [mirrored("project", project(), 1), mirrored("thread", busy, 2)] });
+    renderAgents(<AgentsSurface client={h.client} services={fakeServices()} demo={false} chrome="popup" />, h);
+    await userEvent.click(tab(/Waiting on me/));
+    expect(screen.getByText("Nothing is waiting on you")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Show all" }));
+    expect(tab("All")).toHaveAttribute("aria-selected", "true");
+  });
+});
+
+describe("pinned cards", () => {
+  it("pins a conversation onto the view: live, answerable in place, with its composer; unpins", async () => {
+    const { services } = setup();
+    await userEvent.click(tab(/Waiting on me/));
+    await userEvent.click(screen.getByRole("button", { name: "Pin the conversation on Waiting on me" }));
+    const pinned = screen.getByRole("region", { name: "Pinned conversation Upgrade to Next 16.4" });
+    // The request is answered inside the card, not beside the thread.
+    expect(within(pinned).getByRole("button", { name: "Approve" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Waiting for you")).toBeNull();
+    expect(within(pinned).getByRole("textbox")).toBeInTheDocument();
+    await waitFor(() => expect(lastSaved(services)).toMatchObject({ views: [{ id: "v_waiting", pins: [{ kind: "conversation", id: "thr_2", w: 520, h: 600 }] }, { id: "v_running" }] }));
+    // Only on that view.
+    await userEvent.click(tab("All"));
+    expect(screen.queryByRole("region", { name: /Pinned conversation/ })).toBeNull();
+    await userEvent.click(tab(/Waiting on me/));
+    await userEvent.click(within(screen.getByRole("region", { name: "Pinned conversation Upgrade to Next 16.4" })).getByRole("button", { name: "Unpin from this view" }));
+    expect(screen.queryByRole("region", { name: /Pinned conversation/ })).toBeNull();
+  });
+
+  it("resizes from the corner (and the keyboard), remembered per view", async () => {
+    const { services } = setup();
+    await userEvent.click(within(screen.getByRole("button", { name: "Thread Upgrade to Next 16.4" }).parentElement!).getByRole("button", { name: "Pin the diff" }));
+    const pinned = screen.getByRole("region", { name: /Pinned diff/ });
+    expect(pinned).toHaveStyle({ width: "680px", height: "520px" });
+    const corner = within(pinned).getByRole("separator", { name: "Resize" });
+    corner.focus();
+    await userEvent.keyboard("{Shift>}{ArrowRight}{ArrowDown}{/Shift}");
+    expect(pinned).toHaveStyle({ width: "760px", height: "600px" });
+    await waitFor(() => expect(lastSaved(services)).toMatchObject({ pins: [{ kind: "diff", w: 760, h: 600 }] }));
+  });
+});
+
+describe("kept by roll and on this device", () => {
+  it("loads an old { order } document with the built-in views, and another device's save", async () => {
+    const services = fakeServices();
+    await services.canvas.save("acme", { order: { "p:prj_1": ["t:thr_2", "t:thr_1"] } });
+    const { h } = setup(services);
+    await waitFor(() => expect(screen.getAllByRole("tab")).toHaveLength(3));
+    expect(loadDoc("acme").order).toEqual({ "p:prj_1": ["t:thr_2", "t:thr_1"] });
+    // Another device adds a view: the stream says the canvas changed, and it loads.
+    const { revision } = await services.canvas.save("acme", { order: {}, views: [{ id: "v_x", name: "Elsewhere", filter: { status: ["error"] } }] });
+    act(() => h.client.enqueue({ type: "canvas", cursor: 99, revision, updated_at: 1 }));
+    await waitFor(() => expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["All", "Elsewhere"]));
+  });
+
+  it("keeps the document and the order from before views on this device; the current view is per device", () => {
+    localStorage.setItem("roll:agents:order:o", JSON.stringify({ "m:mch_1": ["p:b", "p:a"] }));
+    localStorage.setItem("roll:agents:positions:o", "{}");
+    const doc = loadDoc("o");
+    expect(doc.order).toEqual({ "m:mch_1": ["p:b", "p:a"] });
+    expect(localStorage.getItem("roll:agents:positions:o")).toBeNull();
+    saveDoc("o", addView(doc, "Mine", {}, "v_m"));
+    expect(localStorage.getItem("roll:agents:order:o")).toBeNull();
+    expect(loadDoc("o").views.map((v) => v.id)).toEqual(["v_waiting", "v_running", "v_m"]);
+    expect(loadCurrentView("o")).toBe(ALL);
+    saveCurrentView("o", "v_m");
+    expect(loadCurrentView("o")).toBe("v_m");
+    expect(parseDoc(JSON.parse(localStorage.getItem("roll:agents:canvas:o")!))).toEqual(loadDoc("o"));
+  });
+});

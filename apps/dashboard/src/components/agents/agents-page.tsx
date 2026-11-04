@@ -1,7 +1,7 @@
 "use client";
 
 import { DotField, RollLogo, RollMark } from "@roll/brand";
-import { Archive, ArrowLeft, MoreHorizontal, PanelRightClose, Plus, Server, Share2, X } from "lucide-react";
+import { Archive, ArrowLeft, MoreHorizontal, PanelRightClose, Pin, PinOff, Plus, Server, Share2, X } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { isBusy } from "@/lib/agents-api";
@@ -10,12 +10,14 @@ import { deriveGraph, rolling, type GraphNode } from "@/lib/agents-graph";
 import type { Size } from "@/lib/agents-layout";
 import type { AgentsServices } from "@/lib/agents-services";
 import { setAgentsView, useAgentsSurface, type AgentsView } from "@/lib/agents-surface";
+import { ALL, applyView, isPinned, pinnedConversations, pinOf, viewStorageKey, type Pin as PinRec } from "@/lib/agents-views";
 import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
 import { useMarkState } from "../mark-state";
 import { AddMachineDialog, AddMachinePaths } from "./add-machine";
-import { AgentsCanvas, type CanvasHandle, type OrderSync } from "./agents-canvas";
+import { AgentsCanvas, type CanvasHandle } from "./agents-canvas";
 import { Menu } from "./menu";
 import { NewAgent } from "./new-agent";
+import { PinnedConversation, PinnedDiff, PinnedTerminal } from "./pinned";
 import { MachineNode, ProjectNode, RequestNode, SubagentNode, ThreadNode } from "./nodes";
 import { RequestCard } from "./request-card";
 import { SettingsPanel } from "./settings-panel";
@@ -24,6 +26,7 @@ import { Conversation, IconButton } from "./session";
 import { TerminalNode } from "./terminal";
 import { AgentsContext, useAgents, useAgentsSnapshot, useHold, useMarkDriver, type AgentsCtx } from "./use-agents";
 import { useAgentsConnection } from "./use-connection";
+import { PinTools, useCanvasViews, ViewsBar, type CanvasViews } from "./views";
 
 /** Threads whose detail the canvas follows besides the open one, so their subagents show. */
 const MAX_FOLLOWED_BUSY = 12;
@@ -111,6 +114,7 @@ export function AgentsSurface({
   const [adding, setAdding] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const canvas = useRef<CanvasHandle>(null);
+  const views = useCanvasViews(services.canvas, client.owner, data.canvas?.revision ?? 0);
   const pendingFocus = useRef<string | null>(initialFocus ?? null);
 
   const threadOpen = view.kind === "thread" ? data.threads.get(view.thread) : undefined;
@@ -269,7 +273,7 @@ export function AgentsSurface({
               {data.machines.size === 0 && snap.conn !== "connecting" ? (
                 <Empty demo={demo} onCreated={onSandbox} />
               ) : (
-                <CanvasView canvasRef={canvas} data={data} showArchived={showArchived} storageKey={client.owner} pendingFocus={pendingFocus} visible={shown.kind !== "new"} selected={selected} />
+                <CanvasView canvasRef={canvas} data={data} showArchived={showArchived} views={views} pendingFocus={pendingFocus} visible={shown.kind !== "new"} selected={selected} phone={phone} />
               )}
               {phone && shown.kind === "canvas" && requests.length > 0 && <PhoneWaiting client={client} />}
             </div>
@@ -278,6 +282,7 @@ export function AgentsSurface({
                 <Conversation
                   thread={threadOpen.value}
                   machine={data.machines.get(threadOpen.machine)?.value}
+                  end={!phone && <PinConversation views={views} thread={threadOpen.value.id} />}
                   start={
                     <IconButton label="Close the conversation (Esc)" onClick={close}>
                       {phone ? <ArrowLeft className="size-4" /> : <PanelRightClose className="size-4" />}
@@ -370,29 +375,52 @@ function CanvasView({
   canvasRef,
   data,
   showArchived,
-  storageKey,
+  views,
   pendingFocus,
   visible,
   selected,
+  phone,
 }: {
   canvasRef: React.RefObject<CanvasHandle | null>;
   data: AgentsClient["data"];
   showArchived: boolean;
-  storageKey: string;
+  views: CanvasViews;
   pendingFocus: React.RefObject<string | null>;
   visible: boolean;
   selected?: string;
+  phone: boolean;
 }) {
-  const graph = useMemo(() => deriveGraph(data, { showArchived }), [data, showArchived]);
-  const { services, owner } = useAgents();
-  const sync = useOrderSync(services?.canvas, owner, data.canvas?.revision ?? 0);
+  const { client, owner } = useAgents();
+  const view = views.current;
+  const filter = views.filter;
+  // A pinned conversation answers its thread's requests itself.
+  const expanded = useMemo(() => pinnedConversations(view), [view]);
+  const whole = useMemo(() => deriveGraph(data, { showArchived, expanded }), [data, showArchived, expanded]);
+  const graph = useMemo(() => applyView(whole, data, { filter, pins: view.pins }, Date.now()), [whole, data, filter, view.pins]);
+  // Pinned conversations and diffs need their thread's detail.
+  const followed = view.pins
+    .filter((p) => p.kind !== "terminal")
+    .map((p) => p.id)
+    .sort()
+    .join();
+  useEffect(() => {
+    client.follow("pins", followed ? followed.split(",") : []);
+  }, [client, followed]);
+  useEffect(() => () => client.unfollow("pins"), [client]);
   // Show a node asked for before the canvas had it (a deep link, a new sandbox).
   useEffect(() => {
     const k = pendingFocus.current;
-    if (!k || !visible || !graph.nodes.has(k)) return;
+    if (!k || !visible) return;
+    if (!graph.nodes.has(k)) {
+      // Not in this view: All has everything.
+      if (view.id !== ALL && whole.nodes.has(k)) views.select(ALL);
+      return;
+    }
     pendingFocus.current = null;
     for (const ms of [60, 420]) setTimeout(() => canvasRef.current?.focus(k), ms);
   });
+  const exists = (p: PinRec) => (p.kind === "terminal" ? data.terminals.has(p.id) : data.threads.has(p.id));
+  const toggle = (kind: PinRec["kind"], id: string) => views.togglePin(kind, id, exists);
   const machineOf = (n: GraphNode) => data.machines.get(n.machine)?.value;
   const render = (n: GraphNode) => {
     switch (n.kind) {
@@ -401,7 +429,18 @@ function CanvasView({
       case "project":
         return <ProjectNode project={data.projects.get(n.id)!.value} machine={machineOf(n)} />;
       case "thread":
-        return <ThreadNode thread={data.threads.get(n.id)!.value} machine={machineOf(n)} />;
+        return (
+          <PinTools
+            view={view}
+            onToggle={toggle}
+            items={[
+              { kind: "conversation", id: n.id, label: "the conversation" },
+              { kind: "diff", id: n.id, label: "the diff" },
+            ]}
+          >
+            <ThreadNode thread={data.threads.get(n.id)!.value} machine={machineOf(n)} />
+          </PinTools>
+        );
       case "subagent": {
         const node = [...data.nodes.values()].map((m) => m.get(n.id)).find(Boolean)?.value;
         return node ? <SubagentNode node={node} /> : null;
@@ -409,45 +448,78 @@ function CanvasView({
       case "request":
         return <RequestNode request={data.requests.get(n.id)!.value} />;
       case "terminal":
-        return <TerminalNode terminal={data.terminals.get(n.id)!.value} machine={machineOf(n)} />;
+        return (
+          <PinTools view={view} onToggle={toggle} items={[{ kind: "terminal", id: n.id, label: "the terminal" }]}>
+            <TerminalNode terminal={data.terminals.get(n.id)!.value} machine={machineOf(n)} />
+          </PinTools>
+        );
+      case "pin": {
+        const p = pinOf(view, n.key);
+        if (!p) return null;
+        const props = { pin: p, onUnpin: () => toggle(p.kind, p.id), onResize: (w: number, h: number) => views.resize(p, w, h) };
+        if (p.kind === "terminal") {
+          const t = data.terminals.get(p.id)?.value;
+          return t ? <PinnedTerminal {...props} terminal={t} machine={machineOf(n)} /> : null;
+        }
+        const t = data.threads.get(p.id)?.value;
+        if (!t) return null;
+        return p.kind === "conversation" ? <PinnedConversation {...props} thread={t} machine={machineOf(n)} /> : <PinnedDiff {...props} thread={t} machine={machineOf(n)} />;
+      }
     }
   };
-  return <AgentsCanvas ref={canvasRef} graph={graph} storageKey={storageKey} sync={sync} render={render} defaultSize={defaultSize} active={visible} selected={selected} />;
+  const sizeOf = useCallback(
+    (n: GraphNode): Size => {
+      if (n.kind !== "pin") return defaultSize(n);
+      const p = pinOf(view, n.key);
+      return p ? { w: p.w, h: p.h } : { w: 520, h: 600 };
+    },
+    [view],
+  );
+  const empty = graph.nodes.size === 0 && whole.nodes.size > 0;
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <ViewsBar views={views} data={data} active={visible} phone={phone} />
+      <div className="relative min-h-0 flex-1">
+        <AgentsCanvas
+          ref={canvasRef}
+          graph={graph}
+          storageKey={viewStorageKey(owner, view.id)}
+          order={view.order}
+          onOrder={views.setOrder}
+          render={render}
+          defaultSize={sizeOf}
+          active={visible}
+          selected={selected}
+          overlay={empty && <EmptyView name={view.id === ALL ? null : view.name} waitingOnly={filter.status?.length === 1 && filter.status[0] === "waiting"} onAll={() => (view.id === ALL ? views.setFilter({}) : views.select(ALL))} />}
+        />
+      </div>
+    </div>
+  );
 }
 
-/**
- * The canvas's order kept by roll (`{ order }`), so every device shows the same. A drop is what
- * the user wants now, so the last writer wins. Another device's save arrives as a newer
- * `revision` on the stream and loads again (our own saves come back as revisions we know).
- */
-function useOrderSync(canvas: AgentsServices["canvas"] | undefined, owner: string, revision: number): OrderSync | undefined {
-  const known = useRef(0);
-  const [stale, setStale] = useState(0);
-  useEffect(() => {
-    if (revision > known.current) setStale(revision);
-  }, [revision]);
-  return useMemo<OrderSync | undefined>(
-    () =>
-      canvas && {
-        load: async () => {
-          const saved = await canvas.load(owner);
-          if (!saved) return null;
-          known.current = Math.max(known.current, saved.revision);
-          const doc = saved.doc as { order?: unknown } | null;
-          return doc?.order ?? null;
-        },
-        save: (order) => {
-          canvas
-            .save(owner, { order })
-            .then((r) => (known.current = Math.max(known.current, r.revision)))
-            .catch(() => {
-              // Kept on this device; the next drop tries again.
-            });
-        },
-      },
-    // `stale` makes a new sync, which the canvas loads again.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [canvas, owner, stale],
+/** A view that picks nothing right now: say so calmly, and the way back to everything. */
+function EmptyView({ name, waitingOnly, onAll }: { name: string | null; waitingOnly: boolean; onAll: () => void }) {
+  return (
+    <div className="fade-in pointer-events-none absolute inset-0 grid place-items-center px-6 text-center">
+      <div className="pointer-events-auto space-y-2">
+        <p className="text-[13.5px] font-medium tracking-[-0.01em]">{waitingOnly ? "Nothing is waiting on you" : name ? `Nothing in ${name} right now` : "No threads match the filter"}</p>
+        <p className="text-[12.5px] text-subtle">{waitingOnly ? "Requests show up here the moment an agent asks." : "Threads show up here as soon as they match."}</p>
+        <button onClick={onAll} className="text-[12.5px] text-accent hover:underline">
+          {name ? "Show all" : "Clear the filter"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** The side panel's way to put its conversation on the canvas view that's showing. */
+function PinConversation({ views, thread }: { views: CanvasViews; thread: string }) {
+  const pinned = isPinned(views.current, "conversation", thread);
+  const where = views.current.id === ALL ? "the canvas" : views.current.name;
+  return (
+    <IconButton label={pinned ? `Unpin from ${where}` : `Pin to ${where}`} active={pinned} onClick={() => views.togglePin("conversation", thread)}>
+      {pinned ? <PinOff className="size-4" /> : <Pin className="size-4" />}
+    </IconButton>
   );
 }
 
@@ -465,6 +537,8 @@ function defaultSize(n: GraphNode): Size {
       return { w: 320, h: 150 };
     case "terminal":
       return { w: 620, h: 380 };
+    case "pin":
+      return { w: 520, h: 600 };
   }
 }
 
