@@ -527,12 +527,13 @@ fn stream() -> Vec<StreamEvent> {
         StreamEvent::Machine { cursor: 8, machine: machine() },
         StreamEvent::MachineRemoved { cursor: 9, machine: mch() },
         StreamEvent::Delta { machine: mch(), delta: deltas().remove(1) },
+        StreamEvent::Canvas { cursor: 10, revision: 3, updated_at: 1_762_000_000_000 },
     ]
 }
 
 fn covered_stream(e: &StreamEvent) {
     match e {
-        StreamEvent::Entity(_) | StreamEvent::Machine { .. } | StreamEvent::MachineRemoved { .. } | StreamEvent::Delta { .. } => {}
+        StreamEvent::Entity(_) | StreamEvent::Machine { .. } | StreamEvent::MachineRemoved { .. } | StreamEvent::Delta { .. } | StreamEvent::Canvas { .. } => {}
     }
 }
 

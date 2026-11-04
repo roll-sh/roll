@@ -909,3 +909,145 @@ async fn large_shares_are_trimmed_to_fit_or_refused() {
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
     assert!(v["error"].as_str().unwrap().contains("too large to share"), "{v}");
 }
+
+/// The canvas as the owner arranged it (`agents/canvas.rs`): one opaque JSON object per owner,
+/// saved over a revision or last-writer-wins, at most 64 KiB, the owner's alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_canvas_is_kept_per_owner_with_revisions() {
+    let w = world().await;
+    let path = "/v1/code/agents/acme/canvas";
+    // Nothing saved yet.
+    let (s, v) = w.req("GET", path, None, &w.owner).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v, json!({ "canvas": null, "revision": 0, "updated_at": null }));
+
+    // A round trip: what was saved comes back as it was, with its revision.
+    let doc = json!({ "version": 1, "order": { "mch_1": ["prj_b", "prj_a"] }, "view": { "x": -12.5, "y": 40, "zoom": 0.8 }, "note": "ünïcode ✓" });
+    let (s, v) = w.req("PUT", path, Some(json!({ "canvas": doc, "revision": 0 })), &w.owner).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!((&v["canvas"], &v["revision"]), (&doc, &json!(1)));
+    let at = v["updated_at"].as_i64().unwrap();
+    assert!(at > 1_700_000_000_000, "{at}");
+    let (s, v) = w.req("GET", path, None, &w.owner).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v, json!({ "canvas": doc, "revision": 1, "updated_at": at }));
+    // Agents read it (it's how the canvas looks), as does admin.
+    for who in [w.agent.as_str(), ADMIN] {
+        assert_eq!(w.req("GET", path, None, who).await.1["revision"], 1);
+    }
+
+    // Over a stale revision: a 409 with what is there now, which stays.
+    let (s, v) = w.req("PUT", path, Some(json!({ "canvas": { "version": 1, "stale": true }, "revision": 0 })), &w.owner).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert_eq!((&v["canvas"], &v["revision"], &v["updated_at"]), (&doc, &json!(1), &json!(at)));
+    assert!(v["error"].as_str().unwrap().contains("revision 1"), "{v}");
+    assert_eq!(w.req("GET", path, None, &w.owner).await.1["canvas"], doc);
+    // Over the current one, and without a revision (the last writer wins).
+    let (s, v) = w.req("PUT", path, Some(json!({ "canvas": { "v": 2 }, "revision": 1 })), &w.owner).await;
+    assert_eq!((s, &v["revision"]), (StatusCode::OK, &json!(2)), "{v}");
+    let (s, v) = w.req("PUT", path, Some(json!({ "canvas": { "v": 3 } })), &w.owner).await;
+    assert_eq!((s, &v["revision"]), (StatusCode::OK, &json!(3)), "{v}");
+    let (s, v) = w.req("PUT", path, Some(json!({ "canvas": { "v": 4 }, "revision": null })), ADMIN).await;
+    assert_eq!((s, &v["revision"]), (StatusCode::OK, &json!(4)), "{v}");
+
+    // Only objects, and only well-formed bodies.
+    for bad in [
+        json!({ "canvas": [1, 2] }),
+        json!({ "canvas": "x" }),
+        json!({ "canvas": null }),
+        json!({}),
+        json!([{ "canvas": {} }]),
+        json!(7),
+        json!({ "canvas": {}, "revision": -1 }),
+        json!({ "canvas": {}, "revision": "1" }),
+    ] {
+        let (s, v) = w.req("PUT", path, Some(bad.clone()), &w.owner).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}: {v}");
+        assert!(v["error"].is_string(), "{v}");
+    }
+    let raw = |body: Body, len: Option<usize>| {
+        let mut b = Request::put(path).header("authorization", format!("Bearer {}", w.owner)).header("content-type", "application/json");
+        if let Some(n) = len {
+            b = b.header("content-length", n.to_string());
+        }
+        b.body(body).unwrap()
+    };
+    assert_eq!(w.a.send(raw(Body::from("{\"canvas\": {"), None)).await.status(), StatusCode::BAD_REQUEST);
+
+    // At most 64 KiB of JSON: exactly that fits, a byte more is a 413, whether the body says its
+    // length or streams it; an endless body is refused without being read to the end.
+    let filler = |n: usize| json!({ "canvas": { "f": "x".repeat(n) } });
+    let fits = 64 * 1024 - r#"{"f":""}"#.len();
+    let (s, v) = w.req("PUT", path, Some(filler(fits)), &w.owner).await;
+    assert_eq!((s, &v["revision"]), (StatusCode::OK, &json!(5)), "64 KiB exactly");
+    let (s, v) = w.req("PUT", path, Some(filler(fits + 1)), &w.owner).await;
+    assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("65536"), "{v}");
+    let endless = futures::stream::repeat_with(|| Ok::<_, std::io::Error>(axum::body::Bytes::from(vec![b' '; 16 << 10])));
+    let resp = tokio::time::timeout(Duration::from_secs(10), w.a.send(raw(Body::from_stream(endless), None))).await.expect("refused without reading it all");
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(w.a.send(raw(Body::empty(), Some(10 << 20))).await.status(), StatusCode::PAYLOAD_TOO_LARGE, "a declared length past the limit");
+    assert_eq!(w.req("GET", path, None, &w.owner).await.1["revision"], 5, "refused saves keep nothing");
+
+    // The owner's alone: agents can't write it, other owners and anonymous callers can't see it,
+    // and every owner has a canvas of their own.
+    let (s, v) = w.req("PUT", path, Some(json!({ "canvas": {} })), &w.agent).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(w.req("GET", path, None, &w.other).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(w.req("PUT", path, Some(json!({ "canvas": {} })), &w.other).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(w.a.req("GET", path, None, None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(w.a.req("PUT", path, Some(json!({ "canvas": {} })), None).await.0, StatusCode::UNAUTHORIZED);
+    let (s, v) = w.req("PUT", "/v1/code/agents/other/canvas", Some(json!({ "canvas": { "mine": true }, "revision": 0 })), &w.other).await;
+    assert_eq!((s, &v["revision"]), (StatusCode::OK, &json!(1)), "{v}");
+    assert_eq!(w.req("GET", "/v1/code/agents/other/canvas", None, &w.owner).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(w.req("GET", path, None, &w.owner).await.1["revision"], 5);
+    assert_eq!(w.req("GET", "/v1/code/agents/nobody/canvas", None, ADMIN).await.0, StatusCode::NOT_FOUND);
+}
+
+/// A save goes out on the owner's event stream as `canvas` (its cursor as `id:`), so other open
+/// devices load it again; a stream that reconnects after it catches up on it from the table.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn canvas_saves_go_out_on_the_event_stream() {
+    let w = world().await;
+    let path = "/v1/code/agents/acme/canvas";
+    let canvas_event = |e: Sse| match e.data {
+        StreamEvent::Canvas { cursor, revision, updated_at } => {
+            assert_eq!((e.event.as_str(), e.id), ("canvas", Some(cursor)));
+            (cursor, revision, updated_at)
+        }
+        other => panic!("expected a canvas event, got {other:?}"),
+    };
+    let events = "/v1/code/agents/acme/events";
+    let mut live = Events::open(&w.a, events, &w.owner, None).await;
+    let mut agents = Events::open(&w.a, events, &w.agent, None).await;
+    let mut others = Events::open(&w.a, "/v1/code/agents/other/events", &w.other, None).await;
+    let (_, v) = w.req("PUT", path, Some(json!({ "canvas": { "v": 1 } })), &w.owner).await;
+    let (c1, rev, at) = canvas_event(live.next().await);
+    assert_eq!((rev, Some(at)), (1, v["updated_at"].as_u64()));
+    assert_eq!(canvas_event(agents.next().await).1, 1);
+    others.quiet(150).await;
+    // A refused save sends nothing.
+    assert_eq!(w.req("PUT", path, Some(json!({ "canvas": { "v": 9 }, "revision": 0 })), &w.owner).await.0, StatusCode::CONFLICT);
+    live.quiet(150).await;
+
+    // Cursors are the owner's: they order canvas saves among machine changes.
+    let (mid, _) = w.machine("box").await;
+    let e = live.next().await;
+    let StreamEvent::Machine { cursor: c2, .. } = e.data else { panic!("{e:?}") };
+    w.req("PUT", path, Some(json!({ "canvas": { "v": 2 } })), &w.owner).await;
+    let (_, v) = w.req("PUT", path, Some(json!({ "canvas": { "v": 3 } })), &w.owner).await;
+    let (c3, r2, _) = canvas_event(live.next().await);
+    let (c4, r3, at3) = canvas_event(live.next().await);
+    assert!(c1 < c2 && c2 < c3 && c3 < c4, "{c1} {c2} {c3} {c4}");
+    assert_eq!((r2, r3, Some(at3)), (2, 3, v["updated_at"].as_u64()));
+    let (_, state) = w.req("GET", "/v1/code/agents/acme/state", None, &w.owner).await;
+    assert_eq!(state["cursor"].as_u64(), Some(c4), "the snapshot's cursor counts canvas saves too");
+
+    // Reconnecting after c1: the machine, then the canvas as it is now (one row: its last save).
+    let mut back = Events::open(&w.a, events, &w.owner, Some(c1)).await;
+    let e = back.next().await;
+    assert!(matches!(&e.data, StreamEvent::Machine { machine, .. } if machine.id.0 == mid), "{e:?}");
+    assert_eq!(canvas_event(back.next().await), (c4, 3, at3));
+    back.quiet(150).await;
+    Events::open(&w.a, events, &w.owner, Some(c4)).await.quiet(150).await;
+}

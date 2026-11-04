@@ -47,6 +47,7 @@ pub fn routes() -> Router<Arc<Code>> {
         .route("/v1/code/agents/{owner}/threads/{thread}/work", post(take_work).delete(drop_work))
         .route("/v1/code/agents/{owner}/state", get(state))
         .route("/v1/code/agents/{owner}/events", get(events))
+        .route("/v1/code/agents/{owner}/canvas", get(super::canvas::get).put(super::canvas::put))
         .route("/v1/code/agents/{owner}/threads/{thread}/shares", post(share::create))
         .route("/v1/code/agents/{owner}/shares", get(share::list))
         .route("/v1/code/agents/{owner}/shares/{id}", delete(share::revoke))
@@ -359,7 +360,7 @@ struct Stream {
 fn cursor_of(ev: &StreamEvent) -> Option<u64> {
     match ev {
         StreamEvent::Entity(m) => Some(m.cursor),
-        StreamEvent::Machine { cursor, .. } | StreamEvent::MachineRemoved { cursor, .. } => Some(*cursor),
+        StreamEvent::Machine { cursor, .. } | StreamEvent::MachineRemoved { cursor, .. } | StreamEvent::Canvas { cursor, .. } => Some(*cursor),
         StreamEvent::Delta { .. } => None,
     }
 }
@@ -370,6 +371,7 @@ fn kind_of(ev: &StreamEvent) -> &'static str {
         StreamEvent::Machine { .. } => "machine",
         StreamEvent::MachineRemoved { .. } => "machine_removed",
         StreamEvent::Delta { .. } => "delta",
+        StreamEvent::Canvas { .. } => "canvas",
     }
 }
 
@@ -377,7 +379,7 @@ impl Stream {
     fn wants(&self, ev: &StreamEvent) -> bool {
         match ev {
             StreamEvent::Entity(m) => self.filter.wants(&m.entity),
-            StreamEvent::Machine { .. } | StreamEvent::MachineRemoved { .. } => true,
+            StreamEvent::Machine { .. } | StreamEvent::MachineRemoved { .. } | StreamEvent::Canvas { .. } => true,
             StreamEvent::Delta { delta, .. } => match delta {
                 agent_proto::Delta::Text { thread, .. } | agent_proto::Delta::Output { thread, .. } => self.filter.threads.iter().any(|t| t == thread.as_str()),
                 agent_proto::Delta::Terminal { .. } => true,
@@ -398,6 +400,10 @@ impl Stream {
             } else {
                 StreamEvent::Machine { cursor: m.cursor, machine: self.code.machine_json(m) }
             });
+        }
+        // One row per owner: its last save, if it's newer.
+        if let Some(c) = super::canvas::after(db, &self.owner_id, self.high)? {
+            evs.push(c.event());
         }
         evs.sort_by_key(|e| cursor_of(e).unwrap_or(0));
         // A full page ends where its last row is; the other table's rows past it come next time.

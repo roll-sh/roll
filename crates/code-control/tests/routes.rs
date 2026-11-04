@@ -503,8 +503,8 @@ async fn github_webhook_statuses() {
 /// (machines, state, events, shares) are the owner's tokens' (agents included) and 404 to
 /// everyone else; commands are the owner's tokens' too, 403/401 for others, and an agent's only
 /// drive threads (never terminals, files outside projects, approvals, projects, rollbacks or a
-/// higher mode: agents/policy.rs); managing machines,
-/// looking up and approving logins, and making and revoking shares is the owner's, not its
+/// higher mode: agents/policy.rs); managing machines, looking up and approving logins, making
+/// and revoking shares and arranging the canvas (reading it is a read) is the owner's, not its
 /// agents'. Starting and polling a login and reading a share by its link look at no caller; bad
 /// tokens, machine tokens included, are 401 everywhere else.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -516,8 +516,8 @@ async fn agents_routes_follow_the_auth_matrix() {
     let mid = m["machine"]["id"].as_str().unwrap().to_string();
     let machine = m["token"].as_str().unwrap().to_string();
     let base = "/v1/code/agents/acme";
-    let body = json!({ "name": "x", "user_code": "BCDF-GHJK", "id": "c1", "command": { "type": "provider.refresh" } });
-    let reads = [format!("{base}/machines"), format!("{base}/state"), format!("{base}/events"), format!("{base}/shares")];
+    let body = json!({ "name": "x", "user_code": "BCDF-GHJK", "id": "c1", "command": { "type": "provider.refresh" }, "canvas": {} });
+    let reads = [format!("{base}/machines"), format!("{base}/state"), format!("{base}/events"), format!("{base}/shares"), format!("{base}/canvas")];
     let command = format!("{base}/machines/{mid}/commands");
     let manages = [
         ("POST", format!("{base}/machines")),
@@ -528,6 +528,7 @@ async fn agents_routes_follow_the_auth_matrix() {
         ("GET", format!("{base}/login/BCDF-GHJK")),
         ("POST", format!("{base}/threads/thr_x/shares")),
         ("DELETE", format!("{base}/shares/shr_x")),
+        ("PUT", format!("{base}/canvas")),
     ];
     let (acme, agent, other, app_in) = (Some(w.acme.as_str()), Some(w.agent.as_str()), Some(w.other.as_str()), Some(w.app_in.as_str()));
     let denied = StatusCode::UNAUTHORIZED;
@@ -604,7 +605,7 @@ async fn agents_routes_follow_the_auth_matrix() {
     for (m, p) in &manages {
         let want = match (*m, p.as_str()) {
             ("POST", p) if p.ends_with("/machines") => StatusCode::CREATED,
-            ("PATCH", _) => OK,
+            ("PATCH", _) | ("PUT", _) => OK,
             ("DELETE", p) if p.contains("/machines/") => StatusCode::NO_CONTENT,
             _ => NOT_FOUND,
         };

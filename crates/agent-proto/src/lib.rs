@@ -1299,6 +1299,9 @@ pub enum StreamEvent {
     MachineRemoved { cursor: u64, machine: MachineId },
     /// Ephemeral (no SSE `id:`).
     Delta { machine: MachineId, delta: Delta },
+    /// The owner's canvas was saved (SSE `id:` is its cursor): a device showing an older
+    /// `revision` loads it again (`GET /v1/code/agents/{owner}/canvas`).
+    Canvas { cursor: u64, revision: u64, updated_at: Millis },
 }
 
 /// `POST /v1/code/agents/{owner}/machines/{machine}/commands`.

@@ -146,5 +146,11 @@
       "node": "nod_0000000000000007",
       "text": "test result: ok\n"
     }
+  },
+  {
+    "type": "canvas",
+    "cursor": 10,
+    "revision": 3,
+    "updated_at": 1762000000000
   }
 ]

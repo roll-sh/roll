@@ -433,6 +433,7 @@ impl Db {
             crate::agents::SCHEMA,
             crate::agents::share::SCHEMA,
             crate::agents::sandbox::store::SCHEMA,
+            crate::agents::canvas::SCHEMA,
         ] {
             sql.ensure_schema(schema)?;
         }
