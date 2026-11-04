@@ -1,0 +1,37 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.60s
+     Running tests/catalog_format.rs (/home/meszmate/.cache/a166/target-debug/debug/deps/catalog_format-677fddf080a1845a)
+
+running 4 tests
+test comment_writes_dont_grow_with_the_comments ... ok
+test comments_upgrade_from_header_and_downgrade ... ok
+test a_format_3_data_directory_opens_and_upgrades ... ok
+test records_leave_defaults_out_and_downgrade_whole ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.19s
+
+     Running tests/catalog_storage.rs (/home/meszmate/.cache/a166/target-debug/debug/deps/catalog_storage-fe341eddda31412b)
+
+running 6 tests
+test catalog_without_shutdown_is_replayed ... ok
+test catalog_survives_restarts_and_rollbacks ... ok
+test ddl_writes_dont_grow_with_the_catalog ... ok
+test legacy_catalog_is_rewritten_as_records ... ok
+test merged_concurrent_ddl_is_stored ... ok
+test group_committed_ddl_keeps_every_change ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.67s
+
+     Running tests/kept_plans.rs (/home/meszmate/.cache/a166/target-debug/debug/deps/kept_plans-b343836d3bffe0ca)
+
+running 7 tests
+test bind_plans_before_checking_result_formats ... ok
+test custom_plans_from_the_analysis ... ok
+test kept_plans_follow_size_changes_across_sessions ... ok
+test extended_custom_plans_run_the_generic_binding ... ok
+test kept_plans_follow_values_sizes_and_ddl ... ok
+test plpgsql_custom_plans_as_the_generic_plan ... ok
+test kept_plans_serve_literals_of_any_length ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.03s
+

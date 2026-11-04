@@ -1,0 +1,39 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 19s
+     Running unittests src/lib.rs (/home/meszmate/.cache/a166/target-debug/debug/deps/pg_engine-357a2b04731fc140)
+
+running 31 tests
+test catalog::btsim::tests::dead_head_walks_match_full_walks ... ok
+test catalog::btsim::tests::long_keys_fit ... ok
+test catalog::btsim::tests::null_keys_follow_tags_not_encoding_length ... ok
+test catalog::btsim::tests::packed_tree_keeps_large_null_keys_across_restart ... ok
+test catalog::btsim::tests::qsort_matches_sorted ... ok
+test catalog::btsim::tests::size_watch_follows_pages ... ok
+test catalog::btsim::tests::vacuum_deletes_emptied_pages ... ok
+test catalog::ginsim::tests::posting_list_sizes ... ok
+test catalog::hashidx::sim_tests::grows_like_postgres ... ok
+test catalog::hashidx::tests::hashes_match_postgres ... ok
+test catalog::heapsim::lps::tests::line_pointers_read_back ... ok
+test catalog::heapsim::lps::tests::settling_waits_for_snapshots_and_preserves_tuple_fields ... ok
+test catalog::heapsim::tests::key_at_answers_every_version ... ok
+test catalog::heapsim::tests::prune_hints_and_visibility_watch_follow_the_model ... ok
+test catalog::heapsim::tests::size_watch_follows_forks ... ok
+test catalog::heapsim::tests::visible_count_follows_writes_and_vacuum ... ok
+test catalog::heapsim::tests::visible_count_pending_insert_clears_target_page ... ok
+test catalog::heapsim::tests::visible_count_restores_old_shapes_atomically ... ok
+test catalog::heapsim::tests::visible_count_survives_bulk_page_initialization ... ok
+test catalog::heapsim::tests::visible_count_survives_pending_restore_and_rollback ... ok
+test catalog::keymap::tests::ascending_rows_found_forward ... ok
+test catalog::keymap::tests::matches_a_hash_map ... ok
+test catalog::pglz::tests::repeats_compress ... ok
+test catalog::pmap::tests::behaves_as_a_btreemap ... ok
+test catalog::pmap::tests::phash_behaves_as_a_hashmap ... ok
+test catalog::pmap::tests::stored_maps_read_groups_as_used ... ok
+test catalog::pmap::tests::stored_phash_reads_buckets_as_used ... ok
+test catalog::relindex::tests::words_match_mentions ... ok
+test catalog::relsize::tests::small_numeric_digits_match_text ... ok
+test catalog::stored_ix::lazy_tags_are_the_listed_maps ... ok
+test catalog::btsim::leaf::tests::items_read_back ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 158 filtered out; finished in 18.88s
+

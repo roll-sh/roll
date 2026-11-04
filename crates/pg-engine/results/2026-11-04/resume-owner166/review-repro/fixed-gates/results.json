@@ -38,5 +38,33 @@
       ]
     ],
     "log_sha256": "f1c705b762f028e0c79d86fdabd1e1392d4555f54d72a31300235b95de3d17f1"
+  },
+  {
+    "name": "debug-catalog-unit",
+    "exit": 0,
+    "validated": true,
+    "summaries": [
+      [
+        "ok",
+        "31",
+        "0",
+        "0"
+      ]
+    ],
+    "log_sha256": "d62cc68373ff1060e80e54e7e1f054b3c6a34df553e7d91dd3010f3076f25398"
+  },
+  {
+    "name": "build",
+    "exit": 0,
+    "validated": true,
+    "summaries": [],
+    "log_sha256": "4278aba788c181841f48c017d920f9e805f00a7635fafeb4fe6c22e89e9944ae"
+  },
+  {
+    "name": "clippy",
+    "exit": 0,
+    "validated": true,
+    "summaries": [],
+    "log_sha256": "6550ac98c0565a76aa6b6f55afda79e006c2da07ff46d5f27784c8b03bc50f10"
   }
 ]
