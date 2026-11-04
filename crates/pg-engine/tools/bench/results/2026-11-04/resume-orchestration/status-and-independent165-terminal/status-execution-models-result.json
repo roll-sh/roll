@@ -1,0 +1,30 @@
+{
+  "taskId": "node:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Adelegate-task%3Apg-resume-20261104-status-execution-models-20261104t17",
+  "childThreadId": "thread:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Adelegate-task%3Apg-resume-20261104-status-execution-models-20261104t17",
+  "childRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A9e5a6feb-d435-4514-ac9d-07c1b03b444b%253Adelegate-task%253Apg-resume-20261104-status-execution-models-20261104t17:ordinal:1",
+  "childNodeId": "node:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Adelegate-task%3Apg-resume-20261104-status-execution-models-20261104t17",
+  "status": "completed",
+  "workState": "result_available",
+  "hasPendingChildRuns": false,
+  "latestTerminalRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A9e5a6feb-d435-4514-ac9d-07c1b03b444b%253Adelegate-task%253Apg-resume-20261104-status-execution-models-20261104t17:ordinal:1",
+  "latestTerminalStatus": "completed",
+  "latestTerminalSummary": null,
+  "latestTerminalResultContextTransferId": null,
+  "providerInstanceId": "codex",
+  "model": "gpt-6.1-sol",
+  "options": [
+    {
+      "id": "reasoningEffort",
+      "value": "high"
+    },
+    {
+      "id": "serviceTier",
+      "value": "default"
+    }
+  ],
+  "summary": "Correctness repairs are progressing, but none of these lanes has performance or integration acceptance yet.\n\n- **167 — executor, `278a2896`:** Saved receipts show **3 focused goldens + 1 reordered-path test PASS**, and the new full-run build passed. Latest saved stage is **debug running**; one process snapshot confirms runner `2199515` still exists, without establishing further progress. Static R3 review closes the named weighted-counter defect but identifies a new **MEDIUM**: whole-map replay can inflate once-only InitPlan/CTE instrumentation. Runtime confirmation remains queued after the pinned run. Also pending: possible EXPLAIN/Materialize mismatch and removal of an unused extra test execution.\n\n- **170 — size models, `047c4697`:** **VACUUM 2 + kept-state 2 + existing TOAST/model 25 tests PASS** in saved receipts. Static review supports the TOAST sizing repair but finds a new **LOW dropped-column undercount**, a one-sided page-count assertion, and a **plausible pre-existing MEDIUM COPY `Load::row` overflow**. Those findings are not runtime reproductions. Full gates for `047` remain deferred; no newer repair appears in the saved status.\n\n- **149 — scan cost, `26f4bfac`:** Storage endpoint, SQL update, transfer and build checks **PASS**. Original full-suite `ddl_scaling` failure remains **unattributed**. The single isolation preflight ended **DEFERRED / exit 3** because of overlapping CPU affinity; the DDL target **never ran**. Remote evidence snapshot: `0e050abf`.\n\n- **148 — bulk writes, `2bc84a5a`:** Retains its **HELD / INCONCLUSIVE** status. Invalid disk false-zero evidence supplies no timing or acceptance result. Original work and the sibling script repair were integrated previously.\n\n**Parent-audited evidence:** Older `0595` executor gates passed all 7 stages; older `c66` model gates passed all 10. Parent audits checked committed evidence and source pins, without rerunning tests. Those passes **do not validate `278` or `047`**. `pnpm test:pg --unit` also does not exercise pg-engine.\n\n**Concrete blocker:** The combined **163/170 HIGH remains open and parent-owned**: parallel btree size checks and real two-worker parity proof are still required.\n\n**Next useful action:** Preserve the running pin until terminal, then capture the InitPlan/CTE PG comparisons and address the reviewed defects before validating the resulting exact revisions.\n\nEvidence: [lane checkpoint](/home/meszmate/.cache/pg-engine-resume-20261104/execution_models/remaining-gates.md), [live receipt](/home/meszmate/.cache/pg-engine-resume-20261104/execution_models/current-live.json), [executor review](/home/meszmate/.cache/pg-engine-resume-20261104/executor-source-review-r3-result.json), [InitPlan review](/home/meszmate/.cache/pg-engine-resume-20261104/executor-source-review-r3-initplan-result.json), [models review](/home/meszmate/.cache/pg-engine-resume-20261104/models-source-review-r3-result.json).",
+  "resultContextTransferId": "context-transfer:type:subagent_result:source-thread:thread%3Adelegated-task%3Acommand%253Amcp%253A9e5a6feb-d435-4514-ac9d-07c1b03b444b%253Adelegate-task%253Apg-resume-20261104-status-execution-models-20261104t17:target-thread:ef773c6d-b273-413f-96df-4136f8b05569:6450626a-61f1-4f52-92f1-d88ac26cf393",
+  "hasPendingQuestion": false,
+  "pendingApproval": null,
+  "waitTimedOut": false
+}

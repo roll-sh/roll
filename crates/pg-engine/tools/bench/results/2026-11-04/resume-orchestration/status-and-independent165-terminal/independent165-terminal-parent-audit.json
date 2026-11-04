@@ -1,0 +1,35 @@
+{
+  "commit": "c113098f191c9e1a55b1d5c63693ae67fcef7634",
+  "manifest_payloads": 316,
+  "closed_membership": true,
+  "all_sha256_verified": true,
+  "manifest_sha256": "4b9b79a9a2767fb221084797b64f186c9f6aacc9a50f8845965e846a2c7e4083",
+  "command_exits": {
+    "debug-test": "0",
+    "release-test": "0",
+    "clippy": "0",
+    "build": "0",
+    "postgres-unit": "0"
+  },
+  "debug_release_totals": [
+    453,
+    0,
+    18,
+    60
+  ],
+  "unit_totals": [
+    24,
+    0,
+    0,
+    5
+  ],
+  "unit_executed": true,
+  "service_stack_acceptance": false,
+  "pnpm_unit_pg_engine_execution": false,
+  "binary_sha256_record": "d4f2d31068d282cc28f98bfd77bcbb4ba85cd5d6492940ad13a7f279e5168b32",
+  "scope": "Parent checked committed evidence, aggregate raw summaries and source identity. Per-binary validation is recorded by owner auditor; binary provenance hash record verified, executable not rehashed by parent here.",
+  "source_acceptance": false,
+  "performance_acceptance": false,
+  "prior_wire_failure": "RETAINED",
+  "affinity_isolation": false
+}

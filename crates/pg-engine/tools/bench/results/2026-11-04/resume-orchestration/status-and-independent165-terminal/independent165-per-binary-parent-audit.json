@@ -1,0 +1,37 @@
+{
+  "commit": "c113098f191c9e1a55b1d5c63693ae67fcef7634",
+  "stage_audits": {
+    "debug-test": {
+      "per_binary_matches": true,
+      "summary_count": 60,
+      "totals": [
+        453,
+        0,
+        18
+      ]
+    },
+    "release-test": {
+      "per_binary_matches": true,
+      "summary_count": 60,
+      "totals": [
+        453,
+        0,
+        18
+      ]
+    }
+  },
+  "binaries_rehashed": {
+    "/home/meszmate/.cache/a165/target/dist/roll-engine": {
+      "bytes": 69448968,
+      "sha256": "d4f2d31068d282cc28f98bfd77bcbb4ba85cd5d6492940ad13a7f279e5168b32"
+    },
+    "/home/meszmate/.cache/a165/bin/independent/roll-engine": {
+      "bytes": 69448968,
+      "sha256": "d4f2d31068d282cc28f98bfd77bcbb4ba85cd5d6492940ad13a7f279e5168b32"
+    }
+  },
+  "expected_map_sha256": "a8f76370c874a10b7c62f85e3c62d15ab9fc2400710373407ba159a7e7e23b15",
+  "source_acceptance": false,
+  "performance_acceptance": false,
+  "scope": "Parent independently parsed committed raw logs per binary and rehashed both actual existing dist artifacts; no execution or timing test"
+}

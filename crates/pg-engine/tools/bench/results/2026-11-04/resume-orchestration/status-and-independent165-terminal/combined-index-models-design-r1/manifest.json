@@ -1,0 +1,21 @@
+{
+  "kind": "static integration design; not applied or executed",
+  "shared_commit": "fe7b0023c9df19a6dae1e6067ba8454998db48c5",
+  "index_commit": "483b4d6e5d41e9025aaa518d5774abd7971f4204",
+  "index_base": "d119ef44fedb3e020977e2dc09b721f481211b31",
+  "models_commit": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+  "models_followup": "047c4697e72ce63867257db3668a02c55c77830a",
+  "prior_reviews": {
+    "index-source-review-r3-result.json": "2d716c9402bb4a31a024bad4e8bea2fe85e1e827208fba5f052edadd40e99612",
+    "models-source-review-r2-result.json": "9e1cb9ff713d96b4104f050b6adcc506aedae66ac1b027dd56ea7c6cba183cf3",
+    "models-source-review-r3-result.json": "c9bcfd13ecfa1999e0721f4f6f001920df138bb2b7300cb2b338e8e1fff1b146"
+  },
+  "artifacts": {
+    "design.md": "11a9e7731b26964f18a7cd82067021e1042359af582afc85d6f3eefa47a1b664",
+    "proof-matrix.tsv": "81b8eaa5ec2bc1f6ea0cd06a06209f81f7134d50bcc87ee951ee1510bcab2ef4"
+  },
+  "proof_case_count": 18,
+  "executed_builds_tests_benchmarks": false,
+  "source_mutations": false,
+  "high_disposition": "OPEN; parent integration and required proof outstanding"
+}
