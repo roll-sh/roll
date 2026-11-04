@@ -1,0 +1,46 @@
+{
+  "method": "Python byte-order witness of source formula; no Rust Store execution",
+  "exit": 0,
+  "cases": [
+    {
+      "ts": 0,
+      "user_key": "0000000700000000018000000000000001",
+      "physical_key": "0000000700000000018000000000000001ffffffffffffffff",
+      "bad_end": "000000070000000001800000000000000100",
+      "prefix_end": "0000000700000000018000000000000002",
+      "cold_cursor_includes": false,
+      "prefix_end_includes": true,
+      "hot_user_range_includes": true
+    },
+    {
+      "ts": 1,
+      "user_key": "0000000700000000018000000000000001",
+      "physical_key": "0000000700000000018000000000000001fffffffffffffffe",
+      "bad_end": "000000070000000001800000000000000100",
+      "prefix_end": "0000000700000000018000000000000002",
+      "cold_cursor_includes": false,
+      "prefix_end_includes": true,
+      "hot_user_range_includes": true
+    },
+    {
+      "ts": 42,
+      "user_key": "0000000700000000018000000000000001",
+      "physical_key": "0000000700000000018000000000000001ffffffffffffffd5",
+      "bad_end": "000000070000000001800000000000000100",
+      "prefix_end": "0000000700000000018000000000000002",
+      "cold_cursor_includes": false,
+      "prefix_end_includes": true,
+      "hot_user_range_includes": true
+    },
+    {
+      "ts": 18446744073709551615,
+      "user_key": "0000000700000000018000000000000001",
+      "physical_key": "00000007000000000180000000000000010000000000000000",
+      "bad_end": "000000070000000001800000000000000100",
+      "prefix_end": "0000000700000000018000000000000002",
+      "cold_cursor_includes": false,
+      "prefix_end_includes": true,
+      "hot_user_range_includes": true
+    }
+  ]
+}

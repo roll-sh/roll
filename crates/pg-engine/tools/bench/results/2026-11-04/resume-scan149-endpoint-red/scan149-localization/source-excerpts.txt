@@ -1,0 +1,375 @@
+### crates/pg-engine/src/exec/scan.rs:3385
+3385:     fn fetch_stored(&mut self, keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Vec<Option<bytes::Bytes>>> {
+3386:         // (A table that never stored a value out of line has rows only as stored.)
+3387:         let Some(snap) = ctx
+3388:             .snapshot()
+3389:             .filter(|_| self.plan.mark.is_none() && !self.plan.sys && super::sizing::tracked(self.plan.table.oid))
+3390:         else {
+3391:             // (Keys close together: one range read a batch at a time, the rows as stored when
+3392:             // none has values out of line.)
+3393:             if ctx.snapshot().is_some()
+3394:                 && let Some(rows) = fetch_dense(keys, true, ctx)?
+3395:             {
+3396:                 return Ok(rows);
+3397:             }
+3398:             if keys.len() < 4
+3399:                 && let Some(rows) = self.fetch_kept(keys, ctx)?
+3400:             {
+3401:                 return Ok(rows);
+3402:             }
+3403:             return fetch_rows(keys, ctx);
+3404:         };
+3405:         let txn = ctx.txn.borrow();
+3406:         if self.toast.is_none() {
+3407:             // (The source of the table's rows' values, as a scan of its rows has it.)
+3408:             let t = self.plan.table.oid;
+3409:             let (start, end) = (index_prefix(t, 0), index_prefix(t, 1));
+3410:             let Some(src) = txn.scan_snap(&start, &end, &snap).source().cloned() else {
+3411:                 drop(txn);
+3412:                 return fetch_rows(keys, ctx);
+3413:             };
+3414:             self.toast = Some(std::cell::RefCell::new(crate::txn::toast::Reader::new(src)));
+3415:         }
+3416:         get_sorted(&txn, keys, &snap, false)
+3417:     }
+3418: 
+3419:     /// `fetch_rows` of a few keys at the statement's snapshot through one scan kept from call
+3420:     /// to call (`fscan`), sought to each key (`Txn::reseek_snap`): the next of ascending
+3421:     /// lookups (a nested loop's inner rows, an index's entries in its table's order) reads on
+3422:     /// in the blocks the last one read, instead of a lookup from the top each. Values are put
+3423:     /// back as `fetch_rows` puts them. None: no statement snapshot.
+3424:     fn fetch_kept(&mut self, keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Option<Vec<Option<bytes::Bytes>>>> {
+3425:         let Some(snap) = ctx.snapshot() else {
+3426:             return Ok(None);
+3427:         };
+3428:         let txn = ctx.txn.borrow();
+3429:         let mut out = Vec::with_capacity(keys.len());
+3430:         for k in keys {
+3431:             // (The smallest key past `k`: user keys are prefix-free.)
+3432:             let mut end = k.clone();
+3433:             end.push(0);
+3434:             let kept = self.fscan.take().and_then(|mut it| txn.reseek_snap(&mut it, k, &end, &snap).then_some(it));
+3435:             let mut it = kept.unwrap_or_else(|| Box::new(txn.scan_snap(k, &end, &snap)));
+3436:             out.push(match it.next() {
+3437:                 Some(r) => {
+3438:                     let (rk, v) = r?;
+3439:                     (rk == *k).then_some(v)
+3440:                 }
+3441:                 None => None,
+3442:             });
+3443:             self.fscan = Some(it);
+3444:         }
+3445:         Ok(Some(out))
+3446:     }
+3447: 
+### crates/pg-engine/src/exec/scan.rs:4610
+4610:         let mut prefiltered = false;
+4611:         // (A row with out-of-line values: the filter's columns decoded once, for both.)
+4612:         let mut probed: Option<(Row, Rc<[bool]>)> = None;
+4613:         if lazy.is_none()
+4614:             && self.ios_cols.is_none()
+4615:             && let Some(fm) = self.prefilter_mask().or_else(|| self.external_prefilter(bytes))
+4616:             && !predicate_locked(&self.plan.table, ctx)
+4617:             && self.plan.filter.is_some()
+4618:         {
+4619:             let ext = self.toast.is_some() && crate::storage::toast::has_external(bytes);
+4620:             // (Decided over the stored values, nothing decoded: `StoredCmps`; else over the
+### crates/pg-engine/src/exec/scan.rs:4860
+4860:     mode: RowLockMode,
+4861:     wait: Wait,
+4862:     oper: Xltw,
+4863:     later: bool,
+4864:     ctx: &ExecCtx,
+4865: ) -> Result<Locked> {
+4866:     ctx.txn.borrow_mut().output_cid();
+4867:     let xact_ctx = xltw_context(oper, &t.name, key, ctx);
+4868:     let got = ctx
+4869:         .txn
+4870:         .borrow_mut()
+4871:         .lock_row(t.oid, key, mode, wait_policy(wait), &|| t.name.clone(), &xact_ctx)?;
+4872:     if !got {
+4873:         return Ok(Locked::Skip);
+4874:     }
+4875:     let txn = ctx.txn.borrow();
+4876:     // Changed by a later command of this transaction (TM_SelfModified): skipped.
+4877:     if later
+4878:         && let (Some(w), Some(cid)) = (txn.written_by(key), ctx.command_id())
+4879:         && w > cid
+4880:     {
+4881:         return Ok(Locked::Skip);
+4882:     }
+4883:     if !txn.changed_since_snapshot(key)? {
+4884:         return Ok(Locked::Same);
+4885:     }
+4886:     let latest = txn.get_latest(key)?;
+4887:     // FOR KEY SHARE doesn't conflict with an update that left the key alone: the row stays
+4888:     // the version our snapshot saw (heap_lock_tuple, HEAP_KEYS_UPDATED unset).
+4889:     if mode == RowLockMode::KeyShare
+4890:         && let Some((_, Some(new))) = &latest
+4891:         && let Some(old) = txn.get(key)?
+4892:     {
+4893:         let cat = txn.catalog();
+4894:         let keys = key_columns(t, &cat);
+4895:         let (old, new) = (decode_table_row(t, &old)?, decode_table_row(t, new)?);
+4896:         if keys.iter().all(|&i| old.get(i) == new.get(i)) {
+4897:             return Ok(Locked::Same);
+4898:         }
+4899:     }
+4900:     let moved = matches!(latest, Some((ts, None)) if txn.moved_at(key, ts));
+4901:     if txn.isolation.txn_snapshot() {
+4902:         return Err(Error::new(
+4903:             code::SERIALIZATION_FAILURE,
+4904:             if moved || matches!(latest, Some((_, Some(_)))) {
+4905:                 "could not serialize access due to concurrent update"
+4906:             } else {
+4907:                 "could not serialize access due to concurrent delete"
+4908:             },
+4909:         ));
+4910:     }
+4911:     if moved {
+4912:         return Err(Error::new(code::SERIALIZATION_FAILURE, MOVED_TO_PARTITION));
+4913:     }
+4914:     match latest {
+### crates/pg-engine/src/exec/dml.rs:4844
+4844:                     trigger::batch(ctx, || self.finish_tree(ctx))?;
+4845:                 } else if !self.deferred {
+4846:                     trigger::batch(ctx, || {
+4847:                         self.end(ctx, false)?;
+4848:                         self.end(ctx, true)
+4849:                     })?;
+4850:                 }
+### crates/pg-engine/src/exec/dml.rs:4898
+4898:                 || (self.plan.route.is_some() && ctx.moved.borrow().contains(&dkey))
+4899:             {
+4900:                 // A row joined more than once is updated once; one moved here by this
+4901:                 // statement isn't updated again.
+4902:                 continue;
+4903:             }
+4904:             match self_modified(&dkey, ctx) {
+4905:                 SelfModified::No => {}
+4906:                 SelfModified::ByThis => continue,
+4907:                 SelfModified::ByLater => return Err(triggered_change("updated")),
+4908:             }
+4909:             let old: Row = match lock_row(&t, &dkey, RowMark::NoKeyUpdate, Wait::Block, Xltw::Update, ctx)? {
+4910:                 Locked::Skip => continue,
+4911:                 Locked::Same => match map {
+4912:                     Some(map) => member_row(&t, map, &src, &dkey, ctx)?,
+4913:                     None => src[..n].to_vec(),
+4914:                 },
+4915:                 Locked::Newer(bytes) => {
+4916:                     let fresh = decode_table_row(&t, &bytes)?;
+4917:                     let named = match map {
+4918:                         Some(map) => crate::sql::plan::row_as_parent(map, &fresh),
+4919:                         None => fresh.clone(),
+4920:                     };
+4921:                     if let Some(f) = &self.plan.recheck
+4922:                         && !eval_bool(f, &named, ctx)?
+4923:                     {
+4924:                         continue;
+4925:                     }
+4926:                     // (A TID scan's condition, on the new version's TID.)
+4927:                     if let Some(tid) = super::scan::stored_tid(&bytes)
+4928:                         && super::scan::tid_recheck(&self.plan.source, t.oid, tid, ctx)? == Some(false)
+4929:                     {
+4930:                         continue;
+4931:                     }
+4932:                     src.splice(0..n, named);
+4933:                     fresh
+4934:                 }
+4935:             };
+4936:             // The rows as the named table's (RETURNING, its transition tables).
+4937:             let as_named = |r: &Row| match map {
+4938:                 Some(map) => crate::sql::plan::row_as_parent(map, r),
+4939:                 None => r.clone(),
+4940:             };
+4941:             let mut new = old.clone();
+4942:             assign(&mut new, msets, &src, ctx)?;
+4943:             if trigger::any(&rules.triggers, true, true, tt::UPDATE, ctx) {
+4944:                 match trigger::before_row(
+4945:                     &rules.triggers,
+4946:                     &t,
+### crates/pg-engine/src/storage/mod.rs:67
+67: pub fn mvcc_key(user: &[u8], ts: u64) -> Vec<u8> {
+68:     let mut k = Vec::with_capacity(user.len() + 8);
+69:     k.extend_from_slice(user);
+70:     k.extend_from_slice(&(!ts).to_be_bytes());
+71:     k
+72: }
+73: 
+### crates/pg-engine/src/storage/mod.rs:870
+870:     pub fn scan_raw(&self, start: &[u8], end: &[u8], ts: u64) -> Scan {
+871:         if let Some(rows) = self.hot.scan(start, end, ts) {
+872:             return Scan::of_rows(self.view(), rows, ts);
+873:         }
+874:         if let Some(p) = hot::covering(start, end)
+875:             && self.hot.note_scan(p)
+876:         {
+877:             // (Kept from now on; a failure to read it leaves it to the merging scan.)
+878:             if self.keep_hot(p).is_ok()
+879:                 && let Some(rows) = self.hot.scan(start, end, ts)
+880:             {
+881:                 return Scan::of_rows(self.view(), rows, ts);
+882:             }
+883:         }
+884:         // (A run of deleted keys a scan found before at a snapshot at or before this one,
+885:         // nothing written into it since, is stepped over: `dead`.)
+886:         let start = match self.dead.skip(start, ts) {
+887:             Some(live) if !end.is_empty() && live.as_slice() >= end => return Scan::of_rows(self.view(), Vec::new(), ts),
+888:             Some(live) => live,
+889:             None => start.to_vec(),
+890:         };
+891:         let mut s = Scan::new(self.view(), start.clone(), end.to_vec(), ts, self.gc_horizon());
+892:         s.dead = Some((self.dead.clone(), start));
+893:         s
+894:     }
+### crates/pg-engine/src/storage/mod.rs:2050
+2050:             Cursor::Mem {
+2051:                 mem,
+2052:                 buf,
+2053:                 from,
+2054:                 end,
+2055:                 done,
+2056:                 batch,
+2057:             } => {
+2058:                 if buf.is_empty() && !*done {
+2059:                     let upper = if end.is_empty() {
+2060:                         Bound::Unbounded
+2061:                     } else {
+2062:                         Bound::Excluded(end.as_slice())
+2063:                     };
+2064:                     let lower = match from {
+2065:                         Bound::Included(k) => Bound::Included(k.as_slice()),
+2066:                         Bound::Excluded(k) => Bound::Excluded(k.as_slice()),
+2067:                         Bound::Unbounded => Bound::Unbounded,
+2068:                     };
+2069:                     for e in mem.map.range::<[u8], _>((lower, upper)).take(*batch) {
+2070:                         buf.push_back((e.key().clone(), e.value().clone()));
+2071:                     }
+2072:                     if buf.len() < *batch {
+2073:                         *done = true;
+2074:                     }
+2075:                     *batch = (*batch * 2).min(BATCH);
+2076:                     if let Some((k, _)) = buf.back() {
+2077:                         *from = Bound::Excluded(k.clone());
+2078:                     }
+2079:                 }
+2080:                 Ok(())
+2081:             }
+2082:             Cursor::Level {
+2083:                 ssts,
+### crates/pg-engine/src/storage/mod.rs:2145
+2145:                 block,
+2146:                 pos,
+2147:                 end,
+2148:                 whole,
+2149:                 ..
+2150:             } => {
+2151:                 if *file >= ssts.len() {
+2152:                     return None;
+2153:                 }
+2154:                 let b = block.as_ref()?;
+2155:                 if pos.index() >= b.len() {
+2156:                     return None;
+2157:                 }
+2158:                 let k = pos.key();
+2159:                 (*whole || end.is_empty() || k < end.as_slice()).then(|| (k, b.value_ref(pos)))
+2160:             }
+2161:         }
+### crates/pg-engine/src/storage/hot.rs:33
+33: const BUILD_AFTER: i32 = 8;
+34: /// A range refused (too big) is tried again after this many more scans, doubling with each
+35: /// refusal (up to 256 times as many).
+36: const RETRY_AFTER: i32 = 4096;
+### crates/pg-engine/src/storage/hot.rs:117
+117: pub(super) struct Hot {
+118:     /// Any range kept (commits skip `apply`'s lookups otherwise).
+119:     pub(super) any: AtomicBool,
+120:     ranges: RwLock<HashMap<Prefix, Arc<Mutex<Chains>>>>,
+121:     /// Scans in ranges not kept (negative: refused, counting up to a retry), and how often
+122:     /// each was refused.
+123:     seen: Mutex<HashMap<Prefix, (i32, u32)>>,
+124: }
+125: 
+126: /// The prefix of a scan of [start, end) that reads one whole relation's range.
+127: fn whole(start: &[u8], end: &[u8]) -> Option<Prefix> {
+128:     let p: Prefix = start.try_into().ok()?;
+129:     let last = p.iter().rposition(|b| *b != 0xFF)?;
+130:     (end.len() == last + 1 && end[..last] == p[..last] && end[last] == p[last] + 1).then_some(p)
+### crates/pg-engine/src/storage/hot.rs:167
+167:     }
+168: 
+169:     /// `get_version` of each of `keys` (ascending) at `ts` that a kept range holds: Some(the
+170:     /// answer) for those, None for the others.
+171:     #[allow(clippy::type_complexity)]
+172:     pub(super) fn get_many(&self, keys: &[&[u8]], ts: u64) -> Option<Vec<Option<Option<(u64, Option<Bytes>)>>>> {
+173:         if !self.any.load(Ordering::Acquire) {
+174:             return None;
+175:         }
+176:         let ranges = self.ranges.read();
+177:         let mut out = Vec::with_capacity(keys.len());
+178:         let mut cur: Option<(Prefix, Option<parking_lot::MutexGuard<'_, Chains>>)> = None;
+179:         for k in keys {
+180:             let Some(p) = k.get(..PREFIX).and_then(|p| Prefix::try_from(p).ok()) else {
+181:                 out.push(None);
+182:                 continue;
+183:             };
+184:             if cur.as_ref().is_none_or(|(q, _)| *q != p) {
+185:                 cur = Some((p, ranges.get(&p).map(|r| r.lock())));
+186:             }
+187:             out.push(match &mut cur {
+188:                 Some((_, Some(c))) => {
+189:                     c.idle = 0;
+190:                     // (A key the range holds no version of at `ts`: the store answers, with
+191:                     // the deletion every snapshot sees that the chain dropped.)
+192:                     c.keys.get(*k).and_then(|chain| chain.iter().find(|(t, _)| *t <= ts)).map(|v| Some(v.clone()))
+193:                 }
+194:                 _ => None,
+195:             });
+196:         }
+### crates/pg-engine/src/txn/mod.rs:2474
+2474:     /// What lies under the buffer in [start, end): the spilled writes as of journal mark
+2475:     /// `mark`, over the store at `ts` (rows as stored: `TxnScan` puts their out-of-line
+2476:     /// values back).
+2477:     fn lower(&self, start: &[u8], end: &[u8], ts: u64, mark: u64) -> Lower {
+2478:         let store = self.db.store.scan_raw(start, end, ts).excluding(&self.own_excluded(start, end, mark));
+2479:         match &self.runs {
+2480:             Some(r) => Lower::Runs(Box::new(Overlay::new(r.scan(start, end, mark), store, false))),
+2481:             None => Lower::Store(Box::new(store)),
+2482:         }
+2483:     }
+2484: 
+### crates/pg-engine/src/txn/mod.rs:2650
+2650:     pub fn scan_snap(&self, start: &[u8], end: &[u8], s: &Snap) -> TxnScan {
+2651:         self.catch_up(s);
+2652:         let st = s.st.borrow();
+2653:         if st.mark < self.journal_base {
+2654:             // Taken before the last spill: none of the buffer, the runs as they were.
+2655:             let src = self.toast_source(start, end, st.ts, st.mark as u64, OwnVals::Runs);
+2656:             return TxnScan::new(Vec::new(), self.lower(start, end, st.ts, st.mark as u64), src);
+2657:         }
+2658:         // (The runs as of the mark, as `snap_get` reads them.)
+2659:         let mark = st.mark as u64;
+2660:         if st.prev.is_empty() {
+2661:             let src = self.toast_source(start, end, st.ts, mark, OwnVals::Now);
+2662:             return TxnScan::new(self.mem_in(start, end).collect(), self.lower(start, end, st.ts, mark), src);
+2663:         }
+2664:         let own = self.snap_own(start, end, &st);
+2665:         let src = self.toast_source(start, end, st.ts, mark, OwnVals::Snap(&st));
+2666:         TxnScan::new(own.into_iter().collect(), self.lower(start, end, st.ts, mark), src)
+2667:     }
+2668: 
+2669:     /// `it` (a forward `scan_snap` at snapshot `s`) over [start, end) instead, its store
+2670:     /// sources keeping their places (`storage::Scan::reseek`): the next of ascending lookups
+### crates/pg-engine/src/storage/keys.rs:425
+425: pub fn prefix_end(prefix: &[u8]) -> Vec<u8> {
+426:     let mut end = prefix.to_vec();
+427:     while let Some(last) = end.last_mut() {
+428:         if *last < 0xFF {
+429:             *last += 1;
+430:             return end;
+431:         }
+432:         end.pop();
+433:     }
+434:     vec![0xFF; prefix.len() + 1]
+435: }
+436: 

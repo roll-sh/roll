@@ -1,0 +1,7 @@
+{
+  "head": "2a854a48074dbd3317807f634a773f29540b2673",
+  "tree": "7b41c62e7ca291f3f349ec68838dff1ab5f3b34d",
+  "status": "M crates/pg-engine/src/storage/mod.rs\n M crates/pg-engine/tests/app_concurrency.rs",
+  "time_utc": "2026-11-04T14:21:03.458990+00:00",
+  "note": "Both tests genuinely failed exit101 on production2a854a48 plus recorded test-only patch. Cold physical key end bound excludes committed key; hot path includes it. SQL index UPDATE0 then UPDATE1 gives1003. Historical6003 failure remains failed and exact execution binary hash unavailable. No acceptance."
+}
