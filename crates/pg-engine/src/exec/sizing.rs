@@ -1325,31 +1325,45 @@ fn index_key(
     row: &[Value],
     ctx: &ExecCtx,
 ) -> Key {
+    let ty = |n: usize| bix.keys.get(n).map(|k| k.ty());
+    index_key_of(t, &bix.index, &ty, &bix.colls, vals, row, ctx.fmt())
+}
+
+/// `index_key` from the index's parts: its key columns' types (`key_ty`), collations, and
+/// the session's formatting (a parallel build's workers, which have no `ExecCtx`).
+pub fn index_key_of(
+    t: &Table,
+    index: &crate::catalog::Index,
+    key_ty: &dyn Fn(usize) -> Option<DataType>,
+    colls: &[Option<crate::storage::keys::KeyColl>],
+    vals: Vec<Value>,
+    row: &[Value],
+    fmt: &crate::types::text::FormatCtx,
+) -> Key {
     thread_local! {
         static BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
     }
     let nkey = vals.len();
-    let natts = nkey + bix.index.include.len();
-    let fmt = ctx.fmt();
+    let natts = nkey + index.include.len();
     let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, fmt);
     let mut size = relsize::IndexTupleSize::default();
     let null = Value::Null;
     let mut att = |n: usize, out: &mut Vec<u8>| {
         // (name_ops keeps a name key as a cstring: opckeytype.)
         let (v, ty) = match n.checked_sub(nkey) {
-            None => (&vals[n], match bix.keys.get(n).map(|k| k.ty()) {
+            None => (&vals[n], match key_ty(n) {
                 Some(DataType::Name) => DataType::Cstring,
                 Some(t) => t,
                 None => DataType::Text,
             }),
             Some(i) => {
-                let c = bix.index.include[i];
+                let c = index.include[i];
                 (row.get(c).unwrap_or(&null), t.columns.get(c).map_or(DataType::Text, |c| c.ty.clone()))
             }
         };
-        let desc = bix.index.columns.get(n).is_some_and(|c| c.desc);
-        let nulls_first = bix.index.columns.get(n).is_some_and(|c| c.nulls_first);
-        crate::storage::keys::encode_index_value(out, v, desc, nulls_first, bix.colls.get(n).and_then(Option::as_ref));
+        let desc = index.columns.get(n).is_some_and(|c| c.desc);
+        let nulls_first = index.columns.get(n).is_some_and(|c| c.nulls_first);
+        crate::storage::keys::encode_index_value(out, v, desc, nulls_first, colls.get(n).and_then(Option::as_ref));
         size.push(v, &ty, &text);
         size.size()
     };
