@@ -1,7 +1,7 @@
 import { HorizonMark } from "@roll/brand";
 import { ArrowLeft } from "lucide-react";
-import { Link } from "@/components/link";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { Link } from "@/components/link";
 import { codeApi, type CodeInfo, type Repo } from "@/lib/code-api";
 import { CodeShell } from "./shell";
 import { btn, Connecting, EmptyPanel, Offline } from "../ui";

@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { Link } from "@/components/link";
 import { Link2 } from "lucide-react";
 import { VisibilityBadge } from "@/components/code/shared";
+import { Link } from "@/components/link";
 import { Monogram } from "@/components/repo/avatar";
 import { Sparkline } from "@/components/repo/meta";
 import { PublicShell } from "@/components/repo/public-header";
