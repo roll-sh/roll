@@ -1,0 +1,7 @@
+{
+  "time": "2026-11-04T19:39:58.146279+00:00",
+  "scope": "One descendant process/thread snapshot only",
+  "processes": [],
+  "status": "NO LIVE DESCENDANTS AT SNAPSHOT",
+  "matched_if_observed": null
+}

@@ -1,0 +1,13 @@
+{
+  "time": "2026-11-04T19:42:56.210219+00:00",
+  "intended_source": "cace40de4b9df2af42b08027138d9830d17abe9f",
+  "execution_validity": "INVALID CANDIDATE ATTEMPT; stale red binary reused",
+  "command_exit": 101,
+  "actual_binary_sha256": "366b058ab4d004de4ad1bdc33bb5874a56bcfd3ac2701731d383c7cb60974476",
+  "binary_matches_red": true,
+  "proof": "No compilation in candidate log; binarySHA exactlyred; testfiltered192/tracevalidated0 matchred",
+  "source_snapshot": "All2501 sourcebytes match cace; bytes alone did not guarantee Cargo freshness across snapshots sharingtarget",
+  "inference": "No cace pass/failure attribution; original b56 behavioralred remains valid",
+  "repair": "New separate runner refreshes pg-engine src/lib.rs mtime only, logs stat before/after, demands compilation from intended snapshot and changed binary hash; original invalid outputs immutable",
+  "resource_sample": "No descendants at attempted post-terminal sample; startupcontrols only"
+}

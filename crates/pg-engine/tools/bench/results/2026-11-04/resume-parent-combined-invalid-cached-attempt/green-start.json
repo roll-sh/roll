@@ -1,0 +1,31 @@
+{
+  "time": "2026-11-04T19:38:35.357020+00:00",
+  "source": {
+    "commit": "cace40de4b9df2af42b08027138d9830d17abe9f",
+    "files": 2501,
+    "all_match": true,
+    "manifest_sha256": "3f3da522ab5481f6b4eed3cf66c5a14bcd4e5ddb7ce9ebb2313bb57cb52023ee"
+  },
+  "pid": 3197290,
+  "affinity": [
+    4,
+    5,
+    6,
+    7,
+    22,
+    23,
+    24,
+    25
+  ],
+  "nice": 19,
+  "environment": {
+    "CARGO_TARGET_DIR": "/home/meszmate/.cache/a170/target",
+    "CARGO_BUILD_JOBS": "2",
+    "RUST_TEST_THREADS": "2",
+    "CARGO_PROFILE_DEV_DEBUG": "line-tables-only",
+    "CARGO_PROFILE_TEST_DEBUG": null,
+    "RUSTFLAGS": null,
+    "TMPDIR": "/home/meszmate/.cache/a170/tmp"
+  },
+  "scope": "Candidate combined worker proof only; command result needs raw assessment and separate gates."
+}

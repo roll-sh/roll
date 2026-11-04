@@ -1,0 +1,23 @@
+{
+  "finished": "2026-11-04T19:38:37.188653+00:00",
+  "command_exit": 101,
+  "source_after": {
+    "commit": "cace40de4b9df2af42b08027138d9830d17abe9f",
+    "files": 2501,
+    "all_match": true,
+    "manifest_sha256": "3f3da522ab5481f6b4eed3cf66c5a14bcd4e5ddb7ce9ebb2313bb57cb52023ee"
+  },
+  "raw_sha256": "122aaac89b40228b28852ff541180874010d91d0f8ae5d2c3dc4d5efc5d3aa82",
+  "binary": [
+    {
+      "path": "/home/meszmate/.cache/a170/target/debug/deps/pg_engine-357a2b04731fc140",
+      "preserved": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-proof-r2/green-binary-pg_engine-357a2b04731fc140",
+      "sha256": "366b058ab4d004de4ad1bdc33bb5874a56bcfd3ac2701731d383c7cb60974476",
+      "bytes": 319143880
+    }
+  ],
+  "test_summaries": [
+    "FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 192 filtered out; finished in 0.48s"
+  ],
+  "assessment": "UNASSESSED; raw compile/test result must be inspected; focused proof is not full acceptance"
+}
