@@ -1,0 +1,1007 @@
+
+running 1 test
+test run ... seed 6100: 1.4s
+  [wrong_error] seed 6101 #16: 0A000 vs 22008
+seed 6101: 0.8s
+seed 6102: 0.7s
+seed 6103: 1.4s
+seed 6104: 1.0s
+seed 6105: 0.6s
+seed 6106: 1.2s
+  [error_detail] seed 6107 #147: 42725
+seed 6107: 0.6s
+seed 6108: 1.4s
+seed 6109: 1.2s
+seed 6110: 1.4s
+seed 6111: 0.7s
+  [error_detail] seed 6112 #94: 42725
+seed 6112: 1.1s
+seed 6113: 1.4s
+  [error_detail] seed 6114 #49: 42725
+seed 6114: 1.3s
+seed 6115: 1.1s
+seed 6116: 0.6s
+  [error_detail] seed 6117 #104: 42P01
+  [missing_error] seed 6117 #107: 0A000: nondeterministic collations are not supported for substring searches
+seed 6117: 1.3s
+  [error_detail] seed 6118 #53: 42P01
+  [wrong_error] seed 6118 #118: 0A000 vs 22023
+  [error_message] seed 6118 #132: subquery uses ungrouped column "t4.id" from outer query | aggregate function calls cannot be nested
+seed 6118: 1.3s
+  [error_detail] seed 6119 #105: 42601
+seed 6119: 3.2s
+  [error_detail] seed 6120 #0: 42803
+  [eval_error] seed 6120 #63: 22008: cannot subtract infinite dates vs ok
+seed 6120: 1.4s
+seed 6121: 1.0s
+seed 6122: 0.9s
+  [error_detail] seed 6123 #63: 42803
+  [error_detail] seed 6123 #71: 42P01
+  [error_detail] seed 6123 #87: 42P01
+seed 6123: 0.9s
+  [error_detail] seed 6124 #31: 42601
+seed 6124: 0.7s
+seed 6125: 1.0s
+  [error_message] seed 6126 #121: column of NOT NULL constraint does not exist | column "e1" of relation "r5a" does not exist
+seed 6126: 1.3s
+seed 6127: 1.3s
+  [error_message] seed 6128 #78: column "e2" of relation "r5a" does not exist | column "e2" does not exist
+seed 6128: 1.2s
+seed 6129: 1.2s
+seed 6130: 0.7s
+seed 6131: 1.4s
+seed 6132: 1.0s
+seed 6133: 0.7s
+  [error_detail] seed 6134 #0: 0A000
+  [error_detail] seed 6134 #103: 42725
+seed 6134: 1.4s
+  [missing_error] seed 6135 #117: 0A000: cannot convert NaN to integer
+seed 6135: 1.5s
+seed 6136: 0.7s
+seed 6137: 1.1s
+  [missing_error] seed 6138 #20: 42804: recursive query "r1" column 1 has type d3int in non-recursive term but type integer overall
+  [missing_error] seed 6138 #147: 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+  [missing_error] seed 6138 #148: 25P02: current transaction is aborted, commands ignored until end of transaction block
+  [missing_error] seed 6138 #149: 25P02: current transaction is aborted, commands ignored until end of transaction block
+  [tag] seed 6138 #150: COMMIT vs ROLLBACK
+seed 6138: 0.8s
+seed 6139: 1.1s
+  [error_detail] seed 6140 #0: 0A000
+seed 6140: 1.2s
+seed 6141: 1.3s
+seed 6142: 1.1s
+  [error_detail] seed 6143 #0: 0A000
+seed 6143: 0.9s
+  [error_detail] seed 6144 #0: 0A000
+seed 6144: 1.1s
+  [error_message] seed 6145 #44: column "e1" of relation "r5a" does not exist | column "e1" does not exist
+seed 6145: 0.7s
+  [error_detail] seed 6146 #10: 42803
+  [eval_error] seed 6146 #52: ok vs 22P02: invalid input syntax for type integer: "2.50"
+seed 6146: 1.4s
+  [error_detail] seed 6147 #31: 42601
+seed 6147: 1.0s
+  [error_detail] seed 6148 #88: 42725
+  [error_detail] seed 6148 #134: 42803
+seed 6148: 1.1s
+seed 6149: 1.2s
+  [error_detail] seed 6150 #96: 42725
+seed 6150: 0.6s
+  [missing_error] seed 6151 #27: 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+  [missing_error] seed 6151 #27: 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+seed 6151: 1.7s
+seed 6152: 1.0s
+seed 6153: 1.5s
+  [error_detail] seed 6154 #91: 42725
+  [error_detail] seed 6154 #149: 42P01
+seed 6154: 0.7s
+seed 6155: 0.7s
+  [error_message] seed 6156 #30: subquery uses ungrouped column "t6.b" from outer query | aggregate function calls cannot be nested
+seed 6156: 1.5s
+seed 6157: 1.3s
+  [error_detail] seed 6158 #127: 42601
+seed 6158: 1.1s
+  [error_detail] seed 6159 #93: 42601
+seed 6159: 0.7s
+  [error_message] seed 6160 #129: cursor "r6k" is not a simply updatable scan of table "r5p2a" | cursor "r6k" is not a simply updatable scan of table "r5p1"
+seed 6160: 1.0s
+  [error_detail] seed 6161 #35: 42601
+seed 6161: 1.4s
+  [error_message] seed 6162 #30: column "e2" of relation "r5a" does not exist | column "e2" does not exist
+seed 6162: 0.7s
+  [eval_error] seed 6163 #51: ok vs 22008: interval out of range
+  [error_detail] seed 6163 #78: 42P21
+seed 6163: 1.6s
+  [error_detail] seed 6164 #124: 42725
+seed 6164: 1.3s
+  [error_message] seed 6165 #51: column "e2" of relation "r5a" does not exist | column "e2" does not exist
+seed 6165: 0.8s
+seed 6166: 1.1s
+  [error_detail] seed 6167 #16: 42601
+seed 6167: 0.6s
+seed 6168: 1.1s
+seed 6169: 0.7s
+  [missing_error] seed 6170 #37: 42804: recursive query "r1" column 1 has type d3int in non-recursive term but type integer overall
+seed 6170: 1.1s
+  [error_detail] seed 6171 #91: 42725
+  [error_detail] seed 6171 #103: 42601
+seed 6171: 1.0s
+  [error_detail] seed 6172 #7: 42803
+  [error_detail] seed 6172 #12: 42P01
+seed 6172: 1.2s
+  [error_detail] seed 6173 #37: 42803
+seed 6173: 0.7s
+seed 6174: 1.1s
+seed 6175: 0.9s
+seed 6176: 1.0s
+  [missing_error] seed 6177 #107: 0A000: FOR UPDATE cannot be applied to the nullable side of an outer join
+seed 6177: 1.0s
+seed 6178: 1.2s
+seed 6179: 0.9s
+  [error_detail] seed 6180 #42: 42P01
+seed 6180: 1.4s
+seed 6181: 1.2s
+seed 6182: 1.2s
+seed 6183: 0.7s
+seed 6184: 1.4s
+seed 6185: 1.1s
+  [error_detail] seed 6186 #23: 42804
+  [error_detail] seed 6186 #34: 42804
+seed 6186: 1.2s
+  [error_detail] seed 6187 #65: 42803
+  [error_message] seed 6187 #114: cannot get array length of a non-array | cannot delete from scalar
+seed 6187: 1.5s
+  [error_detail] seed 6188 #86: 42803
+seed 6188: 1.5s
+  [error_detail] seed 6189 #1: 42803
+seed 6189: 0.9s
+  [error_detail] seed 6190 #32: 23505
+  [eval_error] seed 6190 #42: 22023: cannot get array length of a scalar vs ok
+  [error_detail] seed 6190 #143: 42725
+seed 6190: 0.8s
+seed 6191: 1.8s
+  [error_detail] seed 6192 #91: 42804
+  [error_detail] seed 6192 #133: 42803
+seed 6192: 1.5s
+  [error_message] seed 6193 #127: column "tags" of relation "r6u" does not exist | column "tags" does not exist
+seed 6193: 1.3s
+  [eval_error] seed 6194 #144: ok vs 22023: cannot get array length of a scalar
+seed 6194: 0.8s
+  [eval_error] seed 6195 #56: ok vs 22000: argument must be empty or one-dimensional array
+  [error_detail] seed 6195 #68: 42803
+seed 6195: 1.4s
+  [error_detail] seed 6196 #126: 42601
+seed 6196: 1.1s
+seed 6197: 1.3s
+seed 6198: 0.6s
+seed 6199: 0.7s
+seed 6200: 1.4s
+seed 6201: 1.2s
+  [wrong_error] seed 6202 #100: 0A000 vs 22023
+seed 6202: 0.6s
+seed 6203: 1.3s
+  [missing_error] seed 6204 #64: 42804: structure of query does not match function result type
+  [wrong_order] seed 6204 #112: 
+seed 6204: 1.2s
+  [error_detail] seed 6205 #9: 42803
+  [error_detail] seed 6205 #43: 42725
+seed 6205: 0.6s
+seed 6206: 0.9s
+  [error_detail] seed 6207 #0: 0A000
+seed 6207: 1.1s
+seed 6208: 1.1s
+seed 6209: 0.4s
+seed 6210: 1.0s
+seed 6211: 1.3s
+seed 6212: 1.1s
+  [error_detail] seed 6213 #121: 42601
+seed 6213: 1.4s
+  [error_detail] seed 6214 #0: 0A000
+seed 6214: 1.0s
+  [error_detail] seed 6215 #35: 42725
+  [error_detail] seed 6215 #47: 42725
+seed 6215: 0.9s
+  [error_detail] seed 6216 #20: 42725
+  [error_detail] seed 6216 #112: 42725
+seed 6216: 1.6s
+  [error_detail] seed 6217 #77: 42P01
+  [missing_error] seed 6217 #136: 42601: "EEEE" is incompatible with other formats
+seed 6217: 0.7s
+  [error_detail] seed 6218 #76: 42803
+seed 6218: 1.8s
+  [wrong_rows] seed 6219 #1: 6 vs 6 rows
+seed 6219: 1.1s
+seed 6220: 0.7s
+  [eval_error] seed 6221 #6: 22000: range lower bound must be less than or equal to range upper bound vs ok
+seed 6221: 1.4s
+seed 6222: 1.4s
+seed 6223: 1.4s
+  [error_detail] seed 6224 #16: 42P01
+seed 6224: 1.3s
+  [error_message] seed 6225 #34: could not determine which collation to use for string hashing | could not determine which collation to use for string comparison
+seed 6225: 1.2s
+  [error_detail] seed 6226 #0: 0A000
+  [error_detail] seed 6226 #74: 42803
+  [missing_error] seed 6226 #83: 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+  [missing_error] seed 6226 #83: 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+seed 6226: 0.9s
+  [wrong_rows] seed 6227 #8: 8 vs 8 rows
+seed 6227: 1.0s
+  [error_detail] seed 6228 #0: 0A000
+seed 6228: 0.7s
+  [error_detail] seed 6229 #114: 42P01
+  [error_message] seed 6229 #154: cursor "r6k" is not positioned on a row | cursor "r6k" is not a simply updatable scan of table "r5p1"
+  [error_message] seed 6229 #160: cursor "r6k" is not a simply updatable scan of table "r5p2a" | cursor "r6k" is not a simply updatable scan of table "r5p1"
+seed 6229: 1.0s
+  [error_detail] seed 6230 #136: 42601
+seed 6230: 1.3s
+seed 6231: 1.3s
+seed 6232: 0.5s
+seed 6233: 1.1s
+seed 6234: 0.4s
+seed 6235: 1.1s
+  [error_detail] seed 6236 #97: 42803
+seed 6236: 0.7s
+seed 6237: 1.0s
+  [wrong_rows] seed 6238 #62: 0 vs 1 rows
+  [error_detail] seed 6238 #67: 42725
+seed 6238: 0.7s
+  [error_detail] seed 6239 #89: 42803
+seed 6239: 0.9s
+seed 6240: 0.8s
+seed 6241: 0.7s
+  [error_detail] seed 6242 #4: 42P01
+  [engine_error] seed 6242 #104: 42P10: in an aggregate with DISTINCT, ORDER BY expressions must appear in argument list
+  [error_detail] seed 6242 #108: 23503
+seed 6242: 1.2s
+seed 6243: 1.1s
+  [error_detail] seed 6244 #114: 42P21
+seed 6244: 0.7s
+  [error_detail] seed 6245 #55: 23503
+seed 6245: 0.6s
+seed 6246: 0.7s
+  [missing_error] seed 6247 #51: 42803: column "t1.d" must appear in the GROUP BY clause or be used in an aggregate function
+  [wrong_error] seed 6247 #52: 21000 vs 26000
+  [wrong_error] seed 6247 #53: 21000 vs 26000
+  [missing_error] seed 6247 #54: 26000: prepared statement "a45p1" does not exist
+seed 6247: 1.2s
+seed 6248: 0.4s
+seed 6249: 0.6s
+seed 7000: 1.1s
+seed 7001: 1.4s
+seed 7002: 1.8s
+seed 7003: 1.8s
+  [error_detail] seed 7004 #132: 42803
+seed 7004: 2.0s
+seed 7005: 1.9s
+seed 7006: 1.7s
+  [error_detail] seed 7007 #130: 42725
+seed 7007: 1.0s
+seed 7008: 1.9s
+seed 7009: 1.7s
+seed 7010: 1.8s
+seed 7011: 1.7s
+  [error_detail] seed 7012 #0: 0A000
+  [error_detail] seed 7012 #140: 23503
+seed 7012: 1.4s
+seed 7013: 1.8s
+seed 7014: 0.8s
+seed 7015: 21.9s
+seed 7016: 2.0s
+seed 7017: 1.9s
+seed 7018: 1.9s
+seed 7019: 1.8s
+seed 7020: 2.1s
+seed 7021: 1.9s
+seed 7022: 1.7s
+seed 7023: 2.0s
+seed 7024: 1.7s
+seed 7025: 1.1s
+seed 7026: 1.1s
+seed 7027: 1.5s
+  [error_detail] seed 7028 #99: 42P01
+seed 7028: 1.7s
+seed 7029: 1.7s
+seed 7030: 1.0s
+seed 7031: 1.9s
+seed 7032: 2.1s
+seed 7033: 2.1s
+  [eval_error] seed 7034 #74: ok vs 22012: division by zero
+seed 7034: 1.1s
+seed 7035: 1.8s
+seed 7036: 1.8s
+  [error_detail] seed 7037 #0: 0A000
+seed 7037: 1.7s
+seed 7038: 1.0s
+seed 7039: 0.9s
+  [error_detail] seed 7040 #125: 23505
+seed 7040: 1.1s
+  [eval_error] seed 7041 #130: ok vs 2201G: operand, lower bound, and upper bound cannot be NaN
+seed 7041: 1.7s
+seed 7042: 0.8s
+  [eval_error] seed 7043 #104: ok vs 2201G: operand, lower bound, and upper bound cannot be NaN
+seed 7043: 1.6s
+  [error_detail] seed 7044 #40: 42601
+seed 7044: 0.9s
+seed 7045: 1.1s
+  [error_detail] seed 7046 #118: 42725
+seed 7046: 1.0s
+seed 7047: 1.6s
+seed 7048: 1.0s
+seed 7049: 1.5s
+  [error_message] seed 7050 #51: FOR NO KEY UPDATE is not allowed with GROUP BY clause | FOR NO KEY UPDATE cannot be applied to the nullable side of an outer join
+seed 7050: 1.0s
+  [wrong_error] seed 7051 #66: 0A000 vs 22023
+  [error_detail] seed 7051 #137: 42601
+seed 7051: 1.4s
+  [engine_error] seed 7052 #115: 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+seed 7052: 1.6s
+seed 7053: 1.3s
+seed 7054: 1.8s
+seed 7055: 2.1s
+  [error_message] seed 7056 #105: FOR NO KEY UPDATE is not allowed with UNION/INTERSECT/EXCEPT | FOR NO KEY UPDATE cannot be applied to the nullable side of an outer join
+seed 7056: 1.7s
+seed 7057: 1.7s
+seed 7058: 1.5s
+seed 7059: 1.0s
+seed 7060: 1.7s
+seed 7061: 1.7s
+seed 7062: 1.9s
+  [error_message] seed 7063 #94: subquery uses ungrouped column "t1.b" from outer query | subquery uses ungrouped column "t1.a" from outer query
+seed 7063: 1.9s
+seed 7064: 1.6s
+seed 7065: 1.6s
+seed 7066: 1.0s
+seed 7067: 1.6s
+seed 7068: 1.9s
+  [wrong_error] seed 7069 #5: 0A000 vs 22023
+  [wrong_error] seed 7069 #56: 0A000 vs 22023
+seed 7069: 2.2s
+seed 7070: 1.8s
+seed 7071: 2.1s
+seed 7072: 1.6s
+seed 7073: 1.6s
+seed 7074: 2.2s
+seed 7075: 1.7s
+seed 7076: 1.1s
+seed 7077: 1.6s
+seed 7078: 1.7s
+seed 7079: 1.1s
+  [error_message] seed 7080 #15: subquery uses ungrouped column "s1.v1" from outer query | subquery uses ungrouped column "t6.c" from outer query
+seed 7080: 1.9s
+  [wrong_rows] seed 7081 #80: 2 vs 2 rows
+seed 7081: 1.7s
+seed 7082: 1.5s
+seed 7083: 1.9s
+seed 7084: 1.0s
+  [engine_error] seed 7085 #141: 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+seed 7085: 2.1s
+seed 7086: 1.7s
+seed 7087: 1.6s
+seed 7088: 1.6s
+seed 7089: 0.9s
+  [error_detail] seed 7090 #144: 42601
+seed 7090: 1.8s
+seed 7091: 0.9s
+  [error_detail] seed 7092 #0: 0A000
+seed 7092: 1.6s
+seed 7093: 1.7s
+seed 7094: 1.1s
+  [error_detail] seed 7095 #142: 42601
+seed 7095: 1.9s
+  [missing_error] seed 7096 #15: 0A000: nondeterministic collations are not supported for regular expressions
+seed 7096: 1.6s
+  [error_message] seed 7097 #77: column "t1.b" must appear in the GROUP BY clause or be used in an aggregate function | aggregate function calls cannot be nested
+seed 7097: 1.5s
+seed 7098: 1.8s
+  [error_detail] seed 7099 #130: 42601
+seed 7099: 2.2s
+seed 7100: 1.0s
+  [error_detail] seed 7101 #126: 42725
+seed 7101: 1.7s
+seed 7102: 1.6s
+  [wrong_error] seed 7103 #34: 42P10 vs 42803
+  [wrong_rows] seed 7103 #116: 2 vs 2 rows
+  [wrong_rows] seed 7103 #116: 2 vs 2 rows
+seed 7103: 1.7s
+seed 7104: 1.5s
+seed 7105: 1.7s
+seed 7106: 1.8s
+seed 7107: 1.7s
+  [missing_error] seed 7108 #25: 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+seed 7108: 1.6s
+seed 7109: 1.5s
+seed 7110: 1.4s
+seed 7111: 1.6s
+seed 7112: 1.7s
+  [error_detail] seed 7113 #0: 0A000
+seed 7113: 1.3s
+seed 7114: 0.8s
+  [error_detail] seed 7115 #139: 23503
+seed 7115: 1.7s
+seed 7116: 1.8s
+seed 7117: 1.9s
+seed 7118: 1.2s
+seed 7119: 0.9s
+seed 7120: 0.8s
+  [error_message] seed 7121 #67: could not determine which collation to use for string hashing | could not determine which collation to use for string comparison
+seed 7121: 1.8s
+seed 7122: 1.5s
+  [error_detail] seed 7123 #125: 23503
+seed 7123: 1.5s
+seed 7124: 0.9s
+seed 7125: 1.2s
+seed 7126: 1.7s
+  [error_detail] seed 7127 #92: 42803
+seed 7127: 0.9s
+seed 7128: 1.6s
+  [error_detail] seed 7129 #126: 42P01
+seed 7129: 1.8s
+seed 7130: 2.1s
+seed 7131: 2.1s
+seed 7132: 1.8s
+seed 7133: 2.1s
+  [eval_error] seed 7134 #127: 22000: range lower bound must be less than or equal to range upper bound vs ok
+seed 7134: 2.0s
+seed 7135: 1.1s
+seed 7136: 1.9s
+  [error_detail] seed 7137 #0: 0A000
+seed 7137: 1.7s
+  [error_detail] seed 7138 #0: 0A000
+seed 7138: 1.9s
+seed 7139: 1.7s
+  [error_message] seed 7140 #43: cursor "r6k" is not positioned on a row | cursor "r6k" is not a simply updatable scan of table "r5p1"
+  [error_message] seed 7140 #49: cursor "r6k" is not a simply updatable scan of table "r5p2a" | cursor "r6k" is not a simply updatable scan of table "r5p1"
+  [error_detail] seed 7140 #130: 23505
+seed 7140: 1.4s
+seed 7141: 2.0s
+seed 7142: 1.7s
+seed 7143: 1.5s
+seed 7144: 2.0s
+seed 7145: 0.8s
+seed 7146: 1.7s
+seed 7147: 0.9s
+seed 7148: 0.8s
+seed 7149: 0.8s
+seed 8000: 2.3s
+seed 8001: 2.2s
+seed 8002: 1.8s
+seed 8003: 2.4s
+seed 8004: 2.3s
+seed 8005: 1.1s
+seed 8006: 1.5s
+seed 8007: 1.1s
+seed 8008: 1.9s
+seed 8009: 1.2s
+seed 8010: 1.3s
+seed 8011: 1.9s
+seed 8012: 1.8s
+seed 8013: 2.2s
+seed 8014: 2.2s
+seed 8015: 0.9s
+seed 8016: 1.9s
+seed 8017: 2.1s
+  [wrong_rows] seed 8018 #6: 6 vs 7 rows
+seed 8018: 1.4s
+  [error_message] seed 8019 #1: syntax error at or near ")" of jsonpath input | syntax error at or near "==" of jsonpath input
+seed 8019: 1.4s
+  [error_detail] seed 8020 #0: 0A000
+seed 8020: 2.0s
+seed 8021: 1.1s
+  [missing_error] seed 8022 #67: 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+  [error_detail] seed 8022 #129: 42P01
+seed 8022: 1.2s
+  [wrong_rows] seed 8023 #42: 4 vs 5 rows
+seed 8023: 2.3s
+seed 8024: 2.0s
+seed 8025: 1.3s
+  [wrong_rows] seed 8026 #24: 8 vs 12 rows
+seed 8026: 2.0s
+seed 8027: 1.0s
+  [error_detail] seed 8028 #0: 42725
+seed 8028: 1.0s
+seed 8029: 1.9s
+seed 8030: 2.2s
+  [error_message] seed 8031 #30: extra data after last expected column | unexpected default marker in COPY data
+seed 8031: 1.0s
+seed 8032: 2.3s
+seed 8033: 2.4s
+seed 8034: 2.3s
+  [wrong_rows] seed 8035 #74: 13 vs 15 rows
+seed 8035: 2.4s
+seed 8036: 2.4s
+seed 8037: 1.2s
+seed 8038: 2.4s
+seed 8039: 1.1s
+seed 8040: 2.6s
+seed 8041: 2.4s
+seed 8042: 1.3s
+seed 8043: 2.3s
+seed 8044: 1.1s
+  [error_message] seed 8045 #95: subquery uses ungrouped column "s2.c3" from outer query | subquery uses ungrouped column "s2.c2" from outer query
+seed 8045: 1.2s
+seed 8046: 2.3s
+seed 8047: 2.3s
+  [error_detail] seed 8048 #45: 42P20
+  [error_detail] seed 8048 #132: 42803
+seed 8048: 2.6s
+  [wrong_rows] seed 8049 #120: 11 vs 10 rows
+seed 8049: 2.6s
+seed 8050: 2.4s
+seed 8051: 1.5s
+seed 8052: 2.2s
+seed 8053: 1.1s
+seed 8054: 2.1s
+seed 8055: 2.7s
+seed 8056: 2.2s
+seed 8057: 1.2s
+  [error_detail] seed 8058 #57: 42P01
+seed 8058: 1.8s
+seed 8059: 2.2s
+seed 8060: 2.4s
+seed 8061: 1.1s
+seed 8062: 2.3s
+seed 8063: 1.9s
+  [missing_error] seed 8064 #85: 42804: structure of query does not match function result type
+  [missing_error] seed 8064 #85: 42804: structure of query does not match function result type
+seed 8064: 2.1s
+seed 8065: 1.2s
+seed 8066: 1.1s
+seed 8067: 1.6s
+seed 8068: 1.9s
+seed 8069: 1.9s
+seed 8070: 1.1s
+seed 8071: 1.2s
+seed 8072: 2.2s
+seed 8073: 1.3s
+  [error_detail] seed 8074 #139: 23505
+seed 8074: 1.2s
+  [error_message] seed 8075 #74: extra data after last expected column | unexpected default marker in COPY data
+seed 8075: 2.1s
+  [error_detail] seed 8076 #142: 42803
+seed 8076: 1.4s
+seed 8077: 2.1s
+seed 8078: 1.7s
+seed 8079: 2.2s
+seed 8080: 1.4s
+seed 8081: 1.8s
+seed 8082: 1.9s
+seed 8083: 2.1s
+seed 8084: 2.3s
+seed 8085: 1.6s
+seed 8086: 2.2s
+  [error_detail] seed 8087 #144: 42P20
+seed 8087: 2.3s
+seed 8088: 0.9s
+  [error_detail] seed 8089 #4: 42P20
+seed 8089: 1.9s
+seed 8090: 1.2s
+  [error_detail] seed 8091 #0: 42725
+seed 8091: 1.8s
+seed 8092: 2.2s
+  [error_detail] seed 8093 #0: 42P01
+seed 8093: 2.1s
+seed 8094: 2.1s
+seed 8095: 2.1s
+seed 8096: 1.8s
+seed 8097: 2.1s
+seed 8098: 2.3s
+  [error_detail] seed 8099 #74: 42P20
+seed 8099: 2.1s
+seed 8100: 2.7s
+seed 8101: 2.1s
+seed 8102: 2.2s
+seed 8103: 2.2s
+seed 8104: 1.9s
+seed 8105: 2.8s
+seed 8106: 2.3s
+seed 8107: 1.1s
+seed 8108: 2.5s
+  [error_message] seed 8109 #127: column "t1.b" must appear in the GROUP BY clause or be used in an aggregate function | column "t1.g" must appear in the GROUP BY clause or be used in an aggrega
+seed 8109: 2.7s
+seed 8110: 1.2s
+  [error_message] seed 8111 #43: could not determine which collation to use for string hashing | could not determine which collation to use for string comparison
+seed 8111: 2.4s
+  [error_detail] seed 8112 #0: 23505
+seed 8112: 2.5s
+seed 8113: 1.3s
+  [error_detail] seed 8114 #0: 0A000
+seed 8114: 2.2s
+seed 8115: 2.1s
+seed 8116: 2.3s
+seed 8117: 2.4s
+seed 8118: 1.2s
+seed 8119: 2.3s
+seed 8120: 2.2s
+  [error_detail] seed 8121 #88: 42P20
+seed 8121: 2.6s
+seed 8122: 0.8s
+seed 8123: 2.6s
+  [error_detail] seed 8124 #24: 42P20
+seed 8124: 1.8s
+seed 8125: 1.0s
+seed 8126: 2.3s
+seed 8127: 1.1s
+seed 8128: 2.0s
+seed 8129: 1.4s
+  [wrong_rows] seed 8130 #5: 4 vs 5 rows
+  [error_detail] seed 8130 #50: 42725
+seed 8130: 1.8s
+  [error_detail] seed 8131 #98: 42P20
+seed 8131: 1.8s
+seed 8132: 1.1s
+seed 8133: 0.9s
+seed 8134: 2.1s
+seed 8135: 1.8s
+  [error_detail] seed 8136 #13: 23505
+seed 8136: 2.1s
+seed 8137: 1.7s
+seed 8138: 2.2s
+  [error_detail] seed 8139 #0: 42725
+seed 8139: 1.9s
+  [error_detail] seed 8140 #0: 42725
+seed 8140: 2.0s
+seed 8141: 2.1s
+seed 8142: 1.1s
+seed 8143: 1.6s
+seed 8144: 1.7s
+seed 8145: 2.1s
+seed 8146: 2.1s
+seed 8147: 1.0s
+seed 8148: 2.0s
+seed 8149: 1.7s
+  [wrong_error] seed 9000 #4: 42P22 vs 42P21
+  [wrong_rows] seed 9000 #25: 3 vs 3 rows
+  [wrong_rows] seed 9000 #110: 11 vs 8 rows
+seed 9000: 2.7s
+  [wrong_rows] seed 9001 #84: 1 vs 1 rows
+seed 9001: 3.3s
+seed 9002: 2.9s
+  [wrong_rows] seed 9003 #78: 9 vs 6 rows
+seed 9003: 3.4s
+  [wrong_rows] seed 9004 #133: 9 vs 6 rows
+seed 9004: 3.6s
+  [wrong_rows] seed 9005 #129: 3 vs 3 rows
+seed 9005: 3.4s
+  [wrong_rows] seed 9006 #21: 15 vs 3 rows
+  [wrong_rows] seed 9006 #90: 8 vs 12 rows
+  [wrong_rows] seed 9006 #134: 2 vs 2 rows
+seed 9006: 3.4s
+  [wrong_rows] seed 9007 #115: 2 vs 2 rows
+seed 9007: 1.7s
+  [wrong_rows] seed 9008 #49: 8 vs 10 rows
+seed 9008: 3.7s
+  [wrong_rows] seed 9009 #96: 5 vs 5 rows
+seed 9009: 3.0s
+  [wrong_rows] seed 9010 #35: 3 vs 3 rows
+  [error_detail] seed 9010 #44: 42703
+seed 9010: 3.5s
+seed 9011: 3.7s
+seed 9012: 3.4s
+  [error_detail] seed 9013 #52: 42P01
+seed 9013: 3.2s
+seed 9014: 3.2s
+  [wrong_error] seed 9015 #124: 08P01 vs 54000
+  [wrong_error] seed 9015 #127: 08P01 vs 54000
+seed 9015: 3.1s
+  [error_message] seed 9016 #149: extra data after last expected column | unexpected default marker in COPY data
+seed 9016: 3.0s
+seed 9017: 3.0s
+seed 9018: 2.7s
+  [wrong_rows] seed 9019 #37: 2 vs 2 rows
+seed 9019: 2.6s
+  [wrong_rows] seed 9020 #33: 3 vs 3 rows
+  [wrong_rows] seed 9020 #34: 3 vs 3 rows
+  [wrong_rows] seed 9020 #90: 1 vs 1 rows
+seed 9020: 3.0s
+  [wrong_rows] seed 9021 #127: 1 vs 1 rows
+seed 9021: 2.8s
+seed 9022: 3.2s
+  [wrong_rows] seed 9023 #46: 3 vs 3 rows
+  [wrong_rows] seed 9023 #95: 1 vs 1 rows
+  [wrong_rows] seed 9023 #95: 1 vs 1 rows
+seed 9023: 3.4s
+  [wrong_rows] seed 9024 #113: 2 vs 2 rows
+seed 9024: 3.6s
+  [error_detail] seed 9025 #3: 23505
+  [wrong_rows] seed 9025 #77: 2 vs 2 rows
+seed 9025: 2.1s
+seed 9026: 2.9s
+  [error_detail] seed 9027 #123: 23P01
+seed 9027: 3.1s
+seed 9028: 3.4s
+  [error_message] seed 9029 #0: subquery uses ungrouped column "t2.c" from outer query | subquery uses ungrouped column "t1.e" from outer query
+  [wrong_rows] seed 9029 #20: 5 vs 5 rows
+  [error_detail] seed 9029 #24: 23505
+  [wrong_rows] seed 9029 #95: 13 vs 10 rows
+seed 9029: 2.2s
+  [wrong_rows] seed 9030 #59: 2 vs 2 rows
+  [wrong_rows] seed 9030 #141: 1 vs 1 rows
+seed 9030: 3.2s
+seed 9031: 3.0s
+  [wrong_rows] seed 9032 #45: 5 vs 4 rows
+seed 9032: 3.0s
+  [wrong_rows] seed 9033 #160: 15 vs 12 rows
+seed 9033: 3.2s
+seed 9034: 3.4s
+seed 9035: 2.9s
+  [wrong_rows] seed 9036 #34: 2 vs 2 rows
+  [wrong_rows] seed 9036 #35: 2 vs 2 rows
+  [error_detail] seed 9036 #103: 42703
+seed 9036: 1.9s
+seed 9037: 3.3s
+seed 9038: 2.7s
+  [error_detail] seed 9039 #122: 23P01
+seed 9039: 3.2s
+  [error_detail] seed 9040 #5: 23505
+seed 9040: 2.0s
+  [error_detail] seed 9041 #0: 0A000
+seed 9041: 2.7s
+  [error_detail] seed 9042 #65: 42725
+seed 9042: 3.1s
+seed 9043: 1.8s
+seed 9044: 1.8s
+seed 9045: 3.7s
+seed 9046: 3.5s
+  [wrong_rows] seed 9047 #10: 3 vs 3 rows
+seed 9047: 3.2s
+seed 9048: 3.2s
+seed 9049: 3.3s
+  [error_detail] seed 9050 #0: 0A000
+seed 9050: 3.1s
+  [error_detail] seed 9051 #0: 23505
+seed 9051: 2.7s
+  [wrong_rows] seed 9052 #112: 11 vs 8 rows
+  [wrong_rows] seed 9052 #133: 11 vs 8 rows
+seed 9052: 3.9s
+seed 9053: 1.7s
+  [wrong_rows] seed 9054 #87: 2 vs 2 rows
+seed 9054: 3.4s
+  [wrong_rows] seed 9055 #22: 2 vs 2 rows
+seed 9055: 3.4s
+seed 9056: 3.9s
+  [wrong_rows] seed 9057 #52: 13 vs 10 rows
+  [wrong_rows] seed 9057 #54: 13 vs 10 rows
+seed 9057: 4.0s
+seed 9058: 3.2s
+seed 9059: 3.2s
+  [wrong_rows] seed 9060 #32: 1 vs 1 rows
+  [wrong_rows] seed 9060 #125: 2 vs 2 rows
+  [wrong_rows] seed 9060 #127: 1 vs 1 rows
+seed 9060: 3.3s
+seed 9061: 1.4s
+seed 9062: 2.7s
+seed 9063: 1.8s
+  [wrong_rows] seed 9064 #70: 3 vs 3 rows
+  [eval_error] seed 9064 #105: 22P02: invalid input syntax for type integer: "{"b": 2}" vs ok
+  [wrong_rows] seed 9064 #122: 1 vs 1 rows
+seed 9064: 3.4s
+seed 9065: 2.0s
+seed 9066: 3.0s
+  [wrong_rows] seed 9067 #8: 2 vs 2 rows
+seed 9067: 1.8s
+  [error_detail] seed 9068 #115: 42703
+  [error_detail] seed 9068 #146: 23505
+seed 9068: 3.0s
+seed 9069: 1.9s
+seed 9070: 2.0s
+  [error_detail] seed 9071 #19: 23505
+  [error_detail] seed 9071 #44: 23505
+seed 9071: 3.5s
+  [wrong_rows] seed 9072 #147: 2 vs 2 rows
+  [wrong_rows] seed 9072 #159: 3 vs 3 rows
+seed 9072: 1.6s
+  [wrong_rows] seed 9073 #33: 2 vs 2 rows
+  [wrong_rows] seed 9073 #34: 2 vs 2 rows
+  [wrong_error] seed 9073 #131: 08P01 vs 54000
+  [wrong_error] seed 9073 #132: 08P01 vs 54000
+seed 9073: 3.3s
+seed 9074: 2.8s
+  [engine_error] seed 9075 #59: 42725: operator is not unique: unknown + unknown
+  [engine_error] seed 9075 #60: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #61: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #62: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #63: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #64: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #65: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #66: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #67: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #68: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #69: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #70: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #71: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #72: 26000: prepared statement "r9p80975" does not exist
+  [wrong_rows] seed 9075 #73: 0 vs 1 rows
+  [engine_error] seed 9075 #74: 26000: prepared statement "r9p80975" does not exist
+  [error_message] seed 9075 #81: cannot get array length of a non-array | cannot delete from scalar
+  [error_detail] seed 9075 #143: 23505
+seed 9075: 1.8s
+seed 9076: 3.1s
+  [error_detail] seed 9077 #24: 42P20
+seed 9077: 2.6s
+  [error_detail] seed 9078 #0: 23505
+seed 9078: 2.8s
+  [wrong_rows] seed 9079 #106: 3 vs 3 rows
+seed 9079: 3.5s
+seed 9080: 2.5s
+  [wrong_rows] seed 9081 #20: 1 vs 1 rows
+seed 9081: 2.0s
+  [wrong_rows] seed 9082 #80: 5 vs 5 rows
+  [error_detail] seed 9082 #99: 23505
+seed 9082: 3.5s
+seed 9083: 2.9s
+  [engine_error] seed 9084 #135: 42725: operator is not unique: unknown + unknown
+  [engine_error] seed 9084 #136: 26000: prepared statement "r9p86022" does not exist
+  [engine_error] seed 9084 #137: 26000: prepared statement "r9p86022" does not exist
+  [engine_error] seed 9084 #138: 26000: prepared statement "r9p86022" does not exist
+  [engine_error] seed 9084 #139: 26000: prepared statement "r9p86022" does not exist
+  [wrong_error] seed 9084 #140: 26000 vs 22003
+  [wrong_error] seed 9084 #141: 26000 vs 22003
+  [wrong_error] seed 9084 #142: 26000 vs 22003
+  [engine_error] seed 9084 #143: 26000: prepared statement "r9p86022" does not exist
+  [wrong_rows] seed 9084 #145: 0 vs 1 rows
+  [engine_error] seed 9084 #146: 26000: prepared statement "r9p86022" does not exist
+seed 9084: 1.5s
+seed 9085: 1.9s
+seed 9086: 3.4s
+  [wrong_rows] seed 9087 #150: 5 vs 5 rows
+seed 9087: 2.9s
+seed 9088: 3.2s
+  [wrong_rows] seed 9089 #3: 6 vs 6 rows
+  [wrong_rows] seed 9089 #116: 2 vs 2 rows
+  [wrong_rows] seed 9089 #117: 2 vs 2 rows
+  [wrong_rows] seed 9089 #141: 3 vs 3 rows
+seed 9089: 3.3s
+  [wrong_rows] seed 9090 #40: 2 vs 2 rows
+  [engine_error] seed 9090 #121: 42725: operator is not unique: unknown + unknown
+  [engine_error] seed 9090 #122: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #123: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #124: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #125: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #126: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #127: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #128: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #129: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #130: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #131: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #132: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #133: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #134: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #135: 26000: prepared statement "r9x14839" does not exist
+  [wrong_rows] seed 9090 #136: 0 vs 1 rows
+  [engine_error] seed 9090 #137: 26000: prepared statement "r9x14839" does not exist
+seed 9090: 3.5s
+seed 9091: 3.9s
+seed 9092: 1.8s
+  [wrong_rows] seed 9093 #55: 3 vs 3 rows
+  [wrong_rows] seed 9093 #56: 3 vs 3 rows
+  [wrong_rows] seed 9093 #137: 3 vs 3 rows
+seed 9093: 3.2s
+seed 9094: 1.7s
+  [wrong_rows] seed 9095 #137: 9 vs 6 rows
+seed 9095: 1.8s
+  [wrong_rows] seed 9096 #28: 12 vs 11 rows
+seed 9096: 3.2s
+  [wrong_rows] seed 9097 #124: 2 vs 2 rows
+seed 9097: 3.3s
+  [error_detail] seed 9098 #13: 42703
+seed 9098: 2.4s
+seed 9099: 2.3s
+  [wrong_error] seed 9100 #98: 08P01 vs 54000
+  [wrong_error] seed 9100 #99: 08P01 vs 54000
+  [wrong_error] seed 9100 #101: 08P01 vs 54000
+  [wrong_error] seed 9100 #102: 08P01 vs 54000
+  [wrong_error] seed 9100 #107: 08P01 vs 54000
+seed 9100: 3.0s
+seed 9101: 3.1s
+seed 9102: 3.4s
+  [wrong_rows] seed 9103 #32: 9 vs 6 rows
+  [wrong_rows] seed 9103 #133: 13 vs 10 rows
+seed 9103: 2.2s
+seed 9104: 3.3s
+seed 9105: 2.9s
+  [error_detail] seed 9106 #22: 23P01
+  [wrong_rows] seed 9106 #43: 2 vs 2 rows
+seed 9106: 3.0s
+  [wrong_rows] seed 9107 #119: 10 vs 10 rows
+seed 9107: 2.6s
+  [wrong_error] seed 9108 #152: 22P02 vs 23505
+seed 9108: 3.0s
+seed 9109: 3.4s
+  [error_detail] seed 9110 #74: 23505
+  [error_detail] seed 9110 #75: 23505
+  [wrong_error] seed 9110 #138: 08P01 vs 54000
+seed 9110: 2.9s
+  [wrong_rows] seed 9111 #42: 1 vs 1 rows
+  [wrong_rows] seed 9111 #48: 2 vs 2 rows
+seed 9111: 2.4s
+  [error_detail] seed 9112 #68: 42703
+seed 9112: 1.7s
+  [error_detail] seed 9113 #97: 23505
+  [error_detail] seed 9113 #117: 23505
+  [error_detail] seed 9113 #135: 23505
+seed 9113: 1.2s
+seed 9114: 2.5s
+  [error_detail] seed 9115 #69: 23505
+seed 9115: 3.3s
+  [wrong_rows] seed 9116 #58: 16 vs 3 rows
+  [error_detail] seed 9116 #141: 42601
+seed 9116: 1.4s
+  [wrong_rows] seed 9117 #80: 9 vs 6 rows
+seed 9117: 1.6s
+  [wrong_rows] seed 9118 #154: 3 vs 3 rows
+seed 9118: 2.7s
+  [wrong_rows] seed 9119 #149: 11 vs 10 rows
+seed 9119: 2.9s
+seed 9120: 2.8s
+seed 9121: 1.5s
+  [wrong_rows] seed 9122 #27: 2 vs 2 rows
+seed 9122: 2.7s
+  [wrong_rows] seed 9123 #13: 1 vs 1 rows
+seed 9123: 2.4s
+seed 9124: 2.8s
+  [wrong_rows] seed 9125 #1: 5 vs 5 rows
+  [wrong_rows] seed 9125 #8: 2 vs 2 rows
+  [wrong_rows] seed 9125 #16: 2 vs 2 rows
+  [wrong_rows] seed 9125 #20: 1 vs 1 rows
+seed 9125: 1.3s
+  [error_detail] seed 9126 #146: 23505
+  [error_detail] seed 9126 #147: 23P01
+  [error_detail] seed 9126 #149: 23505
+seed 9126: 3.5s
+seed 9127: 1.7s
+  [error_detail] seed 9128 #20: 23505
+  [error_detail] seed 9128 #21: 23505
+  [wrong_rows] seed 9128 #139: 11 vs 8 rows
+seed 9128: 2.2s
+  [wrong_rows] seed 9129 #98: 9 vs 6 rows
+  [wrong_rows] seed 9129 #101: 11 vs 8 rows
+seed 9129: 2.0s
+  [error_detail] seed 9130 #6: 23505
+seed 9130: 2.4s
+seed 9131: 2.5s
+  [wrong_rows] seed 9132 #14: 2 vs 2 rows
+seed 9132: 4.1s
+seed 9133: 2.9s
+seed 9134: 3.3s
+seed 9135: 3.5s
+  [wrong_rows] seed 9136 #100: 2 vs 2 rows
+seed 9136: 1.3s
+  [wrong_rows] seed 9137 #138: 3 vs 3 rows
+  [error_detail] seed 9137 #152: 23505
+  [error_detail] seed 9137 #154: 23P01
+seed 9137: 1.5s
+seed 9138: 3.4s
+  [error_detail] seed 9139 #12: 42703
+seed 9139: 1.8s
+seed 9140: 1.6s
+  [wrong_rows] seed 9141 #125: 2 vs 2 rows
+seed 9141: 2.4s
+seed 9142: 3.8s
+  [wrong_rows] seed 9143 #149: 2 vs 2 rows
+seed 9143: 1.7s
+  [wrong_rows] seed 9144 #24: 3 vs 3 rows
+seed 9144: 3.6s
+seed 9145: 3.3s
+seed 9146: 1.6s
+seed 9147: 3.0s
+seed 9148: 2.7s
+  [error_detail] seed 9149 #113: 23505
+seed 9149: 2.6s
+difftest: seeds=600 statements=93717 queries=25640 both_error=17248 plan_runs=5421 oracle_runs=4996 secs=1108 wrong_rows=103 wrong_order=1 engine_error=41 missing_error=21 wrong_error=24 eval_error=12 error_message=30 tag=1 error_detail=155
+  both error  4677  25P02 current transaction is aborted, commands ignored until
+  both error  1078  3B001 savepoint "r6f" does not exist
+  both error   663  34000 cursor "r6k" does not exist
+  both error   388  23514 value for domain r7code violates check constraint "r7c
+  both error   382  55000 portal "r6k" cannot be run
+  both error   322  42804 collations are not supported by type integer
+  both error   299  42601 syntax error at or near "WITH"
+  both error   239  22012 division by zero
+  both error   236  08P01 bind message has 2 result formats but query has 1 colu
+  both error   231  24000 cursor "r6k" is held from a previous transaction
+  both error   222  22003 integer out of range
+  both error   216  24000 cursor "r6k" is not a simply updatable scan of table "
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 1108.15s
+

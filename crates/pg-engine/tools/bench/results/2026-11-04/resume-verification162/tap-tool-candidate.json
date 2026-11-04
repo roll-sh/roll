@@ -1,0 +1,9 @@
+{
+  "commit": "bb0a1a8ca0795937201c1b3a173afa3cbff3d409",
+  "previous": "a895aac2db55fb57c08906e09f84723e036c9c0c",
+  "ref": "refs/heads/wip/resume-20261104-a162-tap-audit",
+  "confirmed": true,
+  "file": "crates/pg-engine/tools/audit-tap.py",
+  "tested_checkout_head": "3997cf00a2a301fed65f00469625ff14f223f227",
+  "validation": "13 TAP controls, missing raw files, real166 rejected, real16214817passed"
+}

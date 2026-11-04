@@ -1,0 +1,85 @@
+{
+  "status": "PASS",
+  "cases": [
+    {
+      "name": "complete",
+      "expected_exit": 0,
+      "actual_exit": 0
+    },
+    {
+      "name": "plan-first",
+      "expected_exit": 0,
+      "actual_exit": 0
+    },
+    {
+      "name": "failed",
+      "expected_exit": 1,
+      "actual_exit": 1
+    },
+    {
+      "name": "missing-plan",
+      "expected_exit": 1,
+      "actual_exit": 1
+    },
+    {
+      "name": "truncated",
+      "expected_exit": 1,
+      "actual_exit": 1
+    },
+    {
+      "name": "duplicate",
+      "expected_exit": 1,
+      "actual_exit": 1
+    },
+    {
+      "name": "missing-number",
+      "expected_exit": 1,
+      "actual_exit": 1
+    },
+    {
+      "name": "skip",
+      "expected_exit": 1,
+      "actual_exit": 1
+    },
+    {
+      "name": "todo",
+      "expected_exit": 1,
+      "actual_exit": 1
+    },
+    {
+      "name": "bailout",
+      "expected_exit": 1,
+      "actual_exit": 1
+    },
+    {
+      "name": "duplicate-plan",
+      "expected_exit": 1,
+      "actual_exit": 1
+    },
+    {
+      "name": "plan-middle",
+      "expected_exit": 1,
+      "actual_exit": 1
+    },
+    {
+      "name": "plan-skip",
+      "expected_exit": 1,
+      "actual_exit": 1
+    },
+    {
+      "name": "real166-false-Rust-pass",
+      "expected_exit": 1,
+      "actual_exit": 1
+    },
+    {
+      "name": "real162-passing-14817",
+      "expected_exit": 0,
+      "actual_exit": 0
+    },
+    {
+      "name": "missing-raw-files",
+      "expected_exit": 1,
+      "actual_exit": 1
+    }
+  ]
+}

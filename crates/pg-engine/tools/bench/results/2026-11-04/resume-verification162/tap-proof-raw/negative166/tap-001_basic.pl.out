@@ -1,0 +1,267 @@
+not ok 1 - pg_dump --help exit code 0
+ok 2 - pg_dump --help goes to stdout
+ok 3 - pg_dump --help nothing to stderr
+not ok 4 - pg_dump --version exit code 0
+ok 5 - pg_dump --version goes to stdout
+ok 6 - pg_dump --version nothing to stderr
+ok 7 - pg_dump with invalid option nonzero exit code
+not ok 8 - pg_dump with invalid option prints error message
+not ok 9 - pg_restore --help exit code 0
+ok 10 - pg_restore --help goes to stdout
+ok 11 - pg_restore --help nothing to stderr
+not ok 12 - pg_restore --version exit code 0
+ok 13 - pg_restore --version goes to stdout
+ok 14 - pg_restore --version nothing to stderr
+ok 15 - pg_restore with invalid option nonzero exit code
+not ok 16 - pg_restore with invalid option prints error message
+not ok 17 - pg_dumpall --help exit code 0
+ok 18 - pg_dumpall --help goes to stdout
+ok 19 - pg_dumpall --help nothing to stderr
+not ok 20 - pg_dumpall --version exit code 0
+ok 21 - pg_dumpall --version goes to stdout
+ok 22 - pg_dumpall --version nothing to stderr
+ok 23 - pg_dumpall with invalid option nonzero exit code
+not ok 24 - pg_dumpall with invalid option prints error message
+ok 25 - pg_dump: too many command-line arguments: exit code not 0
+not ok 26 - pg_dump: too many command-line arguments: matches
+ok 27 - pg_restore: too many command-line arguments: exit code not 0
+not ok 28 - pg_restore: too many command-line arguments: matches
+ok 29 - pg_dumpall: too many command-line arguments: exit code not 0
+not ok 30 - pg_dumpall: too many command-line arguments: matches
+ok 31 - pg_dump: options -s/--schema-only and -a/--data-only cannot be used together: exit code not 0
+not ok 32 - pg_dump: options -s/--schema-only and -a/--data-only cannot be used together: matches
+ok 33 - pg_dump: error: options -s/--schema-only and --statistics-only cannot be used together: exit code not 0
+not ok 34 - pg_dump: error: options -s/--schema-only and --statistics-only cannot be used together: matches
+ok 35 - pg_dump: error: options -a/--data-only and --statistics-only cannot be used together: exit code not 0
+not ok 36 - pg_dump: error: options -a/--data-only and --statistics-only cannot be used together: matches
+ok 37 - pg_dump: options -s/--schema-only and --include-foreign-data cannot be used together: exit code not 0
+not ok 38 - pg_dump: options -s/--schema-only and --include-foreign-data cannot be used together: matches
+ok 39 - pg_dump: options --statistics-only and --no-statistics cannot be used together: exit code not 0
+not ok 40 - pg_dump: options --statistics-only and --no-statistics cannot be used together: matches
+ok 41 - pg_dump: option --include-foreign-data is not supported with parallel backup: exit code not 0
+not ok 42 - pg_dump: option --include-foreign-data is not supported with parallel backup: matches
+ok 43 - pg_restore: error: one of -d/--dbname and -f/--file must be specified: exit code not 0
+not ok 44 - pg_restore: error: one of -d/--dbname and -f/--file must be specified: matches
+ok 45 - pg_restore: options -s/--schema-only and -a/--data-only cannot be used together: exit code not 0
+not ok 46 - pg_restore: options -s/--schema-only and -a/--data-only cannot be used together: matches
+ok 47 - pg_restore: options -d/--dbname and -f/--file cannot be used together: exit code not 0
+not ok 48 - pg_restore: options -d/--dbname and -f/--file cannot be used together: matches
+ok 49 - pg_dump: options -c/--clean and -a/--data-only cannot be used together: exit code not 0
+not ok 50 - pg_dump: options -c/--clean and -a/--data-only cannot be used together: matches
+ok 51 - pg_restore: options -c/--clean and -a/--data-only cannot be used together: exit code not 0
+not ok 52 - pg_restore: options -c/--clean and -a/--data-only cannot be used together: matches
+ok 53 - pg_dump: option --if-exists requires option -c/--clean: exit code not 0
+not ok 54 - pg_dump: option --if-exists requires option -c/--clean: matches
+ok 55 - pg_dump: parallel backup only supported by the directory format: exit code not 0
+not ok 56 - pg_dump: parallel backup only supported by the directory format: matches
+ok 57 - pg_dump: -j/--jobs must be in range: exit code not 0
+not ok 58 - pg_dump: -j/--jobs must be in range: matches
+ok 59 - pg_dump: invalid output format: exit code not 0
+not ok 60 - pg_dump: invalid output format: matches
+ok 61 - pg_restore: -j/--jobs must be in range: exit code not 0
+not ok 62 - pg_restore: -j/--jobs must be in range: matches
+ok 63 - pg_restore: cannot specify both --single-transaction and multiple jobs: exit code not 0
+not ok 64 - pg_restore: cannot specify both --single-transaction and multiple jobs: matches
+ok 65 - pg_dump: invalid --compress: exit code not 0
+not ok 66 - pg_dump: invalid --compress: matches
+ok 67 - pg_dump: invalid compression specification: compression algorithm "none" does not accept a compression level: exit code not 0
+not ok 68 - pg_dump: invalid compression specification: compression algorithm "none" does not accept a compression level: matches
+ok 69 - pg_dump: invalid compression specification: must be in range: exit code not 0
+not ok 70 - pg_dump: invalid compression specification: must be in range: matches
+ok 71 - pg_dump: compression is not supported by tar archive format: exit code not 0
+not ok 72 - pg_dump: compression is not supported by tar archive format: matches
+ok 73 - pg_dump: invalid compression specification: must be an integer: exit code not 0
+not ok 74 - pg_dump: invalid compression specification: must be an integer: matches
+ok 75 - pg_dump: --extra-float-digits must be in range: exit code not 0
+not ok 76 - pg_dump: --extra-float-digits must be in range: matches
+ok 77 - pg_dump: --rows-per-insert must be in range: exit code not 0
+not ok 78 - pg_dump: --rows-per-insert must be in range: matches
+ok 79 - pg_restore: option --if-exists requires option -c/--clean: exit code not 0
+not ok 80 - pg_restore: option --if-exists requires option -c/--clean: matches
+ok 81 - pg_dump: unrecognized archive format: exit code not 0
+not ok 82 - pg_dump: unrecognized archive format: matches
+ok 83 - pg_dump: --on-conflict-do-nothing requires --inserts, --rows-per-insert, --column-inserts: exit code not 0
+not ok 84 - pg_dump: --on-conflict-do-nothing requires --inserts, --rows-per-insert, --column-inserts: matches
+ok 85 - pg_dumpall: options -g/--globals-only and -r/--roles-only cannot be used together: exit code not 0
+not ok 86 - pg_dumpall: options -g/--globals-only and -r/--roles-only cannot be used together: matches
+ok 87 - pg_dumpall: options -g/--globals-only and -t/--tablespaces-only cannot be used together: exit code not 0
+not ok 88 - pg_dumpall: options -g/--globals-only and -t/--tablespaces-only cannot be used together: matches
+ok 89 - pg_dumpall: options -r/--roles-only and -t/--tablespaces-only cannot be used together: exit code not 0
+not ok 90 - pg_dumpall: options -r/--roles-only and -t/--tablespaces-only cannot be used together: matches
+ok 91 - pg_dumpall: option --if-exists requires option -c/--clean: exit code not 0
+not ok 92 - pg_dumpall: option --if-exists requires option -c/--clean: matches
+ok 93 - pg_restore: options -C\/--create and -1\/--single-transaction cannot be used together: exit code not 0
+not ok 94 - pg_restore: options -C\/--create and -1\/--single-transaction cannot be used together: matches
+ok 95 - pg_dumpall: option --exclude-database cannot be used together with -g/--globals-only: exit code not 0
+not ok 96 - pg_dumpall: option --exclude-database cannot be used together with -g/--globals-only: matches
+1..96
+
+#   Failed test 'pg_dump --help exit code 0'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 207.
+#   Failed test 'pg_dump --version exit code 0'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 216.
+#   Failed test 'pg_dump with invalid option prints error message'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 226.
+#          got: ''
+#     expected: anything else
+#   Failed test 'pg_restore --help exit code 0'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 207.
+#   Failed test 'pg_restore --version exit code 0'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 216.
+#   Failed test 'pg_restore with invalid option prints error message'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 226.
+#          got: ''
+#     expected: anything else
+#   Failed test 'pg_dumpall --help exit code 0'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 207.
+#   Failed test 'pg_dumpall --version exit code 0'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 216.
+#   Failed test 'pg_dumpall with invalid option prints error message'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 226.
+#          got: ''
+#     expected: anything else
+#   Failed test 'pg_dump: too many command-line arguments: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump\:\ error\:\ too\ many\ command\-line\ arguments\ \(first\ is\ \"abc\"\))'
+#   Failed test 'pg_restore: too many command-line arguments: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_restore\:\ error\:\ too\ many\ command\-line\ arguments\ \(first\ is\ \"abc\"\))'
+#   Failed test 'pg_dumpall: too many command-line arguments: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dumpall\:\ error\:\ too\ many\ command\-line\ arguments\ \(first\ is\ \"qqq\"\))'
+#   Failed test 'pg_dump: options -s/--schema-only and -a/--data-only cannot be used together: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump\:\ error\:\ options\ \-s\/\-\-schema\-only\ and\ \-a\/\-\-data\-only\ cannot\ be\ used\ together)'
+#   Failed test 'pg_dump: error: options -s/--schema-only and --statistics-only cannot be used together: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump\:\ error\:\ options\ \-s\/\-\-schema\-only\ and\ \-\-statistics\-only\ cannot\ be\ used\ together)'
+#   Failed test 'pg_dump: error: options -a/--data-only and --statistics-only cannot be used together: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump\:\ error\:\ options\ \-a\/\-\-data\-only\ and\ \-\-statistics\-only\ cannot\ be\ used\ together)'
+#   Failed test 'pg_dump: options -s/--schema-only and --include-foreign-data cannot be used together: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump\:\ error\:\ options\ \-s\/\-\-schema\-only\ and\ \-\-include\-foreign\-data\ cannot\ be\ used\ together)'
+#   Failed test 'pg_dump: options --statistics-only and --no-statistics cannot be used together: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump\:\ error\:\ options\ \-\-statistics\-only\ and\ \-\-no\-statistics\ cannot\ be\ used\ together)'
+#   Failed test 'pg_dump: option --include-foreign-data is not supported with parallel backup: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump\:\ error\:\ option\ \-\-include\-foreign\-data\ is\ not\ supported\ with\ parallel\ backup)'
+#   Failed test 'pg_restore: error: one of -d/--dbname and -f/--file must be specified: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_restore\:\ error\:\ one\ of\ \-d\/\-\-dbname\ and\ \-f\/\-\-file\ must\ be\ specified)'
+#   Failed test 'pg_restore: options -s/--schema-only and -a/--data-only cannot be used together: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_restore\:\ error\:\ options\ \-s\/\-\-schema\-only\ and\ \-a\/\-\-data\-only\ cannot\ be\ used\ together)'
+#   Failed test 'pg_restore: options -d/--dbname and -f/--file cannot be used together: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_restore\:\ error\:\ options\ \-d\/\-\-dbname\ and\ \-f\/\-\-file\ cannot\ be\ used\ together)'
+#   Failed test 'pg_dump: options -c/--clean and -a/--data-only cannot be used together: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump\:\ error\:\ options\ \-c\/\-\-clean\ and\ \-a\/\-\-data\-only\ cannot\ be\ used\ together)'
+#   Failed test 'pg_restore: options -c/--clean and -a/--data-only cannot be used together: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_restore\:\ error\:\ options\ \-c\/\-\-clean\ and\ \-a\/\-\-data\-only\ cannot\ be\ used\ together)'
+#   Failed test 'pg_dump: option --if-exists requires option -c/--clean: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump\:\ error\:\ option\ \-\-if\-exists\ requires\ option\ \-c\/\-\-clean)'
+#   Failed test 'pg_dump: parallel backup only supported by the directory format: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump\:\ error\:\ parallel\ backup\ only\ supported\ by\ the\ directory\ format)'
+#   Failed test 'pg_dump: -j/--jobs must be in range: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump\:\ error\:\ \-j\/\-\-jobs\ must\ be\ in\ range)'
+#   Failed test 'pg_dump: invalid output format: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump\:\ error\:\ invalid\ output\ format)'
+#   Failed test 'pg_restore: -j/--jobs must be in range: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_restore\:\ error\:\ \-j\/\-\-jobs\ must\ be\ in\ range)'
+#   Failed test 'pg_restore: cannot specify both --single-transaction and multiple jobs: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_restore\:\ error\:\ cannot\ specify\ both\ \-\-single\-transaction\ and\ multiple\ jobs)'
+#   Failed test 'pg_dump: invalid --compress: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump\:\ error\:\ unrecognized\ compression\ algorithm)'
+#   Failed test 'pg_dump: invalid compression specification: compression algorithm "none" does not accept a compression level: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump\:\ error\:\ invalid\ compression\ specification\:\ compression\ algorithm\ \"none\"\ does\ not\ accept\ a\ compression\ level)'
+#   Failed test 'pg_dump: invalid compression specification: must be in range: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump\:\ error\:\ invalid\ compression\ specification\:\ compression\ algorithm\ \"gzip\"\ expects\ a\ compression\ level\ between\ 1\ and\ 9\ \(default\ at\ \-1\))'
+#   Failed test 'pg_dump: compression is not supported by tar archive format: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump\:\ error\:\ compression\ is\ not\ supported\ by\ tar\ archive\ format)'
+#   Failed test 'pg_dump: invalid compression specification: must be an integer: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump\:\ error\:\ invalid\ compression\ specification\:\ unrecognized\ compression\ option\:\ \"nonInt\")'
+#   Failed test 'pg_dump: --extra-float-digits must be in range: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump\:\ error\:\ \-\-extra\-float\-digits\ must\ be\ in\ range)'
+#   Failed test 'pg_dump: --rows-per-insert must be in range: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump\:\ error\:\ \-\-rows\-per\-insert\ must\ be\ in\ range)'
+#   Failed test 'pg_restore: option --if-exists requires option -c/--clean: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_restore\:\ error\:\ option\ \-\-if\-exists\ requires\ option\ \-c\/\-\-clean)'
+#   Failed test 'pg_dump: unrecognized archive format: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_restore\:\ error\:\ unrecognized\ archive\ format\ \"garbage\"\;)'
+#   Failed test 'pg_dump: --on-conflict-do-nothing requires --inserts, --rows-per-insert, --column-inserts: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dump: error: option --on-conflict-do-nothing requires option --inserts, --rows-per-insert, or --column-inserts)'
+#   Failed test 'pg_dumpall: options -g/--globals-only and -r/--roles-only cannot be used together: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dumpall\:\ error\:\ options\ \-g\/\-\-globals\-only\ and\ \-r\/\-\-roles\-only\ cannot\ be\ used\ together)'
+#   Failed test 'pg_dumpall: options -g/--globals-only and -t/--tablespaces-only cannot be used together: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dumpall\:\ error\:\ options\ \-g\/\-\-globals\-only\ and\ \-t\/\-\-tablespaces\-only\ cannot\ be\ used\ together)'
+#   Failed test 'pg_dumpall: options -r/--roles-only and -t/--tablespaces-only cannot be used together: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dumpall\:\ error\:\ options\ \-r\/\-\-roles\-only\ and\ \-t\/\-\-tablespaces\-only\ cannot\ be\ used\ together)'
+#   Failed test 'pg_dumpall: option --if-exists requires option -c/--clean: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dumpall\:\ error\:\ option\ \-\-if\-exists\ requires\ option\ \-c\/\-\-clean)'
+#   Failed test 'pg_restore: options -C\/--create and -1\/--single-transaction cannot be used together: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_restore\:\ error\:\ options\ \-C\/\-\-create\ and\ \-1\/\-\-single\-transaction\ cannot\ be\ used\ together)'
+#   Failed test 'pg_dumpall: option --exclude-database cannot be used together with -g/--globals-only: matches'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 165.
+#                   ''
+#     doesn't match '(?^:pg_dumpall\:\ error\:\ option\ \-\-exclude\-database\ cannot\ be\ used\ together\ with\ \-g\/\-\-globals\-only)'
+# Looks like you failed 45 tests of 96.
