@@ -1,0 +1,11 @@
+{
+  "time": "2026-11-04T19:23:02.037194+00:00",
+  "review": "combined-proof-review-r2-result.json",
+  "reviewed_candidate": "e25c258e",
+  "reviewed_red": "b43e47a5",
+  "R1_disposition": "All6 prior objections addressed statically; no new production correctness objection",
+  "new_medium": "cfg(test) ready-but-aborted race can false-fail8191 cases; prioritize satisfied wait predicate before abort while preserving gate_error",
+  "requested": "Separate test-only correction on candidate and corrected-red successor; speculative INSERT DO NOTHING size-error control",
+  "runtime": "b43 E0283 compile101, zero tests remains sealed; no new compile until successor exact pin stable",
+  "held": "Original combined HIGH runtimeproof, encodingTLS boundary, rawheapTOAST and PGoracles/P6-P12 remain OPEN"
+}
