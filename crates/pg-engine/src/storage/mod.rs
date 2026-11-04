@@ -1987,8 +1987,8 @@ impl Cursor {
     }
 
     /// The same source over [start, end) instead: a memtable's read again from `start`; a
-    /// level's kept in its block when `start` is in it at or past the entry it is on (the
-    /// next of ascending lookups), else positioned afresh.
+    /// level's kept in its block when `start` falls in it past its first entry (the next of
+    /// ascending lookups), else positioned afresh.
     fn reseek(&mut self, start: &[u8], end: &[u8]) {
         match self {
             Cursor::Mem { buf, from, end: e, done, batch, .. } => {
@@ -2002,16 +2002,19 @@ impl Cursor {
             Cursor::Level { ssts, file, block, block_idx, pos, end: e, start: s, started, whole, .. } => {
                 e.clear();
                 e.extend_from_slice(end);
+                // (`start` in the block, past its first entry: the first entry at or past it
+                // is here, not in the block before. At the block's first entry the one before
+                // could hold it: positioned afresh.)
                 if *started
                     && *file < ssts.len()
                     && let Some(b) = block.as_ref()
-                    && pos.index() < b.len()
-                    && pos.key() <= start
                     && b.last_key().is_some_and(|k| k >= start)
                 {
                     b.seek(start, pos);
-                    *whole = end.is_empty() || b.last_key().is_none_or(|k| k < end);
-                    return;
+                    if pos.index() > 0 {
+                        *whole = end.is_empty() || b.last_key().is_none_or(|k| k < end);
+                        return;
+                    }
                 }
                 s.clear();
                 s.extend_from_slice(start);
@@ -2450,6 +2453,50 @@ fn sources(view: &View, start: &[u8], end: &[u8]) -> Vec<Cursor> {
     sources
 }
 
+/// Whether `cursors` are the sources `sources(view, start, end)` would make, in its order:
+/// the same memtables and files (a reseek then moves them in place, nothing made).
+fn same_sources(view: &View, cursors: &[Cursor], start: &[u8], end: &[u8]) -> bool {
+    let overlaps = |s: &Arc<SstReader>| s.overlaps(start, end);
+    let mut c = cursors.iter();
+    let mem = |c: Option<&Cursor>, m: &Arc<Memtable>| matches!(c, Some(Cursor::Mem { mem, .. }) if Arc::ptr_eq(mem, m));
+    let file = |c: Option<&Cursor>, s: &Arc<SstReader>| c.and_then(Cursor::files).is_some_and(|f| f.len() == 1 && Arc::ptr_eq(&f[0], s));
+    if !mem(c.next(), &view.mem) {
+        return false;
+    }
+    for f in &view.imm {
+        let ok = match f {
+            Frozen::Mem(m) => mem(c.next(), m),
+            Frozen::Sst(s) if overlaps(s) => file(c.next(), s),
+            Frozen::Sst(_) => true,
+        };
+        if !ok {
+            return false;
+        }
+    }
+    for s in view.l0.iter().filter(|s| overlaps(s)) {
+        if !file(c.next(), s) {
+            return false;
+        }
+    }
+    let mut l1 = view.l1.iter().filter(|s| overlaps(s)).peekable();
+    if l1.peek().is_some() {
+        let Some(files) = c.next().and_then(Cursor::files) else {
+            return false;
+        };
+        let mut n = 0;
+        for s in l1 {
+            if files.get(n).is_none_or(|f| !Arc::ptr_eq(f, s)) {
+                return false;
+            }
+            n += 1;
+        }
+        if n != files.len() {
+            return false;
+        }
+    }
+    c.next().is_none()
+}
+
 impl Scan {
     fn of_rows(view: Arc<View>, rows: Vec<(Vec<u8>, Bytes)>, ts: u64) -> Scan {
         Scan {
@@ -2515,27 +2562,38 @@ impl Scan {
         if self.rows.is_some() || ts != self.ts || self.rdels.iter().any(|r| r.ts == rdel::ALL) {
             return false;
         }
-        let fresh = sources(&self._view, start, end);
         let mut old = std::mem::take(&mut self.merge.sources);
-        let same = |a: &Cursor, b: &Cursor| match (a, b) {
-            (Cursor::Mem { mem: x, .. }, Cursor::Mem { mem: y, .. }) => Arc::ptr_eq(x, y),
-            _ => match (a.files(), b.files()) {
-                (Some(x), Some(y)) => x.len() == y.len() && x.iter().zip(y).all(|(p, q)| Arc::ptr_eq(p, q)),
-                _ => false,
-            },
+        let sources = if same_sources(&self._view, &old, start, end) {
+            // (The same sources: moved in place, none made.)
+            for c in &mut old {
+                c.reseek(start, end);
+            }
+            old
+        } else {
+            let fresh = sources(&self._view, start, end);
+            let same = |a: &Cursor, b: &Cursor| match (a, b) {
+                (Cursor::Mem { mem: x, .. }, Cursor::Mem { mem: y, .. }) => Arc::ptr_eq(x, y),
+                _ => match (a.files(), b.files()) {
+                    (Some(x), Some(y)) => x.len() == y.len() && x.iter().zip(y).all(|(p, q)| Arc::ptr_eq(p, q)),
+                    _ => false,
+                },
+            };
+            fresh
+                .into_iter()
+                .map(|f| match old.iter().position(|o| same(o, &f)) {
+                    Some(i) => {
+                        let mut c = old.swap_remove(i);
+                        c.reseek(start, end);
+                        c
+                    }
+                    None => f,
+                })
+                .collect()
         };
-        let sources = fresh
-            .into_iter()
-            .map(|f| match old.iter().position(|o| same(o, &f)) {
-                Some(i) => {
-                    let mut c = old.swap_remove(i);
-                    c.reseek(start, end);
-                    c
-                }
-                None => f,
-            })
-            .collect();
-        self.merge = Merge::new(sources, end.to_vec());
+        let mut e = std::mem::take(&mut self.merge.end);
+        e.clear();
+        e.extend_from_slice(end);
+        self.merge = Merge::new(sources, e);
         self.rdels = rdel::relevant(&self._view.rdels, start, end, ts).into_boxed_slice();
         self.decided = None;
         self.decided_ts = 0;
