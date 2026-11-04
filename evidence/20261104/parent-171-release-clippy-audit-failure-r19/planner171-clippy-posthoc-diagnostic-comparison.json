@@ -1,0 +1,230 @@
+{
+  "utc": "2026-11-04T22:37:46.072242+00:00",
+  "scope": "POSTHOC DIAGNOSTIC COMPARISON ONLY; original frozen audit FAILED retained",
+  "raw_sha256": "b276908063ca9ecfd121336af8f77200fc04888cc117eb40398809583451996f",
+  "raw_warning_messages": 24,
+  "raw_primary_span_entries": 29,
+  "duplicate_exact_location_diagnostics": 10,
+  "normalized_warning_diagnostics": 14,
+  "normalization": "One warning per diagnostic identity; collapse repeated same target/code/message/primary-byte-locations across lib and lib-test; each warning has exactly one distinct primary file path; retain distinct locations including five math warnings",
+  "warnings": [
+    {
+      "message": "length comparison to zero",
+      "path": "crates/pg-engine/src/sql/binder/expr.rs",
+      "code": "clippy::len_zero",
+      "target": "pg_engine",
+      "primary_locations": [
+        {
+          "file": "crates/pg-engine/src/sql/binder/expr.rs",
+          "byte_start": 145004,
+          "byte_end": 145065
+        }
+      ]
+    },
+    {
+      "message": "this loop could be written as a `while let` loop",
+      "path": "crates/pg-engine/src/sql/binder/fold.rs",
+      "code": "clippy::while_let_loop",
+      "target": "pg_engine",
+      "primary_locations": [
+        {
+          "file": "crates/pg-engine/src/sql/binder/fold.rs",
+          "byte_start": 8139,
+          "byte_end": 8454
+        }
+      ]
+    },
+    {
+      "message": "the `Err`-variant returned from this function is very large",
+      "path": "crates/pg-engine/src/sql/binder/optimize.rs",
+      "code": "clippy::result_large_err",
+      "target": "pg_engine",
+      "primary_locations": [
+        {
+          "file": "crates/pg-engine/src/sql/binder/optimize.rs",
+          "byte_start": 145382,
+          "byte_end": 145413
+        }
+      ]
+    },
+    {
+      "message": "the loop variable `j` is used to index `rkeys`",
+      "path": "crates/pg-engine/src/sql/paths/joinpath/partitionwise.rs",
+      "code": "clippy::needless_range_loop",
+      "target": "pg_engine",
+      "primary_locations": [
+        {
+          "file": "crates/pg-engine/src/sql/paths/joinpath/partitionwise.rs",
+          "byte_start": 52472,
+          "byte_end": 52486
+        }
+      ]
+    },
+    {
+      "message": "this `if` statement can be collapsed",
+      "path": "crates/pg-engine/src/sql/explain.rs",
+      "code": "clippy::collapsible_if",
+      "target": "pg_engine",
+      "primary_locations": [
+        {
+          "file": "crates/pg-engine/src/sql/explain.rs",
+          "byte_start": 460897,
+          "byte_end": 461125
+        }
+      ]
+    },
+    {
+      "message": "float has excessive precision",
+      "path": "crates/pg-engine/src/sql/func/math.rs",
+      "code": "clippy::excessive_precision",
+      "target": "pg_engine",
+      "primary_locations": [
+        {
+          "file": "crates/pg-engine/src/sql/func/math.rs",
+          "byte_start": 2220,
+          "byte_end": 2242
+        }
+      ]
+    },
+    {
+      "message": "float has excessive precision",
+      "path": "crates/pg-engine/src/sql/func/math.rs",
+      "code": "clippy::excessive_precision",
+      "target": "pg_engine",
+      "primary_locations": [
+        {
+          "file": "crates/pg-engine/src/sql/func/math.rs",
+          "byte_start": 2265,
+          "byte_end": 2287
+        }
+      ]
+    },
+    {
+      "message": "float has excessive precision",
+      "path": "crates/pg-engine/src/sql/func/math.rs",
+      "code": "clippy::excessive_precision",
+      "target": "pg_engine",
+      "primary_locations": [
+        {
+          "file": "crates/pg-engine/src/sql/func/math.rs",
+          "byte_start": 2309,
+          "byte_end": 2332
+        }
+      ]
+    },
+    {
+      "message": "float has excessive precision",
+      "path": "crates/pg-engine/src/sql/func/math.rs",
+      "code": "clippy::excessive_precision",
+      "target": "pg_engine",
+      "primary_locations": [
+        {
+          "file": "crates/pg-engine/src/sql/func/math.rs",
+          "byte_start": 2355,
+          "byte_end": 2378
+        }
+      ]
+    },
+    {
+      "message": "float has excessive precision",
+      "path": "crates/pg-engine/src/sql/func/math.rs",
+      "code": "clippy::excessive_precision",
+      "target": "pg_engine",
+      "primary_locations": [
+        {
+          "file": "crates/pg-engine/src/sql/func/math.rs",
+          "byte_start": 2400,
+          "byte_end": 2423
+        }
+      ]
+    },
+    {
+      "message": "items after a test module",
+      "path": "crates/pg-engine/src/types/json.rs",
+      "code": "clippy::items_after_test_module",
+      "target": "pg_engine",
+      "primary_locations": [
+        {
+          "file": "crates/pg-engine/src/types/json.rs",
+          "byte_start": 32005,
+          "byte_end": 32014
+        },
+        {
+          "file": "crates/pg-engine/src/types/json.rs",
+          "byte_start": 33406,
+          "byte_end": 33547
+        },
+        {
+          "file": "crates/pg-engine/src/types/json.rs",
+          "byte_start": 33865,
+          "byte_end": 33938
+        },
+        {
+          "file": "crates/pg-engine/src/types/json.rs",
+          "byte_start": 34191,
+          "byte_end": 34311
+        },
+        {
+          "file": "crates/pg-engine/src/types/json.rs",
+          "byte_start": 36378,
+          "byte_end": 36468
+        }
+      ]
+    },
+    {
+      "message": "items after a test module",
+      "path": "crates/pg-engine/src/types/text.rs",
+      "code": "clippy::items_after_test_module",
+      "target": "pg_engine",
+      "primary_locations": [
+        {
+          "file": "crates/pg-engine/src/types/text.rs",
+          "byte_start": 82224,
+          "byte_end": 82233
+        },
+        {
+          "file": "crates/pg-engine/src/types/text.rs",
+          "byte_start": 90438,
+          "byte_end": 90496
+        }
+      ]
+    },
+    {
+      "message": "using `chunks_exact` with a constant chunk size",
+      "path": "crates/pg-engine/tools/bench/bench.rs",
+      "code": "clippy::chunks_exact_to_as_chunks",
+      "target": "bench",
+      "primary_locations": [
+        {
+          "file": "crates/pg-engine/tools/bench/bench.rs",
+          "byte_start": 30894,
+          "byte_end": 30909
+        }
+      ]
+    },
+    {
+      "message": "useless use of `format!`",
+      "path": "crates/pg-engine/tests/difftest/round8.rs",
+      "code": "clippy::useless_format",
+      "target": "difftest",
+      "primary_locations": [
+        {
+          "file": "crates/pg-engine/tests/difftest/round8.rs",
+          "byte_start": 55002,
+          "byte_end": 55023
+        }
+      ]
+    }
+  ],
+  "extra": [],
+  "missing": [],
+  "historical_reference": "/home/meszmate/.cache/pg-engine-resume-20261104/session_planner/check165ind-v3/clippy-warning-audit.json",
+  "same_historical_message_path_multiset": true,
+  "changed_production_path_warning": false,
+  "original_cargo_exit": 0,
+  "original_frozen_audit_exit": 1,
+  "original_pipeline_status": "FAILED",
+  "source_or_gate_edits": false,
+  "command_rerun": false,
+  "all_normalized_warning_source_paths_byte_identical_to_c861": true
+}

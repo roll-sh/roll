@@ -1,0 +1,192 @@
+{
+  "scope": "Separate post-hoc comparison; never changes a frozen gate result",
+  "raw_sha256": "b276908063ca9ecfd121336af8f77200fc04888cc117eb40398809583451996f",
+  "raw_warning_messages": 24,
+  "raw_primary_span_entries": 29,
+  "duplicate_diagnostic_copies": 10,
+  "diagnostic_count": 14,
+  "diagnostics": [
+    {
+      "message": "length comparison to zero",
+      "path": "crates/pg-engine/src/sql/binder/expr.rs",
+      "primary_locations": [
+        [
+          "crates/pg-engine/src/sql/binder/expr.rs",
+          145004,
+          145065
+        ]
+      ]
+    },
+    {
+      "message": "this loop could be written as a `while let` loop",
+      "path": "crates/pg-engine/src/sql/binder/fold.rs",
+      "primary_locations": [
+        [
+          "crates/pg-engine/src/sql/binder/fold.rs",
+          8139,
+          8454
+        ]
+      ]
+    },
+    {
+      "message": "the `Err`-variant returned from this function is very large",
+      "path": "crates/pg-engine/src/sql/binder/optimize.rs",
+      "primary_locations": [
+        [
+          "crates/pg-engine/src/sql/binder/optimize.rs",
+          145382,
+          145413
+        ]
+      ]
+    },
+    {
+      "message": "the loop variable `j` is used to index `rkeys`",
+      "path": "crates/pg-engine/src/sql/paths/joinpath/partitionwise.rs",
+      "primary_locations": [
+        [
+          "crates/pg-engine/src/sql/paths/joinpath/partitionwise.rs",
+          52472,
+          52486
+        ]
+      ]
+    },
+    {
+      "message": "this `if` statement can be collapsed",
+      "path": "crates/pg-engine/src/sql/explain.rs",
+      "primary_locations": [
+        [
+          "crates/pg-engine/src/sql/explain.rs",
+          460897,
+          461125
+        ]
+      ]
+    },
+    {
+      "message": "float has excessive precision",
+      "path": "crates/pg-engine/src/sql/func/math.rs",
+      "primary_locations": [
+        [
+          "crates/pg-engine/src/sql/func/math.rs",
+          2220,
+          2242
+        ]
+      ]
+    },
+    {
+      "message": "float has excessive precision",
+      "path": "crates/pg-engine/src/sql/func/math.rs",
+      "primary_locations": [
+        [
+          "crates/pg-engine/src/sql/func/math.rs",
+          2265,
+          2287
+        ]
+      ]
+    },
+    {
+      "message": "float has excessive precision",
+      "path": "crates/pg-engine/src/sql/func/math.rs",
+      "primary_locations": [
+        [
+          "crates/pg-engine/src/sql/func/math.rs",
+          2309,
+          2332
+        ]
+      ]
+    },
+    {
+      "message": "float has excessive precision",
+      "path": "crates/pg-engine/src/sql/func/math.rs",
+      "primary_locations": [
+        [
+          "crates/pg-engine/src/sql/func/math.rs",
+          2355,
+          2378
+        ]
+      ]
+    },
+    {
+      "message": "float has excessive precision",
+      "path": "crates/pg-engine/src/sql/func/math.rs",
+      "primary_locations": [
+        [
+          "crates/pg-engine/src/sql/func/math.rs",
+          2400,
+          2423
+        ]
+      ]
+    },
+    {
+      "message": "items after a test module",
+      "path": "crates/pg-engine/src/types/json.rs",
+      "primary_locations": [
+        [
+          "crates/pg-engine/src/types/json.rs",
+          32005,
+          32014
+        ],
+        [
+          "crates/pg-engine/src/types/json.rs",
+          33406,
+          33547
+        ],
+        [
+          "crates/pg-engine/src/types/json.rs",
+          33865,
+          33938
+        ],
+        [
+          "crates/pg-engine/src/types/json.rs",
+          34191,
+          34311
+        ],
+        [
+          "crates/pg-engine/src/types/json.rs",
+          36378,
+          36468
+        ]
+      ]
+    },
+    {
+      "message": "items after a test module",
+      "path": "crates/pg-engine/src/types/text.rs",
+      "primary_locations": [
+        [
+          "crates/pg-engine/src/types/text.rs",
+          82224,
+          82233
+        ],
+        [
+          "crates/pg-engine/src/types/text.rs",
+          90438,
+          90496
+        ]
+      ]
+    },
+    {
+      "message": "using `chunks_exact` with a constant chunk size",
+      "path": "crates/pg-engine/tools/bench/bench.rs",
+      "primary_locations": [
+        [
+          "crates/pg-engine/tools/bench/bench.rs",
+          30894,
+          30909
+        ]
+      ]
+    },
+    {
+      "message": "useless use of `format!`",
+      "path": "crates/pg-engine/tests/difftest/round8.rs",
+      "primary_locations": [
+        [
+          "crates/pg-engine/tests/difftest/round8.rs",
+          55002,
+          55023
+        ]
+      ]
+    }
+  ],
+  "same_message_path_multiset": true,
+  "extra": [],
+  "missing": []
+}

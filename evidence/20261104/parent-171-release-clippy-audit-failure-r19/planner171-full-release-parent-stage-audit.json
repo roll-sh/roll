@@ -1,0 +1,18 @@
+{
+  "utc": "2026-11-04T22:36:24.179636+00:00",
+  "source": "cac0933bc4eb5ef87674889542cab271de4615d0",
+  "stage": "release-test",
+  "command_exit": 0,
+  "stage_audit_exit": 0,
+  "raw_exact_per_binary_map": [
+    457,
+    0,
+    18,
+    61
+  ],
+  "matches_completed_debug_map": true,
+  "all_actual_executable_hashes_verified": 60,
+  "later_active_output_inspected": false,
+  "pipeline_acceptance": false,
+  "integration_service_performance_acceptance": false
+}
