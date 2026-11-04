@@ -1,0 +1,102 @@
+{
+  "observed_utc": "2026-11-04T18:08:43.010801+00:00",
+  "source": "c8618834caf45bc0a34cf9985c07f9bc13b498ef",
+  "pid": 3971228,
+  "ppid": 3626208,
+  "nice": 19,
+  "command": "/home/meszmate/.cache/a165/target/debug/deps/golden-9749ad749af5ca1c ",
+  "tasks": [
+    {
+      "tid": 3971228,
+      "affinity": [
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        18,
+        19
+      ]
+    },
+    {
+      "tid": 4012668,
+      "affinity": [
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        18,
+        19
+      ]
+    },
+    {
+      "tid": 4012737,
+      "affinity": [
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        18,
+        19
+      ]
+    },
+    {
+      "tid": 4012738,
+      "affinity": [
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        18,
+        19
+      ]
+    },
+    {
+      "tid": 4012739,
+      "affinity": [
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        18,
+        19
+      ]
+    },
+    {
+      "tid": 4012740,
+      "affinity": [
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        18,
+        19
+      ]
+    },
+    {
+      "tid": 311022,
+      "affinity": [
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        18,
+        19
+      ]
+    }
+  ],
+  "scope": "single read-only observation of existing full-debug golden threads; no lifetime isolation claim"
+}

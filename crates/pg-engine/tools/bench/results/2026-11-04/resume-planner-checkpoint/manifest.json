@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "81063aca15900bece2a82a91f6ad8cde1a74729898ab2b02698b9ad73d17117b",
-    "bytes": 12358
+    "sha256": "63d42769c8157be3f8eecd836dbdde561bebfc62009168793755760c96ab4949",
+    "bytes": 12461
   },
   "bytea165compare/RESTORED": {
     "sha256": "cfeb0d7a74ac20eb1d46d347c00db409be5f9c5b47ca77e388b2e494a65d91c3",
@@ -219,9 +219,29 @@
     "sha256": "a7824c2ddab4ed9dd8c18fcfa6d0c761fb592289444e92e4cd8baa3cce29ecd3",
     "bytes": 433
   },
+  "check165ind-v3/affinity-observation-debug.json": {
+    "sha256": "7a521b62662986ebf922b26964c793fca5966ad4fb128e087d1b4c8fcc9960bd",
+    "bytes": 1468
+  },
   "check165ind-v3/affinity-observation-focused.json": {
     "sha256": "3e774eb0bfc708a1951b2e4b31bfdc017c0b3a1eb8997b1385a3bdd6d57861b2",
     "bytes": 15442
+  },
+  "check165ind-v3/debug-completed-exits.tsv": {
+    "sha256": "42456510f4141f0308ece97274d31ff45cc1354f67baf98a1777ff284b956be5",
+    "bytes": 66
+  },
+  "check165ind-v3/debug-test-summary.json": {
+    "sha256": "bc6bf6b62bea0d9fd5535c474a2d3bb6130082b56156f3e90593a2087b663fe4",
+    "bytes": 4016
+  },
+  "check165ind-v3/debug-test.command": {
+    "sha256": "a58cb89f43a482980467f2846f5490a07e7950df8f44eb8825c0aac12cd6eaea",
+    "bytes": 25
+  },
+  "check165ind-v3/debug-test.log": {
+    "sha256": "3811d231d28bf448aa2aa1f6ae753f53f01c2b776fb5edf674a118ad871725ae",
+    "bytes": 38447
   },
   "check165ind-v3/end-monitoring.command": {
     "sha256": "49a1d770135fb5c6fa795a73ac541510263811d2071b173284866c6af3738cab",
@@ -536,8 +556,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "97f6579a6b0273fe5f6e37fa886565484c1b9b51866eb82ab5c3bdf4265799e2",
-    "bytes": 25887
+    "sha256": "5c0cf1331a49cf741c65cb16c86e26bf823536ee9fde6d01e362c838de67218f",
+    "bytes": 26288
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -1174,6 +1194,10 @@
   "runners/audit165-terminal.py": {
     "sha256": "fec1b4e8cfbd4c9bfbda6c0f503faca3d765993c01c83e11456aa368c5b897dd",
     "bytes": 3753
+  },
+  "runners/audit165-v3-terminal.py": {
+    "sha256": "db687d1b4d303bc178e1f8e7b834df5e8679ac5f658dd82b1738f4ed6e47a2d3",
+    "bytes": 4051
   },
   "runners/bench165.sh": {
     "sha256": "f56096e85527276f097b77d81b7ab8c72112cf894a3516afd4ee2917399dfd7d",

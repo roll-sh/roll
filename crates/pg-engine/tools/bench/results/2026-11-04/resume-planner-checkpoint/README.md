@@ -10,9 +10,10 @@ expected1; endingnewsession flushed1. Actualred101 retained. NormalwirePIDreuse 
 is not claimed. Arc::ptr_eq now removes only the registeredslot owned by the ending session.
 Focused corrected lifecycle2/prepared4/idle-statistics1/end-monitoring1 allpassed.
 Frozen fullv3 expected455/0/18/61 reconciles ab3's453/18/60 plus ONLY2tests/newbinary.
-Fullv3 isactive; partial full outputs excluded. Current sourceacceptance remainsHELD.
+Fullv3 DEBUG completed455/0/18/61,command0;every frozen perbinary summary matched.
+Release active; partial release/follow-on outputs excluded. Current sourceacceptance remainsHELD.
 Incremental staticR2 c861 vsab3 found noHIGH/MEDIUM; didnotrun gates. Its not-runstage
-statement is historical and focused2+4+1+1nowpassed;455map remains expected,notfullPASS.
+statement is historical: focused2+4+1+1andfullDEBUG455map nowpassed;release/fullpipelinepending.
 ResidualLOW: new samePIDregistration can displace STILL-LIVE oldslot, delaying its idle
 counts untilflush/end; no wirePIDoverlap claim. Fast-own checks assertblocking/ungranted
 waiter/release but onlyPRINT locktype/mode,do notassertfastpath parity. OtherreviewLOWs
