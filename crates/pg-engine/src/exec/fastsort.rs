@@ -148,6 +148,18 @@ pub fn order<'a>(
     row: impl Fn(usize) -> &'a [Value],
     bound: Option<usize>,
 ) -> Option<Vec<usize>> {
+    order_with(n, keys, key, |a, b| same_row(row(a), row(b)), bound)
+}
+
+/// `order`, with `same(i, j)` telling whether items i and j are the same in every way (so
+/// their order can't be seen); it may say no for items that are.
+pub fn order_with<'a>(
+    n: usize,
+    keys: &[SortKey],
+    key: impl Fn(usize, usize) -> &'a Value,
+    same: impl Fn(usize, usize) -> bool,
+    bound: Option<usize>,
+) -> Option<Vec<usize>> {
     if n < 2 || n > u32::MAX as usize || keys.is_empty() || keys.iter().any(|k| k.using.is_some()) {
         return None;
     }
@@ -200,7 +212,7 @@ pub fn order<'a>(
     };
     let ties = |idx: &[u32], want: usize| {
         idx[..want].windows(2).any(|w| {
-            bytes(w[0]).cmp(bytes(w[1])) == Ordering::Equal && !same_row(row(w[0] as usize), row(w[1] as usize))
+            bytes(w[0]).cmp(bytes(w[1])) == Ordering::Equal && !same(w[0] as usize, w[1] as usize)
         })
     };
     if let Some(want) = want

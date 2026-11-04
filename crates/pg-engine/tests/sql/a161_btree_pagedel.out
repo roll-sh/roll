@@ -1,0 +1,138 @@
+> CREATE EXTENSION IF NOT EXISTS pgstattuple
+-- CREATE EXTENSION
+
+> CREATE TABLE pd (id int PRIMARY KEY, v int) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> CREATE INDEX pd_v ON pd (v)
+-- CREATE INDEX
+
+> INSERT INTO pd SELECT g, g % 50 FROM generate_series(1, 40000) g
+-- INSERT 0 40000
+
+> CREATE VIEW pd_ix AS
+>   SELECT c.relname, pg_relation_size(c.oid) / 8192 AS main, pg_relation_size(c.oid, 'fsm') / 8192 AS fsm,
+>          s.tree_level, s.internal_pages, s.leaf_pages, s.empty_pages, s.deleted_pages
+>   FROM pg_class c, LATERAL pgstatindex(c.oid) s WHERE c.relname IN ('pd_pkey', 'pd_v') ORDER BY 1
+-- CREATE VIEW
+
+> SELECT * FROM pd_ix
+relname:name | main:int8 | fsm:int8 | tree_level:int4 | internal_pages:int8 | leaf_pages:int8 | empty_pages:int8 | deleted_pages:int8
+pd_pkey | 112 | 0 | 1 | 1 | 110 | 0 | 0
+pd_v | 52 | 0 | 1 | 1 | 50 | 0 | 0
+-- SELECT 2
+
+> DELETE FROM pd WHERE id <= 20000
+-- DELETE 20000
+
+> VACUUM pd
+-- VACUUM
+
+> SELECT * FROM pd_ix
+relname:name | main:int8 | fsm:int8 | tree_level:int4 | internal_pages:int8 | leaf_pages:int8 | empty_pages:int8 | deleted_pages:int8
+pd_pkey | 112 | 0 | 1 | 1 | 56 | 0 | 54
+pd_v | 52 | 0 | 1 | 1 | 50 | 0 | 0
+-- SELECT 2
+
+> SELECT relname, relpages FROM pg_class WHERE relname IN ('pd_pkey', 'pd_v') ORDER BY 1
+relname:name | relpages:int4
+pd_pkey | 112
+pd_v | 52
+-- SELECT 2
+
+> VACUUM pd
+-- VACUUM
+
+> SELECT * FROM pd_ix
+relname:name | main:int8 | fsm:int8 | tree_level:int4 | internal_pages:int8 | leaf_pages:int8 | empty_pages:int8 | deleted_pages:int8
+pd_pkey | 112 | 0 | 1 | 1 | 56 | 0 | 54
+pd_v | 52 | 0 | 1 | 1 | 50 | 0 | 0
+-- SELECT 2
+
+> SELECT txid_current() > 0
+?column?:bool
+t
+-- SELECT 1
+
+> VACUUM pd
+-- VACUUM
+
+> SELECT * FROM pd_ix
+relname:name | main:int8 | fsm:int8 | tree_level:int4 | internal_pages:int8 | leaf_pages:int8 | empty_pages:int8 | deleted_pages:int8
+pd_pkey | 112 | 3 | 1 | 1 | 56 | 0 | 54
+pd_v | 52 | 0 | 1 | 1 | 50 | 0 | 0
+-- SELECT 2
+
+> INSERT INTO pd SELECT g, 7 FROM generate_series(1, 12000) g
+-- INSERT 0 12000
+
+> SELECT * FROM pd_ix
+relname:name | main:int8 | fsm:int8 | tree_level:int4 | internal_pages:int8 | leaf_pages:int8 | empty_pages:int8 | deleted_pages:int8
+pd_pkey | 116 | 3 | 1 | 1 | 114 | 0 | 0
+pd_v | 70 | 0 | 1 | 1 | 68 | 0 | 0
+-- SELECT 2
+
+> SELECT ctid, id FROM pd WHERE id IN (1, 6000, 12000) ORDER BY id
+ctid:27 | id:int4
+(0,1) | 1
+(26,124) | 6000
+(53,22) | 12000
+-- SELECT 3
+
+> DELETE FROM pd WHERE id BETWEEN 25000 AND 32000
+-- DELETE 7001
+
+> VACUUM pd
+-- VACUUM
+
+> SELECT * FROM pd_ix
+relname:name | main:int8 | fsm:int8 | tree_level:int4 | internal_pages:int8 | leaf_pages:int8 | empty_pages:int8 | deleted_pages:int8
+pd_pkey | 116 | 3 | 1 | 1 | 96 | 0 | 18
+pd_v | 70 | 0 | 1 | 1 | 68 | 0 | 0
+-- SELECT 2
+
+> SELECT txid_current() > 0
+?column?:bool
+t
+-- SELECT 1
+
+> VACUUM pd
+-- VACUUM
+
+> SELECT * FROM pd_ix
+relname:name | main:int8 | fsm:int8 | tree_level:int4 | internal_pages:int8 | leaf_pages:int8 | empty_pages:int8 | deleted_pages:int8
+pd_pkey | 116 | 3 | 1 | 1 | 96 | 0 | 18
+pd_v | 70 | 0 | 1 | 1 | 68 | 0 | 0
+-- SELECT 2
+
+> INSERT INTO pd SELECT g, g % 50 FROM generate_series(40001, 52000) g
+-- INSERT 0 12000
+
+> SELECT * FROM pd_ix
+relname:name | main:int8 | fsm:int8 | tree_level:int4 | internal_pages:int8 | leaf_pages:int8 | empty_pages:int8 | deleted_pages:int8
+pd_pkey | 130 | 3 | 1 | 1 | 128 | 0 | 0
+pd_v | 70 | 0 | 1 | 1 | 68 | 0 | 0
+-- SELECT 2
+
+> REINDEX TABLE pd
+-- REINDEX
+
+> SELECT * FROM pd_ix
+relname:name | main:int8 | fsm:int8 | tree_level:int4 | internal_pages:int8 | leaf_pages:int8 | empty_pages:int8 | deleted_pages:int8
+pd_pkey | 104 | 0 | 1 | 1 | 102 | 0 | 0
+pd_v | 35 | 0 | 1 | 1 | 33 | 0 | 0
+-- SELECT 2
+
+> SELECT relname, relpages, reltuples FROM pg_class WHERE relname IN ('pd', 'pd_pkey', 'pd_v') ORDER BY 1
+relname:name | relpages:int4 | reltuples:float4
+pd | 177 | 22624
+pd_pkey | 104 | 36999
+pd_v | 35 | 36999
+-- SELECT 3
+
+> DROP VIEW pd_ix
+-- DROP VIEW
+
+> DROP TABLE pd
+-- DROP TABLE
+

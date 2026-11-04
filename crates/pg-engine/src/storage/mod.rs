@@ -3309,7 +3309,7 @@ mod tests {
         let s = Store::open(dir.path(), StoreOptions { memtable_bytes: 1 << 20, sync: false, ..Default::default() }).unwrap();
         let key = |i: u32| format!("r{i:05}").into_bytes();
         let rows = |from: u32, to: u32, step: u32, v: Option<&'static str>| -> Vec<(Vec<u8>, Option<Bytes>)> {
-            (from..to).step_by(step as usize).map(|i| (key(i), v.map(Bytes::from_static))).collect()
+            (from..to).step_by(step as usize).map(|i| (key(i), v.map(|s| Bytes::from_static(s.as_bytes())))).collect()
         };
         s.commit(rows(0, 6000, 1, Some("a")), |_| Ok(())).unwrap();
         s.flush_memtables().unwrap();

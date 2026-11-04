@@ -73,6 +73,9 @@ pub(super) struct Leaf {
     at: Vec<u32>,
     /// Bytes of `buf` no item holds.
     garbage: usize,
+    /// Items not LP_DEAD: a page of none is passed whole by a scan's marking
+    /// (`Btree::kill`), without stepping over its items.
+    live: u32,
 }
 
 impl Leaf {
@@ -82,6 +85,11 @@ impl Leaf {
 
     pub fn is_empty(&self) -> bool {
         self.at.is_empty()
+    }
+
+    /// Items not LP_DEAD.
+    pub fn live(&self) -> usize {
+        self.live as usize
     }
 
     fn span(&self, i: usize) -> (usize, usize) {
@@ -127,6 +135,9 @@ impl Leaf {
 
     pub fn set_dead(&mut self, i: usize) {
         let a = self.at[i] as usize;
+        if self.buf[a] & 1 == 0 {
+            self.live -= 1;
+        }
         self.buf[a] |= 1;
     }
 
@@ -149,6 +160,7 @@ impl Leaf {
             self.buf.extend_from_slice(&o.to_le_bytes());
         }
         self.buf.extend_from_slice(k);
+        self.live += !dead as u32;
         a as u32
     }
 
@@ -173,6 +185,7 @@ impl Leaf {
         let it = self.get(i).to_item();
         let (a, b) = self.span(i);
         self.at.pop();
+        self.live -= !it.dead as u32;
         self.garbage += b - a;
         Some(it)
     }
@@ -191,6 +204,7 @@ impl Leaf {
             buf: Vec::with_capacity(bytes),
             at: Vec::with_capacity(items.len()),
             garbage: 0,
+            live: 0,
         };
         for it in items {
             self.push(it);
@@ -202,7 +216,7 @@ impl Leaf {
     /// mark cleared: PageIndexTupleOverwrite), other items stay as they are. Packed in place,
     /// no item unpacked. Returns (TIDs removed, TIDs left, the items' bytes now).
     pub fn retain_tids(&mut self, keep: impl Fn(Tid) -> bool) -> (usize, usize, usize) {
-        let (mut removed, mut left, mut used) = (0, 0, 0);
+        let (mut removed, mut left, mut used, mut live) = (0, 0, 0, 0);
         let mut buf = Vec::with_capacity(self.buf.len() - self.garbage);
         let mut at = Vec::with_capacity(self.at.len());
         let mut tids = Vec::new();
@@ -216,6 +230,7 @@ impl Leaf {
             }
             left += tids.len();
             let dead = it.dead && tids.len() == it.tids.len();
+            live += !dead as u32;
             used += if tids.len() > 1 { maxalign(it.key.size() + 6 * tids.len()) } else { it.key.size() };
             at.push(buf.len() as u32);
             buf.push(dead as u8);
@@ -226,7 +241,7 @@ impl Leaf {
             }
             buf.extend_from_slice(it.key.as_bytes());
         }
-        *self = Leaf { buf, at, garbage: 0 };
+        *self = Leaf { buf, at, garbage: 0, live };
         (removed, left, used)
     }
 
@@ -292,6 +307,7 @@ mod tests {
                 }
             }
             assert_eq!(l.len(), want.len());
+            assert_eq!(l.live(), want.iter().filter(|w| !w.dead).count());
             for (i, w) in want.iter().enumerate() {
                 let it = l.get(i);
                 assert_eq!(show(it.key.as_bytes(), it.tids.to_vec(), it.dead), show(w.key.as_bytes(), w.tids.to_vec(), w.dead));

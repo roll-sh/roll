@@ -3776,6 +3776,13 @@ impl Ddl<'_, '_> {
             None
         };
         let mut rows = 0usize;
+        // (A modelled table's btree: its model from this pass's keys, not from a second read
+        // of the rows: `sizing::btree_from_build`.)
+        let ctx = self.ctx;
+        let mut model_keys = (measured.is_none() && ix.method == "btree")
+            .then(|| crate::exec::sizing::heap_writes(t.oid, &ctx.sess.db))
+            .flatten()
+            .map(|w| (w, Vec::new()));
         if measured.is_none() {
             // (Only the columns its keys, predicate and INCLUDE columns read are decoded.)
             let mut cols = std::collections::HashSet::new();
@@ -3787,6 +3794,9 @@ impl Ddl<'_, '_> {
                 rows += 1;
                 if let Some(vals) = index_values(&bix, &row, self)? {
                     step(&dkey, &vals)?;
+                    if let Some((_, keys)) = &mut model_keys {
+                        keys.push((crate::exec::sizing::btree_key(t, &bix, vals, &row, ctx), dkey));
+                    }
                 }
             }
         }
@@ -3810,7 +3820,8 @@ impl Ddl<'_, '_> {
             progress.loaded(entries);
         }
         let counted = measured.is_none().then_some((rows, entries as usize));
-        self.index_built_from(t, ix, measured, counted)
+        let prebuilt = model_keys.and_then(|(w, keys)| crate::exec::sizing::btree_from_build(t, &bix, keys, w, &ctx.sess.db));
+        self.index_built_from(t, ix, measured, counted, prebuilt)
     }
 
     pub(super) fn duplicate_key(&self, t: &Table, bix: &BoundIndex, vals: &[Value], name: &str) -> Error {
@@ -9534,6 +9545,21 @@ impl Ddl<'_, '_> {
                 }
                 // The valid ones are rebuilt too: their expressions are computed.
                 self.evaluate_index_exprs(&t, Some(&valid))?;
+                // (In new files, laid out by a sorted build: the size models start them afresh
+                // and their statistics are the build's, as index_build's index_update_stats.
+                // A concurrent REINDEX builds its copies below. Only indexes of plain columns:
+                // laying a model out evaluates expressions and predicates again, outside the
+                // security-restricted context the rebuild ran them in.)
+                if !concurrently || t.temporary {
+                    for &i in &valid {
+                        let Some(ix) = self.cat.indexes.get(&i).map(|x| (**x).clone()) else { continue };
+                        if ix.predicate.is_none()
+                            && ix.columns.iter().all(|c| matches!(c.key, crate::catalog::IndexKey::Column(_)))
+                        {
+                            self.index_built(&t, &ix)?;
+                        }
+                    }
+                }
             }
             // A temporary table's indexes are rebuilt in place even CONCURRENTLY.
             let temp = self.cat.index_table(table).is_some_and(|t| t.temporary);
@@ -9919,7 +9945,7 @@ pub(super) fn key_bytes(vals: &[Value]) -> Vec<u8> {
 /// told apart by the first row's key, computed again from the row.
 #[derive(Default)]
 pub(super) struct UniqueKeys {
-    by_hash: std::collections::HashMap<u64, u32>,
+    by_hash: crate::exec::fasthash::HashMap<u64, u32>,
     dkeys: Vec<u8>,
     ends: Vec<u64>,
     /// Keys whose hash an unequal key took first.
@@ -9935,10 +9961,10 @@ impl UniqueKeys {
         dkey: &[u8],
         key_of: impl FnOnce(&[u8]) -> Result<Option<Vec<u8>>>,
     ) -> Result<Option<Vec<u8>>> {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        key.hash(&mut h);
-        let h = h.finish();
+        use std::hash::BuildHasher;
+        // (A fast hash, not SipHash: keys of one hash are told apart below, and nothing
+        // shows the table's order.)
+        let h = crate::exec::fasthash::FastState::default().hash_one(&key[..]);
         match self.by_hash.get(&h) {
             None => {
                 self.by_hash.insert(h, self.ends.len() as u32);

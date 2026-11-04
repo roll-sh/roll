@@ -316,6 +316,8 @@ pub struct StoreMem {
     /// On disk (TSS_WRITEFILE): the file's bytes.
     pub disk: Option<i64>,
     max_space: i64,
+    /// It has been on disk (usedDisk: kept past tuplestore_clear).
+    used_disk: bool,
     /// A trailing length word per tuple (EXEC_FLAG_BACKWARD).
     backward: bool,
 }
@@ -332,6 +334,7 @@ impl StoreMem {
             grow: true,
             disk: None,
             max_space: 0,
+            used_disk: false,
             backward,
         }
     }
@@ -385,10 +388,101 @@ impl StoreMem {
 
     /// tuplestore_get_stats: (on disk, maximum bytes).
     pub fn stats(&self) -> (bool, i64) {
+        let mut s = self.clone();
+        s.update_max();
+        (s.used_disk, s.max_space)
+    }
+
+    /// tuplestore_updatemax: the space in use now joins the maximum.
+    fn update_max(&mut self) {
         match self.disk {
-            Some(d) => (true, self.max_space.max(d)),
-            None => (false, self.max_space.max(self.allowed - self.avail)),
+            Some(d) => {
+                self.max_space = self.max_space.max(d);
+                self.used_disk = true;
+            }
+            None => self.max_space = self.max_space.max(self.allowed - self.avail),
         }
+    }
+
+    /// tuplestore_trim's frees: the tuples of t_len `tlens` released (the maximum taken
+    /// first), and `compact` of them out of the pointer array (its memmove, when it frees an
+    /// eighth of the tuples or more).
+    pub fn trim(&mut self, tlens: &[i64], compact: usize) {
+        self.update_max();
+        for &t in tlens {
+            self.avail += maxalign(t) + CHUNK_HDR;
+        }
+        self.count -= compact;
+    }
+
+    /// The tuples in the pointer array (memtupcount).
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    /// tuplestore_clear: every tuple gone (the maximum taken first), the file closed, the
+    /// pointer array kept at its size.
+    pub fn clear(&mut self) {
+        self.update_max();
+        self.disk = None;
+        self.count = 0;
+        self.avail = self.allowed - aset_chunk(self.memtupsize as i64 * 8);
+    }
+}
+
+/// A WindowAgg's tuplestore (nodeWindowAgg.c): each partition's rows spooled as the window
+/// needs them, the rows no read pointer can reach again trimmed after each row
+/// (tuplestore_trim), the store cleared between partitions (release_partition). What
+/// EXPLAIN ANALYZE's "Storage" shows of it.
+#[derive(Clone, Debug)]
+pub struct WinStore {
+    pub mem: StoreMem,
+}
+
+impl WinStore {
+    pub fn new(allowed: i64, backward: bool) -> WinStore {
+        WinStore { mem: StoreMem::new(allowed, backward) }
+    }
+
+    /// One partition of tuples of t_len `tlens`: before the trim after row `r`, `spool(r)`
+    /// rows have been read into the store, and the oldest read pointer is at `oldest(r)`
+    /// (both clamped to the partition).
+    pub fn partition(&mut self, tlens: &[i64], spool: impl Fn(usize) -> usize, oldest: impl Fn(usize) -> usize) {
+        let n = tlens.len();
+        // (Rows read in, freed, and moved out of the pointer array: absolute positions.)
+        let (mut spooled, mut deleted, mut base) = (0usize, 0usize, 0usize);
+        for r in 0..n {
+            let want = spool(r).clamp(r + 1, n);
+            while spooled < want {
+                if self.mem.put(tlens[spooled]) {
+                    for &t in &tlens[deleted..=spooled] {
+                        self.mem.dumped(t);
+                    }
+                }
+                spooled += 1;
+            }
+            // (A store on disk isn't trimmed. The tuple before the oldest pointer stays: the
+            // caller may still hold it.)
+            if self.mem.disk.is_some() {
+                continue;
+            }
+            let oldest = oldest(r).min(r + 1).min(spooled);
+            let nremove = oldest.saturating_sub(1);
+            if nremove <= base {
+                continue;
+            }
+            let freed = &tlens[deleted.max(base)..nremove.max(deleted)];
+            let compact = if nremove - base >= (spooled - base) / 8 { nremove - base } else { 0 };
+            self.mem.trim(freed, compact);
+            deleted = deleted.max(nremove);
+            base += compact;
+        }
+        self.mem.clear();
+    }
+
+    /// (on disk, maximum bytes).
+    pub fn stats(&self) -> (bool, i64) {
+        self.mem.stats()
     }
 }
 
