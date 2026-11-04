@@ -156,8 +156,10 @@ Planner171's original six-file WIP ec5b9f39 andremote wip/a171-resume-20261104 r
 AFTER165terminal/export,scope transferredcleanly onto c861 as a6fe3e4e onnewownerbranch
 work-a171-chosen-cost-20261104,newremote wip/a171-chosen-cost-resume-20261104 independently
 verified. Sixpaths102+/2-,eachadded/removedline exactlyoriginal;audit+patch preserved.
-Existingcostgolden3modes/kept7 focusedvalidation iscompiling underexistingheavy,targeta171,
-taskset8-13,18-19/nice19/jobs2/testthreads<=2,startupguardpassed. Partialoutputsexcluded;
+Existingcostgolden matchedONErealSQLfile inall3modes;kept7passed,bothcommands0.
+Originalfocusedwrapper/heavy/runnergone,cleana6fe unchanged. Fullchosen171 pipelineactive,
+frozenexpected455/0/18/61 matchesactualcompletec861map;no test/Cargodelta. Existingheavy,
+targeta171,taskset8-13,18-19/nice19/jobs2/testthreads<=2;partialfulloutputsexcluded;
 no newtiming/service. Earliercargo check stillhasinsufficient sourceidentity. Chosen-cost
 current-source acceptance andcustomANY/IN correctness handoff remainpending;scope171only.
 

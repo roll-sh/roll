@@ -1,0 +1,5 @@
+STARTUP-CONTROLS-PASS {"pid": 2981481, "affinity": [8, 9, 10, 11, 12, 13, 18, 19], "nice": 19, "cargo_jobs": "2", "test_threads": "2"}
+cost-golden	0
+kept	0
+FOCUS171-PASS
+HEAVY-EXIT 0

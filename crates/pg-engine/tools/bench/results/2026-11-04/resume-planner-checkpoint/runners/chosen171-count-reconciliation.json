@@ -1,0 +1,13 @@
+{
+  "source": "a6fe3e4e626b0552c14320c18211886d1b16ad38",
+  "base": "c8618834caf45bc0a34cf9985c07f9bc13b498ef",
+  "base_actual_complete_summary": {
+    "passed": 455,
+    "failed": 0,
+    "ignored": 18,
+    "summaries": 61
+  },
+  "test_or_cargo_delta": false,
+  "expected_same_map": true,
+  "frozen_before_launch": true
+}

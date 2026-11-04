@@ -173,8 +173,10 @@ Planner171's original six-file WIP ec5b9f39 andremote wip/a171-resume-20261104 r
 AFTER165terminal/export,scope transferredcleanly onto c861 as a6fe3e4e onnewownerbranch
 work-a171-chosen-cost-20261104,newremote wip/a171-chosen-cost-resume-20261104 independently
 verified. Sixpaths102+/2-,eachadded/removedline exactlyoriginal;audit+patch preserved.
-Existingcostgolden3modes/kept7 focusedvalidation iscompiling underexistingheavy,targeta171,
-taskset8-13,18-19/nice19/jobs2/testthreads<=2,startupguardpassed. Partialoutputsexcluded;
+Existingcostgolden matchedONErealSQLfile inall3modes;kept7passed,bothcommands0.
+Originalfocusedwrapper/heavy/runnergone,cleana6fe unchanged. Fullchosen171 pipelineactive,
+frozenexpected455/0/18/61 matchesactualcompletec861map;no test/Cargodelta. Existingheavy,
+targeta171,taskset8-13,18-19/nice19/jobs2/testthreads<=2;partialfulloutputsexcluded;
 no newtiming/service. Earliercargo check stillhasinsufficient sourceidentity. Chosen-cost
 current-source acceptance andcustomANY/IN correctness handoff remainpending;scope171only.
 
@@ -296,7 +298,7 @@ sources = {
     'fdw172/contrib-base.log': '/home/meszmate/.cache/a172/contrib-base.log',
     'fdw172/REPORT.md': '/home/meszmate/.cache/a172/contrib/run-base/report/REPORT.md',
 }
-for campaign in ('embedded165v2', 'embedded165v3', 'green165r2', 'green165r2v2', 'check165r2-runner-error', 'check165r2', 'red165r3', 'green165r3', 'check165r3', 'focus165ind', 'bytea165compare', 'probe165-low'):
+for campaign in ('embedded165v2', 'embedded165v3', 'green165r2', 'green165r2v2', 'check165r2-runner-error', 'check165r2', 'red165r3', 'green165r3', 'check165r3', 'focus165ind', 'bytea165compare', 'probe165-low', 'focus171-v1'):
     for artifact in sorted((D / campaign).iterdir()):
         if artifact.is_file():
             sources[campaign + '/' + artifact.name] = str(artifact)
@@ -325,6 +327,9 @@ sources['runners/clippy-v3-bookkeeping-failure.json'] = str(D / 'clippy-v3-bookk
 sources['runners/INDEPENDENT165-HANDOFF.md'] = str(D / 'INDEPENDENT165-HANDOFF.md')
 for name in ('chosen171-candidate.patch', 'chosen171-transfer-audit.json', 'focus171-v1.sh'):
     sources['runners/' + name] = str(D / name)
+for name in ('check171-chosen-v1.sh', 'chosen171-expected-per-binary.json', 'chosen171-count-reconciliation.json', 'chosen171-frozen-runner.sha256'):
+    sources['runners/' + name] = str(D / name)
+sources['focus171-v1/wrapper.log'] = str(D / 'focus171-v1-wrapper.log')
 for name in ('release-test.command', 'release-test.log', 'release-test-summary.json', 'clippy.command', 'clippy.log', 'clippy-completed-exits.tsv', 'clippy-warning-audit.json'):
     sources['check165ind-v3/' + name] = str(D / 'check165ind-v3' / name)
 for name in ('build.command', 'build.log', 'engine.sha256', 'postgres-unit.command', 'postgres-unit.log', 'postgres-unit-status.json', 'postgres-unit-summary.json', 'exits.tsv', 'current.status', 'TERMINAL.json', 'debug-test-terminal-audit.json', 'release-test-terminal-audit.json'):

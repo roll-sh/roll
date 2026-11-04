@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "9c014172ee3da1ae192994608ed111708cb624f9218f55d2624ddc76892f5c51",
-    "bytes": 13692
+    "sha256": "a854fc1489ae9027c9a9a9657845b4dcd552c57eebfddbca4dba00d921d672f8",
+    "bytes": 13856
   },
   "bytea165compare/RESTORED": {
     "sha256": "cfeb0d7a74ac20eb1d46d347c00db409be5f9c5b47ca77e388b2e494a65d91c3",
@@ -636,8 +636,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "425f9092a9a4aab0b082c5280784c988e05122bad5d6def0f2187016d27145a0",
-    "bytes": 28630
+    "sha256": "bde900f5142c0e8175beac1782b728432280ed33ef21e27bb330ae9d937d3dc9",
+    "bytes": 29078
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -714,6 +714,50 @@
   "focus165ind/wire.log": {
     "sha256": "763587f960aaf2f6f8bc38ac12ac896e328433b17cd2461eab6cf4056198a0f9",
     "bytes": 3669
+  },
+  "focus171-v1/cost-golden.command": {
+    "sha256": "ad27562090e01ef79afa3fde2db9de8606f7d8e34c7233ac7e28662b5b0cd3c3",
+    "bytes": 88
+  },
+  "focus171-v1/cost-golden.log": {
+    "sha256": "33f6e7d94da8fa4cfbbf04fb63c1fc20f8b48bb3bba2a7cc3ac75dc338b5b065",
+    "bytes": 6021
+  },
+  "focus171-v1/current.status": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  "focus171-v1/exits.tsv": {
+    "sha256": "3f2159fc1f3fc9ca222a812ba7627f1fcd0ea22d0a6097678b3518e5b631236c",
+    "bytes": 21
+  },
+  "focus171-v1/initial.status": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  "focus171-v1/kept.command": {
+    "sha256": "0ece12190138e35122575a2941ae8e8a8d4652f90fa60d1cd2bce70022ac031c",
+    "bytes": 58
+  },
+  "focus171-v1/kept.log": {
+    "sha256": "11e5217bdb066ab7bb7ff022f62017df25942ca9dfa2cabf45fc5c9763604d0b",
+    "bytes": 775
+  },
+  "focus171-v1/source.txt": {
+    "sha256": "d09d28070c3260e34310ba71d4d8ba3652f95c828aa4a6208a04011a2a2aec30",
+    "bytes": 41
+  },
+  "focus171-v1/startup-controls.json": {
+    "sha256": "3d7a731bf003d462ab937612b628df57f7fd076beb6e62a01d42a3798f1ce913",
+    "bytes": 161
+  },
+  "focus171-v1/tree.txt": {
+    "sha256": "975a2a11e767ad68495ec9aa03f9fe88d0f21f994f0a31afb23d8437083d9bdf",
+    "bytes": 41
+  },
+  "focus171-v1/wrapper.log": {
+    "sha256": "70d060e08709b9ddf36797848b71626643f327391cb2049d86063ba23cd1c33b",
+    "bytes": 183
   },
   "green165r2/a165_cursor_edges.out": {
     "sha256": "d5645e686147eee401fe7c0fbaea659eb0cbfd9dfb5107538dc4f08c11c3caa6",
@@ -1335,6 +1379,10 @@
     "sha256": "8cac243f117b14bbf911390e510b230728453a9479594b2dc33fad8764b97f49",
     "bytes": 2703
   },
+  "runners/check171-chosen-v1.sh": {
+    "sha256": "31e2a9441fc6e1b09e66e40bec4e4b2d61e19e9234fc9404ec5526d12cacced3",
+    "bytes": 3688
+  },
   "runners/check171.sh": {
     "sha256": "2e118548af8498cc83f162fda45d8928d32f912bb98e46f1c34dd0e901c735a1",
     "bytes": 1686
@@ -1342,6 +1390,18 @@
   "runners/chosen171-candidate.patch": {
     "sha256": "90e263c6c93b1e2ddb06919577ef6c95bbdfcb11958519400aa4064e4e4058bf",
     "bytes": 8993
+  },
+  "runners/chosen171-count-reconciliation.json": {
+    "sha256": "0025e6320482039321361b360cd11bd18ca9797ee5bbea7de7718aa00761013d",
+    "bytes": 322
+  },
+  "runners/chosen171-expected-per-binary.json": {
+    "sha256": "eb82e433334ce6b4baf259321bc03289fedac1083bbb9fb6ba05f3f390f3cfbc",
+    "bytes": 3289
+  },
+  "runners/chosen171-frozen-runner.sha256": {
+    "sha256": "e9fe9c470111cef380a71029f9e2ac5ee420ea905fe5a7f0ab4bd1dc82215633",
+    "bytes": 467
   },
   "runners/chosen171-transfer-audit.json": {
     "sha256": "1c0f50d9e2218327f821055567cdf91cd9e891038ddee8ccc05469f065f63679",
