@@ -47,7 +47,7 @@ const IDLE_WRITES: u32 = 8192;
 /// A kept range: each key's versions (commit ts, value; None a deletion), newest first.
 #[derive(Default)]
 struct Chains {
-    keys: BTreeMap<Vec<u8>, Vec<(u64, Option<Bytes>)>>,
+    keys: BTreeMap<Bytes, Vec<(u64, Option<Bytes>)>>,
     bytes: usize,
     /// Versions written since the last scan.
     idle: u32,
@@ -70,7 +70,7 @@ impl Chains {
             Some(c) => c,
             None => {
                 self.bytes += key.len() + 32;
-                self.keys.entry(key.to_vec()).or_default()
+                self.keys.entry(Bytes::copy_from_slice(key)).or_default()
             }
         };
         // (A commit writing a key twice: its last write is the version, as in the memtable.)
@@ -96,8 +96,8 @@ impl Chains {
         }
     }
 
-    /// The rows visible at `ts` among keys in [start, end).
-    fn visible(&self, start: &[u8], end: &[u8], ts: u64) -> Vec<(Vec<u8>, Bytes)> {
+    /// The rows visible at `ts` among keys in [start, end) (the keys shared, not copied).
+    fn visible(&self, start: &[u8], end: &[u8], ts: u64) -> Vec<(Bytes, Bytes)> {
         let range = (Bound::Included(start), Bound::Excluded(end));
         self.keys
             .range::<[u8], _>(range)
@@ -139,7 +139,7 @@ pub(super) fn covering(start: &[u8], end: &[u8]) -> Option<Prefix> {
 
 impl Hot {
     /// The rows of [start, end) visible at `ts`, when a kept range holds them.
-    pub(super) fn scan(&self, start: &[u8], end: &[u8], ts: u64) -> Option<Vec<(Vec<u8>, Bytes)>> {
+    pub(super) fn scan(&self, start: &[u8], end: &[u8], ts: u64) -> Option<Vec<(Bytes, Bytes)>> {
         if !self.any.load(Ordering::Acquire) {
             return None;
         }
@@ -166,35 +166,18 @@ impl Hot {
         false
     }
 
-    /// `get_version` of each of `keys` (ascending) at `ts` that a kept range holds: Some(the
-    /// answer) for those, None for the others.
-    #[allow(clippy::type_complexity)]
-    pub(super) fn get_many(&self, keys: &[&[u8]], ts: u64) -> Option<Vec<Option<Option<(u64, Option<Bytes>)>>>> {
+    /// `get_version` of `key` at `ts` when a kept range holds a version of it (Some: the
+    /// answer); None: the store answers (a key the range holds no version of at `ts` may
+    /// be a deletion every snapshot sees that the chain dropped).
+    pub(super) fn get(&self, key: &[u8], ts: u64) -> Option<Option<(u64, Option<Bytes>)>> {
         if !self.any.load(Ordering::Acquire) {
             return None;
         }
+        let p: Prefix = key.get(..PREFIX)?.try_into().ok()?;
         let ranges = self.ranges.read();
-        let mut out = Vec::with_capacity(keys.len());
-        let mut cur: Option<(Prefix, Option<parking_lot::MutexGuard<'_, Chains>>)> = None;
-        for k in keys {
-            let Some(p) = k.get(..PREFIX).and_then(|p| Prefix::try_from(p).ok()) else {
-                out.push(None);
-                continue;
-            };
-            if cur.as_ref().is_none_or(|(q, _)| *q != p) {
-                cur = Some((p, ranges.get(&p).map(|r| r.lock())));
-            }
-            out.push(match &mut cur {
-                Some((_, Some(c))) => {
-                    c.idle = 0;
-                    // (A key the range holds no version of at `ts`: the store answers, with
-                    // the deletion every snapshot sees that the chain dropped.)
-                    c.keys.get(*k).and_then(|chain| chain.iter().find(|(t, _)| *t <= ts)).map(|v| Some(v.clone()))
-                }
-                _ => None,
-            });
-        }
-        Some(out)
+        let mut c = ranges.get(&p)?.lock();
+        c.idle = 0;
+        c.keys.get(key).and_then(|chain| chain.iter().find(|(t, _)| *t <= ts)).map(|v| Some(v.clone()))
     }
 
     /// Keep `p`'s range, built from `entries`: every stored version in it, in storage order
