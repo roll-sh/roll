@@ -38,6 +38,7 @@ pub(super) fn models(version: Option<&str>) -> Vec<ModelInfo> {
             name: m.name.into(),
             default: i == 0,
             efforts: m.efforts.iter().map(|e| e.to_string()).collect(),
+            custom: false,
         })
         .collect()
 }

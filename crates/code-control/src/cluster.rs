@@ -852,6 +852,7 @@ mod tests {
         assert_eq!(classify("/v1/code/agents/acme/machines/mch_1/commands"), Some(Target::Agents("acme".into())));
         assert_eq!(classify("/v1/code/agents/acme/shares/shr_1"), Some(Target::Agents("acme".into())));
         assert_eq!(classify("/v1/code/agents/acme/canvas"), Some(Target::Agents("acme".into())));
+        assert_eq!(classify("/v1/code/agents/acme/settings"), Some(Target::Agents("acme".into())));
         for global in [
             "/v1/code",
             "/v1/code/agents/login",

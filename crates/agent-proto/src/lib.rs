@@ -1033,7 +1033,281 @@ pub struct MachineInfo {
     pub version: String,
     /// The user's home directory (the default place to add projects from).
     pub home: String,
+    /// The providers on offer: turned-off ones are left out (they are in `settings`).
     pub providers: Vec<ProviderInfo>,
+    /// The machine's settings (unset: a daemon from before machine settings).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<Box<MachineConfig>>,
+}
+
+/// A machine's settings as its daemon reports them (docs/code/agents.md, "Machine settings"):
+/// what the owner set from roll, and what applies where that says nothing. Never a credential:
+/// the daemon's `config.toml` is read for names and paths only.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MachineConfig {
+    /// What the owner set from roll (`machine.configure` replaces it whole).
+    pub set: MachineSettings,
+    /// What applies where `set` says nothing: the daemon's `config.toml`, else roll's defaults.
+    pub base: SettingsBase,
+    /// Every provider the daemon has, on or off.
+    pub providers: Vec<ProviderBase>,
+    /// The daemon's `config.toml` on the machine: API keys and base URLs are set there (or in a
+    /// sandbox's sealed env), never through roll.
+    pub config_path: String,
+}
+
+/// What a machine's settings fall back to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsBase {
+    /// Where new threads' worktrees go (`<data>/worktrees`).
+    pub worktree_dir: String,
+    /// New threads' branches are `<prefix>/<slug>` (`roll`).
+    pub branch_prefix: String,
+    /// Where roll code repos are cloned as projects (`[code] clone_dir`, else `~/roll`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_dir: Option<String>,
+    /// Seconds between auto-pull fetches; 0 never (`[projects] pull_every`, else 60).
+    pub pull_every: u64,
+    /// `[delegation]`.
+    pub max_depth: u32,
+    pub max_children: u32,
+    /// The user's own git identity (`git config --global`), which publishing commits with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_email: Option<String>,
+}
+
+/// A provider as the daemon has it, on or off, and what its `config.toml` entry says.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderBase {
+    pub id: ProviderId,
+    pub name: String,
+    /// The binary `config.toml` names (unset: found on `PATH`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
+    /// How many arguments `config.toml` gives it (not what they are: they may hold a key).
+    #[serde(default)]
+    pub args: u32,
+    /// The environment variables `config.toml` sets for it: names, never values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+}
+
+/// What the owner set for a machine from roll (`machine.configure`; T3 Code's server settings
+/// that belong to a machine, `apps/server/src/serverSettings.ts` there). Every field overrides
+/// [`SettingsBase`] or the provider's `config.toml` entry; unset falls back to it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineSettings {
+    /// Per provider id.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub providers: std::collections::BTreeMap<ProviderId, ProviderSettings>,
+    /// What new threads on the machine start with, after their project's defaults.
+    #[serde(default, skip_serializing_if = "ThreadDefaults::is_empty")]
+    pub defaults: ThreadDefaults,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_every: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_depth: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_children: Option<u32>,
+    /// Who threads on the machine publish commits as (both or neither; unset: the repository's
+    /// git config, else roll).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_email: Option<String>,
+}
+
+/// One provider's settings on a machine (T3's provider instance settings).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderSettings {
+    /// Offered for new threads, delegation and switching (T3's `enabled`). A thread already on
+    /// a turned-off provider keeps its records but takes no new turn on it until it is turned on
+    /// again or the thread switches provider.
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub enabled: bool,
+    /// The binary to run instead of `config.toml`'s (or the one on `PATH`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
+    /// Arguments after `config.toml`'s.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Environment for the provider, over `config.toml`'s. Never a credential
+    /// ([`is_credential_env`]).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Models to offer besides the ones the provider lists (T3's custom models).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<CustomModel>,
+}
+
+impl Default for ProviderSettings {
+    fn default() -> Self {
+        ProviderSettings { enabled: true, binary: None, args: Vec::new(), env: Default::default(), models: Vec::new() }
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_yes(b: &bool) -> bool {
+    *b
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomModel {
+    /// The slug the provider takes (`gpt-5.5-codex`).
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// An environment variable that may carry a credential or point a provider somewhere else: API
+/// keys, tokens, passwords, base URLs, endpoints and proxies. roll never relays one, so machine
+/// settings refuse them; they go in the daemon's `config.toml` on the machine.
+pub fn is_credential_env(name: &str) -> bool {
+    const WORDS: [&str; 13] =
+        ["KEY", "TOKEN", "SECRET", "PASS", "CREDENTIAL", "AUTH", "COOKIE", "SESSION", "PRIVATE", "URL", "ENDPOINT", "PROXY", "HOST"];
+    let upper = name.to_ascii_uppercase();
+    WORDS.iter().any(|w| upper.contains(w))
+}
+
+/// The limits [`MachineSettings::check`] holds settings to.
+pub mod settings_limits {
+    pub const ENV_VARS: usize = 64;
+    pub const ENV_NAME: usize = 128;
+    pub const ENV_VALUE: usize = 4096;
+    pub const ARGS: usize = 64;
+    pub const ARG: usize = 4096;
+    pub const PATH: usize = 4096;
+    pub const MODELS: usize = 100;
+    pub const MODEL_ID: usize = 256;
+    pub const NAME: usize = 256;
+    pub const BRANCH_PREFIX: usize = 64;
+    /// A day.
+    pub const PULL_EVERY: u64 = 86_400;
+    pub const MAX_DEPTH: u32 = 8;
+    pub const MAX_CHILDREN: u32 = 32;
+}
+
+impl MachineSettings {
+    /// Trimmed, with empty strings unset, or why it can't be kept (for an `invalid` reply). The
+    /// daemon checks what it is sent, and the relay checks before it forwards, so a credential
+    /// is refused before it reaches a machine.
+    pub fn check(mut self) -> Result<MachineSettings, String> {
+        use settings_limits as l;
+        fn text(v: Option<String>) -> Option<String> {
+            v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+        }
+        fn path(what: &str, v: Option<String>) -> Result<Option<String>, String> {
+            let Some(p) = text(v) else { return Ok(None) };
+            if p.len() > l::PATH || p.contains('\0') {
+                return Err(format!("{what} must be a path of at most {} bytes", l::PATH));
+            }
+            if !(p.starts_with('/') || p == "~" || p.starts_with("~/") || is_windows_absolute(&p)) {
+                return Err(format!("{what} must be an absolute path (or start with ~/)"));
+            }
+            Ok(Some(p))
+        }
+        fn name(what: &str, v: Option<String>) -> Result<Option<String>, String> {
+            let Some(n) = text(v) else { return Ok(None) };
+            if n.len() > l::NAME || n.chars().any(|c| c.is_control() || c == '<' || c == '>') {
+                return Err(format!("{what} must be one line of at most {} bytes, without < or >", l::NAME));
+            }
+            Ok(Some(n))
+        }
+        for (id, p) in self.providers.iter_mut() {
+            p.binary = path(&format!("{}'s binary", id.0), p.binary.take())?;
+            if p.args.len() > l::ARGS || p.args.iter().any(|a| a.len() > l::ARG || a.contains('\0')) {
+                return Err(format!("{} takes at most {} arguments of at most {} bytes", id.0, l::ARGS, l::ARG));
+            }
+            if p.env.len() > l::ENV_VARS {
+                return Err(format!("{} takes at most {} environment variables", id.0, l::ENV_VARS));
+            }
+            for (k, v) in &p.env {
+                let ok = !k.is_empty() && k.len() <= l::ENV_NAME && k.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                if !ok {
+                    return Err(format!("{k:?} isn't an environment variable name (letters, digits and _, not starting with a digit)"));
+                }
+                if is_credential_env(k) {
+                    return Err(format!("{k} may hold a credential or an address, and roll never relays those: set it in the daemon's config.toml on the machine"));
+                }
+                if v.len() > l::ENV_VALUE || v.contains('\0') {
+                    return Err(format!("{k} can be at most {} bytes", l::ENV_VALUE));
+                }
+            }
+            if p.models.len() > l::MODELS {
+                return Err(format!("{} takes at most {} custom models", id.0, l::MODELS));
+            }
+            let mut seen = std::collections::HashSet::new();
+            for m in &mut p.models {
+                m.id = m.id.trim().to_string();
+                m.name = text(m.name.take());
+                if m.id.is_empty() {
+                    return Err("a custom model needs its slug".into());
+                }
+                if m.id.len() > l::MODEL_ID || m.id.chars().any(char::is_control) {
+                    return Err(format!("model slugs can be at most {} bytes", l::MODEL_ID));
+                }
+                if m.name.as_ref().is_some_and(|n| n.len() > l::NAME) {
+                    return Err(format!("model names can be at most {} bytes", l::NAME));
+                }
+                if !seen.insert(m.id.clone()) {
+                    return Err(format!("{} lists the custom model {} twice", id.0, m.id));
+                }
+            }
+        }
+        self.providers.retain(|_, p| p != &ProviderSettings::default());
+        self.worktree_dir = path("The worktree folder", self.worktree_dir.take())?;
+        self.clone_dir = path("The clone folder", self.clone_dir.take())?;
+        if let Some(prefix) = text(self.branch_prefix.take()) {
+            let parts_ok = prefix.split('/').all(|part| {
+                !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock") && part.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+            });
+            if prefix.len() > l::BRANCH_PREFIX || !parts_ok || prefix.contains("..") {
+                return Err(format!("{prefix:?} can't start a branch name: use letters, digits, '-', '_', '.' and '/' (at most {} bytes)", l::BRANCH_PREFIX));
+            }
+            self.branch_prefix = Some(prefix);
+        }
+        if self.pull_every.is_some_and(|s| s > l::PULL_EVERY) {
+            return Err(format!("auto-pull looks at least once a day (at most {} seconds)", l::PULL_EVERY));
+        }
+        if self.max_depth.is_some_and(|d| d > l::MAX_DEPTH) {
+            return Err(format!("subagents nest at most {} deep", l::MAX_DEPTH));
+        }
+        if self.max_children.is_some_and(|n| n == 0 || n > l::MAX_CHILDREN) {
+            return Err(format!("a thread may run 1 to {} delegated tasks", l::MAX_CHILDREN));
+        }
+        self.git_name = name("The git name", self.git_name.take())?;
+        self.git_email = name("The git email", self.git_email.take())?;
+        if self.git_email.as_ref().is_some_and(|e| !e.contains('@') || e.contains(char::is_whitespace)) {
+            return Err("the git email must be an address".into());
+        }
+        if self.git_name.is_some() != self.git_email.is_some() {
+            return Err("set both the git name and the git email, or neither".into());
+        }
+        self.defaults.model = text(self.defaults.model.take());
+        self.defaults.effort = text(self.defaults.effort.take());
+        Ok(self)
+    }
+
+    /// The settings for a provider (the defaults when there are none).
+    pub fn provider(&self, id: &ProviderId) -> ProviderSettings {
+        self.providers.get(id).cloned().unwrap_or_default()
+    }
+}
+
+fn is_windows_absolute(p: &str) -> bool {
+    let b = p.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1072,6 +1346,9 @@ pub struct ModelInfo {
     /// Reasoning efforts the model accepts, lowest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub efforts: Vec<String>,
+    /// One of the machine's custom models (its settings), not one the provider lists.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub custom: bool,
 }
 
 /// What a provider can do (T3's provider capabilities, trimmed). The UI hides what's missing
@@ -1277,6 +1554,10 @@ pub enum Command {
     /// Check providers again (after a login) and re-send `hello` info.
     #[serde(rename = "provider.refresh")]
     ProviderRefresh {},
+    /// Replace the machine's settings whole ([`MachineSettings`]); replies once the daemon has
+    /// stored and applied them and sent `hello` again with them.
+    #[serde(rename = "machine.configure")]
+    MachineConfigure { settings: Box<MachineSettings> },
 
     // Queries.
     /// The diff of a run (checkpoint before → after), or of the whole thread when `run` is
@@ -1622,6 +1903,9 @@ pub enum StreamEvent {
     /// The owner's canvas was saved (SSE `id:` is its cursor): a device showing an older
     /// `revision` loads it again (`GET /v1/code/agents/{owner}/canvas`).
     Canvas { cursor: u64, revision: u64, updated_at: Millis },
+    /// The owner's agents settings were saved (SSE `id:` is its cursor): a device showing an
+    /// older `revision` loads them again (`GET /v1/code/agents/{owner}/settings`).
+    Settings { cursor: u64, revision: u64, updated_at: Millis },
 }
 
 /// `POST /v1/code/agents/{owner}/machines/{machine}/commands`.

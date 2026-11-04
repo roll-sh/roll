@@ -9,7 +9,7 @@
 //! link of the owner's machines is routed by the lease `agents:<owner id>` (docs/code/cluster.md).
 
 pub mod api;
-pub mod canvas;
+pub mod docs;
 mod code;
 mod link;
 mod policy;

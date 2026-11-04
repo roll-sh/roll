@@ -32,7 +32,7 @@ impl Host {
         attachments: Vec<Attachment>,
     ) -> Res<Reply> {
         let project = self.project(&spec.project)?;
-        self.provider(&spec.provider)?;
+        self.offered(&spec.provider)?;
         let id = ThreadId::from_suffix(&suffix());
         let prompt = prompt.filter(|p| !p.trim().is_empty() || !attachments.is_empty());
         let given = spec.title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
@@ -96,8 +96,8 @@ impl Host {
             Some(base) => base,
             None => git::head(repo).await?.ok_or_else(|| Fail::Invalid("the repository has no commits yet".into()))?,
         };
-        let branch = git::unique_branch(repo, &git::slug(title)).await?;
-        let path = self.config.worktree_path(project.id.as_str(), thread.as_str());
+        let branch = git::unique_branch(repo, &self.branch_prefix(), &git::slug(title)).await?;
+        let path = self.worktree_path(project.id.as_str(), thread.as_str());
         git::worktree_add(repo, &path, &branch, &base).await?;
         let path = path.to_str().ok_or_else(|| Fail::Invalid("the data directory is not UTF-8".into()))?.to_string();
         Ok(Worktree { path, branch, base })
@@ -122,7 +122,7 @@ impl Host {
         if let Some(provider) = provider
             && provider != rt.thread.provider
         {
-            self.provider(&provider)?;
+            self.offered(&provider)?;
             if rt.active.is_some() {
                 return Err(Fail::Conflict("the thread is running: interrupt it before switching providers".into()));
             }
@@ -524,7 +524,8 @@ impl Host {
             None if land => return Err(Fail::Invalid("only a roll code repo can land: this project isn't one".into())),
             None => None,
         };
-        let published = git::publish(Path::new(&worktree.path), &worktree.branch, message, to.as_ref())
+        let identity = self.git_identity();
+        let published = git::publish(Path::new(&worktree.path), &worktree.branch, message, to.as_ref(), identity.as_ref().map(|(n, e)| (n.as_str(), e.as_str())))
             .await
             .map_err(Fail::git)?;
         Ok(Reply::Published(published))

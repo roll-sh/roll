@@ -319,7 +319,7 @@ fn narrow(
 impl Host {
     pub(crate) async fn capabilities(&self, caller: &ThreadId) -> Result<Value, TaskError> {
         let thread = self.stored_thread(caller)?;
-        let limits = self.config.delegation;
+        let limits = self.delegation();
         let depth = self.depth(&thread);
         let info = self.info.lock().unwrap().clone();
         let providers: Vec<Value> = info
@@ -429,7 +429,7 @@ impl Host {
     }
 
     pub(crate) async fn delegate(&self, caller: &ThreadId, d: Delegation) -> Result<TaskView, TaskError> {
-        let limits = self.config.delegation;
+        let limits = self.delegation();
         let mut prt = self.lock(caller).await?;
         let Some(active) = prt.active.as_ref() else {
             return Err(TaskError::new("parent_not_active", "delegating needs a running turn in your thread"));

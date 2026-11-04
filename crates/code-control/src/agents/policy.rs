@@ -75,6 +75,7 @@ pub(crate) fn agent_may(command: &Command, current: Option<(RuntimeMode, Interac
             owner_only("use terminals")
         }
         Command::ProviderRefresh {} => owner_only("refresh providers"),
+        Command::MachineConfigure { .. } => owner_only("change a machine's settings"),
     }
 }
 
@@ -149,6 +150,8 @@ mod tests {
             (json!({ "type": "terminal.close", "terminal": "trm_1" }), None, false),
             (json!({ "type": "terminal.scrollback", "terminal": "trm_1" }), None, false),
             (json!({ "type": "provider.refresh" }), None, false),
+            (json!({ "type": "machine.configure", "settings": {} }), None, false),
+            (json!({ "type": "machine.configure", "settings": { "providers": { "codex": { "enabled": false } } } }), None, false),
             (json!({ "type": "diff.get", "thread": t }), None, true),
             (json!({ "type": "git.status", "thread": t }), None, true),
             (json!({ "type": "fs.list", "path": "/" }), None, false),

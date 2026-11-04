@@ -47,7 +47,7 @@ impl Fake {
 }
 
 fn info(host: &str) -> MachineInfo {
-    MachineInfo { hostname: host.into(), os: "linux".into(), arch: "x86_64".into(), version: "0".into(), home: "/home/me".into(), providers: vec![] }
+    MachineInfo { hostname: host.into(), os: "linux".into(), arch: "x86_64".into(), version: "0".into(), home: "/home/me".into(), providers: vec![], settings: None }
 }
 
 #[async_trait]

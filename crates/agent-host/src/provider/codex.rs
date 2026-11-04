@@ -35,23 +35,23 @@ const START_TIMEOUT: Duration = Duration::from_secs(120);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub struct Codex {
-    cfg: ProviderConfig,
+    cfg: super::LiveConfig,
 }
 
 impl Codex {
     pub fn new(cfg: ProviderConfig) -> Self {
-        Self { cfg }
+        Self { cfg: super::LiveConfig::new(cfg) }
     }
 
     fn binary(&self) -> PathBuf {
-        self.cfg.binary.clone().unwrap_or_else(|| PathBuf::from("codex"))
+        self.cfg.get().binary.clone().unwrap_or_else(|| PathBuf::from("codex"))
     }
 
     fn spawn(&self, env: &[(String, String)], cwd: Option<&Path>) -> anyhow::Result<(std::sync::Arc<rpc::Rpc>, mpsc::UnboundedReceiver<rpc::Inbound>, rpc::Process)> {
         let binary = self.binary();
-        let mut args = self.cfg.args.clone();
+        let mut args = self.cfg.get().args.clone();
         args.push("app-server".into());
-        let env = self.cfg.env.iter().chain(env).cloned().collect();
+        let env = self.cfg.get().env.iter().chain(env).cloned().collect();
         rpc::spawn(rpc::Spawn { binary: &binary, args, env, cwd })
     }
 }
@@ -185,6 +185,7 @@ impl Codex {
                         id: m.model,
                         default: m.is_default,
                         efforts: m.supported_reasoning_efforts.into_iter().map(|e| e.reasoning_effort).collect(),
+                        custom: false,
                     }));
                     cursor = page.next_cursor.filter(|c| !c.is_empty());
                     if cursor.is_none() {
@@ -202,8 +203,8 @@ impl Codex {
 
     async fn cli_version(&self) -> std::io::Result<Option<String>> {
         let mut cmd = tokio::process::Command::new(self.binary());
-        cmd.args(&self.cfg.args).arg("--version").stdin(std::process::Stdio::null()).kill_on_drop(true);
-        for (k, v) in &self.cfg.env {
+        cmd.args(&self.cfg.get().args).arg("--version").stdin(std::process::Stdio::null()).kill_on_drop(true);
+        for (k, v) in &self.cfg.get().env {
             cmd.env(k, v);
         }
         let out = tokio::time::timeout(Duration::from_secs(10), cmd.output())
@@ -219,6 +220,10 @@ impl Provider for Codex {
         ProviderId::codex()
     }
 
+    fn name(&self) -> String {
+        "Codex".into()
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             steer: true,
@@ -231,6 +236,10 @@ impl Provider for Codex {
             // Modes travel with every `turn/start`.
             mode_switch: true,
         }
+    }
+
+    fn configure(&self, cfg: ProviderConfig) {
+        self.cfg.set(cfg);
     }
 
     async fn info(&self) -> ProviderInfo {

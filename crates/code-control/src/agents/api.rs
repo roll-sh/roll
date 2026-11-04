@@ -47,7 +47,8 @@ pub fn routes() -> Router<Arc<Code>> {
         .route("/v1/code/agents/{owner}/threads/{thread}/work", post(take_work).delete(drop_work))
         .route("/v1/code/agents/{owner}/state", get(state))
         .route("/v1/code/agents/{owner}/events", get(events))
-        .route("/v1/code/agents/{owner}/canvas", get(super::canvas::get).put(super::canvas::put))
+        .route("/v1/code/agents/{owner}/canvas", get(super::docs::get_canvas).put(super::docs::put_canvas))
+        .route("/v1/code/agents/{owner}/settings", get(super::docs::get_settings).put(super::docs::put_settings))
         .route("/v1/code/agents/{owner}/threads/{thread}/shares", post(share::create))
         .route("/v1/code/agents/{owner}/shares", get(share::list))
         .route("/v1/code/agents/{owner}/shares/{id}", delete(share::revoke))
@@ -360,7 +361,10 @@ struct Stream {
 fn cursor_of(ev: &StreamEvent) -> Option<u64> {
     match ev {
         StreamEvent::Entity(m) => Some(m.cursor),
-        StreamEvent::Machine { cursor, .. } | StreamEvent::MachineRemoved { cursor, .. } | StreamEvent::Canvas { cursor, .. } => Some(*cursor),
+        StreamEvent::Machine { cursor, .. }
+        | StreamEvent::MachineRemoved { cursor, .. }
+        | StreamEvent::Canvas { cursor, .. }
+        | StreamEvent::Settings { cursor, .. } => Some(*cursor),
         StreamEvent::Delta { .. } => None,
     }
 }
@@ -372,6 +376,7 @@ fn kind_of(ev: &StreamEvent) -> &'static str {
         StreamEvent::MachineRemoved { .. } => "machine_removed",
         StreamEvent::Delta { .. } => "delta",
         StreamEvent::Canvas { .. } => "canvas",
+        StreamEvent::Settings { .. } => "settings",
     }
 }
 
@@ -379,7 +384,7 @@ impl Stream {
     fn wants(&self, ev: &StreamEvent) -> bool {
         match ev {
             StreamEvent::Entity(m) => self.filter.wants(&m.entity),
-            StreamEvent::Machine { .. } | StreamEvent::MachineRemoved { .. } | StreamEvent::Canvas { .. } => true,
+            StreamEvent::Machine { .. } | StreamEvent::MachineRemoved { .. } | StreamEvent::Canvas { .. } | StreamEvent::Settings { .. } => true,
             StreamEvent::Delta { delta, .. } => match delta {
                 agent_proto::Delta::Text { thread, .. } | agent_proto::Delta::Output { thread, .. } => self.filter.threads.iter().any(|t| t == thread.as_str()),
                 agent_proto::Delta::Terminal { .. } => true,
@@ -401,9 +406,11 @@ impl Stream {
                 StreamEvent::Machine { cursor: m.cursor, machine: self.code.machine_json(m) }
             });
         }
-        // One row per owner: its last save, if it's newer.
-        if let Some(c) = super::canvas::after(db, &self.owner_id, self.high)? {
-            evs.push(c.event());
+        // One row per owner and document: its last save, if it's newer.
+        for kind in super::docs::Doc::ALL {
+            if let Some(d) = super::docs::after(db, kind, &self.owner_id, self.high)? {
+                evs.push(d.event(kind));
+            }
         }
         evs.sort_by_key(|e| cursor_of(e).unwrap_or(0));
         // A full page ends where its last row is; the other table's rows past it come next time.
@@ -517,6 +524,11 @@ async fn command(
             _ => None,
         };
         super::policy::agent_may(&req.command, current).map_err(Error::Forbidden)?;
+    }
+    // Machine settings never carry a credential: refused here, before they reach the machine
+    // (the daemon checks again).
+    if let agent_proto::Command::MachineConfigure { settings } = &req.command {
+        (**settings).clone().check().map_err(Error::Invalid)?;
     }
     super::code::follow(&code);
     let granted = super::code::grant_for(&code, &caller, &m, &req.command)?;

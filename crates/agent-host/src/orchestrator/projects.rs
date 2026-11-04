@@ -149,17 +149,27 @@ impl Host {
 }
 
 /// Auto-pull for the projects that fetch on their own: a round now, then one every `every`.
-pub(crate) fn spawn_puller(host: Weak<Host>, every: Option<Duration>) {
-    let Some(every) = every else { return };
+pub(crate) fn spawn_puller(host: Weak<Host>) {
     tokio::spawn(async move {
         loop {
             let Some(h) = host.upgrade() else { return };
-            h.pull_round().await;
+            // The machine's settings may change the pace (or turn it off) at any time.
+            let every = h.pull_every();
+            if every.is_some() {
+                h.pull_round().await;
+            }
+            let changed = h.settings_changed.clone();
             drop(h);
-            tokio::time::sleep(every).await;
+            tokio::select! {
+                _ = tokio::time::sleep(every.unwrap_or(PULL_OFF_LOOK)) => {}
+                _ = changed.notified() => {}
+            }
         }
     });
 }
+
+/// How often a puller that is turned off looks again (the settings wake it sooner).
+const PULL_OFF_LOOK: Duration = Duration::from_secs(3600);
 
 /// Settings as given, trimmed and checked.
 fn checked(mut s: ProjectSettings) -> Res<ProjectSettings> {

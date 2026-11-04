@@ -41,6 +41,8 @@ const MIGRATIONS: &[&str] = &[
     // written before it runs (`reply` NULL until it is done), so a crash can't run it twice.
     "DROP TABLE receipts;
      CREATE TABLE receipts (sender TEXT NOT NULL, id TEXT NOT NULL, reply TEXT, at INTEGER NOT NULL, PRIMARY KEY (sender, id));",
+    // The daemon's own settings (`machine` = the machine's settings, set from roll).
+    "CREATE TABLE settings (key TEXT PRIMARY KEY, json TEXT NOT NULL);",
 ];
 
 /// What the store knows about a command id ([`Store::begin_command`]).
@@ -237,6 +239,20 @@ impl Store {
 
     pub fn delete_thread_state(&self, thread: &ThreadId) -> anyhow::Result<()> {
         self.db().execute("DELETE FROM thread_state WHERE thread = ?1", [thread.as_str()])?;
+        Ok(())
+    }
+
+    /// A setting the daemon keeps (never mirrored as a record).
+    pub fn setting<T: DeserializeOwned>(&self, key: &str) -> anyhow::Result<Option<T>> {
+        let json: Option<String> = self.db().query_row("SELECT json FROM settings WHERE key = ?1", [key], |r| r.get(0)).optional()?;
+        Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
+    }
+
+    pub fn put_setting<T: Serialize>(&self, key: &str, value: &T) -> anyhow::Result<()> {
+        self.db().execute(
+            "INSERT INTO settings (key, json) VALUES (?1, ?2) ON CONFLICT (key) DO UPDATE SET json = excluded.json",
+            params![key, serde_json::to_string(value)?],
+        )?;
         Ok(())
     }
 }

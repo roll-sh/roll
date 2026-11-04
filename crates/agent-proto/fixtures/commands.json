@@ -173,6 +173,42 @@
     "type": "provider.refresh"
   },
   {
+    "type": "machine.configure",
+    "settings": {
+      "providers": {
+        "claude": {
+          "binary": "/opt/claude/bin/claude",
+          "args": [
+            "--verbose"
+          ],
+          "env": {
+            "CLAUDE_CONFIG_DIR": "/Users/ada/.claude-work"
+          },
+          "models": [
+            {
+              "id": "claude-opus-5-5[1m]",
+              "name": "Opus 5.5 (1M)"
+            }
+          ]
+        },
+        "codex": {
+          "enabled": false
+        }
+      },
+      "defaults": {
+        "provider": "claude",
+        "runtime_mode": "auto_edit",
+        "worktree": true
+      },
+      "worktree_dir": "~/worktrees",
+      "branch_prefix": "ada",
+      "pull_every": 300,
+      "max_depth": 2,
+      "git_name": "Ada Lovelace",
+      "git_email": "ada@example.com"
+    }
+  },
+  {
     "type": "diff.get",
     "thread": "thr_a1b2c3d4e5f60718",
     "run": "run_0011223344556677"

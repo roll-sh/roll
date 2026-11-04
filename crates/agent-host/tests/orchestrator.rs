@@ -1008,3 +1008,125 @@ async fn project_settings_are_checked_and_the_setup_script_runs_in_new_worktrees
     let both = Command::TerminalOpen { project: Some(w.project.clone()), thread: None, command: Some("ls".into()), script: Some("lint".into()), cols: 80, rows: 24 };
     assert!(matches!(w.run(both).await, Reply::Error(ReplyError { code: ErrorCode::Invalid, .. })));
 }
+
+
+// ── machine settings ──
+
+/// What the daemon's `config.toml` says about Claude in the settings tests: a key, a binary, an
+/// argument and a variable.
+const CLAUDE_FILE: &str = "[providers.claude]\nbinary = \"/usr/local/bin/claude\"\nargs = [\"--from-file\"]\nenv = { ANTHROPIC_API_KEY = \"sk-ant-file-only\", CLAUDE_CONFIG_DIR = \"/file\" }\n";
+
+fn configure(settings: MachineSettings) -> Command {
+    Command::MachineConfigure { settings: Box::new(settings) }
+}
+
+#[tokio::test]
+async fn machine_settings_are_checked_stored_applied_and_reported_without_credentials() {
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    git_repo(repo.path());
+    std::fs::write(home.path().join("config.toml"), CLAUDE_FILE).unwrap();
+    let (codex, claude) = (FakeProvider::new("codex"), FakeProvider::new("claude"));
+    let host = open(home.path(), vec![codex.clone(), claude.clone()]).await;
+    let Reply::Created { id } = run(&host, Command::ProjectAdd { path: repo.path().to_string_lossy().into(), name: None, clone: None }).await else {
+        panic!("project.add failed")
+    };
+    let project = ProjectId(id);
+    let create = |provider: &str, worktree: bool| Command::ThreadCreate {
+        project: project.clone(),
+        provider: ProviderId(provider.into()),
+        model: Some("big-1".into()),
+        effort: None,
+        runtime_mode: RuntimeMode::FullAccess,
+        interaction_mode: InteractionMode::Default,
+        worktree,
+        title: Some("Settings".into()),
+        prompt: Some("go".into()),
+        attachments: Vec::new(),
+    };
+    let ids = |info: &MachineInfo| info.providers.iter().map(|p| p.id.0.clone()).collect::<Vec<_>>();
+
+    // Before anything is set: everything on offer, and config.toml reported by names only.
+    let info = host.info().await;
+    assert_eq!(ids(&info), ["claude", "codex"]);
+    let config = info.settings.clone().expect("the settings are in the info");
+    assert_eq!(config.set, MachineSettings::default());
+    let file = config.providers.iter().find(|p| p.id == ProviderId::claude()).unwrap();
+    assert_eq!((file.binary.as_deref(), file.args, file.env.clone()), (Some("/usr/local/bin/claude"), 1, vec!["ANTHROPIC_API_KEY".to_string(), "CLAUDE_CONFIG_DIR".into()]));
+    assert_eq!(config.base.branch_prefix, "roll");
+    assert_eq!(config.base.worktree_dir, home.path().join("worktrees").display().to_string());
+    assert_eq!(config.config_path, home.path().join("config.toml").display().to_string());
+    assert!(!serde_json::to_string(&info).unwrap().contains("sk-ant-file-only"), "a credential never leaves the machine");
+    assert_eq!(claude.configured().unwrap().binary, Some("/usr/local/bin/claude".into()));
+
+    // A credential, an address or an unknown provider is refused, and nothing changes.
+    let mut leaky = MachineSettings::default();
+    leaky.providers.insert(ProviderId::claude(), ProviderSettings { env: [("ANTHROPIC_BASE_URL".to_string(), "https://evil.test".to_string())].into(), ..ProviderSettings::default() });
+    let Reply::Error(e) = run(&host, configure(leaky)).await else { panic!("a base URL was accepted") };
+    assert_eq!(e.code, ErrorCode::Invalid);
+    assert!(e.message.contains("config.toml"), "{}", e.message);
+    let mut unknown = MachineSettings::default();
+    unknown.providers.insert(ProviderId("acp:nope".into()), ProviderSettings { enabled: false, ..ProviderSettings::default() });
+    assert!(matches!(run(&host, configure(unknown)).await, Reply::Error(ReplyError { code: ErrorCode::Invalid, .. })));
+    assert_eq!(host.info().await.settings.unwrap().set, MachineSettings::default());
+
+    // Codex off; Claude with its own binary, an argument, a variable over the file's and a model.
+    let wt = home.path().join("wt");
+    let mut settings = MachineSettings {
+        worktree_dir: Some(wt.display().to_string()),
+        branch_prefix: Some("ada".into()),
+        max_depth: Some(1),
+        ..MachineSettings::default()
+    };
+    settings.providers.insert(ProviderId::codex(), ProviderSettings { enabled: false, ..ProviderSettings::default() });
+    settings.providers.insert(
+        ProviderId::claude(),
+        ProviderSettings {
+            binary: Some("/opt/claude".into()),
+            args: vec!["--verbose".into()],
+            env: [("CLAUDE_CONFIG_DIR".to_string(), "/set".to_string())].into(),
+            models: vec![CustomModel { id: "big-1".into(), name: Some("Big".into()) }],
+            ..ProviderSettings::default()
+        },
+    );
+    let mut events = host.subscribe();
+    assert_eq!(run(&host, configure(settings.clone())).await, Reply::Ok);
+    // `hello` went out again with them before the reply.
+    let sent = std::iter::from_fn(|| events.try_recv().ok()).find_map(|o| if let Outbound::Info(i) = o { Some(i) } else { None }).expect("hello again");
+    assert_eq!(sent.settings.as_ref().unwrap().set, settings);
+    let info = host.info().await;
+    assert_eq!(ids(&info), ["claude"], "a provider turned off isn't offered");
+    let big = info.providers[0].models.iter().find(|m| m.id == "big-1").expect("the custom model is listed");
+    assert!(big.custom && big.name == "Big");
+    let applied = claude.configured().unwrap();
+    assert_eq!(applied.binary, Some("/opt/claude".into()));
+    assert_eq!(applied.args, vec!["--from-file", "--verbose"]);
+    assert!(applied.env.contains(&("CLAUDE_CONFIG_DIR".into(), "/set".into())) && !applied.env.contains(&("CLAUDE_CONFIG_DIR".into(), "/file".into())));
+    assert!(applied.env.iter().any(|(k, _)| k == "ANTHROPIC_API_KEY"), "the file's key stays on the machine and in use");
+
+    // New work: never on Codex; Claude's sessions get the variables, worktrees go where they're told.
+    let Reply::Error(e) = run(&host, create("codex", false)).await else { panic!("codex was offered") };
+    assert_eq!(e.code, ErrorCode::Provider);
+    assert!(e.message.contains("turned off"), "{}", e.message);
+    let Reply::Created { id } = run(&host, create("claude", true)).await else { panic!("thread.create on claude") };
+    let session = claude.session(0).await;
+    assert!(session.config.env.contains(&("CLAUDE_CONFIG_DIR".into(), "/set".into())));
+    let thread = state(&host).await.thread(&ThreadId(id)).cloned().unwrap();
+    let worktree = thread.worktree.unwrap();
+    assert!(worktree.path.starts_with(&wt.display().to_string()), "{}", worktree.path);
+    assert!(worktree.branch.starts_with("ada/"), "{}", worktree.branch);
+
+    // Kept across a restart.
+    drop(session);
+    drop(host);
+    let (codex2, claude2) = (FakeProvider::new("codex"), FakeProvider::new("claude"));
+    let host = open(home.path(), vec![codex2, claude2.clone()]).await;
+    let info = host.info().await;
+    assert_eq!(info.settings.as_ref().unwrap().set, settings);
+    assert_eq!(ids(&info), ["claude"]);
+    assert_eq!(claude2.configured().unwrap().binary, Some("/opt/claude".into()));
+
+    // Turned back on, offered again.
+    assert_eq!(run(&host, configure(MachineSettings::default())).await, Reply::Ok);
+    assert_eq!(ids(&host.info().await), ["claude", "codex"]);
+}

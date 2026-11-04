@@ -112,10 +112,14 @@ impl Git<'_> {
     }
 
     fn roll_identity(self) -> Self {
-        self.env("GIT_AUTHOR_NAME", ROLL_NAME)
-            .env("GIT_AUTHOR_EMAIL", ROLL_EMAIL)
-            .env("GIT_COMMITTER_NAME", ROLL_NAME)
-            .env("GIT_COMMITTER_EMAIL", ROLL_EMAIL)
+        self.identity(ROLL_NAME, ROLL_EMAIL)
+    }
+
+    fn identity(self, name: &str, email: &str) -> Self {
+        self.env("GIT_AUTHOR_NAME", name)
+            .env("GIT_AUTHOR_EMAIL", email)
+            .env("GIT_COMMITTER_NAME", name)
+            .env("GIT_COMMITTER_EMAIL", email)
     }
 
     fn stdin(mut self, data: Vec<u8>) -> Self {
@@ -294,16 +298,30 @@ pub fn public_remote(url: &str) -> String {
     format!("{scheme}://{host}{path}")
 }
 
-/// `roll/<slug>`, with `-2`, `-3`, … when the branch exists.
-pub async fn unique_branch(dir: &Path, slug: &str) -> anyhow::Result<String> {
+/// `<prefix>/<slug>` (`roll/<slug>` by default), with `-2`, `-3`, … when the branch exists.
+pub async fn unique_branch(dir: &Path, prefix: &str, slug: &str) -> anyhow::Result<String> {
     for n in 1..1000 {
-        let name = if n == 1 { format!("roll/{slug}") } else { format!("roll/{slug}-{n}") };
+        let name = if n == 1 { format!("{prefix}/{slug}") } else { format!("{prefix}/{slug}-{n}") };
         let exists = git(dir, &["show-ref", "--verify", "--quiet"]).arg(format!("refs/heads/{name}")).try_run().await?;
         if exists.is_none() {
             return Ok(name);
         }
     }
-    bail!("no free branch name for roll/{slug}")
+    bail!("no free branch name for {prefix}/{slug}")
+}
+
+/// The user's own git identity (`git config --global user.name` / `user.email`), for the machine's
+/// settings to show what publishing commits as when they name nobody.
+pub async fn global_identity() -> (Option<String>, Option<String>) {
+    let dir = std::env::temp_dir();
+    let mut found = [None, None];
+    for (slot, key) in found.iter_mut().zip(["user.name", "user.email"]) {
+        if let Ok(Some(out)) = git(&dir, &["config", "--global", "--get", key]).try_run().await {
+            *slot = Some(String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|s| !s.is_empty());
+        }
+    }
+    let [name, email] = found;
+    (name, email)
 }
 
 /// A branch-name-safe slug of a title: lowercase letters and digits joined by `-`, at most 40.
@@ -604,17 +622,19 @@ fn parse_status(out: &[u8]) -> GitStatus {
 }
 
 /// Commits everything in `dir` on `branch` (when there is anything) and pushes the branch: to the
-/// roll code repo of `to` with its token, or to `origin`.
-pub async fn publish(dir: &Path, branch: &str, message: &str, to: Option<&CodeGrant>) -> anyhow::Result<Published> {
+/// roll code repo of `to` with its token, or to `origin`. The commit is `identity`'s (the
+/// machine's settings) when given, else the repository's git config's, else roll's.
+pub async fn publish(dir: &Path, branch: &str, message: &str, to: Option<&CodeGrant>, identity: Option<(&str, &str)>) -> anyhow::Result<Published> {
     if current_branch(dir).await?.as_deref() != Some(branch) {
         bail!("the checkout isn't on {branch}");
     }
     git(dir, &["add", "-A", "--", ":/"]).run().await?;
     let staged = git(dir, &["diff", "--cached", "--quiet"]).try_run().await?.is_none();
     if staged {
-        let has_identity = git(dir, &["config", "user.email"]).try_run().await?.is_some();
         let mut commit = git(dir, &["commit", "--quiet", "-m", message]);
-        if !has_identity {
+        if let Some((name, email)) = identity {
+            commit = commit.identity(name, email);
+        } else if git(dir, &["config", "user.email"]).try_run().await?.is_none() {
             commit = commit.roll_identity();
         }
         commit.run().await?;

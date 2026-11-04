@@ -28,6 +28,12 @@
                   "high",
                   "max"
                 ]
+              },
+              {
+                "id": "claude-opus-5-5[1m]",
+                "name": "Opus 5.5 (1M)",
+                "default": false,
+                "custom": true
               }
             ],
             "capabilities": {
@@ -57,7 +63,68 @@
               "mode_switch": false
             }
           }
-        ]
+        ],
+        "settings": {
+          "set": {
+            "providers": {
+              "claude": {
+                "binary": "/opt/claude/bin/claude",
+                "args": [
+                  "--verbose"
+                ],
+                "env": {
+                  "CLAUDE_CONFIG_DIR": "/Users/ada/.claude-work"
+                },
+                "models": [
+                  {
+                    "id": "claude-opus-5-5[1m]",
+                    "name": "Opus 5.5 (1M)"
+                  }
+                ]
+              },
+              "codex": {
+                "enabled": false
+              }
+            },
+            "defaults": {
+              "provider": "claude",
+              "runtime_mode": "auto_edit",
+              "worktree": true
+            },
+            "worktree_dir": "~/worktrees",
+            "branch_prefix": "ada",
+            "pull_every": 300,
+            "max_depth": 2,
+            "git_name": "Ada Lovelace",
+            "git_email": "ada@example.com"
+          },
+          "base": {
+            "worktree_dir": "/Users/ada/.local/share/roll/agent/worktrees",
+            "branch_prefix": "roll",
+            "clone_dir": "/Users/ada/roll",
+            "pull_every": 60,
+            "max_depth": 3,
+            "max_children": 6,
+            "git_name": "Ada"
+          },
+          "providers": [
+            {
+              "id": "claude",
+              "name": "Claude Code",
+              "args": 0,
+              "env": [
+                "ANTHROPIC_API_KEY"
+              ]
+            },
+            {
+              "id": "codex",
+              "name": "Codex",
+              "binary": "/opt/homebrew/bin/codex",
+              "args": 1
+            }
+          ],
+          "config_path": "/Users/ada/.local/share/roll/agent/config.toml"
+        }
       },
       "sandbox": {
         "backend": "agent37",

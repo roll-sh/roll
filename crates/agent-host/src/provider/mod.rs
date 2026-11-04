@@ -40,6 +40,26 @@ pub struct ProviderConfig {
     pub env: Vec<(String, String)>,
 }
 
+/// A provider's config that the machine's settings can change while the daemon runs: an adapter
+/// reads it each time it starts a process, so a new binary, arguments or environment apply to
+/// the next session and the next status check.
+#[derive(Debug, Default)]
+pub struct LiveConfig(std::sync::RwLock<ProviderConfig>);
+
+impl LiveConfig {
+    pub fn new(cfg: ProviderConfig) -> Self {
+        LiveConfig(std::sync::RwLock::new(cfg))
+    }
+
+    pub fn get(&self) -> ProviderConfig {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn set(&self, cfg: ProviderConfig) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = cfg;
+    }
+}
+
 /// How to start (or resume) a provider session.
 #[derive(Clone, Debug)]
 pub struct SessionConfig {
@@ -176,6 +196,12 @@ pub enum ProviderEvent {
 pub trait Provider: Send + Sync {
     fn id(&self) -> ProviderId;
 
+    /// Its display name ("Codex"), known without asking the provider (a turned-off provider is
+    /// never probed).
+    fn name(&self) -> String {
+        self.id().0
+    }
+
     fn capabilities(&self) -> Capabilities;
 
     /// How a native rollback is done; only asked when `capabilities().rollback`.
@@ -186,6 +212,12 @@ pub trait Provider: Send + Sync {
     /// Installed? Logged in? Which models? Must not start a session or change anything
     /// (T3: "setup must not happen as a health-check side effect").
     async fn info(&self) -> ProviderInfo;
+
+    /// Use `cfg` (the daemon's config with the machine's settings over it) from the next process
+    /// on. A session already running keeps what it started with.
+    fn configure(&self, cfg: ProviderConfig) {
+        let _ = cfg;
+    }
 
     /// Start a session (or resume `cfg.resume`, or fork `cfg.fork`). Events come on the
     /// returned receiver until `Exited`.

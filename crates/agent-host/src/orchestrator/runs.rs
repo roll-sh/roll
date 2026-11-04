@@ -347,7 +347,7 @@ impl Host {
     /// A session for the thread's current provider and settings: the live one when it fits,
     /// else a new one resuming the provider's native conversation.
     pub(crate) async fn ensure_session(&self, rt: &mut Rt) -> Res<()> {
-        let provider = self.provider(&rt.thread.provider)?;
+        let provider = self.offered(&rt.thread.provider)?;
         let caps = provider.capabilities();
         let t = &rt.thread;
         if let Some(live) = &mut rt.live
@@ -383,7 +383,7 @@ impl Host {
             resume,
             resume_at,
             fork: None,
-            env: self.config.provider(&t.provider).env,
+            env: self.provider_config(&t.provider).env,
             mcp: vec![self.mcp.session_server(&t.id)],
             instructions: Some(super::instructions::for_thread(t)),
         };

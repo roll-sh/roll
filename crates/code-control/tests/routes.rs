@@ -504,8 +504,8 @@ async fn github_webhook_statuses() {
 /// everyone else; commands are the owner's tokens' too, 403/401 for others, and an agent's only
 /// drive threads (never terminals, files outside projects, approvals, projects, rollbacks or a
 /// higher mode: agents/policy.rs); managing machines, looking up and approving logins, making
-/// and revoking shares and arranging the canvas (reading it is a read) is the owner's, not its
-/// agents'. Starting and polling a login and reading a share by its link look at no caller; bad
+/// and revoking shares, arranging the canvas and changing the agents settings (reading them is a
+/// read), and changing a machine's settings, is the owner's, not its agents'. Starting and polling a login and reading a share by its link look at no caller; bad
 /// tokens, machine tokens included, are 401 everywhere else.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agents_routes_follow_the_auth_matrix() {
@@ -516,8 +516,8 @@ async fn agents_routes_follow_the_auth_matrix() {
     let mid = m["machine"]["id"].as_str().unwrap().to_string();
     let machine = m["token"].as_str().unwrap().to_string();
     let base = "/v1/code/agents/acme";
-    let body = json!({ "name": "x", "user_code": "BCDF-GHJK", "id": "c1", "command": { "type": "provider.refresh" }, "canvas": {} });
-    let reads = [format!("{base}/machines"), format!("{base}/state"), format!("{base}/events"), format!("{base}/shares"), format!("{base}/canvas")];
+    let body = json!({ "name": "x", "user_code": "BCDF-GHJK", "id": "c1", "command": { "type": "provider.refresh" }, "canvas": {}, "settings": {} });
+    let reads = [format!("{base}/machines"), format!("{base}/state"), format!("{base}/events"), format!("{base}/shares"), format!("{base}/canvas"), format!("{base}/settings")];
     let command = format!("{base}/machines/{mid}/commands");
     let manages = [
         ("POST", format!("{base}/machines")),
@@ -529,6 +529,7 @@ async fn agents_routes_follow_the_auth_matrix() {
         ("POST", format!("{base}/threads/thr_x/shares")),
         ("DELETE", format!("{base}/shares/shr_x")),
         ("PUT", format!("{base}/canvas")),
+        ("PUT", format!("{base}/settings")),
     ];
     let (acme, agent, other, app_in) = (Some(w.acme.as_str()), Some(w.agent.as_str()), Some(w.other.as_str()), Some(w.app_in.as_str()));
     let denied = StatusCode::UNAUTHORIZED;
@@ -574,6 +575,7 @@ async fn agents_routes_follow_the_auth_matrix() {
         json!({ "type": "project.add", "path": "/" }),
         json!({ "type": "project.remove", "project": "prj_1" }),
         json!({ "type": "provider.refresh" }),
+        json!({ "type": "machine.configure", "settings": { "providers": { "codex": { "enabled": false } } } }),
         json!({ "type": "checkpoint.rollback", "thread": "thr_1", "checkpoint": "chk_1" }),
     ];
     for c in agents_drive {

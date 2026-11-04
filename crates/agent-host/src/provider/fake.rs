@@ -9,7 +9,7 @@
 //! with `fork` is a new conversation; the test reads what it was forked from (or the turn it
 //! resumed at) in its `config`. Turn refs are numbered per conversation, across its sessions.
 
-use super::{Item, Provider, ProviderEvent, RollbackStyle, Session, SessionConfig, TurnEnd, TurnInput};
+use super::{Item, Provider, ProviderConfig, ProviderEvent, RollbackStyle, Session, SessionConfig, TurnEnd, TurnInput};
 use agent_proto::{
     Approval, ApprovalAction, AuthStatus, Capabilities, ChangeKind, ContextUsage, Decision, FileChange, InteractionMode, ModelInfo, NodeBody,
     NodeStatus, ProviderId, ProviderInfo, RequestBody, Response, RuntimeMode, ToolCall, ToolKind, Usage,
@@ -65,6 +65,8 @@ pub struct FakeProvider {
     rollback_style: Mutex<RollbackStyle>,
     /// Turns per native conversation, so a resumed one goes on numbering them.
     turns: Mutex<HashMap<String, Arc<AtomicU32>>>,
+    /// What the orchestrator configured it with last (the machine's settings over the config).
+    configured: Mutex<Option<ProviderConfig>>,
     changed: Arc<Notify>,
 }
 
@@ -83,6 +85,7 @@ impl FakeProvider {
             fail_start: Mutex::new(None),
             rollback_style: Mutex::new(RollbackStyle::DropTurns),
             turns: Mutex::new(HashMap::new()),
+            configured: Mutex::new(None),
             changed: Arc::new(Notify::new()),
         })
     }
@@ -100,6 +103,11 @@ impl FakeProvider {
     /// The `n`th session (0-based), waiting up to 5 s for it to start.
     pub async fn session(&self, n: usize) -> FakeSession {
         wait(&self.changed, || self.sessions.lock().unwrap().get(n).cloned(), &format!("session {n} of {}", self.id.0)).await
+    }
+
+    /// What [`Provider::configure`] gave it last.
+    pub fn configured(&self) -> Option<ProviderConfig> {
+        self.configured.lock().unwrap().clone()
     }
 
     /// The next `start` fails with this message.
@@ -135,6 +143,14 @@ impl Provider for FakeProvider {
         *self.rollback_style.lock().unwrap()
     }
 
+    fn name(&self) -> String {
+        format!("Fake {}", self.id.0)
+    }
+
+    fn configure(&self, cfg: ProviderConfig) {
+        *self.configured.lock().unwrap() = Some(cfg);
+    }
+
     async fn info(&self) -> ProviderInfo {
         ProviderInfo {
             id: self.id.clone(),
@@ -143,7 +159,7 @@ impl Provider for FakeProvider {
             version: Some("0.0.0".into()),
             auth: AuthStatus::Ready,
             detail: None,
-            models: vec![ModelInfo { id: "fake-1".into(), name: "Fake 1".into(), default: true, efforts: Vec::new() }],
+            models: vec![ModelInfo { id: "fake-1".into(), name: "Fake 1".into(), default: true, efforts: Vec::new(), custom: false }],
             capabilities: self.capabilities,
         }
     }

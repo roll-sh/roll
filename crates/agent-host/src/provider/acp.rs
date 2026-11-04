@@ -36,17 +36,17 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub struct Acp {
     name: String,
-    cfg: ProviderConfig,
+    cfg: super::LiveConfig,
 }
 
 impl Acp {
     /// The agent `[[acp]]` names `name` (provider id `acp:<name>`).
     pub fn new(name: String, cfg: ProviderConfig) -> Self {
-        Self { name, cfg }
+        Self { name, cfg: super::LiveConfig::new(cfg) }
     }
 
     fn binary(&self) -> PathBuf {
-        self.cfg.binary.clone().unwrap_or_else(|| PathBuf::from(&self.name))
+        self.cfg.get().binary.clone().unwrap_or_else(|| PathBuf::from(&self.name))
     }
 
     fn spawn(
@@ -55,8 +55,8 @@ impl Acp {
         cwd: Option<&Path>,
     ) -> anyhow::Result<(std::sync::Arc<rpc::Rpc>, mpsc::UnboundedReceiver<rpc::Inbound>, rpc::Process)> {
         let binary = self.binary();
-        let env = self.cfg.env.iter().chain(env).cloned().collect();
-        rpc::spawn(rpc::Spawn { binary: &binary, args: self.cfg.args.clone(), env, cwd })
+        let env = self.cfg.get().env.iter().chain(env).cloned().collect();
+        rpc::spawn(rpc::Spawn { binary: &binary, args: self.cfg.get().args.clone(), env, cwd })
     }
 
     /// `initialize` and nothing else: never `authenticate`, never a session (T3: "setup must
@@ -96,11 +96,19 @@ impl Provider for Acp {
         Self::base_capabilities(true)
     }
 
+    fn configure(&self, cfg: ProviderConfig) {
+        self.cfg.set(cfg);
+    }
+
+    fn name(&self) -> String {
+        KNOWN.iter().find(|k| k.name == self.name).map(|k| k.title.to_string()).unwrap_or_else(|| self.name.clone())
+    }
+
     async fn info(&self) -> ProviderInfo {
         let known = KNOWN.iter().find(|k| k.name == self.name);
         let mut info = ProviderInfo {
             id: self.id(),
-            name: known.map(|k| k.title.to_string()).unwrap_or_else(|| self.name.clone()),
+            name: Provider::name(self),
             installed: false,
             version: None,
             auth: AuthStatus::Unknown,
@@ -127,7 +135,7 @@ impl Provider for Acp {
                     info.models = models
                         .available
                         .into_iter()
-                        .map(|m| ModelInfo { default: models.current.as_deref() == Some(m.id.as_str()), id: m.id, name: m.name, efforts: Vec::new() })
+                        .map(|m| ModelInfo { default: models.current.as_deref() == Some(m.id.as_str()), id: m.id, name: m.name, efforts: Vec::new(), custom: false })
                         .collect();
                 }
                 // Starting a session would prove a login, and might start one: roll doesn't

@@ -133,12 +133,12 @@ async fn worktrees_get_their_own_branch_and_removal_keeps_it() {
     let data = tempfile::tempdir().unwrap();
     let path = data.path().join("worktrees/prj_a/thr_a");
     let head = git::head(p).await.unwrap().unwrap();
-    let branch = git::unique_branch(p, &git::slug("Fix the bug")).await.unwrap();
+    let branch = git::unique_branch(p, "roll", &git::slug("Fix the bug")).await.unwrap();
     assert_eq!(branch, "roll/fix-the-bug");
     git::worktree_add(p, &path, &branch, &head).await.unwrap();
     assert_eq!(std::fs::read_to_string(path.join("a.txt")).unwrap(), "one\ntwo\n");
     assert_eq!(git::current_branch(&path).await.unwrap().as_deref(), Some("roll/fix-the-bug"));
-    assert_eq!(git::unique_branch(p, "fix-the-bug").await.unwrap(), "roll/fix-the-bug-2");
+    assert_eq!(git::unique_branch(p, "roll", "fix-the-bug").await.unwrap(), "roll/fix-the-bug-2");
 
     // Checkpoints in a worktree work the same, and live in the shared repository.
     std::fs::write(path.join("w.txt"), "in worktree\n").unwrap();
@@ -180,11 +180,24 @@ async fn publish_commits_and_pushes_the_thread_branch() {
     git::worktree_add(p, &wt, "roll/feature", &head).await.unwrap();
     std::fs::write(wt.join("feature.txt"), "done\n").unwrap();
 
-    let published = git::publish(&wt, "roll/feature", "Add the feature", None).await.unwrap();
+    let published = git::publish(&wt, "roll/feature", "Add the feature", None, None).await.unwrap();
     assert_eq!(published.branch, "roll/feature");
     assert_eq!(sh(remote.path(), &["rev-parse", "refs/heads/roll/feature"]).trim(), published.commit);
     assert_eq!(sh(remote.path(), &["log", "-1", "--format=%s", "roll/feature"]).trim(), "Add the feature");
-    assert!(git::publish(&wt, "roll/other", "x", None).await.is_err());
+    assert!(git::publish(&wt, "roll/other", "x", None, None).await.is_err());
+
+    // The machine's settings name who commits: that wins over the repository's git config.
+    std::fs::write(wt.join("more.txt"), "more\n").unwrap();
+    let email = concat!("ada", "@", "example.com");
+    git::publish(&wt, "roll/feature", "More", None, Some(("Ada Lovelace", email))).await.unwrap();
+    let who = sh(remote.path(), &["log", "-1", "--format=%an <%ae>|%cn <%ce>", "roll/feature"]);
+    assert_eq!(who.trim(), format!("Ada Lovelace <{email}>|Ada Lovelace <{email}>"));
+}
+
+#[tokio::test]
+async fn branches_take_the_machines_prefix() {
+    let repo = repo();
+    assert_eq!(git::unique_branch(repo.path(), "ada/wip", "fix").await.unwrap(), "ada/wip/fix");
 }
 
 #[tokio::test]
@@ -280,12 +293,12 @@ async fn pushes_with_a_grant_run_no_hooks() {
     std::fs::write(wt.join("feature.txt"), "done\n").unwrap();
 
     let g = grant(remote.path().to_str().unwrap());
-    let published = git::publish(&wt, "roll/feature", "Add the feature", Some(&g)).await.unwrap();
+    let published = git::publish(&wt, "roll/feature", "Add the feature", Some(&g), None).await.unwrap();
     assert_eq!(sh(remote.path(), &["rev-parse", "refs/heads/roll/feature"]).trim(), published.commit);
     assert!(!captured.exists(), "pre-push ran with the grant: {}", std::fs::read_to_string(&captured).unwrap_or_default());
 
     std::fs::write(wt.join("more.txt"), "more\n").unwrap();
-    git::publish(&wt, "roll/feature", "More", None).await.unwrap();
+    git::publish(&wt, "roll/feature", "More", None, None).await.unwrap();
     assert!(captured.exists(), "the hook is real: it runs on a push without a grant");
 }
 

@@ -415,6 +415,7 @@ fn commands() -> Vec<Command> {
         Command::TerminalResize { terminal: trm(), cols: 100, rows: 30 },
         Command::TerminalClose { terminal: trm() },
         Command::ProviderRefresh {},
+        Command::MachineConfigure { settings: Box::new(settings()) },
         Command::DiffGet { thread: thr(), run: Some(run()) },
         Command::FsList { project: None, path: "/home/ada".into() },
         Command::FsRead { project: prj(), path: "README.md".into() },
@@ -453,6 +454,7 @@ fn covered_command(c: &Command) {
         | Command::TerminalResize { .. }
         | Command::TerminalClose { .. }
         | Command::ProviderRefresh {}
+        | Command::MachineConfigure { .. }
         | Command::DiffGet { .. }
         | Command::FsList { .. }
         | Command::FsRead { .. }
@@ -521,6 +523,33 @@ fn covered_delta(d: &Delta) {
     }
 }
 
+fn settings() -> MachineSettings {
+    let mut providers = std::collections::BTreeMap::new();
+    providers.insert(ProviderId::codex(), ProviderSettings { enabled: false, ..ProviderSettings::default() });
+    providers.insert(
+        ProviderId::claude(),
+        ProviderSettings {
+            enabled: true,
+            binary: Some("/opt/claude/bin/claude".into()),
+            args: vec!["--verbose".into()],
+            env: [("CLAUDE_CONFIG_DIR".to_string(), "/Users/ada/.claude-work".to_string())].into(),
+            models: vec![CustomModel { id: "claude-opus-5-5[1m]".into(), name: Some("Opus 5.5 (1M)".into()) }],
+        },
+    );
+    MachineSettings {
+        providers,
+        defaults: ThreadDefaults { provider: Some(ProviderId::claude()), runtime_mode: Some(RuntimeMode::AutoEdit), worktree: Some(true), ..ThreadDefaults::default() },
+        worktree_dir: Some("~/worktrees".into()),
+        branch_prefix: Some("ada".into()),
+        clone_dir: None,
+        pull_every: Some(300),
+        max_depth: Some(2),
+        max_children: None,
+        git_name: Some("Ada Lovelace".into()),
+        git_email: Some(concat!("ada", "@", "example.com").into()),
+    }
+}
+
 fn info() -> MachineInfo {
     MachineInfo {
         hostname: "ada-mbp".into(),
@@ -541,6 +570,13 @@ fn info() -> MachineInfo {
                     name: "Opus 5.5".into(),
                     default: true,
                     efforts: vec!["low".into(), "medium".into(), "high".into(), "max".into()],
+                    custom: false,
+                }, ModelInfo {
+                    id: "claude-opus-5-5[1m]".into(),
+                    name: "Opus 5.5 (1M)".into(),
+                    default: false,
+                    efforts: vec![],
+                    custom: true,
                 }],
                 capabilities: Capabilities { steer: true, fork: true, rollback: false, plan_mode: true, images: true, subagents: true, mode_switch: true },
             },
@@ -555,6 +591,24 @@ fn info() -> MachineInfo {
                 capabilities: Capabilities { steer: true, fork: true, rollback: true, plan_mode: true, images: true, subagents: true, mode_switch: false },
             },
         ],
+        settings: Some(Box::new(MachineConfig {
+            set: settings(),
+            base: SettingsBase {
+                worktree_dir: "/Users/ada/.local/share/roll/agent/worktrees".into(),
+                branch_prefix: "roll".into(),
+                clone_dir: Some("/Users/ada/roll".into()),
+                pull_every: 60,
+                max_depth: 3,
+                max_children: 6,
+                git_name: Some("Ada".into()),
+                git_email: None,
+            },
+            providers: vec![
+                ProviderBase { id: ProviderId::claude(), name: "Claude Code".into(), binary: None, args: 0, env: vec!["ANTHROPIC_API_KEY".into()] },
+                ProviderBase { id: ProviderId::codex(), name: "Codex".into(), binary: Some("/opt/homebrew/bin/codex".into()), args: 1, env: vec![] },
+            ],
+            config_path: "/Users/ada/.local/share/roll/agent/config.toml".into(),
+        })),
     }
 }
 
@@ -631,12 +685,13 @@ fn stream() -> Vec<StreamEvent> {
         StreamEvent::MachineRemoved { cursor: 9, machine: mch() },
         StreamEvent::Delta { machine: mch(), delta: deltas().remove(1) },
         StreamEvent::Canvas { cursor: 10, revision: 3, updated_at: 1_762_000_000_000 },
+        StreamEvent::Settings { cursor: 11, revision: 2, updated_at: 1_762_000_000_000 },
     ]
 }
 
 fn covered_stream(e: &StreamEvent) {
     match e {
-        StreamEvent::Entity(_) | StreamEvent::Machine { .. } | StreamEvent::MachineRemoved { .. } | StreamEvent::Delta { .. } | StreamEvent::Canvas { .. } => {}
+        StreamEvent::Entity(_) | StreamEvent::Machine { .. } | StreamEvent::MachineRemoved { .. } | StreamEvent::Delta { .. } | StreamEvent::Canvas { .. } | StreamEvent::Settings { .. } => {}
     }
 }
 
@@ -760,7 +815,7 @@ fn every_variant_of_every_tagged_enum_is_sampled() {
     let tags = |v: serde_json::Value, key: &str| -> std::collections::BTreeSet<String> {
         v.as_array().unwrap().iter().map(|x| x[key].as_str().unwrap().to_string()).collect()
     };
-    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 33, "commands");
+    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 34, "commands");
     assert_eq!(tags(serde_json::to_value(replies()).unwrap(), "type").len(), 10, "replies");
     assert_eq!(tags(serde_json::to_value(entities()).unwrap(), "kind").len(), 8, "entities");
     let bodies: std::collections::BTreeSet<String> = entities()

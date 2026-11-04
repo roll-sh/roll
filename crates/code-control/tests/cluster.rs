@@ -1363,7 +1363,7 @@ async fn agent_link(base: &str, bearer: &str) -> Option<(Ws, u64)> {
     let (mut ws, _) = tokio_tungstenite::connect_async(req).await.ok()?;
     let hello = agent_proto::DaemonFrame::Hello {
         protocol: agent_proto::PROTOCOL,
-        info: agent_proto::MachineInfo { hostname: "box".into(), os: "linux".into(), arch: "x86_64".into(), version: "0".into(), home: "/".into(), providers: vec![] },
+        info: agent_proto::MachineInfo { hostname: "box".into(), os: "linux".into(), arch: "x86_64".into(), version: "0".into(), home: "/".into(), providers: vec![], settings: None },
     };
     ws.send(Message::text(serde_json::to_string(&hello).unwrap())).await.ok()?;
     match ws.next().await? {

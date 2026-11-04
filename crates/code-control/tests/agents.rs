@@ -4,7 +4,7 @@
 
 mod common;
 
-use agent_proto::{DaemonFrame, Entity, RelayFrame, Reply, Stamped, StreamEvent};
+use agent_proto::{Command, DaemonFrame, Entity, MachineConfig, MachineInfo, ProviderId, RelayFrame, Reply, SettingsBase, Stamped, StreamEvent};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::daemon::{Daemon, dial, info};
@@ -1050,4 +1050,123 @@ async fn canvas_saves_go_out_on_the_event_stream() {
     assert_eq!(canvas_event(back.next().await), (c4, 3, at3));
     back.quiet(150).await;
     Events::open(&w.a, events, &w.owner, Some(c4)).await.quiet(150).await;
+}
+
+/// The owner's agents settings (`agents/docs.rs`): a document of its own beside the canvas (one
+/// opaque JSON object per owner, saved over a revision, at most 32 KiB), the owner's alone, and
+/// every save goes out on the owner's event stream as `settings`, caught up on reconnect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn owner_settings_are_kept_per_owner_and_go_out_on_the_event_stream() {
+    let w = world().await;
+    let path = "/v1/code/agents/acme/settings";
+    let (s, v) = w.req("GET", path, None, &w.owner).await;
+    assert_eq!((s, v), (StatusCode::OK, json!({ "settings": null, "revision": 0, "updated_at": null })));
+    let (_, state) = w.req("GET", "/v1/code/agents/acme/state", None, &w.owner).await;
+    let before = state["cursor"].as_u64().unwrap();
+    let events = "/v1/code/agents/acme/events";
+    let mut live = Events::open(&w.a, events, &w.owner, None).await;
+    let mut agents = Events::open(&w.a, events, &w.agent, None).await;
+    let settings_event = |e: Sse| match e.data {
+        StreamEvent::Settings { cursor, revision, updated_at } => {
+            assert_eq!((e.event.as_str(), e.id), ("settings", Some(cursor)));
+            (cursor, revision, updated_at)
+        }
+        other => panic!("expected a settings event, got {other:?}"),
+    };
+
+    let doc = json!({ "version": 1, "notifications": "sound", "confirm_delete": false, "defaults": { "provider": "claude" } });
+    let (s, v) = w.req("PUT", path, Some(json!({ "settings": doc, "revision": 0 })), &w.owner).await;
+    assert_eq!((s, &v["settings"], &v["revision"]), (StatusCode::OK, &doc, &json!(1)), "{v}");
+    let (c1, rev, at) = settings_event(live.next().await);
+    assert_eq!((rev, Some(at)), (1, v["updated_at"].as_u64()));
+    assert_eq!(settings_event(agents.next().await).1, 1, "agents hear it too");
+    assert_eq!(w.req("GET", path, None, &w.owner).await.1["settings"], doc);
+    // A sibling of the canvas, not part of it.
+    assert_eq!(w.req("GET", "/v1/code/agents/acme/canvas", None, &w.owner).await.1["canvas"], Value::Null);
+    // Agents read it (they may follow their owner's preferences) but never change it.
+    assert_eq!(w.req("GET", path, None, &w.agent).await.1["settings"], doc);
+    let (s, v) = w.req("PUT", path, Some(json!({ "settings": {} })), &w.agent).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("agents settings"), "{v}");
+
+    // Over a stale revision: a 409 with what is there now; refused saves send nothing.
+    let (s, v) = w.req("PUT", path, Some(json!({ "settings": { "x": 1 }, "revision": 0 })), &w.owner).await;
+    assert_eq!((s, &v["settings"], &v["revision"]), (StatusCode::CONFLICT, &doc, &json!(1)), "{v}");
+    for bad in [json!({ "settings": [1] }), json!({ "settings": null }), json!({}), json!({ "canvas": {} })] {
+        assert_eq!(w.req("PUT", path, Some(bad.clone()), &w.owner).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let filler = |n: usize| json!({ "settings": { "f": "x".repeat(n) } });
+    let fits = 32 * 1024 - r#"{"f":""}"#.len();
+    let (s, v) = w.req("PUT", path, Some(filler(fits + 1)), &w.owner).await;
+    assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("32768"), "{v}");
+    live.quiet(150).await;
+    let (s, v) = w.req("PUT", path, Some(filler(fits)), &w.owner).await;
+    assert_eq!((s, &v["revision"]), (StatusCode::OK, &json!(2)), "32 KiB exactly");
+    let (c2, rev2, at2) = settings_event(live.next().await);
+    assert!(c1 < c2 && rev2 == 2);
+
+    // Every owner has their own, and no one else sees it.
+    assert_eq!(w.req("GET", path, None, &w.other).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(w.req("PUT", path, Some(json!({ "settings": {} })), &w.other).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(w.a.req("PUT", path, Some(json!({ "settings": {} })), None).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(w.req("GET", "/v1/code/agents/other/settings", None, &w.other).await.1["revision"], 0);
+
+    // A stream reconnecting from before the saves gets the last one (one row per owner).
+    let mut back = Events::open(&w.a, events, &w.owner, Some(before)).await;
+    assert_eq!(settings_event(back.next().await), (c2, 2, at2));
+    back.quiet(150).await;
+}
+
+/// A machine's settings go to its daemon as `machine.configure` and come back in its `hello`. A
+/// credential or an address is refused before it leaves roll (the daemon never sees it), and
+/// agent tokens can't change a machine's settings.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn machine_settings_go_to_the_daemon_and_credentials_never_do() {
+    let w = std::sync::Arc::new(world().await);
+    let (id, minted) = w.machine("box").await;
+    let (mut d, _) = Daemon::connect(&w.url, &minted).await;
+    let path = format!("/v1/code/agents/acme/machines/{id}/commands");
+    let configure = |cid: &str, settings: Value| json!({ "id": cid, "command": { "type": "machine.configure", "settings": settings } });
+
+    for leaky in [json!({ "ANTHROPIC_API_KEY": "sk-ant-oops" }), json!({ "OPENAI_BASE_URL": "https://example.test" }), json!({ "HTTPS_PROXY": "http://p" })] {
+        let (s, v) = w.req("POST", &path, Some(configure("s1", json!({ "providers": { "claude": { "env": leaky } } }))), &w.owner).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+        let error = v["error"].as_str().unwrap();
+        assert!(error.contains("config.toml") && !error.contains("sk-ant-oops"), "{v}");
+    }
+    let good = json!({ "providers": { "codex": { "enabled": false } }, "branch_prefix": "ada", "pull_every": 300 });
+    let (s, v) = w.req("POST", &path, Some(configure("s2", good.clone())), &w.agent).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+
+    let pending = {
+        let (w, path, body) = (w.clone(), path.clone(), configure("s3", good));
+        tokio::spawn(async move { w.req("POST", &path, Some(body), &w.owner).await })
+    };
+    // The first command the daemon gets is the good one: nothing refused went out.
+    let Some(RelayFrame::Command { id: cid, command: Command::MachineConfigure { settings }, .. }) = d.recv().await else { panic!("no machine.configure") };
+    assert_eq!(cid, "s3");
+    assert_eq!((settings.branch_prefix.as_deref(), settings.pull_every), (Some("ada"), Some(300)));
+    assert!(!settings.provider(&ProviderId::codex()).enabled);
+    // The daemon applies them and says so in its hello, before its reply.
+    let base = SettingsBase {
+        worktree_dir: "/home/me/.local/share/roll/agent/worktrees".into(),
+        branch_prefix: "roll".into(),
+        clone_dir: None,
+        pull_every: 60,
+        max_depth: 3,
+        max_children: 6,
+        git_name: None,
+        git_email: None,
+    };
+    let info = MachineInfo {
+        settings: Some(Box::new(MachineConfig { set: *settings, base, providers: vec![], config_path: "/home/me/.local/share/roll/agent/config.toml".into() })),
+        ..info()
+    };
+    d.send(&DaemonFrame::Hello { protocol: agent_proto::PROTOCOL, info }).await;
+    d.send(&DaemonFrame::Reply { id: "s3".into(), result: Reply::Ok }).await;
+    assert_eq!(pending.await.unwrap(), (StatusCode::OK, json!({ "type": "ok" })));
+    let (_, state) = w.req("GET", "/v1/code/agents/acme/state", None, &w.owner).await;
+    let set = &state["machines"][0]["info"]["settings"]["set"];
+    assert_eq!((&set["branch_prefix"], &set["providers"]["codex"]["enabled"]), (&json!("ada"), &json!(false)), "{state}");
 }

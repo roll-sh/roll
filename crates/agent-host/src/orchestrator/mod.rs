@@ -21,6 +21,7 @@ mod instructions;
 mod projects;
 mod queries;
 mod runs;
+mod settings;
 mod settle;
 mod tasks;
 mod terminals;
@@ -65,6 +66,12 @@ pub struct Host {
     pub(crate) mcp: crate::mcp::Server,
     /// Delegated tasks in flight (`tasks.rs`).
     tasks: tasks::Tasks,
+    /// The machine's settings, laid over `config` (`settings.rs`).
+    settings: std::sync::Mutex<MachineSettings>,
+    /// One `machine.configure` at a time.
+    configuring: AsyncMutex<()>,
+    /// Woken when the settings change (auto-pull's pace).
+    settings_changed: Arc<tokio::sync::Notify>,
 }
 
 /// Why a command failed; becomes `Reply::Error`.
@@ -229,7 +236,7 @@ impl Host {
         let store = Store::open(&config.db_path())?;
         store.prune_receipts(now().saturating_sub(RECEIPT_DAYS * 86_400_000))?;
         let providers: BTreeMap<_, _> = providers.into_iter().map(|p| (p.id(), p)).collect();
-        let info = machine_info(&providers).await;
+        let settings = Host::stored_settings(&store);
         let (out, _) = broadcast::channel(8192);
         let (mcp, listener) = crate::mcp::Server::bind().await?;
         let (tasks, task_work) = tasks::Tasks::new();
@@ -239,7 +246,15 @@ impl Host {
             store,
             providers,
             out,
-            info: std::sync::Mutex::new(info),
+            info: std::sync::Mutex::new(MachineInfo {
+                hostname: hostname(),
+                os: std::env::consts::OS.into(),
+                arch: std::env::consts::ARCH.into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+                home: String::new(),
+                providers: Vec::new(),
+                settings: None,
+            }),
             threads: std::sync::Mutex::new(HashMap::new()),
             inflight: std::sync::Mutex::new(HashMap::new()),
             projects: AsyncMutex::new(()),
@@ -247,11 +262,17 @@ impl Host {
             terminals: std::sync::Mutex::new(HashMap::new()),
             mcp,
             tasks,
+            settings: std::sync::Mutex::new(settings),
+            configuring: AsyncMutex::new(()),
+            settings_changed: Arc::new(tokio::sync::Notify::new()),
         });
+        host.configure_providers();
+        let info = host.machine_info().await;
+        *host.info.lock().unwrap() = info;
         host.recover()?;
         host.mcp.start(Arc::downgrade(&host), listener);
         tasks::spawn_worker(Arc::downgrade(&host), task_work);
-        projects::spawn_puller(Arc::downgrade(&host), host.config.pull_every());
+        projects::spawn_puller(Arc::downgrade(&host));
         settle::spawn_sweeper(Arc::downgrade(&host));
         Ok(host)
     }
@@ -556,11 +577,10 @@ impl Host {
             Command::TerminalClose { terminal } => self.terminal_close(&terminal).await,
             Command::TerminalScrollback { terminal } => self.terminal_scrollback(&terminal).await,
             Command::ProviderRefresh {} => {
-                let info = machine_info(&self.providers).await;
-                *self.info.lock().unwrap() = info.clone();
-                let _ = self.out.send(Outbound::Info(info));
+                self.refresh_info().await;
                 Ok(Reply::Ok)
             }
+            Command::MachineConfigure { settings } => self.machine_configure(*settings).await,
             Command::DiffGet { thread, run } => self.diff_get(&thread, run.as_ref()).await,
             Command::FsList { project, path } => self.fs_list(project.as_ref(), &path).await,
             Command::FsRead { project, path } => self.fs_read(&project, &path).await,
@@ -648,7 +668,7 @@ impl Host {
         if given.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
             return Err(Fail::Invalid("a relative path stays inside the clone directory".into()));
         }
-        let root = self.config.clone_dir().ok_or_else(|| Fail::Invalid("no home directory to clone into: give an absolute path".into()))?;
+        let root = self.clone_dir().ok_or_else(|| Fail::Invalid("no home directory to clone into: give an absolute path".into()))?;
         Ok(if path.trim().is_empty() { root.join(&repo.owner).join(&repo.repo) } else { root.join(given) })
     }
 
@@ -662,7 +682,10 @@ impl Host {
                 self.thread_delete(&t.id).await?;
             }
         }
-        let _ = std::fs::remove_dir(self.config.worktrees().join(project.id.as_str()));
+        // Its worktrees' folder, where the settings put them now and where they went before.
+        for dir in [self.worktree_dir(), self.config.worktrees()] {
+            let _ = std::fs::remove_dir(dir.join(project.id.as_str()));
+        }
         let mut tombstones = self.close_terminals(|t| t.project.as_ref() == Some(&project.id))?;
         tombstones.push(Entity::Removed(Removed { entity: EntityKind::Project, id: project.id.0, thread: None }));
         self.put(tombstones)?;
@@ -751,22 +774,7 @@ impl crate::Daemon for Host {
     }
 }
 
-async fn machine_info(providers: &BTreeMap<ProviderId, Arc<dyn Provider>>) -> MachineInfo {
-    let mut infos = Vec::with_capacity(providers.len());
-    for provider in providers.values() {
-        infos.push(provider.info().await);
-    }
-    MachineInfo {
-        hostname: hostname(),
-        os: std::env::consts::OS.into(),
-        arch: std::env::consts::ARCH.into(),
-        version: env!("CARGO_PKG_VERSION").into(),
-        home: crate::config::user_home().unwrap_or_else(|| PathBuf::from("/")).to_string_lossy().into_owned(),
-        providers: infos,
-    }
-}
-
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     let mut buf = [0u8; 256];
     // SAFETY: the buffer is valid for its length; gethostname NUL-terminates within it or
     // truncates, and we stop at the first NUL either way.

@@ -46,24 +46,24 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(20);
 const EVENT_BUFFER: usize = 1024;
 
 pub struct Claude {
-    cfg: ProviderConfig,
+    cfg: super::LiveConfig,
 }
 
 impl Claude {
     pub fn new(cfg: ProviderConfig) -> Self {
-        Self { cfg }
+        Self { cfg: super::LiveConfig::new(cfg) }
     }
 
     fn binary(&self) -> PathBuf {
-        self.cfg.binary.clone().unwrap_or_else(|| PathBuf::from("claude"))
+        self.cfg.get().binary.clone().unwrap_or_else(|| PathBuf::from("claude"))
     }
 
     /// The CLI with the config's arguments and environment, as an SDK host starts it.
     fn command(&self, env: &[(String, String)]) -> Command {
         let mut cmd = Command::new(self.binary());
-        cmd.args(&self.cfg.args);
+        cmd.args(&self.cfg.get().args);
         cmd.env_remove("CLAUDECODE").env("CLAUDE_CODE_ENTRYPOINT", "sdk-ts");
-        cmd.envs(self.cfg.env.iter().cloned()).envs(env.iter().cloned());
+        cmd.envs(self.cfg.get().env.iter().cloned()).envs(env.iter().cloned());
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
         cmd
     }
@@ -92,6 +92,10 @@ impl Provider for Claude {
         ProviderId::claude()
     }
 
+    fn name(&self) -> String {
+        "Claude Code".into()
+    }
+
     fn capabilities(&self) -> Capabilities {
         capabilities()
     }
@@ -101,6 +105,10 @@ impl Provider for Claude {
     /// resume there too until a new turn goes past it.
     fn rollback_style(&self) -> RollbackStyle {
         RollbackStyle::ResumeAt
+    }
+
+    fn configure(&self, cfg: ProviderConfig) {
+        self.cfg.set(cfg);
     }
 
     async fn info(&self) -> ProviderInfo {
@@ -138,7 +146,7 @@ impl Provider for Claude {
         info.models = models::models(info.version.as_deref());
         match tokio::time::timeout(PROBE_TIMEOUT, self.probe()).await {
             Ok(Ok(init)) => {
-                let base_url = self.cfg.env.iter().rev().find(|(k, _)| k == "ANTHROPIC_BASE_URL").map(|(_, v)| v.clone());
+                let base_url = self.cfg.get().env.iter().rev().find(|(k, _)| k == "ANTHROPIC_BASE_URL").map(|(_, v)| v.clone());
                 (info.auth, info.detail) = auth_status(&init, base_url.or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok()).as_deref());
             }
             Ok(Err(e)) => info.detail = Some(format!("Couldn't check the Claude login: {e:#}")),
@@ -338,11 +346,11 @@ impl Launch {
                 .collect();
             Some(McpFile::write(&json!({"mcpServers": servers})).context("writing the MCP config for Claude Code")?)
         };
-        let mut env = claude.cfg.env.clone();
+        let mut env = claude.cfg.get().env;
         env.extend(cfg.env.iter().cloned());
         Ok(Self {
             binary: claude.binary(),
-            pre_args: claude.cfg.args.clone(),
+            pre_args: claude.cfg.get().args,
             env,
             cwd: cfg.cwd.clone(),
             model: cfg.model.clone(),

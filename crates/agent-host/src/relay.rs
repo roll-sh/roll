@@ -398,6 +398,10 @@ async fn session(daemon: &Arc<dyn Daemon>, mut ws: Ws, events: &mpsc::UnboundedS
                             live = daemon.subscribe();
                             out.replay = Some(acked);
                             items.clear();
+                            // An info change may be among what was missed: records replay, info is sent again.
+                            if let Err(e) = send_other(&mut ws, Outbound::Info(daemon.info().await)).await {
+                                return retry(e, true);
+                            }
                             break;
                         }
                         Err(_) => break,
@@ -454,9 +458,13 @@ async fn session(daemon: &Arc<dyn Daemon>, mut ws: Ws, events: &mpsc::UnboundedS
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
-                    // Missed some: start over from what the relay acknowledged.
+                    // Missed some: start over from what the relay acknowledged, and say the info
+                    // again (an info change may be among what was missed).
                     live = daemon.subscribe();
                     out.replay = Some(acked);
+                    if let Err(e) = send_other(&mut ws, Outbound::Info(daemon.info().await)).await {
+                        return retry(e, true);
+                    }
                 }
                 Err(broadcast::error::RecvError::Closed) => return End::Stop(LinkError::Config("the daemon stopped".into())),
             },
