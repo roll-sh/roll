@@ -5673,7 +5673,8 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     heap tuple, HINT, table and constraint fields) after the unique check, GIN array_ops'
     "index row size N exceeds maximum 2712 for index" (the first key in sorted order),
     sized as `relsize::index_tuple` sizes entries (pglz over 512 bytes). On INSERT, COPY
-    (CONTEXT the line), UPDATE (non-HOT), CREATE INDEX (the first entry past the limit in
+    (at the multi-insert buffer's flush, as a unique violation; a COPY line in a CONTEXT is
+    cut at 100 bytes and "...", limit_printout_length), UPDATE (non-HOT), CREATE INDEX (the first entry past the limit in
     index order, after the unique check; the parallel build too). The heap tuple stays dead
     as for a unique violation. Golden `a163_index_row_size`. Probed and not modelled: GiST
     (btree_gist's text key fails with XX000 "failed to add item to index page" past about 4
@@ -5707,8 +5708,12 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     - Index-only `count(*)` over lineitem: 0.63-0.79 s against 0.11 s (PostgreSQL with two
       workers); per-entry executor work on one thread. Parallel index-only scans, or a count
       answered per fill without a row per entry, are the next step (executor).
-    - Skip scans on modelled tables after 161's dead-head walk (71486e55): re-measure on a
-      head with it (this round's numbers predate it).
+    - Skip scans: over a modelled table (300k rows) they match PostgreSQL (0.2 ms) with and
+      without 161's dead-run walk (71486e55); over the suite's 1M-row table (not modelled)
+      they take 0.95-1.16 ms against 0.22-0.34.
+    - An index row size error in a multi-insert COPY (no BEFORE ROW trigger) names a TID the
+      held rows don't have yet (`CopyLoad` places them by batch); its CONTEXT is right (the
+      line number, at the buffer's flush, as a unique violation's).
     - The size models for indexes of a table too big to model: BRIN, GIN and hash relpages
       and pg_relation_size (BENCH round 6's last paragraph). No owner now: through the
       coordinator.

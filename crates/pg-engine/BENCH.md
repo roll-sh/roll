@@ -5601,6 +5601,14 @@ less; 1.8x PostgreSQL's). Peak memory over the builds: 1,588 MB PostgreSQL, 1,15
 781 MB after. With the table's measure kept (the same builds right after a VACUUM in the same
 process, release build): BRIN 0.38 s, GIN tsvector 0.82 s, GiST point 0.59 s.
 
+Rebased onto origin's head (`14f0c608`: agent 161's btree dead-run walk, 159's custom plans,
+160's rescans), one more pair of rounds against the pre-rebase binary: the builds within 15% of
+the table above, the suite within its spread. Skip scans (`count(*) WHERE ts = k` over
+(region, ts)): the suite's skip_t has 1M rows, too big to model: 0.95-1.16 ms against
+PostgreSQL's 0.22-0.34. Over a modelled table (300,000 rows, psql over TCP, the median of 100
+after 100 warm, two alternating runs a binary) the round 5 regression is gone with and without
+161's walk: 0.20-0.21 ms before it, 0.14-0.27 ms with it, PostgreSQL 0.21.
+
 Index-only `count(*)` over TPC-H SF1's lineitem (6M rows, `enable_seqscan = off`, a fresh
 engine): 0.79 s, then 0.63 s (round 5's 50 s doesn't reproduce on this head: no per-entry heap
 check or point read shows in the profile); PostgreSQL 0.11 s with two workers. `l_shipdate < '1995-01-01'` (2.75M entries) 1.06-1.14 s against 0.047 s.
