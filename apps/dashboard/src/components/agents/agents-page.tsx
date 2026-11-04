@@ -10,7 +10,7 @@ import { deriveGraph, rolling, type GraphNode } from "@/lib/agents-graph";
 import type { Size } from "@/lib/agents-layout";
 import type { AgentsServices } from "@/lib/agents-services";
 import { setAgentsView, useAgentsSurface, type AgentsView } from "@/lib/agents-surface";
-import { ALL, applyView, isPinned, pinnedConversations, pinOf, viewStorageKey, type Pin as PinRec } from "@/lib/agents-views";
+import { ALL, applyView, isPinned, pinKey, pinnedConversations, pinOf, viewStorageKey, type Pin as PinRec } from "@/lib/agents-views";
 import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
 import { useMarkState } from "../mark-state";
 import { AddMachineDialog, AddMachinePaths } from "./add-machine";
@@ -407,6 +407,18 @@ function CanvasView({
     client.follow("pins", followed ? followed.split(",") : []);
   }, [client, followed]);
   useEffect(() => () => client.unfollow("pins"), [client]);
+  // A card just pinned comes into view once it's laid out (another view's pins aren't new).
+  const pinsSeen = useRef<{ view: string; keys: Set<string> } | null>(null);
+  useEffect(() => {
+    const keys = new Set(view.pins.map(pinKey));
+    const before = pinsSeen.current;
+    pinsSeen.current = { view: view.id, keys };
+    if (!before || before.view !== view.id) return;
+    const added = [...keys].filter((k) => !before.keys.has(k));
+    if (!added.length) return;
+    const t = setTimeout(() => canvasRef.current?.reveal(added[added.length - 1]), 320);
+    return () => clearTimeout(t);
+  }, [view.id, view.pins, canvasRef]);
   // Show a node asked for before the canvas had it (a deep link, a new sandbox).
   useEffect(() => {
     const k = pendingFocus.current;
@@ -486,6 +498,7 @@ function CanvasView({
           storageKey={viewStorageKey(owner, view.id)}
           order={view.order}
           onOrder={views.setOrder}
+          fitKey={JSON.stringify(filter)}
           render={render}
           defaultSize={sizeOf}
           active={visible}

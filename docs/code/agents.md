@@ -675,6 +675,27 @@ The surface has three views:
   sideways), pinching zooms about the fingers (ctrl+wheel in Chromium, Firefox and Electron,
   gesture events in Safari, two touches on a touch screen), ⌘/ctrl+wheel zooms with a mouse,
   dragging the background or space-drag pans, and + − 0 1 and the arrows work from the keyboard.
+- **Views.** The canvas is a workspace the owner composes (`lib/agents-views.ts`,
+  `components/agents/views.tsx`). A slim bar over it holds "All" (the whole canvas) and the
+  owner's views as tabs, each with how many threads it picks. A view is a named filter (machines,
+  projects, thread status: running, waiting on me, errors, recent; providers; a text match on the
+  title, project and machine) with its own sibling order and its own frame (pan and zoom, per
+  device). It starts with "Waiting on me" and "Running"; views are created with + (or from All's
+  filter: type in the filter field or open the filter editor, then "Save view" or ⌥S), renamed
+  (double-click or the tab's menu), reordered (drag a tab, or "Move left/right") and deleted. A
+  filter that picks threads keeps them, what they hang off and their satellites; one on machines
+  or projects alone keeps them whole. Switching eases the cards to their new places and the frame
+  to the view's (or fits it); ⌥1…⌥9 jump to a view (1 is All), `[` and `]` step, `/` filters
+  (the canvas's own + − 0 1 and arrows stay). Which view shows is per device.
+- **Pinned cards.** A thread's conversation or diff, or a terminal, can be pinned onto a view
+  (the pin buttons over a card, or the pin in the side panel's title bar) as a big live card
+  beside its thread: a pinned conversation shows its newest runs as they stream, answers its
+  requests in place (they leave the canvas beside the thread) and has its composer, so a view can
+  show several agents working side by side without the side panel. Pinned cards are children in
+  the tidy layout (a conversation and diff first under their thread, a terminal in its own card's
+  place), so they never overlap; the header drags them among their siblings, the corner resizes
+  them (arrows on the focused corner too). They always show on their view whatever its filter,
+  at most 12 per view, sizes remembered per view.
 - **A conversation.** Clicking a thread opens it in a panel docked beside the canvas (resizable, remembered; on a phone it covers the canvas), its card selected on the canvas. A machine's or project's settings open in the same panel (`#agents/settings/<key>`). Finished subagents (a done provider subagent, a delegated thread that's done) leave the canvas; their results stay in the parent's transcript. The conversation shows the transcript
   in a centred column, the composer under it, the diff (of the thread or one run) or the thread's
   terminals beside it. Everything is managed from there: approvals in the transcript, fork, roll
@@ -728,7 +749,12 @@ The surface has three views:
 - **Remembered on every device.** How the owner arranged the canvas is kept by roll
   (`GET`/`PUT /v1/code/agents/{owner}/canvas`; `agents/canvas.rs`), so the laptop, the phone and
   the desktop app show the same arrangement. The document is the canvas's own (at most 64 KiB of
-  JSON) and opaque to roll; the dashboard reaches it through `AgentsServices.canvas`. A save names
+  JSON) and opaque to roll; the dashboard reaches it through `AgentsServices.canvas`. It is
+  `{ order, pins?, views? }`: `order` and `pins` are All's, `views` the owner's views
+  (`{ id, name, filter, order?, pins? }`, at most 16). A document from before views (`{ order }`)
+  still parses and shows the built-in views; `views: []` means the owner deleted them all. Saves
+  wait 350 ms (typing a filter, resizing a card is one save) and stay under the limit by
+  dropping the least recently made arrangements first. A save names
   the revision it was made over: over a stale one it's refused with what is there now (409,
   `CanvasConflict`), for the canvas to merge and save again. Each save goes out on the event stream
   as `canvas` with its revision, and an open device showing an older one loads it again

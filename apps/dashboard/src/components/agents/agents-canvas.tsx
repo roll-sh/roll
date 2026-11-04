@@ -61,6 +61,8 @@ export const AgentsCanvas = forwardRef<
     /** The order to show; without it the canvas keeps its own. */
     order?: Order;
     onOrder?: (order: Order) => void;
+    /** When it changes (the view's filter did), fit what's shown again. */
+    fitKey?: string;
     render: (node: GraphNode) => ReactNode;
     defaultSize: (node: GraphNode) => Size;
     onEscape?: () => void;
@@ -70,7 +72,7 @@ export const AgentsCanvas = forwardRef<
     /** The card whose conversation or settings are open beside it. */
     selected?: string;
   }
->(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, render, defaultSize, onEscape, overlay, active = true, selected }, ref) {
+>(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, fitKey, render, defaultSize, onEscape, overlay, active = true, selected }, ref) {
   const reduced = useReducedMotion();
   const container = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -178,6 +180,13 @@ export const AgentsCanvas = forwardRef<
     following.current = true;
     easeIn.current = true;
   }, [storageKey]);
+  // A new filter shows other cards: follow them again (the extent effect fits, easing).
+  const fitFor = useRef(fitKey);
+  useLayoutEffect(() => {
+    if (fitFor.current === fitKey) return;
+    fitFor.current = fitKey;
+    following.current = true;
+  }, [fitKey]);
   // The stream re-renders constantly; only a change in the overall extent refits.
   const extent = useMemo(() => {
     const r = bounds(positions, sizeOf);
@@ -205,7 +214,7 @@ export const AgentsCanvas = forwardRef<
     return () => clearTimeout(t);
     // `fit` changes with every layout; the extent is what matters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [extent, sizes.size > 0, storageKey]);
+  }, [extent, sizes.size > 0, storageKey, fitKey]);
   useEffect(() => {
     const c = container.current;
     if (!c) return;
