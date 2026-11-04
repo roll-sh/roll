@@ -1,0 +1,96 @@
+{
+  "status": "PASS",
+  "controls": [
+    {
+      "case": "success",
+      "exit": 0,
+      "marker": true,
+      "mocked_pnpm_started": true
+    },
+    {
+      "case": "network-failure",
+      "exit": 23,
+      "marker": false,
+      "mocked_pnpm_started": false
+    },
+    {
+      "case": "failed-process",
+      "exit": 101,
+      "marker": false,
+      "mocked_pnpm_started": true
+    },
+    {
+      "case": "failed-summary",
+      "exit": 1,
+      "marker": false,
+      "mocked_pnpm_started": true
+    },
+    {
+      "case": "error-line",
+      "exit": 1,
+      "marker": false,
+      "mocked_pnpm_started": true
+    },
+    {
+      "case": "compiler-error",
+      "exit": 1,
+      "marker": false,
+      "mocked_pnpm_started": true
+    },
+    {
+      "case": "panic",
+      "exit": 1,
+      "marker": false,
+      "mocked_pnpm_started": true
+    },
+    {
+      "case": "stamp-skip",
+      "exit": 1,
+      "marker": false,
+      "mocked_pnpm_started": true
+    },
+    {
+      "case": "environment-skip",
+      "exit": 1,
+      "marker": false,
+      "mocked_pnpm_started": true
+    },
+    {
+      "case": "empty-e2e",
+      "exit": 1,
+      "marker": false,
+      "mocked_pnpm_started": true
+    },
+    {
+      "case": "ignored-e2e",
+      "exit": 1,
+      "marker": false,
+      "mocked_pnpm_started": true
+    },
+    {
+      "case": "no-summary",
+      "exit": 1,
+      "marker": false,
+      "mocked_pnpm_started": true
+    },
+    {
+      "case": "missing-green",
+      "exit": 1,
+      "marker": false,
+      "mocked_pnpm_started": true
+    },
+    {
+      "case": "wrong-binary",
+      "exit": 1,
+      "marker": false,
+      "mocked_pnpm_started": true
+    },
+    {
+      "case": "duplicate-e2e",
+      "exit": 1,
+      "marker": false,
+      "mocked_pnpm_started": true
+    }
+  ],
+  "real_services_started": false
+}

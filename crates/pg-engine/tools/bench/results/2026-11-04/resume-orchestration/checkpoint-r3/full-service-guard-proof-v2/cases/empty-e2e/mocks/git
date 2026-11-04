@@ -1,0 +1,2 @@
+#!/bin/sh
+case "$*" in *"rev-parse HEAD"*) echo exact-source;; *"status --porcelain"*) :;; *) exit 99;; esac
