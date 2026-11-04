@@ -1043,6 +1043,7 @@ async fn machine_settings_are_checked_stored_applied_and_reported_without_creden
         title: Some("Settings".into()),
         prompt: Some("go".into()),
         attachments: Vec::new(),
+        orchestrator: false,
     };
     let ids = |info: &MachineInfo| info.providers.iter().map(|p| p.id.0.clone()).collect::<Vec<_>>();
 
