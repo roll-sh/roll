@@ -15,6 +15,7 @@ import {
   array,
   bool,
   decode,
+  DecodeError,
   int,
   json,
   literal,
@@ -568,7 +569,28 @@ export type StreamEvent =
   | ({ type: "entity" } & Mirrored)
   | { type: "machine"; cursor: number; machine: Machine }
   | { type: "machine_removed"; cursor: number; machine: MachineId }
-  | { type: "delta"; machine: MachineId; delta: Delta };
+  | { type: "delta"; machine: MachineId; delta: Delta }
+  /** The owner's canvas was saved: a device showing an older `revision` loads it again. */
+  | { type: "canvas"; cursor: number; revision: number; updated_at: Millis };
+
+/** `GET`/`PUT /v1/code/agents/{owner}/canvas`: the canvas as the owner arranged it (opaque here). */
+export interface SavedCanvas {
+  /** `null` until the first save. */
+  canvas: Record<string, unknown> | null;
+  /** Saves so far (0: none). */
+  revision: number;
+  updated_at: Millis | null;
+}
+
+/** A save over a revision that isn't the current one (409): `current` is what is there now. */
+export class CanvasConflict extends Error {
+  constructor(readonly current: SavedCanvas) {
+    super(`the canvas changed (it is at revision ${current.revision})`);
+  }
+}
+
+/** The largest canvas the relay keeps, as compact JSON (bytes). */
+export const MAX_CANVAS = 64 * 1024;
 
 // ── the relay protocol (daemon ↔ relay; mirrored for the fixture tests) ──
 
@@ -1004,7 +1026,15 @@ export const streamEventD: Decoder<StreamEvent> = tagged("type", {
   machine: obj<{ cursor: number; machine: Machine }>({ cursor: int, machine: machineD }),
   machine_removed: obj<{ cursor: number; machine: MachineId }>({ cursor: int, machine: str }),
   delta: obj<{ machine: MachineId; delta: Delta }>({ machine: str, delta: deltaD }),
+  canvas: obj<{ cursor: number; revision: number; updated_at: Millis }>({ cursor: int, revision: int, updated_at: int }),
 } satisfies Record<StreamEvent["type"], Decoder<object>>);
+
+/** The canvas document: any JSON object (the canvas parses it), kept whole. */
+const canvasDocD: Decoder<Record<string, unknown> | null> = nullable((v, p) => {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) throw new DecodeError(p, "expected an object");
+  return v as Record<string, unknown>;
+});
+export const savedCanvasD = obj<SavedCanvas>({ canvas: canvasDocD, revision: int, updated_at: nullable(int) });
 
 const stampedD = obj<Stamped>({ seq: int, entity: entityD });
 export const daemonFrameD: Decoder<DaemonFrame> = tagged("type", {
@@ -1266,6 +1296,21 @@ export function createAgentsApi(
     /** The thread lets go of its work item (the claim stays the claimant's). */
     releaseWork: async (owner: string, thread: ThreadId) => {
       await call("DELETE", `${ag(owner)}/threads/${enc(thread)}/work`);
+    },
+    /** The canvas as the owner arranged it (`canvas: null` before the first save). */
+    canvas: async (owner: string) => decode(savedCanvasD, await call("GET", `${ag(owner)}/canvas`)),
+    /**
+     * Save the canvas. With `revision`, only over that revision (0: none saved yet), else a
+     * `CanvasConflict` holding what is there now; without, the last writer wins. Owners only:
+     * agent tokens get a 403.
+     */
+    saveCanvas: async (owner: string, doc: Record<string, unknown>, revision?: number): Promise<SavedCanvas> => {
+      try {
+        return decode(savedCanvasD, await call("PUT", `${ag(owner)}/canvas`, revision === undefined ? { canvas: doc } : { canvas: doc, revision }));
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 409) throw new CanvasConflict(decode(savedCanvasD, e.body));
+        throw e;
+      }
     },
   };
 }

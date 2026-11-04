@@ -144,6 +144,9 @@ Machine            a daemon (hostname, os, providers and their auth state, onlin
   owner's machines). Browsers load `GET …/state` (a snapshot plus its cursor) and then stream
   `GET …/events` (SSE, `id:` is the cursor, `Last-Event-ID` resumes). Nothing is lost on a
   reconnect, because a snapshot plus "everything with a newer cursor" is complete.
+- A save of the owner's canvas arrangement (`…/canvas`, "Canvas") takes a cursor of the same
+  sequence, in the same transaction, so the stream carries it as `canvas` and a reconnect that
+  missed it gets the canvas's last save from the table.
 - The state is in two scopes so the canvas stays light: the **shell** (machines, projects,
   threads, runs, pending requests, terminals) is always sent; **detail** (nodes, checkpoints)
   only for the threads a client asks for (`?threads=`).
@@ -615,6 +618,15 @@ The surface has three views:
   menu and the diff or a terminal takes the transcript's place; the oldest waiting request sits at
   the bottom of the canvas, answerable with one tap; fitting the canvas keeps cards readable (at
   least 55 %) and starts at the machines.
+- **Remembered on every device.** How the owner arranged the canvas is kept by roll
+  (`GET`/`PUT /v1/code/agents/{owner}/canvas`; `agents/canvas.rs`), so the laptop, the phone and
+  the desktop app show the same arrangement. The document is the canvas's own (at most 64 KiB of
+  JSON) and opaque to roll; the dashboard reaches it through `AgentsServices.canvas`. A save names
+  the revision it was made over: over a stale one it's refused with what is there now (409,
+  `CanvasConflict`), for the canvas to merge and save again. Each save goes out on the event stream
+  as `canvas` with its revision, and an open device showing an older one loads it again
+  (`AgentsData.canvas`). Agent tokens read it but never arrange it. The demo keeps it in memory
+  for as long as the page is open.
 
 ## Desktop app
 

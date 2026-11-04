@@ -63,6 +63,11 @@ export interface AgentsData {
   tombs: ReadonlyMap<string, number>;
   /** Threads whose detail this data holds. */
   detail: ReadonlySet<ThreadId>;
+  /**
+   * The newest canvas save the stream announced (`null`: none since the page opened). A canvas
+   * showing an older revision loads it again (`AgentsServices.canvas.load`).
+   */
+  canvas: { revision: number; updated_at: number } | null;
 }
 
 export const emptyData = (): AgentsData => ({
@@ -78,6 +83,7 @@ export const emptyData = (): AgentsData => ({
   live: new Map(),
   tombs: new Map(),
   detail: new Set(),
+  canvas: null,
 });
 
 /** Tombstones kept at most; the oldest go first (only a very late stale upsert could need one). */
@@ -129,6 +135,11 @@ class Draft {
 
   cursor(c: number) {
     if (c > this.d.cursor) this.d.cursor = c;
+  }
+
+  /** Revisions only go up: a late or replayed announcement never takes the canvas back. */
+  canvas(revision: number, updated_at: number) {
+    if (revision > (this.d.canvas?.revision ?? 0)) this.d.canvas = { revision, updated_at };
   }
 
   machine(cursor: number, m: Machine) {
@@ -307,6 +318,10 @@ export function applyEvents(data: AgentsData, events: readonly StreamEvent[]): A
         break;
       case "delta":
         d.delta(ev.delta);
+        break;
+      case "canvas":
+        d.canvas(ev.revision, ev.updated_at);
+        d.cursor(ev.cursor);
         break;
     }
   }

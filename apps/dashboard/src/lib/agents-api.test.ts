@@ -219,10 +219,10 @@ describe("agents api", () => {
     await vi.waitFor(() => expect(urls).toHaveLength(2), { timeout: 3000 });
     stop();
     // Every known event decoded (the unknown one dropped), ids are cursors, deltas have none.
-    expect(seen).toEqual(["entity", 7, "machine", 8, "machine_removed", 9, "delta", null]);
+    expect(seen).toEqual(["entity", 7, "machine", 8, "machine_removed", 9, "delta", null, "canvas", 10]);
     expect(urls[0]).toBe("http://roll.test/v1/code/agents/acme/events?threads=thr_a&after=5");
-    expect(urls[1]).toBe("http://roll.test/v1/code/agents/acme/events?threads=thr_a&after=9");
-    expect(lastIds).toEqual(["5", "9"]);
+    expect(urls[1]).toBe("http://roll.test/v1/code/agents/acme/events?threads=thr_a&after=10");
+    expect(lastIds).toEqual(["5", "10"]);
   });
 });
 

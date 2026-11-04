@@ -37,7 +37,7 @@ import type {
 } from "./agents-api";
 import { reachable } from "./agents-api";
 import type { AgentsTransport } from "./agents-client";
-import type { AgentsServices, RepoChoice } from "./agents-services";
+import { memoryCanvas, type AgentsServices, type RepoChoice } from "./agents-services";
 import { ApiError } from "./code-api";
 import type { Sandbox, SandboxSize } from "./sandboxes-api";
 
@@ -366,6 +366,8 @@ export class DemoOwner implements AgentsTransport {
   private sims = new Map<ThreadId, Sim>();
   private timers = new Set<ReturnType<typeof setTimeout>>();
   private started = false;
+  /** The demo's canvas arrangement: kept for as long as the page is open. */
+  private canvas = memoryCanvas();
   /**
    * `speed` scales every delay (tests run the demo fast); `keepAlive` starts new work whenever
    * the canvas goes quiet.
@@ -653,6 +655,7 @@ export class DemoOwner implements AgentsTransport {
       async releaseWork(_o, thread) {
         owner.patchThread(thread, { work: null });
       },
+      canvas: owner.canvas,
     };
   }
 

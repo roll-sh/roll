@@ -582,6 +582,7 @@ GET /v1/code/agents/{owner}/events?threads=…&after=<cursor> → SSE, events na
        event: machine          id: <cursor>   data: {type: "machine", cursor, machine: Machine}
        event: machine_removed  id: <cursor>   data: {type: "machine_removed", cursor, machine: mch_…}
        event: delta            (no id)        data: {type: "delta", machine, delta: Delta}
+       event: canvas           id: <cursor>   data: {type: "canvas", cursor, revision, updated_at}
        Load /state, then open /events?after=<state.cursor>: a snapshot plus everything with a newer
        cursor is complete. A reconnect with Last-Event-ID (EventSource sends it) first gets what
        changed since, from the mirror (each record once, at its newest), then goes on live; cursors
@@ -590,6 +591,20 @@ GET /v1/code/agents/{owner}/events?threads=…&after=<cursor> → SSE, events na
        terminal deltas always. Deltas are never replayed. Stream limits as for repo events (429).
        With both `?after=` and Last-Event-ID (the canvas sends both on a reconnect) the stream resumes
        after the newer; a Last-Event-ID that isn't a number is ignored, an `after` that isn't is a 400.
+
+GET /v1/code/agents/{owner}/canvas → SavedCanvas {canvas: object | null, revision, updated_at: Millis | null}
+       The canvas as the owner arranged it (the dashboard's document; opaque to roll), so every device
+       shows the same. Before the first save: {canvas: null, revision: 0, updated_at: null}. Owner's
+       tokens (agents too), else 404.
+PUT /v1/code/agents/{owner}/canvas {canvas: object, revision?: int} → SavedCanvas
+       Saves it (revision + 1). With `revision`, only over that revision (0: none saved yet), else 409
+       SavedCanvas + {error}: what is there now, unchanged; without it the last writer wins. `canvas`
+       is at most 64 KiB as compact JSON and the body is read no further than a little past that: 413
+       (also for a Content-Length past it). 400 bad JSON, a body that isn't an object, a `canvas` that
+       isn't an object, a `revision` that isn't a whole number. Code::manages: 401 anonymous, 403 agent
+       tokens and other owners; machine tokens are 401. Each save goes out on /events as `canvas` with
+       its cursor (the owner's, so the snapshot's cursor counts it), and a stream catching up gets the
+       canvas's last save if it's newer: a device showing an older revision loads it again.
 
 POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, command: Command} → Reply
        Forwarded to the machine's daemon; waits up to 30 s for its reply. `id` (1–128 characters) is

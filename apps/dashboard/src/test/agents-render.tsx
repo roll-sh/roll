@@ -4,7 +4,7 @@ import type { ReactElement } from "react";
 import { vi, type Mock } from "vitest";
 import type { Command, Machine, MachineId, Mirrored, Reply } from "@/lib/agents-api";
 import { AgentsClient, type AgentsTransport } from "@/lib/agents-client";
-import type { AgentsServices } from "@/lib/agents-services";
+import { memoryCanvas, type AgentsServices } from "@/lib/agents-services";
 import type { SandboxSize } from "@/lib/sandboxes-api";
 import { AgentsContext, type AgentsCtx } from "@/components/agents/use-agents";
 import { machine as machineFixture, M1 } from "./agents";
@@ -44,9 +44,15 @@ export function renderAgents(ui: ReactElement, h: AgentsHarness) {
   return render(ui, { wrapper: ({ children }) => <AgentsContext.Provider value={h.ctx}>{children}</AgentsContext.Provider> });
 }
 
-/** Services with every call a mock; `over` replaces some. Sandboxes: one size, none rented, docker. */
-export function fakeServices(over: Omit<Partial<AgentsServices>, "sandboxes"> & { sandboxes?: Partial<AgentsServices["sandboxes"]> } = {}): AgentsServices {
-  const { sandboxes, ...rest } = over;
+/**
+ * Services with every call a mock; `over` replaces some. Sandboxes: one size, none rented, docker.
+ * The canvas is kept in memory (revisions and conflicts as the relay does them), behind mocks.
+ */
+export function fakeServices(
+  over: Omit<Partial<AgentsServices>, "sandboxes" | "canvas"> & { sandboxes?: Partial<AgentsServices["sandboxes"]>; canvas?: Partial<AgentsServices["canvas"]> } = {},
+): AgentsServices {
+  const { sandboxes, canvas, ...rest } = over;
+  const kept = memoryCanvas();
   return {
     sandboxes: {
       list: vi.fn(async () => ({ sandboxes: [], sizes: [SIZE], max: 5, backend: "docker" })),
@@ -61,6 +67,7 @@ export function fakeServices(over: Omit<Partial<AgentsServices>, "sandboxes"> & 
     createProject: vi.fn(),
     takeWork: vi.fn(async () => null),
     releaseWork: vi.fn(async () => {}),
+    canvas: { load: vi.fn(kept.load), save: vi.fn(kept.save), ...canvas },
     ...rest,
   };
 }
