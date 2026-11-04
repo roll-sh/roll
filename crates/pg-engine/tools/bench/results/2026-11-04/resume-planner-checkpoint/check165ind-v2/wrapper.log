@@ -1,0 +1,10 @@
+debug-test	0
+{"passed": 453, "failed": 0, "ignored": 18, "summaries": 60}
+release-test	0
+{"passed": 453, "failed": 0, "ignored": 18, "summaries": 60}
+clippy	0
+build	0
+postgres-unit	0
+{"status": "PASS", "executed_unit_checks": true, "service_stack_acceptance": false, "pg_engine_execution": false, "reason": "--unit explicitly disables Docker e2e; separate final forced service-stack gate held"}
+CHECK165INDEPENDENT-PASS
+HEAVY-EXIT 0

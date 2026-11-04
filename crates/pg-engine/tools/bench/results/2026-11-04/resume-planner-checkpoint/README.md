@@ -96,19 +96,23 @@ launch. Shared tested451baseline perbinary map plus ONLY two newpreparedtest nam
 frozen453/0/18/60. Successorcheck165ind-v2 uses exact perbinary map/auditor, selfchecked
 against oldcaab448summary, frozenrunnerhashes preserved. Per-candidate stack check scoped
 pnpm test:pg --unit; stamp skip explicitlySKIP/noexecution; no service-stack orpgengine
-acceptance. One final forced service gate held. Exactab3 fullgate nowactive,partialcurrent
-Build/unit-stack outputs excluded while active. Exactab3 DEBUG and RELEASE passed453/
+acceptance. One final forced service gate held. Exactab3 fullgate terminal. DEBUG and RELEASE passed453/
 0/18/60;every perbinary summary matches frozen map. Wire67/67 passed in this fullrun;
 earlier fullwire101 remains preserved, no causal/performance inference. Release all-target Clippy
 completed0:14diagnostics,message/path sequence equalhistoricalcaab,no candidate-changedpath.
-No freshbaselineClippycomparison claimed. Distbuild active.
+No freshbaselineClippycomparison claimed. Distbuild passed0,binarySHA256
+d4f2d31068d282cc28f98bfd77bcbb4ba85cd5d6492940ad13a7f279e5168b32.
+pnpm test:pg --unit executed(notstampSKIP) andpassed0; its scopedbuild/Clippy/tests do not
+execute pg-engine or establish service-stack acceptance. Separateterminalauditor rechecks
+all5commandexits,completefrozenmaps,cleansource/tree,runnerhashes,binaryhash,unitclassification
+andabsence ofownedwrapper/heavy/runner. Allpassed;sourceacceptance remainsheld.
 Observed debugcargo593561/parallel_scan1489244 effectiveaffinity0-35,overlapping149reserved
 4-7,22-25;nice19/jobs2/threads2 enforced, NO CPUisolation claim. No affinity/runnerchange;
 Release cargo1812146/rustc1812721,1812723 also observed nice19 and effectiveaffinity0-35;
 single read-only observation preserved, no mid-run controls changed.
 Release parallel_scan2401643 and all11 existingthreads also observed effectiveaffinity0-35.
 149timing deferred while overlap persists. Future launch-control assessment held until
-currentfulljobterminal/rawexport. Fullremaining gates pending. Independent exactab3 static review found noHIGH/MEDIUM,
+terminalrawexport. Broader combined/runtime/resource/service gates pending. Independent exactab3 static review found noHIGH/MEDIUM,
 22paths/cursor exclusionverified;rawresult andcount/reviewer-scopeerratum retained.
 
 Owned cache runners now fail explicitly on logged failures (Bash ! guards do not imply

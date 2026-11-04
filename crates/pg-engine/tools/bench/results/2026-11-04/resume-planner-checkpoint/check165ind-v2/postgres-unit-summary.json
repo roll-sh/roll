@@ -1,0 +1,18 @@
+{
+  "summaries": 5,
+  "passed": 24,
+  "failed": 0,
+  "ignored": 0,
+  "finished_profiles": [
+    "dev",
+    "dev",
+    "test"
+  ],
+  "cargo_stages": [
+    "build pg-proxy/pg-storage/pg-control/rolld/roll-cli",
+    "Clippy same crates all-targets -D warnings",
+    "test same crates --lib --bins"
+  ],
+  "pg_engine_execution": false,
+  "service_stack_acceptance": false
+}

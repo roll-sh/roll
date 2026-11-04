@@ -1,0 +1,5 @@
+debug-test	0
+release-test	0
+clippy	0
+build	0
+postgres-unit	0

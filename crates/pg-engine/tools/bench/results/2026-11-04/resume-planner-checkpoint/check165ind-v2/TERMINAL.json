@@ -1,0 +1,46 @@
+{
+  "observed_utc": "2026-11-04T17:19:06.943329+00:00",
+  "source": "ab3f64b8dd92203123f6777ae4a6028d3a3aae67",
+  "tree": "760827d66acfa748e39eb1a5445781c0de3f393a",
+  "clean": true,
+  "owned_wrapper_heavy_runner_absent": true,
+  "frozen_runner_hashes_match": true,
+  "command_exits": {
+    "debug-test": "0",
+    "release-test": "0",
+    "clippy": "0",
+    "build": "0",
+    "postgres-unit": "0"
+  },
+  "test_summaries": {
+    "debug-test": {
+      "passed": 453,
+      "failed": 0,
+      "ignored": 18,
+      "summaries": 60
+    },
+    "release-test": {
+      "passed": 453,
+      "failed": 0,
+      "ignored": 18,
+      "summaries": 60
+    }
+  },
+  "engine_sha256": "d4f2d31068d282cc28f98bfd77bcbb4ba85cd5d6492940ad13a7f279e5168b32",
+  "postgres_unit": {
+    "status": "PASS",
+    "executed_unit_checks": true,
+    "service_stack_acceptance": false,
+    "pg_engine_execution": false,
+    "reason": "--unit explicitly disables Docker e2e; separate final forced service-stack gate held"
+  },
+  "resource_limits": "Observed nice19/jobs2/testthreads2; actual effective affinity0-35, no CPU isolation",
+  "resource_evidence": [
+    "affinity-observation-debug.json",
+    "affinity-observation-release.json",
+    "affinity-observation-release-tests.json"
+  ],
+  "source_acceptance": false,
+  "performance_acceptance": false,
+  "remaining": "Post-terminal LOW/launch-controls assessment; parent review/integration and combined runtime/resource/service gates remain separate. Earlier focused wire101 preserved."
+}

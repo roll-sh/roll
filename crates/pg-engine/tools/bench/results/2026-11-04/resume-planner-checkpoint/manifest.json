@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "78bc0df9ee37d221a58499e2dcd96a65432405a086e300ee9781b65f40ae3ad2",
-    "bytes": 10396
+    "sha256": "97950f200583beea60606c04882159351b0ad599ddb85ed6ee4ad7bff47b3a82",
+    "bytes": 10773
   },
   "bytea165compare/RESTORED": {
     "sha256": "cfeb0d7a74ac20eb1d46d347c00db409be5f9c5b47ca77e388b2e494a65d91c3",
@@ -95,6 +95,10 @@
     "sha256": "0662b53ce16326094c91d35608f44059b2715bb609df884cece5b27852e4d8b5",
     "bytes": 41
   },
+  "check165ind-v2/TERMINAL.json": {
+    "sha256": "7a31c9789125ced07975aca29301b3b3542cf1fb059b6bbe567a10997f019be8",
+    "bytes": 1509
+  },
   "check165ind-v2/affinity-observation-debug.json": {
     "sha256": "353f870df69398a58d5c13b340f10c906ede8765c897115c2019af29069b4356",
     "bytes": 4667
@@ -106,6 +110,14 @@
   "check165ind-v2/affinity-observation-release.json": {
     "sha256": "26ffd3d1345877066ea87ac78cc255dfb3877fd54205978453b8e599033ce842",
     "bytes": 14628
+  },
+  "check165ind-v2/build.command": {
+    "sha256": "a07bb951576e7a8a4b2043e5eec8b2f6254bb57f0a4e9636e781ce351d7f7927",
+    "bytes": 59
+  },
+  "check165ind-v2/build.log": {
+    "sha256": "1b83e4179511e2c02cb30b45dbf31cd67bc0f649378a5da313e7917efa0a31a2",
+    "bytes": 172
   },
   "check165ind-v2/clippy-completed-exits.tsv": {
     "sha256": "093461a98ae1f8ded9992f808e72edd8c2741280c6a2ff8df17ab35a9ba76627",
@@ -123,11 +135,19 @@
     "sha256": "0b91d766534add86d2066b2411b75a9740363795017ba463b50ec689b8052d53",
     "bytes": 10548
   },
+  "check165ind-v2/current.status": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
   "check165ind-v2/debug-completed-exits.tsv": {
     "sha256": "f08abcdc322c626e258456ce735cd82410657a770f20177d70bae93cba340fc1",
     "bytes": 13
   },
   "check165ind-v2/debug-test-summary.json": {
+    "sha256": "a3acdd6802a54cc9ea7a202afd48191f90954ddfcb187fc78d318efd84cac3ff",
+    "bytes": 3947
+  },
+  "check165ind-v2/debug-test-terminal-audit.json": {
     "sha256": "a3acdd6802a54cc9ea7a202afd48191f90954ddfcb187fc78d318efd84cac3ff",
     "bytes": 3947
   },
@@ -139,15 +159,43 @@
     "sha256": "5793f0bf5bd7d6b1d3b624da60a62fcaee03fc7be9be75b7611a7a48aee3d1e3",
     "bytes": 38176
   },
+  "check165ind-v2/engine.sha256": {
+    "sha256": "56e4b1ffd7c2a729b8e3524a7df622d7b888849f04bbddab8e67d51b9975864d",
+    "bytes": 121
+  },
+  "check165ind-v2/exits.tsv": {
+    "sha256": "5760255dfb952e0bb9d2c517bfefff14d1fa75dcfe46a3f5a80c7b1918fb7614",
+    "bytes": 61
+  },
   "check165ind-v2/initial.status": {
     "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "bytes": 0
+  },
+  "check165ind-v2/postgres-unit-status.json": {
+    "sha256": "532e62062756dc948146c542adc6a658b90ca4df36121ca700779d6c565a8497",
+    "bytes": 224
+  },
+  "check165ind-v2/postgres-unit-summary.json": {
+    "sha256": "dea02491b871fc16a839a9768f2833c270d54e6638f3aa7a6cffaf46f71a1ea7",
+    "bytes": 370
+  },
+  "check165ind-v2/postgres-unit.command": {
+    "sha256": "99f2cf965ef407eb3f36a6aa3cf858909f5d8f75396abbd47109bb9d94ac2e3e",
+    "bytes": 21
+  },
+  "check165ind-v2/postgres-unit.log": {
+    "sha256": "f72e7fe035f2b900bafdccb66909ec4fd1034d2bd9c03a787eba112a2be85064",
+    "bytes": 14564
   },
   "check165ind-v2/release-completed-exits.tsv": {
     "sha256": "e32cfa9a9c13bbd3fd8a48aae7954d0a11188718cac2eba4133af9a4c83e6ef9",
     "bytes": 28
   },
   "check165ind-v2/release-test-summary.json": {
+    "sha256": "a3acdd6802a54cc9ea7a202afd48191f90954ddfcb187fc78d318efd84cac3ff",
+    "bytes": 3947
+  },
+  "check165ind-v2/release-test-terminal-audit.json": {
     "sha256": "a3acdd6802a54cc9ea7a202afd48191f90954ddfcb187fc78d318efd84cac3ff",
     "bytes": 3947
   },
@@ -166,6 +214,10 @@
   "check165ind-v2/tree.txt": {
     "sha256": "8dfa0aab3e5a59d8af57f56da2d8253de6b850eda93c8516e48dbab328f3515d",
     "bytes": 41
+  },
+  "check165ind-v2/wrapper.log": {
+    "sha256": "a7824c2ddab4ed9dd8c18fcfa6d0c761fb592289444e92e4cd8baa3cce29ecd3",
+    "bytes": 433
   },
   "check165r2-runner-error/exits.tsv": {
     "sha256": "5afdccc0c3a6898bcf901621239b567706c88ec04836a91942b6be918e8e24cb",
@@ -428,8 +480,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "3d560ed72f81eb906fd35e391c946bc00d471b2aeb721c5e6833f1806def6240",
-    "bytes": 22484
+    "sha256": "2510fd88676a8a31ee0bebc6967810bed6c156e488d6d806ffee8030ae2718ca",
+    "bytes": 23370
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -1014,6 +1066,10 @@
   "runners/audit165-summary.py": {
     "sha256": "805e1c00d0baaa1f585fbb21aded1190028706387de122339b04aed649451a8e",
     "bytes": 1311
+  },
+  "runners/audit165-terminal.py": {
+    "sha256": "fec1b4e8cfbd4c9bfbda6c0f503faca3d765993c01c83e11456aa368c5b897dd",
+    "bytes": 3753
   },
   "runners/bench165.sh": {
     "sha256": "f56096e85527276f097b77d81b7ab8c72112cf894a3516afd4ee2917399dfd7d",
