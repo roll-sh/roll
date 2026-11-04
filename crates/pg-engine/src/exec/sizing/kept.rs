@@ -163,7 +163,12 @@ pub(super) struct Building<'a> {
 
 impl Drop for Building<'_> {
     fn drop(&mut self) {
-        self.db.relfiles.of(self.oid).write().building.remove(&self.oid);
+        let mut rf = self.db.relfiles.of(self.oid).write();
+        rf.building.remove(&self.oid);
+        if !rf.heaps.contains_key(&self.oid) {
+            rf.kept_sizes.remove(&self.oid);
+        }
+        drop(rf);
         self.db.relfiles.notify_built();
     }
 }
@@ -238,17 +243,18 @@ pub(super) fn sizes(db: &Database, cat: &Catalog, t: &Table) -> Option<Sizes> {
 
 /// The sizes `sizes` found for table `oid`, without reading anything (None: none read).
 pub(super) fn sizes_read(rf: &RelFiles, oid: u32) -> Option<&Sizes> {
-    if rf.heaps.contains_key(&oid) {
+    if rf.heaps.contains_key(&oid) || !(rf.kept.contains(&oid) || rf.building.contains(&oid)) {
         return None;
     }
     rf.kept_sizes.get(&oid)?.as_ref()
 }
 
 /// The models of kept table `oid` are laid out (`rf` has them): its header's sizes go, and
-/// (debug builds) must be the models'.
-pub(super) fn laid_out(rf: &mut RelFiles, oid: u32) {
+/// (debug builds) must match when their saved shape was restored. A rebuild from rows
+/// may pack pages differently.
+pub(super) fn laid_out(rf: &mut RelFiles, oid: u32, restored: bool) {
     let Some(s) = rf.kept_sizes.remove(&oid).flatten() else { return };
-    if cfg!(debug_assertions) {
+    if cfg!(debug_assertions) && restored {
         let heap = rf.heaps.get(&oid).map(Heap::nblocks);
         debug_assert_eq!(heap, Some(s.heap), "kept heap pages of {oid}");
         for &(ix, pages, level) in &s.btrees {
@@ -304,7 +310,7 @@ fn lay_out(db: &Database, oid: u32, building: Building<'_>) {
         rf.btrees.insert(ix, tree);
     }
     rf.kept_hash.insert(oid, h);
-    laid_out(&mut rf, oid);
+    laid_out(&mut rf, oid, true);
     drop(rf);
     drop(building);
 }

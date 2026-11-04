@@ -1698,6 +1698,7 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
     }
     // Each row's TID in the heap laid out here (None: modelled already, by keys).
     let mut placed: Option<Vec<Tid>> = None;
+    let mut restored_shape = false;
     if heap_missing && !rf.heaps.contains_key(&t.oid) {
         // (Every row where its stored TID says: rows never move when a database reopens, nor
         // when a rolled-back TRUNCATE or rewrite gives the table its old storage back.)
@@ -1726,6 +1727,7 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
         // Otherwise, the first model of the table since the database was opened: the pages
         // its last VACUUM left all-visible stay so, as Postgres's visibility map keeps them.)
         if shape.as_ref().is_some_and(|s| h.read_shape(s).is_some()) {
+            restored_shape = true;
         } else if !rf.dropped.contains(&t.oid)
             && let Some(st) = ctx.catalog().relstats.get(&t.oid)
         {
@@ -1755,7 +1757,7 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
             .collect();
         rf.btrees.insert(oid, Btree::build(opts, ents));
     }
-    kept::laid_out(rf, t.oid);
+    kept::laid_out(rf, t.oid, restored_shape);
     Ok(true)
 }
 
@@ -4495,7 +4497,10 @@ pub fn model_bytes(db: &Database) -> usize {
 }
 
 pub fn btree_blocks(table: u32, index: u32, db: &Database) -> Option<u32> {
-    db.relfiles.of(table).read().btrees.get(&index).map(Btree::nblocks)
+    let rf = db.relfiles.of(table).read();
+    rf.btrees.get(&index).map(Btree::nblocks).or_else(|| {
+        kept::sizes_read(&rf, table).and_then(|s| s.btrees.iter().find(|b| b.0 == index).map(|b| b.1))
+    })
 }
 
 /// Where each row (by data key) is in the table's heap, and whether the visibility map
