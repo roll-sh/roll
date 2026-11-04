@@ -73,6 +73,14 @@ describe("ThreadNode, T3's thread row as a card", () => {
 });
 
 describe("threadPill", () => {
+  it("marks an orchestrator with the agents it started and how many still run (forks don't count)", () => {
+    const o = thread({ id: "thr_o", title: "Ship the release", orchestrator: true });
+    const kid = (id: string, status: "running" | "idle", relation: "subagent" | "fork" = "subagent") =>
+      mirrored("thread", thread({ id, status, lineage: { parent: "thr_o", relation, root: "thr_o", from_run: null } }), 2);
+    const h = agentsHarness({ entities: [mirrored("thread", o, 1), kid("thr_a", "running"), kid("thr_b", "idle"), kid("thr_c", "running", "fork")] });
+    renderAgents(<ThreadNode thread={o} machine={machine()} />, h);
+    expect(screen.getByLabelText("Orchestrator · 2 agents, 1 running")).toBeInTheDocument();
+  });
   it("follows T3's order: what waits on you, working, failed, plan ready, completed", () => {
     const t = thread();
     expect(threadPill(t, [], undefined)).toBeNull();

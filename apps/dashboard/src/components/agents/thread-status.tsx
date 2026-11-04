@@ -8,7 +8,37 @@
  * palette with orange in it).
  */
 
-import type { Request, Run, Thread } from "@/lib/agents-api";
+import { Workflow } from "lucide-react";
+import { isBusy, type Request, type Run, type Thread } from "@/lib/agents-api";
+
+/** What an orchestrator has spun up: the agents it started (delegated threads) and how many still run. */
+export function orchestration(thread: Thread, threads: Iterable<Thread>): { started: number; running: number } {
+  let started = 0;
+  let running = 0;
+  for (const t of threads) {
+    if (t.lineage?.parent !== thread.id || t.lineage.relation !== "subagent") continue;
+    started++;
+    if (isBusy(t.status)) running++;
+  }
+  return { started, running };
+}
+
+/** An orchestrator's mark (the palette's `Workflow` glyph), with the agents it started and how many still run. */
+export function OrchestratorChip({ started, running, className = "" }: { started: number; running: number; className?: string }) {
+  const label = `Orchestrator${started ? ` · ${started} agent${started === 1 ? "" : "s"}${running ? `, ${running} running` : ""}` : ""}`;
+  return (
+    <span aria-label={label} title={label} className={`inline-flex min-w-0 shrink-0 items-center gap-1 rounded-full border border-line-2 px-1.5 py-px text-[10.5px] leading-[16px] text-muted ${className}`}>
+      <Workflow className={`size-3 shrink-0 ${running ? "text-accent" : ""}`} aria-hidden />
+      <span aria-hidden>Orchestrator</span>
+      {started > 0 && (
+        <span aria-hidden className="font-mono tabular-nums text-subtle">
+          {started}
+          {running > 0 && <span className="text-accent"> · {running} running</span>}
+        </span>
+      )}
+    </span>
+  );
+}
 
 export type PillTone = "accent" | "ok" | "danger" | "muted";
 

@@ -15,7 +15,7 @@ import { PullLine } from "./project-settings";
 import { RequestCard } from "./request-card";
 import { SandboxPanel } from "./sandbox";
 import { ago, loginCommand, MachineIcon, modelName, providerName, shortPath, Stat, StatusDot, threadStatusLabel, usageLine } from "./shared";
-import { ProjectMonogram, StatusPill, threadDone, threadPill } from "./thread-status";
+import { orchestration, OrchestratorChip, ProjectMonogram, StatusPill, threadDone, threadPill } from "./thread-status";
 import { useAgents } from "./use-agents";
 
 /** The frame every canvas card shares: flat panel, hairline border, the whole card a drag handle. */
@@ -379,6 +379,7 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
   const model = modelName(providers, thread.provider, thread.model);
   const project = data.projects.get(thread.project)?.value;
   const terminals = [...data.terminals.values()].filter((r) => r.value.thread === thread.id && r.value.status !== "exited").length;
+  const orchestrated = thread.orchestrator ? orchestration(thread, [...data.threads.values()].map((r) => r.value)) : null;
   // Idle with nothing to say but the last prompt: no line when that's the title again.
   const quiet = !thread.error && !running && thread.status !== "waiting";
   const tone = thread.status === "error" ? "error" : running ? "busy" : thread.archived_at ? "muted" : done ? "done" : undefined;
@@ -428,8 +429,9 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
           )}
         </p>
         )}
-        {(thread.change || thread.work || thread.worktree || terminals > 0) && (
+        {(thread.orchestrator || thread.change || thread.work || thread.worktree || terminals > 0) && (
           <div className="mt-2 flex min-w-0 items-center gap-2 text-[11px] text-subtle">
+            {orchestrated && <OrchestratorChip {...orchestrated} />}
             {thread.change && <ChangeChip change={thread.change} />}
             {thread.work && <WorkChip work={thread.work} className="min-w-0 flex-1" />}
             {thread.worktree && (
