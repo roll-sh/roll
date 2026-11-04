@@ -1,0 +1,11 @@
+{
+  "status": "SUPERSEDED",
+  "stage": "dist-build",
+  "reason": "R2 replay predicate gap; completed debug/release448/0/18 and Clippy0 preserved. Stop only obsolete owned dist stage before bounded actualPG proof.",
+  "pids": [
+    940663,
+    1113283,
+    3651715
+  ],
+  "watcher_failure": "Unrelated proc comm contained spaces; parser corrected using final ) boundary."
+}

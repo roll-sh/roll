@@ -1,0 +1,22 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a640c14a8f76f8ea4/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.99s
+     Running tests/cursor_replay_probe.rs (/home/meszmate/.cache/a165/target/debug/deps/cursor_replay_probe-3faf8cc19c199c5b)
+
+running 1 test
+caab domain projection rows retained after forward ALL: 3; forward: [Notice(Field { severity: "NOTICE", code: "00000", message: "domain check 1", detail: None, hint: None, position: None, context: Some("PL/pgSQL function noticing(integer) line 1 at RAISE"), internal: None, objects: [] }), Notice(Field { severity: "NOTICE", code: "00000", message: "domain check 2", detail: None, hint: None, position: None, context: Some("PL/pgSQL function noticing(integer) line 1 at RAISE"), internal: None, objects: [] }), Notice(Field { severity: "NOTICE", code: "00000", message: "domain check 3", detail: None, hint: None, position: None, context: Some("PL/pgSQL function noticing(integer) line 1 at RAISE"), internal: None, objects: [] }), Result { cols: Some([("id", 23)]), rows: [[Some("1")], [Some("2")], [Some("3")]], tag: "FETCH 3" }]
+
+thread 'caab_domain_check_takes_replay_path' (1179364) panicked at crates/pg-engine/tests/cursor_replay_probe.rs:17:5:
+assertion `left == right` failed: probe must exercise caab's streaming/replay path
+  left: 3
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test caab_domain_check_takes_replay_path ... FAILED
+
+failures:
+
+failures:
+    caab_domain_check_takes_replay_path
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+error: test failed, to rerun pass `-p pg-engine --test cursor_replay_probe`

@@ -1,7 +1,19 @@
 {
   "README.md": {
-    "sha256": "8bb23aed94f84f958deb26868d09dbf4f730291363dfa964b188da35ab5bbc67",
-    "bytes": 4626
+    "sha256": "7947623642190c2eccc3d4fdd4f8a60de68183331f7d70c0e9c1fb6d5b783354",
+    "bytes": 4995
+  },
+  "check165fixed/SUPERSEDED.json": {
+    "sha256": "7f22633dc4bf0ba55a5198297137e6eeaf49c08cebfc42455718ac666b049e8f",
+    "bytes": 373
+  },
+  "check165fixed/clippy.command": {
+    "sha256": "1b86d70e59e973e8d8af181830282fc52041d009cee30d84e2d7169430dd0de1",
+    "bytes": 51
+  },
+  "check165fixed/clippy.log": {
+    "sha256": "5c3da505b6da4f4d5e2afd48454170cd02fdc4632db761c4d7817cf6ac27fb72",
+    "bytes": 10548
   },
   "check165fixed/debug-test-summary.json": {
     "sha256": "99bcb8c96a5ed4c14e82de8fda156187dad45d0bac1eb37519fe4bf92da53717",
@@ -15,6 +27,22 @@
     "sha256": "bed976b2fe65a10a16bca329b628cb5cbfd7ba2b54d83d9f74d50fcfc5288984",
     "bytes": 37789
   },
+  "check165fixed/dist-superseded.log": {
+    "sha256": "affd869c461126b242fbfb8052bb655f3e2f15788ba5af0c2721d2fbb270ab8b",
+    "bytes": 111
+  },
+  "check165fixed/release-test-summary.json": {
+    "sha256": "99bcb8c96a5ed4c14e82de8fda156187dad45d0bac1eb37519fe4bf92da53717",
+    "bytes": 71
+  },
+  "check165fixed/release-test.command": {
+    "sha256": "1ab4b6b574ab0a947d6e458995e864ac91fc71f65f60614f41ed8a0f637d4a2b",
+    "bytes": 50
+  },
+  "check165fixed/release-test.log": {
+    "sha256": "f57925b7823f76ee4803cdc099e8d60da3c1e4f6c517d83326ccfce46cef7798",
+    "bytes": 37251
+  },
   "check165fixed/source.txt": {
     "sha256": "1b60ab8719a9c8cdd0801fc6c167edc4fff1fdc283b40e4c329d7d73e555d461",
     "bytes": 41
@@ -23,9 +51,29 @@
     "sha256": "0662b53ce16326094c91d35608f44059b2715bb609df884cece5b27852e4d8b5",
     "bytes": 41
   },
+  "embedded165/cursor_replay_probe.rs": {
+    "sha256": "be8240164ee8f786b529810e08a5c5bdd34342d9cb3e16e9cede465e5673bd55",
+    "bytes": 1131
+  },
+  "embedded165/exits.tsv": {
+    "sha256": "008dbc6e9cc353e076c1be22d82fcc0e8119d5ddce03f66ec33acf2eec7182ac",
+    "bytes": 10
+  },
+  "embedded165/reference.txt": {
+    "sha256": "e602a79df119d8795d1db228d6d29ad90dd5a9465bb6a8bf82a8226b7ee7b98c",
+    "bytes": 279
+  },
+  "embedded165/shape.command": {
+    "sha256": "c5395a740f6abff447ff65500d028ac92b0d4317a856f63709aa1f13968e1385",
+    "bytes": 67
+  },
+  "embedded165/shape.log": {
+    "sha256": "3ac5042a5eb16b4ad1473115f701fb513767ddfcf31d6c4f4e4531bc41882f68",
+    "bytes": 1749
+  },
   "export_checkpoint.py": {
-    "sha256": "9037897eff9723505996ec7f88b8d8cff239583fbc9c35d0ffdcaa05e447b375",
-    "bytes": 12914
+    "sha256": "1d14a6ae1fb36c0e4c8dba1797aa9b13d7436255c4969469b29f533ab3904f6b",
+    "bytes": 15316
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -82,6 +130,14 @@
   "green165v2/source.patch": {
     "sha256": "e8ff98a4a6f50ffb178b9bd8bd21f8dc58b2c9deb9cc94e634785579ec7c4f16",
     "bytes": 31575
+  },
+  "lock-fix/r2-NOTES.md": {
+    "sha256": "a565936afd8b717c5a868105bd56945ed9787d02c50944f3b596f1189fdabef0",
+    "bytes": 2675
+  },
+  "lock-fix/r2-tests.patch": {
+    "sha256": "63cb5e79c6048f8bed1589fbaf9f0a4e90c951233a30f7940bd9df0ab1e6900f",
+    "bytes": 3917
   },
   "oltp165/SUPERSEDED.json": {
     "sha256": "4a0efa9640138d56df4902295efa74957ac907848bb4d513f4cac9f485288029",
@@ -300,8 +356,16 @@
     "bytes": 2703
   },
   "runners/cursor-embedded-functions-probe.sql": {
-    "sha256": "c98c37d9b2eb45c8c692123144a3ffa5ec151b7ff7ecc72534d65aca4da02a99",
-    "bytes": 1669
+    "sha256": "2305042cef1ff9dc349179eb48e6aeaf776f9b82eb7e63a75c7eb118aad92bbf",
+    "bytes": 2080
+  },
+  "runners/embedded165.sh": {
+    "sha256": "cadd8883ff9d0b1496a28a457a686856ff7d31c1f4ff2175049bafdebcea81a9",
+    "bytes": 1853
+  },
+  "runners/embedded165v2.sh": {
+    "sha256": "709bc63bcc2d00a894b60a1e8e97c76326513be57ce6f8604695c2475c724c62",
+    "bytes": 1863
   },
   "runners/footprint.sh": {
     "sha256": "afc925795bcc33c12ed2392ed9684d81b83ca8966227c4341577501c2064dd21",
@@ -346,6 +410,14 @@
   "runners/review165.sh": {
     "sha256": "42e97f5aaea2826762dc64f0565d025f99c6a5d2315e8aa442acfa5470236693",
     "bytes": 2906
+  },
+  "runners/stop165-followon-failed.log": {
+    "sha256": "62add5b995793a8754df3633c1f6f31000d980b00de1558938b6dcc6ed37b3b8",
+    "bytes": 456
+  },
+  "runners/stop165-followon.py": {
+    "sha256": "a3bb532d90d41c0e8d45c42369da60e9e91133c5d6bc5bffa16930a234d9919c",
+    "bytes": 2648
   },
   "runners/wrapper-selftest.py": {
     "sha256": "b80c34606a241ba33e69032c61cb0ae7b336c0a97b3af747fad7c8d828340bf0",
