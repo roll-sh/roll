@@ -3765,7 +3765,7 @@ impl Ddl<'_, '_> {
         let measures = self.measures_in_build(t, ix);
         let writes = (ix.method == "btree").then(|| crate::exec::sizing::heap_writes(t.oid, &ctx.sess.db)).flatten();
         let parallel = match (measures || (writes.is_some() && ix.id != 0)) && !quad {
-            true => match super::parbuild::index_workers(self, t, crate::exec::sizing::heap_blocks(t, self.ctx)?.unwrap_or(0)) {
+            true => match super::parbuild::index_workers(self, t, blocks.unwrap_or(0)) {
                 0 => None,
                 w => self.build_index_parallel(t, ix, &bix, w, &progress, !measures)?,
             },
