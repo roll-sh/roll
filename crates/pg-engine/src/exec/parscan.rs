@@ -229,11 +229,16 @@ impl From<Chunk> for Source {
 /// the batch kernels take them as they take a table's.
 pub struct ListFill(pub std::vec::IntoIter<(Vec<u8>, bytes::Bytes)>);
 
+/// Reordered heap rows actually filled into batches (tests distinguish this source).
+pub static LIST_FILL_ROWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl FillRows for ListFill {
     fn fill(&mut self, b: &mut RowBatch, max: usize) -> Result<()> {
+        let before = b.len();
         for (k, v) in self.0.by_ref().take(max) {
             b.push(&k, v);
         }
+        LIST_FILL_ROWS.fetch_add((b.len() - before) as u64, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 }
@@ -873,12 +878,15 @@ type Item = (Row, u8, bool, u32);
 pub enum Piece {
     Row(Row, u8, bool, u32),
     Part(super::partial::Part),
+    /// Rows read in chunk order, independently of carried aggregate states.
+    Read(u64),
 }
 
 enum Msg {
     Rows(Vec<Item>),
     Seg(super::partial::Seg),
     Err(Error),
+    Read(u64),
     /// The chunk's end, after this many dropped rows.
     Done(u32, u32),
 }
@@ -1262,7 +1270,16 @@ fn work_partial<'s>(
     // (Rows read and not counted in a part yet.)
     let mut read = 0u64;
     let send_part = |pa: &mut Partials, read: &mut u64| {
-        pa.read(std::mem::take(read));
+        let read = std::mem::take(read);
+        if carried {
+            // Aggregate states may span chunks; their statistics must still reach the
+            // coordinator in chunk order, before a later chunk's error stops the scan.
+            if read != 0 && out.send(Msg::Read(read)).is_err() {
+                return false;
+            }
+        } else {
+            pa.read(read);
+        }
         match pa.take() {
             Some(p) => out.send(Msg::Seg(Seg::Part(p))).is_ok(),
             None => true,
@@ -1354,8 +1371,7 @@ fn work_partial<'s>(
     }
     scratch.flush(&d.stages);
     if carried {
-        pa.read(read);
-        return true;
+        return read == 0 || out.send(Msg::Read(read)).is_ok();
     }
     send_part(pa, &mut read) && out.send(Msg::Done(0, 0)).is_ok()
 }
@@ -1539,6 +1555,7 @@ impl ParScan {
             skipped: 0,
             stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             inline: Some(Box::new(Inline { cur: None, d: Arc::new(d), scratch: Default::default(), lazy, batch: RowBatch::default() })),
+            late: None,
         }
     }
 
@@ -1608,6 +1625,7 @@ impl ParScan {
                 return Ok(None);
             };
             match rx.recv() {
+                Ok(Msg::Read(read)) => return Ok(Some(Piece::Read(read))),
                 Ok(Msg::Rows(rows)) => self.batch = rows.into_iter(),
                 Ok(Msg::Seg(Seg::Part(p))) => return Ok(Some(Piece::Part(p))),
                 Ok(Msg::Seg(Seg::Rows(rows))) => self.seg = rows.into_iter(),

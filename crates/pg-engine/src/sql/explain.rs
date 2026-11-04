@@ -18257,7 +18257,7 @@ struct Render<'r> {
     leader: bool,
     /// Inside a nested loop's inner side the executor ran once for all the outer rows:
     /// the scans Postgres makes of it.
-    rescans: u64,
+    rescans: (u64, u64),
     /// A nested loop's inner Materialize about to be shown: the outer rows, each a rescan
     /// of it (its input read once).
     mat_loops: Option<u64>,
@@ -18270,12 +18270,13 @@ struct Render<'r> {
 impl Render<'_> {
     fn stats(&self, key: Option<usize>) -> Option<NodeStats> {
         let mut s = self.instr?.get(key?)?;
-        s.loops *= self.procs * self.rescans;
-        s.rows *= self.rescans;
-        s.removed *= self.rescans;
-        s.searches *= self.rescans;
-        s.fetches *= self.rescans;
-        s.pages *= self.rescans;
+        let scale = |v| v * self.rescans.0 / self.rescans.1;
+        s.loops = scale(s.loops * self.procs);
+        s.rows = scale(s.rows);
+        s.removed = scale(s.removed);
+        s.searches = scale(s.searches);
+        s.fetches = scale(s.fetches);
+        s.pages = scale(s.pages);
         (s.loops > 0).then_some(s)
     }
 
@@ -18322,16 +18323,12 @@ impl Render<'_> {
         for (i, c) in n.initplans.iter().chain(&n.children).chain(&n.subplans).enumerate() {
             let inner = n.inner_cached && i == n.initplans.len() + 1;
             if inner {
-                // (Postgres scans it once per outer row; the executor read it once per run of
-                // the join, which runs many times inside a SubPlan: the outer rows of a run.)
+                // Keep the exact ratio until scaling totals: varying outer row counts
+                // across SubPlan runs need not average to a whole number.
                 let raw = |k: Option<usize>| k.and_then(|k| self.instr?.get(k));
                 let outer_rows = raw(n.children.first().and_then(|o| o.key)).map_or(0, |s| s.rows);
                 let reads = raw(c.key).map_or(1, |s| s.loops.max(1));
-                let per = match outer_rows {
-                    0 => 0,
-                    r => ((r + reads / 2) / reads).max(1),
-                };
-                self.rescans = saved * per;
+                self.rescans = (saved.0 * outer_rows, saved.1 * reads);
             }
             if n.node_type == "Nested Loop" && i == n.initplans.len() + 1 && c.node_type == "Materialize" {
                 let outer_rows = n.children.first().and_then(|o| self.stats(o.key)).map_or(0, |s| s.rows);
@@ -20885,7 +20882,7 @@ pub fn explain(
         instr,
         w: Writer::new(o.format),
         procs: 1,
-        rescans: 1,
+        rescans: (1, 1),
         mat_loops: None,
         leader: crate::sql::paths::parallel::ParCfg::read(ctx).leader,
         jg: super::joins::JoinGucs::read(ctx),

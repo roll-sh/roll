@@ -4185,6 +4185,7 @@ impl ScanNode {
                 return Ok(None);
             };
             match piece {
+                Piece::Read(read) => self.count_read(read as i64, ctx),
                 Piece::Part(p) => {
                     self.count_read(p.read as i64, ctx);
                     return Ok(Some(super::pipe::Item::Part(p)));

@@ -986,28 +986,39 @@ fn reordered_heaps_through_batches() {
 /// by the statement's thread, its rows go to the workers a fill at a time and through the
 /// batch kernels, as a table's stored in order do.
 fn reordered_heaps_through_batches_inner() {
-    use pg_engine::exec::parscan::{VECTOR_ROWS, without_vectors};
+    use pg_engine::exec::parscan::{LIST_FILL_ROWS, VECTOR_ROWS, without_vectors};
     let dir = tempfile::tempdir().unwrap();
     let engine = open(dir.path());
     let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
     s.query(
-        "CREATE TABLE r (id int, g int, x numeric(10, 2), d date, t text); \
-         INSERT INTO r SELECT i, i % 23, (i % 4000) / 40.0, date '2024-01-01' + i % 150, 'r' || (i % 300) \
+        "CREATE TABLE r (id int, g int, x numeric(10, 2), d date, t text, pad text); \
+         INSERT INTO r SELECT i, i % 23, (i % 4000) / 40.0, date '2024-01-01' + i % 150, 'r' || (i % 300), repeat('x', 96) \
          FROM generate_series(1, 90000) i; \
-         DELETE FROM r WHERE id % 3 = 0; VACUUM r; \
-         INSERT INTO r SELECT i, i % 23, CASE WHEN i % 17 = 0 THEN NULL ELSE (i % 4000) / 40.0 END, \
-         CASE WHEN i % 19 = 0 THEN NULL ELSE date '2024-01-01' + i % 150 END, 'r' || (i % 300) \
+         DELETE FROM r WHERE id % 3 = 0",
+    )
+    .unwrap();
+    s.query("VACUUM r").unwrap();
+    s.query(
+        "INSERT INTO r SELECT i, i % 23, CASE WHEN i % 17 = 0 THEN NULL ELSE (i % 4000) / 40.0 END, \
+         CASE WHEN i % 19 = 0 THEN NULL ELSE date '2024-01-01' + i % 150 END, 'r' || (i % 300), repeat('x', 96) \
          FROM generate_series(90001, 120000) i; \
          CREATE TABLE q (k int PRIMARY KEY, w int); INSERT INTO q SELECT k, k % 4 FROM generate_series(0, 15) k; \
          ANALYZE r; ANALYZE q",
     )
     .unwrap();
+    // Reordered heaps below 8 MB stay serial; padding makes these workers exercise
+    // ListFill and the column batches while the row count stays within the model cap.
+    assert_eq!(out(&mut s, "SELECT pg_relation_size('r') >= 8 * 1024 * 1024"), ["[Bool(true)]"]);
     let run = |s: &mut Session| -> Vec<Vec<String>> { REORDERED_QUERIES.iter().map(|q| out(s, q)).collect() };
     s.query("SET max_parallel_workers_per_gather = 0").unwrap();
     let serial = run(&mut s);
     s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    let started = pg_engine::exec::parscan::started();
     let before = VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed);
+    let list_before = LIST_FILL_ROWS.load(std::sync::atomic::Ordering::Relaxed);
     let parallel = run(&mut s);
+    assert!(pg_engine::exec::parscan::started() > started, "reordered heap ran in workers");
+    assert!(LIST_FILL_ROWS.load(std::sync::atomic::Ordering::Relaxed) > list_before, "reordered ListFill source supplied rows");
     assert!(VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed) > before, "rows went through column batches");
     let rows = without_vectors(|| run(&mut s));
     for (((q, a), b), c) in REORDERED_QUERIES.iter().zip(&serial).zip(&parallel).zip(&rows) {
