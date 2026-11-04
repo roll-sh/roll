@@ -1,7 +1,7 @@
 "use client";
 
-import { ArrowUp, ChevronDown, ImagePlus, ListChecks, Square, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ArrowUp, ImagePlus, ListChecks, Square, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   Attachment,
   InteractionMode,
@@ -13,8 +13,9 @@ import type {
   Thread,
 } from "@/lib/agents-api";
 import { coming, machineState, reachable } from "@/lib/agents-api";
-import { btn, input } from "../ui";
+import { btn } from "../ui";
 import { ContextMeter } from "./context-meter";
+import { ModelPicker, Picker, resolveModel } from "./model-picker";
 import { useAgents } from "./use-agents";
 
 /** What a new thread starts with (the `thread.create` fields the composer picks). */
@@ -135,9 +136,7 @@ export function Composer({
   }, [autoFocus]);
 
   const info = providers.find((p) => p.id === provider);
-  const models = info?.models ?? [];
-  const modelInfo = models.find((m) => m.id === model) ?? models.find((m) => m.default) ?? models[0];
-  const efforts = modelInfo?.efforts ?? [];
+  const modelInfo = resolveModel(info, model);
   const running = !!thread && (thread.status === "starting" || thread.status === "running" || thread.status === "waiting");
   const caps = info?.capabilities;
   // An asleep (or stopped) sandbox takes messages: sending wakes it.
@@ -302,30 +301,22 @@ export function Composer({
         style={{ fieldSizing: "content" } as React.CSSProperties}
       />
       <div className="flex flex-wrap items-center gap-1 px-2 pb-2">
-        <Picker label="Provider" value={provider} onChange={pickProvider} options={providers.map((p) => ({ id: p.id, label: p.name, hint: p.auth === "missing" ? "log in first" : undefined }))} />
-        {models.length > 0 && (
-          <Picker
-            label="Model"
-            value={modelInfo?.id ?? ""}
-            onChange={(id) => {
-              setModel(id);
-              setEffort(null);
-              configure({ model: id });
-            }}
-            options={models.map((m) => ({ id: m.id, label: m.name }))}
-          />
-        )}
-        {efforts.length > 0 && (
-          <Picker
-            label="Effort"
-            value={effort ?? ""}
-            onChange={(id) => {
-              setEffort(id || null);
-              if (id) configure({ effort: id });
-            }}
-            options={[{ id: "", label: "default effort" }, ...efforts.map((x) => ({ id: x, label: x }))]}
-          />
-        )}
+        <ModelPicker
+          providers={providers}
+          provider={provider}
+          model={model}
+          effort={effort}
+          onProvider={pickProvider}
+          onModel={(id) => {
+            setModel(id);
+            setEffort(null);
+            configure({ model: id });
+          }}
+          onEffort={(id) => {
+            setEffort(id);
+            if (id) configure({ effort: id });
+          }}
+        />
         <Picker
           label="Runtime mode"
           value={runtime}
@@ -423,34 +414,5 @@ export function Composer({
         </p>
       )}
     </div>
-  );
-}
-
-/** A compact select that looks like a chip. */
-function Picker({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  options: { id: string; label: string; hint?: string }[];
-  onChange: (id: string) => void;
-}): ReactNode {
-  const current = options.find((o) => o.id === value);
-  return (
-    <label className="relative inline-flex items-center gap-0.5 rounded-md px-1.5 py-1 text-[11.5px] text-muted hover:bg-panel-2 hover:text-fg" title={current?.hint ?? label}>
-      <span className="max-w-32 truncate">{current?.label ?? label}</span>
-      <ChevronDown className="size-3 text-subtle" />
-      <select aria-label={label} value={value} onChange={(e) => onChange(e.target.value)} className={`${input} absolute inset-0 cursor-pointer opacity-0`}>
-        {options.map((o) => (
-          <option key={o.id} value={o.id}>
-            {o.label}
-            {o.hint && o.id !== value ? ` (${o.hint})` : ""}
-          </option>
-        ))}
-      </select>
-    </label>
   );
 }
