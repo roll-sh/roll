@@ -1,0 +1,176 @@
+# portals: 291/354 units match; first 12 differing units (- reference, + engine)
+
+@@ unit 24 (sql line 53) [wrong result] FETCH: row count differs
+  FETCH 1 in foo1;
+   unique1 | unique2 | two | four | ten | twenty | hundred | thousand | twothousand | fivethous | tenthous | odd | even | stringu1 | stringu2 | string4 
+  ---------+---------+-----+------+-----+--------+---------+----------+-------------+-----------+----------+-----+------+----------+----------+---------
++ (0 rows)
+-     8800 |       0 |   0 |    0 |   0 |      0 |       0 |      800 |         800 |      3800 |     8800 |   0 |    1 | MAAAAA   | AAAAAA   | AAAAxx
+- (1 row)
+  
+
+@@ unit 25 (sql line 55) [wrong result] FETCH: row count differs
+  FETCH 2 in foo2;
+   unique1 | unique2 | two | four | ten | twenty | hundred | thousand | twothousand | fivethous | tenthous | odd | even | stringu1 | stringu2 | string4 
+  ---------+---------+-----+------+-----+--------+---------+----------+-------------+-----------+----------+-----+------+----------+----------+---------
++ (0 rows)
+-     8800 |       0 |   0 |    0 |   0 |      0 |       0 |      800 |         800 |      3800 |     8800 |   0 |    1 | MAAAAA   | AAAAAA   | AAAAxx
+-     1891 |       1 |   1 |    3 |   1 |     11 |      91 |      891 |        1891 |      1891 |     1891 | 182 |  183 | TUAAAA   | BAAAAA   | HHHHxx
+- (2 rows)
+  
+
+@@ unit 26 (sql line 57) [wrong result] FETCH: row count differs
+  FETCH 3 in foo3;
+   unique1 | unique2 | two | four | ten | twenty | hundred | thousand | twothousand | fivethous | tenthous | odd | even | stringu1 | stringu2 | string4 
+  ---------+---------+-----+------+-----+--------+---------+----------+-------------+-----------+----------+-----+------+----------+----------+---------
++ (0 rows)
+-     8800 |       0 |   0 |    0 |   0 |      0 |       0 |      800 |         800 |      3800 |     8800 |   0 |    1 | MAAAAA   | AAAAAA   | AAAAxx
+-     1891 |       1 |   1 |    3 |   1 |     11 |      91 |      891 |        1891 |      1891 |     1891 | 182 |  183 | TUAAAA   | BAAAAA   | HHHHxx
+-     3420 |       2 |   0 |    0 |   0 |      0 |      20 |      420 |        1420 |      3420 |     3420 |  40 |   41 | OBAAAA   | CAAAAA   | OOOOxx
+- (3 rows)
+  
+
+@@ unit 27 (sql line 59) [wrong result] FETCH: row count differs
+  FETCH 4 in foo4;
+   unique1 | unique2 | two | four | ten | twenty | hundred | thousand | twothousand | fivethous | tenthous | odd | even | stringu1 | stringu2 | string4 
+  ---------+---------+-----+------+-----+--------+---------+----------+-------------+-----------+----------+-----+------+----------+----------+---------
++ (0 rows)
+-     8800 |       0 |   0 |    0 |   0 |      0 |       0 |      800 |         800 |      3800 |     8800 |   0 |    1 | MAAAAA   | AAAAAA   | AAAAxx
+-     1891 |       1 |   1 |    3 |   1 |     11 |      91 |      891 |        1891 |      1891 |     1891 | 182 |  183 | TUAAAA   | BAAAAA   | HHHHxx
+-     3420 |       2 |   0 |    0 |   0 |      0 |      20 |      420 |        1420 |      3420 |     3420 |  40 |   41 | OBAAAA   | CAAAAA   | OOOOxx
+-     9850 |       3 |   0 |    2 |   0 |     10 |      50 |      850 |        1850 |      4850 |     9850 | 100 |  101 | WOAAAA   | DAAAAA   | VVVVxx
+- (4 rows)
+  
+
+@@ unit 28 (sql line 61) [wrong result] FETCH: row count differs
+  FETCH 5 in foo5;
+   unique1 | unique2 | two | four | ten | twenty | hundred | thousand | twothousand | fivethous | tenthous | odd | even | stringu1 | stringu2 | string4 
+  ---------+---------+-----+------+-----+--------+---------+----------+-------------+-----------+----------+-----+------+----------+----------+---------
++ (0 rows)
+-     8800 |       0 |   0 |    0 |   0 |      0 |       0 |      800 |         800 |      3800 |     8800 |   0 |    1 | MAAAAA   | AAAAAA   | AAAAxx
+-     1891 |       1 |   1 |    3 |   1 |     11 |      91 |      891 |        1891 |      1891 |     1891 | 182 |  183 | TUAAAA   | BAAAAA   | HHHHxx
+-     3420 |       2 |   0 |    0 |   0 |      0 |      20 |      420 |        1420 |      3420 |     3420 |  40 |   41 | OBAAAA   | CAAAAA   | OOOOxx
+-     9850 |       3 |   0 |    2 |   0 |     10 |      50 |      850 |        1850 |      4850 |     9850 | 100 |  101 | WOAAAA   | DAAAAA   | VVVVxx
+-     7164 |       4 |   0 |    0 |   4 |      4 |      64 |      164 |        1164 |      2164 |     7164 | 128 |  129 | OPAAAA   | EAAAAA   | AAAAxx
+- (5 rows)
+  
+
+@@ unit 29 (sql line 63) [wrong result] FETCH: row count differs
+  FETCH 6 in foo6;
+   unique1 | unique2 | two | four | ten | twenty | hundred | thousand | twothousand | fivethous | tenthous | odd | even | stringu1 | stringu2 | string4 
+  ---------+---------+-----+------+-----+--------+---------+----------+-------------+-----------+----------+-----+------+----------+----------+---------
++ (0 rows)
+-     8800 |       0 |   0 |    0 |   0 |      0 |       0 |      800 |         800 |      3800 |     8800 |   0 |    1 | MAAAAA   | AAAAAA   | AAAAxx
+-     1891 |       1 |   1 |    3 |   1 |     11 |      91 |      891 |        1891 |      1891 |     1891 | 182 |  183 | TUAAAA   | BAAAAA   | HHHHxx
+-     3420 |       2 |   0 |    0 |   0 |      0 |      20 |      420 |        1420 |      3420 |     3420 |  40 |   41 | OBAAAA   | CAAAAA   | OOOOxx
+-     9850 |       3 |   0 |    2 |   0 |     10 |      50 |      850 |        1850 |      4850 |     9850 | 100 |  101 | WOAAAA   | DAAAAA   | VVVVxx
+-     7164 |       4 |   0 |    0 |   4 |      4 |      64 |      164 |        1164 |      2164 |     7164 | 128 |  129 | OPAAAA   | EAAAAA   | AAAAxx
+-     8009 |       5 |   1 |    1 |   9 |      9 |       9 |        9 |           9 |      3009 |     8009 |  18 |   19 | BWAAAA   | FAAAAA   | HHHHxx
+- (6 rows)
+  
+
+@@ unit 30 (sql line 65) [wrong result] FETCH: row count differs
+  FETCH 7 in foo7;
+   unique1 | unique2 | two | four | ten | twenty | hundred | thousand | twothousand | fivethous | tenthous | odd | even | stringu1 | stringu2 | string4 
+  ---------+---------+-----+------+-----+--------+---------+----------+-------------+-----------+----------+-----+------+----------+----------+---------
++ (0 rows)
+-     8800 |       0 |   0 |    0 |   0 |      0 |       0 |      800 |         800 |      3800 |     8800 |   0 |    1 | MAAAAA   | AAAAAA   | AAAAxx
+-     1891 |       1 |   1 |    3 |   1 |     11 |      91 |      891 |        1891 |      1891 |     1891 | 182 |  183 | TUAAAA   | BAAAAA   | HHHHxx
+-     3420 |       2 |   0 |    0 |   0 |      0 |      20 |      420 |        1420 |      3420 |     3420 |  40 |   41 | OBAAAA   | CAAAAA   | OOOOxx
+-     9850 |       3 |   0 |    2 |   0 |     10 |      50 |      850 |        1850 |      4850 |     9850 | 100 |  101 | WOAAAA   | DAAAAA   | VVVVxx
+-     7164 |       4 |   0 |    0 |   4 |      4 |      64 |      164 |        1164 |      2164 |     7164 | 128 |  129 | OPAAAA   | EAAAAA   | AAAAxx
+-     8009 |       5 |   1 |    1 |   9 |      9 |       9 |        9 |           9 |      3009 |     8009 |  18 |   19 | BWAAAA   | FAAAAA   | HHHHxx
+-     5057 |       6 |   1 |    1 |   7 |     17 |      57 |       57 |        1057 |        57 |     5057 | 114 |  115 | NMAAAA   | GAAAAA   | OOOOxx
+- (7 rows)
+  
+
+@@ unit 31 (sql line 67) [wrong result] FETCH: row count differs
+  FETCH 8 in foo8;
+   unique1 | unique2 | two | four | ten | twenty | hundred | thousand | twothousand | fivethous | tenthous | odd | even | stringu1 | stringu2 | string4 
+  ---------+---------+-----+------+-----+--------+---------+----------+-------------+-----------+----------+-----+------+----------+----------+---------
++ (0 rows)
+-     8800 |       0 |   0 |    0 |   0 |      0 |       0 |      800 |         800 |      3800 |     8800 |   0 |    1 | MAAAAA   | AAAAAA   | AAAAxx
+-     1891 |       1 |   1 |    3 |   1 |     11 |      91 |      891 |        1891 |      1891 |     1891 | 182 |  183 | TUAAAA   | BAAAAA   | HHHHxx
+-     3420 |       2 |   0 |    0 |   0 |      0 |      20 |      420 |        1420 |      3420 |     3420 |  40 |   41 | OBAAAA   | CAAAAA   | OOOOxx
+-     9850 |       3 |   0 |    2 |   0 |     10 |      50 |      850 |        1850 |      4850 |     9850 | 100 |  101 | WOAAAA   | DAAAAA   | VVVVxx
+-     7164 |       4 |   0 |    0 |   4 |      4 |      64 |      164 |        1164 |      2164 |     7164 | 128 |  129 | OPAAAA   | EAAAAA   | AAAAxx
+-     8009 |       5 |   1 |    1 |   9 |      9 |       9 |        9 |           9 |      3009 |     8009 |  18 |   19 | BWAAAA   | FAAAAA   | HHHHxx
+-     5057 |       6 |   1 |    1 |   7 |     17 |      57 |       57 |        1057 |        57 |     5057 | 114 |  115 | NMAAAA   | GAAAAA   | OOOOxx
+-     6701 |       7 |   1 |    1 |   1 |      1 |       1 |      701 |         701 |      1701 |     6701 |   2 |    3 | TXAAAA   | HAAAAA   | VVVVxx
+- (8 rows)
+  
+
+@@ unit 32 (sql line 69) [wrong result] FETCH: row count differs
+  FETCH 9 in foo9;
+   unique1 | unique2 | two | four | ten | twenty | hundred | thousand | twothousand | fivethous | tenthous | odd | even | stringu1 | stringu2 | string4 
+  ---------+---------+-----+------+-----+--------+---------+----------+-------------+-----------+----------+-----+------+----------+----------+---------
++ (0 rows)
+-     8800 |       0 |   0 |    0 |   0 |      0 |       0 |      800 |         800 |      3800 |     8800 |   0 |    1 | MAAAAA   | AAAAAA   | AAAAxx
+-     1891 |       1 |   1 |    3 |   1 |     11 |      91 |      891 |        1891 |      1891 |     1891 | 182 |  183 | TUAAAA   | BAAAAA   | HHHHxx
+-     3420 |       2 |   0 |    0 |   0 |      0 |      20 |      420 |        1420 |      3420 |     3420 |  40 |   41 | OBAAAA   | CAAAAA   | OOOOxx
+-     9850 |       3 |   0 |    2 |   0 |     10 |      50 |      850 |        1850 |      4850 |     9850 | 100 |  101 | WOAAAA   | DAAAAA   | VVVVxx
+-     7164 |       4 |   0 |    0 |   4 |      4 |      64 |      164 |        1164 |      2164 |     7164 | 128 |  129 | OPAAAA   | EAAAAA   | AAAAxx
+-     8009 |       5 |   1 |    1 |   9 |      9 |       9 |        9 |           9 |      3009 |     8009 |  18 |   19 | BWAAAA   | FAAAAA   | HHHHxx
+-     5057 |       6 |   1 |    1 |   7 |     17 |      57 |       57 |        1057 |        57 |     5057 | 114 |  115 | NMAAAA   | GAAAAA   | OOOOxx
+-     6701 |       7 |   1 |    1 |   1 |      1 |       1 |      701 |         701 |      1701 |     6701 |   2 |    3 | TXAAAA   | HAAAAA   | VVVVxx
+-     4321 |       8 |   1 |    1 |   1 |      1 |      21 |      321 |         321 |      4321 |     4321 |  42 |   43 | FKAAAA   | IAAAAA   | AAAAxx
+- (9 rows)
+  
+
+@@ unit 33 (sql line 71) [wrong result] FETCH: row count differs
+  FETCH 10 in foo10;
+   unique1 | unique2 | two | four | ten | twenty | hundred | thousand | twothousand | fivethous | tenthous | odd | even | stringu1 | stringu2 | string4 
+  ---------+---------+-----+------+-----+--------+---------+----------+-------------+-----------+----------+-----+------+----------+----------+---------
++ (0 rows)
+-     8800 |       0 |   0 |    0 |   0 |      0 |       0 |      800 |         800 |      3800 |     8800 |   0 |    1 | MAAAAA   | AAAAAA   | AAAAxx
+-     1891 |       1 |   1 |    3 |   1 |     11 |      91 |      891 |        1891 |      1891 |     1891 | 182 |  183 | TUAAAA   | BAAAAA   | HHHHxx
+-     3420 |       2 |   0 |    0 |   0 |      0 |      20 |      420 |        1420 |      3420 |     3420 |  40 |   41 | OBAAAA   | CAAAAA   | OOOOxx
+-     9850 |       3 |   0 |    2 |   0 |     10 |      50 |      850 |        1850 |      4850 |     9850 | 100 |  101 | WOAAAA   | DAAAAA   | VVVVxx
+-     7164 |       4 |   0 |    0 |   4 |      4 |      64 |      164 |        1164 |      2164 |     7164 | 128 |  129 | OPAAAA   | EAAAAA   | AAAAxx
+-     8009 |       5 |   1 |    1 |   9 |      9 |       9 |        9 |           9 |      3009 |     8009 |  18 |   19 | BWAAAA   | FAAAAA   | HHHHxx
+-     5057 |       6 |   1 |    1 |   7 |     17 |      57 |       57 |        1057 |        57 |     5057 | 114 |  115 | NMAAAA   | GAAAAA   | OOOOxx
+-     6701 |       7 |   1 |    1 |   1 |      1 |       1 |      701 |         701 |      1701 |     6701 |   2 |    3 | TXAAAA   | HAAAAA   | VVVVxx
+-     4321 |       8 |   1 |    1 |   1 |      1 |      21 |      321 |         321 |      4321 |     4321 |  42 |   43 | FKAAAA   | IAAAAA   | AAAAxx
+-     3043 |       9 |   1 |    3 |   3 |      3 |      43 |       43 |        1043 |      3043 |     3043 |  86 |   87 | BNAAAA   | JAAAAA   | HHHHxx
+- (10 rows)
+  
+
+@@ unit 34 (sql line 73) [wrong result] FETCH: row count differs
+  FETCH 11 in foo11;
+   unique1 | unique2 | two | four | ten | twenty | hundred | thousand | twothousand | fivethous | tenthous | odd | even | stringu1 | stringu2 | string4 
+  ---------+---------+-----+------+-----+--------+---------+----------+-------------+-----------+----------+-----+------+----------+----------+---------
++ (0 rows)
+-     8800 |       0 |   0 |    0 |   0 |      0 |       0 |      800 |         800 |      3800 |     8800 |   0 |    1 | MAAAAA   | AAAAAA   | AAAAxx
+-     1891 |       1 |   1 |    3 |   1 |     11 |      91 |      891 |        1891 |      1891 |     1891 | 182 |  183 | TUAAAA   | BAAAAA   | HHHHxx
+-     3420 |       2 |   0 |    0 |   0 |      0 |      20 |      420 |        1420 |      3420 |     3420 |  40 |   41 | OBAAAA   | CAAAAA   | OOOOxx
+-     9850 |       3 |   0 |    2 |   0 |     10 |      50 |      850 |        1850 |      4850 |     9850 | 100 |  101 | WOAAAA   | DAAAAA   | VVVVxx
+-     7164 |       4 |   0 |    0 |   4 |      4 |      64 |      164 |        1164 |      2164 |     7164 | 128 |  129 | OPAAAA   | EAAAAA   | AAAAxx
+-     8009 |       5 |   1 |    1 |   9 |      9 |       9 |        9 |           9 |      3009 |     8009 |  18 |   19 | BWAAAA   | FAAAAA   | HHHHxx
+-     5057 |       6 |   1 |    1 |   7 |     17 |      57 |       57 |        1057 |        57 |     5057 | 114 |  115 | NMAAAA   | GAAAAA   | OOOOxx
+-     6701 |       7 |   1 |    1 |   1 |      1 |       1 |      701 |         701 |      1701 |     6701 |   2 |    3 | TXAAAA   | HAAAAA   | VVVVxx
+-     4321 |       8 |   1 |    1 |   1 |      1 |      21 |      321 |         321 |      4321 |     4321 |  42 |   43 | FKAAAA   | IAAAAA   | AAAAxx
+-     3043 |       9 |   1 |    3 |   3 |      3 |      43 |       43 |        1043 |      3043 |     3043 |  86 |   87 | BNAAAA   | JAAAAA   | HHHHxx
+-     1314 |      10 |   0 |    2 |   4 |     14 |      14 |      314 |        1314 |      1314 |     1314 |  28 |   29 | OYAAAA   | KAAAAA   | OOOOxx
+- (11 rows)
+  
+
+@@ unit 35 (sql line 75) [wrong result] FETCH: row count differs
+  FETCH 12 in foo12;
+   unique1 | unique2 | two | four | ten | twenty | hundred | thousand | twothousand | fivethous | tenthous | odd | even | stringu1 | stringu2 | string4 
+  ---------+---------+-----+------+-----+--------+---------+----------+-------------+-----------+----------+-----+------+----------+----------+---------
++ (0 rows)
+-     8800 |       0 |   0 |    0 |   0 |      0 |       0 |      800 |         800 |      3800 |     8800 |   0 |    1 | MAAAAA   | AAAAAA   | AAAAxx
+-     1891 |       1 |   1 |    3 |   1 |     11 |      91 |      891 |        1891 |      1891 |     1891 | 182 |  183 | TUAAAA   | BAAAAA   | HHHHxx
+-     3420 |       2 |   0 |    0 |   0 |      0 |      20 |      420 |        1420 |      3420 |     3420 |  40 |   41 | OBAAAA   | CAAAAA   | OOOOxx
+-     9850 |       3 |   0 |    2 |   0 |     10 |      50 |      850 |        1850 |      4850 |     9850 | 100 |  101 | WOAAAA   | DAAAAA   | VVVVxx
+-     7164 |       4 |   0 |    0 |   4 |      4 |      64 |      164 |        1164 |      2164 |     7164 | 128 |  129 | OPAAAA   | EAAAAA   | AAAAxx
+-     8009 |       5 |   1 |    1 |   9 |      9 |       9 |        9 |           9 |      3009 |     8009 |  18 |   19 | BWAAAA   | FAAAAA   | HHHHxx
+-     5057 |       6 |   1 |    1 |   7 |     17 |      57 |       57 |        1057 |        57 |     5057 | 114 |  115 | NMAAAA   | GAAAAA   | OOOOxx
+-     6701 |       7 |   1 |    1 |   1 |      1 |       1 |      701 |         701 |      1701 |     6701 |   2 |    3 | TXAAAA   | HAAAAA   | VVVVxx
+-     4321 |       8 |   1 |    1 |   1 |      1 |      21 |      321 |         321 |      4321 |     4321 |  42 |   43 | FKAAAA   | IAAAAA   | AAAAxx
+-     3043 |       9 |   1 |    3 |   3 |      3 |      43 |       43 |        1043 |      3043 |     3043 |  86 |   87 | BNAAAA   | JAAAAA   | HHHHxx
+-     1314 |      10 |   0 |    2 |   4 |     14 |      14 |      314 |        1314 |      1314 |     1314 |  28 |   29 | OYAAAA   | KAAAAA   | OOOOxx
+-     1504 |      11 |   0 |    0 |   4 |      4 |       4 |      504 |        1504 |      1504 |     1504 |   8 |    9 | WFAAAA   | LAAAAA   | VVVVxx
+- (12 rows)
+  
+

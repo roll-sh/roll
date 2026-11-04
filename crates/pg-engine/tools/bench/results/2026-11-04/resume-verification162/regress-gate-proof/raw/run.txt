@@ -1,0 +1,8 @@
+commit=3997cf0
+date=2026-11-04 12:31 UTC
+reference=a162-rref
+engine_bin=/home/meszmate/.cache/a162/target/release/roll-engine
+engine_build=release
+schedule=full
+timeout=300
+reference_preexisting=

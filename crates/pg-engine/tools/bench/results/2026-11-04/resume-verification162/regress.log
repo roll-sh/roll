@@ -1,0 +1,320 @@
+    Finished `release` profile [optimized] target(s) in 0.14s
+     Running tests/pg_regress.rs (/home/meszmate/.cache/a162/target/release/deps/pg_regress-08878ac11afed4ba)
+
+running 1 test
+SET client_min_messages = warning;
+DROP DATABASE IF EXISTS "regression_a162_resume" WITH (FORCE);
+CREATE DATABASE "regression_a162_resume" TEMPLATE=template0 ENCODING='UTF8' LOCALE='C';
+ALTER DATABASE "regression_a162_resume" SET lc_messages TO 'C';
+ALTER DATABASE "regression_a162_resume" SET lc_monetary TO 'C';
+ALTER DATABASE "regression_a162_resume" SET lc_numeric TO 'C';
+ALTER DATABASE "regression_a162_resume" SET lc_time TO 'C';
+ALTER DATABASE "regression_a162_resume" SET bytea_output TO 'hex';
+ALTER DATABASE "regression_a162_resume" SET timezone_abbreviations TO 'Default';
+
+SET client_min_messages = warning;
+DROP DATABASE IF EXISTS "regression_a162_resume" WITH (FORCE);
+CREATE DATABASE "regression_a162_resume" TEMPLATE=template0 ENCODING='UTF8' LOCALE='C';
+ALTER DATABASE "regression_a162_resume" SET lc_messages TO 'C';
+ALTER DATABASE "regression_a162_resume" SET lc_monetary TO 'C';
+ALTER DATABASE "regression_a162_resume" SET lc_numeric TO 'C';
+ALTER DATABASE "regression_a162_resume" SET lc_time TO 'C';
+ALTER DATABASE "regression_a162_resume" SET bytea_output TO 'hex';
+ALTER DATABASE "regression_a162_resume" SET timezone_abbreviations TO 'Default';
+
+test_setup                   ref ok    0.3s  engine ok    0.3s
+boolean                      ref ok    0.3s  engine ok    0.4s
+char                         ref ok    0.2s  engine ok    0.3s
+name                         ref ok    0.1s  engine ok    0.3s
+varchar                      ref ok    0.2s  engine ok    0.3s
+text                         ref ok    0.1s  engine ok    0.3s
+int2                         ref ok    0.2s  engine ok    0.3s
+int4                         ref ok    0.2s  engine ok    0.3s
+int8                         ref ok    0.2s  engine ok    0.3s
+oid                          ref ok    0.2s  engine ok    0.3s
+float4                       ref ok    0.2s  engine ok    0.3s
+float8                       ref ok    0.2s  engine ok    0.4s
+bit                          ref ok    0.3s  engine ok    0.4s
+numeric                      ref ok    0.4s  engine ok    0.8s
+txid                         ref ok    0.2s  engine ok    0.3s
+uuid                         ref ok    0.2s  engine ok    0.3s
+enum                         ref ok    0.2s  engine ok    0.4s
+money                        ref ok    0.2s  engine ok    0.3s
+rangetypes                   ref ok    0.4s  engine ok    0.8s
+pg_lsn                       ref ok    0.2s  engine ok    0.3s
+regproc                      ref ok    0.2s  engine ok    0.3s
+strings                      ref ok    0.2s  engine ok    0.5s
+md5                          ref ok    0.2s  engine ok    0.3s
+numerology                   ref ok    0.1s  engine ok    0.3s
+point                        ref ok    0.2s  engine ok    0.3s
+lseg                         ref ok    0.2s  engine ok    0.3s
+line                         ref ok    0.1s  engine ok    0.3s
+box                          ref ok    0.4s  engine ok    0.8s
+path                         ref ok    0.2s  engine ok    0.3s
+polygon                      ref ok    0.3s  engine ok    0.9s
+circle                       ref ok    0.2s  engine ok    0.3s
+date                         ref ok    0.2s  engine ok    0.4s
+time                         ref ok    0.2s  engine ok    0.3s
+timetz                       ref ok    0.2s  engine ok    0.3s
+timestamp                    ref ok    0.5s  engine ok    0.7s
+timestamptz                  ref ok    0.6s  engine ok    0.7s
+interval                     ref ok    0.3s  engine ok    0.6s
+inet                         ref ok    0.2s  engine ok    0.5s
+macaddr                      ref ok    0.2s  engine ok    0.4s
+macaddr8                     ref ok    0.2s  engine ok    0.4s
+multirangetypes              ref ok    0.5s  engine ok    1.4s
+geometry                     ref ok    0.3s  engine ok    0.5s
+horology                     ref ok    0.6s  engine ok    0.8s
+tstypes                      ref ok    0.3s  engine ok    0.6s
+regex                        ref ok    0.5s  engine ok    1.1s
+type_sanity                  ref ok    0.3s  engine ok    0.8s
+opr_sanity                   ref ok    0.6s  engine ok    1.3s
+misc_sanity                  ref ok    0.2s  engine ok    0.4s
+comments                     ref ok    0.2s  engine ok    0.4s
+expressions                  ref ok    0.3s  engine ok    0.6s
+unicode                      ref ok    0.2s  engine ok    0.4s
+xid                          ref ok    0.2s  engine ok    0.5s
+mvcc                         ref ok    0.3s  engine ok    0.4s
+database                     ref ok    0.6s  engine ok    0.7s
+stats_import                 ref ok    0.4s  engine ok    0.7s
+encoding                     ref ok    0.2s  engine ok    0.4s
+euc_kr                       ref ok    0.2s  engine ok    0.2s
+copy                         ref ok    0.2s  engine ok    0.4s
+copyselect                   ref ok    0.2s  engine ok    0.9s
+copydml                      ref ok    0.2s  engine ok    0.3s
+copyencoding                 ref ok    0.2s  engine ok    0.3s
+insert                       ref ok    0.6s  engine ok    0.7s
+insert_conflict              ref ok    0.3s  engine ok    0.5s
+create_function_c            ref ok    0.2s  engine ok    0.3s
+create_misc                  ref ok    0.2s  engine ok    0.3s
+create_operator              ref ok    0.2s  engine ok    0.3s
+create_procedure             ref ok    0.2s  engine ok    0.4s
+create_table                 ref ok    0.6s  engine ok    0.8s
+create_type                  ref ok    0.2s  engine ok    0.3s
+create_schema                ref ok    0.2s  engine ok    0.4s
+create_index                 ref ok    0.9s  engine ok    1.2s
+create_index_spgist          ref ok    0.5s  engine ok    0.5s
+create_view                  ref ok    0.5s  engine ok    1.0s
+index_including              ref ok    0.3s  engine ok    0.4s
+index_including_gist         ref ok    0.4s  engine ok    0.5s
+create_aggregate             ref ok    0.2s  engine ok    0.3s
+create_function_sql          ref ok    0.2s  engine ok    0.7s
+create_cast                  ref ok    0.2s  engine ok    0.3s
+constraints                  ref ok    0.7s  engine ok    1.2s
+test pg_regress has been running for over 60 seconds
+triggers                     ref ok    1.0s  engine ok    1.1s
+select                       ref ok    0.2s  engine ok    0.4s
+inherit                      ref ok    1.1s  engine ok    2.0s
+typed_table                  ref ok    0.2s  engine ok    0.4s
+vacuum                       ref ok    0.7s  engine ok    0.6s
+drop_if_exists               ref ok    0.2s  engine ok    0.4s
+updatable_views              ref ok    0.7s  engine ok    1.4s
+roleattributes               ref ok    0.2s  engine ok    0.3s
+create_am                    ref ok    0.3s  engine ok    0.4s
+hash_func                    ref ok    0.3s  engine ok    0.3s
+errors                       ref ok    0.2s  engine ok    0.3s
+infinite_recurse             ref ok    0.6s  engine ok    0.6s
+sanity_check                 ref ok    0.3s  engine ok    0.3s
+select_into                  ref ok    0.2s  engine ok    0.3s
+select_distinct              ref ok    0.4s  engine ok    0.3s
+select_distinct_on           ref ok    0.2s  engine ok    0.3s
+select_implicit              ref ok    0.2s  engine ok    0.3s
+select_having                ref ok    0.2s  engine ok    0.3s
+subselect                    ref ok    0.5s  engine ok    0.6s
+union                        ref ok    0.2s  engine ok    0.5s
+case                         ref ok    0.2s  engine ok    0.3s
+join                         ref ok    1.3s  engine ok    1.1s
+aggregates                   ref ok    0.8s  engine ok    0.9s
+transactions                 ref ok    0.2s  engine ok    0.4s
+random                       ref ok    0.2s  engine ok    0.4s
+portals                      ref ok    0.2s  engine ok    0.4s
+arrays                       ref ok    0.3s  engine ok    0.5s
+btree_index                  ref ok    0.9s  engine ok    1.7s
+hash_index                   ref ok    0.8s  engine ok    0.6s
+update                       ref ok    0.6s  engine ok    0.6s
+delete                       ref ok    0.2s  engine ok    0.2s
+namespace                    ref ok    0.2s  engine ok    0.4s
+prepared_xacts               ref ok    0.2s  engine ok    0.2s
+brin                         ref ok    0.4s  engine ok    0.7s
+gin                          ref ok    0.7s  engine ok    1.3s
+gist                         ref ok    0.6s  engine ok    0.9s
+spgist                       ref ok    0.4s  engine ok    7.7s
+privileges                   ref ok    1.5s  engine ok    3.3s
+init_privs                   ref ok    0.1s  engine ok    0.2s
+security_label               ref ok    0.2s  engine ok    0.3s
+collate                      ref ok    0.3s  engine ok    0.4s
+matview                      ref ok    0.4s  engine ok    0.6s
+lock                         ref ok    0.1s  engine ok    0.3s
+replica_identity             ref ok    0.3s  engine ok    0.5s
+rowsecurity                  ref ok    0.7s  engine ok    2.1s
+object_address               ref ok    0.2s  engine ok    0.4s
+tablesample                  ref ok    0.2s  engine ok    0.3s
+groupingsets                 ref ok    0.7s  engine ok    0.4s
+drop_operator                ref ok    0.2s  engine ok    0.3s
+password                     ref ok    0.2s  engine ok    0.4s
+identity                     ref ok    0.4s  engine ok    0.7s
+generated_stored             ref ok    0.6s  engine ok    1.4s
+join_hash                    ref ok    5.0s  engine ok    2.1s
+brin_bloom                   ref ok    0.2s  engine ok    0.5s
+brin_multi                   ref ok    0.4s  engine ok    0.8s
+create_table_like            ref ok    0.5s  engine ok    1.1s
+alter_generic                ref ok    0.3s  engine ok    1.0s
+alter_operator               ref ok    0.1s  engine ok    0.4s
+misc                         ref ok    0.7s  engine ok    0.4s
+async                        ref ok    0.1s  engine ok    0.3s
+dbsize                       ref ok    0.1s  engine ok    0.2s
+merge                        ref ok    0.5s  engine ok    1.5s
+misc_functions               ref ok    0.3s  engine ok    0.3s
+sysviews                     ref ok    0.2s  engine ok    0.3s
+tsrf                         ref ok    0.2s  engine ok    0.3s
+tid                          ref ok    0.2s  engine ok    0.3s
+tidscan                      ref ok    0.1s  engine ok    0.3s
+tidrangescan                 ref ok    0.2s  engine ok    0.3s
+collate.utf8                 ref ok    0.2s  engine ok    0.3s
+collate.icu.utf8             ref ok    0.8s  engine ok    0.9s
+incremental_sort             ref ok    0.3s  engine ok    0.5s
+create_role                  ref ok    0.2s  engine ok    0.9s
+without_overlaps             ref ok    1.2s  engine ok    1.3s
+generated_virtual            ref ok    0.6s  engine ok    1.2s
+rules                        ref ok    3.5s  engine ok    1.0s
+psql                         ref ok    0.7s  engine ok    1.8s
+psql_crosstab                ref ok    0.1s  engine ok    0.3s
+psql_pipeline                ref ok    0.2s  engine ok    0.4s
+amutils                      ref ok    0.2s  engine ok    0.4s
+stats_ext                    ref ok    1.3s  engine ok    3.6s
+collate.linux.utf8           ref ok    0.2s  engine ok    0.2s
+collate.windows.win1252: no sql file
+select_parallel              ref ok    2.9s  engine ok    1.0s
+write_parallel               ref ok    0.3s  engine ok    0.2s
+vacuum_parallel              ref ok    0.3s  engine ok    0.6s
+maintain_every               ref ok    0.2s  engine ok    0.4s
+publication                  ref ok    5.4s  engine ok    2.1s
+subscription                 ref ok    0.2s  engine ok    0.4s
+select_views                 ref ok    0.2s  engine ok    0.3s
+portals_p2                   ref ok    0.2s  engine ok    0.2s
+foreign_key                  ref ok    1.8s  engine ok    2.1s
+cluster                      ref ok    0.4s  engine ok    0.8s
+dependency                   ref ok    0.2s  engine ok    0.7s
+guc                          ref ok    0.2s  engine ok    0.4s
+bitmapops                    ref ok    0.3s  engine ok    0.7s
+combocid                     ref ok    0.2s  engine ok    0.3s
+tsearch                      ref ok    0.4s  engine ok    0.6s
+tsdicts                      ref ok    0.2s  engine ok    0.3s
+foreign_data                 ref ok    0.8s  engine ok    2.7s
+window                       ref ok    0.3s  engine ok    0.6s
+xmlmap                       ref ok    0.2s  engine ok    0.4s
+functional_deps              ref ok    0.2s  engine ok    0.3s
+advisory_lock                ref ok    0.2s  engine ok    0.3s
+indirect_toast               ref ok    0.2s  engine ok    0.4s
+equivclass                   ref ok    0.5s  engine ok    0.5s
+json                         ref ok    0.3s  engine ok    0.4s
+jsonb                        ref ok    0.5s  engine ok    0.7s
+json_encoding                ref ok    0.2s  engine ok    0.3s
+jsonpath                     ref ok    0.2s  engine ok    0.2s
+jsonpath_encoding            ref ok    0.2s  engine ok    0.3s
+jsonb_jsonpath               ref ok    0.3s  engine ok    0.5s
+sqljson                      ref ok    0.2s  engine ok    0.5s
+sqljson_queryfuncs           ref ok    0.2s  engine ok    0.5s
+sqljson_jsontable            ref ok    0.2s  engine ok    0.4s
+plancache                    ref ok    0.2s  engine ok    0.4s
+limit                        ref ok    0.2s  engine ok    0.4s
+plpgsql                      ref ok    0.7s  engine ok    2.4s
+copy2                        ref ok    0.2s  engine ok    0.5s
+temp                         ref ok    0.3s  engine ok    1.1s
+domain                       ref ok    0.4s  engine ok    1.5s
+rangefuncs                   ref ok    0.4s  engine ok    1.1s
+prepare                      ref ok    0.2s  engine ok    0.3s
+conversion                   ref ok    0.2s  engine ok    0.4s
+truncate                     ref ok    0.3s  engine ok    0.5s
+alter_table                  ref ok    2.0s  engine ok    5.9s
+sequence                     ref ok    0.2s  engine ok    1.2s
+polymorphism                 ref ok    0.3s  engine ok    1.2s
+rowtypes                     ref ok    0.3s  engine ok    0.5s
+returning                    ref ok    0.3s  engine ok    0.5s
+largeobject                  ref ok    0.3s  engine ok    0.4s
+with                         ref ok    0.4s  engine ok    0.6s
+xml                          ref ok    1.8s  engine ok    0.4s
+partition_join               ref ok    1.0s  engine ok    2.8s
+partition_prune              ref ok    1.5s  engine ok    2.8s
+reloptions                   ref ok    0.2s  engine ok    0.5s
+hash_part                    ref ok    0.2s  engine ok    0.3s
+indexing                     ref ok    1.8s  engine ok    3.7s
+partition_aggregate          ref ok    0.8s  engine ok    1.5s
+partition_info               ref ok    0.2s  engine ok    0.4s
+tuplesort                    ref ok    0.7s  engine ok    2.1s
+explain                      ref ok    0.2s  engine ok    0.4s
+memoize                      ref ok    0.8s  engine ok    0.5s
+stats                        ref ok    0.9s  engine ok    1.4s
+predicate                    ref ok    0.2s  engine ok    0.4s
+numa                         ref ok    0.2s  engine ok    0.3s
+compression                  ref ok    0.3s  engine ok    0.8s
+compression_pglz             ref ok    0.2s  engine ok    0.2s
+oidjoins                     ref ok    0.3s  engine ok    0.6s
+event_trigger                ref ok    0.4s  engine ok    1.8s
+event_trigger_login          ref ok    0.2s  engine ok    0.4s
+fast_default                 ref ok    0.4s  engine ok    1.8s
+tablespace                   ref ok    0.6s  engine ok    1.8s
+kill: (3410512): No such process
+pg_regress: ## Changes against the baseline run
+
+Baseline: `tests/regress/results.tsv` (full run of commit `f24d364`, debug build, 2026-11-01 19:09 UTC, reference `t3-d4020b98-regref-f24d3643`). This run: commit `3997cf0`, release build. Newly differing units: 1280; newly matching: 0.
+
+The two runs' engines are builds of different (or unknown) profiles.
+
+| file | units | newly differing | newly matching |
+|---|---:|---|---|
+| test_setup | 79 | 33, 39, 45, 49, 53, 57, 61 |  |
+| copy | 118 | 69, 104, 105 |  |
+| create_index | 708 | 30, 47, 48, 49, 51, 65, 66, 71, 73, 75, 79, 107, 109, 111, 122, 124, 127, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 144, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 158, 161, 162, 163, 164, 165, 166, 167, 183, 184, 335, 337, 344, 346, 354, 356, 363, 365, 373, 374, 375, 376, 377, 378, 383, 384, 385, 386, 387, 388, 389, 390, 391, 392, 393, 394, 395, 397, 398, 399, 400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 416, 417, 418, 419, 420, 421, 422, 423, 424, 425, 426, 427, 428, 430, 432, 434, 436, 437, 438, 440, 441, 442, 444, 445, 446, 447, 448, 450, 452, 454, 455, 456, 457, 458, 459, 460, 655, 656 |  |
+| create_index_spgist | 202 | 15, 16, 17, 18, 19, 20, 21, 22, 23, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 47, 49, 51, 53, 55, 57, 59, 61, 63, 74, 76, 78, 80, 82, 84, 86, 99, 101, 109, 111, 113, 115, 117, 119, 121, 123, 125, 127, 129, 131, 138, 140, 142, 144, 146, 148, 150, 152, 154, 156, 158, 160, 162, 164, 166, 168, 176, 178, 180, 182, 184, 186, 188, 190, 192, 194, 196, 198 |  |
+| create_view | 343 | 7 |  |
+| constraints | 607 | 112, 113, 115, 116 |  |
+| select | 87 | 0, 1, 2, 3, 4, 5, 6, 11, 12, 13, 17, 18, 22, 23, 24, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 67, 69, 70, 72, 73, 74, 75 |  |
+| inherit | 934 | 467, 468, 469, 472 |  |
+| create_am | 142 | 12, 14, 16 |  |
+| select_distinct | 101 | 0, 1, 2, 3, 4, 6, 36, 37, 39, 41, 47, 51, 55 |  |
+| select_distinct_on | 23 | 0, 2, 5, 7 |  |
+| subselect | 356 | 36, 37, 56, 57, 58, 59, 98, 99, 177, 178, 179, 180, 193, 194, 197, 198, 202, 203, 205, 206, 216, 217, 224, 225, 235, 237, 238, 240, 241, 290, 291, 321, 322, 323, 324, 325, 326, 327, 328, 329, 330, 331, 332, 333, 335, 336, 337, 345, 347, 348, 349, 350, 351, 352, 354 |  |
+| union | 198 | 40, 41, 42, 43, 46, 52, 53, 54, 55, 56, 57, 58, 195, 196 |  |
+| join | 925 | 66, 111, 112, 116, 122, 123, 125, 126, 130, 136, 137, 142, 145, 146, 150, 218, 223, 224, 238, 239, 240, 241, 242, 244, 246, 276, 277, 314, 315, 340, 341, 342, 343, 344, 345, 347, 348, 378, 379, 380, 381, 383, 384, 385, 386, 399, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 416, 417, 418, 419, 420, 424, 452, 453, 454, 455, 462, 463, 464, 465, 466, 467, 468, 469, 494, 543, 548, 549, 586, 725, 726, 727, 728, 729, 730, 731, 734, 735, 736, 737, 740, 741, 742, 743, 781, 782, 888, 892, 919, 920, 921, 922, 923, 924 |  |
+| aggregates | 556 | 4, 6, 7, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 48, 49, 50, 51, 74, 75, 76, 77, 78, 79, 80, 81, 82, 101, 102, 103, 104, 105, 106, 107, 108, 109, 111, 113, 130, 131, 132, 133, 134, 135, 136, 137, 140, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 160, 352, 353, 354, 355, 361, 362, 374, 375, 376, 377, 382, 383, 384, 386, 390, 403, 443, 488, 489, 505, 506, 507, 508, 517 |  |
+| transactions | 433 | 212, 214, 216, 220, 222, 225 |  |
+| portals | 354 | 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 87, 92, 93, 99, 100, 102, 103, 104, 109, 110, 112, 113, 114, 124, 292, 294, 295, 296 |  |
+| arrays | 519 | 4, 172, 173, 174, 175, 176, 177, 178, 179, 180, 182, 183, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 197, 396, 397, 398 |  |
+| btree_index | 135 | 6, 8, 10, 12, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 47, 48, 53, 55, 57, 59 |  |
+| hash_index | 102 | 6, 7, 8, 9, 22, 24, 26, 28, 30, 31, 33, 35, 37, 41, 43, 45, 47 |  |
+| brin | 77 | 36 |  |
+| tablesample | 58 | 34, 35, 37, 38, 40, 41 |  |
+| groupingsets | 217 | 38, 39, 42, 43, 46, 47, 48, 49, 50, 51, 61, 78, 94, 95, 98, 99, 100, 101, 102, 103, 144, 145, 146, 147, 151, 152, 154 |  |
+| join_hash | 279 | 276, 277 |  |
+| brin_multi | 172 | 26 |  |
+| misc | 68 | 23, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 62, 66, 67 |  |
+| misc_functions | 148 | 98, 101 |  |
+| tidscan | 49 | 38, 39, 41, 42 |  |
+| incremental_sort | 120 | 99, 100, 101, 102, 103, 104, 105, 106, 107, 119 |  |
+| psql | 1264 | 752, 755, 757, 758, 759, 761, 762, 935, 938 |  |
+| select_parallel | 250 | 38, 39, 41, 42, 46, 47, 48, 49, 50, 52, 53, 56, 57, 64, 65, 73, 74, 75, 76, 77, 78, 80, 81, 82, 83, 89, 90, 104, 105, 112, 116, 126, 127, 131, 132, 135, 136, 138, 140, 141, 143, 144, 147, 148, 151, 152, 153, 154, 156, 157, 159, 160, 164, 167, 170, 174, 188, 191, 192, 195, 199, 203, 205, 207, 208, 217 |  |
+| write_parallel | 22 | 5, 8, 11, 18 |  |
+| select_views | 52 | 0, 2 |  |
+| portals_p2 | 41 | 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26 |  |
+| tsearch | 451 | 9, 11, 12, 13, 14, 15, 16, 17, 18, 20, 21, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 40, 41, 42, 43, 44, 45, 46, 47, 49, 50, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 67, 68, 69, 70, 71, 72, 73, 74, 76, 77, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 100, 101, 102, 103, 104, 105, 106, 107, 109, 110, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 128, 129, 130, 131, 132, 133, 134, 135, 137, 138, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 160, 161, 162, 163, 164, 165, 166, 167, 169, 170, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 185, 187, 190 |  |
+| window | 400 | 4, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 34, 35, 38, 43, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 129, 130, 133, 134, 137, 138, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 264, 265, 325, 326, 392, 393, 394, 395 |  |
+| jsonb | 1090 | 3, 197, 199, 532, 533, 534, 535, 536, 537, 539, 540, 541, 542, 543, 544, 545, 546, 547, 549, 550, 551, 552, 553, 554, 555, 556, 557, 562, 563, 564, 565, 566, 567, 568, 569, 570, 572, 573, 575, 576, 577, 578, 579, 580, 581, 582, 583, 584, 585, 586, 587, 588, 590, 591, 593, 594, 595, 596, 597, 598, 599, 600, 601, 602, 605, 607, 609, 610, 611, 613, 616, 625, 626, 630, 631, 632, 633, 634, 635, 636, 637, 638, 639, 640, 641, 642, 643, 644, 645, 646, 647, 648, 650, 651, 652, 653, 654, 655, 656, 657, 658, 659 |  |
+| plancache | 97 | 32 |  |
+| limit | 85 | 0, 1, 2, 3, 5, 6, 7, 8, 52, 53, 54, 56, 57, 58, 59, 61, 66, 67, 68, 69, 70, 71 |  |
+| plpgsql | 941 | 414, 453 |  |
+| prepare | 33 | 17, 24 |  |
+| alter_table | 1749 | 140 |  |
+| rowtypes | 237 | 59, 60, 61, 62, 63, 64, 65, 66, 67, 204, 205, 206, 207 |  |
+| largeobject | 151 | 76, 79, 80, 81, 82, 83, 84, 85, 86, 87, 90, 91, 94, 96, 98, 100, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112 |  |
+| with | 307 | 32, 50, 51, 52 |  |
+| xml | 281 | 30, 120 |  |
+| explain | 60 | 22, 42 |  |
+| memoize | 73 | 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 23, 55, 56, 67, 68 |  |
+| stats | 482 | 57, 59, 65, 66 |  |
+
+pg_regress: 49868/51150 units match (97.5%), report in /home/meszmate/.cache/pg-engine-resume-20261104/verification/regress-report/REPORT.md
+test pg_regress ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 260.39s
+

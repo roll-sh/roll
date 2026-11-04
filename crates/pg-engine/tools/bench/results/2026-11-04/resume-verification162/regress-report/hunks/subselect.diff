@@ -1,0 +1,170 @@
+# subselect: 301/356 units match; first 12 differing units (- reference, + engine)
+
+@@ unit 36 (sql line 99) [wrong result] SELECT: values differ
+  -- Subselects without aliases
+  SELECT count FROM (SELECT COUNT(DISTINCT name) FROM road);
+   count 
+  -------
++      0
+-   2911
+  (1 row)
+  
+
+@@ unit 37 (sql line 102) [wrong result] SELECT: values differ
+  SELECT COUNT(*) FROM (SELECT DISTINCT name FROM road);
+   count 
+  -------
++      0
+-   2911
+  (1 row)
+  
+
+@@ unit 56 (sql line 168) [wrong result] SELECT: values differ
+  --
+  -- Test cases to catch unpleasant interactions between IN-join processing
+  -- and subquery pullup.
+  --
+  select count(*) from
+    (select 1 from tenk1 a
+     where unique1 IN (select hundred from tenk1 b)) ss;
+   count 
+  -------
++      0
+-    100
+  (1 row)
+  
+
+@@ unit 57 (sql line 176) [wrong result] SELECT: values differ
+  select count(distinct ss.ten) from
+    (select ten from tenk1 a
+     where unique1 IN (select hundred from tenk1 b)) ss;
+   count 
+  -------
++      0
+-     10
+  (1 row)
+  
+
+@@ unit 58 (sql line 179) [wrong result] SELECT: values differ
+  select count(*) from
+    (select 1 from tenk1 a
+     where unique1 IN (select distinct hundred from tenk1 b)) ss;
+   count 
+  -------
++      0
+-    100
+  (1 row)
+  
+
+@@ unit 59 (sql line 182) [wrong result] SELECT: values differ
+  select count(distinct ss.ten) from
+    (select ten from tenk1 a
+     where unique1 IN (select distinct hundred from tenk1 b)) ss;
+   count 
+  -------
++      0
+-     10
+  (1 row)
+  
+
+@@ unit 98 (sql line 328) [wrong result] SELECT: values differ
+  --
+  -- Test cases involving PARAM_EXEC parameters and min/max index optimizations.
+  -- Per bug report from David Sanchez i Gregori.
+  --
+  select * from (
+    select max(unique1) from tenk1 as a
+    where exists (select 1 from tenk1 as b where b.thousand = a.unique2)
+  ) ss;
++  max 
++ -----
++     
+-  max  
+- ------
+-  9997
+  (1 row)
+  
+
+@@ unit 99 (sql line 338) [wrong result] SELECT: values differ
+  select * from (
+    select min(unique1) from tenk1 as a
+    where not exists (select 1 from tenk1 as b where b.unique2 = 10000)
+  ) ss;
+   min 
+  -----
++     
+-    0
+  (1 row)
+  
+
+@@ unit 177 (sql line 587) [wrong EXPLAIN] EXPLAIN plan text differs
+  --
+  -- Test resolution of hashed vs non-hashed implementation of EXISTS subplan
+  --
+  explain (costs off)
+  select count(*) from tenk1 t
+  where (exists(select 1 from tenk1 k where k.unique1 = t.unique2) or ten < 0);
++                     QUERY PLAN                    
++ --------------------------------------------------
+-                                 QUERY PLAN                                
+- --------------------------------------------------------------------------
+   Aggregate
+     ->  Seq Scan on tenk1 t
++          Filter: (EXISTS(SubPlan 1) OR (ten < 0))
++          SubPlan 1
++            ->  Seq Scan on tenk1 k
++                  Filter: (unique1 = t.unique2)
++ (6 rows)
+-          Filter: ((ANY (unique2 = (hashed SubPlan 2).col1)) OR (ten < 0))
+-          SubPlan 2
+-            ->  Index Only Scan using tenk1_unique1 on tenk1 k
+- (5 rows)
+  
+
+@@ unit 178 (sql line 593) [wrong result] SELECT: values differ
+  select count(*) from tenk1 t
+  where (exists(select 1 from tenk1 k where k.unique1 = t.unique2) or ten < 0);
+   count 
+  -------
++      0
+-  10000
+  (1 row)
+  
+
+@@ unit 179 (sql line 596) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (costs off)
+  select count(*) from tenk1 t
+  where (exists(select 1 from tenk1 k where k.unique1 = t.unique2) or ten < 0)
+    and thousand = 1;
++                               QUERY PLAN                               
++ -----------------------------------------------------------------------
+-                           QUERY PLAN                          
+- --------------------------------------------------------------
+   Aggregate
++    ->  Seq Scan on tenk1 t
++          Filter: ((thousand = 1) AND (EXISTS(SubPlan 1) OR (ten < 0)))
+-    ->  Bitmap Heap Scan on tenk1 t
+-          Recheck Cond: (thousand = 1)
+-          Filter: (EXISTS(SubPlan 1) OR (ten < 0))
+-          ->  Bitmap Index Scan on tenk1_thous_tenthous
+-                Index Cond: (thousand = 1)
+           SubPlan 1
++            ->  Seq Scan on tenk1 k
++                  Filter: (unique1 = t.unique2)
++ (6 rows)
+-            ->  Index Only Scan using tenk1_unique1 on tenk1 k
+-                  Index Cond: (unique1 = t.unique2)
+- (9 rows)
+  
+
+@@ unit 180 (sql line 600) [wrong result] SELECT: values differ
+  select count(*) from tenk1 t
+  where (exists(select 1 from tenk1 k where k.unique1 = t.unique2) or ten < 0)
+    and thousand = 1;
+   count 
+  -------
++      0
+-     10
+  (1 row)
+  
+

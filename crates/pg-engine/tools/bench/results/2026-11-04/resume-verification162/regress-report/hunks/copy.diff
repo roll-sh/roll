@@ -1,0 +1,28 @@
+# copy: 115/118 units match; first 3 differing units (- reference, + engine)
+
+@@ unit 69 (sql line 223) [feature missing] ERROR: absolute path not allowed
+  copy tab_progress_reporting from :'filename'
+  	where (salary < 2000);
++ ERROR:  absolute path not allowed
+- INFO:  progress: {"type": "FILE", "command": "COPY FROM", "relname": "tab_progress_reporting", "tuples_skipped": 0, "has_bytes_total": true, "tuples_excluded": 1, "tuples_processed": 2, "has_bytes_processed": true}
+
+@@ unit 104 (sql line 351) [feature missing] ERROR: absolute path not allowed
+  COPY parted_si(id, data) FROM :'filename';
++ ERROR:  absolute path not allowed
+
+@@ unit 105 (sql line 353) [wrong result] SELECT: row count differs
+  -- An earlier bug (see commit b1ecb9b3fcf) could end up using a buffer from
+  -- the wrong partition. This test is *not* guaranteed to trigger that bug, but
+  -- does so when shared_buffers is small enough.  To test if we encountered the
+  -- bug, check that the partition condition isn't violated.
+  SELECT tableoid::regclass, id % 2 = 0 is_even, count(*) from parted_si GROUP BY 1, 2 ORDER BY 1;
++  tableoid | is_even | count 
++ ----------+---------+-------
++ (0 rows)
+-      tableoid     | is_even | count 
+- ------------------+---------+-------
+-  parted_si_p_even | t       |  5000
+-  parted_si_p_odd  | f       |  5000
+- (2 rows)
+  
+

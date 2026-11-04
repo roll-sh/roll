@@ -1,0 +1,20 @@
+# plpgsql: 939/941 units match; first 2 differing units (- reference, + engine)
+
+@@ unit 414 (sql line 2080) [wrong result] SELECT: values differ
+  select namedparmcursor_test9(6);
+   namedparmcursor_test9 
+  -----------------------
++                      0
+-                      1
+  (1 row)
+  
+
+@@ unit 453 (sql line 2301) [wrong result] SELECT: values differ
+  select multi_datum_use(42);
+   multi_datum_use 
+  -----------------
++  
+-  t
+  (1 row)
+  
+

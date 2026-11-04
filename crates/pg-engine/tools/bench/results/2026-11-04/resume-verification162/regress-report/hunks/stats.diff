@@ -1,0 +1,47 @@
+# stats: 478/482 units match; first 4 differing units (- reference, + engine)
+
+@@ unit 57 (sql line 99) [wrong result] SELECT: values differ
+  -- do a seqscan
+  SELECT count(*) FROM tenk2;
+   count 
+  -------
++      0
+-  10000
+  (1 row)
+  
+
+@@ unit 59 (sql line 104) [wrong result] SELECT: values differ
+  SELECT count(*) FROM tenk2 WHERE unique1 = 1;
+   count 
+  -------
++      0
+-      1
+  (1 row)
+  
+
+@@ unit 65 (sql line 118) [wrong result] SELECT: values differ
+  SELECT st.seq_scan >= pr.seq_scan + 1,
+         st.seq_tup_read >= pr.seq_tup_read + cl.reltuples,
+         st.idx_scan >= pr.idx_scan + 1,
+         st.idx_tup_fetch >= pr.idx_tup_fetch + 1
+    FROM pg_stat_user_tables AS st, pg_class AS cl, prevstats AS pr
+   WHERE st.relname='tenk2' AND cl.relname='tenk2';
+   ?column? | ?column? | ?column? | ?column? 
+  ----------+----------+----------+----------
++  t        | t        | f        | f
+-  t        | t        | t        | t
+  (1 row)
+  
+
+@@ unit 66 (sql line 125) [wrong result] SELECT: values differ
+  SELECT st.heap_blks_read + st.heap_blks_hit >= pr.heap_blks + cl.relpages,
+         st.idx_blks_read + st.idx_blks_hit >= pr.idx_blks + 1
+    FROM pg_statio_user_tables AS st, pg_class AS cl, prevstats AS pr
+   WHERE st.relname='tenk2' AND cl.relname='tenk2';
+   ?column? | ?column? 
+  ----------+----------
++  t        | f
+-  t        | t
+  (1 row)
+  
+

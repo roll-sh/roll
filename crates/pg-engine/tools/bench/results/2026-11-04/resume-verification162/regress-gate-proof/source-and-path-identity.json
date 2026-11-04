@@ -1,0 +1,13 @@
+{
+  "regression_copied_engine_sha256": "9e876733e089594f98399bf3caebb1c2027a1a1506e606e0e6586841b813ce2d",
+  "target_engine_sha256": "9e876733e089594f98399bf3caebb1c2027a1a1506e606e0e6586841b813ce2d",
+  "previous_build_gate_sha256_file": "bbd6097c97716bed73f4d03fffb7f31db62171c15c1891dd81f1fcf36a1d971e  /home/meszmate/.cache/a162/target/release/roll-engine\n",
+  "note": "Cargo dtbuild may relink same-source executable after original build-gate hash capture; copied regression executable matches current target. No frozen artifact overwritten.",
+  "allowed_root": "/home/meszmate/.cache/a162/pgr/resume-3997cf00",
+  "source_data_path": "/home/meszmate/.cache/a162/pgr/resume-3997cf00/src-repo/src/test/regress/data/onek.data",
+  "resolved_source_data_path": "/home/meszmate/.cache/a162/pgr/src-repo/src/test/regress/data/onek.data",
+  "resolved_under_allowed_root": false,
+  "source_path_exists": true,
+  "observed_refusal": "absolute path not allowed in saved engine/create_index.out and copy.out",
+  "interpretation": "setup issue likely: source fixture symlink escapes --allow-server-files root. Not yet rerun/proven as complete explanation; acceptance remains false."
+}

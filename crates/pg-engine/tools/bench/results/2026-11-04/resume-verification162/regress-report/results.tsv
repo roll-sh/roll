@@ -1,0 +1,239 @@
+# schedule=full
+# commit=3997cf0
+# date=2026-11-04 12:31 UTC
+# reference=a162-rref
+# timeout=300
+# reference_preexisting=
+# engine_build=release
+# files=230 units=51150 matched=49868 differing=1282 files_matching=180 ref_expected=203 engine_expected=159
+file	units	match	ref_exp	eng_exp	engine_status	panics	differing
+test_setup	79	72	no	no	ok	0	33:feature missing,39:feature missing,45:feature missing,49:feature missing,53:feature missing,57:feature missing,61:feature missing
+boolean	99	99	yes	yes	ok	0	
+char	32	32	yes	yes	ok	0	
+name	40	40	yes	yes	ok	0	
+varchar	22	22	yes	yes	ok	0	
+text	73	73	yes	yes	ok	0	
+int2	76	76	yes	yes	ok	0	
+int4	94	94	yes	yes	ok	0	
+int8	174	174	yes	yes	ok	0	
+oid	37	37	yes	yes	ok	0	
+float4	100	100	yes	yes	ok	0	
+float8	184	184	yes	yes	ok	0	
+bit	133	133	yes	yes	ok	0	
+numeric	1058	1058	yes	yes	ok	0	
+txid	47	47	yes	yes	ok	0	
+uuid	68	68	yes	yes	ok	0	
+enum	172	172	yes	yes	ok	0	
+money	113	113	yes	yes	ok	0	
+rangetypes	419	419	yes	yes	ok	0	
+pg_lsn	31	31	yes	yes	ok	0	
+regproc	107	107	yes	yes	ok	0	
+strings	504	504	yes	yes	ok	0	
+md5	14	14	yes	yes	ok	0	
+numerology	89	89	yes	yes	ok	0	
+point	43	43	yes	yes	ok	0	
+lseg	16	16	yes	yes	ok	0	
+line	35	35	yes	yes	ok	0	
+box	101	101	yes	yes	ok	0	
+path	23	23	yes	yes	ok	0	
+polygon	62	62	yes	yes	ok	0	
+circle	22	22	yes	yes	ok	0	
+date	271	271	yes	yes	ok	0	
+time	44	44	yes	yes	ok	0	
+timetz	57	57	yes	yes	ok	0	
+timestamp	177	177	yes	yes	ok	0	
+timestamptz	406	406	yes	yes	ok	0	
+interval	446	446	yes	yes	ok	0	
+inet	116	116	yes	yes	ok	0	
+macaddr	35	35	yes	yes	ok	0	
+macaddr8	71	71	yes	yes	ok	0	
+multirangetypes	619	619	yes	yes	ok	0	
+geometry	162	162	yes	yes	ok	0	
+horology	399	399	yes	yes	ok	0	
+tstypes	238	238	yes	yes	ok	0	
+regex	105	105	yes	yes	ok	0	
+type_sanity	66	66	no	no	ok	0	
+opr_sanity	133	133	no	no	ok	0	
+misc_sanity	5	5	yes	yes	ok	0	
+comments	7	7	yes	yes	ok	0	
+expressions	81	81	yes	yes	ok	0	
+unicode	32	32	yes	yes	ok	0	
+xid	84	84	yes	yes	ok	0	
+mvcc	11	11	yes	yes	ok	0	
+database	16	16	yes	yes	ok	0	
+stats_import	150	150	yes	yes	ok	0	
+encoding	81	81	no	no	ok	0	
+euc_kr	5	5	yes	yes	ok	0	
+copy	118	115	yes	no	ok	0	69:feature missing,104:feature missing,105:wrong result
+copyselect	36	36	no	no	ok	0	
+copydml	62	62	yes	yes	ok	0	
+copyencoding	22	22	yes	yes	ok	0	
+insert	399	399	no	no	ok	0	
+insert_conflict	261	261	yes	yes	ok	0	
+create_function_c	10	10	no	no	ok	0	
+create_misc	88	88	yes	yes	ok	0	
+create_operator	90	90	yes	yes	ok	0	
+create_procedure	115	115	yes	yes	ok	0	
+create_table	348	348	yes	yes	ok	0	
+create_type	88	88	no	no	ok	0	
+create_schema	30	30	yes	yes	ok	0	
+create_index	708	579	yes	no	ok	0	30:feature missing,47:wrong result,48:wrong result,49:wrong result,51:wrong result,65:wrong result,66:wrong result,71:wrong result,73:wrong result,75:wrong result,79:wrong result,107:wrong result,109:wrong result,111:wrong result,122:feature missing,124:wrong result,127:wrong result,133:wrong result,134:wrong result,135:wrong result,136:wrong result,137:wrong result,138:wrong result,139:wrong result,140:wrong result,141:wrong result,142:wrong result,144:wrong result,147:wrong result,148:wrong result,149:wrong result,150:wrong result,151:wrong result,152:wrong result,153:wrong result,154:wrong result,155:wrong result,156:wrong result,158:wrong result,161:wrong result,162:wrong result,163:wrong result,164:wrong result,165:wrong result,166:wrong result,167:wrong result,183:wrong EXPLAIN,184:wrong result,335:wrong result,337:wrong result,344:wrong result,346:wrong result,354:wrong result,356:wrong result,363:wrong result,365:wrong result,373:wrong result,374:wrong result,375:wrong result,376:wrong result,377:wrong result,378:wrong result,383:wrong EXPLAIN,384:wrong result,385:wrong EXPLAIN,386:wrong result,387:wrong EXPLAIN,388:wrong EXPLAIN,389:wrong EXPLAIN,390:wrong EXPLAIN,391:wrong EXPLAIN,392:wrong result,393:wrong EXPLAIN,394:wrong result,395:wrong EXPLAIN,397:wrong EXPLAIN,398:wrong result,399:wrong EXPLAIN,400:wrong result,401:wrong EXPLAIN,402:wrong result,403:wrong EXPLAIN,404:wrong result,405:wrong EXPLAIN,406:wrong result,407:wrong EXPLAIN,408:wrong result,409:wrong EXPLAIN,410:wrong EXPLAIN,411:wrong EXPLAIN,412:wrong EXPLAIN,416:wrong EXPLAIN,417:wrong result,418:wrong EXPLAIN,419:wrong result,420:wrong EXPLAIN,421:wrong result,422:wrong EXPLAIN,423:wrong result,424:wrong EXPLAIN,425:wrong result,426:wrong EXPLAIN,427:wrong result,428:wrong EXPLAIN,430:wrong EXPLAIN,432:wrong EXPLAIN,434:wrong EXPLAIN,436:wrong EXPLAIN,437:wrong result,438:wrong EXPLAIN,440:wrong EXPLAIN,441:wrong result,442:wrong EXPLAIN,444:wrong EXPLAIN,445:wrong result,446:wrong EXPLAIN,447:wrong result,448:wrong EXPLAIN,450:wrong EXPLAIN,452:wrong EXPLAIN,454:wrong EXPLAIN,455:wrong result,456:wrong EXPLAIN,457:wrong result,458:wrong EXPLAIN,459:wrong result,460:wrong EXPLAIN,655:wrong EXPLAIN,656:wrong EXPLAIN
+create_index_spgist	202	124	yes	no	ok	0	15:wrong result,16:wrong result,17:wrong result,18:wrong result,19:wrong result,20:wrong result,21:wrong result,22:wrong result,23:wrong result,30:wrong result,31:wrong result,32:wrong result,33:wrong result,34:wrong result,35:wrong result,36:wrong result,37:wrong result,38:wrong result,39:wrong result,40:wrong result,47:wrong result,49:wrong result,51:wrong result,53:wrong result,55:wrong result,57:wrong result,59:wrong result,61:wrong result,63:wrong result,74:wrong result,76:wrong result,78:wrong result,80:wrong result,82:wrong result,84:wrong result,86:wrong result,99:wrong result,101:wrong result,109:wrong result,111:wrong result,113:wrong result,115:wrong result,117:wrong result,119:wrong result,121:wrong result,123:wrong result,125:wrong result,127:wrong result,129:wrong result,131:wrong result,138:wrong result,140:wrong result,142:wrong result,144:wrong result,146:wrong result,148:wrong result,150:wrong result,152:wrong result,154:wrong result,156:wrong result,158:wrong result,160:wrong result,162:wrong result,164:wrong result,166:wrong result,168:wrong result,176:wrong result,178:wrong result,180:wrong result,182:wrong result,184:wrong result,186:wrong result,188:wrong result,190:wrong result,192:wrong result,194:wrong result,196:wrong result,198:wrong result
+create_view	343	342	no	no	ok	0	7:feature missing
+index_including	137	137	yes	yes	ok	0	
+index_including_gist	52	52	yes	yes	ok	0	
+create_aggregate	60	60	yes	yes	ok	0	
+create_function_sql	168	168	yes	yes	ok	0	
+create_cast	24	24	yes	yes	ok	0	
+constraints	607	603	yes	no	ok	0	112:feature missing,113:wrong result,115:wrong error message,116:wrong result
+triggers	1041	1041	no	no	ok	0	
+select	87	54	yes	no	ok	0	0:wrong result,1:wrong result,2:wrong result,3:wrong result,4:wrong result,5:wrong result,6:wrong result,11:wrong result,12:wrong result,13:wrong result,17:wrong result,18:wrong result,22:wrong result,23:wrong result,24:wrong result,55:wrong EXPLAIN,56:wrong result,57:wrong EXPLAIN,58:wrong EXPLAIN,59:wrong result,60:wrong EXPLAIN,61:wrong result,62:wrong EXPLAIN,63:wrong result,64:wrong EXPLAIN,65:wrong result,67:wrong result,69:wrong EXPLAIN,70:wrong result,72:wrong EXPLAIN,73:wrong result,74:wrong EXPLAIN,75:wrong result
+inherit	934	930	yes	no	ok	0	467:wrong EXPLAIN,468:wrong EXPLAIN,469:wrong EXPLAIN,472:wrong EXPLAIN
+typed_table	36	36	yes	yes	ok	0	
+vacuum	328	328	yes	yes	ok	0	
+drop_if_exists	161	161	yes	yes	ok	0	
+updatable_views	1109	1109	no	no	ok	0	
+roleattributes	80	80	yes	yes	ok	0	
+create_am	142	139	yes	no	ok	0	12:wrong result,14:wrong result,16:wrong result
+hash_func	43	43	yes	yes	ok	0	
+errors	87	87	yes	yes	ok	0	
+infinite_recurse	8	8	yes	yes	ok	0	
+sanity_check	3	3	yes	yes	ok	0	
+select_into	67	67	yes	yes	ok	0	
+select_distinct	101	88	yes	no	ok	0	0:wrong result,1:wrong result,2:wrong result,3:wrong result,4:wrong result,6:wrong result,36:wrong EXPLAIN,37:wrong result,39:wrong EXPLAIN,41:wrong EXPLAIN,47:wrong result,51:wrong result,55:wrong EXPLAIN
+select_distinct_on	23	19	yes	no	ok	0	0:wrong result,2:wrong result,5:wrong result,7:wrong EXPLAIN
+select_implicit	44	44	yes	yes	ok	0	
+select_having	23	23	yes	yes	ok	0	
+subselect	356	301	yes	no	ok	0	36:wrong result,37:wrong result,56:wrong result,57:wrong result,58:wrong result,59:wrong result,98:wrong result,99:wrong result,177:wrong EXPLAIN,178:wrong result,179:wrong EXPLAIN,180:wrong result,193:wrong EXPLAIN,194:wrong result,197:wrong EXPLAIN,198:wrong result,202:wrong EXPLAIN,203:wrong result,205:wrong EXPLAIN,206:wrong result,216:wrong EXPLAIN,217:wrong result,224:wrong result,225:wrong result,235:wrong result,237:wrong EXPLAIN,238:wrong result,240:wrong EXPLAIN,241:wrong result,290:wrong EXPLAIN,291:wrong result,321:wrong EXPLAIN,322:wrong EXPLAIN,323:wrong EXPLAIN,324:wrong EXPLAIN,325:wrong EXPLAIN,326:wrong EXPLAIN,327:wrong EXPLAIN,328:wrong EXPLAIN,329:wrong EXPLAIN,330:wrong EXPLAIN,331:wrong EXPLAIN,332:wrong EXPLAIN,333:wrong EXPLAIN,335:wrong EXPLAIN,336:wrong EXPLAIN,337:wrong EXPLAIN,345:wrong EXPLAIN,347:wrong EXPLAIN,348:wrong EXPLAIN,349:wrong EXPLAIN,350:wrong EXPLAIN,351:wrong EXPLAIN,352:wrong EXPLAIN,354:wrong EXPLAIN
+union	198	184	yes	no	ok	0	40:wrong EXPLAIN,41:wrong result,42:wrong EXPLAIN,43:wrong result,46:wrong result,52:wrong EXPLAIN,53:wrong result,54:wrong EXPLAIN,55:wrong result,56:wrong EXPLAIN,57:wrong result,58:wrong EXPLAIN,195:wrong EXPLAIN,196:wrong EXPLAIN
+case	64	64	yes	yes	ok	0	
+join	925	817	yes	no	ok	0	66:wrong EXPLAIN,111:wrong result,112:wrong result,116:wrong result,122:wrong result,123:wrong EXPLAIN,125:wrong EXPLAIN,126:wrong result,130:wrong EXPLAIN,136:wrong EXPLAIN,137:wrong EXPLAIN,142:wrong EXPLAIN,145:wrong EXPLAIN,146:wrong result,150:wrong EXPLAIN,218:wrong EXPLAIN,223:wrong EXPLAIN,224:wrong result,238:wrong EXPLAIN,239:wrong EXPLAIN,240:wrong EXPLAIN,241:wrong EXPLAIN,242:wrong EXPLAIN,244:wrong EXPLAIN,246:wrong EXPLAIN,276:wrong result,277:wrong result,314:wrong EXPLAIN,315:wrong result,340:wrong EXPLAIN,341:wrong EXPLAIN,342:wrong EXPLAIN,343:wrong EXPLAIN,344:wrong result,345:wrong EXPLAIN,347:wrong EXPLAIN,348:wrong result,368:wrong EXPLAIN,378:wrong EXPLAIN,379:wrong EXPLAIN,380:wrong EXPLAIN,381:wrong EXPLAIN,383:wrong EXPLAIN,384:wrong EXPLAIN,385:wrong EXPLAIN,386:wrong EXPLAIN,399:wrong EXPLAIN,401:wrong EXPLAIN,402:wrong EXPLAIN,403:wrong EXPLAIN,404:wrong EXPLAIN,405:wrong EXPLAIN,406:wrong EXPLAIN,407:wrong EXPLAIN,408:wrong EXPLAIN,409:wrong result,410:wrong EXPLAIN,411:wrong result,412:wrong EXPLAIN,413:wrong result,416:wrong EXPLAIN,417:wrong result,418:wrong EXPLAIN,419:wrong result,420:wrong EXPLAIN,424:wrong EXPLAIN,452:wrong EXPLAIN,453:wrong result,454:wrong EXPLAIN,455:wrong EXPLAIN,462:wrong EXPLAIN,463:wrong result,464:wrong EXPLAIN,465:wrong result,466:wrong EXPLAIN,467:wrong result,468:wrong EXPLAIN,469:wrong result,494:wrong EXPLAIN,543:wrong EXPLAIN,548:wrong EXPLAIN,549:wrong result,586:wrong EXPLAIN,725:wrong result,726:wrong EXPLAIN,727:wrong result,728:wrong EXPLAIN,729:wrong EXPLAIN,730:wrong result,731:wrong EXPLAIN,734:wrong result,735:wrong EXPLAIN,736:wrong EXPLAIN,737:wrong EXPLAIN,740:wrong EXPLAIN,741:wrong result,742:wrong EXPLAIN,743:wrong result,781:wrong EXPLAIN,782:wrong result,888:wrong EXPLAIN,892:wrong EXPLAIN,919:wrong EXPLAIN,920:wrong result,921:wrong EXPLAIN,922:wrong result,923:wrong EXPLAIN,924:wrong result
+aggregates	556	461	yes	no	ok	0	4:feature missing,6:wrong result,7:wrong result,12:wrong result,13:wrong result,14:wrong result,15:wrong result,16:wrong result,17:wrong result,18:wrong result,19:wrong result,20:wrong result,21:wrong result,22:wrong result,23:wrong result,24:wrong result,25:wrong result,26:wrong result,27:wrong result,28:wrong result,29:wrong result,48:wrong result,49:wrong result,50:wrong result,51:wrong result,74:wrong result,75:wrong result,76:wrong result,77:wrong result,78:wrong result,79:wrong result,80:wrong result,81:wrong result,82:wrong result,101:wrong result,102:wrong result,103:wrong result,104:wrong result,105:wrong result,106:wrong result,107:wrong result,108:wrong result,109:wrong result,111:wrong result,113:wrong result,130:wrong EXPLAIN,131:wrong result,132:wrong EXPLAIN,133:wrong result,134:wrong EXPLAIN,135:wrong result,136:wrong EXPLAIN,137:wrong result,140:wrong EXPLAIN,143:wrong EXPLAIN,144:wrong result,145:wrong EXPLAIN,146:wrong result,147:wrong EXPLAIN,148:wrong result,149:wrong EXPLAIN,150:wrong result,151:wrong EXPLAIN,152:wrong result,153:wrong EXPLAIN,154:wrong result,155:wrong EXPLAIN,156:wrong result,157:wrong EXPLAIN,158:wrong result,160:wrong result,352:wrong result,353:wrong result,354:wrong result,355:wrong result,361:wrong result,362:wrong result,374:wrong result,375:wrong result,376:wrong result,377:wrong result,382:wrong result,383:wrong result,384:wrong result,386:wrong result,390:wrong result,403:wrong result,443:wrong result,488:wrong EXPLAIN,489:wrong result,505:wrong EXPLAIN,506:wrong result,507:wrong EXPLAIN,508:wrong result,517:wrong result
+transactions	433	427	yes	no	ok	0	212:wrong result,214:wrong result,216:wrong result,220:missing error,222:missing error,225:missing error
+random	48	48	yes	yes	ok	0	
+portals	354	291	yes	no	ok	0	24:wrong result,25:wrong result,26:wrong result,27:wrong result,28:wrong result,29:wrong result,30:wrong result,31:wrong result,32:wrong result,33:wrong result,34:wrong result,35:wrong result,36:wrong result,37:wrong result,38:wrong result,39:wrong result,40:wrong result,41:wrong result,42:wrong result,43:wrong result,44:wrong result,45:wrong result,46:wrong result,47:wrong result,48:wrong result,49:wrong result,50:wrong result,51:wrong result,52:wrong result,53:wrong result,54:wrong result,55:wrong result,56:wrong result,57:wrong result,58:wrong result,59:wrong result,60:wrong result,61:wrong result,62:wrong result,63:wrong result,64:wrong result,65:wrong result,66:wrong result,67:wrong result,68:wrong result,87:wrong result,92:wrong result,93:wrong result,99:wrong result,100:wrong result,102:wrong result,103:wrong result,104:wrong result,109:wrong result,110:wrong result,112:wrong result,113:wrong result,114:missing error,124:wrong result,292:wrong EXPLAIN,294:wrong result,295:feature missing,296:knock-on
+arrays	519	493	yes	no	ok	0	4:feature missing,172:wrong result,173:wrong result,174:wrong result,175:wrong result,176:wrong result,177:wrong result,178:wrong result,179:wrong result,180:wrong result,182:wrong result,183:wrong result,186:wrong result,187:wrong result,188:wrong result,189:wrong result,190:wrong result,191:wrong result,192:wrong result,193:wrong result,194:wrong result,195:wrong result,197:wrong result,396:wrong result,397:wrong result,398:wrong result
+btree_index	135	113	yes	no	ok	0	6:feature missing,8:feature missing,10:feature missing,12:feature missing,21:wrong result,22:wrong result,23:wrong result,24:wrong result,25:wrong result,26:wrong result,27:wrong result,28:wrong result,29:wrong result,30:wrong result,31:wrong result,32:wrong result,47:wrong EXPLAIN,48:wrong result,53:wrong result,55:wrong result,57:wrong result,59:wrong result
+hash_index	102	85	yes	no	ok	0	6:feature missing,7:feature missing,8:feature missing,9:feature missing,22:wrong result,24:wrong result,26:wrong result,28:wrong result,30:wrong EXPLAIN,31:wrong result,33:wrong result,35:wrong result,37:wrong result,41:wrong result,43:wrong result,45:wrong result,47:wrong result
+update	289	289	yes	yes	ok	0	
+delete	10	10	yes	yes	ok	0	
+namespace	42	42	yes	yes	ok	0	
+prepared_xacts	2	2	yes	yes	ok	0	
+brin	77	76	yes	no	ok	0	36:wrong result
+gin	59	59	yes	yes	ok	0	
+gist	69	69	yes	yes	ok	0	
+spgist	31	31	yes	yes	ok	0	
+privileges	1398	1398	no	no	ok	0	
+init_privs	4	4	yes	yes	ok	0	
+security_label	28	28	yes	yes	ok	0	
+collate	149	149	yes	yes	ok	0	
+matview	189	189	yes	yes	ok	0	
+lock	134	134	no	no	ok	0	
+replica_identity	75	75	yes	yes	ok	0	
+rowsecurity	1226	1226	yes	yes	ok	0	
+object_address	85	85	yes	yes	ok	0	
+tablesample	58	52	yes	no	ok	0	34:wrong result,35:wrong result,37:wrong result,38:wrong result,40:wrong result,41:wrong result
+groupingsets	217	190	yes	no	ok	0	38:wrong result,39:wrong result,42:wrong result,43:wrong result,46:wrong EXPLAIN,47:wrong result,48:wrong EXPLAIN,49:wrong result,50:wrong EXPLAIN,51:wrong result,61:wrong EXPLAIN,78:wrong result,94:wrong result,95:wrong result,98:wrong result,99:wrong result,100:wrong result,101:wrong result,102:wrong result,103:wrong result,144:wrong result,145:wrong result,146:wrong result,147:wrong result,151:wrong EXPLAIN,152:wrong EXPLAIN,154:wrong EXPLAIN
+drop_operator	12	12	yes	yes	ok	0	
+password	53	53	yes	yes	ok	0	
+identity	288	288	yes	yes	ok	0	
+generated_stored	468	468	yes	yes	ok	0	
+join_hash	279	277	yes	no	ok	0	276:wrong EXPLAIN,277:wrong result
+brin_bloom	40	40	yes	yes	ok	0	
+brin_multi	172	171	yes	no	ok	0	26:wrong result
+create_table_like	191	191	yes	yes	ok	0	
+alter_generic	336	336	no	no	ok	0	
+alter_operator	65	65	yes	yes	ok	0	
+misc	68	54	no	no	ok	0	23:wrong result,44:wrong result,45:wrong result,46:wrong result,47:wrong result,48:wrong result,49:wrong result,50:wrong result,51:wrong result,52:wrong result,53:wrong result,62:wrong result,66:wrong result,67:wrong result
+async	11	11	yes	yes	ok	0	
+dbsize	25	25	yes	yes	ok	0	
+merge	572	572	yes	yes	ok	0	
+misc_functions	148	146	no	no	ok	0	98:wrong EXPLAIN,101:wrong EXPLAIN
+sysviews	29	29	yes	yes	ok	0	
+tsrf	74	74	yes	yes	ok	0	
+tid	41	41	yes	yes	ok	0	
+tidscan	49	45	yes	no	ok	0	38:wrong EXPLAIN,39:wrong result,41:wrong EXPLAIN,42:wrong result
+tidrangescan	45	45	yes	yes	ok	0	
+collate.utf8	61	61	yes	yes	ok	0	
+collate.icu.utf8	681	681	yes	yes	ok	0	
+incremental_sort	120	110	yes	no	ok	0	99:wrong EXPLAIN,100:wrong EXPLAIN,101:wrong EXPLAIN,102:wrong EXPLAIN,103:wrong EXPLAIN,104:wrong EXPLAIN,105:wrong EXPLAIN,106:wrong EXPLAIN,107:wrong EXPLAIN,119:wrong EXPLAIN
+create_role	144	144	yes	yes	ok	0	
+without_overlaps	674	674	yes	yes	ok	0	
+generated_virtual	489	489	yes	yes	ok	0	
+rules	632	632	yes	yes	ok	0	
+psql	1264	1255	no	no	ok	0	752:wrong result,755:psql describe,757:missing error,758:psql describe,759:psql describe,761:psql describe,762:psql describe,935:wrong result,938:wrong result
+psql_crosstab	32	32	yes	yes	ok	0	
+psql_pipeline	362	362	yes	yes	ok	0	
+amutils	10	10	yes	yes	ok	0	
+stats_ext	878	878	yes	yes	ok	0	
+collate.linux.utf8	2	2	yes	yes	ok	0	
+select_parallel	250	184	yes	no	ok	0	38:wrong EXPLAIN,39:wrong result,41:wrong EXPLAIN,42:wrong result,46:wrong EXPLAIN,47:wrong EXPLAIN,48:wrong result,49:wrong EXPLAIN,50:wrong EXPLAIN,52:wrong EXPLAIN,53:wrong result,56:wrong EXPLAIN,57:wrong result,64:wrong EXPLAIN,65:wrong result,73:wrong EXPLAIN,74:wrong result,75:wrong EXPLAIN,76:wrong result,77:wrong EXPLAIN,78:wrong result,80:wrong EXPLAIN,81:wrong result,82:wrong EXPLAIN,83:wrong result,89:wrong EXPLAIN,90:wrong result,104:wrong EXPLAIN,105:wrong result,112:wrong EXPLAIN,116:wrong result,126:wrong EXPLAIN,127:wrong result,131:wrong EXPLAIN,132:wrong EXPLAIN,135:wrong EXPLAIN,136:wrong result,138:wrong EXPLAIN,140:wrong EXPLAIN,141:wrong result,143:wrong EXPLAIN,144:wrong result,147:wrong EXPLAIN,148:wrong result,151:wrong EXPLAIN,152:wrong result,153:wrong EXPLAIN,154:wrong result,156:wrong EXPLAIN,157:wrong result,159:wrong EXPLAIN,160:wrong result,164:wrong EXPLAIN,167:wrong EXPLAIN,170:wrong EXPLAIN,174:wrong EXPLAIN,188:wrong result,191:wrong EXPLAIN,192:wrong EXPLAIN,195:wrong EXPLAIN,199:missing error,203:wrong EXPLAIN,205:wrong EXPLAIN,207:wrong EXPLAIN,208:wrong EXPLAIN,217:wrong EXPLAIN
+write_parallel	22	18	yes	no	ok	0	5:wrong EXPLAIN,8:wrong EXPLAIN,11:wrong EXPLAIN,18:wrong EXPLAIN
+vacuum_parallel	14	14	yes	yes	ok	0	
+maintain_every	16	16	yes	yes	ok	0	
+publication	781	781	yes	yes	ok	0	
+subscription	179	179	no	no	ok	0	
+select_views	52	50	no	no	ok	0	0:wrong result,2:wrong result
+portals_p2	41	28	yes	no	ok	0	14:wrong result,15:wrong result,16:wrong result,17:wrong result,18:wrong result,19:wrong result,20:wrong result,21:wrong result,22:wrong result,23:wrong result,24:wrong result,25:wrong result,26:wrong result
+foreign_key	1267	1267	yes	yes	ok	0	
+cluster	205	205	yes	yes	ok	0	
+dependency	68	68	yes	yes	ok	0	
+guc	222	222	yes	yes	ok	0	
+bitmapops	12	12	yes	yes	ok	0	
+combocid	62	62	yes	yes	ok	0	
+tsearch	451	315	yes	no	ok	0	9:feature missing,11:wrong result,12:wrong result,13:wrong result,14:wrong result,15:wrong result,16:wrong result,17:wrong result,18:wrong result,20:wrong result,21:wrong result,23:wrong result,24:wrong result,25:wrong result,26:wrong result,27:wrong result,28:wrong result,29:wrong result,30:wrong result,31:wrong result,32:wrong result,33:wrong result,34:wrong result,40:wrong result,41:wrong result,42:wrong result,43:wrong result,44:wrong result,45:wrong result,46:wrong result,47:wrong result,49:wrong result,50:wrong result,52:wrong result,53:wrong result,54:wrong result,55:wrong result,56:wrong result,57:wrong result,58:wrong result,59:wrong result,60:wrong result,61:wrong result,62:wrong result,63:wrong result,67:wrong result,68:wrong result,69:wrong result,70:wrong result,71:wrong result,72:wrong result,73:wrong result,74:wrong result,76:wrong result,77:wrong result,79:wrong result,80:wrong result,81:wrong result,82:wrong result,83:wrong result,84:wrong result,85:wrong result,86:wrong result,87:wrong result,88:wrong result,89:wrong result,90:wrong result,100:wrong result,101:wrong result,102:wrong result,103:wrong result,104:wrong result,105:wrong result,106:wrong result,107:wrong result,109:wrong result,110:wrong result,112:wrong result,113:wrong result,114:wrong result,115:wrong result,116:wrong result,117:wrong result,118:wrong result,119:wrong result,120:wrong result,121:wrong result,122:wrong result,123:wrong result,128:wrong result,129:wrong result,130:wrong result,131:wrong result,132:wrong result,133:wrong result,134:wrong result,135:wrong result,137:wrong result,138:wrong result,140:wrong result,141:wrong result,142:wrong result,143:wrong result,144:wrong result,145:wrong result,146:wrong result,147:wrong result,148:wrong result,149:wrong result,150:wrong result,151:wrong result,160:wrong result,161:wrong result,162:wrong result,163:wrong result,164:wrong result,165:wrong result,166:wrong result,167:wrong result,169:wrong result,170:wrong result,172:wrong result,173:wrong result,174:wrong result,175:wrong result,176:wrong result,177:wrong result,178:wrong result,179:wrong result,180:wrong result,181:wrong result,182:wrong result,183:wrong result,185:wrong result,187:wrong result,190:wrong result
+tsdicts	131	131	yes	yes	ok	0	
+foreign_data	624	624	no	no	ok	0	
+window	400	298	yes	no	ok	0	4:wrong result,7:wrong result,8:wrong result,10:wrong result,11:wrong result,12:wrong result,13:wrong result,14:wrong result,15:wrong result,16:wrong result,17:wrong result,18:wrong result,19:wrong result,20:wrong result,21:wrong result,22:wrong result,23:wrong result,24:wrong result,25:wrong result,26:wrong result,27:wrong result,28:wrong result,29:wrong result,30:wrong result,31:wrong result,32:wrong result,34:wrong result,35:wrong result,38:wrong result,43:wrong result,46:wrong result,47:wrong result,48:wrong result,49:wrong result,50:wrong result,51:wrong result,52:wrong result,53:wrong result,54:wrong result,55:wrong result,56:wrong result,57:wrong result,58:wrong result,59:wrong result,60:wrong result,61:wrong result,62:wrong result,63:wrong result,64:wrong result,65:wrong result,66:wrong result,67:wrong result,68:wrong result,69:wrong result,70:wrong result,71:wrong result,72:wrong result,94:wrong result,95:wrong result,96:wrong result,97:wrong result,98:wrong result,99:wrong result,100:wrong result,101:wrong result,102:wrong result,103:wrong result,104:wrong result,105:wrong result,106:wrong result,107:wrong result,108:wrong result,129:wrong result,130:wrong result,133:wrong result,134:wrong result,137:wrong result,138:wrong result,213:wrong result,214:wrong result,215:wrong result,216:wrong result,217:wrong result,218:wrong result,219:wrong result,220:wrong result,221:wrong result,222:wrong result,223:wrong result,224:wrong result,225:wrong result,226:wrong result,227:wrong result,228:wrong result,264:missing error,265:missing error,325:wrong result,326:wrong result,392:wrong EXPLAIN,393:wrong EXPLAIN,394:wrong EXPLAIN,395:wrong EXPLAIN
+xmlmap	40	40	no	no	ok	0	
+functional_deps	40	40	yes	yes	ok	0	
+advisory_lock	38	38	yes	yes	ok	0	
+indirect_toast	31	31	no	no	ok	0	
+equivclass	96	96	yes	yes	ok	0	
+json	469	469	yes	yes	ok	0	
+jsonb	1090	988	yes	no	ok	0	3:feature missing,197:wrong result,199:wrong result,532:wrong result,533:wrong result,534:wrong result,535:wrong result,536:wrong result,537:wrong result,539:wrong result,540:wrong result,541:wrong result,542:wrong result,543:wrong result,544:wrong result,545:wrong result,546:wrong result,547:wrong result,549:wrong result,550:wrong result,551:wrong result,552:wrong result,553:wrong result,554:wrong result,555:wrong result,556:wrong result,557:wrong result,562:wrong result,563:wrong result,564:wrong result,565:wrong result,566:wrong result,567:wrong result,568:wrong result,569:wrong result,570:wrong result,572:wrong result,573:wrong result,575:wrong result,576:wrong result,577:wrong result,578:wrong result,579:wrong result,580:wrong result,581:wrong result,582:wrong result,583:wrong result,584:wrong result,585:wrong result,586:wrong result,587:wrong result,588:wrong result,590:wrong result,591:wrong result,593:wrong result,594:wrong result,595:wrong result,596:wrong result,597:wrong result,598:wrong result,599:wrong result,600:wrong result,601:wrong result,602:wrong result,605:wrong result,607:wrong result,609:wrong result,610:wrong result,611:wrong result,613:wrong result,616:wrong result,625:wrong result,626:wrong result,630:wrong result,631:wrong result,632:wrong result,633:wrong result,634:wrong result,635:wrong result,636:wrong result,637:wrong result,638:wrong result,639:wrong result,640:wrong result,641:wrong result,642:wrong result,643:wrong result,644:wrong result,645:wrong result,646:wrong result,647:wrong result,648:wrong result,650:wrong result,651:wrong result,652:wrong result,653:wrong result,654:wrong result,655:wrong result,656:wrong result,657:wrong result,658:wrong result,659:wrong result
+json_encoding	47	47	yes	yes	ok	0	
+jsonpath	224	224	yes	yes	ok	0	
+jsonpath_encoding	35	35	yes	yes	ok	0	
+jsonb_jsonpath	836	836	yes	yes	ok	0	
+sqljson	242	242	yes	yes	ok	0	
+sqljson_queryfuncs	318	318	yes	yes	ok	0	
+sqljson_jsontable	131	131	yes	yes	ok	0	
+plancache	97	96	yes	no	ok	0	32:wrong result
+limit	85	63	yes	no	ok	0	0:wrong result,1:wrong result,2:wrong result,3:wrong result,5:wrong result,6:wrong result,7:wrong result,8:wrong result,52:wrong EXPLAIN,53:wrong result,54:feature missing,56:wrong result,57:feature missing,58:wrong EXPLAIN,59:wrong result,61:wrong result,66:wrong EXPLAIN,67:wrong result,68:wrong result,69:wrong result,70:wrong result,71:wrong result
+plpgsql	941	939	yes	no	ok	0	414:wrong result,453:wrong result
+copy2	290	290	no	no	ok	0	
+temp	211	211	yes	yes	ok	0	
+domain	486	486	no	no	ok	0	
+rangefuncs	428	428	yes	yes	ok	0	
+prepare	33	31	yes	no	ok	0	17:wrong result,24:wrong result
+conversion	68	68	no	no	ok	0	
+truncate	193	193	yes	yes	ok	0	
+alter_table	1749	1748	yes	no	ok	0	140:wrong result
+sequence	265	265	no	no	ok	0	
+polymorphism	426	426	yes	yes	ok	0	
+rowtypes	237	224	yes	no	ok	0	59:wrong result,60:wrong EXPLAIN,61:wrong result,62:wrong EXPLAIN,63:wrong result,64:wrong EXPLAIN,65:wrong result,66:wrong EXPLAIN,67:wrong result,204:wrong EXPLAIN,205:wrong result,206:wrong result,207:wrong result
+returning	145	145	yes	yes	ok	0	
+largeobject	151	124	yes	no	ok	0	76:feature missing,79:wrong result,80:wrong result,81:wrong result,82:wrong result,83:wrong result,84:wrong result,85:wrong result,86:wrong result,87:wrong result,90:wrong result,91:psql describe,94:feature missing,96:wrong result,98:feature missing,100:psql describe,102:feature missing,103:feature missing,104:feature missing,105:feature missing,106:feature missing,107:feature missing,108:feature missing,109:wrong error message,110:feature missing,111:feature missing,112:feature missing
+with	307	303	yes	no	ok	0	32:wrong result,50:wrong EXPLAIN,51:wrong EXPLAIN,52:wrong EXPLAIN
+xml	281	279	yes	no	ok	0	30:wrong result,120:wrong result
+partition_join	614	614	yes	yes	ok	0	
+partition_prune	771	770	yes	no	ok	0	410:wrong result
+reloptions	66	66	yes	yes	ok	0	
+hash_part	29	29	yes	yes	ok	0	
+indexing	645	645	yes	yes	ok	0	
+partition_aggregate	137	137	yes	yes	ok	0	
+partition_info	73	73	yes	yes	ok	0	
+tuplesort	108	108	yes	yes	ok	0	
+explain	60	58	yes	no	ok	0	22:wrong result,42:wrong EXPLAIN
+memoize	73	58	yes	no	ok	0	3:wrong result,4:wrong result,5:wrong result,6:wrong result,7:wrong result,8:wrong result,9:wrong result,10:wrong result,11:wrong result,12:wrong result,23:wrong result,55:wrong EXPLAIN,56:wrong result,67:wrong EXPLAIN,68:wrong result
+stats	482	478	yes	no	ok	0	57:wrong result,59:wrong result,65:wrong result,66:wrong result
+predicate	42	42	yes	yes	ok	0	
+numa	3	3	yes	yes	ok	0	
+compression	102	102	yes	yes	ok	0	
+compression_pglz	21	21	no	no	ok	0	
+oidjoins	1	1	yes	yes	ok	0	
+event_trigger	230	230	yes	yes	ok	0	
+event_trigger_login	14	14	yes	yes	ok	0	
+fast_default	275	275	yes	yes	ok	0	
+tablespace	261	261	yes	yes	ok	0	

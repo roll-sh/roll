@@ -1,0 +1,214 @@
+# select_parallel: 184/250 units match; first 12 differing units (- reference, + engine)
+
+@@ unit 38 (sql line 74) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (costs off)
+    select count(*) from tenk1 where stringu1 = 'GRAAAA';
++                  QUERY PLAN                  
++ ---------------------------------------------
++  Aggregate
++    ->  Seq Scan on tenk1
++          Filter: (stringu1 = 'GRAAAA'::name)
++ (3 rows)
+-                        QUERY PLAN                        
+- ---------------------------------------------------------
+-  Finalize Aggregate
+-    ->  Gather
+-          Workers Planned: 4
+-          ->  Partial Aggregate
+-                ->  Parallel Seq Scan on tenk1
+-                      Filter: (stringu1 = 'GRAAAA'::name)
+- (6 rows)
+  
+
+@@ unit 39 (sql line 76) [wrong result] SELECT: values differ
+  select count(*) from tenk1 where stringu1 = 'GRAAAA';
+   count 
+  -------
++      0
+-     15
+  (1 row)
+  
+
+@@ unit 41 (sql line 81) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (costs off)
+    select count(*) from tenk1 where stringu1 = 'GRAAAA';
++                  QUERY PLAN                  
++ ---------------------------------------------
++  Aggregate
++    ->  Seq Scan on tenk1
++          Filter: (stringu1 = 'GRAAAA'::name)
++ (3 rows)
+-                        QUERY PLAN                        
+- ---------------------------------------------------------
+-  Finalize Aggregate
+-    ->  Gather
+-          Workers Planned: 4
+-          ->  Partial Aggregate
+-                ->  Parallel Seq Scan on tenk1
+-                      Filter: (stringu1 = 'GRAAAA'::name)
+- (6 rows)
+  
+
+@@ unit 42 (sql line 83) [wrong result] SELECT: values differ
+  select count(*) from tenk1 where stringu1 = 'GRAAAA';
+   count 
+  -------
++      0
+-     15
+  (1 row)
+  
+
+@@ unit 46 (sql line 90) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (verbose, costs off)
+  select sp_parallel_restricted(unique1) from tenk1
+    where stringu1 = 'GRAAAA' order by 1;
++                      QUERY PLAN                      
++ -----------------------------------------------------
+-                        QUERY PLAN                        
+- ---------------------------------------------------------
+   Sort
+     Output: (sp_parallel_restricted(unique1))
+     Sort Key: (sp_parallel_restricted(tenk1.unique1))
++    ->  Seq Scan on public.tenk1
+-    ->  Gather
+           Output: sp_parallel_restricted(unique1)
++          Filter: (tenk1.stringu1 = 'GRAAAA'::name)
++ (6 rows)
+-          Workers Planned: 4
+-          ->  Parallel Seq Scan on public.tenk1
+-                Output: unique1
+-                Filter: (tenk1.stringu1 = 'GRAAAA'::name)
+- (9 rows)
+  
+
+@@ unit 47 (sql line 94) [wrong EXPLAIN] EXPLAIN plan text differs
+  -- test parallel plan when group by expression is in target list.
+  explain (costs off)
+  	select length(stringu1) from tenk1 group by length(stringu1);
++               QUERY PLAN               
++ ---------------------------------------
++  HashAggregate
++    Group Key: length((stringu1)::text)
++    ->  Seq Scan on tenk1
++ (3 rows)
+-                     QUERY PLAN                     
+- ---------------------------------------------------
+-  Finalize HashAggregate
+-    Group Key: (length((stringu1)::text))
+-    ->  Gather
+-          Workers Planned: 4
+-          ->  Partial HashAggregate
+-                Group Key: length((stringu1)::text)
+-                ->  Parallel Seq Scan on tenk1
+- (7 rows)
+  
+
+@@ unit 48 (sql line 97) [wrong result] SELECT: row count differs
+  select length(stringu1) from tenk1 group by length(stringu1);
+   length 
+  --------
++ (0 rows)
+-       6
+- (1 row)
+  
+
+@@ unit 49 (sql line 99) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (costs off)
+  	select stringu1, count(*) from tenk1 group by stringu1 order by stringu1;
++           QUERY PLAN           
++ -------------------------------
++  GroupAggregate
++    Group Key: stringu1
++    ->  Sort
++          Sort Key: stringu1
++          ->  Seq Scan on tenk1
++ (5 rows)
+-                      QUERY PLAN                     
+- ----------------------------------------------------
+-  Sort
+-    Sort Key: stringu1
+-    ->  Finalize HashAggregate
+-          Group Key: stringu1
+-          ->  Gather
+-                Workers Planned: 4
+-                ->  Partial HashAggregate
+-                      Group Key: stringu1
+-                      ->  Parallel Seq Scan on tenk1
+- (9 rows)
+  
+
+@@ unit 50 (sql line 102) [wrong EXPLAIN] EXPLAIN plan text differs
+  -- test that parallel plan for aggregates is not selected when
+  -- target list contains parallel restricted clause.
+  explain (costs off)
+  	select  sum(sp_parallel_restricted(unique1)) from tenk1
+  	group by(sp_parallel_restricted(unique1));
++                   QUERY PLAN                  
++ ----------------------------------------------
+-                             QUERY PLAN                             
+- -------------------------------------------------------------------
+   HashAggregate
+     Group Key: sp_parallel_restricted(unique1)
++    ->  Seq Scan on tenk1
++ (3 rows)
+-    ->  Gather
+-          Workers Planned: 4
+-          ->  Parallel Index Only Scan using tenk1_unique1 on tenk1
+- (5 rows)
+  
+
+@@ unit 52 (sql line 110) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (costs off) execute tenk1_count(1);
++           QUERY PLAN           
++ -------------------------------
++  Aggregate
++    ->  Seq Scan on tenk1
++          Filter: (hundred > 1)
++ (3 rows)
+-                   QUERY PLAN                  
+- ----------------------------------------------
+-  Finalize Aggregate
+-    ->  Gather
+-          Workers Planned: 4
+-          ->  Partial Aggregate
+-                ->  Parallel Seq Scan on tenk1
+-                      Filter: (hundred > 1)
+- (6 rows)
+  
+
+@@ unit 53 (sql line 111) [wrong result] EXECUTE: values differ
+  execute tenk1_count(1);
+   count 
+  -------
++      0
+-   9800
+  (1 row)
+  
+
+@@ unit 56 (sql line 116) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (costs off)
+  	select count(*) from tenk1 where (two, four) not in
+  	(select hundred, thousand from tenk2 where thousand > 100);
++                                              QUERY PLAN                                             
++ ----------------------------------------------------------------------------------------------------
++  Aggregate
++    ->  Seq Scan on tenk1
++          Filter: (NOT (ANY ((two = (hashed SubPlan 1).col1) AND (four = (hashed SubPlan 1).col2))))
++          SubPlan 1
++            ->  Seq Scan on tenk2
++                  Filter: (thousand > 100)
++ (6 rows)
+-                                                    QUERY PLAN                                                   
+- ----------------------------------------------------------------------------------------------------------------
+-  Finalize Aggregate
+-    ->  Gather
+-          Workers Planned: 4
+-          ->  Partial Aggregate
+-                ->  Parallel Seq Scan on tenk1
+-                      Filter: (NOT (ANY ((two = (hashed SubPlan 1).col1) AND (four = (hashed SubPlan 1).col2))))
+-                      SubPlan 1
+-                        ->  Seq Scan on tenk2
+-                              Filter: (thousand > 100)
+- (9 rows)
+  
+

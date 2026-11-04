@@ -1,0 +1,357 @@
+
+running 1 test
+test run ...   [wrong_error] seed 9000 #4: 42P22 vs 42P21
+  [wrong_rows] seed 9000 #25: 3 vs 3 rows
+  [wrong_rows] seed 9000 #110: 11 vs 8 rows
+seed 9000: 2.5s
+  [wrong_rows] seed 9001 #84: 1 vs 1 rows
+seed 9001: 2.9s
+seed 9002: 2.7s
+  [wrong_rows] seed 9003 #78: 9 vs 6 rows
+seed 9003: 2.3s
+  [wrong_rows] seed 9004 #133: 9 vs 6 rows
+seed 9004: 3.1s
+  [wrong_rows] seed 9005 #129: 3 vs 3 rows
+seed 9005: 2.2s
+  [wrong_rows] seed 9006 #21: 15 vs 3 rows
+  [wrong_rows] seed 9006 #90: 8 vs 12 rows
+  [wrong_rows] seed 9006 #134: 2 vs 2 rows
+seed 9006: 3.1s
+  [wrong_rows] seed 9007 #115: 2 vs 2 rows
+seed 9007: 1.7s
+  [wrong_rows] seed 9008 #49: 8 vs 10 rows
+seed 9008: 3.1s
+  [wrong_rows] seed 9009 #96: 5 vs 5 rows
+seed 9009: 2.5s
+  [wrong_rows] seed 9010 #35: 3 vs 3 rows
+  [error_detail] seed 9010 #44: 42703
+seed 9010: 2.6s
+seed 9011: 3.1s
+seed 9012: 2.5s
+  [error_detail] seed 9013 #52: 42P01
+seed 9013: 2.5s
+seed 9014: 2.3s
+  [wrong_error] seed 9015 #124: 08P01 vs 54000
+  [wrong_error] seed 9015 #127: 08P01 vs 54000
+seed 9015: 2.7s
+  [error_message] seed 9016 #149: extra data after last expected column | unexpected default marker in COPY data
+seed 9016: 3.4s
+seed 9017: 2.5s
+seed 9018: 4.1s
+  [wrong_rows] seed 9019 #37: 2 vs 2 rows
+seed 9019: 2.7s
+  [wrong_rows] seed 9020 #33: 3 vs 3 rows
+  [wrong_rows] seed 9020 #34: 3 vs 3 rows
+  [wrong_rows] seed 9020 #90: 1 vs 1 rows
+seed 9020: 2.4s
+  [wrong_rows] seed 9021 #127: 1 vs 1 rows
+seed 9021: 2.5s
+seed 9022: 2.4s
+  [wrong_rows] seed 9023 #46: 3 vs 3 rows
+  [wrong_rows] seed 9023 #95: 1 vs 1 rows
+  [wrong_rows] seed 9023 #95: 1 vs 1 rows
+seed 9023: 2.8s
+  [wrong_rows] seed 9024 #113: 2 vs 2 rows
+seed 9024: 3.0s
+  [error_detail] seed 9025 #3: 23505
+  [wrong_rows] seed 9025 #77: 2 vs 2 rows
+seed 9025: 1.9s
+seed 9026: 2.5s
+  [error_detail] seed 9027 #123: 23P01
+seed 9027: 2.7s
+seed 9028: 2.9s
+  [error_message] seed 9029 #0: subquery uses ungrouped column "t2.c" from outer query | subquery uses ungrouped column "t1.e" from outer query
+  [wrong_rows] seed 9029 #20: 5 vs 5 rows
+  [error_detail] seed 9029 #24: 23505
+  [wrong_rows] seed 9029 #95: 13 vs 10 rows
+seed 9029: 2.0s
+  [wrong_rows] seed 9030 #59: 2 vs 2 rows
+  [wrong_rows] seed 9030 #141: 1 vs 1 rows
+seed 9030: 2.7s
+seed 9031: 2.3s
+  [wrong_rows] seed 9032 #45: 5 vs 4 rows
+seed 9032: 2.7s
+  [wrong_rows] seed 9033 #160: 15 vs 12 rows
+seed 9033: 2.6s
+seed 9034: 3.0s
+seed 9035: 2.9s
+  [wrong_rows] seed 9036 #34: 2 vs 2 rows
+  [wrong_rows] seed 9036 #35: 2 vs 2 rows
+  [error_detail] seed 9036 #103: 42703
+seed 9036: 1.8s
+seed 9037: 3.0s
+seed 9038: 2.5s
+  [error_detail] seed 9039 #122: 23P01
+seed 9039: 3.2s
+  [error_detail] seed 9040 #5: 23505
+seed 9040: 1.9s
+  [error_detail] seed 9041 #0: 0A000
+seed 9041: 2.3s
+  [error_detail] seed 9042 #65: 42725
+seed 9042: 3.0s
+seed 9043: 1.8s
+seed 9044: 1.6s
+seed 9045: 2.8s
+seed 9046: 3.1s
+  [wrong_rows] seed 9047 #10: 3 vs 3 rows
+seed 9047: 2.9s
+seed 9048: 2.7s
+seed 9049: 3.1s
+  [error_detail] seed 9050 #0: 0A000
+seed 9050: 2.8s
+  [error_detail] seed 9051 #0: 23505
+seed 9051: 3.2s
+  [wrong_rows] seed 9052 #112: 11 vs 8 rows
+  [wrong_rows] seed 9052 #133: 11 vs 8 rows
+seed 9052: 3.3s
+seed 9053: 1.8s
+  [wrong_rows] seed 9054 #87: 2 vs 2 rows
+seed 9054: 2.5s
+  [wrong_rows] seed 9055 #22: 2 vs 2 rows
+seed 9055: 2.8s
+seed 9056: 3.3s
+  [wrong_rows] seed 9057 #52: 13 vs 10 rows
+  [wrong_rows] seed 9057 #54: 13 vs 10 rows
+seed 9057: 3.4s
+seed 9058: 3.0s
+seed 9059: 2.8s
+  [wrong_rows] seed 9060 #32: 1 vs 1 rows
+  [wrong_rows] seed 9060 #125: 2 vs 2 rows
+  [wrong_rows] seed 9060 #127: 1 vs 1 rows
+seed 9060: 2.7s
+seed 9061: 1.5s
+seed 9062: 2.5s
+seed 9063: 1.8s
+  [wrong_rows] seed 9064 #70: 3 vs 3 rows
+  [eval_error] seed 9064 #105: 22P02: invalid input syntax for type integer: "{"b": 2}" vs ok
+  [wrong_rows] seed 9064 #122: 1 vs 1 rows
+seed 9064: 2.5s
+seed 9065: 1.9s
+seed 9066: 2.6s
+  [wrong_rows] seed 9067 #8: 2 vs 2 rows
+seed 9067: 1.5s
+  [error_detail] seed 9068 #115: 42703
+  [error_detail] seed 9068 #146: 23505
+seed 9068: 3.1s
+seed 9069: 2.0s
+seed 9070: 2.0s
+  [error_detail] seed 9071 #19: 23505
+  [error_detail] seed 9071 #44: 23505
+seed 9071: 3.0s
+  [wrong_rows] seed 9072 #147: 2 vs 2 rows
+  [wrong_rows] seed 9072 #159: 3 vs 3 rows
+seed 9072: 1.8s
+  [wrong_rows] seed 9073 #33: 2 vs 2 rows
+  [wrong_rows] seed 9073 #34: 2 vs 2 rows
+  [wrong_error] seed 9073 #131: 08P01 vs 54000
+  [wrong_error] seed 9073 #132: 08P01 vs 54000
+seed 9073: 2.7s
+seed 9074: 2.7s
+  [engine_error] seed 9075 #59: 42725: operator is not unique: unknown + unknown
+  [engine_error] seed 9075 #60: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #61: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #62: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #63: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #64: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #65: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #66: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #67: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #68: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #69: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #70: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #71: 26000: prepared statement "r9p80975" does not exist
+  [engine_error] seed 9075 #72: 26000: prepared statement "r9p80975" does not exist
+  [wrong_rows] seed 9075 #73: 0 vs 1 rows
+  [engine_error] seed 9075 #74: 26000: prepared statement "r9p80975" does not exist
+  [error_message] seed 9075 #81: cannot get array length of a non-array | cannot delete from scalar
+  [error_detail] seed 9075 #143: 23505
+seed 9075: 1.8s
+seed 9076: 3.0s
+  [error_detail] seed 9077 #24: 42P20
+seed 9077: 2.2s
+  [error_detail] seed 9078 #0: 23505
+seed 9078: 2.5s
+  [wrong_rows] seed 9079 #106: 3 vs 3 rows
+seed 9079: 3.2s
+seed 9080: 3.1s
+  [wrong_rows] seed 9081 #20: 1 vs 1 rows
+seed 9081: 1.9s
+  [wrong_rows] seed 9082 #80: 5 vs 5 rows
+  [error_detail] seed 9082 #99: 23505
+seed 9082: 3.4s
+seed 9083: 2.4s
+  [engine_error] seed 9084 #135: 42725: operator is not unique: unknown + unknown
+  [engine_error] seed 9084 #136: 26000: prepared statement "r9p86022" does not exist
+  [engine_error] seed 9084 #137: 26000: prepared statement "r9p86022" does not exist
+  [engine_error] seed 9084 #138: 26000: prepared statement "r9p86022" does not exist
+  [engine_error] seed 9084 #139: 26000: prepared statement "r9p86022" does not exist
+  [wrong_error] seed 9084 #140: 26000 vs 22003
+  [wrong_error] seed 9084 #141: 26000 vs 22003
+  [wrong_error] seed 9084 #142: 26000 vs 22003
+  [engine_error] seed 9084 #143: 26000: prepared statement "r9p86022" does not exist
+  [wrong_rows] seed 9084 #145: 0 vs 1 rows
+  [engine_error] seed 9084 #146: 26000: prepared statement "r9p86022" does not exist
+seed 9084: 1.4s
+seed 9085: 1.7s
+seed 9086: 3.3s
+  [wrong_rows] seed 9087 #150: 5 vs 5 rows
+seed 9087: 2.9s
+seed 9088: 3.2s
+  [wrong_rows] seed 9089 #3: 6 vs 6 rows
+  [wrong_rows] seed 9089 #116: 2 vs 2 rows
+  [wrong_rows] seed 9089 #117: 2 vs 2 rows
+  [wrong_rows] seed 9089 #141: 3 vs 3 rows
+seed 9089: 3.3s
+  [wrong_rows] seed 9090 #40: 2 vs 2 rows
+  [engine_error] seed 9090 #121: 42725: operator is not unique: unknown + unknown
+  [engine_error] seed 9090 #122: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #123: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #124: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #125: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #126: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #127: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #128: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #129: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #130: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #131: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #132: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #133: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #134: 26000: prepared statement "r9x14839" does not exist
+  [engine_error] seed 9090 #135: 26000: prepared statement "r9x14839" does not exist
+  [wrong_rows] seed 9090 #136: 0 vs 1 rows
+  [engine_error] seed 9090 #137: 26000: prepared statement "r9x14839" does not exist
+seed 9090: 3.3s
+seed 9091: 3.7s
+seed 9092: 1.9s
+  [wrong_rows] seed 9093 #55: 3 vs 3 rows
+  [wrong_rows] seed 9093 #56: 3 vs 3 rows
+  [wrong_rows] seed 9093 #137: 3 vs 3 rows
+seed 9093: 3.6s
+seed 9094: 1.6s
+  [wrong_rows] seed 9095 #137: 9 vs 6 rows
+seed 9095: 1.6s
+  [wrong_rows] seed 9096 #28: 12 vs 11 rows
+seed 9096: 2.8s
+  [wrong_rows] seed 9097 #124: 2 vs 2 rows
+seed 9097: 2.9s
+  [error_detail] seed 9098 #13: 42703
+seed 9098: 2.7s
+seed 9099: 2.8s
+  [wrong_error] seed 9100 #98: 08P01 vs 54000
+  [wrong_error] seed 9100 #99: 08P01 vs 54000
+  [wrong_error] seed 9100 #101: 08P01 vs 54000
+  [wrong_error] seed 9100 #102: 08P01 vs 54000
+  [wrong_error] seed 9100 #107: 08P01 vs 54000
+seed 9100: 4.2s
+seed 9101: 3.4s
+seed 9102: 3.1s
+  [wrong_rows] seed 9103 #32: 9 vs 6 rows
+  [wrong_rows] seed 9103 #133: 13 vs 10 rows
+seed 9103: 2.4s
+seed 9104: 3.6s
+seed 9105: 2.6s
+  [error_detail] seed 9106 #22: 23P01
+  [wrong_rows] seed 9106 #43: 2 vs 2 rows
+seed 9106: 4.0s
+  [wrong_rows] seed 9107 #119: 10 vs 10 rows
+seed 9107: 3.0s
+  [wrong_error] seed 9108 #152: 22P02 vs 23505
+seed 9108: 2.8s
+seed 9109: 3.7s
+  [error_detail] seed 9110 #74: 23505
+  [error_detail] seed 9110 #75: 23505
+  [wrong_error] seed 9110 #138: 08P01 vs 54000
+seed 9110: 3.2s
+  [wrong_rows] seed 9111 #42: 1 vs 1 rows
+  [wrong_rows] seed 9111 #48: 2 vs 2 rows
+seed 9111: 2.8s
+  [error_detail] seed 9112 #68: 42703
+seed 9112: 1.5s
+  [error_detail] seed 9113 #97: 23505
+  [error_detail] seed 9113 #117: 23505
+  [error_detail] seed 9113 #135: 23505
+seed 9113: 1.2s
+seed 9114: 2.6s
+  [error_detail] seed 9115 #69: 23505
+seed 9115: 2.5s
+  [wrong_rows] seed 9116 #58: 16 vs 3 rows
+  [error_detail] seed 9116 #141: 42601
+seed 9116: 2.0s
+  [wrong_rows] seed 9117 #80: 9 vs 6 rows
+seed 9117: 1.8s
+  [wrong_rows] seed 9118 #154: 3 vs 3 rows
+seed 9118: 3.2s
+  [wrong_rows] seed 9119 #149: 11 vs 10 rows
+seed 9119: 3.3s
+seed 9120: 3.9s
+seed 9121: 1.5s
+  [wrong_rows] seed 9122 #27: 2 vs 2 rows
+seed 9122: 3.1s
+  [wrong_rows] seed 9123 #13: 1 vs 1 rows
+seed 9123: 2.9s
+seed 9124: 3.0s
+  [wrong_rows] seed 9125 #1: 5 vs 5 rows
+  [wrong_rows] seed 9125 #8: 2 vs 2 rows
+  [wrong_rows] seed 9125 #16: 2 vs 2 rows
+  [wrong_rows] seed 9125 #20: 1 vs 1 rows
+seed 9125: 1.3s
+  [error_detail] seed 9126 #146: 23505
+  [error_detail] seed 9126 #147: 23P01
+  [error_detail] seed 9126 #149: 23505
+seed 9126: 3.4s
+seed 9127: 1.7s
+  [error_detail] seed 9128 #20: 23505
+  [error_detail] seed 9128 #21: 23505
+  [wrong_rows] seed 9128 #139: 11 vs 8 rows
+seed 9128: 2.4s
+  [wrong_rows] seed 9129 #98: 9 vs 6 rows
+  [wrong_rows] seed 9129 #101: 11 vs 8 rows
+seed 9129: 2.0s
+  [error_detail] seed 9130 #6: 23505
+seed 9130: 3.0s
+seed 9131: 2.7s
+  [wrong_rows] seed 9132 #14: 2 vs 2 rows
+seed 9132: 2.8s
+seed 9133: 2.4s
+seed 9134: 2.9s
+seed 9135: 3.4s
+  [wrong_rows] seed 9136 #100: 2 vs 2 rows
+seed 9136: 1.7s
+  [wrong_rows] seed 9137 #138: 3 vs 3 rows
+  [error_detail] seed 9137 #152: 23505
+  [error_detail] seed 9137 #154: 23P01
+seed 9137: 1.6s
+seed 9138: 3.2s
+  [error_detail] seed 9139 #12: 42703
+seed 9139: 1.6s
+seed 9140: 1.5s
+  [wrong_rows] seed 9141 #125: 2 vs 2 rows
+seed 9141: 2.7s
+seed 9142: 3.4s
+  [wrong_rows] seed 9143 #149: 2 vs 2 rows
+seed 9143: 1.7s
+  [wrong_rows] seed 9144 #24: 3 vs 3 rows
+seed 9144: 2.7s
+seed 9145: 3.4s
+seed 9146: 1.3s
+seed 9147: 3.1s
+seed 9148: 3.1s
+  [error_detail] seed 9149 #113: 23505
+seed 9149: 3.0s
+difftest: seeds=150 statements=23502 queries=4456 both_error=1735 plan_runs=1033 oracle_runs=911 secs=394 wrong_rows=91 engine_error=38 wrong_error=15 eval_error=1 error_message=3 error_detail=40
+  both error   153  25P02 current transaction is aborted, commands ignored until
+  both error   133  22012 division by zero
+  both error    99  22003 integer out of range
+  both error    60  08P01 bind message has 2 result formats but query has 3 colu
+  both error    55  08P01 bind message has 2 result formats but query has 1 colu
+  both error    37  23514 value for domain r7code violates check constraint "r7c
+  both error    34  22003 value "3000000000" is out of range for type integer
+  both error    32  2201X OFFSET must not be negative
+  both error    31  22P02 invalid input syntax for type integer: "x1"
+  both error    29  08P01 insufficient data left in message
+  both error    29  42803 arguments to GROUPING must be grouping expressions of 
+  both error    27  42P17 OLD TABLE can only be specified for a DELETE or UPDATE
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 394.41s
+

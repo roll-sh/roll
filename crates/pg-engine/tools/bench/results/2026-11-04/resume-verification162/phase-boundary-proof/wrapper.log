@@ -1,0 +1,83 @@
+{
+  "status": "PASS",
+  "scope": "no service, source suite or benchmark; exact saved phase implementations",
+  "implementations": {
+    "conditional": "2709dd24c2c06dcda969945614178b871cdb5d4c170557acd1c2d467253b1cfa",
+    "subshell": "9d95f9db7b88de3815abb6859a45d6808ff5bae1b76745dad59a5d44966bf7e6"
+  },
+  "cases": [
+    {
+      "implementation": "conditional",
+      "case": "early-failure",
+      "original_failure": 23,
+      "expected_exit": 0,
+      "actual_exit": 0,
+      "marker_created": true,
+      "expected_marker": true
+    },
+    {
+      "implementation": "conditional",
+      "case": "pipeline-failure",
+      "original_failure": 29,
+      "expected_exit": 0,
+      "actual_exit": 0,
+      "marker_created": true,
+      "expected_marker": true
+    },
+    {
+      "implementation": "conditional",
+      "case": "nested-function",
+      "original_failure": 31,
+      "expected_exit": 0,
+      "actual_exit": 0,
+      "marker_created": true,
+      "expected_marker": true
+    },
+    {
+      "implementation": "conditional",
+      "case": "success",
+      "original_failure": 0,
+      "expected_exit": 0,
+      "actual_exit": 0,
+      "marker_created": true,
+      "expected_marker": true
+    },
+    {
+      "implementation": "subshell",
+      "case": "early-failure",
+      "original_failure": 23,
+      "expected_exit": 23,
+      "actual_exit": 23,
+      "marker_created": false,
+      "expected_marker": false
+    },
+    {
+      "implementation": "subshell",
+      "case": "pipeline-failure",
+      "original_failure": 29,
+      "expected_exit": 29,
+      "actual_exit": 29,
+      "marker_created": false,
+      "expected_marker": false
+    },
+    {
+      "implementation": "subshell",
+      "case": "nested-function",
+      "original_failure": 31,
+      "expected_exit": 31,
+      "actual_exit": 31,
+      "marker_created": false,
+      "expected_marker": false
+    },
+    {
+      "implementation": "subshell",
+      "case": "success",
+      "original_failure": 0,
+      "expected_exit": 0,
+      "actual_exit": 0,
+      "marker_created": true,
+      "expected_marker": true
+    }
+  ]
+}
+HEAVY-EXIT 0

@@ -1,0 +1,110 @@
+# create_index_spgist: 124/202 units match; first 12 differing units (- reference, + engine)
+
+@@ unit 15 (sql line 37) [wrong result] SELECT: values differ
+  SELECT count(*) FROM quad_point_tbl WHERE p IS NOT NULL;
+   count 
+  -------
++   1000
+-  11000
+  (1 row)
+  
+
+@@ unit 16 (sql line 39) [wrong result] SELECT: values differ
+  SELECT count(*) FROM quad_point_tbl;
+   count 
+  -------
++   1003
+-  11003
+  (1 row)
+  
+
+@@ unit 17 (sql line 41) [wrong result] SELECT: values differ
+  SELECT count(*) FROM quad_point_tbl WHERE p <@ box '(200,200,1000,1000)';
+   count 
+  -------
++   1000
+-   1057
+  (1 row)
+  
+
+@@ unit 18 (sql line 43) [wrong result] SELECT: values differ
+  SELECT count(*) FROM quad_point_tbl WHERE box '(200,200,1000,1000)' @> p;
+   count 
+  -------
++   1000
+-   1057
+  (1 row)
+  
+
+@@ unit 19 (sql line 45) [wrong result] SELECT: values differ
+  SELECT count(*) FROM quad_point_tbl WHERE p << '(5000, 4000)';
+   count 
+  -------
++   1000
+-   6000
+  (1 row)
+  
+
+@@ unit 20 (sql line 47) [wrong result] SELECT: values differ
+  SELECT count(*) FROM quad_point_tbl WHERE p >> '(5000, 4000)';
+   count 
+  -------
++      0
+-   4999
+  (1 row)
+  
+
+@@ unit 21 (sql line 49) [wrong result] SELECT: values differ
+  SELECT count(*) FROM quad_point_tbl WHERE p <<| '(5000, 4000)';
+   count 
+  -------
++   1000
+-   5000
+  (1 row)
+  
+
+@@ unit 22 (sql line 51) [wrong result] SELECT: values differ
+  SELECT count(*) FROM quad_point_tbl WHERE p |>> '(5000, 4000)';
+   count 
+  -------
++      0
+-   5999
+  (1 row)
+  
+
+@@ unit 23 (sql line 53) [wrong result] SELECT: values differ
+  SELECT count(*) FROM quad_point_tbl WHERE p ~= '(4585, 365)';
+   count 
+  -------
++      0
+-      1
+  (1 row)
+  
+
+@@ unit 30 (sql line 73) [wrong result] SELECT: values differ
+  SELECT count(*) FROM radix_text_tbl WHERE t <    'Aztec                         Ct  ';
+   count 
+  -------
++      0
+-    272
+  (1 row)
+  
+
+@@ unit 31 (sql line 75) [wrong result] SELECT: values differ
+  SELECT count(*) FROM radix_text_tbl WHERE t ~<~  'Aztec                         Ct  ';
+   count 
+  -------
++      0
+-    272
+  (1 row)
+  
+
+@@ unit 32 (sql line 77) [wrong result] SELECT: values differ
+  SELECT count(*) FROM radix_text_tbl WHERE t <=   'Aztec                         Ct  ';
+   count 
+  -------
++      0
+-    273
+  (1 row)
+  
+

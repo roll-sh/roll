@@ -1,0 +1,37 @@
+# constraints: 603/607 units match; first 4 differing units (- reference, + engine)
+
+@@ unit 112 (sql line 260) [feature missing] ERROR: absolute path not allowed
+  COPY COPY_TBL FROM :'filename';
++ ERROR:  absolute path not allowed
+
+@@ unit 113 (sql line 262) [wrong result] SELECT: row count differs
+  SELECT * FROM COPY_TBL;
++  x | y | z 
++ ---+---+---
++ (0 rows)
+-  x |       y       | z 
+- ---+---------------+---
+-  4 | !check failed | 5
+-  6 | OK            | 4
+- (2 rows)
+  
+
+@@ unit 115 (sql line 265) [wrong error message] ERROR: new row for relation "…" violates check constraint "…"  ⟶  engine: ERROR: absolute path not allowed
+  COPY COPY_TBL FROM :'filename';
++ ERROR:  absolute path not allowed
+- ERROR:  new row for relation "copy_tbl" violates check constraint "copy_con"
+- DETAIL:  Failing row contains (7, check failed, 6).
+- CONTEXT:  COPY copy_tbl, line 2: "7	check failed	6"
+
+@@ unit 116 (sql line 267) [wrong result] SELECT: row count differs
+  SELECT * FROM COPY_TBL;
++  x | y | z 
++ ---+---+---
++ (0 rows)
+-  x |       y       | z 
+- ---+---------------+---
+-  4 | !check failed | 5
+-  6 | OK            | 4
+- (2 rows)
+  
+

@@ -1,0 +1,108 @@
+# jsonb: 988/1090 units match; first 12 differing units (- reference, + engine)
+
+@@ unit 3 (sql line 9) [feature missing] ERROR: absolute path not allowed
+  COPY testjsonb FROM :'filename';
++ ERROR:  absolute path not allowed
+
+@@ unit 197 (sql line 304) [wrong result] SELECT: values differ
+  -- array exists - array elements should behave as keys
+  SELECT count(*) from testjsonb  WHERE j->'array' ? 'bar';
+   count 
+  -------
++      0
+-      3
+  (1 row)
+  
+
+@@ unit 199 (sql line 309) [wrong result] SELECT: values differ
+  -- However, a raw scalar is *contained* within the array
+  SELECT count(*) from testjsonb  WHERE j->'array' @> '5'::jsonb;
+   count 
+  -------
++      0
+-      1
+  (1 row)
+  
+
+@@ unit 532 (sql line 825) [wrong result] SELECT: values differ
+  -- indexing
+  SELECT count(*) FROM testjsonb WHERE j @> '{"wait":null}';
+   count 
+  -------
++      0
+-      1
+  (1 row)
+  
+
+@@ unit 533 (sql line 827) [wrong result] SELECT: values differ
+  SELECT count(*) FROM testjsonb WHERE j @> '{"wait":"CC"}';
+   count 
+  -------
++      0
+-     15
+  (1 row)
+  
+
+@@ unit 534 (sql line 828) [wrong result] SELECT: values differ
+  SELECT count(*) FROM testjsonb WHERE j @> '{"wait":"CC", "public":true}';
+   count 
+  -------
++      0
+-      2
+  (1 row)
+  
+
+@@ unit 535 (sql line 829) [wrong result] SELECT: values differ
+  SELECT count(*) FROM testjsonb WHERE j @> '{"age":25}';
+   count 
+  -------
++      0
+-      2
+  (1 row)
+  
+
+@@ unit 536 (sql line 830) [wrong result] SELECT: values differ
+  SELECT count(*) FROM testjsonb WHERE j @> '{"age":25.0}';
+   count 
+  -------
++      0
+-      2
+  (1 row)
+  
+
+@@ unit 537 (sql line 831) [wrong result] SELECT: values differ
+  SELECT count(*) FROM testjsonb WHERE j ? 'public';
+   count 
+  -------
++      0
+-    194
+  (1 row)
+  
+
+@@ unit 539 (sql line 833) [wrong result] SELECT: values differ
+  SELECT count(*) FROM testjsonb WHERE j ?| ARRAY['public','disabled'];
+   count 
+  -------
++      0
+-    337
+  (1 row)
+  
+
+@@ unit 540 (sql line 834) [wrong result] SELECT: values differ
+  SELECT count(*) FROM testjsonb WHERE j ?& ARRAY['public','disabled'];
+   count 
+  -------
++      0
+-     42
+  (1 row)
+  
+
+@@ unit 541 (sql line 835) [wrong result] SELECT: values differ
+  SELECT count(*) FROM testjsonb WHERE j @@ '$.wait == null';
+   count 
+  -------
++      0
+-      1
+  (1 row)
+  
+

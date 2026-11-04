@@ -1,0 +1,69 @@
+# tablesample: 52/58 units match; first 6 differing units (- reference, + engine)
+
+@@ unit 34 (sql line 58) [wrong result] SELECT: values differ
+  select count(*) from person tablesample bernoulli (100);
+   count 
+  -------
++      0
+-     58
+  (1 row)
+  
+
+@@ unit 35 (sql line 59) [wrong result] SELECT: values differ
+  select count(*) from person;
+   count 
+  -------
++      0
+-     58
+  (1 row)
+  
+
+@@ unit 37 (sql line 64) [wrong result] SELECT: values differ
+  -- check behavior during rescans, as well as correct handling of min/max pct
+  select * from
+    (values (0),(100)) v(pct),
+    lateral (select count(*) from tenk1 tablesample bernoulli (pct)) ss;
+   pct | count 
+  -----+-------
+     0 |     0
++  100 |     0
+-  100 | 10000
+  (2 rows)
+  
+
+@@ unit 38 (sql line 68) [wrong result] SELECT: values differ
+  select * from
+    (values (0),(100)) v(pct),
+    lateral (select count(*) from tenk1 tablesample system (pct)) ss;
+   pct | count 
+  -----+-------
+     0 |     0
++  100 |     0
+-  100 | 10000
+  (2 rows)
+  
+
+@@ unit 40 (sql line 76) [wrong result] SELECT: row count differs
+  select pct, count(unique1) from
+    (values (0),(100)) v(pct),
+    lateral (select * from tenk1 tablesample bernoulli (pct)) ss
+    group by pct;
+   pct | count 
+  -----+-------
++ (0 rows)
+-  100 | 10000
+- (1 row)
+  
+
+@@ unit 41 (sql line 80) [wrong result] SELECT: row count differs
+  select pct, count(unique1) from
+    (values (0),(100)) v(pct),
+    lateral (select * from tenk1 tablesample system (pct)) ss
+    group by pct;
+   pct | count 
+  -----+-------
++ (0 rows)
+-  100 | 10000
+- (1 row)
+  
+

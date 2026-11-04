@@ -1,0 +1,125 @@
+# btree_index: 113/135 units match; first 12 differing units (- reference, + engine)
+
+@@ unit 6 (sql line 29) [feature missing] ERROR: absolute path not allowed
+  COPY bt_i4_heap FROM :'filename';
++ ERROR:  absolute path not allowed
+
+@@ unit 8 (sql line 32) [feature missing] ERROR: absolute path not allowed
+  COPY bt_name_heap FROM :'filename';
++ ERROR:  absolute path not allowed
+
+@@ unit 10 (sql line 35) [feature missing] ERROR: absolute path not allowed
+  COPY bt_txt_heap FROM :'filename';
++ ERROR:  absolute path not allowed
+
+@@ unit 12 (sql line 38) [feature missing] ERROR: absolute path not allowed
+  COPY bt_f8_heap FROM :'filename';
++ ERROR:  absolute path not allowed
+
+@@ unit 21 (sql line 61) [wrong result] SELECT: row count differs
+  --
+  -- test retrieval of min/max keys for each index
+  --
+  SELECT b.*
+     FROM bt_i4_heap b
+     WHERE b.seqno < 1;
++  seqno | random 
++ -------+--------
++ (0 rows)
+-  seqno |   random   
+- -------+------------
+-      0 | 1935401906
+- (1 row)
+  
+
+@@ unit 22 (sql line 69) [wrong result] SELECT: row count differs
+  SELECT b.*
+     FROM bt_i4_heap b
+     WHERE b.seqno >= 9999;
++  seqno | random 
++ -------+--------
++ (0 rows)
+-  seqno |   random   
+- -------+------------
+-   9999 | 1227676208
+- (1 row)
+  
+
+@@ unit 23 (sql line 73) [wrong result] SELECT: row count differs
+  SELECT b.*
+     FROM bt_i4_heap b
+     WHERE b.seqno = 4500;
++  seqno | random 
++ -------+--------
++ (0 rows)
+-  seqno |   random   
+- -------+------------
+-   4500 | 2080851358
+- (1 row)
+  
+
+@@ unit 24 (sql line 77) [wrong result] SELECT: row count differs
+  SELECT b.*
+     FROM bt_name_heap b
+     WHERE b.seqno < '1'::name;
++  seqno | random 
++ -------+--------
++ (0 rows)
+-  seqno |   random   
+- -------+------------
+-  0     | 1935401906
+- (1 row)
+  
+
+@@ unit 25 (sql line 81) [wrong result] SELECT: row count differs
+  SELECT b.*
+     FROM bt_name_heap b
+     WHERE b.seqno >= '9999'::name;
++  seqno | random 
++ -------+--------
++ (0 rows)
+-  seqno |   random   
+- -------+------------
+-  9999  | 1227676208
+- (1 row)
+  
+
+@@ unit 26 (sql line 85) [wrong result] SELECT: row count differs
+  SELECT b.*
+     FROM bt_name_heap b
+     WHERE b.seqno = '4500'::name;
++  seqno | random 
++ -------+--------
++ (0 rows)
+-  seqno |   random   
+- -------+------------
+-  4500  | 2080851358
+- (1 row)
+  
+
+@@ unit 27 (sql line 89) [wrong result] SELECT: row count differs
+  SELECT b.*
+     FROM bt_txt_heap b
+     WHERE b.seqno < '1'::text;
++  seqno | random 
++ -------+--------
++ (0 rows)
+-  seqno |   random   
+- -------+------------
+-  0     | 1935401906
+- (1 row)
+  
+
+@@ unit 28 (sql line 93) [wrong result] SELECT: row count differs
+  SELECT b.*
+     FROM bt_txt_heap b
+     WHERE b.seqno >= '9999'::text;
++  seqno | random 
++ -------+--------
++ (0 rows)
+-  seqno |   random   
+- -------+------------
+-  9999  | 1227676208
+- (1 row)
+  
+

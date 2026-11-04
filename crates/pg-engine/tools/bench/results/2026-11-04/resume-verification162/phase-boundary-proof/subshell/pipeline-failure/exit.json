@@ -1,0 +1,9 @@
+{
+  "implementation": "subshell",
+  "case": "pipeline-failure",
+  "original_failure": 29,
+  "expected_exit": 29,
+  "actual_exit": 29,
+  "marker_created": false,
+  "expected_marker": false
+}

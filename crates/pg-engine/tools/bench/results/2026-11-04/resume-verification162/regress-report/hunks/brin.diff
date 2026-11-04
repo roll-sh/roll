@@ -1,0 +1,11 @@
+# brin: 76/77 units match; first 1 differing units (- reference, + engine)
+
+@@ unit 36 (sql line 459) [wrong result] SELECT: values differ
+  SELECT brin_summarize_range('brinidx', 0);
+   brin_summarize_range 
+  ----------------------
++                     0
+-                     1
+  (1 row)
+  
+

@@ -1,0 +1,134 @@
+# hash_index: 85/102 units match; first 12 differing units (- reference, + engine)
+
+@@ unit 6 (sql line 29) [feature missing] ERROR: absolute path not allowed
+  COPY hash_i4_heap FROM :'filename';
++ ERROR:  absolute path not allowed
+
+@@ unit 7 (sql line 30) [feature missing] ERROR: absolute path not allowed
+  COPY hash_name_heap FROM :'filename';
++ ERROR:  absolute path not allowed
+
+@@ unit 8 (sql line 31) [feature missing] ERROR: absolute path not allowed
+  COPY hash_txt_heap FROM :'filename';
++ ERROR:  absolute path not allowed
+
+@@ unit 9 (sql line 32) [feature missing] ERROR: absolute path not allowed
+  COPY hash_f8_heap FROM :'filename';
++ ERROR:  absolute path not allowed
+
+@@ unit 22 (sql line 67) [wrong result] SELECT: row count differs
+  --
+  -- hash index
+  -- grep 843938989 hash.data
+  --
+  SELECT * FROM hash_i4_heap
+     WHERE hash_i4_heap.random = 843938989;
++  seqno | random 
++ -------+--------
++ (0 rows)
+-  seqno |  random   
+- -------+-----------
+-     15 | 843938989
+- (1 row)
+  
+
+@@ unit 24 (sql line 81) [wrong result] SELECT: row count differs
+  --
+  -- hash index
+  -- grep 1505703298 hash.data
+  --
+  SELECT * FROM hash_name_heap
+     WHERE hash_name_heap.random = '1505703298'::name;
++  seqno | random 
++ -------+--------
++ (0 rows)
+-  seqno |   random   
+- -------+------------
+-   9838 | 1505703298
+- (1 row)
+  
+
+@@ unit 26 (sql line 95) [wrong result] SELECT: row count differs
+  --
+  -- hash index
+  -- grep 1351610853 hash.data
+  --
+  SELECT * FROM hash_txt_heap
+     WHERE hash_txt_heap.random = '1351610853'::text;
++  seqno | random 
++ -------+--------
++ (0 rows)
+-  seqno |   random   
+- -------+------------
+-   5677 | 1351610853
+- (1 row)
+  
+
+@@ unit 28 (sql line 109) [wrong result] SELECT: row count differs
+  --
+  -- hash index
+  -- grep 444705537 hash.data
+  --
+  SELECT * FROM hash_f8_heap
+     WHERE hash_f8_heap.random = '444705537'::float8;
++  seqno | random 
++ -------+--------
++ (0 rows)
+-  seqno |  random   
+- -------+-----------
+-   7853 | 444705537
+- (1 row)
+  
+
+@@ unit 30 (sql line 123) [wrong EXPLAIN] EXPLAIN plan text differs
+  --
+  -- partial hash index
+  --
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM hash_i4_heap
+     WHERE seqno = 9999;
++         QUERY PLAN        
++ --------------------------
++  Seq Scan on hash_i4_heap
++    Filter: (seqno = 9999)
+-                        QUERY PLAN                       
+- --------------------------------------------------------
+-  Index Scan using hash_i4_partial_index on hash_i4_heap
+-    Index Cond: (seqno = 9999)
+  (2 rows)
+  
+
+@@ unit 31 (sql line 130) [wrong result] SELECT: row count differs
+  SELECT * FROM hash_i4_heap
+     WHERE seqno = 9999;
++  seqno | random 
++ -------+--------
++ (0 rows)
+-  seqno |   random   
+- -------+------------
+-   9999 | 1227676208
+- (1 row)
+  
+
+@@ unit 33 (sql line 154) [wrong result] SELECT: row count differs
+  SELECT h.seqno AS i1492, h.random AS i1
+     FROM hash_i4_heap h
+     WHERE h.random = 1;
+   i1492 | i1 
+  -------+----
++ (0 rows)
+-   1492 |  1
+- (1 row)
+  
+
+@@ unit 35 (sql line 162) [wrong result] SELECT: row count differs
+  SELECT h.seqno AS i20000
+     FROM hash_i4_heap h
+     WHERE h.random = 1492795354;
+   i20000 
+  --------
++ (0 rows)
+-   20000
+- (1 row)
+  
+

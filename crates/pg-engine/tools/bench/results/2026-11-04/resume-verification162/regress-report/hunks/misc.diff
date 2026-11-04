@@ -1,0 +1,199 @@
+# misc: 54/68 units match; first 12 differing units (- reference, + engine)
+
+@@ unit 23 (sql line 94) [wrong result] SELECT: row count differs
+  SELECT * FROM stud_emp_copy;
++  name | age | location | salary | manager | gpa | percent 
++ ------+-----+----------+--------+---------+-----+---------
++ (0 rows)
+-  name  | age |  location  | salary | manager | gpa | percent 
+- -------+-----+------------+--------+---------+-----+---------
+-  jeff  |  23 | (8,7.7)    |    600 | sharon  | 3.5 |        
+-  cim   |  30 | (10.5,4.7) |    400 |         | 3.4 |        
+-  linda |  19 | (0.9,6.1)  |    100 |         | 2.9 |        
+- (3 rows)
+  
+
+@@ unit 44 (sql line 189) [wrong result] SELECT: row count differs
+  --
+  -- mike does post_hacking,
+  -- joe and sally play basketball, and
+  -- everyone else does nothing.
+  --
+  SELECT p.name, name(p.hobbies) FROM ONLY person p;
++  name | name 
++ ------+------
++ (0 rows)
+-  name  |    name     
+- -------+-------------
+-  mike  | posthacking
+-  joe   | basketball
+-  sally | basketball
+- (3 rows)
+  
+
+@@ unit 45 (sql line 196) [wrong result] SELECT: row count differs
+  --
+  -- as above, but jeff also does post_hacking.
+  --
+  SELECT p.name, name(p.hobbies) FROM person* p;
++  name | name 
++ ------+------
++ (0 rows)
+-  name  |    name     
+- -------+-------------
+-  mike  | posthacking
+-  joe   | basketball
+-  sally | basketball
+-  jeff  | posthacking
+- (4 rows)
+  
+
+@@ unit 46 (sql line 201) [wrong result] SELECT: row count differs
+  --
+  -- the next two queries demonstrate how functions generate bogus duplicates.
+  -- this is a "feature" ..
+  --
+  SELECT DISTINCT hobbies_r.name, name(hobbies_r.equipment) FROM hobbies_r
+    ORDER BY 1,2;
++     name    | name 
++ ------------+------
++  skywalking | guts
++ (1 row)
+-     name     |     name      
+- -------------+---------------
+-  basketball  | hightops
+-  posthacking | advil
+-  posthacking | peet's coffee
+-  skywalking  | guts
+- (4 rows)
+  
+
+@@ unit 47 (sql line 208) [wrong result] SELECT: row count differs
+  SELECT hobbies_r.name, (hobbies_r.equipment).name FROM hobbies_r;
++     name    | name 
++ ------------+------
++  skywalking | guts
++ (1 row)
+-     name     |     name      
+- -------------+---------------
+-  posthacking | advil
+-  posthacking | peet's coffee
+-  posthacking | advil
+-  posthacking | peet's coffee
+-  basketball  | hightops
+-  basketball  | hightops
+-  skywalking  | guts
+- (7 rows)
+  
+
+@@ unit 48 (sql line 210) [wrong result] SELECT: row count differs
+  --
+  -- mike needs advil and peet's coffee,
+  -- joe and sally need hightops, and
+  -- everyone else is fine.
+  --
+  SELECT p.name, name(p.hobbies), name(equipment(p.hobbies)) FROM ONLY person p;
++  name | name | name 
++ ------+------+------
++ (0 rows)
+-  name  |    name     |     name      
+- -------+-------------+---------------
+-  mike  | posthacking | advil
+-  mike  | posthacking | peet's coffee
+-  joe   | basketball  | hightops
+-  sally | basketball  | hightops
+- (4 rows)
+  
+
+@@ unit 49 (sql line 217) [wrong result] SELECT: row count differs
+  --
+  -- as above, but jeff needs advil and peet's coffee as well.
+  --
+  SELECT p.name, name(p.hobbies), name(equipment(p.hobbies)) FROM person* p;
++  name | name | name 
++ ------+------+------
++ (0 rows)
+-  name  |    name     |     name      
+- -------+-------------+---------------
+-  mike  | posthacking | advil
+-  mike  | posthacking | peet's coffee
+-  joe   | basketball  | hightops
+-  sally | basketball  | hightops
+-  jeff  | posthacking | advil
+-  jeff  | posthacking | peet's coffee
+- (6 rows)
+  
+
+@@ unit 50 (sql line 222) [wrong result] SELECT: row count differs
+  --
+  -- just like the last two, but make sure that the target list fixup and
+  -- unflattening is being done correctly.
+  --
+  SELECT name(equipment(p.hobbies)), p.name, name(p.hobbies) FROM ONLY person p;
++  name | name | name 
++ ------+------+------
++ (0 rows)
+-      name      | name  |    name     
+- ---------------+-------+-------------
+-  advil         | mike  | posthacking
+-  peet's coffee | mike  | posthacking
+-  hightops      | joe   | basketball
+-  hightops      | sally | basketball
+- (4 rows)
+  
+
+@@ unit 51 (sql line 228) [wrong result] SELECT: row count differs
+  SELECT (p.hobbies).equipment.name, p.name, name(p.hobbies) FROM person* p;
++  name | name | name 
++ ------+------+------
++ (0 rows)
+-      name      | name  |    name     
+- ---------------+-------+-------------
+-  advil         | mike  | posthacking
+-  peet's coffee | mike  | posthacking
+-  hightops      | joe   | basketball
+-  hightops      | sally | basketball
+-  advil         | jeff  | posthacking
+-  peet's coffee | jeff  | posthacking
+- (6 rows)
+  
+
+@@ unit 52 (sql line 230) [wrong result] SELECT: row count differs
+  SELECT (p.hobbies).equipment.name, name(p.hobbies), p.name FROM ONLY person p;
++  name | name | name 
++ ------+------+------
++ (0 rows)
+-      name      |    name     | name  
+- ---------------+-------------+-------
+-  advil         | posthacking | mike
+-  peet's coffee | posthacking | mike
+-  hightops      | basketball  | joe
+-  hightops      | basketball  | sally
+- (4 rows)
+  
+
+@@ unit 53 (sql line 232) [wrong result] SELECT: row count differs
+  SELECT name(equipment(p.hobbies)), name(p.hobbies), p.name FROM person* p;
++  name | name | name 
++ ------+------+------
++ (0 rows)
+-      name      |    name     | name  
+- ---------------+-------------+-------
+-  advil         | posthacking | mike
+-  peet's coffee | posthacking | mike
+-  hightops      | basketball  | joe
+-  hightops      | basketball  | sally
+-  advil         | posthacking | jeff
+-  peet's coffee | posthacking | jeff
+- (6 rows)
+  
+
+@@ unit 62 (sql line 250) [wrong result] SELECT: values differ
+  SELECT hobbies_by_name('basketball');
+   hobbies_by_name 
+  -----------------
++  
+-  joe
+  (1 row)
+  
+

@@ -1,0 +1,148 @@
+# create_index: 579/708 units match; first 12 differing units (- reference, + engine)
+
+@@ unit 30 (sql line 78) [feature missing] ERROR: absolute path not allowed
+  COPY slow_emp4000 FROM :'filename';
++ ERROR:  absolute path not allowed
+
+@@ unit 47 (sql line 115) [wrong result] SELECT: row count differs
+  SELECT * FROM fast_emp4000
+      WHERE home_base <@ '(200,200),(2000,1000)'::box
+      ORDER BY (home_base[0])[0];
++  home_base 
++ -----------
++ (0 rows)
+-        home_base       
+- -----------------------
+-  (337,455),(240,359)
+-  (1444,403),(1346,344)
+- (2 rows)
+  
+
+@@ unit 48 (sql line 119) [wrong result] SELECT: values differ
+  SELECT count(*) FROM fast_emp4000 WHERE home_base && '(1000,1000,0,0)'::box;
+   count 
+  -------
++      0
+-      2
+  (1 row)
+  
+
+@@ unit 49 (sql line 121) [wrong result] SELECT: values differ
+  SELECT count(*) FROM fast_emp4000 WHERE home_base IS NULL;
+   count 
+  -------
++      0
+-    278
+  (1 row)
+  
+
+@@ unit 51 (sql line 125) [wrong result] SELECT: values differ
+  SELECT count(*) FROM gcircle_tbl WHERE f1 && '<(500,500),500>'::circle;
+   count 
+  -------
++      0
+-      2
+  (1 row)
+  
+
+@@ unit 65 (sql line 153) [wrong result] SELECT: row count differs
+  SELECT * FROM gpolygon_tbl ORDER BY f1 <-> '(0,0)'::point LIMIT 10;
++            f1           
++ ------------------------
+-                        f1                        
+- -------------------------------------------------
+-  ((240,359),(240,455),(337,455),(337,359))
+-  ((662,163),(662,187),(759,187),(759,163))
+   ((1000,0),(0,1000))
+   ((0,1000),(1000,1000))
++ (2 rows)
+-  ((1346,344),(1346,403),(1444,403),(1444,344))
+-  ((278,1409),(278,1457),(369,1457),(369,1409))
+-  ((907,1156),(907,1201),(948,1201),(948,1156))
+-  ((1517,971),(1517,1043),(1594,1043),(1594,971))
+-  ((175,1820),(175,1850),(259,1850),(259,1820))
+-  ((2424,81),(2424,160),(2424,160),(2424,81))
+- (10 rows)
+  
+
+@@ unit 66 (sql line 155) [wrong result] SELECT: row count differs
+  SELECT circle_center(f1), round(radius(f1)) as radius FROM gcircle_tbl ORDER BY f1 <-> '(200,300)'::point LIMIT 10;
++  circle_center | radius 
++ ---------------+--------
++ (0 rows)
+-  circle_center  | radius 
+- ----------------+--------
+-  (288.5,407)    |     68
+-  (710.5,175)    |     50
+-  (323.5,1433)   |     51
+-  (927.5,1178.5) |     30
+-  (1395,373.5)   |     57
+-  (1555.5,1007)  |     53
+-  (217,1835)     |     45
+-  (489,2421.5)   |     22
+-  (2424,120.5)   |     40
+-  (751.5,2655)   |     20
+- (10 rows)
+  
+
+@@ unit 71 (sql line 166) [wrong result] SELECT: row count differs
+  SELECT * FROM fast_emp4000
+      WHERE home_base <@ '(200,200),(2000,1000)'::box
+      ORDER BY (home_base[0])[0];
++  home_base 
++ -----------
++ (0 rows)
+-        home_base       
+- -----------------------
+-  (337,455),(240,359)
+-  (1444,403),(1346,344)
+- (2 rows)
+  
+
+@@ unit 73 (sql line 172) [wrong result] SELECT: values differ
+  SELECT count(*) FROM fast_emp4000 WHERE home_base && '(1000,1000,0,0)'::box;
+   count 
+  -------
++      0
+-      2
+  (1 row)
+  
+
+@@ unit 75 (sql line 176) [wrong result] SELECT: values differ
+  SELECT count(*) FROM fast_emp4000 WHERE home_base IS NULL;
+   count 
+  -------
++      0
+-    278
+  (1 row)
+  
+
+@@ unit 79 (sql line 184) [wrong result] SELECT: values differ
+  SELECT count(*) FROM gcircle_tbl WHERE f1 && '<(500,500),500>'::circle;
+   count 
+  -------
++      0
+-      2
+  (1 row)
+  
+
+@@ unit 107 (sql line 240) [wrong result] SELECT: row count differs
+  SELECT * FROM gpolygon_tbl ORDER BY f1 <-> '(0,0)'::point LIMIT 10;
++            f1           
++ ------------------------
+-                        f1                        
+- -------------------------------------------------
+-  ((240,359),(240,455),(337,455),(337,359))
+-  ((662,163),(662,187),(759,187),(759,163))
+   ((1000,0),(0,1000))
+   ((0,1000),(1000,1000))
++ (2 rows)
+-  ((1346,344),(1346,403),(1444,403),(1444,344))
+-  ((278,1409),(278,1457),(369,1457),(369,1409))
+-  ((907,1156),(907,1201),(948,1201),(948,1156))
+-  ((1517,971),(1517,1043),(1594,1043),(1594,971))
+-  ((175,1820),(175,1850),(259,1850),(259,1820))
+-  ((2424,81),(2424,160),(2424,160),(2424,81))
+- (10 rows)
+  
+

@@ -1,0 +1,11 @@
+# plancache: 96/97 units match; first 1 differing units (- reference, + engine)
+
+@@ unit 32 (sql line 95) [wrong result] SELECT: values differ
+  select cache_test_2();
+   cache_test_2 
+  --------------
++              
+-         10007
+  (1 row)
+  
+

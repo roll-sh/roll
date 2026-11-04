@@ -1,0 +1,47 @@
+# misc_functions: 146/148 units match; first 2 differing units (- reference, + engine)
+
+@@ unit 98 (sql line 240) [wrong EXPLAIN] EXPLAIN plan text differs
+  -- By default, planner does not think that's selective
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tenk1 a JOIN tenk1 b ON a.unique1 = b.unique1
+  WHERE my_int_eq(a.unique2, 42);
++                QUERY PLAN               
++ ----------------------------------------
++  Nested Loop
++    Join Filter: (a.unique1 = b.unique1)
++    ->  Seq Scan on tenk1 a
++          Filter: my_int_eq(unique2, 42)
+-                   QUERY PLAN                  
+- ----------------------------------------------
+-  Hash Join
+-    Hash Cond: (b.unique1 = a.unique1)
+     ->  Seq Scan on tenk1 b
++ (5 rows)
+-    ->  Hash
+-          ->  Seq Scan on tenk1 a
+-                Filter: my_int_eq(unique2, 42)
+- (6 rows)
+  
+
+@@ unit 101 (sql line 253) [wrong EXPLAIN] EXPLAIN plan text differs
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tenk1 a JOIN tenk1 b ON a.unique1 = b.unique1
+  WHERE my_int_eq(a.unique2, 42);
++                QUERY PLAN               
++ ----------------------------------------
++  Nested Loop
++    Join Filter: (a.unique1 = b.unique1)
++    ->  Seq Scan on tenk1 a
++          Filter: my_int_eq(unique2, 42)
+-                   QUERY PLAN                  
+- ----------------------------------------------
+-  Hash Join
+-    Hash Cond: (b.unique1 = a.unique1)
+     ->  Seq Scan on tenk1 b
++ (5 rows)
+-    ->  Hash
+-          ->  Seq Scan on tenk1 a
+-                Filter: my_int_eq(unique2, 42)
+- (6 rows)
+  
+

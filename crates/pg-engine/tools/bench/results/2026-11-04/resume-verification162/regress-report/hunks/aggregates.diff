@@ -1,0 +1,111 @@
+# aggregates: 461/556 units match; first 12 differing units (- reference, + engine)
+
+@@ unit 4 (sql line 18) [feature missing] ERROR: absolute path not allowed
+  COPY aggtest FROM :'filename';
++ ERROR:  absolute path not allowed
+
+@@ unit 6 (sql line 23) [wrong result] SELECT: values differ
+  SELECT avg(four) AS avg_1 FROM onek;
++  avg_1 
++ -------
++       
+-        avg_1        
+- --------------------
+-  1.5000000000000000
+  (1 row)
+  
+
+@@ unit 7 (sql line 25) [wrong result] SELECT: values differ
+  SELECT avg(a) AS avg_32 FROM aggtest WHERE a < 100;
++  avg_32 
++ --------
++        
+-        avg_32        
+- ---------------------
+-  32.6666666666666667
+  (1 row)
+  
+
+@@ unit 12 (sql line 32) [wrong result] SELECT: values differ
+  -- In 7.1, avg(float4) is computed using float8 arithmetic.
+  -- Round the result to 3 digits to avoid platform-specific results.
+  SELECT avg(b)::numeric(10,3) AS avg_107_943 FROM aggtest;
+   avg_107_943 
+  -------------
++             
+-      107.943
+  (1 row)
+  
+
+@@ unit 13 (sql line 37) [wrong result] SELECT: values differ
+  SELECT avg(gpa) AS avg_3_4 FROM ONLY student;
+   avg_3_4 
+  ---------
++         
+-      3.4
+  (1 row)
+  
+
+@@ unit 14 (sql line 40) [wrong result] SELECT: values differ
+  SELECT sum(four) AS sum_1500 FROM onek;
+   sum_1500 
+  ----------
++          
+-      1500
+  (1 row)
+  
+
+@@ unit 15 (sql line 41) [wrong result] SELECT: values differ
+  SELECT sum(a) AS sum_198 FROM aggtest;
+   sum_198 
+  ---------
++         
+-      198
+  (1 row)
+  
+
+@@ unit 16 (sql line 42) [wrong result] SELECT: values differ
+  SELECT sum(b) AS avg_431_773 FROM aggtest;
+   avg_431_773 
+  -------------
++             
+-      431.773
+  (1 row)
+  
+
+@@ unit 17 (sql line 43) [wrong result] SELECT: values differ
+  SELECT sum(gpa) AS avg_6_8 FROM ONLY student;
+   avg_6_8 
+  ---------
++         
+-      6.8
+  (1 row)
+  
+
+@@ unit 18 (sql line 45) [wrong result] SELECT: values differ
+  SELECT max(four) AS max_3 FROM onek;
+   max_3 
+  -------
++       
+-      3
+  (1 row)
+  
+
+@@ unit 19 (sql line 46) [wrong result] SELECT: values differ
+  SELECT max(a) AS max_100 FROM aggtest;
+   max_100 
+  ---------
++         
+-      100
+  (1 row)
+  
+
+@@ unit 20 (sql line 47) [wrong result] SELECT: values differ
+  SELECT max(aggtest.b) AS max_324_78 FROM aggtest;
+   max_324_78 
+  ------------
++            
+-      324.78
+  (1 row)
+  
+

@@ -1,0 +1,247 @@
+# select_distinct: 88/101 units match; first 12 differing units (- reference, + engine)
+
+@@ unit 0 (sql line 1) [wrong result] SELECT: row count differs
+  --
+  -- SELECT_DISTINCT
+  --
+  --
+  -- awk '{print $3;}' onek.data | sort -n | uniq
+  --
+  SELECT DISTINCT two FROM onek ORDER BY 1;
+   two 
+  -----
++ (0 rows)
+-    0
+-    1
+- (2 rows)
+  
+
+@@ unit 1 (sql line 10) [wrong result] SELECT: row count differs
+  --
+  -- awk '{print $5;}' onek.data | sort -n | uniq
+  --
+  SELECT DISTINCT ten FROM onek ORDER BY 1;
+   ten 
+  -----
++ (0 rows)
+-    0
+-    1
+-    2
+-    3
+-    4
+-    5
+-    6
+-    7
+-    8
+-    9
+- (10 rows)
+  
+
+@@ unit 2 (sql line 15) [wrong result] SELECT: row count differs
+  --
+  -- awk '{print $16;}' onek.data | sort -d | uniq
+  --
+  SELECT DISTINCT string4 FROM onek ORDER BY 1;
+   string4 
+  ---------
++ (0 rows)
+-  AAAAxx
+-  HHHHxx
+-  OOOOxx
+-  VVVVxx
+- (4 rows)
+  
+
+@@ unit 3 (sql line 20) [wrong result] SELECT: row count differs
+  --
+  -- awk '{print $3,$16,$5;}' onek.data | sort -d | uniq |
+  -- sort +0n -1 +1d -2 +2n -3
+  --
+  SELECT DISTINCT two, string4, ten
+     FROM onek
+     ORDER BY two using <, string4 using <, ten using <;
+   two | string4 | ten 
+  -----+---------+-----
++ (0 rows)
+-    0 | AAAAxx  |   0
+-    0 | AAAAxx  |   2
+-    0 | AAAAxx  |   4
+-    0 | AAAAxx  |   6
+-    0 | AAAAxx  |   8
+-    0 | HHHHxx  |   0
+-    0 | HHHHxx  |   2
+-    0 | HHHHxx  |   4
+-    0 | HHHHxx  |   6
+-    0 | HHHHxx  |   8
+-    0 | OOOOxx  |   0
+-    0 | OOOOxx  |   2
+-    0 | OOOOxx  |   4
+-    0 | OOOOxx  |   6
+-    0 | OOOOxx  |   8
+-    0 | VVVVxx  |   0
+-    0 | VVVVxx  |   2
+-    0 | VVVVxx  |   4
+-    0 | VVVVxx  |   6
+-    0 | VVVVxx  |   8
+-    1 | AAAAxx  |   1
+-    1 | AAAAxx  |   3
+-    1 | AAAAxx  |   5
+-    1 | AAAAxx  |   7
+-    1 | AAAAxx  |   9
+-    1 | HHHHxx  |   1
+-    1 | HHHHxx  |   3
+-    1 | HHHHxx  |   5
+-    1 | HHHHxx  |   7
+-    1 | HHHHxx  |   9
+-    1 | OOOOxx  |   1
+-    1 | OOOOxx  |   3
+-    1 | OOOOxx  |   5
+-    1 | OOOOxx  |   7
+-    1 | OOOOxx  |   9
+-    1 | VVVVxx  |   1
+-    1 | VVVVxx  |   3
+-    1 | VVVVxx  |   5
+-    1 | VVVVxx  |   7
+-    1 | VVVVxx  |   9
+- (40 rows)
+  
+
+@@ unit 4 (sql line 28) [wrong result] SELECT: row count differs
+  --
+  -- awk '{print $2;}' person.data |
+  -- awk '{if(NF!=1){print $2;}else{print;}}' - emp.data |
+  -- awk '{if(NF!=1){print $2;}else{print;}}' - student.data |
+  -- awk 'BEGIN{FS="      ";}{if(NF!=1){print $5;}else{print;}}' - stud_emp.data |
+  -- sort -n -r | uniq
+  --
+  SELECT DISTINCT p.age FROM person* p ORDER BY age using >;
+   age 
+  -----
++ (0 rows)
+-   98
+-   88
+-   78
+-   68
+-   60
+-   58
+-   50
+-   48
+-   40
+-   38
+-   34
+-   30
+-   28
+-   25
+-   24
+-   23
+-   20
+-   19
+-   18
+-    8
+- (20 rows)
+  
+
+@@ unit 6 (sql line 45) [wrong result] SELECT: values differ
+  SELECT count(*) FROM
+    (SELECT DISTINCT two, four, two FROM tenk1) ss;
+   count 
+  -------
++      0
+-      4
+  (1 row)
+  
+
+@@ unit 36 (sql line 124) [wrong EXPLAIN] EXPLAIN plan text differs
+  -- Ensure we get a parallel plan
+  EXPLAIN (costs off)
+  SELECT DISTINCT four FROM tenk1;
++        QUERY PLAN        
++ -------------------------
++  HashAggregate
++    Group Key: four
++    ->  Seq Scan on tenk1
++ (3 rows)
+-                      QUERY PLAN                     
+- ----------------------------------------------------
+-  Unique
+-    ->  Gather Merge
+-          Workers Planned: 2
+-          ->  Sort
+-                Sort Key: four
+-                ->  HashAggregate
+-                      Group Key: four
+-                      ->  Parallel Seq Scan on tenk1
+- (8 rows)
+  
+
+@@ unit 37 (sql line 128) [wrong result] SELECT: row count differs
+  -- Ensure the parallel plan produces the correct results
+  SELECT DISTINCT four FROM tenk1;
+   four 
+  ------
++ (0 rows)
+-     0
+-     1
+-     2
+-     3
+- (4 rows)
+  
+
+@@ unit 39 (sql line 137) [wrong EXPLAIN] EXPLAIN plan text differs
+  -- Ensure we don't do parallel distinct with a parallel unsafe function
+  EXPLAIN (COSTS OFF)
+  SELECT DISTINCT distinct_func(1) FROM tenk1;
++               QUERY PLAN              
++ --------------------------------------
+-                         QUERY PLAN                        
+- ----------------------------------------------------------
+   Unique
+     ->  Sort
+           Sort Key: (distinct_func(1))
++          ->  Seq Scan on tenk1
+-          ->  Index Only Scan using tenk1_hundred on tenk1
+  (4 rows)
+  
+
+@@ unit 41 (sql line 148) [wrong EXPLAIN] EXPLAIN plan text differs
+  -- Ensure we do parallel distinct now that the function is parallel safe
+  EXPLAIN (COSTS OFF)
+  SELECT DISTINCT distinct_func(1) FROM tenk1;
++               QUERY PLAN              
++ --------------------------------------
+-                      QUERY PLAN                     
+- ----------------------------------------------------
+   Unique
++    ->  Sort
++          Sort Key: (distinct_func(1))
++          ->  Seq Scan on tenk1
++ (4 rows)
+-    ->  Gather Merge
+-          Workers Planned: 2
+-          ->  Unique
+-                ->  Sort
+-                      Sort Key: (distinct_func(1))
+-                      ->  Parallel Seq Scan on tenk1
+- (7 rows)
+  
+
+@@ unit 47 (sql line 166) [wrong result] SELECT: row count differs
+  -- Ensure the above gives us the correct result
+  SELECT DISTINCT four FROM tenk1 WHERE four = 0;
+   four 
+  ------
++ (0 rows)
+-     0
+- (1 row)
+  
+
+@@ unit 51 (sql line 180) [wrong result] SELECT: row count differs
+  -- Ensure we only get 1 row
+  SELECT DISTINCT four,1,2,3 FROM tenk1 WHERE four = 0;
+   four | ?column? | ?column? | ?column? 
+  ------+----------+----------+----------
++ (0 rows)
+-     0 |        1 |        2 |        3
+- (1 row)
+  
+

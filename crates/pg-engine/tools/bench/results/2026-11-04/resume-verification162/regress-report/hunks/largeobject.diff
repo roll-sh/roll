@@ -1,0 +1,109 @@
+# largeobject: 124/151 units match; first 12 differing units (- reference, + engine)
+
+@@ unit 76 (sql line 192) [feature missing] ERROR: absolute path not allowed
+  INSERT INTO lotest_stash_values (loid) SELECT lo_import(:'filename');
++ ERROR:  absolute path not allowed
+
+@@ unit 79 (sql line 197) [wrong result] SELECT: row count differs
+  -- verify length of large object
+  SELECT lo_lseek(fd, 0, 2) FROM lotest_stash_values;
+   lo_lseek 
+  ----------
++ (0 rows)
+-    670800
+- (1 row)
+  
+
+@@ unit 80 (sql line 200) [wrong result] SELECT: row count differs
+  -- with the default BLCKSZ, LOBLKSIZE = 2048, so this positions us for a block
+  -- edge case
+  SELECT lo_lseek(fd, 2030, 0) FROM lotest_stash_values;
+   lo_lseek 
+  ----------
++ (0 rows)
+-      2030
+- (1 row)
+  
+
+@@ unit 81 (sql line 204) [wrong result] SELECT: row count differs
+  -- this should get half of the value from page 0 and half from page 1 of the
+  -- large object
+  SELECT loread(fd, 36) FROM lotest_stash_values;
++  loread 
++ --------
++ (0 rows)
+-                              loread                              
+- -----------------------------------------------------------------
+-  AAA\011FBAAAA\011VVVVxx\0122513\01132\0111\0111\0113\01113\0111
+- (1 row)
+  
+
+@@ unit 82 (sql line 208) [wrong result] SELECT: row count differs
+  SELECT lo_tell(fd) FROM lotest_stash_values;
+   lo_tell 
+  ---------
++ (0 rows)
+-     2066
+- (1 row)
+  
+
+@@ unit 83 (sql line 210) [wrong result] SELECT: row count differs
+  SELECT lo_lseek(fd, -26, 1) FROM lotest_stash_values;
+   lo_lseek 
+  ----------
++ (0 rows)
+-      2040
+- (1 row)
+  
+
+@@ unit 84 (sql line 212) [wrong result] SELECT: row count differs
+  SELECT lowrite(fd, 'abcdefghijklmnop') FROM lotest_stash_values;
+   lowrite 
+  ---------
++ (0 rows)
+-       16
+- (1 row)
+  
+
+@@ unit 85 (sql line 214) [wrong result] SELECT: row count differs
+  SELECT lo_lseek(fd, 2030, 0) FROM lotest_stash_values;
+   lo_lseek 
+  ----------
++ (0 rows)
+-      2030
+- (1 row)
+  
+
+@@ unit 86 (sql line 216) [wrong result] SELECT: row count differs
+  SELECT loread(fd, 36) FROM lotest_stash_values;
++  loread 
++ --------
++ (0 rows)
+-                        loread                        
+- -----------------------------------------------------
+-  AAA\011FBAAAAabcdefghijklmnop1\0111\0113\01113\0111
+- (1 row)
+  
+
+@@ unit 87 (sql line 218) [wrong result] SELECT: row count differs
+  SELECT lo_close(fd) FROM lotest_stash_values;
+   lo_close 
+  ----------
++ (0 rows)
+-         0
+- (1 row)
+  
+
+@@ unit 90 (sql line 222) [wrong result] SELECT: row count differs
+  SELECT lo_export(loid, :'filename') FROM lotest_stash_values;
+   lo_export 
+  -----------
++ (0 rows)
+-          1
+- (1 row)
+  
+
+@@ unit 91 (sql line 224) [psql describe] \lo_import output differs
+  \lo_import :filename
++ could not open file "/home/meszmate/.cache/a162/pgr/resume-3997cf00/build/results/lotest.txt": No such file or directory
+

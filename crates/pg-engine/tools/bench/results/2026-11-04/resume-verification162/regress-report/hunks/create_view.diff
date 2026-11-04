@@ -1,0 +1,6 @@
+# create_view: 342/343 units match; first 1 differing units (- reference, + engine)
+
+@@ unit 7 (sql line 26) [feature missing] ERROR: absolute path not allowed
+  COPY real_city FROM :'filename';
++ ERROR:  absolute path not allowed
+

@@ -1,0 +1,98 @@
+# with: 303/307 units match; first 4 differing units (- reference, + engine)
+
+@@ unit 32 (sql line 246) [wrong result] WITH: values differ
+  -- use same CTE twice at different subquery levels
+  WITH q1(x,y) AS (
+      SELECT hundred, sum(ten) FROM tenk1 GROUP BY hundred
+    )
+  SELECT count(*) FROM q1 WHERE y > (SELECT sum(y)/100 FROM q1 qsub);
+   count 
+  -------
++      0
+-     50
+  (1 row)
+  
+
+@@ unit 50 (sql line 376) [wrong EXPLAIN] EXPLAIN plan text differs
+  -- test that column statistics from a materialized CTE are available
+  -- to upper planner (otherwise, we'd get a stupider plan)
+  explain (costs off)
+  with x as materialized (select unique1 from tenk1 b)
+  select count(*) from tenk1 a
+    where unique1 in (select * from x);
++                   QUERY PLAN                  
++ ----------------------------------------------
+-                          QUERY PLAN                         
+- ------------------------------------------------------------
+   Aggregate
+     CTE x
++      ->  Seq Scan on tenk1 b
++    ->  Nested Loop Semi Join
++          Join Filter: (a.unique1 = x.unique1)
++          ->  Seq Scan on tenk1 a
++          ->  CTE Scan on x
++ (7 rows)
+-      ->  Index Only Scan using tenk1_unique1 on tenk1 b
+-    ->  Hash Semi Join
+-          Hash Cond: (a.unique1 = x.unique1)
+-          ->  Index Only Scan using tenk1_unique1 on tenk1 a
+-          ->  Hash
+-                ->  CTE Scan on x
+- (8 rows)
+  
+
+@@ unit 51 (sql line 383) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (costs off)
+  with x as materialized (insert into tenk1 default values returning unique1)
+  select count(*) from tenk1 a
+    where unique1 in (select * from x);
++                   QUERY PLAN                  
++ ----------------------------------------------
+-                          QUERY PLAN                         
+- ------------------------------------------------------------
+   Aggregate
+     CTE x
+       ->  Insert on tenk1
+             ->  Result
++    ->  Nested Loop Semi Join
++          Join Filter: (a.unique1 = x.unique1)
++          ->  Seq Scan on tenk1 a
++          ->  CTE Scan on x
++ (8 rows)
+-    ->  Nested Loop
+-          ->  HashAggregate
+-                Group Key: x.unique1
+-                ->  CTE Scan on x
+-          ->  Index Only Scan using tenk1_unique1 on tenk1 a
+-                Index Cond: (unique1 = x.unique1)
+- (10 rows)
+  
+
+@@ unit 52 (sql line 388) [wrong EXPLAIN] EXPLAIN plan text differs
+  -- test that pathkeys from a materialized CTE are propagated up to the
+  -- outer query
+  explain (costs off)
+  with x as materialized (select unique1 from tenk1 b order by unique1)
+  select count(*) from tenk1 a
+    where unique1 in (select * from x);
++                   QUERY PLAN                  
++ ----------------------------------------------
+-                          QUERY PLAN                         
+- ------------------------------------------------------------
+   Aggregate
+     CTE x
++      ->  Sort
++            Sort Key: b.unique1
++            ->  Seq Scan on tenk1 b
++    ->  Nested Loop Semi Join
++          Join Filter: (a.unique1 = x.unique1)
++          ->  Seq Scan on tenk1 a
+-      ->  Index Only Scan using tenk1_unique1 on tenk1 b
+-    ->  Merge Semi Join
+-          Merge Cond: (a.unique1 = x.unique1)
+-          ->  Index Only Scan using tenk1_unique1 on tenk1 a
+           ->  CTE Scan on x
++ (9 rows)
+- (7 rows)
+  
+

@@ -1,0 +1,196 @@
+# limit: 63/85 units match; first 12 differing units (- reference, + engine)
+
+@@ unit 0 (sql line 1) [wrong result] SELECT: row count differs
+  --
+  -- LIMIT
+  -- Check the LIMIT/OFFSET feature of SELECT
+  --
+  SELECT ''::text AS two, unique1, unique2, stringu1
+  		FROM onek WHERE unique1 > 50
+  		ORDER BY unique1 LIMIT 2;
+   two | unique1 | unique2 | stringu1 
+  -----+---------+---------+----------
++ (0 rows)
+-      |      51 |      76 | ZBAAAA
+-      |      52 |     985 | ACAAAA
+- (2 rows)
+  
+
+@@ unit 1 (sql line 9) [wrong result] SELECT: row count differs
+  SELECT ''::text AS five, unique1, unique2, stringu1
+  		FROM onek WHERE unique1 > 60
+  		ORDER BY unique1 LIMIT 5;
+   five | unique1 | unique2 | stringu1 
+  ------+---------+---------+----------
++ (0 rows)
+-       |      61 |     560 | JCAAAA
+-       |      62 |     633 | KCAAAA
+-       |      63 |     296 | LCAAAA
+-       |      64 |     479 | MCAAAA
+-       |      65 |      64 | NCAAAA
+- (5 rows)
+  
+
+@@ unit 2 (sql line 12) [wrong result] SELECT: row count differs
+  SELECT ''::text AS two, unique1, unique2, stringu1
+  		FROM onek WHERE unique1 > 60 AND unique1 < 63
+  		ORDER BY unique1 LIMIT 5;
+   two | unique1 | unique2 | stringu1 
+  -----+---------+---------+----------
++ (0 rows)
+-      |      61 |     560 | JCAAAA
+-      |      62 |     633 | KCAAAA
+- (2 rows)
+  
+
+@@ unit 3 (sql line 15) [wrong result] SELECT: row count differs
+  SELECT ''::text AS three, unique1, unique2, stringu1
+  		FROM onek WHERE unique1 > 100
+  		ORDER BY unique1 LIMIT 3 OFFSET 20;
+   three | unique1 | unique2 | stringu1 
+  -------+---------+---------+----------
++ (0 rows)
+-        |     121 |     700 | REAAAA
+-        |     122 |     519 | SEAAAA
+-        |     123 |     777 | TEAAAA
+- (3 rows)
+  
+
+@@ unit 5 (sql line 21) [wrong result] SELECT: row count differs
+  SELECT ''::text AS eleven, unique1, unique2, stringu1
+  		FROM onek WHERE unique1 < 50
+  		ORDER BY unique1 DESC LIMIT 20 OFFSET 39;
+   eleven | unique1 | unique2 | stringu1 
+  --------+---------+---------+----------
++ (0 rows)
+-         |      10 |     520 | KAAAAA
+-         |       9 |      49 | JAAAAA
+-         |       8 |     653 | IAAAAA
+-         |       7 |     647 | HAAAAA
+-         |       6 |     978 | GAAAAA
+-         |       5 |     541 | FAAAAA
+-         |       4 |     833 | EAAAAA
+-         |       3 |     431 | DAAAAA
+-         |       2 |     326 | CAAAAA
+-         |       1 |     214 | BAAAAA
+-         |       0 |     998 | AAAAAA
+- (11 rows)
+  
+
+@@ unit 6 (sql line 24) [wrong result] SELECT: row count differs
+  SELECT ''::text AS ten, unique1, unique2, stringu1
+  		FROM onek
+  		ORDER BY unique1 OFFSET 990;
+   ten | unique1 | unique2 | stringu1 
+  -----+---------+---------+----------
++ (0 rows)
+-      |     990 |     369 | CMAAAA
+-      |     991 |     426 | DMAAAA
+-      |     992 |     363 | EMAAAA
+-      |     993 |     661 | FMAAAA
+-      |     994 |     695 | GMAAAA
+-      |     995 |     144 | HMAAAA
+-      |     996 |     258 | IMAAAA
+-      |     997 |      21 | JMAAAA
+-      |     998 |     549 | KMAAAA
+-      |     999 |     152 | LMAAAA
+- (10 rows)
+  
+
+@@ unit 7 (sql line 27) [wrong result] SELECT: row count differs
+  SELECT ''::text AS five, unique1, unique2, stringu1
+  		FROM onek
+  		ORDER BY unique1 OFFSET 990 LIMIT 5;
+   five | unique1 | unique2 | stringu1 
+  ------+---------+---------+----------
++ (0 rows)
+-       |     990 |     369 | CMAAAA
+-       |     991 |     426 | DMAAAA
+-       |     992 |     363 | EMAAAA
+-       |     993 |     661 | FMAAAA
+-       |     994 |     695 | GMAAAA
+- (5 rows)
+  
+
+@@ unit 8 (sql line 30) [wrong result] SELECT: row count differs
+  SELECT ''::text AS five, unique1, unique2, stringu1
+  		FROM onek
+  		ORDER BY unique1 LIMIT 5 OFFSET 900;
+   five | unique1 | unique2 | stringu1 
+  ------+---------+---------+----------
++ (0 rows)
+-       |     900 |     913 | QIAAAA
+-       |     901 |     931 | RIAAAA
+-       |     902 |     702 | SIAAAA
+-       |     903 |     641 | TIAAAA
+-       |     904 |     793 | UIAAAA
+- (5 rows)
+  
+
+@@ unit 52 (sql line 102) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (verbose, costs off)
+  select unique1, unique2, nextval('testseq')
+    from tenk1 order by unique2 limit 10;
+                             QUERY PLAN                           
+  ----------------------------------------------------------------
+   Limit
+     Output: unique1, unique2, (nextval('testseq'::regclass))
++    ->  Result
+-    ->  Index Scan using tenk1_unique2 on public.tenk1
+           Output: unique1, unique2, nextval('testseq'::regclass)
++          ->  Sort
++                Output: unique1, unique2
++                Sort Key: tenk1.unique2
++                ->  Seq Scan on public.tenk1
++                      Output: unique1, unique2
++ (9 rows)
+- (4 rows)
+  
+
+@@ unit 53 (sql line 106) [wrong result] SELECT: row count differs
+  select unique1, unique2, nextval('testseq')
+    from tenk1 order by unique2 limit 10;
+   unique1 | unique2 | nextval 
+  ---------+---------+---------
++ (0 rows)
+-     8800 |       0 |       1
+-     1891 |       1 |       2
+-     3420 |       2 |       3
+-     9850 |       3 |       4
+-     7164 |       4 |       5
+-     8009 |       5 |       6
+-     5057 |       6 |       7
+-     6701 |       7 |       8
+-     4321 |       8 |       9
+-     3043 |       9 |      10
+- (10 rows)
+  
+
+@@ unit 54 (sql line 109) [feature missing] ERROR: currval of sequence "…" is not yet defined in this session
+  select currval('testseq');
++ ERROR:  currval of sequence "testseq" is not yet defined in this session
+-  currval 
+- ---------
+-       10
+- (1 row)
+- 
+
+@@ unit 56 (sql line 115) [wrong result] SELECT: row count differs
+  select unique1, unique2, nextval('testseq')
+    from tenk1 order by tenthous limit 10;
+   unique1 | unique2 | nextval 
+  ---------+---------+---------
++ (0 rows)
+-        0 |    9998 |      11
+-        1 |    2838 |      12
+-        2 |    2716 |      13
+-        3 |    5679 |      14
+-        4 |    1621 |      15
+-        5 |    5557 |      16
+-        6 |    2855 |      17
+-        7 |    8518 |      18
+-        8 |    5435 |      19
+-        9 |    4463 |      20
+- (10 rows)
+  
+

@@ -1,0 +1,29 @@
+# xml: 279/281 units match; first 2 differing units (- reference, + engine)
+
+@@ unit 30 (sql line 56) [wrong result] SELECT: row count differs
+  SELECT xmlelement(name employee, xmlforest(name, age, salary as pay)) FROM emp;
++  xmlelement 
++ ------------
++ (0 rows)
+-                               xmlelement                              
+- ----------------------------------------------------------------------
+-  <employee><name>sharon</name><age>25</age><pay>1000</pay></employee>
+-  <employee><name>sam</name><age>30</age><pay>2000</pay></employee>
+-  <employee><name>bill</name><age>20</age><pay>1000</pay></employee>
+-  <employee><name>jeff</name><age>23</age><pay>600</pay></employee>
+-  <employee><name>cim</name><age>30</age><pay>400</pay></employee>
+-  <employee><name>linda</name><age>19</age><pay>100</pay></employee>
+- (6 rows)
+  
+
+@@ unit 120 (sql line 191) [wrong result] SELECT: values differ
+  SELECT xmlelement(name employees, xmlagg(xmlelement(name name, name))) FROM emp;
++   xmlelement  
++ --------------
++  <employees/>
+-                                                            xmlelement                                                           
+- --------------------------------------------------------------------------------------------------------------------------------
+-  <employees><name>sharon</name><name>sam</name><name>bill</name><name>jeff</name><name>cim</name><name>linda</name></employees>
+  (1 row)
+  
+

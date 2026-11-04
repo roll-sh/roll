@@ -1,0 +1,121 @@
+# psql: 1255/1264 units match; first 9 differing units (- reference, + engine)
+
+@@ unit 752 (sql line 1241) [wrong result] SELECT: row count differs
+  select unique2 from tenk1 order by unique2 limit 19;
+   unique2 
+  ---------
++ (0 rows)
+-        0
+-        1
+-        2
+-        3
+-        4
+-        5
+-        6
+-        7
+-        8
+-        9
+-       10
+-       11
+-       12
+-       13
+-       14
+-       15
+-       16
+-       17
+-       18
+- (19 rows)
+  
+
+@@ unit 755 (sql line 1244) [psql describe] \echo output differs
+  \echo 'number of rows:' :ROW_COUNT
++ number of rows: 0
+- number of rows: 19
+
+@@ unit 757 (sql line 1249) [missing error] ERROR: division by zero
+  select 1/(15-unique2) from tenk1 order by unique2 limit 19;
+   ?column? 
+  ----------
++ (0 rows)
++ 
+-         0
+-         0
+-         0
+-         0
+-         0
+-         0
+-         0
+-         0
+-         0
+-         0
+- ERROR:  division by zero
+
+@@ unit 758 (sql line 1250) [psql describe] \echo output differs
+  \echo 'error:' :ERROR
++ error: false
+- error: true
+
+@@ unit 759 (sql line 1251) [psql describe] \echo output differs
+  \echo 'error code:' :SQLSTATE
++ error code: 00000
+- error code: 22012
+
+@@ unit 761 (sql line 1253) [psql describe] \echo output differs
+  \echo 'last error message:' :LAST_ERROR_MESSAGE
++ last error message: syntax error at end of input
+- last error message: division by zero
+
+@@ unit 762 (sql line 1254) [psql describe] \echo output differs
+  \echo 'last error code:' :LAST_ERROR_SQLSTATE
++ last error code: 42601
+- last error code: 22012
+
+@@ unit 935 (sql line 1547) [wrong result] SELECT: row count differs
+  SELECT line FROM reload_output ORDER BY lineno;
+   line 
+  ------
++ (0 rows)
+-  0
+-  1
+-  2
+-  3
+-  4
+-  5
+-  6
+-  7
+-  8
+-  9
+- (10 rows)
+  
+
+@@ unit 938 (sql line 1550) [wrong result] SELECT: values differ
+  SELECT line FROM reload_output ORDER BY lineno;
+     line   
+  ----------
+    max 
+   -----
++      
+-   999
+   (1 row)
+   
+    a 
+   ---
+    1
+   (1 row)
+   
+    b 
+   ---
+    2
+   (1 row)
+   
+    c 
+   ---
+    3
+   (1 row)
+   
++  COPY 0
+-  COPY 10
+   UPDATE 0
+  (22 rows)
+  
+

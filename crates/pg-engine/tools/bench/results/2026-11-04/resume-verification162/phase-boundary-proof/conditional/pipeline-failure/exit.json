@@ -1,0 +1,9 @@
+{
+  "implementation": "conditional",
+  "case": "pipeline-failure",
+  "original_failure": 29,
+  "expected_exit": 0,
+  "actual_exit": 0,
+  "marker_created": true,
+  "expected_marker": true
+}

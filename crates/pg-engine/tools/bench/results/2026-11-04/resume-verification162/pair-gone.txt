@@ -1,0 +1,10 @@
+  [wrong_error] seed 9015 #124: 08P01 vs 54000
+  [wrong_error] seed 9015 #127: 08P01 vs 54000
+  [wrong_error] seed 9073 #131: 08P01 vs 54000
+  [wrong_error] seed 9073 #132: 08P01 vs 54000
+  [wrong_error] seed 9100 #101: 08P01 vs 54000
+  [wrong_error] seed 9100 #102: 08P01 vs 54000
+  [wrong_error] seed 9100 #107: 08P01 vs 54000
+  [wrong_error] seed 9100 #98: 08P01 vs 54000
+  [wrong_error] seed 9100 #99: 08P01 vs 54000
+  [wrong_error] seed 9110 #138: 08P01 vs 54000

@@ -1,0 +1,249 @@
+# groupingsets: 190/217 units match; first 12 differing units (- reference, + engine)
+
+@@ unit 38 (sql line 155) [wrong result] SELECT: row count differs
+  -- check that pulled-up subquery outputs still go to null when appropriate
+  select four, x
+    from (select four, ten, 'foo'::text as x from tenk1) as t
+    group by grouping sets (four, x)
+    having x = 'foo';
++  four | x 
++ ------+---
++ (0 rows)
+-  four |  x  
+- ------+-----
+-       | foo
+- (1 row)
+  
+
+@@ unit 39 (sql line 161) [wrong result] SELECT: row count differs
+  select four, x || 'x'
+    from (select four, ten, 'foo'::text as x from tenk1) as t
+    group by grouping sets (four, x)
+    order by four;
+   four | ?column? 
+  ------+----------
++ (0 rows)
+-     0 | 
+-     1 | 
+-     2 | 
+-     3 | 
+-       | foox
+- (5 rows)
+  
+
+@@ unit 42 (sql line 175) [wrong result] SELECT: row count differs
+  select x, y
+    from (select four as x, four as y from tenk1) as t
+    group by grouping sets (x, y)
+    having y is null
+    order by 1, 2;
+   x | y 
+  ---+---
++ (0 rows)
+-  0 |  
+-  1 |  
+-  2 |  
+-  3 |  
+- (4 rows)
+  
+
+@@ unit 43 (sql line 181) [wrong result] SELECT: row count differs
+  select x, y || 'y'
+    from (select four as x, four as y from tenk1) as t
+    group by grouping sets (x, y)
+    order by 1, 2;
+   x | ?column? 
+  ---+----------
++ (0 rows)
+-  0 | 
+-  1 | 
+-  2 | 
+-  3 | 
+-    | 0y
+-    | 1y
+-    | 2y
+-    | 3y
+- (8 rows)
+  
+
+@@ unit 46 (sql line 191) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (costs off)
+  select x, y
+    from (select unique1 as x, unique2 as y from tenk1) as t
+    where x = 1
+    group by grouping sets (x, y)
+    order by 1, 2;
++                 QUERY PLAN                
++ ------------------------------------------
+-                      QUERY PLAN                      
+- -----------------------------------------------------
+   Sort
+     Sort Key: tenk1.unique1, tenk1.unique2
+     ->  GroupAggregate
+           Group Key: tenk1.unique1
+           Sort Key: tenk1.unique2
+             Group Key: tenk1.unique2
++          ->  Seq Scan on tenk1
++                Filter: (unique1 = 1)
+-          ->  Index Scan using tenk1_unique1 on tenk1
+-                Index Cond: (unique1 = 1)
+  (8 rows)
+  
+
+@@ unit 47 (sql line 198) [wrong result] SELECT: row count differs
+  select x, y
+    from (select unique1 as x, unique2 as y from tenk1) as t
+    where x = 1
+    group by grouping sets (x, y)
+    order by 1, 2;
++  x | y 
++ ---+---
++ (0 rows)
+-  x |  y   
+- ---+------
+-  1 |     
+-    | 2838
+- (2 rows)
+  
+
+@@ unit 48 (sql line 204) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (costs off)
+  select x, y
+    from (select unique1::oid as x, unique2 as y from tenk1) as t
+    where x::integer = 1
+    group by grouping sets (x, y)
+    order by 1, 2;
++                          QUERY PLAN                          
++ -------------------------------------------------------------
+-                            QUERY PLAN                            
+- -----------------------------------------------------------------
+   Sort
+     Sort Key: ((tenk1.unique1)::oid), tenk1.unique2
+     ->  GroupAggregate
+           Group Key: ((tenk1.unique1)::oid)
+           Sort Key: tenk1.unique2
+             Group Key: tenk1.unique2
+           ->  Sort
+                 Sort Key: ((tenk1.unique1)::oid)
++                ->  Seq Scan on tenk1
++                      Filter: (((unique1)::oid)::integer = 1)
+-                ->  Index Scan using tenk1_unique1 on tenk1
+-                      Index Cond: (((unique1)::oid)::integer = 1)
+  (10 rows)
+  
+
+@@ unit 49 (sql line 211) [wrong result] SELECT: row count differs
+  select x, y
+    from (select unique1::oid as x, unique2 as y from tenk1) as t
+    where x::integer = 1
+    group by grouping sets (x, y)
+    order by 1, 2;
++  x | y 
++ ---+---
++ (0 rows)
+-  x |  y   
+- ---+------
+-  1 |     
+-    | 2838
+- (2 rows)
+  
+
+@@ unit 50 (sql line 217) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (costs off)
+  select x, y
+    from (select t1.unique1 as x, t1.unique2 as y from tenk1 t1, tenk1 t2) as t
+    where x = 1
+    group by grouping sets (x, y)
+    order by 1, 2;
++                 QUERY PLAN                 
++ -------------------------------------------
+-                             QUERY PLAN                             
+- -------------------------------------------------------------------
+   Sort
+     Sort Key: t1.unique1, t1.unique2
+     ->  GroupAggregate
+           Group Key: t1.unique1
+           Sort Key: t1.unique2
+             Group Key: t1.unique2
+           ->  Nested Loop
++                ->  Seq Scan on tenk1 t1
++                      Filter: (unique1 = 1)
++                ->  Seq Scan on tenk1 t2
+-                ->  Index Scan using tenk1_unique1 on tenk1 t1
+-                      Index Cond: (unique1 = 1)
+-                ->  Index Only Scan using tenk1_hundred on tenk1 t2
+  (10 rows)
+  
+
+@@ unit 51 (sql line 224) [wrong result] SELECT: row count differs
+  select x, y
+    from (select t1.unique1 as x, t1.unique2 as y from tenk1 t1, tenk1 t2) as t
+    where x = 1
+    group by grouping sets (x, y)
+    order by 1, 2;
++  x | y 
++ ---+---
++ (0 rows)
+-  x |  y   
+- ---+------
+-  1 |     
+-    | 2838
+- (2 rows)
+  
+
+@@ unit 61 (sql line 281) [wrong EXPLAIN] EXPLAIN plan text differs
+  -- min max optimization should still work with GROUP BY ()
+  explain (costs off)
+    select min(unique1) from tenk1 GROUP BY ();
++        QUERY PLAN        
++ -------------------------
++  Aggregate
++    Group Key: ()
++    ->  Seq Scan on tenk1
++ (3 rows)
+-                          QUERY PLAN                         
+- ------------------------------------------------------------
+-  Result
+-    InitPlan 1
+-      ->  Limit
+-            ->  Index Only Scan using tenk1_unique1 on tenk1
+-                  Index Cond: (unique1 IS NOT NULL)
+- (5 rows)
+  
+
+@@ unit 78 (sql line 322) [wrong result] SELECT: row count differs
+  -- HAVING queries
+  select ten, sum(distinct four) from onek a
+  group by grouping sets((ten,four),(ten))
+  having exists (select 1 from onek b where sum(distinct a.four) = b.four);
+   ten | sum 
+  -----+-----
++ (0 rows)
+-    0 |   0
+-    0 |   2
+-    0 |   2
+-    1 |   1
+-    1 |   3
+-    2 |   0
+-    2 |   2
+-    2 |   2
+-    3 |   1
+-    3 |   3
+-    4 |   0
+-    4 |   2
+-    4 |   2
+-    5 |   1
+-    5 |   3
+-    6 |   0
+-    6 |   2
+-    6 |   2
+-    7 |   1
+-    7 |   3
+-    8 |   0
+-    8 |   2
+-    8 |   2
+-    9 |   1
+-    9 |   3
+- (25 rows)
+  
+

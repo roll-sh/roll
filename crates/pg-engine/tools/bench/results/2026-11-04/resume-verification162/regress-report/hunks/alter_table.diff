@@ -1,0 +1,16 @@
+# alter_table: 1748/1749 units match; first 1 differing units (- reference, + engine)
+
+@@ unit 140 (sql line 272) [wrong result] SELECT: row count differs
+  -- 5 values, sorted
+  SELECT unique1 FROM tenk1 WHERE unique1 < 5;
+   unique1 
+  ---------
++ (0 rows)
+-        0
+-        1
+-        2
+-        3
+-        4
+- (5 rows)
+  
+

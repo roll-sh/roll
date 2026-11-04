@@ -1,0 +1,36 @@
+{
+  "previous": [
+    "float has excessive precision",
+    "float has excessive precision",
+    "float has excessive precision",
+    "float has excessive precision",
+    "float has excessive precision",
+    "items after a test module",
+    "items after a test module",
+    "length comparison to zero",
+    "the `Err`-variant returned from this function is very large",
+    "the loop variable `j` is used to index `rkeys`",
+    "this `if` statement can be collapsed",
+    "this loop could be written as a `while let` loop",
+    "useless use of `format!`",
+    "using `chunks_exact` with a constant chunk size"
+  ],
+  "current": [
+    "float has excessive precision",
+    "float has excessive precision",
+    "float has excessive precision",
+    "float has excessive precision",
+    "float has excessive precision",
+    "items after a test module",
+    "items after a test module",
+    "length comparison to zero",
+    "the `Err`-variant returned from this function is very large",
+    "the loop variable `j` is used to index `rkeys`",
+    "this `if` statement can be collapsed",
+    "this loop could be written as a `while let` loop",
+    "useless use of `format!`",
+    "using `chunks_exact` with a constant chunk size"
+  ],
+  "same_warning_headings": true,
+  "scope": "headings only; source positions can differ"
+}

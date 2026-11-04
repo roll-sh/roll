@@ -1,0 +1,89 @@
+# write_parallel: 18/22 units match; first 4 differing units (- reference, + engine)
+
+@@ unit 5 (sql line 13) [wrong EXPLAIN] EXPLAIN plan text differs
+  --
+  -- Test write operations that has an underlying query that is eligible
+  -- for parallel plans
+  --
+  explain (costs off) create table parallel_write as
+      select length(stringu1) from tenk1 group by length(stringu1);
++               QUERY PLAN               
++ ---------------------------------------
++  HashAggregate
++    Group Key: length((stringu1)::text)
++    ->  Seq Scan on tenk1
++ (3 rows)
+-                     QUERY PLAN                     
+- ---------------------------------------------------
+-  Finalize HashAggregate
+-    Group Key: (length((stringu1)::text))
+-    ->  Gather
+-          Workers Planned: 4
+-          ->  Partial HashAggregate
+-                Group Key: length((stringu1)::text)
+-                ->  Parallel Seq Scan on tenk1
+- (7 rows)
+  
+
+@@ unit 8 (sql line 23) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (costs off) select length(stringu1) into parallel_write
+      from tenk1 group by length(stringu1);
++               QUERY PLAN               
++ ---------------------------------------
++  HashAggregate
++    Group Key: length((stringu1)::text)
++    ->  Seq Scan on tenk1
++ (3 rows)
+-                     QUERY PLAN                     
+- ---------------------------------------------------
+-  Finalize HashAggregate
+-    Group Key: (length((stringu1)::text))
+-    ->  Gather
+-          Workers Planned: 4
+-          ->  Partial HashAggregate
+-                Group Key: length((stringu1)::text)
+-                ->  Parallel Seq Scan on tenk1
+- (7 rows)
+  
+
+@@ unit 11 (sql line 29) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (costs off) create materialized view parallel_mat_view as
+      select length(stringu1) from tenk1 group by length(stringu1);
++               QUERY PLAN               
++ ---------------------------------------
++  HashAggregate
++    Group Key: length((stringu1)::text)
++    ->  Seq Scan on tenk1
++ (3 rows)
+-                     QUERY PLAN                     
+- ---------------------------------------------------
+-  Finalize HashAggregate
+-    Group Key: (length((stringu1)::text))
+-    ->  Gather
+-          Workers Planned: 4
+-          ->  Partial HashAggregate
+-                Group Key: length((stringu1)::text)
+-                ->  Parallel Seq Scan on tenk1
+- (7 rows)
+  
+
+@@ unit 18 (sql line 39) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (costs off) create table parallel_write as execute prep_stmt;
++               QUERY PLAN               
++ ---------------------------------------
++  HashAggregate
++    Group Key: length((stringu1)::text)
++    ->  Seq Scan on tenk1
++ (3 rows)
+-                     QUERY PLAN                     
+- ---------------------------------------------------
+-  Finalize HashAggregate
+-    Group Key: (length((stringu1)::text))
+-    ->  Gather
+-          Workers Planned: 4
+-          ->  Partial HashAggregate
+-                Group Key: length((stringu1)::text)
+-                ->  Parallel Seq Scan on tenk1
+- (7 rows)
+  
+

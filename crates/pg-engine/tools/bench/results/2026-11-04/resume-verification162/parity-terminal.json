@@ -1,0 +1,18 @@
+{
+  "observed_at": "2026-11-04T12:39:42.765412+00:00",
+  "tested_head": "3997cf00a2a301fed65f00469625ff14f223f227",
+  "command": [
+    "rg",
+    "-q",
+    "pg_regress: 51148/51150 units match",
+    "/home/meszmate/.cache/pg-engine-resume-20261104/verification/regress.log"
+  ],
+  "exit": 1,
+  "expected_units": "51148/51150",
+  "actual_units": "49868/51150",
+  "rust_test_exit": 0,
+  "overall_parity_exit": 1,
+  "later_phases": "NOT RUN: regress-compare, isolation, dump",
+  "full_service": "HELD",
+  "source_acceptance": false
+}

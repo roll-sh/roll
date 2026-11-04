@@ -1,0 +1,82 @@
+# explain: 58/60 units match; first 2 differing units (- reference, + engine)
+
+@@ unit 22 (sql line 96) [wrong result] SELECT: row count differs
+  -- GENERIC_PLAN option
+  select explain_filter('explain (generic_plan) select unique1 from tenk1 where thousand = $1');
++                   explain_filter                   
++ ---------------------------------------------------
++  Seq Scan on tenk1  (cost=N.N..N.N rows=N width=N)
++    Filter: (thousand = $N)
++ (2 rows)
+-                                  explain_filter                                  
+- ---------------------------------------------------------------------------------
+-  Bitmap Heap Scan on tenk1  (cost=N.N..N.N rows=N width=N)
+-    Recheck Cond: (thousand = $N)
+-    ->  Bitmap Index Scan on tenk1_thous_tenthous  (cost=N.N..N.N rows=N width=N)
+-          Index Cond: (thousand = $N)
+- (4 rows)
+  
+
+@@ unit 42 (sql line 145) [wrong EXPLAIN] EXPLAIN plan text differs
+  select jsonb_pretty(
+    explain_filter_to_json('explain (analyze, verbose, buffers, format json)
+                           select * from tenk1 order by tenthous')
+    -- remove "Workers" node of the Seq Scan plan node
+    #- '{0,Plan,Plans,0,Plans,0,Workers}'
+    -- remove "Workers" node of the Sort plan node
+    #- '{0,Plan,Plans,0,Workers}'
+    -- Also remove its sort-type fields, as those aren't 100% stable
+    #- '{0,Plan,Plans,0,Sort Method}'
+    #- '{0,Plan,Plans,0,Sort Space Type}'
+  );
++                     jsonb_pretty                     
++ -----------------------------------------------------
++  [                                                  +
++      {                                              +
++          "Plan": {                                  +
++              "Plans": [                             +
++                  {                                  +
++                      "Alias": "tenk1",              +
++                      "Output": [                    +
++                          "unique1",                 +
++                          "unique2",                 +
++                          "two",                     +
++                          "four",                    +
++                          "ten",                     +
++                          "twenty",                  +
++                          "hundred",                 +
++                          "thousand",                +
++                          "twothousand",             +
++                          "fivethous",               +
++                          "tenthous",                +
++                          "odd",                     +
++                          "even",                    +
++                          "stringu1",                +
++                          "stringu2",                +
++                          "string4"                  +
++                      ],                             +
++                      "Schema": "public",            +
++                      "Disabled": false,             +
++                      "Node Type": "Seq Scan",       +
++                      "Plan Rows": 0,                +
++                      "Plan Width": 0,               +
++                      "Total Cost": 0.0,             +
++                      "Actual Rows": 0.0,            +
++                      "Actual Loops": 0,             +
++                      "Startup Cost": 0.0,           +
++                      "Async Capable": false,        +
++                      "Relation Name": "tenk1",      +
++                      "Parallel Aware": false,       +
++                      "Local Hit Blocks": 0,         +
++                      "Temp Read Blocks": 0,         +
++                      "Actual Total Time": 0.0,      +
++                      "Local Read Blocks": 0,        +
++                      "Shared Hit Blocks": 0,        +
++                      "Shared Read Blocks": 0,       +
++                      "Actual Startup Time": 0.0,    +
++                      "Parent Relationship": "Outer",+
++                      "Temp Written Blocks": 0,      +
++                      "Local Dirtied Blocks": 0,     +
++                      "Local Written Blocks": 0,     +
+  ... 233 more lines
+

@@ -1,0 +1,30 @@
+# test_setup: 72/79 units match; first 7 differing units (- reference, + engine)
+
+@@ unit 33 (sql line 138) [feature missing] ERROR: absolute path not allowed
+  COPY onek FROM :'filename';
++ ERROR:  absolute path not allowed
+
+@@ unit 39 (sql line 164) [feature missing] ERROR: absolute path not allowed
+  COPY tenk1 FROM :'filename';
++ ERROR:  absolute path not allowed
+
+@@ unit 45 (sql line 177) [feature missing] ERROR: absolute path not allowed
+  COPY person FROM :'filename';
++ ERROR:  absolute path not allowed
+
+@@ unit 49 (sql line 186) [feature missing] ERROR: absolute path not allowed
+  COPY emp FROM :'filename';
++ ERROR:  absolute path not allowed
+
+@@ unit 53 (sql line 194) [feature missing] ERROR: absolute path not allowed
+  COPY student FROM :'filename';
++ ERROR:  absolute path not allowed
+
+@@ unit 57 (sql line 202) [feature missing] ERROR: absolute path not allowed
+  COPY stud_emp FROM :'filename';
++ ERROR:  absolute path not allowed
+
+@@ unit 61 (sql line 211) [feature missing] ERROR: absolute path not allowed
+  COPY road FROM :'filename';
++ ERROR:  absolute path not allowed
+

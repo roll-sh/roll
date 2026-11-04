@@ -1,0 +1,106 @@
+# tsearch: 315/451 units match; first 12 differing units (- reference, + engine)
+
+@@ unit 9 (sql line 52) [feature missing] ERROR: absolute path not allowed
+  COPY test_tsvector FROM :'filename';
++ ERROR:  absolute path not allowed
+
+@@ unit 11 (sql line 56) [wrong result] SELECT: values differ
+  -- test basic text search behavior without indexes, then with
+  SELECT count(*) FROM test_tsvector WHERE a @@ 'wr|qh';
+   count 
+  -------
++      0
+-    158
+  (1 row)
+  
+
+@@ unit 12 (sql line 59) [wrong result] SELECT: values differ
+  SELECT count(*) FROM test_tsvector WHERE a @@ 'wr&qh';
+   count 
+  -------
++      0
+-     17
+  (1 row)
+  
+
+@@ unit 13 (sql line 60) [wrong result] SELECT: values differ
+  SELECT count(*) FROM test_tsvector WHERE a @@ 'eq&yt';
+   count 
+  -------
++      0
+-      6
+  (1 row)
+  
+
+@@ unit 14 (sql line 61) [wrong result] SELECT: values differ
+  SELECT count(*) FROM test_tsvector WHERE a @@ 'eq|yt';
+   count 
+  -------
++      0
+-     98
+  (1 row)
+  
+
+@@ unit 15 (sql line 62) [wrong result] SELECT: values differ
+  SELECT count(*) FROM test_tsvector WHERE a @@ '(eq&yt)|(wr&qh)';
+   count 
+  -------
++      0
+-     23
+  (1 row)
+  
+
+@@ unit 16 (sql line 63) [wrong result] SELECT: values differ
+  SELECT count(*) FROM test_tsvector WHERE a @@ '(eq|yt)&(wr|qh)';
+   count 
+  -------
++      0
+-     39
+  (1 row)
+  
+
+@@ unit 17 (sql line 64) [wrong result] SELECT: values differ
+  SELECT count(*) FROM test_tsvector WHERE a @@ 'w:*|q:*';
+   count 
+  -------
++      0
+-    494
+  (1 row)
+  
+
+@@ unit 18 (sql line 65) [wrong result] SELECT: values differ
+  SELECT count(*) FROM test_tsvector WHERE a @@ any ('{wr,qh}');
+   count 
+  -------
++      0
+-    158
+  (1 row)
+  
+
+@@ unit 20 (sql line 67) [wrong result] SELECT: values differ
+  SELECT count(*) FROM test_tsvector WHERE a @@ '!no_such_lexeme';
+   count 
+  -------
++      0
+-    508
+  (1 row)
+  
+
+@@ unit 21 (sql line 68) [wrong result] SELECT: values differ
+  SELECT count(*) FROM test_tsvector WHERE a @@ 'pl <-> yh';
+   count 
+  -------
++      0
+-      1
+  (1 row)
+  
+
+@@ unit 23 (sql line 70) [wrong result] SELECT: values differ
+  SELECT count(*) FROM test_tsvector WHERE a @@ 'qe <2> qt';
+   count 
+  -------
++      0
+-      1
+  (1 row)
+  
+

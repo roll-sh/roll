@@ -1,0 +1,190 @@
+# union: 184/198 units match; first 12 differing units (- reference, + engine)
+
+@@ unit 40 (sql line 125) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (costs off)
+  select count(*) from
+    ( select unique1 from tenk1 union select fivethous from tenk1 ) ss;
++                     QUERY PLAN                     
++ ---------------------------------------------------
+-                            QUERY PLAN                           
+- ----------------------------------------------------------------
+   Aggregate
++    ->  Unique
++          ->  Sort
++                Sort Key: tenk1.unique1
++                ->  Append
++                      ->  Seq Scan on tenk1
++                      ->  Seq Scan on tenk1 tenk1_1
++ (7 rows)
+-    ->  HashAggregate
+-          Group Key: tenk1.unique1
+-          ->  Append
+-                ->  Index Only Scan using tenk1_unique1 on tenk1
+-                ->  Seq Scan on tenk1 tenk1_1
+- (6 rows)
+  
+
+@@ unit 41 (sql line 128) [wrong result] SELECT: values differ
+  select count(*) from
+    ( select unique1 from tenk1 union select fivethous from tenk1 ) ss;
+   count 
+  -------
++      0
+-  10000
+  (1 row)
+  
+
+@@ unit 42 (sql line 131) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (costs off)
+  select count(*) from
+    ( select unique1 from tenk1 intersect select fivethous from tenk1 ) ss;
++               QUERY PLAN               
++ ---------------------------------------
+-                             QUERY PLAN                            
+- ------------------------------------------------------------------
+   Aggregate
+     ->  HashSetOp Intersect
+           ->  Seq Scan on tenk1
++          ->  Seq Scan on tenk1 tenk1_1
+-          ->  Index Only Scan using tenk1_unique1 on tenk1 tenk1_1
+  (4 rows)
+  
+
+@@ unit 43 (sql line 134) [wrong result] SELECT: values differ
+  select count(*) from
+    ( select unique1 from tenk1 intersect select fivethous from tenk1 ) ss;
+   count 
+  -------
++      0
+-   5000
+  (1 row)
+  
+
+@@ unit 46 (sql line 142) [wrong result] SELECT: row count differs
+  select unique1 from tenk1 except select unique2 from tenk1 where unique2 != 10;
+   unique1 
+  ---------
++ (0 rows)
+-       10
+- (1 row)
+  
+
+@@ unit 52 (sql line 154) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (costs off)
+  select count(*) from
+    ( select unique1 from tenk1 union select fivethous from tenk1 ) ss;
++                     QUERY PLAN                     
++ ---------------------------------------------------
+-                            QUERY PLAN                           
+- ----------------------------------------------------------------
+   Aggregate
+     ->  Unique
++          ->  Sort
+-          ->  Merge Append
+                 Sort Key: tenk1.unique1
++                ->  Append
++                      ->  Seq Scan on tenk1
+-                ->  Index Only Scan using tenk1_unique1 on tenk1
+-                ->  Sort
+-                      Sort Key: tenk1_1.fivethous
+                       ->  Seq Scan on tenk1 tenk1_1
++ (7 rows)
+- (8 rows)
+  
+
+@@ unit 53 (sql line 157) [wrong result] SELECT: values differ
+  select count(*) from
+    ( select unique1 from tenk1 union select fivethous from tenk1 ) ss;
+   count 
+  -------
++      0
+-  10000
+  (1 row)
+  
+
+@@ unit 54 (sql line 160) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (costs off)
+  select count(*) from
+    ( select unique1 from tenk1 intersect select fivethous from tenk1 ) ss;
++                  QUERY PLAN                  
++ ---------------------------------------------
+-                             QUERY PLAN                            
+- ------------------------------------------------------------------
+   Aggregate
+     ->  SetOp Intersect
+           ->  Sort
++                Sort Key: tenk1.unique1
+-                Sort Key: tenk1.fivethous
+                 ->  Seq Scan on tenk1
++          ->  Sort
++                Sort Key: tenk1_1.fivethous
++                ->  Seq Scan on tenk1 tenk1_1
++ (8 rows)
+-          ->  Index Only Scan using tenk1_unique1 on tenk1 tenk1_1
+- (6 rows)
+  
+
+@@ unit 55 (sql line 163) [wrong result] SELECT: values differ
+  select count(*) from
+    ( select unique1 from tenk1 intersect select fivethous from tenk1 ) ss;
+   count 
+  -------
++      0
+-   5000
+  (1 row)
+  
+
+@@ unit 56 (sql line 166) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (costs off)
+  select unique1 from tenk1 except select unique2 from tenk1 where unique2 != 10;
++               QUERY PLAN               
++ ---------------------------------------
+-                          QUERY PLAN                         
+- ------------------------------------------------------------
+   SetOp Except
++    ->  Sort
++          Sort Key: tenk1.unique1
++          ->  Seq Scan on tenk1
++    ->  Sort
++          Sort Key: tenk1_1.unique2
++          ->  Seq Scan on tenk1 tenk1_1
++                Filter: (unique2 <> 10)
++ (8 rows)
+-    ->  Index Only Scan using tenk1_unique1 on tenk1
+-    ->  Index Only Scan using tenk1_unique2 on tenk1 tenk1_1
+-          Filter: (unique2 <> 10)
+- (4 rows)
+  
+
+@@ unit 57 (sql line 168) [wrong result] SELECT: row count differs
+  select unique1 from tenk1 except select unique2 from tenk1 where unique2 != 10;
+   unique1 
+  ---------
++ (0 rows)
+-       10
+- (1 row)
+  
+
+@@ unit 58 (sql line 170) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (costs off)
+  select f1 from int4_tbl union all
+    (select unique1 from tenk1 union select unique2 from tenk1);
++                     QUERY PLAN                     
++ ---------------------------------------------------
+-                                QUERY PLAN                               
+- ------------------------------------------------------------------------
+   Append
+     ->  Seq Scan on int4_tbl
+     ->  Unique
++          ->  Sort
+-          ->  Merge Append
+                 Sort Key: tenk1.unique1
++                ->  Append
++                      ->  Seq Scan on tenk1
++                      ->  Seq Scan on tenk1 tenk1_1
++ (8 rows)
+-                ->  Index Only Scan using tenk1_unique1 on tenk1
+-                ->  Index Only Scan using tenk1_unique2 on tenk1 tenk1_1
+- (7 rows)
+  
+

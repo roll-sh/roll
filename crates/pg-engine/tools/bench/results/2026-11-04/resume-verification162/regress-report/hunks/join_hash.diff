@@ -1,0 +1,42 @@
+# join_hash: 277/279 units match; first 2 differing units (- reference, + engine)
+
+@@ unit 276 (sql line 614) [wrong EXPLAIN] EXPLAIN plan text differs
+  explain (costs off)
+  select i8.q2, ss.* from
+  int8_tbl i8,
+  lateral (select t1.fivethous, i4.f1 from tenk1 t1 join int4_tbl i4
+           on t1.fivethous = i4.f1+i8.q2 order by 1,2) ss;
+                          QUERY PLAN                         
+  -----------------------------------------------------------
+   Nested Loop
+     ->  Seq Scan on int8_tbl i8
+     ->  Sort
+           Sort Key: t1.fivethous, i4.f1
+           ->  Hash Join
++                Hash Cond: ((i4.f1 + i8.q2) = t1.fivethous)
++                ->  Seq Scan on int4_tbl i4
+-                Hash Cond: (t1.fivethous = (i4.f1 + i8.q2))
+-                ->  Seq Scan on tenk1 t1
+                 ->  Hash
++                      ->  Seq Scan on tenk1 t1
+-                      ->  Seq Scan on int4_tbl i4
+  (9 rows)
+  
+
+@@ unit 277 (sql line 620) [wrong result] SELECT: row count differs
+  select i8.q2, ss.* from
+  int8_tbl i8,
+  lateral (select t1.fivethous, i4.f1 from tenk1 t1 join int4_tbl i4
+           on t1.fivethous = i4.f1+i8.q2 order by 1,2) ss;
++  q2 | fivethous | f1 
++ ----+-----------+----
++ (0 rows)
+-  q2  | fivethous | f1 
+- -----+-----------+----
+-  456 |       456 |  0
+-  456 |       456 |  0
+-  123 |       123 |  0
+-  123 |       123 |  0
+- (4 rows)
+  
+
