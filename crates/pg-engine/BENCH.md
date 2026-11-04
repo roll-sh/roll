@@ -2056,6 +2056,107 @@ between rounds (select-only 42.6k / 33.9k base, 34.6k / 39.0k new).
   runs agree, statistics included. `big_tables` `deferred_entry_deletes`: inline over a
   table too big to model.
 
+## Executor, round 9 (round 25, agent 160)
+
+Step 1: nested-loop rescan and wider batch kernels (HANDOFF "Executor, round 9, step 1").
+**base** is the branch at `3df0c607`; **new** is this step on top of it. Both are dist builds
+(fat LTO) of their own checkouts.
+
+How it was run:
+- Each server is in a container of its own, both pinned to the same four CPUs (4-7) and
+  both in system.slice. The client is on 8-11, at nice 19.
+- PostgreSQL 18.6 is the pinned image with the bench settings (shared_buffers 2 GB, host
+  network). The engine has `--cache-mb 2048`, with its binary bind-mounted
+  (`run.sh ENGINE_DOCKER=1`).
+- Rounds are interleaved: PostgreSQL, new, base, base, new, PostgreSQL. Each engine run is
+  a fresh server, a warm-up pass, then the measured one.
+- User-space instructions and cycles come from `perf stat -e instructions:u,cycles:u` of the
+  engine process, from a privileged helper container. CPU is the cgroup's.
+- The machine ran at load 15-40. Wall times move about ±10% from run to run.
+
+### 200,000 inner index lookups (`bench nl`: hash and merge joins off, serial; 1M-row `nl_t`, primary key; median of 5)
+
+| query | PostgreSQL | base | new |
+|---|---|---|---|
+| `sum(t.v) FROM generate_series(1, 200000) g JOIN nl_t t ON t.id = g` | 0.23, 0.26 s | 0.84, 0.85 s | **0.68, 0.69 s** (-19%) |
+| `LEFT JOIN nl_t t ON t.id = g * 7` | 0.24, 0.27 s | 0.70, 0.71 s | **0.55, 0.58 s** (-19%) |
+| `EXISTS (... WHERE t.id = g * 3)` | 0.20, 0.21 s | 0.60, 0.61 s | **0.44, 0.44 s** (-27%) |
+| user instructions, 10^9 (the 3 queries, 5 runs each) | | 80.7, 81.2 | **68.4, 69.6 (-15%)** |
+| user cycles, 10^9 | | 43.5, 43.9 | **34.8, 35.3 (-20%)** |
+| peak (engine VmHWM) | | 173-175 MB | 171-173 MB |
+
+The inner join is 2.8x PostgreSQL's time, down from 3.4x (round 8 measured 3.2x on a release
+build). The rest is the storage lookup, which agent 149's point-lookup path behind `next`
+takes on: a TxnScan per rescan, the entry seek, the row fetch.
+
+### TPC-H SF1 (all 22 over the wire)
+
+| | PostgreSQL | base | new |
+|---|---|---|---|
+| wall, s (sum of the 22) | 12.41, 11.98 | 19.58, 18.88 | **17.02, 17.63** |
+| CPU, s (cgroup) | 29.1, 29.6 | 45.5, 45.2 | **41.6, 42.7** |
+| user instructions, 10^9 | | 303.4, 305.2 | **280.3, 281.4 (-7.7%)** |
+| user cycles, 10^9 | | 176.8, 175.3 | **163.1, 162.7 (-7.5%)** |
+| peak, MB (engine VmHWM; PostgreSQL's anon + shmem) | 1,775, 1,775 | 1,832, 1,832 | 1,836, 1,829 |
+
+All 22 result hashes equal PostgreSQL's in every run.
+
+**Engine/PostgreSQL (new): wall 1.42x, CPU 1.44x, peak 1.03x.** Round 8's 2.4x / 1.9x / 1.44x
+came from release builds, and since then from size models, scan cost rounds and query memory.
+The base here measures 1.58x / 1.54x.
+
+Per query, seconds (the round's medians):
+
+| | q01 | q10 | q12 | q13 | q18 | q21 | q22 |
+|---|---|---|---|---|---|---|---|
+| PostgreSQL | 1.98 | 0.65 | 0.60 | 0.73 | 2.53 | 0.62 | 0.10 |
+| base | 1.37 | 1.31 | 1.63 | 1.62 | 2.04 | 1.45 | 0.86 |
+| new | **1.23** | **0.82** | **1.31** | **1.39** | **2.00** | **0.96** | **0.43** |
+
+- q01 and q18 are ahead of PostgreSQL.
+- q10 and q12 read lineitem through filters on char(n) columns (`l_returnflag = 'R'`,
+  `l_shipmode IN (...)`). Under the binder's `::bpchar` cast, neither the
+  stored comparisons nor the batch filter took them, so every row was decoded and filtered
+  row by row. The cast now compiles away.
+- q21 and q22 are nested-loop semi and anti joins over inner index scans: lineitem l2 / l3
+  by `lineitem_pkey`, orders by `orders_o_custkey_idx`. They are rescanned now, and stop at
+  the first match, as do the workers' lookups.
+- q13 gains from LIKE becoming a kernel: orders' `o_comment NOT LIKE` filter runs in the
+  workers (`LikePattern::matches` is 5% of its profile). What's left is the grouping above
+  the join (`AggNode::run`, 18%).
+
+### pgbench and the footprint gate (`scoreboard.sh quick`, SB_ONLY=pgbench,analytic: 2 interleaved rounds, scale 1)
+
+User instructions per transaction (`perf stat` of the engine; scale 10, `-M prepared`, 8
+clients, 15 s after a 5 s warm-up, a fresh data directory each; new, base, base, new, two
+rounds):
+
+| | base | new |
+|---|---|---|
+| select-only | 82.7k-82.9k | 82.8k-83.0k |
+| simple-update (`-N`) | 366k-397k | 375k-397k |
+| tpcb-like | 878k-910k | 863k-904k |
+
+These are unchanged: point reads and updates don't take the changed paths.
+
+Engine/PostgreSQL (scale 1, 2 rounds, CPU per operation; above 1x the engine is ahead):
+
+| | base | new |
+|---|---|---|
+| select-only, 1 / 8 / 32 clients | 0.99x / 0.81x / 0.89x | 0.98x / 0.83x / 0.89x |
+| tpcb-like, 1 / 8 / 32 clients | 0.88x / 0.90x / 1.17x | 0.83x / 0.82x / 1.17x |
+
+The two scoreboard runs were not interleaved and the machine's load moved between them. The
+instruction counts above are the measure.
+
+Footprint gate (new):
+- fresh data directory 3.03 MB (PostgreSQL 38.9);
+- idle CPU over 5 minutes 0.02 s (0.54);
+- 100 idle sessions 29.9 MB (211).
+
+All three pass. The step adds no thread, timer or cache. The inner node it keeps lives as
+long as its join.
+
 ## Executor, round 8 (round 25, agent 154)
 
 Step 1 of batch execution (HANDOFF "Executor: batch execution, the next step", "What is

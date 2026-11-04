@@ -44,8 +44,9 @@ fn stored_comparisons_match_evaluation() {
     ] {
         s.query(q).unwrap_or_else(|e| panic!("{q}: {e:?}"));
     }
-    // Each filter, and whether it runs over stored bytes. Width-bearing varchar and
-    // bpchar columns retain casts, so those comparisons use the general kernel.
+    // Each filter, and whether it runs over stored bytes. A width-bearing varchar or bpchar
+    // column's cast to its unbounded type leaves its bytes as they are and compiles away
+    // (`kernel::compile`), so those comparisons run over stored bytes too.
     let filters = [
         ("a > 100", true),
         ("e = 'x7'", true),
@@ -57,13 +58,13 @@ fn stored_comparisons_match_evaluation() {
         ("e <= 'x7 '", true),
         ("e = repeat('x7', 100)", true),
         ("e > repeat('x', 300)", true),
-        ("v = 'v3'", false),
-        ("v < 'v1 '", false),
-        ("c = 'c1'", false),
-        ("c = 'c1  '", false),
-        ("c < 'c2'", false),
-        ("c >= 'c3 '", false),
-        ("c = ''", false),
+        ("v = 'v3'", true),
+        ("v < 'v1 '", true),
+        ("c = 'c1'", true),
+        ("c = 'c1  '", true),
+        ("c < 'c2'", true),
+        ("c >= 'c3 '", true),
+        ("c = ''", true),
         ("n = 'n4'", true),
         ("e = 'x7' AND a > 100", true),
         ("a < 2000 AND e > 'x2' AND m >= 1.25", true),
@@ -72,8 +73,8 @@ fn stored_comparisons_match_evaluation() {
         ("e COLLATE c_utf8 > 'x3'", true),
         ("e COLLATE und_d = 'x7'", true),
         ("e COLLATE und_d <> 'X7'", true),
-        ("v COLLATE und_d = 'v3'", false),
-        ("c COLLATE und_d = 'c1'", false),
+        ("v COLLATE und_d = 'v3'", true),
+        ("c COLLATE und_d = 'c1'", true),
         ("e COLLATE und_d < 'x7'", false),
         ("e COLLATE und_ci = 'X7'", false),
         ("e COLLATE und_ci <> 'x7'", false),

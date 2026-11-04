@@ -2681,6 +2681,75 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     - pg_dump_tap 14,817 / 14,817.
   - Also found: an allocation profile of tpcb, attributed (BENCH.md, "tpcb allocations").
     The run logs were removed with the agent's cache.
+- **Executor, round 9, step 1: nested-loop rescan and wider batch kernels** (round 25, agent
+  160; BENCH.md "Executor, round 9"):
+  - **Nested loops rescan their inner side** (`exec/nodes.rs` `NestLoopNode::streams` /
+    `open_inner`, `exec/scan.rs` `ScanNode::rescan_index`, `exec/mod.rs` `Node::rescan`):
+    - A parameterized inner side without a memo stays open across outer rows. For each outer
+      row it is rescanned under the row's parameters (`ExecCtx::with_outer`, pushed around the
+      rescan and every `next`), and its rows are read as the join asks: not collected first.
+    - So a semi or anti join stops at its first match, LIMIT stops the inner scan, and an
+      inner error comes after the joined rows before it. Notices show how far it read
+      (golden `a160_nestloop_rescan`, recorded from PostgreSQL).
+    - The inner plan streams only when it is a btree or hash `Access::Index` scan read by its
+      ranges (`scan::rescans`). Any other inner plan, Memoize, fixed sides, EXPLAIN ANALYZE, or
+      a context outside a running statement collect as before.
+    - `Node::rescan(&mut self, ctx) -> Result<bool>` defaults to false: the caller opens
+      the plan again. The parameters come from the `with_outer` frames, not an argument.
+    - `rescan_index` rebinds `ranges` and redoes what depends on them through `bind_scan`
+      (shared with `open_scan_as`): LP_DEAD marks (`Kills`, the old one dropped first so it
+      marks what it passed), the skip scan, the pg_stat index scan count and SSI locks.
+    - It resets `cur_range`, `iter`, `rb` (to `RB_MIN`), `held`, `one`, `run_blocks`,
+      `emitted`, `run`, `pending`, `fetched`, `batch` (to `FETCH_BATCH_MIN`), `last_block`
+      and `toast`.
+    - It keeps the plan, `need`, `kfilter` (agent 149's compiled filter: kernels can't read
+      outer values, so none is bound to a row), the masks, `ios_cols` and `one_run`.
+    - Agent 149 drops the `iter = None` / `toast = None` resets when `open_range` can
+      reseek a kept cursor (its point-lookup batch).
+  - **pg_stat**:
+    - A btree scan whose ranges come out empty (a NULL key, conditions that can't hold) isn't
+      counted as an index scan, as _bt_first returns before counting when `qual_ok` is false.
+      Hash scans count first (_hash_first), as before. Golden: idx_scan 41 for 42 outer rows,
+      one with a NULL key.
+    - The workers' semi and anti lookups (`exec/lookup.rs`) stop fetching at the first match,
+      as the serial rescan does, so `idx_tup_read` / `idx_tup_fetch` agree between the two
+      (`parallel_lookups_match_serial`).
+  - **Batch kernels** (`exec/vector.rs`, `exec/kernel.rs`, `sql/func/string.rs`):
+    - A string cast that leaves the bytes as they are compiles away: bpchar(n) to bpchar,
+      varchar(n) to varchar or text, text to text. The binder writes `l_shipmode::bpchar`
+      for a char(10) compared with bpchar constants. That cast stopped the row kernel's stored
+      comparisons and every batch filter over such a column: q12's lineitem filter and q19's
+      ran row by row. bpchar to text trims, so it stays a cast.
+    - `col = ANY (array)` and `col <> ALL (array)` of strings (`VB::StrIn`) and of exact
+      numbers (`VB::NumIn`). An empty array is left to the row path: ANY of `'{}'` is false
+      even for a NULL.
+    - `text [NOT] LIKE 'pattern'` is a kernel (`K::Like`, `string::LikePattern` compiled once)
+      under no collation or a deterministic one, and a batch kernel over text columns
+      (`VB::Like`). Before, a LIKE left the scan's whole filter to the executor's thread.
+      An error (a pattern ending in its escape) goes to the row path at its row.
+    - Rows the batch filter passed (`parscan::PASSED`) aren't checked by the row kernel
+      again.
+  - Measured, dist builds in containers against PostgreSQL 18.6 (BENCH.md "Executor, round 9"):
+    - 200,000 inner index lookups: 0.68-0.69 s against 0.84-0.85 s before (-15% user
+      instructions). PostgreSQL takes 0.23-0.26 s, so the ratio goes from 3.4x to 2.8x.
+    - TPC-H SF1: -7.7% user instructions; wall 17.0-17.6 s against 18.9-19.6 s.
+      - Against PostgreSQL: wall 1.42x, CPU 1.44x, peak 1.03x.
+      - Per query: q10 1.31 -> 0.82 s, q12 1.63 -> 1.31 s, q21 1.45 -> 0.96 s, q22 0.86 -> 0.43 s.
+      - All 22 hashes equal PostgreSQL's.
+    - pgbench is unchanged and the footprint gate passes.
+  - Verified on 3df0c607:
+    - crate tests in debug and release, `CRASH_SEEDS=1-30`, deep_input and parallel_scan
+      (441 each; `stored_filters` now expects the varchar(n) / char(n) comparisons over
+      stored bytes);
+    - clippy, with no warning in the files changed;
+    - difftest smoke;
+    - isolation 138 / 139 specs and 1,805 / 1,806 permutations (`intra-grant-inplace`, as on
+      origin);
+    - full regress on a private reference: 51,148 / 51,150, 0 units changed;
+    - pg_dump_tap 14,817 / 14,817.
+  - Left: the rescan covers plain index scans only (Project, Result or Sort inner sides
+    reopen); 149's point lookup behind `next`; SQL functions' plans opened per call (agent
+    150's burst profile: 19% of `fn`).
 - **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
   longer overflows the stack of the thread that runs it, however deep the input nests. A
   host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the
@@ -6874,7 +6943,7 @@ a `Vec<Value>` per row and walks `Expr` per row.
   emitting joined rows from batches (only misses are dropped), Sort / Window inputs,
   out-of-line values (a table that ever stored one is read on the statement's thread).
 
-**Next: nested loops rescan their inner side (agreed with agent 149, measured, not built).**
+**Nested loops rescan their inner side (agreed with agent 149; built in round 9 by agent 160: "Executor, round 9, step 1" above, where it differs from this plan).**
 `NestLoopNode::right_rows` reopens the inner plan for every outer row: `collect_right` ->
 `exec::collect_need` -> `nodes::open_need`, a fresh node tree and `ScanNode` each time.
 - Measured: `SELECT sum(t.v) FROM generate_series(1, 200000) g JOIN nl_t t ON t.id = g`
