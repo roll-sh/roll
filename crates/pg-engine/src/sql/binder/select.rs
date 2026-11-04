@@ -4818,6 +4818,7 @@ impl Binder<'_, '_> {
                     reltarget: Default::default(),
                     fdw: None,
                     rtindex: crate::sql::plan::RtIndex(self.cur_rtindex),
+                    est: Default::default(),
                 };
                 let mut scan = scan;
                 if !colnames.is_empty() {
@@ -4933,6 +4934,7 @@ impl Binder<'_, '_> {
                             reltarget: Default::default(),
                             fdw: None,
                             rtindex: Default::default(),
+                            est: Default::default(),
                         }))
                     }
                     None if self.view_stack.contains(&v.oid) => {

@@ -4041,6 +4041,7 @@ fn to_bitmap(rel: &Rel, b: &BPath) -> BitmapQual {
 /// Record path `p` in the scan.
 fn apply(rel: &Rel, s: &mut ScanPlan, p: &Path) {
     s.params = crate::sql::plan::ScanParams(rel.params.clone());
+    s.est = crate::sql::plan::ScanEst(Some((p.startup, p.total)));
     match &p.kind {
         PathKind::Seq => {
             s.index = None;
@@ -6131,6 +6132,11 @@ impl Planner<'_, '_> {
         {
             s.access = Access::Seq;
             s.index = None;
+            // (cost_seqscan, as `paths` costs it.)
+            let total = rel.qual_startup
+                + self.g.seq_page_cost * rel.size.pages
+                + (seq_cpu_tuple_cost(&self.cat, &rel.table) + rel.qual_cost) * rel.size.tuples;
+            s.est = crate::sql::plan::ScanEst(Some((rel.qual_startup, total)));
             return false;
         }
         let path = self.choose(&rel, want, width);
@@ -6542,6 +6548,57 @@ pub fn plan_query(ctx: &ExecCtx, plan: &mut Plan) -> usize {
 pub fn plan_query_limited(ctx: &ExecCtx, plan: &mut Plan, lim: Option<(f64, f64)>) -> usize {
     let w = crate::sql::binder::plan_width(plan);
     plan_level(ctx, plan, &vec![true; w], lim)
+}
+
+/// The plan's total cost as EXPLAIN shows it, from the cost the planner kept with the path
+/// it chose (`ScanPlan::est`), where that is the plan's: a lone scan of a table, under
+/// projections of its columns, with no sub-select in its expressions, over which EXPLAIN
+/// places no Gather (it places them itself: none when the scan costs less than
+/// parallel_setup_cost, with add_path's fuzz, as `explain::total_and_gathers` bounds it).
+/// None otherwise: EXPLAIN's estimate (`explain::estimate`) is the cost. Prepared statements'
+/// custom plans are costed so every execution (`Session::plan_cost`).
+pub fn planned_total(plan: &Plan, ctx: &ExecCtx) -> Option<f64> {
+    let mut p = plan;
+    while let Plan::Project { input, exprs } = p {
+        if !exprs.iter().all(|e| matches!(e, Expr::Col(..))) {
+            return None;
+        }
+        p = input;
+    }
+    let Plan::Scan(s) = p else {
+        return None;
+    };
+    let (_, total) = s.est.0?;
+    if !matches!(s.access, Access::Seq | Access::Index { .. })
+        || s.table.is_foreign()
+        || s.sample.is_some()
+        || s.mark.is_some()
+        || s.current_of.is_some()
+        || s.limit.is_some()
+        || s.fdw.is_some()
+        || s.part.is_some()
+        || s.part_excl.is_some()
+        || !s.phv_quals.is_empty()
+    {
+        return None;
+    }
+    let mut sub = false;
+    let mut look = |e: &Expr| e.walk(&mut |x| sub |= matches!(x, Expr::Subquery(_)));
+    s.filter.iter().for_each(&mut look);
+    if let Access::Index { quals, .. } = &s.access {
+        quals.iter().for_each(|q| look(&q.expr));
+    }
+    if let Some((_, b)) = &s.index {
+        b.eq.iter().chain(&b.any).chain(b.lower.as_ref().map(|l| &l.0)).chain(b.upper.as_ref().map(|u| &u.0)).for_each(&mut look);
+    }
+    if sub {
+        return None;
+    }
+    let cfg = parallel::ParCfg::read(ctx);
+    if cfg.max_workers > 0 && (parallel::debug_parallel_query(ctx) || total * 1.02 >= cfg.setup_cost) {
+        return None;
+    }
+    Some(total)
 }
 
 /// A locked relation of the level on the nullable side of an outer join, as planning
