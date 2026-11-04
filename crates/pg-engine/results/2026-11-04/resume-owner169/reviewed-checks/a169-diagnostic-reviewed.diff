@@ -1,0 +1,51 @@
+diff --git a/crates/pg-engine/tests/storage_linked_gc.rs b/crates/pg-engine/tests/storage_linked_gc.rs
+index 1cf6d728..26d227ae 100644
+--- a/crates/pg-engine/tests/storage_linked_gc.rs
++++ b/crates/pg-engine/tests/storage_linked_gc.rs
+@@ -123,10 +123,11 @@ fn direct_l1_replay_barrier_preserves_tombstones_snapshots_and_wal_order() {
+     assert_eq!(m["l1"][0]["commit_ts"], linked, "exercise direct L1");
+     assert!(m["l1"][0]["max_ts"].as_u64().unwrap() > m["flushed_ts"].as_u64().unwrap());
+     let after = s.commit(vec![(b"b0004".to_vec(), Some(Bytes::from_static(b"after")))], |_| Ok(())).unwrap();
+-    let check = |s: &Store| {
++    let check = |s: &Store, stage: &str| {
++        eprintln!("direct L1 stage={stage}, manifest={}", manifest(dir.path()));
+         for ts in [before, linked, after] {
+             assert_eq!(s.get(b"a0000", ts).unwrap().as_deref(), Some(&b"before"[..]));
+-            assert_eq!(s.get_version(b"b0006", ts).unwrap(), (ts >= linked).then_some((linked, None)));
++            assert_eq!(s.get_version(b"b0006", ts).unwrap(), (ts >= linked).then_some((linked, None)), "stage={stage}, ts={ts}");
+             let want = if ts == before { None } else if ts == linked { Some((linked, None)) } else { Some((after, Some(Bytes::from_static(b"after")))) };
+             assert_eq!(s.get_version(b"b0004", ts).unwrap(), want);
+             assert_eq!(s.get(b"b0005", ts).unwrap().as_deref(), (ts >= linked).then_some(&[b'v'; 80][..]));
+@@ -135,12 +136,12 @@ fn direct_l1_replay_barrier_preserves_tombstones_snapshots_and_wal_order() {
+         assert_eq!(s.latest_version_ts(b"b0004").unwrap(), Some(after));
+         assert_eq!(s.get_versions(&[b"b0004", b"b0006"], linked).unwrap(), vec![Some((linked, None)), Some((linked, None))]);
+     };
+-    check(&s);
++    check(&s, "before crash");
+     drop(pin);
+     drop(s); // Crash reopen with WAL before elsewhere and WAL after inside the run.
+     let s = Store::open(dir.path(), opts()).unwrap();
+     let pin = s.pin(before);
+-    check(&s);
++    check(&s, "after crash");
+     let m = manifest(dir.path());
+     for meta in m["l0"].as_array().unwrap() {
+         assert!(!(meta["min_ts"].as_u64().unwrap() < linked && meta["max_ts"].as_u64().unwrap() > linked), "WAL straddles linked barrier: {meta}");
+@@ -148,7 +149,7 @@ fn direct_l1_replay_barrier_preserves_tombstones_snapshots_and_wal_order() {
+     s.commit(vec![(b"b".to_vec(), Some(Bytes::from_static(b"left"))), (b"bz".to_vec(), Some(Bytes::from_static(b"right")))], |_| Ok(())).unwrap();
+     s.flush_memtables().unwrap();
+     s.compact().unwrap();
+-    check(&s); // The pinned snapshot keeps deletion metadata and every live version.
++    check(&s, "after pinned compact"); // The pinned snapshot keeps deletion metadata and every live version.
+     drop(pin);
+     let now = s.commit(vec![(b"b".to_vec(), Some(Bytes::from_static(b"left2"))), (b"bz".to_vec(), Some(Bytes::from_static(b"right2")))], |_| Ok(())).unwrap();
+     s.flush_memtables().unwrap();
+@@ -187,7 +188,7 @@ fn fresh_transaction_sink_honors_store_compression_policy() {
+         assert!(!files.is_empty(), "the sink must actually link its fresh runs");
+         for meta in files {
+             let reader = SstReader::open(dir.path(), serde_json::from_value(meta.clone()).unwrap(), opts().cache).unwrap();
+-            assert_eq!(reader.first_block_compressed().unwrap(), compress);
++            assert_eq!(reader.first_block_compressed().unwrap(), compress, "compress={compress},meta={meta}");
+         }
+         assert_eq!(s.scan(b"zzzzzzzz", b"{", ts).count(), 2000);
+         drop(db);

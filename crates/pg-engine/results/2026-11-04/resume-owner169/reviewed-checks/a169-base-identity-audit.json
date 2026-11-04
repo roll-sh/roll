@@ -1,0 +1,2386 @@
+{
+  "utc": "2026-11-04T12:10:11.257050+00:00",
+  "git": {
+    "command": [
+      "git",
+      "-C",
+      "/home/meszmate/.cache/a169/base",
+      "rev-parse",
+      "HEAD"
+    ],
+    "exit": 0,
+    "stdout": "5c31223568fead896be10e66edd59e3d5a261002\n",
+    "stderr": ""
+  },
+  "status": {
+    "command": [
+      "git",
+      "-C",
+      "/home/meszmate/.cache/a169/base",
+      "status",
+      "--porcelain=v1"
+    ],
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "binary": {
+    "path": "/home/meszmate/.cache/a169/target-base/release/roll-engine",
+    "sha256": "0c9d96e93c8985266d16beec682524ac328836574bac6b6bf24fefe9680b519b",
+    "size": 85991120,
+    "mtime_utc": "2026-11-04T06:29:06.686849+00:00"
+  },
+  "build_log": {
+    "path": "/home/meszmate/.cache/a169/build-base.log",
+    "sha256": "a283ea2c41c97830b80a08d84cdfa105402ada38e294b41767eb15d529e52661"
+  },
+  "fingerprints": {
+    "/home/meszmate/.cache/a169/target-base/release/.fingerprint/pg-engine-e233181aff36f205/bin-roll-engine": {
+      "sha256": "fbf46b2b0dbc30c2dfb25801332b134ae9ba8c4eb8d8323c377dc2b9d41ec350",
+      "content": "79f3bee1490e0bcb"
+    },
+    "/home/meszmate/.cache/a169/target-base/release/.fingerprint/pg-engine-e233181aff36f205/bin-roll-engine.json": {
+      "sha256": "871661f86817aaf0fa455ca0504b4fecb7776c8627c726c95f39ba84d6cae0cf",
+      "content": "{\"rustc\":11835527281324007204,\"features\":\"[]\",\"declared_features\":\"[\\\"heapprof\\\", \\\"icu4x\\\"]\",\"target\":10052870327396377281,\"profile\":854319013279132213,\"path\":3571249885004418960,\"deps\":[[235075339826570825,\"crossbeam_skiplist\",false,12149836928854298034],[1957009224993739128,\"thiserror\",false,1399454400221934644],[3067591776805002636,\"hashbrown\",false,7705478145677816918],[3255947484945651179,\"chrono_tz\",false,1410751619447690561],[3421691859463223775,\"postgres_protocol\",false,17270056764728239247],[3576417723470263736,\"pg_query\",false,16434969055078516953],[4123717487350527044,\"pg_engine\",false,8516977756035132555],[4527761821434833334,\"pg_icu\",false,2637963099662225269],[5157631553186200874,\"num_traits\",false,3822369904148797408],[5203778569089034751,\"pg_snowball\",false,17904506540873658481],[5380358770761950913,\"tracing_subscriber\",false,2873879160940648009],[5532778797167691009,\"itoa\",false,5980037749618896451],[5858724833873664919,\"bigdecimal\",false,7847458851829473155],[6128861683254529859,\"tokio\",false,1909616727909957796],[6189282118926088809,\"zstd\",false,8889004533815674369],[6203923490111702455,\"crc32fast\",false,1961262666275088063],[6400797066282925533,\"ryu\",false,12232542503516327293],[6557439603276904804,\"serde\",false,14719518795976517555],[7051825882133757896,\"md5\",false,3092747233792121339],[7587927542190771932,\"sm3\",false,9225181488063550401],[7798214352590335065,\"des\",false,11200966479011460643],[8160210889872729633,\"serde_json\",false,1328324254409610227],[8699875171042161596,\"clap\",false,16975544901125719172],[8700459469608572718,\"blake2\",false,15663911651885539181],[8965365795984555791,\"uuid\",false,4501231997832345792],[9209347893430674936,\"hmac\",false,11553118851109235202],[9298649433536336071,\"prost\",false,5436841891884486688],[9857275760291862238,\"sha2\",false,1040244450808532421],[10364619138950789809,\"anyhow\",false,13472596534970118333],[11139724944462096257,\"sha3\",false,3422970097911802496],[11509331996780215580,\"num_bigint\",false,5693216893922275267],[11926622812581095017,\"bytes\",false,17853884949019345736],[12006118792573981896,\"mimalloc\",false,5133740998782840967],[12320328748302079349,\"sha1\",false,14956811542257514573],[12459942763388630573,\"parking_lot\",false,7164510755168583692],[13077212702700853852,\"base64\",false,6555951284088147703],[13993395002434631280,\"unicode_normalization\",false,985053881557962048],[14739046195986019181,\"smallvec\",false,9106323031222715097],[14757622794040968908,\"tracing\",false,16195364807282237214],[14904764184512644212,\"stacker\",false,15384902469082464426],[15457745972171993476,\"psm\",false,11864175875440614274],[15603583605579657406,\"ripemd\",false,818063313753952036],[16096353056231309054,\"flate2\",false,17670290988303066895],[16117757646811882223,\"chrono\",false,5216684014518825940],[17625407307438784893,\"aes\",false,14529278002532152593],[17725626451704002459,\"fallible_iterator\",false,16459365733751779191],[17989731678791879549,\"getrandom\",false,4030063670175200042],[18070707816531966863,\"libc\",false,5429391917474628226]],\"local\":[{\"CheckDepInfo\":{\"dep_info\":\"release/.fingerprint/pg-engine-e233181aff36f205/dep-bin-roll-engine\",\"checksum\":false}}],\"rustflags\":[],\"config\":9396254390672932401,\"compile_kind\":0}"
+    }
+  },
+  "source_manifest": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "4c2847b6bd57099a17b00e73dacb0b6067669081bca3c6840f763d10d024cfce"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "ad459ffb3f5a9bf37e71d3c16564ba5d9ef3624028a1b6957b63dd985a10070b"
+    },
+    {
+      "path": "crates/pg-engine/examples/pk_layout_bench.rs",
+      "sha256": "497f3f3d02a74018c3ad0e7d3e74cd3f09b97c75864d57344c6a2521f5677d76"
+    },
+    {
+      "path": "crates/pg-engine/examples/plp.rs",
+      "sha256": "14e0956713b9caa5edebbd70e2453979ecfe73dd6ae6d07538f818145d1827d2"
+    },
+    {
+      "path": "crates/pg-engine/examples/q.rs",
+      "sha256": "d899976fadddc9e0ce47ddbe5956aeb48aa5bcfef8e0090fb3c4a83f7efcbfea"
+    },
+    {
+      "path": "crates/pg-engine/examples/scan_bench.rs",
+      "sha256": "013b03eeafcf9474a426a914b61f08b169c2b7fa39ba2392f300ab6b9063798e"
+    },
+    {
+      "path": "crates/pg-engine/src/auth.rs",
+      "sha256": "cd8faf700b0d6cf54196e7da359a692890a9ac82349ccc69b63b31a9b254bdd5"
+    },
+    {
+      "path": "crates/pg-engine/src/autovacuum.rs",
+      "sha256": "34e03fb3a1f030c03d650c69e3d8cc445e7ad0472cd5278735d33311b5904ba2"
+    },
+    {
+      "path": "crates/pg-engine/src/bin/roll-engine/heapprof.rs",
+      "sha256": "e1682fc9ca0bbfb21300a68145b6da8a2dbfdc6bf60561a869b50482a5e444aa"
+    },
+    {
+      "path": "crates/pg-engine/src/bin/roll-engine.rs",
+      "sha256": "380cd12121a94037f28557121c30ba5629d32d67b7cff6ff6e4003451bd19249"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/acl.rs",
+      "sha256": "eb0e54e5d31d472cee88e5a46e8e1e08e26aa7c434d67ed520d19d5079becd64"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/btsim/leaf.rs",
+      "sha256": "f9f2f8ea59b5302ee77ee0814cd1c4e338e3f4afb5533eff1ea329fdf9b5973f"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/btsim.rs",
+      "sha256": "7a9cedbe09c8887b5d20df315c8da188b0480232db6afeb224296e2545b047d3"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/comments.rs",
+      "sha256": "628303fe7b1b1e083672010dd7c26f385fb192cb27dc12a6591699bc4c61f3f0"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/depend.rs",
+      "sha256": "89deed1d63fb31a653924070cb71fce42825dc32ac9c5b324c64e10c0a0d829c"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/ginsim.rs",
+      "sha256": "cd127cd5c41df6c4711fbedd2cb6ecad46ed7b8a798b7f38da05b18f2557ed69"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/gistsim.rs",
+      "sha256": "0a70efa922eea71f4a14d7a269baa127da449849f08ea52d046e1af2b5cebf00"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/hashidx.rs",
+      "sha256": "c211ccafe03d93f3b37a393d8e5b27a4a7d8bebbe0949057a6625865ceae0a85"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/heapsim/lps.rs",
+      "sha256": "3f25b9408998ac68e5b216e1ee10a333421a218fd621824815e345c830364e7a"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/heapsim.rs",
+      "sha256": "1d8276dd97a64116644f1e859c1b31e3a0fe1da86660ff9dc725f34d357c28f1"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/identify.rs",
+      "sha256": "00f04f44c1a82631b749ed6ede79154db75b029042996c898ca5396c57476a8e"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/jsonbin.rs",
+      "sha256": "3e11ad30df12daf50fa3ece88f80910f2e38623d4bad3e65341d54f8d9c3ae94"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/keymap.rs",
+      "sha256": "0f387cf38a1b074047c3be49f2b9a7b84c8a11b67197d7d72a71261f7118868c"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/lz4.rs",
+      "sha256": "b8e5877206a3730d6faddc5828c8b1a2fa0868d33d76eb88e999e39c2de1faad"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/mod.rs",
+      "sha256": "b0f5a55abc0fd2ea65134f8639e93746b73c20ac3eb8d74a16e2a828f40fa1ac"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/names.rs",
+      "sha256": "275e1752d1b84ad87284cb8dc4087e87b6adb557cd34d81c8779c1aea037a9a7"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/partition.rs",
+      "sha256": "a95fed6b40d4519acd44f71fc9473091922c49100a3564786b5462950e4bc6e8"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/persist.rs",
+      "sha256": "04364d8fa1d6fae3398570552db23b00482333fb5d0b8776f2c4cf9a7e7bccad"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/pglz.rs",
+      "sha256": "cbf29e1c2663bb6cf04d3b8e4cca10501b2f0ae4db60fe39a27b247b9c16422e"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/pmap.rs",
+      "sha256": "58c6bd22f5a410c8fc319ff2123d00fff8efb1fddb6ee1dcf469d64d58ce3390"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/pubsub.rs",
+      "sha256": "e4700f916f07a8cb0641a7208bcccd52ea3b32bdb9c3b56d33952513160e4406"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/relindex.rs",
+      "sha256": "0067fa85dacc030bd80f4c089ae50e03a71cc159d3e7fa8703670c0bbec0e9b8"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/relsize.rs",
+      "sha256": "a745b11110e9cd2b109809204c4b811f99d54ee71dbd17fbbce698cdc98e747b"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/shared.rs",
+      "sha256": "1adfbdcaf499562f4bca70a65834b5592726e3b9df8e2eae609bf183ed996134"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/shdepend.rs",
+      "sha256": "f005586e3a47ff8b953489ef2403a524dfc4c0583c0d952508c839f5709ddbea"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/stat_views.rs",
+      "sha256": "21db7481e6c0fe36cf8916d6716a4510808d3bde1474019e2fd3ef1b050e887a"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/static_rows.rs",
+      "sha256": "fa0cf8072bae1d2b92d897e17036ab4ac5d6dbd18c99893a4f32f92dc52fcde8"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/stored_ix.rs",
+      "sha256": "1da4392912b346dddc90121731b819b08d84508e7ccec7f9e06bb192895666c8"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/sys_rels.rs",
+      "sha256": "fdf2de09a34fd86ac55b542dbf886704b7fbea118206c06c5e23c9ceb419bd9b"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/sys_sizes.rs",
+      "sha256": "119567db873d4a3291d1ae807c2fdf6b9c513cc527491ce38cd8a92f2c99fbb4"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/sysdelta.rs",
+      "sha256": "4f8c2f4fc4422ef2f7c1f4a9d81ad0991629bcbd961cb17c57bdaa6677ad93c4"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/sysrows.rs",
+      "sha256": "a9dc1f1902b44273d1877e828a5a6e9abe875ae1c92274ff89eaf8a89c707c95"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/system.rs",
+      "sha256": "4462f191763e8d9928c8f408a4938170eedcfa8fc03d4f4b0bb17e2bc8cc8ad3"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/tsearch.rs",
+      "sha256": "a4ffa8e5fb95bf286587aa8b24ae5800a12f61ee2e9a0258bb7d6afad18c8c01"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/type_procs.rs",
+      "sha256": "bc3d5c9cb022c89b13ee27a5fb739b25ee64dd068f97ca7b5e3fd7057bc9539d"
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/userobj.rs",
+      "sha256": "04b198a855fab9baf1f53db52ef464b3cb23b2d381b57e597a1979985b857ce5"
+    },
+    {
+      "path": "crates/pg-engine/src/engine.rs",
+      "sha256": "b1b0e4963ca2f52bc4b9e5c30f12640c0dde5ae734b17bdff9252b52780334df"
+    },
+    {
+      "path": "crates/pg-engine/src/error.rs",
+      "sha256": "0dc33b922116a06ba041dee8fcf840e16409d72be6504c760ece91cc79dc536b"
+    },
+    {
+      "path": "crates/pg-engine/src/error_location.rs",
+      "sha256": "6d835e850e6ac6343fe1527844046b43b1b3ab92f1eb67ce9af91f0c066892cd"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/agg.rs",
+      "sha256": "515101e5f0a02b59b125cc80b95e1fb43a67717d533db36bba78a5c0946cc39c"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/dml.rs",
+      "sha256": "cae6818ceb231bb42e59e2c3d9b297dbc15a13dc7b8fff4bb448efc084928f60"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/extsort.rs",
+      "sha256": "7f5001e2276d46b24a3fa69d3d908697ba2d4723526f07c5014958b7140e89e4"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/fasthash.rs",
+      "sha256": "eb0361de1a9e4c0c41e8d107c662259f924f49941261b60edb416edf798b3e1f"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/fastsort.rs",
+      "sha256": "e6ff27bc183e2769621200e73423aa90c357801e6a5a86b322ea3a0eafb17e49"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/hashjoin.rs",
+      "sha256": "020880967c694cc1e938307248d3c19683cf8ae34a281976e5c6900daf071353"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/hashspill.rs",
+      "sha256": "46418a5b0aa822a9ab0771c8b964b6549a8c8417813c35325af0bbf2c81ec71f"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/heaporder.rs",
+      "sha256": "f9c0e9e9d9474ed277dcdfac56d22db89eb05a93cada08f9a697ba971aa8f6c8"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/kernel.rs",
+      "sha256": "fbbe82565f38981dca9aabb424e6c2df8e5b087a975055f23dd726c94d9d80fe"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/lookup.rs",
+      "sha256": "5ba3fbbccd38eac481145e02ed97861241911c6bfa44058a5f6bcb4c2f2d86a2"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/merge.rs",
+      "sha256": "24cf0d52efcd2665477e99d84f7fd2b8cc0f995fdefdeb51ec81bd4d63c43085"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/mod.rs",
+      "sha256": "4c2f1f410922aa01cb59bfcffb76475e2d02a8c39cc2f6087d9f662fe0a09ba8"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/nearest.rs",
+      "sha256": "ac0e3587a782ca486129c75f90349ad052b1e81e9b9a126c372448b574c0c252"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/need.rs",
+      "sha256": "1fa7660e549a777eed459d7ca8dae41fb5808042994935fbec0f0d514f106b5e"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/nodes.rs",
+      "sha256": "8ea9821c74629a64811c7fc661b7275ab0478c075913acf41118e262b6edd262"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/parallel_part.rs",
+      "sha256": "d7271108309a998f0a219ad12656c6170867c734cd8f93bdb6d36fc42e55a421"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/parscan.rs",
+      "sha256": "bd79b968f0fbb6dec685d957db4ad9fce8c151cbd8a8b15eb33792ef3569735e"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/partial.rs",
+      "sha256": "45743495d7c5af37030fc9d1c92fae953e823c3beaa3d4341e38da7d9839b782"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/pghash.rs",
+      "sha256": "c1b3fc432f24187d5c3ad558b141c57e22a8e87b92ee7342a9cff1f2a2b88305"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/pgsort.rs",
+      "sha256": "2caab79d7b673d7f6e471e6212638ce223ac9b682de1749169afb4914903a354"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/pgstat.rs",
+      "sha256": "58cddf5de37da0dc26dff13b1de6b6128d8627c094bbadaca7d2a63f71de6e8d"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/pipe.rs",
+      "sha256": "4e8665ecc01de80b62be1e2918e731488e4a10e64211aa1dbe078f83b1ea71f3"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/planref.rs",
+      "sha256": "6f7da26bd5345bb7c022cfd5a4c96dc246f02d2596625b0fc60d3c028b4ac441"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/replication.rs",
+      "sha256": "cf508352ac1ea44a274e579641f3a0b056501e3cfecbed954cd0c6cbe9a2e4b2"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/scan.rs",
+      "sha256": "371be6578542ed80783c88e7f1186d6a21b58d5f82f3a9f28a18ee6747f60f92"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/search/gin.rs",
+      "sha256": "1ea9084457f5f7fc3db0106823f7b4d2ccb9a79d139c2c3fef1ed8264800ecd5"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/search/near.rs",
+      "sha256": "c751b2a6c061ae9dd40f6a7bbf69cdc840116d3dd2d25728bc4b0f0d3d8c98ac"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/search.rs",
+      "sha256": "d5658d795abee45c69b2cc69f144ae754baeeae725e3ad3804fc9de515154852"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/sizing/gistlog.rs",
+      "sha256": "6f4ab5c93aed236520fb7cf7ff2dee3c72efec34ebc7231a065853ec964a2b40"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/sizing/kept.rs",
+      "sha256": "9ba6bf0b808b0d154645b422e4b9ebff9d83900f0c99de2e1b0ee678c02df048"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/sizing.rs",
+      "sha256": "88288d4bfacb07cd13b09b072f3c41e98da4b095024d468eb1416cecf14fc13c"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/skipcount.rs",
+      "sha256": "05675bbcc274dd2dd709ea0d5f3defcf375177d2eb628d25dad0a8c0b9c7e161"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/spill.rs",
+      "sha256": "3b27bda40499c0b8b01f24b0d17a407118c9e102654274d2b91818adc8675a3d"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/toast.rs",
+      "sha256": "209f8c7f8923a006c6461c65702ea78500d931efbbf9f6bb410b332b22ae03eb"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/trigger.rs",
+      "sha256": "d7f5872c9330cab27c9c6e063397191b25fa847df55dab0beabc12c0674466a2"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/tuplestore.rs",
+      "sha256": "32d85ab27da24152b88b3a3198935e9fd4ebeb2be06a545e35e34f7527d1e2a8"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/vector.rs",
+      "sha256": "6ffe4bb74e46137c478f446ebc56818bd5ad829b8b31ac51f895e64d866d1ffa"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/window.rs",
+      "sha256": "b68b94547652102a034581b4f5632d0deedf09b6ae7aa49ab00ae7dd22153406"
+    },
+    {
+      "path": "crates/pg-engine/src/exec/workmem.rs",
+      "sha256": "1a0293990ea2bc6c24400c876abb37746fc95f27d50412116c429e52928945e5"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/amcheck.rs",
+      "sha256": "f04bf68b0114f87fb375ca17b63d1ad213e24ddb44ba5b668f9eb54fe98fae2b"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/auto_explain.rs",
+      "sha256": "6d7ced617cdfb898cf8be88dd077e71e41521fe6f2fce314dc6f850ed5e6e73c"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/binary.rs",
+      "sha256": "ff7b5728fda2cf78d2d5c9b03cded2bb4eef78eda288f180837e0f51049c42cb"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/bloom.rs",
+      "sha256": "ddb3139ec12baf585eeb52382fa5d30bcc86d244b3c47174351a83eb61d5b5c2"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/btree.rs",
+      "sha256": "29f67efdb39774a6308b66b2a7ae275feb1f166094f088e9950c37c22dfac64a"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/citext.rs",
+      "sha256": "32482dd3aed2878291469591d673a9b03099bceef87c21ef0737dc7b757e2ebc"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/cube/funcs.rs",
+      "sha256": "a88ce26daaaf933b992f810ddca9d778d91a16cd4ab175a21a2e509360937044"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/cube/mod.rs",
+      "sha256": "b0f178ba6588357fc77aa5b6d406a733625a1b97dd06914f6f473967b7a7135b"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/cube/parse.rs",
+      "sha256": "34e92a49a7ba1d7d993298e62e1fd705c8a0c18adcbf5db80092de45c2e002db"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/dblink.rs",
+      "sha256": "428a8981957876ba0e34b52b4f663efdcd7c58438118feeeb514f1275a6a5253"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/dicts.rs",
+      "sha256": "a85644266b5c0d3dee2ce8ef7f1a49e36f49443e96b9995378888f9dd0b6cf82"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/fdw.rs",
+      "sha256": "29d9a9fdd165883fd2075b075771f08faf793c2a5198922a73e5491c11f3ef14"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/file_fdw.rs",
+      "sha256": "57412e77b3d0ceea6c6db0d7f8c8d8cc4b07670d4dc5fc862995cd12fa798f9a"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/files.rs",
+      "sha256": "2fd44fe04de28a39347737d18e905cca9ebb4c47f626d3ee974208b088cad466"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/fuzzystrmatch/daitch_mokotoff.rs",
+      "sha256": "4e287fbd8427afeff95b5a17b77d40bb8b07cd124e20d235d7d5e4ac146c556c"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/fuzzystrmatch/dmetaphone.rs",
+      "sha256": "aa2a9acf0e589e1382931956c006a36543feecd7f859db42ed73915af65add62"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/fuzzystrmatch/metaphone.rs",
+      "sha256": "a4752a35cfff79a19588162c685818180823265088ee87b89e04251d9dc8ec0b"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/fuzzystrmatch/mod.rs",
+      "sha256": "184a0f0932de478098b3e218e2a28dc89e4b659dd09efbd17f43507d6ff67845"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/hstore/build.rs",
+      "sha256": "2e57e9b164bc7e3cc7d1cd7edb9a8cca8bd6bd83991cbecb65f1fcef5d9bdb37"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/hstore/convert.rs",
+      "sha256": "43784c8efebb029dc94f798807db96aeada8e3fc115812c85b961c9865bb3c45"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/hstore/index.rs",
+      "sha256": "3ded93388da25ff6c7a810fc83278db3b0b5ed9b16714f8e482ce81878108068"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/hstore/io.rs",
+      "sha256": "ce5b8b1836e27f8e731825eede9f14991acb8d0facbe18450c1dbf7010d10923"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/hstore/mod.rs",
+      "sha256": "647a428a910bb2c756ebdbc283a41626ae21943a861c9ad4ca3a271084e0e8ba"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/hstore/ops.rs",
+      "sha256": "2662953330ac4bd2a25b4808c89e632adc1e9f2d48b160c96870a007726743ef"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/hstore/tests.rs",
+      "sha256": "0aa22bbc2f7ce3d419865e1aa4fa2f55f27b7a5a083e96825aeb76232f0e6993"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/index_am.rs",
+      "sha256": "a44054c93a35dac67da13c7e528de8bbe81eec43b852ebdb2180be2c2251e8f7"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/intarray/mod.rs",
+      "sha256": "b5ea5a89a81dadcf88f7a47a36b1a2ea4640f43777dd1a9bc6e8321d55ab54ed"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/intarray/query.rs",
+      "sha256": "786b9c5f530a6c688ce3bfd530bba3bb25c2f0d26447d1e92139bb574e0590bc"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/isn/mod.rs",
+      "sha256": "1b64c8f202fe1fc56f9106ca17c616a364bcef325306fdfd83a92c59431e1e80"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/isn/tables.rs",
+      "sha256": "9a1967a72befbaf4125236510c0ace6924469184097e60312a3ec15e47dc1e82"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/lo.rs",
+      "sha256": "1754386a0ae24335838ae466e878acdd2195312b2b0ddfb6416e0783c8e62389"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/ltree/data.rs",
+      "sha256": "16e6a13f5a830c05ea64b2ec247965415628000a74cbb6352cb455ee8a5e2d3a"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/ltree/lquery.rs",
+      "sha256": "6320296097a1f8abc5687ae316951161d647c074dfd0707479ac538d7840c681"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/ltree/mod.rs",
+      "sha256": "8fb200dd66cf524a3629ba169c9d48d3ffeaa22cc7c3d8b115bcc90d505a3ac8"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/ltree/ops.rs",
+      "sha256": "bf892556c6682100e598d1948185fb30f99b197879b71b576ef4137815f8cb64"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/ltree/txt.rs",
+      "sha256": "766b687c6ff0bd3f2ae0aa5c38e7252242ca4140efaf6e7acd950690224ce63a"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/mod.rs",
+      "sha256": "8d2d85ec89ae7b87d150088f8e22ce3d5d3b58c235cfdcc5535bf00509a98721"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/native.rs",
+      "sha256": "2b7d07df6fda86a9952e5d82a6201db41584934cdb0be28a112b40780463bf60"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pg_buffercache.rs",
+      "sha256": "f087e89087ee32605f325d04e376fcd134eff8394ef8891889100ed12d4e3175"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pg_freespacemap.rs",
+      "sha256": "cef2861dffc184e11c7d0959a086070147a7158692e713dfb70bd00598409203"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pg_prewarm.rs",
+      "sha256": "05495bd8e24b234fce03d7e91d460c4d2f51d27a506dd36e11212895468a57fb"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pg_stat_statements/jumble.rs",
+      "sha256": "db0646584a3f84635feb146879cb77c37ced0eef1474aa1c471e41378a7e4dd5"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pg_stat_statements/mod.rs",
+      "sha256": "ed7eb49c9eb0f7a76daa602e3d96ace8274daae307c3bed35eb6555ce84b20db"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pg_stat_statements/normalize.rs",
+      "sha256": "900fc499650c29d6971849720f9a05f5926e21d4e985db724fb1fdbabb213319"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pg_stat_statements/store.rs",
+      "sha256": "a5c7c9894b32ee4188bccfe25748a3253e68bc4fd99c878462f286f4923001f6"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pg_trgm/mod.rs",
+      "sha256": "bddfbde0e98a685968c1dec3e6d63156c6b67fe6734f215d681e40f4ad5c1ee3"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pg_trgm/trgm.rs",
+      "sha256": "96fea1403ce1c94224b683cea4eab7433a956ab228b1810bd98c5c8880a5c2d4"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pg_trgm/word.rs",
+      "sha256": "edb273c2d5c789667893faacc707e6455505f6d138337594d918b287c38920e8"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pg_visibility.rs",
+      "sha256": "e84531c494caf182f1a926bb0a18fa8af4ef67d0f898269f947d7639ba4daee2"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/bf_tables.rs",
+      "sha256": "6c9d1e97528da0d7f04badeac3ae484e477a92936b8c8fdec2e557ddc279a03b"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/cipher.rs",
+      "sha256": "3c0a41d960011b9c40121316f527a6a19fa41b8c702efba99ead92aae9f548ab"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/crypt.rs",
+      "sha256": "20b8ceb85f238993c8f7c5071f7df49c6db2c692bd14f271cd5a7aefc937a0bc"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/crypt_bf.rs",
+      "sha256": "e24d56f365c69903cff982bf633d571388993e3f13e45b7e58d1d62ea24298b6"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/crypt_des.rs",
+      "sha256": "3ddcb723c7c5a2706545698cc642170a2997da3f81641f29e73f45563b7546f9"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/digest.rs",
+      "sha256": "a4a29e1c87133dd1afd2f238cc86dc9d448a51a5c498cab6337462f6cde195ed"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/mod.rs",
+      "sha256": "3de048674176f2d255175a87cb7b1875894fbed9f32d2bf800d191034faef3df"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/pgp/armor.rs",
+      "sha256": "982e7e61d1dd24a1910c40d87a6d40b052e9136bb7947c4b65a2ed5e9f148a83"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/pgp/cfb.rs",
+      "sha256": "565877635c443e61d3e9f30a63e9a4e9340006ad850cb726519cad061adce988"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/pgp/compress.rs",
+      "sha256": "c82845e13399ef028ce7ef5c1774b8be880eed5f44e774731e2f1fa7ab1b4926"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/pgp/decrypt.rs",
+      "sha256": "702e0e6a85f95b5e80e04d0c538fe66538f740b7906cbdafb3c12c84d6f41003"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/pgp/encrypt.rs",
+      "sha256": "59b7b0c20c38812c66231d6671bcd646e19588477a5bbcecc76d80947089c015"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/pgp/filters.rs",
+      "sha256": "5a464cf68f7a7de7ef70e9f469ebcc96314d1c31e709b0fbc0aaadf6268bc4f2"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/pgp/info.rs",
+      "sha256": "f253a04d64fde3c251075a58ee43c8471482bfc39c6f39474fada7471f7fd2ea"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/pgp/mbuf.rs",
+      "sha256": "c7043bbb19c684a19fd6a62feebc3b19497e641e6d8eaf0e2ef925d15e6c977d"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/pgp/mod.rs",
+      "sha256": "6763c0b06314cc61de1e9412c250d8d49b988124db12325abf48a2cd62b9fc83"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/pgp/mpi.rs",
+      "sha256": "bbfc102be33f3881df58f0f70fb21757a901043cea02d9da599e97f3fc23a4bc"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/pgp/options.rs",
+      "sha256": "12bbc9bbb0065458358d66de749375f6162d765081c14ac82dfbdb0ac1eceb62"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/pgp/packet.rs",
+      "sha256": "01af698126d3dd72ba891ad8a4e49e72d52b9e4591c356e943e5f0ac45fa01cf"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/pgp/pubenc.rs",
+      "sha256": "432d0f1fcc7a3cbdc9c838f3a00f67324ba92eb65a39ec3dc7c1b1f8a9b71dca"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/pgp/pubkey.rs",
+      "sha256": "5d78a6e58d8e99df9fe7380bdb14208f3365d384a11dced6222cd851cba86f08"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/pgp/s2k.rs",
+      "sha256": "cdf7e8fb52262e3acfc38134d0b1fb849fb0380cd08fb27971085dcd18552be3"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/pgp/sql.rs",
+      "sha256": "f0935ae5c89e713eac789fffd1ba6bd89b448dee53f717dd4ce4876cb4a24a23"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/pgp/tests.rs",
+      "sha256": "caff7e61a51c3ce5ee40739aaf78c3b65ef202827f909453f71ce30560bcbebb"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgcrypto/px.rs",
+      "sha256": "788bb44c0181597756a711a59dc5d2e5350e97824671aa427536f7616a8fbe62"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgrowlocks.rs",
+      "sha256": "79cf1ae984bfeaa1474feb4852e9133e02617937a01c571fa10b93c231c12c1a"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/pgstattuple.rs",
+      "sha256": "c5ffb14c651eec74205e901e5f27dcce8f209eb61f6c22e5e410031648dd3bd5"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/postgres_fdw/connection.rs",
+      "sha256": "6a38bb105c2e08e5994f95f2cf74d3a0d04a2837534bc2bcc1014d312ee153d9"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/postgres_fdw/deparse.rs",
+      "sha256": "fd303d535b645cdbcf23347676b17f61e190e43c2f7deb3b1112c2c51ec1f6e3"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/postgres_fdw/direct.rs",
+      "sha256": "0898f6a21eddfb7016928384596ac6642af3a514f04204dd897c91d0785531dc"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/postgres_fdw/import.rs",
+      "sha256": "b3d25ab81b6b1e65f648313a13b8ec050392d229c2733bc0615adc48736b844d"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/postgres_fdw/join.rs",
+      "sha256": "74e09c80a22cbc3ad09d4ae7736c9c8d45a9d6af63ed9b285d462c18ece75dd8"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/postgres_fdw/joinscan.rs",
+      "sha256": "f7bb34bf67e6ecebc29c91a07e8996d025ec20680a19a1ee1878ce4d1f4fce67"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/postgres_fdw/joinsql.rs",
+      "sha256": "7abdaf721660277d890361099db83c373c544312d85df6643616b47bd4b7422c"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/postgres_fdw/mod.rs",
+      "sha256": "f79945c2af4091139401b49e246543909a592e4f9671238bb182123812a0468e"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/postgres_fdw/modify.rs",
+      "sha256": "2cbbe55bf6c8e125fbdde34f87dc93cfc0a8985ed2cd0673cbc92e6d1ef67f4d"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/postgres_fdw/option.rs",
+      "sha256": "5b5fed9413117dc20962b4e4359608755f75ca25f5fd9d8cb1d9664c51996b30"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/postgres_fdw/pushdown.rs",
+      "sha256": "4c14f928f1863d13e64e6e31582bbe20dbfa05cc6bfd7b420d798c3a9d223040"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/postgres_fdw/scan.rs",
+      "sha256": "2b91d261290f9e7cc962cc4611271d7e5f32494715a0156e5e533fe65f303468"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/postgres_fdw/upper.rs",
+      "sha256": "34b710e69e13cc1ab953d389256e3853af6510033df42ee5bf521ac93cd8e384"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/postgres_fdw/upperpath.rs",
+      "sha256": "8411c1aadaeefea38e2494407b7b846636619470d15ef0e6aeb6c28c7b3dbe82"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/relinfo.rs",
+      "sha256": "56884981b5a72767c739be70370b16337f9cb2a1d1455e313ede30ad3fb50706"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/seg/funcs.rs",
+      "sha256": "50f5a98d8743b6200d083a7ee0ed81572827fba380c78b88be3d9cfb59127274"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/seg/mod.rs",
+      "sha256": "7406fedaf873778019cbbaa6e9f82fdca246662c13e24142b42404390d523c15"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/seg/parse.rs",
+      "sha256": "d4a9ff56d5a556973d78646a2ba61d09334552729abfc42e06fea1f0ad72af6a"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/seg/restore.rs",
+      "sha256": "8a0fd4c7f56b23da9f16f8b834e622e4213f4ec429dff4d8cef09b19c86c6fd6"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/spi.rs",
+      "sha256": "add4171ca4fabee2480b0296ec2ed6d601cadca2cf0cfc04431d4bc441b8e505"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/sslinfo.rs",
+      "sha256": "fd9453b2bf757d34df2e32fc864f76a92e30baeb2c6bca334c44546059ce118b"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/tablefunc.rs",
+      "sha256": "b44beed4013de4a02f781272c7357337eb86942f15095170f98199176dc05c3a"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/tcn.rs",
+      "sha256": "7e257c282da111418c84768766ab6da1c959096231c8d01a0ba7def64e70c8a3"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/tsm.rs",
+      "sha256": "ac5f2c9f55361ca9c97dca1200a43b3a0c3a98ef39299e2e0cd4f119c81a88e9"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/types.rs",
+      "sha256": "41c6f994d765bdf04797a6170fab000cf89a6ac002cd003c937def56fa4e5fe1"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/unaccent.rs",
+      "sha256": "b6f800593ef7f525045f115a6ae243d5f149843702ad3913422ba3b9b92b7697"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/uuid_ossp.rs",
+      "sha256": "1f8b944dde81c64f7857327ba6ffdf793ad84f16d32b9e27c97be0fbbbc48e8a"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/bitvec.rs",
+      "sha256": "ae9614e16be5939db7ee5279580d0a4398576dd7d31b5b11fdccfee680d48c89"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/common.rs",
+      "sha256": "d17b22292652d522b9b8bc63aa9fa8cd47219073676856b22a8eed1cc12be842"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/dist.rs",
+      "sha256": "1a4bd97d8748aada7fd3f306ee11d578d5ef7c9f851f988e206928c4c8665dc4"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/halfvec.rs",
+      "sha256": "f59febe092ace0459faf55b03a147b60e046968afc9372b192ee33a7eef7e098"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/hnsw/build.rs",
+      "sha256": "9ffa7346ebf4cabb554f78b49c1a5313f2f8f9d4d83a62c287473e82b5b2396e"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/hnsw/graph.rs",
+      "sha256": "e50d8a0e498ec62131419e4869d9cc7038e42bc8de033ca6bbc34076493f9c37"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/hnsw/insert.rs",
+      "sha256": "d2f3a8b0692e587b2968e1e2c3eb685d26fa94fc7859c852ea6310e5ba0629b8"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/hnsw/mem.rs",
+      "sha256": "d76dc441194f7e29753cc3dbbe60d49349c95538f8d99d457f9c68d69be402e1"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/hnsw/mod.rs",
+      "sha256": "5998ab6a7537c1461592f4c143d532729a88d6d5e98e8598326931657687fb86"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/hnsw/pheap.rs",
+      "sha256": "056998fe38fc610d8431a82bbb3c22938433c798eab1fcae6ab7b41fbc7a32cd"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/hnsw/scan.rs",
+      "sha256": "c21d2bb5eb99f94449e910a3065411e2cbc68548c2fae5f5e05da1910db0c701"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/hnsw/search.rs",
+      "sha256": "2f41a0c5123197126b97feb4e6c5182e38fc35bc479f2fe662f6e27f83395702"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/hnsw/types.rs",
+      "sha256": "7a8e41b970ae92559560ac3eeb7b65f0c90d457fcb429a0380d4e095477a1303"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/hnsw/vacuum.rs",
+      "sha256": "f63736599f3acc5be44dc54d45144e1a8b36556a1cc870bb03bea39e1de32d81"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/ivfflat/build.rs",
+      "sha256": "b359d52277f5a6cb5c637b406baba40e6d5ba932a7281f853e56469f4a22862f"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/ivfflat/kmeans.rs",
+      "sha256": "6a47f26b183c559ea1488648493fd24886f445573fdb1b129b45773df5db4c52"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/ivfflat/mod.rs",
+      "sha256": "e3b5fa04934829f153a84444f8db6864b35d7fa0244a5e252b3ef06e0afab16e"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/ivfflat/modify.rs",
+      "sha256": "2ca2d9142027bde726ddbb2610ca93b63189f955ef376e4a639cd6880ad0936f"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/ivfflat/page.rs",
+      "sha256": "e6b9d6743ea74aadb6bcb1607dd91ea10f5012cb09f32a9ddf737a624ed935d3"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/ivfflat/pairingheap.rs",
+      "sha256": "cca3bb1fe72582520f611e7f2aebbcfb279d5244f1e44fb6e9fde30af2fe2cd9"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/ivfflat/sampling.rs",
+      "sha256": "31bdded229531e4306fcd74739178c95d05c2eb08bdd4893b1de645ba1e5fb50"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/ivfflat/scan.rs",
+      "sha256": "492c2512774d7a02f8e323a6b397583904c3c7e2bf4ba3788b122cb092ce3b00"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/ivfflat/tuplesort.rs",
+      "sha256": "64e050060edb72a39169421224e405230cca6df192eee3c92549a3a58d907fcd"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/ivfflat/types.rs",
+      "sha256": "e6cfa10dc5ce72e29b344981d9083676480b92f5c042dd7d9c43974c8eac0dc8"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/mod.rs",
+      "sha256": "ab4c2395cc5532a51d394a5fe6a226e87f443984db95f12669487d5f516d5ba9"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/sparsevec.rs",
+      "sha256": "f699c12158489949d232c48f3badcf8516db3f437771447e977b3a13e73abd3f"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/tests.rs",
+      "sha256": "f85e35a0a996d3512aafebaa4cbe5a981445048cf4a627cfd9ece8997ee6e185"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/vector/vector.rs",
+      "sha256": "4b733412311657cbbe7dd4ced458a0cc5111523d400bed3bf94139cad97ab3a2"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/xml2.rs",
+      "sha256": "9f250a22db69603c9dc755f76b7e71db3649725fb87b111a98d4a5ee92f89bfb"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/xslt/apply.rs",
+      "sha256": "128735da2cbd9f4791fb3ca4c5fae3c31a29e738359db54fb1d6f51bbbaf8761"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/xslt/body.rs",
+      "sha256": "b6aae195a3a0a7ffd5dad87c5128f31867ade9d6323b2eeb274507eacbd02cd7"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/xslt/build.rs",
+      "sha256": "831014bdd26ca213ccb9a9f83d6ab0caef2292b3ac55a0b46e508131f5fa3b45"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/xslt/compile.rs",
+      "sha256": "44f8f6c76c1ef88b25e086eb3ddebf2633799401c3e94e62a1a1525113eb49f6"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/xslt/exec.rs",
+      "sha256": "0290c098dfaeef1971da5cd06045799bc514d3a0d08e6a6f0dea55b19192e198"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/xslt/funcs.rs",
+      "sha256": "987308dd5cdfc4c541a02ef6a605142e5c55a80a25319a2c9e4638a0cf92a0d7"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/xslt/html.rs",
+      "sha256": "781f99eb722c27b0f06126deae223712089200a9c7d0fea3fe66ac293de8a96e"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/xslt/instr.rs",
+      "sha256": "f48c89ffaf7a5f848873d711eafc39c56cea70f280a208c731eec2a3471aa60c"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/xslt/mod.rs",
+      "sha256": "1724b5c421ebd97fd2f959054b29a5edec0938b6ff6d0a7d2eb847dc8271ddd3"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/xslt/number.rs",
+      "sha256": "5821fea1f9adf7b55065188c68db6b4bd531a64295520f6e0dda194af5e528cf"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/xslt/numcount.rs",
+      "sha256": "573091152f0dcf7e29d6116c980499fc99e12f386edc030b69bea90d42461d7d"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/xslt/output.rs",
+      "sha256": "d1674a9d4a1b891d0088dc9e29a066f27bf2ff1711b6006f5180aa4d9c018105"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/xslt/pattern.rs",
+      "sha256": "328792a550d1a69a600fcfe7977f4fa9dd946524ef4d5b4d63b6bb7ad37b6393"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/xslt/run.rs",
+      "sha256": "59dbdd6da6cd1af3f62dbd4fa84662c54345eca3fd545a94f3df2aea396b8320"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/xslt/style.rs",
+      "sha256": "577e9cc5d16758792e5f159fccef5731232a06728032bcc28cac50576843682a"
+    },
+    {
+      "path": "crates/pg-engine/src/ext/xslt/top.rs",
+      "sha256": "fc97e9f653f216bb1482b147c61ad70eb5a386d49b6d49f510079200d26abba2"
+    },
+    {
+      "path": "crates/pg-engine/src/hba.rs",
+      "sha256": "d688468759464fb3a727ee78fb45940780ebd21c52572f9054d5855a25121e44"
+    },
+    {
+      "path": "crates/pg-engine/src/largeobj.rs",
+      "sha256": "35bd79d1a5010f4eec3b5071cd95aa882d06dd59871c56975272001b8e119f99"
+    },
+    {
+      "path": "crates/pg-engine/src/lib.rs",
+      "sha256": "439b9a69a9990752f05dcacf9fed7c93250b6781cf71b1d91257169dab2c8a6a"
+    },
+    {
+      "path": "crates/pg-engine/src/log/collector.rs",
+      "sha256": "e4c0af78717da45b22a6d59383006723762f6e6c50f719bdb7c57760ea250e38"
+    },
+    {
+      "path": "crates/pg-engine/src/log/formats.rs",
+      "sha256": "579f8532cb536092820faee141cef6675100046cce55d5f77462950a618424b8"
+    },
+    {
+      "path": "crates/pg-engine/src/log/lifecycle.rs",
+      "sha256": "1e3bcb6fcb71dcd3a18694f76d3e6ac8e8f29d1bea57b64cb82b0f1513791add"
+    },
+    {
+      "path": "crates/pg-engine/src/log.rs",
+      "sha256": "f17fc2af3f2bda32173fdab36244c337c93789b192f0850e967f8cbb3a9ca603"
+    },
+    {
+      "path": "crates/pg-engine/src/lru.rs",
+      "sha256": "1bc34f1f051e2368d6dc50a646bf278592294e9b3a6c4e3181a44502bb88c38d"
+    },
+    {
+      "path": "crates/pg-engine/src/notify.rs",
+      "sha256": "3aa10cf4b7b2f5575fcaa3577230b4812fd8eeee93013e8eb6232c7d6da7f9cb"
+    },
+    {
+      "path": "crates/pg-engine/src/plpgsql/compile.rs",
+      "sha256": "60662a578077c15cffadb100a5e988bf607719d7a64ecdfaa46d104ebd94dbae"
+    },
+    {
+      "path": "crates/pg-engine/src/plpgsql/conditions.rs",
+      "sha256": "d5c8367a3024db6e680921a2dcfbe94cbd558f58c2ab7f1b3029d88c198a9d20"
+    },
+    {
+      "path": "crates/pg-engine/src/plpgsql/mod.rs",
+      "sha256": "b1f2c1d06f5c12b12a2d2430dad68bc572efcbb1259524a5b04dcaf96731f1de"
+    },
+    {
+      "path": "crates/pg-engine/src/plpgsql/parse.rs",
+      "sha256": "df7488a1599d9b1f14c4e7e559803e6c88f5b2a25cc4d929b0f4491c11955955"
+    },
+    {
+      "path": "crates/pg-engine/src/remote/conn.rs",
+      "sha256": "118dcaf52cc0a830a7a99b84b89ade082d189ba5b9c70b8f5eac2b0402c0d9cf"
+    },
+    {
+      "path": "crates/pg-engine/src/remote/conninfo.rs",
+      "sha256": "99025e1e16b28e8e5ef75dbedbe56293db3528ab4099ee9556a59215dac4d7f0"
+    },
+    {
+      "path": "crates/pg-engine/src/remote/mod.rs",
+      "sha256": "e924988470a15cc919aba7f75c86b9e45223343cae1c3d11201f8a5282625da4"
+    },
+    {
+      "path": "crates/pg-engine/src/remote/outbound.rs",
+      "sha256": "fedfa717e9a74371a8d4cef2a53024b29e0e0a9145b3cf165b7233fde1452a7c"
+    },
+    {
+      "path": "crates/pg-engine/src/repl/apply/parallel.rs",
+      "sha256": "855923e87eb4313590706be373df964bfb81c82de47a0aaaf016793ede76600d"
+    },
+    {
+      "path": "crates/pg-engine/src/repl/apply/tablesync.rs",
+      "sha256": "43a58963cea02e0a13357b66a53d3f8992e02165881e64622a9be4218432275a"
+    },
+    {
+      "path": "crates/pg-engine/src/repl/apply/tablesync_tests.rs",
+      "sha256": "63b1d2836b204452c7ceffb19fd516b8df87842b8bfa018669bba05d3e8562f7"
+    },
+    {
+      "path": "crates/pg-engine/src/repl/apply.rs",
+      "sha256": "be90e7c4afed84f3e198f31f99ad4da4b664a48542f718ad8d7c44c2e794141a"
+    },
+    {
+      "path": "crates/pg-engine/src/repl/apply_rows.rs",
+      "sha256": "b1d7aeb142dc1e9c722799cfdc6c9767c0dfae22f7fdb1470bde84318dbf511a"
+    },
+    {
+      "path": "crates/pg-engine/src/repl/apply_stream.rs",
+      "sha256": "75184d466872fcff337e251a63e4919d5f93d65a1333ebf416ee28aa8df6126f"
+    },
+    {
+      "path": "crates/pg-engine/src/repl/cmd.rs",
+      "sha256": "3a8849ca05dcd1bcaeae4d1addc905d0a8552dc16e4d032b35467359e156f146"
+    },
+    {
+      "path": "crates/pg-engine/src/repl/commit_ts.rs",
+      "sha256": "18fb75ab9ff8c7ead2c914c8941145627da6e21192047970a581a98dbbeed0a6"
+    },
+    {
+      "path": "crates/pg-engine/src/repl/decode.rs",
+      "sha256": "47cedaf5f0108992e7ba1442a5c12f2b6a86eba5d829dc7ab2739be7e53ea105"
+    },
+    {
+      "path": "crates/pg-engine/src/repl/log.rs",
+      "sha256": "1d79528bf0a0418b7fb9e89f03132398fe994910495dd7b734ae6d9227dc4aaa"
+    },
+    {
+      "path": "crates/pg-engine/src/repl/log_tests.rs",
+      "sha256": "153eedc72d596e34349e88bb202e2bffb270a802c154fcb2172e4c9d9fb2d8ba"
+    },
+    {
+      "path": "crates/pg-engine/src/repl/lsn.rs",
+      "sha256": "0b7c5278fc9144f3a7bafbaaaefeaaf7bd9ba4b8dd139ab726f66ec5bf81d71c"
+    },
+    {
+      "path": "crates/pg-engine/src/repl/mod.rs",
+      "sha256": "f60d712ef0c011a0e455f3f7ceb3378ddb79bb96f46b219b36d4e740822020f6"
+    },
+    {
+      "path": "crates/pg-engine/src/repl/origin.rs",
+      "sha256": "1f26b5ad4aec65574fab0e0e4d264cce33e38413531dabc40686fa5aafadb669"
+    },
+    {
+      "path": "crates/pg-engine/src/repl/pgoutput.rs",
+      "sha256": "8f186273f708d7cc30039ce4fd53b24b7033efa8343ff5f5671c77303d797cf7"
+    },
+    {
+      "path": "crates/pg-engine/src/repl/plugin.rs",
+      "sha256": "9840fee7fbe9fdeac456adc73f515c3d7fabbe238358d4bab169d66bb7ce0be1"
+    },
+    {
+      "path": "crates/pg-engine/src/repl/slot.rs",
+      "sha256": "948cf5e4187d21f0d1c063f2a973634e77e48aef064510703d215786d1ea25df"
+    },
+    {
+      "path": "crates/pg-engine/src/repl/sqlfn.rs",
+      "sha256": "fc82de76dddaace8e23eca0e4f740f5003948c4daa3396d804d83f8a6e5ce99e"
+    },
+    {
+      "path": "crates/pg-engine/src/repl/test_decoding.rs",
+      "sha256": "963cb3a90bb2dee7ef9a708c10fc7c190de6fe25efb1ac3b4e4fcf171d846252"
+    },
+    {
+      "path": "crates/pg-engine/src/repl/walrcv.rs",
+      "sha256": "5a375681216044c03118399d5a9891cc4fdbbc553c01a8dc2dc5d326b536989b"
+    },
+    {
+      "path": "crates/pg-engine/src/repl/walsender.rs",
+      "sha256": "1d2c721a937c18dc2afdfbf9dcc6bc7d572a73575a69dc5b4ae95bb1b907d86a"
+    },
+    {
+      "path": "crates/pg-engine/src/scoped.rs",
+      "sha256": "073c819c3947c01c09ede9545b3a5e2a7948ee21058fa77c0a9a31b02263cc77"
+    },
+    {
+      "path": "crates/pg-engine/src/server.rs",
+      "sha256": "e34fa22902befe103f07f838baef8777725768a926ef678c2d339afc777a8561"
+    },
+    {
+      "path": "crates/pg-engine/src/server_files.rs",
+      "sha256": "26f8327f4e0fb64cc850b575cb8d9e730c7f2f502d608d7eee447a27c6e74dc2"
+    },
+    {
+      "path": "crates/pg-engine/src/server_programs.rs",
+      "sha256": "7ab00f5b77091ce3181225a979a7410a9ff290511553f718573c1f2dee5db3d4"
+    },
+    {
+      "path": "crates/pg-engine/src/session/copy.rs",
+      "sha256": "7b081813ad985873dc56b33bb37250bdbe80d56984581d965b0ff692ccea00aa"
+    },
+    {
+      "path": "crates/pg-engine/src/session/createdb.rs",
+      "sha256": "411d1c5db03dd357df998ec317119f6abf012767c12039c3b8cb963cfabb890b"
+    },
+    {
+      "path": "crates/pg-engine/src/session/current.rs",
+      "sha256": "d67bcd3fb277b3b4edac7978a5d8da73962b6ce2e3b8e2e7ee1906425d8724b4"
+    },
+    {
+      "path": "crates/pg-engine/src/session/cursor.rs",
+      "sha256": "f4f30571a6fb6a8a34640e3d25d8aa84037bdff94e01c5141f1dc71bee9cb915"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/aggregate.rs",
+      "sha256": "f63ca48e6eda86e90f99ee7b0ffc756738905f12f83dffa3dea68dc22020c315"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/am_index.rs",
+      "sha256": "1b751972c2e575fb1d1fc1d68c3f117efe710ee01307247a02f03af7ae255366"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/analyze.rs",
+      "sha256": "75a120100500a4f7a54a89556b859be1dcf7fb93960265e01ea8a740cb176e1d"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/basetype.rs",
+      "sha256": "6560c82cd5427efe83c6b2f1b006b05a358c6b91a521d647dbf76a740b578eee"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/catalog_dml.rs",
+      "sha256": "994b573c33fa4a8e40dc9422acfe7241ee164969b2eb68e5630664a78d1a8376"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/collation.rs",
+      "sha256": "5a4d280bb5b3850144f9267a957eb30e3c4c9cf149fa6ba4e58c900a1ffb09f4"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/composite.rs",
+      "sha256": "0282d818f95c44aeea0edf3629e7b70cfce2fd36cb4a0c919c83968544400de5"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/database.rs",
+      "sha256": "d91415bd762a44df7e05dd337bb53a757e355f4bb2471ecaafa1df4c1add9e8e"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/description_dml.rs",
+      "sha256": "a3d259b88fe00d0a9a9a7148b0759675c46c5f9923172f7cd4cbdc5b847ed34c"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/domain.rs",
+      "sha256": "24c28dc128201c8ca74bd77e36c01028f25ff91e206bd37ec23aa4af5a6b47f2"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/event_trigger.rs",
+      "sha256": "eb7a984a240e2d0f8fe38b65f81a94aa9c6fb81eef68fe97f4019da4fea12c46"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/extension.rs",
+      "sha256": "50e44240155e5353925797e1181b7458c39c3f8d98dd1e7281c569dbaf3f6018"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/fdw.rs",
+      "sha256": "09e983ab01f5ec063966b07ec29206b47d7020241011cbeb28f71bd831100fdd"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/foreign.rs",
+      "sha256": "f86fe1af0cba5074def96c875edff666be549986d95495b9fc3fed662d40d985"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/idxprogress.rs",
+      "sha256": "db4a9230b60f67d0452ba83ee7838bde32e75f951fe6a736f74c326cde644d9f"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/inherit.rs",
+      "sha256": "eb68913c32fe9c378fd9b93f1eedf4fa7ea10277134b2d393aaa19311e5c79d8"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/mod.rs",
+      "sha256": "c352f35a3825e020a5cbb5a1ec1b08ebfdcdc3fff025c6e1a7b0ff5d3ed62327"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/objects.rs",
+      "sha256": "e88a190e6d5d48a81fce10687a7868ebc6e147715d51872c8a47bf4a5fc5d05c"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/opclass.rs",
+      "sha256": "44690d94a6ceaab2e828131625810d1dae701bfecd2d197c01cd174b525a7ab6"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/operator.rs",
+      "sha256": "7d26a90b943c6db05ed2b9d1c9efbb9d12bf96aa8d9a64f43d6346917ad4d3ae"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/parbuild.rs",
+      "sha256": "ac9dff5cb13ac3a1cef00fb0737f933b7dded1cf5f8497178fce07789571d29e"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/partition.rs",
+      "sha256": "d4562df8f43363011a3e3174ecdf5a6e2f50f935743bce2f31b0ec6cecf59e56"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/policy.rs",
+      "sha256": "b2840f5be8ae90af59470ab144974698c21c1e42d5ffb70d4e4aeaa2aab28960"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/privs.rs",
+      "sha256": "ab2209b2c5eedd066bcd757cd04b201982f63fd9808516d46d771fd541c8c261"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/publication.rs",
+      "sha256": "36fa704351f6ef68136df6f3d316760c45ccc071a56a0bca2343d90e1aa5a7f9"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/rule.rs",
+      "sha256": "aad6523b7e6b45d700160dd7b302fd0c256995ac1daa6ffd12b229c72f92cc1c"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/stats.rs",
+      "sha256": "e72ef03887a9b9afd6336bdfb5af1fdff9a071c025555088f55b2420790f3ef6"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/stats_import.rs",
+      "sha256": "4f9a49085af628df42c26603bf8c0d5ff07623123bbdfd494b139b1e6fac6816"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/stored.rs",
+      "sha256": "f3e1f8cd044c5412812949f795c78c03a0844cb5f97ac9173f1812aa93ef8c79"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/subscription.rs",
+      "sha256": "a31efb022a6e5df909645311fccd01394499a2390c55523c6c3fa9dc228f47b6"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/table.rs",
+      "sha256": "efdfbecec9608a509f75c2642cfcc9e4cfa494b05c23e424dd78d2dbab81812e"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/tblspc.rs",
+      "sha256": "f16e223fb0f33153e3036038e86762eb8ec5887e0f6be9ad55f84c0cf097eeb5"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/trigger.rs",
+      "sha256": "acf82118f3bcc0cffdfebd8bb33773b0d322396f42a6f1e610fbfbe6a51816f0"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/tsearch.rs",
+      "sha256": "aff331b59bb0394d3df7b88f2e4418f2854066213ddd3d7754e787002e76e31c"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/userobj.rs",
+      "sha256": "4c8b9216e48935e535c0311e78c608b261fecd74f236a15c5ab66f5d5fd1d416"
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/vacuum.rs",
+      "sha256": "41ea3cd92371e4ad053e816c583e58b1a6d87371f21c0ee3ccf7e27d8721e447"
+    },
+    {
+      "path": "crates/pg-engine/src/session/explain_spi.rs",
+      "sha256": "d685aa2b1ef4d2861b4faae8014689bde52e4d24ffc11b047a227fe429b99ecf"
+    },
+    {
+      "path": "crates/pg-engine/src/session/fastpath.rs",
+      "sha256": "8c3a44d8900106c84f146efbb49a63e55bc9c17c6c18ad477565c328694d06a5"
+    },
+    {
+      "path": "crates/pg-engine/src/session/litplan.rs",
+      "sha256": "da1ee2b1df4bd4c95375f2feef0b79b26054ab40d7c6314d9cc6d4b4d13b4e8f"
+    },
+    {
+      "path": "crates/pg-engine/src/session/mod.rs",
+      "sha256": "3442c961b89ea560a52db0d5bd35b035843bc8284c444d550c2432fe67e0656e"
+    },
+    {
+      "path": "crates/pg-engine/src/session/pgss.rs",
+      "sha256": "ebd3edb0cc495e8affed0401957fdb831e0fcaf2bed4900a1f402210222952da"
+    },
+    {
+      "path": "crates/pg-engine/src/session/prepared.rs",
+      "sha256": "c0d3b93965e2c2a4cb935fdde53e4b9543f2430bfe6fa6900bcc89d5b40e3fd3"
+    },
+    {
+      "path": "crates/pg-engine/src/session/serverlog.rs",
+      "sha256": "ea4aaeac96daa47b595f56364218b29824bb235cdb2d28c70a0ab844bdf20dfb"
+    },
+    {
+      "path": "crates/pg-engine/src/session/settings.rs",
+      "sha256": "6578e831dbce0145e991ccdbea7a2828e2979bafdb5ee3fc9541a2c1b228f0de"
+    },
+    {
+      "path": "crates/pg-engine/src/session/sink.rs",
+      "sha256": "ee757fbb75309c0ed03cbc6115a6cb92491583d062e8cedd5e9006bb2f3b2a82"
+    },
+    {
+      "path": "crates/pg-engine/src/session/state.rs",
+      "sha256": "5fd55d35413427af9d22812f36cf2b357677ba6c99393289082bf3922c313720"
+    },
+    {
+      "path": "crates/pg-engine/src/session/utility.rs",
+      "sha256": "17b08f946c3322667a56175cef273e50a27db7b3032718e928d6a344d82e7803"
+    },
+    {
+      "path": "crates/pg-engine/src/sort.rs",
+      "sha256": "5c2243ac6a393735e77cf6d26ba6c265aaf5e419e333cfb89a64036b2f4c0c3b"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/ast.rs",
+      "sha256": "4f7db96e66ea2d888f1172f7909c5d64e6e6f2f6112e55229889134ba01649bf"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/custom.rs",
+      "sha256": "1d7b9e0dd9fd213346d1fd66faef138f2a97a5bf1e2bedd27958b3198258b3ef"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/dml.rs",
+      "sha256": "fa0d6704f3a021d8b0fd1d5c8ae62dc146bed591c3c25e26f98a86ff9b16d514"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/expr.rs",
+      "sha256": "8a123f172c62c65ae535aa2fcbe133afaf792b41ad2ee48b9a59f89222623406"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/fold.rs",
+      "sha256": "e25b923e0bff98ab9c7f7d93a8de4065b9099e4f9f15c09991cfcc732b2a39fc"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/inherit.rs",
+      "sha256": "0d9f36044a10d2ddf239becfeffca815a3fad3676948e0adb91ac0b311d47982"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/mod.rs",
+      "sha256": "f9493fe3384b5e441cbe7a2ccb97f76e4e1f8139551b1643f923ef675fa93f80"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/optimize.rs",
+      "sha256": "f637f15621f4271d3c41d542bff450fac8025a972bd97a6ab41d1b5a3c0fe1e0"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/partition.rs",
+      "sha256": "0b6c776d9b71f6bd44315c407ced6945cbf790f7a00187a02d9160f8749af197"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/partprune.rs",
+      "sha256": "c4d8bca6a4626934705ecd8886f5161e7bb76027351acee143ded2947af33149"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/perms.rs",
+      "sha256": "6ecd0b30e09f71e44f60caa72550fec3c1daaa824bfebf15d428905696a2349f"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/recursion.rs",
+      "sha256": "029e1a5a01464229c6952cd1083bcc78de015cc21dc4de44b36aff4f8a4fac93"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/refs.rs",
+      "sha256": "e20e4e5dea5e6fcc221241987a8f7d54292576b7b1ffcb8141ef0d72fe0c012d"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/refute.rs",
+      "sha256": "76f7dfa350ee94bb79e1e9ba98c03f3dbbd302688c4f1a743fe1d62698aeae19"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/rls.rs",
+      "sha256": "ae3f62f58e5f1e06b55950eaf2e830e3f5669498a9df1db46079ab12fa3ca1b0"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/rules.rs",
+      "sha256": "fc1e9e3793a51a971f9d012316a9165c83f9f0c14304dd904637e561fddc9e28"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/select.rs",
+      "sha256": "aafb8dcacf3ac1b1035f3f1b6deeeec2d4dd0e899d31fed4166440fe955b758d"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/sqljson.rs",
+      "sha256": "e4be521e06c19b316c0e2eeab0f187a642c6ac35725e7e26d107a4923a2a43d5"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/sublink.rs",
+      "sha256": "9f1ec7271aef0ca90ae161cfa6186a57c83d16ce4aa5c8159b5e3241e18dabb4"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/types.rs",
+      "sha256": "f71d2352b121cc342728d01eb306f98d14f1999348d76cfc00ceee71d55633ae"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/views.rs",
+      "sha256": "280bfbe80b0d9cdb996eb4a83e2edff41be5313e3e63dc452482af5d9ad0c928"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/xml.rs",
+      "sha256": "51aacfdfce781c065869597a71a0efb9c17f4309b844d4716da3d5a283cff620"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/xmltable.rs",
+      "sha256": "35144d5ea24531d59c53790cd34ccdf5b405c1f239596341b6217a286945aaac"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/costs.rs",
+      "sha256": "40ade28ebeebca139e0b4bc452bf028eaf6990da31a131c4cf372b4cdb10920e"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/deparse/expr.rs",
+      "sha256": "6515f0aed5cfdfd2a23cf50e91ee743a4e05d4a37419f869e48b0b893c0a19c0"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/deparse/from.rs",
+      "sha256": "76cf09de1a560d2c0d8fd853de5cdf12314128530f197ddfd501c5461901f083"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/deparse/func.rs",
+      "sha256": "f97df8fece8be1cd95b665e3ec0b9c5a8e19be088a712e6ad1242f15b9f597b0"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/deparse/json.rs",
+      "sha256": "c8220abbb153abe49e5fecaa92d5b3b18c548703ff44cebcefc9d935791afdda"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/deparse/mod.rs",
+      "sha256": "c94d1cb124b5a03ab15f435c033a78fd538cb517b2d233b8284329922a53c44b"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/deparse/stmt.rs",
+      "sha256": "30589082c93abff04262d924bf193f1e08afc910329054c38bc7e135245aaf0c"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/explain/overexplain.rs",
+      "sha256": "0843041ae454af9f1fa93fd8907353ebc835ac910385e01e25e669a1698302af"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/explain/parallel.rs",
+      "sha256": "6da04712987014afa7267d9473df693da16c2a485a3be290f404f813c14296e7"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/explain/pwagg.rs",
+      "sha256": "dc8e859436838d07033de957b98720b8c124296d9e02245468bd04a77e846f62"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/explain.rs",
+      "sha256": "097d4ef63105dd6871277baf8e94937965c2f4578083aa35dc3614981f1c7039"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/expr.rs",
+      "sha256": "10341b22a91e39692976448eb52fffd94f554658039848d55c83fb3213be5a57"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/extstat.rs",
+      "sha256": "f09662fde249541ebee2e397f7cd756f03b1e245d86a2d9652dcd66e2fb6733b"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/admin.rs",
+      "sha256": "daa98a976d4118d3d13d99da30e11b5b2cea05809411231ba9ef12954064986b"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/amutils.rs",
+      "sha256": "432c35ddc708cadf183d5b527a07dca8d8c7c262807b7f4dacd3c11203ec519b"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/amvalidate.rs",
+      "sha256": "5586da83259b210a21795c1074518874832a0c3cb3e8fa68c4f7dafe2998ace8"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/array.rs",
+      "sha256": "398a940d44857bcce9cec2d581b17551aad5d23bd3e920e3d1b53edbe7ecbaf9"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/bits.rs",
+      "sha256": "87b7c2ce49eb81a8c05125796e22a6167df5c3179ec744a26a250c28aeefd275"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/btcmp.rs",
+      "sha256": "4c593062e616b101be96032ae6e0e47a53b2f27d2a235789879f66408afc9c6e"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/datetime.rs",
+      "sha256": "7640dba7357743287a793aaae0250ad8cd900af03b83d24ed12df581d6f80200"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/formatting.rs",
+      "sha256": "752c0a6c8bd0747cf66bda8d32998409524faef100f36cdabbe4781eb184d474"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/geo.rs",
+      "sha256": "a1cdffef7fcbfafc0d8c8a218d743a3dab95480ae0b07db5f84416671e55ce19"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/json.rs",
+      "sha256": "34a8cde223e851b51dcef54364d7859c08df8ae236f08e7c0b235eccb4e5b296"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/largeobj.rs",
+      "sha256": "78dafcdede95418178d6e9f28797f4c93f67136005011ef665d2dc64600a3641"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/math.rs",
+      "sha256": "7b0da98497546c9e6f08f6ec0c0ceae9ff6528cc97e408325535b4d3097148e0"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/mod.rs",
+      "sha256": "db904525de15d061a4bf5f37130b9b8ab9f01b812982fac68558b2840586c4dd"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/monitor.rs",
+      "sha256": "70abd96849ce3d1b862ebf4c25d835d4975f869905becb692edcc90ac1c13360"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/net.rs",
+      "sha256": "2f1a0092387137c5cbce45f4ddce069a239b8c3129a2634c1f0e518e9a4cbba7"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/opfuncs.rs",
+      "sha256": "1f6f3d41c5af1fccec48bf80988780790049f551b621f0197eea2e5ddf2771b4"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/ops.rs",
+      "sha256": "ca309f5968e6f6556ef3e5d1905ec6514e34483a0702e111bf37631cd8712504"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/pg_oids.rs",
+      "sha256": "23b46db2ce7ba2a61914a72c4895d7fcb7eea76820fa6b2487b98120bda85302"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/pgstatfuncs.rs",
+      "sha256": "a6fd273817ca9663e435056d824a2fd8d82324f82f7e980bf926d3ba46f5bfb9"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/privs.rs",
+      "sha256": "5baa4be01e9ecd8eb5dab252a0daf00f79112ac8a8061267bfa584ffe0471c6c"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/pubsub.rs",
+      "sha256": "1c4a7aa0710d2506a81119b72c5c1ad8929d9d6570c87c1f9f2ad818b687edf8"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/range.rs",
+      "sha256": "88c26571644e192c607d5cbfabc10fdaf47e8dc00c7e21402f65ad20e490921d"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/sqljson.rs",
+      "sha256": "c854ace21be078e145845c32c86c7bd6e9d545ebf1dca957f83660c61a62b352"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/string.rs",
+      "sha256": "8213625aacab9cce2524e807083f032cce35e783d38f43bd9e648d5f7eaad6ce"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/system.rs",
+      "sha256": "db02f53aac84b3707d3cc8bef897c5a02eb167b2cd5c47d99e633c3e9d13254c"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/tsearch.rs",
+      "sha256": "4c624667410359d0c304f6c4f30376fc4b7fd6c4dbc475171ff4b8b4cc9822eb"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/walfuncs.rs",
+      "sha256": "529c2537e32637567d2b5f4e503dcec3d8338669b1d2ad98f0849f35b68fdcca"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/xact.rs",
+      "sha256": "267158f7ba3d93ab5555f2789beeb32a32b12aaff4ad1f6d8604a35090225b8c"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/xml.rs",
+      "sha256": "fd79808a5226e2f7240245ef3a2e74496da1a35258c9679a2d956d908458b68f"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/xmlmap.rs",
+      "sha256": "36d87a9f7b8dab1e62599befe0c9f5bb5504f0380f9f655fe3a2106b64d70d1b"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/xmltable.rs",
+      "sha256": "9438b9882e2e8cfdb55cec8a977d350be9bd656bc12a2eade0a76f09c24035bb"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/joins.rs",
+      "sha256": "fb5a41315bb5e688b78f80a719c12689cd303ce8a0e0b654645379c9173d7b57"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/literals.rs",
+      "sha256": "577f022036a9dc99af972595c01e48c4ae557ad9b285bbd475188a46ffa51092"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/mod.rs",
+      "sha256": "8e8a040b631e57aa774f562ef03214aac772dc685a1b489b040a9b5bac67e02d"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/nodetree.rs",
+      "sha256": "3bcc46588423c1f3ae12440abbb6343ce42e13c577af29a0c6a3b527b45f47a3"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/nodewalk.rs",
+      "sha256": "f06490c885f21fd6c4abecef13d42d6a42b59243260528eaa2763a57de7b9915"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/parse.rs",
+      "sha256": "c7e78511887dd72bd5aea6370e4b06d42b3ca9078da6c694beaf7775b429441a"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/paths/analyzejoins.rs",
+      "sha256": "69a7f74fb353ffa7b308a619a76d90657e8cdeacd778095f3a8a0b4a5205de9a"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/paths/joinpath/foreign.rs",
+      "sha256": "e8730b7398d43edbe681cc2faf35713a9fea019ab566180a7c05623a7863335e"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/paths/joinpath/lift.rs",
+      "sha256": "376b6130daa0b98b50f1313bca29aca55984afa52bb4b6f1c584e0c973c808b7"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/paths/joinpath/outerjoins.rs",
+      "sha256": "5face91addc163a8eb02ebbcc8042f18222fd4101f664ffe60dafb34f9bcee12"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/paths/joinpath/partial.rs",
+      "sha256": "5a9f182106622eb3d4e236bf449651a15e4fa25f0b29b33c41c01863c39fce54"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/paths/joinpath/partitionwise.rs",
+      "sha256": "f9499d69ee20c8631494adab18243c0c66c7714ea0dcfc21a8bd5f779c0c4df4"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/paths/joinpath/partmerge.rs",
+      "sha256": "e2bfa9d33e0e7a1c539f5826b1bb88b0f87babbac39e555c4de211037a394531"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/paths/joinpath.rs",
+      "sha256": "dcc1684a9e3cdc56fb2dafeb5e0f8f7166a2ce8999978af23c2a8110fdaac61a"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/paths/mergeappend.rs",
+      "sha256": "96c73504b7b92f5aadcfb9962c3b0bebacd0259d638cae1dde16e6374b525532"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/paths/parallel.rs",
+      "sha256": "f9e12e4734724955581f6295826e0ad9e6c1342325fbeff8af7bf36d45ecbba3"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/paths/pathkeys.rs",
+      "sha256": "50c2ca11f4504e7706288ae7c5af74e070f4b11b6b8a1930b1d435a878cf116b"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/paths/pullup.rs",
+      "sha256": "945c208dc4dab64544a9699173f76038693432fa3927b5079857da1f73f88a34"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/paths/reducejoins.rs",
+      "sha256": "872e94db01b1c6248214a76f283aa788e9e9a83451287ba895982c04a8c251f4"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/paths/rowmarks.rs",
+      "sha256": "a86f6283bacea2459aa6fdaaa83ae7e9f1f4522927f825e0ec298fb9369b227c"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/paths/sublinkcopy.rs",
+      "sha256": "cd48a85eebda52b53da187d5d940e3161addfda3b2a544bc91c0cd3f30c39610"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/paths/syscat.rs",
+      "sha256": "ad09c863632b1e2929c336410a6bda7344b9cee1da33728e9fd32103ebc85d4c"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/paths/unused.rs",
+      "sha256": "b19078134a8b7077899551150f19d9645a8440d79a39aab049abb5eca8079b02"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/paths.rs",
+      "sha256": "7482e2ba9da4f1cb58a491405e7337dc130f64993f55e6fff85038925720992c"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/plan.rs",
+      "sha256": "9da8360fc0f4604202d477ee51e11016adb3ba328c6279cdf958d58e2c9890da"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/ruleutils/query/body.rs",
+      "sha256": "eb064f1c0072c3c713cd2fb07da48b1bb2b263b60c55727f146434483a8d4b58"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/ruleutils/query/rule.rs",
+      "sha256": "3a30d90614aec3aa6f85f16ee9fd02ebd171b073d4fd03aa559ae1e070cc5fbe"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/ruleutils/query.rs",
+      "sha256": "d7b3f7d95107f53685868fe56c697a23638b867f9171dd5f9b7540f49c224ca4"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/ruleutils.rs",
+      "sha256": "bda778a5a6ed51b7d716d7edfd4684357d4ed241ab6c2045d288d3a7ad828e3c"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/scs.rs",
+      "sha256": "b0e9d9b5d029b4887eef7761d37b4736d034072ab66e67402ab8e9666338a2c8"
+    },
+    {
+      "path": "crates/pg-engine/src/sql/srvlit.rs",
+      "sha256": "66a644aa34fbdaee1e2a9861f09d83f19a5ca5c4a2c4b20436b64f13ad6a19e7"
+    },
+    {
+      "path": "crates/pg-engine/src/stack.rs",
+      "sha256": "963f1e301aea6e58df4cb84aad2abf8e28fa0261b3809c8fd34333d6d8c7dff2"
+    },
+    {
+      "path": "crates/pg-engine/src/storage/batch.rs",
+      "sha256": "a8dae6388bd64e2d3948018b76b3b71b8bc893d0f56c561a257dfdf47ed5d9e7"
+    },
+    {
+      "path": "crates/pg-engine/src/storage/cache.rs",
+      "sha256": "12ced2b85ad1c1a2659684d0887b6ea280c1ff6a5d44563a67742cc9d738486a"
+    },
+    {
+      "path": "crates/pg-engine/src/storage/cols.rs",
+      "sha256": "f4415471e5550e0b80eb9db83826169c9d1834a4fa04bc67c78bb78719992db3"
+    },
+    {
+      "path": "crates/pg-engine/src/storage/dead.rs",
+      "sha256": "161de501b0df43f1985bf32e52dfbfc089fa527ab4a0c7a70c13e6b5057960c2"
+    },
+    {
+      "path": "crates/pg-engine/src/storage/discard.rs",
+      "sha256": "066c439f33574fa22e52011ec9e79f465da23e592e8c517ec7a6b6eb9ab404ce"
+    },
+    {
+      "path": "crates/pg-engine/src/storage/fileio.rs",
+      "sha256": "a0853045773f30a0de3ad6cecdefd002b2da479fc7815723c44aee5499d7e452"
+    },
+    {
+      "path": "crates/pg-engine/src/storage/hot.rs",
+      "sha256": "946e2bf85b921cc4ff60707b73a0e5358441cd51210dab1ed8aa3063496955b6"
+    },
+    {
+      "path": "crates/pg-engine/src/storage/keys.rs",
+      "sha256": "a655d281c47390a50b145f85b52fdd7890c80aeb59ddc8589d8f5f17b05e0561"
+    },
+    {
+      "path": "crates/pg-engine/src/storage/mod.rs",
+      "sha256": "9d95b54995c98352061cb6c85dc1d97816468d99abd0b5c93d25d1260c00697b"
+    },
+    {
+      "path": "crates/pg-engine/src/storage/rdel.rs",
+      "sha256": "dc348bc7af6b433c121e43ab38abea41ded2cf61c119f5353ce295ba9a208f33"
+    },
+    {
+      "path": "crates/pg-engine/src/storage/row.rs",
+      "sha256": "21727c860e2df0f9ffd404777f58b5e00465c81eb87bd43605717150c6f35c98"
+    },
+    {
+      "path": "crates/pg-engine/src/storage/sst.rs",
+      "sha256": "03f3db697d03d416e89bbd737eb89c175086f2c2724e99eef1b9060021e5b84e"
+    },
+    {
+      "path": "crates/pg-engine/src/storage/toast.rs",
+      "sha256": "4b492491a98d76f69b484c6ba2e3742866c7f24d4a8ed235794f12f2cff080db"
+    },
+    {
+      "path": "crates/pg-engine/src/storage/wal.rs",
+      "sha256": "3de169f72cfb7895fa410fb2307e2ab879d4e4514b16c2e831d1288f9f58982b"
+    },
+    {
+      "path": "crates/pg-engine/src/sysconf.rs",
+      "sha256": "fe6e34532944a4a3e50cef858e2b442bab194f364e1dd027eecc1a414d0f13e0"
+    },
+    {
+      "path": "crates/pg-engine/src/txn/bulklocks.rs",
+      "sha256": "eb1776de77b5e577dfa274a43b750a0d42db8bfad4c3527455d8373007991b30"
+    },
+    {
+      "path": "crates/pg-engine/src/txn/catmerge.rs",
+      "sha256": "f24ec2400596b35f023438ae9fafed5953deb1d701c2bc20ecbc19a0f7fe0246"
+    },
+    {
+      "path": "crates/pg-engine/src/txn/locks.rs",
+      "sha256": "040c5289bd2df110c638b9bb85288860e8b3ad69b93d755f24320f0dafff96fb"
+    },
+    {
+      "path": "crates/pg-engine/src/txn/mod.rs",
+      "sha256": "554a0ffc0331b9608f0eff6576870896665970138f09c0939b0968d229909eb5"
+    },
+    {
+      "path": "crates/pg-engine/src/txn/procs.rs",
+      "sha256": "c5e9550465816960892b91f26811148685b012f38504c9dbaa15f25f1946cf53"
+    },
+    {
+      "path": "crates/pg-engine/src/txn/spill.rs",
+      "sha256": "0de6160e8022e31dadb1acc1ad4e4be7c26f57836617edd93126720a78d096bc"
+    },
+    {
+      "path": "crates/pg-engine/src/txn/ssi.rs",
+      "sha256": "1d48491da8f7ec13eaf02af3cffa5d9311301f67c65f2289cdc71001db20c9d2"
+    },
+    {
+      "path": "crates/pg-engine/src/txn/toast.rs",
+      "sha256": "786bd93e62e686fe67e1f409e9518b3c089a1b1cad1f474f1c71693c25608b60"
+    },
+    {
+      "path": "crates/pg-engine/src/txn/twophase.rs",
+      "sha256": "2cadc8dd36ee88e60c5787e43bb25d0ec03ac29fdafbf0efce5bb831f946cabd"
+    },
+    {
+      "path": "crates/pg-engine/src/txn/unchanged.rs",
+      "sha256": "14631d7114b18a2de7b695163cb02da7f93a9a7826509bdf77d048f6c6edbc56"
+    },
+    {
+      "path": "crates/pg-engine/src/txn/watch.rs",
+      "sha256": "5fbfb34b1a07a1f43f99080dc22ee62449589e4b25ea0082f91b43c149aa0b75"
+    },
+    {
+      "path": "crates/pg-engine/src/txn/xids.rs",
+      "sha256": "c7df0bd92b470240ed3985abb9a1542775e08269f91726ddb94b06c0539a71ff"
+    },
+    {
+      "path": "crates/pg-engine/src/types/array.rs",
+      "sha256": "374c7bb264228cd9f70e9f978506af29e021c1e18e881c11568b527b2a42f2e6"
+    },
+    {
+      "path": "crates/pg-engine/src/types/binary.rs",
+      "sha256": "dc1cdbc1df44ef2b9a5be63841f4a438d3f685a37e5e55f25474388c2a2e5601"
+    },
+    {
+      "path": "crates/pg-engine/src/types/cast.rs",
+      "sha256": "b9d9a2d82532903558396ba9ec255ce864cd63e7188e40c44ce2497b9a0c9ac6"
+    },
+    {
+      "path": "crates/pg-engine/src/types/collation/case.rs",
+      "sha256": "9d12ecc2475a53843c30b2e05e87c29a93945074e0c509aea3e33a723bc740d4"
+    },
+    {
+      "path": "crates/pg-engine/src/types/collation/dblocale.rs",
+      "sha256": "f56be77d87a0ab1e84d0727eb4a9775c32515028ce2f60c43bfa092334205c36"
+    },
+    {
+      "path": "crates/pg-engine/src/types/collation/icu.rs",
+      "sha256": "461ca2604b02c77acbae98f8b3052ec8e714a64202ed7ef26b66dce2a0c4e5e5"
+    },
+    {
+      "path": "crates/pg-engine/src/types/collation/icu4x.rs",
+      "sha256": "858551ee02a25cba4cde10e761571ffa5e6c7ec7c9c61dce8ba10460cca02457"
+    },
+    {
+      "path": "crates/pg-engine/src/types/collation/libc.rs",
+      "sha256": "745db68c65d348638ec832ea30b47b909b5fee0859f010a7e84d36f0127e2ded"
+    },
+    {
+      "path": "crates/pg-engine/src/types/collation/mod.rs",
+      "sha256": "23525e3269f49537db977d8523efae3e92cb543824e512a648eaae2a42e39e9f"
+    },
+    {
+      "path": "crates/pg-engine/src/types/collation/tables.rs",
+      "sha256": "392b55933b717e3af511ca53a976b8d96d4b8ac682eaecf50529d32da42fbc83"
+    },
+    {
+      "path": "crates/pg-engine/src/types/datetime.rs",
+      "sha256": "89f48a45c492e9d977521a3c0adb209c2b8f3d2f4575bbf908e75cb528ff35b8"
+    },
+    {
+      "path": "crates/pg-engine/src/types/datum.rs",
+      "sha256": "dfbc1d932e2efecaaabb6862d401c6d994e8398666c1fe34566eff8a3802c17a"
+    },
+    {
+      "path": "crates/pg-engine/src/types/decint.rs",
+      "sha256": "839f78a214fec1c1eaf4c0d65d0de610ecedc8caee76f09869f476b5cfd8c961"
+    },
+    {
+      "path": "crates/pg-engine/src/types/encnames.rs",
+      "sha256": "9b9f6cc07c24071bf17dd86e61cbe870f64f299ffa12f1abf4fdce5ef654cc6c"
+    },
+    {
+      "path": "crates/pg-engine/src/types/extstats.rs",
+      "sha256": "82eaba2b2a6a65f5ca6fd997656499d942022cbe39189c4896188a5277aa2d23"
+    },
+    {
+      "path": "crates/pg-engine/src/types/geo.rs",
+      "sha256": "7b31b89310ee3ae386dd348aa8d0c9f526b3423230429cc902bfdce1b4b6d6e3"
+    },
+    {
+      "path": "crates/pg-engine/src/types/hash.rs",
+      "sha256": "1abb5b9b775b04f3d8d1428d8c1be27274cb8d9c58be94ec4eb266c1ac4608e0"
+    },
+    {
+      "path": "crates/pg-engine/src/types/json.rs",
+      "sha256": "023d1773d9ea43dad4d874aa90d72c0f38098d6e515800aabf8a37b9b3cf920c"
+    },
+    {
+      "path": "crates/pg-engine/src/types/jsonpath.rs",
+      "sha256": "b83081572a741320cda2a692c5f0f6193cbe17a9520ed422ecead09adfc2006c"
+    },
+    {
+      "path": "crates/pg-engine/src/types/mbconv/direct.rs",
+      "sha256": "1c666f6965c30685a19d6382fa0da5e96eed8f7de062d5d3d3c8d3c6b120021f"
+    },
+    {
+      "path": "crates/pg-engine/src/types/mbconv/mod.rs",
+      "sha256": "a83bee20831c8f51e05175629021e2047979e615c38f4d664e351f1bd1ebbde1"
+    },
+    {
+      "path": "crates/pg-engine/src/types/mbconv/server.rs",
+      "sha256": "afd14bee046563fe04aeff68e3bfe7c062ea3ad8eb46eaa432c4d63dc13dc41a"
+    },
+    {
+      "path": "crates/pg-engine/src/types/mod.rs",
+      "sha256": "33af5f267c19a6e93a259ba57569b806fc4d7b24d62f0bbe02a2685f161efddb"
+    },
+    {
+      "path": "crates/pg-engine/src/types/numeric.rs",
+      "sha256": "4fa24509756e8bf9a17f682b1437248b218889c2b22d740f51fc0fc5e0edc59f"
+    },
+    {
+      "path": "crates/pg-engine/src/types/ondisk.rs",
+      "sha256": "460a97c7af742bed0c4a46c78c5d01f85e5668afcb4cd88d19f556f1c4a67ff8"
+    },
+    {
+      "path": "crates/pg-engine/src/types/range.rs",
+      "sha256": "ffa362d0d6c4242ab68f9d1c1ba1e00a9841c3977c4b0649535e79747999de89"
+    },
+    {
+      "path": "crates/pg-engine/src/types/regex/comp.rs",
+      "sha256": "816dce7bdc886f7be68c61dd4be1910ac836c76879af3d5a25ebd16e55688821"
+    },
+    {
+      "path": "crates/pg-engine/src/types/regex/exec.rs",
+      "sha256": "d6728f483e22d10a4406c8b635936e53737ecca81cf7e91303dff251ef7f02a8"
+    },
+    {
+      "path": "crates/pg-engine/src/types/regex/locale.rs",
+      "sha256": "d835abd3f1be3273b6a72e980807f43823150eed0857ec68ea9447e8ec06c456"
+    },
+    {
+      "path": "crates/pg-engine/src/types/regex/mod.rs",
+      "sha256": "a5ba66afc83d76806a662a1fae8f2813fe65818a46f7b9652441a0337d02432f"
+    },
+    {
+      "path": "crates/pg-engine/src/types/regex/nfa.rs",
+      "sha256": "e39cea5ff2ffa044b3dcbc2892b68a8af0db698b30d99e2c129072d05236ef9b"
+    },
+    {
+      "path": "crates/pg-engine/src/types/regex/prefix.rs",
+      "sha256": "96960d623e835ef2b89be2d11aae3028f16c932d01d1d5eea3115c4149c50238"
+    },
+    {
+      "path": "crates/pg-engine/src/types/regex/unicode_tables.rs",
+      "sha256": "36c647b78a92fb9efda94556b7099ca7ed84cff301cb30d7588fb9a350eb2c81"
+    },
+    {
+      "path": "crates/pg-engine/src/types/snapshot.rs",
+      "sha256": "edfc62ad657483dd3258b9383c69f6bc5f66623c2037ddb414c4dfe391d5185c"
+    },
+    {
+      "path": "crates/pg-engine/src/types/text.rs",
+      "sha256": "be05ec6a900289e4c28f687598a35631c91401c1169809cc9f8fe6e33075e2d9"
+    },
+    {
+      "path": "crates/pg-engine/src/types/tsearch/config.rs",
+      "sha256": "f4b3d80189f96ebf06b58cfb640035273538bfb2a88411725784394b939972c8"
+    },
+    {
+      "path": "crates/pg-engine/src/types/tsearch/exec.rs",
+      "sha256": "8d57587e56a426f30ab9b486496a3262d3668af39c8f8437efc192b234728a58"
+    },
+    {
+      "path": "crates/pg-engine/src/types/tsearch/headline.rs",
+      "sha256": "f73596c5973f0bada97ab5fc66990432f57d7fc9d61c608572eeae4ace0bb6c7"
+    },
+    {
+      "path": "crates/pg-engine/src/types/tsearch/ispell.rs",
+      "sha256": "b74364f891e32263d4565e2159fd5ad0c9a6ad9d1a7052766762b0103e296421"
+    },
+    {
+      "path": "crates/pg-engine/src/types/tsearch/mod.rs",
+      "sha256": "421c0eaa10aa7936a76c2731388d1d21802ebeb026018c91331a9ffa874f96b0"
+    },
+    {
+      "path": "crates/pg-engine/src/types/tsearch/parser.rs",
+      "sha256": "87cc034b651a4b93fc73621c492982ca6e5e5c5c6f39d1e907427186d79c5f70"
+    },
+    {
+      "path": "crates/pg-engine/src/types/tsearch/parser_tables.rs",
+      "sha256": "5e04b88a08179bf1e0cdf91bfaed9a5e3bd2ab5963c646615f7a18f683afaa26"
+    },
+    {
+      "path": "crates/pg-engine/src/types/tsearch/queryops.rs",
+      "sha256": "5d99f32a0fbda5aff227aa187806ab5246182e540707dce83511972407dbe3bb"
+    },
+    {
+      "path": "crates/pg-engine/src/types/tsearch/rank.rs",
+      "sha256": "60c0f9ce257d950de372122d155ae9aa44a648f61a00102393a199172b1ae69a"
+    },
+    {
+      "path": "crates/pg-engine/src/types/tsearch/thesaurus.rs",
+      "sha256": "3755de063cf5fabdd8c63a844a492af11af0ae964b881d06a5d91545d858fd8f"
+    },
+    {
+      "path": "crates/pg-engine/src/types/tsearch/vecops.rs",
+      "sha256": "376fa7938cc8859b5638c3c63eb5e2cc7618d61913ea2ebd9eb6371026544d1f"
+    },
+    {
+      "path": "crates/pg-engine/src/types/tz/mod.rs",
+      "sha256": "e1f903beabc3cad44efea95788263da30c1898bbaf203e292a5bcf95975ff1b5"
+    },
+    {
+      "path": "crates/pg-engine/src/types/value.rs",
+      "sha256": "412b64dc6cd3f3c184682ffe1cbd20fb806844adbfbe308582b15e05dca2c936"
+    },
+    {
+      "path": "crates/pg-engine/src/types/xml/chvalid.rs",
+      "sha256": "f200f52a9e2fe5f0560b70610b4a5a70a7083d28a5c28398f6a53aa7803acd3c"
+    },
+    {
+      "path": "crates/pg-engine/src/types/xml/mod.rs",
+      "sha256": "6ac324bb671f72ad1da6760603d41f6353e4072f9ea0e4efe22a18bdc84d53ae"
+    },
+    {
+      "path": "crates/pg-engine/src/types/xml/parser.rs",
+      "sha256": "e8ae01d72e213ef614f4a7b82723e8db475bed409b0c39c363e607e964aff719"
+    },
+    {
+      "path": "crates/pg-engine/src/types/xml/save.rs",
+      "sha256": "f74590f6cc866553b38abdfa2aecc815e9304ad41d50cde10af0ab8e733c4d70"
+    },
+    {
+      "path": "crates/pg-engine/src/types/xml/tree.rs",
+      "sha256": "2885ab0e85c7d3b05e94adce0d2f171132584406c211ca7c5e8928bd41e23543"
+    },
+    {
+      "path": "crates/pg-engine/src/types/xml/xpath.rs",
+      "sha256": "f5730b4301f35903dcec03964f8c5cf2cc0aefb0ebcd53aa007056d2d5766577"
+    },
+    {
+      "path": "crates/pg-engine/tests/app_concurrency.rs",
+      "sha256": "14642ac322bafcc719d639c9fee2d1170ba3d27d4b5d72a64b92699280f4208c"
+    },
+    {
+      "path": "crates/pg-engine/tests/autovacuum.rs",
+      "sha256": "4c7af9aa862c72001db89ab403c1c664dc0e544815a65f2794064fab228b0638"
+    },
+    {
+      "path": "crates/pg-engine/tests/autovacuum_log.rs",
+      "sha256": "00cde9040d31bd07615aedce0a7712d4fa18a4c32b44d66b696be5f9cad8a097"
+    },
+    {
+      "path": "crates/pg-engine/tests/backend_status.rs",
+      "sha256": "6a1a689ba0a4c1a8a50b141dad40034b45c6e46b8b4f4690ce61491769d77400"
+    },
+    {
+      "path": "crates/pg-engine/tests/big_tables.rs",
+      "sha256": "9b346f698d55868bf8dc0e47721bfd7bf8f73763d2eb8bd2e6d234174989ae2b"
+    },
+    {
+      "path": "crates/pg-engine/tests/catalog_format.rs",
+      "sha256": "c50455e5cbab68f7f24817575f5a4df88165e2106a3d9f4da40cf3f8cc316e2f"
+    },
+    {
+      "path": "crates/pg-engine/tests/catalog_storage.rs",
+      "sha256": "9ca3b513ee3b349c3d286ca9cf3e8f5bb62d600c52b63f542c9f23d11a3226f4"
+    },
+    {
+      "path": "crates/pg-engine/tests/common/mod.rs",
+      "sha256": "4008f084a3af8342b4c9731cf07c04e3ffecc0e388ab6505a0195efda81530c8"
+    },
+    {
+      "path": "crates/pg-engine/tests/common/pgclient.rs",
+      "sha256": "64c459ee7bff6630576f650b32e42f29472e4126064cce0fec5b3943fa00272e"
+    },
+    {
+      "path": "crates/pg-engine/tests/common/raw.rs",
+      "sha256": "a2d0cba80fbc6f6e6972be0202d0be3f25682fc2f2f439af3b8ee0d878a3b268"
+    },
+    {
+      "path": "crates/pg-engine/tests/compact_locks.rs",
+      "sha256": "bee0b64e2bb3b4e7855a858cf98378d555da174ffba13b796d423e40970ec9fb"
+    },
+    {
+      "path": "crates/pg-engine/tests/connection_log.rs",
+      "sha256": "69324dbb99f6f0998c2a5ded525d6bcd3b9019d70b9526f16beb8ef9bb8eda03"
+    },
+    {
+      "path": "crates/pg-engine/tests/crash_async_commit.rs",
+      "sha256": "600ac5553c24d157a3a4198b2a86f1b9bc177ea3da4366f6392fe2141199f5da"
+    },
+    {
+      "path": "crates/pg-engine/tests/crash_bulk.rs",
+      "sha256": "505e7675643a97fbe63af728d4344464a5dfb688f22d978d8ddf82217840b941"
+    },
+    {
+      "path": "crates/pg-engine/tests/crash_ctids.rs",
+      "sha256": "aea537b67e9403db022c955ad5ee4fc931bee5e697ef9c5bc922833511410b2f"
+    },
+    {
+      "path": "crates/pg-engine/tests/crash_random.rs",
+      "sha256": "c34df436b23445084c15f579bae1196338274a3b85fc9e695ff4fc0220704b61"
+    },
+    {
+      "path": "crates/pg-engine/tests/crash_unlogged.rs",
+      "sha256": "cb953518b2fe975808da83b8509b6ad8d9780f4791616d5509680998eb28e48f"
+    },
+    {
+      "path": "crates/pg-engine/tests/ddl_scaling.rs",
+      "sha256": "48b7a7a19fc5fdd5824eecafd8ebed1440e955011b68e470412738f0a90257a4"
+    },
+    {
+      "path": "crates/pg-engine/tests/deep_input.rs",
+      "sha256": "e81cecb7c42b3e9419e9ef56e9da18e5799e4bec9e50e0c99e97427960fecffe"
+    },
+    {
+      "path": "crates/pg-engine/tests/deparse_identity.rs",
+      "sha256": "e5c30a6cbeb11058f3077d24266cb30e106b9fe4823f95b757aebe701257de1d"
+    },
+    {
+      "path": "crates/pg-engine/tests/difftest/generate.rs",
+      "sha256": "45eabac5ce9a7cacf1e0bbb44b93a6f71951b384957cc1a608da2fa03e0b65d5"
+    },
+    {
+      "path": "crates/pg-engine/tests/difftest/round10.rs",
+      "sha256": "95b7f0d668aacccf92ac1a6a633670dbc4fa9dad02a596a961ce9796668c65e8"
+    },
+    {
+      "path": "crates/pg-engine/tests/difftest/round4.rs",
+      "sha256": "821f709b4194fd7c26c3651fd1d1bec024a27cfc6534677a2811b425b621a5a5"
+    },
+    {
+      "path": "crates/pg-engine/tests/difftest/round5.rs",
+      "sha256": "ebfaa99d41e5bdd1558e04e3c1bdeaefd6afca99908753117af731d343c3b19a"
+    },
+    {
+      "path": "crates/pg-engine/tests/difftest/round6.rs",
+      "sha256": "b9cf1a66721b7badf8940805dd6a8f3547a829da99008e006c429b4b0e98694b"
+    },
+    {
+      "path": "crates/pg-engine/tests/difftest/round7.rs",
+      "sha256": "11931302aa98bf3a80cad7664ba4a21535f8329303d774212c9a45510b994857"
+    },
+    {
+      "path": "crates/pg-engine/tests/difftest/round8.rs",
+      "sha256": "c67a4ac5578c4d1b861f94aadc7409b00628302b5111f752d3d6d8c704e3be5a"
+    },
+    {
+      "path": "crates/pg-engine/tests/difftest/round9.rs",
+      "sha256": "c8d4ed71f45497525400b992b5617c425f7861d3b68679f1f0199aee72349df2"
+    },
+    {
+      "path": "crates/pg-engine/tests/difftest/wire.rs",
+      "sha256": "5b41a305fd561c51f98a5d7b080b84f060bc4493caa0ddcaacfc5375d4e67fde"
+    },
+    {
+      "path": "crates/pg-engine/tests/difftest.rs",
+      "sha256": "28c2710e8d19194a812601ff574a811c20f285076137b8c8f0398e688606afc5"
+    },
+    {
+      "path": "crates/pg-engine/tests/drop_storage.rs",
+      "sha256": "6ecba438516789b3b7d580e1e393a050bcc4ec5d7f0cced3389ad009c36c7ac4"
+    },
+    {
+      "path": "crates/pg-engine/tests/fdw_loopback.rs",
+      "sha256": "21ec899dca7e77346dad379ffa5a2d8d70b304de30682d4251ca75b810076f36"
+    },
+    {
+      "path": "crates/pg-engine/tests/fdw_traffic.rs",
+      "sha256": "d394f3a769387424b4490fe0bfee190a5cb70608049fa442878c8a77b492ab98"
+    },
+    {
+      "path": "crates/pg-engine/tests/golden.rs",
+      "sha256": "725a9d7656272792a210394c18c75e2589b6dbbeff278f0a74ab88922f9f5307"
+    },
+    {
+      "path": "crates/pg-engine/tests/harness/regress.rs",
+      "sha256": "9e8af5d9a4955a76920b7d04e6054682b6b22cd8c14edfddbd6e4a756e869a30"
+    },
+    {
+      "path": "crates/pg-engine/tests/hba.rs",
+      "sha256": "814b718595443fb0c9d87592e1275173e9e53a30795542cc8d39bd18289c7a51"
+    },
+    {
+      "path": "crates/pg-engine/tests/heap_order_scan.rs",
+      "sha256": "c09a0b7c85f8071b6e74c6823a4da60cfccda21ae9d33512220901826abe4b35"
+    },
+    {
+      "path": "crates/pg-engine/tests/index_key_format.rs",
+      "sha256": "ced4ab971644060387c2bc8b0187c3631da530eb8f125667ad4bdc7c551a1aee"
+    },
+    {
+      "path": "crates/pg-engine/tests/kept_plans.rs",
+      "sha256": "e55ae46d1b233f87da5f4298f4675f9b81a777f858aa9d021ebe7a3971949f0a"
+    },
+    {
+      "path": "crates/pg-engine/tests/lifecycle_log.rs",
+      "sha256": "1c6329955a9d1609122ec0a227b32b3e1f4b1aff124eaaf7c884942cdb62528f"
+    },
+    {
+      "path": "crates/pg-engine/tests/locale.rs",
+      "sha256": "97752032548e490b7b4dc9ea230825c0a47afe00752e1301b2730b7631ca27a0"
+    },
+    {
+      "path": "crates/pg-engine/tests/log_collector.rs",
+      "sha256": "0c1a9f4665fd926443442441b708fa961d9eab6d896aecf097e52b3ff10ff18f"
+    },
+    {
+      "path": "crates/pg-engine/tests/logical_apply.rs",
+      "sha256": "207fce1e06ee19b13727647e4482324471414a4cec00727f4bdbd0dd6703b4c5"
+    },
+    {
+      "path": "crates/pg-engine/tests/memory_load.rs",
+      "sha256": "93d40cd2405fd1d03692efccff0d5546f5fb46a6aa48a769888ed277f088f3d6"
+    },
+    {
+      "path": "crates/pg-engine/tests/models_kept.rs",
+      "sha256": "6025369276884d90f63680a255ca450a5c18ccdefa6ce7015721cb91be0c4b68"
+    },
+    {
+      "path": "crates/pg-engine/tests/outbound.rs",
+      "sha256": "847cadf7cf86d849a0117e61d97898fbf2670227fe9b5198949c0a3b85730842"
+    },
+    {
+      "path": "crates/pg-engine/tests/parallel_scan.rs",
+      "sha256": "c983dee8ee00ebd2671629dddfb963340fb01ef06f5d546a5d62e6d328d0e410"
+    },
+    {
+      "path": "crates/pg-engine/tests/pg_contrib.rs",
+      "sha256": "6e380e0ca9a14f1aef2c2919ceb73a28b08f6e54feaa5f2469152cc05957ea8a"
+    },
+    {
+      "path": "crates/pg-engine/tests/pg_dump.rs",
+      "sha256": "b79f23622ef5c0a79b4dd6c529cc746a648cc15931a515ae98cf3b04364e6bf4"
+    },
+    {
+      "path": "crates/pg-engine/tests/pg_isolation.rs",
+      "sha256": "d934cfe2c8c2edebf16f170410472518cad174ed48b7ba83142580e36353ee52"
+    },
+    {
+      "path": "crates/pg-engine/tests/pg_regress.rs",
+      "sha256": "af9c158001b940dd37e2a6e90151fe00a002b0d4eeb6ef46394799b0cb213282"
+    },
+    {
+      "path": "crates/pg-engine/tests/pgvector_equality.rs",
+      "sha256": "766882fa70f98826f8fc0d663abe0f56a11fbc6a3e60f7129f595b2cf0b51c1d"
+    },
+    {
+      "path": "crates/pg-engine/tests/pgvector_hnsw.rs",
+      "sha256": "8bfdaeb0bf05bc1f773d38a22ff04881288154cbdeb5ca9d5e714f9da0e3c35f"
+    },
+    {
+      "path": "crates/pg-engine/tests/pgvector_ivfflat.rs",
+      "sha256": "5a464af68f6abb7897bbb58d377416761ab16fa04c192f6e3258b5629dc24a44"
+    },
+    {
+      "path": "crates/pg-engine/tests/pk_clustered.rs",
+      "sha256": "41b5301df9ce4cec4053c1bcdecaa65d06764136bab0cd1f74457a109d2204ad"
+    },
+    {
+      "path": "crates/pg-engine/tests/poisoned_caches.rs",
+      "sha256": "4ca368fee9feb9379bbbb24b493477419185f5dffc46f52687ff8a11a84e1cad"
+    },
+    {
+      "path": "crates/pg-engine/tests/query_spill.rs",
+      "sha256": "feecb3fcd1b91c3fdd2dcf65d55efe3f6ceff803d101e2591e4d0317b32d4d8e"
+    },
+    {
+      "path": "crates/pg-engine/tests/restart_cost.rs",
+      "sha256": "55abfaf154c228022d3f320eee519a6f8af6212e66c192511ed0fdf9f928ffa9"
+    },
+    {
+      "path": "crates/pg-engine/tests/server_files.rs",
+      "sha256": "63e667246f2e87ab7399dd2cf5671cf96c35a49f30c6bdd17004c04960c93985"
+    },
+    {
+      "path": "crates/pg-engine/tests/server_log.rs",
+      "sha256": "8408ac5b23a9f0252b980b3fece5dd3815771598fbc373636e97503f9d263e15"
+    },
+    {
+      "path": "crates/pg-engine/tests/session_state.rs",
+      "sha256": "cb247ea2fb7366dbc8d79afc5bc1fec8abe43c0dc4a7e68d999953682f6dbbca"
+    },
+    {
+      "path": "crates/pg-engine/tests/storage_format.rs",
+      "sha256": "cafb81e187a4f46869aab13cace0be5313872e370791d0b91aca6c3994e0ef4c"
+    },
+    {
+      "path": "crates/pg-engine/tests/storage_upgrade_batches.rs",
+      "sha256": "834ee70da9a6340ef2452e66dbaf7c5fbf07721d1f465a1b68bb8e40650671e1"
+    },
+    {
+      "path": "crates/pg-engine/tests/stored_filters.rs",
+      "sha256": "d682c42f9afb119247e7ce61272fadbf961d5606576d860f76255371c771a9c2"
+    },
+    {
+      "path": "crates/pg-engine/tests/toast_storage.rs",
+      "sha256": "b28f7a75b4f50dd501e68c564415f29631078bebdb112224b87a0ee20f34b256"
+    },
+    {
+      "path": "crates/pg-engine/tests/twophase.rs",
+      "sha256": "c9fcc6428f95c22384f107e42ebed280f5d9520e4114d94cee00dbec17ed58b5"
+    },
+    {
+      "path": "crates/pg-engine/tests/txn_spill.rs",
+      "sha256": "e7ccfd93f66be8f974257f739b31a491bd05704f8aff64043bb699cd09f57e4e"
+    },
+    {
+      "path": "crates/pg-engine/tests/wire.rs",
+      "sha256": "2dcc4e12789f5443ea464827634ab58ffd7c4c77492d127c25bcf7ff5df4ab87"
+    },
+    {
+      "path": "crates/pg-engine/tests/wire_waits.rs",
+      "sha256": "348154c5feff4404fa7a9e28f1b1adb7538ecc1d945737c5288de158506456ed"
+    },
+    {
+      "path": "crates/pg-engine/tests/xml_memory.rs",
+      "sha256": "b887ac64c04655a1d43b04cd72b0ddae0c5c6e5e2d54cf802baea0175ec40f14"
+    },
+    {
+      "path": "crates/pg-engine/tools/bench/access.rs",
+      "sha256": "72d66f92864a28b3c09a30f99e07d79402fb93951d32f6406bdd2b3b10107910"
+    },
+    {
+      "path": "crates/pg-engine/tools/bench/bench.rs",
+      "sha256": "43743f9b699ce6622d4ed2191f6fa9965fb2599c4b9d4c3f68269d22513920be"
+    },
+    {
+      "path": "crates/pg-engine/tools/bench/burst.rs",
+      "sha256": "5a441f0b2272c1919fceefce68057ffa409b561eaa154fa50b176f633063bcda"
+    },
+    {
+      "path": "crates/pg-engine/tools/bench/tpch.rs",
+      "sha256": "c2559540f24d7cb9fd546ee114e02cedf68e4949a2f5b4a77f9e433838c2b722"
+    }
+  ],
+  "limitation": "Clean current baseline HEAD and historical successful build log/fingerprint timestamps support identity; no original sealed source-to-binary hash record was captured, so exact historical mapping is not independently proved. Parent should require reproducible provenance before timed acceptance."
+}

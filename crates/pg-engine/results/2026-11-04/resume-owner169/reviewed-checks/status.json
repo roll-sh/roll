@@ -1,0 +1,10 @@
+{
+  "source_head": "79746f31",
+  "review2_response": "per-file close-only linkedL1rewrite; staging removed;no unrelatedordinaryL1rewrite;pendingFrozenSst preserved;writersdrained assumptiondocumented",
+  "failed_fad_proof": "FAILED101:2/4;prefixkeyfixture and overstrongallfilescompressedexpectation;rawpreserved",
+  "diagnostic": "FAILED101 confirms phaseaftercompact,lastkeyb prefixcollision and107rowordinaryuncompressedtail",
+  "corrected_8c_debug": "proof4+1,storage28,integrations23PASS;wrapper127FAILdueactiveexternalrunneredit;remainingstagesNOTRUN",
+  "current_797_gate": "RUNNING:debugproof4+1/storage29/integrations23PASS;releaseproofbuilding;notfullgatepass",
+  "performance_footprint": "HELD:no perf launch",
+  "ssi_signal": "no matchingapp_concurrency/serializable_transfers evidence;no duplicateprobe"
+}
