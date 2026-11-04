@@ -1,0 +1,29 @@
+{
+  "time": "2026-11-04T20:23:23.561229+00:00",
+  "source": "a6fe3e4e626b0552c14320c18211886d1b16ad38",
+  "evidence_commit": "fdcb8f36d2afdc7edefe63b641285a4ad24d42bd",
+  "remote_exact": true,
+  "closed_files": 415,
+  "hashes_verified": 414,
+  "raw_summary_counts": [
+    305,
+    2,
+    9,
+    33
+  ],
+  "actual_debug_exit": 101,
+  "failed_tests": [
+    "logical_apply::parallel_apply",
+    "logical_apply::prepared_stream_without_two_phase_cleans_up"
+  ],
+  "later_stages": {
+    "release-test": "NOTRUN after fail-fast debug101",
+    "clippy": "NOTRUN after fail-fast debug101",
+    "build": "NOTRUN after fail-fast debug101",
+    "postgres-unit": "NOTRUN after fail-fast debug101"
+  },
+  "partial_only": true,
+  "second_assertion_attribution": "UNRESOLVED; occurrence in existing explain assertion is not proof of baseline defect",
+  "source_acceptance": false,
+  "performance_acceptance": false
+}

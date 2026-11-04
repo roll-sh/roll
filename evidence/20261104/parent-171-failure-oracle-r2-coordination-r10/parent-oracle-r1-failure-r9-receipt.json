@@ -1,0 +1,12 @@
+{
+  "time": "2026-11-04T20:20:55.899448+00:00",
+  "commit": "8df00a1c41405f9107d7cc44e757b11a61fb375d",
+  "ref": "refs/heads/wip/resume-20261104-parent-receipt-r4",
+  "prefix": "evidence/20261104/parent-oracle-r1-failure-r9/",
+  "files": 98,
+  "hashes": 97,
+  "all_committed_bytes_verified": true,
+  "closed_membership": true,
+  "remote_exact": true,
+  "head_index_worktree_unchanged": true
+}

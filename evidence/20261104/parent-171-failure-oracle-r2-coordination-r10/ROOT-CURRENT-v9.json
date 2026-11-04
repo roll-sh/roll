@@ -1,0 +1,63 @@
+{
+  "time": "2026-11-04T20:23:23.561229+00:00",
+  "shared_source": "fe7b0023c9df19a6dae1e6067ba8454998db48c5",
+  "integration": "HELD; no owner sources integrated in this turn",
+  "performance": "NO broad performance acceptance",
+  "lanes": {
+    "165": {
+      "source": "c8618834",
+      "owner_report": "All9commands terminal0; parentaudited381files380hashes exactraw455/0/18/61debug+release anddistbinary/unit24/5; standaloneverificationCOMPLETE",
+      "limits": "Earlierwire101/R2LOWs retained; no parentintegration/service/performance acceptance"
+    },
+    "167": {
+      "source": "d9e2279c",
+      "focused": "PASS golden3modes/reordered1/libClippy0 ownerseal7eff5c45",
+      "new_review": "R4 N1 static plausible MEDIUM nested InitPlan undercount; owner cache-only preparation assigned; reviewer stale runtime paragraphs corrected",
+      "full": "UNRUN on d9e; original278crash101/pgunitNOTRUN remain independent"
+    },
+    "170": {
+      "source": "1b6a80b9",
+      "focused": "PASS5+2+25/libClippy ownerseal a313c23a",
+      "review": "No newHIGH/MEDIUM in range; measured-parbuild rawheap sizing staticMEDIUM outside range now parent-owned; historicalphysicalfidelity held",
+      "full": "UNRUN on successor"
+    },
+    "163_combined": {
+      "candidate": "e686696a testonly successor of cace;39changedblobhashes/2501snapshotinputs verified and exactremote",
+      "behavioral_red": "b56 actualcompiled101;2workers6000modelreturns0validations; seal4bf103ca",
+      "invalid_attempt": "First intendedcace reusedredbinary invalid; seal834a37fa, no sourceattribution",
+      "actual_green": "cace recompiled fromintendedsnapshot; 28serialparallelcases14realworkerbuilds PASS; exactdifferentbinarybb597bdb; parenttrace/sourceaudit seal0a4f017d",
+      "runtime_obligation": "Focused originalmodeledsizevalidation proof achieved; PG2896/3016/TID oracle/P6-P12/finalacceptance pending",
+      "next": "PG oracle R1 setupFAILED:zero fixtures,removed; parentaudited/export8df00a1c. Corrected sibling R2 assigned including frozen171Parse/Bind controls; no enginecompile until terminal.",
+      "encoding": "Exact e686 focused3/library193pass2ignored PASS; measuredencoding/parscanTLS held",
+      "separate_gaps": "Measuredparbuild rawTOASTheapsizing MEDIUM remains outsideoriginalmodeledHIGH; newstats oracle pending"
+    },
+    "166": {
+      "bounded": "PASS",
+      "acceptance": "coverage/perf/finalintegration pending"
+    },
+    "169": {
+      "correctness": "PASS",
+      "performance": "HOLD/INCONCLUSIVE memory/indexoutlier/close topology"
+    },
+    "148": {
+      "performance": "HOLD/INCONCLUSIVE invalidfalsezero"
+    },
+    "149": {
+      "correctness": "focused endpointPASS",
+      "performance": "originalDDL101 unresolved; isolatedtargetNOTRUN/DEFERRED"
+    },
+    "171": {
+      "source": "a6fe3e4e on c861",
+      "focused": "3modes of1realSQLfile +kept7PASS ownerreported",
+      "full": "TERMINAL FAILED101: raw partial305pass/2fail/9ignored/33summaries; release/clippy/dist/unit NOTRUN, parentaudited ownerexportfdcb8f36",
+      "review": "Two introducedMEDIUMs: Parse-time Gather/settings drift and stalegenericcost atchoice; mechanicaltransplant exact",
+      "action": "Two bounded embedded Parse/Bind red filters authorized on frozen production; root PG controls assigned in R2; session-only lazy repair design UNAPPLIED",
+      "customANY_IN": "Earliercorrectnessdiscrepancies retained, no timing",
+      "behavioral_red": "Owner reports both compiled behavioral RED101 on productiona6fe:generic0/6vs1/5,parallelboth0/0vs2/2;correctrows/currentGather2. Fixture-onlyeb548388,rawexportpending;parent runtimeauditpending."
+    },
+    "172": "Baseline/research closure queued"
+  },
+  "crash_diagnostic": "R2review compileblocker missingModelDebug and evidence/oracle-order MEDIUMs; cache-onlyR3preparation assigned, no execution authorized",
+  "latest_parent_backup": "8df00a1c41405f9107d7cc44e757b11a61fb375d",
+  "oracle_r2_task": "node:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Athread-send%3Apg-resume-20261104-combined-pg18-oracles-r2"
+}
