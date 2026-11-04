@@ -50,7 +50,7 @@ export function machine(over: Partial<Machine> = {}): Machine {
 }
 
 export function project(over: Partial<Project> = {}): Project {
-  return { id: "prj_1", name: "roll", path: "/Users/ada/roll", repo: null, git: null, created_at: T0, updated_at: T0, ...over };
+  return { id: "prj_1", name: "roll", path: "/Users/ada/roll", repo: null, git: null, settings: { auto_pull: false, defaults: {}, scripts: [] }, pull: null, created_at: T0, updated_at: T0, ...over };
 }
 
 export function thread(over: Partial<Thread> = {}): Thread {

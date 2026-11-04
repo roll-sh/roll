@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowUpRight, CircleAlert, Folder, FolderPlus, GitBranch, GitFork, GitPullRequest, LogIn, MoreHorizontal, Plus, RefreshCw, SquareTerminal, Trash2 } from "lucide-react";
+import { ArrowUpRight, CircleAlert, Folder, FolderPlus, GitBranch, GitFork, GitPullRequest, LogIn, MoreHorizontal, Plus, RefreshCw, Settings2, SquareTerminal, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { coming, isRunning, machineState, reachable, type Machine, type Node, type Project, type ProviderInfo, type Request, type Run, type Thread } from "@/lib/agents-api";
 import { projectStats, type ProjectStats } from "@/lib/agents-graph";
@@ -10,6 +10,7 @@ import { ChangeChip, changeStatusLabel, WorkChip } from "./change";
 import { ContextMeter } from "./context-meter";
 import { Menu } from "./menu";
 import { NewProject } from "./project-new";
+import { ProjectSettingsDialog } from "./project-settings";
 import { RequestCard } from "./request-card";
 import { SandboxPanel } from "./sandbox";
 import { ago, loginCommand, MachineIcon, modelName, providerName, shortPath, Stat, StatusDot, threadStatusLabel, usageLine } from "./shared";
@@ -234,6 +235,7 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
   // An asleep sandbox counts: what's sent to it wakes it.
   const online = reachable(machine);
   const stats = projectStats(client.data, project.id);
+  const [settings, setSettings] = useState(false);
   return (
     <Card width={256} label={`Project ${project.name}`}>
       <div className="flex items-center gap-2 px-3.5 pt-3">
@@ -256,6 +258,7 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
             label="Project"
             trigger={<MoreHorizontal className="size-3.5" />}
             items={[
+              { label: "Settings", icon: <Settings2 />, onSelect: () => setSettings(true) },
               {
                 label: "Remove from roll",
                 confirm: "Remove? (the folder stays)",
@@ -294,6 +297,7 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
         </div>
       )}
       {error && <p className="px-3.5 pb-3 text-[12px] text-danger">{error}</p>}
+      {settings && <ProjectSettingsDialog project={project} machine={machine} onClose={() => setSettings(false)} />}
     </Card>
   );
 }

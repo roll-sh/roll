@@ -86,13 +86,16 @@ export function Composer({
 
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const [provider, setProvider] = useState<string>(() => thread?.provider ?? defaultProvider(providers)?.id ?? "");
-  const [model, setModel] = useState<string | null>(thread?.model ?? null);
-  const [effort, setEffort] = useState<string | null>(thread?.effort ?? null);
-  const [runtime, setRuntime] = useState<RuntimeMode>(thread?.runtime_mode ?? "auto_edit");
-  const [plan, setPlan] = useState<InteractionMode>(thread?.interaction_mode ?? "default");
+  // A new thread starts from its project's defaults (project settings), else the usual choices.
+  const defaults = mode.kind === "new" ? mode.project.settings?.defaults : undefined;
+  const preset = defaults?.provider && providers.some((p) => p.id === defaults.provider) ? defaults : undefined;
+  const [provider, setProvider] = useState<string>(() => thread?.provider ?? preset?.provider ?? defaultProvider(providers)?.id ?? "");
+  const [model, setModel] = useState<string | null>(thread?.model ?? preset?.model ?? null);
+  const [effort, setEffort] = useState<string | null>(thread?.effort ?? preset?.effort ?? null);
+  const [runtime, setRuntime] = useState<RuntimeMode>(thread?.runtime_mode ?? defaults?.runtime_mode ?? "auto_edit");
+  const [plan, setPlan] = useState<InteractionMode>(thread?.interaction_mode ?? defaults?.interaction_mode ?? "default");
   // A roll code project publishes threads as changes, which needs a worktree: on by default there.
-  const [worktree, setWorktree] = useState(mode.kind === "new" && !!mode.project.repo);
+  const [worktree, setWorktree] = useState(mode.kind === "new" && (defaults?.worktree ?? !!mode.project.repo));
   const [sendMode, setSendMode] = useState<SendMode>("queue");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

@@ -10,6 +10,8 @@ fn project(id: &str, name: &str) -> Entity {
         path: format!("/src/{name}"),
         repo: None,
         git: None,
+        settings: ProjectSettings::default(),
+        pull: None,
         created_at: 1,
         updated_at: 1,
     })

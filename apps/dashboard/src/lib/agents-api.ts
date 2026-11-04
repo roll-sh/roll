@@ -66,9 +66,60 @@ export interface Project {
   path: string;
   repo: RepoRef | null;
   git: GitInfo | null;
+  /** What the owner set (`project.update`). */
+  settings: ProjectSettings;
+  /** What the last pull did (auto-pull or `project.pull`). */
+  pull: PullResult | null;
   created_at: Millis;
   updated_at: Millis;
 }
+
+/** A project's settings (T3's per-project settings); `project.update` replaces them whole. */
+export interface ProjectSettings {
+  /** Fast-forward the checkout's default branch when the remote's moves, while it is clean. */
+  auto_pull: boolean;
+  /** What new threads in the project start with. */
+  defaults: ThreadDefaults;
+  /** Commands for the checkout or a thread's worktree (T3's project scripts). */
+  scripts: ProjectScript[];
+}
+
+/** Unset fields fall back to the composer's last choice. */
+export interface ThreadDefaults {
+  provider?: ProviderId;
+  model?: string;
+  effort?: string;
+  runtime_mode?: RuntimeMode;
+  interaction_mode?: InteractionMode;
+  /** New threads get their own worktree (`true`) or work in the checkout (`false`). */
+  worktree?: boolean;
+}
+
+export type ScriptIcon = "play" | "test" | "lint" | "configure" | "build" | "debug";
+
+export interface ProjectScript {
+  id: string;
+  name: string;
+  command: string;
+  icon: ScriptIcon;
+  /** Runs in each new worktree, beside the agent (the setup script). */
+  on_worktree: boolean;
+}
+
+export type PullSkip = "not_git" | "detached" | "other_branch" | "no_upstream" | "local_changes" | "diverged" | "busy" | "no_access";
+
+export type PullOutcome =
+  | { status: "pulled"; branch: string; from: string; to: string; commits: number }
+  | { status: "up_to_date"; branch: string }
+  | { status: "skipped"; reason: PullSkip; message: string }
+  | { status: "failed"; message: string };
+
+export interface PullResult {
+  at: Millis;
+  outcome: PullOutcome;
+}
+
+export const NO_SETTINGS: ProjectSettings = { auto_pull: false, defaults: {}, scripts: [] };
 
 export type RuntimeMode = "full_access" | "auto_edit" | "ask";
 export type InteractionMode = "default" | "plan";
@@ -453,6 +504,13 @@ export type Command =
   | { type: "project.add"; path: string; name?: string; clone?: RepoRef }
   | { type: "project.remove"; project: ProjectId }
   | {
+      type: "project.update";
+      project: ProjectId;
+      name?: string;
+      settings?: { auto_pull: boolean; defaults?: ThreadDefaults; scripts?: ProjectScript[] };
+    }
+  | { type: "project.pull"; project: ProjectId }
+  | {
       type: "thread.create";
       project: ProjectId;
       provider: ProviderId;
@@ -485,7 +543,16 @@ export type Command =
   | { type: "request.respond"; request: RequestId; response: RequestResponse }
   | { type: "checkpoint.rollback"; thread: ThreadId; checkpoint: CheckpointId }
   | { type: "thread.publish"; thread: ThreadId; message: string; land?: boolean }
-  | { type: "terminal.open"; project?: ProjectId; thread?: ThreadId; command?: string; cols: number; rows: number }
+  | {
+      type: "terminal.open";
+      project?: ProjectId;
+      thread?: ThreadId;
+      command?: string;
+      /** A project script's id: its command, told where it runs. */
+      script?: string;
+      cols: number;
+      rows: number;
+    }
   | { type: "terminal.input"; terminal: TerminalId; data: string }
   | { type: "terminal.resize"; terminal: TerminalId; cols: number; rows: number }
   | { type: "terminal.close"; terminal: TerminalId }
@@ -559,6 +626,7 @@ export type Reply =
   | ({ type: "file" } & FileContent)
   | ({ type: "git_status" } & GitStatus)
   | ({ type: "published" } & Published)
+  | ({ type: "pulled" } & PullResult)
   | { type: "scrollback"; data: string }
   | { type: "error"; code: ErrorCode; message: string };
 
@@ -711,17 +779,50 @@ const opt = nullable;
 
 const repoRefD: Decoder<RepoRef> = obj<RepoRef>({ owner: str, repo: str });
 const gitInfoD = obj<GitInfo>({ branch: opt(str), head: opt(str), remote: opt(str), dirty: bool });
+const runtimeModeD = literal("full_access", "auto_edit", "ask");
+const interactionModeD = literal("default", "plan");
+const threadDefaultsD = obj<ThreadDefaults>({
+  provider: optional(str),
+  model: optional(str),
+  effort: optional(str),
+  runtime_mode: optional(runtimeModeD),
+  interaction_mode: optional(interactionModeD),
+  worktree: optional(bool),
+});
+const projectScriptD = obj<ProjectScript>({
+  id: str,
+  name: str,
+  command: str,
+  icon: withDefault(literal("play", "test", "lint", "configure", "build", "debug"), () => "play" as const),
+  on_worktree: withDefault(bool, () => false),
+});
+const settingsFields = { auto_pull: withDefault(bool, () => false), defaults: optional(threadDefaultsD), scripts: optional(array(projectScriptD)) };
+const projectSettingsD = obj<ProjectSettings>({
+  auto_pull: settingsFields.auto_pull,
+  defaults: withDefault(threadDefaultsD, () => ({})),
+  scripts: vec(projectScriptD),
+});
+const pullOutcomeD: Decoder<PullOutcome> = tagged("status", {
+  pulled: obj<{ branch: string; from: string; to: string; commits: number }>({ branch: str, from: str, to: str, commits: int }),
+  up_to_date: obj<{ branch: string }>({ branch: str }),
+  skipped: obj<{ reason: PullSkip; message: string }>({
+    reason: literal("not_git", "detached", "other_branch", "no_upstream", "local_changes", "diverged", "busy", "no_access"),
+    message: str,
+  }),
+  failed: obj<{ message: string }>({ message: str }),
+} satisfies Record<PullOutcome["status"], Decoder<object>>);
+const pullResultD = obj<PullResult>({ at: int, outcome: pullOutcomeD });
 const projectD = obj<Project>({
   id: str,
   name: str,
   path: str,
   repo: opt(repoRefD),
   git: opt(gitInfoD),
+  settings: withDefault(projectSettingsD, () => ({ ...NO_SETTINGS })),
+  pull: opt(pullResultD),
   created_at: int,
   updated_at: int,
 });
-const runtimeModeD = literal("full_access", "auto_edit", "ask");
-const interactionModeD = literal("default", "plan");
 const attachmentD = obj<Attachment>({ name: str, mime: str, data: str });
 const usageFields = {
   input_tokens: withDefault(int, () => 0),
@@ -952,6 +1053,8 @@ const cmd = <K extends CommandType>(shape: Decoder<Body<Command, K>>) => shape;
 export const commandD: Decoder<Command> = tagged("type", {
   "project.add": cmd<"project.add">(obj({ path: str, name: optional(str), clone: optional(repoRefD) })),
   "project.remove": cmd<"project.remove">(obj({ project: str })),
+  "project.update": cmd<"project.update">(obj({ project: str, name: optional(str), settings: optional(obj(settingsFields)) })),
+  "project.pull": cmd<"project.pull">(obj({ project: str })),
   "thread.create": cmd<"thread.create">(
     obj({
       project: str,
@@ -990,7 +1093,7 @@ export const commandD: Decoder<Command> = tagged("type", {
   "checkpoint.rollback": cmd<"checkpoint.rollback">(obj({ thread: str, checkpoint: str })),
   "thread.publish": cmd<"thread.publish">(obj({ thread: str, message: str, land: optional(bool) })),
   "terminal.open": cmd<"terminal.open">(
-    obj({ project: optional(str), thread: optional(str), command: optional(str), cols: int, rows: int }),
+    obj({ project: optional(str), thread: optional(str), command: optional(str), script: optional(str), cols: int, rows: int }),
   ),
   "terminal.input": cmd<"terminal.input">(obj({ terminal: str, data: str })),
   "terminal.resize": cmd<"terminal.resize">(obj({ terminal: str, cols: int, rows: int })),
@@ -1025,6 +1128,7 @@ export const replyD: Decoder<Reply> = tagged("type", {
     ),
   }),
   scrollback: obj<{ data: string }>({ data: str }),
+  pulled: pullResultD,
   error: obj<{ code: ErrorCode; message: string }>({
     code: literal("not_found", "invalid", "conflict", "provider", "machine_offline", "timeout", "internal"),
     message: str,

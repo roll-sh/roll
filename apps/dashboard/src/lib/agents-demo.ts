@@ -6,6 +6,8 @@
  */
 
 import type {
+  PullOutcome,
+  PullResult,
   Approval,
   ChangeStatus,
   Landing,
@@ -36,7 +38,7 @@ import type {
   ThreadId,
   Todo,
 } from "./agents-api";
-import { reachable } from "./agents-api";
+import { NO_SETTINGS, reachable } from "./agents-api";
 import type { AgentsTransport } from "./agents-client";
 import { memoryCanvas, type AgentsServices, type RepoChoice } from "./agents-services";
 import { ApiError } from "./code-api";
@@ -441,6 +443,23 @@ export class DemoOwner implements AgentsTransport {
     this.put("thread", { ...rest, ...patch, updated_at: now() }, this.machineOf(tid));
   }
 
+  /** Auto-pull's rules, pretended: a dirty checkout is skipped, a clean one comes up to date. */
+  private demoPull(pid: string, machine: MachineId): PullResult | null {
+    const p = this.get<Project>("project", pid);
+    if (!p) return null;
+    const branch = p.git?.branch ?? "main";
+    const outcome: PullOutcome = p.git?.dirty
+      ? { status: "skipped", reason: "local_changes", message: "the checkout has uncommitted changes" }
+      : p.pull?.outcome.status === "pulled" || p.pull?.outcome.status === "up_to_date"
+        ? { status: "up_to_date", branch }
+        : { status: "pulled", branch, from: p.git?.head ?? "f35f34cf", to: "9fceb02d", commits: 2 };
+    const pull = { at: now(), outcome };
+    const { kind: _k, ...rest } = p as Project & { kind?: string };
+    const git = p.git && outcome.status === "pulled" ? { ...p.git, head: outcome.to } : p.git;
+    this.put("project", { ...rest, git, pull, updated_at: now() }, machine);
+    return pull;
+  }
+
   private patchRun(rid: string, patch: Partial<Run>) {
     const r = this.get<Run & { kind: string }>("run", rid);
     if (!r) return;
@@ -712,17 +731,44 @@ export class DemoOwner implements AgentsTransport {
     this.cursor = 2;
     this.nap();
 
-    const project = (pid: string, name: string, path: string, branch: string, dirty: boolean, repo: string | null): Project => ({
+    const project = (pid: string, name: string, path: string, branch: string, dirty: boolean, repo: string | null, over: Partial<Project> = {}): Project => ({
       id: pid,
       name,
       path,
       repo: repo ? { owner: "acme", repo } : null,
       git: { branch, head: "f35f34cf", remote: repo ? `https://roll.sh/acme/${repo}.git` : null, dirty },
+      settings: { ...NO_SETTINGS },
+      pull: null,
       created_at: t0,
       updated_at: t0,
+      ...over,
     });
-    this.put("project", project("prj_demo_roll", "roll", "/Users/ada/roll", "main", true, "roll"), MBP);
-    this.put("project", project("prj_demo_web", "web", "/Users/ada/web", "main", false, "web"), MBP);
+    this.put(
+      "project",
+      project("prj_demo_roll", "roll", "/Users/ada/roll", "main", true, "roll", {
+        settings: {
+          auto_pull: true,
+          defaults: { provider: "claude", runtime_mode: "auto_edit", worktree: true },
+          scripts: [
+            { id: "setup", name: "Install", command: "pnpm install", icon: "configure", on_worktree: true },
+            { id: "test", name: "Test", command: "cargo test -p roll-cli", icon: "test", on_worktree: false },
+          ],
+        },
+        pull: {
+          at: t0 - 6 * 60_000,
+          outcome: { status: "skipped", reason: "local_changes", message: "the checkout has uncommitted changes" },
+        },
+      }),
+      MBP,
+    );
+    this.put(
+      "project",
+      project("prj_demo_web", "web", "/Users/ada/web", "main", false, "web", {
+        settings: { ...NO_SETTINGS, auto_pull: true },
+        pull: { at: t0 - 14 * 60_000, outcome: { status: "pulled", branch: "main", from: "8ea39e4d", to: "f35f34cf", commits: 3 } },
+      }),
+      MBP,
+    );
     this.put("project", project("prj_demo_infra", "infra", "/home/roll/infra", "main", false, "infra"), BOX);
 
     const base = (tid: string, pid: string, title: string, provider: string, model: string, over: Partial<Thread> = {}): Omit<Thread, never> => ({
@@ -1209,12 +1255,39 @@ export class DemoOwner implements AgentsTransport {
       case "project.add": {
         const pid = id("prj_");
         const name = c.name ?? c.path.split("/").filter(Boolean).pop() ?? "project";
-        this.put("project", { id: pid, name, path: c.path, repo: c.clone ?? null, git: { branch: "main", head: "f35f34cf", remote: null, dirty: false }, created_at: now(), updated_at: now() }, machine);
+        this.put(
+          "project",
+          {
+            id: pid,
+            name,
+            path: c.path,
+            repo: c.clone ?? null,
+            git: { branch: "main", head: "f35f34cf", remote: null, dirty: false },
+            settings: { ...NO_SETTINGS },
+            pull: null,
+            created_at: now(),
+            updated_at: now(),
+          },
+          machine,
+        );
         return { type: "created", id: pid };
       }
       case "project.remove":
         this.remove("project", c.project, null);
         return { type: "ok" };
+      case "project.update": {
+        const p = this.get<Project>("project", c.project);
+        if (!p) return notFound("project");
+        const settings = c.settings ? { auto_pull: c.settings.auto_pull, defaults: c.settings.defaults ?? {}, scripts: c.settings.scripts ?? [] } : p.settings;
+        const next = { ...p, name: c.name?.trim() || p.name, settings, updated_at: now() };
+        this.put("project", next, machine);
+        if (settings.auto_pull && !p.settings.auto_pull) this.after(600, () => this.demoPull(c.project, machine));
+        return { type: "ok" };
+      }
+      case "project.pull": {
+        const result = this.demoPull(c.project, machine);
+        return result ? { type: "pulled", ...result } : notFound("project");
+      }
       case "terminal.open": {
         const tid = id("trm_");
         const p = c.project ? this.get<Project>("project", c.project) : undefined;

@@ -620,7 +620,8 @@ POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, com
        `thread.unarchive`, `message.send`, `message.unqueue`, `run.interrupt`, `thread.publish`,
        `diff.get`, `git.status`, and `fs.list`/`fs.read` in a project. The rest (`terminal.*`,
        `fs.list` without a project, `request.respond`, `project.add`, `project.remove`,
-       `thread.delete`, `checkpoint.rollback`, `provider.refresh`) needs Code::manages.
+       `project.update`, `project.pull`, `thread.delete`, `checkpoint.rollback`, `provider.refresh`)
+       needs Code::manages.
        200 with the Reply, or Reply.Error {type: "error", code, message, error /* = message */} with
        not_found 404, invalid 400, conflict 409, provider 422, internal 502,
        machine_offline 503 (not connected), timeout 504 (no reply in time).
@@ -637,7 +638,11 @@ POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, com
        for that repo to the daemon. The repo must be the machine's owner's (400 otherwise, 404 when it
        doesn't exist or the caller can't read it); publishing needs write access to it (403). A
        clone's grant only fetches; a publish's pushes only the thread's worktree branch (400 when that
-       is the repo's default branch; a thread without a worktree gets none).
+       is the repo's default branch; a thread without a worktree gets none). `project.pull`, and
+       `project.update` with `settings.auto_pull` (it pulls at once), in a roll code project carry a
+       fetch-only grant too (docs/code/agents.md, "Project settings"); `project.pull` answers
+       {type: "pulled", at, outcome: {status: "pulled", branch, from, to, commits} | {status:
+       "up_to_date", branch} | {status: "skipped", reason, message} | {status: "failed", message}}.
        `thread.publish` answers Published {branch, commit, change: number | null /* the branch's open
        change */, url: string | null, landing?: Landing /* with land: true */};
        Landing = {status: "landed" | "queued" | "blocked" | "conflict" | "failed", message, blockers: string[]}:

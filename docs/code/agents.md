@@ -57,7 +57,8 @@ need. Every entity is a full record keyed by its id; a change re-sends the whole
 
 ```
 Machine            a daemon (hostname, os, providers and their auth state, online)
-  Project          a directory on that machine, optionally a roll code repo
+  Project          a directory on that machine, optionally a roll code repo; its settings
+                   (auto-pull, new-thread defaults, scripts) and last pull
     Thread         one agent conversation: provider, model, modes, worktree, lineage,
                    its context window
       Run          one user turn (prompt → completion), with its checkpoint, usage and
@@ -335,9 +336,10 @@ server (`docs/orchestration-v2/orchestrator-mcp-server.md` there), ported in
     thread as the relay mirrors it), fork, message, interrupt, archive and publish them, and read
     their state, diffs, status and files inside a project.
   - Terminals, files outside a project (`fs.list` without one), answering a thread's approvals
-    and questions (an agent could approve itself), adding or removing projects (also `POST
-    …/projects`), deleting threads, rollbacks and `provider.refresh` need `Code::manages`, as
-    do adding, renaming or revoking machines, sandboxes and shares.
+    and questions (an agent could approve itself), adding, changing (`project.update`,
+    `project.pull`) or removing projects (also `POST …/projects`), deleting threads, rollbacks and
+    `provider.refresh` need `Code::manages`, as do adding, renaming or revoking machines,
+    sandboxes and shares.
   - Why the relay and not the daemon: agent tokens are the relay's idea (the daemon sees only a
     `by`), and the relay is the one place every command passes. Delegated subagents (the
     daemon's orchestrator MCP) already only narrow modes.
@@ -449,6 +451,50 @@ that change (checks, reviews, the merge queue, landing) shows on the thread. The
   - **Publishing does the item.** `thread.publish` links the branch's change to the thread's item
     (`PATCH /v1/code/changes/{id} {work_item}` as the sender), as if the change had been opened
     with it: the item moves to `review`, and landing the change marks it `done`.
+
+## Project settings
+
+A project keeps settings of its own (`Project.settings`), T3 Code's per-project settings
+(`packages/contracts/src/settings.ts`, `ProjectStore.ts`, migration
+`045_ProjectionProjectsAutoPull.ts` there). `project.update {project, name?, settings?}` renames
+it or replaces its settings whole, and replies once the record is stored. Code:
+`agent-host/src/orchestrator/projects.rs`, `git.rs` (`fast_forward`),
+`code-control/src/agents/pull.rs`; the panel is `components/agents/project-settings.tsx`.
+
+- **Auto-pull** (`auto_pull`, off by default as in T3): keep the checkout's default branch current
+  when a change lands or a PR merges. It follows T3's `maybeAutoPull` (`VcsStatusBroadcaster.ts`):
+  the checkout must be on the remote's default branch (`refs/remotes/<remote>/HEAD`, else `main` or
+  `master`) with an upstream; after a fetch it must be behind and not ahead, and the work tree clean
+  (untracked files count); then `git merge --ff-only` of the fetched branch. Anything else is a
+  reason (`not_git`, `detached`, `other_branch`, `no_upstream`, `local_changes`, `diverged`, and
+  roll's own `busy`: a thread is running in the checkout itself, and `no_access`), and nothing is
+  touched: the user's files and index move only in that one fast-forward (`status` runs without
+  refreshing the index, `GIT_OPTIONAL_LOCKS=0`). `project.pull` does the same at once, whether or
+  not auto-pull is on, and answers `Reply::Pulled`.
+- **The last result** is kept on the project (`Project.pull {at, outcome}`; T3 only logs it), so
+  the canvas says what happened ("Pulled 3 commits into main", "Didn't pull: the checkout has
+  uncommitted changes"). The same outcome again keeps its first time and writes nothing, so a
+  project that stays up to date sends no records.
+- **What triggers it.** Both, because a roll code checkout can't fetch on its own:
+  - A plain git project fetches with the user's own git setup (credential helpers, ssh in batch
+    mode), a round at startup and every `[projects] pull_every` seconds (60; 0 never), as T3 pulls
+    every project at startup and polls while a client watches.
+  - A roll code project's remote has no credentials, so the relay asks: `project.pull` with a
+    fetch-only grant for the repo whenever the repo's default-branch head isn't the project's
+    mirrored `git.head`, looked at every 30 s and as soon as the store says something landed (a
+    hint; a dropped one loses nothing). Once per head, again after 5 minutes while the checkout
+    still isn't there (it may have had local changes). Turning auto-pull on (`project.update` with
+    it, granted the same way) pulls at once.
+- **Defaults for new threads** (`defaults`: provider, model, effort, runtime and interaction mode,
+  worktree or the checkout), T3's project defaults. The composer starts a new thread from them;
+  `thread.create` itself always says everything, so the daemon doesn't apply them.
+- **Scripts** (`scripts`: id, name, command, icon), T3's project scripts. `terminal.open {script}`
+  runs one in a terminal, in the thread's worktree or the project's checkout, with
+  `ROLL_PROJECT_ROOT` (and `ROLL_WORKTREE_PATH`) set. The first with `on_worktree` is the setup
+  script: it runs in each new worktree (new threads, forks and delegated tasks with one) beside the
+  agent, as T3's `ProjectSetupScriptRunner` does for `async` scripts (roll doesn't make the agent
+  wait). A script that can't start never fails the thread.
+- Shares leave a project's settings and last pull out (a command can hold anything).
 
 ## Sandboxes
 
@@ -629,7 +675,9 @@ The surface has three views:
   while it boots. A sandbox's card shows its size, status, price and this month's usage, with
   start, stop and delete, and puts logging a provider in first (a terminal on the canvas running
   the device login). A machine with no projects offers adding one (a folder, a clone of one of the
-  owner's roll code repos, or a new repo); a project with no threads offers starting one. Offline
+  owner's roll code repos, or a new repo, with auto-pull offered right there: on for a clone, off
+  for a folder); a project's card has "Settings" in its menu (a sheet over the page: auto-pull and
+  its last result, new-thread defaults, scripts); a project with no threads offers starting one. Offline
   machines are dimmed with when they were last seen. A sandbox that isn't connected is never
   "offline": it's asleep ("Asleep · wakes when an agent needs it", no Stop), stopped, or waking
   (pulsing, on every open canvas), and its threads' composers, approvals and actions stay usable

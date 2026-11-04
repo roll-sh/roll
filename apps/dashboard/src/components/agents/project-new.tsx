@@ -2,7 +2,7 @@
 
 import { ChevronRight, Folder, FolderOpen, Lock, Search } from "lucide-react";
 import { useEffect, useState } from "react";
-import { commandId, expectOk, type FsEntry, type Machine } from "@/lib/agents-api";
+import { commandId, expectOk, NO_SETTINGS, type FsEntry, type Machine } from "@/lib/agents-api";
 import type { RepoChoice } from "@/lib/agents-services";
 import { btn, input, primary } from "../ui";
 import { shortPath } from "./shared";
@@ -20,11 +20,24 @@ const TABS: { id: Tab; label: string }[] = [
  * Add a project to a machine three ways: a directory already there (`fs.list`), a clone of one of
  * the owner's roll code repos (`project.add` with `clone`), or a new roll code repo started as a
  * project (`POST …/machines/{machine}/projects`). `onAdded` gets the new project's id.
+ *
+ * Auto-pull is offered right here (project settings): on for a fresh clone, which nobody edits
+ * on its default branch, off for a folder that is someone's working checkout.
  */
 export function NewProject({ machine, onClose, onAdded }: { machine: Machine; onClose: () => void; onAdded: (project: string) => void }) {
-  const { services, demo } = useAgents();
+  const { client, services, demo } = useAgents();
   const [tab, setTab] = useState<Tab>("folder");
+  const [pull, setPull] = useState<boolean | null>(null);
+  const autoPull = pull ?? tab !== "folder";
   const tabs = services ? TABS : TABS.slice(0, 1);
+  // The project exists once added; turning auto-pull on is best effort (its settings say).
+  const added = async (id: string) => {
+    const existing = client.data.projects.get(id)?.value.settings;
+    if (autoPull && !existing?.auto_pull) {
+      await client.send(machine.id, { type: "project.update", project: id, settings: { ...(existing ?? NO_SETTINGS), auto_pull: true } }).catch(() => null);
+    }
+    onAdded(id);
+  };
   return (
     <div data-nodrag className="space-y-2 rounded-lg border border-line bg-bg p-2">
       {tabs.length > 1 && (
@@ -42,9 +55,16 @@ export function NewProject({ machine, onClose, onAdded }: { machine: Machine; on
           ))}
         </div>
       )}
-      {tab === "folder" && <DirBrowser machine={machine} onClose={onClose} onAdded={onAdded} />}
-      {tab === "clone" && <CloneRepo machine={machine} onClose={onClose} onAdded={onAdded} />}
-      {tab === "new" && <NewRepo machine={machine} onClose={onClose} onAdded={onAdded} demo={demo} />}
+      {tab === "folder" && <DirBrowser machine={machine} onClose={onClose} onAdded={added} />}
+      {tab === "clone" && <CloneRepo machine={machine} onClose={onClose} onAdded={added} />}
+      {tab === "new" && <NewRepo machine={machine} onClose={onClose} onAdded={added} demo={demo} />}
+      <label className="flex items-start gap-1.5 border-t border-line px-0.5 pt-2 text-[12px] text-muted" title="You can change it later in the project's settings">
+        <input type="checkbox" checked={autoPull} onChange={(e) => setPull(e.target.checked)} className="mt-0.5 accent-[var(--accent)]" />
+        <span>
+          Pull merged changes
+          <span className="block text-[11px] text-subtle">Fast-forwards the default branch while the checkout has no local changes.</span>
+        </span>
+      </label>
     </div>
   );
 }
@@ -52,7 +72,7 @@ export function NewProject({ machine, onClose, onAdded }: { machine: Machine; on
 interface Step {
   machine: Machine;
   onClose: () => void;
-  onAdded: (project: string) => void;
+  onAdded: (project: string) => void | Promise<void>;
 }
 
 function useAct() {
@@ -145,7 +165,7 @@ export function DirBrowser({ machine, onClose, onAdded }: Step) {
           onClick={() =>
             act("add", async () => {
               const r = await client.run<{ type: "created"; id: string }>(machine.id, { type: "project.add", path }, "created");
-              onAdded(r.id);
+              await onAdded(r.id);
               onClose();
             })
           }
@@ -210,7 +230,7 @@ function CloneRepo({ machine, onClose, onAdded }: Step) {
                     if (!ids.has(r.full_name)) ids.set(r.full_name, commandId());
                     const reply = await client.send(machine.id, { type: "project.add", path: "", clone: { owner: r.owner, repo: r.name } }, ids.get(r.full_name));
                     const created = expectOk<{ type: "created"; id: string }>(reply, "created");
-                    onAdded(created.id);
+                    await onAdded(created.id);
                     onClose();
                   })
                 }
@@ -260,7 +280,7 @@ function NewRepo({ machine, onClose, onAdded, demo }: Step & { demo: boolean }) 
           });
           const created = expectOk<{ type: "created"; id: string }>(reply, "created");
           setId(commandId());
-          onAdded(created.id);
+          await onAdded(created.id);
           onClose();
         });
       }}

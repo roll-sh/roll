@@ -95,6 +95,8 @@ describe("agent-proto fixtures", () => {
     const all: Record<CommandType, true> = {
       "project.add": true,
       "project.remove": true,
+      "project.update": true,
+      "project.pull": true,
       "thread.create": true,
       "thread.configure": true,
       "thread.fork": true,
