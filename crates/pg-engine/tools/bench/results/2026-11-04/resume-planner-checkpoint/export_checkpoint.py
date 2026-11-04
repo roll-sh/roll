@@ -457,6 +457,9 @@ for name in ('remaining171-lazy-v1.sh', 'remaining171-stage-audit.py', 'remainin
     sources['runners/' + name] = str(D / name)
 for name in ('source.txt', 'tree.txt', 'initial.status', 'startup-controls.json', 'toolchain.txt', 'disk-before-build.json', 'build.command'):
     sources['remaining171-lazy-v1/' + name] = str(D / 'remaining171-lazy-v1' / name)
+# Separate dist stage is closed; unit output is still active and excluded.
+for name in ('build.log', 'build-audit.log', 'build-artifact.json', 'build-completion.json', 'affinity-observation-dist-build.json'):
+    sources['remaining171-lazy-v1/' + name] = str(D / 'remaining171-lazy-v1' / name)
 for name, source in sources.items():
     files[name] = Path(source).read_bytes()
 files['manifest.json'] = (json.dumps({name: {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}

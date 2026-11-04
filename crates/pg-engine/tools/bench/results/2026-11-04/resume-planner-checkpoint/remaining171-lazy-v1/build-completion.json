@@ -1,0 +1,17 @@
+{
+  "stage": "build",
+  "command_exit": 0,
+  "stage_audit_exit": 0,
+  "artifact": {
+    "binary": "/home/meszmate/.cache/a171/bin/lazy-cac0933b/roll-engine",
+    "sha256": "02155aafc79c86e24696f4f0cae43b10c54774aac4b33c5d7f0dd767a3d06fb3",
+    "bytes": 69451432,
+    "profile": "dist",
+    "source": "cac0933bc4eb5ef87674889542cab271de4615d0",
+    "source_artifact": "/home/meszmate/.cache/a171/target/dist/roll-engine",
+    "source_artifact_matches": true
+  },
+  "unit_stage": "ACTIVE;notcomplete;activeoutputexcluded",
+  "original_pipeline": "FAILED/PARTIAL unchanged;buildNOTRUNthere",
+  "observed_utc": "2026-11-04T22:58:14.150409+00:00"
+}

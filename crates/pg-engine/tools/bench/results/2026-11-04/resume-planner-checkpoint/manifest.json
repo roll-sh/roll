@@ -772,8 +772,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "78b3f17e11e6b567ea8bd30c9b48892fdfb3ed33c7d547cd7dcd6365fa5ec88a",
-    "bytes": 39449
+    "sha256": "b6a54a788757e9b855e1a46452e1e2476c4fda67e700e554d8ccfc07973d19c9",
+    "bytes": 39743
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -1827,9 +1827,29 @@
     "sha256": "4409070528e5249d7aca2869b2fd67ceeaf88cb77af0311b1588dc1271c2d0bc",
     "bytes": 421
   },
+  "remaining171-lazy-v1/affinity-observation-dist-build.json": {
+    "sha256": "8d0eecb906a46f3e5d3143aff4d7d1ce8574ce626394a0416d3f6e7784960394",
+    "bytes": 1904
+  },
+  "remaining171-lazy-v1/build-artifact.json": {
+    "sha256": "fd2a991895a324f9bfc7d2b89a6d037e99dfab711e96bece808c8dd89c6fade0",
+    "bytes": 363
+  },
+  "remaining171-lazy-v1/build-audit.log": {
+    "sha256": "78383ff408ef881fb7c0074bc7c0920e9f3a5ea34beea32b761744bee5f23464",
+    "bytes": 17
+  },
+  "remaining171-lazy-v1/build-completion.json": {
+    "sha256": "75b471c4a8ec17e00e911eab894f48e9da368c914dcc0518d6e05c0cf4b04cae",
+    "bytes": 644
+  },
   "remaining171-lazy-v1/build.command": {
     "sha256": "a07bb951576e7a8a4b2043e5eec8b2f6254bb57f0a4e9636e781ce351d7f7927",
     "bytes": 59
+  },
+  "remaining171-lazy-v1/build.log": {
+    "sha256": "31863c88692878269b54b1f68e78b985b6f79b8732240b72b2fc0b3456079d0b",
+    "bytes": 5964
   },
   "remaining171-lazy-v1/disk-before-build.json": {
     "sha256": "c8b5ec2754c989663c98e0464d76f20706a57f08c129f96598efe127e0774d63",
