@@ -227,19 +227,6 @@ pub struct ScanPlan {
     /// known): the FROM items, join and subquery entries in parse order, then the relations of
     /// subqueries pulled up (a foreign join's remote SQL names relations `r<index>`).
     pub rtindex: RtIndex,
-    /// The (startup, total) cost of the access path the planner chose for it
-    /// (`sql::paths` `apply`), EXPLAIN's for the scan node; None when no path was costed.
-    pub est: ScanEst,
-}
-
-/// `ScanPlan::est`. Not part of its Debug text.
-#[derive(Clone, Copy, Default)]
-pub struct ScanEst(pub Option<(f64, f64)>);
-
-impl std::fmt::Debug for ScanEst {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("_")
-    }
 }
 
 /// `ScanPlan::rtindex`. Not part of its Debug text.

@@ -2422,7 +2422,6 @@ impl Binder<'_, '_> {
                     reltarget: Default::default(),
                     fdw: None,
                     rtindex: Default::default(),
-                    est: Default::default(),
                 };
                 let mut scan = scan;
                 if self.dml_inh {
@@ -2797,7 +2796,6 @@ impl Binder<'_, '_> {
                     reltarget: Default::default(),
                     fdw: None,
                     rtindex: Default::default(),
-                    est: Default::default(),
                 };
                 if inh {
                     // (Through a view: its relation's name in the view, not the MERGE's

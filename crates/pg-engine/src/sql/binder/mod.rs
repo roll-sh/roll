@@ -149,8 +149,7 @@ impl Analyzed {
             param_domains: self.param_domains.clone(),
             gathers: Default::default(),
             cost: Default::default(),
-        }
-        .costed(ctx))
+        })
     }
 
     /// `plan`, once.
@@ -167,8 +166,7 @@ impl Analyzed {
             param_domains: self.param_domains,
             gathers: Default::default(),
             cost: Default::default(),
-        }
-        .costed(ctx))
+        })
     }
 
     /// The plan, planned, with the range table entries it hides.
@@ -214,29 +212,6 @@ impl Analyzed {
 }
 
 impl BoundQuery {
-    /// The plan's cost and Gathers, where the planner's chosen path gives them
-    /// (`paths::planned_total`: a lone scan EXPLAIN places no Gather over), so neither a
-    /// custom plan's costing (`Session::plan_cost`) nor its execution's Gathers
-    /// (`parallel_part::start`) builds the plan's EXPLAIN tree.
-    fn costed(self, ctx: &ExecCtx) -> BoundQuery {
-        if let Some(total) = crate::sql::paths::planned_total(&self.plan, ctx) {
-            // (Debug builds: it is EXPLAIN's, with no Gather.)
-            #[cfg(debug_assertions)]
-            {
-                let (t, found) = crate::sql::explain::total_and_gathers(&self.plan, ctx);
-                assert!(
-                    found.is_empty() && (t - total).abs() <= 1e-9 * t.abs().max(1.0),
-                    "planned cost {total} isn't EXPLAIN's {t} ({} Gathers) for {:?}",
-                    found.len(),
-                    self.plan
-                );
-            }
-            let _ = self.cost.set((self.plan.clone(), total));
-            let _ = self.gathers.set((self.plan.clone(), Arc::from(Vec::new())));
-        }
-        self
-    }
-
     /// Check the privileges the statement needs, as the current user.
     pub fn check_perms(&self, ctx: &ExecCtx) -> Result<()> {
         perms::check(&self.perms, ctx)

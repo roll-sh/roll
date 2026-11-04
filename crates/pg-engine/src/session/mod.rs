@@ -1945,7 +1945,10 @@ impl Session {
             let total = match bq.cost.get() {
                 Some((p, t)) if Arc::ptr_eq(p, &bq.plan) => *t,
                 _ => {
-                    let (t, found) = crate::sql::explain::total_and_gathers(&bq.plan, ctx);
+                    let (t, found) = match crate::sql::paths::planned_total(&bq.plan, ctx) {
+                        Some(t) => (t, Vec::new()),
+                        None => crate::sql::explain::total_and_gathers(&bq.plan, ctx),
+                    };
                     let gathers = crate::exec::parallel_part::of_explain(&bq.plan, found);
                     let _ = bq.gathers.set((bq.plan.clone(), gathers.into()));
                     let _ = bq.cost.set((bq.plan.clone(), t));

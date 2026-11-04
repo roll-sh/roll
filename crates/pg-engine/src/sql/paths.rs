@@ -4041,7 +4041,6 @@ fn to_bitmap(rel: &Rel, b: &BPath) -> BitmapQual {
 /// Record path `p` in the scan.
 fn apply(rel: &Rel, s: &mut ScanPlan, p: &Path) {
     s.params = crate::sql::plan::ScanParams(rel.params.clone());
-    s.est = crate::sql::plan::ScanEst(Some((p.startup, p.total)));
     match &p.kind {
         PathKind::Seq => {
             s.index = None;
@@ -6132,11 +6131,6 @@ impl Planner<'_, '_> {
         {
             s.access = Access::Seq;
             s.index = None;
-            // (cost_seqscan, as `paths` costs it.)
-            let total = rel.qual_startup
-                + self.g.seq_page_cost * rel.size.pages
-                + (seq_cpu_tuple_cost(&self.cat, &rel.table) + rel.qual_cost) * rel.size.tuples;
-            s.est = crate::sql::plan::ScanEst(Some((rel.qual_startup, total)));
             return false;
         }
         let path = self.choose(&rel, want, width);
@@ -6550,13 +6544,9 @@ pub fn plan_query_limited(ctx: &ExecCtx, plan: &mut Plan, lim: Option<(f64, f64)
     plan_level(ctx, plan, &vec![true; w], lim)
 }
 
-/// The plan's total cost as EXPLAIN shows it, from the cost the planner kept with the path
-/// it chose (`ScanPlan::est`), where that is the plan's: a lone scan of a table, under
-/// projections of its columns, with no sub-select in its expressions, over which EXPLAIN
-/// places no Gather (it places them itself: none when the scan costs less than
-/// parallel_setup_cost, with add_path's fuzz, as `explain::total_and_gathers` bounds it).
-/// None otherwise: EXPLAIN's estimate (`explain::estimate`) is the cost. Prepared statements'
-/// custom plans are costed so every execution (`Session::plan_cost`).
+/// The current total cost of a lone scan under column-only projections, where EXPLAIN
+/// places no Gather. Other shapes keep the full EXPLAIN costing path. Read lazily when
+/// a prepared plan choice first needs its cost, under that call's settings and estimates.
 pub fn planned_total(plan: &Plan, ctx: &ExecCtx) -> Option<f64> {
     let mut p = plan;
     while let Plan::Project { input, exprs } = p {
@@ -6568,7 +6558,6 @@ pub fn planned_total(plan: &Plan, ctx: &ExecCtx) -> Option<f64> {
     let Plan::Scan(s) = p else {
         return None;
     };
-    let (_, total) = s.est.0?;
     if !matches!(s.access, Access::Seq | Access::Index { .. })
         || s.table.is_foreign()
         || s.sample.is_some()
@@ -6594,6 +6583,7 @@ pub fn planned_total(plan: &Plan, ctx: &ExecCtx) -> Option<f64> {
     if sub {
         return None;
     }
+    let total = describe(ctx, s)?.total;
     let cfg = parallel::ParCfg::read(ctx);
     if cfg.max_workers > 0 && (parallel::debug_parallel_query(ctx) || total * 1.02 >= cfg.setup_cost) {
         return None;
