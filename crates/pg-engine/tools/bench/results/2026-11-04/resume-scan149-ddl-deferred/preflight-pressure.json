@@ -1,0 +1,9 @@
+{
+  "at_utc": "2026-11-04T16:35:34.206380+00:00",
+  "load": "14.30 14.19 16.19 13/9665 1843876\n",
+  "psi": {
+    "cpu": "some avg10=0.02 avg60=0.73 avg300=1.90 total=20259764040\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+    "io": "some avg10=0.00 avg60=0.06 avg300=0.02 total=954518190\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=729239507\n",
+    "memory": "some avg10=0.03 avg60=0.24 avg300=0.08 total=444228927\nfull avg10=0.03 avg60=0.24 avg300=0.08 total=396303043\n"
+  }
+}

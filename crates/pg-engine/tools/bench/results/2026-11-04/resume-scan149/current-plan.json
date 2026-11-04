@@ -1,0 +1,111 @@
+{
+  "worktree": "/home/meszmate/roll/.claude/worktrees/agent-a814fa71b51112148",
+  "head": "2a854a48074dbd3317807f634a773f29540b2673",
+  "output": "/home/meszmate/.cache/pg-engine-resume-20261104/execution_models/a149-verify-current",
+  "env": {
+    "TMPDIR": "/home/meszmate/.cache/a149/tmp",
+    "CARGO_TARGET_DIR": "/home/meszmate/.cache/a149/target",
+    "CARGO_BUILD_JOBS": "2",
+    "RUST_TEST_THREADS": "2"
+  },
+  "stages": [
+    {
+      "name": "build",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "pg-engine",
+        "--bin",
+        "roll-engine"
+      ],
+      "expect": "Finished .* profile",
+      "env": {}
+    },
+    {
+      "name": "debug",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "pg-engine"
+      ],
+      "expect": "^test result: ok\\.",
+      "env": {}
+    },
+    {
+      "name": "release",
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "pg-engine"
+      ],
+      "expect": "^test result: ok\\.",
+      "env": {}
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "-p",
+        "pg-engine",
+        "--all-targets"
+      ],
+      "expect": "Finished .* profile",
+      "env": {}
+    },
+    {
+      "name": "crash30",
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "pg-engine",
+        "--test",
+        "crash_random"
+      ],
+      "expect": "^test result: ok\\.",
+      "env": {
+        "CRASH_SEEDS": "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30",
+        "CRASH_ROUNDS": "4"
+      }
+    },
+    {
+      "name": "spill",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "pg-engine",
+        "--test",
+        "txn_spill",
+        "--test",
+        "toast_storage",
+        "--test",
+        "drop_storage",
+        "--test",
+        "heap_order_scan",
+        "--test",
+        "stored_filters"
+      ],
+      "expect": "^test result: ok\\.",
+      "env": {
+        "ROLL_TXN_SPILL_BYTES": "4096"
+      }
+    },
+    {
+      "name": "postgres-unit",
+      "command": [
+        "pnpm",
+        "test:pg",
+        "--unit"
+      ],
+      "expect": "(test result: ok\\.|[Ss][Kk][Ii][Pp]|[Ss]kipping)",
+      "env": {}
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "head": "26f4bfac98647989ecff63ef234ec2a8a96d5771",
+  "tree": "edf2f85249bb6c07848cc645b275f7eacf6c56ca",
+  "status": "",
+  "time_utc": "2026-11-04T16:36:05.540295+00:00",
+  "note": "Pinned26f4bfac unchanged. Preflight exit3 DEFERRED: overlapping a165 release and other heavy jobs effective affinity0-35. DDL binary never launched; no timing/performance inference. Original full-debug101 and historical6003 remain failures, attribution unresolved. No repeated timing attempt."
+}

@@ -1,0 +1,10 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a814fa71b51112148/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 01s
+     Running tests/app_concurrency.rs (/home/meszmate/.cache/a149/target/debug/deps/app_concurrency-92d70bfa5da59eb5)
+
+running 1 test
+test serializable_transfers_retried has been running for over 60 seconds
+test serializable_transfers_retried ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 66.76s
+

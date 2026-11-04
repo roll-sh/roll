@@ -1,0 +1,46 @@
+[
+  {
+    "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/windows.jsonl",
+    "tag": "index-0-baseline-loaded",
+    "first_sample_utc": "2026-11-04T14:29:22.186837+00:00",
+    "last_sample_utc": "2026-11-04T14:29:27.054983+00:00",
+    "host_before": {
+      "load": "16.64 13.61 12.56 4/9483 2082414\n",
+      "pressure": {
+        "cpu": "some avg10=1.22 avg60=1.79 avg300=1.43 total=19894804177\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+        "io": "some avg10=0.02 avg60=0.48 avg300=0.38 total=930203197\nfull avg10=0.02 avg60=0.41 avg300=0.31 total=709463569\n",
+        "memory": "some avg10=3.64 avg60=1.82 avg300=1.25 total=434214440\nfull avg10=3.64 avg60=1.79 avg300=1.22 total=387340633\n"
+      }
+    },
+    "host_after": {
+      "load": "15.46 13.42 12.51 5/9434 2084325\n",
+      "pressure": {
+        "cpu": "some avg10=0.67 avg60=1.62 avg300=1.40 total=19894839777\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+        "io": "some avg10=0.01 avg60=0.43 avg300=0.37 total=930203552\nfull avg10=0.01 avg60=0.37 avg300=0.30 total=709463908\n",
+        "memory": "some avg10=2.00 avg60=1.64 avg300=1.22 total=434214447\nfull avg10=2.00 avg60=1.62 avg300=1.19 total=387340639\n"
+      }
+    }
+  },
+  {
+    "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/windows.jsonl",
+    "tag": "index-0-candidate-setup",
+    "first_sample_utc": "2026-11-04T14:29:49.271379+00:00",
+    "last_sample_utc": "2026-11-04T14:29:54.156655+00:00",
+    "host_before": {
+      "load": "35.82 18.12 14.07 138/10589 2098741\n",
+      "pressure": {
+        "cpu": "some avg10=38.84 avg60=12.35 avg300=3.88 total=19903540264\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+        "io": "some avg10=0.10 avg60=0.32 avg300=0.35 total=930265803\nfull avg10=0.00 avg60=0.26 avg300=0.28 total=709509485\n",
+        "memory": "some avg10=0.58 avg60=1.20 avg300=1.14 total=434281001\nfull avg10=0.40 avg60=1.15 avg300=1.11 total=387385279\n"
+      }
+    },
+    "host_after": {
+      "load": "42.64 19.83 14.64 109/10454 2100461\n",
+      "pressure": {
+        "cpu": "some avg10=56.56 avg60=18.59 avg300=5.39 total=19907517426\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+        "io": "some avg10=0.05 avg60=0.29 avg300=0.34 total=930270298\nfull avg10=0.00 avg60=0.23 avg300=0.27 total=709509879\n",
+        "memory": "some avg10=1.52 avg60=1.34 avg300=1.18 total=434446028\nfull avg10=1.09 avg60=1.23 avg300=1.13 total=387512402\n"
+      }
+    }
+  }
+]

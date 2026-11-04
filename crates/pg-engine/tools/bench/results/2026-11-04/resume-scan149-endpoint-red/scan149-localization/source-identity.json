@@ -1,0 +1,18 @@
+{
+  "source": {
+    "head": "2a854a48074dbd3317807f634a773f29540b2673",
+    "tree": "7b41c62e7ca291f3f349ec68838dff1ab5f3b34d",
+    "status": "",
+    "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "sha256": {
+    "/home/meszmate/roll/.claude/worktrees/agent-a814fa71b51112148/crates/pg-engine/src/exec/scan.rs": "fee29f08519d5113c969ac8c06b353517e7ed860546b9ea644104c23168a73d7",
+    "/home/meszmate/roll/.claude/worktrees/agent-a814fa71b51112148/crates/pg-engine/src/exec/dml.rs": "8f0934c5060c37b28a3cfdf67ef13334e42172119a8c45d272131ab503f45898",
+    "/home/meszmate/roll/.claude/worktrees/agent-a814fa71b51112148/crates/pg-engine/src/storage/mod.rs": "e6097280b1635306d87987c4f1361ecfba4cb14e59ad1ad203bdd02413596c52",
+    "/home/meszmate/roll/.claude/worktrees/agent-a814fa71b51112148/crates/pg-engine/src/storage/keys.rs": "a655d281c47390a50b145f85b52fdd7890c80aeb59ddc8589d8f5f17b05e0561",
+    "/home/meszmate/roll/.claude/worktrees/agent-a814fa71b51112148/crates/pg-engine/src/storage/hot.rs": "946e2bf85b921cc4ff60707b73a0e5358441cd51210dab1ed8aa3063496955b6",
+    "/home/meszmate/roll/.claude/worktrees/agent-a814fa71b51112148/crates/pg-engine/src/storage/row.rs": "85b294f79c252a6f2eea27bb40d637bd9147d496bad10d731877c461ed732a1e",
+    "/home/meszmate/roll/.claude/worktrees/agent-a814fa71b51112148/crates/pg-engine/src/storage/sst.rs": "b2a91f49c6165b56697ad7970b769f44bb0bb6be2b2e2121653afb9caf7a57f5",
+    "/home/meszmate/roll/.claude/worktrees/agent-a814fa71b51112148/crates/pg-engine/src/txn/mod.rs": "eba499366685a54fee8032900735dd85383095f4cffda49a3e6883241cf96619"
+  }
+}

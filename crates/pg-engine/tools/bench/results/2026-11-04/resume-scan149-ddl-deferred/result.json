@@ -1,0 +1,4 @@
+{
+  "status": "DEFERRED",
+  "reason": "overlapping heavy process affinity; target never launched"
+}

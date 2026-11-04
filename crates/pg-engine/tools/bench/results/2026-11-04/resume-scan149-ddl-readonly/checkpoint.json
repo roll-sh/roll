@@ -1,0 +1,7 @@
+{
+  "head": "26f4bfac98647989ecff63ef234ec2a8a96d5771",
+  "tree": "edf2f85249bb6c07848cc645b275f7eacf6c56ca",
+  "status": "",
+  "time_utc": "2026-11-04T15:08:50.048335+00:00",
+  "note": "Frozen ddl_scaling101 retained.169host evidence overlaps failure binary: load35.82to42.64 CPU PSI38.84to56.56. No per-small/large counters; cause unresolved, no new test/benchmark. Endpoint source flow does not add row work to empty table index builds."
+}
