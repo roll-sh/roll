@@ -1303,7 +1303,7 @@ impl Ddl<'_, '_> {
     /// CREATE INDEX measures the new index and its table (an empty table that was never
     /// measured keeps its unknown tuple count).
     pub(super) fn index_built(&mut self, t: &Table, index: &crate::catalog::Index) -> Result<()> {
-        self.index_built_from(t, index, None, None)
+        self.index_built_from(t, index, None, None, None)
     }
 
     /// `index_built`, with the measure the build's own pass took (`measures_in_build`), or
@@ -1314,6 +1314,7 @@ impl Ddl<'_, '_> {
         index: &crate::catalog::Index,
         measured: Option<RowMeasure>,
         counted: Option<(usize, usize)>,
+        prebuilt: Option<(crate::catalog::btsim::Btree, u64)>,
     ) -> Result<()> {
         // (Modelling the index's pages evaluates its expressions again: what they say then
         // isn't Postgres's.)
@@ -1322,7 +1323,7 @@ impl Ddl<'_, '_> {
         self.ctx.txn.borrow_mut().inplace_lock_catalog_row(1259, t.oid)?;
         let hold = self.ctx.sess.hold_notices();
         let quiet = self.ctx.notices.borrow().len();
-        let r = self.index_built_measured(t, index, measured, counted);
+        let r = self.index_built_measured(t, index, measured, counted, prebuilt);
         self.ctx.notices.borrow_mut().truncate(quiet);
         drop(hold);
         r
@@ -1334,8 +1335,9 @@ impl Ddl<'_, '_> {
         index: &crate::catalog::Index,
         measured: Option<RowMeasure>,
         counted: Option<(usize, usize)>,
+        prebuilt: Option<(crate::catalog::btsim::Btree, u64)>,
     ) -> Result<()> {
-        crate::exec::sizing::index_built(t, index.oid, crate::exec::sizing::models_build(&index.method), self.ctx)?;
+        crate::exec::sizing::index_built(t, index.oid, crate::exec::sizing::models_build(&index.method), prebuilt, self.ctx)?;
         // (A modelled table and a modelled btree: the measure's pass would count only the
         // rows and the index's tuples, which the build's pass counted.)
         let db = &self.ctx.sess.db;

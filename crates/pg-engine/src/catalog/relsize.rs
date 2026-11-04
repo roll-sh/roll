@@ -676,26 +676,51 @@ pub fn index_tuple(
     key: &[Value],
     text: &dyn Fn(&Value, &DataType) -> String,
 ) -> usize {
-    // index_form_tuple compresses a varlena bigger than TOAST_INDEX_TARGET (MaxHeapTupleSize /
-    // 16), as default_toast_compression (pglz) does.
-    const TOAST_INDEX_TARGET: usize = 8160 / 16;
-    let has_null = key.iter().any(Value::is_null);
-    let mut off = if has_null { align(8 + 4, MAXALIGN) } else { 8 };
+    let mut size = IndexTupleSize::default();
     for (v, ty) in key.iter().zip(types) {
+        size.push(v, ty, text);
+    }
+    size.size()
+}
+
+/// `index_tuple` attribute by attribute: after each `push`, `size` is the tuple's size
+/// holding the attributes pushed so far (each prefix's in one pass). A null bitmap moves
+/// every later datum by 8 bytes (the header grows from 8 to 16 bytes, and nothing is
+/// aligned to more than 8), so the offsets are kept as if there were no bitmap.
+pub struct IndexTupleSize {
+    off: usize,
+    has_null: bool,
+}
+
+impl Default for IndexTupleSize {
+    fn default() -> IndexTupleSize {
+        IndexTupleSize { off: 8, has_null: false }
+    }
+}
+
+impl IndexTupleSize {
+    pub fn push(&mut self, v: &Value, ty: &DataType, text: &dyn Fn(&Value, &DataType) -> String) {
+        // index_form_tuple compresses a varlena bigger than TOAST_INDEX_TARGET (MaxHeapTupleSize /
+        // 16), as default_toast_compression (pglz) does.
+        const TOAST_INDEX_TARGET: usize = 8160 / 16;
         if v.is_null() {
-            continue;
+            self.has_null = true;
+            return;
         }
         if type_layout(ty).0 < 0
             && !matches!(ty, DataType::Cstring)
             && varlena_payload(v, ty, text) > TOAST_INDEX_TARGET
             && let Some(c) = super::pglz::compressed_len(text(v, ty).as_bytes())
         {
-            off = align(off, type_layout(ty).1) + c + 8;
-            continue;
+            self.off = align(self.off, type_layout(ty).1) + c + 8;
+            return;
         }
-        off += datum_bytes(off, v, ty, text);
+        self.off += datum_bytes(self.off, v, ty, text);
     }
-    align(off, MAXALIGN)
+
+    pub fn size(&self) -> usize {
+        align(self.off, MAXALIGN) + if self.has_null { 8 } else { 0 }
+    }
 }
 
 /// Whether btree deduplication works for a key type ("equalimage": equal values are

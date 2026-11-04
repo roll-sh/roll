@@ -4250,6 +4250,84 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     contrib pg_stat_statements + auto_explain 1,025 / 1,025; pgbench select-only and
     tpcb-like alternated twice within this machine's noise (65-76 / 72-74 µs, 589-667 /
     572-577 µs per transaction).
+- **Query memory, round 3** (round 25, agent 164; BENCH.md "Query memory, round 3"):
+  - *Tuplestores counted as tuplestore.c counts them* (`exec/workmem.rs` `StoreMem`, now with
+    tuplestore_trim, tuplestore_clear and updatemax's usedDisk). EXPLAIN ANALYZE's `Storage`
+    lines of WindowAgg, CTE Scan and Recursive Union are the executor's counts:
+    - *WindowAgg* (`WinStore`, `window.rs` `count_store`): per partition, the rows nodeWindowAgg.c
+      has spooled before each row's trim (to one past the frame's end for aggregates and
+      RANGE / GROUPS tail pointers, the whole partition for ntile, percent_rank, cume_dist,
+      UNBOUNDED FOLLOWING) and the oldest read pointer (the current row; the frame head and
+      tail pointers; the aggregates' mark at the frame head when it moves or with an
+      exclusion; row_number / rank / dense_rank's at the current row, lag / lead's at their
+      constant offset's row, first_value / last_value / nth_value's in the frame, ntile's and
+      non-constant offsets' at 0); tuplestore_trim's frees and its 1/8 compaction of the
+      pointer array; tuplestore_clear between partitions; on disk past work_mem with no trim
+      until the clear. The tuples are the input's columns the parent and the window read
+      (Window nodes now get the parent's columns under EXPLAIN ANALYZE, `nodes.rs` `open`),
+      an upper WindowAgg's with the lower ones' results; one count per WindowAgg
+      (`NodeStats::winstore`, by `ExNode::win_seq`). The 17 kB PostgreSQL shows where the
+      estimate said Disk 46,875 kB is what it gives now.
+    - *CTE* (`exec/tuplestore.rs`, `CteState::store`): a CTE's rows are a `Tuplestore`: in
+      memory until StoreMem says the file (work_mem), then every row in one temporary file
+      (dumptuples), each CTE Scan reading from its own place (a read pointer: the leading
+      scan takes rows as the CTE makes them and never reads the file; a lagging one or a
+      new scan of it reads the file from its offset). PostgreSQL's file size counts against
+      temp_file_limit and as temp blocks; the leader sets the scan's flags before a row is
+      stored, so no trailing length words. The scans' Storage line is counted under
+      `exec::cte_key(id)` (a scan's own counters can be its Filter's).
+    - *Recursive Union*: its working and intermediate tables are counted (StoreMem each,
+      cleared and swapped per iteration) for show_recursive_union_info's line (the bigger
+      table's type, the sum of both). The rows themselves still stay in memory.
+  - *Windows' Sorts*: the Sort the executor puts under a WindowAgg over a table scan reports
+    its tuplesort stats under PostgreSQL's Sort node (its input's counters); windows without
+    PARTITION BY take that Sort too (it was the window's own in-memory sort, so EXPLAIN
+    showed the estimate and equal keys came in quicksort's order where PostgreSQL's
+    external merge differs).
+  - *Spilling sorts pack their runs* (`extsort.rs` `Packed`): after the first run is written,
+    rows are encoded as they come (one buffer, the keys' values beside it), and each run is
+    sorted (`fastsort::order_with`, the same quicksort order) and written from the buffer.
+    Writing runs from rows spread over the heap was a cache miss per value (78% of
+    `encode_value` on its first load); the run's memory is now about PostgreSQL's tuples.
+    The analytic `window` (2M rows): 2.62-2.69 -> 2.26-2.35 s, 256 -> 233 MB peak.
+  - *Catalog rows generated once per key* (`catalog/system.rs` `rows_shared`): a session
+    wanting rows another session is generating waits for them (at most 10 s; a generation
+    inside another one on the same thread doesn't wait). 100 sessions starting on a database
+    just opened each made a copy of pg_attribute's (in debug builds twice: the splice
+    check), which is what made `memory_load::many_sessions_stay_bounded` swing to +126 MB in
+    debug. Now +43-48 MB release (nine runs) and +46-49 MB debug (five) against the unchanged
+    120 MB bound.
+  - *roll-engine raises RLIMIT_NOFILE to its hard limit* (`bin/roll-engine.rs`): each
+    connection holds seven descriptors (`server.rs` clones its socket for the reader, the
+    writer, the liveness check, the backend registry), so a container's soft limit of 1024
+    ran out near 150 connections: accept failed ("Too many open files") and the 200-session
+    burst hung. (Fewer clones per connection would be the server owner's change.)
+  - *TPC-H peak, measured, not changed* (BENCH): the block cache's bulk admission isn't what
+    fills it. With bulk reads admitted to 0 % or 25 % of the cache (an experiment knob, not
+    kept) the peak stayed 1,729-1,732 MB: lineitem's blocks come in through index lookups
+    (q04 / q21 by l_orderkey, q17 / q20 by l_partkey) like PostgreSQL's shared buffers do.
+    What a smaller cache costs is those lookups, not sequential scans: at 512 MB q01's CPU
+    is unchanged (4.32 / 4.36 s) while q09 goes 4.9 -> 22.6 s, q17 1.9 -> 6.7, q07 1.6 -> 6.6
+    (each miss decompresses and decodes a 16 kB block for one row). So the peak comes down
+    without that cost only with a smaller decoded block (storage, agent 149) or cached rows
+    for point fetches, not with admission policy.
+  - Left: Materialize's rows and a Recursive Union's tables physically spilling (counted
+    only), set operations (in memory as before; HashSetOp doesn't spill in PostgreSQL 18
+    either, sorted SetOp's Sorts would), grouping sets' hashed sets, the two-window Sorts'
+    EXPLAIN lines (estimates: several windows still sort inside the WindowAgg), a Recursive
+    Union's Storage on disk 3 kB over PostgreSQL's, sorts merged in several passes a block
+    under PostgreSQL's Disk, the WorkTable Scan's "Rows Removed by Filter: 0" (missing: the
+    removed count is per loop), the window query (2.3 s against 1.75 s: decoding runs read
+    back, 12 %, and the intermediate merge pass).
+  - Verified (on `73edecba` with this batch): crate tests release and debug (443 passed, 18
+    ignored, none failed; deep_input, memory_load, query_spill's new
+    `cte_tuplestore_spills_and_cleans_up`), clippy (the lib's 10 warnings, none in the
+    changed files), difftest smoke, isolation 121 / 122 (intra-grant-inplace, as before),
+    the full regression suite on a private reference (release) 51,148 / 51,150 with 0 units
+    changed against results.tsv, pg_dump_tap 14,817 / 14,817, contrib pg_stat_statements +
+    auto_explain 1,025 / 1,025, golden `a164_tuplestores` (recorded from PostgreSQL 18.6;
+    in-process, wire, shuffled), TPC-H SF1's 22 hashes equal, the burst at 10-200
+    sessions, pgbench select-only and tpcb-like, the footprint gate (BENCH).
 - **OLTP round 1** (round 22, agent 105; BENCH.md "OLTP round 1"): pgbench and web-app
   transactions.
   - *Hot relation ranges* (`storage/hot.rs`): a relation's key range (8-byte table / index
@@ -6428,6 +6506,9 @@ definitions (from PostgreSQL 18.6's `information_schema.sql`) takes and risks:
   quicksort Memory exact, HashAggregate Memory Usage within 8 kB without by-reference transitions), accepted as
   internal differences; methods and batch counts are PostgreSQL's. A large transaction's
   write buffer (`txn::spill`) has no PostgreSQL counterpart and counts as no temporary file.
+  A CTE's rows are a tuplestore that goes to a temporary file the same way (round 25, agent
+  164, `exec/tuplestore.rs`); WindowAgg and Recursive Union tuplestores are counted for
+  EXPLAIN ANALYZE's Storage lines (their rows stay in memory).
   The subscriber's spool of a streamed transaction (`repl/apply_stream`) stands for the
   apply worker's BufFile: counted and logged since round 23, agent 128 (below).
 - **Virtual transaction ids and proc numbers are PostgreSQL's** (round 23, agent 128). The
@@ -7005,9 +7086,9 @@ cheaper and its read side lock-free.
   Measured again on this round's tree with only the limit lifted (BENCH.md's table): COPY
   1.8 -> 2.7 s, primary key 0.8 -> 1.7 s, CREATE INDEX 0.9 -> 1.7 s, DELETE 1.0 -> 1.4 s,
   first statement 0.02 -> 0.31 s, simple-update +27% CPU, tpcb-like +15%, pgbench's peak
-  memory 250-290 -> 470 MB. Before any future lift, re-run that whole table (its scripts:
-  `bulk.sh`, `ddl2.sh`, `liftcmp.sh`, in `~/.cache/a151/scripts` while it lasts; describe
-  them in BENCH.md when you re-create them) with peak memory, and lift only when every row
+  memory 250-290 -> 470 MB. Before any future lift, re-run that whole table (since round 5
+  `tools/bench/sizing/liftcmp.sh`, which replaces 151's deleted `bulk.sh`, `ddl2.sh` and
+  `liftcmp.sh`; BENCH.md "Size models, round 5") with peak memory, and lift only when every row
   is at or below the 400k column. What a big model still costs: the per-row upkeep of
   writes to it (`sizing::updated` / `inserted_with` / `deleted`: locate, update, settle,
   btree insert), the kept record's layout at open (`kept::lay_out`, `heapsim::restored`:
@@ -7087,6 +7168,90 @@ cheaper and its read side lock-free.
   - Item 5 (simple-update memory at 64 clients) is agent 150's measurement. `model_bytes(db)`
     is the size models' share for its budget: about 93 bytes a modelled row with a primary
     key.
+
+## Size models, round 5 (round 24, agent 161)
+
+BENCH.md "Size models, round 5" has the numbers and the scripts (`tools/bench/sizing/`, which
+replace 151's deleted ones). Round 4's seven commits were verified first (release crate
+tests 440 / 0 / 18, regress 51,148 / 51,150 with 0 units changed, isolation 121 / 122,
+pg_dump_tap 14,817); `crash_random` failed intermittently there and on the commit before round
+4 alike (below).
+
+- **The limit stays at 400,000** (`ROLL_MODEL_MAX_VERSIONS` now sets it for an operator or a
+  measurement; run.sh's `ENGINE_ENV` passes it into the engine's container). Lifted, COPY,
+  CREATE INDEX, VACUUM, tpcb-like, the apply-like mix and the skip scan are now at or below
+  the 400k column; still above it: the primary key (a modelled table's build is the serial
+  one, `measures_in_build` sends only estimated tables to `parbuild`'s workers), DELETE of
+  10%, the first statement after a restart (0.24-0.25 s at 1M rows), simple-update (+5-30%)
+  and the peak memory of the pgbench runs (340-550 MB against 220-390 at 400k; PostgreSQL 250-280).
+- **Dead heads** (agent 149's apply-like profile: the InitPlan `min(hid)` walked hist's dead
+  head in `Btree::kill` / `kill_needed`, 37% of CPU): leaves count their entries that aren't
+  LP_DEAD (`Leaf::live`), a walk passes a leaf with none whole, and `DeadHead` remembers
+  where a walk from the start finds its first live leaf (forgotten when an insert lands in a
+  leaf with no live entry, and by every VACUUM scan). `kill` and `kill_needed` share
+  `kill_walk`. In the mix's steady state the models are now 0.9% of the engine's samples;
+  the rest is the executor's `parscan` / storage's dead ranges (149's, 160's). The mix's
+  first seconds after its setup measure the setup's million-row load being written out:
+  `lift.sh` warms up first now (151's 3.8 ms per transaction was mostly that).
+- **Reads don't wait for upkeep** (agent 150's burst profile): `fetched`, `Fetcher`,
+  `mark_passed` and `scanned_pages` take the models' write lock with `try_write` and skip the
+  pruning or LP_DEAD marks when it is held, as heap_page_prune_opt skips a page it can't lock
+  for cleanup and _bt_killitems marks only what it can; `scanned_pages` checks its pages under
+  the read lock first. A single session's results don't change unless a background job
+  (the kept-model builder, autovacuum) holds the lock at that moment; concurrent sessions
+  prune and mark a little less, as PostgreSQL's do under contention. An index scan's first two marking ranges are
+  one walk (`Kills::queue`).
+- **Cheaper big models**: KeyMap slots keep their key hash's top half (`slot`, `table_hash`:
+  the table grows without reading the arena; COPY's rehash was 11% of a modelled load) and a
+  lookup searches forward from the cursor only within `FORWARD_MAX` rows (random lookups
+  galloped through the arena); an update that keeps its key reuses the row its lookup found
+  (`Heap::locate_row`, `KeyMap::set_tid`); `Lps::settle` in one pass; kept records decode
+  rows into one key buffer (`kept::KeptRows`, `heapsim::restored_from`); index keys encode in
+  a per-thread buffer (`Key::build_in`, `relsize::IndexTupleSize`: one allocation per key);
+  an index build on a modelled table lays its btree model out from its own pass
+  (`sizing::btree_from_build`, kept by `index_built` while `Heap::writes` says the heap is as
+  the pass saw it) instead of `ensure` reading every row again; the build's unique-key set
+  uses the fast hasher.
+- **VACUUM deletes btree pages** (`Btree::vacuum_scan`, `delete_empty_pages`): a leaf left
+  empty goes in block order unless it is the rightmost on its level or the rightmost child
+  of its parent without being the only one (an only child goes with its parent chain,
+  _bt_lock_subtree_parent); the parent's downlink then leads to the right sibling and the
+  right sibling's goes; the block stays (None, counted as pgstatindex's deleted_pages, free
+  space for pgstattuple). Deleted pages carry their safexid (the next xid); a scan
+  (btbulkdelete's, or btvacuumcleanup's when more than 5% of the index is deleted and not yet
+  free: `needs_cleanup`) records the recyclable ones in the index's free space map
+  (`heapsim::Fsm`, now shared: `record_free_index_page`, `get_free_index_page`,
+  `vacuum_all`), and splits take pages from it before extending (`alloc`). The index's fsm
+  fork is the map's; images mark deleted pages in the map (flags 16). Golden
+  `a161_btree_pagedel`. At 300,000 rows the mixed workload's pgstatindex now matches
+  deleted_pages (162 / 162) but has one empty leaf PostgreSQL doesn't (1,613 + 1 against
+  1,614 + 0) after its VACUUM: not found yet.
+- **Long keys and REINDEX**: an attribute's encoding past 1,800 bytes keeps its start and a
+  hash of the rest in the model's key (`btsim::ATT_MAX`; agent 146's test_decoding toast key
+  over 64 kB overflowed the u16 offsets), sizes past u16 are capped; REINDEX now lays its
+  indexes' models out afresh through `index_built` (151's "REINDEX can retain old model
+  sizes").
+- **crash_random** fails about one run in four (seeds 1-30 x 4), on 359c14e0 (before round 4)
+  as on round 4: after recovery a table shows writes of a step the harness logged as not
+  committed (seed 9, round 2, after step 805: values, a key move and an insert of step 804;
+  seed 11 round 1 after step 345; seed 14 round 1 after step 407; seed 27 round 1 after step
+  236). Every scan agrees with every other and ctids are distinct: storage / recovery or the
+  harness's settle step, not the models. The harness now prints the rows that differ.
+- **Verified**: the final code (13e620f2, the commits as pushed): release crate tests 444
+  passed / 0 failed / 18 ignored (the golden included), full regress on a private reference
+  51,148 / 51,150 with 0 units changed against results.tsv, the models' unit tests in debug.
+  The batch before the last three commits (b5aeaf72, which only add the long-key cap and the
+  REINDEX layout): debug crate tests (failing only on the golden's REINDEX part, fixed since),
+  difftest smoke, isolation 121 / 122 (1,647 / 1,648 permutations), pg_dump_tap 14,817,
+  clippy with no warning in a file this round touched. memory_load's
+  `hash_join_spilling_bounds_the_build_heap` failed once in four runs (its heap counter sees
+  other threads); crash_random as above.
+- **Left**: the primary key / CREATE INDEX of a modelled table in `parbuild`'s workers (the
+  model's keys from the workers' sorted runs); DELETE's per-row upkeep; a lazy layout at
+  open (item 5: the record's page counts in a header, reads deferred); the KeyMap's random
+  lookups (1.5% of lifted simple-update: three a transaction); the 300k empty-leaf
+  difference above; lifting, once the lift table's rows are all at or below the 400k column;
+  index-only `count(*)` over lineitem needs the table modelled first.
 
 ## Starting prompt for the next agent
 

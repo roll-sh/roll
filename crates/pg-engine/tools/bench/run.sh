@@ -30,6 +30,8 @@ PG_IMAGE=${PG_IMAGE:-postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c666
 # cpuset and CPU weight): a host process sits in the user slice, which every agent's builds
 # share, while a container's slice gets its own weight, so a host engine competes for CPU on
 # worse terms than PostgreSQL. The image only supplies glibc (the binary is bind-mounted).
+# ENGINE_ENV="VAR=value ..." sets the engine's environment (in the container or on the host),
+# e.g. ROLL_MODEL_MAX_VERSIONS for tools/bench/sizing.
 ENGINE_NAME=${ENGINE_NAME:-$PG_NAME-engine}
 ENGINE_IMAGE=${ENGINE_IMAGE:-debian@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad}
 BIN=${BENCH_BIN:-$ROOT/target/release}
@@ -84,12 +86,13 @@ engine-start)
     docker run -d --name "$ENGINE_NAME" --cpuset-cpus "$SERVER_CPUS" \
       ${PG_CPU_SHARES:+--cpu-shares "$PG_CPU_SHARES"} --network host --user "$(id -u):$(id -g)" \
       -v "$BIN:$BIN:ro" -v "$DATA/engine:$DATA/engine" -v /usr/share/zoneinfo:/usr/share/zoneinfo:ro \
-      -e TMPDIR="$DATA/engine" "$ENGINE_IMAGE" "$BIN/roll-engine" --data "$DATA/engine" \
+      -e TMPDIR="$DATA/engine" $(for e in ${ENGINE_ENV:-}; do printf ' -e %s' "$e"; done) \
+      "$ENGINE_IMAGE" "$BIN/roll-engine" --data "$DATA/engine" \
       --listen 127.0.0.1:$ENGINE_PORT --password pw --cache-mb "${CACHE_MB:-2048}" "$@" >/dev/null
     # (The container's process, as the host sees it: /proc probes work as for a host engine.)
     docker inspect -f '{{.State.Pid}}' "$ENGINE_NAME" >"$DATA/engine.pid"
   else
-    taskset -c "$SERVER_CPUS" "$BIN/roll-engine" --data "$DATA/engine" --listen 127.0.0.1:$ENGINE_PORT \
+    env ${ENGINE_ENV:-} taskset -c "$SERVER_CPUS" "$BIN/roll-engine" --data "$DATA/engine" --listen 127.0.0.1:$ENGINE_PORT \
       --password pw --cache-mb "${CACHE_MB:-2048}" "$@" >>"$DATA/logs/engine.log" 2>&1 &
     echo $! >"$DATA/engine.pid"
   fi

@@ -375,6 +375,11 @@ pub struct RowReader {
 }
 
 impl RowReader {
+    /// The file offset of the next row.
+    pub fn offset(&self) -> u64 {
+        self.pos - (self.buf.len() - self.at) as u64
+    }
+
     /// A row `put_tagged_row` wrote.
     pub fn read_tagged_row(&mut self) -> Result<Option<([u32; 2], Vec<Value>)>> {
         let Some(t) = self.take(8)? else { return Ok(None) };

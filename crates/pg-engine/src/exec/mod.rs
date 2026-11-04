@@ -30,6 +30,7 @@ pub mod spill;
 pub mod replication;
 pub mod toast;
 pub mod trigger;
+pub mod tuplestore;
 pub mod vector;
 pub mod window;
 pub mod workmem;
@@ -525,6 +526,9 @@ pub struct NodeStats {
     pub hashjoin: Option<HashStats>,
     /// A Materialize's tuplestore (`workmem::StoreMem`): on disk, and its maximum bytes.
     pub material: Option<(bool, u64)>,
+    /// A WindowAgg's tuplestore (`workmem::WinStore`), by window from the bottom (the
+    /// WindowAggs over one input share its key): on disk, and its maximum bytes.
+    pub winstore: [Option<(bool, u64)>; 4],
 }
 
 /// A Hash node's HashInstrumentation.
@@ -554,6 +558,12 @@ impl HashStats {
     }
 }
 
+/// The counters a CTE's tuplestore is counted under (its CTE Scans' "Storage": a scan's own
+/// counters may be its Filter's): no plan node's address.
+pub fn cte_key(id: usize) -> usize {
+    usize::MAX - id
+}
+
 /// Counters per plan node, keyed by the node's address (`Arc::as_ptr`; a scan's filter by its
 /// `ScanPlan`).
 #[derive(Debug, Default)]
@@ -566,7 +576,7 @@ impl Instr {
         self.nodes.borrow().get(&key).copied()
     }
 
-    fn update(&self, key: usize, f: impl FnOnce(&mut NodeStats)) {
+    pub(crate) fn update(&self, key: usize, f: impl FnOnce(&mut NodeStats)) {
         f(self.nodes.borrow_mut().entry(key).or_default())
     }
 }

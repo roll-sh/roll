@@ -221,31 +221,43 @@ impl Lps {
     /// take the small form (their xmin `SETTLED_XMIN`). Returns the oldest xmin of those
     /// left that may settle later (u64::MAX: none).
     pub fn settle(&mut self, v: &Vis) -> u64 {
+        // Which whole versions settle (`full` by index), and the oldest xmin of those that
+        // may later.
         let mut oldest = u64::MAX;
-        let mut i = 0;
-        while i < self.slots.len() {
-            let s = self.slots[i];
-            i += 1;
+        let mut any = false;
+        let settles = |t: &Tup| t.xmax == 0 && t.xmin >= FIRST_NORMAL_XID;
+        for t in self.full.iter().filter(|&t| settles(t)) {
+            if !v.removable(t.xmin) || v.state(t.xmin) != Xs::Committed {
+                oldest = oldest.min(t.xmin);
+            } else {
+                any = true;
+            }
+        }
+        if !any {
+            return oldest;
+        }
+        // One pass over the slots: settled versions take their small form, the rest of
+        // `full` is laid out again in slot order (a version at a time would move the last
+        // whole one into each freed place, and look for its slot).
+        let old = std::mem::take(&mut self.full);
+        let mut keep = Vec::new();
+        for s in &mut self.slots {
             if s.tag() != T_FULL {
                 continue;
             }
-            let t = &mut self.full[s.low() as usize];
-            if t.xmax != 0 || t.xmin < FIRST_NORMAL_XID {
-                continue;
-            }
-            if !v.removable(t.xmin) || v.state(t.xmin) != Xs::Committed {
-                oldest = oldest.min(t.xmin);
-                continue;
-            }
-            let x = std::mem::replace(&mut t.xmin, SETTLED_XMIN);
-            match Slot::small(t) {
-                Some(m) => {
-                    self.slots[i - 1] = m;
-                    self.release(s);
+            let mut t = old[s.low() as usize];
+            if settles(&t) && v.removable(t.xmin) && v.state(t.xmin) == Xs::Committed {
+                let x = std::mem::replace(&mut t.xmin, SETTLED_XMIN);
+                if let Some(m) = Slot::small(&t) {
+                    *s = m;
+                    continue;
                 }
-                None => t.xmin = x,
+                t.xmin = x;
             }
+            *s = Slot::of(T_FULL, keep.len() as u64);
+            keep.push(t);
         }
+        self.full = keep;
         oldest
     }
 

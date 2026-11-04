@@ -12,6 +12,10 @@ use super::heapsim::{Tid, get_varint, put_varint};
 use crate::exec::fasthash::FastState;
 use std::hash::BuildHasher;
 
+/// How far past the cursor (in rows, about twice this) a lookup searches the ascending rows
+/// before asking the hash table.
+const FORWARD_MAX: usize = 64;
+
 /// A row of no key (a version written without one).
 pub const NO_ROW: u32 = u32::MAX;
 
@@ -42,8 +46,11 @@ impl Row {
 
 #[derive(Default)]
 pub struct KeyMap {
-    /// The rows of the keys present, by their keys' hashes.
-    table: hashbrown::HashTable<u32>,
+    /// The rows of the keys present, by their keys' hashes: each slot the row and the top
+    /// half of its key's hash (`slot`), so growing the table (a load's, a batch at a time)
+    /// rehashes from the slots alone, and a probe compares a key only when its hash's half
+    /// matches.
+    table: hashbrown::HashTable<u64>,
     rows: Vec<Row>,
     arena: Vec<u8>,
     state: FastState,
@@ -61,6 +68,21 @@ impl std::fmt::Debug for KeyMap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "KeyMap({} keys, {} rows)", self.table.len(), self.rows.len())
     }
+}
+
+/// A table slot of row `row` whose key hashes to `h`.
+fn slot(row: u32, h: u64) -> u64 {
+    (h & !(u32::MAX as u64)) | row as u64
+}
+
+/// The table's hash of a slot or a key hash: from the top half alone (all a slot keeps).
+fn table_hash(h: u64) -> u64 {
+    (h >> 32).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+}
+
+/// Whether slot `s` is the one of a key hashing to `h` (its key still to compare).
+fn same_half(s: u64, h: u64) -> bool {
+    s >> 32 == h >> 32
 }
 
 fn key_at<'a>(arena: &'a [u8], r: &Row) -> &'a [u8] {
@@ -90,8 +112,7 @@ impl KeyMap {
 
     /// Room for `n` more keys of about `bytes` bytes in all.
     pub fn reserve(&mut self, n: usize, bytes: usize) {
-        let (rows, arena, state) = (&self.rows, &self.arena, &self.state);
-        self.table.reserve(n, |&r| state.hash_one(key_at(arena, &rows[r as usize])));
+        self.table.reserve(n, |&s| table_hash(s));
         self.rows.reserve(n);
         self.arena.reserve(bytes + n);
     }
@@ -113,7 +134,8 @@ impl KeyMap {
             self.cursor.store(r, Relaxed);
             return Some(r);
         }
-        let found = self.table.find(self.hash(key), |&r| key_at(arena, &rows[r as usize]) == key).copied();
+        let h = self.hash(key);
+        let found = self.table.find(table_hash(h), |&s| same_half(s, h) && key_at(arena, &rows[s as u32 as usize]) == key).map(|&s| s as u32);
         if let Some(r) = found {
             self.cursor.store(r, Relaxed);
         }
@@ -130,10 +152,15 @@ impl KeyMap {
         if cur >= end || key_at(arena, &rows[cur]) >= key {
             return None;
         }
-        // (Rows cur+1..; the first whose key is at least `key`.)
+        // (Rows cur+1..; the first whose key is at least `key`. Only near the cursor: a key
+        // further on is a random lookup, which the hash table answers in a probe or two
+        // where a search of the rows' keys would miss the cache at every step.)
         let (mut lo, mut step) = (cur + 1, 1);
         let mut hi = lo;
         while hi < end && key_at(arena, &rows[hi]) < key {
+            if step > FORWARD_MAX {
+                return None;
+            }
             lo = hi + 1;
             hi = (hi + step).min(end);
             step *= 2;
@@ -167,19 +194,18 @@ impl KeyMap {
         // (A key past every key added so far is new: no probe for it, only its slot.)
         if self.rows.is_empty() || key > self.max_key.as_slice() {
             let row = self.push_row(key, tid);
-            let (rows, arena, state) = (&self.rows, &self.arena, &self.state);
-            self.table.insert_unique(h, row, |&r| state.hash_one(key_at(arena, &rows[r as usize])));
+            self.table.insert_unique(table_hash(h), slot(row, h), |&s| table_hash(s));
             return row;
         }
-        let (rows, arena, state) = (&self.rows, &self.arena, &self.state);
+        let (rows, arena) = (&self.rows, &self.arena);
         let entry = self.table.entry(
-            h,
-            |&r| key_at(arena, &rows[r as usize]) == key,
-            |&r| state.hash_one(key_at(arena, &rows[r as usize])),
+            table_hash(h),
+            |&s| same_half(s, h) && key_at(arena, &rows[s as u32 as usize]) == key,
+            |&s| table_hash(s),
         );
         match entry {
             hashbrown::hash_table::Entry::Occupied(e) => {
-                let row = *e.get();
+                let row = *e.get() as u32;
                 let r = &mut self.rows[row as usize];
                 (r.blk, r.off) = tid;
                 self.cursor.store(row, std::sync::atomic::Ordering::Relaxed);
@@ -187,7 +213,7 @@ impl KeyMap {
             }
             hashbrown::hash_table::Entry::Vacant(e) => {
                 let row = u32::try_from(self.rows.len()).ok().filter(|&n| n != NO_ROW).expect("rows");
-                e.insert(row);
+                e.insert(slot(row, h));
                 self.push_row(key, tid)
             }
         }
@@ -210,11 +236,20 @@ impl KeyMap {
         row
     }
 
+    /// Row `row` (one `find` gave) now has its current version at `tid`: `insert` of its
+    /// key, without the lookup.
+    pub fn set_tid(&mut self, row: u32, tid: Tid) {
+        let r = &mut self.rows[row as usize];
+        (r.blk, r.off) = tid;
+        self.cursor.store(row, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// No row is under `key` any more (its row keeps the key's bytes). Returns its row.
     pub fn remove(&mut self, key: &[u8]) -> Option<u32> {
         let h = self.hash(key);
         let (rows, arena) = (&self.rows, &self.arena);
-        let (row, _) = self.table.find_entry(h, |&r| key_at(arena, &rows[r as usize]) == key).ok()?.remove();
+        let (s, _) = self.table.find_entry(table_hash(h), |&s| same_half(s, h) && key_at(arena, &rows[s as u32 as usize]) == key).ok()?.remove();
+        let row = s as u32;
         self.rows[row as usize].part &= !PRESENT;
         Some(row)
     }
@@ -227,7 +262,7 @@ impl KeyMap {
             return false;
         }
         let h = self.hash(key_at(&self.arena, r));
-        match self.table.find_entry(h, |&x| x == row) {
+        match self.table.find_entry(table_hash(h), |&s| s as u32 == row) {
             Ok(e) => {
                 e.remove();
                 self.rows[row as usize].part &= !PRESENT;
@@ -240,8 +275,8 @@ impl KeyMap {
     /// Keep the keys whose current versions' TIDs `keep` accepts.
     pub fn retain(&mut self, mut keep: impl FnMut(Tid) -> bool) {
         let rows = &mut self.rows;
-        self.table.retain(|&mut r| {
-            let row = &mut rows[r as usize];
+        self.table.retain(|&mut s| {
+            let row = &mut rows[s as u32 as usize];
             let kept = keep((row.blk, row.off));
             if !kept {
                 row.part &= !PRESENT;
@@ -252,9 +287,9 @@ impl KeyMap {
 
     /// Every key present, its row and its current version's TID, in no particular order.
     pub fn iter(&self) -> impl Iterator<Item = (&[u8], u32, Tid)> {
-        self.table.iter().map(|&r| {
-            let row = &self.rows[r as usize];
-            (key_at(&self.arena, row), r, (row.blk, row.off))
+        self.table.iter().map(|&s| {
+            let row = &self.rows[s as u32 as usize];
+            (key_at(&self.arena, row), s as u32, (row.blk, row.off))
         })
     }
 
@@ -269,8 +304,8 @@ impl KeyMap {
     /// renumbered in order. Returns each old row's new number (`NO_ROW`: dropped).
     pub fn compact(&mut self, keep: &[bool]) -> Vec<u32> {
         let mut map = vec![NO_ROW; self.rows.len()];
-        for &r in self.table.iter() {
-            map[r as usize] = 0;
+        for &s in self.table.iter() {
+            map[s as u32 as usize] = 0;
         }
         let mut rows = Vec::with_capacity(self.table.len());
         let mut arena = Vec::new();
@@ -290,8 +325,8 @@ impl KeyMap {
             }
             rows.push(Row { at: (pos % PART) as u32, part: (pos / PART) as u16 | (r.part & PRESENT), ..*r });
         }
-        for r in self.table.iter_mut() {
-            *r = map[*r as usize];
+        for s in self.table.iter_mut() {
+            *s = (*s & !(u32::MAX as u64)) | map[*s as u32 as usize] as u64;
         }
         self.rows = rows;
         self.arena = arena;
@@ -302,7 +337,7 @@ impl KeyMap {
 
     /// Bytes held (the table's slots and control bytes, the rows, the arena).
     pub fn bytes(&self) -> usize {
-        self.table.capacity() * (size_of::<u32>() + 1) + self.rows.capacity() * size_of::<Row>() + self.arena.capacity()
+        self.table.capacity() * (size_of::<u64>() + 1) + self.rows.capacity() * size_of::<Row>() + self.arena.capacity()
     }
 }
 

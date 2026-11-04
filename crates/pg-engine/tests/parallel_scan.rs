@@ -970,6 +970,9 @@ const REORDERED_QUERIES: &[&str] = &[
     "SELECT id, g, x FROM r WHERE x > 99.5 AND d <> date '2024-01-09'",
     "SELECT q.w, count(*), sum(r.x) FROM r JOIN q ON r.g = q.k WHERE r.d < timestamp '2024-04-01 06:00' GROUP BY q.w ORDER BY 1",
     "SELECT r.id, q.w FROM r JOIN q ON r.g = q.k WHERE r.x = 12.25",
+    // A key of EXTRACT over a date through a projection (whole numbers: no presort).
+    "SELECT m, w, count(*), sum(x) FROM (SELECT extract(month FROM r.d) AS m, q.w, r.x FROM r JOIN q ON r.g = q.k) t GROUP BY m, w ORDER BY m, w",
+    "SELECT extract(day FROM d), count(*), sum(id) FROM r WHERE x > 50 GROUP BY 1 ORDER BY 1",
 ];
 
 #[test]
