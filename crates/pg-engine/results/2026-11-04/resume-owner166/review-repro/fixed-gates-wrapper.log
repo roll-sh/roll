@@ -1,0 +1,85 @@
+START debug-golden 2026-11-04T13:00:11.474710+00:00
+{"name": "debug-golden", "exit": 0, "validated": true, "summaries": [["ok", "3", "0", "0"]], "log_sha256": "87306f91dc0aeca8bbd1525e970b6303daa5ce974a823462117f5faa27223c0e"}
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 25s
+     Running tests/golden.rs (/home/meszmate/.cache/a166/target-debug/debug/deps/golden-9749ad749af5ca1c)
+
+running 3 tests
+3 golden files match in a shuffled order (seed 2579)
+test golden_shuffled ... ok
+3 golden files match
+test golden ... ok
+3 golden files match
+test golden_wire ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.36s
+
+START debug-catalog-kept 2026-11-04T13:01:39.318361+00:00
+{"name": "debug-catalog-kept", "exit": 0, "validated": true, "summaries": [["ok", "4", "0", "0"], ["ok", "6", "0", "0"], ["ok", "7", "0", "0"]], "log_sha256": "f1c705b762f028e0c79d86fdabd1e1392d4555f54d72a31300235b95de3d17f1"}
+
+     Running tests/kept_plans.rs (/home/meszmate/.cache/a166/target-debug/debug/deps/kept_plans-b343836d3bffe0ca)
+
+running 7 tests
+test bind_plans_before_checking_result_formats ... ok
+test custom_plans_from_the_analysis ... ok
+test kept_plans_follow_size_changes_across_sessions ... ok
+test extended_custom_plans_run_the_generic_binding ... ok
+test kept_plans_follow_values_sizes_and_ddl ... ok
+test plpgsql_custom_plans_as_the_generic_plan ... ok
+test kept_plans_serve_literals_of_any_length ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.03s
+
+START debug-catalog-unit 2026-11-04T13:01:54.224812+00:00
+{"name": "debug-catalog-unit", "exit": 0, "validated": true, "summaries": [["ok", "31", "0", "0"]], "log_sha256": "d62cc68373ff1060e80e54e7e1f054b3c6a34df553e7d91dd3010f3076f25398"}
+test catalog::keymap::tests::ascending_rows_found_forward ... ok
+test catalog::keymap::tests::matches_a_hash_map ... ok
+test catalog::pglz::tests::repeats_compress ... ok
+test catalog::pmap::tests::behaves_as_a_btreemap ... ok
+test catalog::pmap::tests::phash_behaves_as_a_hashmap ... ok
+test catalog::pmap::tests::stored_maps_read_groups_as_used ... ok
+test catalog::pmap::tests::stored_phash_reads_buckets_as_used ... ok
+test catalog::relindex::tests::words_match_mentions ... ok
+test catalog::relsize::tests::small_numeric_digits_match_text ... ok
+test catalog::stored_ix::lazy_tags_are_the_listed_maps ... ok
+test catalog::btsim::leaf::tests::items_read_back ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 158 filtered out; finished in 18.88s
+
+START build 2026-11-04T13:03:32.959515+00:00
+{"name": "build", "exit": 0, "validated": true, "summaries": [], "log_sha256": "4278aba788c181841f48c017d920f9e805f00a7635fafeb4fe6c22e89e9944ae"}
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 17s
+START clippy 2026-11-04T13:04:50.626762+00:00
+{"name": "clippy", "exit": 0, "validated": true, "summaries": [], "log_sha256": "6550ac98c0565a76aa6b6f55afda79e006c2da07ff46d5f27784c8b03bc50f10"}
+    = note: `#[warn(clippy::chunks_exact_to_as_chunks)]` on by default
+
+warning: `pg-engine` (example "bench") generated 1 warning (run `cargo clippy --fix --example "bench" -p pg-engine -- ` to apply 1 suggestion)
+warning: useless use of `format!`
+   --> crates/pg-engine/tests/difftest/round8.rs:874:103
+    |
+874 | ...PARED 'r8none{k}'"), format!("\\s2 BEGIN"), "SELECT 1".into()]).clone());
+    |                         ^^^^^^^^^^^^^^^^^^^^^ help: consider using `.to_string()`: `"\\s2 BEGIN".to_string()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#useless_format
+    = note: `#[warn(clippy::useless_format)]` on by default
+
+warning: `pg-engine` (test "difftest") generated 1 warning (run `cargo clippy --fix --test "difftest" -p pg-engine -- ` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 35.88s
+START release-golden 2026-11-04T13:05:26.969163+00:00
+{"name": "release-golden", "exit": 0, "validated": true, "summaries": [["ok", "3", "0", "0"]], "log_sha256": "d8214f566c390ebe0ffbcbbeb3453d5f20f943c10a78e0b1b2e1508f53ce213e"}
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine)
+    Finished `release` profile [optimized + debuginfo] target(s) in 8m 02s
+     Running tests/golden.rs (/home/meszmate/.cache/a166/target-release/release/deps/golden-2eda3d10d9a54b46)
+
+running 3 tests
+3 golden files match
+test golden ... ok
+3 golden files match in a shuffled order (seed 2579)
+test golden_shuffled ... ok
+3 golden files match
+test golden_wire ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+HEAVY-EXIT 0

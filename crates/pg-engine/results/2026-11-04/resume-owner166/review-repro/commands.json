@@ -1,0 +1,172 @@
+[
+  {
+    "name": "source-head",
+    "command": [
+      "git",
+      "-C",
+      "/home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2",
+      "rev-parse",
+      "HEAD"
+    ],
+    "exit": 0,
+    "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/source-head.stdout",
+    "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/source-head.stderr"
+  },
+  {
+    "name": "source-status",
+    "command": [
+      "git",
+      "-C",
+      "/home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2",
+      "status",
+      "--porcelain=v1"
+    ],
+    "exit": 0,
+    "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/source-status.stdout",
+    "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/source-status.stderr"
+  },
+  {
+    "name": "create-reference-db",
+    "command": [
+      "docker",
+      "exec",
+      "a166-psql1",
+      "psql",
+      "-XAt",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "53320",
+      "-U",
+      "postgres",
+      "-d",
+      "postgres",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "CREATE DATABASE a166_catalog_review_repro"
+    ],
+    "exit": 0,
+    "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/create-reference-db.stdout",
+    "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/create-reference-db.stderr"
+  },
+  {
+    "name": "engine-start",
+    "pid": 3216876,
+    "command": [
+      "/home/meszmate/.cache/a166/target-debug/debug/roll-engine",
+      "--data",
+      "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/engine-data",
+      "--listen",
+      "127.0.0.1:53329",
+      "--no-sync",
+      "--idle-close-secs",
+      "60"
+    ],
+    "nice": 19
+  },
+  {
+    "name": "create-engine-db",
+    "command": [
+      "docker",
+      "exec",
+      "a166-psql1",
+      "psql",
+      "-XAt",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "53329",
+      "-U",
+      "postgres",
+      "-d",
+      "postgres",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "CREATE DATABASE a166_catalog_review_repro"
+    ],
+    "exit": 0,
+    "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/create-engine-db.stdout",
+    "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/create-engine-db.stderr"
+  },
+  {
+    "name": "reference",
+    "command": [
+      "docker",
+      "exec",
+      "-i",
+      "a166-psql1",
+      "psql",
+      "-X",
+      "-a",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "53320",
+      "-U",
+      "postgres",
+      "-d",
+      "a166_catalog_review_repro",
+      "-v",
+      "ON_ERROR_STOP=0"
+    ],
+    "exit": 0,
+    "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/reference.stdout",
+    "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/reference.stderr"
+  },
+  {
+    "name": "engine",
+    "command": [
+      "docker",
+      "exec",
+      "-i",
+      "a166-psql1",
+      "psql",
+      "-X",
+      "-a",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "53329",
+      "-U",
+      "postgres",
+      "-d",
+      "a166_catalog_review_repro",
+      "-v",
+      "ON_ERROR_STOP=0"
+    ],
+    "exit": 0,
+    "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/engine.stdout",
+    "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/engine.stderr"
+  },
+  {
+    "name": "engine-exit",
+    "exit": 0
+  },
+  {
+    "name": "drop-reference-db",
+    "command": [
+      "docker",
+      "exec",
+      "a166-psql1",
+      "psql",
+      "-XAt",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "53320",
+      "-U",
+      "postgres",
+      "-d",
+      "postgres",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "DROP DATABASE a166_catalog_review_repro WITH (FORCE)"
+    ],
+    "exit": 0,
+    "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/drop-reference-db.stdout",
+    "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/drop-reference-db.stderr"
+  }
+]

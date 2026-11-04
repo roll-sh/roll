@@ -1,0 +1,9 @@
+SET a166.bad_oid = 'not_an_oid';
+SET
+SELECT count(*) AS no_qualified_rows FROM pg_class WHERE relkind = 'x' AND relnamespace = current_setting('a166.bad_oid')::oid;
+ no_qualified_rows 
+-------------------
+                 0
+(1 row)
+
+SELECT count(*) AS runtime_bad_oid FROM pg_class WHERE relnamespace = current_setting('a166.bad_oid')::oid;

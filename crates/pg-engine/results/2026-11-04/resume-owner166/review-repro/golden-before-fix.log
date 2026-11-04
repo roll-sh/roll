@@ -1,0 +1,32 @@
+
+running 1 test
+
+thread '<unnamed>' (3553837) panicked at crates/pg-engine/tests/golden.rs:191:9:
+1 of 1 golden files differ:
+
+a166_lazy_snapshot.sql:
+   > FULL JOIN (SELECT a166_make_relation() AS ns OFFSET 0) f ON c.relnamespace = f.ns
+   seen_inside:bool
+ - f
+ + t
+   -- SELECT 1
+   
+   > SELECT count(*) AS seen_next_statement FROM pg_class WHERE relname = 'a166_relation_inside'
+   seen_next_statement:int8
+   1
+   -- SELECT 1
+   
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'golden' (3553836) panicked at crates/pg-engine/tests/golden.rs:147:10:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+test golden ... FAILED
+
+failures:
+
+failures:
+    golden
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.28s
+

@@ -1,0 +1,98 @@
+{
+  "status": "snapshot correction committed 256e4d04; all six exact-source bounded steps PASS",
+  "source": "0cd26bfd3b19bc43a113dced2254674355d0a55a",
+  "snapshot_proof": "broad-quiet-full: PG18.6 false,engine true;nextstatement1both",
+  "runtime_bad_oid": "preexisting mismatch reproduced in retained5c312235baselinebinary;not a166 regression;historicalbinaryprovenance supported notsealed",
+  "SysTable_inventory": {
+    "entries": 213,
+    "max_oid": 13673,
+    "at_or_above_FIRST_USER_OID": 0
+  },
+  "repros": {
+    ".": {
+      "reference": {
+        "seen_inside": [
+          ""
+        ],
+        "stderr": "ERROR:  invalid input syntax for type oid: \"not_an_oid\"\nERROR:  invalid input syntax for type oid: \"not_an_oid\"\n"
+      },
+      "engine": {
+        "seen_inside": [
+          ""
+        ],
+        "stderr": "ERROR:  invalid input syntax for type oid: \"not_an_oid\"\n"
+      }
+    },
+    "sorted-outer": {
+      "reference": {
+        "seen_inside": [
+          ""
+        ],
+        "stderr": "ERROR:  invalid input syntax for type oid: \"not_an_oid\"\nERROR:  invalid input syntax for type oid: \"not_an_oid\"\n"
+      },
+      "engine": {
+        "seen_inside": [
+          ""
+        ],
+        "stderr": "ERROR:  invalid input syntax for type oid: \"not_an_oid\"\n"
+      }
+    },
+    "cold-catalog": {
+      "reference": {
+        "seen_inside": [
+          "f"
+        ],
+        "stderr": "ERROR:  invalid input syntax for type oid: \"not_an_oid\"\nERROR:  invalid input syntax for type oid: \"not_an_oid\"\n"
+      },
+      "engine": {
+        "seen_inside": [
+          "f"
+        ],
+        "stderr": "ERROR:  invalid input syntax for type oid: \"not_an_oid\"\n"
+      }
+    },
+    "full-join": {
+      "reference": {
+        "seen_inside": [
+          "f"
+        ],
+        "stderr": "ERROR:  invalid input syntax for type oid: \"not_an_oid\"\nERROR:  invalid input syntax for type oid: \"not_an_oid\"\n"
+      },
+      "engine": {
+        "seen_inside": [
+          "f"
+        ],
+        "stderr": "ERROR:  invalid input syntax for type oid: \"not_an_oid\"\n"
+      }
+    },
+    "broad-quiet-full": {
+      "reference": {
+        "seen_inside": [
+          "f"
+        ],
+        "stderr": "ERROR:  invalid input syntax for type oid: \"not_an_oid\"\nERROR:  invalid input syntax for type oid: \"not_an_oid\"\n"
+      },
+      "engine": {
+        "seen_inside": [
+          "t"
+        ],
+        "stderr": "ERROR:  invalid input syntax for type oid: \"not_an_oid\"\n"
+      }
+    },
+    "runtime-baseline": {
+      "reference": {
+        "seen_inside": [],
+        "stderr": "ERROR:  invalid input syntax for type oid: \"not_an_oid\"\nERROR:  invalid input syntax for type oid: \"not_an_oid\"\n"
+      },
+      "engine": {
+        "seen_inside": [],
+        "stderr": "ERROR:  invalid input syntax for type oid: \"not_an_oid\"\n"
+      }
+    }
+  },
+  "remaining_gates": [
+    "parent fresh review and combined service PENDING",
+    "10k tables plus composites performance and footprint HELD"
+  ],
+  "correction_source": "256e4d049d4f82db1166c08437bab736a0d0a3ee"
+}
