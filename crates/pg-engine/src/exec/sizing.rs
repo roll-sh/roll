@@ -2159,6 +2159,20 @@ fn columns_unchanged(bix: &BoundIndex, old: &[Value], new: &[Value]) -> bool {
 }
 
 fn same(a: Option<&Value>, b: Option<&Value>) -> bool {
+    // (The common kinds compared as they are: their encodings are equal exactly when they are.)
+    let null = &Value::Null;
+    match (a.unwrap_or(null), b.unwrap_or(null)) {
+        (Value::Null, Value::Null) => return true,
+        (Value::Bool(x), Value::Bool(y)) => return x == y,
+        (Value::Int2(x), Value::Int2(y)) => return x == y,
+        (Value::Int4(x), Value::Int4(y)) => return x == y,
+        (Value::Int8(x), Value::Int8(y)) => return x == y,
+        (Value::Oid(x), Value::Oid(y)) => return x == y,
+        (Value::Date(x), Value::Date(y)) => return x == y,
+        (Value::Timestamp(x), Value::Timestamp(y)) | (Value::Timestamptz(x), Value::Timestamptz(y)) => return x == y,
+        (Value::Text(x), Value::Text(y)) => return x == y,
+        _ => {}
+    }
     let enc = |v: Option<&Value>| {
         let mut out = Vec::new();
         encode_value(&mut out, v.unwrap_or(&Value::Null), false);
@@ -2283,7 +2297,9 @@ pub fn updated(
             let Some(nv) = index_values(bix, new, ctx)? else {
                 continue;
             };
-            let unchanged = index_values(bix, old, ctx)?.is_some_and(|ov| same_vals(&ov, &nv));
+            // (Columns unchanged: values unchanged, without computing the old ones.)
+            let unchanged = columns_unchanged(bix, old, new)
+                || index_values(bix, old, ctx)?.is_some_and(|ov| same_vals(&ov, &nv));
             ents.push((bix.index.oid, index_key(t, bix, nv, new, ctx), unchanged));
         }
         let gist = gist_entries(t.oid, indexes, new, None, ctx)?;
@@ -2514,6 +2530,23 @@ impl Fetcher {
         }
         Some(blk)
     }
+}
+
+/// Logical apply found the row stored under `key` through its replica identity index `bix`
+/// (RelationFindReplTupleByIndex): that index scan's upkeep, as an executor's point lookup
+/// has it. The dead entries passed before the row's are marked (_bt_killitems at
+/// index_endscan; the primary key's, whose entries the data key names) and the row's page
+/// is pruned (heap_page_prune_opt at the heap fetch). Without it a subscriber's updated
+/// pages were never pruned: every update past a page's free space went to another page,
+/// non-HOT, with new index entries PostgreSQL's subscriber doesn't make.
+pub fn identity_fetched(t: &Table, bix: &BoundIndex, key: &[u8], ctx: &ExecCtx) {
+    if bix.index.id == 0 && bix.index.method == "btree" {
+        let prefix = index_prefix(t.oid, 0);
+        if let Some(mut k) = Kills::new(t.oid, bix.index.oid, &prefix, &[(key.to_vec(), prefix_end(key))], false, ctx) {
+            k.passed(key);
+        }
+    }
+    fetched(t.oid, key, None, ctx);
 }
 
 /// An index or bitmap heap fetch: prune when reaching a different heap page.

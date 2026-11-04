@@ -234,6 +234,9 @@ pub fn find(rules: &TableRules, how: Search, search: &[Value], delete: bool, ctx
     loop {
         ctx.check()?;
         let Some((dkey, seen)) = locate(rules, how, search, ctx)? else { return Ok(None) };
+        if let Search::Identity(i) = how {
+            super::sizing::identity_fetched(t, &rules.indexes[i], &dkey, ctx);
+        }
         let oper = if delete { Xltw::Delete } else { Xltw::Update };
         let (row, xmin) = match lock_row(t, &dkey, RowMark::Update, Wait::Block, oper, ctx)? {
             Locked::Skip => continue,
