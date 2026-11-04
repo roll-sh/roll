@@ -1,0 +1,34 @@
+{
+  "time": "2026-11-04T20:00:06.114270+00:00",
+  "command_exit": 0,
+  "source_after": {
+    "commit": "e686696add25112c0d2ce33720bd84f0e04e21bf",
+    "files": 2501,
+    "match": true,
+    "manifest_sha256": "f9793f88fe3cb99461678085099dfd475af11f945fe3b7d4f4c64edaebd66e97"
+  },
+  "raw_sha256": "9fc70bc30db980118e849d4713c3c3e6c47bf8c3a04221592aa73104c7f9d603",
+  "counts": [
+    [
+      3,
+      0,
+      0
+    ]
+  ],
+  "binary": [
+    {
+      "path": "/home/meszmate/.cache/a170/target/debug/deps/pg_engine-357a2b04731fc140",
+      "preserved": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-e686-focused/binary-ca88bb947cfdea19d973b86f63a00cfd286b508039201460685c211503c8df93",
+      "sha256": "ca88bb947cfdea19d973b86f63a00cfd286b508039201460685c211503c8df93",
+      "bytes": 319463944
+    }
+  ],
+  "compiled_from_source_this_stage": true,
+  "provenance_valid": true,
+  "expected": [
+    3,
+    0,
+    0
+  ],
+  "assessment": "Focused/test-library gate only; no integration/service/PGoracle/performance acceptance"
+}

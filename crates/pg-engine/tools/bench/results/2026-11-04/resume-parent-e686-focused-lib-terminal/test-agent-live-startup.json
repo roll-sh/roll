@@ -1,0 +1,253 @@
+{
+  "time": "2026-11-04T19:58:12.977509+00:00",
+  "scope": "Live startup sample only; no lifetime affinity or nice claim",
+  "root_pid": 3712034,
+  "processes": [
+    {
+      "pid": 3712034,
+      "ppid": 1445,
+      "exe": "/usr/bin/dash",
+      "command": "sh -c \"$0\" \"$@\"; echo \"HEAVY-EXIT $?\" /home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/crates/pg-engine/tools/heavy.sh taskset -c 4-7,22-25 env CARGO_TARGET_DIR=/home/meszmate/.cache/a170/target CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 TMPDIR=/home/meszmate/.cache/a170/tmp python3 /home/meszmate/.cache/pg-engine-resume-20261104/combined-e686-focused/run.py ",
+      "threads": [
+        {
+          "tid": 3712034,
+          "cpus": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23,
+            24,
+            25,
+            26,
+            27,
+            28,
+            29,
+            30,
+            31,
+            32,
+            33,
+            34,
+            35
+          ],
+          "nice": 0,
+          "comm": "sh"
+        }
+      ]
+    },
+    {
+      "pid": 3712035,
+      "ppid": 3712034,
+      "exe": "/usr/bin/dash",
+      "command": "/bin/sh /home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/crates/pg-engine/tools/heavy.sh taskset -c 4-7,22-25 env CARGO_TARGET_DIR=/home/meszmate/.cache/a170/target CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 TMPDIR=/home/meszmate/.cache/a170/tmp python3 /home/meszmate/.cache/pg-engine-resume-20261104/combined-e686-focused/run.py ",
+      "threads": [
+        {
+          "tid": 3712035,
+          "cpus": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23,
+            24,
+            25,
+            26,
+            27,
+            28,
+            29,
+            30,
+            31,
+            32,
+            33,
+            34,
+            35
+          ],
+          "nice": 0,
+          "comm": "heavy.sh"
+        }
+      ]
+    },
+    {
+      "pid": 3712058,
+      "ppid": 3712035,
+      "exe": "/usr/bin/python3.13",
+      "command": "python3 /home/meszmate/.cache/pg-engine-resume-20261104/combined-e686-focused/run.py ",
+      "threads": [
+        {
+          "tid": 3712058,
+          "cpus": [
+            4,
+            5,
+            6,
+            7,
+            22,
+            23,
+            24,
+            25
+          ],
+          "nice": 19,
+          "comm": "python3"
+        }
+      ]
+    },
+    {
+      "pid": 3712064,
+      "ppid": 3712058,
+      "exe": "/home/meszmate/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+      "command": "/home/meszmate/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo test -v -p pg-engine --lib combined_index -- --nocapture --test-threads=2 ",
+      "threads": [
+        {
+          "tid": 3712064,
+          "cpus": [
+            4,
+            5,
+            6,
+            7,
+            22,
+            23,
+            24,
+            25
+          ],
+          "nice": 19,
+          "comm": "cargo"
+        },
+        {
+          "tid": 3712073,
+          "cpus": [
+            4,
+            5,
+            6,
+            7,
+            22,
+            23,
+            24,
+            25
+          ],
+          "nice": 19,
+          "comm": "futures-timer"
+        },
+        {
+          "tid": 3712074,
+          "cpus": [
+            4,
+            5,
+            6,
+            7,
+            22,
+            23,
+            24,
+            25
+          ],
+          "nice": 19,
+          "comm": "cargo"
+        },
+        {
+          "tid": 3712075,
+          "cpus": [
+            4,
+            5,
+            6,
+            7,
+            22,
+            23,
+            24,
+            25
+          ],
+          "nice": 19,
+          "comm": "cargo"
+        }
+      ]
+    },
+    {
+      "pid": 3712076,
+      "ppid": 3712064,
+      "exe": "/home/meszmate/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc",
+      "command": "/home/meszmate/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name pg_engine --edition=2024 crates/pg-engine/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=line-tables-only --test --check-cfg cfg(docsrs,test) --check-cfg cfg(feature, values(\"heapprof\", \"icu4x\")) -C metadata=57555f5389a33c46 -C extra-filename=-357a2b04731fc140 --out-dir /home/meszmate/.cache/a170/target/debug/deps -C incremental=/home/meszmate/.cache/a170/target/debug/incremental -L dependency=/home/meszmate/.cache/a170/target/debug/deps --extern aes=/home/meszmate/.cache/a170/target/debug/deps/libaes-ca70092763fcfa83.rlib --extern anyhow=/home/meszmate/.cache/a170/target/debug/deps/libanyhow-9d504ed04d9eda62.rlib --extern base64=/home/meszmate/.cache/a170/target/debug/deps/libbase64-3ba403358e5bb055.rlib --extern bigdecimal=/home/meszmate/.cache/a170/target/debug/deps/libbigdecimal-34adf853a502fcc2.rlib --extern blake2=/home/meszmate/.cache/a170/target/debug/deps/libblake2-ceda80fb5bd81b29.rlib --extern bytes=/home/meszmate/.cache/a170/target/debug/deps/libbytes-d3b99d407f557edb.rlib --extern chrono=/home/meszmate/.cache/a170/target/debug/deps/libchrono-f4af4100998f57bc.rlib --extern chrono_tz=/home/meszmate/.cache/a170/target/debug/deps/libchrono_tz-b65ca3b65bf2d86c.rlib --extern clap=/home/meszmate/.cache/a170/target/debug/deps/libclap-fae170e5ff89dce1.rlib --extern crc32fast=/home/meszmate/.cache/a170/target/debug/deps/libcrc32fast-274bf1520a2dc5e0.rlib --extern crossbeam_skiplist=/home/meszmate/.cache/a170/target/debug/deps/libcrossbeam_skiplist-2126cbf10be0d17c.rlib --extern des=/home/meszmate/.cache/a170/target/debug/deps/libdes-5b9977c86e9a2e46.rlib --extern fallible_iterator=/home/meszmate/.cache/a170/target/debug/deps/libfallible_iterator-f060508d6050da57.rlib --extern flate2=/home/meszmate/.cache/a170/target/debug/deps/libflate2-d09ed2b9a4f084e8.rlib --extern futures=/home/meszmate/.cache/a170/target/debug/deps/libfutures-9b3313cbe23d82e0.rlib --extern getrandom=/home/meszmate/.cache/a170/target/debug/deps/libgetrandom-5d0bf248573c3274.rlib --extern hashbrown=/home/meszmate/.cache/a170/target/debug/deps/libhashbrown-76856f03efd5ed2f.rlib --extern hmac=/home/meszmate/.cache/a170/target/debug/deps/libhmac-1ca768a61fb358db.rlib --extern itoa=/home/meszmate/.cache/a170/target/debug/deps/libitoa-0abd08f900c8f906.rlib --extern libc=/home/meszmate/.cache/a170/target/debug/deps/liblibc-4a11036bf59632d9.rlib --extern md5=/home/meszmate/.cache/a170/target/debug/deps/libmd5-316f58dde404b9ee.rlib --extern mimalloc=/home/meszmate/.cache/a170/target/debug/deps/libmimalloc-e0b540e7a7bf6eb8.rlib --extern num_bigint=/home/meszmate/.cache/a170/target/debug/deps/libnum_bigint-50fdc7e9ee9ba707.rlib --extern num_traits=/home/meszmate/.cache/a170/target/debug/deps/libnum_traits-1392eae624a2f6b9.rlib --extern parking_lot=/home/meszmate/.cache/a170/target/debug/deps/libparking_lot-77de2e28d36bc1a7.rlib --extern pg_icu=/home/meszmate/.cache/a170/target/debug/deps/libpg_icu-6e40aac187d44f32.rlib --extern pg_snowball=/home/meszmate/.cache/a170/target/debug/deps/libpg_snowball-6e88fc7bd749d812.rlib --extern pg_query=/home/meszmate/.cache/a170/target/debug/deps/libpg_query-88118d3383a3a6b5.rlib --extern postgres_protocol=/home/meszmate/.cache/a170/target/debug/deps/libpostgres_protocol-0d2c8e94bea84f20.rlib --extern prost=/home/meszmate/.cache/a170/target/debug/deps/libprost-0cc8674e7f6ea6b6.rlib --extern psm=/home/meszmate/.cache/a170/target/debug/deps/libpsm-bb973bfb1e1757dc.rlib --extern ripemd=/home/meszmate/.cache/a170/target/debug/deps/libripemd-1314872365bb5ec1.rlib --extern ryu=/home/meszmate/.cache/a170/target/debug/deps/libryu-4604cb0dace59bc7.rlib --extern serde=/home/meszmate/.cache/a170/target/debug/deps/libserde-135d2c02a60b0a07.rlib --extern serde_json=/home/meszmate/.cache/a170/target/debug/deps/libserde_json-58a34ba7d4c5f36a.rlib --extern sha1=/home/meszmate/.cache/a170/target/debug/deps/libsha1-f0eb777afa2cbd92.rlib --extern sha2=/home/meszmate/.cache/a170/target/debug/deps/libsha2-50e51ceed77bf668.rlib --extern sha3=/home/meszmate/.cache/a170/target/debug/deps/libsha3-3f9351d951013440.rlib --extern sm3=/home/meszmate/.cache/a170/target/debug/deps/libsm3-209d4a4c398ea6f7.rlib --extern smallvec=/home/meszmate/.cache/a170/target/debug/deps/libsmallvec-f85fdbfd8f4ffbf8.rlib --extern stacker=/home/meszmate/.cache/a170/target/debug/deps/libstacker-22d2003836ec74c9.rlib --extern tempfile=/home/meszmate/.cache/a170/target/debug/deps/libtempfile-ec0faa3f60c142b5.rlib --extern thiserror=/home/meszmate/.cache/a170/target/debug/deps/libthiserror-7275dd5bbbb6cc7f.rlib --extern tokio=/home/meszmate/.cache/a170/target/debug/deps/libtokio-ae8fcfe415ba0a5c.rlib --extern tokio_postgres=/home/meszmate/.cache/a170/target/debug/deps/libtokio_postgres-7b32e4dd462a70eb.rlib --extern tracing=/home/meszmate/.cache/a170/target/debug/deps/libtracing-2be1e3bbbf7702e6.rlib --extern tracing_subscriber=/home/meszmate/.cache/a170/target/debug/deps/libtracing_subscriber-3406277e86c7b14e.rlib --extern unicode_normalization=/home/meszmate/.cache/a170/target/debug/deps/libunicode_normalization-0cb10f2caf39f824.rlib --extern uuid=/home/meszmate/.cache/a170/target/debug/deps/libuuid-3904418cb5d2a199.rlib --extern zstd=/home/meszmate/.cache/a170/target/debug/deps/libzstd-c40ed22b634ce42f.rlib -L native=/home/meszmate/.cache/a170/target/debug/build/libmimalloc-sys-0d65bc0af709c4c8/out -L native=/home/meszmate/.cache/a170/target/debug/build/pg_query-8e7607214f1dfc71/out -L native=/home/meszmate/.cache/a170/target/debug/build/pg_query-8e7607214f1dfc71/out -L native=/home/meszmate/.cache/a170/target/debug/build/psm-273dcd35d17e0532/out -L native=/home/meszmate/.cache/a170/target/debug/build/zstd-sys-a18cd8b4504cb4ae/out -L native=/home/meszmate/.cache/a170/target/icu4c/78.1-x86_64-unknown-linux-gnu/lib ",
+      "threads": [
+        {
+          "tid": 3712076,
+          "cpus": [
+            4,
+            5,
+            6,
+            7,
+            22,
+            23,
+            24,
+            25
+          ],
+          "nice": 19,
+          "comm": "rustc"
+        },
+        {
+          "tid": 3712077,
+          "cpus": [
+            4,
+            5,
+            6,
+            7,
+            22,
+            23,
+            24,
+            25
+          ],
+          "nice": 19,
+          "comm": "ctrl-c"
+        },
+        {
+          "tid": 3712078,
+          "cpus": [
+            4,
+            5,
+            6,
+            7,
+            22,
+            23,
+            24,
+            25
+          ],
+          "nice": 19,
+          "comm": "rustc"
+        }
+      ]
+    }
+  ]
+}

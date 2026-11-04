@@ -1,0 +1,30 @@
+{
+  "taskId": "node:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Adelegate-task%3Apg-resume-20261104-combined-e686-focused-lib-execution-r1",
+  "childThreadId": "thread:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Adelegate-task%3Apg-resume-20261104-combined-e686-focused-lib-execution-r1",
+  "childRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A9e5a6feb-d435-4514-ac9d-07c1b03b444b%253Adelegate-task%253Apg-resume-20261104-combined-e686-focused-lib-execution-r1:ordinal:1",
+  "childNodeId": "node:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Adelegate-task%3Apg-resume-20261104-combined-e686-focused-lib-execution-r1",
+  "status": "completed",
+  "workState": "result_available",
+  "hasPendingChildRuns": false,
+  "latestTerminalRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A9e5a6feb-d435-4514-ac9d-07c1b03b444b%253Adelegate-task%253Apg-resume-20261104-combined-e686-focused-lib-execution-r1:ordinal:1",
+  "latestTerminalStatus": "completed",
+  "latestTerminalSummary": null,
+  "latestTerminalResultContextTransferId": null,
+  "providerInstanceId": "codex",
+  "model": "gpt-6.1-sol",
+  "options": [
+    {
+      "id": "reasoningEffort",
+      "value": "high"
+    },
+    {
+      "id": "serviceTier",
+      "value": "default"
+    }
+  ],
+  "summary": "PASS. Launched once; both Cargo stages and wrapper exited 0.\n\n- Focused: **3 passed, 0 failed, 0 ignored**.\n- Full library: **193 passed, 0 failed, 2 ignored**.\n- Source: `e686696add25112c0d2ce33720bd84f0e04e21bf`; all 2,501 files and frozen hashes verified afterward.\n- Fresh snapshot compilation confirmed; both stages used the same preserved binary.\n- Live compiler/test thread samples showed CPUs 4–7,22–25 and nice 19. Owned processes terminated; no active Cargo/test use of a170 remained.\n\nSHA-256:\n\n```text\nFocused raw: 9fc70bc30db980118e849d4713c3c3e6c47bf8c3a04221592aa73104c7f9d603\nFull raw:    229799c9b0462013e1ca6ada7e1489a33f27cdd6b5d45a6696aa79ff046b4cca\nBinary:      ca88bb947cfdea19d973b86f63a00cfd286b508039201460685c211503c8df93\n```\n\n[Terminal result](/home/meszmate/.cache/pg-engine-resume-20261104/combined-e686-focused/TERMINAL.json) · [Audit, commands, exits and evidence](/home/meszmate/.cache/pg-engine-resume-20261104/combined-e686-focused/test-agent-terminal-audit.json)\n\nNo fixes, retries, pushes, or cleanup. Acceptance covers only these focused/library gates; affinity observations are samples, and broader integration, readiness and performance remain unassessed.",
+  "resultContextTransferId": "context-transfer:type:subagent_result:source-thread:thread%3Adelegated-task%3Acommand%253Amcp%253A9e5a6feb-d435-4514-ac9d-07c1b03b444b%253Adelegate-task%253Apg-resume-20261104-combined-e686-focused-lib-execution-r1:target-thread:ef773c6d-b273-413f-96df-4136f8b05569:74e37cf0-7831-4cb1-9df1-5e4a75000f3c",
+  "hasPendingQuestion": false,
+  "pendingApproval": null,
+  "waitTimedOut": false
+}

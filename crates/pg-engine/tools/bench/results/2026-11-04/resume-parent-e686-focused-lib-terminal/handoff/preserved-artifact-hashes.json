@@ -1,0 +1,14 @@
+{
+  "/tmp/combined-index-models-d62e3d3b/source-r1-successor/preservation.json": "18d4b322d96fc8f73666ee8f494c20fe934956d5203305975266c311d587a509",
+  "/tmp/combined-index-models-d62e3d3b/source-r1-successor/candidate-manifest.json": "1154c78a25ef61ec10b3f736eb36cc2bb54f8861cd585d2663d558afaf4e964d",
+  "/tmp/combined-index-models-d62e3d3b/proof-r1-successor/candidate-manifest.json": "8f9940b386a3bf5057067141d66272892771512b984182ea8f273e24dbe61225",
+  "/tmp/combined-index-models-d62e3d3b/proof-r1-successor/red-manifest.json": "f2b1a3bca97aaa5ec7228be7b2daca48cedffe375b041ec362b3de5b259beee5",
+  "/tmp/combined-index-models-d62e3d3b/proof-r1-successor/production-preservation.json": "0e8cf3097138ebd0c8011b459738e0595e254174b4a3bfa276ed7063fc45dbd9",
+  "/tmp/combined-index-models-d62e3d3b/encoding-boundary-successor/preservation.json": "18d4b322d96fc8f73666ee8f494c20fe934956d5203305975266c311d587a509",
+  "/tmp/combined-index-models-d62e3d3b/encoding-boundary-successor/candidate-manifest.json": "cabdd8a9476ae657cdf630b69f672e0ecda78f5448d0ce68309f1980138c3530",
+  "/tmp/combined-index-models-d62e3d3b/encoding-boundary-successor/red-manifest.json": "d2bfd5b074c90217767c0111acd0be6dd375ebbcd5aa8b28c35bb7ee083841ff",
+  "/tmp/combined-index-models-d62e3d3b/encoding-boundary-successor/verification.json": "d7d6045165a638c4ce4d8ea5e1df47fc7a662ac78e7e9375467ed078ac98b874",
+  "/tmp/combined-index-models-d62e3d3b/encoding-boundary-successor/preserved-artifact-hashes.json": "a52299011e932fb8d2102716548c78f6158e17161b0ea57d04c65cd2f77f815f",
+  "/tmp/combined-index-models-d62e3d3b/encoding-boundary-successor/red-identity.json": "1069f34fb0189fed0196a42f1ff6f9edf5e30933bc2d5634592270901e8f786f",
+  "/tmp/combined-index-models-d62e3d3b/encoding-boundary-successor/red-r2-identity.json": "217da5a33309ebf5de87e5778773ef0af1d3752014c42ec840a467116c73f956"
+}

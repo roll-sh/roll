@@ -1,0 +1,38 @@
+{
+  "time": "2026-11-04T20:03:52.329439+00:00",
+  "source": "e686696add25112c0d2ce33720bd84f0e04e21bf",
+  "all2501snapshot_hashes_and_frozen_hashes_match": true,
+  "stages": [
+    {
+      "stage": "combined-focused",
+      "actual_exit": 0,
+      "raw_sha256": "9fc70bc30db980118e849d4713c3c3e6c47bf8c3a04221592aa73104c7f9d603",
+      "actual_summary": [
+        3,
+        0,
+        0
+      ],
+      "same_preserved_binary": true
+    },
+    {
+      "stage": "full-lib",
+      "actual_exit": 0,
+      "raw_sha256": "229799c9b0462013e1ca6ada7e1489a33f27cdd6b5d45a6696aa79ff046b4cca",
+      "actual_summary": [
+        193,
+        0,
+        2
+      ],
+      "same_preserved_binary": true
+    }
+  ],
+  "binary_sha256": "ca88bb947cfdea19d973b86f63a00cfd286b508039201460685c211503c8df93",
+  "compile_from_exact_snapshot_confirmed": true,
+  "same_binary_for_both_stages": true,
+  "one_launch_no_retries": true,
+  "actual_multithreaded_test_threads": 2,
+  "startup_and_agent_samples": "Nice19/cpus4-7,22-25 samples match; not lifetime audit",
+  "post_owner_processes_absent": true,
+  "target": "a170 existing target released to parent",
+  "scope": "Focused3 andfullLIB193/0/2 accepted only; remaining PGoracles/P6-P12/integration/service/perf held"
+}

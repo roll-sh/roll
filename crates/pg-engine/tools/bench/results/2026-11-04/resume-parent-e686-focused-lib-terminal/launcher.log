@@ -1,0 +1,2 @@
+{"status": "PASS", "completed": [{"stage": "combined-focused", "command_exit": 0, "counts": [[3, 0, 0]], "provenance_valid": true}, {"stage": "full-lib", "command_exit": 0, "counts": [[193, 0, 2]], "provenance_valid": true}]}
+HEAVY-EXIT 0

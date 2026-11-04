@@ -1,0 +1,5412 @@
+       Fresh libc v0.2.191
+       Fresh cfg-if v1.0.5
+       Fresh unicode-ident v1.0.27
+       Fresh proc-macro2 v1.0.107
+       Fresh version_check v0.9.5
+       Fresh quote v1.0.47
+       Fresh jobserver v0.1.35
+       Fresh find-msvc-tools v0.1.14
+       Fresh shlex v2.0.1
+       Fresh syn v3.0.9
+       Fresh cc v1.8.0
+       Fresh syn v2.0.119
+       Fresh autocfg v1.5.1
+       Fresh once_cell v1.21.4
+       Fresh bitflags v2.13.2
+       Fresh hybrid-array v0.4.15
+       Fresh subtle v2.6.1
+       Fresh anyhow v1.0.104
+       Fresh itertools v0.14.0
+       Fresh pin-project-lite v0.2.17
+       Fresh typenum v1.20.1
+       Fresh cmov v0.5.4
+       Fresh memchr v2.8.3
+       Fresh glob v0.3.4
+       Fresh ctutils v0.4.3
+       Fresh generic-array v0.14.7
+       Fresh prost-derive v0.13.5
+       Fresh block-buffer v0.12.1
+       Fresh crypto-common v0.2.2
+       Fresh equivalent v1.0.3
+       Fresh cpufeatures v0.2.17
+       Fresh rand_core v0.10.1
+       Fresh const-oid v0.10.2
+       Fresh linux-raw-sys v0.12.1
+       Fresh rustix v1.1.5
+       Fresh digest v0.11.3
+       Fresh bytes v1.12.1
+       Fresh fastrand v2.5.0
+       Fresh lazy_static v1.5.1
+       Fresh minimal-lexical v0.2.1
+       Fresh smallvec v1.16.3
+       Fresh cpufeatures v0.3.1
+       Fresh pkg-config v0.3.34
+       Fresh linux-raw-sys v0.4.15
+       Fresh futures-sink v0.3.34
+       Fresh futures-core v0.3.34
+       Fresh siphasher v1.0.4
+       Fresh heck v0.5.0
+       Fresh indexmap v2.14.2
+       Fresh rustix v0.38.44
+       Fresh nom v7.1.3
+       Fresh num-traits v0.2.19
+       Fresh object v0.39.1
+       Fresh getrandom v0.4.3
+       Fresh regex v1.13.1
+       Fresh prettyplease v0.2.37
+       Fresh block-buffer v0.10.4
+       Fresh crypto-common v0.1.7
+       Fresh libloading v0.8.9
+       Fresh home v0.5.12
+       Fresh fixedbitset v0.5.7
+       Fresh tinyvec v1.13.3
+       Fresh scopeguard v1.2.0
+       Fresh lock_api v0.4.14
+       Fresh unicode-normalization v0.1.26
+       Fresh petgraph v0.7.1
+       Fresh which v4.4.2
+       Fresh digest v0.10.7
+       Fresh clang-sys v1.9.1
+       Fresh ar_archive_writer v0.5.3
+       Fresh prost-types v0.13.5
+       Fresh cexpr v0.6.0
+       Fresh parking_lot_core v0.9.12
+       Fresh futures-channel v0.3.34
+       Fresh chacha20 v0.10.2
+       Fresh futures-macro v0.3.34
+       Fresh errno v0.3.14
+       Fresh unicode-bidi v0.3.18
+       Fresh multimap v0.10.1
+       Fresh futures-io v0.3.34
+       Fresh rustc-hash v1.1.0
+       Fresh unicode-properties v0.1.4
+       Fresh lazycell v1.3.0
+       Fresh utf8parse v0.2.2
+       Fresh futures-task v0.3.34
+       Fresh shlex v1.3.0
+       Fresh peeking_take_while v0.1.2
+       Fresh slab v0.4.12
+       Fresh futures-util v0.3.34
+       Fresh bindgen v0.66.1
+       Fresh anstyle-parse v1.0.0
+       Fresh stringprep v0.1.5
+       Fresh prost-build v0.13.5
+       Fresh signal-hook-registry v1.4.8
+       Fresh rand v0.10.3
+       Fresh parking_lot v0.12.5
+       Fresh serde_core v1.0.229
+       Fresh sha2 v0.11.1
+       Fresh hmac v0.13.0
+       Fresh md-5 v0.11.0
+       Fresh tracing-core v0.1.36
+       Fresh inout v0.1.4
+       Fresh tokio-macros v2.7.2
+       Fresh mio v1.2.4
+       Fresh socket2 v0.6.5
+       Fresh base64 v0.22.1
+       Fresh log v0.4.34
+       Fresh byteorder v1.5.0
+       Fresh regex-syntax v0.8.11
+       Fresh is_terminal_polyfill v1.70.2
+       Fresh colorchoice v1.0.5
+       Fresh fallible-iterator v0.2.0
+       Fresh anstyle v1.0.14
+       Fresh fs_extra v1.3.0
+       Fresh anstyle-query v1.1.5
+       Fresh anstream v1.0.0
+       Fresh postgres-protocol v0.6.12
+       Fresh regex-automata v0.4.18
+       Fresh tokio v1.53.3
+       Fresh cipher v0.4.4
+       Fresh crossbeam-utils v0.8.23
+       Fresh zmij v1.0.23
+       Fresh zstd-sys v2.1.2+zstd.1.5.7
+       Fresh num-integer v0.1.47
+       Fresh phf_shared v0.12.1
+       Fresh phf_shared v0.13.1
+       Fresh thiserror-impl v1.0.69
+       Fresh tracing-attributes v0.1.31
+       Fresh serde_derive v1.0.229
+       Fresh iana-time-zone v0.1.65
+       Fresh simd-adler32 v0.3.10
+       Fresh strsim v0.11.1
+       Fresh itoa v1.0.18
+       Fresh adler2 v2.0.1
+       Fresh clap_lex v1.1.1
+       Fresh either v1.19.0
+       Fresh clap_builder v4.6.7
+       Fresh itertools v0.10.5
+       Fresh miniz_oxide v0.9.1
+       Fresh serde_json v1.0.154
+       Fresh chrono v0.4.45
+       Fresh serde v1.0.229
+       Fresh tracing v0.1.44
+       Fresh thiserror v1.0.69
+       Fresh phf v0.13.1
+       Fresh phf v0.12.1
+       Fresh num-bigint v0.4.8
+       Fresh zstd-safe v8.2.0
+       Fresh psm v0.1.32
+       Fresh crossbeam-epoch v0.9.21
+       Fresh libmimalloc-sys v0.1.49
+       Fresh tokio-util v0.7.20
+       Fresh libm v0.2.16
+       Fresh crc32fast v1.5.2
+       Fresh matchers v0.2.0
+       Fresh postgres-types v0.2.14
+       Fresh tracing-log v0.2.0
+       Fresh futures-executor v0.3.34
+       Fresh clap_derive v4.6.7
+       Fresh sharded-slab v0.1.7
+       Fresh prost v0.13.5
+       Fresh thiserror-impl v2.0.21
+       Fresh async-trait v0.1.92
+       Fresh thread_local v1.1.10
+       Fresh whoami v2.1.3
+       Fresh allocator-api2 v0.2.21
+       Fresh nu-ansi-term v0.50.3
+       Fresh keccak v0.1.6
+       Fresh foldhash v0.2.0
+       Fresh percent-encoding v2.3.2
+       Fresh sha3 v0.10.9
+       Fresh tokio-postgres v0.7.18
+       Fresh hashbrown v0.17.1
+       Fresh tracing-subscriber v0.3.23
+       Fresh thiserror v2.0.21
+       Fresh pg_query v18.0.0 (https://github.com/pganalyze/pg_query.rs?rev=ad0c87ed59c84ec6b42c970bb42d7985b7b5878b#ad0c87ed)
+       Fresh clap v4.6.7
+       Fresh futures v0.3.34
+       Fresh flate2 v1.1.10
+       Fresh bigdecimal v0.4.11
+       Fresh pg-icu v0.1.0 (/home/meszmate/.cache/pg-engine-resume-20261104/combined-e686-focused/src/crates/pg-icu)
+       Fresh mimalloc v0.1.52
+       Fresh crossbeam-skiplist v0.1.3
+       Fresh zstd v0.14.3
+       Fresh stacker v0.1.25
+       Fresh chrono-tz v0.10.4
+       Fresh aes v0.8.4
+       Fresh des v0.8.1
+       Fresh tempfile v3.27.0
+       Fresh sha1 v0.10.7
+       Fresh sha2 v0.10.9
+       Fresh ripemd v0.1.3
+       Fresh sm3 v0.4.2
+       Fresh md-5 v0.10.6
+       Fresh hmac v0.12.1
+       Fresh blake2 v0.10.6
+       Fresh pg-snowball v0.1.0 (/home/meszmate/.cache/pg-engine-resume-20261104/combined-e686-focused/src/crates/pg-snowball)
+       Fresh uuid v1.28.0
+       Fresh ryu v1.0.23
+       Fresh pg-engine v0.1.0 (/home/meszmate/.cache/pg-engine-resume-20261104/combined-e686-focused/src/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running `/home/meszmate/.cache/a170/target/debug/deps/pg_engine-357a2b04731fc140 --nocapture --test-threads=2`
+
+running 195 tests
+test auth::tests::rfc7677_vector ... ok
+test catalog::btsim::tests::dead_head_walks_match_full_walks ... ok
+test catalog::btsim::tests::long_keys_fit ... ok
+test catalog::btsim::tests::null_keys_follow_tags_not_encoding_length ... ok
+test catalog::btsim::tests::packed_tree_keeps_large_null_keys_across_restart ... ok
+test catalog::btsim::tests::qsort_matches_sorted ... ok
+test catalog::btsim::tests::size_watch_follows_pages ... ok
+test catalog::btsim::tests::vacuum_deletes_emptied_pages ... ok
+test catalog::ginsim::tests::posting_list_sizes ... ok
+test catalog::hashidx::sim_tests::grows_like_postgres ... ok
+test catalog::hashidx::tests::hashes_match_postgres ... ok
+test catalog::heapsim::lps::tests::line_pointers_read_back ... ok
+test catalog::heapsim::lps::tests::settling_waits_for_snapshots_and_preserves_tuple_fields ... ok
+test catalog::heapsim::tests::key_at_answers_every_version ... ok
+test catalog::heapsim::tests::prune_hints_and_visibility_watch_follow_the_model ... ok
+test catalog::heapsim::tests::size_watch_follows_forks ... ok
+test catalog::heapsim::tests::visible_count_follows_writes_and_vacuum ... ok
+test catalog::heapsim::tests::visible_count_pending_insert_clears_target_page ... ok
+test catalog::heapsim::tests::visible_count_restores_old_shapes_atomically ... ok
+test catalog::heapsim::tests::visible_count_survives_bulk_page_initialization ... ok
+test catalog::heapsim::tests::visible_count_survives_pending_restore_and_rollback ... ok
+test catalog::keymap::tests::ascending_rows_found_forward ... ok
+test catalog::keymap::tests::matches_a_hash_map ... ok
+test catalog::pglz::tests::repeats_compress ... ok
+test catalog::pmap::tests::behaves_as_a_btreemap ... ok
+test catalog::pmap::tests::phash_behaves_as_a_hashmap ... ok
+test catalog::pmap::tests::stored_maps_read_groups_as_used ... ok
+test catalog::pmap::tests::stored_phash_reads_buckets_as_used ... ok
+test catalog::relindex::tests::words_match_mentions ... ok
+test catalog::relsize::tests::small_numeric_digits_match_text ... ok
+test catalog::stored_ix::lazy_tags_are_the_listed_maps ... ok
+test exec::fasthash::tests::row_keys_spread ... ok
+test exec::fastsort::tests::encodings_order_as_compare_values ... ok
+test exec::fastsort::tests::ties_between_different_rows_are_left_to_postgres_order ... ok
+test exec::heaporder::tests::displaced_rows_are_outside_the_longest_run ... ok
+test exec::parscan::tests::first_key_pruning_preserves_two_key_tuplesort ... ok
+test exec::parscan::tests::row_sources_preserve_rows_across_slices ... ok
+test exec::pghash::tests::agg_buckets_follow_postgres ... ok
+test exec::pghash::tests::matches_postgres ... ok
+test exec::pgsort::tests::skipped_items_change_nothing ... ok
+test exec::pgsort::tests::ties_like_postgres ... ok
+test exec::pipe::tests::keys_of_both_sides_hash_alike ... ok
+test exec::pipe::tests::single_integer_keys ... ok
+combined_index_build_validation Include(2800) workers=0 estimated=false: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: false,
+    requested: 0,
+    reserved: 0,
+    spawned: 0,
+    participants: {},
+    serial_rows: 6000,
+    serial_validated: 6000,
+    fold: [],
+    minimum: None,
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row size 2816 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            detail: Some(
+                "Index row references tuple (32,80) in relation \"ci\".",
+            ),
+            hint: Some(
+                "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+            ),
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ci",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ci_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Include(2800) workers=2 estimated=false: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: true,
+    requested: 2,
+    reserved: 2,
+    spawned: 2,
+    participants: {
+        0: Participant {
+            thread: "ThreadId(46)/exec::sizing::kept::tests::combined_index_build_validation",
+            chunks: [
+                0,
+                5,
+                7,
+                10,
+                12,
+                14,
+                18,
+                21,
+            ],
+            rows: 1999,
+            validated: 1999,
+            model_returns: 1999,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+        1: Participant {
+            thread: "ThreadId(53)/roll-build-0",
+            chunks: [
+                1,
+                3,
+                8,
+                13,
+                16,
+                19,
+                22,
+            ],
+            rows: 1750,
+            validated: 1750,
+            model_returns: 1750,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+        2: Participant {
+            thread: "ThreadId(54)/roll-build-1",
+            chunks: [
+                2,
+                4,
+                6,
+                9,
+                11,
+                15,
+                17,
+                20,
+                23,
+            ],
+            rows: 2251,
+            validated: 2251,
+            model_returns: 2251,
+            expanded_text: 2800,
+            minimum: Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                    ],
+                    2816,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                    ],
+                ),
+            ),
+            error: None,
+            coordinator_aborted: false,
+        },
+    },
+    serial_rows: 0,
+    serial_validated: 0,
+    fold: [
+        (
+            0,
+            None,
+        ),
+        (
+            1,
+            None,
+        ),
+        (
+            2,
+            Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                    ],
+                    2816,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                    ],
+                ),
+            ),
+        ),
+    ],
+    minimum: Some(
+        (
+            [
+                0,
+                0,
+                64,
+                1,
+                0,
+                0,
+                64,
+                6,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                23,
+                112,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                23,
+                112,
+            ],
+            2816,
+            [
+                0,
+                0,
+                64,
+                1,
+                0,
+                0,
+                0,
+                0,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                23,
+                112,
+            ],
+        ),
+    ),
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row size 2816 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            detail: Some(
+                "Index row references tuple (32,80) in relation \"ci\".",
+            ),
+            hint: Some(
+                "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+            ),
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ci",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ci_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Include(8300) workers=0 estimated=false: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: false,
+    requested: 0,
+    reserved: 0,
+    spawned: 0,
+    participants: {},
+    serial_rows: 6000,
+    serial_validated: 5999,
+    fold: [],
+    minimum: None,
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row requires 8320 bytes, maximum size is 8191",
+            detail: None,
+            hint: None,
+            position: None,
+            severity: Error,
+            context: None,
+            objects: None,
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Include(8300) workers=2 estimated=false: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: true,
+    requested: 2,
+    reserved: 2,
+    spawned: 2,
+    participants: {
+        0: Participant {
+            thread: "ThreadId(46)/exec::sizing::kept::tests::combined_index_build_validation",
+            chunks: [
+                0,
+                5,
+                7,
+                10,
+                13,
+                17,
+                20,
+                23,
+            ],
+            rows: 2000,
+            validated: 1999,
+            model_returns: 1999,
+            expanded_text: 8300,
+            minimum: None,
+            error: Some(
+                Error {
+                    code: "54000",
+                    message: "index row requires 8320 bytes, maximum size is 8191",
+                    detail: None,
+                    hint: None,
+                    position: None,
+                    severity: Error,
+                    context: None,
+                    objects: None,
+                    stacked: false,
+                },
+            ),
+            coordinator_aborted: false,
+        },
+        1: Participant {
+            thread: "ThreadId(61)/roll-build-0",
+            chunks: [
+                1,
+                3,
+                8,
+                11,
+                14,
+                15,
+                18,
+                21,
+            ],
+            rows: 2000,
+            validated: 2000,
+            model_returns: 2000,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+        2: Participant {
+            thread: "ThreadId(62)/roll-build-1",
+            chunks: [
+                2,
+                4,
+                6,
+                9,
+                12,
+                16,
+                19,
+                22,
+            ],
+            rows: 2000,
+            validated: 2000,
+            model_returns: 2000,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+    },
+    serial_rows: 0,
+    serial_validated: 0,
+    fold: [],
+    minimum: None,
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row requires 8320 bytes, maximum size is 8191",
+            detail: None,
+            hint: None,
+            position: None,
+            severity: Error,
+            context: None,
+            objects: None,
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Duplicate(8300) workers=0 estimated=false: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: false,
+    requested: 0,
+    reserved: 0,
+    spawned: 0,
+    participants: {},
+    serial_rows: 6000,
+    serial_validated: 5999,
+    fold: [],
+    minimum: None,
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row requires 8320 bytes, maximum size is 8191",
+            detail: None,
+            hint: None,
+            position: None,
+            severity: Error,
+            context: None,
+            objects: None,
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Duplicate(8300) workers=2 estimated=false: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: true,
+    requested: 2,
+    reserved: 2,
+    spawned: 2,
+    participants: {
+        0: Participant {
+            thread: "ThreadId(46)/exec::sizing::kept::tests::combined_index_build_validation",
+            chunks: [
+                0,
+                4,
+                7,
+                9,
+                13,
+                15,
+                17,
+                20,
+                22,
+            ],
+            rows: 2249,
+            validated: 2249,
+            model_returns: 2249,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+        1: Participant {
+            thread: "ThreadId(69)/roll-build-0",
+            chunks: [
+                1,
+                3,
+                8,
+                11,
+                14,
+                19,
+                21,
+                23,
+            ],
+            rows: 2001,
+            validated: 2000,
+            model_returns: 2000,
+            expanded_text: 8300,
+            minimum: None,
+            error: Some(
+                Error {
+                    code: "54000",
+                    message: "index row requires 8320 bytes, maximum size is 8191",
+                    detail: None,
+                    hint: None,
+                    position: None,
+                    severity: Error,
+                    context: None,
+                    objects: None,
+                    stacked: false,
+                },
+            ),
+            coordinator_aborted: false,
+        },
+        2: Participant {
+            thread: "ThreadId(70)/roll-build-1",
+            chunks: [
+                2,
+                5,
+                6,
+                10,
+                12,
+                16,
+                18,
+            ],
+            rows: 1750,
+            validated: 1750,
+            model_returns: 1750,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+    },
+    serial_rows: 0,
+    serial_validated: 0,
+    fold: [
+        (
+            0,
+            None,
+        ),
+    ],
+    minimum: None,
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row requires 8320 bytes, maximum size is 8191",
+            detail: None,
+            hint: None,
+            position: None,
+            severity: Error,
+            context: None,
+            objects: None,
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Duplicate(2800) workers=0 estimated=false: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: false,
+    requested: 0,
+    reserved: 0,
+    spawned: 0,
+    participants: {},
+    serial_rows: 6000,
+    serial_validated: 6000,
+    fold: [],
+    minimum: None,
+    outcome: Some(
+        Error {
+            code: "23505",
+            message: "could not create unique index \"ci_i\"",
+            detail: Some(
+                "Key (k)=(1) is duplicated.",
+            ),
+            hint: None,
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ci",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ci_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Duplicate(2800) workers=2 estimated=false: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: true,
+    requested: 2,
+    reserved: 2,
+    spawned: 2,
+    participants: {
+        0: Participant {
+            thread: "ThreadId(46)/exec::sizing::kept::tests::combined_index_build_validation",
+            chunks: [
+                0,
+                4,
+                6,
+                7,
+                9,
+                11,
+                12,
+                14,
+                16,
+                18,
+                20,
+                21,
+            ],
+            rows: 2999,
+            validated: 2999,
+            model_returns: 2999,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+        1: Participant {
+            thread: "ThreadId(77)/roll-build-0",
+            chunks: [
+                1,
+                5,
+                10,
+                15,
+                19,
+                23,
+            ],
+            rows: 1501,
+            validated: 1501,
+            model_returns: 1501,
+            expanded_text: 2800,
+            minimum: Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                    ],
+                    2816,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                    ],
+                ),
+            ),
+            error: None,
+            coordinator_aborted: false,
+        },
+        2: Participant {
+            thread: "ThreadId(78)/roll-build-1",
+            chunks: [
+                2,
+                3,
+                8,
+                13,
+                17,
+                22,
+            ],
+            rows: 1500,
+            validated: 1500,
+            model_returns: 1500,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+    },
+    serial_rows: 0,
+    serial_validated: 0,
+    fold: [
+        (
+            0,
+            None,
+        ),
+        (
+            1,
+            Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                    ],
+                    2816,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                    ],
+                ),
+            ),
+        ),
+        (
+            2,
+            None,
+        ),
+    ],
+    minimum: Some(
+        (
+            [
+                0,
+                0,
+                64,
+                1,
+                0,
+                0,
+                64,
+                6,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                23,
+                112,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                23,
+                112,
+            ],
+            2816,
+            [
+                0,
+                0,
+                64,
+                1,
+                0,
+                0,
+                0,
+                0,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                23,
+                112,
+            ],
+        ),
+    ),
+    outcome: Some(
+        Error {
+            code: "23505",
+            message: "could not create unique index \"ci_i\"",
+            detail: Some(
+                "Key (k)=(1) is duplicated.",
+            ),
+            hint: None,
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ci",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ci_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Duplicate(0) workers=0 estimated=false: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: false,
+    requested: 0,
+    reserved: 0,
+    spawned: 0,
+    participants: {},
+    serial_rows: 6000,
+    serial_validated: 6000,
+    fold: [],
+    minimum: None,
+    outcome: Some(
+        Error {
+            code: "23505",
+            message: "could not create unique index \"ci_i\"",
+            detail: Some(
+                "Key (k)=(1) is duplicated.",
+            ),
+            hint: None,
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ci",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ci_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Duplicate(0) workers=2 estimated=false: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: true,
+    requested: 2,
+    reserved: 2,
+    spawned: 2,
+    participants: {
+        0: Participant {
+            thread: "ThreadId(46)/exec::sizing::kept::tests::combined_index_build_validation",
+            chunks: [
+                0,
+                4,
+                7,
+                10,
+                13,
+                16,
+                20,
+                23,
+            ],
+            rows: 2000,
+            validated: 2000,
+            model_returns: 2000,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+        1: Participant {
+            thread: "ThreadId(85)/roll-build-0",
+            chunks: [
+                1,
+                5,
+                8,
+                12,
+                15,
+                18,
+                21,
+            ],
+            rows: 1750,
+            validated: 1750,
+            model_returns: 1750,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+        2: Participant {
+            thread: "ThreadId(86)/roll-build-1",
+            chunks: [
+                2,
+                3,
+                6,
+                9,
+                11,
+                14,
+                17,
+                19,
+                22,
+            ],
+            rows: 2250,
+            validated: 2250,
+            model_returns: 2250,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+    },
+    serial_rows: 0,
+    serial_validated: 0,
+    fold: [
+        (
+            0,
+            None,
+        ),
+        (
+            1,
+            None,
+        ),
+        (
+            2,
+            None,
+        ),
+    ],
+    minimum: None,
+    outcome: Some(
+        Error {
+            code: "23505",
+            message: "could not create unique index \"ci_i\"",
+            detail: Some(
+                "Key (k)=(1) is duplicated.",
+            ),
+            hint: None,
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ci",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ci_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Minimum(false) workers=0 estimated=false: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: false,
+    requested: 0,
+    reserved: 0,
+    spawned: 0,
+    participants: {},
+    serial_rows: 6000,
+    serial_validated: 6000,
+    fold: [],
+    minimum: None,
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            detail: Some(
+                "Index row references tuple (3,45) in relation \"ci\".",
+            ),
+            hint: Some(
+                "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+            ),
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ci",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ci_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Minimum(false) workers=2 estimated=false: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: true,
+    requested: 2,
+    reserved: 2,
+    spawned: 2,
+    participants: {
+        0: Participant {
+            thread: "ThreadId(46)/exec::sizing::kept::tests::combined_index_build_validation",
+            chunks: [
+                0,
+                4,
+                6,
+                8,
+                10,
+                12,
+                14,
+                17,
+                19,
+                21,
+                23,
+            ],
+            rows: 2750,
+            validated: 2750,
+            model_returns: 2750,
+            expanded_text: 2800,
+            minimum: Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        35,
+                        40,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                    ],
+                    2816,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                    ],
+                ),
+            ),
+            error: None,
+            coordinator_aborted: false,
+        },
+        1: Participant {
+            thread: "ThreadId(93)/roll-build-0",
+            chunks: [
+                1,
+                5,
+                7,
+                11,
+                15,
+                18,
+                22,
+            ],
+            rows: 1750,
+            validated: 1750,
+            model_returns: 1750,
+            expanded_text: 3000,
+            minimum: Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        127,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        246,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        44,
+                    ],
+                    3016,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        44,
+                    ],
+                ),
+            ),
+            error: None,
+            coordinator_aborted: false,
+        },
+        2: Participant {
+            thread: "ThreadId(94)/roll-build-1",
+            chunks: [
+                2,
+                3,
+                9,
+                13,
+                16,
+                20,
+            ],
+            rows: 1500,
+            validated: 1500,
+            model_returns: 1500,
+            expanded_text: 2880,
+            minimum: Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        127,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        236,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        2,
+                        88,
+                    ],
+                    2896,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        2,
+                        88,
+                    ],
+                ),
+            ),
+            error: None,
+            coordinator_aborted: false,
+        },
+    },
+    serial_rows: 0,
+    serial_validated: 0,
+    fold: [
+        (
+            0,
+            Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        35,
+                        40,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                    ],
+                    2816,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                    ],
+                ),
+            ),
+        ),
+        (
+            1,
+            Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        127,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        246,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        44,
+                    ],
+                    3016,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        44,
+                    ],
+                ),
+            ),
+        ),
+        (
+            2,
+            Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        127,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        236,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        2,
+                        88,
+                    ],
+                    2896,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        2,
+                        88,
+                    ],
+                ),
+            ),
+        ),
+    ],
+    minimum: Some(
+        (
+            [
+                0,
+                0,
+                64,
+                1,
+                0,
+                0,
+                64,
+                6,
+                32,
+                127,
+                255,
+                255,
+                255,
+                255,
+                255,
+                255,
+                236,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                2,
+                88,
+            ],
+            2896,
+            [
+                0,
+                0,
+                64,
+                1,
+                0,
+                0,
+                0,
+                0,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                2,
+                88,
+            ],
+        ),
+    ),
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            detail: Some(
+                "Index row references tuple (3,45) in relation \"ci\".",
+            ),
+            hint: Some(
+                "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+            ),
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ci",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ci_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Minimum(true) workers=0 estimated=false: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: false,
+    requested: 0,
+    reserved: 0,
+    spawned: 0,
+    participants: {},
+    serial_rows: 6000,
+    serial_validated: 6000,
+    fold: [],
+    minimum: None,
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            detail: Some(
+                "Index row references tuple (1,115) in relation \"ci\".",
+            ),
+            hint: Some(
+                "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+            ),
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ci",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ci_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Minimum(true) workers=2 estimated=false: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: true,
+    requested: 2,
+    reserved: 2,
+    spawned: 2,
+    participants: {
+        0: Participant {
+            thread: "ThreadId(46)/exec::sizing::kept::tests::combined_index_build_validation",
+            chunks: [
+                0,
+                4,
+                7,
+                10,
+                13,
+                16,
+                19,
+                22,
+            ],
+            rows: 1999,
+            validated: 1999,
+            model_returns: 1999,
+            expanded_text: 2800,
+            minimum: Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        223,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        35,
+                        39,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                    ],
+                    2816,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                    ],
+                ),
+            ),
+            error: None,
+            coordinator_aborted: false,
+        },
+        1: Participant {
+            thread: "ThreadId(101)/roll-build-0",
+            chunks: [
+                1,
+                3,
+                8,
+                11,
+                14,
+                17,
+                20,
+                23,
+            ],
+            rows: 2001,
+            validated: 2001,
+            model_returns: 2001,
+            expanded_text: 2880,
+            minimum: Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        223,
+                        127,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        235,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        44,
+                    ],
+                    2896,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        44,
+                    ],
+                ),
+            ),
+            error: None,
+            coordinator_aborted: false,
+        },
+        2: Participant {
+            thread: "ThreadId(102)/roll-build-1",
+            chunks: [
+                2,
+                5,
+                6,
+                9,
+                12,
+                15,
+                18,
+                21,
+            ],
+            rows: 2000,
+            validated: 2000,
+            model_returns: 2000,
+            expanded_text: 3000,
+            minimum: Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        223,
+                        127,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        245,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        2,
+                        88,
+                    ],
+                    3016,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        2,
+                        88,
+                    ],
+                ),
+            ),
+            error: None,
+            coordinator_aborted: false,
+        },
+    },
+    serial_rows: 0,
+    serial_validated: 0,
+    fold: [
+        (
+            0,
+            Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        223,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        35,
+                        39,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                    ],
+                    2816,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                    ],
+                ),
+            ),
+        ),
+        (
+            1,
+            Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        223,
+                        127,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        235,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        44,
+                    ],
+                    2896,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        44,
+                    ],
+                ),
+            ),
+        ),
+        (
+            2,
+            Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        223,
+                        127,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        245,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        2,
+                        88,
+                    ],
+                    3016,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        2,
+                        88,
+                    ],
+                ),
+            ),
+        ),
+    ],
+    minimum: Some(
+        (
+            [
+                0,
+                0,
+                64,
+                1,
+                0,
+                0,
+                64,
+                6,
+                223,
+                127,
+                255,
+                255,
+                255,
+                255,
+                255,
+                255,
+                235,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                44,
+            ],
+            2896,
+            [
+                0,
+                0,
+                64,
+                1,
+                0,
+                0,
+                0,
+                0,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                44,
+            ],
+        ),
+    ),
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            detail: Some(
+                "Index row references tuple (1,115) in relation \"ci\".",
+            ),
+            hint: Some(
+                "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+            ),
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ci",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ci_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Include(2800) workers=0 estimated=true: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: false,
+    requested: 0,
+    reserved: 0,
+    spawned: 0,
+    participants: {},
+    serial_rows: 6000,
+    serial_validated: 6000,
+    fold: [],
+    minimum: None,
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row size 2816 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            detail: Some(
+                "Index row references tuple (1904608731,56300) in relation \"ci\".",
+            ),
+            hint: Some(
+                "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+            ),
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ci",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ci_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Include(2800) workers=2 estimated=true: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: false,
+    requested: 2,
+    reserved: 2,
+    spawned: 2,
+    participants: {
+        0: Participant {
+            thread: "ThreadId(46)/exec::sizing::kept::tests::combined_index_build_validation",
+            chunks: [
+                0,
+                4,
+                6,
+                7,
+                8,
+                11,
+                12,
+                13,
+                16,
+                17,
+                20,
+                21,
+                23,
+            ],
+            rows: 3250,
+            validated: 3250,
+            model_returns: 0,
+            expanded_text: 2800,
+            minimum: Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                    ],
+                    2816,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                    ],
+                ),
+            ),
+            error: None,
+            coordinator_aborted: false,
+        },
+        1: Participant {
+            thread: "ThreadId(109)/roll-build-0",
+            chunks: [
+                1,
+                5,
+                9,
+                14,
+                18,
+                22,
+            ],
+            rows: 1500,
+            validated: 1500,
+            model_returns: 0,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+        2: Participant {
+            thread: "ThreadId(110)/roll-build-1",
+            chunks: [
+                2,
+                3,
+                10,
+                15,
+                19,
+            ],
+            rows: 1250,
+            validated: 1250,
+            model_returns: 0,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+    },
+    serial_rows: 0,
+    serial_validated: 0,
+    fold: [
+        (
+            0,
+            Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                    ],
+                    2816,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                    ],
+                ),
+            ),
+        ),
+        (
+            1,
+            None,
+        ),
+        (
+            2,
+            None,
+        ),
+    ],
+    minimum: Some(
+        (
+            [
+                0,
+                0,
+                64,
+                1,
+                0,
+                0,
+                64,
+                6,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                23,
+                112,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                23,
+                112,
+            ],
+            2816,
+            [
+                0,
+                0,
+                64,
+                1,
+                0,
+                0,
+                0,
+                0,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                23,
+                112,
+            ],
+        ),
+    ),
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row size 2816 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            detail: Some(
+                "Index row references tuple (1904608731,56300) in relation \"ci\".",
+            ),
+            hint: Some(
+                "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+            ),
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ci",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ci_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Include(8300) workers=0 estimated=true: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: false,
+    requested: 0,
+    reserved: 0,
+    spawned: 0,
+    participants: {},
+    serial_rows: 6000,
+    serial_validated: 5999,
+    fold: [],
+    minimum: None,
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row requires 8320 bytes, maximum size is 8191",
+            detail: None,
+            hint: None,
+            position: None,
+            severity: Error,
+            context: None,
+            objects: None,
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Include(8300) workers=2 estimated=true: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: false,
+    requested: 2,
+    reserved: 2,
+    spawned: 2,
+    participants: {
+        0: Participant {
+            thread: "ThreadId(46)/exec::sizing::kept::tests::combined_index_build_validation",
+            chunks: [
+                0,
+                4,
+                7,
+                10,
+                11,
+                12,
+                15,
+                16,
+                18,
+                20,
+                22,
+                23,
+            ],
+            rows: 3000,
+            validated: 2999,
+            model_returns: 0,
+            expanded_text: 8300,
+            minimum: None,
+            error: Some(
+                Error {
+                    code: "54000",
+                    message: "index row requires 8320 bytes, maximum size is 8191",
+                    detail: None,
+                    hint: None,
+                    position: None,
+                    severity: Error,
+                    context: None,
+                    objects: None,
+                    stacked: false,
+                },
+            ),
+            coordinator_aborted: false,
+        },
+        1: Participant {
+            thread: "ThreadId(117)/roll-build-0",
+            chunks: [
+                1,
+                3,
+                8,
+                13,
+                17,
+                21,
+            ],
+            rows: 1500,
+            validated: 1500,
+            model_returns: 0,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+        2: Participant {
+            thread: "ThreadId(118)/roll-build-1",
+            chunks: [
+                2,
+                5,
+                6,
+                9,
+                14,
+                19,
+            ],
+            rows: 1500,
+            validated: 1500,
+            model_returns: 0,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+    },
+    serial_rows: 0,
+    serial_validated: 0,
+    fold: [],
+    minimum: None,
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row requires 8320 bytes, maximum size is 8191",
+            detail: None,
+            hint: None,
+            position: None,
+            severity: Error,
+            context: None,
+            objects: None,
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Duplicate(8300) workers=0 estimated=true: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: false,
+    requested: 0,
+    reserved: 0,
+    spawned: 0,
+    participants: {},
+    serial_rows: 6000,
+    serial_validated: 5999,
+    fold: [],
+    minimum: None,
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row requires 8320 bytes, maximum size is 8191",
+            detail: None,
+            hint: None,
+            position: None,
+            severity: Error,
+            context: None,
+            objects: None,
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Duplicate(8300) workers=2 estimated=true: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: false,
+    requested: 2,
+    reserved: 2,
+    spawned: 2,
+    participants: {
+        0: Participant {
+            thread: "ThreadId(46)/exec::sizing::kept::tests::combined_index_build_validation",
+            chunks: [
+                0,
+                4,
+                6,
+                7,
+                10,
+                11,
+                12,
+                14,
+                16,
+                18,
+                19,
+                22,
+                23,
+            ],
+            rows: 3250,
+            validated: 3249,
+            model_returns: 0,
+            expanded_text: 8300,
+            minimum: None,
+            error: Some(
+                Error {
+                    code: "54000",
+                    message: "index row requires 8320 bytes, maximum size is 8191",
+                    detail: None,
+                    hint: None,
+                    position: None,
+                    severity: Error,
+                    context: None,
+                    objects: None,
+                    stacked: false,
+                },
+            ),
+            coordinator_aborted: false,
+        },
+        1: Participant {
+            thread: "ThreadId(125)/roll-build-0",
+            chunks: [
+                1,
+                3,
+                8,
+                13,
+                17,
+                21,
+            ],
+            rows: 1500,
+            validated: 1500,
+            model_returns: 0,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+        2: Participant {
+            thread: "ThreadId(126)/roll-build-1",
+            chunks: [
+                2,
+                5,
+                9,
+                15,
+                20,
+            ],
+            rows: 1250,
+            validated: 1250,
+            model_returns: 0,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+    },
+    serial_rows: 0,
+    serial_validated: 0,
+    fold: [],
+    minimum: None,
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row requires 8320 bytes, maximum size is 8191",
+            detail: None,
+            hint: None,
+            position: None,
+            severity: Error,
+            context: None,
+            objects: None,
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Duplicate(2800) workers=0 estimated=true: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: false,
+    requested: 0,
+    reserved: 0,
+    spawned: 0,
+    participants: {},
+    serial_rows: 6000,
+    serial_validated: 6000,
+    fold: [],
+    minimum: None,
+    outcome: Some(
+        Error {
+            code: "23505",
+            message: "could not create unique index \"ci_i\"",
+            detail: Some(
+                "Key (k)=(1) is duplicated.",
+            ),
+            hint: None,
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ci",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ci_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Duplicate(2800) workers=2 estimated=true: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: false,
+    requested: 2,
+    reserved: 2,
+    spawned: 2,
+    participants: {
+        0: Participant {
+            thread: "ThreadId(46)/exec::sizing::kept::tests::combined_index_build_validation",
+            chunks: [
+                0,
+                4,
+                6,
+                9,
+                11,
+                14,
+                17,
+                20,
+                23,
+            ],
+            rows: 2250,
+            validated: 2250,
+            model_returns: 0,
+            expanded_text: 2800,
+            minimum: Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                    ],
+                    2816,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                    ],
+                ),
+            ),
+            error: None,
+            coordinator_aborted: false,
+        },
+        1: Participant {
+            thread: "ThreadId(133)/roll-build-0",
+            chunks: [
+                1,
+                3,
+                8,
+                13,
+                16,
+                19,
+                22,
+            ],
+            rows: 1750,
+            validated: 1750,
+            model_returns: 0,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+        2: Participant {
+            thread: "ThreadId(134)/roll-build-1",
+            chunks: [
+                2,
+                5,
+                7,
+                10,
+                12,
+                15,
+                18,
+                21,
+            ],
+            rows: 2000,
+            validated: 2000,
+            model_returns: 0,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+    },
+    serial_rows: 0,
+    serial_validated: 0,
+    fold: [
+        (
+            0,
+            Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                    ],
+                    2816,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        23,
+                        112,
+                    ],
+                ),
+            ),
+        ),
+        (
+            1,
+            None,
+        ),
+        (
+            2,
+            None,
+        ),
+    ],
+    minimum: Some(
+        (
+            [
+                0,
+                0,
+                64,
+                1,
+                0,
+                0,
+                64,
+                6,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                23,
+                112,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                23,
+                112,
+            ],
+            2816,
+            [
+                0,
+                0,
+                64,
+                1,
+                0,
+                0,
+                0,
+                0,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                23,
+                112,
+            ],
+        ),
+    ),
+    outcome: Some(
+        Error {
+            code: "23505",
+            message: "could not create unique index \"ci_i\"",
+            detail: Some(
+                "Key (k)=(1) is duplicated.",
+            ),
+            hint: None,
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ci",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ci_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Duplicate(0) workers=0 estimated=true: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: false,
+    requested: 0,
+    reserved: 0,
+    spawned: 0,
+    participants: {},
+    serial_rows: 6000,
+    serial_validated: 6000,
+    fold: [],
+    minimum: None,
+    outcome: Some(
+        Error {
+            code: "23505",
+            message: "could not create unique index \"ci_i\"",
+            detail: Some(
+                "Key (k)=(1) is duplicated.",
+            ),
+            hint: None,
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ci",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ci_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Duplicate(0) workers=2 estimated=true: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: false,
+    requested: 2,
+    reserved: 2,
+    spawned: 2,
+    participants: {
+        0: Participant {
+            thread: "ThreadId(46)/exec::sizing::kept::tests::combined_index_build_validation",
+            chunks: [
+                0,
+                4,
+                7,
+                9,
+                11,
+                14,
+                17,
+                20,
+                23,
+            ],
+            rows: 2250,
+            validated: 2250,
+            model_returns: 0,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+        1: Participant {
+            thread: "ThreadId(141)/roll-build-0",
+            chunks: [
+                1,
+                3,
+                8,
+                13,
+                16,
+                19,
+                22,
+            ],
+            rows: 1750,
+            validated: 1750,
+            model_returns: 0,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+        2: Participant {
+            thread: "ThreadId(142)/roll-build-1",
+            chunks: [
+                2,
+                5,
+                6,
+                10,
+                12,
+                15,
+                18,
+                21,
+            ],
+            rows: 2000,
+            validated: 2000,
+            model_returns: 0,
+            expanded_text: 5,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+    },
+    serial_rows: 0,
+    serial_validated: 0,
+    fold: [
+        (
+            0,
+            None,
+        ),
+        (
+            1,
+            None,
+        ),
+        (
+            2,
+            None,
+        ),
+    ],
+    minimum: None,
+    outcome: Some(
+        Error {
+            code: "23505",
+            message: "could not create unique index \"ci_i\"",
+            detail: Some(
+                "Key (k)=(1) is duplicated.",
+            ),
+            hint: None,
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ci",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ci_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Minimum(false) workers=0 estimated=true: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: false,
+    requested: 0,
+    reserved: 0,
+    spawned: 0,
+    participants: {},
+    serial_rows: 6000,
+    serial_validated: 6000,
+    fold: [],
+    minimum: None,
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            detail: Some(
+                "Index row references tuple (1906703067,17643) in relation \"ci\".",
+            ),
+            hint: Some(
+                "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+            ),
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ci",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ci_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Minimum(false) workers=2 estimated=true: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: false,
+    requested: 2,
+    reserved: 2,
+    spawned: 2,
+    participants: {
+        0: Participant {
+            thread: "ThreadId(46)/exec::sizing::kept::tests::combined_index_build_validation",
+            chunks: [
+                0,
+                5,
+                7,
+                10,
+                12,
+                15,
+                17,
+                20,
+                23,
+            ],
+            rows: 2250,
+            validated: 2250,
+            model_returns: 0,
+            expanded_text: 2800,
+            minimum: Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        35,
+                        40,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                    ],
+                    2816,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                    ],
+                ),
+            ),
+            error: None,
+            coordinator_aborted: false,
+        },
+        1: Participant {
+            thread: "ThreadId(149)/roll-build-0",
+            chunks: [
+                1,
+                3,
+                9,
+                14,
+                18,
+                21,
+            ],
+            rows: 1500,
+            validated: 1500,
+            model_returns: 0,
+            expanded_text: 3000,
+            minimum: Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        127,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        246,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        44,
+                    ],
+                    3016,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        44,
+                    ],
+                ),
+            ),
+            error: None,
+            coordinator_aborted: false,
+        },
+        2: Participant {
+            thread: "ThreadId(150)/roll-build-1",
+            chunks: [
+                2,
+                4,
+                6,
+                8,
+                11,
+                13,
+                16,
+                19,
+                22,
+            ],
+            rows: 2250,
+            validated: 2250,
+            model_returns: 0,
+            expanded_text: 2880,
+            minimum: Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        127,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        236,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        2,
+                        88,
+                    ],
+                    2896,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        2,
+                        88,
+                    ],
+                ),
+            ),
+            error: None,
+            coordinator_aborted: false,
+        },
+    },
+    serial_rows: 0,
+    serial_validated: 0,
+    fold: [
+        (
+            0,
+            Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        35,
+                        40,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                    ],
+                    2816,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                    ],
+                ),
+            ),
+        ),
+        (
+            1,
+            Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        127,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        246,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        44,
+                    ],
+                    3016,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        44,
+                    ],
+                ),
+            ),
+        ),
+        (
+            2,
+            Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        127,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        236,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        2,
+                        88,
+                    ],
+                    2896,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        2,
+                        88,
+                    ],
+                ),
+            ),
+        ),
+    ],
+    minimum: Some(
+        (
+            [
+                0,
+                0,
+                64,
+                1,
+                0,
+                0,
+                64,
+                6,
+                32,
+                127,
+                255,
+                255,
+                255,
+                255,
+                255,
+                255,
+                236,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                2,
+                88,
+            ],
+            2896,
+            [
+                0,
+                0,
+                64,
+                1,
+                0,
+                0,
+                0,
+                0,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                2,
+                88,
+            ],
+        ),
+    ),
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            detail: Some(
+                "Index row references tuple (1906703067,17643) in relation \"ci\".",
+            ),
+            hint: Some(
+                "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+            ),
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ci",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ci_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Minimum(true) workers=0 estimated=true: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: false,
+    requested: 0,
+    reserved: 0,
+    spawned: 0,
+    participants: {},
+    serial_rows: 6000,
+    serial_validated: 6000,
+    fold: [],
+    minimum: None,
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            detail: Some(
+                "Index row references tuple (1,115) in relation \"ci\".",
+            ),
+            hint: Some(
+                "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+            ),
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ci",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ci_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_build_validation Minimum(true) workers=2 estimated=true: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ci_i",
+        ),
+    ),
+    model: false,
+    requested: 2,
+    reserved: 2,
+    spawned: 2,
+    participants: {
+        0: Participant {
+            thread: "ThreadId(46)/exec::sizing::kept::tests::combined_index_build_validation",
+            chunks: [
+                0,
+                5,
+                7,
+                9,
+                12,
+                15,
+                18,
+                21,
+            ],
+            rows: 1999,
+            validated: 1999,
+            model_returns: 0,
+            expanded_text: 2800,
+            minimum: Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        223,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        35,
+                        39,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                    ],
+                    2816,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                    ],
+                ),
+            ),
+            error: None,
+            coordinator_aborted: false,
+        },
+        1: Participant {
+            thread: "ThreadId(157)/roll-build-0",
+            chunks: [
+                1,
+                3,
+                10,
+                13,
+                16,
+                19,
+                22,
+            ],
+            rows: 1750,
+            validated: 1750,
+            model_returns: 0,
+            expanded_text: 2880,
+            minimum: Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        223,
+                        127,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        235,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        44,
+                    ],
+                    2896,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        44,
+                    ],
+                ),
+            ),
+            error: None,
+            coordinator_aborted: false,
+        },
+        2: Participant {
+            thread: "ThreadId(158)/roll-build-1",
+            chunks: [
+                2,
+                4,
+                6,
+                8,
+                11,
+                14,
+                17,
+                20,
+                23,
+            ],
+            rows: 2251,
+            validated: 2251,
+            model_returns: 0,
+            expanded_text: 3000,
+            minimum: Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        223,
+                        127,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        245,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        2,
+                        88,
+                    ],
+                    3016,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        2,
+                        88,
+                    ],
+                ),
+            ),
+            error: None,
+            coordinator_aborted: false,
+        },
+    },
+    serial_rows: 0,
+    serial_validated: 0,
+    fold: [
+        (
+            0,
+            Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        223,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        35,
+                        39,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                    ],
+                    2816,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                    ],
+                ),
+            ),
+        ),
+        (
+            1,
+            Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        223,
+                        127,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        235,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        44,
+                    ],
+                    2896,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        44,
+                    ],
+                ),
+            ),
+        ),
+        (
+            2,
+            Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        223,
+                        127,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        255,
+                        245,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        2,
+                        88,
+                    ],
+                    3016,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        2,
+                        88,
+                    ],
+                ),
+            ),
+        ),
+    ],
+    minimum: Some(
+        (
+            [
+                0,
+                0,
+                64,
+                1,
+                0,
+                0,
+                64,
+                6,
+                223,
+                127,
+                255,
+                255,
+                255,
+                255,
+                255,
+                255,
+                235,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                44,
+            ],
+            2896,
+            [
+                0,
+                0,
+                64,
+                1,
+                0,
+                0,
+                0,
+                0,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                44,
+            ],
+        ),
+    ),
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row size 2896 exceeds btree version 4 maximum 2704 for index \"ci_i\"",
+            detail: Some(
+                "Index row references tuple (1,115) in relation \"ci\".",
+            ),
+            hint: Some(
+                "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+            ),
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ci",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ci_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+test exec::sizing::kept::tests::combined_index_build_validation ... ok
+PG oracle pending: size stats len=2800, single failed INSERT observed delta=[1, 0, 0, 0, 1, 1], error=Error { code: "54000", message: "index row size 2816 exceeds btree version 4 maximum 2704 for index \"cs_i\"", detail: Some("Index row references tuple (0,2) in relation \"cs\"."), hint: Some("Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing."), position: None, severity: Error, context: None, objects: Some(Objects { schema: Some("public"), table: Some("cs"), column: None, datatype: None, constraint: Some("cs_i"), internal: None, routine: None }), stacked: false }
+PG oracle pending: size stats len=2800, speculative no-conflict INSERT observed delta=[1, 0, 0, 0, 1, 1], error=Error { code: "54000", message: "index row size 2816 exceeds btree version 4 maximum 2704 for index \"cs_i\"", detail: Some("Index row references tuple (0,8) in relation \"cs\"."), hint: Some("Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing."), position: None, severity: Error, context: None, objects: Some(Objects { schema: Some("public"), table: Some("cs"), column: None, datatype: None, constraint: Some("cs_i"), internal: None, routine: None }), stacked: false }
+PG oracle pending: size stats len=8300, single failed INSERT observed delta=[1, 0, 0, 0, 1, 1], error=Error { code: "54000", message: "index row requires 8320 bytes, maximum size is 8191", detail: None, hint: None, position: None, severity: Error, context: None, objects: None, stacked: false }
+PG oracle pending: size stats len=8300, speculative no-conflict INSERT observed delta=[1, 0, 0, 0, 1, 1], error=Error { code: "54000", message: "index row requires 8320 bytes, maximum size is 8191", detail: None, hint: None, position: None, severity: Error, context: None, objects: None, stacked: false }
+test exec::sizing::kept::tests::combined_index_size_error_stats_unoracled ... ok
+combined_index_worker_database_encoding encoding=LATIN1 workers=0: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ce_i",
+        ),
+    ),
+    model: false,
+    requested: 0,
+    reserved: 0,
+    spawned: 0,
+    participants: {},
+    serial_rows: 6000,
+    serial_validated: 6000,
+    fold: [],
+    minimum: None,
+    outcome: None,
+    gate_error: None,
+}
+combined_index_worker_database_encoding encoding=LATIN1 workers=2: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ce_i",
+        ),
+    ),
+    model: true,
+    requested: 2,
+    reserved: 2,
+    spawned: 2,
+    participants: {
+        0: Participant {
+            thread: "ThreadId(166)/exec::sizing::kept::tests::combined_index_worker_database_encoding",
+            chunks: [
+                0,
+                5,
+                6,
+                9,
+                10,
+                13,
+                16,
+                19,
+                20,
+                23,
+            ],
+            rows: 2500,
+            validated: 2500,
+            model_returns: 2500,
+            expanded_text: 240,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+        1: Participant {
+            thread: "ThreadId(183)/roll-build-0",
+            chunks: [
+                1,
+                4,
+                8,
+                11,
+                15,
+                18,
+                21,
+            ],
+            rows: 1750,
+            validated: 1750,
+            model_returns: 1750,
+            expanded_text: 240,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+        2: Participant {
+            thread: "ThreadId(184)/roll-build-1",
+            chunks: [
+                2,
+                3,
+                7,
+                12,
+                14,
+                17,
+                22,
+            ],
+            rows: 1750,
+            validated: 1750,
+            model_returns: 1750,
+            expanded_text: 240,
+            minimum: None,
+            error: None,
+            coordinator_aborted: false,
+        },
+    },
+    serial_rows: 0,
+    serial_validated: 0,
+    fold: [
+        (
+            0,
+            None,
+        ),
+        (
+            1,
+            None,
+        ),
+        (
+            2,
+            None,
+        ),
+    ],
+    minimum: None,
+    outcome: None,
+    gate_error: None,
+}
+combined_index_worker_database_encoding encoding=UTF8 workers=0: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ce_i",
+        ),
+    ),
+    model: false,
+    requested: 0,
+    reserved: 0,
+    spawned: 0,
+    participants: {},
+    serial_rows: 6000,
+    serial_validated: 6000,
+    fold: [],
+    minimum: None,
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row size 3920 exceeds btree version 4 maximum 2704 for index \"ce_i\"",
+            detail: Some(
+                "Index row references tuple (0,1) in relation \"ce\".",
+            ),
+            hint: Some(
+                "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+            ),
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ce",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ce_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+combined_index_worker_database_encoding encoding=UTF8 workers=2: Trace {
+    identity: Some(
+        (
+            16385,
+            16390,
+            "ce_i",
+        ),
+    ),
+    model: true,
+    requested: 2,
+    reserved: 2,
+    spawned: 2,
+    participants: {
+        0: Participant {
+            thread: "ThreadId(166)/exec::sizing::kept::tests::combined_index_worker_database_encoding",
+            chunks: [
+                0,
+                4,
+                7,
+                11,
+                15,
+                21,
+            ],
+            rows: 1499,
+            validated: 1499,
+            model_returns: 1499,
+            expanded_text: 240,
+            minimum: Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                    ],
+                    3920,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                    ],
+                ),
+            ),
+            error: None,
+            coordinator_aborted: false,
+        },
+        1: Participant {
+            thread: "ThreadId(196)/roll-build-0",
+            chunks: [
+                1,
+                3,
+                6,
+                9,
+                10,
+                13,
+                14,
+                17,
+                19,
+                22,
+            ],
+            rows: 2500,
+            validated: 2500,
+            model_returns: 2500,
+            expanded_text: 240,
+            minimum: Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        250,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        250,
+                    ],
+                    3920,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        250,
+                    ],
+                ),
+            ),
+            error: None,
+            coordinator_aborted: false,
+        },
+        2: Participant {
+            thread: "ThreadId(197)/roll-build-1",
+            chunks: [
+                2,
+                5,
+                8,
+                12,
+                16,
+                18,
+                20,
+                23,
+            ],
+            rows: 2001,
+            validated: 2001,
+            model_returns: 2001,
+            expanded_text: 240,
+            minimum: Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        244,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        244,
+                    ],
+                    3920,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        244,
+                    ],
+                ),
+            ),
+            error: None,
+            coordinator_aborted: false,
+        },
+    },
+    serial_rows: 0,
+    serial_validated: 0,
+    fold: [
+        (
+            0,
+            Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                    ],
+                    3920,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                    ],
+                ),
+            ),
+        ),
+        (
+            1,
+            Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        250,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        250,
+                    ],
+                    3920,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        250,
+                    ],
+                ),
+            ),
+        ),
+        (
+            2,
+            Some(
+                (
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        64,
+                        6,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        244,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        244,
+                    ],
+                    3920,
+                    [
+                        0,
+                        0,
+                        64,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        32,
+                        128,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        244,
+                    ],
+                ),
+            ),
+        ),
+    ],
+    minimum: Some(
+        (
+            [
+                0,
+                0,
+                64,
+                1,
+                0,
+                0,
+                64,
+                6,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+            ],
+            3920,
+            [
+                0,
+                0,
+                64,
+                1,
+                0,
+                0,
+                0,
+                0,
+                32,
+                128,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+            ],
+        ),
+    ),
+    outcome: Some(
+        Error {
+            code: "54000",
+            message: "index row size 3920 exceeds btree version 4 maximum 2704 for index \"ce_i\"",
+            detail: Some(
+                "Index row references tuple (0,1) in relation \"ce\".",
+            ),
+            hint: Some(
+                "Values larger than 1/3 of a buffer page cannot be indexed.\nConsider a function index of an MD5 hash of the value, or use full text indexing.",
+            ),
+            position: None,
+            severity: Error,
+            context: None,
+            objects: Some(
+                Objects {
+                    schema: Some(
+                        "public",
+                    ),
+                    table: Some(
+                        "ce",
+                    ),
+                    column: None,
+                    datatype: None,
+                    constraint: Some(
+                        "ce_i",
+                    ),
+                    internal: None,
+                    routine: None,
+                },
+            ),
+            stacked: false,
+        },
+    ),
+    gate_error: None,
+}
+test exec::sizing::kept::tests::combined_index_worker_database_encoding ... ok
+test exec::sizing::kept::tests::header_pages_are_available_before_layout ... ok
+test exec::sizing::kept::tests::missing_tree_discards_header_before_row_rebuild ... ok
+test ext::cube::parse::tests::shapes ... ok
+test ext::fuzzystrmatch::daitch_mokotoff::tests::dm_vectors ... ok
+test ext::fuzzystrmatch::dmetaphone::tests::dmetaphone_vectors ... ok
+test ext::fuzzystrmatch::metaphone::tests::metaphone_vectors ... ok
+test ext::fuzzystrmatch::tests::levenshtein_vectors ... ok
+test ext::fuzzystrmatch::tests::soundex_vectors ... ok
+test ext::hstore::convert::tests::json_numbers ... ok
+test ext::hstore::tests::errors ... ok
+test ext::hstore::tests::layout_and_order ... ok
+test ext::hstore::tests::parse_and_print ... ok
+test ext::intarray::query::tests::round_trips ... ok
+test ext::isn::tables::tests::tables_parse ... ok
+test ext::isn::tests::isn_vectors ... ok
+test ext::ltree::tests::io ... ok
+test ext::pg_stat_statements::normalize::tests::constants_become_parameters ... ok
+test ext::pg_stat_statements::normalize::tests::grouping_ignores_constants_and_aliases ... ok
+test ext::pg_stat_statements::normalize::tests::list_types_follow_the_column ... ok
+test ext::pg_stat_statements::normalize::tests::lists_squash ... ok
+test ext::pgcrypto::cipher::tests::aes_fips197 ... ok
+test ext::pgcrypto::cipher::tests::reference_outputs ... ok
+test ext::pgcrypto::crypt::tests::gen_salt_shapes ... ok
+test ext::pgcrypto::crypt::tests::md5_crypt_vectors ... ok
+test ext::pgcrypto::crypt::tests::sha_crypt_vectors ... ok
+test ext::pgcrypto::crypt_bf::tests::known_hashes ... ok
+test ext::pgcrypto::crypt_des::tests::known_hashes ... ok
+test ext::pgcrypto::digest::tests::digests_match_reference ... ok
+test ext::pgcrypto::digest::tests::rfc4231_hmac_sha256 ... ok
+test ext::pgcrypto::pgp::tests::gnupg_messages ... ok
+test ext::pgcrypto::pgp::tests::round_trips ... ok
+test ext::seg::parse::tests::round_trips ... ok
+test ext::seg::restore::tests::digits ... ok
+test ext::tests::pgcrypto_paths ... ok
+test ext::tests::symbols_of_scripts ... ok
+test ext::uuid_ossp::tests::name_based_vectors ... ok
+test ext::vector::hnsw::mem::tests::aset_sizes ... ok
+test ext::vector::hnsw::mem::tests::tidhash_set ... ok
+test ext::vector::hnsw::pheap::tests::orders_like_a_heap ... ok
+test ext::vector::tests::binary_errors ... ok
+test ext::vector::tests::binary_round_trip ... ok
+test ext::vector::tests::four_row_kernels_match ... ok
+test ext::vector::tests::halves ... ok
+test ext::vector::tests::kernel_speed ... ignored
+test ext::vector::tests::keys_order_as_cmp ... ok
+test ext::vector::tests::reference_fixture ... ignored
+test ext::vector::tests::strtof_prefixes ... ok
+test ext::xslt::html::tests::detection_needs_an_html_root_first ... ok
+test ext::xslt::html::tests::latin1_as_string ... ok
+test ext::xslt::html::tests::reference_cases ... ok
+test ext::xslt::html::tests::xhtml_is_always_indented ... ok
+test ext::xslt::number::tests::format_number_matches_libxslt ... ok
+test ext::xslt::number::tests::helpers ... ok
+test ext::xslt::number::tests::xsl_number_matches_libxslt ... ok
+test hba::tests::hba_rules ... ok
+test lru::tests::bounded_by_bytes_and_keeps_used_entries ... ok
+test remote::outbound::tests::entries ... ok
+test repl::apply::tablesync::tests::concurrent_copy_completion_keeps_finished_table_ready ... ok
+test repl::cmd::tests::parses_the_commands_clients_send ... ok
+test repl::log::tests::confirmed_records_are_discarded ... ok
+test repl::lsn::tests::positions_increase_and_persist_ahead ... ok
+test repl::pgoutput::tests::publication_names ... ok
+test server::tests::startup_options ... ok
+test server_files::tests::canonicalize ... ok
+test server_files::tests::prefix ... ok
+test session::ddl::tsearch::tests::support_functions_are_the_builtin_ones ... ok
+test session::settings::tests::local_and_rollback ... ok
+test session::settings::tests::units ... ok
+test sort::tests::sorts ... ok
+test sql::costs::hist_ineq_tests::cached_histogram_boundaries_keep_equality_and_cutoffs ... ok
+test sql::costs::hist_ineq_tests::larger_histograms_refresh_only_probed_ends_and_interpolate_them ... ok
+test sql::costs::hist_ineq_tests::missing_or_short_histograms_do_not_fetch_endpoints ... ok
+test sql::costs::hist_ineq_tests::two_entries_replace_both_endpoints_or_neither ... ok
+test sql::func::formatting::tests::numbers ... ok
+test sql::literals::tests::keys_leave_out_literals ... ok
+test sql::literals::tests::templates_parse_as_the_parser_does ... ok
+test sql::parse::tests::syntax_error_position ... ok
+test sql::scs::tests::continuation_lines ... ok
+test sql::scs::tests::parser_positions_are_chars ... ok
+test sql::scs::tests::quoted_body_positions ... ok
+test sql::scs::tests::rewrite_keeps_positions ... ok
+test sql::srvlit::tests::escapes_become_server_characters ... ok
+test storage::batch::tests::rows_by_reference_and_owned ... ok
+test storage::cols::tests::columns_match_decoded_rows ... ok
+test storage::dead::tests::cut_keys_compare_conservatively ... ok
+test storage::dead::tests::hints_hold_until_a_commit_writes_into_them ... ok
+test storage::discard::tests::floors_grow_and_filter_in_order ... ok
+test storage::hot::tests::whole_and_covering_ranges ... ok
+test storage::keys::tests::index_values_decode ... ok
+test storage::keys::tests::order_matches_values ... ok
+test storage::row::tests::numerics_roundtrip ... ok
+test storage::row::tests::roundtrip ... ok
+test storage::row::tests::stored_sizes_of_varlenas ... ok
+test storage::sst::tests::block_index_find ... ok
+test storage::sst::tests::block_positions ... ok
+test storage::sst::tests::fast_mod_is_rem ... ok
+test storage::tests::async_commits_visible_then_durable ... ok
+test storage::tests::compaction_leaves_other_files ... ok
+test storage::tests::deleted_sst_runs_preserve_snapshots_and_merge_bounds ... ok
+test storage::tests::discarded_ranges_leave_flushes_and_compactions ... ok
+test storage::tests::flush_compact_reopen ... ok
+test storage::tests::hot_ranges_match_the_store ... ok
+test storage::tests::ingested_commits_and_crash_recovery ... ok
+test storage::tests::mvcc_reads ... ok
+test catalog::btsim::leaf::tests::items_read_back ... ok
+test storage::tests::reverse_scan_matches_forward ... ok
+test storage::tests::scans_step_over_deleted_runs_once ... ok
+test storage::tests::snapshots_survive_compaction ... ok
+test storage::tests::range_deletions_and_crash_recovery ... ok
+test txn::bulklocks::tests::keyset_matches_a_map ... ok
+test txn::catmerge::tests::racing_statistics_keep_the_later_commit ... ok
+test txn::procs::tests::slots_are_reused_in_order_and_keep_counting ... ok
+test txn::tests::sort_by_key_after_sorts_as_the_keys ... ok
+test types::binary::tests::numeric_roundtrip ... ok
+test types::cast::tests::common ... ok
+test types::cast::tests::contexts ... ok
+test types::cast::tests::contexts_match_pg_cast ... ok
+test types::cast::tests::values ... ok
+test types::datetime::tests::arithmetic ... ok
+test types::datetime::tests::dates ... ok
+test types::datetime::tests::intervals ... ok
+test types::datetime::tests::timestamps ... ok
+test txn::bulklocks::tests::keyset_payloads ... ok
+test types::decint::tests::primitive_conversions ... ok
+test types::decint::tests::rounding_by_powers_of_ten ... ok
+test types::enum_serde_tests::enum_array_oid_round_trips_and_defaults ... ok
+test types::hash::tests::matches_postgres ... ok
+test types::json::tests::containment ... ok
+test types::json::tests::roundtrip ... ok
+test types::jsonpath::tests::canonical_text ... ok
+test types::jsonpath::tests::keyvalue_offsets ... ok
+test types::jsonpath::tests::syntax_errors ... ok
+test types::mbconv::server::tests::codes_keep_byte_order_and_round_trip ... ok
+test types::mbconv::server::tests::single_byte_text_is_its_bytes ... ok
+test types::numeric::tests::arithmetic_scales ... ok
+test types::numeric::tests::from_float ... ok
+test types::numeric::tests::ordering ... ok
+test types::numeric::tests::parse_and_print ... ok
+test types::numeric::tests::rounding ... ok
+test types::numeric::tests::small_fast_paths_match_bigint ... ok
+test types::numeric::tests::typmod ... ok
+test types::text::tests::arrays ... ok
+test types::text::tests::floats ... ok
+test types::text::tests::ints ... ok
+test types::decint::tests::arithmetic_matches_a_binary_big_integer ... ok
+test types::text::tests::misc ... ok
+test types::text::tests::midpoint_quick_check_agrees ... ok
+test types::tz::tests::loads_zones ... ok
+test types::text::tests::shortest_digits_match_reference ... ok
+
+test result: ok. 193 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 26.97s
+

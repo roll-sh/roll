@@ -1,0 +1,20 @@
+{
+  "status": "Static byte/Git checks only; no Rust execution",
+  "head": "e686696add25112c0d2ce33720bd84f0e04e21bf",
+  "parent": "cace40de4b9df2af42b08027138d9830d17abe9f",
+  "changed_paths": [
+    "crates/pg-engine/src/exec/sizing/kept.rs"
+  ],
+  "scope": "Only existing cfg(test) test body/comment; every production byte matches cace",
+  "production_prefix_sha256": "b5238f33a13adf49b9046dad45395223b8ee145235a5e88624958f0408afb4f8",
+  "prior_manifests_verified_and_preserved": true,
+  "refs_exactly_verified": {
+    "refs/heads/wip/combined-index-models-d62e3d3b": "4e588363d065aa9f12dc1b987d22dbf6742dcb9f",
+    "refs/heads/wip/combined-index-models-source-r1-d62e3d3b": "e25c258e759feb28ccb247fa8b10cc25bc7e5810",
+    "refs/heads/wip/combined-index-models-red-proof-r1-d62e3d3b": "b43e47a5ba581ac72254d15f39bf7ae4389f35b3",
+    "refs/heads/wip/combined-index-models-red-proof-r2-d62e3d3b": "b56ed0fb4c9a6113cfef09504e2b695a1cf17b70",
+    "refs/heads/wip/combined-index-models-encoding-proof-r2-d62e3d3b": "cace40de4b9df2af42b08027138d9830d17abe9f",
+    "refs/heads/wip/combined-index-models-encoding-plain-r3-d62e3d3b": "e686696add25112c0d2ce33720bd84f0e04e21bf"
+  },
+  "diffstat": " crates/pg-engine/src/exec/sizing/kept.rs | 8 ++++++--\n 1 file changed, 6 insertions(+), 2 deletions(-)\n"
+}

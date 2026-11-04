@@ -1,0 +1,27 @@
+{
+  "argv": [
+    "cargo",
+    "test",
+    "-v",
+    "-p",
+    "pg-engine",
+    "--lib",
+    "combined_index",
+    "--",
+    "--nocapture",
+    "--test-threads=2"
+  ],
+  "cwd": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-e686-focused/src",
+  "expected_pass_fail_ignore": [
+    3,
+    0,
+    0
+  ],
+  "time": "2026-11-04T19:57:57.350945+00:00",
+  "source_before": {
+    "commit": "e686696add25112c0d2ce33720bd84f0e04e21bf",
+    "files": 2501,
+    "match": true,
+    "manifest_sha256": "f9793f88fe3cb99461678085099dfd475af11f945fe3b7d4f4c64edaebd66e97"
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "status": "PASS",
+  "completed": [
+    {
+      "stage": "combined-focused",
+      "command_exit": 0,
+      "counts": [
+        [
+          3,
+          0,
+          0
+        ]
+      ],
+      "provenance_valid": true
+    },
+    {
+      "stage": "full-lib",
+      "command_exit": 0,
+      "counts": [
+        [
+          193,
+          0,
+          2
+        ]
+      ],
+      "provenance_valid": true
+    }
+  ],
+  "source": {
+    "commit": "e686696add25112c0d2ce33720bd84f0e04e21bf",
+    "files": 2501,
+    "match": true,
+    "manifest_sha256": "f9793f88fe3cb99461678085099dfd475af11f945fe3b7d4f4c64edaebd66e97"
+  },
+  "acceptance": "Focused and multithreaded library gates only; remaining PGoracle/P6-P12/final integration remain held"
+}

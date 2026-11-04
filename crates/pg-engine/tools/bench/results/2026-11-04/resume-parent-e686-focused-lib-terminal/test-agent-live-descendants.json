@@ -1,0 +1,112 @@
+[
+  {
+    "time": "2026-11-04T19:59:59.009125+00:00",
+    "pid": 3759136,
+    "exe": "/home/meszmate/.cache/a170/target/debug/deps/pg_engine-357a2b04731fc140",
+    "cwd": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-e686-focused/src/crates/pg-engine",
+    "command": "/home/meszmate/.cache/a170/target/debug/deps/pg_engine-357a2b04731fc140 combined_index --nocapture --test-threads=2 ",
+    "threads": [
+      {
+        "tid": 3759136,
+        "comm": "pg_engine-357a2",
+        "cpus": [
+          4,
+          5,
+          6,
+          7,
+          22,
+          23,
+          24,
+          25
+        ],
+        "nice": 19
+      },
+      {
+        "tid": 3759137,
+        "comm": "exec::sizing::k",
+        "cpus": [
+          4,
+          5,
+          6,
+          7,
+          22,
+          23,
+          24,
+          25
+        ],
+        "nice": 19
+      },
+      {
+        "tid": 3759138,
+        "comm": "exec::sizing::k",
+        "cpus": [
+          4,
+          5,
+          6,
+          7,
+          22,
+          23,
+          24,
+          25
+        ],
+        "nice": 19
+      }
+    ],
+    "scope": "Live sample only; no lifetime claim"
+  },
+  {
+    "time": "2026-11-04T20:00:06.655886+00:00",
+    "pid": 3763188,
+    "exe": "/home/meszmate/.cache/a170/target/debug/deps/pg_engine-357a2b04731fc140",
+    "cwd": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-e686-focused/src/crates/pg-engine",
+    "command": "/home/meszmate/.cache/a170/target/debug/deps/pg_engine-357a2b04731fc140 --nocapture --test-threads=2 ",
+    "threads": [
+      {
+        "tid": 3763188,
+        "comm": "pg_engine-357a2",
+        "cpus": [
+          4,
+          5,
+          6,
+          7,
+          22,
+          23,
+          24,
+          25
+        ],
+        "nice": 19
+      },
+      {
+        "tid": 3763191,
+        "comm": "catalog::btsim:",
+        "cpus": [
+          4,
+          5,
+          6,
+          7,
+          22,
+          23,
+          24,
+          25
+        ],
+        "nice": 19
+      },
+      {
+        "tid": 3763199,
+        "comm": "catalog::btsim:",
+        "cpus": [
+          4,
+          5,
+          6,
+          7,
+          22,
+          23,
+          24,
+          25
+        ],
+        "nice": 19
+      }
+    ],
+    "scope": "Live sample only; no lifetime claim"
+  }
+]

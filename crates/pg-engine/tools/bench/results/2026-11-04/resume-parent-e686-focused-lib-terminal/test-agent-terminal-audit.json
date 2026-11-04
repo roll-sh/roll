@@ -1,0 +1,202 @@
+{
+  "time": "2026-11-04T20:01:11.563110+00:00",
+  "launch_command": "/home/meszmate/.cache/a163/heavy-bg.sh /home/meszmate/.cache/pg-engine-resume-20261104/combined-e686-focused/launcher.log taskset -c 4-7,22-25 env CARGO_TARGET_DIR=/home/meszmate/.cache/a170/target CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 TMPDIR=/home/meszmate/.cache/a170/tmp python3 /home/meszmate/.cache/pg-engine-resume-20261104/combined-e686-focused/run.py",
+  "launch_invocations": 1,
+  "wrapper_launch_command_exit": 0,
+  "launcher_log": "{\"status\": \"PASS\", \"completed\": [{\"stage\": \"combined-focused\", \"command_exit\": 0, \"counts\": [[3, 0, 0]], \"provenance_valid\": true}, {\"stage\": \"full-lib\", \"command_exit\": 0, \"counts\": [[193, 0, 2]], \"provenance_valid\": true}]}\nHEAVY-EXIT 0\n",
+  "terminal": {
+    "status": "PASS",
+    "completed": [
+      {
+        "stage": "combined-focused",
+        "command_exit": 0,
+        "counts": [
+          [
+            3,
+            0,
+            0
+          ]
+        ],
+        "provenance_valid": true
+      },
+      {
+        "stage": "full-lib",
+        "command_exit": 0,
+        "counts": [
+          [
+            193,
+            0,
+            2
+          ]
+        ],
+        "provenance_valid": true
+      }
+    ],
+    "source": {
+      "commit": "e686696add25112c0d2ce33720bd84f0e04e21bf",
+      "files": 2501,
+      "match": true,
+      "manifest_sha256": "f9793f88fe3cb99461678085099dfd475af11f945fe3b7d4f4c64edaebd66e97"
+    },
+    "acceptance": "Focused and multithreaded library gates only; remaining PGoracle/P6-P12/final integration remain held"
+  },
+  "source_commit": "e686696add25112c0d2ce33720bd84f0e04e21bf",
+  "source_files_verified_post": 2501,
+  "frozen_hashes_post": [
+    {
+      "path": "run.py",
+      "sha256": "bc3f8e695ade52e4187bc1a4ca476ea3ef0ad688eff60f1f272f18d342a110e9"
+    },
+    {
+      "path": "source-manifest.json",
+      "sha256": "f9793f88fe3cb99461678085099dfd475af11f945fe3b7d4f4c64edaebd66e97"
+    },
+    {
+      "path": "parent-source-audit.json",
+      "sha256": "a2bfbf4d971d7a8fbc6f6c3f74960bb20dbe3de3d3146b33130544d2301f8b27"
+    }
+  ],
+  "frozen_sha256_file_sha256": "362bdf1064dc96a890143aab76f16221482a3768448a63348949feb73284e3fa",
+  "stages": [
+    {
+      "stage": "combined-focused",
+      "command": {
+        "argv": [
+          "cargo",
+          "test",
+          "-v",
+          "-p",
+          "pg-engine",
+          "--lib",
+          "combined_index",
+          "--",
+          "--nocapture",
+          "--test-threads=2"
+        ],
+        "cwd": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-e686-focused/src",
+        "expected_pass_fail_ignore": [
+          3,
+          0,
+          0
+        ],
+        "time": "2026-11-04T19:57:57.350945+00:00",
+        "source_before": {
+          "commit": "e686696add25112c0d2ce33720bd84f0e04e21bf",
+          "files": 2501,
+          "match": true,
+          "manifest_sha256": "f9793f88fe3cb99461678085099dfd475af11f945fe3b7d4f4c64edaebd66e97"
+        }
+      },
+      "result": {
+        "time": "2026-11-04T20:00:06.114270+00:00",
+        "command_exit": 0,
+        "source_after": {
+          "commit": "e686696add25112c0d2ce33720bd84f0e04e21bf",
+          "files": 2501,
+          "match": true,
+          "manifest_sha256": "f9793f88fe3cb99461678085099dfd475af11f945fe3b7d4f4c64edaebd66e97"
+        },
+        "raw_sha256": "9fc70bc30db980118e849d4713c3c3e6c47bf8c3a04221592aa73104c7f9d603",
+        "counts": [
+          [
+            3,
+            0,
+            0
+          ]
+        ],
+        "binary": [
+          {
+            "path": "/home/meszmate/.cache/a170/target/debug/deps/pg_engine-357a2b04731fc140",
+            "preserved": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-e686-focused/binary-ca88bb947cfdea19d973b86f63a00cfd286b508039201460685c211503c8df93",
+            "sha256": "ca88bb947cfdea19d973b86f63a00cfd286b508039201460685c211503c8df93",
+            "bytes": 319463944
+          }
+        ],
+        "compiled_from_source_this_stage": true,
+        "provenance_valid": true,
+        "expected": [
+          3,
+          0,
+          0
+        ],
+        "assessment": "Focused/test-library gate only; no integration/service/PGoracle/performance acceptance"
+      }
+    },
+    {
+      "stage": "full-lib",
+      "command": {
+        "argv": [
+          "cargo",
+          "test",
+          "-v",
+          "-p",
+          "pg-engine",
+          "--lib",
+          "--",
+          "--nocapture",
+          "--test-threads=2"
+        ],
+        "cwd": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-e686-focused/src",
+        "expected_pass_fail_ignore": [
+          193,
+          0,
+          2
+        ],
+        "time": "2026-11-04T20:00:06.246284+00:00",
+        "source_before": {
+          "commit": "e686696add25112c0d2ce33720bd84f0e04e21bf",
+          "files": 2501,
+          "match": true,
+          "manifest_sha256": "f9793f88fe3cb99461678085099dfd475af11f945fe3b7d4f4c64edaebd66e97"
+        }
+      },
+      "result": {
+        "time": "2026-11-04T20:00:34.348544+00:00",
+        "command_exit": 0,
+        "source_after": {
+          "commit": "e686696add25112c0d2ce33720bd84f0e04e21bf",
+          "files": 2501,
+          "match": true,
+          "manifest_sha256": "f9793f88fe3cb99461678085099dfd475af11f945fe3b7d4f4c64edaebd66e97"
+        },
+        "raw_sha256": "229799c9b0462013e1ca6ada7e1489a33f27cdd6b5d45a6696aa79ff046b4cca",
+        "counts": [
+          [
+            193,
+            0,
+            2
+          ]
+        ],
+        "binary": [
+          {
+            "path": "/home/meszmate/.cache/a170/target/debug/deps/pg_engine-357a2b04731fc140",
+            "preserved": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-e686-focused/binary-ca88bb947cfdea19d973b86f63a00cfd286b508039201460685c211503c8df93",
+            "sha256": "ca88bb947cfdea19d973b86f63a00cfd286b508039201460685c211503c8df93",
+            "bytes": 319463944
+          }
+        ],
+        "compiled_from_source_this_stage": false,
+        "provenance_valid": true,
+        "expected": [
+          193,
+          0,
+          2
+        ],
+        "assessment": "Focused/test-library gate only; no integration/service/PGoracle/performance acceptance"
+      }
+    }
+  ],
+  "owned_observed_pids": [
+    3712034,
+    3712035,
+    3712058,
+    3712064,
+    3712076,
+    3759136,
+    3763188
+  ],
+  "owned_live_processes_post": [],
+  "active_cargo_test_using_a170_post": [],
+  "target_released_observed": true,
+  "limits": "Focused and library gates only. Live affinity/nice samples only. No performance/integration/readiness acceptance. No cleanup or retries."
+}

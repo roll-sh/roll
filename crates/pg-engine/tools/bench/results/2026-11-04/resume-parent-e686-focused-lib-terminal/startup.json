@@ -1,0 +1,24 @@
+{
+  "time": "2026-11-04T19:57:57.113343+00:00",
+  "pid": 3712058,
+  "source": {
+    "commit": "e686696add25112c0d2ce33720bd84f0e04e21bf",
+    "files": 2501,
+    "match": true,
+    "manifest_sha256": "f9793f88fe3cb99461678085099dfd475af11f945fe3b7d4f4c64edaebd66e97"
+  },
+  "cpus": [
+    4,
+    5,
+    6,
+    7,
+    22,
+    23,
+    24,
+    25
+  ],
+  "nice": 19,
+  "jobs": "2",
+  "threads": "2",
+  "target": "/home/meszmate/.cache/a170/target"
+}

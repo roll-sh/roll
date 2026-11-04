@@ -1,0 +1,30 @@
+{
+  "time": "2026-11-04T19:57:47.967671+00:00",
+  "frozen": [
+    {
+      "path": "run.py",
+      "sha256": "bc3f8e695ade52e4187bc1a4ca476ea3ef0ad688eff60f1f272f18d342a110e9"
+    },
+    {
+      "path": "source-manifest.json",
+      "sha256": "f9793f88fe3cb99461678085099dfd475af11f945fe3b7d4f4c64edaebd66e97"
+    },
+    {
+      "path": "parent-source-audit.json",
+      "sha256": "a2bfbf4d971d7a8fbc6f6c3f74960bb20dbe3de3d3146b33130544d2301f8b27"
+    }
+  ],
+  "source_commit": "e686696add25112c0d2ce33720bd84f0e04e21bf",
+  "source_files_verified": 2501,
+  "parent_source_audit": {
+    "commit": "e686696add25112c0d2ce33720bd84f0e04e21bf",
+    "changed_file_hashes_verified": 39,
+    "snapshot_files_verified": 2501,
+    "remote": "e686696add25112c0d2ce33720bd84f0e04e21bf\trefs/heads/wip/combined-index-models-encoding-plain-r3-d62e3d3b\n",
+    "production_matches_cace": true,
+    "scope": "Test-only6/-2delta reviewed; source/encodingoracle still requires runtime"
+  },
+  "target_exists": true,
+  "active_cargo_test_using_a170": [],
+  "existing_run_outputs": []
+}
