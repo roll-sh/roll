@@ -116,7 +116,7 @@ impl Observer {
         if let Some(e) = &s.trace.gate_error {
             return Err(crate::error::internal(e));
         }
-        if s.aborted.is_some() {
+        if s.aborted.is_some() && !ready(&s) {
             s.trace.participants.entry(id).or_default().coordinator_aborted = true;
             return Ok(None);
         }
