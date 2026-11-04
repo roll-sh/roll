@@ -1,0 +1,12 @@
+{
+  "commit": "9c29e42da78995244f4bca4d1444ce78207ae28c",
+  "ref": "refs/heads/wip/resume-20261104-parent-checkpoint-r3",
+  "remote": "9c29e42da78995244f4bca4d1444ce78207ae28c\trefs/heads/wip/resume-20261104-parent-checkpoint-r3",
+  "pending_review": true,
+  "shared_branch_unchanged": "eb450f4e9aff7c36137241f2e7a719650ae57254",
+  "semantic_index_equals_backup": true,
+  "payload_blobs_verified": 456,
+  "closed_set": true,
+  "post_push_assertion_failure": "Raw index bytes changed after git write-tree (cache metadata); subsequent semantic index comparison passed. No owner index was touched.",
+  "scope": "checkpoint-r3 evidence only; not source readiness"
+}

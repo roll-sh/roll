@@ -1,0 +1,16 @@
+{
+  "status": "PASS",
+  "observed_utc": "2026-11-04T15:21:50.491496+00:00",
+  "commit": "ec7e6511211158d96978293229478c605c51ac3c",
+  "remote": "ec7e6511211158d96978293229478c605c51ac3c\trefs/heads/wip/resume-20261104-storage-perf169",
+  "manifest_sha256": "b042216f3c7d5c76d0843dfe21e8e031b382926387a4f22842f03147bb0dd13a",
+  "payload_blobs": 979,
+  "raw_log_blobs": 779,
+  "bytes": 38930808,
+  "closed_set": true,
+  "last_commit_changed_paths": 980,
+  "all_changed_paths_owned_final_evidence": true,
+  "scope": "independent committed-byte and remote-ref audit, not measurement rerun or performance acceptance",
+  "performance_verdict": "INCONCLUSIVE",
+  "acceptance": "HOLD"
+}

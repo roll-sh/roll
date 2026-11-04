@@ -1,0 +1,63 @@
+{
+  "closed": true,
+  "base": "fe7b0023c9df19a6dae1e6067ba8454998db48c5",
+  "scope": "evidence receipts only; further source acceptance held",
+  "files": {
+    "README.md": {
+      "sha256": "bc3230f6ec46c25b8491d83511bf56a790876e01902a7f1bd5666111db5157ac",
+      "bytes": 898
+    },
+    "acceptance-scope-v2.json": {
+      "sha256": "2daeaf95a8c68bca0d26dd45c53510e3cc4432a14cbf55b393f72befd22c9cf0",
+      "bytes": 2323
+    },
+    "checkpoint-r3-pre-review-backup.json": {
+      "sha256": "1c240b766006ec69e8b101810e45522c9cf1f0477b678c671fab524a319377dd",
+      "bytes": 662
+    },
+    "decisions-excerpt.tsv": {
+      "sha256": "6347aa3821b2e1ee1868eb56f282a317835938f11058106c762c0e22f9d9fc09",
+      "bytes": 4830
+    },
+    "executor-source-review-r2-result.json": {
+      "sha256": "8b2c45d0eab29f86f4417fdb5e2a1bace1c7c81e68898ea242758f75b5edeb7c",
+      "bytes": 10156
+    },
+    "executor-source-review-r2.json": {
+      "sha256": "736a9a7e7eea2ba7a48eb3b4e5e4ee5c1c8acab6f17fa2968f93c9b8c1f676b2",
+      "bytes": 1226
+    },
+    "index-source-review-r2-result.json": {
+      "sha256": "11c469ef0072dfcaf3781c7025237ea52c6735d6ec49b6074807568d45e0072b",
+      "bytes": 10267
+    },
+    "models-source-review-r2-result.json": {
+      "sha256": "9e1cb9ff713d96b4104f050b6adcc506aedae66ac1b027dd56ea7c6cba183cf3",
+      "bytes": 12090
+    },
+    "models-source-review-r2.json": {
+      "sha256": "32c24673958e4c4a20afc2739cce73cceaf8dc0a695376f49361f9e4957cc24b",
+      "bytes": 1218
+    },
+    "oltp-source-review-r3-result.json": {
+      "sha256": "1ffb4312885614a1c3c24d5870182f5f664d98e0e9d491096cbdc98287edb584",
+      "bytes": 8956
+    },
+    "oltp-source-review-r4.json": {
+      "sha256": "bb5cd9d3ee6cf86e1e68e736e83ea01e8996b01467a873c5ad2154d56413995d",
+      "bytes": 1210
+    },
+    "storage-performance-parent-object-audit.json": {
+      "sha256": "614e69ca1326c35df078158764227ee71be51f1373cca08d3dbfc32e3a582c12",
+      "bytes": 679
+    },
+    "trail-review-r5-result.json": {
+      "sha256": "67fd54c1934471588f3ba29e17bb2c5af5653fc0ef73522c8b0c83fa990efc35",
+      "bytes": 7168
+    },
+    "trail-review-r5-result.md": {
+      "sha256": "d8952db2fa1d92fdd5d91e418ee5a5d6abc898bc61a8abe996912e05429030b6",
+      "bytes": 5491
+    }
+  }
+}

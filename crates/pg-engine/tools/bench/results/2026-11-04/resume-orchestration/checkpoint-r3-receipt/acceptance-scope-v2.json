@@ -1,0 +1,40 @@
+{
+  "full_product_acceptance": false,
+  "combined_pg_engine": {
+    "status": "NOT RUN on final intended integrated source",
+    "required": [
+      "exact final source, tracked-file hashes, index/HEAD/status and actual executable provenance",
+      "cargo build -p pg-engine --bin roll-engine on exact final source",
+      "cargo test -p pg-engine debug and release with expected per-binary summaries and explicit ignored-test disposition",
+      "cargo clippy -p pg-engine --all-targets with baseline diagnostics accounted for",
+      "focused integrated regressions for every correctness repair and cross-candidate interaction, including modeled serial/actual-worker index size checks",
+      "FULL regression on exact final source: baseline51148/51150; compare every per-file row and known differing hunks; explain and review every deviation, including improvements",
+      "FULL isolation on exact final source: declared baseline121/122specs1647/1648permutations12234/12238steps; compare individual outcomes and disposition all deviations",
+      "FIRST strict dump on exact final source:14817/0 and complete canonical96/14609/4/108plans; independent count and canonical auditors, final identity and owned-resource cleanup"
+    ],
+    "coverage": "pg-engine runtime and integration behavior; separate from pg-control service stack"
+  },
+  "postgres_service_stack": {
+    "status": "HELD",
+    "command": "pnpm test:pg --force",
+    "crates": [
+      "pg-proxy",
+      "pg-storage",
+      "pg-control",
+      "rolld",
+      "roll-cli"
+    ],
+    "does_not_exercise_pg_engine": true,
+    "purpose": "required repository service-stack compatibility gate; not evidence of pg-engine runtime acceptance"
+  },
+  "performance_and_footprint": {
+    "status": "HELD or active as recorded by owner; no accepted timing"
+  },
+  "supersedes": "checkpoint-r3/acceptance-scope.json required parity wording; historical owner readiness record remains preserved",
+  "oltp_memory_limitations": {
+    "accepted_base": "default scrollable STABLE cursor can retain O(result) rows; no universal cursor bound claim",
+    "new_review_findings": "351 widens selective quals to O(scanned) and regresses NO SCROLL; not accepted, repair required",
+    "integrated_focus_status": "NOT RUN"
+  },
+  "updated_utc": "2026-11-04T14:58:53.263492+00:00"
+}
