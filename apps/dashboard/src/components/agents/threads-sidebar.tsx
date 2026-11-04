@@ -54,10 +54,10 @@ function store(key: string, value: string) {
   }
 }
 
-/** Whether the sidebar shows: remembered on a computer (open the first time), closed on a phone until asked for. */
+/** Whether the sidebar shows: closed until asked for (⌘B, the header button), then remembered on a computer. */
 export function useSidebarOpen(phone: boolean): [boolean, (open: boolean) => void] {
   const [open, setOpen] = useState(false);
-  useEffect(() => setOpen(!phone && stored(OPEN_KEY) !== "0"), [phone]);
+  useEffect(() => setOpen(!phone && stored(OPEN_KEY) === "1"), [phone]);
   const set = useCallback(
     (next: boolean) => {
       setOpen(next);
