@@ -958,7 +958,10 @@ impl<'a> ExecCtx<'a> {
     /// transaction's catalog. The transaction and the caller's context keep that change.
     pub(crate) fn reading_catalog(&self, cat: Arc<Catalog>) -> ExecCtx<'_> {
         let mut c = self.child(self.params);
-        c.fmt.names = Some(Arc::new(CatalogNames::new(cat.clone(), self.search_path.clone())));
+        c.fmt.names = Some(Arc::new(CatalogNames::new(
+            cat.clone(),
+            self.search_path.clone(),
+        )));
         c.catalog_snapshot = Some(cat);
         c
     }
@@ -991,9 +994,12 @@ impl<'a> ExecCtx<'a> {
         c
     }
 
-    /// The catalog as this transaction sees it (including its own DDL).
+    /// The catalog as this transaction sees it (including its own DDL), or an opened
+    /// catalog scan's version while its deferred rows are generated.
     pub fn catalog(&self) -> Arc<Catalog> {
-        self.catalog_snapshot.clone().unwrap_or_else(|| self.txn.borrow().catalog())
+        self.catalog_snapshot
+            .clone()
+            .unwrap_or_else(|| self.txn.borrow().catalog())
     }
 
     /// current_user's oid.

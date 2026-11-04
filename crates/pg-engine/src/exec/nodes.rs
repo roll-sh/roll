@@ -1831,7 +1831,8 @@ struct LazyRowsNode {
 impl LazyRowsNode {
     fn rows(&mut self, ctx: &ExecCtx) -> Result<&mut SharedRowsNode> {
         if self.rows.is_none() {
-            let held = (!Arc::ptr_eq(&self.catalog, &ctx.catalog())).then(|| ctx.reading_catalog(self.catalog.clone()));
+            let held = (!Arc::ptr_eq(&self.catalog, &ctx.catalog()))
+                .then(|| ctx.reading_catalog(self.catalog.clone()));
             let generation = held.as_ref().unwrap_or(ctx);
             let rows = crate::catalog::system::rows_shared(self.table, generation)?;
             let picked = match &self.filter {
@@ -1853,7 +1854,8 @@ impl Node for LazyRowsNode {
         match &mut self.rows {
             Some(r) => r.count_rest(ctx),
             None if self.filter.is_none() => {
-                let held = (!Arc::ptr_eq(&self.catalog, &ctx.catalog())).then(|| ctx.reading_catalog(self.catalog.clone()));
+                let held = (!Arc::ptr_eq(&self.catalog, &ctx.catalog()))
+                    .then(|| ctx.reading_catalog(self.catalog.clone()));
                 let n = crate::catalog::system::row_count(self.table, held.as_ref().unwrap_or(ctx));
                 // (Nothing is left once counted.)
                 let none = Arc::new(crate::catalog::system::SysRows::new(Vec::new()));
@@ -1866,7 +1868,8 @@ impl Node for LazyRowsNode {
 
     fn restrict_keys(&mut self, col: usize, keys: &[u32], ctx: &ExecCtx) -> Result<()> {
         use crate::catalog::system::SysTable;
-        let held = (!Arc::ptr_eq(&self.catalog, &ctx.catalog())).then(|| ctx.reading_catalog(self.catalog.clone()));
+        let held = (!Arc::ptr_eq(&self.catalog, &ctx.catalog()))
+            .then(|| ctx.reading_catalog(self.catalog.clone()));
         let generation = held.as_ref().unwrap_or(ctx);
         let quiet = self.filter.as_ref().is_none_or(quiet_filter);
         let subset = match (self.table, col) {
