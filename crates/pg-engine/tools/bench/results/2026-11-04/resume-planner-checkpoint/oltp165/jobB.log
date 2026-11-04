@@ -1,0 +1,92 @@
+6fde4096 wip a165: cursors stream their rows
+== record
+    |
+
+Some errors have detailed explanations: E0425, E0433.
+For more information about an error, try `rustc --explain E0425`.
+error: could not compile `pg-engine` (lib) due to 2 previous errors
+0 crates/pg-engine/tests/sql/a165_cursor_stream.out
+== debug tests
+debug exit 101
+error[E0425]: cannot find type `AtomicU64` in this scope
+error[E0433]: cannot find type `AtomicU64` in this scope
+error: could not compile `pg-engine` (lib) due to 2 previous errors
+error: could not compile `pg-engine` (lib test) due to 2 previous errors
+== release tests
+release exit 101
+error[E0425]: cannot find type `AtomicU64` in this scope
+error[E0433]: cannot find type `AtomicU64` in this scope
+error: could not compile `pg-engine` (lib) due to 2 previous errors
+error: could not compile `pg-engine` (lib test) due to 2 previous errors
+== clippy
+error[E0425]: cannot find type `AtomicU64` in this scope
+   --> crates/pg-engine/src/txn/locks.rs:455:11
+error[E0433]: cannot find type `AtomicU64` in this scope
+   --> crates/pg-engine/src/txn/locks.rs:878:84
+error: could not compile `pg-engine` (lib) due to 2 previous errors
+== dist
+   Compiling pg-icu v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a640c14a8f76f8ea4/crates/pg-icu)
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a640c14a8f76f8ea4/crates/pg-engine)
+error[E0425]: cannot find type `AtomicU64` in this scope
+   --> crates/pg-engine/src/txn/locks.rs:455:11
+    |
+455 |     xact: AtomicU64,
+    |           ^^^^^^^^^ not found in this scope
+    |
+help: consider importing one of these type aliases
+    |
+ 19 + use crate::txn::AtomicU64;
+    |
+ 19 + use std::sync::atomic::AtomicU64;
+    |
+
+error[E0433]: cannot find type `AtomicU64` in this scope
+   --> crates/pg-engine/src/txn/locks.rs:878:84
+    |
+878 |                     Arc::new(FastSlot { proc, holds: Mutex::new(Vec::new()), xact: AtomicU64::new(0), moved: AtomicBool::new(false) })
+    |                                                                                    ^^^^^^^^^ use of undeclared type `AtomicU64`
+    |
+help: consider importing one of these type aliases
+    |
+ 19 + use crate::txn::AtomicU64;
+    |
+ 19 + use std::sync::atomic::AtomicU64;
+    |
+
+Some errors have detailed explanations: E0425, E0433.
+For more information about an error, try `rustc --explain E0425`.
+error: could not compile `pg-engine` (lib) due to 2 previous errors
+dist exit 101
+== prof
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a640c14a8f76f8ea4/crates/pg-engine)
+error[E0425]: cannot find type `AtomicU64` in this scope
+   --> crates/pg-engine/src/txn/locks.rs:455:11
+    |
+455 |     xact: AtomicU64,
+    |           ^^^^^^^^^ not found in this scope
+    |
+help: consider importing one of these type aliases
+    |
+ 19 + use crate::txn::AtomicU64;
+    |
+ 19 + use std::sync::atomic::AtomicU64;
+    |
+
+error[E0433]: cannot find type `AtomicU64` in this scope
+   --> crates/pg-engine/src/txn/locks.rs:878:84
+    |
+878 |                     Arc::new(FastSlot { proc, holds: Mutex::new(Vec::new()), xact: AtomicU64::new(0), moved: AtomicBool::new(false) })
+    |                                                                                    ^^^^^^^^^ use of undeclared type `AtomicU64`
+    |
+help: consider importing one of these type aliases
+    |
+ 19 + use crate::txn::AtomicU64;
+    |
+ 19 + use std::sync::atomic::AtomicU64;
+    |
+
+Some errors have detailed explanations: E0425, E0433.
+For more information about an error, try `rustc --explain E0425`.
+error: could not compile `pg-engine` (lib) due to 2 previous errors
+prof exit 101
+HEAVY-EXIT 0

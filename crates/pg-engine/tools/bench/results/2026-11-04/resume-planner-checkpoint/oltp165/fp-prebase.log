@@ -1,0 +1,12 @@
+pre	run=1	fresh_data_mb=3.031	idle_cpu_s_5min=0.030	no_sessions_mb=10.238	idle_100_sessions_mb=30.000
+pre	run=2	fresh_data_mb=3.031	idle_cpu_s_5min=0.030	no_sessions_mb=10.234	idle_100_sessions_mb=29.910
+base	run=1	fresh_data_mb=3.031	idle_cpu_s_5min=0.030	no_sessions_mb=10.242	idle_100_sessions_mb=30.777
+base	run=2	fresh_data_mb=3.031	idle_cpu_s_5min=0.025	no_sessions_mb=9.832	idle_100_sessions_mb=30.309
+pre	run=1	fresh_data_mb=3.031	idle_cpu_s_5min=0.020	no_sessions_mb=10.242	idle_100_sessions_mb=29.980
+pre	run=2	fresh_data_mb=3.031	idle_cpu_s_5min=0.025	no_sessions_mb=10.238	idle_100_sessions_mb=29.938
+base	run=1	fresh_data_mb=3.031	idle_cpu_s_5min=0.030	no_sessions_mb=11.258	idle_100_sessions_mb=31.695
+base	run=2	fresh_data_mb=3.031	idle_cpu_s_5min=0.020	no_sessions_mb=10.242	idle_100_sessions_mb=30.777
+pre	run=1	fresh_data_mb=3.031	idle_cpu_s_5min=0.030	no_sessions_mb=11.211	idle_100_sessions_mb=30.863
+pre	run=2	fresh_data_mb=3.031	idle_cpu_s_5min=0.025	no_sessions_mb=11.219	idle_100_sessions_mb=30.922
+base	run=1	fresh_data_mb=3.031	idle_cpu_s_5min=0.030	no_sessions_mb=10.246	idle_100_sessions_mb=30.812
+base	run=2	fresh_data_mb=3.031	idle_cpu_s_5min=0.025	no_sessions_mb=10.242	idle_100_sessions_mb=30.762

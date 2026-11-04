@@ -1,0 +1,6 @@
+GATE	base	run=1	fresh_data_mb=3.031	idle_cpu_s_5min=0.025	no_sessions_mb=10.250	idle_100_sessions_mb=30.734
+GATE	base	run=2	fresh_data_mb=3.031	idle_cpu_s_5min=0.030	no_sessions_mb=11.254	idle_100_sessions_mb=31.766
+GATE	base	run=3	fresh_data_mb=3.031	idle_cpu_s_5min=0.030	no_sessions_mb=9.859	idle_100_sessions_mb=30.367
+GATE	base	run=4	fresh_data_mb=3.031	idle_cpu_s_5min=0.030	no_sessions_mb=10.227	idle_100_sessions_mb=30.723
+GATE	base	run=5	fresh_data_mb=3.031	idle_cpu_s_5min=0.035	no_sessions_mb=10.246	idle_100_sessions_mb=30.805
+GATE	base	run=6	fresh_data_mb=3.031	idle_cpu_s_5min=0.030	no_sessions_mb=10.242	idle_100_sessions_mb=30.738

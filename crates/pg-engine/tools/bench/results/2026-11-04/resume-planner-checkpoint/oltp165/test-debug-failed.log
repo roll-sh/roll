@@ -1,0 +1,32 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a640c14a8f76f8ea4/crates/pg-engine)
+error[E0425]: cannot find type `AtomicU64` in this scope
+   --> crates/pg-engine/src/txn/locks.rs:455:11
+    |
+455 |     xact: AtomicU64,
+    |           ^^^^^^^^^ not found in this scope
+    |
+help: consider importing one of these type aliases
+    |
+ 19 + use crate::txn::AtomicU64;
+    |
+ 19 + use std::sync::atomic::AtomicU64;
+    |
+
+error[E0433]: cannot find type `AtomicU64` in this scope
+   --> crates/pg-engine/src/txn/locks.rs:878:84
+    |
+878 |                     Arc::new(FastSlot { proc, holds: Mutex::new(Vec::new()), xact: AtomicU64::new(0), moved: AtomicBool::new(false) })
+    |                                                                                    ^^^^^^^^^ use of undeclared type `AtomicU64`
+    |
+help: consider importing one of these type aliases
+    |
+ 19 + use crate::txn::AtomicU64;
+    |
+ 19 + use std::sync::atomic::AtomicU64;
+    |
+
+Some errors have detailed explanations: E0425, E0433.
+For more information about an error, try `rustc --explain E0425`.
+error: could not compile `pg-engine` (lib) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `pg-engine` (lib test) due to 2 previous errors
