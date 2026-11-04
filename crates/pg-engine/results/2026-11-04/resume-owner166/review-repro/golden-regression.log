@@ -1,0 +1,22 @@
+golden-record EXIT 0
+
+running 1 test
+recorded /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/sql/a166_lazy_snapshot.sql
+test golden ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.08s
+
+golden-before-fix EXIT 101
+
+thread 'golden' (3553836) panicked at crates/pg-engine/tests/golden.rs:147:10:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+test golden ... FAILED
+
+failures:
+
+failures:
+    golden
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.28s
+
+HEAVY-EXIT 1
