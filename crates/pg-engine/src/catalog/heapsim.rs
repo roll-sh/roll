@@ -1562,6 +1562,12 @@ impl Heap {
 
     /// heap_delete.
     pub fn delete(&mut self, key: &[u8], xid: u64, v: &Vis) {
+        self.delete_cid(key, xid, v, &mut |t| t.cid);
+    }
+
+    /// `delete`, the version's command id set as `cmax` says (HeapTupleHeaderAdjustCmax),
+    /// in the same lookup.
+    pub fn delete_cid(&mut self, key: &[u8], xid: u64, v: &Vis, cmax: &mut dyn FnMut(&Tup) -> u32) {
         self.writes += 1;
         let Some((b, off)) = self.locate(key, v) else {
             return;
@@ -1569,6 +1575,7 @@ impl Heap {
         let p = &mut self.pages[b as usize];
         let mut row = super::keymap::NO_ROW;
         p.update_tup(off, |t| {
+            t.cid = cmax(t);
             t.xmax = xid;
             t.hot_updated = false;
             row = t.row;

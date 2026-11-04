@@ -13,7 +13,7 @@
 #   pgbench select-only, simple-update and tpcb-like at $CLIENTS clients, $SECS s each, on a
 #           fresh pgbench -i -s $SCALE
 #   apply   the apply-like workload (apply.sql: agent 152's logical apply statements) on
-#           extra_setup.sql's tables, $CLIENTS clients
+#           extra_setup.sql's tables, $CLIENTS clients, after a 10 s warm-up
 #   skip    a warm skip scan, `count(*) FROM skip_t WHERE ts = K` (index (g, ts), 1M rows),
 #           the median of 9 (wall, \timing)
 #
@@ -108,6 +108,10 @@ for c in $CHECKS; do
       client psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p "$port" -U postgres -d bench -f "$HERE/extra_setup.sql" >>"$LOG" 2>&1
     fi
     if [ "$c" = apply ]; then
+      # (A warm-up first: the setup's million-row load is still being written out, which
+      # the first seconds would count as the workload's.)
+      pgb -n -M prepared -f "$HERE/apply.sql" -c "$CLIENTS" -j "$(( CLIENTS < 4 ? CLIENTS : 4 ))" -T 10 bench >>"$LOG" 2>&1
+      sql "CHECKPOINT" >/dev/null
       measure "apply-like c$CLIENTS" pgb -n -M prepared -f "$HERE/apply.sql" -c "$CLIENTS" -j "$(( CLIENTS < 4 ? CLIENTS : 4 ))" -T "$SECS" bench
     else
       q="SELECT count(*) FROM skip_t WHERE ts = 4321;"

@@ -2261,7 +2261,7 @@ pub fn updated(
             return Ok(None);
         };
         let cid = ctx.txn.borrow_mut().output_cid();
-        // (The old version's command id as mark_cmax sets it, within the update's lookup.)
+        // (The old version's command id as HeapTupleHeaderAdjustCmax sets it, within the update's lookup.)
         let mut cmax = |o: &heapsim::Tup| match ctx.txn.try_borrow_mut() {
             Ok(mut txn) => {
                 let here = txn.is_current_xid(o.xmin);
@@ -2300,24 +2300,6 @@ pub fn updated(
     Ok(Some((tid, hot)))
 }
 
-/// The live version of `key` is being deleted by the running command: its raw command id
-/// becomes the deleting command's, or a combo command id when this transaction inserted
-/// it (HeapTupleHeaderAdjustCmax).
-fn mark_cmax(heap: &mut Heap, key: &[u8], v: &Vis, ctx: &ExecCtx) {
-    let Some(tid) = heap.locate(key, v) else {
-        return;
-    };
-    let Some(t) = heap.tuple(tid) else {
-        return;
-    };
-    let (xmin, cmin) = (t.xmin, t.cid);
-    let Ok(mut txn) = ctx.txn.try_borrow_mut() else {
-        return;
-    };
-    let here = txn.is_current_xid(xmin);
-    let c = txn.adjust_cmax(cmin, here);
-    heap.set_raw_cid(tid, c);
-}
 
 /// The raw command id (cmin / cmax) of the tuple at `tid` of `table`, when modelled.
 pub fn raw_cid(table: u32, tid: Tid, db: &Database) -> Option<u32> {
@@ -2347,8 +2329,15 @@ pub fn deleted(t: &Table, indexes: &[BoundIndex], key: &[u8], old: &[Value], ctx
     let mut rf = db.relfiles.of(t.oid).write();
     let RelFiles { heaps, toast, .. } = &mut *rf;
     if let Some(heap) = heaps.get_mut(&t.oid) {
-        mark_cmax(heap, key, &v, ctx);
-        heap.delete(key, xid, &v);
+        // (The deleting command's cmax (HeapTupleHeaderAdjustCmax), within the delete's lookup.)
+        let mut cmax = |o: &heapsim::Tup| match ctx.txn.try_borrow_mut() {
+            Ok(mut txn) => {
+                let here = txn.is_current_xid(o.xmin);
+                txn.adjust_cmax(o.cid, here)
+            }
+            Err(_) => o.cid,
+        };
+        heap.delete_cid(key, xid, &v, &mut cmax);
     }
     if let Some(exts) = toast.get(&t.oid).and_then(|tt| tt.rows.get(key)) {
         delete_toast(heaps, t.toast, exts, xid, &v);
