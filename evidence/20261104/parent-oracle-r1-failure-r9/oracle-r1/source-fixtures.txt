@@ -1,0 +1,306 @@
+687: 
+688:     #[derive(Clone, Copy, Debug)]
+689:     enum BuildCase {
+690:         Include(usize),
+691:         Duplicate(usize),
+692:         Minimum(bool),
+693:     }
+694: 
+695:     fn combined_build_case(case: BuildCase, workers: usize, estimated: bool) -> (crate::error::Error, crate::exec::rowsize::observe::Trace) {
+696:         use crate::exec::rowsize::observe;
+697:         with_max_versions(if estimated { 500 } else { 20000 }, || {
+698:             let dir = tempfile::tempdir().unwrap();
+699:             let eng = Engine::open(EngineOptions { data_dir: dir.path().into(), sync: false, ..Default::default() }).unwrap();
+700:             let mut s = eng.connect(1, "postgres", "postgres", "combined-build-test").unwrap();
+701:             s.query(&format!("SET max_parallel_maintenance_workers={workers};
+702:                 SET max_parallel_workers=1024; SET min_parallel_table_scan_size=0;
+703:                 SET maintenance_work_mem='128MB'")).unwrap();
+704:             s.query("CREATE FUNCTION ci_text(n int) RETURNS text LANGUAGE sql IMMUTABLE AS $$
+705:                 SELECT left(string_agg(md5(g::text), '' ORDER BY g), n)
+706:                 FROM generate_series(1, (n+31)/32) g $$").unwrap();
+707:             s.query("CREATE TABLE ci(k int, payload text) WITH (parallel_workers=2)").unwrap();
+708:             let (key, payload, unique, direction): (String, String, &str, &str) = match case {
+709:                 BuildCase::Include(n) => ("g".into(), format!("CASE WHEN g=6000 THEN ci_text({n}) ELSE 'small' END"), "", ""),
+710:                 BuildCase::Duplicate(n) => ("CASE WHEN g=2 THEN 1 ELSE g END".into(),
+711:                     format!("CASE WHEN g=6000 THEN ci_text({n}) ELSE 'small' END"), "UNIQUE ", ""),
+712:                 BuildCase::Minimum(desc) => {
+713:                     let (key, payload) = if desc {
+714:                         ("CASE WHEN g=1 THEN -9000 WHEN g=300 THEN 20 WHEN g=600 THEN 10 ELSE -g END",
+715:                          "CASE WHEN g=1 THEN ci_text(2800) WHEN g=300 THEN ci_text(2880) WHEN g=600 THEN ci_text(3000) ELSE 'small' END")
+716:                     } else {
+717:                         ("CASE WHEN g=1 THEN 9000 WHEN g=300 THEN -10 WHEN g=600 THEN -20 ELSE g END",
+718:                          "CASE WHEN g=1 THEN ci_text(2800) WHEN g=300 THEN ci_text(3000) WHEN g=600 THEN ci_text(2880) ELSE 'small' END")
+719:                     };
+720:                     (key.into(), payload.into(), "", if desc { " DESC" } else { "" })
+721:                 }
+722:             };
+723:             s.query(&format!("INSERT INTO ci SELECT {key}, {payload} FROM generate_series(1,6000) g")).unwrap();
+724:             let t = s.state.db.catalog().tables.values().find(|t| t.name == "ci").unwrap().clone();
+725:             assert_eq!(is_estimated(t.oid, &s.state.db), estimated);
+726:             assert_eq!(heap_writes(t.oid, &s.state.db).is_some(), !estimated);
+727:             let sql = format!("CREATE {unique}INDEX ci_i ON ci(k{direction}) INCLUDE(payload)");
+728:             let (result, trace) = observe::capture(workers == 2, || s.query(&sql));
+729:             eprintln!("combined_index_build_validation {case:?} workers={workers} estimated={estimated}: {trace:#?}");
+730:             let error = match result {
+731:                 Err(error) => error,
+732:                 Ok(rows) => panic!("expected an index build error for {case:?}, workers={workers}, estimated={estimated}; got {rows:#?}; trace: {trace:#?}"),
+733:             };
+734:             assert_eq!(trace.identity.as_ref().map(|i| i.2.as_str()), Some("ci_i"));
+735:             assert_eq!(trace.outcome.as_ref(), Some(&error));
+736:             assert!(trace.gate_error.is_none(), "{trace:#?}");
+737:             if workers == 0 {
+738:                 assert_eq!(trace.spawned, 0);
+739:                 assert!(trace.participants.is_empty());
+740:                 assert!(trace.serial_validated > 0);
+741:             } else {
+742:                 assert_eq!((trace.requested, trace.reserved, trace.spawned), (2, 2, 2));
+743:                 assert_eq!(trace.model, !estimated);
+744:                 assert_eq!(trace.serial_rows, 0, "parallel build fell back");
+745:                 assert_eq!(trace.participants.len(), 3);
+746:                 let threads: std::collections::BTreeSet<_> = trace.participants.values().map(|p| &p.thread).collect();
+747:                 assert_eq!(threads.len(), 3, "participants must run on distinct threads");
+748:                 let first_chunks: std::collections::BTreeSet<_> = trace.participants.values().map(|p| p.chunks[0]).collect();
+749:                 assert_eq!(first_chunks.len(), 3);
+750:                 for id in 0..=2 {
+751:                     let p = &trace.participants[&id];
+752:                     assert!(!p.coordinator_aborted, "unexpected coordinator abort: {trace:#?}");
+753:                     assert!(p.rows > 0 && p.validated > 0, "participant {id}: {p:#?}");
+754:                     if id > 0 {
+755:                         assert!(p.thread.contains("roll-build-"), "{p:#?}");
+756:                     }
+757:                     if !estimated {
+758:                         assert!(p.model_returns > 0, "modeled early-return path was not used: {p:#?}");
+759:                     } else {
+760:                         assert_eq!(p.model_returns, 0);
+761:                     }
+762:                 }
+763:                 if error.message.contains("maximum size is 8191") {
+764:                     assert!(trace.participants.values().any(|p| p.error.as_ref().is_some_and(|e| e.code == error.code && e.message == error.message)
+765:                         && p.expanded_text >= 8300), "formation failure lost its participant or expanded INCLUDE: {trace:#?}");
+766:                 } else {
+767:                     assert_eq!(trace.participants.values().map(|p| p.validated).sum::<usize>(), 6000);
+768:                 }
+769:             }
+770:             (error, trace)
+771:         })
+772:     }
+773: 
+774:     // Definitions only until the parent runs this existing library-test target.
+775:     #[test]
+776:     fn combined_index_build_validation() {
+777:         for estimated in [false, true] {
+778:             for (case, code, message) in [
+779:                 (BuildCase::Include(2800), "54000", "index row size 2816 exceeds btree version 4 maximum 2704"),
+780:                 (BuildCase::Include(8300), "54000", "index row requires 8320 bytes, maximum size is 8191"),
+781:                 (BuildCase::Duplicate(8300), "54000", "index row requires 8320 bytes, maximum size is 8191"),
+782:                 (BuildCase::Duplicate(2800), "23505", "could not create unique index"),
+783:                 (BuildCase::Duplicate(0), "23505", "could not create unique index"),
+784:             ] {
+785:                 let (serial, _) = combined_build_case(case, 0, estimated);
+786:                 let (parallel, trace) = combined_build_case(case, 2, estimated);
+787:                 assert_eq!(serial.code, code);
+788:                 assert!(serial.message.starts_with(message), "{serial:?}");
+789:                 assert_eq!(parallel, serial, "full error fields differ: {case:?}, estimated={estimated}");
+790:                 if matches!(case, BuildCase::Duplicate(2800)) {
+791:                     assert!(trace.participants.values().any(|p| p.minimum.is_some()), "duplicate must win over a real deferred candidate");
+792:                 }
+793:                 if matches!(case, BuildCase::Include(2800)) {
+794:                     assert!(trace.participants.values().any(|p| p.expanded_text >= 2800));
+795:                 }
+796:             }
+797:             for desc in [false, true] {
+798:                 let case = BuildCase::Minimum(desc);
+799:                 let (serial, _) = combined_build_case(case, 0, estimated);
+800:                 let (parallel, trace) = combined_build_case(case, 2, estimated);
+801:                 assert_eq!(parallel, serial, "full error fields and selected TID differ: {case:?}");
+802:                 assert!(serial.message.starts_with("index row size 2896 exceeds btree version 4 maximum 2704"), "{serial:?}");
+803:                 let candidates: Vec<_> = trace.fold.iter().filter_map(|(id, c)| c.as_ref().map(|c| (*id, c))).collect();
+804:                 assert_eq!(candidates.len(), 3, "all reserved first chunks must own a different candidate: {trace:#?}");
+805:                 assert_eq!(candidates.iter().map(|c| c.0).collect::<Vec<_>>(), vec![0, 1, 2], "actual fold must include leader, worker1, worker2 in order: {trace:#?}");
+806:                 let owners: std::collections::BTreeSet<_> = candidates.iter().map(|c| &c.1.2).collect();
+807:                 assert_eq!(owners.len(), 3, "candidate data keys must be distinct: {trace:#?}");
+808:                 let keys: std::collections::BTreeSet<_> = candidates.iter().map(|c| &c.1.0).collect();
+809:                 assert_eq!(keys.len(), 3, "full encoded candidate keys must be distinct: {trace:#?}");
+810:                 let winner_id = if desc { 1 } else { 2 };
+811:                 for (id, candidate) in &candidates {
+812:                     assert_eq!(trace.participants[id].minimum.as_ref(), Some(*candidate));
+813:                     let expected = if *id == 0 { 2816 } else if *id == winner_id { 2896 } else { 3016 };
+814:                     assert_eq!(candidate.1, expected, "participant {id} must retain its own size: {trace:#?}");
+815:                 }
+816:                 let winner = candidates.iter().min_by(|a, b| a.1.0.cmp(&b.1.0)).unwrap();
+817:                 assert_eq!(winner.0, winner_id, "DESC must select the middle participant; ASC the last: {trace:#?}");
+818:                 assert_ne!(winner.0, candidates[0].0, "winner must not be first folded");
+819:                 assert_ne!(winner.0, 0, "leader must be included without overriding a worker winner");
+820:                 assert_eq!(trace.minimum.as_ref(), Some(winner.1));
+821:                 assert_eq!(winner.1.1, 2896);
+822:                 // Use the actual participants' full encoded keys, sizes and data keys.
+823:                 // Both reduction orders must retain the same candidate's own fields.
+824:                 for reverse in [false, true] {
+825:                     let mut order = candidates.clone();
+826:                     if reverse {
+827:                         order.reverse();
+828:                     }
+829:                     let mut reduced = crate::exec::rowsize::BuildSizes::default();
+830:                     for (_, c) in order {
+831:                         let mut part = crate::exec::rowsize::BuildSizes::default();
+832:                         part.btree_row(Some(c.1), || c.0.clone(), &c.2).unwrap();
+833:                         reduced.merge(part);
+834:                     }
+835:                     assert_eq!(reduced.candidate().as_ref(), Some(winner.1));
+836:                 }
+837:                 assert_eq!(trace.participants[&winner.0].minimum.as_ref(), Some(winner.1));
+838:             }
+839:         }
+840:     }
+841: 
+842:     // Unrun: PLAIN prevents heap compression; short values avoid index compression.
+843:     // The entry fits in LATIN1 but exceeds 2704 in UTF8. No PG oracle is claimed.
+844:     #[test]
+845:     fn combined_index_worker_database_encoding() {
+846:         use crate::exec::rowsize::observe;
+847:         for encoding in ["LATIN1", "UTF8"] {
+848:             for workers in [0, 2] {
+849:                 with_max_versions(20000, || {
+850:                     let dir = tempfile::tempdir().unwrap();
+851:                     let eng = Engine::open(EngineOptions { data_dir: dir.path().into(), sync: false, ..Default::default() }).unwrap();
+852:                     let mut admin = eng.connect(1, "postgres", "postgres", "encoding-build-admin").unwrap();
+853:                     admin.query(&format!("CREATE DATABASE ce_db TEMPLATE template0 ENCODING '{encoding}' LOCALE 'C'")).unwrap();
+854:                     let mut s = eng.connect(2, "ce_db", "postgres", "encoding-build-test").unwrap();
+855:                     s.query(&format!("SET max_parallel_maintenance_workers={workers};
+856:                         SET max_parallel_workers=1024; SET min_parallel_table_scan_size=0;
+857:                         SET maintenance_work_mem='128MB'")).unwrap();
+858:                     assert_eq!(s.query("SHOW server_encoding").unwrap()[0].rows, vec![vec![Value::text(encoding)]]);
+859:                     let columns = (0..16).map(|i| format!("p{i} text")).collect::<Vec<_>>().join(", ");
+860:                     let include = (0..16).map(|i| format!("p{i}")).collect::<Vec<_>>().join(", ");
+861:                     let storage = (0..16).map(|i| format!("ALTER TABLE ce ALTER COLUMN p{i} SET STORAGE PLAIN;")).collect::<Vec<_>>().join("\n");
+862:                     let payload = vec!["repeat('é', 120)"; 16].join(", ");
+863:                     s.query(&format!("CREATE TABLE ce(k int, {columns}) WITH (parallel_workers=2);
+864:                         {storage}
+865:                         INSERT INTO ce SELECT g, {payload} FROM generate_series(1,6000) g")).unwrap();
+866:                     let t = s.state.db.catalog().tables.values().find(|t| t.name == "ce").unwrap().clone();
+867:                     assert!(t.columns.iter().skip(1).all(|c| c.storage == Some('p')));
+868:                     assert!(!is_estimated(t.oid, &s.state.db));
+869:                     assert!(heap_writes(t.oid, &s.state.db).is_some());
+870:                     let bytes = if encoding == "LATIN1" { 120 } else { 240 };
+871:                     assert_eq!(s.query("SELECT octet_length(p0), length(p0) FROM ce WHERE k=1").unwrap()[0].rows,
+872:                         vec![vec![Value::Int4(bytes), Value::Int4(120)]]);
+873:                     let leader_encoding = crate::types::collation::database_encoding();
+874:                     assert_eq!(crate::types::mbconv::server::name(leader_encoding), encoding);
+875:                     let (result, trace) = observe::capture(workers == 2, || s.query(&format!("CREATE INDEX ce_i ON ce(k) INCLUDE({include})")));
+876:                     eprintln!("combined_index_worker_database_encoding encoding={encoding} workers={workers}: {trace:#?}");
+877:                     assert_eq!(crate::types::collation::database_encoding(), leader_encoding);
+878:                     assert_eq!(trace.identity.as_ref().map(|i| i.2.as_str()), Some("ce_i"));
+879:                     assert!(trace.gate_error.is_none(), "{trace:#?}");
+880:                     if workers == 0 {
+881:                         assert_eq!(trace.spawned, 0);
+882:                         assert!(trace.participants.is_empty());
+883:                         assert_eq!((trace.serial_rows, trace.serial_validated), (6000, 6000));
+884:                     } else {
+885:                         assert_eq!((trace.requested, trace.reserved, trace.spawned), (2, 2, 2));
+886:                         assert!(trace.model);
+887:                         assert_eq!(trace.serial_rows, 0, "parallel build fell back: {trace:#?}");
+888:                         assert_eq!(trace.participants.len(), 3);
+889:                         let threads: std::collections::BTreeSet<_> = trace.participants.values().map(|p| &p.thread).collect();
+890:                         let chunks: std::collections::BTreeSet<_> = trace.participants.values().map(|p| p.chunks[0]).collect();
+891:                         assert_eq!(threads.len(), 3, "participants must run on distinct threads: {trace:#?}");
+892:                         assert_eq!(chunks.len(), 3, "participants must own distinct first chunks: {trace:#?}");
+893:                         assert_eq!(trace.participants.values().map(|p| p.validated).sum::<usize>(), 6000);
+894:                         for id in 0..=2 {
+895:                             let p = &trace.participants[&id];
+896:                             assert!(p.rows > 0, "participant {id}: {trace:#?}");
+897:                             assert_eq!(p.validated, p.rows, "participant {id}: {trace:#?}");
+898:                             assert_eq!(p.model_returns, p.rows, "modeled early return must follow validation: {trace:#?}");
+899:                             assert_eq!(p.expanded_text, 240);
+900:                             assert!(!p.coordinator_aborted && p.error.is_none(), "{trace:#?}");
+901:                             assert_eq!(p.minimum.is_some(), encoding == "UTF8", "participant {id}: {trace:#?}");
+902:                             if id > 0 {
+903:                                 assert!(p.thread.contains("roll-build-"), "{trace:#?}");
+904:                             }
+905:                         }
+906:                     }
+907:                     if encoding == "LATIN1" {
+908:                         result.unwrap_or_else(|e| panic!("LATIN1 index must fit: {e:?}; trace: {trace:#?}"));
+909:                         assert!(trace.minimum.is_none());
+910:                     } else {
+911:                         let error = match result {
+912:                             Err(e) => e,
+913:                             Ok(rows) => panic!("UTF8 control must exceed the limit: {rows:?}; trace: {trace:#?}"),
+914:                         };
+915:                         assert_eq!(error.code, "54000");
+916:                         assert!(error.message.contains("exceeds btree version 4 maximum 2704"), "{error:?}; trace: {trace:#?}");
+917:                     }
+918:                 });
+919:             }
+920:         }
+921:     }
+922: 
+923:     fn size_failure_stats(s: &mut Session) -> Vec<i64> {
+924:         s.query("SELECT pg_stat_force_next_flush()").unwrap();
+925:         s.query("SELECT pg_stat_clear_snapshot()").unwrap();
+926:         let result = s.query("SELECT n_tup_ins, n_tup_upd, n_tup_del, n_live_tup, n_dead_tup, n_ins_since_vacuum
+927:             FROM pg_stat_user_tables WHERE relname='cs'").unwrap();
+928:         assert_eq!(result[0].rows.len(), 1);
+929:         result[0].rows[0].iter().map(|v| match v {
+930:             Value::Int8(n) => *n,
+931:             _ => panic!("expected int8 stats, got {v:?}"),
+932:         }).collect()
+933:     }
+934: 
+935:     // Expectations follow the accepted failed-INSERT accounting contract. These new
+936:     // size-failure cases are unrun and need a separate PG18 capture before parity claims.
+937:     #[test]
+938:     fn combined_index_size_error_stats_unoracled() {
+939:         for (len, message) in [(2800, "index row size 2816 exceeds"), (8300, "index row requires 8320 bytes")] {
+940:             let dir = tempfile::tempdir().unwrap();
+941:             let eng = Engine::open(EngineOptions { data_dir: dir.path().into(), sync: false, ..Default::default() }).unwrap();
+942:             let mut s = eng.connect(1, "postgres", "postgres", "size-error-stats-test").unwrap();
+943:             s.query("CREATE FUNCTION cs_text(n int) RETURNS text LANGUAGE sql IMMUTABLE AS $$
+944:                 SELECT left(string_agg(md5(g::text), '' ORDER BY g), n)
+945:                 FROM generate_series(1, (n+31)/32) g $$").unwrap();
+946:             s.query("CREATE TABLE cs(id int PRIMARY KEY, payload text) WITH (autovacuum_enabled=off);
+947:                 CREATE INDEX cs_i ON cs(id) INCLUDE(payload);
+948:                 INSERT INTO cs VALUES (1, 'small')").unwrap();
+949:             let before = size_failure_stats(&mut s);
+950:             let error = s.query(&format!("INSERT INTO cs VALUES (2, cs_text({len}))")).unwrap_err();
+951:             assert_eq!(error.code, "54000");
+952:             assert!(error.message.starts_with(message), "{error:?}");
+953:             let failed = size_failure_stats(&mut s);
+954:             let delta: Vec<_> = failed.iter().zip(&before).map(|(a, b)| a - b).collect();
+955:             eprintln!("PG oracle pending: size stats len={len}, single failed INSERT observed delta={delta:?}, error={error:?}");
+956:             assert_eq!(delta, vec![1, 0, 0, 0, 1, 1], "one failed heap insertion counts once");
+957:             assert_eq!(s.query("SELECT count(*) FROM cs").unwrap()[0].rows, vec![vec![Value::Int8(1)]]);
+958: 
+959:             let error = s.query(&format!("INSERT INTO cs VALUES (2, 'small'), (3, cs_text({len}))")).unwrap_err();
+960:             assert_eq!(error.code, "54000");
+961:             assert!(error.message.starts_with(message), "{error:?}");
+962:             let multi = size_failure_stats(&mut s);
+963:             let delta: Vec<_> = multi.iter().zip(&failed).map(|(a, b)| a - b).collect();
+964:             assert_eq!(delta, vec![2, 0, 0, 0, 2, 2], "earlier row and failed row each count once after statement rollback");
+965:             assert_eq!(s.query("SELECT count(*) FROM cs").unwrap()[0].rows, vec![vec![Value::Int8(1)]]);
+966: 
+967:             s.query("INSERT INTO cs VALUES (2, 'small')").unwrap();
+968:             let success = size_failure_stats(&mut s);
+969:             let delta: Vec<_> = success.iter().zip(&multi).map(|(a, b)| a - b).collect();
+970:             assert_eq!(delta, vec![1, 0, 0, 1, 0, 1], "successful insertion is not counted twice");
+971:             for sql in [format!("UPDATE cs SET payload=cs_text({len}) WHERE id=1"),
+972:                 format!("INSERT INTO cs VALUES (1, cs_text({len})) ON CONFLICT(id) DO UPDATE SET payload=EXCLUDED.payload")] {
+973:                 let before_update = size_failure_stats(&mut s);
+974:                 let error = s.query(&sql).unwrap_err();
+975:                 assert_eq!(error.code, "54000");
+976:                 assert!(error.message.starts_with(message), "{error:?}");
+977:                 let after_update = size_failure_stats(&mut s);
+978:                 assert_eq!(after_update[0], before_update[0], "UPDATE must not add an INSERT count: {sql}");
+979:                 assert_eq!(after_update[5], before_update[5], "UPDATE must not add ins_since_vacuum: {sql}");
+980:             }
+981:             let before_speculative = size_failure_stats(&mut s);
+982:             let error = s.query(&format!("INSERT INTO cs VALUES (5, cs_text({len})) ON CONFLICT DO NOTHING")).unwrap_err();
+983:             assert_eq!(error.code, "54000");
+984:             assert!(error.message.starts_with(message), "{error:?}");
+985:             let speculative = size_failure_stats(&mut s);
+986:             let delta: Vec<_> = speculative.iter().zip(&before_speculative).map(|(a, b)| a - b).collect();
+987:             eprintln!("PG oracle pending: size stats len={len}, speculative no-conflict INSERT observed delta={delta:?}, error={error:?}");
+988:             assert_eq!(delta, vec![1, 0, 0, 0, 1, 1], "failed speculative insertion counts once");
+989:             assert_eq!(s.query("SELECT count(*) FROM cs").unwrap()[0].rows, vec![vec![Value::Int8(2)]]);
+990:         }
+991:     }
+992: }

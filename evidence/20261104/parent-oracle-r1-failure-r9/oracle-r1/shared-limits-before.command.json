@@ -1,0 +1,1 @@
+{"argv": ["bash", "-c", "cat /tmp/pg-engine-heavy.lock.slots /tmp/pg-engine-heavy.lock.jobs; ls -ld /tmp/pg-engine-heavy.lock*; ls -ld /home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/target/debug/deps /home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/target/debug/incremental"], "exit": 2}

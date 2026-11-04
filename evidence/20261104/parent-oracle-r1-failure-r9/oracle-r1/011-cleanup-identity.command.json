@@ -1,0 +1,17 @@
+{
+  "tag": "cleanup-identity",
+  "argv": [
+    "docker",
+    "inspect",
+    "--format",
+    "{{index .Config.Labels \"agent.worktree\"}}|{{index .Config.Labels \"agent.evidence\"}}",
+    "t3-d4020b98-combined-pg18-oracles-r1"
+  ],
+  "shell_rendering": "docker inspect --format '{{index .Config.Labels \"agent.worktree\"}}|{{index .Config.Labels \"agent.evidence\"}}' t3-d4020b98-combined-pg18-oracles-r1",
+  "started_utc": "2026-11-04T20:13:08.489706+00:00",
+  "stdin_path": null,
+  "actual_exit": 0,
+  "ended_utc": "2026-11-04T20:13:08.521849+00:00",
+  "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/011-cleanup-identity.stdout",
+  "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/011-cleanup-identity.stderr"
+}

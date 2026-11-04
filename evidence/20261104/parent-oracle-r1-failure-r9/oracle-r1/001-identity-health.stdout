@@ -1,0 +1,77 @@
+2026-11-04T20:13:05+00:00
+Name:	cat
+Umask:	0002
+State:	R (running)
+Tgid:	4118511
+Ngid:	0
+Pid:	4118511
+PPid:	4118509
+TracerPid:	0
+Uid:	1000	1000	1000	1000
+Gid:	1000	1000	1000	1000
+FDSize:	64
+Groups:	27 989 1000 
+NStgid:	4118511
+NSpid:	4118511
+NSpgid:	4118506
+NSsid:	4118484
+Kthread:	0
+VmPeak:	    6272 kB
+VmSize:	    6272 kB
+VmLck:	       0 kB
+VmPin:	       0 kB
+VmHWM:	    1968 kB
+VmRSS:	    1968 kB
+RssAnon:	     120 kB
+RssFile:	    1848 kB
+RssShmem:	       0 kB
+VmData:	     488 kB
+VmStk:	     132 kB
+VmExe:	      24 kB
+VmLib:	    1588 kB
+VmPTE:	      52 kB
+VmSwap:	       0 kB
+HugetlbPages:	       0 kB
+CoreDumping:	0
+THP_enabled:	1
+untag_mask:	0xffffffffffffffff
+Threads:	1
+SigQ:	1/513775
+SigPnd:	0000000000000000
+ShdPnd:	0000000000000000
+SigBlk:	0000000000000000
+SigIgn:	0000000000000000
+SigCgt:	0000000000000000
+CapInh:	0000000800000000
+CapPrm:	0000000000000000
+CapEff:	0000000000000000
+CapBnd:	000001ffffffffff
+CapAmb:	0000000000000000
+NoNewPrivs:	0
+Seccomp:	0
+Seccomp_filters:	0
+Speculation_Store_Bypass:	thread vulnerable
+SpeculationIndirectBranch:	conditional enabled
+Cpus_allowed:	0,03c000f0
+Cpus_allowed_list:	4-7,22-25
+Mems_allowed:	00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001
+Mems_allowed_list:	0
+voluntary_ctxt_switches:	0
+nonvoluntary_ctxt_switches:	0
+x86_Thread_features:	
+x86_Thread_features_locked:	
+    PID    PPID    PGID  NI COMMAND
+4118507 4118506 4118506  19 python3 /home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/run.py
+4118509 4118507 4118506  19 bash -c date -u --iso-8601=seconds; cat /proc/self/status; ps -o pid,ppid,pgid,ni,args -p $$ -p $PPID; df -B1 /home/meszmate/.cache; free -b; cat /proc/pressure/cpu; cat /tmp/pg-engine-heavy.lock.slots /tmp/pg-engine-heavy.lock.jobs; ls -ld /tmp/pg-engine-heavy.lock*
+Filesystem         1B-blocks          Used    Available Use% Mounted on
+/dev/md2       1869804793856 1551639203840 223109242880  88% /
+               total        used        free      shared  buff/cache   available
+Mem:     134748430336 42839007232  1112621056 15317381120 107398508544 91909423104
+Swap:    17160990720 17160908800       81920
+some avg10=0.59 avg60=4.06 avg300=7.37 total=21295343453
+full avg10=0.00 avg60=0.00 avg300=0.00 total=0
+4
+2
+drwxrwxr-x 2 meszmate meszmate 4096 Nov  4 21:13 /tmp/pg-engine-heavy.lock
+-rw-rw-r-- 1 meszmate meszmate    2 Oct 31 14:06 /tmp/pg-engine-heavy.lock.jobs
+-rw-rw-r-- 1 meszmate meszmate    2 Oct 31 14:04 /tmp/pg-engine-heavy.lock.slots

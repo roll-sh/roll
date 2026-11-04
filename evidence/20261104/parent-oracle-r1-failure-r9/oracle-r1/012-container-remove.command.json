@@ -1,0 +1,16 @@
+{
+  "tag": "container-remove",
+  "argv": [
+    "docker",
+    "rm",
+    "-f",
+    "t3-d4020b98-combined-pg18-oracles-r1"
+  ],
+  "shell_rendering": "docker rm -f t3-d4020b98-combined-pg18-oracles-r1",
+  "started_utc": "2026-11-04T20:13:08.523362+00:00",
+  "stdin_path": null,
+  "actual_exit": 0,
+  "ended_utc": "2026-11-04T20:13:08.888528+00:00",
+  "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/012-container-remove.stdout",
+  "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/012-container-remove.stderr"
+}

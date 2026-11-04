@@ -1,0 +1,18 @@
+{
+  "argv": [
+    "taskset",
+    "-c",
+    "4-7,22-25",
+    "/home/meszmate/.cache/a163/heavy-bg.sh",
+    "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/terminal.log",
+    "timeout",
+    "--signal=TERM",
+    "--kill-after=8s",
+    "580s",
+    "python3",
+    "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/run.py"
+  ],
+  "shell_rendering": "taskset -c 4-7,22-25 /home/meszmate/.cache/a163/heavy-bg.sh /home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/terminal.log timeout --signal=TERM --kill-after=8s 580s python3 /home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/run.py",
+  "runner_sha256": "a004beaa5b8a169ce0ce6e514241864d179ce63ecbbbf0cdd67b4b91a66718f0",
+  "prepare_sha256": "a366fa9ee2589787ab2c3eaa44f20c307ddf0fd518cff5af5c9dfde3897f8c80"
+}

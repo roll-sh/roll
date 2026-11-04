@@ -1,0 +1,60 @@
+{
+  "status": "REFERENCE_CAPTURE_FAILED_BEFORE_FIXTURES",
+  "reason": "Readiness accepted initdb temporary postmaster, then SELECT version() hit init-to-final-postmaster socket gap. No retry: one named container/job allowed.",
+  "actual_version_query_exit": 2,
+  "actual_version_query_stdout": "",
+  "server_log_start_version_lines": [
+    "2026-11-04T20:13:08.370170204Z 2026-11-04 20:13:08.370 UTC [1] LOG:  00000: starting PostgreSQL 18.6 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit",
+    "2026-11-04T20:13:08.127000892Z 2026-11-04 20:13:08.126 UTC [49] LOG:  00000: starting PostgreSQL 18.6 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit"
+  ],
+  "image_id": "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5",
+  "image_env_pg_version": "18.6",
+  "version_query_verified": false,
+  "executed_fixture_count": 0,
+  "planned_fixture_count": 20,
+  "outcomes": [
+    {
+      "scenario": "Minimum ASC/DESC workers0/setting2; Include2800/8300; Duplicate2800/8300/0",
+      "outcome": "NOT MEASURED"
+    },
+    {
+      "scenario": "Stats lengths2800/8300: single/multi/success/update/upsert/speculative",
+      "outcome": "NOT MEASURED"
+    },
+    {
+      "scenario": "PLAIN LATIN1/UTF8 workers0/setting2",
+      "outcome": "NOT MEASURED"
+    }
+  ],
+  "actual_runner_exit": 1,
+  "actual_heavy_exit": 1,
+  "container_removed": true,
+  "container_remove_actual_exit": 0,
+  "host_config": {
+    "AutoRemove": true,
+    "Memory": 536870912,
+    "MemorySwap": 536870912,
+    "NanoCpus": 2000000000,
+    "CpusetCpus": "4-7,22-25",
+    "PortBindings": {},
+    "NetworkMode": "none",
+    "Tmpfs": {
+      "/var/lib/postgresql": "rw,size=1m"
+    },
+    "Binds": null
+  },
+  "mounts": [],
+  "source_runner_hashes": {
+    "parent_sealed_source_commit": "e686696add25112c0d2ce33720bd84f0e04e21bf",
+    "snapshot": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-e686-focused/src",
+    "sha256": {
+      "/home/meszmate/.cache/pg-engine-resume-20261104/combined-e686-focused/src/crates/pg-engine/src/exec/sizing/kept.rs": "69005b8b873e65709e6e4eadf830482e097acfaf4deebabe1070895f17de379b",
+      "/home/meszmate/.cache/pg-engine-resume-20261104/combined-proof-r2/candidate2.log": "33e6449fcf7ca0da96145f94053527697d3db3eec7a660e377c7bc9f52d3a8e8",
+      "/home/meszmate/.cache/a163/heavy-bg.sh": "6b89e35cb4bac89a27918d6fb12fc31a90b34675f9fee1e0cff9e12b72e82110",
+      "/home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/crates/pg-engine/tools/heavy.sh": "6cf1127d5a598b761abd4744d2fec5a38eeb7f9fb1313f58eee94954c616f937"
+    }
+  },
+  "no_engine_execution": true,
+  "parity_established": false,
+  "worker_launch_proven_by_this_reference": false
+}

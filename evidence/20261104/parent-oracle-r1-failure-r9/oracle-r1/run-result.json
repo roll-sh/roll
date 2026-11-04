@@ -1,0 +1,17 @@
+{
+  "started_utc": "2026-11-04T20:13:05.027217+00:00",
+  "container_name": "t3-d4020b98-combined-pg18-oracles-r1",
+  "image_id": "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5",
+  "process_group": 4118506,
+  "pid": 4118507,
+  "internal_deadline_seconds": 550,
+  "outer_process_group_deadline_seconds": 580,
+  "free_bytes_before": 223109107712,
+  "container_id": "70386cc43ec065bf6dde21821bdd060cdaf27abdb4c0270f6ed38a039a767f69",
+  "exception": "RuntimeError('verify-version actual exit 2')",
+  "container_remove_actual_exit": 0,
+  "container_absence_confirmed": true,
+  "ended_utc": "2026-11-04T20:13:08.971826+00:00",
+  "elapsed_seconds": 3.944647653028369,
+  "runner_actual_exit": 1
+}

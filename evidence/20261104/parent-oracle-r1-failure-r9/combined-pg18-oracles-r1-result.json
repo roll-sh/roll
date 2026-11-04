@@ -1,0 +1,30 @@
+{
+  "taskId": "node:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Adelegate-task%3Apg-resume-20261104-combined-pg18-oracles-r1",
+  "childThreadId": "thread:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Adelegate-task%3Apg-resume-20261104-combined-pg18-oracles-r1",
+  "childRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A9e5a6feb-d435-4514-ac9d-07c1b03b444b%253Adelegate-task%253Apg-resume-20261104-combined-pg18-oracles-r1:ordinal:1",
+  "childNodeId": "node:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Adelegate-task%3Apg-resume-20261104-combined-pg18-oracles-r1",
+  "status": "completed",
+  "workState": "result_available",
+  "hasPendingChildRuns": false,
+  "latestTerminalRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A9e5a6feb-d435-4514-ac9d-07c1b03b444b%253Adelegate-task%253Apg-resume-20261104-combined-pg18-oracles-r1:ordinal:1",
+  "latestTerminalStatus": "completed",
+  "latestTerminalSummary": null,
+  "latestTerminalResultContextTransferId": null,
+  "providerInstanceId": "codex",
+  "model": "gpt-6.1-sol",
+  "options": [
+    {
+      "id": "reasoningEffort",
+      "value": "high"
+    },
+    {
+      "id": "serviceTier",
+      "value": "default"
+    }
+  ],
+  "summary": "The single job failed before fixtures ran. My readiness check caught the temporary initialization server; `SELECT version()` then hit the startup socket gap and exited **2**. Runner/`HEAVY-EXIT`: **1**. No retry was started.\n\n| Requested reference | Outcome |\n|---|---|\n| Minimum ASC/DESC and Include/Duplicate precedence | Unmeasured |\n| Stats scenarios, 2800/8300 | Unmeasured |\n| PLAIN LATIN1/UTF8, serial0/setting2 | Unmeasured |\n\nServer logs identify **PostgreSQL 18.6**; SELECT verification did not complete. Image ID: `sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5`.\n\nThe container was removed in `finally` (`docker rm` exit **0**); absence is confirmed. Runtime: **3.945s**. No engine execution or source mutation occurred. All parity claims remain held.\n\nEvidence: [report](/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/REPORT.md), [raw terminal](/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/terminal.log), [commands and actual exits](/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/commands.json), [SQL hashes](/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/sql-sha256.json), [source/runner hashes](/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/source-runner-hashes.json).\n\nRaw terminal SHA-256: `327d481015c82d712d2d24ff097067447bfcc68954c0a36eed646fd0c4fce1e8`  \n[Evidence manifest](/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/MANIFEST.sha256) SHA-256: `38d2878d3946a1425ac529990093413b07c84b6ea27aabb3525b74c7f8f15404`",
+  "resultContextTransferId": "context-transfer:type:subagent_result:source-thread:thread%3Adelegated-task%3Acommand%253Amcp%253A9e5a6feb-d435-4514-ac9d-07c1b03b444b%253Adelegate-task%253Apg-resume-20261104-combined-pg18-oracles-r1:target-thread:ef773c6d-b273-413f-96df-4136f8b05569:9e732a9c-5b36-4b55-971b-d307da9cfffe",
+  "hasPendingQuestion": false,
+  "pendingApproval": null,
+  "waitTimedOut": false
+}

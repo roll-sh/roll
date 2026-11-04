@@ -1,0 +1,271 @@
+[
+  {
+    "tag": "identity-health",
+    "argv": [
+      "bash",
+      "-c",
+      "date -u --iso-8601=seconds; cat /proc/self/status; ps -o pid,ppid,pgid,ni,args -p $$ -p $PPID; df -B1 /home/meszmate/.cache; free -b; cat /proc/pressure/cpu; cat /tmp/pg-engine-heavy.lock.slots /tmp/pg-engine-heavy.lock.jobs; ls -ld /tmp/pg-engine-heavy.lock*"
+    ],
+    "shell_rendering": "bash -c 'date -u --iso-8601=seconds; cat /proc/self/status; ps -o pid,ppid,pgid,ni,args -p $$ -p $PPID; df -B1 /home/meszmate/.cache; free -b; cat /proc/pressure/cpu; cat /tmp/pg-engine-heavy.lock.slots /tmp/pg-engine-heavy.lock.jobs; ls -ld /tmp/pg-engine-heavy.lock*'",
+    "started_utc": "2026-11-04T20:13:05.027289+00:00",
+    "stdin_path": null,
+    "actual_exit": 0,
+    "ended_utc": "2026-11-04T20:13:05.191858+00:00",
+    "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/001-identity-health.stdout",
+    "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/001-identity-health.stderr"
+  },
+  {
+    "tag": "own-label-check",
+    "argv": [
+      "docker",
+      "ps",
+      "-a",
+      "--filter",
+      "label=agent.worktree=t3-d4020b98",
+      "--no-trunc",
+      "--format",
+      "{{json .}}"
+    ],
+    "shell_rendering": "docker ps -a --filter label=agent.worktree=t3-d4020b98 --no-trunc --format '{{json .}}'",
+    "started_utc": "2026-11-04T20:13:05.192544+00:00",
+    "stdin_path": null,
+    "actual_exit": 0,
+    "ended_utc": "2026-11-04T20:13:05.306951+00:00",
+    "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/002-own-label-check.stdout",
+    "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/002-own-label-check.stderr"
+  },
+  {
+    "tag": "image-identity",
+    "argv": [
+      "docker",
+      "image",
+      "inspect",
+      "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5"
+    ],
+    "shell_rendering": "docker image inspect sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5",
+    "started_utc": "2026-11-04T20:13:05.308035+00:00",
+    "stdin_path": null,
+    "actual_exit": 0,
+    "ended_utc": "2026-11-04T20:13:05.423321+00:00",
+    "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/003-image-identity.stdout",
+    "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/003-image-identity.stderr"
+  },
+  {
+    "tag": "container-start",
+    "argv": [
+      "docker",
+      "run",
+      "--pull=never",
+      "--detach",
+      "--rm",
+      "--name",
+      "t3-d4020b98-combined-pg18-oracles-r1",
+      "--label",
+      "agent.worktree=t3-d4020b98",
+      "--label",
+      "agent.evidence=combined-pg18-oracles-r1",
+      "--memory=512m",
+      "--memory-swap=512m",
+      "--cpus=2",
+      "--cpuset-cpus=4-7,22-25",
+      "--network=none",
+      "--tmpfs",
+      "/var/lib/postgresql:rw,size=1m",
+      "-e",
+      "PGDATA=/tmp/pg18-reference-data",
+      "-e",
+      "POSTGRES_HOST_AUTH_METHOD=trust",
+      "-e",
+      "POSTGRES_INITDB_ARGS=--locale=C --encoding=UTF8",
+      "--entrypoint",
+      "/bin/sh",
+      "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5",
+      "-c",
+      "exec nice -n 19 docker-entrypoint.sh postgres -c shared_buffers=16MB -c max_connections=12 -c log_min_messages=debug1 -c log_error_verbosity=verbose -c log_line_prefix='%m [%p] ' -c listen_addresses='' "
+    ],
+    "shell_rendering": "docker run --pull=never --detach --rm --name t3-d4020b98-combined-pg18-oracles-r1 --label agent.worktree=t3-d4020b98 --label agent.evidence=combined-pg18-oracles-r1 --memory=512m --memory-swap=512m --cpus=2 --cpuset-cpus=4-7,22-25 --network=none --tmpfs /var/lib/postgresql:rw,size=1m -e PGDATA=/tmp/pg18-reference-data -e POSTGRES_HOST_AUTH_METHOD=trust -e 'POSTGRES_INITDB_ARGS=--locale=C --encoding=UTF8' --entrypoint /bin/sh sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5 -c 'exec nice -n 19 docker-entrypoint.sh postgres -c shared_buffers=16MB -c max_connections=12 -c log_min_messages=debug1 -c log_error_verbosity=verbose -c log_line_prefix='\"'\"'%m [%p] '\"'\"' -c listen_addresses='\"'\"''\"'\"' '",
+    "started_utc": "2026-11-04T20:13:05.423921+00:00",
+    "stdin_path": null,
+    "actual_exit": 0,
+    "ended_utc": "2026-11-04T20:13:06.941760+00:00",
+    "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/004-container-start.stdout",
+    "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/004-container-start.stderr"
+  },
+  {
+    "tag": "container-inspect",
+    "argv": [
+      "docker",
+      "inspect",
+      "t3-d4020b98-combined-pg18-oracles-r1"
+    ],
+    "shell_rendering": "docker inspect t3-d4020b98-combined-pg18-oracles-r1",
+    "started_utc": "2026-11-04T20:13:06.942459+00:00",
+    "stdin_path": null,
+    "actual_exit": 0,
+    "ended_utc": "2026-11-04T20:13:07.006590+00:00",
+    "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/005-container-inspect.stdout",
+    "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/005-container-inspect.stderr"
+  },
+  {
+    "tag": "readiness-00",
+    "argv": [
+      "docker",
+      "exec",
+      "t3-d4020b98-combined-pg18-oracles-r1",
+      "pg_isready",
+      "-U",
+      "postgres",
+      "-d",
+      "postgres"
+    ],
+    "shell_rendering": "docker exec t3-d4020b98-combined-pg18-oracles-r1 pg_isready -U postgres -d postgres",
+    "started_utc": "2026-11-04T20:13:07.007296+00:00",
+    "stdin_path": null,
+    "actual_exit": 2,
+    "ended_utc": "2026-11-04T20:13:07.121624+00:00",
+    "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/006-readiness-00.stdout",
+    "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/006-readiness-00.stderr"
+  },
+  {
+    "tag": "readiness-01",
+    "argv": [
+      "docker",
+      "exec",
+      "t3-d4020b98-combined-pg18-oracles-r1",
+      "pg_isready",
+      "-U",
+      "postgres",
+      "-d",
+      "postgres"
+    ],
+    "shell_rendering": "docker exec t3-d4020b98-combined-pg18-oracles-r1 pg_isready -U postgres -d postgres",
+    "started_utc": "2026-11-04T20:13:08.123171+00:00",
+    "stdin_path": null,
+    "actual_exit": 0,
+    "ended_utc": "2026-11-04T20:13:08.237942+00:00",
+    "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/007-readiness-01.stdout",
+    "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/007-readiness-01.stderr"
+  },
+  {
+    "tag": "verify-version",
+    "argv": [
+      "docker",
+      "exec",
+      "t3-d4020b98-combined-pg18-oracles-r1",
+      "psql",
+      "-X",
+      "-At",
+      "-U",
+      "postgres",
+      "-d",
+      "postgres",
+      "-c",
+      "SELECT version(), current_setting('server_version_num')"
+    ],
+    "shell_rendering": "docker exec t3-d4020b98-combined-pg18-oracles-r1 psql -X -At -U postgres -d postgres -c 'SELECT version(), current_setting('\"'\"'server_version_num'\"'\"')'",
+    "started_utc": "2026-11-04T20:13:08.238644+00:00",
+    "stdin_path": null,
+    "actual_exit": 2,
+    "ended_utc": "2026-11-04T20:13:08.352786+00:00",
+    "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/008-verify-version.stdout",
+    "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/008-verify-version.stderr"
+  },
+  {
+    "tag": "container-logs",
+    "argv": [
+      "docker",
+      "logs",
+      "--timestamps",
+      "t3-d4020b98-combined-pg18-oracles-r1"
+    ],
+    "shell_rendering": "docker logs --timestamps t3-d4020b98-combined-pg18-oracles-r1",
+    "started_utc": "2026-11-04T20:13:08.359646+00:00",
+    "stdin_path": null,
+    "actual_exit": 0,
+    "ended_utc": "2026-11-04T20:13:08.423813+00:00",
+    "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/009-container-logs.stdout",
+    "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/009-container-logs.stderr"
+  },
+  {
+    "tag": "container-final-inspect",
+    "argv": [
+      "docker",
+      "inspect",
+      "t3-d4020b98-combined-pg18-oracles-r1"
+    ],
+    "shell_rendering": "docker inspect t3-d4020b98-combined-pg18-oracles-r1",
+    "started_utc": "2026-11-04T20:13:08.424801+00:00",
+    "stdin_path": null,
+    "actual_exit": 0,
+    "ended_utc": "2026-11-04T20:13:08.489028+00:00",
+    "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/010-container-final-inspect.stdout",
+    "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/010-container-final-inspect.stderr"
+  },
+  {
+    "tag": "cleanup-identity",
+    "argv": [
+      "docker",
+      "inspect",
+      "--format",
+      "{{index .Config.Labels \"agent.worktree\"}}|{{index .Config.Labels \"agent.evidence\"}}",
+      "t3-d4020b98-combined-pg18-oracles-r1"
+    ],
+    "shell_rendering": "docker inspect --format '{{index .Config.Labels \"agent.worktree\"}}|{{index .Config.Labels \"agent.evidence\"}}' t3-d4020b98-combined-pg18-oracles-r1",
+    "started_utc": "2026-11-04T20:13:08.489706+00:00",
+    "stdin_path": null,
+    "actual_exit": 0,
+    "ended_utc": "2026-11-04T20:13:08.521849+00:00",
+    "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/011-cleanup-identity.stdout",
+    "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/011-cleanup-identity.stderr"
+  },
+  {
+    "tag": "container-remove",
+    "argv": [
+      "docker",
+      "rm",
+      "-f",
+      "t3-d4020b98-combined-pg18-oracles-r1"
+    ],
+    "shell_rendering": "docker rm -f t3-d4020b98-combined-pg18-oracles-r1",
+    "started_utc": "2026-11-04T20:13:08.523362+00:00",
+    "stdin_path": null,
+    "actual_exit": 0,
+    "ended_utc": "2026-11-04T20:13:08.888528+00:00",
+    "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/012-container-remove.stdout",
+    "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/012-container-remove.stderr"
+  },
+  {
+    "tag": "container-absence",
+    "argv": [
+      "docker",
+      "ps",
+      "-a",
+      "--filter",
+      "name=^/t3-d4020b98-combined-pg18-oracles-r1$",
+      "--format",
+      "{{.ID}} {{.Names}}"
+    ],
+    "shell_rendering": "docker ps -a --filter 'name=^/t3-d4020b98-combined-pg18-oracles-r1$' --format '{{.ID}} {{.Names}}'",
+    "started_utc": "2026-11-04T20:13:08.889291+00:00",
+    "stdin_path": null,
+    "actual_exit": 0,
+    "ended_utc": "2026-11-04T20:13:08.953667+00:00",
+    "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/013-container-absence.stdout",
+    "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/013-container-absence.stderr"
+  },
+  {
+    "tag": "health-after",
+    "argv": [
+      "bash",
+      "-c",
+      "date -u --iso-8601=seconds; df -B1 /home/meszmate/.cache; cat /proc/pressure/cpu; cat /tmp/pg-engine-heavy.lock.slots /tmp/pg-engine-heavy.lock.jobs"
+    ],
+    "shell_rendering": "bash -c 'date -u --iso-8601=seconds; df -B1 /home/meszmate/.cache; cat /proc/pressure/cpu; cat /tmp/pg-engine-heavy.lock.slots /tmp/pg-engine-heavy.lock.jobs'",
+    "started_utc": "2026-11-04T20:13:08.954895+00:00",
+    "stdin_path": null,
+    "actual_exit": 0,
+    "ended_utc": "2026-11-04T20:13:08.971089+00:00",
+    "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/014-health-after.stdout",
+    "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/014-health-after.stderr"
+  }
+]

@@ -1,0 +1,65 @@
+2026-11-04T20:13:06.968994730Z ********************************************************************************
+2026-11-04T20:13:06.969056372Z WARNING: POSTGRES_HOST_AUTH_METHOD has been set to "trust". This will allow
+2026-11-04T20:13:06.969063083Z          anyone with access to the Postgres port to access your database without
+2026-11-04T20:13:06.969067192Z          a password, even if POSTGRES_PASSWORD is set. See PostgreSQL
+2026-11-04T20:13:06.969071108Z          documentation about "trust":
+2026-11-04T20:13:06.969075198Z          https://www.postgresql.org/docs/current/auth-trust.html
+2026-11-04T20:13:06.969079085Z          In Docker's default configuration, this is effectively any other
+2026-11-04T20:13:06.969083436Z          container on the same system.
+2026-11-04T20:13:06.969087294Z 
+2026-11-04T20:13:06.969090865Z          It is not recommended to use POSTGRES_HOST_AUTH_METHOD=trust. Replace
+2026-11-04T20:13:06.969094814Z          it with "-e POSTGRES_PASSWORD=password" instead to set a password in
+2026-11-04T20:13:06.969098964Z          "docker run".
+2026-11-04T20:13:06.969102743Z ********************************************************************************
+2026-11-04T20:13:07.461734529Z sh: locale: not found
+2026-11-04T20:13:07.461910457Z 2026-11-04 20:13:07.461 UTC [43] WARNING:  no usable system locales were found
+2026-11-04T20:13:08.060946953Z initdb: warning: enabling "trust" authentication for local connections
+2026-11-04T20:13:08.060971321Z initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+2026-11-04T20:13:08.366732302Z 2026-11-04 20:13:08.366 UTC [1] DEBUG:  00000: registering background worker "logical replication launcher"
+2026-11-04T20:13:08.366767775Z 2026-11-04 20:13:08.366 UTC [1] LOCATION:  RegisterBackgroundWorker, bgworker.c:979
+2026-11-04T20:13:08.366812142Z 2026-11-04 20:13:08.366 UTC [1] DEBUG:  00000: mmap(25165824) with MAP_HUGETLB failed, huge pages disabled: Out of memory
+2026-11-04T20:13:08.366833179Z 2026-11-04 20:13:08.366 UTC [1] LOCATION:  CreateAnonymousSegment, pg_shmem.c:626
+2026-11-04T20:13:08.370170204Z 2026-11-04 20:13:08.370 UTC [1] LOG:  00000: starting PostgreSQL 18.6 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+2026-11-04T20:13:08.370215695Z 2026-11-04 20:13:08.370 UTC [1] LOCATION:  PostmasterMain, postmaster.c:1103
+2026-11-04T20:13:08.370538064Z 2026-11-04 20:13:08.370 UTC [1] LOG:  00000: listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-11-04T20:13:08.370549124Z 2026-11-04 20:13:08.370 UTC [1] LOCATION:  ListenServerPort, pqcomm.c:658
+2026-11-04T20:13:08.371585371Z 2026-11-04 20:13:08.371 UTC [1] DEBUG:  00000: updating PMState from PM_INIT to PM_STARTUP
+2026-11-04T20:13:08.371592652Z 2026-11-04 20:13:08.371 UTC [1] LOCATION:  UpdatePMState, postmaster.c:3253
+2026-11-04T20:13:08.373378146Z 2026-11-04 20:13:08.373 UTC [82] LOG:  00000: database system was shut down at 2026-11-04 20:13:08 UTC
+2026-11-04T20:13:08.373389039Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  StartupXLOG, xlog.c:5510
+2026-11-04T20:13:08.373479818Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: checkpoint record is at 0/1765EB8
+2026-11-04T20:13:08.373483786Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  InitWalRecovery, xlogrecovery.c:798
+2026-11-04T20:13:08.373486198Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: redo record is at 0/1765EB8; shutdown true
+2026-11-04T20:13:08.373488489Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  InitWalRecovery, xlogrecovery.c:898
+2026-11-04T20:13:08.373490799Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: next transaction ID: 753; next OID: 13690
+2026-11-04T20:13:08.373493137Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  InitWalRecovery, xlogrecovery.c:902
+2026-11-04T20:13:08.373495354Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: next MultiXactId: 1; next MultiXactOffset: 0
+2026-11-04T20:13:08.373497586Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  InitWalRecovery, xlogrecovery.c:906
+2026-11-04T20:13:08.373499680Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: oldest unfrozen transaction ID: 745, in database 1
+2026-11-04T20:13:08.373502034Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  InitWalRecovery, xlogrecovery.c:909
+2026-11-04T20:13:08.373504284Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: oldest MultiXactId: 1, in database 1
+2026-11-04T20:13:08.373506548Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  InitWalRecovery, xlogrecovery.c:912
+2026-11-04T20:13:08.373508775Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: commit timestamp Xid oldest/newest: 0/0
+2026-11-04T20:13:08.373511012Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  InitWalRecovery, xlogrecovery.c:915
+2026-11-04T20:13:08.373513284Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: transaction ID wrap limit is 2147484392, limited by database with OID 1
+2026-11-04T20:13:08.373515608Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  SetTransactionIdLimit, varsup.c:454
+2026-11-04T20:13:08.373520658Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: MultiXactId wrap limit is 2147483648, limited by database with OID 1
+2026-11-04T20:13:08.373529970Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  SetMultiXactIdLimit, multixact.c:2599
+2026-11-04T20:13:08.373716174Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: starting up replication slots
+2026-11-04T20:13:08.373732913Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  StartupReplicationSlots, slot.c:2204
+2026-11-04T20:13:08.373752936Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: xmin required by slots: data 0, catalog 0
+2026-11-04T20:13:08.373770515Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  ProcArraySetReplicationSlotXmin, procarray.c:3957
+2026-11-04T20:13:08.374612742Z 2026-11-04 20:13:08.374 UTC [82] DEBUG:  00000: MultiXactId wrap limit is 2147483648, limited by database with OID 1
+2026-11-04T20:13:08.374631924Z 2026-11-04 20:13:08.374 UTC [82] LOCATION:  SetMultiXactIdLimit, multixact.c:2599
+2026-11-04T20:13:08.374636697Z 2026-11-04 20:13:08.374 UTC [82] DEBUG:  00000: MultiXact member stop limit is now 4294914944 based on MultiXact 1
+2026-11-04T20:13:08.374640854Z 2026-11-04 20:13:08.374 UTC [82] LOCATION:  SetOffsetVacuumLimit, multixact.c:2971
+2026-11-04T20:13:08.377561741Z 2026-11-04 20:13:08.377 UTC [1] DEBUG:  00000: updating PMState from PM_STARTUP to PM_RUN
+2026-11-04T20:13:08.377572019Z 2026-11-04 20:13:08.377 UTC [1] LOCATION:  UpdatePMState, postmaster.c:3253
+2026-11-04T20:13:08.377575562Z 2026-11-04 20:13:08.377 UTC [1] LOG:  00000: database system is ready to accept connections
+2026-11-04T20:13:08.377578793Z 2026-11-04 20:13:08.377 UTC [1] LOCATION:  process_pm_child_exit, postmaster.c:2331
+2026-11-04T20:13:08.378341443Z 2026-11-04 20:13:08.378 UTC [1] DEBUG:  00000: starting background worker process "logical replication launcher"
+2026-11-04T20:13:08.378360759Z 2026-11-04 20:13:08.378 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:13:08.378712267Z 2026-11-04 20:13:08.378 UTC [84] DEBUG:  00000: autovacuum launcher started
+2026-11-04T20:13:08.378731672Z 2026-11-04 20:13:08.378 UTC [84] LOCATION:  AutoVacLauncherMain, autovacuum.c:384
+2026-11-04T20:13:08.379079146Z 2026-11-04 20:13:08.378 UTC [85] DEBUG:  00000: logical replication launcher started
+2026-11-04T20:13:08.379089666Z 2026-11-04 20:13:08.378 UTC [85] LOCATION:  ApplyLauncherMain, launcher.c:1134

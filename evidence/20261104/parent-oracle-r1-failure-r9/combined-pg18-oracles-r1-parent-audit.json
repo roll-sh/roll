@@ -1,0 +1,14 @@
+{
+  "utc": "2026-11-04T20:20:50.666638+00:00",
+  "status": "SETUP_FAILED_NO_FIXTURES",
+  "verified_manifest_entries": 93,
+  "manifest_sha256": "38d2878d3946a1425ac529990093413b07c84b6ea27aabb3525b74c7f8f15404",
+  "command_count": 14,
+  "version_exit": 2,
+  "fixture_stdin_invocations": 0,
+  "container_removal_exit": 0,
+  "container_absent_parent_confirmed": true,
+  "runner_exit": 1,
+  "parity_acceptance": false,
+  "source_acceptance": false
+}

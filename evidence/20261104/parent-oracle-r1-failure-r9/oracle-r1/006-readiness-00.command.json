@@ -1,0 +1,20 @@
+{
+  "tag": "readiness-00",
+  "argv": [
+    "docker",
+    "exec",
+    "t3-d4020b98-combined-pg18-oracles-r1",
+    "pg_isready",
+    "-U",
+    "postgres",
+    "-d",
+    "postgres"
+  ],
+  "shell_rendering": "docker exec t3-d4020b98-combined-pg18-oracles-r1 pg_isready -U postgres -d postgres",
+  "started_utc": "2026-11-04T20:13:07.007296+00:00",
+  "stdin_path": null,
+  "actual_exit": 2,
+  "ended_utc": "2026-11-04T20:13:07.121624+00:00",
+  "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/006-readiness-00.stdout",
+  "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/006-readiness-00.stderr"
+}

@@ -1,0 +1,2 @@
+ls: cannot access '/home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/target/debug/deps': No such file or directory
+ls: cannot access '/home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/target/debug/incremental': No such file or directory

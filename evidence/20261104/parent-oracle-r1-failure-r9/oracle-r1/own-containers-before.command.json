@@ -1,0 +1,1 @@
+{"argv": ["docker", "ps", "-a", "--filter", "label=agent.worktree=t3-d4020b98", "--no-trunc", "--format", "{{json .}}"], "exit": 0}

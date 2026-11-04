@@ -1,0 +1,15 @@
+{
+  "tag": "health-after",
+  "argv": [
+    "bash",
+    "-c",
+    "date -u --iso-8601=seconds; df -B1 /home/meszmate/.cache; cat /proc/pressure/cpu; cat /tmp/pg-engine-heavy.lock.slots /tmp/pg-engine-heavy.lock.jobs"
+  ],
+  "shell_rendering": "bash -c 'date -u --iso-8601=seconds; df -B1 /home/meszmate/.cache; cat /proc/pressure/cpu; cat /tmp/pg-engine-heavy.lock.slots /tmp/pg-engine-heavy.lock.jobs'",
+  "started_utc": "2026-11-04T20:13:08.954895+00:00",
+  "stdin_path": null,
+  "actual_exit": 0,
+  "ended_utc": "2026-11-04T20:13:08.971089+00:00",
+  "stdout": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/014-health-after.stdout",
+  "stderr": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/014-health-after.stderr"
+}

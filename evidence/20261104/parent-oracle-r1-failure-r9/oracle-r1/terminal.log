@@ -1,0 +1,971 @@
+COMMAND bash -c 'date -u --iso-8601=seconds; cat /proc/self/status; ps -o pid,ppid,pgid,ni,args -p $$ -p $PPID; df -B1 /home/meszmate/.cache; free -b; cat /proc/pressure/cpu; cat /tmp/pg-engine-heavy.lock.slots /tmp/pg-engine-heavy.lock.jobs; ls -ld /tmp/pg-engine-heavy.lock*'
+001-identity-health STDOUT BEGIN
+2026-11-04T20:13:05+00:00
+Name:	cat
+Umask:	0002
+State:	R (running)
+Tgid:	4118511
+Ngid:	0
+Pid:	4118511
+PPid:	4118509
+TracerPid:	0
+Uid:	1000	1000	1000	1000
+Gid:	1000	1000	1000	1000
+FDSize:	64
+Groups:	27 989 1000 
+NStgid:	4118511
+NSpid:	4118511
+NSpgid:	4118506
+NSsid:	4118484
+Kthread:	0
+VmPeak:	    6272 kB
+VmSize:	    6272 kB
+VmLck:	       0 kB
+VmPin:	       0 kB
+VmHWM:	    1968 kB
+VmRSS:	    1968 kB
+RssAnon:	     120 kB
+RssFile:	    1848 kB
+RssShmem:	       0 kB
+VmData:	     488 kB
+VmStk:	     132 kB
+VmExe:	      24 kB
+VmLib:	    1588 kB
+VmPTE:	      52 kB
+VmSwap:	       0 kB
+HugetlbPages:	       0 kB
+CoreDumping:	0
+THP_enabled:	1
+untag_mask:	0xffffffffffffffff
+Threads:	1
+SigQ:	1/513775
+SigPnd:	0000000000000000
+ShdPnd:	0000000000000000
+SigBlk:	0000000000000000
+SigIgn:	0000000000000000
+SigCgt:	0000000000000000
+CapInh:	0000000800000000
+CapPrm:	0000000000000000
+CapEff:	0000000000000000
+CapBnd:	000001ffffffffff
+CapAmb:	0000000000000000
+NoNewPrivs:	0
+Seccomp:	0
+Seccomp_filters:	0
+Speculation_Store_Bypass:	thread vulnerable
+SpeculationIndirectBranch:	conditional enabled
+Cpus_allowed:	0,03c000f0
+Cpus_allowed_list:	4-7,22-25
+Mems_allowed:	00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001
+Mems_allowed_list:	0
+voluntary_ctxt_switches:	0
+nonvoluntary_ctxt_switches:	0
+x86_Thread_features:	
+x86_Thread_features_locked:	
+    PID    PPID    PGID  NI COMMAND
+4118507 4118506 4118506  19 python3 /home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/run.py
+4118509 4118507 4118506  19 bash -c date -u --iso-8601=seconds; cat /proc/self/status; ps -o pid,ppid,pgid,ni,args -p $$ -p $PPID; df -B1 /home/meszmate/.cache; free -b; cat /proc/pressure/cpu; cat /tmp/pg-engine-heavy.lock.slots /tmp/pg-engine-heavy.lock.jobs; ls -ld /tmp/pg-engine-heavy.lock*
+Filesystem         1B-blocks          Used    Available Use% Mounted on
+/dev/md2       1869804793856 1551639203840 223109242880  88% /
+               total        used        free      shared  buff/cache   available
+Mem:     134748430336 42839007232  1112621056 15317381120 107398508544 91909423104
+Swap:    17160990720 17160908800       81920
+some avg10=0.59 avg60=4.06 avg300=7.37 total=21295343453
+full avg10=0.00 avg60=0.00 avg300=0.00 total=0
+4
+2
+drwxrwxr-x 2 meszmate meszmate 4096 Nov  4 21:13 /tmp/pg-engine-heavy.lock
+-rw-rw-r-- 1 meszmate meszmate    2 Oct 31 14:06 /tmp/pg-engine-heavy.lock.jobs
+-rw-rw-r-- 1 meszmate meszmate    2 Oct 31 14:04 /tmp/pg-engine-heavy.lock.slots
+001-identity-health STDOUT END
+001-identity-health STDERR BEGIN
+001-identity-health STDERR END
+001-identity-health ACTUAL_EXIT 0
+COMMAND docker ps -a --filter label=agent.worktree=t3-d4020b98 --no-trunc --format '{{json .}}'
+002-own-label-check STDOUT BEGIN
+{"Command":"\"sleep infinity\"","CreatedAt":"2026-11-01 20:51:34 +0100 CET","HealthStatus":"none","ID":"813b04eed73f713bd8abc2346601ebb0308ac9518b9f7fe11cbbab0902bc24ca","Image":"alpine:3.22","Labels":"agent.worktree=t3-d4020b98","LocalVolumes":"0","Mounts":"/lib64,/lib/x86_64-linux-gnu,/home/meszmate/.cache/pg-engine-perf-20261101,/home/meszmate/worktrees/roll/t3-d4020b98/target","Names":"t3-d4020b98-perf-profiler","Networks":"bridge","Platform":{"architecture":"amd64","os":"linux"},"Ports":"","RunningFor":"3 days ago","Size":"2.62GB (virtual 2.63GB)","State":"exited","Status":"Exited (143) 2 days ago"}
+{"Command":"\"docker-entrypoint.sh -c listen_addresses=127.0.0.1 -c port=53100 -c shared_buffers=2GB -c maintenance_work_mem=256MB -c max_wal_size=8GB -c checkpoint_timeout=30min -c max_connections=100\"","CreatedAt":"2026-11-01 20:51:34 +0100 CET","HealthStatus":"none","ID":"0999a52ae0a37c31df9591a40951dd62fe654c1c6f942b3ed2ce5ac0b29fdca0","Image":"postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873","Labels":"agent.worktree=t3-d4020b98","LocalVolumes":"0","Mounts":"/home/meszmate/.cache/pg-engine-perf-20261101/pgdata","Names":"t3-d4020b98-perf-pg","Networks":"host","Platform":{"architecture":"amd64","os":"linux"},"Ports":"","RunningFor":"3 days ago","Size":"16.4kB (virtual 313MB)","State":"exited","Status":"Exited (0) 2 days ago"}
+002-own-label-check STDOUT END
+002-own-label-check STDERR BEGIN
+002-own-label-check STDERR END
+002-own-label-check ACTUAL_EXIT 0
+COMMAND docker image inspect sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5
+003-image-identity STDOUT BEGIN
+[
+    {
+        "Id": "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5",
+        "RepoTags": [
+            "postgres:18-alpine"
+        ],
+        "RepoDigests": [
+            "postgres@sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5"
+        ],
+        "Comment": "buildkit.dockerfile.v0",
+        "Created": "2026-10-21T22:56:40.8228104Z",
+        "Config": {
+            "ExposedPorts": {
+                "5432/tcp": {}
+            },
+            "Env": [
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "GOSU_VERSION=1.19",
+                "LANG=en_US.utf8",
+                "PG_MAJOR=18",
+                "PG_VERSION=18.6",
+                "PG_SHA256=555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f",
+                "DOCKER_PG_LLVM_DEPS=llvm21-dev \t\tclang21",
+                "PGDATA=/var/lib/postgresql/18/docker"
+            ],
+            "Entrypoint": [
+                "docker-entrypoint.sh"
+            ],
+            "Cmd": [
+                "postgres"
+            ],
+            "Volumes": {
+                "/var/lib/postgresql": {}
+            },
+            "WorkingDir": "/",
+            "StopSignal": "SIGINT"
+        },
+        "Architecture": "amd64",
+        "Os": "linux",
+        "Size": 432741923,
+        "RootFS": {
+            "Type": "layers",
+            "Layers": [
+                "sha256:75c137aedfb2760f88629236cb7b797630aed0c3d91d626d1d1bb694878fc2ba",
+                "sha256:4d0273c37bdc514fffff95149ce8785621655581d2c069a31cf3038e08c308fa",
+                "sha256:364b86e7bc378a980468461c9c7fa8f825d173bbd7b512ad62757fee133eb7e6",
+                "sha256:81000a837ae268cccacb50c4ac69341aa6eaf11dbc1baba83ebb829c87299ae2",
+                "sha256:d948599f0e747cf5ceeb3302b4a67fde5edd06abbe9f61fd4d4e2fe4e4980294",
+                "sha256:26a545bd361b13e34447f803d18a6244c5bfcbb929135528c39d55c90e22d75b",
+                "sha256:7ca201ad0f726c7eaf249399e04994c30e26d3c9e06e43d6b371e3b25f8630bc",
+                "sha256:2343fb8f16ceba7c1a809c8517142814afe99462036a7aa83ef784bbb3312ad4",
+                "sha256:ac355b2037545737428ed497d5706127f23722edfa2f5f6d9ac7a75fd30d75c6"
+            ]
+        },
+        "Metadata": {
+            "LastTagTime": "2026-10-24T18:30:48.385091289Z"
+        },
+        "Descriptor": {
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "digest": "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5",
+            "size": 10293
+        },
+        "Identity": {
+            "Pull": [
+                {
+                    "Repository": "docker.io/library/postgres"
+                }
+            ]
+        }
+    }
+]
+003-image-identity STDOUT END
+003-image-identity STDERR BEGIN
+003-image-identity STDERR END
+003-image-identity ACTUAL_EXIT 0
+COMMAND docker run --pull=never --detach --rm --name t3-d4020b98-combined-pg18-oracles-r1 --label agent.worktree=t3-d4020b98 --label agent.evidence=combined-pg18-oracles-r1 --memory=512m --memory-swap=512m --cpus=2 --cpuset-cpus=4-7,22-25 --network=none --tmpfs /var/lib/postgresql:rw,size=1m -e PGDATA=/tmp/pg18-reference-data -e POSTGRES_HOST_AUTH_METHOD=trust -e 'POSTGRES_INITDB_ARGS=--locale=C --encoding=UTF8' --entrypoint /bin/sh sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5 -c 'exec nice -n 19 docker-entrypoint.sh postgres -c shared_buffers=16MB -c max_connections=12 -c log_min_messages=debug1 -c log_error_verbosity=verbose -c log_line_prefix='"'"'%m [%p] '"'"' -c listen_addresses='"'"''"'"' '
+004-container-start STDOUT BEGIN
+70386cc43ec065bf6dde21821bdd060cdaf27abdb4c0270f6ed38a039a767f69
+004-container-start STDOUT END
+004-container-start STDERR BEGIN
+004-container-start STDERR END
+004-container-start ACTUAL_EXIT 0
+COMMAND docker inspect t3-d4020b98-combined-pg18-oracles-r1
+005-container-inspect STDOUT BEGIN
+[
+    {
+        "Id": "70386cc43ec065bf6dde21821bdd060cdaf27abdb4c0270f6ed38a039a767f69",
+        "Created": "2026-11-04T20:13:05.468913336Z",
+        "Path": "/bin/sh",
+        "Args": [
+            "-c",
+            "exec nice -n 19 docker-entrypoint.sh postgres -c shared_buffers=16MB -c max_connections=12 -c log_min_messages=debug1 -c log_error_verbosity=verbose -c log_line_prefix='%m [%p] ' -c listen_addresses='' "
+        ],
+        "State": {
+            "Status": "running",
+            "Running": true,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 4119424,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-11-04T20:13:06.778380163Z",
+            "FinishedAt": "0001-01-01T00:00:00Z"
+        },
+        "Image": "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5",
+        "ResolvConfPath": "/var/lib/docker/containers/70386cc43ec065bf6dde21821bdd060cdaf27abdb4c0270f6ed38a039a767f69/resolv.conf",
+        "HostnamePath": "/var/lib/docker/containers/70386cc43ec065bf6dde21821bdd060cdaf27abdb4c0270f6ed38a039a767f69/hostname",
+        "HostsPath": "/var/lib/docker/containers/70386cc43ec065bf6dde21821bdd060cdaf27abdb4c0270f6ed38a039a767f69/hosts",
+        "LogPath": "/var/lib/docker/containers/70386cc43ec065bf6dde21821bdd060cdaf27abdb4c0270f6ed38a039a767f69/70386cc43ec065bf6dde21821bdd060cdaf27abdb4c0270f6ed38a039a767f69-json.log",
+        "Name": "/t3-d4020b98-combined-pg18-oracles-r1",
+        "RestartCount": 0,
+        "Driver": "overlayfs",
+        "Platform": "linux",
+        "MountLabel": "",
+        "ProcessLabel": "",
+        "AppArmorProfile": "docker-default",
+        "ExecIDs": null,
+        "HostConfig": {
+            "Binds": null,
+            "ContainerIDFile": "",
+            "LogConfig": {
+                "Type": "json-file",
+                "Config": {}
+            },
+            "NetworkMode": "none",
+            "PortBindings": {},
+            "RestartPolicy": {
+                "Name": "no",
+                "MaximumRetryCount": 0
+            },
+            "AutoRemove": true,
+            "VolumeDriver": "",
+            "VolumesFrom": null,
+            "ConsoleSize": [
+                0,
+                0
+            ],
+            "CapAdd": null,
+            "CapDrop": null,
+            "CgroupnsMode": "private",
+            "Dns": null,
+            "DnsOptions": [],
+            "DnsSearch": [],
+            "ExtraHosts": null,
+            "GroupAdd": null,
+            "IpcMode": "private",
+            "Cgroup": "",
+            "Links": null,
+            "OomScoreAdj": 0,
+            "PidMode": "",
+            "Privileged": false,
+            "PublishAllPorts": false,
+            "ReadonlyRootfs": false,
+            "SecurityOpt": null,
+            "Tmpfs": {
+                "/var/lib/postgresql": "rw,size=1m"
+            },
+            "UTSMode": "",
+            "UsernsMode": "",
+            "ShmSize": 67108864,
+            "Runtime": "runc",
+            "Isolation": "",
+            "CpuShares": 0,
+            "Memory": 536870912,
+            "NanoCpus": 2000000000,
+            "CgroupParent": "",
+            "BlkioWeight": 0,
+            "BlkioWeightDevice": [],
+            "BlkioDeviceReadBps": [],
+            "BlkioDeviceWriteBps": [],
+            "BlkioDeviceReadIOps": [],
+            "BlkioDeviceWriteIOps": [],
+            "CpuPeriod": 0,
+            "CpuQuota": 0,
+            "CpuRealtimePeriod": 0,
+            "CpuRealtimeRuntime": 0,
+            "CpusetCpus": "4-7,22-25",
+            "CpusetMems": "",
+            "Devices": [],
+            "DeviceCgroupRules": null,
+            "DeviceRequests": null,
+            "MemoryReservation": 0,
+            "MemorySwap": 536870912,
+            "MemorySwappiness": null,
+            "OomKillDisable": null,
+            "PidsLimit": null,
+            "Ulimits": null,
+            "CpuCount": 0,
+            "CpuPercent": 0,
+            "IOMaximumIOps": 0,
+            "IOMaximumBandwidth": 0,
+            "MaskedPaths": [
+                "/proc/acpi",
+                "/proc/asound",
+                "/proc/interrupts",
+                "/proc/kcore",
+                "/proc/keys",
+                "/proc/latency_stats",
+                "/proc/sched_debug",
+                "/proc/scsi",
+                "/proc/timer_list",
+                "/proc/timer_stats",
+                "/sys/devices/virtual/powercap",
+                "/sys/firmware",
+                "/sys/devices/system/cpu/cpu0/thermal_throttle",
+                "/sys/devices/system/cpu/cpu1/thermal_throttle",
+                "/sys/devices/system/cpu/cpu2/thermal_throttle",
+                "/sys/devices/system/cpu/cpu3/thermal_throttle",
+                "/sys/devices/system/cpu/cpu4/thermal_throttle",
+                "/sys/devices/system/cpu/cpu5/thermal_throttle",
+                "/sys/devices/system/cpu/cpu6/thermal_throttle",
+                "/sys/devices/system/cpu/cpu7/thermal_throttle",
+                "/sys/devices/system/cpu/cpu8/thermal_throttle",
+                "/sys/devices/system/cpu/cpu9/thermal_throttle",
+                "/sys/devices/system/cpu/cpu10/thermal_throttle",
+                "/sys/devices/system/cpu/cpu11/thermal_throttle",
+                "/sys/devices/system/cpu/cpu12/thermal_throttle",
+                "/sys/devices/system/cpu/cpu13/thermal_throttle",
+                "/sys/devices/system/cpu/cpu14/thermal_throttle",
+                "/sys/devices/system/cpu/cpu15/thermal_throttle",
+                "/sys/devices/system/cpu/cpu16/thermal_throttle",
+                "/sys/devices/system/cpu/cpu17/thermal_throttle",
+                "/sys/devices/system/cpu/cpu18/thermal_throttle",
+                "/sys/devices/system/cpu/cpu19/thermal_throttle",
+                "/sys/devices/system/cpu/cpu20/thermal_throttle",
+                "/sys/devices/system/cpu/cpu21/thermal_throttle",
+                "/sys/devices/system/cpu/cpu22/thermal_throttle",
+                "/sys/devices/system/cpu/cpu23/thermal_throttle",
+                "/sys/devices/system/cpu/cpu24/thermal_throttle",
+                "/sys/devices/system/cpu/cpu25/thermal_throttle",
+                "/sys/devices/system/cpu/cpu26/thermal_throttle",
+                "/sys/devices/system/cpu/cpu27/thermal_throttle",
+                "/sys/devices/system/cpu/cpu28/thermal_throttle",
+                "/sys/devices/system/cpu/cpu29/thermal_throttle",
+                "/sys/devices/system/cpu/cpu30/thermal_throttle",
+                "/sys/devices/system/cpu/cpu31/thermal_throttle",
+                "/sys/devices/system/cpu/cpu32/thermal_throttle",
+                "/sys/devices/system/cpu/cpu33/thermal_throttle",
+                "/sys/devices/system/cpu/cpu34/thermal_throttle",
+                "/sys/devices/system/cpu/cpu35/thermal_throttle"
+            ],
+            "ReadonlyPaths": [
+                "/proc/bus",
+                "/proc/fs",
+                "/proc/irq",
+                "/proc/sys",
+                "/proc/sysrq-trigger"
+            ]
+        },
+        "Storage": {
+            "RootFS": {
+                "Snapshot": {
+                    "Name": "overlayfs"
+                }
+            }
+        },
+        "Mounts": [],
+        "Config": {
+            "Hostname": "70386cc43ec0",
+            "Domainname": "",
+            "User": "",
+            "AttachStdin": false,
+            "AttachStdout": false,
+            "AttachStderr": false,
+            "ExposedPorts": {
+                "5432/tcp": {}
+            },
+            "Tty": false,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "Env": [
+                "PGDATA=/tmp/pg18-reference-data",
+                "POSTGRES_HOST_AUTH_METHOD=trust",
+                "POSTGRES_INITDB_ARGS=--locale=C --encoding=UTF8",
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "GOSU_VERSION=1.19",
+                "LANG=en_US.utf8",
+                "PG_MAJOR=18",
+                "PG_VERSION=18.6",
+                "PG_SHA256=555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f",
+                "DOCKER_PG_LLVM_DEPS=llvm21-dev \t\tclang21"
+            ],
+            "Cmd": [
+                "-c",
+                "exec nice -n 19 docker-entrypoint.sh postgres -c shared_buffers=16MB -c max_connections=12 -c log_min_messages=debug1 -c log_error_verbosity=verbose -c log_line_prefix='%m [%p] ' -c listen_addresses='' "
+            ],
+            "Image": "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5",
+            "Volumes": {
+                "/var/lib/postgresql": {}
+            },
+            "WorkingDir": "/",
+            "Entrypoint": [
+                "/bin/sh"
+            ],
+            "Labels": {
+                "agent.evidence": "combined-pg18-oracles-r1",
+                "agent.worktree": "t3-d4020b98"
+            },
+            "StopSignal": "SIGINT"
+        },
+        "NetworkSettings": {
+            "SandboxID": "53a674d0bf7470ca09dabaf1ba2e455955901d84a4b1c40c50ba396ea3293de5",
+            "SandboxKey": "/var/run/docker/netns/53a674d0bf74",
+            "Ports": {},
+            "Networks": {
+                "none": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": null,
+                    "DriverOpts": null,
+                    "GwPriority": 0,
+                    "NetworkID": "963ce10479ff6292d5ba009174286fc8f2d305167a0ae61aedc5853d6915dd8d",
+                    "EndpointID": "1d19d4be6e85d46e8429050ea6c307cb6ed88c3d194248a0d44dc77cbbfb3f2a",
+                    "Gateway": "",
+                    "IPAddress": "",
+                    "MacAddress": "",
+                    "IPPrefixLen": 0,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "DNSNames": null
+                }
+            }
+        },
+        "ImageManifestDescriptor": {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": "sha256:3b0ef735388b2cb097fc29b8bb421d86d57d0ddbe7aa1fbd6493e06d65028503",
+            "size": 2678,
+            "annotations": {
+                "com.docker.official-images.bashbrew.arch": "amd64",
+                "org.opencontainers.image.base.digest": "sha256:c26612752c78b18faacd63c7d50f4592c2e7b0f25e0e20e82bd74e465c57ab0d",
+                "org.opencontainers.image.base.name": "alpine:3.24",
+                "org.opencontainers.image.created": "2026-10-21T22:54:26Z",
+                "org.opencontainers.image.revision": "e00e1bd34ec5c8a8e7ad89b273b3d42efaf6d5bc",
+                "org.opencontainers.image.source": "https://github.com/docker-library/postgres.git#e00e1bd34ec5c8a8e7ad89b273b3d42efaf6d5bc:18/alpine3.24",
+                "org.opencontainers.image.url": "https://hub.docker.com/_/postgres",
+                "org.opencontainers.image.version": "18.6-alpine3.24"
+            },
+            "platform": {
+                "architecture": "amd64",
+                "os": "linux"
+            }
+        }
+    }
+]
+005-container-inspect STDOUT END
+005-container-inspect STDERR BEGIN
+005-container-inspect STDERR END
+005-container-inspect ACTUAL_EXIT 0
+COMMAND docker exec t3-d4020b98-combined-pg18-oracles-r1 pg_isready -U postgres -d postgres
+006-readiness-00 STDOUT BEGIN
+/var/run/postgresql:5432 - no response
+006-readiness-00 STDOUT END
+006-readiness-00 STDERR BEGIN
+006-readiness-00 STDERR END
+006-readiness-00 ACTUAL_EXIT 2
+COMMAND docker exec t3-d4020b98-combined-pg18-oracles-r1 pg_isready -U postgres -d postgres
+007-readiness-01 STDOUT BEGIN
+/var/run/postgresql:5432 - accepting connections
+007-readiness-01 STDOUT END
+007-readiness-01 STDERR BEGIN
+007-readiness-01 STDERR END
+007-readiness-01 ACTUAL_EXIT 0
+COMMAND docker exec t3-d4020b98-combined-pg18-oracles-r1 psql -X -At -U postgres -d postgres -c 'SELECT version(), current_setting('"'"'server_version_num'"'"')'
+008-verify-version STDOUT BEGIN
+008-verify-version STDOUT END
+008-verify-version STDERR BEGIN
+psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: No such file or directory
+	Is the server running locally and accepting connections on that socket?
+008-verify-version STDERR END
+008-verify-version ACTUAL_EXIT 2
+Traceback (most recent call last):
+  File "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/run.py", line 63, in <module>
+    ver,_=run('verify-version',['docker','exec',NAME,'psql','-X','-At','-U','postgres','-d','postgres','-c','SELECT version(), current_setting(\'server_version_num\')'])
+          ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/meszmate/.cache/pg-engine-resume-20261104/combined-pg18-oracles-r1/run.py", line 32, in run
+    if check and r.returncode: raise RuntimeError(f'{tag} actual exit {r.returncode}')
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: verify-version actual exit 2
+COMMAND docker logs --timestamps t3-d4020b98-combined-pg18-oracles-r1
+009-container-logs STDOUT BEGIN
+2026-11-04T20:13:07.010390022Z The files belonging to this database system will be owned by user "postgres".
+2026-11-04T20:13:07.010450354Z This user must also own the server process.
+2026-11-04T20:13:07.010456098Z 
+2026-11-04T20:13:07.011150143Z The database cluster will be initialized with locale "C".
+2026-11-04T20:13:07.011172583Z The default text search configuration will be set to "english".
+2026-11-04T20:13:07.011177887Z 
+2026-11-04T20:13:07.011181893Z Data page checksums are enabled.
+2026-11-04T20:13:07.011185800Z 
+2026-11-04T20:13:07.011197726Z fixing permissions on existing directory /tmp/pg18-reference-data ... ok
+2026-11-04T20:13:07.011833086Z creating subdirectories ... ok
+2026-11-04T20:13:07.011914858Z selecting dynamic shared memory implementation ... posix
+2026-11-04T20:13:07.030749284Z selecting default "max_connections" ... 100
+2026-11-04T20:13:07.050110760Z selecting default "shared_buffers" ... 128MB
+2026-11-04T20:13:07.157153887Z selecting default time zone ... UTC
+2026-11-04T20:13:07.158165544Z creating configuration files ... ok
+2026-11-04T20:13:07.286065494Z running bootstrap script ... ok
+2026-11-04T20:13:07.853238812Z performing post-bootstrap initialization ... ok
+2026-11-04T20:13:08.060946685Z syncing data to disk ... ok
+2026-11-04T20:13:08.060990453Z 
+2026-11-04T20:13:08.060992401Z 
+2026-11-04T20:13:08.060994024Z Success. You can now start the database server using:
+2026-11-04T20:13:08.060995906Z 
+2026-11-04T20:13:08.060997462Z     pg_ctl -D /tmp/pg18-reference-data -l logfile start
+2026-11-04T20:13:08.060999145Z 
+2026-11-04T20:13:08.124550900Z waiting for server to start....2026-11-04 20:13:08.124 UTC [49] DEBUG:  00000: registering background worker "logical replication launcher"
+2026-11-04T20:13:08.124583290Z 2026-11-04 20:13:08.124 UTC [49] LOCATION:  RegisterBackgroundWorker, bgworker.c:979
+2026-11-04T20:13:08.124656985Z 2026-11-04 20:13:08.124 UTC [49] DEBUG:  00000: mmap(25165824) with MAP_HUGETLB failed, huge pages disabled: Out of memory
+2026-11-04T20:13:08.124682100Z 2026-11-04 20:13:08.124 UTC [49] LOCATION:  CreateAnonymousSegment, pg_shmem.c:626
+2026-11-04T20:13:08.127000892Z 2026-11-04 20:13:08.126 UTC [49] LOG:  00000: starting PostgreSQL 18.6 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+2026-11-04T20:13:08.127031551Z 2026-11-04 20:13:08.126 UTC [49] LOCATION:  PostmasterMain, postmaster.c:1103
+2026-11-04T20:13:08.127516512Z 2026-11-04 20:13:08.127 UTC [49] LOG:  00000: listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-11-04T20:13:08.127537019Z 2026-11-04 20:13:08.127 UTC [49] LOCATION:  ListenServerPort, pqcomm.c:658
+2026-11-04T20:13:08.129828151Z 2026-11-04 20:13:08.129 UTC [49] DEBUG:  00000: updating PMState from PM_INIT to PM_STARTUP
+2026-11-04T20:13:08.129848757Z 2026-11-04 20:13:08.129 UTC [49] LOCATION:  UpdatePMState, postmaster.c:3253
+2026-11-04T20:13:08.133386539Z 2026-11-04 20:13:08.133 UTC [55] LOG:  00000: database system was shut down at 2026-11-04 20:13:07 UTC
+2026-11-04T20:13:08.133401560Z 2026-11-04 20:13:08.133 UTC [55] LOCATION:  StartupXLOG, xlog.c:5510
+2026-11-04T20:13:08.133471943Z 2026-11-04 20:13:08.133 UTC [55] DEBUG:  00000: checkpoint record is at 0/1765E08
+2026-11-04T20:13:08.133489520Z 2026-11-04 20:13:08.133 UTC [55] LOCATION:  InitWalRecovery, xlogrecovery.c:798
+2026-11-04T20:13:08.133494613Z 2026-11-04 20:13:08.133 UTC [55] DEBUG:  00000: redo record is at 0/1765E08; shutdown true
+2026-11-04T20:13:08.133498873Z 2026-11-04 20:13:08.133 UTC [55] LOCATION:  InitWalRecovery, xlogrecovery.c:898
+2026-11-04T20:13:08.133502894Z 2026-11-04 20:13:08.133 UTC [55] DEBUG:  00000: next transaction ID: 753; next OID: 13690
+2026-11-04T20:13:08.133506796Z 2026-11-04 20:13:08.133 UTC [55] LOCATION:  InitWalRecovery, xlogrecovery.c:902
+2026-11-04T20:13:08.133510716Z 2026-11-04 20:13:08.133 UTC [55] DEBUG:  00000: next MultiXactId: 1; next MultiXactOffset: 0
+2026-11-04T20:13:08.133514699Z 2026-11-04 20:13:08.133 UTC [55] LOCATION:  InitWalRecovery, xlogrecovery.c:906
+2026-11-04T20:13:08.133518706Z 2026-11-04 20:13:08.133 UTC [55] DEBUG:  00000: oldest unfrozen transaction ID: 745, in database 1
+2026-11-04T20:13:08.133537296Z 2026-11-04 20:13:08.133 UTC [55] LOCATION:  InitWalRecovery, xlogrecovery.c:909
+2026-11-04T20:13:08.133541570Z 2026-11-04 20:13:08.133 UTC [55] DEBUG:  00000: oldest MultiXactId: 1, in database 1
+2026-11-04T20:13:08.133545686Z 2026-11-04 20:13:08.133 UTC [55] LOCATION:  InitWalRecovery, xlogrecovery.c:912
+2026-11-04T20:13:08.133549430Z 2026-11-04 20:13:08.133 UTC [55] DEBUG:  00000: commit timestamp Xid oldest/newest: 0/0
+2026-11-04T20:13:08.133553379Z 2026-11-04 20:13:08.133 UTC [55] LOCATION:  InitWalRecovery, xlogrecovery.c:915
+2026-11-04T20:13:08.133557207Z 2026-11-04 20:13:08.133 UTC [55] DEBUG:  00000: transaction ID wrap limit is 2147484392, limited by database with OID 1
+2026-11-04T20:13:08.133561366Z 2026-11-04 20:13:08.133 UTC [55] LOCATION:  SetTransactionIdLimit, varsup.c:454
+2026-11-04T20:13:08.133565561Z 2026-11-04 20:13:08.133 UTC [55] DEBUG:  00000: MultiXactId wrap limit is 2147483648, limited by database with OID 1
+2026-11-04T20:13:08.133569799Z 2026-11-04 20:13:08.133 UTC [55] LOCATION:  SetMultiXactIdLimit, multixact.c:2599
+2026-11-04T20:13:08.133577379Z 2026-11-04 20:13:08.133 UTC [55] DEBUG:  00000: starting up replication slots
+2026-11-04T20:13:08.133581532Z 2026-11-04 20:13:08.133 UTC [55] LOCATION:  StartupReplicationSlots, slot.c:2204
+2026-11-04T20:13:08.133585394Z 2026-11-04 20:13:08.133 UTC [55] DEBUG:  00000: xmin required by slots: data 0, catalog 0
+2026-11-04T20:13:08.133589650Z 2026-11-04 20:13:08.133 UTC [55] LOCATION:  ProcArraySetReplicationSlotXmin, procarray.c:3957
+2026-11-04T20:13:08.134265046Z 2026-11-04 20:13:08.134 UTC [55] DEBUG:  00000: MultiXactId wrap limit is 2147483648, limited by database with OID 1
+2026-11-04T20:13:08.134293626Z 2026-11-04 20:13:08.134 UTC [55] LOCATION:  SetMultiXactIdLimit, multixact.c:2599
+2026-11-04T20:13:08.134299658Z 2026-11-04 20:13:08.134 UTC [55] DEBUG:  00000: MultiXact member stop limit is now 4294914944 based on MultiXact 1
+2026-11-04T20:13:08.134304099Z 2026-11-04 20:13:08.134 UTC [55] LOCATION:  SetOffsetVacuumLimit, multixact.c:2971
+2026-11-04T20:13:08.140749374Z 2026-11-04 20:13:08.140 UTC [49] DEBUG:  00000: updating PMState from PM_STARTUP to PM_RUN
+2026-11-04T20:13:08.140768864Z 2026-11-04 20:13:08.140 UTC [49] LOCATION:  UpdatePMState, postmaster.c:3253
+2026-11-04T20:13:08.140772527Z 2026-11-04 20:13:08.140 UTC [49] LOG:  00000: database system is ready to accept connections
+2026-11-04T20:13:08.140775740Z 2026-11-04 20:13:08.140 UTC [49] LOCATION:  process_pm_child_exit, postmaster.c:2331
+2026-11-04T20:13:08.142132103Z 2026-11-04 20:13:08.142 UTC [49] DEBUG:  00000: starting background worker process "logical replication launcher"
+2026-11-04T20:13:08.142163666Z 2026-11-04 20:13:08.142 UTC [49] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:13:08.142349052Z 2026-11-04 20:13:08.142 UTC [57] DEBUG:  00000: autovacuum launcher started
+2026-11-04T20:13:08.142360210Z 2026-11-04 20:13:08.142 UTC [57] LOCATION:  AutoVacLauncherMain, autovacuum.c:384
+2026-11-04T20:13:08.143151977Z 2026-11-04 20:13:08.143 UTC [58] DEBUG:  00000: logical replication launcher started
+2026-11-04T20:13:08.143182765Z 2026-11-04 20:13:08.143 UTC [58] LOCATION:  ApplyLauncherMain, launcher.c:1134
+2026-11-04T20:13:08.211734931Z  done
+2026-11-04T20:13:08.211770020Z server started
+2026-11-04T20:13:08.240285240Z 
+2026-11-04T20:13:08.240317886Z /usr/local/bin/docker-entrypoint.sh: ignoring /docker-entrypoint-initdb.d/*
+2026-11-04T20:13:08.240324415Z 
+2026-11-04T20:13:08.241041604Z waiting for server to shut down....2026-11-04 20:13:08.240 UTC [49] LOG:  00000: received fast shutdown request
+2026-11-04T20:13:08.241052950Z 2026-11-04 20:13:08.240 UTC [49] LOCATION:  process_pm_shutdown_request, postmaster.c:2153
+2026-11-04T20:13:08.241909026Z 2026-11-04 20:13:08.241 UTC [49] LOG:  00000: aborting any active transactions
+2026-11-04T20:13:08.241934371Z 2026-11-04 20:13:08.241 UTC [49] LOCATION:  process_pm_shutdown_request, postmaster.c:2171
+2026-11-04T20:13:08.241939354Z 2026-11-04 20:13:08.241 UTC [49] DEBUG:  00000: updating PMState from PM_RUN to PM_STOP_BACKENDS
+2026-11-04T20:13:08.241944211Z 2026-11-04 20:13:08.241 UTC [49] LOCATION:  UpdatePMState, postmaster.c:3253
+2026-11-04T20:13:08.241948188Z 2026-11-04 20:13:08.241 UTC [49] DEBUG:  00000: updating PMState from PM_STOP_BACKENDS to PM_WAIT_BACKENDS
+2026-11-04T20:13:08.241952237Z 2026-11-04 20:13:08.241 UTC [49] LOCATION:  UpdatePMState, postmaster.c:3253
+2026-11-04T20:13:08.241956090Z 2026-11-04 20:13:08.241 UTC [57] DEBUG:  00000: autovacuum launcher shutting down
+2026-11-04T20:13:08.241960142Z 2026-11-04 20:13:08.241 UTC [57] LOCATION:  AutoVacLauncherShutdown, autovacuum.c:794
+2026-11-04T20:13:08.241964010Z 2026-11-04 20:13:08.241 UTC [58] DEBUG:  00000: logical replication launcher shutting down
+2026-11-04T20:13:08.241968038Z 2026-11-04 20:13:08.241 UTC [58] LOCATION:  ProcessInterrupts, postgres.c:3328
+2026-11-04T20:13:08.245312231Z 2026-11-04 20:13:08.245 UTC [49] LOG:  00000: background worker "logical replication launcher" (PID 58) exited with exit code 1
+2026-11-04T20:13:08.245325602Z 2026-11-04 20:13:08.245 UTC [49] LOCATION:  LogChildExit, postmaster.c:2814
+2026-11-04T20:13:08.245450684Z 2026-11-04 20:13:08.245 UTC [49] DEBUG:  00000: updating PMState from PM_WAIT_BACKENDS to PM_WAIT_XLOG_SHUTDOWN
+2026-11-04T20:13:08.245476020Z 2026-11-04 20:13:08.245 UTC [49] LOCATION:  UpdatePMState, postmaster.c:3253
+2026-11-04T20:13:08.245490216Z 2026-11-04 20:13:08.245 UTC [53] LOG:  00000: shutting down
+2026-11-04T20:13:08.245497972Z 2026-11-04 20:13:08.245 UTC [53] LOCATION:  ShutdownXLOG, xlog.c:6654
+2026-11-04T20:13:08.245697112Z 2026-11-04 20:13:08.245 UTC [53] LOG:  00000: checkpoint starting: shutdown immediate
+2026-11-04T20:13:08.245705707Z 2026-11-04 20:13:08.245 UTC [53] LOCATION:  LogCheckpointStart, xlog.c:6704
+2026-11-04T20:13:08.245709736Z 2026-11-04 20:13:08.245 UTC [53] DEBUG:  00000: performing replication slot checkpoint
+2026-11-04T20:13:08.245713877Z 2026-11-04 20:13:08.245 UTC [53] LOCATION:  CheckPointReplicationSlots, slot.c:2126
+2026-11-04T20:13:08.247002074Z 2026-11-04 20:13:08.246 UTC [53] DEBUG:  00000: checkpoint sync: number=1 file=pg_xact/0000 time=0.080 ms
+2026-11-04T20:13:08.247035434Z 2026-11-04 20:13:08.246 UTC [53] LOCATION:  ProcessSyncRequests, sync.c:429
+2026-11-04T20:13:08.247060475Z 2026-11-04 20:13:08.246 UTC [53] DEBUG:  00000: checkpoint sync: number=2 file=pg_multixact/offsets/0000 time=0.059 ms
+2026-11-04T20:13:08.247069334Z 2026-11-04 20:13:08.246 UTC [53] LOCATION:  ProcessSyncRequests, sync.c:429
+2026-11-04T20:13:08.247510183Z 2026-11-04 20:13:08.247 UTC [53] LOG:  00000: checkpoint complete: wrote 0 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=2, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=0/1765EB8, redo lsn=0/1765EB8
+2026-11-04T20:13:08.247531899Z 2026-11-04 20:13:08.247 UTC [53] LOCATION:  LogCheckpointEnd, xlog.c:6794
+2026-11-04T20:13:08.247553551Z 2026-11-04 20:13:08.247 UTC [49] DEBUG:  00000: updating PMState from PM_WAIT_XLOG_SHUTDOWN to PM_WAIT_XLOG_ARCHIVAL
+2026-11-04T20:13:08.247565726Z 2026-11-04 20:13:08.247 UTC [49] LOCATION:  UpdatePMState, postmaster.c:3253
+2026-11-04T20:13:08.247570093Z 2026-11-04 20:13:08.247 UTC [49] DEBUG:  00000: updating PMState from PM_WAIT_XLOG_ARCHIVAL to PM_WAIT_IO_WORKERS
+2026-11-04T20:13:08.247574300Z 2026-11-04 20:13:08.247 UTC [49] LOCATION:  UpdatePMState, postmaster.c:3253
+2026-11-04T20:13:08.251688912Z 2026-11-04 20:13:08.251 UTC [49] DEBUG:  00000: updating PMState from PM_WAIT_IO_WORKERS to PM_WAIT_CHECKPOINTER
+2026-11-04T20:13:08.251720335Z 2026-11-04 20:13:08.251 UTC [49] LOCATION:  UpdatePMState, postmaster.c:3253
+2026-11-04T20:13:08.256274694Z 2026-11-04 20:13:08.256 UTC [49] DEBUG:  00000: updating PMState from PM_WAIT_CHECKPOINTER to PM_WAIT_DEAD_END
+2026-11-04T20:13:08.256307637Z 2026-11-04 20:13:08.256 UTC [49] LOCATION:  UpdatePMState, postmaster.c:3253
+2026-11-04T20:13:08.256313993Z 2026-11-04 20:13:08.256 UTC [49] DEBUG:  00000: updating PMState from PM_WAIT_DEAD_END to PM_NO_CHILDREN
+2026-11-04T20:13:08.256319012Z 2026-11-04 20:13:08.256 UTC [49] LOCATION:  UpdatePMState, postmaster.c:3253
+2026-11-04T20:13:08.256984507Z 2026-11-04 20:13:08.256 UTC [49] LOG:  00000: database system is shut down
+2026-11-04T20:13:08.257006971Z 2026-11-04 20:13:08.256 UTC [49] LOCATION:  UnlinkLockFiles, miscinit.c:1197
+2026-11-04T20:13:08.341266245Z  done
+2026-11-04T20:13:08.341302865Z server stopped
+2026-11-04T20:13:08.342539573Z 
+2026-11-04T20:13:08.342558422Z PostgreSQL init process complete; ready for start up.
+2026-11-04T20:13:08.342561236Z 
+009-container-logs STDOUT END
+009-container-logs STDERR BEGIN
+2026-11-04T20:13:06.968994730Z ********************************************************************************
+2026-11-04T20:13:06.969056372Z WARNING: POSTGRES_HOST_AUTH_METHOD has been set to "trust". This will allow
+2026-11-04T20:13:06.969063083Z          anyone with access to the Postgres port to access your database without
+2026-11-04T20:13:06.969067192Z          a password, even if POSTGRES_PASSWORD is set. See PostgreSQL
+2026-11-04T20:13:06.969071108Z          documentation about "trust":
+2026-11-04T20:13:06.969075198Z          https://www.postgresql.org/docs/current/auth-trust.html
+2026-11-04T20:13:06.969079085Z          In Docker's default configuration, this is effectively any other
+2026-11-04T20:13:06.969083436Z          container on the same system.
+2026-11-04T20:13:06.969087294Z 
+2026-11-04T20:13:06.969090865Z          It is not recommended to use POSTGRES_HOST_AUTH_METHOD=trust. Replace
+2026-11-04T20:13:06.969094814Z          it with "-e POSTGRES_PASSWORD=password" instead to set a password in
+2026-11-04T20:13:06.969098964Z          "docker run".
+2026-11-04T20:13:06.969102743Z ********************************************************************************
+2026-11-04T20:13:07.461734529Z sh: locale: not found
+2026-11-04T20:13:07.461910457Z 2026-11-04 20:13:07.461 UTC [43] WARNING:  no usable system locales were found
+2026-11-04T20:13:08.060946953Z initdb: warning: enabling "trust" authentication for local connections
+2026-11-04T20:13:08.060971321Z initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+2026-11-04T20:13:08.366732302Z 2026-11-04 20:13:08.366 UTC [1] DEBUG:  00000: registering background worker "logical replication launcher"
+2026-11-04T20:13:08.366767775Z 2026-11-04 20:13:08.366 UTC [1] LOCATION:  RegisterBackgroundWorker, bgworker.c:979
+2026-11-04T20:13:08.366812142Z 2026-11-04 20:13:08.366 UTC [1] DEBUG:  00000: mmap(25165824) with MAP_HUGETLB failed, huge pages disabled: Out of memory
+2026-11-04T20:13:08.366833179Z 2026-11-04 20:13:08.366 UTC [1] LOCATION:  CreateAnonymousSegment, pg_shmem.c:626
+2026-11-04T20:13:08.370170204Z 2026-11-04 20:13:08.370 UTC [1] LOG:  00000: starting PostgreSQL 18.6 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+2026-11-04T20:13:08.370215695Z 2026-11-04 20:13:08.370 UTC [1] LOCATION:  PostmasterMain, postmaster.c:1103
+2026-11-04T20:13:08.370538064Z 2026-11-04 20:13:08.370 UTC [1] LOG:  00000: listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-11-04T20:13:08.370549124Z 2026-11-04 20:13:08.370 UTC [1] LOCATION:  ListenServerPort, pqcomm.c:658
+2026-11-04T20:13:08.371585371Z 2026-11-04 20:13:08.371 UTC [1] DEBUG:  00000: updating PMState from PM_INIT to PM_STARTUP
+2026-11-04T20:13:08.371592652Z 2026-11-04 20:13:08.371 UTC [1] LOCATION:  UpdatePMState, postmaster.c:3253
+2026-11-04T20:13:08.373378146Z 2026-11-04 20:13:08.373 UTC [82] LOG:  00000: database system was shut down at 2026-11-04 20:13:08 UTC
+2026-11-04T20:13:08.373389039Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  StartupXLOG, xlog.c:5510
+2026-11-04T20:13:08.373479818Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: checkpoint record is at 0/1765EB8
+2026-11-04T20:13:08.373483786Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  InitWalRecovery, xlogrecovery.c:798
+2026-11-04T20:13:08.373486198Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: redo record is at 0/1765EB8; shutdown true
+2026-11-04T20:13:08.373488489Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  InitWalRecovery, xlogrecovery.c:898
+2026-11-04T20:13:08.373490799Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: next transaction ID: 753; next OID: 13690
+2026-11-04T20:13:08.373493137Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  InitWalRecovery, xlogrecovery.c:902
+2026-11-04T20:13:08.373495354Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: next MultiXactId: 1; next MultiXactOffset: 0
+2026-11-04T20:13:08.373497586Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  InitWalRecovery, xlogrecovery.c:906
+2026-11-04T20:13:08.373499680Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: oldest unfrozen transaction ID: 745, in database 1
+2026-11-04T20:13:08.373502034Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  InitWalRecovery, xlogrecovery.c:909
+2026-11-04T20:13:08.373504284Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: oldest MultiXactId: 1, in database 1
+2026-11-04T20:13:08.373506548Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  InitWalRecovery, xlogrecovery.c:912
+2026-11-04T20:13:08.373508775Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: commit timestamp Xid oldest/newest: 0/0
+2026-11-04T20:13:08.373511012Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  InitWalRecovery, xlogrecovery.c:915
+2026-11-04T20:13:08.373513284Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: transaction ID wrap limit is 2147484392, limited by database with OID 1
+2026-11-04T20:13:08.373515608Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  SetTransactionIdLimit, varsup.c:454
+2026-11-04T20:13:08.373520658Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: MultiXactId wrap limit is 2147483648, limited by database with OID 1
+2026-11-04T20:13:08.373529970Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  SetMultiXactIdLimit, multixact.c:2599
+2026-11-04T20:13:08.373716174Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: starting up replication slots
+2026-11-04T20:13:08.373732913Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  StartupReplicationSlots, slot.c:2204
+2026-11-04T20:13:08.373752936Z 2026-11-04 20:13:08.373 UTC [82] DEBUG:  00000: xmin required by slots: data 0, catalog 0
+2026-11-04T20:13:08.373770515Z 2026-11-04 20:13:08.373 UTC [82] LOCATION:  ProcArraySetReplicationSlotXmin, procarray.c:3957
+2026-11-04T20:13:08.374612742Z 2026-11-04 20:13:08.374 UTC [82] DEBUG:  00000: MultiXactId wrap limit is 2147483648, limited by database with OID 1
+2026-11-04T20:13:08.374631924Z 2026-11-04 20:13:08.374 UTC [82] LOCATION:  SetMultiXactIdLimit, multixact.c:2599
+2026-11-04T20:13:08.374636697Z 2026-11-04 20:13:08.374 UTC [82] DEBUG:  00000: MultiXact member stop limit is now 4294914944 based on MultiXact 1
+2026-11-04T20:13:08.374640854Z 2026-11-04 20:13:08.374 UTC [82] LOCATION:  SetOffsetVacuumLimit, multixact.c:2971
+2026-11-04T20:13:08.377561741Z 2026-11-04 20:13:08.377 UTC [1] DEBUG:  00000: updating PMState from PM_STARTUP to PM_RUN
+2026-11-04T20:13:08.377572019Z 2026-11-04 20:13:08.377 UTC [1] LOCATION:  UpdatePMState, postmaster.c:3253
+2026-11-04T20:13:08.377575562Z 2026-11-04 20:13:08.377 UTC [1] LOG:  00000: database system is ready to accept connections
+2026-11-04T20:13:08.377578793Z 2026-11-04 20:13:08.377 UTC [1] LOCATION:  process_pm_child_exit, postmaster.c:2331
+2026-11-04T20:13:08.378341443Z 2026-11-04 20:13:08.378 UTC [1] DEBUG:  00000: starting background worker process "logical replication launcher"
+2026-11-04T20:13:08.378360759Z 2026-11-04 20:13:08.378 UTC [1] LOCATION:  StartBackgroundWorker, postmaster.c:4135
+2026-11-04T20:13:08.378712267Z 2026-11-04 20:13:08.378 UTC [84] DEBUG:  00000: autovacuum launcher started
+2026-11-04T20:13:08.378731672Z 2026-11-04 20:13:08.378 UTC [84] LOCATION:  AutoVacLauncherMain, autovacuum.c:384
+2026-11-04T20:13:08.379079146Z 2026-11-04 20:13:08.378 UTC [85] DEBUG:  00000: logical replication launcher started
+2026-11-04T20:13:08.379089666Z 2026-11-04 20:13:08.378 UTC [85] LOCATION:  ApplyLauncherMain, launcher.c:1134
+009-container-logs STDERR END
+009-container-logs ACTUAL_EXIT 0
+COMMAND docker inspect t3-d4020b98-combined-pg18-oracles-r1
+010-container-final-inspect STDOUT BEGIN
+[
+    {
+        "Id": "70386cc43ec065bf6dde21821bdd060cdaf27abdb4c0270f6ed38a039a767f69",
+        "Created": "2026-11-04T20:13:05.468913336Z",
+        "Path": "/bin/sh",
+        "Args": [
+            "-c",
+            "exec nice -n 19 docker-entrypoint.sh postgres -c shared_buffers=16MB -c max_connections=12 -c log_min_messages=debug1 -c log_error_verbosity=verbose -c log_line_prefix='%m [%p] ' -c listen_addresses='' "
+        ],
+        "State": {
+            "Status": "running",
+            "Running": true,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 4119424,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-11-04T20:13:06.778380163Z",
+            "FinishedAt": "0001-01-01T00:00:00Z"
+        },
+        "Image": "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5",
+        "ResolvConfPath": "/var/lib/docker/containers/70386cc43ec065bf6dde21821bdd060cdaf27abdb4c0270f6ed38a039a767f69/resolv.conf",
+        "HostnamePath": "/var/lib/docker/containers/70386cc43ec065bf6dde21821bdd060cdaf27abdb4c0270f6ed38a039a767f69/hostname",
+        "HostsPath": "/var/lib/docker/containers/70386cc43ec065bf6dde21821bdd060cdaf27abdb4c0270f6ed38a039a767f69/hosts",
+        "LogPath": "/var/lib/docker/containers/70386cc43ec065bf6dde21821bdd060cdaf27abdb4c0270f6ed38a039a767f69/70386cc43ec065bf6dde21821bdd060cdaf27abdb4c0270f6ed38a039a767f69-json.log",
+        "Name": "/t3-d4020b98-combined-pg18-oracles-r1",
+        "RestartCount": 0,
+        "Driver": "overlayfs",
+        "Platform": "linux",
+        "MountLabel": "",
+        "ProcessLabel": "",
+        "AppArmorProfile": "docker-default",
+        "ExecIDs": null,
+        "HostConfig": {
+            "Binds": null,
+            "ContainerIDFile": "",
+            "LogConfig": {
+                "Type": "json-file",
+                "Config": {}
+            },
+            "NetworkMode": "none",
+            "PortBindings": {},
+            "RestartPolicy": {
+                "Name": "no",
+                "MaximumRetryCount": 0
+            },
+            "AutoRemove": true,
+            "VolumeDriver": "",
+            "VolumesFrom": null,
+            "ConsoleSize": [
+                0,
+                0
+            ],
+            "CapAdd": null,
+            "CapDrop": null,
+            "CgroupnsMode": "private",
+            "Dns": null,
+            "DnsOptions": [],
+            "DnsSearch": [],
+            "ExtraHosts": null,
+            "GroupAdd": null,
+            "IpcMode": "private",
+            "Cgroup": "",
+            "Links": null,
+            "OomScoreAdj": 0,
+            "PidMode": "",
+            "Privileged": false,
+            "PublishAllPorts": false,
+            "ReadonlyRootfs": false,
+            "SecurityOpt": null,
+            "Tmpfs": {
+                "/var/lib/postgresql": "rw,size=1m"
+            },
+            "UTSMode": "",
+            "UsernsMode": "",
+            "ShmSize": 67108864,
+            "Runtime": "runc",
+            "Isolation": "",
+            "CpuShares": 0,
+            "Memory": 536870912,
+            "NanoCpus": 2000000000,
+            "CgroupParent": "",
+            "BlkioWeight": 0,
+            "BlkioWeightDevice": [],
+            "BlkioDeviceReadBps": [],
+            "BlkioDeviceWriteBps": [],
+            "BlkioDeviceReadIOps": [],
+            "BlkioDeviceWriteIOps": [],
+            "CpuPeriod": 0,
+            "CpuQuota": 0,
+            "CpuRealtimePeriod": 0,
+            "CpuRealtimeRuntime": 0,
+            "CpusetCpus": "4-7,22-25",
+            "CpusetMems": "",
+            "Devices": [],
+            "DeviceCgroupRules": null,
+            "DeviceRequests": null,
+            "MemoryReservation": 0,
+            "MemorySwap": 536870912,
+            "MemorySwappiness": null,
+            "OomKillDisable": null,
+            "PidsLimit": null,
+            "Ulimits": null,
+            "CpuCount": 0,
+            "CpuPercent": 0,
+            "IOMaximumIOps": 0,
+            "IOMaximumBandwidth": 0,
+            "MaskedPaths": [
+                "/proc/acpi",
+                "/proc/asound",
+                "/proc/interrupts",
+                "/proc/kcore",
+                "/proc/keys",
+                "/proc/latency_stats",
+                "/proc/sched_debug",
+                "/proc/scsi",
+                "/proc/timer_list",
+                "/proc/timer_stats",
+                "/sys/devices/virtual/powercap",
+                "/sys/firmware",
+                "/sys/devices/system/cpu/cpu0/thermal_throttle",
+                "/sys/devices/system/cpu/cpu1/thermal_throttle",
+                "/sys/devices/system/cpu/cpu2/thermal_throttle",
+                "/sys/devices/system/cpu/cpu3/thermal_throttle",
+                "/sys/devices/system/cpu/cpu4/thermal_throttle",
+                "/sys/devices/system/cpu/cpu5/thermal_throttle",
+                "/sys/devices/system/cpu/cpu6/thermal_throttle",
+                "/sys/devices/system/cpu/cpu7/thermal_throttle",
+                "/sys/devices/system/cpu/cpu8/thermal_throttle",
+                "/sys/devices/system/cpu/cpu9/thermal_throttle",
+                "/sys/devices/system/cpu/cpu10/thermal_throttle",
+                "/sys/devices/system/cpu/cpu11/thermal_throttle",
+                "/sys/devices/system/cpu/cpu12/thermal_throttle",
+                "/sys/devices/system/cpu/cpu13/thermal_throttle",
+                "/sys/devices/system/cpu/cpu14/thermal_throttle",
+                "/sys/devices/system/cpu/cpu15/thermal_throttle",
+                "/sys/devices/system/cpu/cpu16/thermal_throttle",
+                "/sys/devices/system/cpu/cpu17/thermal_throttle",
+                "/sys/devices/system/cpu/cpu18/thermal_throttle",
+                "/sys/devices/system/cpu/cpu19/thermal_throttle",
+                "/sys/devices/system/cpu/cpu20/thermal_throttle",
+                "/sys/devices/system/cpu/cpu21/thermal_throttle",
+                "/sys/devices/system/cpu/cpu22/thermal_throttle",
+                "/sys/devices/system/cpu/cpu23/thermal_throttle",
+                "/sys/devices/system/cpu/cpu24/thermal_throttle",
+                "/sys/devices/system/cpu/cpu25/thermal_throttle",
+                "/sys/devices/system/cpu/cpu26/thermal_throttle",
+                "/sys/devices/system/cpu/cpu27/thermal_throttle",
+                "/sys/devices/system/cpu/cpu28/thermal_throttle",
+                "/sys/devices/system/cpu/cpu29/thermal_throttle",
+                "/sys/devices/system/cpu/cpu30/thermal_throttle",
+                "/sys/devices/system/cpu/cpu31/thermal_throttle",
+                "/sys/devices/system/cpu/cpu32/thermal_throttle",
+                "/sys/devices/system/cpu/cpu33/thermal_throttle",
+                "/sys/devices/system/cpu/cpu34/thermal_throttle",
+                "/sys/devices/system/cpu/cpu35/thermal_throttle"
+            ],
+            "ReadonlyPaths": [
+                "/proc/bus",
+                "/proc/fs",
+                "/proc/irq",
+                "/proc/sys",
+                "/proc/sysrq-trigger"
+            ]
+        },
+        "Storage": {
+            "RootFS": {
+                "Snapshot": {
+                    "Name": "overlayfs"
+                }
+            }
+        },
+        "Mounts": [],
+        "Config": {
+            "Hostname": "70386cc43ec0",
+            "Domainname": "",
+            "User": "",
+            "AttachStdin": false,
+            "AttachStdout": false,
+            "AttachStderr": false,
+            "ExposedPorts": {
+                "5432/tcp": {}
+            },
+            "Tty": false,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "Env": [
+                "PGDATA=/tmp/pg18-reference-data",
+                "POSTGRES_HOST_AUTH_METHOD=trust",
+                "POSTGRES_INITDB_ARGS=--locale=C --encoding=UTF8",
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "GOSU_VERSION=1.19",
+                "LANG=en_US.utf8",
+                "PG_MAJOR=18",
+                "PG_VERSION=18.6",
+                "PG_SHA256=555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f",
+                "DOCKER_PG_LLVM_DEPS=llvm21-dev \t\tclang21"
+            ],
+            "Cmd": [
+                "-c",
+                "exec nice -n 19 docker-entrypoint.sh postgres -c shared_buffers=16MB -c max_connections=12 -c log_min_messages=debug1 -c log_error_verbosity=verbose -c log_line_prefix='%m [%p] ' -c listen_addresses='' "
+            ],
+            "Image": "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5",
+            "Volumes": {
+                "/var/lib/postgresql": {}
+            },
+            "WorkingDir": "/",
+            "Entrypoint": [
+                "/bin/sh"
+            ],
+            "Labels": {
+                "agent.evidence": "combined-pg18-oracles-r1",
+                "agent.worktree": "t3-d4020b98"
+            },
+            "StopSignal": "SIGINT"
+        },
+        "NetworkSettings": {
+            "SandboxID": "53a674d0bf7470ca09dabaf1ba2e455955901d84a4b1c40c50ba396ea3293de5",
+            "SandboxKey": "/var/run/docker/netns/53a674d0bf74",
+            "Ports": {},
+            "Networks": {
+                "none": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": null,
+                    "DriverOpts": null,
+                    "GwPriority": 0,
+                    "NetworkID": "963ce10479ff6292d5ba009174286fc8f2d305167a0ae61aedc5853d6915dd8d",
+                    "EndpointID": "1d19d4be6e85d46e8429050ea6c307cb6ed88c3d194248a0d44dc77cbbfb3f2a",
+                    "Gateway": "",
+                    "IPAddress": "",
+                    "MacAddress": "",
+                    "IPPrefixLen": 0,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "DNSNames": null
+                }
+            }
+        },
+        "ImageManifestDescriptor": {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": "sha256:3b0ef735388b2cb097fc29b8bb421d86d57d0ddbe7aa1fbd6493e06d65028503",
+            "size": 2678,
+            "annotations": {
+                "com.docker.official-images.bashbrew.arch": "amd64",
+                "org.opencontainers.image.base.digest": "sha256:c26612752c78b18faacd63c7d50f4592c2e7b0f25e0e20e82bd74e465c57ab0d",
+                "org.opencontainers.image.base.name": "alpine:3.24",
+                "org.opencontainers.image.created": "2026-10-21T22:54:26Z",
+                "org.opencontainers.image.revision": "e00e1bd34ec5c8a8e7ad89b273b3d42efaf6d5bc",
+                "org.opencontainers.image.source": "https://github.com/docker-library/postgres.git#e00e1bd34ec5c8a8e7ad89b273b3d42efaf6d5bc:18/alpine3.24",
+                "org.opencontainers.image.url": "https://hub.docker.com/_/postgres",
+                "org.opencontainers.image.version": "18.6-alpine3.24"
+            },
+            "platform": {
+                "architecture": "amd64",
+                "os": "linux"
+            }
+        }
+    }
+]
+010-container-final-inspect STDOUT END
+010-container-final-inspect STDERR BEGIN
+010-container-final-inspect STDERR END
+010-container-final-inspect ACTUAL_EXIT 0
+COMMAND docker inspect --format '{{index .Config.Labels "agent.worktree"}}|{{index .Config.Labels "agent.evidence"}}' t3-d4020b98-combined-pg18-oracles-r1
+011-cleanup-identity STDOUT BEGIN
+t3-d4020b98|combined-pg18-oracles-r1
+011-cleanup-identity STDOUT END
+011-cleanup-identity STDERR BEGIN
+011-cleanup-identity STDERR END
+011-cleanup-identity ACTUAL_EXIT 0
+COMMAND docker rm -f t3-d4020b98-combined-pg18-oracles-r1
+012-container-remove STDOUT BEGIN
+t3-d4020b98-combined-pg18-oracles-r1
+012-container-remove STDOUT END
+012-container-remove STDERR BEGIN
+012-container-remove STDERR END
+012-container-remove ACTUAL_EXIT 0
+COMMAND docker ps -a --filter 'name=^/t3-d4020b98-combined-pg18-oracles-r1$' --format '{{.ID}} {{.Names}}'
+013-container-absence STDOUT BEGIN
+013-container-absence STDOUT END
+013-container-absence STDERR BEGIN
+013-container-absence STDERR END
+013-container-absence ACTUAL_EXIT 0
+COMMAND bash -c 'date -u --iso-8601=seconds; df -B1 /home/meszmate/.cache; cat /proc/pressure/cpu; cat /tmp/pg-engine-heavy.lock.slots /tmp/pg-engine-heavy.lock.jobs'
+014-health-after STDOUT BEGIN
+2026-11-04T20:13:08+00:00
+Filesystem         1B-blocks          Used    Available Use% Mounted on
+/dev/md2       1869804793856 1551745069056 223003377664  88% /
+some avg10=0.67 avg60=3.96 avg300=7.33 total=21295397587
+full avg10=0.00 avg60=0.00 avg300=0.00 total=0
+4
+2
+014-health-after STDOUT END
+014-health-after STDERR BEGIN
+014-health-after STDERR END
+014-health-after ACTUAL_EXIT 0
+RUN_RESULT {"started_utc": "2026-11-04T20:13:05.027217+00:00", "container_name": "t3-d4020b98-combined-pg18-oracles-r1", "image_id": "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5", "process_group": 4118506, "pid": 4118507, "internal_deadline_seconds": 550, "outer_process_group_deadline_seconds": 580, "free_bytes_before": 223109107712, "container_id": "70386cc43ec065bf6dde21821bdd060cdaf27abdb4c0270f6ed38a039a767f69", "exception": "RuntimeError('verify-version actual exit 2')", "container_remove_actual_exit": 0, "container_absence_confirmed": true, "ended_utc": "2026-11-04T20:13:08.971826+00:00", "elapsed_seconds": 3.944647653028369, "runner_actual_exit": 1}
+HEAVY-EXIT 1
