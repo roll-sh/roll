@@ -345,3 +345,40 @@ fn streaming_cursor_bounds_keys_and_backward_work() {
     assert!(elapsed < Duration::from_secs(10), "backward fetch rescanned prefixes: {elapsed:?}");
     s.query("ROLLBACK").unwrap();
 }
+
+#[test]
+fn default_cursor_stable_qual_releases_retained_rows_on_close() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = common::engine_session(common::open_store(dir.path()), "cursor_stable_memory");
+    for sql in [
+        "CREATE TABLE cm (id int primary key)",
+        "INSERT INTO cm SELECT g FROM generate_series(1, 100000) g",
+        "CREATE FUNCTION cm_qual(int) RETURNS bool STABLE LANGUAGE plpgsql AS $$ BEGIN RETURN $1 > 0; END $$",
+        "SET max_parallel_workers_per_gather = 0",
+        "SELECT sum(id) FROM cm",
+        "BEGIN",
+        "DECLARE warm CURSOR FOR SELECT id FROM cm WHERE cm_qual(id)",
+        "MOVE ALL FROM warm",
+        "CLOSE warm",
+        "DECLARE c CURSOR FOR SELECT id FROM cm WHERE cm_qual(id)",
+    ] {
+        s.query(sql).unwrap();
+    }
+    let before = MINE.with(|m| m.get());
+    s.query("MOVE 20000 FROM c").unwrap();
+    let at20 = MINE.with(|m| m.get()) - before;
+    let rows20 = s.state.cursors.borrow()["c"].rows.len();
+    s.query("MOVE ALL FROM c").unwrap();
+    let at100 = MINE.with(|m| m.get()) - before;
+    let rows100 = s.state.cursors.borrow()["c"].rows.len();
+    eprintln!("default STABLE qual cursor retained: 20000 rows => {rows20} stored/{at20} bytes; 100000 rows => {rows100} stored/{at100} bytes");
+    // This cursor requires qualifier re-evaluation and currently retains input rows.
+    // Record its O(n) limitation rather than extending the NO SCROLL bound to it.
+    assert_eq!(rows100, 100000);
+    s.query("CLOSE c").unwrap();
+    let closed = MINE.with(|m| m.get()) - before;
+    eprintln!("default STABLE qual cursor after CLOSE: {closed} bytes above opened baseline");
+    assert!(at100 - closed > 1 << 20, "CLOSE retained cursor rows: {at100} vs {closed}");
+    s.query("ROLLBACK").unwrap();
+}

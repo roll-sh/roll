@@ -105,7 +105,7 @@ pub struct Lazy {
     /// The LIMIT count under `project`: backing up from the end of its window re-returns the
     /// row it last returned, as PostgreSQL's Limit node does.
     window: Option<Expr>,
-    /// The WHERE qual of the scan under the target list, when it is volatile: evaluated anew
+    /// The observable WHERE qual of the scan under the target list: evaluated anew
     /// each time the scan passes a row, back and forth (ExecScan), so the rows kept are the
     /// scan's; rows failing it are passed over.
     qual: Option<Expr>,
@@ -359,7 +359,7 @@ fn split_target(plan: &Plan) -> Option<(Plan, Vec<Expr>)> {
     }
 }
 
-/// The scan under a cursor's target list and its volatile WHERE qual, which a scan node
+/// The scan under a cursor's target list and its observable WHERE qual, which a scan node
 /// evaluates as it passes rows in either direction (a sequential or index scan, a function
 /// or VALUES scan); with the count and offset of a LIMIT over it.
 #[allow(clippy::type_complexity)]
@@ -373,7 +373,7 @@ fn split_qual(
     };
     match plan {
         Plan::Scan(s)
-            if s.filter.as_ref().is_some_and(|f| f.is_volatile())
+            if s.filter.as_ref().is_some_and(|f| !replayable_expr(f))
                 && s.mark.is_none()
                 && s.sample.is_none()
                 && (s.limit.is_none() || under_limit) =>
@@ -383,7 +383,7 @@ fn split_qual(
             s.limit = None;
             Some((Plan::Scan(s), qual, None))
         }
-        Plan::Filter { input, pred } if pred.is_volatile() && leaf(input) => {
+        Plan::Filter { input, pred } if !replayable_expr(pred) && leaf(input) => {
             Some(((**input).clone(), pred.clone(), None))
         }
         Plan::Limit {
@@ -641,7 +641,7 @@ impl Cursor {
         let mut c = Cursor::new(cols, Vec::new(), key_table, hold, scroll, text, created);
         c.projected = lazy.project.is_some();
         c.plain = lazy.project.is_none() && lazy.qual.is_none() && !lazy.fill;
-        c.rerun = scroll && c.plain && replayable(&lazy.plan);
+        c.rerun = scroll && c.plain && lazy.coerce.is_none() && replayable(&lazy.plan);
         c.lazy = Some(lazy);
         c
     }
@@ -1146,7 +1146,7 @@ impl Cursor {
                 rows.push(r);
                 if let Some((_, k)) = &c.keys {
                     let key = if c.pos <= c.base {
-                        c.current_key.as_ref().expect("streamed current key")
+                        c.current_key.as_ref().ok_or_else(|| crate::error::internal("missing streamed cursor key"))?
                     } else {
                         &k[c.pos - 1 - c.base]
                     };
@@ -1270,6 +1270,27 @@ impl Cursor {
     }
 }
 
+/// Calls hidden in operator/domain nodes are not all visited by Expr::walk.
+/// Keep this cursor-local: only immutable builtins may be replayed unobservably.
+fn replayable_expr(expr: &Expr) -> bool {
+    let builtin = |f: &crate::sql::func::FuncDef| f.oid < 16384 && f.volatility == 'i';
+    let mut safe = expr.is_immutable();
+    expr.walk(&mut |e| {
+        safe &= match e {
+            Expr::Subquery(_) | Expr::RowCompare(_) => false,
+            Expr::Call(f, ..) | Expr::IsDistinct(_, _, _, f)
+            | Expr::NullIf(_, _, f, _) | Expr::MinMax(_, _, _, f) => builtin(f),
+            Expr::InList(_, items, _) => items.iter().all(|(_, f)| builtin(f)),
+            Expr::ArrayOp { op, .. } => builtin(op),
+            // Even an IMMUTABLE domain check can raise a notice. It must run
+            // once per row passed, including backward passes through a scan.
+            Expr::CoerceToDomain(_, d) => d.tag,
+            _ => true,
+        };
+    });
+    safe
+}
+
 /// Restarting is safe only for immutable expressions over ordinary stored rows.
 /// Function/CTE scans and sorts keep executor state even when their functions are STABLE.
 fn replayable(plan: &Plan) -> bool {
@@ -1300,15 +1321,7 @@ fn replayable(plan: &Plan) -> bool {
         }
         exprs.extend(s.current_of.as_ref());
     }
-    exprs.into_iter().all(|e| {
-        let mut safe = e.is_immutable();
-        e.walk(&mut |x| match x {
-            Expr::Subquery(_) => safe = false,
-            Expr::Call(f, ..) if f.oid >= 16384 => safe = false,
-            _ => {}
-        });
-        safe
-    })
+    exprs.into_iter().all(replayable_expr)
 }
 
 /// Whether a cursor over `plan` is scrollable when declared without [NO] SCROLL: PostgreSQL's
@@ -1331,8 +1344,8 @@ pub fn scrollable(plan: &Plan) -> bool {
             }
             // The binder represents a non-inlined FROM call as a Join carrying
             // FromCall; EXPLAIN exposes the same node as Function Scan.
-            Plan::Join { meta, .. } if meta.from_call.is_some() => true,
-            Plan::Join { left, right, cond: None, hash: None, nleft: 0, .. }
+            Plan::Join { kind: crate::sql::plan::JoinKind::Inner, meta, .. } if meta.from_call.is_some() => true,
+            Plan::Join { kind: crate::sql::plan::JoinKind::Inner, left, right, cond: None, hash: None, nleft: 0, .. }
                 if matches!(&**left, Plan::One) => go(right),
             Plan::SysScan { .. }
             | Plan::FunctionScan { .. }

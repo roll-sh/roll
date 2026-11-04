@@ -224,3 +224,60 @@ fn prepared_finish_preserves_reused_backend_lock_owners() {
         }
     });
 }
+
+/// Prepared locks outlive the preparing session and wake existing relation/transaction
+/// waiters when another session finishes the prepared transaction, without a restart.
+#[test]
+fn prepared_waiters_wake_after_finish_and_disconnect() {
+    on_thread(|| {
+        for finish in ["COMMIT", "ROLLBACK"] {
+            for disconnect in [false, true] {
+                for row_waiter in [false, true] {
+                    let dir = tempfile::tempdir().unwrap();
+                    let e = engine(dir.path(), 5);
+                    let mut a = e.connect(1, "postgres", "postgres", "preparer").unwrap();
+                    let mut finisher = e.connect(2, "postgres", "postgres", "finisher").unwrap();
+                    let mut observer = e.connect(3, "postgres", "postgres", "observer").unwrap();
+                    let checked = |s: &mut Session, sql: &str| {
+                        let out = run(s, sql);
+                        assert!(!out.contains("ERROR"), "{finish}, disconnect={disconnect}, row={row_waiter}: {out}");
+                    };
+                    checked(&mut a, "CREATE TABLE t (id int PRIMARY KEY, v int); INSERT INTO t VALUES (1, 1)");
+                    checked(&mut a, "BEGIN; UPDATE t SET v = 10 WHERE id = 1; PREPARE TRANSACTION 'wake'");
+                    let preparer = if disconnect { drop(a); None } else { Some(a) };
+                    assert_eq!(rows(&mut observer, "SELECT count(*) FROM pg_prepared_xacts WHERE gid = 'wake'"), ["1"]);
+                    let e2 = e.clone();
+                    let waiter = std::thread::Builder::new().stack_size(64 << 20).spawn(move || {
+                        let mut w = e2.connect(4, "postgres", "postgres", "waiter").unwrap();
+                        let wait = if row_waiter {
+                            "UPDATE t SET v = v + 100 WHERE id = 1"
+                        } else {
+                            "LOCK TABLE t IN ACCESS EXCLUSIVE MODE"
+                        };
+                        let out = run(&mut w, &format!("SET lock_timeout = '5s'; BEGIN; {wait}; COMMIT"));
+                        assert!(!out.contains("ERROR"), "{out}");
+                    }).unwrap();
+                    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                    loop {
+                        if rows(&mut observer, "SELECT pg_blocking_pids(4)::text") == ["{0}"] {
+                            break;
+                        }
+                        assert!(std::time::Instant::now() < deadline, "waiter did not block on prepared transaction");
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    checked(&mut finisher, &format!("{finish} PREPARED 'wake'"));
+                    waiter.join().unwrap();
+                    assert_eq!(rows(&mut observer, "SELECT pg_blocking_pids(4)::text"), ["{}"]);
+                    assert_eq!(rows(&mut observer, "SELECT count(*) FROM pg_prepared_xacts"), ["0"]);
+                    assert_eq!(rows(&mut observer, "SELECT count(*) FROM pg_locks WHERE pid IS NULL AND locktype IN ('relation', 'transactionid', 'virtualxid')"), ["0"]);
+                    let expected = if finish == "COMMIT" { 10 } else { 1 } + if row_waiter { 100 } else { 0 };
+                    assert_eq!(rows(&mut observer, "SELECT v FROM t WHERE id = 1"), [expected.to_string()]);
+                    checked(&mut observer, "SET statement_timeout = '2s'; CREATE INDEX CONCURRENTLY t_v ON t (v)");
+                    checked(&mut observer, "BEGIN; LOCK TABLE t IN ACCESS EXCLUSIVE MODE NOWAIT; COMMIT");
+                    drop((preparer, finisher, observer));
+                    e.shutdown();
+                }
+            }
+        }
+    });
+}
