@@ -7436,3 +7436,17 @@ orphan entries; this batch does not rewrite existing databases to reclaim them.
 New reference fixtures: a163_review_sizes and roll-bitmap-recheck (row locks, concurrent
 changed versions/EPQ, BitmapOr and UPDATE). Their exact outcomes are recorded in the
 owner's review-followup evidence; source integration and performance remain parent gates.
+
+Concurrent index follow-up: `rowsize::BuildSizes` shares formation/page-size validation
+between serial construction and `index_build_error` preflight. A formation error after
+an earlier duplicate wins; CIC and invalid-index REINDEX CONCURRENTLY preserve their
+not-ready INVALID index/copy through the existing commit-on-error path. A retry chooses
+a free `_ccnew` name instead of duplicating a failed copy's catalog name. The PG18.6
+`a163_review_concurrent` fixture checks errors, catalog state and repaired retries.
+`measured_serial_include_size` asserts the unmodelled heap/no-model state with workers
+zero and checks the reference's INCLUDE 2704/8191 errors. Bitmap isolation also covers
+qualifying indexed updates, filter-only row updates and UPDATE of the changed version.
+
+GIN oversized-key order currently uses `Value::cmp_total`, as in the existing per-row
+check; reference coverage here establishes byte/C ordering. Collation-sensitive error
+precedence has not been validated, and accumulation-flush ordering remains unmodelled.

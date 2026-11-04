@@ -118,7 +118,7 @@ pub fn btree_error(t: &Table, bix: &BoundIndex, size: usize, (b, o): (u32, u16),
 
 /// The first oversized GIN key, retained across a build's heap rows without retaining
 /// all extracted keys. INSERT reports it immediately; a build reports it in key order.
-pub struct GinFormError {
+struct GinFormError {
     column: usize,
     key: Value,
     pub error: Error,
@@ -132,7 +132,7 @@ impl GinFormError {
 
 /// GinFormTuple of each key array_ops extracts from `vals` (in the keys' order, as
 /// ginExtractEntries sorts them), without a posting list (a build's posting tree's case).
-pub fn gin_form_error(bix: &BoundIndex, vals: &[Value], ctx: &ExecCtx) -> Option<GinFormError> {
+fn gin_form_error(bix: &BoundIndex, vals: &[Value], ctx: &ExecCtx) -> Option<GinFormError> {
     let one = bix.keys.len() == 1;
     for (i, v) in vals.iter().enumerate() {
         let (Value::Array(a), Some(c)) = (v, bix.index.columns.get(i)) else { continue };
@@ -170,4 +170,47 @@ pub fn gin_form_error(bix: &BoundIndex, vals: &[Value], ctx: &ExecCtx) -> Option
         }
     }
     None
+}
+
+
+/// Size validation shared by serial construction and concurrent-build preflight. Tuple
+/// formation runs for every heap row; page limits are reported after uniqueness.
+#[derive(Default)]
+pub struct BuildSizes {
+    btree: Option<(Vec<u8>, usize, Vec<u8>)>,
+    gin: Option<GinFormError>,
+}
+
+impl BuildSizes {
+    pub fn row(&mut self, t: &Table, bix: &BoundIndex, vals: &[Value], row: &[Value], dkey: &[u8], ctx: &ExecCtx) -> Result<()> {
+        if bix.index.method == "gin" {
+            if let Some(e) = gin_form_error(bix, vals, ctx)
+                && self.gin.as_ref().is_none_or(|first| e.precedes(first))
+            {
+                self.gin = Some(e);
+            }
+        } else {
+            on_form(t, bix, Some(vals), row, ctx)?;
+        }
+        if bix.index.method == "btree"
+            && let Some(n) = btree_oversized(t, bix, vals, row, ctx)?
+        {
+            let k = crate::exec::scan::index_entry_key(t, &bix.index, vals, dkey, &bix.colls);
+            if self.btree.as_ref().is_none_or(|first| k < first.0) {
+                self.btree = Some((k, n, dkey.to_vec()));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn finish(self, t: &Table, bix: &BoundIndex, ctx: &ExecCtx) -> Result<()> {
+        if let Some(e) = self.gin {
+            return Err(e.error);
+        }
+        if let Some((_, n, dkey)) = self.btree {
+            let tid = crate::exec::dml::row_tid(t, &dkey, ctx);
+            return Err(btree_error(t, bix, n, tid, ctx));
+        }
+        Ok(())
+    }
 }
