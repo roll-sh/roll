@@ -65,6 +65,6 @@ export function fakeServices(over: Omit<Partial<AgentsServices>, "sandboxes"> & 
   };
 }
 
-export const SIZE: SandboxSize = { name: "standard", cpu: 2, memory_gb: 4, disk_gb: 20, monthly_cents: 2000 };
+export const SIZE: SandboxSize = { name: "standard", cpu: 2, memory_gb: 4, disk_gb: 20, hourly_cents: 3 };
 
 export { M1 };

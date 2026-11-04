@@ -27,7 +27,7 @@ function state(s: Sandbox, hours = 12.5): SandboxesState {
     list: { sandboxes: [s], sizes: [SIZE], max: 5, backend: "docker" },
     error: null,
     byMachine: new Map([[s.machine, s]]),
-    usage: new Map([[s.id, { sandbox: s.id, name: s.name, size: "standard", monthly_cents: 2000, running_ms: hours * 3_600_000, running_hours: hours, price_usd: (hours * 20) / 730 }]]),
+    usage: new Map([[s.id, { sandbox: s.id, name: s.name, size: "standard", hourly_cents: 3, running_ms: hours * 3_600_000, running_hours: hours, price_usd: (hours * 3) / 100 }]]),
     reload: vi.fn(),
   };
 }
@@ -36,21 +36,21 @@ const sandboxMachine = (status: Sandbox["status"], over: Partial<Machine> = {}) 
   machine({
     name: "box",
     info: { hostname: "box", os: "linux", arch: "x86_64", version: "0.1.0", home: "/home/roll", providers: [provider(), provider({ id: "codex", name: "Codex" })] },
-    sandbox: { backend: "docker", size: "standard", status, monthly_cents: 2000 },
+    sandbox: { backend: "docker", size: "standard", status, hourly_cents: 3 },
     ...over,
   });
 
 describe("a sandbox machine on the canvas", () => {
-  it("shows its size, status, monthly price and this month's usage", () => {
+  it("shows its size, status, hourly price and this month's usage", () => {
     const s = sb();
     const h = agentsHarness({ ctx: { services: fakeServices(), sandboxes: state(s) } });
     renderAgents(<MachineNode machine={sandboxMachine("running")} />, h);
     const panel = screen.getByRole("group", { name: "Sandbox" });
     expect(within(panel).getByText("Running")).toBeInTheDocument();
-    expect(within(panel).getByText("$20/mo")).toBeInTheDocument();
+    expect(within(panel).getByText("$0.03/h")).toBeInTheDocument();
     expect(within(panel).getByText("standard · 2 vCPU · 4 GB · 20 GB disk")).toBeInTheDocument();
     expect(within(panel).getByText("12.5 h")).toBeInTheDocument();
-    expect(within(panel).getByText("$0.34")).toBeInTheDocument();
+    expect(within(panel).getByText("$0.38")).toBeInTheDocument();
   });
 
   it("stops and starts, and deletes only after asking", async () => {

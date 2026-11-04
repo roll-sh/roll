@@ -110,7 +110,7 @@ describe("agents layout", () => {
 
 describe("sandboxes and phones on the canvas", () => {
   it("a sandbox pulses while it boots, and not once it runs", () => {
-    const sb = (status: "creating" | "running") => machine({ id: "mch_s", name: "sandbox", online: status === "running", info: null, sandbox: { backend: "docker", size: "standard", status, monthly_cents: 2000 } });
+    const sb = (status: "creating" | "running") => machine({ id: "mch_s", name: "sandbox", online: status === "running", info: null, sandbox: { backend: "docker", size: "standard", status, hourly_cents: 3 } });
     let d = applyEvents(emptyData(), [{ type: "machine", cursor: 1, machine: sb("creating") }]);
     expect(deriveGraph(d).nodes.get(keyOf.machine("mch_s"))?.busy).toBe(true);
     d = applyEvents(d, [{ type: "machine", cursor: 2, machine: sb("running") }]);

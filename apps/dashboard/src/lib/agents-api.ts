@@ -380,7 +380,7 @@ export interface SandboxInfo {
   backend: string;
   size: string;
   status: SandboxStatus;
-  monthly_cents: number;
+  hourly_cents: number;
 }
 
 export interface Machine {
@@ -862,7 +862,7 @@ export const machineD = obj<Machine>({
       backend: str,
       size: str,
       status: literal("creating", "running", "stopped", "failed", "deleting"),
-      monthly_cents: int,
+      hourly_cents: int,
     }),
   ),
   created_at: int,

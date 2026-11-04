@@ -505,7 +505,7 @@ fn machine() -> Machine {
         name: "ada-mbp".into(),
         online: true,
         info: Some(info()),
-        sandbox: Some(SandboxInfo { backend: "agent37".into(), size: "2cpu-4gb".into(), status: SandboxStatus::Running, monthly_cents: 2000 }),
+        sandbox: Some(SandboxInfo { backend: "agent37".into(), size: "2cpu-4gb".into(), status: SandboxStatus::Running, hourly_cents: 3 }),
         created_at: T,
         last_seen: Some(T),
     }

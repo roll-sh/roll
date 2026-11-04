@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Machine } from "@/lib/agents-api";
 import type { AgentsData } from "@/lib/agents-store";
 import type { AgentsServices } from "@/lib/agents-services";
-import { canStart, canStop, formatMonthly, type Sandbox, type SandboxList, type SandboxUsageRow } from "@/lib/sandboxes-api";
+import { canStart, canStop, formatHourly, type Sandbox, type SandboxList, type SandboxUsageRow } from "@/lib/sandboxes-api";
 import { btn } from "../ui";
 import { useAgents } from "./use-agents";
 
@@ -117,7 +117,7 @@ export function SandboxPanel({ machine }: { machine: Machine }) {
       <div className="flex items-center gap-2 text-[12px]">
         <span className={`size-1.5 rounded-full ${moving ? "bg-accent" : status === "running" ? "bg-ok" : status === "failed" ? "bg-danger" : "bg-subtle"}`} aria-hidden />
         <span className={moving ? "shimmer" : ""}>{statusLabel[status]}</span>
-        <span className="ml-auto font-mono text-[11px] text-muted">{formatMonthly(size?.monthly_cents ?? info.monthly_cents)}</span>
+        <span className="ml-auto font-mono text-[11px] text-muted">{formatHourly(size?.hourly_cents ?? info.hourly_cents)}</span>
       </div>
       <p className="font-mono text-[11px] text-subtle">{size ? `${size.name} · ${size.cpu} vCPU · ${size.memory_gb} GB · ${size.disk_gb} GB disk` : info.size}</p>
       {used && (

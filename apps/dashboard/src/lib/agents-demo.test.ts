@@ -60,7 +60,7 @@ describe("agents demo", () => {
     const release = client.hold();
     const services = demo.services();
     const list = await services.sandboxes.list("demo");
-    expect(list.sizes[0]).toMatchObject({ name: "standard", monthly_cents: 2000 });
+    expect(list.sizes[0]).toMatchObject({ name: "standard", hourly_cents: 3 });
     expect(list.sandboxes.map((s) => s.machine)).toEqual(["mch_demo_box"]);
 
     const { sandbox, machine } = await services.sandboxes.create("demo", { name: "scratch", env: { ANTHROPIC_API_KEY: "sk-test" } });

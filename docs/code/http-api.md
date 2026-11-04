@@ -716,16 +716,16 @@ DELETE /v1/code/agents/{owner}/sandboxes/{id} → 204 the backend deleted it and
        Removing a sandbox's machine (DELETE …/machines/{machine}, or `roll agent logout` in it) deletes the
        sandbox the same way. 404 for an unknown or deleted sandbox.
 GET    /v1/code/agents/{owner}/sandboxes/usage?month=YYYY-MM (default: this UTC month)
-       → {owner, month, sandboxes: [{sandbox, name, size, monthly_cents, running_ms, running_hours, price_usd}],
+       → {owner, month, sandboxes: [{sandbox, name, size, hourly_cents, running_ms, running_hours, price_usd}],
           totals: {running_ms, running_hours, price_usd}}
-       Running time as the reconciler saw it (it looks every 30 s), deleted sandboxes included; a month's
-       price is 730 hours. 400 for a malformed month.
+       Running time as the reconciler saw it (it looks every 30 s), deleted sandboxes included; price_usd is
+       hours × hourly_cents / 100, rounded to a hundredth of a cent (0.0001). 400 for a malformed month.
 
 Sandbox = {id /* sbx_… */, name, machine /* mch_… */, backend, size: Size,
            status: "creating" | "running" | "stopped" | "failed" | "deleting" /* = Machine.sandbox.status */,
            desired: "running" | "stopped" | "deleted", error?: string /* the backend's last complaint */,
            created_at, updated_at}
-Size = {name /* "standard" */, cpu, memory_gb, disk_gb, monthly_cents /* always-on price, US cents */}
+Size = {name /* "standard" */, cpu, memory_gb, disk_gb, hourly_cents /* price per running hour, US cents */}
 ```
 
 A `failed` sandbox stays until it's deleted (a refused create isn't tried again). One that stopped on

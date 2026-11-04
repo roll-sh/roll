@@ -221,7 +221,7 @@ async fn a_sandbox_runs_on_agent37_from_create_to_delete() {
     let w = world(|_| {}).await;
     let (s, list) = w.req("GET", "/v1/code/agents/acme/sandboxes", None).await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!((list["backend"].as_str(), list["max"].as_u64(), list["sizes"][0]["name"].as_str(), list["sizes"][0]["monthly_cents"].as_u64()), (Some("agent37"), Some(5), Some("standard"), Some(2000)));
+    assert_eq!((list["backend"].as_str(), list["max"].as_u64(), list["sizes"][0]["name"].as_str(), list["sizes"][0]["hourly_cents"].as_u64()), (Some("agent37"), Some(5), Some("standard"), Some(3)));
 
     let made = w.create(json!({ "name": "box", "size": "standard", "env": { "ANTHROPIC_API_KEY": "sk-ant-owner-key" } })).await;
     let text = made.to_string();
@@ -229,7 +229,7 @@ async fn a_sandbox_runs_on_agent37_from_create_to_delete() {
     let id = made["sandbox"]["id"].as_str().unwrap().to_string();
     let machine = made["machine"]["id"].as_str().unwrap().to_string();
     assert_eq!((made["sandbox"]["status"].as_str(), made["sandbox"]["machine"].as_str()), (Some("creating"), Some(machine.as_str())));
-    assert_eq!(made["machine"]["sandbox"], json!({ "backend": "agent37", "size": "standard", "status": "creating", "monthly_cents": 2000 }));
+    assert_eq!(made["machine"]["sandbox"], json!({ "backend": "agent37", "size": "standard", "status": "creating", "hourly_cents": 3 }));
 
     // The reconciler creates the instance from roll's template, with the machine's token.
     let running = w.until(&id, "running", status_is("running")).await;
@@ -272,7 +272,7 @@ async fn a_sandbox_runs_on_agent37_from_create_to_delete() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     let row = &usage["sandboxes"][0];
-    assert_eq!((row["sandbox"].as_str(), row["size"].as_str(), row["monthly_cents"].as_u64()), (Some(id.as_str()), Some("standard"), Some(2000)), "{usage}");
+    assert_eq!((row["sandbox"].as_str(), row["size"].as_str(), row["hourly_cents"].as_u64()), (Some(id.as_str()), Some("standard"), Some(3)), "{usage}");
     assert_eq!(usage["totals"]["running_ms"], row["running_ms"]);
     let (s, _) = w.req("GET", "/v1/code/agents/acme/sandboxes/usage?month=1999-01", None).await;
     assert_eq!(s, StatusCode::OK);

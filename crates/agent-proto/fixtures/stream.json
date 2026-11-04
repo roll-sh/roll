@@ -126,7 +126,7 @@
         "backend": "agent37",
         "size": "2cpu-4gb",
         "status": "running",
-        "monthly_cents": 2000
+        "hourly_cents": 3
       },
       "created_at": 1762000000000,
       "last_seen": 1762000000000

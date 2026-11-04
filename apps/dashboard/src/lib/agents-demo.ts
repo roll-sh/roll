@@ -82,9 +82,9 @@ const gemini: ProviderInfo = {
 };
 
 const DEMO_SIZES: SandboxSize[] = [
-  { name: "standard", cpu: 2, memory_gb: 4, disk_gb: 20, monthly_cents: 2000 },
-  { name: "large", cpu: 4, memory_gb: 8, disk_gb: 40, monthly_cents: 4000 },
-  { name: "xl", cpu: 8, memory_gb: 16, disk_gb: 80, monthly_cents: 8000 },
+  { name: "standard", cpu: 2, memory_gb: 4, disk_gb: 20, hourly_cents: 3 },
+  { name: "large", cpu: 4, memory_gb: 8, disk_gb: 40, hourly_cents: 6 },
+  { name: "xl", cpu: 8, memory_gb: 16, disk_gb: 80, hourly_cents: 10 },
 ];
 
 const DEMO_REPOS: RepoChoice[] = [
@@ -492,7 +492,7 @@ export class DemoOwner implements AgentsTransport {
   private sandboxMachine(s: Sandbox, patch: Partial<Machine>) {
     const m = this.machines.get(s.machine);
     if (!m) return;
-    const next: Machine = { ...m, ...patch, sandbox: { backend: s.backend, size: s.size.name, status: s.status, monthly_cents: s.size.monthly_cents } };
+    const next: Machine = { ...m, ...patch, sandbox: { backend: s.backend, size: s.size.name, status: s.status, hourly_cents: s.size.hourly_cents } };
     this.machines.set(m.id, next);
     this.emit({ type: "machine", cursor: ++this.cursor, machine: next });
   }
@@ -578,10 +578,10 @@ export class DemoOwner implements AgentsTransport {
               sandbox: s.id,
               name: s.name,
               size: s.size.name,
-              monthly_cents: s.size.monthly_cents,
+              hourly_cents: s.size.hourly_cents,
               running_ms: Math.round(hours * 3_600_000),
               running_hours: hours,
-              price_usd: (hours * s.size.monthly_cents) / 100 / 730,
+              price_usd: (hours * s.size.hourly_cents) / 100,
             };
           });
           const sum = (f: (r: (typeof rows)[number]) => number) => rows.reduce((a, r) => a + f(r), 0);
@@ -636,7 +636,7 @@ export class DemoOwner implements AgentsTransport {
       name: "build-box",
       online: true,
       info: { hostname: "build-box", os: "linux", arch: "x86_64", version: "0.1.0", home: "/home/roll", providers: [codex(), claude("missing")] },
-      sandbox: { backend: "agent37", size: "standard", status: "running", monthly_cents: 2000 },
+      sandbox: { backend: "agent37", size: "standard", status: "running", hourly_cents: 3 },
       created_at: t0,
       last_seen: now(),
     });

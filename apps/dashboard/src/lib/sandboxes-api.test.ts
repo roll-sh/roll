@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canStart, canStop, createSandboxesApi, formatMonthly, sandboxListD, type Sandbox } from "./sandboxes-api";
+import { canStart, canStop, createSandboxesApi, formatHourly, sandboxListD, type Sandbox } from "./sandboxes-api";
 import { decode } from "./decode";
 
 const sandbox = (over: Partial<Sandbox> = {}): Sandbox => ({
@@ -7,7 +7,7 @@ const sandbox = (over: Partial<Sandbox> = {}): Sandbox => ({
   name: "box",
   machine: "mch_1",
   backend: "agent37",
-  size: { name: "standard", cpu: 2, memory_gb: 4, disk_gb: 8, monthly_cents: 2000 },
+  size: { name: "standard", cpu: 2, memory_gb: 4, disk_gb: 8, hourly_cents: 3 },
   status: "running",
   desired: "running",
   error: null,
@@ -31,7 +31,7 @@ function fakeFetch(answers: Record<string, [number, unknown]>) {
 describe("sandboxes api", () => {
   it("lists, creates, starts, stops, deletes and reads usage on the documented routes", async () => {
     const s = sandbox();
-    const machine = { id: "mch_1", name: "box", online: false, sandbox: { backend: "agent37", size: "standard", status: "creating", monthly_cents: 2000 }, created_at: 1 };
+    const machine = { id: "mch_1", name: "box", online: false, sandbox: { backend: "agent37", size: "standard", status: "creating", hourly_cents: 3 }, created_at: 1 };
     const { f, asked } = fakeFetch({
       "GET https://api/v1/code/agents/acme/sandboxes": [200, { sandboxes: [s], sizes: [s.size], max: 5, backend: "agent37" }],
       "POST https://api/v1/code/agents/acme/sandboxes": [201, { sandbox: { ...s, status: "creating" }, machine }],
@@ -41,12 +41,12 @@ describe("sandboxes api", () => {
       "DELETE https://api/v1/code/agents/acme/sandboxes/sbx_2": [202, { ...s, id: "sbx_2", status: "deleting", desired: "deleted" }],
       "GET https://api/v1/code/agents/acme/sandboxes/usage?month=2026-11": [
         200,
-        { owner: "acme", month: "2026-11", sandboxes: [{ sandbox: "sbx_1", name: "box", size: "standard", monthly_cents: 2000, running_ms: 3_600_000, running_hours: 1, price_usd: 0.03 }], totals: { running_ms: 3_600_000, running_hours: 1, price_usd: 0.03 } },
+        { owner: "acme", month: "2026-11", sandboxes: [{ sandbox: "sbx_1", name: "box", size: "standard", hourly_cents: 3, running_ms: 3_600_000, running_hours: 1, price_usd: 0.03 }], totals: { running_ms: 3_600_000, running_hours: 1, price_usd: 0.03 } },
       ],
     });
     const api = createSandboxesApi("https://api", "rlc_tok", undefined, f);
     const list = await api.list("acme");
-    expect([list.backend, list.max, list.sandboxes[0].size.monthly_cents]).toEqual(["agent37", 5, 2000]);
+    expect([list.backend, list.max, list.sandboxes[0].size.hourly_cents]).toEqual(["agent37", 5, 3]);
     const made = await api.create("acme", { name: "box", env: { ANTHROPIC_API_KEY: "sk-ant" } });
     expect([made.sandbox.status, made.machine.sandbox?.status]).toEqual(["creating", "creating"]);
     expect(asked[1].body).toEqual({ name: "box", env: { ANTHROPIC_API_KEY: "sk-ant" } });
@@ -77,8 +77,9 @@ describe("sandboxes api", () => {
   });
 
   it("formats prices and says what can be done", () => {
-    expect(formatMonthly(2000)).toBe("$20/mo");
-    expect(formatMonthly(476)).toBe("$4.76/mo");
+    expect(formatHourly(3)).toBe("$0.03/h");
+    expect(formatHourly(10)).toBe("$0.10/h");
+    expect(formatHourly(120)).toBe("$1.20/h");
     expect(canStop(sandbox())).toBe(true);
     expect(canStart(sandbox())).toBe(false);
     expect(canStart(sandbox({ status: "stopped", desired: "stopped" }))).toBe(true);

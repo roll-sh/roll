@@ -1239,8 +1239,8 @@ pub struct SandboxInfo {
     pub backend: String,
     pub size: String,
     pub status: SandboxStatus,
-    /// What it costs per month while always on, in US cents.
-    pub monthly_cents: u32,
+    /// What it costs per running hour, in US cents.
+    pub hourly_cents: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

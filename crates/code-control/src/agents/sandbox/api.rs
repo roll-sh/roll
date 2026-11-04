@@ -4,7 +4,7 @@
 
 use super::reconcile::seal_scope;
 use super::store::{self, Created, NewSandbox, SandboxRow};
-use super::{Desired, price_usd};
+use super::{Desired, price_usd, round_usd};
 use crate::agents::api::{machine_name, manageable, new_machine_token};
 use crate::api::{Body, Q};
 use crate::{Caller, Code, Error, Result, hash_token};
@@ -215,22 +215,21 @@ async fn usage(State(code): S, caller: Caller, Path(owner): Path<String>, Q(q): 
     };
     let rows = store::usage(code.db.sql(), &o.id, &month)?;
     let hours = |ms: i64| (ms as f64 / 36_000.0).round() / 100.0;
-    let round2 = |x: f64| (x * 100.0).round() / 100.0;
     let (mut total_ms, mut total_usd) = (0i64, 0.0f64);
     let sandboxes: Vec<Value> = rows
         .iter()
         .map(|u| {
-            let usd = price_usd(u.running_ms, u.monthly_cents);
+            let usd = price_usd(u.running_ms, u.hourly_cents);
             total_ms += u.running_ms;
             total_usd += usd;
-            json!({ "sandbox": u.sandbox_id, "name": u.name, "size": u.size, "monthly_cents": u.monthly_cents, "running_ms": u.running_ms, "running_hours": hours(u.running_ms), "price_usd": round2(usd) })
+            json!({ "sandbox": u.sandbox_id, "name": u.name, "size": u.size, "hourly_cents": u.hourly_cents, "running_ms": u.running_ms, "running_hours": hours(u.running_ms), "price_usd": round_usd(usd) })
         })
         .collect();
     Ok(Json(json!({
         "owner": o.name,
         "month": month,
         "sandboxes": sandboxes,
-        "totals": { "running_ms": total_ms, "running_hours": hours(total_ms), "price_usd": round2(total_usd) },
+        "totals": { "running_ms": total_ms, "running_hours": hours(total_ms), "price_usd": round_usd(total_usd) },
     })))
 }
 

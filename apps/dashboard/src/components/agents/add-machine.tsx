@@ -4,7 +4,7 @@ import { ChevronRight, Cloud, KeyRound, Laptop, X } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type { Machine } from "@/lib/agents-api";
-import { formatMonthly, type SandboxSize } from "@/lib/sandboxes-api";
+import { formatHourly, type SandboxSize } from "@/lib/sandboxes-api";
 import { CopyButton, input, primary, useCopy } from "../ui";
 import { apiFlag, useInstallLine } from "./connect";
 import { useAgents } from "./use-agents";
@@ -166,7 +166,7 @@ function RentSandbox({ onCreated }: { onCreated?: (m: Machine) => void }) {
         )}
         <div className="flex items-center gap-2">
           <button type="submit" className={primary} disabled={busy || full || !chosen}>
-            {busy ? <span className="shimmer">Renting…</span> : `Rent for ${formatMonthly(chosen?.monthly_cents ?? 0)}`}
+            {busy ? <span className="shimmer">Renting…</span> : `Rent for ${formatHourly(chosen?.hourly_cents ?? 0)}`}
           </button>
           <span className="text-[11.5px] text-subtle">
             {used} of {list.max} in use
@@ -189,7 +189,7 @@ function SizeOption({ size, checked, onChange }: { size: SandboxSize; checked: b
       <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-subtle">
         {size.cpu} vCPU · {size.memory_gb} GB · {size.disk_gb} GB disk
       </span>
-      <span className="font-mono text-[11.5px]">{formatMonthly(size.monthly_cents)}</span>
+      <span className="font-mono text-[11.5px]">{formatHourly(size.hourly_cents)}</span>
     </label>
   );
 }

@@ -409,8 +409,9 @@ that change (checks, reviews, the merge queue, landing) shows on the thread. The
 
 A sandbox is a machine roll hosts: a container running `roll agent up` with a machine token, so it
 appears on the canvas like any other machine (`Machine.sandbox`: backend, size, status, price). It's
-the product for people who don't want to connect their own machine: $20 a month for an always-on
-2 vCPU / 4 GB (`standard`; larger sizes are priced in config). Code: `code-control/src/agents/sandbox/`;
+the product for people who don't want to connect their own machine: 3¢ per running hour for an
+always-on 2 vCPU / 4 GB (`standard`; `large` 6¢, `xlarge` 10¢; sizes are priced in config).
+Prices are integer US cents per running hour (`hourly_cents`), and that is what's charged. Code: `code-control/src/agents/sandbox/`;
 routes: docs/code/http-api.md, "Sandboxes".
 
 - **Backends** implement `SandboxBackend` (create, find by roll's id, status, start, stop, delete;
@@ -471,8 +472,8 @@ routes: docs/code/http-api.md, "Sandboxes".
   logged and left alone: another deployment may share the account (roll never removes sandbox
   rows, so its own are always known).
 - **Metering**: at each look, running time is added to `agent_sandbox_usage` per sandbox and UTC
-  month (split at month boundaries), with the size's monthly price at creation; a month is 730
-  hours. `GET …/sandboxes/usage` shows it; there's no payment processor.
+  month (split at month boundaries), with the size's hourly price at creation; a row costs
+  hours × `hourly_cents` / 100 dollars. `GET …/sandboxes/usage` shows it; there's no payment processor.
 - **Limits** (config): sandboxes per owner (`ROLL_SANDBOX_MAX_PER_OWNER`, 5), sizes
   (`ROLL_SANDBOX_SIZES`), the URL sandboxes connect to (`ROLL_SANDBOX_API_URL`, default the API URL).
 

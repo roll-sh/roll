@@ -20,7 +20,7 @@ export interface SandboxSize {
   cpu: number;
   memory_gb: number;
   disk_gb: number;
-  monthly_cents: number;
+  hourly_cents: number;
 }
 
 /** What the owner asked the sandbox to be. */
@@ -71,7 +71,7 @@ export interface SandboxUsageRow {
   /** `null` for a row whose sandbox record is gone. */
   name: string | null;
   size: string;
-  monthly_cents: number;
+  hourly_cents: number;
   running_ms: number;
   running_hours: number;
   price_usd: number;
@@ -85,7 +85,7 @@ export interface SandboxUsage {
   totals: { running_ms: number; running_hours: number; price_usd: number };
 }
 
-const sizeD = obj<SandboxSize>({ name: str, cpu: int, memory_gb: int, disk_gb: int, monthly_cents: int });
+const sizeD = obj<SandboxSize>({ name: str, cpu: int, memory_gb: int, disk_gb: int, hourly_cents: int });
 
 export const sandboxD = obj<Sandbox>({
   id: str,
@@ -117,7 +117,7 @@ export const sandboxUsageD = obj<SandboxUsage>({
       sandbox: str,
       name: withDefault(nullable(str), () => null),
       size: str,
-      monthly_cents: int,
+      hourly_cents: int,
       running_ms: int,
       running_hours: num,
       price_usd: num,
@@ -126,10 +126,9 @@ export const sandboxUsageD = obj<SandboxUsage>({
   totals: obj<SandboxUsage["totals"]>({ running_ms: int, running_hours: num, price_usd: num }),
 });
 
-/** What a sandbox costs per month, as shown: `$20/mo`. */
-export function formatMonthly(cents: number): string {
-  const dollars = cents / 100;
-  return `$${Number.isInteger(dollars) ? dollars : dollars.toFixed(2)}/mo`;
+/** What a sandbox costs per running hour, as shown: `$0.03/h`, `$1.20/h`. */
+export function formatHourly(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}/h`;
 }
 
 /** A sandbox the owner can start (stopped, and not on its way out). */

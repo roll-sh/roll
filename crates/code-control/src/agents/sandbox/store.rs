@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS agent_sandboxes (
     cpu INTEGER NOT NULL,
     memory_gb INTEGER NOT NULL,
     disk_gb INTEGER NOT NULL,
-    monthly_cents INTEGER NOT NULL,
+    hourly_cents INTEGER NOT NULL,
     -- creating | running | stopped | failed | deleting (agent_proto::SandboxStatus)
     status TEXT NOT NULL,
     -- running | stopped | deleted: what the owner asked for.
@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS agent_sandbox_usage (
     month TEXT NOT NULL,
     owner_id TEXT NOT NULL,
     size TEXT NOT NULL,
-    monthly_cents INTEGER NOT NULL,
+    hourly_cents INTEGER NOT NULL,
     running_ms INTEGER NOT NULL,
     PRIMARY KEY (sandbox_id, month)
 );
@@ -71,11 +71,11 @@ pub struct SandboxRow {
 
 impl SandboxRow {
     pub fn info(&self) -> SandboxInfo {
-        SandboxInfo { backend: self.backend.clone(), size: self.size.name.clone(), status: self.status, monthly_cents: self.size.monthly_cents }
+        SandboxInfo { backend: self.backend.clone(), size: self.size.name.clone(), status: self.status, hourly_cents: self.size.hourly_cents }
     }
 }
 
-const COLS: &str = "id, owner_id, machine_id, name, backend, backend_id, size, cpu, memory_gb, disk_gb, monthly_cents, status, desired, sealed, error, \
+const COLS: &str = "id, owner_id, machine_id, name, backend, backend_id, size, cpu, memory_gb, disk_gb, hourly_cents, status, desired, sealed, error, \
                     created_at, updated_at, metered_at, deleted_at";
 
 pub(crate) fn status_str(s: SandboxStatus) -> &'static str {
@@ -107,7 +107,7 @@ fn row(r: &Row<'_>) -> code_sql::Result<SandboxRow> {
         name: r.get(3)?,
         backend: r.get(4)?,
         backend_id: r.get(5)?,
-        size: Size { name: r.get(6)?, cpu: u(7)?, memory_gb: u(8)?, disk_gb: u(9)?, monthly_cents: u(10)? },
+        size: Size { name: r.get(6)?, cpu: u(7)?, memory_gb: u(8)?, disk_gb: u(9)?, hourly_cents: u(10)? },
         status: parse_status(&r.get::<_, String>(11)?),
         desired: Desired::parse(&r.get::<_, String>(12)?),
         sealed: r.get(13)?,
@@ -195,7 +195,7 @@ pub fn create(db: &code_sql::Db, n: &NewSandbox<'_>) -> code_sql::Result<Created
                 n.size.cpu as i64,
                 n.size.memory_gb as i64,
                 n.size.disk_gb as i64,
-                n.size.monthly_cents as i64,
+                n.size.hourly_cents as i64,
                 n.sealed,
                 now,
                 now
@@ -211,9 +211,9 @@ pub fn create(db: &code_sql::Db, n: &NewSandbox<'_>) -> code_sql::Result<Created
 fn meter(c: &Conn<'_>, s: &SandboxRow, from: i64, to: i64) -> code_sql::Result<()> {
     for (month, ms) in super::split_by_month(from, to) {
         c.execute(
-            "INSERT INTO agent_sandbox_usage (sandbox_id, month, owner_id, size, monthly_cents, running_ms) VALUES (?, ?, ?, ?, ?, ?) \
+            "INSERT INTO agent_sandbox_usage (sandbox_id, month, owner_id, size, hourly_cents, running_ms) VALUES (?, ?, ?, ?, ?, ?) \
              ON CONFLICT (sandbox_id, month) DO UPDATE SET running_ms = agent_sandbox_usage.running_ms + excluded.running_ms",
-            params![s.id, month, s.owner_id, s.size.name.as_str(), s.size.monthly_cents as i64, ms],
+            params![s.id, month, s.owner_id, s.size.name.as_str(), s.size.hourly_cents as i64, ms],
         )?;
     }
     Ok(())
@@ -317,13 +317,13 @@ pub struct UsageRow {
     pub sandbox_id: String,
     pub name: Option<String>,
     pub size: String,
-    pub monthly_cents: u32,
+    pub hourly_cents: u32,
     pub running_ms: i64,
 }
 
 pub fn usage(db: &code_sql::Db, owner_id: &str, month: &str) -> code_sql::Result<Vec<UsageRow>> {
     db.query(
-        "SELECT u.sandbox_id, s.name, u.size, u.monthly_cents, u.running_ms FROM agent_sandbox_usage u \
+        "SELECT u.sandbox_id, s.name, u.size, u.hourly_cents, u.running_ms FROM agent_sandbox_usage u \
          LEFT JOIN agent_sandboxes s ON s.id = u.sandbox_id WHERE u.owner_id = ? AND u.month = ? ORDER BY u.sandbox_id",
         [owner_id, month],
         |r| {
@@ -331,7 +331,7 @@ pub fn usage(db: &code_sql::Db, owner_id: &str, month: &str) -> code_sql::Result
                 sandbox_id: r.get(0)?,
                 name: r.get(1)?,
                 size: r.get(2)?,
-                monthly_cents: r.get::<_, i64>(3)?.clamp(0, u32::MAX as i64) as u32,
+                hourly_cents: r.get::<_, i64>(3)?.clamp(0, u32::MAX as i64) as u32,
                 running_ms: r.get(4)?,
             })
         },

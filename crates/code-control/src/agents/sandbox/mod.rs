@@ -27,9 +27,6 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use tokio::sync::Notify;
 
-/// One hour of a month's price: an always-on month is 730 hours.
-pub const MONTH_MS: i64 = 730 * 3_600_000;
-
 /// A size owners pick, and its price.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Size {
@@ -37,13 +34,13 @@ pub struct Size {
     pub cpu: u32,
     pub memory_gb: u32,
     pub disk_gb: u32,
-    /// What it costs per month while always on, in US cents.
-    pub monthly_cents: u32,
+    /// What it costs per running hour, in US cents.
+    pub hourly_cents: u32,
 }
 
 impl Size {
-    fn new(name: &str, cpu: u32, memory_gb: u32, disk_gb: u32, monthly_cents: u32) -> Size {
-        Size { name: name.into(), cpu, memory_gb, disk_gb, monthly_cents }
+    fn new(name: &str, cpu: u32, memory_gb: u32, disk_gb: u32, hourly_cents: u32) -> Size {
+        Size { name: name.into(), cpu, memory_gb, disk_gb, hourly_cents }
     }
 }
 
@@ -113,20 +110,20 @@ impl Default for SandboxConfig {
     }
 }
 
-/// $20 a month for the always-on 2 vCPU / 4 GB, and the larger agent37 shapes.
+/// 3¢ an hour for the 2 vCPU / 4 GB, and the larger agent37 shapes.
 pub fn default_sizes() -> Vec<Size> {
-    vec![Size::new("standard", 2, 4, 8, 2000), Size::new("large", 4, 8, 16, 4000), Size::new("xlarge", 4, 16, 32, 7000)]
+    vec![Size::new("standard", 2, 4, 8, 3), Size::new("large", 4, 8, 16, 6), Size::new("xlarge", 4, 16, 32, 10)]
 }
 
-/// `name=cpu:memory_gb:disk_gb:monthly_cents,…`.
+/// `name=cpu:memory_gb:disk_gb:hourly_cents,…`.
 pub fn parse_sizes(s: &str) -> anyhow::Result<Vec<Size>> {
     let mut out: Vec<Size> = Vec::new();
     for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-        let (name, rest) = part.split_once('=').ok_or_else(|| anyhow::anyhow!("size {part:?}: expected name=cpu:memory_gb:disk_gb:monthly_cents"))?;
+        let (name, rest) = part.split_once('=').ok_or_else(|| anyhow::anyhow!("size {part:?}: expected name=cpu:memory_gb:disk_gb:hourly_cents"))?;
         let n: Vec<u32> = rest.split(':').map(|x| x.trim().parse::<u32>()).collect::<Result<_, _>>().map_err(|_| anyhow::anyhow!("size {part:?}: numbers expected"))?;
         let name = name.trim();
         if n.len() != 4 || n[0] == 0 || n[1] == 0 || name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-            anyhow::bail!("size {part:?}: expected name=cpu:memory_gb:disk_gb:monthly_cents");
+            anyhow::bail!("size {part:?}: expected name=cpu:memory_gb:disk_gb:hourly_cents");
         }
         if out.iter().any(|s| s.name == name) {
             anyhow::bail!("size {name} is named twice");
@@ -147,7 +144,7 @@ impl SandboxConfig {
     ///   `ROLL_SANDBOX_DOCKER_NETWORK` (default: `roll-sandboxes`, made on first use),
     ///   `ROLL_SANDBOX_DOCKER_HOST_GATEWAY` (`1`: `host.docker.internal`), `ROLL_SANDBOX_DOCKER_DISK_LIMIT`
     ///   (`1`: `--storage-opt size=`)
-    /// - `ROLL_SANDBOX_SIZES` (`name=cpu:memory_gb:disk_gb:monthly_cents,…`), `ROLL_SANDBOX_MAX_PER_OWNER`,
+    /// - `ROLL_SANDBOX_SIZES` (`name=cpu:memory_gb:disk_gb:hourly_cents,…`), `ROLL_SANDBOX_MAX_PER_OWNER`,
     ///   `ROLL_SANDBOX_API_URL`
     pub fn from_env() -> anyhow::Result<SandboxConfig> {
         Self::from_lookup(|k| std::env::var(k).ok().filter(|v| !v.trim().is_empty()))
@@ -327,9 +324,16 @@ pub fn split_by_month(from: i64, to: i64) -> Vec<(String, i64)> {
     out
 }
 
-/// What `running_ms` of a size priced at `monthly_cents` costs, in US dollars.
-pub fn price_usd(running_ms: i64, monthly_cents: u32) -> f64 {
-    running_ms.max(0) as f64 / MONTH_MS as f64 * monthly_cents as f64 / 100.0
+/// What `running_ms` of a size priced at `hourly_cents` costs, in US dollars: hours × cents / 100.
+pub fn price_usd(running_ms: i64, hourly_cents: u32) -> f64 {
+    // ms × cents is exact in i128; one division keeps whole hours at whole cents.
+    (running_ms.max(0) as i128 * hourly_cents as i128) as f64 / 360_000_000.0
+}
+
+/// A dollar amount as the API shows it: to a hundredth of a cent, so short runs at a few cents an
+/// hour don't round to nothing.
+pub fn round_usd(usd: f64) -> f64 {
+    (usd * 10_000.0).round() / 10_000.0
 }
 
 #[cfg(test)]
@@ -343,13 +347,22 @@ mod tests {
         assert_eq!(split_by_month(t(2026, 1, 31, 23), t(2026, 2, 1, 2)), vec![("2026-01".into(), 3_600_000), ("2026-02".into(), 7_200_000)]);
         assert_eq!(split_by_month(t(2026, 12, 31, 0), t(2027, 1, 1, 1)), vec![("2026-12".into(), 86_400_000), ("2027-01".into(), 3_600_000)]);
         assert_eq!(split_by_month(t(2026, 5, 1, 0), t(2026, 5, 1, 0)), vec![]);
-        assert_eq!(price_usd(MONTH_MS, 2000), 20.0);
+    }
+
+    #[test]
+    fn running_time_is_priced_by_the_hour() {
+        let hour = 3_600_000;
+        assert_eq!(round_usd(price_usd(hour, 3)), 0.03);
+        assert_eq!(round_usd(price_usd(hour * 3 / 2, 3)), 0.045);
+        assert_eq!(round_usd(price_usd(730 * hour, 10)), 73.0);
+        assert_eq!(price_usd(-1, 3), 0.0);
+        assert_eq!(default_sizes()[0], Size::new("standard", 2, 4, 8, 3));
     }
 
     #[test]
     fn sizes_and_env_config() {
-        let s = parse_sizes("small=2:4:8:2000, big=4:16:32:7000").unwrap();
-        assert_eq!(s[1], Size::new("big", 4, 16, 32, 7000));
+        let s = parse_sizes("small=2:4:8:3, big=4:16:32:10").unwrap();
+        assert_eq!(s[1], Size::new("big", 4, 16, 32, 10));
         for bad in ["", "x=1:2:3", "x=0:2:3:4", "=1:2:3:4", "a=1:1:1:1,a=1:1:1:1", "a b=1:1:1:1"] {
             assert!(parse_sizes(bad).is_err(), "{bad}");
         }
