@@ -1,0 +1,111 @@
+ok 1 - filter file without patterns
+ok 2 - table one dumped
+ok 3 - table two dumped
+ok 4 - table three dumped
+ok 5 - table three one dumped
+ok 6 - dump tables with filter patterns as well as comments and whitespace
+ok 7 - dumped table one
+ok 8 - dumped table two
+ok 9 - table three not dumped
+ok 10 - table three_one not dumped
+ok 11 - content of table one is not included
+ok 12 - content of table two is included
+ok 13 - filter file without patterns
+ok 14 - dumped table one
+ok 15 - dumped table two
+ok 16 - dumped table three
+ok 17 - dump tables with exclusion of a single table
+ok 18 - table one not dumped
+ok 19 - dumped table two
+ok 20 - dumped table three
+ok 21 - dumped table three_one
+ok 22 - dump tables with wildcard in pattern
+ok 23 - table one not dumped
+ok 24 - table two not dumped
+ok 25 - dumped table three
+ok 26 - dumped table three_one
+ok 27 - dump tables with multiline names requiring quoting
+ok 28 - dump table with new line in name
+ok 29 - dump tables with filter
+ok 30 - dump table with new line in name
+ok 31 - exclude the public schema
+ok 32 - no table dumped
+ok 33 - exclude the public schema with multiple filters
+ok 34 - no table dumped
+ok 35 - dump tables with filter
+ok 36 - dump table with multiline strange name
+ok 37 - dump tables with filter
+ok 38 - dump table with multiline strange name
+ok 39 - dump nonexisting foreign server: exit code not 0
+ok 40 - dump nonexisting foreign server: matches
+GLOB(0x5610d782e9a0)include foreign_data dummyserver
+ok 41 - dump foreign_data with filter
+ok 42 - dump foreign server
+ok 43 - erroneously exclude foreign server: exit code not 0
+ok 44 - erroneously exclude foreign server: matches
+ok 45 - invalid syntax: incorrect filter command: exit code not 0
+ok 46 - invalid syntax: incorrect filter command: matches
+ok 47 - invalid syntax: invalid object type specified: exit code not 0
+ok 48 - invalid syntax: invalid object type specified: matches
+ok 49 - invalid syntax: missing object identifier pattern: exit code not 0
+ok 50 - invalid syntax: missing object identifier pattern: matches
+ok 51 - invalid syntax: extra content after object identifier pattern: exit code not 0
+ok 52 - invalid syntax: extra content after object identifier pattern: matches
+ok 53 - strict names with matching pattern
+ok 54 - no table dumped
+ok 55 - inclusion of non-existing objects with --strict names: exit code not 0
+ok 56 - inclusion of non-existing objects with --strict names: matches
+ok 57 - dump tables with exclusion of a database
+ok 58 - database postgres is not dumped
+ok 59 - database template1 is dumped
+ok 60 - pg_dumpall: option --exclude-database cannot be used together with -g/--globals-only: exit code not 0
+ok 61 - pg_dumpall: option --exclude-database cannot be used together with -g/--globals-only: matches
+ok 62 - invalid syntax: incorrect filter command: exit code not 0
+ok 63 - invalid syntax: incorrect filter command: matches
+ok 64 - invalid syntax: exclusion of non-existing object type: exit code not 0
+ok 65 - invalid syntax: exclusion of non-existing object type: matches
+ok 66 - invalid syntax: exclusion of unsupported object type: exit code not 0
+ok 67 - invalid syntax: exclusion of unsupported object type: matches
+ok 68 - dump all tables
+ok 69 - restore tables with filter
+ok 70 - wanted table restored
+ok 71 - unwanted table is not restored
+ok 72 - invalid syntax: inclusion of unallowed object: exit code not 0
+ok 73 - invalid syntax: inclusion of unallowed object: matches
+ok 74 - invalid syntax: inclusion of unallowed object: exit code not 0
+ok 75 - invalid syntax: inclusion of unallowed object: matches
+ok 76 - invalid syntax: exclusion of unallowed object: exit code not 0
+ok 77 - invalid syntax: exclusion of unallowed object: matches
+ok 78 - invalid syntax: exclusion of unallowed object: exit code not 0
+ok 79 - invalid syntax: exclusion of unallowed object: matches
+ok 80 - dump all objects from sourcedb
+ok 81 - restore function with filter
+ok 82 - wanted function restored
+ok 83 - unwanted function is not restored
+ok 84 - restore function with filter
+ok 85 - wanted function restored
+ok 86 - restore function with filter
+ok 87 - wanted index restored
+ok 88 - unwanted index are not restored
+ok 89 - wanted trigger restored
+ok 90 - unwanted trigger is not restored
+ok 91 - restore function with filter
+ok 92 - wanted table from schema restored
+ok 93 - wanted sequence from schema restored
+ok 94 - unwanted table is not restored
+ok 95 - restore function with filter
+ok 96 - unwanted table from schema is not restored
+ok 97 - unwanted sequence from schema is not restored
+ok 98 - wanted table restored
+ok 99 - wanted table restored
+ok 100 - filter file without patterns
+ok 101 - dumped children table
+ok 102 - filter file without patterns
+ok 103 - exclude dumped children table
+ok 104 - filter file without patterns
+ok 105 - dumped children table
+ok 106 - exclude dumped children table
+ok 107 - dump nonexisting extension: exit code not 0
+ok 108 - dump nonexisting extension: matches
+1..108
+

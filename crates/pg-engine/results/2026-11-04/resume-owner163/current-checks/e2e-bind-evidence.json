@@ -1,0 +1,10 @@
+{
+  "current_shell_ROLL_E2E_BIND": null,
+  "runner_scripts_export_bind": false,
+  "historical_inherited_env_not_captured": true,
+  "live_owned_runner_env": {
+    "1191072": [],
+    "952356": [],
+    "2323446": []
+  }
+}
