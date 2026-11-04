@@ -1539,6 +1539,7 @@ impl ParScan {
             skipped: 0,
             stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             inline: Some(Box::new(Inline { cur: None, d: Arc::new(d), scratch: Default::default(), lazy, batch: RowBatch::default() })),
+            late: None,
         }
     }
 
