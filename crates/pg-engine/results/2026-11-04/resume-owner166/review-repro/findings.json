@@ -94,5 +94,6 @@
     "minimalfix/currentexactsourcebuild/debug+releasegoldens/Clippy",
     "10ktables+composites/performance+footprint HELD",
     "parentcombinedservice"
-  ]
+  ],
+  "golden_regression": "PG18.6 recorded both pg_class+pg_attribute false;exact0cd26bfd both true;expectedbeforefixFAIL101 retained"
 }
