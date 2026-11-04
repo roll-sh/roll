@@ -18356,14 +18356,8 @@ impl Render<'_> {
         let total: u64 = list
             .iter()
             .map(|r| match r {
-                Removed::Scan(k) => self
-                    .instr
-                    .and_then(|i| i.get(*k))
-                    .map_or(0, |s| s.removed * self.rescans),
-                Removed::Diff(k) => self
-                    .instr
-                    .and_then(|i| i.get(*k))
-                    .map_or(0, |s| (s.rows * self.rescans).saturating_sub(st.rows)),
+                Removed::Scan(k) => self.stats(Some(*k)).map_or(0, |s| s.removed),
+                Removed::Diff(k) => self.stats(Some(*k)).map_or(0, |s| s.rows.saturating_sub(st.rows)),
             })
             .sum();
         (total as f64 / st.loops as f64).round()
