@@ -6,8 +6,10 @@ import type { MenuItemConstructorOptions } from "electron";
 import { activityLine, type TrayModel } from "./status.ts";
 
 export interface MenuActions {
-  open(): void;
-  home(): void;
+  /** Show the main window (the dashboard and roll code). */
+  openRoll(): void;
+  /** Open or focus the Agents window. */
+  openAgents(): void;
   back(): void;
   forward(): void;
   pause(): void;
@@ -25,7 +27,8 @@ export function appMenu(platform: NodeJS.Platform, m: TrayModel, a: MenuActions)
   const agents: MenuItemConstructorOptions = {
     label: "Agents",
     submenu: [
-      { label: "Canvas", accelerator: "CmdOrCtrl+1", click: a.home },
+      { label: "Open roll", accelerator: "CmdOrCtrl+1", click: a.openRoll },
+      { label: "Open agents", accelerator: "CmdOrCtrl+2", click: a.openAgents },
       { type: "separator" },
       { label: m.machine, enabled: false },
       m.paused
@@ -105,7 +108,8 @@ export function trayMenu(m: TrayModel, a: MenuActions): MenuItemConstructorOptio
     { label: m.machine, enabled: false },
     ...(activity ? [{ label: activity, enabled: false }] : []),
     { type: "separator" },
-    { label: "Open roll", click: a.open },
+    { label: "Open agents", click: a.openAgents },
+    { label: "Open roll", click: a.openRoll },
     m.paused
       ? { label: "Resume agents", enabled: m.canPause, click: a.resume }
       : { label: "Pause agents", enabled: m.canPause, click: a.pause },

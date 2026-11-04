@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
  * The dashboard declares the bridge's types in `apps/dashboard/src/lib/desktop.ts` (it can't
  * import this package). Both copies must stay identical.
  */
-const NAMES = ["PendingRequest", "DesktopStatus", "DesktopNotice", "DeepLink", "RollDesktop"];
+const NAMES = ["PendingRequest", "DesktopStatus", "DesktopNotice", "AgentsTarget", "DeepLink", "RollDesktop"];
 
 function declarations(file: string): Map<string, string> {
   const src = readFileSync(new URL(file, import.meta.url), "utf8")

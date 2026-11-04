@@ -1,6 +1,6 @@
 /**
- * `state.json`: what the app remembers between launches (window bounds, whether the agents are
- * paused). Unlike settings it is rewritten by the app, never meant to be edited.
+ * `state.json`: what the app remembers between launches (each window's bounds, whether the agents
+ * are paused). Unlike settings it is rewritten by the app, never meant to be edited.
  */
 import { readFileSync } from "node:fs";
 import { writeJsonAtomic } from "./settings.ts";
@@ -12,9 +12,15 @@ export interface Rect {
   height: number;
 }
 
-export interface AppState {
+/** Where a window was. */
+export interface WindowState {
   bounds: Rect | null;
   maximized: boolean;
+}
+
+/** The main window's state at the top level (as before there were two), the Agents window's under `agents`. */
+export interface AppState extends WindowState {
+  agents: WindowState;
   /** "Pause agents" survives a restart: paused agents never start on their own. */
   paused: boolean;
 }
@@ -24,14 +30,20 @@ export const DEFAULT_SIZE = { width: 1280, height: 820 };
 
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
-export function parseState(raw: unknown): AppState {
-  const o = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
-  const b = o.bounds as Record<string, unknown> | undefined;
+const record = (v: unknown): Record<string, unknown> => (typeof v === "object" && v !== null ? (v as Record<string, unknown>) : {});
+
+function parseWindow(o: Record<string, unknown>): WindowState {
+  const b = record(o.bounds);
   const bounds =
-    b && finite(b.x) && finite(b.y) && finite(b.width) && finite(b.height)
+    finite(b.x) && finite(b.y) && finite(b.width) && finite(b.height)
       ? { x: Math.round(b.x), y: Math.round(b.y), width: Math.round(b.width), height: Math.round(b.height) }
       : null;
-  return { bounds, maximized: o.maximized === true, paused: o.paused === true };
+  return { bounds, maximized: o.maximized === true };
+}
+
+export function parseState(raw: unknown): AppState {
+  const o = record(raw);
+  return { ...parseWindow(o), agents: parseWindow(record(o.agents)), paused: o.paused === true };
 }
 
 export function readState(file: string): AppState {

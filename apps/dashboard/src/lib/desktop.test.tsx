@@ -32,12 +32,14 @@ describe("useDesktop", () => {
     const bridge: RollDesktop = {
       version: "0.1.0",
       platform: "darwin",
+      window: "agents",
       setStatus: vi.fn(),
       notify: vi.fn(),
       onDeepLink: (l) => {
         listener = l;
         return off;
       },
+      openAgents: vi.fn(),
     };
     window.rollDesktop = bridge;
     const focus = vi.fn();
@@ -64,7 +66,15 @@ describe("useDesktop", () => {
   });
 
   it("reports nothing for null data (the demo)", () => {
-    const bridge = { version: "", platform: "linux", setStatus: vi.fn(), notify: vi.fn(), onDeepLink: () => () => {} } satisfies RollDesktop;
+    const bridge = {
+      version: "",
+      platform: "linux",
+      window: "agents",
+      setStatus: vi.fn(),
+      notify: vi.fn(),
+      onDeepLink: () => () => {},
+      openAgents: vi.fn(),
+    } satisfies RollDesktop;
     window.rollDesktop = bridge;
     renderHook(() => useDesktop(null, () => {}));
     expect(bridge.setStatus).not.toHaveBeenCalled();

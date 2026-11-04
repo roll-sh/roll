@@ -37,8 +37,8 @@ sidebar app.
   machine tokens, device login, sandboxes and shares.
 - **`apps/dashboard`**: the canvas at `/dashboard/agents`, the "rolling" popover in the header,
   public shares at `/agents/s/<id>` (`src/app/agents/s/[id]`, replayed by `lib/agents-replay.ts`).
-- **`apps/desktop`**: the desktop app (Electron): the canvas in a window, plus this machine's
-  daemon, a tray and notifications (see "Desktop app").
+- **`apps/desktop`**: the desktop app (Electron): roll in a main window and the canvas in its own
+  Agents window, plus this machine's daemon, a tray and notifications (see "Desktop app").
 
 ## Why the daemon owns the truth
 
@@ -518,13 +518,21 @@ node cards are DOM, positioned by the same world transform.
 `apps/desktop` (`@roll/desktop`) is a thin Electron shell, like T3 Code's desktop app around its
 web app: the backend stays the Rust daemon, and the UI stays the dashboard. It does three things:
 
-- **A window on the canvas.** It loads `https://roll.sh/dashboard/agents` (the `url` in
-  `settings.json` in the app's data directory, or `ROLL_DESKTOP_URL` for development against a
-  local dashboard). The renderer is sandboxed and context-isolated, with no Node and no webviews.
-  Only the app's origin (plus `extraOrigins`, for a sign-in provider) loads in the window. Other
-  web links open in the system browser, new windows are never opened, and every web permission
-  is denied except notifications, clipboard writes and fullscreen for the app's own top frame.
-  Window bounds are remembered.
+- **Two windows.** The main window shows roll: it loads `https://roll.sh/dashboard` (the `url`
+  in `settings.json` in the app's data directory, or `ROLL_DESKTOP_URL` for development against
+  a local dashboard). The Agents window shows the canvas at `<origin>/dashboard/agents`. There
+  is one of it, opened from the dashboard header's agents control (`openAgents`), `roll://`
+  links, notifications, the tray and the menu ("Open agents", "Open roll"). The dock icon shows
+  the main window. Closing the Agents window only closes it; the agents keep running. Closing
+  the main window keeps roll in the tray. On macOS the Agents window has no title bar (inset
+  traffic lights at 16,16), so the canvas draws its own 48 px bar. The page pads it and makes it
+  a drag region when `rollDesktop.window` is `"agents"`. Each window remembers its own bounds. In
+  both windows a trackpad pinch reaches the page as ctrl+wheel, so the canvas zooms itself and
+  the page doesn't. Both renderers are sandboxed and context-isolated, with no Node and no
+  webviews. Only the app's origin (plus `extraOrigins`, for a sign-in provider) loads in them.
+  Other web links open in the system browser, new windows are never opened by a page, and every
+  web permission is denied except notifications, clipboard writes and fullscreen for the app's
+  own top frame.
 - **This machine.** It ships the `roll` CLI (`<resources>/bin/roll`; in development
   `target/release/roll` or `ROLL_BIN`) and supervises `roll agent up`, which takes the API and
   token from `agent.json`. If the daemon exits, the app restarts it after 1 s, doubling up to
@@ -535,7 +543,7 @@ web app: the backend stays the Rust daemon, and the UI stays the dashboard. It d
   **First run:** with no `agent.json` (where the CLI keeps it: `ROLL_AGENT_CONFIG`, else
   `~/.config/roll/agent.json`), the app runs `roll agent login --json --api <api>`. It reads the
   `verification_uri` (`/dashboard/agents/connect?code=…`) from the output and opens it in the
-  same window, where the user is already signed in, so approving is one click. When the CLI exits
+  main window, where the user is already signed in, so approving is one click. When the CLI exits
   with the token saved, the daemon starts. The API is `api` in settings (`ROLL_DESKTOP_API`).
   Unset, it is api.roll.sh for roll.sh and the web origin anywhere else. If `agent.json`
   disappears (`roll agent logout`, a revoked machine), the app stops retrying and offers
@@ -545,31 +553,41 @@ web app: the backend stays the Rust daemon, and the UI stays the dashboard. It d
   offline and reconnecting, "offline · retrying in N s" while the daemon is down, paused, not
   signed in, or waiting for approval (with the code). The daemon's own "connected to roll as …"
   and "…; retrying in N s" lines tell it whether the link is up. The tray also shows how many
-  agents are running and how many requests are waiting, with "Open roll", "Pause agents" and
-  "Quit". The dock or taskbar badge counts the waiting requests. Each new approval or question
-  posts one native notification, except while the window is focused. Requests already waiting at
-  launch don't notify. Clicking a notification focuses the thread.
+  agents are running and how many requests are waiting, with "Open agents", "Open roll", "Pause
+  agents" and "Quit". The dock or taskbar badge counts the waiting requests. Each new approval or
+  question posts one native notification, except while the Agents window is focused. Requests
+  already waiting at launch don't notify. Clicking a notification opens the thread in the Agents
+  window.
 
-**The bridge.** The preload exposes `window.rollDesktop`. The main process only accepts its
-messages from the app's own top frame in its window, so the bridge does nothing on any other
-origin. The page reports its state; the shell never talks to the relay itself:
+**The bridge.** The preload exposes `window.rollDesktop` in both windows. The main process only
+accepts its messages from the app's own top frame in one of its windows, so the bridge does
+nothing on any other origin. The page reports its state (from either window; the latest wins);
+the shell never talks to the relay itself:
 
 ```ts
+rollDesktop.window                    // "main" | "agents": the window this page is in
 rollDesktop.setStatus({ running, pending: [{ thread, title, request, kind, summary? }], machines? })
 rollDesktop.notify({ title, body?, thread? })
-rollDesktop.onDeepLink((link) => …)   // { kind: "agents" | "thread" | "connect", … }; returns unsubscribe
+rollDesktop.onDeepLink((link) => …)   // { kind: "agents" | "thread" | "new" | "connect", … }; returns unsubscribe
+rollDesktop.openAgents(target)        // { kind: "canvas" } | { kind: "thread", thread } | { kind: "new" }
 ```
 
 `apps/dashboard/src/lib/desktop.ts` has the same types (a test keeps them identical). Its
 `useDesktop(data, focus)` is the canvas's one call: it sends the status from the agents store
-whenever the status changes, and opens thread links with `focus("t:<id>")`. In a browser it does
-nothing.
+whenever the status changes, and opens thread links with `focus("t:<id>")`. Its
+`openAgentsWindow(target)` opens the Agents window from the main window and returns true; in a
+browser, in the Agents window or in an older app it returns false, so the header control shows
+its in-page popup instead. In a browser every helper does nothing.
 
-**Deep links.** `roll://agents`, `roll://agents/thread/<id>` and
+**Deep links.** `roll://agents`, `roll://agents/thread/<id>`, `roll://agents/new` and
 `roll://agents/connect?code=<user code>` are registered at install (macOS `Info.plist`, Linux
 `x-scheme-handler/roll`, Windows NSIS) and at runtime. They reach the running instance (one
-instance at a time). A page that listens through `onDeepLink` gets agents and thread links
-without a reload. Otherwise the window loads `/dashboard/agents?focus=t:<id>` or the connect page.
+instance at a time). Agents, thread and new links (and `openAgents`) go to the Agents window. If
+it is closed, it opens on `/dashboard/agents`, `?focus=t:<id>` or `?new`. If it is open, it comes
+to the front and its page gets the link through `onDeepLink` without a reload. While the page is
+still loading, the link waits until the page listens. A page that never listens (one that isn't
+the canvas) gets the link's URL loaded 3 s after it finishes loading. Connect links load the
+connect page in the main window.
 
 **Packaging.** electron-builder (`apps/desktop/electron-builder.yml`) builds a dmg and zip for
 macOS, NSIS for Windows, and an AppImage and deb for Linux, with the CLI as an extra resource.

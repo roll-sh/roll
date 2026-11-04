@@ -58,10 +58,11 @@ describe("permissions", () => {
 });
 
 describe("deep links", () => {
-  it("parses the three link shapes", () => {
+  it("parses the four link shapes", () => {
     expect(parseDeepLink("roll://agents")).toEqual({ kind: "agents" });
     expect(parseDeepLink("roll://agents/")).toEqual({ kind: "agents" });
     expect(parseDeepLink("roll://agents/thread/thr_01JX9")).toEqual({ kind: "thread", thread: "thr_01JX9" });
+    expect(parseDeepLink("roll://agents/new")).toEqual({ kind: "new" });
     expect(parseDeepLink("roll://agents/connect?code=ABCD-EFGH")).toEqual({ kind: "connect", code: "ABCD-EFGH" });
   });
 
@@ -77,6 +78,8 @@ describe("deep links", () => {
       "roll://user:pw@agents/thread/t1",
       "https://roll.sh/agents/thread/t1",
       "roll://agents/nope",
+      "roll://agents/new/x",
+      "roll://agents/thread/new/x",
       `roll://agents/thread/${"a".repeat(3000)}`,
       "",
     ]) {
@@ -87,6 +90,7 @@ describe("deep links", () => {
   it("maps links to dashboard paths with escaped values", () => {
     expect(deepLinkPath({ kind: "agents" })).toBe("/dashboard/agents");
     expect(deepLinkPath({ kind: "thread", thread: "t_1" })).toBe("/dashboard/agents?focus=t%3At_1");
+    expect(deepLinkPath({ kind: "new" })).toBe("/dashboard/agents?new");
     expect(deepLinkPath({ kind: "connect", code: "AB-CD" })).toBe("/dashboard/agents/connect?code=AB-CD");
   });
 

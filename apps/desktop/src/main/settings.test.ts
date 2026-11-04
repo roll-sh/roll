@@ -17,6 +17,7 @@ describe("settings", () => {
     const file = join(dir, "settings.json");
     const s = loadSettings(file, {});
     expect(s.url).toBe(DEFAULT_URL);
+    expect(DEFAULT_URL).toBe("https://roll.sh/dashboard");
     expect(s.origin).toBe("https://roll.sh");
     expect(s.apiUrl).toBe("https://api.roll.sh");
     expect(s.daemon).toBe(true);
@@ -24,6 +25,14 @@ describe("settings", () => {
     expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(defaults);
     expect(statSync(file).mode & 0o777).toBe(0o600);
     expect(s.warnings).toEqual([]);
+  });
+
+  it("moves the main window off the old default (the canvas, which has its own window now)", () => {
+    const file = join(dir, "settings.json");
+    writeFileSync(file, JSON.stringify({ ...defaults, url: "https://roll.sh/dashboard/agents" }));
+    expect(loadSettings(file, {}).url).toBe(DEFAULT_URL);
+    // Any other choice is the user's own.
+    expect(parseSettings({ url: "https://roll.sh/dashboard/code" }).url).toBe("https://roll.sh/dashboard/code");
   });
 
   it("reads a self-hosted server and derives the API from its origin", () => {
@@ -74,12 +83,26 @@ describe("settings", () => {
 describe("window state", () => {
   const display = { x: 0, y: 0, width: 1920, height: 1080 };
 
-  it("round-trips bounds and the paused flag", () => {
+  it("round-trips each window's bounds and the paused flag", () => {
     const file = join(dir, "state.json");
-    expect(readState(file)).toEqual({ bounds: null, maximized: false, paused: false });
-    writeState(file, { bounds: { x: 10, y: 20, width: 1000, height: 700 }, maximized: true, paused: true });
-    expect(readState(file)).toEqual({ bounds: { x: 10, y: 20, width: 1000, height: 700 }, maximized: true, paused: true });
-    expect(parseState({ bounds: { x: "1" } })).toEqual({ bounds: null, maximized: false, paused: false });
+    const closed = { bounds: null, maximized: false };
+    expect(readState(file)).toEqual({ ...closed, agents: closed, paused: false });
+    const saved = {
+      bounds: { x: 10, y: 20, width: 1000, height: 700 },
+      maximized: true,
+      agents: { bounds: { x: 40, y: 50, width: 1400, height: 900 }, maximized: false },
+      paused: true,
+    };
+    writeState(file, saved);
+    expect(readState(file)).toEqual(saved);
+    expect(parseState({ bounds: { x: "1" }, agents: { bounds: { x: 1 }, maximized: "yes" } })).toEqual({ ...closed, agents: closed, paused: false });
+    // A state.json from before the Agents window keeps the main window where it was.
+    expect(parseState({ bounds: { x: 1, y: 2, width: 800, height: 600 }, maximized: true })).toEqual({
+      bounds: { x: 1, y: 2, width: 800, height: 600 },
+      maximized: true,
+      agents: closed,
+      paused: false,
+    });
   });
 
   it("restores bounds that are on a display, clamped to the minimum size", () => {

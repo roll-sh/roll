@@ -1,12 +1,13 @@
 /**
- * `roll://` deep links: `roll://agents`, `roll://agents/thread/<id>`, `roll://agents/connect?code=…`.
+ * `roll://` deep links: `roll://agents`, `roll://agents/thread/<id>`, `roll://agents/new`,
+ * `roll://agents/connect?code=…`.
  * Links come from other programs, so anything that doesn't match exactly is dropped.
  */
 import type { DeepLink } from "../shared/bridge.ts";
 
 export const SCHEME = "roll";
 
-const THREAD_ID = /^[A-Za-z0-9_-]{1,128}$/;
+export const THREAD_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const USER_CODE = /^[A-Za-z0-9-]{1,32}$/;
 
 export function parseDeepLink(raw: string): DeepLink | null {
@@ -24,6 +25,7 @@ export function parseDeepLink(raw: string): DeepLink | null {
     const thread = decodeSegment(parts[1]);
     return thread !== null && THREAD_ID.test(thread) ? { kind: "thread", thread } : null;
   }
+  if (parts.length === 1 && parts[0] === "new") return { kind: "new" };
   if (parts.length === 1 && parts[0] === "connect") {
     const code = url.searchParams.get("code");
     return code !== null && USER_CODE.test(code) ? { kind: "connect", code } : null;
@@ -47,6 +49,8 @@ export function deepLinkPath(link: DeepLink): string {
     case "thread":
       // The canvas focuses (and opens) a node from `?focus=t:<thread>`.
       return `/dashboard/agents?focus=${encodeURIComponent(`t:${link.thread}`)}`;
+    case "new":
+      return "/dashboard/agents?new";
     case "connect":
       return `/dashboard/agents/connect?code=${encodeURIComponent(link.code)}`;
   }

@@ -7,10 +7,15 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { httpOrigin } from "./policy.ts";
 
-export const DEFAULT_URL = "https://roll.sh/dashboard/agents";
+export const DEFAULT_URL = "https://roll.sh/dashboard";
+/** The default before the canvas got its own window; first runs wrote it into settings.json. */
+const OLD_DEFAULT_URL = "https://roll.sh/dashboard/agents";
 
 export interface Settings {
-  /** The page the window opens. Its origin is the only one the window may show (plus `extraOrigins`). */
+  /**
+   * The page the main window opens. Its origin is the only one the windows may show (plus
+   * `extraOrigins`); the Agents window opens `<origin>/dashboard/agents`.
+   */
   url: string;
   /** The API base for `roll agent login/up --api`. Unset: api.roll.sh for roll.sh, else the URL's origin. */
   api: string | null;
@@ -56,7 +61,7 @@ export function parseSettings(raw: unknown, warnings: string[] = []): Settings {
   const s = structuredClone(defaults);
   const url = raw.url;
   if (url !== undefined) {
-    if (typeof url === "string" && httpOrigin(url)) s.url = url;
+    if (typeof url === "string" && httpOrigin(url)) s.url = url === OLD_DEFAULT_URL ? DEFAULT_URL : url;
     else warnings.push("settings.url: not an http(s) URL");
   }
   const api = raw.api;

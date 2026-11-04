@@ -39,16 +39,22 @@ export interface DesktopNotice {
   thread?: string;
 }
 
+/** What the Agents window should show. */
+export type AgentsTarget = { kind: "canvas" } | { kind: "thread"; thread: string } | { kind: "new" };
+
 /** Where a `roll://` link points. */
 export type DeepLink =
   | { kind: "agents" }
   | { kind: "thread"; thread: string }
+  | { kind: "new" }
   | { kind: "connect"; code: string };
 
 export interface RollDesktop {
   /** The desktop app's version. */
   readonly version: string;
   readonly platform: "darwin" | "win32" | "linux";
+  /** Which window this page is in. */
+  readonly window: "main" | "agents";
   setStatus(status: DesktopStatus): void;
   notify(notice: DesktopNotice): void;
   /**
@@ -56,6 +62,8 @@ export interface RollDesktop {
    * hands links to the page instead of reloading it. Returns an unsubscribe function.
    */
   onDeepLink(listener: (link: DeepLink) => void): () => void;
+  /** Open (or focus) the Agents window on `target`. */
+  openAgents(target: AgentsTarget): void;
 }
 
 declare global {
@@ -101,6 +109,18 @@ export function reportToDesktop(status: DesktopStatus): void {
 /** Subscribes to deep links when in the desktop app; returns the unsubscribe (a no-op in a browser). */
 export function onDesktopDeepLink(listener: (link: DeepLink) => void): () => void {
   return desktop()?.onDeepLink(listener) ?? (() => {});
+}
+
+/**
+ * In the desktop app's main window: open the Agents window on `target` and return true.
+ * Elsewhere (a browser, or already in the Agents window) return false.
+ */
+export function openAgentsWindow(target: AgentsTarget): boolean {
+  const d = desktop();
+  // An older desktop app has no `window` (one window on the canvas): false there too.
+  if (d?.window !== "main") return false;
+  d.openAgents(target);
+  return true;
 }
 
 const values = <T>(m: ReadonlyMap<string, { value: T }>) => Array.from(m.values(), (r) => r.value);

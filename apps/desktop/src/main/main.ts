@@ -1,18 +1,30 @@
 /**
- * roll desktop: one window on the roll web app (`/dashboard/agents`), a tray with this machine's
- * status, and `roll agent up` supervised in the background. The shell's logic lives in the
- * modules next to this one; this file wires them to Electron.
+ * roll desktop: two windows on the roll web app, a tray with this machine's status, and
+ * `roll agent up` supervised in the background. The main window shows roll (the dashboard and
+ * roll code, `settings.url`); the Agents window shows the canvas (`/dashboard/agents`) and opens
+ * from the dashboard's header control, `roll://` links, notifications, the tray and the menu.
+ * The shell's logic lives in the modules next to this one (`windows.ts` decides which window a
+ * link goes to); this file wires them to Electron.
  *
  * Structure and security posture follow T3 Code's desktop app (`apps/desktop/src/main.ts`,
  * `window/DesktopWindow.ts`): a sandboxed, context-isolated renderer with no Node, navigation
  * pinned to the app's origin, new windows denied (web links go to the system browser), every
- * permission denied but a short allowlist, and webviews refused.
+ * permission denied but a short allowlist, and webviews refused. Both windows get the same.
  */
 import { app, BrowserWindow, ipcMain, Menu, nativeImage, Notification, screen, session, shell, Tray, type IpcMainEvent } from "electron";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { ipc, VERSION_ARG, type DeepLink, type DesktopNotice, type DesktopStatus } from "../shared/bridge.ts";
-import { deepLinkFromArgv, deepLinkPath, parseDeepLink, SCHEME } from "./deeplink.ts";
+import {
+  ipc,
+  VERSION_ARG,
+  WINDOW_ARG,
+  type AgentsTarget,
+  type DeepLink,
+  type DesktopNotice,
+  type DesktopStatus,
+  type DesktopWindow,
+} from "../shared/bridge.ts";
+import { deepLinkFromArgv, parseDeepLink, SCHEME } from "./deeplink.ts";
 import { agentConfigPath, findRollBinary, loginShellPath, mergePath, readAgentLogin } from "./local.ts";
 import { lineReader, runLogin, type Login } from "./login.ts";
 import { appMenu, trayMenu, type MenuActions } from "./menu.ts";
@@ -22,6 +34,7 @@ import { DEFAULT_SIZE, fitBounds, MIN_SIZE, readState, writeState } from "./stat
 import { Announcer, noticeFor, parseDaemonLine, parseNotice, parseStatus, trayModel, type LinkState, type LoginState, type TrayModel } from "./status.ts";
 import { FileLog, Supervisor, type DaemonState, type Log } from "./supervisor.ts";
 import { startUpdater } from "./updater.ts";
+import { agentsUrl, delivery, parseAgentsTarget, routeLink, targetLink } from "./windows.ts";
 
 app.setName("roll");
 // Not `<appData>/roll`: on Linux that is ~/.config/roll, the CLI's own directory (agent.json),
@@ -33,7 +46,7 @@ app.enableSandbox();
 const primary = app.requestSingleInstanceLock();
 if (!primary) app.exit(0);
 
-/** Set once the window exists; until then links wait in `pendingLink`. */
+/** Set once the windows are wired; until then links wait in `pendingLink`. */
 let route: ((link: DeepLink) => void) | null = null;
 let focusWindow: (() => void) | null = null;
 let pendingLink: DeepLink | null = deepLinkFromArgv(process.argv);
@@ -223,26 +236,36 @@ async function main(): Promise<void> {
     });
   }
 
-  // ── the window ──
+  // ── the windows ──
   let win: BrowserWindow | null = null;
+  let agentsWin: BrowserWindow | null = null;
   let tray: Tray | null = null;
-  let pageListens = false;
+  /** The Agents window's page has a deep-link listener. */
+  let agentsListens = false;
+  /** A target waiting for the loading Agents window's page to listen. */
+  let agentsPending: AgentsTarget | null = null;
+  let agentsPendingTimer: ReturnType<typeof setTimeout> | null = null;
   let quitting = false;
 
-  function createWindow(): BrowserWindow {
+  function createWindow(kind: DesktopWindow, url: string): BrowserWindow {
+    // The main window's state is at the top of state.json, the Agents window's under `agents`.
+    const saved = kind === "main" ? state : state.agents;
     const bounds = fitBounds(
-      state.bounds,
+      saved.bounds,
       screen.getAllDisplays().map((d) => d.workArea),
     );
+    const mac = process.platform === "darwin";
     const w = new BrowserWindow({
-      title: "roll",
+      title: kind === "main" ? "roll" : "roll agents",
       ...(bounds ?? DEFAULT_SIZE),
       minWidth: MIN_SIZE.width,
       minHeight: MIN_SIZE.height,
       show: false,
       backgroundColor: "#000000",
-      ...(process.platform === "darwin" ? {} : { icon: join(icons, "icon.png") }),
-      autoHideMenuBar: process.platform !== "darwin",
+      ...(mac ? {} : { icon: join(icons, "icon.png") }),
+      // The canvas draws its own 48px top bar around the traffic lights on macOS.
+      ...(mac && kind === "agents" ? { titleBarStyle: "hiddenInset" as const, trafficLightPosition: { x: 16, y: 16 } } : {}),
+      autoHideMenuBar: !mac,
       webPreferences: {
         preload: join(__dirname, "preload.cjs"),
         contextIsolation: true,
@@ -252,69 +275,133 @@ async function main(): Promise<void> {
         nodeIntegrationInWorker: false,
         webviewTag: false,
         spellcheck: true,
-        additionalArguments: [`${VERSION_ARG}${app.getVersion()}`],
+        additionalArguments: [`${VERSION_ARG}${app.getVersion()}`, `${WINDOW_ARG}${kind}`],
       },
     });
-    if (state.maximized) w.maximize();
+    if (saved.maximized) w.maximize();
     w.once("ready-to-show", () => w.show());
     w.on("page-title-updated", (e) => e.preventDefault());
     const remember = () => {
       if (w.isDestroyed() || w.isMinimized() || w.isFullScreen()) return;
-      state.maximized = w.isMaximized();
-      if (!state.maximized) state.bounds = w.getNormalBounds();
+      saved.maximized = w.isMaximized();
+      if (!saved.maximized) saved.bounds = w.getNormalBounds();
       saveState();
     };
     for (const ev of ["resize", "move", "maximize", "unmaximize"] as const) w.on(ev as "resize", remember);
     w.on("close", (e) => {
       remember();
-      if (!quitting && settings.closeToTray && tray) {
+      // Closing the Agents window just closes it; the agents keep running either way.
+      if (kind === "main" && !quitting && settings.closeToTray && tray) {
         e.preventDefault();
         w.hide();
       }
     });
-    w.on("closed", () => {
-      win = null;
-      pageListens = false;
-    });
-    w.webContents.on("did-start-navigation", (e) => {
-      if (e.isMainFrame && !e.isSameDocument) pageListens = false;
-    });
-    w.webContents.on("render-process-gone", (_e, d) => desktopLog.event(`renderer gone: ${d.reason}`));
-    void w.loadURL(settings.url);
+    // A trackpad pinch reaches the page as ctrl+wheel (the canvas zooms itself), not page zoom.
+    const noPinchZoom = () => void w.webContents.setVisualZoomLevelLimits(1, 1).catch(() => {});
+    noPinchZoom();
+    w.webContents.on("did-finish-load", noPinchZoom);
+    w.webContents.on("render-process-gone", (_e, d) => desktopLog.event(`${kind} renderer gone: ${d.reason}`));
+    void w.loadURL(url);
     return w;
   }
 
-  function ensureWindow(): BrowserWindow {
-    if (!win || win.isDestroyed()) win = createWindow();
-    return win;
-  }
+  const alive = (w: BrowserWindow | null): w is BrowserWindow => !!w && !w.isDestroyed();
 
-  function focus(): void {
-    const w = ensureWindow();
+  function reveal(w: BrowserWindow): void {
     if (w.isMinimized()) w.restore();
     w.show();
     w.focus();
   }
 
+  function ensureMain(): BrowserWindow {
+    if (alive(win)) return win;
+    const w = createWindow("main", settings.url);
+    w.on("closed", () => {
+      if (win === w) win = null;
+    });
+    win = w;
+    return w;
+  }
+
+  function focusMain(): void {
+    reveal(ensureMain());
+  }
+
+  /** Loads `url` in the main window and shows it. */
   function show(url: string): void {
-    void ensureWindow().loadURL(url);
-    focus();
+    void ensureMain().loadURL(url);
+    focusMain();
   }
 
-  function routeLink(link: DeepLink): void {
-    focus();
-    // A listening page handles agents and thread links itself (no reload); anything else loads.
-    if (link.kind !== "connect" && pageListens && win && isInApp(origins, win.webContents.getURL())) {
-      win.webContents.send(ipc.deepLink, link);
-    } else show(settings.origin + deepLinkPath(link));
+  function clearAgentsPending(): void {
+    agentsPending = null;
+    if (agentsPendingTimer) clearTimeout(agentsPendingTimer);
+    agentsPendingTimer = null;
   }
 
-  // ── the bridge: only the app's own top frame in our window may talk to the shell ──
-  const fromApp = (e: IpcMainEvent): boolean => {
+  function createAgents(target: AgentsTarget): BrowserWindow {
+    const w = createWindow("agents", agentsUrl(settings.origin, target));
+    w.on("closed", () => {
+      if (agentsWin !== w) return;
+      agentsWin = null;
+      agentsListens = false;
+      clearAgentsPending();
+    });
+    w.webContents.on("did-start-navigation", (e) => {
+      if (e.isMainFrame && !e.isSameDocument && agentsWin === w) agentsListens = false;
+    });
+    // A queued target whose page never listens (it isn't the canvas) loads as a URL instead.
+    w.webContents.on("did-stop-loading", () => {
+      if (agentsWin !== w || !agentsPending || agentsListens) return;
+      if (agentsPendingTimer) clearTimeout(agentsPendingTimer);
+      agentsPendingTimer = setTimeout(() => {
+        agentsPendingTimer = null;
+        const target = agentsPending;
+        agentsPending = null;
+        if (target && agentsWin === w && !w.isDestroyed() && !agentsListens) void w.loadURL(agentsUrl(settings.origin, target));
+      }, 3000);
+    });
+    return w;
+  }
+
+  /** Opens (or focuses) the one Agents window on `target`. */
+  function openAgents(target: AgentsTarget): void {
+    const w = alive(agentsWin) ? agentsWin : null;
+    const how = delivery({
+      open: !!w,
+      listening: !!w && agentsListens && isInApp(origins, w.webContents.getURL()),
+      loading: !!w && w.webContents.isLoading(),
+    });
+    if (how === "open" || !w) {
+      // A new window shows itself once it has painted.
+      agentsWin = createAgents(target);
+      return;
+    }
+    if (how === "queue") agentsPending = target;
+    else {
+      clearAgentsPending();
+      if (how === "send") w.webContents.send(ipc.deepLink, targetLink(target));
+      else void w.loadURL(agentsUrl(settings.origin, target));
+    }
+    reveal(w);
+  }
+
+  function openLink(link: DeepLink): void {
+    const to = routeLink(link);
+    if (to.window === "agents") openAgents(to.target);
+    else show(settings.origin + to.path);
+  }
+
+  // ── the bridge: only the app's own top frame in one of our windows may talk to the shell ──
+  const fromApp = (e: IpcMainEvent): DesktopWindow | null => {
     const frame = e.senderFrame;
-    return !!win && e.sender === win.webContents && !!frame && frame.parent === null && httpOrigin(frame.url) === origins.app;
+    if (!frame || frame.parent !== null || httpOrigin(frame.url) !== origins.app) return null;
+    if (alive(win) && e.sender === win.webContents) return "main";
+    if (alive(agentsWin) && e.sender === agentsWin.webContents) return "agents";
+    return null;
   };
   ipcMain.on(ipc.setStatus, (e, raw: unknown) => {
+    // Either window may report; the latest wins.
     if (!fromApp(e)) return;
     const next = parseStatus(raw);
     if (!next) return;
@@ -327,13 +414,19 @@ async function main(): Promise<void> {
     const n = parseNotice(raw);
     if (n) notify(n);
   });
-  ipcMain.on(ipc.deepLinkListening, (e, on: unknown) => {
+  ipcMain.on(ipc.openAgents, (e, raw: unknown) => {
     if (!fromApp(e)) return;
-    pageListens = on === true;
-    if (pageListens && pendingLink) {
-      const link = pendingLink;
-      pendingLink = null;
-      routeLink(link);
+    const target = parseAgentsTarget(raw);
+    if (target) openAgents(target);
+  });
+  ipcMain.on(ipc.deepLinkListening, (e, on: unknown) => {
+    // Links only ever go to the Agents window, so only its page's listener counts.
+    if (fromApp(e) !== "agents" || !alive(agentsWin)) return;
+    agentsListens = on === true;
+    if (agentsListens && agentsPending) {
+      const target = agentsPending;
+      clearAgentsPending();
+      agentsWin.webContents.send(ipc.deepLink, targetLink(target));
     }
   });
 
@@ -343,21 +436,20 @@ async function main(): Promise<void> {
   function notify(n: DesktopNotice): void {
     if (!Notification.isSupported()) return;
     // Don't interrupt someone looking at the canvas; the badge still counts it.
-    if (win?.isVisible() && win.isFocused()) return;
+    if (alive(agentsWin) && agentsWin.isVisible() && agentsWin.isFocused()) return;
     const note = new Notification({ title: n.title, body: n.body ?? "", icon: noteIcon });
     note.on("click", () => deliver(n.thread ? { kind: "thread", thread: n.thread } : { kind: "agents" }));
     shown.push(note);
     if (shown.length > 20) shown.shift();
     note.show();
   }
-
   // ── menus, tray, badge ──
   const updater = await startUpdater(settings.autoUpdate, app.isPackaged, desktopLog);
   const actions: MenuActions = {
-    open: focus,
-    home: () => show(settings.url),
-    back: () => win?.webContents.navigationHistory.goBack(),
-    forward: () => win?.webContents.navigationHistory.goForward(),
+    openRoll: focusMain,
+    openAgents: () => openAgents({ kind: "canvas" }),
+    back: () => BrowserWindow.getFocusedWindow()?.webContents.navigationHistory.goBack(),
+    forward: () => BrowserWindow.getFocusedWindow()?.webContents.navigationHistory.goForward(),
     pause: () => {
       state.paused = true;
       saveState();
@@ -371,7 +463,7 @@ async function main(): Promise<void> {
       refresh();
     },
     signIn: () => {
-      focus();
+      focusMain();
       signIn();
     },
     showLogs: () => void shell.openPath(agentLog.file),
@@ -406,15 +498,16 @@ async function main(): Promise<void> {
       tray.setContextMenu(Menu.buildFromTemplate(trayMenu(m, actions)));
       tray.setToolTip(m.tooltip);
     }
-    if (process.platform === "win32") win?.setOverlayIcon(m.pending ? badge : null, m.pending ? `${m.pending} waiting` : "");
-    else app.setBadgeCount(m.pending);
+    if (process.platform === "win32") {
+      for (const w of [win, agentsWin]) if (alive(w)) w.setOverlayIcon(m.pending ? badge : null, m.pending ? `${m.pending} waiting` : "");
+    } else app.setBadgeCount(m.pending);
   }
 
   const trayIcon = nativeImage.createFromPath(join(icons, process.platform === "darwin" ? "trayTemplate.png" : "tray.png"));
   if (process.platform === "darwin") trayIcon.setTemplateImage(true);
   try {
     tray = new Tray(trayIcon);
-    if (process.platform !== "darwin") tray.on("click", focus);
+    if (process.platform !== "darwin") tray.on("click", focusMain);
   } catch (e) {
     desktopLog.event(`no tray: ${(e as Error).message}`);
   }
@@ -423,28 +516,25 @@ async function main(): Promise<void> {
     if (supervisor?.state.kind === "restarting") refresh();
   }, 1000).unref();
 
-  // Everything is wired: from here on links and focus requests go straight to the window.
-  focusWindow = focus;
-  route = routeLink;
-  win = createWindow();
+  // Everything is wired: from here on links and focus requests go straight to the windows.
+  focusWindow = focusMain;
+  route = openLink;
+  const first = ensureMain();
   refresh();
   if (pendingLink) {
-    // Give the page a moment to say it listens (it then takes the link); otherwise load the link.
+    // A link that launched the app opens its window on the link's URL.
     const link = pendingLink;
-    setTimeout(() => {
-      if (pendingLink === link) {
-        pendingLink = null;
-        deliver(link);
-      }
-    }, 3000);
+    pendingLink = null;
+    openLink(link);
   }
 
   if (settings.daemon && bin) {
     if (loginState.kind === "signed_in") startDaemon();
-    else win.webContents.once("did-finish-load", signIn);
+    else first.webContents.once("did-finish-load", signIn);
   }
 
-  app.on("activate", focus);
+  // The dock icon shows roll; the Agents window has its own ways in.
+  app.on("activate", focusMain);
   app.on("window-all-closed", () => {
     if (!tray) app.quit();
   });

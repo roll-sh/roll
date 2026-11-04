@@ -109,15 +109,25 @@ describe("tray", () => {
     (item.click as () => void)();
   };
 
-  it("builds the tray menu: status, open, pause or resume, quit", () => {
+  it("builds the tray menu: status, open agents or roll, pause or resume, quit", () => {
     const m = trayModel(base);
     const items = trayMenu(m, actions);
-    expect(labels(items)).toEqual(["Connected", "3 agents running · 1 waiting for you", "separator", "Open roll", "Pause agents", "separator", "Quit roll"]);
+    expect(labels(items)).toEqual([
+      "Connected",
+      "3 agents running · 1 waiting for you",
+      "separator",
+      "Open agents",
+      "Open roll",
+      "Pause agents",
+      "separator",
+      "Quit roll",
+    ]);
     click(items, "Pause agents");
+    click(items, "Open agents");
     click(items, "Open roll");
     expect(labels(trayMenu(trayModel({ ...base, paused: true }), actions))).toContain("Resume agents");
     expect(labels(trayMenu(trayModel({ ...base, login: { kind: "signed_out" } }), actions))).toContain("Connect this machine…");
-    expect(clicks).toEqual(["pause", "open"]);
+    expect(clicks).toEqual(["pause", "openAgents", "openRoll"]);
   });
 
   it("builds the app menu with the usual roles and shortcuts", () => {
@@ -127,6 +137,15 @@ describe("tray", () => {
     expect(labels(linux)).toEqual(["File", "editMenu", "View", "Go", "Agents", "windowMenu", "help"]);
     const file = linux[0].submenu as MenuItemConstructorOptions[];
     expect(file.find((i) => i.label === "Quit")?.accelerator).toBe("Ctrl+Q");
+    const agents = linux.find((i) => i.label === "Agents")?.submenu as MenuItemConstructorOptions[];
+    expect(agents.slice(0, 2).map((i) => [i.label, i.accelerator])).toEqual([
+      ["Open roll", "CmdOrCtrl+1"],
+      ["Open agents", "CmdOrCtrl+2"],
+    ]);
+    clicks.length = 0;
+    click(agents, "Open agents");
+    click(agents, "Open roll");
+    expect(clicks).toEqual(["openAgents", "openRoll"]);
   });
 });
 

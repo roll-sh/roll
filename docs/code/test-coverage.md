@@ -1020,7 +1020,7 @@ jsdom (`vitest.config.mts` projects `node` and `dom`, setup in `src/test/`).
 | agents services over HTTP: start a repo as a project, take work (204 → none), let go, a daemon's error reply returned not thrown, only the owner's repos offered; the work field's references | `src/lib/agents-services.test.ts` |
 | the demo's sandboxes boot into machines (provider keys log them in), stop and delete; a published change follows checking → queued → landed; work items on threads | `src/lib/agents-demo.test.ts` ("rents sandboxes that boot into machines…") |
 | a booting sandbox pulses on the canvas; a phone's fit stays readable and starts at the machines | `src/lib/agents-graph.test.ts` ("sandboxes and phones on the canvas") |
-| desktop bridge: status from the agents shell (live running threads, pending requests oldest first with summaries, machines), no-op in a browser, forwards to `window.rollDesktop`; `useDesktop` sends only when the status changes (not per stream frame), nothing for the demo, and focuses `t:<id>` from thread links | `src/lib/desktop.test.ts`, `src/lib/desktop.test.tsx` (`useDesktop`) |
+| desktop bridge: status from the agents shell (live running threads, pending requests oldest first with summaries, machines), no-op in a browser, forwards to `window.rollDesktop`; `openAgentsWindow` opens the Agents window only from the desktop app's main window (false in a browser, the Agents window or an older app); `useDesktop` sends only when the status changes (not per stream frame), nothing for the demo, and focuses `t:<id>` from thread links | `src/lib/desktop.test.ts`, `src/lib/desktop.test.tsx` (`useDesktop`) |
 
 ## Desktop app (`apps/desktop`, vitest)
 
@@ -1031,13 +1031,14 @@ login tests drive a fake `roll` process (`apps/desktop/test/fake-roll.mjs`).
 | --- | --- |
 | navigation: the app's origin (and configured extras) stay in the window; other http(s) and mailto go to the system browser; new windows never open; file/javascript/data/custom schemes and credentialed URLs are dropped | `src/main/policy.test.ts` (`navigation policy`) |
 | permissions: only notifications, sanitized clipboard writes and fullscreen, only for the app's top frame | `src/main/policy.test.ts` (`permissions`) |
-| deep links: `roll://agents`, `…/thread/<id>`, `…/connect?code=`; everything else (other hosts, extra segments, encoded traversal, bad codes, credentials, overlong) refused; dashboard paths; links in a second instance's argv | `src/main/policy.test.ts` (`deep links`) |
-| settings: defaults written 0600 on first run (roll.sh, api.roll.sh), self-hosted origin as API, `ROLL_DESKTOP_URL`/`ROLL_DESKTOP_API` overrides, bad fields ignored with warnings, a corrupt file never overwritten | `src/main/settings.test.ts` (`settings`) |
-| window state: bounds and paused round-trip; bounds restored only on a connected display with the title bar reachable, clamped to the minimum | `src/main/settings.test.ts` (`window state`) |
+| deep links: `roll://agents`, `…/thread/<id>`, `…/new`, `…/connect?code=`; everything else (other hosts, extra segments, encoded traversal, bad codes, credentials, overlong) refused; dashboard paths; links in a second instance's argv | `src/main/policy.test.ts` (`deep links`) |
+| two windows: agents, thread and new links go to the Agents window, connect links to the main window; the Agents window opens on `/dashboard/agents`, `?focus=t:<id>` or `?new`; an open one gets the link sent (listening page), queued (loading page) or loaded (a page that doesn't listen); `openAgents` targets from a page parsed exactly; the preload's `window` from its argument | `src/main/windows.test.ts` |
+| settings: defaults written 0600 on first run (roll.sh/dashboard, api.roll.sh), the old default (the canvas) moved to the dashboard, self-hosted origin as API, `ROLL_DESKTOP_URL`/`ROLL_DESKTOP_API` overrides, bad fields ignored with warnings, a corrupt file never overwritten | `src/main/settings.test.ts` (`settings`) |
+| window state: each window's bounds (the Agents window's under `agents`; an older state.json keeps the main window's) and paused round-trip; bounds restored only on a connected display with the title bar reachable, clamped to the minimum | `src/main/settings.test.ts` (`window state`) |
 | this machine: the CLI from `ROLL_BIN`, `resources/bin` (packaged) or `target/{release,debug}`; agent.json where the CLI keeps it (`ROLL_AGENT_CONFIG`, `XDG_CONFIG_HOME`); signed-in check without reading the token; PATH from a noisy login shell | `src/main/settings.test.ts` (`this machine`) |
 | daemon supervisor: crash loop restarts at 40/80/160/160 ms (doubling, capped), backoff resets after a long run, SIGTERM stop with output logged, SIGKILL after the grace period, stop cancels a pending restart, idempotent start, missing binary retried; log rotation | `src/main/supervisor.test.ts` |
 | status from the page: parsed and bounded (counts, lengths, ids); each pending request notifies once and the backlog at launch doesn't; notification wording links to the thread | `src/main/status.test.ts` (`status from the page`) |
-| tray and menus: every machine state (connected from the daemon's log or the page, connecting, reconnecting, retrying countdown, offline, paused, signed out, signing in with code, CLI missing, managed outside), running and waiting counts, pause/resume/connect enabled only when they apply; app menu roles and shortcuts per platform | `src/main/status.test.ts` (`tray`, `daemon output`) |
+| tray and menus: every machine state (connected from the daemon's log or the page, connecting, reconnecting, retrying countdown, offline, paused, signed out, signing in with code, CLI missing, managed outside), running and waiting counts, pause/resume/connect enabled only when they apply; "Open agents" and "Open roll" in the tray and app menu; app menu roles and shortcuts per platform | `src/main/status.test.ts` (`tray`, `daemon output`) |
 | first-run login: the code and approve URL from `--json` or text output, bounded line reading, `roll agent login --json --api` run to approval (agent.json written), denial reported | `src/main/status.test.ts` (`first-run login`) |
 | bridge types identical in the desktop app and the dashboard | `src/main/bridge-parity.test.ts` |
 
@@ -1237,7 +1238,7 @@ written in the tests.
   connecting through the API).
 - **S3-backed storage for code.** Tests use the local object store, the same `pg_storage::Objects`
   API the other suites test against S3. The local store doesn't fsync blobs.
-- **The desktop app's Electron wiring** (`apps/desktop/src/main/main.ts`: the window, tray, badge,
+- **The desktop app's Electron wiring** (`apps/desktop/src/main/main.ts`: the two windows, tray, badge,
   notifications, IPC sender checks, single-instance and `open-url` routing, quit stopping the
   daemon). It's type-checked and its decisions are the tested modules above, but a window can't
   start on the dev server (no GTK; Xvfb alone isn't enough). Packaging is checked by building the

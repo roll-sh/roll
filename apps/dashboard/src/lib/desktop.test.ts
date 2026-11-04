@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Machine, Request, Thread } from "./agents-api";
-import { desktop, desktopStatus, onDesktopDeepLink, reportToDesktop, type RollDesktop } from "./desktop";
+import { desktop, desktopStatus, onDesktopDeepLink, openAgentsWindow, reportToDesktop, type RollDesktop } from "./desktop";
 
 const thread = (id: string, status: Thread["status"], title = id, archived_at: number | null = null) =>
   ({ id, title, status, archived_at }) as Thread;
@@ -62,9 +62,11 @@ describe("bridge helpers", () => {
     const bridge: RollDesktop = {
       version: "0.1.0",
       platform: "linux",
+      window: "main",
       setStatus: vi.fn(),
       notify: vi.fn(),
       onDeepLink: vi.fn(() => off),
+      openAgents: vi.fn(),
     };
     vi.stubGlobal("window", { rollDesktop: bridge });
     reportToDesktop({ running: 1, pending: [] });
@@ -72,5 +74,22 @@ describe("bridge helpers", () => {
     const listener = () => {};
     expect(onDesktopDeepLink(listener)).toBe(off);
     expect(bridge.onDeepLink).toHaveBeenCalledWith(listener);
+  });
+
+  it("open the Agents window only from the desktop app's main window", () => {
+    expect(openAgentsWindow({ kind: "new" })).toBe(false);
+    const bridge = (window: RollDesktop["window"] | undefined) =>
+      ({ version: "0.1.0", platform: "darwin", window, openAgents: vi.fn() }) as unknown as RollDesktop;
+    const main = bridge("main");
+    vi.stubGlobal("window", { rollDesktop: main });
+    expect(openAgentsWindow({ kind: "thread", thread: "thr_1" })).toBe(true);
+    expect(main.openAgents).toHaveBeenCalledExactlyOnceWith({ kind: "thread", thread: "thr_1" });
+    // In the Agents window the page shows the canvas itself; an older app has no `window`.
+    for (const w of ["agents", undefined] as const) {
+      const other = bridge(w);
+      vi.stubGlobal("window", { rollDesktop: other });
+      expect(openAgentsWindow({ kind: "canvas" })).toBe(false);
+      expect(other.openAgents).not.toHaveBeenCalled();
+    }
   });
 });
