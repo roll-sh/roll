@@ -23,6 +23,9 @@
 //!
 //! [code]                                 # roll code repos cloned as projects
 //! clone_dir = "~/src"                    # where they go (default ~/roll)
+//!
+//! [projects]                             # auto-pull (docs/code/agents.md, "Project settings")
+//! pull_every = 60                        # seconds between fetches; 0 never
 //! ```
 
 use crate::provider::ProviderConfig;
@@ -43,6 +46,8 @@ pub struct Config {
     pub delegation: Delegation,
     /// `[code] clone_dir`: where roll code repos are cloned as projects (`None`: `~/roll`).
     pub clone_dir: Option<PathBuf>,
+    /// `[projects] pull_every`; read it through [`Config::pull_every`].
+    pub pull_every: Option<std::time::Duration>,
 }
 
 /// `[delegation]`: limits on what agents may delegate through roll's orchestrator MCP.
@@ -83,6 +88,14 @@ struct File {
     delegation: RawDelegation,
     #[serde(default)]
     code: RawCode,
+    #[serde(default)]
+    projects: RawProjects,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawProjects {
+    pull_every: Option<u64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -186,6 +199,7 @@ impl Config {
                 max_children: file.delegation.max_children.unwrap_or(Delegation::default().max_children),
             },
             clone_dir: file.code.clone_dir.filter(|d| !d.trim().is_empty()).map(|d| expand_tilde(d.trim())),
+            pull_every: file.projects.pull_every.map(std::time::Duration::from_secs),
         })
     }
 
@@ -212,6 +226,16 @@ impl Config {
 
     pub fn worktree_path(&self, project: &str, thread: &str) -> PathBuf {
         self.worktrees().join(project).join(thread)
+    }
+
+    /// How often projects with auto-pull fetch their remote (`[projects] pull_every`, seconds;
+    /// 60 by default, 0 never). roll code projects don't poll: the relay asks when they move.
+    pub fn pull_every(&self) -> Option<std::time::Duration> {
+        match self.pull_every {
+            None => Some(std::time::Duration::from_secs(60)),
+            Some(d) if d.is_zero() => None,
+            Some(d) => Some(d),
+        }
     }
 }
 
@@ -273,5 +297,13 @@ mod tests {
         assert_eq!(Config::parse("").unwrap().clone_dir, None);
         assert_eq!(Config::parse("[code]\nclone_dir = \"/srv/src\"").unwrap().clone_dir, Some(PathBuf::from("/srv/src")));
         assert!(Config::parse("[code]\ndir = \"x\"").is_err());
+    }
+
+    #[test]
+    fn auto_pull_looks_every_minute_unless_told_otherwise() {
+        assert_eq!(Config::parse("").unwrap().pull_every(), Some(std::time::Duration::from_secs(60)));
+        assert_eq!(Config::parse("[projects]\npull_every = 300").unwrap().pull_every(), Some(std::time::Duration::from_secs(300)));
+        assert_eq!(Config::parse("[projects]\npull_every = 0").unwrap().pull_every(), None);
+        assert!(Config::parse("[projects]\nevery = 1").is_err());
     }
 }

@@ -14,7 +14,7 @@
 //! Projects that aren't git repositories have no checkpoints, diffs or worktrees; everything else
 //! (runs, terminals, files) works the same.
 
-use agent_proto::{ChangeKind, CodeGrant, Diff, DiffStat, FileChange, GitInfo, GitStatus, Published};
+use agent_proto::{ChangeKind, CodeGrant, Diff, DiffStat, FileChange, GitInfo, GitStatus, Published, PullOutcome, PullSkip};
 use anyhow::{Context, bail};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -275,7 +275,8 @@ pub async fn info(dir: &Path) -> Option<GitInfo> {
         .ok()
         .flatten()
         .map(|o| public_remote(String::from_utf8_lossy(&o.stdout).trim()));
-    let dirty = git(dir, &["status", "--porcelain"]).cap(1).run().await.map(|o| !o.stdout.is_empty()).unwrap_or(false);
+    // `status` writes a refreshed index back when it can: not the user's.
+    let dirty = git(dir, &["status", "--porcelain"]).env("GIT_OPTIONAL_LOCKS", "0").cap(1).run().await.map(|o| !o.stdout.is_empty()).unwrap_or(false);
     Some(GitInfo { branch, head, remote, dirty })
 }
 
@@ -696,6 +697,106 @@ pub async fn clone_into_within(grant: &CodeGrant, dir: &Path, idle: Duration) ->
         let _ = tokio::fs::remove_dir_all(&temp).await;
     }
     made
+}
+
+/// One git config value, or `None` when unset.
+async fn config_value(dir: &Path, key: &str) -> anyhow::Result<Option<String>> {
+    let out = git(dir, &["config", "--get", key]).try_run().await?;
+    Ok(out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|v| !v.is_empty()))
+}
+
+/// The remote's default branch: what `refs/remotes/<remote>/HEAD` names, else `main` or `master`
+/// when the remote has one, else `main` (T3's `GitVcsDriverCore.ts` default-ref lookup).
+async fn default_branch(dir: &Path, remote: &str) -> anyhow::Result<String> {
+    let head = git(dir, &["symbolic-ref", "-q", "--short"]).arg(format!("refs/remotes/{remote}/HEAD")).try_run().await?;
+    if let Some(name) = head.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        && let Some(branch) = name.strip_prefix(&format!("{remote}/"))
+        && !branch.is_empty()
+    {
+        return Ok(branch.to_string());
+    }
+    for branch in ["main", "master"] {
+        let exists = git(dir, &["show-ref", "--verify", "--quiet"]).arg(format!("refs/remotes/{remote}/{branch}")).try_run().await?;
+        if exists.is_some() {
+            return Ok(branch.to_string());
+        }
+    }
+    Ok("main".into())
+}
+
+/// Fast-forwards the checked-out default branch to its upstream, by T3 Code's auto-pull rules
+/// (`apps/server/src/vcs/VcsStatusBroadcaster.ts` `maybeAutoPull`, `GitVcsDriverCore.ts`
+/// `pullCurrentBranch`): the checkout must be on the remote's default branch, with an upstream;
+/// after a fetch the branch must be behind and not ahead, and the work tree clean (untracked
+/// files count). Then `merge --ff-only`. Anything else is an outcome saying why, and touches
+/// nothing: the user's files and index move only in that one fast-forward.
+///
+/// `grant` fetches a roll code repo with the relay's token (its URL must be the upstream
+/// remote's); without one the fetch uses the user's own git setup, as T3's does.
+pub async fn fast_forward(dir: &Path, grant: Option<&CodeGrant>) -> PullOutcome {
+    match try_fast_forward(dir, grant).await {
+        Ok(outcome) => outcome,
+        Err(e) => PullOutcome::Failed { message: format!("{e:#}") },
+    }
+}
+
+async fn try_fast_forward(dir: &Path, grant: Option<&CodeGrant>) -> anyhow::Result<PullOutcome> {
+    let skip = |reason, message: String| Ok(PullOutcome::Skipped { reason, message });
+    if root(dir).await.is_none() {
+        return skip(PullSkip::NotGit, "the project isn't a git checkout".into());
+    }
+    let Some(branch) = current_branch(dir).await? else { return skip(PullSkip::Detached, "HEAD is detached".into()) };
+    let remote = config_value(dir, &format!("branch.{branch}.remote")).await?.filter(|r| r != ".");
+    let merge = config_value(dir, &format!("branch.{branch}.merge")).await?;
+    let (Some(remote), Some(upstream)) = (remote, merge.as_deref().and_then(|m| m.strip_prefix("refs/heads/"))) else {
+        return skip(PullSkip::NoUpstream, format!("{branch} has no upstream branch to pull from"));
+    };
+    let default = default_branch(dir, &remote).await?;
+    if branch != default || upstream != default {
+        return skip(PullSkip::OtherBranch, format!("the checkout is on {branch}, not {default}"));
+    }
+    let tracking = format!("refs/remotes/{remote}/{upstream}");
+    let fetch = match grant {
+        Some(grant) => {
+            let url = config_value(dir, &format!("remote.{remote}.url")).await?;
+            if url.as_deref() != Some(grant.url.as_str()) {
+                return skip(PullSkip::NoAccess, format!("{remote} isn't {}/{}", grant.repo.owner, grant.repo.repo));
+            }
+            git(dir, &["fetch", "--progress", "--no-tags", "--", &grant.url])
+                .arg(format!("+refs/heads/{upstream}:{tracking}"))
+                .bearer(&grant.token)
+        }
+        None => {
+            let mut fetch = git(dir, &["fetch", "--progress", "--no-tags", "--", &remote]);
+            // Never wait on a passphrase or a host key: there is nobody to answer.
+            if std::env::var_os("GIT_SSH_COMMAND").is_none() && config_value(dir, "core.sshCommand").await?.is_none() {
+                fetch = fetch.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+            }
+            fetch
+        }
+    };
+    if let Err(e) = fetch.patient(NETWORK_IDLE).run().await {
+        return Ok(PullOutcome::Failed { message: format!("fetching {remote}: {e:#}") });
+    }
+    let counts = git(dir, &["rev-list", "--left-right", "--count"]).arg(format!("HEAD...{tracking}")).text().await?;
+    let mut counts = counts.split_whitespace().map(|n| n.parse::<u32>().unwrap_or(0));
+    let (ahead, behind) = (counts.next().unwrap_or(0), counts.next().unwrap_or(0));
+    if behind == 0 {
+        return Ok(PullOutcome::UpToDate { branch });
+    }
+    if ahead > 0 {
+        let commits = if ahead == 1 { "a commit" } else { "commits" };
+        return skip(PullSkip::Diverged, format!("{branch} has {commits} {remote} doesn't"));
+    }
+    let dirty = git(dir, &["status", "--porcelain", "--untracked-files=normal"]).env("GIT_OPTIONAL_LOCKS", "0").cap(1).run().await?;
+    if !dirty.stdout.is_empty() {
+        return skip(PullSkip::LocalChanges, "the checkout has uncommitted changes".into());
+    }
+    let from = head(dir).await?.unwrap_or_default();
+    // git itself refuses to overwrite a file someone changed in the meantime.
+    git(dir, &["merge", "--ff-only", "--quiet"]).arg(&tracking).env("GIT_MERGE_AUTOEDIT", "no").run().await?;
+    let to = head(dir).await?.unwrap_or_default();
+    Ok(PullOutcome::Pulled { branch, from, to, commits: behind })
 }
 
 #[cfg(test)]

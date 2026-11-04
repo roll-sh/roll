@@ -166,6 +166,9 @@ fn strip(e: &mut Entity) {
         Entity::Project(p) => {
             p.repo = None;
             p.git = None;
+            // Scripts can hold anything (a token in a command); pulls name branches and remotes.
+            p.settings = agent_proto::ProjectSettings::default();
+            p.pull = None;
         }
         _ => {}
     }

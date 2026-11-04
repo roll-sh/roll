@@ -67,7 +67,11 @@ impl Host {
             archived_at: None,
         };
         self.store.put_thread_state(&id, &Private { auto_title, ..Private::default() })?;
+        let in_worktree = thread.worktree.is_some();
         self.put(vec![Entity::Thread(thread)])?;
+        if in_worktree {
+            self.setup_worktree(&project.id, &id).await;
+        }
         if let Some(text) = prompt {
             let mut rt = self.lock(&id).await?;
             // A run that can't start is recorded as failed on the thread; the thread exists.
@@ -234,8 +238,12 @@ impl Host {
         // when it can, else hands the summary over (T3's lazy fork resolution).
         let transfer = (upto > 0).then(|| Transfer::Pending { provider: s.provider.0.clone(), upto });
         self.store.put_thread_state(&id, &Private { preamble, transfer, ..Private::default() })?;
+        let (in_worktree, project) = (thread.worktree.is_some(), thread.project.clone());
         self.put(vec![Entity::Thread(thread)])?;
         drop(src);
+        if in_worktree {
+            self.setup_worktree(&project, &id).await;
+        }
         Ok(Reply::Created { id: id.0 })
     }
 

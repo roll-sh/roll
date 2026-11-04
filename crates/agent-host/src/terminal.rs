@@ -47,6 +47,8 @@ pub struct Spawn<'a> {
     pub cwd: &'a Path,
     /// Run this through the shell instead of an interactive login shell.
     pub command: Option<&'a str>,
+    /// More environment for it (a project script's `ROLL_PROJECT_ROOT`, …).
+    pub env: &'a [(&'static str, String)],
     pub cols: u16,
     pub rows: u16,
 }
@@ -98,6 +100,7 @@ pub fn spawn(spec: &Spawn<'_>) -> std::io::Result<Spawned> {
     cmd.current_dir(spec.cwd)
         .env("TERM", "xterm-256color")
         .env("COLORTERM", "truecolor")
+        .envs(spec.env.iter().map(|(k, v)| (k, v)))
         .stdin(slave.try_clone()?)
         .stdout(slave.try_clone()?)
         .stderr(slave)

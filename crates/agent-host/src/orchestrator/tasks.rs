@@ -536,8 +536,12 @@ impl Host {
             .insert(id.clone(), Link { node: node.id.clone(), parent: caller.clone(), cancelled: false });
         // Held before the child starts, so a quick result goes to this call and not into a wake.
         let hold = d.wait.map(|_| self.tasks.hold(&id));
+        let (in_worktree, project) = (thread.worktree.is_some(), thread.project.clone());
         self.put(vec![Entity::Thread(thread), Entity::Node(node)])?;
         drop(prt);
+        if in_worktree {
+            self.setup_worktree(&project, &id).await;
+        }
 
         {
             let mut crt = self.lock(&id).await?;

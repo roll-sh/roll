@@ -48,6 +48,7 @@ async fn a_terminal_echoes_input_keeps_scrollback_resizes_and_exits() {
             project: Some(w.project.clone()),
             thread: None,
             command: Some("printf 'ready\\n'; read a; echo \"got:$a\"; stty size; pwd; read b; exit 3".into()),
+            script: None,
             cols: 100,
             rows: 30,
         })
@@ -91,7 +92,7 @@ async fn closing_hangs_up_a_login_shell() {
     let w = World::new(vec![FakeProvider::new("codex")]).await;
     let mut rx = w.host.subscribe();
     let Reply::Created { id } =
-        w.run(Command::TerminalOpen { project: None, thread: None, command: None, cols: 80, rows: 24 }).await
+        w.run(Command::TerminalOpen { project: None, thread: None, command: None, script: None, cols: 80, rows: 24 }).await
     else {
         panic!()
     };
@@ -126,6 +127,7 @@ async fn thread_terminals_run_in_the_thread_and_go_with_it() {
             project: None,
             thread: Some(thread.clone()),
             command: Some("pwd; read x".into()),
+            script: None,
             cols: 80,
             rows: 24,
         })

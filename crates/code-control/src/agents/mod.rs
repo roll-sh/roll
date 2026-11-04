@@ -13,6 +13,7 @@ pub mod canvas;
 mod code;
 mod link;
 mod policy;
+mod pull;
 pub mod sandbox;
 pub mod share;
 pub mod store;
@@ -65,6 +66,12 @@ pub struct Agents {
     touched: Mutex<HashMap<String, i64>>,
     /// Woken whenever a link attaches (a woken sandbox's command waits for its daemon).
     linked: Notify,
+    /// The task that asks roll code projects to pull runs (`pull.rs`).
+    pulling: std::sync::atomic::AtomicBool,
+    /// How often it looks, in ms (0: [`pull::PULL_EVERY`]).
+    pull_ms: AtomicU64,
+    /// The head each project was last asked to pull to, and when, by (machine, project).
+    pulls: Mutex<HashMap<(String, String), (String, std::time::Instant)>>,
 }
 
 struct LinkHandle {
@@ -201,6 +208,19 @@ impl Agents {
     pub(crate) fn follow_every(&self) -> Duration {
         match self.follow_ms.load(Ordering::Relaxed) {
             0 => code::FOLLOW_EVERY,
+            ms => Duration::from_millis(ms),
+        }
+    }
+
+    /// How often roll code projects with auto-pull are looked at when nothing lands (tests
+    /// shorten it).
+    pub fn set_pull_every(&self, d: Duration) {
+        self.pull_ms.store(d.as_millis().max(1) as u64, Ordering::Relaxed);
+    }
+
+    pub(crate) fn pull_every(&self) -> Duration {
+        match self.pull_ms.load(Ordering::Relaxed) {
+            0 => pull::PULL_EVERY,
             ms => Duration::from_millis(ms),
         }
     }

@@ -17,6 +17,7 @@
 //!   reply again (also after a restart), and a command a crash cut short never runs twice.
 
 mod handoff;
+mod projects;
 mod queries;
 mod runs;
 mod tasks;
@@ -52,8 +53,11 @@ pub struct Host {
     /// Commands in flight by sender and id, so a retry that races the first call waits for its
     /// receipt.
     inflight: std::sync::Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
-    /// Serializes project add/remove (path uniqueness, cascading deletes).
+    /// Serializes changes to project records (path uniqueness, cascading deletes, settings and
+    /// pull results).
     projects: AsyncMutex<()>,
+    /// One pull at a time (`projects.rs`).
+    pulling: AsyncMutex<()>,
     terminals: std::sync::Mutex<HashMap<TerminalId, Arc<terminals::LiveTerminal>>>,
     /// roll's orchestrator MCP server, given to every provider session.
     pub(crate) mcp: crate::mcp::Server,
@@ -237,6 +241,7 @@ impl Host {
             threads: std::sync::Mutex::new(HashMap::new()),
             inflight: std::sync::Mutex::new(HashMap::new()),
             projects: AsyncMutex::new(()),
+            pulling: AsyncMutex::new(()),
             terminals: std::sync::Mutex::new(HashMap::new()),
             mcp,
             tasks,
@@ -244,6 +249,7 @@ impl Host {
         host.recover()?;
         host.mcp.start(Arc::downgrade(&host), listener);
         tasks::spawn_worker(Arc::downgrade(&host), task_work);
+        projects::spawn_puller(Arc::downgrade(&host), host.config.pull_every());
         Ok(host)
     }
 
@@ -481,6 +487,8 @@ impl Host {
         match command {
             Command::ProjectAdd { path, name, clone } => self.project_add(path, name, clone, grant).await,
             Command::ProjectRemove { project } => self.project_remove(&project).await,
+            Command::ProjectUpdate { project, name, settings } => self.project_update(&project, name, settings, grant).await,
+            Command::ProjectPull { project } => self.project_pull(&project, grant).await,
             Command::ThreadCreate {
                 project,
                 provider,
@@ -528,8 +536,8 @@ impl Host {
             Command::RequestRespond { request, response } => self.request_respond(by, &request, response).await,
             Command::CheckpointRollback { thread, checkpoint } => self.checkpoint_rollback(&thread, &checkpoint).await,
             Command::ThreadPublish { thread, message, land } => self.thread_publish(&thread, &message, land, grant).await,
-            Command::TerminalOpen { project, thread, command, cols, rows } => {
-                self.terminal_open(project, thread, command, cols, rows).await
+            Command::TerminalOpen { project, thread, command, script, cols, rows } => {
+                self.terminal_open(project, thread, command, script, cols, rows).await
             }
             Command::TerminalInput { terminal, data } => self.terminal_input(&terminal, &data).await,
             Command::TerminalResize { terminal, cols, rows } => self.terminal_resize(&terminal, cols, rows).await,
@@ -601,6 +609,8 @@ impl Host {
             path: path_str,
             repo: clone,
             git: crate::git::info(&path).await,
+            settings: ProjectSettings::default(),
+            pull: None,
             created_at: at,
             updated_at: at,
         };

@@ -41,24 +41,37 @@ impl Host {
         project: Option<ProjectId>,
         thread: Option<ThreadId>,
         command: Option<String>,
+        script: Option<String>,
         cols: u16,
         rows: u16,
     ) -> Res<Reply> {
-        let (project, cwd) = match (&thread, &project) {
+        let (project, cwd, worktree) = match (&thread, &project) {
             (Some(thread), _) => {
                 let t = self.stored_thread(thread)?;
-                (Some(t.project), t.cwd)
+                (Some(t.project), t.cwd, t.worktree.map(|w| w.path))
             }
-            (None, Some(project)) => (Some(project.clone()), self.project(project)?.path),
+            (None, Some(project)) => (Some(project.clone()), self.project(project)?.path, None),
             (None, None) => {
                 let home = crate::config::user_home().unwrap_or_else(|| PathBuf::from("/"));
-                (None, home.to_string_lossy().into_owned())
+                (None, home.to_string_lossy().into_owned(), None)
             }
         };
         let command = command.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
-        let spawned = terminal::spawn(&Spawn { cwd: cwd.as_ref(), command: command.as_deref(), cols, rows })
+        // A project script (T3's `projectScripts.ts`): its command, told where it runs.
+        let (command, env, name) = match script {
+            None => (command, Vec::new(), None),
+            Some(_) if command.is_some() => return Err(Fail::Invalid("give a command or a script, not both".into())),
+            Some(id) => {
+                let p = self.project(project.as_ref().ok_or_else(|| Fail::Invalid("a script needs a project or a thread".into()))?)?;
+                let s = p.settings.scripts.into_iter().find(|s| s.id == id).ok_or_else(|| Fail::NotFound(format!("no script {id} in {}", p.name)))?;
+                let mut env = vec![("ROLL_PROJECT_ROOT", p.path)];
+                env.extend(worktree.map(|w| ("ROLL_WORKTREE_PATH", w)));
+                (Some(s.command), env, Some(s.name))
+            }
+        };
+        let spawned = terminal::spawn(&Spawn { cwd: cwd.as_ref(), command: command.as_deref(), env: &env, cols, rows })
             .map_err(|e| Fail::Invalid(format!("starting a terminal in {cwd}: {e}")))?;
-        let title = command.clone().unwrap_or_else(|| {
+        let title = name.or_else(|| command.clone()).unwrap_or_else(|| {
             let shell = terminal::shell();
             shell.rsplit('/').next().unwrap_or(&shell).to_string()
         });

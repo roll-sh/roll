@@ -695,3 +695,312 @@ async fn accepting_a_plan_leaves_plan_mode() {
     assert!(!calls.iter().any(|c| matches!(c, Call::SetModes(..))), "{calls:?}");
     assert_eq!(fake.sessions().len(), 1);
 }
+
+// ── project settings and auto-pull (docs/code/agents.md, "Project settings") ──
+
+/// A bare remote whose `main` someone else lands work on (a merged PR, as the remote sees it),
+/// and a daemon whose project is a clone of it.
+struct Remote {
+    host: std::sync::Arc<agent_host::Host>,
+    project: ProjectId,
+    /// The project's checkout.
+    dir: std::path::PathBuf,
+    /// Another clone, where merges come from.
+    other: std::path::PathBuf,
+    bare: std::path::PathBuf,
+    _dirs: Vec<tempfile::TempDir>,
+}
+
+impl Remote {
+    /// `pull_every`: the daemon's `[projects] pull_every` (0: no polling).
+    async fn new(pull_every: u64, providers: Vec<std::sync::Arc<FakeProvider>>) -> Remote {
+        let (home, root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let (bare, seed, dir, other) = (root_path.join("remote.git"), root_path.join("seed"), root_path.join("checkout"), root_path.join("other"));
+        for d in [&bare, &seed] {
+            std::fs::create_dir(d).unwrap();
+        }
+        sh(&bare, &["init", "-q", "--bare", "-b", "main"]);
+        git_repo(&seed);
+        sh(&seed, &["push", "-q", bare.to_str().unwrap(), "main"]);
+        for d in [&dir, &other] {
+            sh(&root_path, &["clone", "-q", bare.to_str().unwrap(), d.to_str().unwrap()]);
+            sh(d, &["config", "user.name", "Test"]);
+            sh(d, &["config", "user.email", "[EMAIL]"]);
+        }
+        std::fs::write(home.path().join("config.toml"), format!("[projects]\npull_every = {pull_every}\n")).unwrap();
+        let host = open(home.path(), providers).await;
+        let Reply::Created { id } = run(&host, Command::ProjectAdd { path: dir.to_string_lossy().into(), name: None, clone: None }).await else {
+            panic!("project.add failed")
+        };
+        Remote { host, project: ProjectId(id), dir, other, bare, _dirs: vec![home, root] }
+    }
+
+    /// Someone lands a commit adding `file` on the remote's main; returns the new head.
+    fn land(&self, file: &str) -> String {
+        std::fs::write(self.other.join(file), format!("{file}\n")).unwrap();
+        sh(&self.other, &["add", "."]);
+        sh(&self.other, &["commit", "-qm", &format!("Add {file}")]);
+        sh(&self.other, &["push", "-q", "origin", "main"]);
+        sh(&self.bare, &["rev-parse", "main"]).trim().to_string()
+    }
+
+    fn head(&self) -> String {
+        sh(&self.dir, &["rev-parse", "HEAD"]).trim().to_string()
+    }
+
+    async fn record(&self) -> Project {
+        match state(&self.host).await.live.get(&(EntityKind::Project, self.project.0.clone())) {
+            Some(Entity::Project(p)) => p.clone(),
+            other => panic!("no project record: {other:?}"),
+        }
+    }
+
+    async fn settings(&self, settings: ProjectSettings) -> Reply {
+        run(&self.host, Command::ProjectUpdate { project: self.project.clone(), name: None, settings: Some(settings) }).await
+    }
+
+    async fn pull(&self) -> PullOutcome {
+        match run(&self.host, Command::ProjectPull { project: self.project.clone() }).await {
+            Reply::Pulled(r) => r.outcome,
+            other => panic!("project.pull: {other:?}"),
+        }
+    }
+
+    /// Waits (5 s at most) for a record of the project whose pull result satisfies `f`, as it
+    /// goes by: a later poll may replace it at once.
+    async fn until(&self, events: &mut tokio::sync::broadcast::Receiver<Outbound>, what: &str, f: impl Fn(&PullOutcome) -> bool) -> PullOutcome {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let ev = tokio::time::timeout_at(deadline, events.recv()).await.unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+            if let Ok(Outbound::Entity(s)) = ev
+                && let Entity::Project(Project { id, pull: Some(r), .. }) = &s.entity
+                && *id == self.project
+                && f(&r.outcome)
+            {
+                return r.outcome.clone();
+            }
+        }
+    }
+}
+
+fn auto_pull() -> ProjectSettings {
+    ProjectSettings { auto_pull: true, ..ProjectSettings::default() }
+}
+
+#[tokio::test]
+async fn auto_pull_fast_forwards_the_default_branch_when_a_merge_lands() {
+    let r = Remote::new(1, vec![FakeProvider::new("codex")]).await;
+    let before = r.head();
+    // Off by default: the checkout stays where it is.
+    r.land("one.txt");
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert_eq!(r.head(), before);
+    assert!(r.record().await.pull.is_none());
+
+    // Turning it on pulls at once.
+    let mut events = r.host.subscribe();
+    assert_eq!(r.settings(auto_pull()).await, Reply::Ok);
+    assert!(r.record().await.settings.auto_pull, "the reply comes after the settings are stored");
+    let pulled = r.until(&mut events, "the first pull", |o| matches!(o, PullOutcome::Pulled { .. })).await;
+    let PullOutcome::Pulled { branch, from, to, commits } = pulled else { unreachable!() };
+    assert_eq!((branch.as_str(), from.as_str(), commits), ("main", before.as_str(), 1));
+    assert_eq!(to, r.head());
+    assert_eq!(std::fs::read_to_string(r.dir.join("one.txt")).unwrap(), "one.txt\n");
+
+    // The next merge comes in on its own, and the project's git info follows.
+    let head = r.land("two.txt");
+    r.until(&mut events, "the second pull", |o| matches!(o, PullOutcome::Pulled { to, .. } if *to == head)).await;
+    assert_eq!(r.head(), head);
+    assert_eq!(r.record().await.git.and_then(|g| g.head), Some(head));
+    assert!(sh(&r.dir, &["status", "--porcelain"]).is_empty());
+
+    // Nothing new: up to date, said once.
+    r.until(&mut events, "up to date", |o| matches!(o, PullOutcome::UpToDate { .. })).await;
+    let seq = r.host.last_seq().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    assert_eq!(r.host.last_seq().await.unwrap(), seq, "a project that stays up to date sends no records");
+
+    // Off again: merges wait.
+    assert_eq!(r.settings(ProjectSettings::default()).await, Reply::Ok);
+    let head = r.head();
+    r.land("three.txt");
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert_eq!(r.head(), head);
+}
+
+#[tokio::test]
+async fn a_pull_touches_nothing_unless_it_is_a_clean_fast_forward() {
+    let r = Remote::new(0, vec![FakeProvider::new("codex")]).await;
+    let untouched = |r: &Remote, head: &str, index: &[u8], what: &str| {
+        assert_eq!(r.head(), head, "{what}: HEAD moved");
+        assert_eq!(std::fs::read(r.dir.join(".git/index")).unwrap(), index, "{what}: the index changed");
+    };
+    let index = || std::fs::read(r.dir.join(".git/index")).unwrap();
+
+    // Nothing new.
+    assert_eq!(r.pull().await, PullOutcome::UpToDate { branch: "main".into() });
+
+    // Uncommitted changes, tracked or not: skipped, and the files stay as they are.
+    r.land("a.txt");
+    let head = r.head();
+    std::fs::write(r.dir.join("README.md"), "mine\n").unwrap();
+    let i = index();
+    let skipped = r.pull().await;
+    assert!(matches!(skipped, PullOutcome::Skipped { reason: PullSkip::LocalChanges, .. }), "{skipped:?}");
+    untouched(&r, &head, &i, "a modified file");
+    assert_eq!(std::fs::read_to_string(r.dir.join("README.md")).unwrap(), "mine\n");
+    assert!(!r.dir.join("a.txt").exists());
+    // The project says so.
+    assert_eq!(r.record().await.pull.map(|p| p.outcome), Some(skipped));
+    sh(&r.dir, &["checkout", "-q", "--", "README.md"]);
+    std::fs::write(r.dir.join("notes.txt"), "scratch\n").unwrap();
+    let i = index();
+    assert!(matches!(r.pull().await, PullOutcome::Skipped { reason: PullSkip::LocalChanges, .. }));
+    untouched(&r, &head, &i, "an untracked file");
+    std::fs::remove_file(r.dir.join("notes.txt")).unwrap();
+
+    // Clean: fast-forwarded.
+    assert!(matches!(r.pull().await, PullOutcome::Pulled { commits: 1, .. }));
+    assert!(r.dir.join("a.txt").exists());
+
+    // A local commit the remote doesn't have: diverged, nothing moves.
+    std::fs::write(r.dir.join("local.txt"), "local\n").unwrap();
+    sh(&r.dir, &["add", "."]);
+    sh(&r.dir, &["commit", "-qm", "local"]);
+    r.land("b.txt");
+    let (head, i) = (r.head(), index());
+    assert!(matches!(r.pull().await, PullOutcome::Skipped { reason: PullSkip::Diverged, .. }));
+    untouched(&r, &head, &i, "diverged");
+    sh(&r.dir, &["reset", "-q", "--hard", "origin/main"]);
+
+    // Another branch checked out, a detached HEAD, a branch without upstream: skipped.
+    sh(&r.dir, &["checkout", "-q", "-b", "feature", "--track", "origin/main"]);
+    r.land("c.txt");
+    let (head, i) = (r.head(), index());
+    let other = r.pull().await;
+    assert!(matches!(&other, PullOutcome::Skipped { reason: PullSkip::OtherBranch, message } if message.contains("feature")), "{other:?}");
+    untouched(&r, &head, &i, "another branch");
+    sh(&r.dir, &["checkout", "-q", "--detach"]);
+    assert!(matches!(r.pull().await, PullOutcome::Skipped { reason: PullSkip::Detached, .. }));
+    sh(&r.dir, &["checkout", "-q", "main"]);
+    sh(&r.dir, &["branch", "-q", "--unset-upstream"]);
+    let (head, i) = (r.head(), index());
+    assert!(matches!(r.pull().await, PullOutcome::Skipped { reason: PullSkip::NoUpstream, .. }));
+    untouched(&r, &head, &i, "no upstream");
+    sh(&r.dir, &["branch", "-q", "--set-upstream-to", "origin/main"]);
+
+    // A remote that can't be reached: failed, nothing touched.
+    sh(&r.dir, &["remote", "set-url", "origin", r.bare.join("gone").to_str().unwrap()]);
+    let (head, i) = (r.head(), index());
+    assert!(matches!(r.pull().await, PullOutcome::Failed { .. }));
+    untouched(&r, &head, &i, "an unreachable remote");
+    sh(&r.dir, &["remote", "set-url", "origin", r.bare.to_str().unwrap()]);
+    assert!(matches!(r.pull().await, PullOutcome::Pulled { commits: 1, .. }));
+}
+
+#[tokio::test]
+async fn a_checkout_an_agent_works_in_is_never_pulled_under_it() {
+    let fake = manual("claude", false);
+    let r = Remote::new(0, vec![fake.clone()]).await;
+    let thread = match run(&r.host, Command::ThreadCreate {
+        project: r.project.clone(),
+        provider: ProviderId::claude(),
+        model: None,
+        effort: None,
+        runtime_mode: RuntimeMode::FullAccess,
+        interaction_mode: InteractionMode::Default,
+        worktree: false,
+        title: None,
+        prompt: Some("work".into()),
+        attachments: Vec::new(),
+    })
+    .await
+    {
+        Reply::Created { id } => ThreadId(id),
+        other => panic!("{other:?}"),
+    };
+    let session = fake.session(0).await;
+    session.wait_calls(|c| !c.is_empty()).await;
+    r.land("a.txt");
+    let head = r.head();
+    assert!(matches!(r.pull().await, PullOutcome::Skipped { reason: PullSkip::Busy, .. }));
+    assert_eq!(r.head(), head);
+    session.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
+    wait(&r.host, |s| s.thread(&thread).filter(|t| t.status == ThreadStatus::Idle).cloned(), "the run to end").await;
+    assert!(matches!(r.pull().await, PullOutcome::Pulled { .. }));
+}
+
+#[tokio::test]
+async fn project_settings_are_checked_and_the_setup_script_runs_in_new_worktrees() {
+    let w = World::new(vec![FakeProvider::new("codex")]).await;
+    let script = |id: &str, name: &str, command: &str, on_worktree: bool| ProjectScript {
+        id: id.into(),
+        name: name.into(),
+        command: command.into(),
+        icon: ScriptIcon::Play,
+        on_worktree,
+    };
+    let settings = ProjectSettings {
+        auto_pull: false,
+        defaults: ThreadDefaults { provider: Some(ProviderId::codex()), worktree: Some(true), ..ThreadDefaults::default() },
+        scripts: vec![
+            script("setup", "Install", "printf '%s|%s' \"$ROLL_PROJECT_ROOT\" \"$ROLL_WORKTREE_PATH\" > setup.out", true),
+            script("lint", "Lint", "printf '%s' \"$ROLL_PROJECT_ROOT\" > lint.out", false),
+        ],
+    };
+    let update = |name: Option<&str>, settings: Option<ProjectSettings>| Command::ProjectUpdate {
+        project: w.project.clone(),
+        name: name.map(String::from),
+        settings,
+    };
+    assert_eq!(w.run(update(Some("  App  "), Some(settings.clone()))).await, Reply::Ok);
+    let project = w.wait("the settings", |s| match s.live.get(&(EntityKind::Project, w.project.0.clone())) {
+        Some(Entity::Project(p)) if p.name == "App" => Some(p.clone()),
+        _ => None,
+    }).await;
+    assert_eq!(project.settings, settings);
+
+    // Bad settings are refused, and nothing changes.
+    let mut twice = settings.clone();
+    twice.scripts.push(script("lint", "Again", "true", false));
+    for bad in [twice, ProjectSettings { scripts: vec![script("x y", "X", "true", false)], ..settings.clone() }, ProjectSettings {
+        scripts: vec![script("empty", "Empty", "  ", false)],
+        ..settings.clone()
+    }] {
+        let refused = w.run(update(None, Some(bad))).await;
+        assert!(matches!(refused, Reply::Error(ReplyError { code: ErrorCode::Invalid, .. })), "{refused:?}");
+    }
+    assert!(matches!(w.run(update(Some(" "), None)).await, Reply::Error(ReplyError { code: ErrorCode::Invalid, .. })));
+    assert!(matches!(
+        w.run(Command::ProjectUpdate { project: ProjectId("prj_nope".into()), name: None, settings: None }).await,
+        Reply::Error(ReplyError { code: ErrorCode::NotFound, .. })
+    ));
+
+    // A new worktree gets the setup script in a terminal, told where it runs.
+    let thread = w.thread("codex", None, true).await;
+    let worktree = w.state().await.thread(&thread).unwrap().worktree.clone().unwrap();
+    let terminal = w.wait("the setup terminal", |s| {
+        s.live.values().find_map(|e| match e {
+            Entity::Terminal(t) if t.thread.as_ref() == Some(&thread) => Some(t.clone()),
+            _ => None,
+        })
+    }).await;
+    assert_eq!((terminal.title.as_str(), terminal.cwd.as_str()), ("Install", worktree.path.as_str()));
+    let out = std::path::Path::new(&worktree.path).join("setup.out");
+    let expected = format!("{}|{}", w.repo.display(), worktree.path);
+    w.wait("the setup script's output", |_| std::fs::read_to_string(&out).ok().filter(|s| *s == expected)).await;
+    // A thread in the checkout doesn't.
+    let local = w.thread("codex", None, false).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(!w.state().await.live.values().any(|e| matches!(e, Entity::Terminal(t) if t.thread.as_ref() == Some(&local))));
+
+    // Any script runs by id in a terminal.
+    let open = |script: &str| Command::TerminalOpen { project: Some(w.project.clone()), thread: None, command: None, script: Some(script.into()), cols: 80, rows: 24 };
+    assert!(matches!(w.run(open("lint")).await, Reply::Created { .. }));
+    let lint = w.repo.join("lint.out");
+    w.wait("the lint script's output", |_| std::fs::read_to_string(&lint).ok().filter(|s| *s == w.repo.to_string_lossy())).await;
+    assert!(matches!(w.run(open("nope")).await, Reply::Error(ReplyError { code: ErrorCode::NotFound, .. })));
+    let both = Command::TerminalOpen { project: Some(w.project.clone()), thread: None, command: Some("ls".into()), script: Some("lint".into()), cols: 80, rows: 24 };
+    assert!(matches!(w.run(both).await, Reply::Error(ReplyError { code: ErrorCode::Invalid, .. })));
+}

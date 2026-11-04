@@ -71,6 +71,31 @@
     }
   },
   {
+    "type": "pulled",
+    "at": 1762000000000,
+    "outcome": {
+      "status": "up_to_date",
+      "branch": "main"
+    }
+  },
+  {
+    "type": "pulled",
+    "at": 1762000000000,
+    "outcome": {
+      "status": "skipped",
+      "reason": "local_changes",
+      "message": "the checkout has uncommitted changes"
+    }
+  },
+  {
+    "type": "pulled",
+    "at": 1762000000000,
+    "outcome": {
+      "status": "failed",
+      "message": "fetching origin failed: could not resolve host"
+    }
+  },
+  {
     "type": "scrollback",
     "data": "JCBscwo="
   },

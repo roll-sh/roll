@@ -44,6 +44,22 @@ fn project() -> Project {
         path: "/home/ada/roll".into(),
         repo: Some(RepoRef { owner: "acme".into(), repo: "roll".into() }),
         git: Some(GitInfo { branch: Some("main".into()), head: Some("f35f34cf".into()), remote: None, dirty: true }),
+        settings: ProjectSettings {
+            auto_pull: true,
+            defaults: ThreadDefaults {
+                provider: Some(ProviderId::claude()),
+                model: Some("claude-opus-5-5".into()),
+                effort: Some("high".into()),
+                runtime_mode: Some(RuntimeMode::AutoEdit),
+                interaction_mode: Some(InteractionMode::Default),
+                worktree: Some(true),
+            },
+            scripts: vec![
+                ProjectScript { id: "setup".into(), name: "Install".into(), command: "pnpm install".into(), icon: ScriptIcon::Configure, on_worktree: true },
+                ProjectScript { id: "test".into(), name: "Test".into(), command: "cargo test".into(), icon: ScriptIcon::Test, on_worktree: false },
+            ],
+        },
+        pull: Some(PullResult { at: T, outcome: PullOutcome::Pulled { branch: "main".into(), from: "8ea39e4d".into(), to: "f35f34cf".into(), commits: 3 } }),
         created_at: T,
         updated_at: T,
     }
@@ -291,6 +307,12 @@ fn commands() -> Vec<Command> {
     vec![
         Command::ProjectAdd { path: "/home/ada/roll".into(), name: None, clone: Some(RepoRef { owner: "acme".into(), repo: "roll".into() }) },
         Command::ProjectRemove { project: prj() },
+        Command::ProjectUpdate {
+            project: prj(),
+            name: Some("roll".into()),
+            settings: Some(ProjectSettings { auto_pull: true, ..ProjectSettings::default() }),
+        },
+        Command::ProjectPull { project: prj() },
         Command::ThreadCreate {
             project: prj(),
             provider: ProviderId::codex(),
@@ -325,7 +347,8 @@ fn commands() -> Vec<Command> {
         },
         Command::CheckpointRollback { thread: thr(), checkpoint: chk() },
         Command::ThreadPublish { thread: thr(), message: "Fix the flaky queue test".into(), land: true },
-        Command::TerminalOpen { project: Some(prj()), thread: None, command: Some("claude /login".into()), cols: 120, rows: 32 },
+        Command::TerminalOpen { project: Some(prj()), thread: None, command: Some("claude /login".into()), script: None, cols: 120, rows: 32 },
+        Command::TerminalOpen { project: None, thread: Some(thr()), command: None, script: Some("test".into()), cols: 120, rows: 32 },
         Command::TerminalInput { terminal: trm(), data: "bHMK".into() },
         Command::TerminalResize { terminal: trm(), cols: 100, rows: 30 },
         Command::TerminalClose { terminal: trm() },
@@ -342,6 +365,8 @@ fn covered_command(c: &Command) {
     match c {
         Command::ProjectAdd { .. }
         | Command::ProjectRemove { .. }
+        | Command::ProjectUpdate { .. }
+        | Command::ProjectPull { .. }
         | Command::ThreadCreate { .. }
         | Command::ThreadConfigure { .. }
         | Command::ThreadFork { .. }
@@ -387,6 +412,12 @@ fn replies() -> Vec<Reply> {
                 blockers: vec!["needs an approving review".into()],
             }),
         }),
+        Reply::Pulled(PullResult { at: T, outcome: PullOutcome::UpToDate { branch: "main".into() } }),
+        Reply::Pulled(PullResult {
+            at: T,
+            outcome: PullOutcome::Skipped { reason: PullSkip::LocalChanges, message: "the checkout has uncommitted changes".into() },
+        }),
+        Reply::Pulled(PullResult { at: T, outcome: PullOutcome::Failed { message: "fetching origin failed: could not resolve host".into() } }),
         Reply::Scrollback { data: "JCBscwo=".into() },
         Reply::Error(ReplyError { code: ErrorCode::MachineOffline, message: "the machine isn't connected".into() }),
     ]
@@ -401,6 +432,7 @@ fn covered_reply(r: &Reply) {
         | Reply::File(_)
         | Reply::GitStatus(_)
         | Reply::Published(_)
+        | Reply::Pulled(_)
         | Reply::Scrollback { .. }
         | Reply::Error(_) => {}
     }
@@ -659,8 +691,8 @@ fn every_variant_of_every_tagged_enum_is_sampled() {
     let tags = |v: serde_json::Value, key: &str| -> std::collections::BTreeSet<String> {
         v.as_array().unwrap().iter().map(|x| x[key].as_str().unwrap().to_string()).collect()
     };
-    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 24, "commands");
-    assert_eq!(tags(serde_json::to_value(replies()).unwrap(), "type").len(), 9, "replies");
+    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 26, "commands");
+    assert_eq!(tags(serde_json::to_value(replies()).unwrap(), "type").len(), 10, "replies");
     assert_eq!(tags(serde_json::to_value(entities()).unwrap(), "kind").len(), 8, "entities");
     let bodies: std::collections::BTreeSet<String> = entities()
         .iter()

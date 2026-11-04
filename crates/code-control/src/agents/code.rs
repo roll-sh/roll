@@ -111,7 +111,7 @@ pub(crate) fn grant(code: &Code, token: &str) -> Result<Option<store::GrantRow>>
 }
 
 /// A repo by the name a project knows it by, following a rename.
-fn repo_of(code: &Code, r: &RepoRef) -> Result<RepoRow> {
+pub(super) fn repo_of(code: &Code, r: &RepoRef) -> Result<RepoRow> {
     match code.find_repo(&r.owner, &r.repo) {
         Err(Error::Moved(to)) => {
             let (o, n) = to.split_once('/').unwrap_or((&to, ""));
@@ -137,7 +137,7 @@ fn granted_repo(code: &Code, caller: &Caller, m: &MachineRow, asked: &RepoRef, p
     Ok(r)
 }
 
-fn mint(code: &Code, m: &MachineRow, r: &RepoRow, asked: &RepoRef, push_ref: Option<&str>) -> Result<CodeGrant> {
+pub(super) fn mint(code: &Code, m: &MachineRow, r: &RepoRow, asked: &RepoRef, push_ref: Option<&str>) -> Result<CodeGrant> {
     let mut b = [0u8; 24];
     getrandom::fill(&mut b).expect("system randomness");
     let token = format!("{GRANT_PREFIX}{}", hex::encode(b));
@@ -147,11 +147,24 @@ fn mint(code: &Code, m: &MachineRow, r: &RepoRow, asked: &RepoRef, push_ref: Opt
 }
 
 /// The repo a command works on and the grant for it, when it needs one. A clone's grant only
-/// fetches; a publish's pushes the thread's own branch (`refs/heads/<worktree branch>`) and
-/// nothing else: never the default branch, another branch or a tag (`git.rs` checks each ref).
+/// fetches, as does a pull's (`project.pull`, and `project.update` turning auto-pull on, which
+/// pulls at once); a publish's pushes the thread's own branch (`refs/heads/<worktree branch>`)
+/// and nothing else: never the default branch, another branch or a tag (`git.rs` checks each ref).
 pub(super) fn grant_for(code: &Code, caller: &Caller, m: &MachineRow, command: &Command) -> Result<Option<(CodeGrant, RepoRow)>> {
+    let project_repo = |project: &agent_proto::ProjectId| -> Result<Option<RepoRef>> {
+        Ok(match store::mirrored(code.db.sql(), &m.id, EntityKind::Project, project.as_str())? {
+            Some(agent_proto::Entity::Project(agent_proto::Project { repo, .. })) => repo,
+            _ => None,
+        })
+    };
     let (asked, branch) = match command {
         Command::ProjectAdd { clone: Some(repo), .. } => (repo.clone(), None),
+        Command::ProjectPull { project } | Command::ProjectUpdate { project, settings: Some(agent_proto::ProjectSettings { auto_pull: true, .. }), .. } => {
+            match project_repo(project)? {
+                Some(repo) => (repo, None),
+                None => return Ok(None),
+            }
+        }
         Command::ThreadPublish { thread, .. } => {
             let Some(agent_proto::Entity::Thread(t)) = store::mirrored(code.db.sql(), &m.id, EntityKind::Thread, thread.as_str())? else { return Ok(None) };
             // Only a thread in its own worktree publishes (the daemon refuses the rest).

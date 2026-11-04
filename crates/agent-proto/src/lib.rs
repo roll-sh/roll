@@ -183,8 +183,128 @@ pub struct Project {
     pub repo: Option<RepoRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<GitInfo>,
+    /// What the owner set for the project (`project.update`).
+    #[serde(default)]
+    pub settings: ProjectSettings,
+    /// What the last pull did (auto-pull or `project.pull`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull: Option<PullResult>,
     pub created_at: Millis,
     pub updated_at: Millis,
+}
+
+/// A project's settings (T3 Code's per-project settings: `defaultAutoPull`,
+/// `defaultProjectScripts`, `defaultModelSelection`, `defaultRuntimeMode` and
+/// `defaultThreadEnvMode` in `packages/contracts/src/settings.ts`, and the project columns of
+/// `045_ProjectionProjectsAutoPull.ts`). `project.update` replaces them whole.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectSettings {
+    /// Keep the checkout's default branch current: when the remote's moves (a change landed, a
+    /// PR merged), fast-forward it, only while the checkout is on that branch with no local
+    /// changes or commits (docs/code/agents.md, "Project settings").
+    #[serde(default)]
+    pub auto_pull: bool,
+    /// What new threads in the project start with.
+    #[serde(default, skip_serializing_if = "ThreadDefaults::is_empty")]
+    pub defaults: ThreadDefaults,
+    /// Commands for the project's checkout or a thread's worktree (T3's project scripts).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scripts: Vec<ProjectScript>,
+}
+
+/// What a new thread in a project starts with; an unset field falls back to the client's last
+/// choice. Clients fill new threads from it (`thread.create` itself always says everything).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadDefaults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_mode: Option<RuntimeMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_mode: Option<InteractionMode>,
+    /// New threads get their own worktree (`true`) or work in the checkout (`false`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<bool>,
+}
+
+impl ThreadDefaults {
+    pub fn is_empty(&self) -> bool {
+        self == &ThreadDefaults::default()
+    }
+}
+
+/// A command kept with a project (T3's `ProjectScript`). It runs in a terminal, in the thread's
+/// worktree or the project's checkout, with `ROLL_PROJECT_ROOT` set (and `ROLL_WORKTREE_PATH`
+/// in a worktree).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectScript {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub icon: ScriptIcon,
+    /// Run it in each new worktree of the project, beside the agent (T3's
+    /// `runOnWorktreeCreate`: the setup script).
+    #[serde(default)]
+    pub on_worktree: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptIcon {
+    #[default]
+    Play,
+    Test,
+    Lint,
+    Configure,
+    Build,
+    Debug,
+}
+
+/// What a pull did, and when.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullResult {
+    pub at: Millis,
+    pub outcome: PullOutcome,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum PullOutcome {
+    /// The default branch was fast-forwarded from `from` to `to`.
+    Pulled { branch: String, from: String, to: String, commits: u32 },
+    /// The remote has nothing new.
+    UpToDate { branch: String },
+    /// Something keeps it from pulling; nothing was touched.
+    Skipped { reason: PullSkip, message: String },
+    /// Fetching or fast-forwarding failed; nothing was touched.
+    Failed { message: String },
+}
+
+/// Why a pull didn't happen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PullSkip {
+    /// The project isn't a git checkout.
+    NotGit,
+    /// HEAD is detached.
+    Detached,
+    /// The checkout is on another branch than the default one.
+    OtherBranch,
+    /// The branch has no upstream to pull from.
+    NoUpstream,
+    /// Uncommitted or untracked files.
+    LocalChanges,
+    /// The branch has commits the remote doesn't.
+    Diverged,
+    /// An agent is working in the checkout.
+    Busy,
+    /// roll can't fetch it (a roll code repo, without the relay's grant).
+    NoAccess,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -879,6 +999,20 @@ pub enum Command {
     },
     #[serde(rename = "project.remove")]
     ProjectRemove { project: ProjectId },
+    /// Rename a project, or replace its settings.
+    #[serde(rename = "project.update")]
+    ProjectUpdate {
+        project: ProjectId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        settings: Option<ProjectSettings>,
+    },
+    /// Fast-forward the checkout's default branch now, by auto-pull's rules (whether or not
+    /// auto-pull is on); answers `pulled`. A roll code project fetches with the relay's grant,
+    /// and the relay sends this itself when the repo's default branch moves.
+    #[serde(rename = "project.pull")]
+    ProjectPull { project: ProjectId },
 
     /// Start a thread. `worktree` puts it in its own git worktree on a new branch.
     #[serde(rename = "thread.create")]
@@ -979,6 +1113,10 @@ pub enum Command {
         /// Run this instead of the login shell (e.g. `claude /login`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command: Option<String>,
+        /// Run the project's script with this id instead (its command, with
+        /// `ROLL_PROJECT_ROOT` and `ROLL_WORKTREE_PATH` set).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        script: Option<String>,
         cols: u16,
         rows: u16,
     },
@@ -1055,6 +1193,8 @@ pub enum Reply {
     File(FileContent),
     GitStatus(GitStatus),
     Published(Published),
+    /// What `project.pull` did.
+    Pulled(PullResult),
     Scrollback {
         /// Base64.
         data: String,

@@ -296,6 +296,43 @@
             "remote": null,
             "dirty": true
           },
+          "settings": {
+            "auto_pull": true,
+            "defaults": {
+              "provider": "claude",
+              "model": "claude-opus-5-5",
+              "effort": "high",
+              "runtime_mode": "auto_edit",
+              "interaction_mode": "default",
+              "worktree": true
+            },
+            "scripts": [
+              {
+                "id": "setup",
+                "name": "Install",
+                "command": "pnpm install",
+                "icon": "configure",
+                "on_worktree": true
+              },
+              {
+                "id": "test",
+                "name": "Test",
+                "command": "cargo test",
+                "icon": "test",
+                "on_worktree": false
+              }
+            ]
+          },
+          "pull": {
+            "at": 1762000000000,
+            "outcome": {
+              "status": "pulled",
+              "branch": "main",
+              "from": "8ea39e4d",
+              "to": "f35f34cf",
+              "commits": 3
+            }
+          },
           "created_at": 1762000000000,
           "updated_at": 1762000000000
         }

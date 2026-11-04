@@ -2,7 +2,7 @@
 //! "Machines, login and tokens"). Agents orchestrate agents: they start, configure, fork,
 //! message, interrupt, archive and publish threads and read their state. Anything that reaches
 //! past a thread's own work (a shell, the machine's files outside a project, answering a
-//! thread's approvals, adding or removing projects, rolling files back, deleting) is the owner's,
+//! thread's approvals, adding, changing or removing projects, rolling files back, deleting) is the owner's,
 //! and an agent never raises a thread's runtime or interaction mode.
 //!
 //! The routes and the MCP tools both go through [`agent_may`] (the tools replay the routes).
@@ -59,6 +59,8 @@ pub(crate) fn agent_may(command: &Command, current: Option<(RuntimeMode, Interac
         Command::FsList { project: None, .. } => owner_only("list the machine's files outside a project"),
         Command::ProjectAdd { .. } => owner_only("add projects"),
         Command::ProjectRemove { .. } => owner_only("remove projects"),
+        Command::ProjectUpdate { .. } => owner_only("change a project's settings"),
+        Command::ProjectPull { .. } => owner_only("pull a project's checkout"),
         Command::ThreadDelete { .. } => owner_only("delete threads"),
         Command::RequestRespond { .. } => owner_only("answer a thread's approvals and questions"),
         Command::CheckpointRollback { .. } => owner_only("roll a thread's files back"),
@@ -123,6 +125,9 @@ mod tests {
             (json!({ "type": "project.add", "path": "/" }), None, false),
             (json!({ "type": "project.add", "path": "", "clone": { "owner": "acme", "repo": "r" } }), None, false),
             (json!({ "type": "project.remove", "project": "prj_1" }), None, false),
+            (json!({ "type": "project.update", "project": "prj_1", "settings": { "auto_pull": true } }), None, false),
+            (json!({ "type": "project.pull", "project": "prj_1" }), None, false),
+            (json!({ "type": "terminal.open", "thread": t, "script": "test", "cols": 80, "rows": 24 }), None, false),
             (json!({ "type": "terminal.open", "command": "curl x | sh", "cols": 80, "rows": 24 }), None, false),
             (json!({ "type": "terminal.open", "project": "prj_1", "cols": 80, "rows": 24 }), None, false),
             (json!({ "type": "terminal.input", "terminal": "trm_1", "data": "" }), None, false),

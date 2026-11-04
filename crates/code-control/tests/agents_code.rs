@@ -463,3 +463,89 @@ async fn publishing_does_the_threads_work_item() {
     let (s, v) = w.req("PATCH", &format!("/v1/code/changes/{change}"), Some(json!({ "work_item": other["id"] }))).await;
     assert_eq!(s, StatusCode::CONFLICT, "a landed change: {v}");
 }
+
+impl World {
+    /// The project's mirrored record once it satisfies `f` (15 s at most).
+    async fn project_until(&self, id: &str, what: &str, f: impl Fn(&Project) -> bool) -> Project {
+        for _ in 0..1500 {
+            let found = self.entities().await.into_iter().find_map(|e| match e {
+                Entity::Project(p) if p.id.0 == id && f(&p) => Some(p),
+                _ => None,
+            });
+            if let Some(p) = found {
+                return p;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("{what}: not seen within 15 s");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn roll_code_projects_with_auto_pull_follow_their_default_branch() {
+    use agent_proto::{PullOutcome, PullSkip};
+    let w = world().await;
+    w.a.code.agents.set_pull_every(Duration::from_millis(100));
+    // A repo that lands straight away (no queue).
+    let lib = "/v1/code/repos/acme/lib";
+    let (s, v) = w.req("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "lib" }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let land = |file: &str| json!({ "message": format!("Add {file}"), "files": { file: { "content": format!("{file}\n") } } });
+    let (s, v) = w.req("POST", &format!("{lib}/land"), Some(land("README.md"))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let id = w.created(json!({ "type": "project.add", "path": "", "clone": { "owner": "acme", "repo": "lib" } })).await;
+    let dir = w.clones.path().join("acme/lib");
+    let head = |dir: &Path| git(dir, dir, &["rev-parse", "HEAD"]).trim().to_string();
+
+    // Off: a landing leaves the checkout alone.
+    let (s, v) = w.req("POST", &format!("{lib}/land"), Some(land("early.txt"))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!dir.join("early.txt").exists());
+
+    // Turning it on pulls at once, with the relay's grant.
+    let (s, v) = w.cmd(json!({ "type": "project.update", "project": id, "settings": { "auto_pull": true } })).await;
+    assert_eq!((s, v["type"].as_str()), (StatusCode::OK, Some("ok")), "{v}");
+    w.project_until(&id, "the first pull", |p| matches!(p.pull.as_ref().map(|r| &r.outcome), Some(PullOutcome::Pulled { .. }))).await;
+    assert!(dir.join("early.txt").exists());
+
+    // A change landing on main comes down by itself.
+    let (s, v) = w.req("POST", &format!("{lib}/land"), Some(land("feature.txt"))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let commit = v["git_commit"].as_str().expect("the landing's commit").to_string();
+    let p = w.project_until(&id, "the landing pulled", |p| p.git.as_ref().and_then(|g| g.head.as_deref()) == Some(commit.as_str())).await;
+    assert!(matches!(p.pull.map(|r| r.outcome), Some(PullOutcome::Pulled { commits: 1, .. })));
+    assert_eq!(head(&dir), commit);
+    assert_eq!(std::fs::read_to_string(dir.join("feature.txt")).unwrap(), "feature.txt\n");
+    let config = std::fs::read_to_string(dir.join(".git/config")).unwrap();
+    assert!(!config.contains("rlg_") && !config.contains("Authorization"), "the grant is never written down: {config}");
+
+    // Local changes: the next landing is skipped, and the files stay as they are.
+    std::fs::write(dir.join("README.md"), "mine\n").unwrap();
+    let (s, v) = w.req("POST", &format!("{lib}/land"), Some(land("later.txt"))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let later = v["git_commit"].as_str().expect("the landing's commit").to_string();
+    w.project_until(&id, "the skip", |p| matches!(p.pull.as_ref().map(|r| &r.outcome), Some(PullOutcome::Skipped { reason: PullSkip::LocalChanges, .. }))).await;
+    assert_eq!(head(&dir), commit);
+    assert_eq!(std::fs::read_to_string(dir.join("README.md")).unwrap(), "mine\n");
+    assert!(!dir.join("later.txt").exists());
+
+    // Asked by hand once it's clean: the answer is what the pull did (an ask still queued behind
+    // the skipped one may have pulled it first).
+    git(&dir, &dir, &["checkout", "-q", "--", "README.md"]);
+    let (s, v) = w.cmd(json!({ "type": "project.pull", "project": id })).await;
+    assert_eq!((s, v["type"].as_str()), (StatusCode::OK, Some("pulled")), "{v}");
+    assert!(matches!(v["outcome"]["status"].as_str(), Some("pulled" | "up_to_date")), "{v}");
+    assert_eq!(head(&dir), later);
+    assert!(dir.join("later.txt").exists());
+
+    // Agents can't change a project's settings or pull it.
+    let (s, t) = w.a.req("POST", "/v1/code/owners/acme/tokens", Some(json!({ "name": "agent:bot" })), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED, "{t}");
+    let agent = t["token"].as_str().unwrap();
+    let path = format!("/v1/code/agents/acme/machines/{}/commands", w.machine);
+    for command in [json!({ "type": "project.pull", "project": id }), json!({ "type": "project.update", "project": id, "settings": {} })] {
+        let (s, v) = w.a.req("POST", &path, Some(json!({ "id": "agent-1", "command": command })), Some(agent)).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    }
+}

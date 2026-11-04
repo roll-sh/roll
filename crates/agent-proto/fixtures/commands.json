@@ -12,6 +12,18 @@
     "project": "prj_1234567890abcdef"
   },
   {
+    "type": "project.update",
+    "project": "prj_1234567890abcdef",
+    "name": "roll",
+    "settings": {
+      "auto_pull": true
+    }
+  },
+  {
+    "type": "project.pull",
+    "project": "prj_1234567890abcdef"
+  },
+  {
     "type": "thread.create",
     "project": "prj_1234567890abcdef",
     "provider": "codex",
@@ -86,6 +98,13 @@
     "type": "terminal.open",
     "project": "prj_1234567890abcdef",
     "command": "claude /login",
+    "cols": 120,
+    "rows": 32
+  },
+  {
+    "type": "terminal.open",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "script": "test",
     "cols": 120,
     "rows": 32
   },

@@ -87,6 +87,7 @@ pub(crate) async fn serve(code: Arc<Code>, machine: MachineRow, mut socket: WebS
         }
     };
     let hub = code.agents.hub(&machine.owner_id);
+    super::pull::start(&code);
     let attached = {
         let _order = hub.order.lock().await;
         let attached = code.agents.attach(&machine.id, &machine.owner_id);
