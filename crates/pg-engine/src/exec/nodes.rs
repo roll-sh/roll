@@ -3909,7 +3909,7 @@ fn rescan_snapshot(plan: &Arc<Plan>, instr: &super::Instr, enclosing: bool) -> H
         let mut exprs = Vec::new();
         crate::sql::explain::node_exprs(p, &mut exprs);
         if let Plan::Scan(s) = p.as_ref() {
-            let key = s as *const crate::sql::plan::ScanPlan as usize;
+            let key = &**s as *const crate::sql::plan::ScanPlan as usize;
             before.insert(key, instr.get(key).unwrap_or_default());
             exprs.extend(s.current_of.as_ref());
             if let Some((_, b)) = &s.index {
