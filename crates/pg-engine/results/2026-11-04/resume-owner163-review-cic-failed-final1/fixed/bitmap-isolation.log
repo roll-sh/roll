@@ -1,0 +1,11 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.50s
+     Running tests/pg_isolation.rs (/home/meszmate/.cache/a163/target/debug/deps/pg_isolation-bf49b20f4eb4d86c)
+
+running 1 test
+roll-bitmap-recheck: ok (0.6s)
+pg_isolation: 1/1 specs, 3/3 permutations, 23/23 steps match; report in /home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/index163_followup/fixed/isolation-report/REPORT.md
+test pg_isolation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.14s
+

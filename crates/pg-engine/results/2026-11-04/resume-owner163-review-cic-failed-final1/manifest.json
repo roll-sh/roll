@@ -1,0 +1,391 @@
+{
+  "source_head": "a54718cadcd4407b93fc5fd7f976a6268e2e31de",
+  "status": "EXACT COMMAND OUTCOMES IN results.json; prior failures retained; no performance/combined-service claim",
+  "files": [
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/apply-fix.py",
+      "bytes": 2210,
+      "sha256": "c18d30d1a5f424f105519dbe6a9e00d878236a9b350190c6613078afc36fb565"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/audit-bitmap.py",
+      "bytes": 962,
+      "sha256": "d1b51f3c5bbc37e736f90dc5e936d16f69a0aaeb55f7c38e07adfb2de41a3842"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/binary-identities.json",
+      "bytes": 365,
+      "sha256": "7bafddcc21fa87d275f43de93aef2acd19359b2aa85771dd58d56aa70f2a49f3"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/bitmap-outcome-audit.json",
+      "bytes": 604,
+      "sha256": "6baf4eaeab51b9afd052aa9538b6614520c6daf8f1670d16ad7268ebb7357e60"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/bitmap-raw/engine.out",
+      "bytes": 2773,
+      "sha256": "a69e77e3dfd85eded1fbe5c0251b65199c08da64afe493b80888c26bad801ee7"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/bitmap-raw/reference.out",
+      "bytes": 2773,
+      "sha256": "a69e77e3dfd85eded1fbe5c0251b65199c08da64afe493b80888c26bad801ee7"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-fix.py",
+      "bytes": 4496,
+      "sha256": "9afa707a065beab1238031fcb63e686e4163d13e716cb48ede503ff46333a701"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-focused.py",
+      "bytes": 3206,
+      "sha256": "858616f34a12d60f97621c65fc318060c8d3ac9e16e2d9c4e10bb2253a0cf8fd"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-focused/measured-include.command.json",
+      "bytes": 330,
+      "sha256": "0d03a3464a6748fc575926702979bab3a3bbea52f2fc8b282302991078c8f71d"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-focused/measured-include.log",
+      "bytes": 938,
+      "sha256": "4386d2ca1320785e3c1a3046e166f65addad7b9497d4d1ba41fd80509d4f3f7d"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-focused/results.json",
+      "bytes": 353,
+      "sha256": "6ed6d7627f55990740ee999f097ac685e722a13e10c916199c908249198202dd"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-focused/review-goldens.command.json",
+      "bytes": 314,
+      "sha256": "9c2790d17929031b95529f36a32fa1fc3a59770b4033d13d81536d325dda3a25"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-focused/review-goldens.log",
+      "bytes": 564,
+      "sha256": "36a6fcae18555115cb112e550242658650cf103fe024605cbd5cd979a4ed86cc"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-focused/source-head",
+      "bytes": 41,
+      "sha256": "6a508a167efa59dc4aff5fda5b7148c7e0b4e24f527e4a1d3261ceb350362ea0"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-focused/source-sha256.json",
+      "bytes": 233220,
+      "sha256": "51959dafa529b3d79273072e408f06d7a8eb141871ca1e4f314b48bffd93d379"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-focused/source-status",
+      "bytes": 71,
+      "sha256": "2b553cb55ab1ca447156b6d6365f4def9752a28e391a33e78eb8dad303e54162"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-measured-diagnostic.py",
+      "bytes": 1028,
+      "sha256": "b51b0cd4e34a7f86333b5a1a40ce96e5c4fbc2b4330839ec6903b3517312d4c8"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-measured-diagnostic/command.json",
+      "bytes": 343,
+      "sha256": "3d93ddc748d827fea6eadac93990fcc54fc8f705287812fd9201f7a5a98399d2"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-measured-diagnostic/diagnostic.log",
+      "bytes": 5411,
+      "sha256": "ff675c307f27fad8a2f1095cd84ca1151b159bf95cf2ce7c98ee81b6094abbbd"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-measured-diagnostic/exit.json",
+      "bytes": 91,
+      "sha256": "ce47cf8c6e3c3ea621e6afba59f8cde04e8d5826746d0a4646079823cfad07aa"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-red.py",
+      "bytes": 1642,
+      "sha256": "95eebb21e3c61f3b87b019401ae2f21935513f63cee8dad7fabb8e596e22d5a7"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-red/a163_review_concurrent.actual",
+      "bytes": 3610,
+      "sha256": "7d495849ccf8387f2ecb45183b245b25f31ffe3d671ae8e946eded7c0d085ded"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-red/a163_review_concurrent.out",
+      "bytes": 3513,
+      "sha256": "07c264a11c99c9ec70e5eb2e4931b8040ed8924045dcb744de6326d3a0372e34"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-red/a163_review_concurrent.sql",
+      "bytes": 2344,
+      "sha256": "741452e540aca412a4effa588002fefbe8fe9447487ed1f11a01933c0540ae65"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-red/complete",
+      "bytes": 54,
+      "sha256": "68476670545b9d20e9157a42a23c62328a6f70eb182f740648cd2356dd8256de"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-red/engine-red.log",
+      "bytes": 1691,
+      "sha256": "429079ee541303378b02ca1555f3adc221cf7f9317b3afb1bf56db9ac7df2979"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-red/pg18-record.log",
+      "bytes": 429,
+      "sha256": "ca285147b0841e9a8f1291783ebcb390fe7035ade29916d1ba625cde3f3c73c8"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-red/results.json",
+      "bytes": 581,
+      "sha256": "71b39beaba420efcd37edc8914e7dd4c8f10ca204328b8e4331cfec0f7f5d266"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-red/source-head",
+      "bytes": 41,
+      "sha256": "732108e36e31035e57d7b800f79b970404973c8da5ff0f392cb82d576d25b3ff"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/cic-red/source.diff",
+      "bytes": 1729,
+      "sha256": "0817cdc057ffc74b14acbdfd0c35cecc2b58ac97e583615714e0ec624c3cf869"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/clippy-warning-comparison.json",
+      "bytes": 308,
+      "sha256": "34eae913a8752bc39ef971998df371b6528b8d2413a1efe8f26fbced5ea42b21"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/export.py",
+      "bytes": 3338,
+      "sha256": "2010c018385d53fd06e9504bdc9685597d3be08c381ff3ca85057dc4696c1d9e"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/final1-audit.json",
+      "bytes": 365,
+      "sha256": "5debbf7aff076e68d6ae3e3f6930ba96e9441ec9ab4d4b74f729dd09b9d28a0d"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/fixed/bitmap-isolation.command.json",
+      "bytes": 669,
+      "sha256": "c2816f50d0c4f88428992ccad8048c485a99b5c4b97ba62a89806d104f91d438"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/fixed/bitmap-isolation.log",
+      "bytes": 655,
+      "sha256": "8ddbdb50bf3fc18e2d7f25c341551061e873a6be983f5e20543742717f596637"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/fixed/build.command.json",
+      "bytes": 251,
+      "sha256": "f7b5dcd1243a42b8fde2f9b2156df61756f323a75bba08997d2979224ac223af"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/fixed/build.log",
+      "bytes": 184,
+      "sha256": "6e83fa8cdced9b5b3dc530963beec32e3cb17bee9e227bbbc7f16b05c8bda758"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/fixed/clippy.command.json",
+      "bytes": 241,
+      "sha256": "cd7b451c9fc6c6675970ff5c4b576309e8ce6dd36ae2bb1cfd721a4da693c26c"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/fixed/clippy.log",
+      "bytes": 10558,
+      "sha256": "f1530e16e3eac6ba5e6c4d545b43889891381e4d2de83d313b058ecf8c261b4e"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/fixed/complete",
+      "bytes": 105,
+      "sha256": "f0788fd3bcd0f2b2779133c59649188ec485705bb717b39d2fd039c25f23359c"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/fixed/focused.command.json",
+      "bytes": 355,
+      "sha256": "99c7e3663f655e4f6d6316143c3b6f0e8cd673cb8075c8a681e80602365fca11"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/fixed/focused.log",
+      "bytes": 12893,
+      "sha256": "0a2a07fb9adfdb9c89d05d8d51ea0ee3bbc11e2e0c483ad28b8ff3229e2e952d"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/fixed/isolation-output-paths.json",
+      "bytes": 151,
+      "sha256": "56ed70af3d3c289d4a6112334653a5060cb6d8eeb816753d7201ea2d3a3d7d63"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/fixed/isolation-report/REPORT.md",
+      "bytes": 545,
+      "sha256": "89e81a78df4b51f974b56ea9a2677c54839895a82b5668c59c9098134a17e5a9"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/fixed/release-golden.command.json",
+      "bytes": 307,
+      "sha256": "811f9c90cc6e1455da14ce33353b779af42e999b7b3e9b295c588aa6ccdf96f4"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/fixed/release-golden.log",
+      "bytes": 460,
+      "sha256": "7be5fdb0a37dc962d8b91c38bbd7b018bb03ae1b1a4b732566887fd07f488a65"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/fixed/results.json",
+      "bytes": 1072,
+      "sha256": "f863758685a45520057fa96971174853d3ae095fa0352f9d5acb7d63fa189e44"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/fixed/source-head",
+      "bytes": 41,
+      "sha256": "732108e36e31035e57d7b800f79b970404973c8da5ff0f392cb82d576d25b3ff"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/fixed/source-sha256.json",
+      "bytes": 232966,
+      "sha256": "384dbbe1e72e3da8cb691420f336ecba20a263fb493357d93eb7834fe9e39767"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/fixed/source-status",
+      "bytes": 71,
+      "sha256": "2b553cb55ab1ca447156b6d6365f4def9752a28e391a33e78eb8dad303e54162"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/integration-170-contract.md",
+      "bytes": 1713,
+      "sha256": "6798479861d9824744fff2021393cbf4efea2c7b971e0e86234f80dce31c538b"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/red-isolated.py",
+      "bytes": 1637,
+      "sha256": "a55c515298355047754a0f18905ab007a1e0e88bdb7aa26186342c4b1d458b2b"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/red-isolated/a163_review_sizes.actual",
+      "bytes": 3309,
+      "sha256": "8f4226b2655d47c34cc9b87efa01787d4518b4f0aaa6e295bb2af811be519270"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/red-isolated/a163_review_sizes.out",
+      "bytes": 3632,
+      "sha256": "8465075fb6aeb86486ebbb36ac72ba29c0ee5c56e629895082e5a84e88d53ace"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/red-isolated/a163_review_sizes.sql",
+      "bytes": 2040,
+      "sha256": "2415bfa4a31439e917713222c0bd33b9fdbf523c7bc7d11bb741f89d7b4c9104"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/red-isolated/complete",
+      "bytes": 54,
+      "sha256": "68476670545b9d20e9157a42a23c62328a6f70eb182f740648cd2356dd8256de"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/red-isolated/engine-red.log",
+      "bytes": 1462,
+      "sha256": "cfd8a757940122a64e8b107d6b9cb47113ddfd5b48ed5eb9a05391c3fd0a4d96"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/red-isolated/pg18-record.log",
+      "bytes": 424,
+      "sha256": "c0c9a2305675369b3797d52f5c0293b1f6b999dfe920cad03d627dcf35142cb3"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/red-isolated/results.json",
+      "bytes": 581,
+      "sha256": "71b39beaba420efcd37edc8914e7dd4c8f10ca204328b8e4331cfec0f7f5d266"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/red-isolated/source-head",
+      "bytes": 41,
+      "sha256": "4ec11c431964559337cef6f06a7aac1f0fcdfdf834f878849bd8a4b81fc1610d"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/red-isolated/source.diff",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/red.py",
+      "bytes": 1628,
+      "sha256": "8a0bd72584a430241fa648c867c6ed7d1f78705677ed56dee7c78e60adc6104f"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/red/a163_review_sizes.actual",
+      "bytes": 3074,
+      "sha256": "74a299a0b3e34d07a2d95de114fcb9e22a3dcb378b5d6d58d7ef29473ec376a8"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/red/a163_review_sizes.out",
+      "bytes": 3488,
+      "sha256": "c23e800e013624eade1eb14e1c600f245fe80356387a623a10d6762afeea09fc"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/red/a163_review_sizes.sql",
+      "bytes": 1924,
+      "sha256": "d5b3ba7f043eb9ea4523d9e1fa280df456567fc446a707d613a8e598cd6312bf"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/red/complete",
+      "bytes": 54,
+      "sha256": "68476670545b9d20e9157a42a23c62328a6f70eb182f740648cd2356dd8256de"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/red/engine-red.log",
+      "bytes": 1527,
+      "sha256": "4a5f8e01f7c99e496ec043b74c4834fc42ec686849ab9eea15419f7108a1c9aa"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/red/pg18-record.log",
+      "bytes": 424,
+      "sha256": "2469a01173baf77645b229e15bcdc01068cb9cad5509e5d734d84b3d3bb3af87"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/red/results.json",
+      "bytes": 581,
+      "sha256": "71b39beaba420efcd37edc8914e7dd4c8f10ca204328b8e4331cfec0f7f5d266"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/red/source-head",
+      "bytes": 41,
+      "sha256": "4ec11c431964559337cef6f06a7aac1f0fcdfdf834f878849bd8a4b81fc1610d"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/red/source.diff",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/red1-audit.json",
+      "bytes": 361,
+      "sha256": "95c0919598120c931acaa607ed9c358ca3ca0715cd5232ddff2c5e668cfcbbb8"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/reference-identity.json",
+      "bytes": 1055,
+      "sha256": "0d5b6ef8a0fd2c2d2fb8c4476bbfbe4f7a85460245e7fd121bb974207d393ed2"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/roll-bitmap-recheck.spec",
+      "bytes": 1387,
+      "sha256": "593519df6907df85738bf791c27b364cfe99703814ae1b6b796fc0466c798231"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/snapshot.py",
+      "bytes": 1552,
+      "sha256": "a4d58a40288dff2b5e6d26cc20d15a6982fef13c90527d4012de4dadb27d4053"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/status.json",
+      "bytes": 1477,
+      "sha256": "eecb0f606470ad7cf852390d65761961a9156dd477394639001f05a271299dc0"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-cic-failed-final1/verify.py",
+      "bytes": 3229,
+      "sha256": "556205d7dfd20c3bade2876a9481d4f82552ce5e2c73bd8afb394abfe237f744"
+    }
+  ]
+}

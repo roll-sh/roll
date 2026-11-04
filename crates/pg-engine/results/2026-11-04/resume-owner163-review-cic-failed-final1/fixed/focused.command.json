@@ -1,0 +1,20 @@
+{
+  "argv": [
+    "cargo",
+    "test",
+    "-p",
+    "pg-engine",
+    "--lib",
+    "--test",
+    "golden",
+    "--test",
+    "big_tables",
+    "--test",
+    "deep_input"
+  ],
+  "env": {
+    "GOLDEN_FILTER": "a163_"
+  },
+  "cwd": "/home/meszmate/roll/.claude/worktrees/agent-a3512214927146502",
+  "source_head": "37e9896225915add74cb51e0d966765cdf01d8b4"
+}

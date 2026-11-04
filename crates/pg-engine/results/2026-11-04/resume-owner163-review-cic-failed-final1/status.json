@@ -1,0 +1,29 @@
+{
+  "utc": "2026-11-04T14:20:39.734789+00:00",
+  "owner": 163,
+  "tested_source_pending": "4c5496833385eb2df038b465b30f7bab4e71595f + a163_review_sizes fixture",
+  "source_mutations": false,
+  "backup": {
+    "commit": "7d1bc479589d8cb481638cf18299dab08d493511",
+    "ref": "wip/resume-20261104-a163-followup-backup1",
+    "ls_remote_verified": true,
+    "committed_evidence_hashes_verified": true
+  },
+  "fixture_checkpoint": {
+    "commit": "9bcf87d23ce96789c9e5b290eeb8a35041b1c0f4",
+    "ref": "wip/resume-20261104-a163-followup-fixture1",
+    "ls_remote_verified": true,
+    "committed_evidence_hashes_verified": true
+  },
+  "red_job": {
+    "state": "TERMINAL_EXPECTED_FAILURE101",
+    "evidence": "red/ and red-isolated/"
+  },
+  "bitmap_spec": "cache-only draft roll-bitmap-recheck.spec, not tested",
+  "candidate_acceptance": "HELD independent37review and combined170modeledworkerformation/parity; parentperformance/footprint/fullservice",
+  "169": "untouched; dedicated parent performance worker owns",
+  "candidate": "37e9896225915add74cb51e0d966765cdf01d8b4",
+  "local_gates": "PASS build0 focused205pass0fail2existingignored Clippy0(14baseline-identical diagnostics) releasegolden3pass isolation1spec3perm23stepsmatch",
+  "bitmap_raw": "both outputs SHA256 a69e77e3dfd85eded1fbe5c0251b65199c08da64afe493b80888c26bad801ee7;3 actual waits,3 BitmapHeap,1BitmapOr",
+  "target_bytes_summary": "42GiB existing a163target; no newtargetdirs; isolatedengineport53269gone"
+}

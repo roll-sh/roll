@@ -1,0 +1,23 @@
+{
+  "argv": [
+    "cargo",
+    "test",
+    "-p",
+    "pg-engine",
+    "--test",
+    "pg_isolation",
+    "--",
+    "--ignored",
+    "--nocapture"
+  ],
+  "env": {
+    "PGISOLATION_ONLY": "roll-bitmap-recheck",
+    "PGISOLATION_DIR": "/home/meszmate/.cache/a163/v/iso",
+    "PGISOLATION_PORT": "53269",
+    "PGISOLATION_REF": "127.0.0.1:53263",
+    "PGISOLATION_DB": "a163_bitmap_followup",
+    "PGISOLATION_REPORT_DIR": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/index163_followup/fixed/isolation-report"
+  },
+  "cwd": "/home/meszmate/roll/.claude/worktrees/agent-a3512214927146502",
+  "source_head": "37e9896225915add74cb51e0d966765cdf01d8b4"
+}

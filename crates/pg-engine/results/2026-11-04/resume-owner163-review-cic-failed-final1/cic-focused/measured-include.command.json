@@ -1,0 +1,17 @@
+{
+  "argv": [
+    "cargo",
+    "test",
+    "-p",
+    "pg-engine",
+    "--test",
+    "big_tables",
+    "--",
+    "--exact",
+    "measured_serial_include_size",
+    "--nocapture"
+  ],
+  "env": {},
+  "cwd": "/home/meszmate/roll/.claude/worktrees/agent-a3512214927146502",
+  "source_head": "a54718cadcd4407b93fc5fd7f976a6268e2e31de"
+}

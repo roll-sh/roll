@@ -1,0 +1,22 @@
+[
+  {
+    "side": "reference",
+    "path": "/home/meszmate/.cache/a163/v/iso/out/reference/roll-bitmap-recheck.out",
+    "sha256": "a69e77e3dfd85eded1fbe5c0251b65199c08da64afe493b80888c26bad801ee7",
+    "permutations": 3,
+    "waiting": 3,
+    "bitmap_heap": 3,
+    "bitmap_or": 1,
+    "error": false
+  },
+  {
+    "side": "engine",
+    "path": "/home/meszmate/.cache/a163/v/iso/out/engine/roll-bitmap-recheck.out",
+    "sha256": "a69e77e3dfd85eded1fbe5c0251b65199c08da64afe493b80888c26bad801ee7",
+    "permutations": 3,
+    "waiting": 3,
+    "bitmap_heap": 3,
+    "bitmap_or": 1,
+    "error": false
+  }
+]

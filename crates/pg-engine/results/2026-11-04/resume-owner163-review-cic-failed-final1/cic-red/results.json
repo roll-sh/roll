@@ -1,0 +1,40 @@
+[
+  {
+    "name": "pg18-record",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "pg-engine",
+      "--test",
+      "golden",
+      "--",
+      "golden",
+      "--exact",
+      "--nocapture"
+    ],
+    "env": {
+      "GOLDEN_RECORD": "127.0.0.1:53263"
+    },
+    "exit": 0,
+    "expected": 0
+  },
+  {
+    "name": "engine-red",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "pg-engine",
+      "--test",
+      "golden",
+      "--",
+      "golden",
+      "--exact",
+      "--nocapture"
+    ],
+    "env": {},
+    "exit": 101,
+    "expected": 101
+  }
+]

@@ -1,0 +1,235 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 25s
+     Running unittests src/lib.rs (/home/meszmate/.cache/a163/target/debug/deps/pg_engine-bc518221d668f0bf)
+
+running 186 tests
+test auth::tests::rfc7677_vector ... ok
+test catalog::btsim::tests::dead_head_walks_match_full_walks ... ok
+test catalog::btsim::tests::long_keys_fit ... ok
+test catalog::btsim::tests::null_keys_follow_tags_not_encoding_length ... ok
+test catalog::btsim::tests::packed_tree_keeps_large_null_keys_across_restart ... ok
+test catalog::btsim::tests::qsort_matches_sorted ... ok
+test catalog::btsim::tests::size_watch_follows_pages ... ok
+test catalog::btsim::tests::vacuum_deletes_emptied_pages ... ok
+test catalog::ginsim::tests::posting_list_sizes ... ok
+test catalog::hashidx::sim_tests::grows_like_postgres ... ok
+test catalog::hashidx::tests::hashes_match_postgres ... ok
+test catalog::heapsim::lps::tests::line_pointers_read_back ... ok
+test catalog::heapsim::lps::tests::settling_waits_for_snapshots_and_preserves_tuple_fields ... ok
+test catalog::heapsim::tests::key_at_answers_every_version ... ok
+test catalog::heapsim::tests::prune_hints_and_visibility_watch_follow_the_model ... ok
+test catalog::heapsim::tests::size_watch_follows_forks ... ok
+test catalog::heapsim::tests::visible_count_follows_writes_and_vacuum ... ok
+test catalog::heapsim::tests::visible_count_pending_insert_clears_target_page ... ok
+test catalog::heapsim::tests::visible_count_restores_old_shapes_atomically ... ok
+test catalog::heapsim::tests::visible_count_survives_bulk_page_initialization ... ok
+test catalog::heapsim::tests::visible_count_survives_pending_restore_and_rollback ... ok
+test catalog::keymap::tests::ascending_rows_found_forward ... ok
+test catalog::keymap::tests::matches_a_hash_map ... ok
+test catalog::pglz::tests::repeats_compress ... ok
+test catalog::pmap::tests::behaves_as_a_btreemap ... ok
+test catalog::pmap::tests::phash_behaves_as_a_hashmap ... ok
+test catalog::pmap::tests::stored_maps_read_groups_as_used ... ok
+test catalog::pmap::tests::stored_phash_reads_buckets_as_used ... ok
+test catalog::relindex::tests::words_match_mentions ... ok
+test catalog::relsize::tests::small_numeric_digits_match_text ... ok
+test catalog::stored_ix::lazy_tags_are_the_listed_maps ... ok
+test exec::fasthash::tests::row_keys_spread ... ok
+test exec::fastsort::tests::encodings_order_as_compare_values ... ok
+test exec::fastsort::tests::ties_between_different_rows_are_left_to_postgres_order ... ok
+test exec::heaporder::tests::displaced_rows_are_outside_the_longest_run ... ok
+test exec::parscan::tests::first_key_pruning_preserves_two_key_tuplesort ... ok
+test exec::parscan::tests::row_sources_preserve_rows_across_slices ... ok
+test exec::pghash::tests::agg_buckets_follow_postgres ... ok
+test exec::pghash::tests::matches_postgres ... ok
+test exec::pgsort::tests::skipped_items_change_nothing ... ok
+test exec::pgsort::tests::ties_like_postgres ... ok
+test exec::pipe::tests::keys_of_both_sides_hash_alike ... ok
+test exec::pipe::tests::single_integer_keys ... ok
+test ext::cube::parse::tests::shapes ... ok
+test ext::fuzzystrmatch::daitch_mokotoff::tests::dm_vectors ... ok
+test ext::fuzzystrmatch::dmetaphone::tests::dmetaphone_vectors ... ok
+test ext::fuzzystrmatch::metaphone::tests::metaphone_vectors ... ok
+test ext::fuzzystrmatch::tests::levenshtein_vectors ... ok
+test ext::fuzzystrmatch::tests::soundex_vectors ... ok
+test ext::hstore::convert::tests::json_numbers ... ok
+test ext::hstore::tests::errors ... ok
+test ext::hstore::tests::layout_and_order ... ok
+test ext::hstore::tests::parse_and_print ... ok
+test ext::intarray::query::tests::round_trips ... ok
+test ext::isn::tables::tests::tables_parse ... ok
+test ext::isn::tests::isn_vectors ... ok
+test ext::ltree::tests::io ... ok
+test ext::pg_stat_statements::normalize::tests::constants_become_parameters ... ok
+test ext::pg_stat_statements::normalize::tests::grouping_ignores_constants_and_aliases ... ok
+test ext::pg_stat_statements::normalize::tests::list_types_follow_the_column ... ok
+test ext::pg_stat_statements::normalize::tests::lists_squash ... ok
+test ext::pgcrypto::cipher::tests::aes_fips197 ... ok
+test ext::pgcrypto::cipher::tests::reference_outputs ... ok
+test ext::pgcrypto::crypt::tests::gen_salt_shapes ... ok
+test ext::pgcrypto::crypt::tests::md5_crypt_vectors ... ok
+test ext::pgcrypto::crypt::tests::sha_crypt_vectors ... ok
+test ext::pgcrypto::crypt_bf::tests::known_hashes ... ok
+test ext::pgcrypto::crypt_des::tests::known_hashes ... ok
+test ext::pgcrypto::digest::tests::digests_match_reference ... ok
+test ext::pgcrypto::digest::tests::rfc4231_hmac_sha256 ... ok
+test ext::pgcrypto::pgp::tests::gnupg_messages ... ok
+test ext::pgcrypto::pgp::tests::round_trips ... ok
+test ext::seg::parse::tests::round_trips ... ok
+test ext::seg::restore::tests::digits ... ok
+test ext::tests::pgcrypto_paths ... ok
+test ext::tests::symbols_of_scripts ... ok
+test ext::uuid_ossp::tests::name_based_vectors ... ok
+test ext::vector::hnsw::mem::tests::aset_sizes ... ok
+test ext::vector::hnsw::mem::tests::tidhash_set ... ok
+test ext::vector::hnsw::pheap::tests::orders_like_a_heap ... ok
+test ext::vector::tests::binary_errors ... ok
+test ext::vector::tests::binary_round_trip ... ok
+test ext::vector::tests::four_row_kernels_match ... ok
+test ext::vector::tests::halves ... ok
+test ext::vector::tests::kernel_speed ... ignored
+test ext::vector::tests::keys_order_as_cmp ... ok
+test ext::vector::tests::reference_fixture ... ignored
+test ext::vector::tests::strtof_prefixes ... ok
+test ext::xslt::html::tests::detection_needs_an_html_root_first ... ok
+test ext::xslt::html::tests::latin1_as_string ... ok
+test ext::xslt::html::tests::reference_cases ... ok
+test ext::xslt::html::tests::xhtml_is_always_indented ... ok
+test ext::xslt::number::tests::format_number_matches_libxslt ... ok
+test ext::xslt::number::tests::helpers ... ok
+test ext::xslt::number::tests::xsl_number_matches_libxslt ... ok
+test hba::tests::hba_rules ... ok
+test lru::tests::bounded_by_bytes_and_keeps_used_entries ... ok
+test remote::outbound::tests::entries ... ok
+test repl::apply::tablesync::tests::concurrent_copy_completion_keeps_finished_table_ready ... ok
+test repl::cmd::tests::parses_the_commands_clients_send ... ok
+test repl::lsn::tests::positions_increase_and_persist_ahead ... ok
+test repl::pgoutput::tests::publication_names ... ok
+test server::tests::startup_options ... ok
+test server_files::tests::canonicalize ... ok
+test server_files::tests::prefix ... ok
+test session::ddl::tsearch::tests::support_functions_are_the_builtin_ones ... ok
+test session::settings::tests::local_and_rollback ... ok
+test session::settings::tests::units ... ok
+test sort::tests::sorts ... ok
+test sql::costs::hist_ineq_tests::cached_histogram_boundaries_keep_equality_and_cutoffs ... ok
+test sql::costs::hist_ineq_tests::larger_histograms_refresh_only_probed_ends_and_interpolate_them ... ok
+test sql::costs::hist_ineq_tests::missing_or_short_histograms_do_not_fetch_endpoints ... ok
+test sql::costs::hist_ineq_tests::two_entries_replace_both_endpoints_or_neither ... ok
+test sql::func::formatting::tests::numbers ... ok
+test sql::literals::tests::keys_leave_out_literals ... ok
+test sql::literals::tests::templates_parse_as_the_parser_does ... ok
+test sql::parse::tests::syntax_error_position ... ok
+test sql::scs::tests::continuation_lines ... ok
+test sql::scs::tests::parser_positions_are_chars ... ok
+test sql::scs::tests::quoted_body_positions ... ok
+test sql::scs::tests::rewrite_keeps_positions ... ok
+test sql::srvlit::tests::escapes_become_server_characters ... ok
+test storage::batch::tests::rows_by_reference_and_owned ... ok
+test storage::cols::tests::columns_match_decoded_rows ... ok
+test storage::dead::tests::cut_keys_compare_conservatively ... ok
+test storage::dead::tests::hints_hold_until_a_commit_writes_into_them ... ok
+test storage::hot::tests::whole_and_covering_ranges ... ok
+test storage::keys::tests::index_values_decode ... ok
+test storage::keys::tests::order_matches_values ... ok
+test storage::row::tests::numerics_roundtrip ... ok
+test storage::row::tests::roundtrip ... ok
+test storage::row::tests::stored_sizes_of_varlenas ... ok
+test storage::sst::tests::block_index_find ... ok
+test storage::sst::tests::block_positions ... ok
+test storage::sst::tests::fast_mod_is_rem ... ok
+test storage::tests::async_commits_visible_then_durable ... ok
+test storage::tests::compaction_leaves_other_files ... ok
+test storage::tests::deleted_sst_runs_preserve_snapshots_and_merge_bounds ... ok
+test storage::tests::flush_compact_reopen ... ok
+test storage::tests::hot_ranges_match_the_store ... ok
+test storage::tests::ingested_commits_and_crash_recovery ... ok
+test storage::tests::mvcc_reads ... ok
+test storage::tests::range_deletions_and_crash_recovery ... ok
+test storage::tests::reverse_scan_matches_forward ... ok
+test storage::tests::scans_step_over_deleted_runs_once ... ok
+test storage::tests::snapshots_survive_compaction ... ok
+test txn::bulklocks::tests::keyset_matches_a_map ... ok
+test txn::bulklocks::tests::keyset_payloads ... ok
+test txn::catmerge::tests::racing_statistics_keep_the_later_commit ... ok
+test txn::procs::tests::slots_are_reused_in_order_and_keep_counting ... ok
+test txn::tests::sort_by_key_after_sorts_as_the_keys ... ok
+test types::binary::tests::numeric_roundtrip ... ok
+test types::cast::tests::common ... ok
+test types::cast::tests::contexts ... ok
+test types::cast::tests::contexts_match_pg_cast ... ok
+test types::cast::tests::values ... ok
+test types::datetime::tests::arithmetic ... ok
+test types::datetime::tests::dates ... ok
+test types::datetime::tests::intervals ... ok
+test types::datetime::tests::timestamps ... ok
+test types::decint::tests::arithmetic_matches_a_binary_big_integer ... ok
+test types::decint::tests::primitive_conversions ... ok
+test types::decint::tests::rounding_by_powers_of_ten ... ok
+test types::enum_serde_tests::enum_array_oid_round_trips_and_defaults ... ok
+test types::hash::tests::matches_postgres ... ok
+test types::json::tests::containment ... ok
+test types::json::tests::roundtrip ... ok
+test types::jsonpath::tests::canonical_text ... ok
+test types::jsonpath::tests::keyvalue_offsets ... ok
+test types::jsonpath::tests::syntax_errors ... ok
+test types::mbconv::server::tests::codes_keep_byte_order_and_round_trip ... ok
+test types::mbconv::server::tests::single_byte_text_is_its_bytes ... ok
+test types::numeric::tests::arithmetic_scales ... ok
+test types::numeric::tests::from_float ... ok
+test types::numeric::tests::ordering ... ok
+test types::numeric::tests::parse_and_print ... ok
+test types::numeric::tests::rounding ... ok
+test types::numeric::tests::small_fast_paths_match_bigint ... ok
+test types::numeric::tests::typmod ... ok
+test types::text::tests::arrays ... ok
+test types::text::tests::floats ... ok
+test types::text::tests::ints ... ok
+test types::text::tests::misc ... ok
+test types::text::tests::shortest_digits_match_reference ... ok
+test types::tz::tests::loads_zones ... ok
+test catalog::btsim::leaf::tests::items_read_back ... ok
+
+test result: ok. 184 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 24.39s
+
+     Running tests/big_tables.rs (/home/meszmate/.cache/a163/target/debug/deps/big_tables-56871ac7816feb9b)
+
+running 15 tests
+test copy_past_the_model ... ok
+test analyze_samples_pages_of_big_tables ... ok
+test deferred_entry_deletes ... ok
+test copy_through_the_sink ... ok
+test estimate_kept_across_restart ... ok
+test estimate_rebuilt_with_higher_model_limit ... ok
+test heap_pages_kept_across_restart ... ok
+test index_build_measures_as_analyze ... ok
+test index_only_scans_from_entries ... ok
+test measured_sizes_from_stored_rows ... ok
+test deferred_model_matches ... ok
+test toast_locks_past_the_model ... ok
+test vacuum_keeps_xmins_of_unchanged_tables ... ok
+test vacuum_skips_unchanged_tables ... ok
+test parallel_index_builds ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.65s
+
+     Running tests/deep_input.rs (/home/meszmate/.cache/a163/target/debug/deps/deep_input-6f89e4c25966a63a)
+
+running 3 tests
+test deep_input_on_2mb_thread has been running for over 60 seconds
+test deep_input_on_test_thread has been running for over 60 seconds
+test deep_input_on_test_thread ... ok
+test deep_input_record ... ok
+test deep_input_on_2mb_thread ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 169.89s
+
+     Running tests/golden.rs (/home/meszmate/.cache/a163/target/debug/deps/golden-6af41b6f5ce20b8e)
+
+running 3 tests
+test golden_shuffled ... ok
+test golden ... ok
+test golden_wire ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.20s
+
