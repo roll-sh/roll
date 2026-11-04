@@ -1,0 +1,22 @@
+[
+  {
+    "owner": "bulk148",
+    "contains_e4214aa4": false,
+    "copy_hooks_touched_by_recovered_delta": false
+  },
+  {
+    "owner": "scan149",
+    "contains_e4214aa4": false,
+    "copy_hooks_touched_by_recovered_delta": false
+  },
+  {
+    "owner": "executor167",
+    "contains_e4214aa4": false,
+    "copy_hooks_touched_by_recovered_delta": false
+  },
+  {
+    "owner": "models170",
+    "contains_e4214aa4": true,
+    "copy_hooks_touched_by_recovered_delta": false
+  }
+]
