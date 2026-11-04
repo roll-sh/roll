@@ -1,0 +1,7 @@
+{
+  "head": "26f4bfac98647989ecff63ef234ec2a8a96d5771",
+  "tree": "edf2f85249bb6c07848cc645b275f7eacf6c56ca",
+  "status": "",
+  "time_utc": "2026-11-04T14:33:30.486553+00:00",
+  "note": "Exact26f4bfac focused Store1/1 SQL1/1 transfer1/1 and build PASS. Full debug FAILED exit101 at unchanged ddl_scaling timing assertion0.138s vs2.106s. App-concurrency suite7passed/1ignored inside debug, including transfer. Remaining configured gates NOT RUN. Prior red/historical evidence retained; no readiness/performance/resource claim."
+}

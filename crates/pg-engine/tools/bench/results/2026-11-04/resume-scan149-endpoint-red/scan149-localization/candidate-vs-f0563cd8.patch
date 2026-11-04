@@ -1,0 +1,404 @@
+diff --git a/crates/pg-engine/src/exec/scan.rs b/crates/pg-engine/src/exec/scan.rs
+index 7619e7ff..dc32280f 100644
+--- a/crates/pg-engine/src/exec/scan.rs
++++ b/crates/pg-engine/src/exec/scan.rs
+@@ -557,6 +557,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
+             kfilter: None,
+             erb: Default::default(),
+             spare: None,
++            fscan: None,
+             run: Default::default(),
+             pending: None,
+             one_run: false,
+@@ -648,6 +649,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
+             kfilter: None,
+             erb: Default::default(),
+             spare: None,
++            fscan: None,
+             run: Default::default(),
+             pending: None,
+             one_run: false,
+@@ -729,6 +731,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
+             kfilter: None,
+             erb: Default::default(),
+             spare: None,
++            fscan: None,
+             run: Default::default(),
+             pending: None,
+             one_run: false,
+@@ -877,6 +880,7 @@ fn open_scan_as(
+         kfilter: None,
+         erb: Default::default(),
+         spare: None,
++        fscan: None,
+         run: Default::default(),
+         pending: None,
+         blocks: Default::default(),
+@@ -1737,6 +1741,7 @@ fn dense_bitmap_scan(
+         kfilter: None,
+         erb: Default::default(),
+         spare: None,
++        fscan: None,
+         run: Default::default(),
+         pending: None,
+         one_run: false,
+@@ -2165,6 +2170,9 @@ struct ScanNode {
+     /// The last range's store iterator once it ended, for the next range to read on with
+     /// (`Txn::reseek_snap`) instead of a new one.
+     spare: Option<StoreIter>,
++    /// The table's rows read for a few keys at a time (`fetch_kept`): one scan kept and
++    /// sought from key to key, its sources staying in their blocks.
++    fscan: Option<Box<TxnScan>>,
+     /// Such a scan read by worker threads (`parscan`), once decided (`par_tried`).
+     par: Option<super::parscan::ParScan>,
+     par_tried: bool,
+@@ -3387,6 +3395,11 @@ impl ScanNode {
+             {
+                 return Ok(rows);
+             }
++            if keys.len() < 4
++                && let Some(rows) = self.fetch_kept(keys, ctx)?
++            {
++                return Ok(rows);
++            }
+             return fetch_rows(keys, ctx);
+         };
+         let txn = ctx.txn.borrow();
+@@ -3403,6 +3416,35 @@ impl ScanNode {
+         get_sorted(&txn, keys, &snap, false)
+     }
+ 
++    /// `fetch_rows` of a few keys at the statement's snapshot through one scan kept from call
++    /// to call (`fscan`), sought to each key (`Txn::reseek_snap`): the next of ascending
++    /// lookups (a nested loop's inner rows, an index's entries in its table's order) reads on
++    /// in the blocks the last one read, instead of a lookup from the top each. Values are put
++    /// back as `fetch_rows` puts them. None: no statement snapshot.
++    fn fetch_kept(&mut self, keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Option<Vec<Option<bytes::Bytes>>>> {
++        let Some(snap) = ctx.snapshot() else {
++            return Ok(None);
++        };
++        let txn = ctx.txn.borrow();
++        let mut out = Vec::with_capacity(keys.len());
++        for k in keys {
++            // (The smallest key past `k`: user keys are prefix-free.)
++            let mut end = k.clone();
++            end.push(0);
++            let kept = self.fscan.take().and_then(|mut it| txn.reseek_snap(&mut it, k, &end, &snap).then_some(it));
++            let mut it = kept.unwrap_or_else(|| Box::new(txn.scan_snap(k, &end, &snap)));
++            out.push(match it.next() {
++                Some(r) => {
++                    let (rk, v) = r?;
++                    (rk == *k).then_some(v)
++                }
++                None => None,
++            });
++            self.fscan = Some(it);
++        }
++        Ok(Some(out))
++    }
++
+     /// Whether this scan's rows go through `LazyScan` (decided once): a plain sequential
+     /// scan, its filter one with a kernel, no row locks, system columns or index entries.
+     fn lazy_scan(&mut self) -> Option<&mut LazyScan> {
+@@ -3526,10 +3568,10 @@ impl ScanNode {
+         self.prefilter.clone().flatten()
+     }
+ 
+-    /// The scan's filter decided by its kernel (None: left to `eval`) for a row made from
+-    /// the stored row `bytes` (an index scan's rows, their conditions checked again): over
+-    /// the stored values first (`StoredCmps`), else over the row.
+-    fn filter_kernel(&mut self, bytes: &[u8], row: &Row) -> Option<bool> {
++    /// The scan's filter decided by its kernel (None: left to `eval`) for the stored row
++    /// `bytes` (an index scan's rows, their conditions checked again; a row whose filter reads
++    /// a few of its columns): over the stored values first (`StoredCmps`), else over `row`.
++    fn filter_kernel(&mut self, bytes: &[u8], row: Option<&Row>) -> Option<bool> {
+         let stored = self.ios_cols.is_none() && !crate::storage::toast::has_external(bytes);
+         let plan = &self.plan;
+         let (k, cmps) = self
+@@ -3547,7 +3589,7 @@ impl ScanNode {
+         {
+             return Some(pass);
+         }
+-        k.passes(row)
++        k.passes(row?)
+     }
+ 
+     fn full_row(&self, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<Row> {
+@@ -3645,7 +3687,8 @@ impl ScanNode {
+ fn scan_row_need(plan: &ScanPlan, key: &[u8], bytes: &[u8], need: &[bool], ctx: &ExecCtx) -> Result<Row> {
+     let t = &plan.table;
+     let (xmin, data) = split_header(bytes)?;
+-    let mut row = crate::storage::row::decode_row_need(data, need)?;
++    // (Room for the key and system columns `scan_row_rest` adds: no reallocation per row.)
++    let mut row = crate::storage::row::decode_row_need_spare(data, need, rest_len(plan))?;
+     if row.len() < t.columns.len() {
+         for (i, c) in t.columns.iter().enumerate().skip(row.len()) {
+             row.push(match need.get(i) {
+@@ -3661,10 +3704,21 @@ fn scan_row_need(plan: &ScanPlan, key: &[u8], bytes: &[u8], need: &[bool], ctx:
+ 
+ /// A stored row as scan `plan` emits it: columns, then the key and system columns if asked.
+ fn scan_row(plan: &ScanPlan, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<Row> {
++    // (Every column, as `scan_row_need` decodes them: sized once with the key and system
++    // columns.)
++    static ALL: [bool; 1664] = [true; 1664];
++    if let Some(all) = ALL.get(..plan.table.columns.len()) {
++        return scan_row_need(plan, key, bytes, all, ctx);
++    }
+     let row = decode_table_row_at(&plan.table, Some(key), bytes)?;
+     scan_row_rest(plan, key, bytes, row, ctx)
+ }
+ 
++/// The values `scan_row_rest` adds after a row's columns.
++fn rest_len(plan: &ScanPlan) -> usize {
++    plan.with_key as usize + if plan.sys { NUM_SYS_COLS } else { 0 }
++}
++
+ /// The key and system columns after a scanned row's columns, if the scan asks for them.
+ fn scan_row_rest(plan: &ScanPlan, key: &[u8], bytes: &[u8], mut row: Row, ctx: &ExecCtx) -> Result<Row> {
+     if plan.with_key {
+@@ -4560,20 +4614,35 @@ impl ScanNode {
+             && self.ios_cols.is_none()
+             && let Some(fm) = self.prefilter_mask().or_else(|| self.external_prefilter(bytes))
+             && !predicate_locked(&self.plan.table, ctx)
+-            && let Some(f) = &self.plan.filter
++            && self.plan.filter.is_some()
+         {
+             let ext = self.toast.is_some() && crate::storage::toast::has_external(bytes);
+-            let probe = match ext {
+-                true => self.row_ext(key, bytes, Some(&fm), None, ctx)?,
+-                false => scan_row_need(&self.plan, key, bytes, &fm, ctx)?,
+-            };
+-            if !eval_bool(f, &probe, ctx)? {
+-                ctx.filtered(self.key);
+-                return Ok(None);
+-            }
+-            prefiltered = true;
+-            if ext {
+-                probed = Some((probe, fm));
++            // (Decided over the stored values, nothing decoded: `StoredCmps`; else over the
++            // filter's columns by its kernel, else `eval`.)
++            match self.filter_kernel(bytes, None) {
++                Some(false) => {
++                    ctx.filtered(self.key);
++                    return Ok(None);
++                }
++                Some(true) => prefiltered = true,
++                None => {
++                    let probe = match ext {
++                        true => self.row_ext(key, bytes, Some(&fm), None, ctx)?,
++                        false => scan_row_need(&self.plan, key, bytes, &fm, ctx)?,
++                    };
++                    let pass = match self.filter_kernel(bytes, Some(&probe)) {
++                        Some(p) => p,
++                        None => eval_bool(self.plan.filter.as_ref().expect("a filter"), &probe, ctx)?,
++                    };
++                    if !pass {
++                        ctx.filtered(self.key);
++                        return Ok(None);
++                    }
++                    prefiltered = true;
++                    if ext {
++                        probed = Some((probe, fm));
++                    }
++                }
+             }
+         }
+         let mut row = match (lazy, &self.ios_cols, probed) {
+@@ -4622,7 +4691,7 @@ impl ScanNode {
+         }
+         if !prefiltered
+             && self.plan.filter.is_some()
+-            && !match self.filter_kernel(bytes, &row) {
++            && !match self.filter_kernel(bytes, Some(&row)) {
+                 Some(pass) => pass,
+                 None => eval_bool(self.plan.filter.as_ref().expect("a filter"), &row, ctx)?,
+             }
+@@ -5269,6 +5338,7 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
+         kfilter: None,
+         erb: Default::default(),
+         spare: None,
++        fscan: None,
+         run: Default::default(),
+         pending: None,
+         one_run: false,
+diff --git a/crates/pg-engine/src/storage/mod.rs b/crates/pg-engine/src/storage/mod.rs
+index 8f87a63a..b3389a54 100644
+--- a/crates/pg-engine/src/storage/mod.rs
++++ b/crates/pg-engine/src/storage/mod.rs
+@@ -1987,8 +1987,8 @@ impl Cursor {
+     }
+ 
+     /// The same source over [start, end) instead: a memtable's read again from `start`; a
+-    /// level's kept in its block when `start` is in it at or past the entry it is on (the
+-    /// next of ascending lookups), else positioned afresh.
++    /// level's kept in its block when `start` falls in it past its first entry (the next of
++    /// ascending lookups), else positioned afresh.
+     fn reseek(&mut self, start: &[u8], end: &[u8]) {
+         match self {
+             Cursor::Mem { buf, from, end: e, done, batch, .. } => {
+@@ -2002,16 +2002,19 @@ impl Cursor {
+             Cursor::Level { ssts, file, block, block_idx, pos, end: e, start: s, started, whole, .. } => {
+                 e.clear();
+                 e.extend_from_slice(end);
++                // (`start` in the block, past its first entry: the first entry at or past it
++                // is here, not in the block before. At the block's first entry the one before
++                // could hold it: positioned afresh.)
+                 if *started
+                     && *file < ssts.len()
+                     && let Some(b) = block.as_ref()
+-                    && pos.index() < b.len()
+-                    && pos.key() <= start
+                     && b.last_key().is_some_and(|k| k >= start)
+                 {
+                     b.seek(start, pos);
+-                    *whole = end.is_empty() || b.last_key().is_none_or(|k| k < end);
+-                    return;
++                    if pos.index() > 0 {
++                        *whole = end.is_empty() || b.last_key().is_none_or(|k| k < end);
++                        return;
++                    }
+                 }
+                 s.clear();
+                 s.extend_from_slice(start);
+@@ -2450,6 +2453,50 @@ fn sources(view: &View, start: &[u8], end: &[u8]) -> Vec<Cursor> {
+     sources
+ }
+ 
++/// Whether `cursors` are the sources `sources(view, start, end)` would make, in its order:
++/// the same memtables and files (a reseek then moves them in place, nothing made).
++fn same_sources(view: &View, cursors: &[Cursor], start: &[u8], end: &[u8]) -> bool {
++    let overlaps = |s: &Arc<SstReader>| s.overlaps(start, end);
++    let mut c = cursors.iter();
++    let mem = |c: Option<&Cursor>, m: &Arc<Memtable>| matches!(c, Some(Cursor::Mem { mem, .. }) if Arc::ptr_eq(mem, m));
++    let file = |c: Option<&Cursor>, s: &Arc<SstReader>| c.and_then(Cursor::files).is_some_and(|f| f.len() == 1 && Arc::ptr_eq(&f[0], s));
++    if !mem(c.next(), &view.mem) {
++        return false;
++    }
++    for f in &view.imm {
++        let ok = match f {
++            Frozen::Mem(m) => mem(c.next(), m),
++            Frozen::Sst(s) if overlaps(s) => file(c.next(), s),
++            Frozen::Sst(_) => true,
++        };
++        if !ok {
++            return false;
++        }
++    }
++    for s in view.l0.iter().filter(|s| overlaps(s)) {
++        if !file(c.next(), s) {
++            return false;
++        }
++    }
++    let mut l1 = view.l1.iter().filter(|s| overlaps(s)).peekable();
++    if l1.peek().is_some() {
++        let Some(files) = c.next().and_then(Cursor::files) else {
++            return false;
++        };
++        let mut n = 0;
++        for s in l1 {
++            if files.get(n).is_none_or(|f| !Arc::ptr_eq(f, s)) {
++                return false;
++            }
++            n += 1;
++        }
++        if n != files.len() {
++            return false;
++        }
++    }
++    c.next().is_none()
++}
++
+ impl Scan {
+     fn of_rows(view: Arc<View>, rows: Vec<(Vec<u8>, Bytes)>, ts: u64) -> Scan {
+         Scan {
+@@ -2515,27 +2562,38 @@ impl Scan {
+         if self.rows.is_some() || ts != self.ts || self.rdels.iter().any(|r| r.ts == rdel::ALL) {
+             return false;
+         }
+-        let fresh = sources(&self._view, start, end);
+         let mut old = std::mem::take(&mut self.merge.sources);
+-        let same = |a: &Cursor, b: &Cursor| match (a, b) {
+-            (Cursor::Mem { mem: x, .. }, Cursor::Mem { mem: y, .. }) => Arc::ptr_eq(x, y),
+-            _ => match (a.files(), b.files()) {
+-                (Some(x), Some(y)) => x.len() == y.len() && x.iter().zip(y).all(|(p, q)| Arc::ptr_eq(p, q)),
+-                _ => false,
+-            },
++        let sources = if same_sources(&self._view, &old, start, end) {
++            // (The same sources: moved in place, none made.)
++            for c in &mut old {
++                c.reseek(start, end);
++            }
++            old
++        } else {
++            let fresh = sources(&self._view, start, end);
++            let same = |a: &Cursor, b: &Cursor| match (a, b) {
++                (Cursor::Mem { mem: x, .. }, Cursor::Mem { mem: y, .. }) => Arc::ptr_eq(x, y),
++                _ => match (a.files(), b.files()) {
++                    (Some(x), Some(y)) => x.len() == y.len() && x.iter().zip(y).all(|(p, q)| Arc::ptr_eq(p, q)),
++                    _ => false,
++                },
++            };
++            fresh
++                .into_iter()
++                .map(|f| match old.iter().position(|o| same(o, &f)) {
++                    Some(i) => {
++                        let mut c = old.swap_remove(i);
++                        c.reseek(start, end);
++                        c
++                    }
++                    None => f,
++                })
++                .collect()
+         };
+-        let sources = fresh
+-            .into_iter()
+-            .map(|f| match old.iter().position(|o| same(o, &f)) {
+-                Some(i) => {
+-                    let mut c = old.swap_remove(i);
+-                    c.reseek(start, end);
+-                    c
+-                }
+-                None => f,
+-            })
+-            .collect();
+-        self.merge = Merge::new(sources, end.to_vec());
++        let mut e = std::mem::take(&mut self.merge.end);
++        e.clear();
++        e.extend_from_slice(end);
++        self.merge = Merge::new(sources, e);
+         self.rdels = rdel::relevant(&self._view.rdels, start, end, ts).into_boxed_slice();
+         self.decided = None;
+         self.decided_ts = 0;
+diff --git a/crates/pg-engine/src/storage/row.rs b/crates/pg-engine/src/storage/row.rs
+index b0443e9f..09734180 100644
+--- a/crates/pg-engine/src/storage/row.rs
++++ b/crates/pg-engine/src/storage/row.rs
+@@ -772,7 +772,7 @@ pub fn decode_row_need(b: &[u8], need: &[bool]) -> Result<Vec<Value>> {
+ pub fn decode_row_need_spare(b: &[u8], need: &[bool], spare: usize) -> Result<Vec<Value>> {
+     let mut pos = 0;
+     let n = get_varint(b, &mut pos)? as usize;
+-    let mut row = Vec::with_capacity(n + spare);
++    let mut row = Vec::with_capacity(n.max(need.len()) + spare);
+     // (The values after the last column needed aren't walked.)
+     let last = need[..need.len().min(n)].iter().rposition(|&x| x).map_or(0, |i| i + 1);
+     for &want in &need[..last] {
+diff --git a/crates/pg-engine/src/txn/mod.rs b/crates/pg-engine/src/txn/mod.rs
+index 817a01a1..c5304ed6 100644
+--- a/crates/pg-engine/src/txn/mod.rs
++++ b/crates/pg-engine/src/txn/mod.rs
+@@ -2693,8 +2693,13 @@ impl Txn {
+         o.upper_done = false;
+         o.lower_head = None;
+         o.lower_done = false;
+-        it.src = self.toast_source(start, end, st.ts, mark, OwnVals::Now);
+-        it.reader = None;
++        // (Without writes of ours the values' source is the store's, whatever the range: the
++        // one it had stays.)
++        let keep = self.writes.is_empty() && it.src.is_some() == crate::storage::toast::may_hold_rows(start, end);
++        if !keep {
++            it.src = self.toast_source(start, end, st.ts, mark, OwnVals::Now);
++            it.reader = None;
++        }
+         true
+     }
+ 

@@ -1,0 +1,66 @@
+
+running 1 test
+== pgvector: bit btree cast copy halfvec hnsw_bit hnsw_halfvec hnsw_sparsevec hnsw_vector ivfflat_bit ivfflat_halfvec ivfflat_vector sparsevec vector_type
+bit                          ref ok    0.1s  engine ok    0.4s
+btree                        ref ok    0.1s  engine ok    0.4s
+cast                         ref ok    0.2s  engine ok    0.6s
+copy                         ref ok    0.2s  engine ok    0.4s
+halfvec                      ref ok    0.2s  engine ok    0.6s
+hnsw_bit                     ref ok    0.1s  engine ok    0.4s
+hnsw_halfvec                 ref ok    0.2s  engine ok    0.4s
+hnsw_sparsevec               ref ok    0.4s  engine ok    0.5s
+hnsw_vector                  ref ok    0.2s  engine ok    0.6s
+ivfflat_bit                  ref ok    0.5s  engine ok    2.0s
+ivfflat_halfvec              ref ok    0.3s  engine ok    1.0s
+ivfflat_vector               ref ok    0.2s  engine ok    1.8s
+sparsevec                    ref ok    0.2s  engine ok    0.5s
+vector_type                  ref ok    0.2s  engine ok    0.6s
+== bloom: bloom
+bloom                        ref ok    0.3s  engine ok    2.6s
+== pg_trgm: pg_trgm pg_utf8_trgm pg_word_trgm pg_strict_word_trgm
+pg_trgm                      ref ok    0.7s  engine ok    4.2s
+pg_utf8_trgm                 ref ok    0.2s  engine ok    0.3s
+pg_word_trgm                 ref ok    0.2s  engine ok    0.6s
+pg_strict_word_trgm          ref ok    0.2s  engine ok    0.7s
+== btree_gist: init int2 int4 int8 float4 float8 cash oid timestamp timestamptz time timetz date interval macaddr macaddr8 inet cidr text varchar char bytea bit varbit numeric uuid not_equal enum bool partitions stratnum without_overlaps
+init                         ref ok    0.2s  engine ok    1.1s
+int2                         ref ok    0.2s  engine ok    0.4s
+int4                         ref ok    0.2s  engine ok    0.3s
+int8                         ref ok    0.2s  engine ok    0.4s
+float4                       ref ok    0.2s  engine ok    0.4s
+float8                       ref ok    0.1s  engine ok    0.4s
+cash                         ref ok    0.1s  engine ok    0.4s
+oid                          ref ok    0.1s  engine ok    0.4s
+timestamp                    ref ok    0.1s  engine ok    0.4s
+timestamptz                  ref ok    0.1s  engine ok    0.5s
+time                         ref ok    0.2s  engine ok    0.4s
+timetz                       ref ok    0.1s  engine ok    0.5s
+date                         ref ok    0.2s  engine ok    0.4s
+interval                     ref ok    0.1s  engine ok    0.4s
+macaddr                      ref ok    0.2s  engine ok    0.4s
+macaddr8                     ref ok    0.2s  engine ok    0.3s
+inet                         ref ok    0.2s  engine ok    0.4s
+cidr                         ref ok    0.2s  engine ok    0.3s
+text                         ref ok    0.2s  engine ok    0.5s
+varchar                      ref ok    0.2s  engine ok    0.4s
+char                         ref ok    0.2s  engine ok    0.5s
+bytea                        ref ok    0.2s  engine ok    0.5s
+bit                          ref ok    0.2s  engine ok    0.4s
+varbit                       ref ok    0.2s  engine ok    0.3s
+numeric                      ref ok    0.2s  engine ok    0.7s
+uuid                         ref ok    0.1s  engine ok    0.4s
+not_equal                    ref ok    0.2s  engine ok    0.5s
+enum                         ref ok    0.2s  engine ok    0.4s
+bool                         ref ok    0.2s  engine ok    0.3s
+partitions                   ref ok    0.2s  engine ok    0.4s
+stratnum                     ref ok    0.2s  engine ok    0.3s
+without_overlaps             ref ok    0.2s  engine ok    0.7s
+== cube: cube cube_sci
+cube                         ref ok    0.3s  engine ok    1.9s
+cube_sci                     ref ok    0.2s  engine ok    0.3s
+kill: (475848): No such process
+pg_contrib: 2163/2166 units match (99.9%), report in /home/meszmate/.cache/a149/pgc/report/REPORT.md
+test pg_contrib ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 48.12s
+
