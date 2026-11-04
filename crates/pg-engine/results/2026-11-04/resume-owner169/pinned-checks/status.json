@@ -1,0 +1,10 @@
+{
+  "source_head": "c21a26b15e324ab7ab08b5baa4ec55ce1ce91ef4",
+  "pinned_job": "build still active at checkpoint; logs partial",
+  "source_gates": "prior targeted+newGC/read_once debug/release+30x4crash+Clippy pass",
+  "preserved_failures": [
+    "masked initial tombstone assertion",
+    "wrong test import compile failure"
+  ],
+  "acceptance": "HELD:reviewed fixes not yet applied;compression performance/footprint pending;combined e2e delegated"
+}

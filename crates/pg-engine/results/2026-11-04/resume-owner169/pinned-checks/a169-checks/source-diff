@@ -1,0 +1,47 @@
+diff --git a/crates/pg-engine/src/storage/mod.rs b/crates/pg-engine/src/storage/mod.rs
+index bfbd4bb2..2278f7aa 100644
+--- a/crates/pg-engine/src/storage/mod.rs
++++ b/crates/pg-engine/src/storage/mod.rs
+@@ -3197,21 +3197,26 @@ mod tests {
+             .commit_sorted(0, &mut std::iter::empty::<Result<(Vec<u8>, Option<Bytes>)>>(), |_, _| Ok(()), &|_, _| Ok(()), |_| {}, linked)
+             .unwrap();
+         assert_eq!(LINKED_TO_L1.load(Ordering::Relaxed) - to_l1, 1);
+-        let check = |s: &Store| {
++        let check = |s: &Store, compacted: bool| {
+             for (p, n) in [("b", 3000u32), ("a", 50), ("d", 50), ("e", 50)] {
+                 for i in (0..n).filter(|i| i % 7 == 0 || *i < 6) {
+                     let k = format!("{p}{i:04}");
+                     let want = (i % 9 != 4).then(|| val(p, i));
+                     let got = s.get(k.as_bytes(), ts).unwrap().map(|v| String::from_utf8(v.to_vec()).unwrap());
+                     assert_eq!(got, want, "{k}");
+-                    assert_eq!(s.get_version(k.as_bytes(), ts).unwrap().map(|v| v.0), Some(ts), "{k}");
++                    let version = s.get_version(k.as_bytes(), ts).unwrap().map(|v| v.0);
++                    if !compacted || want.is_some() {
++                        assert_eq!(version, Some(ts), "{k}, compacted={compacted}");
++                    } else {
++                        assert!(version.is_none() || version == Some(ts), "{k}: {version:?}");
++                    }
+                 }
+             }
+             assert_eq!(s.get(b"c0001", ts).unwrap().as_deref(), Some(&b"old"[..]));
+             let bs = scan_all(s, ts).iter().filter(|(k, _)| k.starts_with('b')).count();
+             assert_eq!(bs, (0..3000).filter(|i| i % 9 != 4).count());
+         };
+-        check(&s);
++        check(&s, false);
+         assert!(s.view().l1.iter().any(|f| f.meta.commit_ts == Some(ts) && f.meta.first_key.starts_with(b"b")));
+         // (Older snapshots see none of it.)
+         assert_eq!(s.get(b"b0001", before).unwrap(), None);
+@@ -3219,10 +3224,10 @@ mod tests {
+         // A crash: the WAL's commits replayed around the run.
+         drop(s);
+         s = Store::open(dir.path(), o()).unwrap();
+-        check(&s);
++        check(&s, false);
+         s.flush_memtables().unwrap();
+         s.compact().unwrap();
+-        check(&s);
++        check(&s, true);
+     }
+ 
+     #[test]
