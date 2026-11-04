@@ -1,0 +1,72 @@
+[
+  {
+    "owner": "executor167",
+    "base": "575ad4b22586afa16eb2bfcd32075e98a744438a",
+    "head": "c1594cc6c9fac649ee76a86d711e1bf880871f08",
+    "tree": "58ff6a42818f23863213a7f3a14b8d13abfde466",
+    "commits_in_order": [
+      "8ac2cede98304c2d7b9abb26d2d65e2f776082b7",
+      "80a43ef173f6268a63c07437cc05cd63184fbd26",
+      "b9b251f4f6912cc381b3b21b29880f6bdf56dc42",
+      "6eb2c85e491c7915dc7fa957326455694573e3cd",
+      "f92d227bd7e9e35d9e524be852adf8508518f89d",
+      "3792eaec3ac58e8150080e79731cec2e329e2299",
+      "c1594cc6c9fac649ee76a86d711e1bf880871f08"
+    ],
+    "files": [
+      "crates/pg-engine/src/exec/agg.rs",
+      "crates/pg-engine/src/exec/lookup.rs",
+      "crates/pg-engine/src/exec/parscan.rs",
+      "crates/pg-engine/src/exec/partial.rs",
+      "crates/pg-engine/src/exec/scan.rs",
+      "crates/pg-engine/src/exec/vector.rs",
+      "crates/pg-engine/src/sql/explain.rs",
+      "crates/pg-engine/src/sql/func/datetime.rs",
+      "crates/pg-engine/src/sql/func/ops.rs",
+      "crates/pg-engine/src/storage/cols.rs",
+      "crates/pg-engine/tests/parallel_scan.rs",
+      "crates/pg-engine/tests/sql/a167_subplan_nestloop.out",
+      "crates/pg-engine/tests/sql/a167_subplan_nestloop.sql"
+    ],
+    "copy_dml_hook_file_touched": false,
+    "patch": "/home/meszmate/.cache/pg-engine-resume-20261104/execution_models/executor167-current.patch",
+    "integration_ready": false,
+    "requirement": "Parent only integrates reviewed scoped commits/hunks after source validation; never replace files from old bases."
+  },
+  {
+    "owner": "models170",
+    "base": "5c31223568fead896be10e66edd59e3d5a261002",
+    "head": "3bb04519be5a02bc6a041395a3a122a644a994d8",
+    "tree": "60958310c764b51ea572371fe2dea82902f85df9",
+    "commits_in_order": [
+      "1bc72ccdc8edea674152f34be058200f18ad7bcf",
+      "a29fcfe3d3f5a178567c9bbbe6faa03b0487af2e",
+      "e86b679448cca30a749f44ab4fbe09d698f7b7c8",
+      "4ccf5c7ffc58e9a2d42fcd13da918872ffa1bba8",
+      "45ad80d0caaad5717be0add5896e7c5826c3e0a4",
+      "055218c7333fd7243f3a97cc999874f1dcb18e7c",
+      "7a6ed0cdbded3f7fda226933666f82de2695aa6e",
+      "b9e2786a1445770577a986b28861141d006f2d6b",
+      "3bb04519be5a02bc6a041395a3a122a644a994d8"
+    ],
+    "files": [
+      "crates/pg-engine/src/catalog/btsim.rs",
+      "crates/pg-engine/src/exec/replication.rs",
+      "crates/pg-engine/src/exec/scan.rs",
+      "crates/pg-engine/src/exec/sizing.rs",
+      "crates/pg-engine/src/exec/sizing/kept.rs",
+      "crates/pg-engine/src/session/ddl/parbuild.rs",
+      "crates/pg-engine/src/session/ddl/table.rs",
+      "crates/pg-engine/src/sql/costs.rs",
+      "crates/pg-engine/src/sql/literals.rs",
+      "crates/pg-engine/tests/models_kept.rs",
+      "crates/pg-engine/tests/sql/a170_btree_empty_leaf.out",
+      "crates/pg-engine/tests/sql/a170_btree_empty_leaf.sql",
+      "crates/pg-engine/tools/bench/repl/apply.sh"
+    ],
+    "copy_dml_hook_file_touched": false,
+    "patch": "/home/meszmate/.cache/pg-engine-resume-20261104/execution_models/models170-current.patch",
+    "integration_ready": false,
+    "requirement": "Parent only integrates reviewed scoped commits/hunks after source validation; never replace files from old bases."
+  }
+]
