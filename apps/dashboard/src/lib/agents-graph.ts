@@ -82,9 +82,12 @@ export function deriveGraph(data: AgentsData, opts: GraphOptions = {}): Graph {
 
   // Threads: newest first under their parent, so fresh work sits at the top.
   // A delegated subagent's thread leaves once it's done (its result is in its parent's transcript).
+  // Settled and snoozed threads are on the sidebar's shelves (docs/code/agents.md, "Settling"):
+  // new activity brings one back, so a thread with a request is never among them.
   const visible = [...data.threads.values()]
     .filter((r) => opts.showArchived || r.value.archived_at === null)
     .filter((r) => r.value.lineage?.relation !== "subagent" || isBusy(r.value.status) || r.value.status === "error")
+    .filter((r) => !shelved(r.value))
     .sort((a, b) => b.value.created_at - a.value.created_at || a.value.id.localeCompare(b.value.id));
   const shown = new Set(visible.map((r) => r.value.id));
   const parentOf = (t: Thread): string | null => {
@@ -183,6 +186,11 @@ export function deriveGraph(data: AgentsData, opts: GraphOptions = {}): Graph {
     edges.push({ from: n.parent, to: n.key, busy: n.busy, dashed: n.relation === "fork" });
   }
   return { roots, nodes, edges };
+}
+
+/** Settled, or snoozed (the daemon wakes it): off the canvas, on the sidebar's shelves. */
+export function shelved(t: Thread): boolean {
+  return t.inbox.settle?.state === "settled" || t.inbox.snooze !== null;
 }
 
 /** Everything the "rolling" popover lists: busy threads and the requests waiting on someone. */

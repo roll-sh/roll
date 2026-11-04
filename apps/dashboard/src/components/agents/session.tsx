@@ -25,6 +25,7 @@ import { input } from "../ui";
 import { ChangeChip, PublishForm, TakeWorkForm, WorkChip } from "./change";
 import { Composer } from "./composer";
 import { Menu } from "./menu";
+import { useInboxMenu } from "./threads-sidebar";
 import { toFileDiff } from "./request-card";
 import { ShareButton } from "./share";
 import { modelName, providerName, Stat, StatusDot, threadStatusLabel, usageLine } from "./shared";
@@ -263,6 +264,8 @@ function TitleBar({
   const lastStat = runs.findLast((r) => r.status !== "rolled_back")?.stat ?? null;
   const busy = isBusy(thread.status);
   const usage = usageLine(thread.usage);
+  // Settle, snooze (docs/code/agents.md, "Settling").
+  const inboxMenu = useInboxMenu(thread);
   const act = (fn: () => Promise<unknown>) => {
     setError(null);
     fn().catch((e: Error) => setError(e.message));
@@ -366,6 +369,7 @@ function TitleBar({
                 phone && { label: "Fork", icon: <Split />, onSelect: fork, disabled: !online },
                 phone && !!project?.repo && { label: "Publish as a change", icon: <Upload />, onSelect: () => setPanel("publish"), disabled: !online || busy },
                 !!services && !thread.work && { label: "Take a work item", icon: <ClipboardList />, onSelect: () => setPanel("work") },
+                ...inboxMenu.items,
                 {
                   label: thread.archived_at ? "Unarchive" : "Archive",
                   icon: thread.archived_at ? <ArchiveRestore /> : <Archive />,
@@ -405,6 +409,7 @@ function TitleBar({
           {thread.work && <WorkChip work={thread.work} className="min-w-0 flex-1" onRelease={readOnly || !services ? undefined : () => act(() => services.releaseWork(owner, thread.id))} />}
         </div>
       )}
+      {inboxMenu.extra}
       {panel === "publish" && machine && <PublishForm thread={thread} machine={machine} onDone={() => setPanel(null)} />}
       {panel === "work" && !thread.work && <TakeWorkForm thread={thread} repo={project?.repo ? `${project.repo.owner}/${project.repo.repo}` : null} onDone={() => setPanel(null)} />}
     </div>

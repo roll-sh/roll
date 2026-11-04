@@ -420,6 +420,18 @@ body {
   animation: panel-in 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+/* The agents threads sidebar slides in from the left edge. */
+@keyframes sidebar-in {
+  from {
+    opacity: 0;
+    transform: translateX(-16px);
+  }
+}
+
+.sidebar-in {
+  animation: sidebar-in 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
 /* The card whose conversation or settings are open beside the canvas. */
 [data-card][data-selected] [data-drag] {
   border-color: color-mix(in oklab, var(--accent) 55%, transparent);
@@ -429,6 +441,7 @@ body {
   .pop,
   .sheet-in,
   .panel-in,
+  .sidebar-in,
   .fade-in {
     animation: none;
   }

@@ -24,6 +24,7 @@ import { SettingsPanel } from "./settings-panel";
 import { useSandboxes } from "./sandbox";
 import { Conversation, IconButton } from "./session";
 import { TerminalNode } from "./terminal";
+import { SidebarToggle, ThreadsSidebar, useSidebarOpen } from "./threads-sidebar";
 import { AgentsContext, useAgents, useAgentsSnapshot, useHold, useMarkDriver, type AgentsCtx } from "./use-agents";
 import { useAgentsConnection } from "./use-connection";
 import { PinTools, useCanvasViews, ViewsBar, type CanvasViews } from "./views";
@@ -113,6 +114,7 @@ export function AgentsSurface({
   const [newIn, setNewIn] = useState<string | undefined>(undefined);
   const [adding, setAdding] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
+  const [sidebar, setSidebar] = useSidebarOpen(phone);
   const canvas = useRef<CanvasHandle>(null);
   const views = useCanvasViews(services.canvas, client.owner, data.canvas?.revision ?? 0);
   const pendingFocus = useRef<string | null>(initialFocus ?? null);
@@ -240,6 +242,7 @@ export function AgentsSurface({
         <div className={`min-h-0 flex-1 flex-col ${shown.kind === "new" ? "hidden" : "flex"}`}>
           <div className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-3" data-drag-region>
             {chrome === "window" && <WindowHome />}
+            <SidebarToggle open={sidebar} onToggle={() => setSidebar(!sidebar)} />
             <h2 className="text-[13.5px] font-semibold tracking-[-0.02em]">Agents</h2>
             <span className="flex min-w-0 items-center gap-2 text-[12px] text-subtle">
               <span className={`size-1.5 shrink-0 rounded-full ${snap.conn === "live" ? (running ? "pulse-dot bg-accent" : "bg-ok") : snap.conn === "error" ? "bg-danger" : "bg-subtle"}`} aria-hidden />
@@ -269,6 +272,7 @@ export function AgentsSurface({
             </span>
           </div>
           <div className="relative flex min-h-0 flex-1">
+            <ThreadsSidebar data={data} open={sidebar} setOpen={setSidebar} phone={phone} openThread={shown.kind === "thread" ? shown.thread : null} />
             <div className="relative min-h-0 min-w-0 flex-1">
               {data.machines.size === 0 && snap.conn !== "connecting" ? (
                 <Empty demo={demo} onCreated={onSandbox} />

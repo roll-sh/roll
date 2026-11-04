@@ -3,6 +3,7 @@ import { deriveGraph, keyOf, projectStats, rolling } from "./agents-graph";
 import { arrange, bounds, dropIndex, fitView, mergeOrder, moveTo, ROOTS, tidyLayout, withOrder, zoomAt } from "./agents-layout";
 import { applyEvents, emptyData, follow } from "./agents-store";
 import { approval, ev, machine, node, project, run, terminal, thread } from "@/test/agents";
+import { EMPTY_INBOX, type Thread } from "./agents-api";
 
 function sample() {
   let d = follow(emptyData(), ["thr_1"]);
@@ -63,6 +64,21 @@ describe("agents graph", () => {
     expect(g.nodes.has("t:thr_w")).toBe(true);
     // A fork stays: it's the user's own thread.
     expect(g.nodes.has("t:thr_2")).toBe(true);
+  });
+
+  it("settled and snoozed threads leave the canvas; their active forks hang off the project", () => {
+    const inbox = (over: Partial<Thread["inbox"]>) => ({ ...EMPTY_INBOX, ...over });
+    const d = applyEvents(sample(), [
+      ev("thread", thread({ id: "thr_3", title: "Docs", created_at: 30, inbox: inbox({ settle: { state: "settled", at: 40, by: "inactivity" } }) }), 30),
+      ev("thread", thread({ id: "thr_s", title: "Later", created_at: 31, inbox: inbox({ snooze: { until: Date.now() + 60_000, at: 31 } }) }), 31),
+      ev("thread", thread({ id: "thr_k", title: "Kept", created_at: 32, inbox: inbox({ settle: { state: "active", at: 40 } }) }), 32),
+      ev("thread", thread({ id: "thr_f", title: "Fork of docs", created_at: 33, lineage: { parent: "thr_3", relation: "fork", root: "thr_3", from_run: null } }), 33),
+    ]);
+    const g = deriveGraph(d);
+    expect(g.nodes.has("t:thr_3")).toBe(false);
+    expect(g.nodes.has("t:thr_s")).toBe(false);
+    expect(g.nodes.has("t:thr_k")).toBe(true);
+    expect(g.nodes.get("t:thr_f")!.parent).toBe("p:prj_1");
   });
 
   it("moves an open thread's requests into the session and shows archived threads on request", () => {
