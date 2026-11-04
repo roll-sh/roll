@@ -84,7 +84,20 @@ SearchPath typeconversion+preparedbehavior tests. All cursor/utility/PLcursorOPE
 changes,memorycursoradditions,165cursorgoldens excluded. Three-wayclean;each retained
 added/removedline exactlymatches documentedsource delta (169zero-contexthunks). Newshared
 COPY/scan_need changes preserved;cursor/utility/memory bytesmatchshared. Scope/audit/patch
-included. Focused independentgate active;partialoutputs excluded. Fullgates/reviewpending.
+included. Focused lock/compact/kept/searchpath/privileges passed. Wire failed101:
+66passed/1failed; big_bytea existing20s gate took28.455601813s after output checks passed.
+Raw failure remains declared. Bounded candidate/sharedfe7/candidate isolated target all
+passed (wire sourcehash equal);compile-inclusive times explicitly separate from harness
+test times. These isolated passes do not erase fullwire failure/prove sourceeffect.
+Transient control checkout restored cleanab3 before new gates;RESTORED receipt retained.
+
+Prepared449count runner NEVER executed:parent caught wrong old-base library count before
+launch. Shared tested451baseline perbinary map plus ONLY two newpreparedtest names =>
+frozen453/0/18/60. Successorcheck165ind-v2 uses exact perbinary map/auditor, selfchecked
+against oldcaab448summary, frozenrunnerhashes preserved. Per-candidate stack check scoped
+pnpm test:pg --unit; stamp skip explicitlySKIP/noexecution; no service-stack orpgengine
+acceptance. One final forced service gate held. Exactab3 fullgate nowactive,partialcurrent
+outputs excluded;source/review/gates pending.
 
 Owned cache runners now fail explicitly on logged failures (Bash ! guards do not imply
 errexit). Profiler wrapper records perf/pgbench exits separately. Matrix/scaled scripts

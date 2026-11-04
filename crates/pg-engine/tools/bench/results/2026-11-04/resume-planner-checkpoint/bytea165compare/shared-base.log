@@ -1,0 +1,9 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a640c14a8f76f8ea4/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 35s
+     Running tests/wire.rs (/home/meszmate/.cache/a165/target/debug/deps/wire-1216b25cfa9dada3)
+
+running 1 test
+test big_bytea_values_go_out_in_linear_time ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 66 filtered out; finished in 13.30s
+

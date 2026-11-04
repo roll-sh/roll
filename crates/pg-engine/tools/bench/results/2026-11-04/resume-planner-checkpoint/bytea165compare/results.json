@@ -1,0 +1,26 @@
+[
+  {
+    "name": "candidate-before",
+    "head": "ab3f64b8dd92203123f6777ae4a6028d3a3aae67",
+    "tree": "760827d66acfa748e39eb1a5445781c0de3f393a",
+    "exit": 0,
+    "wall_including_cargo": 12.282798977917992,
+    "wire_source_sha256": "2dcc4e12789f5443ea464827634ab58ffd7c4c77492d127c25bcf7ff5df4ab87"
+  },
+  {
+    "name": "shared-base",
+    "head": "fe7b0023c9df19a6dae1e6067ba8454998db48c5",
+    "tree": "cd22966cc63b13caca8ac7db19224f74cbed7103",
+    "exit": 0,
+    "wall_including_cargo": 169.27480457606725,
+    "wire_source_sha256": "2dcc4e12789f5443ea464827634ab58ffd7c4c77492d127c25bcf7ff5df4ab87"
+  },
+  {
+    "name": "candidate-after",
+    "head": "ab3f64b8dd92203123f6777ae4a6028d3a3aae67",
+    "tree": "760827d66acfa748e39eb1a5445781c0de3f393a",
+    "exit": 0,
+    "wall_including_cargo": 129.46716687700246,
+    "wire_source_sha256": "2dcc4e12789f5443ea464827634ab58ffd7c4c77492d127c25bcf7ff5df4ab87"
+  }
+]

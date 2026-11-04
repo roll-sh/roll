@@ -1,0 +1,85 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a640c14a8f76f8ea4/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.21s
+     Running tests/wire.rs (/home/meszmate/.cache/a165/target/debug/deps/wire-1216b25cfa9dada3)
+
+running 67 tests
+test activity_query_clipped_to_track_activity_query_size ... ok
+test after_waits_for_ddl ... ok
+test authentication ... ok
+test binary_datetime_input_in_range ... ok
+test binary_formats_and_user_types ... ok
+test bound_parameters_of_domains_and_explain ... ok
+test cached_plan_result_change_before_result_formats ... ok
+test cancel_and_terminate ... ok
+test cancel_request_closes_after_the_error ... ok
+test cancel_while_rows_stream ... ok
+test catalog_row_locks ... ok
+test composite_domain_fields_in_binary ... ok
+test concurrent_connects_and_closes ... ok
+test concurrent_ddl ... ok
+test concurrent_ddl_on_unrelated_objects ... ok
+test concurrent_foreign_keys_take_distinct_oids ... ok
+test concurrent_index_builds_wait_for_old_snapshots ... ok
+test copy_errors_encodings_and_transaction_defaults ... ok
+test copy_in_and_out ... ok
+
+thread 'big_bytea_values_go_out_in_linear_time' (182595) panicked at crates/pg-engine/tests/wire.rs:3786:9:
+28.455601813s
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test cursors_are_portals ... ok
+test big_bytea_values_go_out_in_linear_time ... FAILED
+test database_settings ... ok
+test database_options ... ok
+test described_types_startup_options_and_copy_not_null ... ok
+test detach_partition_concurrently ... ok
+test domain_array_binary_element_type ... ok
+test drop_database_waits_for_exiting_sessions ... ok
+test exported_snapshots ... ok
+test extended_protocol_types ... ok
+test databases_open_and_close ... ok
+test failed_transaction_parses_its_end ... ok
+test extension_types_binary_format ... ok
+test heap_order_sessions_and_reopen ... ok
+test heavyweight_locks_and_deadlocks ... ok
+test listen_notify ... ok
+test listen_settings_and_connection_addresses ... ok
+test login_checks_and_role_settings ... ok
+test md5_and_password_authentication ... ok
+test monitoring_views ... ok
+test notices_copy_lines_and_portal_rows_as_they_come ... ok
+test idle_hook_runs_and_the_connection_goes_on ... ok
+test parameters_left_without_a_type ... ok
+test portals_hold_returning_rows_and_run_once ... ok
+test pruning_horizons_follow_snapshots ... ok
+test range_binary_format ... ok
+test rechecks_after_concurrent_updates ... ok
+test roles_are_cluster_wide ... ok
+test row_locks_at_the_query_level_top ... ok
+test row_locks_pushed_into_subqueries_and_views ... ok
+test rows_before_an_error ... ok
+test parallel_workers_seen_by_others ... ok
+test semi_join_right_side_not_a_parameter ... ok
+test sequence_columns_and_unplanned_on_conflict_describe ... ok
+test sequences_survive_a_clean_close ... ok
+test serializable_write_skew ... ok
+test several_locking_clauses ... ok
+test startup_names_cut_to_namedatalen ... ok
+test startup_notice_empty_arrays_and_catalog_dml ... ok
+test rows_stream_as_the_executor_makes_them ... ok
+test text_parameters_of_reg_types ... ok
+test toast_relations ... ok
+test transactions_and_portals ... ok
+test trust_and_startup_options ... ok
+test unique_checks_wait_for_writers_in_progress ... ok
+test utility_statements_describe_their_analyzed_parameters ... ok
+test virtual_transaction_ids ... ok
+test statistics_reach_other_sessions_when_flushed ... ok
+
+failures:
+
+failures:
+    big_bytea_values_go_out_in_linear_time
+
+test result: FAILED. 66 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 74.83s
+
+error: test failed, to rerun pass `-p pg-engine --test wire`

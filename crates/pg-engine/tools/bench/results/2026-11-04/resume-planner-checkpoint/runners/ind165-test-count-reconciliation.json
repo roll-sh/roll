@@ -1,0 +1,19 @@
+{
+  "base": "fe7b0023c9df19a6dae1e6067ba8454998db48c5",
+  "candidate": "ab3f64b8dd92203123f6777ae4a6028d3a3aae67",
+  "base_map_sha256": "210d6c0e7ed940b1aa4724f24e56d1f2f071f090f1a693079c91afe76ab74eb9",
+  "expected_map_sha256": "a8f76370c874a10b7c62f85e3c62d15ab9fc2400710373407ba159a7e7e23b15",
+  "expected": {
+    "passed": 453,
+    "failed": 0,
+    "ignored": 18,
+    "summaries": 60
+  },
+  "new_test_names": [
+    "prepared_finish_preserves_reused_backend_lock_owners",
+    "prepared_waiters_wake_after_finish_and_disconnect"
+  ],
+  "changed_binary": "tests/twophase.rs:2\u21924",
+  "other_binary_counts": "unchanged from shared451 baseline",
+  "old_449_runner": "prepared only, NEVER RUN; invalid old-base lib count"
+}

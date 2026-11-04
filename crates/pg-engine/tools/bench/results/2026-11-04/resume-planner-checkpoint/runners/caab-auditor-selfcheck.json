@@ -1,0 +1,310 @@
+{
+  "summary": {
+    "passed": 448,
+    "failed": 0,
+    "ignored": 18,
+    "summaries": 60
+  },
+  "per_binary": {
+    "src/lib.rs": [
+      183,
+      0,
+      2
+    ],
+    "src/bin/roll-engine.rs": [
+      0,
+      0,
+      0
+    ],
+    "tests/app_concurrency.rs": [
+      6,
+      0,
+      1
+    ],
+    "tests/autovacuum.rs": [
+      6,
+      0,
+      0
+    ],
+    "tests/autovacuum_log.rs": [
+      1,
+      0,
+      0
+    ],
+    "tests/backend_status.rs": [
+      1,
+      0,
+      0
+    ],
+    "tests/big_tables.rs": [
+      15,
+      0,
+      0
+    ],
+    "tests/catalog_format.rs": [
+      4,
+      0,
+      0
+    ],
+    "tests/catalog_storage.rs": [
+      6,
+      0,
+      0
+    ],
+    "tests/compact_locks.rs": [
+      4,
+      0,
+      0
+    ],
+    "tests/connection_log.rs": [
+      1,
+      0,
+      0
+    ],
+    "tests/crash_async_commit.rs": [
+      2,
+      0,
+      0
+    ],
+    "tests/crash_bulk.rs": [
+      2,
+      0,
+      0
+    ],
+    "tests/crash_ctids.rs": [
+      6,
+      0,
+      0
+    ],
+    "tests/crash_random.rs": [
+      2,
+      0,
+      0
+    ],
+    "tests/crash_unlogged.rs": [
+      4,
+      0,
+      0
+    ],
+    "tests/ddl_scaling.rs": [
+      6,
+      0,
+      0
+    ],
+    "tests/deep_input.rs": [
+      3,
+      0,
+      0
+    ],
+    "tests/deparse_identity.rs": [
+      4,
+      0,
+      0
+    ],
+    "tests/difftest.rs": [
+      0,
+      0,
+      5
+    ],
+    "tests/drop_storage.rs": [
+      2,
+      0,
+      0
+    ],
+    "tests/fdw_loopback.rs": [
+      7,
+      0,
+      0
+    ],
+    "tests/fdw_traffic.rs": [
+      0,
+      0,
+      1
+    ],
+    "tests/golden.rs": [
+      3,
+      0,
+      0
+    ],
+    "tests/hba.rs": [
+      1,
+      0,
+      0
+    ],
+    "tests/heap_order_scan.rs": [
+      1,
+      0,
+      0
+    ],
+    "tests/index_key_format.rs": [
+      4,
+      0,
+      0
+    ],
+    "tests/kept_plans.rs": [
+      7,
+      0,
+      0
+    ],
+    "tests/lifecycle_log.rs": [
+      1,
+      0,
+      0
+    ],
+    "tests/locale.rs": [
+      1,
+      0,
+      0
+    ],
+    "tests/log_collector.rs": [
+      1,
+      0,
+      0
+    ],
+    "tests/logical_apply.rs": [
+      16,
+      0,
+      0
+    ],
+    "tests/memory_load.rs": [
+      5,
+      0,
+      0
+    ],
+    "tests/models_kept.rs": [
+      5,
+      0,
+      0
+    ],
+    "tests/outbound.rs": [
+      3,
+      0,
+      0
+    ],
+    "tests/parallel_scan.rs": [
+      9,
+      0,
+      0
+    ],
+    "tests/pg_contrib.rs": [
+      3,
+      0,
+      1
+    ],
+    "tests/pg_dump.rs": [
+      0,
+      0,
+      3
+    ],
+    "tests/pg_isolation.rs": [
+      0,
+      0,
+      1
+    ],
+    "tests/pg_regress.rs": [
+      3,
+      0,
+      1
+    ],
+    "tests/pgvector_equality.rs": [
+      0,
+      0,
+      1
+    ],
+    "tests/pgvector_hnsw.rs": [
+      7,
+      0,
+      0
+    ],
+    "tests/pgvector_ivfflat.rs": [
+      5,
+      0,
+      0
+    ],
+    "tests/pk_clustered.rs": [
+      5,
+      0,
+      0
+    ],
+    "tests/poisoned_caches.rs": [
+      2,
+      0,
+      0
+    ],
+    "tests/query_spill.rs": [
+      4,
+      0,
+      0
+    ],
+    "tests/restart_cost.rs": [
+      0,
+      0,
+      1
+    ],
+    "tests/server_files.rs": [
+      5,
+      0,
+      0
+    ],
+    "tests/server_log.rs": [
+      1,
+      0,
+      0
+    ],
+    "tests/session_state.rs": [
+      10,
+      0,
+      0
+    ],
+    "tests/storage_format.rs": [
+      2,
+      0,
+      0
+    ],
+    "tests/storage_upgrade_batches.rs": [
+      1,
+      0,
+      0
+    ],
+    "tests/stored_filters.rs": [
+      1,
+      0,
+      0
+    ],
+    "tests/toast_storage.rs": [
+      4,
+      0,
+      0
+    ],
+    "tests/twophase.rs": [
+      3,
+      0,
+      0
+    ],
+    "tests/txn_spill.rs": [
+      1,
+      0,
+      0
+    ],
+    "tests/wire.rs": [
+      67,
+      0,
+      0
+    ],
+    "tests/wire_waits.rs": [
+      1,
+      0,
+      1
+    ],
+    "tests/xml_memory.rs": [
+      1,
+      0,
+      0
+    ],
+    "doc-tests pg_engine": [
+      0,
+      0,
+      0
+    ]
+  }
+}

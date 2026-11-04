@@ -101,7 +101,20 @@ SearchPath typeconversion+preparedbehavior tests. All cursor/utility/PLcursorOPE
 changes,memorycursoradditions,165cursorgoldens excluded. Three-wayclean;each retained
 added/removedline exactlymatches documentedsource delta (169zero-contexthunks). Newshared
 COPY/scan_need changes preserved;cursor/utility/memory bytesmatchshared. Scope/audit/patch
-included. Focused independentgate active;partialoutputs excluded. Fullgates/reviewpending.
+included. Focused lock/compact/kept/searchpath/privileges passed. Wire failed101:
+66passed/1failed; big_bytea existing20s gate took28.455601813s after output checks passed.
+Raw failure remains declared. Bounded candidate/sharedfe7/candidate isolated target all
+passed (wire sourcehash equal);compile-inclusive times explicitly separate from harness
+test times. These isolated passes do not erase fullwire failure/prove sourceeffect.
+Transient control checkout restored cleanab3 before new gates;RESTORED receipt retained.
+
+Prepared449count runner NEVER executed:parent caught wrong old-base library count before
+launch. Shared tested451baseline perbinary map plus ONLY two newpreparedtest names =>
+frozen453/0/18/60. Successorcheck165ind-v2 uses exact perbinary map/auditor, selfchecked
+against oldcaab448summary, frozenrunnerhashes preserved. Per-candidate stack check scoped
+pnpm test:pg --unit; stamp skip explicitlySKIP/noexecution; no service-stack orpgengine
+acceptance. One final forced service gate held. Exactab3 fullgate nowactive,partialcurrent
+outputs excluded;source/review/gates pending.
 
 Owned cache runners now fail explicitly on logged failures (Bash ! guards do not imply
 errexit). Profiler wrapper records perf/pgbench exits separately. Matrix/scaled scripts
@@ -234,11 +247,11 @@ sources = {
     'fdw172/contrib-base.log': '/home/meszmate/.cache/a172/contrib-base.log',
     'fdw172/REPORT.md': '/home/meszmate/.cache/a172/contrib/run-base/report/REPORT.md',
 }
-for campaign in ('embedded165v2', 'embedded165v3', 'green165r2', 'green165r2v2', 'check165r2-runner-error', 'check165r2', 'red165r3', 'green165r3', 'check165r3'):
+for campaign in ('embedded165v2', 'embedded165v3', 'green165r2', 'green165r2v2', 'check165r2-runner-error', 'check165r2', 'red165r3', 'green165r3', 'check165r3', 'focus165ind', 'bytea165compare'):
     for artifact in sorted((D / campaign).iterdir()):
         if artifact.is_file():
             sources[campaign + '/' + artifact.name] = str(artifact)
-for runner in ('embedded165v3.sh', 'green165r2.sh', 'green165r2v2.sh', 'check165r2.sh', 'check165r2-runner-error.sh', 'wrapper-selftest-results.json', 'red165r3.sh', 'green165r3.sh', 'R3-CASE-MATRIX.md', 'check165r3.sh', 'independent165.patch', 'independent165-scope.json', 'independent165-merge-audit.json', 'independent165-candidate.patch', 'DEFERRED-CURSOR-R4.md', 'focus165ind.sh'):
+for runner in ('embedded165v3.sh', 'green165r2.sh', 'green165r2v2.sh', 'check165r2.sh', 'check165r2-runner-error.sh', 'wrapper-selftest-results.json', 'red165r3.sh', 'green165r3.sh', 'R3-CASE-MATRIX.md', 'check165r3.sh', 'independent165.patch', 'independent165-scope.json', 'independent165-merge-audit.json', 'independent165-candidate.patch', 'DEFERRED-CURSOR-R4.md', 'focus165ind.sh', 'bytea165compare.py', 'check165ind.sh', 'check165ind-v2.sh', 'audit165-summary.py', 'ind165-expected-per-binary.json', 'ind165-test-count-reconciliation.json', 'ind165-frozen-runner.sha256', 'count-map-verification.json', 'count-map-check165fixed.json', 'caab-auditor-selfcheck.json'):
     sources['runners/' + runner] = str(D / runner)
 for name, source in sources.items():
     files[name] = Path(source).read_bytes()
