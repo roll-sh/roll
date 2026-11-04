@@ -1,5 +1,5 @@
 {
-  "status": "CONFIRMED catalog lazy snapshot regression; correction pending coordinated API",
+  "status": "snapshot correction committed256e4d04; exactsource debug goldenPASS; remaining gates active",
   "source": "0cd26bfd3b19bc43a113dced2254674355d0a55a",
   "snapshot_proof": "broad-quiet-full: PG18.6 false,engine true;nextstatement1both",
   "runtime_bad_oid": "preexisting mismatch reproduced in retained5c312235baselinebinary;not a166 regression;historicalbinaryprovenance supported notsealed",
@@ -91,9 +91,9 @@
     }
   },
   "remaining_gates": [
-    "minimalfix/currentexactsourcebuild/debug+releasegoldens/Clippy",
-    "10ktables+composites/performance+footprint HELD",
-    "parentcombinedservice"
+    "debug catalog/kept/unit build Clippy release golden ACTIVE",
+    "fresh parent review and combined service PENDING",
+    "10ktables+composites/performance+footprint HELD"
   ],
-  "golden_regression": "PG18.6 recorded both pg_class+pg_attribute false;exact0cd26bfd both true;expectedbeforefixFAIL101 retained"
+  "correction_source": "256e4d049d4f82db1166c08437bab736a0d0a3ee"
 }

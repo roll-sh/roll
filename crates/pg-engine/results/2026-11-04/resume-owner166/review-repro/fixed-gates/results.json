@@ -1,0 +1,42 @@
+[
+  {
+    "name": "debug-golden",
+    "exit": 0,
+    "validated": true,
+    "summaries": [
+      [
+        "ok",
+        "3",
+        "0",
+        "0"
+      ]
+    ],
+    "log_sha256": "87306f91dc0aeca8bbd1525e970b6303daa5ce974a823462117f5faa27223c0e"
+  },
+  {
+    "name": "debug-catalog-kept",
+    "exit": 0,
+    "validated": true,
+    "summaries": [
+      [
+        "ok",
+        "4",
+        "0",
+        "0"
+      ],
+      [
+        "ok",
+        "6",
+        "0",
+        "0"
+      ],
+      [
+        "ok",
+        "7",
+        "0",
+        "0"
+      ]
+    ],
+    "log_sha256": "f1c705b762f028e0c79d86fdabd1e1392d4555f54d72a31300235b95de3d17f1"
+  }
+]
