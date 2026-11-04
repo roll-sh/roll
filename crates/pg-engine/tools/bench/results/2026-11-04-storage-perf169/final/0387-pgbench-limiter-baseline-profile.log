@@ -1,0 +1,22 @@
+dropping old tables...
+NOTICE:  table "pgbench_accounts" does not exist, skipping
+NOTICE:  table "pgbench_branches" does not exist, skipping
+NOTICE:  table "pgbench_history" does not exist, skipping
+NOTICE:  table "pgbench_tellers" does not exist, skipping
+creating tables...
+generating data (client-side)...
+100000 of 1000000 tuples (10%) of pgbench_accounts done (elapsed 0.02 s, remaining 0.14 s)
+200000 of 1000000 tuples (20%) of pgbench_accounts done (elapsed 0.03 s, remaining 0.11 s)
+300000 of 1000000 tuples (30%) of pgbench_accounts done (elapsed 0.14 s, remaining 0.32 s)
+400000 of 1000000 tuples (40%) of pgbench_accounts done (elapsed 0.15 s, remaining 0.22 s)
+500000 of 1000000 tuples (50%) of pgbench_accounts done (elapsed 0.32 s, remaining 0.32 s)
+600000 of 1000000 tuples (60%) of pgbench_accounts done (elapsed 0.51 s, remaining 0.34 s)
+700000 of 1000000 tuples (70%) of pgbench_accounts done (elapsed 0.72 s, remaining 0.31 s)
+800000 of 1000000 tuples (80%) of pgbench_accounts done (elapsed 0.90 s, remaining 0.23 s)
+900000 of 1000000 tuples (90%) of pgbench_accounts done (elapsed 1.20 s, remaining 0.13 s)
+1000000 of 1000000 tuples (100%) of pgbench_accounts done (elapsed 1.34 s, remaining 0.00 s)
+vacuuming...
+creating primary keys...
+done in 2.93 s (drop tables 0.00 s, create tables 0.00 s, client-side generate 2.19 s, vacuum 0.28 s, primary keys 0.47 s).
+[ perf record: Woken up 5 times to write data ]
+[ perf record: Captured and wrote 1.647 MB /home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/pgbench-limiter-baseline-profile.perf.data (200 samples) ]

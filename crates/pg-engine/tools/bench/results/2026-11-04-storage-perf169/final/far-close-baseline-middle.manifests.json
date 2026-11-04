@@ -1,0 +1,19 @@
+{
+  "base/16384/MANIFEST": {
+    "next_id": 16,
+    "flushed_ts": 983,
+    "last_ts": 983,
+    "l0": [],
+    "l1": [
+      {
+        "id": 15,
+        "size": 33567904,
+        "entries": 1000075,
+        "first_key": "0000000000000001fffffffffffffffb",
+        "last_key": "00004009000000002080000000000f4240fffffffffffffc28",
+        "min_ts": 1,
+        "max_ts": 983
+      }
+    ]
+  }
+}

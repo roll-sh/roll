@@ -1,0 +1,776 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 81  of event 'cycles:P'
+# Event count (approx.): 4921424818
+#
+# Children      Self  Command       Shared Object      Symbol                                                                                                                                                                                                                                                                                                           
+# ........  ........  ............  .................  .................................................................................................................................................................................................................................................................................................................
+#
+    58.69%     0.00%  roll-conn     roll-engine        [.] _RNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB7_3Ddl20build_index_parallel
+            |
+            ---_RNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB7_3Ddl20build_index_parallel
+               |          
+               |--30.31%--_RINvNtNtCs8ZKwes1zzDd_3std6thread6scoped5scopeNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtBS_3Ddl20build_index_parallelsa_0INtNtCsgFX3jaOk65H_5alloc3vec3VecINtNtCskADBYZwJmSU_4core6result6ResultNtBQ_8GatheredNtNtBW_5error5ErrorEEEBW_
+               |          _RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run
+               |          |          
+               |          |--4.72%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          |          |          
+               |          |           --3.11%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          |                     _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          |          
+               |          |--3.88%--_RNvNtNtCs9sg4cstvzz7_9pg_engine7storage4keys12encode_value
+               |          |          _RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine
+               |          |          |          
+               |          |           --2.21%--_RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+               |          |                     _mi_theap_realloc_zero
+               |          |          
+               |          |--3.54%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+               |          |          |          
+               |          |           --3.02%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+               |          |                     _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+               |          |          
+               |          |--3.51%--_RNvXsc_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_7TxnScanNtNtNtNtCskADBYZwJmSU_4core4iter6traits8iterator8Iterator4next
+               |          |          _RNvXs9_NtCs9sg4cstvzz7_9pg_engine7storageNtB5_4ScanNtNtNtNtCskADBYZwJmSU_4core4iter6traits8iterator8Iterator4next
+               |          |          
+               |          |--2.82%--_RNvMs2_NtNtCs9sg4cstvzz7_9pg_engine7catalog7relsizeNtB5_14IndexTupleSize4push
+               |          |          _RNvNtNtCs9sg4cstvzz7_9pg_engine7catalog7relsize11datum_bytes
+               |          |          
+               |           --2.79%--_RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row16stored_tuple_len
+               |          
+               |--18.72%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn14put_index_runs
+               |          _RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+               |          |          
+               |          |--12.61%--_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add
+               |          |          |          
+               |          |           --9.45%--_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter12finish_block
+               |          |                     |          
+               |          |                      --7.84%--_RNvMs_NtNtCskkazuifsGj9_4zstd4bulk10compressorNtB4_10Compressor8compress
+               |          |                                ZSTD_compress2
+               |          |                                ZSTD_compressStream_generic
+               |          |                                ZSTD_compressEnd_public
+               |          |                                ZSTD_compress_frameChunk
+               |          |                                ZSTD_compressBlock_internal
+               |          |                                |          
+               |          |                                 --6.22%--ZSTD_compressLiterals
+               |          |                                           HUF_compress4X_repeat
+               |          |                                           HUF_compress_internal
+               |          |                                           |          
+               |          |                                            --4.76%--HUF_buildCTable_wksp
+               |          |          
+               |           --3.17%--0x7efd7cdef840
+               |          
+                --8.19%--_RINvNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl6vacuum18btree_pages_sortedINtNtNtNtCskADBYZwJmSU_4core4iter7sources7from_fn6FromFnNCINvNtB4_8parbuild12merge_sortedToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjEE0EEB8_
+                          |          
+                           --4.87%--0x7efd7cdef214
+
+    56.48%     0.00%  roll-conn     roll-engine        [.] _RNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl5tableNtB4_3Ddl11build_index
+            |
+            ---_RNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl5tableNtB4_3Ddl11build_index
+               _RNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB7_3Ddl20build_index_parallel
+               |          
+               |--28.09%--_RINvNtNtCs8ZKwes1zzDd_3std6thread6scoped5scopeNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtBS_3Ddl20build_index_parallelsa_0INtNtCsgFX3jaOk65H_5alloc3vec3VecINtNtCskADBYZwJmSU_4core6result6ResultNtBQ_8GatheredNtNtBW_5error5ErrorEEEBW_
+               |          _RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run
+               |          |          
+               |          |--4.72%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          |          |          
+               |          |           --3.11%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          |                     _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          |          
+               |          |--3.88%--_RNvNtNtCs9sg4cstvzz7_9pg_engine7storage4keys12encode_value
+               |          |          _RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine
+               |          |          |          
+               |          |           --2.21%--_RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+               |          |                     _mi_theap_realloc_zero
+               |          |          
+               |          |--2.95%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+               |          |          |          
+               |          |           --2.43%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+               |          |                     _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+               |          |          
+               |          |--2.82%--_RNvMs2_NtNtCs9sg4cstvzz7_9pg_engine7catalog7relsizeNtB5_14IndexTupleSize4push
+               |          |          _RNvNtNtCs9sg4cstvzz7_9pg_engine7catalog7relsize11datum_bytes
+               |          |          
+               |           --2.79%--_RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row16stored_tuple_len
+               |          
+               |--18.72%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn14put_index_runs
+               |          _RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+               |          |          
+               |          |--12.61%--_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add
+               |          |          |          
+               |          |           --9.45%--_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter12finish_block
+               |          |                     |          
+               |          |                      --7.84%--_RNvMs_NtNtCskkazuifsGj9_4zstd4bulk10compressorNtB4_10Compressor8compress
+               |          |                                ZSTD_compress2
+               |          |                                ZSTD_compressStream_generic
+               |          |                                ZSTD_compressEnd_public
+               |          |                                ZSTD_compress_frameChunk
+               |          |                                ZSTD_compressBlock_internal
+               |          |                                |          
+               |          |                                 --6.22%--ZSTD_compressLiterals
+               |          |                                           HUF_compress4X_repeat
+               |          |                                           HUF_compress_internal
+               |          |                                           |          
+               |          |                                            --4.76%--HUF_buildCTable_wksp
+               |          |          
+               |           --3.17%--0x7efd7cdef840
+               |          
+                --8.19%--_RINvNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl6vacuum18btree_pages_sortedINtNtNtNtCskADBYZwJmSU_4core4iter7sources7from_fn6FromFnNCINvNtB4_8parbuild12merge_sortedToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjEE0EEB8_
+                          |          
+                           --4.87%--0x7efd7cdef214
+
+    36.11%     6.33%  roll-build-0  roll-engine        [.] _RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run
+            |          
+            |--29.78%--_RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run
+            |          |          
+            |          |--8.35%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+            |          |          _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+            |          |          |          
+            |          |           --6.68%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+            |          |                     |          
+            |          |                      --5.03%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+            |          |                                _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+            |          |                                |          
+            |          |                                 --3.35%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+            |          |                                           _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+            |          |          
+            |          |--6.04%--_RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row16stored_tuple_len
+            |          |          
+            |          |--4.67%--_RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine
+            |          |          _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+            |          |          _mi_theap_realloc_zero
+            |          |          
+            |          |--3.35%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+            |          |          _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+            |          |          
+            |           --2.20%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec4scan21decode_table_row_need
+            |                     _RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row21decode_row_need_spare
+            |          
+             --4.68%--__clone
+                       0x7efd7cd0f8ba
+                       _RNvNvMs0_NtNtNtCs8ZKwes1zzDd_3std3sys6thread4unixNtB7_6Thread3new12thread_start
+                       _RNSNvYNCINvNtNtCs8ZKwes1zzDd_3std6thread9lifecycle15spawn_uncheckedNCNCNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1h_3Ddl20build_index_parallelsa_000INtNtCskADBYZwJmSU_4core6result6ResultNtB1f_8GatheredNtNtB1l_5error5ErrorEEs_0INtNtNtB2L_3ops8function6FnOnceuE9call_once6vtableB1l_
+                       _RINvNtNtCs8ZKwes1zzDd_3std3sys9backtrace28___rust_begin_short_backtraceNCNCNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1l_3Ddl20build_index_parallelsa_000INtNtCskADBYZwJmSU_4core6result6ResultNtB1j_8GatheredNtNtB1p_5error5ErrorEEB1p_
+                       _RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run
+
+    34.46%     0.00%  roll-build-0  libc.so.6          [.] __clone
+            |
+            ---__clone
+               0x7efd7cd0f8ba
+               _RNvNvMs0_NtNtNtCs8ZKwes1zzDd_3std3sys6thread4unixNtB7_6Thread3new12thread_start
+               _RNSNvYNCINvNtNtCs8ZKwes1zzDd_3std6thread9lifecycle15spawn_uncheckedNCNCNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1h_3Ddl20build_index_parallelsa_000INtNtCskADBYZwJmSU_4core6result6ResultNtB1f_8GatheredNtNtB1l_5error5ErrorEEs_0INtNtNtB2L_3ops8function6FnOnceuE9call_once6vtableB1l_
+               _RINvNtNtCs8ZKwes1zzDd_3std3sys9backtrace28___rust_begin_short_backtraceNCNCNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1l_3Ddl20build_index_parallelsa_000INtNtCskADBYZwJmSU_4core6result6ResultNtB1j_8GatheredNtNtB1p_5error5ErrorEEB1p_
+               _RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run
+               |          
+               |--8.35%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          |          
+               |           --6.68%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |                     |          
+               |                      --5.03%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |                                _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |                                |          
+               |                                 --3.35%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |                                           _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          
+               |--6.04%--_RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row16stored_tuple_len
+               |          
+               |--4.67%--_RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine
+               |          _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+               |          _mi_theap_realloc_zero
+               |          
+               |--3.35%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+               |          _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+               |          
+                --2.20%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec4scan21decode_table_row_need
+                          _RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row21decode_row_need_spare
+
+    34.46%     0.00%  roll-build-0  libc.so.6          [.] 0x00007efd7cd0f8ba
+            |
+            ---0x7efd7cd0f8ba
+               _RNvNvMs0_NtNtNtCs8ZKwes1zzDd_3std3sys6thread4unixNtB7_6Thread3new12thread_start
+               _RNSNvYNCINvNtNtCs8ZKwes1zzDd_3std6thread9lifecycle15spawn_uncheckedNCNCNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1h_3Ddl20build_index_parallelsa_000INtNtCskADBYZwJmSU_4core6result6ResultNtB1f_8GatheredNtNtB1l_5error5ErrorEEs_0INtNtNtB2L_3ops8function6FnOnceuE9call_once6vtableB1l_
+               _RINvNtNtCs8ZKwes1zzDd_3std3sys9backtrace28___rust_begin_short_backtraceNCNCNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1l_3Ddl20build_index_parallelsa_000INtNtCskADBYZwJmSU_4core6result6ResultNtB1j_8GatheredNtNtB1p_5error5ErrorEEB1p_
+               _RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run
+               |          
+               |--8.35%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          |          
+               |           --6.68%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |                     |          
+               |                      --5.03%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |                                _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |                                |          
+               |                                 --3.35%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |                                           _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          
+               |--6.04%--_RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row16stored_tuple_len
+               |          
+               |--4.67%--_RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine
+               |          _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+               |          _mi_theap_realloc_zero
+               |          
+               |--3.35%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+               |          _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+               |          
+                --2.20%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec4scan21decode_table_row_need
+                          _RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row21decode_row_need_spare
+
+    34.46%     0.00%  roll-build-0  roll-engine        [.] _RNvNvMs0_NtNtNtCs8ZKwes1zzDd_3std3sys6thread4unixNtB7_6Thread3new12thread_start
+            |
+            ---_RNvNvMs0_NtNtNtCs8ZKwes1zzDd_3std3sys6thread4unixNtB7_6Thread3new12thread_start
+               _RNSNvYNCINvNtNtCs8ZKwes1zzDd_3std6thread9lifecycle15spawn_uncheckedNCNCNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1h_3Ddl20build_index_parallelsa_000INtNtCskADBYZwJmSU_4core6result6ResultNtB1f_8GatheredNtNtB1l_5error5ErrorEEs_0INtNtNtB2L_3ops8function6FnOnceuE9call_once6vtableB1l_
+               _RINvNtNtCs8ZKwes1zzDd_3std3sys9backtrace28___rust_begin_short_backtraceNCNCNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1l_3Ddl20build_index_parallelsa_000INtNtCskADBYZwJmSU_4core6result6ResultNtB1j_8GatheredNtNtB1p_5error5ErrorEEB1p_
+               _RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run
+               |          
+               |--8.35%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          |          
+               |           --6.68%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |                     |          
+               |                      --5.03%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |                                _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |                                |          
+               |                                 --3.35%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |                                           _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          
+               |--6.04%--_RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row16stored_tuple_len
+               |          
+               |--4.67%--_RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine
+               |          _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+               |          _mi_theap_realloc_zero
+               |          
+               |--3.35%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+               |          _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+               |          
+                --2.20%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec4scan21decode_table_row_need
+                          _RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row21decode_row_need_spare
+
+    34.46%     0.00%  roll-build-0  roll-engine        [.] _RNSNvYNCINvNtNtCs8ZKwes1zzDd_3std6thread9lifecycle15spawn_uncheckedNCNCNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1h_3Ddl20build_index_parallelsa_000INtNtCskADBYZwJmSU_4core6result6ResultNtB1f_8GatheredNtNtB1l_5error5ErrorEEs_0INtNtNtB2L_3ops8function6FnOnceuE9call_once6vtableB1l_
+            |
+            ---_RNSNvYNCINvNtNtCs8ZKwes1zzDd_3std6thread9lifecycle15spawn_uncheckedNCNCNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1h_3Ddl20build_index_parallelsa_000INtNtCskADBYZwJmSU_4core6result6ResultNtB1f_8GatheredNtNtB1l_5error5ErrorEEs_0INtNtNtB2L_3ops8function6FnOnceuE9call_once6vtableB1l_
+               _RINvNtNtCs8ZKwes1zzDd_3std3sys9backtrace28___rust_begin_short_backtraceNCNCNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1l_3Ddl20build_index_parallelsa_000INtNtCskADBYZwJmSU_4core6result6ResultNtB1j_8GatheredNtNtB1p_5error5ErrorEEB1p_
+               _RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run
+               |          
+               |--8.35%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          |          
+               |           --6.68%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |                     |          
+               |                      --5.03%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |                                _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |                                |          
+               |                                 --3.35%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |                                           _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          
+               |--6.04%--_RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row16stored_tuple_len
+               |          
+               |--4.67%--_RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine
+               |          _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+               |          _mi_theap_realloc_zero
+               |          
+               |--3.35%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+               |          _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+               |          
+                --2.20%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec4scan21decode_table_row_need
+                          _RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row21decode_row_need_spare
+
+    34.46%     0.00%  roll-build-0  roll-engine        [.] _RINvNtNtCs8ZKwes1zzDd_3std3sys9backtrace28___rust_begin_short_backtraceNCNCNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1l_3Ddl20build_index_parallelsa_000INtNtCskADBYZwJmSU_4core6result6ResultNtB1j_8GatheredNtNtB1p_5error5ErrorEEB1p_
+            |
+            ---_RINvNtNtCs8ZKwes1zzDd_3std3sys9backtrace28___rust_begin_short_backtraceNCNCNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1l_3Ddl20build_index_parallelsa_000INtNtCskADBYZwJmSU_4core6result6ResultNtB1j_8GatheredNtNtB1p_5error5ErrorEEB1p_
+               _RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run
+               |          
+               |--8.35%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          |          
+               |           --6.68%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |                     |          
+               |                      --5.03%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |                                _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |                                |          
+               |                                 --3.35%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |                                           _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          
+               |--6.04%--_RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row16stored_tuple_len
+               |          
+               |--4.67%--_RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine
+               |          _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+               |          _mi_theap_realloc_zero
+               |          
+               |--3.35%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+               |          _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+               |          
+                --2.20%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec4scan21decode_table_row_need
+                          _RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row21decode_row_need_spare
+
+    30.63%     0.00%  roll-conn     roll-engine        [.] _RINvNtNtCs8ZKwes1zzDd_3std6thread6scoped5scopeNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtBS_3Ddl20build_index_parallelsa_0INtNtCsgFX3jaOk65H_5alloc3vec3VecINtNtCskADBYZwJmSU_4core6result6ResultNtBQ_8GatheredNtNtBW_5error5ErrorEEEBW_
+            |
+            ---_RINvNtNtCs8ZKwes1zzDd_3std6thread6scoped5scopeNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtBS_3Ddl20build_index_parallelsa_0INtNtCsgFX3jaOk65H_5alloc3vec3VecINtNtCskADBYZwJmSU_4core6result6ResultNtBQ_8GatheredNtNtBW_5error5ErrorEEEBW_
+               _RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run
+               |          
+               |--4.72%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          |          
+               |           --3.11%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |                     _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               |          
+               |--3.88%--_RNvNtNtCs9sg4cstvzz7_9pg_engine7storage4keys12encode_value
+               |          _RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine
+               |          |          
+               |           --2.21%--_RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+               |                     _mi_theap_realloc_zero
+               |          
+               |--3.87%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+               |          |          
+               |           --3.34%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+               |                     _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+               |          
+               |--3.51%--_RNvXsc_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_7TxnScanNtNtNtNtCskADBYZwJmSU_4core4iter6traits8iterator8Iterator4next
+               |          _RNvXs9_NtCs9sg4cstvzz7_9pg_engine7storageNtB5_4ScanNtNtNtNtCskADBYZwJmSU_4core4iter6traits8iterator8Iterator4next
+               |          
+               |--2.82%--_RNvMs2_NtNtCs9sg4cstvzz7_9pg_engine7catalog7relsizeNtB5_14IndexTupleSize4push
+               |          _RNvNtNtCs9sg4cstvzz7_9pg_engine7catalog7relsize11datum_bytes
+               |          
+                --2.79%--_RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row16stored_tuple_len
+
+    30.63%     3.33%  roll-conn     roll-engine        [.] _RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run
+            |          
+            |--27.30%--_RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run
+            |          |          
+            |          |--4.72%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+            |          |          |          
+            |          |           --3.11%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+            |          |                     _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+            |          |          
+            |          |--3.88%--_RNvNtNtCs9sg4cstvzz7_9pg_engine7storage4keys12encode_value
+            |          |          _RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine
+            |          |          |          
+            |          |           --2.21%--_RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+            |          |                     _mi_theap_realloc_zero
+            |          |          
+            |          |--3.87%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+            |          |          |          
+            |          |           --3.34%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+            |          |                     _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+            |          |          
+            |          |--3.51%--_RNvXsc_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_7TxnScanNtNtNtNtCskADBYZwJmSU_4core4iter6traits8iterator8Iterator4next
+            |          |          _RNvXs9_NtCs9sg4cstvzz7_9pg_engine7storageNtB5_4ScanNtNtNtNtCskADBYZwJmSU_4core4iter6traits8iterator8Iterator4next
+            |          |          
+            |          |--2.82%--_RNvMs2_NtNtCs9sg4cstvzz7_9pg_engine7catalog7relsizeNtB5_14IndexTupleSize4push
+            |          |          _RNvNtNtCs9sg4cstvzz7_9pg_engine7catalog7relsize11datum_bytes
+            |          |          
+            |           --2.79%--_RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row16stored_tuple_len
+            |          
+             --3.33%--_RNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl5tableNtB4_3Ddl11build_index
+                       _RNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB7_3Ddl20build_index_parallel
+                       _RINvNtNtCs8ZKwes1zzDd_3std6thread6scoped5scopeNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtBS_3Ddl20build_index_parallelsa_0INtNtCsgFX3jaOk65H_5alloc3vec3VecINtNtCskADBYZwJmSU_4core6result6ResultNtBQ_8GatheredNtNtBW_5error5ErrorEEEBW_
+                       _RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run
+
+    18.72%     0.00%  roll-conn     roll-engine        [.] _RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn14put_index_runs
+            |
+            ---_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn14put_index_runs
+               _RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+               |          
+               |--12.61%--_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add
+               |          |          
+               |           --9.45%--_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter12finish_block
+               |                     |          
+               |                      --7.84%--_RNvMs_NtNtCskkazuifsGj9_4zstd4bulk10compressorNtB4_10Compressor8compress
+               |                                ZSTD_compress2
+               |                                ZSTD_compressStream_generic
+               |                                ZSTD_compressEnd_public
+               |                                ZSTD_compress_frameChunk
+               |                                ZSTD_compressBlock_internal
+               |                                |          
+               |                                 --6.22%--ZSTD_compressLiterals
+               |                                           HUF_compress4X_repeat
+               |                                           HUF_compress_internal
+               |                                           |          
+               |                                            --4.76%--HUF_buildCTable_wksp
+               |          
+                --3.17%--0x7efd7cdef840
+
+    18.72%     1.44%  roll-conn     roll-engine        [.] _RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+            |          
+             --17.28%--_RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+                       |          
+                       |--12.61%--_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add
+                       |          |          
+                       |           --9.45%--_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter12finish_block
+                       |                     |          
+                       |                      --7.84%--_RNvMs_NtNtCskkazuifsGj9_4zstd4bulk10compressorNtB4_10Compressor8compress
+                       |                                ZSTD_compress2
+                       |                                ZSTD_compressStream_generic
+                       |                                ZSTD_compressEnd_public
+                       |                                ZSTD_compress_frameChunk
+                       |                                ZSTD_compressBlock_internal
+                       |                                |          
+                       |                                 --6.22%--ZSTD_compressLiterals
+                       |                                           HUF_compress4X_repeat
+                       |                                           HUF_compress_internal
+                       |                                           |          
+                       |                                            --4.76%--HUF_buildCTable_wksp
+                       |          
+                        --3.17%--0x7efd7cdef840
+
+    12.61%     3.16%  roll-conn     roll-engine        [.] _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add
+            |          
+            |--9.45%--_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add
+            |          _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter12finish_block
+            |          |          
+            |           --7.84%--_RNvMs_NtNtCskkazuifsGj9_4zstd4bulk10compressorNtB4_10Compressor8compress
+            |                     ZSTD_compress2
+            |                     ZSTD_compressStream_generic
+            |                     ZSTD_compressEnd_public
+            |                     ZSTD_compress_frameChunk
+            |                     ZSTD_compressBlock_internal
+            |                     |          
+            |                      --6.22%--ZSTD_compressLiterals
+            |                                HUF_compress4X_repeat
+            |                                HUF_compress_internal
+            |                                |          
+            |                                 --4.76%--HUF_buildCTable_wksp
+            |          
+             --3.16%--_RNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl5tableNtB4_3Ddl11build_index
+                       _RNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB7_3Ddl20build_index_parallel
+                       _RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn14put_index_runs
+                       _RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+                       _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add
+
+     9.45%     0.00%  roll-conn     roll-engine        [.] _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter12finish_block
+            |
+            ---_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter12finish_block
+               |          
+                --7.84%--_RNvMs_NtNtCskkazuifsGj9_4zstd4bulk10compressorNtB4_10Compressor8compress
+                          ZSTD_compress2
+                          ZSTD_compressStream_generic
+                          ZSTD_compressEnd_public
+                          ZSTD_compress_frameChunk
+                          ZSTD_compressBlock_internal
+                          |          
+                           --6.22%--ZSTD_compressLiterals
+                                     HUF_compress4X_repeat
+                                     HUF_compress_internal
+                                     |          
+                                      --4.76%--HUF_buildCTable_wksp
+
+     8.35%     5.00%  roll-build-0  roll-engine        [.] _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+            |          
+            |--5.00%--__clone
+            |          0x7efd7cd0f8ba
+            |          _RNvNvMs0_NtNtNtCs8ZKwes1zzDd_3std3sys6thread4unixNtB7_6Thread3new12thread_start
+            |          _RNSNvYNCINvNtNtCs8ZKwes1zzDd_3std6thread9lifecycle15spawn_uncheckedNCNCNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1h_3Ddl20build_index_parallelsa_000INtNtCskADBYZwJmSU_4core6result6ResultNtB1f_8GatheredNtNtB1l_5error5ErrorEEs_0INtNtNtB2L_3ops8function6FnOnceuE9call_once6vtableB1l_
+            |          _RINvNtNtCs8ZKwes1zzDd_3std3sys9backtrace28___rust_begin_short_backtraceNCNCNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1l_3Ddl20build_index_parallelsa_000INtNtCskADBYZwJmSU_4core6result6ResultNtB1j_8GatheredNtNtB1p_5error5ErrorEEB1p_
+            |          _RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run
+            |          _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+            |          _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+            |          |          
+            |           --3.33%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+            |          
+             --3.35%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+                       _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+                       _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+                       _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+                       _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+                       _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+                       _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+
+     8.19%     0.40%  roll-conn     roll-engine        [.] _RINvNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl6vacuum18btree_pages_sortedINtNtNtNtCskADBYZwJmSU_4core4iter7sources7from_fn6FromFnNCINvNtB4_8parbuild12merge_sortedToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjEE0EEB8_
+            |          
+             --7.80%--_RINvNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl6vacuum18btree_pages_sortedINtNtNtNtCskADBYZwJmSU_4core4iter7sources7from_fn6FromFnNCINvNtB4_8parbuild12merge_sortedToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjEE0EEB8_
+                       |          
+                        --4.87%--0x7efd7cdef214
+
+     7.84%     0.00%  roll-conn     roll-engine        [.] _RNvMs_NtNtCskkazuifsGj9_4zstd4bulk10compressorNtB4_10Compressor8compress
+            |
+            ---_RNvMs_NtNtCskkazuifsGj9_4zstd4bulk10compressorNtB4_10Compressor8compress
+               ZSTD_compress2
+               ZSTD_compressStream_generic
+               ZSTD_compressEnd_public
+               ZSTD_compress_frameChunk
+               ZSTD_compressBlock_internal
+               |          
+                --6.22%--ZSTD_compressLiterals
+                          HUF_compress4X_repeat
+                          HUF_compress_internal
+                          |          
+                           --4.76%--HUF_buildCTable_wksp
+
+     7.84%     0.00%  roll-conn     roll-engine        [.] ZSTD_compress2
+            |
+            ---ZSTD_compress2
+               ZSTD_compressStream_generic
+               ZSTD_compressEnd_public
+               ZSTD_compress_frameChunk
+               ZSTD_compressBlock_internal
+               |          
+                --6.22%--ZSTD_compressLiterals
+                          HUF_compress4X_repeat
+                          HUF_compress_internal
+                          |          
+                           --4.76%--HUF_buildCTable_wksp
+
+     7.84%     0.00%  roll-conn     roll-engine        [.] ZSTD_compressStream_generic
+            |
+            ---ZSTD_compressStream_generic
+               ZSTD_compressEnd_public
+               ZSTD_compress_frameChunk
+               ZSTD_compressBlock_internal
+               |          
+                --6.22%--ZSTD_compressLiterals
+                          HUF_compress4X_repeat
+                          HUF_compress_internal
+                          |          
+                           --4.76%--HUF_buildCTable_wksp
+
+     7.84%     0.00%  roll-conn     roll-engine        [.] ZSTD_compressEnd_public
+            |
+            ---ZSTD_compressEnd_public
+               ZSTD_compress_frameChunk
+               ZSTD_compressBlock_internal
+               |          
+                --6.22%--ZSTD_compressLiterals
+                          HUF_compress4X_repeat
+                          HUF_compress_internal
+                          |          
+                           --4.76%--HUF_buildCTable_wksp
+
+     7.84%     0.00%  roll-conn     roll-engine        [.] ZSTD_compress_frameChunk
+            |
+            ---ZSTD_compress_frameChunk
+               ZSTD_compressBlock_internal
+               |          
+                --6.22%--ZSTD_compressLiterals
+                          HUF_compress4X_repeat
+                          HUF_compress_internal
+                          |          
+                           --4.76%--HUF_buildCTable_wksp
+
+     7.84%     0.00%  roll-conn     roll-engine        [.] ZSTD_compressBlock_internal
+            |
+            ---ZSTD_compressBlock_internal
+               |          
+                --6.22%--ZSTD_compressLiterals
+                          HUF_compress4X_repeat
+                          HUF_compress_internal
+                          |          
+                           --4.76%--HUF_buildCTable_wksp
+
+     6.32%     0.00%  roll-build-0  roll-engine        [.] _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+            |
+            ---_RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+               |          
+                --4.67%--_mi_theap_realloc_zero
+
+     6.22%     0.00%  roll-conn     roll-engine        [.] ZSTD_compressLiterals
+            |
+            ---ZSTD_compressLiterals
+               HUF_compress4X_repeat
+               HUF_compress_internal
+               |          
+                --4.76%--HUF_buildCTable_wksp
+
+     6.22%     0.00%  roll-conn     roll-engine        [.] HUF_compress4X_repeat
+            |
+            ---HUF_compress4X_repeat
+               HUF_compress_internal
+               |          
+                --4.76%--HUF_buildCTable_wksp
+
+     6.22%     0.00%  roll-conn     roll-engine        [.] HUF_compress_internal
+            |
+            ---HUF_compress_internal
+               |          
+                --4.76%--HUF_buildCTable_wksp
+
+     6.04%     4.42%  roll-build-0  roll-engine        [.] _RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row16stored_tuple_len
+            |          
+             --4.42%--__clone
+                       0x7efd7cd0f8ba
+                       _RNvNvMs0_NtNtNtCs8ZKwes1zzDd_3std3sys6thread4unixNtB7_6Thread3new12thread_start
+                       _RNSNvYNCINvNtNtCs8ZKwes1zzDd_3std6thread9lifecycle15spawn_uncheckedNCNCNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1h_3Ddl20build_index_parallelsa_000INtNtCskADBYZwJmSU_4core6result6ResultNtB1f_8GatheredNtNtB1l_5error5ErrorEEs_0INtNtNtB2L_3ops8function6FnOnceuE9call_once6vtableB1l_
+                       _RINvNtNtCs8ZKwes1zzDd_3std3sys9backtrace28___rust_begin_short_backtraceNCNCNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1l_3Ddl20build_index_parallelsa_000INtNtCskADBYZwJmSU_4core6result6ResultNtB1j_8GatheredNtNtB1p_5error5ErrorEEB1p_
+                       _RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run
+                       _RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row16stored_tuple_len
+
+     5.07%     0.41%  roll-build-0  roll-engine        [.] _RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine
+            |          
+             --4.67%--_RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine
+                       _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+                       _mi_theap_realloc_zero
+
+     5.01%     3.33%  roll-build-0  roll-engine        [.] _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+            |          
+             --3.35%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+                       _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+
+     4.87%     4.87%  roll-conn     libc.so.6          [.] 0x0000000000172214
+            |
+            ---_RNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl5tableNtB4_3Ddl11build_index
+               _RNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB7_3Ddl20build_index_parallel
+               _RINvNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl6vacuum18btree_pages_sortedINtNtNtNtCskADBYZwJmSU_4core4iter7sources7from_fn6FromFnNCINvNtB4_8parbuild12merge_sortedToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjEE0EEB8_
+               0x7efd7cdef214
+
+     4.87%     0.00%  roll-conn     libc.so.6          [.] 0x00007efd7cdef214
+            |
+            ---0x7efd7cdef214
+
+     4.87%     2.95%  roll-conn     roll-engine        [.] _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+            |          
+             --2.95%--_RNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl5tableNtB4_3Ddl11build_index
+                       _RNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB7_3Ddl20build_index_parallel
+                       _RINvNtNtCs8ZKwes1zzDd_3std6thread6scoped5scopeNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtBS_3Ddl20build_index_parallelsa_0INtNtCsgFX3jaOk65H_5alloc3vec3VecINtNtCskADBYZwJmSU_4core6result6ResultNtBQ_8GatheredNtNtBW_5error5ErrorEEEBW_
+                       _RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run
+                       _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+                       |          
+                        --2.43%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+                                  _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_
+
+     4.82%     4.82%  roll-conn     libc.so.6          [.] 0x000000000017221a
+            |
+            ---_RNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl5tableNtB4_3Ddl11build_index
+               _RNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB7_3Ddl20build_index_parallel
+               |          
+                --3.11%--_RINvNtNtCs8ZKwes1zzDd_3std6thread6scoped5scopeNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtBS_3Ddl20build_index_parallelsa_0INtNtCsgFX3jaOk65H_5alloc3vec3VecINtNtCskADBYZwJmSU_4core6result6ResultNtBQ_8GatheredNtNtBW_5error5ErrorEEEBW_
+                          _RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run
+                          _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+                          _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+                          _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+
+     4.82%     0.00%  roll-conn     libc.so.6          [.] 0x00007efd7cdef21a
+            |
+            ---0x7efd7cdef21a
+
+     4.76%     4.76%  roll-conn     roll-engine        [.] HUF_buildCTable_wksp
+            |
+            ---_RNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl5tableNtB4_3Ddl11build_index
+               _RNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB7_3Ddl20build_index_parallel
+               _RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn14put_index_runs
+               _RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+               _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add
+               _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter12finish_block
+               _RNvMs_NtNtCskkazuifsGj9_4zstd4bulk10compressorNtB4_10Compressor8compress
+               ZSTD_compress2
+               ZSTD_compressStream_generic
+               ZSTD_compressEnd_public
+               ZSTD_compress_frameChunk
+               ZSTD_compressBlock_internal
+               ZSTD_compressLiterals
+               HUF_compress4X_repeat
+               HUF_compress_internal
+               HUF_buildCTable_wksp
+
+     4.72%     1.61%  roll-conn     roll-engine        [.] _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+            |          
+             --3.11%--_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+                       _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+                       _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+
+     4.67%     1.34%  roll-build-0  roll-engine        [.] _mi_theap_realloc_zero
+            |          
+             --3.32%--_mi_theap_realloc_zero
+
+     3.88%     1.67%  roll-conn     roll-engine        [.] _RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine
+            |          
+             --2.21%--_RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine
+                       _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+                       _mi_theap_realloc_zero
+
+     3.88%     0.00%  roll-conn     roll-engine        [.] _RNvNtNtCs9sg4cstvzz7_9pg_engine7storage4keys12encode_value
+            |
+            ---_RNvNtNtCs9sg4cstvzz7_9pg_engine7storage4keys12encode_value
+               _RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine
+               |          
+                --2.21%--_RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+                          _mi_theap_realloc_zero
+
+     3.51%     0.00%  roll-conn     roll-engine        [.] _RNvXsc_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_7TxnScanNtNtNtNtCskADBYZwJmSU_4core4iter6traits8iterator8Iterator4next
+            |
+            ---_RNvXsc_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_7TxnScanNtNtNtNtCskADBYZwJmSU_4core4iter6traits8iterator8Iterator4next
+               _RNvXs9_NtCs9sg4cstvzz7_9pg_engine7storageNtB5_4ScanNtNtNtNtCskADBYZwJmSU_4core4iter6traits8iterator8Iterator4next
+
+     3.51%     0.00%  roll-conn     roll-engine        [.] _RNvXs9_NtCs9sg4cstvzz7_9pg_engine7storageNtB5_4ScanNtNtNtNtCskADBYZwJmSU_4core4iter6traits8iterator8Iterator4next
+            |
+            ---_RNvXs9_NtCs9sg4cstvzz7_9pg_engine7storageNtB5_4ScanNtNtNtNtCskADBYZwJmSU_4core4iter6traits8iterator8Iterator4next
+
+     3.35%     3.35%  roll-build-0  libc.so.6          [.] 0x000000000017221a
+            |
+            ---__clone
+               0x7efd7cd0f8ba
+               _RNvNvMs0_NtNtNtCs8ZKwes1zzDd_3std3sys6thread4unixNtB7_6Thread3new12thread_start
+               _RNSNvYNCINvNtNtCs8ZKwes1zzDd_3std6thread9lifecycle15spawn_uncheckedNCNCNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1h_3Ddl20build_index_parallelsa_000INtNtCskADBYZwJmSU_4core6result6ResultNtB1f_8GatheredNtNtB1l_5error5ErrorEEs_0INtNtNtB2L_3ops8function6FnOnceuE9call_once6vtableB1l_
+               _RINvNtNtCs8ZKwes1zzDd_3std3sys9backtrace28___rust_begin_short_backtraceNCNCNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1l_3Ddl20build_index_parallelsa_000INtNtCskADBYZwJmSU_4core6result6ResultNtB1j_8GatheredNtNtB1p_5error5ErrorEEB1p_
+               _RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run
+               _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+               _RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine
+
+     3.35%     0.00%  roll-build-0  libc.so.6          [.] 0x00007efd7cdef21a
+            |
+            ---0x7efd7cdef21a
+
+     3.17%     3.17%  roll-conn     libc.so.6          [.] 0x0000000000172840
+            |
+            ---_RNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl5tableNtB4_3Ddl11build_index
+               _RNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB7_3Ddl20build_index_parallel
+               _RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn14put_index_runs
+               _RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+               0x7efd7cdef840
+
+     3.17%     0.00%  roll-conn     libc.so.6          [.] 0x00007efd7cdef840
+            |
+            ---0x7efd7cdef840
+
+     3.10%     3.10%  roll-build-0  roll-engine        [.] mi_theap_malloc_aligned
+            |
+            ---__clone
+               0x7efd7cd0f8ba
+               _RNvNvMs0_NtNtNtCs8ZKwes1zzDd_3std3sys6thread4unixNtB7_6Thread3new12thread_start
+               _RNSNvYNCINvNtNtCs8ZKwes1zzDd_3std6thread9lifecycle15spawn_uncheckedNCNCNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1h_3Ddl20build_index_parallelsa_000INtNtCskADBYZwJmSU_4core6result6ResultNtB1f_8GatheredNtNtB1l_5error5ErrorEEs_0INtNtNtB2L_3ops8function6FnOnceuE9call_once6vtableB1l_
+               _RINvNtNtCs8ZKwes1zzDd_3std3sys9backtrace28___rust_begin_short_backtraceNCNCNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1l_3Ddl20build_index_parallelsa_000INtNtCskADBYZwJmSU_4core6result6ResultNtB1j_8GatheredNtNtB1p_5error5ErrorEEB1p_
+               _RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run
+
+     2.90%     2.90%  roll-conn     roll-engine        [.] mi_free
+            |
+            ---_RNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl5tableNtB4_3Ddl11build_index
+               _RNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB7_3Ddl20build_index_parallel
+
+     2.82%     2.82%  roll-conn     roll-engine        [.] _RNvNtNtCs9sg4cstvzz7_9pg_engine7catalog7relsize11datum_bytes
+            |
+            ---_RNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl5tableNtB4_3Ddl11build_index
+               _RNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB7_3Ddl20build_index_parallel
+               _RINvNtNtCs8ZKwes1zzDd_3std6thread6scoped5scopeNCNvMs1_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtBS_3Ddl20build_index_parallelsa_0INtNtCsgFX3jaOk65H_5alloc3vec3VecINtNtCskADBYZwJmSU_4core6result6ResultNtBQ_8GatheredNtNtBW_5error5ErrorEEEBW_
+               _RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run
+               _RNvMs2_NtNtCs9sg4cstvzz7_9pg_engine7catalog7relsizeNtB5_14IndexTupleSize4push
+               _RNvNtNtCs9sg4cstvzz7_9pg_engine7catalog7relsize11datum_bytes
+
+     2.82%     0.00%  roll-conn     roll-engine        [.] _RNvMs2_NtNtCs9sg4cstvzz7_9pg_engine7catalog7relsizeNtB5_14IndexTupleSize4push
+            |
+            ---_RNvMs2_NtNtCs9sg4cstvzz7_9pg_engine7catalog7relsizeNtB5_14IndexTupleSize4push
+               _RNvNtNtCs9sg4cstvzz7_9pg_engine7catalog7relsize11datum_bytes
+
+     2.79%     1.94%  roll-conn     roll-engine        [.] _RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row16stored_tuple_len
+     2.48%     0.00%  roll-conn     roll-engine        [.] _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+            |
+            ---_RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+               |          
+                --2.21%--_mi_theap_realloc_zero
+
+     2.21%     0.85%  roll-conn     roll-engine        [.] _mi_theap_realloc_zero
+     2.20%     0.54%  roll-build-0  roll-engine        [.] _RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row21decode_row_need_spare
+     2.20%     0.00%  roll-build-0  roll-engine        [.] _RNvNtNtCs9sg4cstvzz7_9pg_engine4exec4scan21decode_table_row_need
+            |
+            ---_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec4scan21decode_table_row_need
+               _RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row21decode_row_need_spare
+
+     2.02%     2.02%  roll-conn     roll-engine        [.] _RNvMs1_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB5_5Block4read
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

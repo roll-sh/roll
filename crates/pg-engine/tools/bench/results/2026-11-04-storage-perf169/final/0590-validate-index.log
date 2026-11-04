@@ -1,0 +1,7 @@
+1
+SET
+Bitmap Heap Scan on data  (cost=95.17..13901.68 rows=5000 width=4)
+  Recheck Cond: (bucket = 417)
+  ->  Bitmap Index Scan on data_bucket_idx  (cost=0.00..93.92 rows=5000 width=0)
+        Index Cond: (bucket = 417)
+1000|499917000

@@ -1,0 +1,16 @@
+
+ Performance counter stats for 'sleep 0.05':
+
+              0.90 msec task-clock                       #    0.017 CPUs utilized             
+           1636606      cycles                           #    1.817 GHz                       
+           1253807      instructions                     #    0.77  insn per cycle            
+                 1      context-switches                 #    1.110 K/sec                     
+                 0      cpu-migrations                   #    0.000 /sec                      
+                80      page-faults                      #   88.800 K/sec                     
+
+       0.052327203 seconds time elapsed
+
+       0.002378000 seconds user
+       0.000000000 seconds sys
+
+

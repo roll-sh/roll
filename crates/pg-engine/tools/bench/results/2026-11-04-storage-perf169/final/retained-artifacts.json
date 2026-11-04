@@ -1,0 +1,46 @@
+{
+  "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/copy-limiter-candidate-profile.perf.data": {
+    "bytes": 1877390,
+    "sha256": "d050f8a28baa2cfbfb845c1c66eac39a90b1db7fd2039dd09d5c31a9787a6b24"
+  },
+  "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/pgbench-limiter-candidate-profile.perf.data": {
+    "bytes": 1608486,
+    "sha256": "b64e4067a88739f2338f52f7aa4b018d8ebdce02ecef02cca3c943a8227eb196"
+  },
+  "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/index-limiter-candidate-profile.perf.data": {
+    "bytes": 829954,
+    "sha256": "fec4690b8c27a9e70f4f204e5579ff1178c6ff7e5ffb0dfe4b5678d35d5f970a"
+  },
+  "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/index-limiter-baseline-profile.perf.data": {
+    "bytes": 906746,
+    "sha256": "49d596ee550608a07629cdb0ce7bfca11ddda093dfc99c8942874f61b26b5e93"
+  },
+  "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/pgbench-limiter-baseline-profile.perf.data": {
+    "bytes": 1828618,
+    "sha256": "342aaf06f3aaba38ae227b9592171a86e26154386cd4eb123375eadd00fbada0"
+  },
+  "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/copy-limiter-baseline-profile.perf.data": {
+    "bytes": 1785898,
+    "sha256": "c9813085dbd99f5828471eca28e618d07aea7fe5a4d59b010a51ec785b742f54"
+  },
+  "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/input/rows.csv": {
+    "bytes": 267778896,
+    "sha256": "17122cc009eb57b00500fe1e74cda9cfbe808ed874dbb8676e5ca60c7311049c"
+  },
+  "/home/meszmate/.cache/a169/target/dist/roll-engine": {
+    "bytes": 69436376,
+    "sha256": "377e85acc26bfae7074e081f9da5224cd6d24c5439526a82907bc20cf4480810"
+  },
+  "/home/meszmate/.cache/a169/target-base/dist/roll-engine": {
+    "bytes": 69415528,
+    "sha256": "146750fa01e1abb69311d32c69e3f9b4f690472ae7b1326cb5cc68bbaaf5ccb1"
+  },
+  "/home/meszmate/.cache/a169/target/release/roll-engine": {
+    "bytes": 86895160,
+    "sha256": "899b7e3d135dada0e7b4dd8a4271dec82c2e9b141d3759accac0809a9e66742a"
+  },
+  "/home/meszmate/.cache/a169/target-base/release/roll-engine": {
+    "bytes": 85991120,
+    "sha256": "0c9d96e93c8985266d16beec682524ac328836574bac6b6bf24fefe9680b519b"
+  }
+}

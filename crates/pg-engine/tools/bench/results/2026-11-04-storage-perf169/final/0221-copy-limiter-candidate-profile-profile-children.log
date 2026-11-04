@@ -1,0 +1,840 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 204  of event 'cycles:P'
+# Event count (approx.): 16230645517
+#
+# Children      Self  Command    Shared Object      Symbol                                                                                                                                                                  
+# ........  ........  .........  .................  ........................................................................................................................................................................
+#
+    85.65%     0.00%  roll-conn  roll-engine        [.] _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7session4copyNtB6_7Session11copy_in_run
+            |
+            ---_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7session4copyNtB6_7Session11copy_in_run
+               _RNCNCNvMs_NtNtCs9sg4cstvzz7_9pg_engine7session4copyNtBa_7Session11copy_in_run0s_0Bc_
+               |          
+               |--60.82%--_RNvMs0_NtNtCs9sg4cstvzz7_9pg_engine7session4copyNtB5_10CopyReader10next_batch
+               |          |          
+               |          |--57.35%--_RNvNtNtCs9sg4cstvzz7_9pg_engine7session4copy15parse_copy_data
+               |          |          |          
+               |          |           --5.66%--_RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine
+               |          |                     _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+               |          |                     |          
+               |          |                      --3.51%--_mi_theap_realloc_zero
+               |          |          
+               |           --2.93%--_RNCNvNtCs9sg4cstvzz7_9pg_engine6server7outcomes2_0B5_
+               |                     _RNvMs4_NtCs9sg4cstvzz7_9pg_engine6serverNtB5_4Conn9read_body
+               |                     _RNvXs4_NtNtNtCsgFX3jaOk65H_5alloc2io8buffered9bufreaderINtB5_9BufReaderNtNtCs9sg4cstvzz7_9pg_engine6server8IdleReadENtNtB9_4read4Read10read_exactB1b_
+               |                     _RNvXs4_NtNtNtCsgFX3jaOk65H_5alloc2io8buffered9bufreaderINtB5_9BufReaderNtNtCs9sg4cstvzz7_9pg_engine6server8IdleReadENtNtB9_4read4Read4readB1b_
+               |                     _RNvXs2_NtCs9sg4cstvzz7_9pg_engine6serverNtB5_8IdleReadNtNtNtCsgFX3jaOk65H_5alloc2io4read4Read4read
+               |                     recv
+               |                     0x7f011b0313cc
+               |                     0x7f011b031387
+               |                     0x7f011b03c72e
+               |                     0xffffffffb400012f
+               |                     0xffffffffb3ef7267
+               |                     0xffffffffb3c041c4
+               |                     0xffffffffb3c04112
+               |                     0xffffffffb3c01287
+               |                     0xffffffffb3d49994
+               |                     0xffffffffb3d08f37
+               |          
+                --24.83%--_RNvXs2_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNodeNtB7_4Node4next
+                          |          
+                          |--11.80%--_RNvMs1_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNode6insert
+                          |          |          
+                          |           --11.26%--_RNvMs1_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNode11insert_once
+                          |                     |          
+                          |                      --10.50%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml10insert_new
+                          |                                |          
+                          |                                 --9.45%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml15insert_prepared
+                          |                                           _RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml14store_inserted
+                          |                                           |          
+                          |                                           |--3.82%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec6sizing13inserted_with
+                          |                                           |          
+                          |                                           |--2.85%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec5toast6encode
+                          |                                           |          
+                          |                                            --2.23%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn9put_fresh
+                          |          
+                           --5.84%--_RNvMs8_NtNtCs9sg4cstvzz7_9pg_engine4exec6sizingNtB5_8CopyLoad5flush
+                                     _RNvMs8_NtNtCs9sg4cstvzz7_9pg_engine4exec6sizingNtB5_8CopyLoad5model
+                                     |          
+                                      --4.10%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn9put_fresh
+                                                |          
+                                                 --2.77%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn10flush_sink
+                                                           |          
+                                                            --2.22%--_RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+
+    85.65%     0.00%  roll-conn  roll-engine        [.] _RNCNCNvMs_NtNtCs9sg4cstvzz7_9pg_engine7session4copyNtBa_7Session11copy_in_run0s_0Bc_
+            |
+            ---_RNCNCNvMs_NtNtCs9sg4cstvzz7_9pg_engine7session4copyNtBa_7Session11copy_in_run0s_0Bc_
+               |          
+               |--60.82%--_RNvMs0_NtNtCs9sg4cstvzz7_9pg_engine7session4copyNtB5_10CopyReader10next_batch
+               |          |          
+               |          |--57.35%--_RNvNtNtCs9sg4cstvzz7_9pg_engine7session4copy15parse_copy_data
+               |          |          |          
+               |          |           --5.66%--_RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine
+               |          |                     _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+               |          |                     |          
+               |          |                      --3.51%--_mi_theap_realloc_zero
+               |          |          
+               |           --2.93%--_RNCNvNtCs9sg4cstvzz7_9pg_engine6server7outcomes2_0B5_
+               |                     _RNvMs4_NtCs9sg4cstvzz7_9pg_engine6serverNtB5_4Conn9read_body
+               |                     _RNvXs4_NtNtNtCsgFX3jaOk65H_5alloc2io8buffered9bufreaderINtB5_9BufReaderNtNtCs9sg4cstvzz7_9pg_engine6server8IdleReadENtNtB9_4read4Read10read_exactB1b_
+               |                     _RNvXs4_NtNtNtCsgFX3jaOk65H_5alloc2io8buffered9bufreaderINtB5_9BufReaderNtNtCs9sg4cstvzz7_9pg_engine6server8IdleReadENtNtB9_4read4Read4readB1b_
+               |                     _RNvXs2_NtCs9sg4cstvzz7_9pg_engine6serverNtB5_8IdleReadNtNtNtCsgFX3jaOk65H_5alloc2io4read4Read4read
+               |                     recv
+               |                     0x7f011b0313cc
+               |                     0x7f011b031387
+               |                     0x7f011b03c72e
+               |                     0xffffffffb400012f
+               |                     0xffffffffb3ef7267
+               |                     0xffffffffb3c041c4
+               |                     0xffffffffb3c04112
+               |                     0xffffffffb3c01287
+               |                     0xffffffffb3d49994
+               |                     0xffffffffb3d08f37
+               |          
+                --24.83%--_RNvXs2_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNodeNtB7_4Node4next
+                          |          
+                          |--11.80%--_RNvMs1_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNode6insert
+                          |          |          
+                          |           --11.26%--_RNvMs1_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNode11insert_once
+                          |                     |          
+                          |                      --10.50%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml10insert_new
+                          |                                |          
+                          |                                 --9.45%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml15insert_prepared
+                          |                                           _RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml14store_inserted
+                          |                                           |          
+                          |                                           |--3.82%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec6sizing13inserted_with
+                          |                                           |          
+                          |                                           |--2.85%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec5toast6encode
+                          |                                           |          
+                          |                                            --2.23%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn9put_fresh
+                          |          
+                           --5.84%--_RNvMs8_NtNtCs9sg4cstvzz7_9pg_engine4exec6sizingNtB5_8CopyLoad5flush
+                                     _RNvMs8_NtNtCs9sg4cstvzz7_9pg_engine4exec6sizingNtB5_8CopyLoad5model
+                                     |          
+                                      --4.10%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn9put_fresh
+                                                |          
+                                                 --2.77%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn10flush_sink
+                                                           |          
+                                                            --2.22%--_RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+
+    60.82%     0.54%  roll-conn  roll-engine        [.] _RNvMs0_NtNtCs9sg4cstvzz7_9pg_engine7session4copyNtB5_10CopyReader10next_batch
+            |          
+             --60.28%--_RNvMs0_NtNtCs9sg4cstvzz7_9pg_engine7session4copyNtB5_10CopyReader10next_batch
+                       |          
+                       |--57.35%--_RNvNtNtCs9sg4cstvzz7_9pg_engine7session4copy15parse_copy_data
+                       |          |          
+                       |           --5.66%--_RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine
+                       |                     _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+                       |                     |          
+                       |                      --3.51%--_mi_theap_realloc_zero
+                       |          
+                        --2.93%--_RNCNvNtCs9sg4cstvzz7_9pg_engine6server7outcomes2_0B5_
+                                  _RNvMs4_NtCs9sg4cstvzz7_9pg_engine6serverNtB5_4Conn9read_body
+                                  _RNvXs4_NtNtNtCsgFX3jaOk65H_5alloc2io8buffered9bufreaderINtB5_9BufReaderNtNtCs9sg4cstvzz7_9pg_engine6server8IdleReadENtNtB9_4read4Read10read_exactB1b_
+                                  _RNvXs4_NtNtNtCsgFX3jaOk65H_5alloc2io8buffered9bufreaderINtB5_9BufReaderNtNtCs9sg4cstvzz7_9pg_engine6server8IdleReadENtNtB9_4read4Read4readB1b_
+                                  _RNvXs2_NtCs9sg4cstvzz7_9pg_engine6serverNtB5_8IdleReadNtNtNtCsgFX3jaOk65H_5alloc2io4read4Read4read
+                                  recv
+                                  0x7f011b0313cc
+                                  0x7f011b031387
+                                  0x7f011b03c72e
+                                  0xffffffffb400012f
+                                  0xffffffffb3ef7267
+                                  0xffffffffb3c041c4
+                                  0xffffffffb3c04112
+                                  0xffffffffb3c01287
+                                  0xffffffffb3d49994
+                                  0xffffffffb3d08f37
+
+    57.45%    50.20%  roll-conn  roll-engine        [.] _RNvNtNtCs9sg4cstvzz7_9pg_engine7session4copy15parse_copy_data
+            |          
+            |--50.10%--_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7session4copyNtB6_7Session11copy_in_run
+            |          _RNCNCNvMs_NtNtCs9sg4cstvzz7_9pg_engine7session4copyNtBa_7Session11copy_in_run0s_0Bc_
+            |          _RNvMs0_NtNtCs9sg4cstvzz7_9pg_engine7session4copyNtB5_10CopyReader10next_batch
+            |          _RNvNtNtCs9sg4cstvzz7_9pg_engine7session4copy15parse_copy_data
+            |          
+             --7.26%--_RNvNtNtCs9sg4cstvzz7_9pg_engine7session4copy15parse_copy_data
+                       |          
+                        --5.66%--_RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine
+                                  _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+                                  |          
+                                   --3.51%--_mi_theap_realloc_zero
+
+    24.83%     5.02%  roll-conn  roll-engine        [.] _RNvXs2_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNodeNtB7_4Node4next
+            |          
+            |--19.82%--_RNvXs2_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNodeNtB7_4Node4next
+            |          |          
+            |          |--11.80%--_RNvMs1_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNode6insert
+            |          |          |          
+            |          |           --11.26%--_RNvMs1_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNode11insert_once
+            |          |                     |          
+            |          |                      --10.50%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml10insert_new
+            |          |                                |          
+            |          |                                 --9.45%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml15insert_prepared
+            |          |                                           _RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml14store_inserted
+            |          |                                           |          
+            |          |                                           |--3.82%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec6sizing13inserted_with
+            |          |                                           |          
+            |          |                                           |--2.85%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec5toast6encode
+            |          |                                           |          
+            |          |                                            --2.23%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn9put_fresh
+            |          |          
+            |           --5.84%--_RNvMs8_NtNtCs9sg4cstvzz7_9pg_engine4exec6sizingNtB5_8CopyLoad5flush
+            |                     _RNvMs8_NtNtCs9sg4cstvzz7_9pg_engine4exec6sizingNtB5_8CopyLoad5model
+            |                     |          
+            |                      --4.10%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn9put_fresh
+            |                                |          
+            |                                 --2.77%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn10flush_sink
+            |                                           |          
+            |                                            --2.22%--_RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+            |          
+             --5.02%--_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7session4copyNtB6_7Session14copy_in_stream
+                       _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7session4copyNtB6_7Session11copy_in_run
+                       _RNCNCNvMs_NtNtCs9sg4cstvzz7_9pg_engine7session4copyNtBa_7Session11copy_in_run0s_0Bc_
+                       _RNvXs2_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNodeNtB7_4Node4next
+
+    19.93%     0.76%  roll-conn  roll-engine        [.] _RNvMs1_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNode11insert_once
+            |          
+             --19.18%--_RNvMs1_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNode11insert_once
+                       _RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml10insert_new
+                       |          
+                        --18.13%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml15insert_prepared
+                                  _RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml14store_inserted
+                                  |          
+                                  |--9.09%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn9put_fresh
+                                  |          |          
+                                  |           --7.99%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn10flush_sink
+                                  |                     |          
+                                  |                      --6.86%--_RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+                                  |                                _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add
+                                  |                                _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter12finish_block
+                                  |                                |          
+                                  |                                 --6.32%--_RNvMs_NtNtCskkazuifsGj9_4zstd4bulk10compressorNtB4_10Compressor8compress
+                                  |                                           ZSTD_compress2
+                                  |                                           ZSTD_compressStream_generic
+                                  |                                           ZSTD_compressEnd_public
+                                  |                                           ZSTD_compress_frameChunk
+                                  |                                           ZSTD_compressBlock_internal
+                                  |                                           |          
+                                  |                                           |--2.90%--ZSTD_buildSeqStore
+                                  |                                           |          ZSTD_compressBlock_fast
+                                  |                                           |          
+                                  |                                            --2.62%--ZSTD_compressLiterals
+                                  |                                                      HUF_compress4X_repeat
+                                  |                                                      HUF_compress_internal
+                                  |          
+                                  |--5.64%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec6sizing13inserted_with
+                                  |          
+                                   --2.85%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec5toast6encode
+
+    19.18%     0.00%  roll-conn  roll-engine        [.] _RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml10insert_new
+            |
+            ---_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml10insert_new
+               |          
+                --18.13%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml15insert_prepared
+                          _RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml14store_inserted
+                          |          
+                          |--9.09%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn9put_fresh
+                          |          |          
+                          |           --7.99%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn10flush_sink
+                          |                     |          
+                          |                      --6.86%--_RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+                          |                                _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add
+                          |                                _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter12finish_block
+                          |                                |          
+                          |                                 --6.32%--_RNvMs_NtNtCskkazuifsGj9_4zstd4bulk10compressorNtB4_10Compressor8compress
+                          |                                           ZSTD_compress2
+                          |                                           ZSTD_compressStream_generic
+                          |                                           ZSTD_compressEnd_public
+                          |                                           ZSTD_compress_frameChunk
+                          |                                           ZSTD_compressBlock_internal
+                          |                                           |          
+                          |                                           |--2.90%--ZSTD_buildSeqStore
+                          |                                           |          ZSTD_compressBlock_fast
+                          |                                           |          
+                          |                                            --2.62%--ZSTD_compressLiterals
+                          |                                                      HUF_compress4X_repeat
+                          |                                                      HUF_compress_internal
+                          |          
+                          |--5.64%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec6sizing13inserted_with
+                          |          
+                           --2.85%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec5toast6encode
+
+    18.67%     0.54%  roll-conn  roll-engine        [.] _RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml15insert_prepared
+            |          
+             --18.13%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml15insert_prepared
+                       _RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml14store_inserted
+                       |          
+                       |--9.09%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn9put_fresh
+                       |          |          
+                       |           --7.99%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn10flush_sink
+                       |                     |          
+                       |                      --6.86%--_RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+                       |                                _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add
+                       |                                _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter12finish_block
+                       |                                |          
+                       |                                 --6.32%--_RNvMs_NtNtCskkazuifsGj9_4zstd4bulk10compressorNtB4_10Compressor8compress
+                       |                                           ZSTD_compress2
+                       |                                           ZSTD_compressStream_generic
+                       |                                           ZSTD_compressEnd_public
+                       |                                           ZSTD_compress_frameChunk
+                       |                                           ZSTD_compressBlock_internal
+                       |                                           |          
+                       |                                           |--2.90%--ZSTD_buildSeqStore
+                       |                                           |          ZSTD_compressBlock_fast
+                       |                                           |          
+                       |                                            --2.62%--ZSTD_compressLiterals
+                       |                                                      HUF_compress4X_repeat
+                       |                                                      HUF_compress_internal
+                       |          
+                       |--5.64%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec6sizing13inserted_with
+                       |          
+                        --2.85%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec5toast6encode
+
+    18.13%     0.00%  roll-conn  roll-engine        [.] _RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml14store_inserted
+            |
+            ---_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml14store_inserted
+               |          
+               |--9.09%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn9put_fresh
+               |          |          
+               |           --7.99%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn10flush_sink
+               |                     |          
+               |                      --6.86%--_RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+               |                                _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add
+               |                                _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter12finish_block
+               |                                |          
+               |                                 --6.32%--_RNvMs_NtNtCskkazuifsGj9_4zstd4bulk10compressorNtB4_10Compressor8compress
+               |                                           ZSTD_compress2
+               |                                           ZSTD_compressStream_generic
+               |                                           ZSTD_compressEnd_public
+               |                                           ZSTD_compress_frameChunk
+               |                                           ZSTD_compressBlock_internal
+               |                                           |          
+               |                                           |--2.90%--ZSTD_buildSeqStore
+               |                                           |          ZSTD_compressBlock_fast
+               |                                           |          
+               |                                            --2.62%--ZSTD_compressLiterals
+               |                                                      HUF_compress4X_repeat
+               |                                                      HUF_compress_internal
+               |          
+               |--5.64%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec6sizing13inserted_with
+               |          
+                --2.85%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec5toast6encode
+
+    13.26%     0.63%  roll-conn  roll-engine        [.] _RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn9put_fresh
+            |          
+             --12.64%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn9put_fresh
+                       |          
+                        --10.77%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn10flush_sink
+                                  |          
+                                   --9.08%--_RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+                                             |          
+                                              --8.52%--_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add
+                                                        _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter12finish_block
+                                                        |          
+                                                         --7.98%--_RNvMs_NtNtCskkazuifsGj9_4zstd4bulk10compressorNtB4_10Compressor8compress
+                                                                   ZSTD_compress2
+                                                                   |          
+                                                                    --7.43%--ZSTD_compressStream_generic
+                                                                              ZSTD_compressEnd_public
+                                                                              ZSTD_compress_frameChunk
+                                                                              ZSTD_compressBlock_internal
+                                                                              |          
+                                                                              |--4.01%--ZSTD_buildSeqStore
+                                                                              |          ZSTD_compressBlock_fast
+                                                                              |          
+                                                                               --2.62%--ZSTD_compressLiterals
+                                                                                         HUF_compress4X_repeat
+                                                                                         HUF_compress_internal
+
+    12.41%     0.00%  roll-conn  roll-engine        [.] _RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn10flush_sink
+            |
+            ---_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn10flush_sink
+               |          
+               |--10.18%--_RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+               |          |          
+               |           --9.07%--_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add
+               |                     _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter12finish_block
+               |                     |          
+               |                      --8.53%--_RNvMs_NtNtCskkazuifsGj9_4zstd4bulk10compressorNtB4_10Compressor8compress
+               |                                ZSTD_compress2
+               |                                |          
+               |                                 --7.97%--ZSTD_compressStream_generic
+               |                                           ZSTD_compressEnd_public
+               |                                           ZSTD_compress_frameChunk
+               |                                           ZSTD_compressBlock_internal
+               |                                           |          
+               |                                           |--4.01%--ZSTD_buildSeqStore
+               |                                           |          ZSTD_compressBlock_fast
+               |                                           |          
+               |                                            --3.17%--ZSTD_compressLiterals
+               |                                                      HUF_compress4X_repeat
+               |                                                      HUF_compress_internal
+               |          
+                --2.23%--_RINvNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable7ipnsortTomENCINvMB6_SBT_16sort_unstable_byNCNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB1A_3Txn10flush_sinks1_0E0EB1C_
+                          _RNCINvMNtCskADBYZwJmSU_4core5sliceSTomE16sort_unstable_byNCNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB11_3Txn10flush_sinks1_0E0B13_
+                          0x7f011b11421a
+
+    12.34%     0.55%  roll-conn  roll-engine        [.] _RNvMs1_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNode6insert
+            |          
+             --11.80%--_RNvMs1_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNode6insert
+                       _RNvMs1_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNode11insert_once
+                       |          
+                        --11.04%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml10insert_new
+                                  |          
+                                   --9.99%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml15insert_prepared
+                                             _RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml14store_inserted
+                                             |          
+                                             |--3.82%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec6sizing13inserted_with
+                                             |          
+                                             |--2.85%--_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec5toast6encode
+                                             |          
+                                              --2.77%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn9put_fresh
+
+    10.18%     0.00%  roll-conn  roll-engine        [.] _RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+            |
+            ---_RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+               |          
+                --9.07%--_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add
+                          _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter12finish_block
+                          |          
+                           --8.53%--_RNvMs_NtNtCskkazuifsGj9_4zstd4bulk10compressorNtB4_10Compressor8compress
+                                     ZSTD_compress2
+                                     |          
+                                      --7.97%--ZSTD_compressStream_generic
+                                                ZSTD_compressEnd_public
+                                                ZSTD_compress_frameChunk
+                                                ZSTD_compressBlock_internal
+                                                |          
+                                                |--4.01%--ZSTD_buildSeqStore
+                                                |          ZSTD_compressBlock_fast
+                                                |          
+                                                 --3.17%--ZSTD_compressLiterals
+                                                           HUF_compress4X_repeat
+                                                           HUF_compress_internal
+
+     9.07%     0.00%  roll-conn  roll-engine        [.] _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add
+            |
+            ---_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add
+               _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter12finish_block
+               |          
+                --8.53%--_RNvMs_NtNtCskkazuifsGj9_4zstd4bulk10compressorNtB4_10Compressor8compress
+                          ZSTD_compress2
+                          |          
+                           --7.97%--ZSTD_compressStream_generic
+                                     ZSTD_compressEnd_public
+                                     ZSTD_compress_frameChunk
+                                     ZSTD_compressBlock_internal
+                                     |          
+                                     |--4.01%--ZSTD_buildSeqStore
+                                     |          ZSTD_compressBlock_fast
+                                     |          
+                                      --3.17%--ZSTD_compressLiterals
+                                                HUF_compress4X_repeat
+                                                HUF_compress_internal
+
+     9.07%     0.00%  roll-conn  roll-engine        [.] _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter12finish_block
+            |
+            ---_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter12finish_block
+               |          
+                --8.53%--_RNvMs_NtNtCskkazuifsGj9_4zstd4bulk10compressorNtB4_10Compressor8compress
+                          ZSTD_compress2
+                          |          
+                           --7.97%--ZSTD_compressStream_generic
+                                     ZSTD_compressEnd_public
+                                     ZSTD_compress_frameChunk
+                                     ZSTD_compressBlock_internal
+                                     |          
+                                     |--4.01%--ZSTD_buildSeqStore
+                                     |          ZSTD_compressBlock_fast
+                                     |          
+                                      --3.17%--ZSTD_compressLiterals
+                                                HUF_compress4X_repeat
+                                                HUF_compress_internal
+
+     8.53%     0.00%  roll-conn  roll-engine        [.] _RNvMs_NtNtCskkazuifsGj9_4zstd4bulk10compressorNtB4_10Compressor8compress
+            |
+            ---_RNvMs_NtNtCskkazuifsGj9_4zstd4bulk10compressorNtB4_10Compressor8compress
+               ZSTD_compress2
+               |          
+                --7.97%--ZSTD_compressStream_generic
+                          ZSTD_compressEnd_public
+                          ZSTD_compress_frameChunk
+                          ZSTD_compressBlock_internal
+                          |          
+                          |--4.01%--ZSTD_buildSeqStore
+                          |          ZSTD_compressBlock_fast
+                          |          
+                           --3.17%--ZSTD_compressLiterals
+                                     HUF_compress4X_repeat
+                                     HUF_compress_internal
+
+     8.53%     0.00%  roll-conn  roll-engine        [.] ZSTD_compress2
+            |
+            ---ZSTD_compress2
+               |          
+                --7.97%--ZSTD_compressStream_generic
+                          ZSTD_compressEnd_public
+                          ZSTD_compress_frameChunk
+                          ZSTD_compressBlock_internal
+                          |          
+                          |--4.01%--ZSTD_buildSeqStore
+                          |          ZSTD_compressBlock_fast
+                          |          
+                           --3.17%--ZSTD_compressLiterals
+                                     HUF_compress4X_repeat
+                                     HUF_compress_internal
+
+     7.97%     0.00%  roll-conn  roll-engine        [.] ZSTD_compressStream_generic
+            |
+            ---ZSTD_compressStream_generic
+               ZSTD_compressEnd_public
+               ZSTD_compress_frameChunk
+               ZSTD_compressBlock_internal
+               |          
+               |--4.01%--ZSTD_buildSeqStore
+               |          ZSTD_compressBlock_fast
+               |          
+                --3.17%--ZSTD_compressLiterals
+                          HUF_compress4X_repeat
+                          HUF_compress_internal
+
+     7.97%     0.00%  roll-conn  roll-engine        [.] ZSTD_compressEnd_public
+            |
+            ---ZSTD_compressEnd_public
+               ZSTD_compress_frameChunk
+               ZSTD_compressBlock_internal
+               |          
+               |--4.01%--ZSTD_buildSeqStore
+               |          ZSTD_compressBlock_fast
+               |          
+                --3.17%--ZSTD_compressLiterals
+                          HUF_compress4X_repeat
+                          HUF_compress_internal
+
+     7.97%     0.00%  roll-conn  roll-engine        [.] ZSTD_compress_frameChunk
+            |
+            ---ZSTD_compress_frameChunk
+               ZSTD_compressBlock_internal
+               |          
+               |--4.01%--ZSTD_buildSeqStore
+               |          ZSTD_compressBlock_fast
+               |          
+                --3.17%--ZSTD_compressLiterals
+                          HUF_compress4X_repeat
+                          HUF_compress_internal
+
+     7.97%     0.00%  roll-conn  roll-engine        [.] ZSTD_compressBlock_internal
+            |
+            ---ZSTD_compressBlock_internal
+               |          
+               |--4.01%--ZSTD_buildSeqStore
+               |          ZSTD_compressBlock_fast
+               |          
+                --3.17%--ZSTD_compressLiterals
+                          HUF_compress4X_repeat
+                          HUF_compress_internal
+
+     7.17%     0.00%  roll-conn  roll-engine        [.] _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7session4copyNtB6_7Session14copy_in_stream
+            |
+            ---_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7session4copyNtB6_7Session14copy_in_stream
+               _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7session4copyNtB6_7Session11copy_in_run
+               _RNCNCNvMs_NtNtCs9sg4cstvzz7_9pg_engine7session4copyNtBa_7Session11copy_in_run0s_0Bc_
+               |          
+                --6.63%--_RNvXs2_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNodeNtB7_4Node4next
+
+     6.70%     0.54%  roll-conn  roll-engine        [.] _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+            |
+            ---_RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+               |          
+                --3.51%--_mi_theap_realloc_zero
+
+     5.84%     0.00%  roll-conn  roll-engine        [.] _RNvMs8_NtNtCs9sg4cstvzz7_9pg_engine4exec6sizingNtB5_8CopyLoad5flush
+            |
+            ---_RNvMs8_NtNtCs9sg4cstvzz7_9pg_engine4exec6sizingNtB5_8CopyLoad5flush
+               _RNvMs8_NtNtCs9sg4cstvzz7_9pg_engine4exec6sizingNtB5_8CopyLoad5model
+               |          
+                --4.10%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn9put_fresh
+                          |          
+                           --2.77%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn10flush_sink
+                                     |          
+                                      --2.22%--_RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+
+     5.84%     0.00%  roll-conn  roll-engine        [.] _RNvMs8_NtNtCs9sg4cstvzz7_9pg_engine4exec6sizingNtB5_8CopyLoad5model
+            |
+            ---_RNvMs8_NtNtCs9sg4cstvzz7_9pg_engine4exec6sizingNtB5_8CopyLoad5model
+               |          
+                --4.10%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn9put_fresh
+                          |          
+                           --2.77%--_RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn10flush_sink
+                                     |          
+                                      --2.22%--_RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+
+     5.66%     0.00%  roll-conn  roll-engine        [.] _RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine
+            |
+            ---_RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine
+               _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine
+               |          
+                --3.51%--_mi_theap_realloc_zero
+
+     5.64%     0.00%  roll-conn  roll-engine        [.] _RNvNtNtCs9sg4cstvzz7_9pg_engine4exec6sizing13inserted_with
+            |
+            ---_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec6sizing13inserted_with
+
+     4.05%     0.65%  roll-conn  roll-engine        [.] _mi_theap_realloc_zero
+            |          
+             --3.40%--_mi_theap_realloc_zero
+
+     4.01%     4.01%  roll-conn  roll-engine        [.] ZSTD_compressBlock_fast
+            |          
+             --2.90%--_RNvMs1_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNode11insert_once
+                       _RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml10insert_new
+                       _RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml15insert_prepared
+                       _RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml14store_inserted
+                       _RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn9put_fresh
+                       _RNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB5_3Txn10flush_sink
+                       _RNvMNtNtCs9sg4cstvzz7_9pg_engine3txn5spillNtB2_4Runs11write_fresh
+                       _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add
+                       _RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter12finish_block
+                       _RNvMs_NtNtCskkazuifsGj9_4zstd4bulk10compressorNtB4_10Compressor8compress
+                       ZSTD_compress2
+                       ZSTD_compressStream_generic
+                       ZSTD_compressEnd_public
+                       ZSTD_compress_frameChunk
+                       ZSTD_compressBlock_internal
+                       ZSTD_buildSeqStore
+                       ZSTD_compressBlock_fast
+
+     4.01%     0.00%  roll-conn  roll-engine        [.] ZSTD_buildSeqStore
+            |
+            ---ZSTD_buildSeqStore
+               ZSTD_compressBlock_fast
+
+     3.17%     0.00%  roll-conn  roll-engine        [.] ZSTD_compressLiterals
+            |
+            ---ZSTD_compressLiterals
+               HUF_compress4X_repeat
+               HUF_compress_internal
+
+     3.17%     0.00%  roll-conn  roll-engine        [.] HUF_compress4X_repeat
+            |
+            ---HUF_compress4X_repeat
+               HUF_compress_internal
+
+     3.17%     0.00%  roll-conn  roll-engine        [.] HUF_compress_internal
+            |
+            ---HUF_compress_internal
+
+     2.93%     0.00%  roll-conn  roll-engine        [.] _RNCNvNtCs9sg4cstvzz7_9pg_engine6server7outcomes2_0B5_
+            |
+            ---_RNCNvNtCs9sg4cstvzz7_9pg_engine6server7outcomes2_0B5_
+               _RNvMs4_NtCs9sg4cstvzz7_9pg_engine6serverNtB5_4Conn9read_body
+               _RNvXs4_NtNtNtCsgFX3jaOk65H_5alloc2io8buffered9bufreaderINtB5_9BufReaderNtNtCs9sg4cstvzz7_9pg_engine6server8IdleReadENtNtB9_4read4Read10read_exactB1b_
+               _RNvXs4_NtNtNtCsgFX3jaOk65H_5alloc2io8buffered9bufreaderINtB5_9BufReaderNtNtCs9sg4cstvzz7_9pg_engine6server8IdleReadENtNtB9_4read4Read4readB1b_
+               _RNvXs2_NtCs9sg4cstvzz7_9pg_engine6serverNtB5_8IdleReadNtNtNtCsgFX3jaOk65H_5alloc2io4read4Read4read
+               recv
+               0x7f011b0313cc
+               0x7f011b031387
+               0x7f011b03c72e
+               0xffffffffb400012f
+               0xffffffffb3ef7267
+               0xffffffffb3c041c4
+               0xffffffffb3c04112
+               0xffffffffb3c01287
+               0xffffffffb3d49994
+               0xffffffffb3d08f37
+
+     2.93%     0.00%  roll-conn  roll-engine        [.] _RNvMs4_NtCs9sg4cstvzz7_9pg_engine6serverNtB5_4Conn9read_body
+            |
+            ---_RNvMs4_NtCs9sg4cstvzz7_9pg_engine6serverNtB5_4Conn9read_body
+               _RNvXs4_NtNtNtCsgFX3jaOk65H_5alloc2io8buffered9bufreaderINtB5_9BufReaderNtNtCs9sg4cstvzz7_9pg_engine6server8IdleReadENtNtB9_4read4Read10read_exactB1b_
+               _RNvXs4_NtNtNtCsgFX3jaOk65H_5alloc2io8buffered9bufreaderINtB5_9BufReaderNtNtCs9sg4cstvzz7_9pg_engine6server8IdleReadENtNtB9_4read4Read4readB1b_
+               _RNvXs2_NtCs9sg4cstvzz7_9pg_engine6serverNtB5_8IdleReadNtNtNtCsgFX3jaOk65H_5alloc2io4read4Read4read
+               recv
+               0x7f011b0313cc
+               0x7f011b031387
+               0x7f011b03c72e
+               0xffffffffb400012f
+               0xffffffffb3ef7267
+               0xffffffffb3c041c4
+               0xffffffffb3c04112
+               0xffffffffb3c01287
+               0xffffffffb3d49994
+               0xffffffffb3d08f37
+
+     2.93%     0.00%  roll-conn  roll-engine        [.] _RNvXs4_NtNtNtCsgFX3jaOk65H_5alloc2io8buffered9bufreaderINtB5_9BufReaderNtNtCs9sg4cstvzz7_9pg_engine6server8IdleReadENtNtB9_4read4Read10read_exactB1b_
+            |
+            ---_RNvXs4_NtNtNtCsgFX3jaOk65H_5alloc2io8buffered9bufreaderINtB5_9BufReaderNtNtCs9sg4cstvzz7_9pg_engine6server8IdleReadENtNtB9_4read4Read10read_exactB1b_
+               _RNvXs4_NtNtNtCsgFX3jaOk65H_5alloc2io8buffered9bufreaderINtB5_9BufReaderNtNtCs9sg4cstvzz7_9pg_engine6server8IdleReadENtNtB9_4read4Read4readB1b_
+               _RNvXs2_NtCs9sg4cstvzz7_9pg_engine6serverNtB5_8IdleReadNtNtNtCsgFX3jaOk65H_5alloc2io4read4Read4read
+               recv
+               0x7f011b0313cc
+               0x7f011b031387
+               0x7f011b03c72e
+               0xffffffffb400012f
+               0xffffffffb3ef7267
+               0xffffffffb3c041c4
+               0xffffffffb3c04112
+               0xffffffffb3c01287
+               0xffffffffb3d49994
+               0xffffffffb3d08f37
+
+     2.93%     0.00%  roll-conn  roll-engine        [.] _RNvXs4_NtNtNtCsgFX3jaOk65H_5alloc2io8buffered9bufreaderINtB5_9BufReaderNtNtCs9sg4cstvzz7_9pg_engine6server8IdleReadENtNtB9_4read4Read4readB1b_
+            |
+            ---_RNvXs4_NtNtNtCsgFX3jaOk65H_5alloc2io8buffered9bufreaderINtB5_9BufReaderNtNtCs9sg4cstvzz7_9pg_engine6server8IdleReadENtNtB9_4read4Read4readB1b_
+               _RNvXs2_NtCs9sg4cstvzz7_9pg_engine6serverNtB5_8IdleReadNtNtNtCsgFX3jaOk65H_5alloc2io4read4Read4read
+               recv
+               0x7f011b0313cc
+               0x7f011b031387
+               0x7f011b03c72e
+               0xffffffffb400012f
+               0xffffffffb3ef7267
+               0xffffffffb3c041c4
+               0xffffffffb3c04112
+               0xffffffffb3c01287
+               0xffffffffb3d49994
+               0xffffffffb3d08f37
+
+     2.93%     0.00%  roll-conn  roll-engine        [.] _RNvXs2_NtCs9sg4cstvzz7_9pg_engine6serverNtB5_8IdleReadNtNtNtCsgFX3jaOk65H_5alloc2io4read4Read4read
+            |
+            ---_RNvXs2_NtCs9sg4cstvzz7_9pg_engine6serverNtB5_8IdleReadNtNtNtCsgFX3jaOk65H_5alloc2io4read4Read4read
+               recv
+               0x7f011b0313cc
+               0x7f011b031387
+               0x7f011b03c72e
+               0xffffffffb400012f
+               0xffffffffb3ef7267
+               0xffffffffb3c041c4
+               0xffffffffb3c04112
+               0xffffffffb3c01287
+               0xffffffffb3d49994
+               0xffffffffb3d08f37
+
+     2.93%     0.00%  roll-conn  libc.so.6          [.] recv
+            |
+            ---recv
+               0x7f011b0313cc
+               0x7f011b031387
+               0x7f011b03c72e
+               0xffffffffb400012f
+               0xffffffffb3ef7267
+               0xffffffffb3c041c4
+               0xffffffffb3c04112
+               0xffffffffb3c01287
+               0xffffffffb3d49994
+               0xffffffffb3d08f37
+
+     2.93%     0.00%  roll-conn  libc.so.6          [.] 0x00007f011b0313cc
+            |
+            ---0x7f011b0313cc
+               0x7f011b031387
+               0x7f011b03c72e
+               0xffffffffb400012f
+               0xffffffffb3ef7267
+               0xffffffffb3c041c4
+               0xffffffffb3c04112
+               0xffffffffb3c01287
+               0xffffffffb3d49994
+               0xffffffffb3d08f37
+
+     2.93%     0.00%  roll-conn  libc.so.6          [.] 0x00007f011b031387
+            |
+            ---0x7f011b031387
+               0x7f011b03c72e
+               0xffffffffb400012f
+               0xffffffffb3ef7267
+               0xffffffffb3c041c4
+               0xffffffffb3c04112
+               0xffffffffb3c01287
+               0xffffffffb3d49994
+               0xffffffffb3d08f37
+
+     2.93%     0.00%  roll-conn  libc.so.6          [.] 0x00007f011b03c72e
+            |
+            ---0x7f011b03c72e
+               0xffffffffb400012f
+               0xffffffffb3ef7267
+               0xffffffffb3c041c4
+               0xffffffffb3c04112
+               0xffffffffb3c01287
+               0xffffffffb3d49994
+               0xffffffffb3d08f37
+
+     2.93%     0.00%  roll-conn  [kernel.kallsyms]  [k] 0xffffffffb400012f
+            |
+            ---0xffffffffb400012f
+               0xffffffffb3ef7267
+               0xffffffffb3c041c4
+               0xffffffffb3c04112
+               0xffffffffb3c01287
+               0xffffffffb3d49994
+               0xffffffffb3d08f37
+
+     2.93%     0.00%  roll-conn  [kernel.kallsyms]  [k] 0xffffffffb3ef7267
+            |
+            ---0xffffffffb3ef7267
+               0xffffffffb3c041c4
+               0xffffffffb3c04112
+               0xffffffffb3c01287
+               0xffffffffb3d49994
+               0xffffffffb3d08f37
+
+     2.93%     0.00%  roll-conn  [kernel.kallsyms]  [k] 0xffffffffb3c041c4
+            |
+            ---0xffffffffb3c041c4
+               0xffffffffb3c04112
+               0xffffffffb3c01287
+               0xffffffffb3d49994
+               0xffffffffb3d08f37
+
+     2.93%     0.00%  roll-conn  [kernel.kallsyms]  [k] 0xffffffffb3c04112
+            |
+            ---0xffffffffb3c04112
+               0xffffffffb3c01287
+               0xffffffffb3d49994
+               0xffffffffb3d08f37
+
+     2.93%     0.00%  roll-conn  [kernel.kallsyms]  [k] 0xffffffffb3c01287
+            |
+            ---0xffffffffb3c01287
+               0xffffffffb3d49994
+               0xffffffffb3d08f37
+
+     2.93%     0.00%  roll-conn  [kernel.kallsyms]  [k] 0xffffffffb3d49994
+            |
+            ---0xffffffffb3d49994
+               0xffffffffb3d08f37
+
+     2.93%     0.00%  roll-conn  [kernel.kallsyms]  [k] 0xffffffffb3d08f37
+            |
+            ---0xffffffffb3d08f37
+
+     2.85%     0.00%  roll-conn  roll-engine        [.] _RNvNtNtCs9sg4cstvzz7_9pg_engine4exec5toast6encode
+            |
+            ---_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec5toast6encode
+
+     2.34%     0.11%  roll-conn  roll-engine        [.] _RNCINvMNtCskADBYZwJmSU_4core5sliceSTomE16sort_unstable_byNCNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB11_3Txn10flush_sinks1_0E0B13_
+            |          
+             --2.23%--_RNCINvMNtCskADBYZwJmSU_4core5sliceSTomE16sort_unstable_byNCNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB11_3Txn10flush_sinks1_0E0B13_
+                       0x7f011b11421a
+
+     2.23%     2.23%  roll-conn  libc.so.6          [.] 0x000000000017221a
+     2.23%     0.00%  roll-conn  roll-engine        [.] _RINvNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable7ipnsortTomENCINvMB6_SBT_16sort_unstable_byNCNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB1A_3Txn10flush_sinks1_0E0EB1C_
+            |
+            ---_RINvNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable7ipnsortTomENCINvMB6_SBT_16sort_unstable_byNCNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB1A_3Txn10flush_sinks1_0E0EB1C_
+               _RNCINvMNtCskADBYZwJmSU_4core5sliceSTomE16sort_unstable_byNCNvMs2_NtCs9sg4cstvzz7_9pg_engine3txnNtB11_3Txn10flush_sinks1_0E0B13_
+               0x7f011b11421a
+
+     2.23%     0.00%  roll-conn  libc.so.6          [.] 0x00007f011b11421a
+            |
+            ---0x7f011b11421a
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

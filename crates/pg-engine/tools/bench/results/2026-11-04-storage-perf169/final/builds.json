@@ -1,0 +1,44 @@
+[
+  {
+    "side": "candidate",
+    "source": "/home/meszmate/roll/.claude/worktrees/agent-a76932e8127f6d35b",
+    "commit": "79746f3174996b8047c4c0c30db87f345418b162",
+    "target": "/home/meszmate/.cache/a169/target",
+    "command": [
+      "cargo",
+      "build",
+      "--locked",
+      "--profile",
+      "dist",
+      "-p",
+      "pg-engine",
+      "--bin",
+      "roll-engine"
+    ],
+    "exit": 0,
+    "wall": 900.2858512401581,
+    "binary": "/home/meszmate/.cache/a169/target/dist/roll-engine",
+    "sha256": "377e85acc26bfae7074e081f9da5224cd6d24c5439526a82907bc20cf4480810"
+  },
+  {
+    "side": "baseline",
+    "source": "/home/meszmate/.cache/a169/base",
+    "commit": "5c31223568fead896be10e66edd59e3d5a261002",
+    "target": "/home/meszmate/.cache/a169/target-base",
+    "command": [
+      "cargo",
+      "build",
+      "--locked",
+      "--profile",
+      "dist",
+      "-p",
+      "pg-engine",
+      "--bin",
+      "roll-engine"
+    ],
+    "exit": 0,
+    "wall": 991.39302110672,
+    "binary": "/home/meszmate/.cache/a169/target-base/dist/roll-engine",
+    "sha256": "146750fa01e1abb69311d32c69e3f9b4f690472ae7b1326cb5cc68bbaaf5ccb1"
+  }
+]

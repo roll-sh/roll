@@ -1,0 +1,1 @@
+A read-only inline status diagnostic had a Python SyntaxError from an 'else0' typo; no command ran or measurement changed. Replaced by frozen status.py. Metadata exporter/profile-parser failures are separately retained; no measured command failed from these issues.

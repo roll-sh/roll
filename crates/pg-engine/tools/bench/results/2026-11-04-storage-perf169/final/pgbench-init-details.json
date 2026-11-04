@@ -1,0 +1,292 @@
+[
+  {
+    "tag": "pgbench-0-baseline",
+    "driver_wall_s": 2.6757956760702655,
+    "pgbench_reported_total_s": 2.57,
+    "subphases": [
+      [
+        "drop tables",
+        0.0
+      ],
+      [
+        " create tables",
+        0.0
+      ],
+      [
+        " client-side generate",
+        1.87
+      ],
+      [
+        " vacuum",
+        0.26
+      ],
+      [
+        " primary keys",
+        0.44
+      ]
+    ],
+    "subphase_sum_s": 2.5700000000000003,
+    "note": "subphase values rounded to0.01s; sum is not independent end-to-end timer"
+  },
+  {
+    "tag": "pgbench-0-candidate",
+    "driver_wall_s": 2.621968834893778,
+    "pgbench_reported_total_s": 2.49,
+    "subphases": [
+      [
+        "drop tables",
+        0.0
+      ],
+      [
+        " create tables",
+        0.0
+      ],
+      [
+        " client-side generate",
+        1.75
+      ],
+      [
+        " vacuum",
+        0.24
+      ],
+      [
+        " primary keys",
+        0.5
+      ]
+    ],
+    "subphase_sum_s": 2.49,
+    "note": "subphase values rounded to0.01s; sum is not independent end-to-end timer"
+  },
+  {
+    "tag": "pgbench-1-candidate",
+    "driver_wall_s": 2.5719472359633073,
+    "pgbench_reported_total_s": 2.43,
+    "subphases": [
+      [
+        "drop tables",
+        0.0
+      ],
+      [
+        " create tables",
+        0.0
+      ],
+      [
+        " client-side generate",
+        1.68
+      ],
+      [
+        " vacuum",
+        0.27
+      ],
+      [
+        " primary keys",
+        0.47
+      ]
+    ],
+    "subphase_sum_s": 2.42,
+    "note": "subphase values rounded to0.01s; sum is not independent end-to-end timer"
+  },
+  {
+    "tag": "pgbench-1-baseline",
+    "driver_wall_s": 3.246468651923351,
+    "pgbench_reported_total_s": 3.13,
+    "subphases": [
+      [
+        "drop tables",
+        0.0
+      ],
+      [
+        " create tables",
+        0.01
+      ],
+      [
+        " client-side generate",
+        2.26
+      ],
+      [
+        " vacuum",
+        0.29
+      ],
+      [
+        " primary keys",
+        0.57
+      ]
+    ],
+    "subphase_sum_s": 3.13,
+    "note": "subphase values rounded to0.01s; sum is not independent end-to-end timer"
+  },
+  {
+    "tag": "pgbench-2-baseline",
+    "driver_wall_s": 2.476581793045625,
+    "pgbench_reported_total_s": 2.37,
+    "subphases": [
+      [
+        "drop tables",
+        0.0
+      ],
+      [
+        " create tables",
+        0.0
+      ],
+      [
+        " client-side generate",
+        1.68
+      ],
+      [
+        " vacuum",
+        0.25
+      ],
+      [
+        " primary keys",
+        0.44
+      ]
+    ],
+    "subphase_sum_s": 2.37,
+    "note": "subphase values rounded to0.01s; sum is not independent end-to-end timer"
+  },
+  {
+    "tag": "pgbench-2-candidate",
+    "driver_wall_s": 2.6281059430912137,
+    "pgbench_reported_total_s": 2.48,
+    "subphases": [
+      [
+        "drop tables",
+        0.0
+      ],
+      [
+        " create tables",
+        0.0
+      ],
+      [
+        " client-side generate",
+        1.76
+      ],
+      [
+        " vacuum",
+        0.23
+      ],
+      [
+        " primary keys",
+        0.49
+      ]
+    ],
+    "subphase_sum_s": 2.48,
+    "note": "subphase values rounded to0.01s; sum is not independent end-to-end timer"
+  },
+  {
+    "tag": "pgbench-3-candidate",
+    "driver_wall_s": 3.1360220729839057,
+    "pgbench_reported_total_s": 3.01,
+    "subphases": [
+      [
+        "drop tables",
+        0.0
+      ],
+      [
+        " create tables",
+        0.0
+      ],
+      [
+        " client-side generate",
+        2.18
+      ],
+      [
+        " vacuum",
+        0.39
+      ],
+      [
+        " primary keys",
+        0.44
+      ]
+    ],
+    "subphase_sum_s": 3.0100000000000002,
+    "note": "subphase values rounded to0.01s; sum is not independent end-to-end timer"
+  },
+  {
+    "tag": "pgbench-3-baseline",
+    "driver_wall_s": 3.134548190049827,
+    "pgbench_reported_total_s": 2.95,
+    "subphases": [
+      [
+        "drop tables",
+        0.0
+      ],
+      [
+        " create tables",
+        0.0
+      ],
+      [
+        " client-side generate",
+        2.15
+      ],
+      [
+        " vacuum",
+        0.31
+      ],
+      [
+        " primary keys",
+        0.49
+      ]
+    ],
+    "subphase_sum_s": 2.9499999999999997,
+    "note": "subphase values rounded to0.01s; sum is not independent end-to-end timer"
+  },
+  {
+    "tag": "pgbench-4-baseline",
+    "driver_wall_s": 3.3592104309936985,
+    "pgbench_reported_total_s": 3.27,
+    "subphases": [
+      [
+        "drop tables",
+        0.0
+      ],
+      [
+        " create tables",
+        0.0
+      ],
+      [
+        " client-side generate",
+        2.36
+      ],
+      [
+        " vacuum",
+        0.38
+      ],
+      [
+        " primary keys",
+        0.53
+      ]
+    ],
+    "subphase_sum_s": 3.27,
+    "note": "subphase values rounded to0.01s; sum is not independent end-to-end timer"
+  },
+  {
+    "tag": "pgbench-4-candidate",
+    "driver_wall_s": 3.6073972400045022,
+    "pgbench_reported_total_s": 3.47,
+    "subphases": [
+      [
+        "drop tables",
+        0.01
+      ],
+      [
+        " create tables",
+        0.0
+      ],
+      [
+        " client-side generate",
+        2.42
+      ],
+      [
+        " vacuum",
+        0.56
+      ],
+      [
+        " primary keys",
+        0.47
+      ]
+    ],
+    "subphase_sum_s": 3.46,
+    "note": "subphase values rounded to0.01s; sum is not independent end-to-end timer"
+  }
+]

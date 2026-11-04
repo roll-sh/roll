@@ -1,0 +1,1060 @@
+{
+  "summary": {
+    "copy": {
+      "baseline": {
+        "wall_s": {
+          "n": 5,
+          "median": 4.5966343159088865,
+          "min": 4.2389047319302335,
+          "max": 4.7986210259841755
+        },
+        "server_cpu_s": {
+          "n": 5,
+          "median": 4.210031,
+          "min": 3.999148,
+          "max": 4.476751
+        },
+        "client_cpu_s": {
+          "n": 5,
+          "median": 0.821787,
+          "min": 0.765019,
+          "max": 0.86807
+        },
+        "server_wbytes": {
+          "n": 5,
+          "median": 299347968,
+          "min": 299347968,
+          "max": 299347968
+        },
+        "server_rbytes": {
+          "n": 5,
+          "median": 4096,
+          "min": 0,
+          "max": 24576
+        },
+        "peak_anon_shmem": {
+          "n": 5,
+          "median": 138436608,
+          "min": 134733824,
+          "max": 140726272
+        },
+        "disk_allocated": {
+          "n": 5,
+          "median": 299499520,
+          "min": 298717184,
+          "max": 300806144
+        }
+      },
+      "candidate": {
+        "wall_s": {
+          "n": 5,
+          "median": 4.284490740974434,
+          "min": 4.132020792923868,
+          "max": 4.541231509996578
+        },
+        "server_cpu_s": {
+          "n": 5,
+          "median": 4.119459,
+          "min": 3.955268,
+          "max": 4.386291
+        },
+        "client_cpu_s": {
+          "n": 5,
+          "median": 0.839708,
+          "min": 0.813842,
+          "max": 0.848728
+        },
+        "server_wbytes": {
+          "n": 5,
+          "median": 40345600,
+          "min": 40345600,
+          "max": 40345600
+        },
+        "server_rbytes": {
+          "n": 5,
+          "median": 4096,
+          "min": 0,
+          "max": 4096
+        },
+        "peak_anon_shmem": {
+          "n": 5,
+          "median": 137723904,
+          "min": 136073216,
+          "max": 139055104
+        },
+        "disk_allocated": {
+          "n": 5,
+          "median": 39456768,
+          "min": 39456768,
+          "max": 39456768
+        }
+      },
+      "candidate_change_pct": {
+        "wall_s": -6.790698443296394,
+        "server_cpu_s": -2.1513380780331492,
+        "client_cpu_s": 2.1807353973718246,
+        "peak_anon_shmem": -0.514823362329131,
+        "disk_allocated": -86.82576586433261
+      }
+    },
+    "pgbench": {
+      "baseline": {
+        "wall_s": {
+          "n": 5,
+          "median": 3.134853769093752,
+          "min": 2.476843982003629,
+          "max": 3.3594833080423996
+        },
+        "server_cpu_s": {
+          "n": 5,
+          "median": 3.611073,
+          "min": 2.975097,
+          "max": 3.9763
+        },
+        "client_cpu_s": {
+          "n": 5,
+          "median": 0.273351,
+          "min": 0.223314,
+          "max": 0.304923
+        },
+        "server_wbytes": {
+          "n": 5,
+          "median": 183029760,
+          "min": 183025664,
+          "max": 183029760
+        },
+        "server_rbytes": {
+          "n": 5,
+          "median": 8192,
+          "min": 4096,
+          "max": 32768
+        },
+        "peak_anon_shmem": {
+          "n": 5,
+          "median": 438992896,
+          "min": 433946624,
+          "max": 455094272
+        },
+        "disk_allocated": {
+          "n": 5,
+          "median": 55107584,
+          "min": 55103488,
+          "max": 56680448
+        }
+      },
+      "candidate": {
+        "wall_s": {
+          "n": 5,
+          "median": 2.6285748470108956,
+          "min": 2.5723107459489256,
+          "max": 3.607660937937908
+        },
+        "server_cpu_s": {
+          "n": 5,
+          "median": 3.198134,
+          "min": 3.097384,
+          "max": 4.175166
+        },
+        "client_cpu_s": {
+          "n": 5,
+          "median": 0.291803,
+          "min": 0.287707,
+          "max": 0.318572
+        },
+        "server_wbytes": {
+          "n": 5,
+          "median": 25497600,
+          "min": 25497600,
+          "max": 25497600
+        },
+        "server_rbytes": {
+          "n": 5,
+          "median": 4096,
+          "min": 0,
+          "max": 20480
+        },
+        "peak_anon_shmem": {
+          "n": 5,
+          "median": 451108864,
+          "min": 437428224,
+          "max": 497946624
+        },
+        "disk_allocated": {
+          "n": 5,
+          "median": 16637952,
+          "min": 16375808,
+          "max": 17686528
+        }
+      },
+      "candidate_change_pct": {
+        "wall_s": -16.15000122411501,
+        "server_cpu_s": -11.435354533126308,
+        "client_cpu_s": 6.75029540773584,
+        "peak_anon_shmem": 2.7599462566246125,
+        "disk_allocated": -69.8082354690055
+      }
+    },
+    "index": {
+      "baseline": {
+        "wall_s": {
+          "n": 5,
+          "median": 1.0254675280302763,
+          "min": 0.9696147450013086,
+          "max": 1.1711576860398054
+        },
+        "server_cpu_s": {
+          "n": 5,
+          "median": 1.453375,
+          "min": 1.36003,
+          "max": 1.650692
+        },
+        "client_cpu_s": {
+          "n": 5,
+          "median": 0.048491,
+          "min": 0.040154,
+          "max": 0.057518
+        },
+        "server_wbytes": {
+          "n": 5,
+          "median": 47009792,
+          "min": 47005696,
+          "max": 47009792
+        },
+        "server_rbytes": {
+          "n": 5,
+          "median": 12288,
+          "min": 0,
+          "max": 17027072
+        },
+        "peak_anon_shmem": {
+          "n": 5,
+          "median": 504287232,
+          "min": 493101056,
+          "max": 543477760
+        },
+        "disk_allocated": {
+          "n": 5,
+          "median": 83738624,
+          "min": 83734528,
+          "max": 83742720
+        }
+      },
+      "candidate": {
+        "wall_s": {
+          "n": 5,
+          "median": 0.9264899640111253,
+          "min": 0.8669201720040292,
+          "max": 2.556099766981788
+        },
+        "server_cpu_s": {
+          "n": 5,
+          "median": 1.251932,
+          "min": 1.144877,
+          "max": 2.538442
+        },
+        "client_cpu_s": {
+          "n": 5,
+          "median": 0.060699,
+          "min": 0.047562,
+          "max": 0.068724
+        },
+        "server_wbytes": {
+          "n": 5,
+          "median": 9891840,
+          "min": 9850880,
+          "max": 9961472
+        },
+        "server_rbytes": {
+          "n": 5,
+          "median": 0,
+          "min": 0,
+          "max": 8192
+        },
+        "peak_anon_shmem": {
+          "n": 5,
+          "median": 526303232,
+          "min": 516034560,
+          "max": 561467392
+        },
+        "disk_allocated": {
+          "n": 5,
+          "median": 50188288,
+          "min": 49664000,
+          "max": 51904512
+        }
+      },
+      "candidate_change_pct": {
+        "wall_s": -9.651945216565528,
+        "server_cpu_s": -13.86035950804163,
+        "client_cpu_s": 25.175805819636633,
+        "peak_anon_shmem": 4.365765897479634,
+        "disk_allocated": -40.06554490315006
+      }
+    }
+  },
+  "footprint": {
+    "baseline": {
+      "fresh": {
+        "anon_shmem": {
+          "n": 3,
+          "median": 13578240.0,
+          "min": 13578240.0,
+          "max": 13578240.0
+        },
+        "cpu_cores": {
+          "n": 3,
+          "median": 2.7051855618937686e-05,
+          "min": 2.5608977034348794e-05,
+          "max": 3.102980265133118e-05
+        },
+        "per_window": [
+          {
+            "tag": "footprint-baseline-fresh-0",
+            "duration": 10.165661234990694,
+            "anon_shmem": 13578240.0,
+            "server_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 81,
+              "throttled_usec": 0,
+              "usage_usec": 275,
+              "user_usec": 194
+            },
+            "client_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 0,
+              "throttled_usec": 0,
+              "usage_usec": 0,
+              "user_usec": 0
+            }
+          },
+          {
+            "tag": "footprint-baseline-fresh-1",
+            "duration": 10.152689802926034,
+            "anon_shmem": 13578240.0,
+            "server_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 77,
+              "throttled_usec": 0,
+              "usage_usec": 260,
+              "user_usec": 182
+            },
+            "client_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 0,
+              "throttled_usec": 0,
+              "usage_usec": 0,
+              "user_usec": 0
+            }
+          },
+          {
+            "tag": "footprint-baseline-fresh-2",
+            "duration": 10.151530885952525,
+            "anon_shmem": 13578240.0,
+            "server_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 94,
+              "throttled_usec": 0,
+              "usage_usec": 315,
+              "user_usec": 222
+            },
+            "client_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 0,
+              "throttled_usec": 0,
+              "usage_usec": 0,
+              "user_usec": 0
+            }
+          }
+        ]
+      },
+      "loaded": {
+        "anon_shmem": {
+          "n": 3,
+          "median": 316350464.0,
+          "min": 316350464.0,
+          "max": 316350464.0
+        },
+        "cpu_cores": {
+          "n": 3,
+          "median": 3.223244129288418e-05,
+          "min": 2.879856364028515e-05,
+          "max": 0.0001802695436612288
+        },
+        "per_window": [
+          {
+            "tag": "footprint-baseline-loaded-0",
+            "duration": 10.151465205010027,
+            "anon_shmem": 316350464.0,
+            "server_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 7,
+              "throttled_usec": 0,
+              "usage_usec": 1830,
+              "user_usec": 1823
+            },
+            "client_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 0,
+              "throttled_usec": 0,
+              "usage_usec": 0,
+              "user_usec": 0
+            }
+          },
+          {
+            "tag": "footprint-baseline-loaded-1",
+            "duration": 10.139394577010535,
+            "anon_shmem": 316350464.0,
+            "server_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 0,
+              "throttled_usec": 0,
+              "usage_usec": 292,
+              "user_usec": 292
+            },
+            "client_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 0,
+              "throttled_usec": 0,
+              "usage_usec": 0,
+              "user_usec": 0
+            }
+          },
+          {
+            "tag": "footprint-baseline-loaded-2",
+            "duration": 10.145058422000147,
+            "anon_shmem": 316350464.0,
+            "server_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 0,
+              "throttled_usec": 0,
+              "usage_usec": 327,
+              "user_usec": 327
+            },
+            "client_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 0,
+              "throttled_usec": 0,
+              "usage_usec": 0,
+              "user_usec": 0
+            }
+          }
+        ]
+      },
+      "100idle": {
+        "anon_shmem": {
+          "n": 3,
+          "median": 344743936.0,
+          "min": 344743936.0,
+          "max": 344743936.0
+        },
+        "cpu_cores": {
+          "n": 3,
+          "median": 0.0004004167114614942,
+          "min": 0.00038569482399779346,
+          "max": 0.00043169427575954464
+        },
+        "per_window": [
+          {
+            "tag": "footprint-baseline-100idle-0",
+            "duration": 10.142733987071551,
+            "anon_shmem": 344743936.0,
+            "server_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 434,
+              "throttled_usec": 0,
+              "usage_usec": 3912,
+              "user_usec": 3478
+            },
+            "client_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 0,
+              "throttled_usec": 0,
+              "usage_usec": 0,
+              "user_usec": 0
+            }
+          },
+          {
+            "tag": "footprint-baseline-100idle-1",
+            "duration": 10.139436951023526,
+            "anon_shmem": 344743936.0,
+            "server_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 450,
+              "throttled_usec": 0,
+              "usage_usec": 4060,
+              "user_usec": 3610
+            },
+            "client_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 0,
+              "throttled_usec": 0,
+              "usage_usec": 0,
+              "user_usec": 0
+            }
+          },
+          {
+            "tag": "footprint-baseline-100idle-2",
+            "duration": 10.141436303034425,
+            "anon_shmem": 344743936.0,
+            "server_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 486,
+              "throttled_usec": 0,
+              "usage_usec": 4378,
+              "user_usec": 3893
+            },
+            "client_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 0,
+              "throttled_usec": 0,
+              "usage_usec": 0,
+              "user_usec": 0
+            }
+          }
+        ]
+      }
+    },
+    "candidate": {
+      "fresh": {
+        "anon_shmem": {
+          "n": 3,
+          "median": 14512128.0,
+          "min": 14512128.0,
+          "max": 14512128.0
+        },
+        "cpu_cores": {
+          "n": 3,
+          "median": 3.168153367668816e-05,
+          "min": 3.0099721859103106e-05,
+          "max": 3.183998992454814e-05
+        },
+        "per_window": [
+          {
+            "tag": "footprint-candidate-fresh-0",
+            "duration": 10.132983999908902,
+            "anon_shmem": 14512128.0,
+            "server_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 102,
+              "throttled_usec": 0,
+              "usage_usec": 305,
+              "user_usec": 203
+            },
+            "client_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 0,
+              "throttled_usec": 0,
+              "usage_usec": 0,
+              "user_usec": 0
+            }
+          },
+          {
+            "tag": "footprint-candidate-fresh-1",
+            "duration": 10.132085248013027,
+            "anon_shmem": 14512128.0,
+            "server_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 107,
+              "throttled_usec": 0,
+              "usage_usec": 321,
+              "user_usec": 214
+            },
+            "client_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 0,
+              "throttled_usec": 0,
+              "usage_usec": 0,
+              "user_usec": 0
+            }
+          },
+          {
+            "tag": "footprint-candidate-fresh-2",
+            "duration": 10.144475571927615,
+            "anon_shmem": 14512128.0,
+            "server_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 108,
+              "throttled_usec": 0,
+              "usage_usec": 323,
+              "user_usec": 216
+            },
+            "client_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 0,
+              "throttled_usec": 0,
+              "usage_usec": 0,
+              "user_usec": 0
+            }
+          }
+        ]
+      },
+      "loaded": {
+        "anon_shmem": {
+          "n": 3,
+          "median": 324476928.0,
+          "min": 324476928.0,
+          "max": 324476928.0
+        },
+        "cpu_cores": {
+          "n": 3,
+          "median": 2.9047364502501084e-05,
+          "min": 2.886264169156049e-05,
+          "max": 0.0001763791418862053
+        },
+        "per_window": [
+          {
+            "tag": "footprint-candidate-loaded-0",
+            "duration": 10.165601106942631,
+            "anon_shmem": 324476928.0,
+            "server_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 312,
+              "throttled_usec": 0,
+              "usage_usec": 1793,
+              "user_usec": 1480
+            },
+            "client_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 0,
+              "throttled_usec": 0,
+              "usage_usec": 0,
+              "user_usec": 0
+            }
+          },
+          {
+            "tag": "footprint-candidate-loaded-1",
+            "duration": 10.190253231907263,
+            "anon_shmem": 324476928.0,
+            "server_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 297,
+              "throttled_usec": 0,
+              "usage_usec": 296,
+              "user_usec": 0
+            },
+            "client_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 0,
+              "throttled_usec": 0,
+              "usage_usec": 0,
+              "user_usec": 0
+            }
+          },
+          {
+            "tag": "footprint-candidate-loaded-2",
+            "duration": 10.15153093507979,
+            "anon_shmem": 324476928.0,
+            "server_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 293,
+              "throttled_usec": 0,
+              "usage_usec": 293,
+              "user_usec": 0
+            },
+            "client_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 0,
+              "throttled_usec": 0,
+              "usage_usec": 0,
+              "user_usec": 0
+            }
+          }
+        ]
+      },
+      "100idle": {
+        "anon_shmem": {
+          "n": 3,
+          "median": 352870400.0,
+          "min": 352870400.0,
+          "max": 352870400.0
+        },
+        "cpu_cores": {
+          "n": 3,
+          "median": 0.000435211079515727,
+          "min": 0.0004164934633263285,
+          "max": 0.0004993577849603455
+        },
+        "per_window": [
+          {
+            "tag": "footprint-candidate-100idle-0",
+            "duration": 10.165056304074824,
+            "anon_shmem": 352870400.0,
+            "server_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 298,
+              "throttled_usec": 0,
+              "usage_usec": 5076,
+              "user_usec": 4778
+            },
+            "client_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 0,
+              "throttled_usec": 0,
+              "usage_usec": 0,
+              "user_usec": 0
+            }
+          },
+          {
+            "tag": "footprint-candidate-100idle-1",
+            "duration": 10.127409842913039,
+            "anon_shmem": 352870400.0,
+            "server_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 247,
+              "throttled_usec": 0,
+              "usage_usec": 4218,
+              "user_usec": 3971
+            },
+            "client_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 0,
+              "throttled_usec": 0,
+              "usage_usec": 0,
+              "user_usec": 0
+            }
+          },
+          {
+            "tag": "footprint-candidate-100idle-2",
+            "duration": 10.133014088030905,
+            "anon_shmem": 352870400.0,
+            "server_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 259,
+              "throttled_usec": 0,
+              "usage_usec": 4410,
+              "user_usec": 4150
+            },
+            "client_cpu": {
+              "burst_usec": 0,
+              "nice_usec": 0,
+              "nr_bursts": 0,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "system_usec": 0,
+              "throttled_usec": 0,
+              "usage_usec": 0,
+              "user_usec": 0
+            }
+          }
+        ]
+      }
+    }
+  },
+  "topology": {
+    "baseline": [
+      {
+        "manifest": "base/16384/MANIFEST",
+        "l1_linked": 0,
+        "l1_ordinary": 1,
+        "ordinary_between_linked": [],
+        "l0": 7
+      }
+    ],
+    "candidate": [
+      {
+        "manifest": "base/16384/MANIFEST",
+        "l1_linked": 5,
+        "l1_ordinary": 1,
+        "ordinary_between_linked": [],
+        "l0": 2
+      }
+    ]
+  },
+  "notes": [
+    "copy wall_s: ranges overlap; no measurable direction from conservative spread rule",
+    "copy server_cpu_s: ranges overlap; no measurable direction from conservative spread rule",
+    "pgbench wall_s: ranges overlap; no measurable direction from conservative spread rule",
+    "pgbench server_cpu_s: ranges overlap; no measurable direction from conservative spread rule",
+    "index wall_s: ranges overlap; no measurable direction from conservative spread rule",
+    "index server_cpu_s: ranges overlap; no measurable direction from conservative spread rule",
+    "copy-limiter-baseline-profile: untimed server CPU/wall=0.798 cores, client=0.151; see perf reports for source attribution",
+    "copy-limiter-candidate-profile: untimed server CPU/wall=0.731 cores, client=0.159; see perf reports for source attribution",
+    "pgbench-limiter-baseline-profile: untimed server CPU/wall=0.980 cores, client=0.056; see perf reports for source attribution",
+    "pgbench-limiter-candidate-profile: untimed server CPU/wall=1.057 cores, client=0.082; see perf reports for source attribution",
+    "index-limiter-baseline-profile: untimed server CPU/wall=0.680 cores, client=0.020; see perf reports for source attribution",
+    "index-limiter-candidate-profile: untimed server CPU/wall=0.951 cores, client=0.016; see perf reports for source attribution",
+    "baseline close wall=0.420436s, removed/replaced input SST bytes=362404635, sampled allocated high-water=103895040; exit counters may be lower bounds",
+    "candidate close wall=2.895060s, removed/replaced input SST bytes=103427857, sampled allocated high-water=165396480; exit counters may be lower bounds"
+  ],
+  "gaps": [
+    "candidate far-close fixture did not prove linked L1 ranges surrounding an ordinary L1 file",
+    "runner failure retained; investigate separately",
+    "fresh anon+shmem footprint regression separated across window ranges",
+    "loaded anon+shmem footprint regression separated across window ranges",
+    "100idle anon+shmem footprint regression separated across window ranges"
+  ],
+  "failures": [],
+  "negative_controls": [
+    {
+      "at": 1793800248.9099743,
+      "cmd": [
+        "docker",
+        "run",
+        "--rm",
+        "--cidfile",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/negative-sql.cid",
+        "--name",
+        "a169-resume-perf-negative-sql",
+        "--label",
+        "agent.worktree=agent-a76932e8127f6d35b",
+        "--label",
+        "agent.lane=storage_perf169",
+        "--network",
+        "host",
+        "--cpuset-cpus",
+        "20-21",
+        "--cpu-shares",
+        "2",
+        "--memory",
+        "2g",
+        "--memory-swap",
+        "2g",
+        "-e",
+        "PGCONNECT_TIMEOUT=2",
+        "postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873",
+        "psql",
+        "-X",
+        "-w",
+        "-h",
+        "127.0.0.1",
+        "-p",
+        "53399",
+        "-U",
+        "postgres",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-c",
+        "SELECT 1/0"
+      ],
+      "exit": 2,
+      "log": "0001-negative-sql.log",
+      "tag": "negative-sql",
+      "wall": 1.0671859269496053
+    },
+    {
+      "at": 1793800248.9746993,
+      "cmd": [
+        "docker",
+        "container",
+        "inspect",
+        "a169-resume-perf-no-such-negative-control"
+      ],
+      "exit": 1,
+      "log": "0002-negative-docker.log",
+      "tag": "negative-docker",
+      "wall": 0.0642719219904393
+    },
+    {
+      "at": 1793800248.9829657,
+      "cmd": [
+        "bash",
+        "-o",
+        "pipefail",
+        "-c",
+        "exit 7 | cat"
+      ],
+      "exit": 7,
+      "log": "0003-negative-pipeline.log",
+      "tag": "negative-pipeline",
+      "wall": 0.007956803077831864
+    }
+  ],
+  "correctness_checks": 76,
+  "correctness_failures": 0,
+  "profile_runs": 6,
+  "timed_runs": 30,
+  "builds": [
+    {
+      "side": "candidate",
+      "source": "/home/meszmate/roll/.claude/worktrees/agent-a76932e8127f6d35b",
+      "commit": "79746f3174996b8047c4c0c30db87f345418b162",
+      "target": "/home/meszmate/.cache/a169/target",
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--profile",
+        "dist",
+        "-p",
+        "pg-engine",
+        "--bin",
+        "roll-engine"
+      ],
+      "exit": 0,
+      "wall": 900.2858512401581,
+      "binary": "/home/meszmate/.cache/a169/target/dist/roll-engine",
+      "sha256": "377e85acc26bfae7074e081f9da5224cd6d24c5439526a82907bc20cf4480810"
+    },
+    {
+      "side": "baseline",
+      "source": "/home/meszmate/.cache/a169/base",
+      "commit": "5c31223568fead896be10e66edd59e3d5a261002",
+      "target": "/home/meszmate/.cache/a169/target-base",
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--profile",
+        "dist",
+        "-p",
+        "pg-engine",
+        "--bin",
+        "roll-engine"
+      ],
+      "exit": 0,
+      "wall": 991.39302110672,
+      "binary": "/home/meszmate/.cache/a169/target-base/dist/roll-engine",
+      "sha256": "146750fa01e1abb69311d32c69e3f9b4f690472ae7b1326cb5cc68bbaaf5ccb1"
+    }
+  ],
+  "verdict": "INCONCLUSIVE",
+  "limits": [
+    "before/after roll only",
+    "single bounded1M/scale10 dataset",
+    "sampled peaks are lower bounds",
+    "close final cgroup counters may disappear; flagged last sample is lower bound",
+    "first-character payload sum is a checksum, not full per-row digest",
+    "ranges alone do not establish equivalence margins",
+    "host interference retained in raw samples; profile attribution must be reviewed"
+  ]
+}

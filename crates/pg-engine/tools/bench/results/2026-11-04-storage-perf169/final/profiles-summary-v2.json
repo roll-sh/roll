@@ -1,0 +1,410 @@
+[
+  {
+    "tag": "copy-limiter-baseline-profile-profile-self",
+    "raw": "0199-copy-limiter-baseline-profile-profile-self.log",
+    "lost": 0,
+    "samples": 195,
+    "top": [
+      {
+        "self_percent": 49.95,
+        "symbol": "_RNvNtNtCs9sg4cstvzz7_9pg_engine7session4copy15parse_copy_data",
+        "context": "roll-conn   roll-engine"
+      },
+      {
+        "self_percent": 4.55,
+        "symbol": "_RNvXs2_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNodeNtB7_4Node4next",
+        "context": "roll-conn   roll-engine"
+      },
+      {
+        "self_percent": 4.07,
+        "symbol": "_RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine",
+        "context": "roll-conn   roll-engine"
+      },
+      {
+        "self_percent": 2.99,
+        "symbol": "_mi_theap_realloc_zero",
+        "context": "roll-conn   roll-engine"
+      },
+      {
+        "self_percent": 2.16,
+        "symbol": "_RNvNtNtCs9sg4cstvzz7_9pg_engine7catalog7relsize11datum_bytes",
+        "context": "roll-conn   roll-engine"
+      },
+      {
+        "self_percent": 1.71,
+        "symbol": "_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add",
+        "context": "roll-conn   roll-engine"
+      },
+      {
+        "self_percent": 1.71,
+        "symbol": "mi_free",
+        "context": "roll-conn   roll-engine"
+      },
+      {
+        "self_percent": 1.65,
+        "symbol": "mi_theap_umalloc",
+        "context": "roll-conn   roll-engine"
+      },
+      {
+        "self_percent": 1.52,
+        "symbol": "_RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs9sg4cstvzz7_9pg_engine",
+        "context": "roll-conn   roll-engine"
+      },
+      {
+        "self_percent": 1.13,
+        "symbol": "_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec6sizing13inserted_with",
+        "context": "roll-conn   roll-engine"
+      },
+      {
+        "self_percent": 1.12,
+        "symbol": "_RINvNtCskADBYZwJmSU_4core3ptr9drop_glueNtNtNtCs9sg4cstvzz7_9pg_engine5types5value5ValueEBH_",
+        "context": "roll-conn   roll-engine"
+      },
+      {
+        "self_percent": 1.06,
+        "symbol": "_RNvMs0_NtNtCs9sg4cstvzz7_9pg_engine7session4copyNtB5_10CopyReader10next_batch",
+        "context": "roll-conn   roll-engine"
+      }
+    ]
+  },
+  {
+    "tag": "copy-limiter-candidate-profile-profile-self",
+    "raw": "0220-copy-limiter-candidate-profile-profile-self.log",
+    "lost": 0,
+    "samples": 204,
+    "top": [
+      {
+        "self_percent": 50.2,
+        "symbol": "_RNvNtNtCs9sg4cstvzz7_9pg_engine7session4copy15parse_copy_data",
+        "context": "roll-conn  roll-engine"
+      },
+      {
+        "self_percent": 5.02,
+        "symbol": "_RNvXs2_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNodeNtB7_4Node4next",
+        "context": "roll-conn  roll-engine"
+      },
+      {
+        "self_percent": 4.01,
+        "symbol": "ZSTD_compressBlock_fast",
+        "context": "roll-conn  roll-engine"
+      },
+      {
+        "self_percent": 2.23,
+        "symbol": "0x000000000017221a",
+        "context": "roll-conn  libc.so.6"
+      },
+      {
+        "self_percent": 1.64,
+        "symbol": "HUF_buildCTable_wksp",
+        "context": "roll-conn  roll-engine"
+      },
+      {
+        "self_percent": 1.58,
+        "symbol": "_RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row12encode_value",
+        "context": "roll-conn  roll-engine"
+      },
+      {
+        "self_percent": 1.39,
+        "symbol": "mi_theap_malloc_aligned",
+        "context": "roll-conn  roll-engine"
+      },
+      {
+        "self_percent": 1.27,
+        "symbol": "mi_free",
+        "context": "roll-conn  roll-engine"
+      },
+      {
+        "self_percent": 1.1,
+        "symbol": "_RNCNvNtNtCs9sg4cstvzz7_9pg_engine4exec6sizing6ensure0B7_",
+        "context": "roll-conn  roll-engine"
+      },
+      {
+        "self_percent": 1.09,
+        "symbol": "_RNvMs0_NtNtCs9sg4cstvzz7_9pg_engine7catalog6keymapNtB5_6KeyMap6insert",
+        "context": "roll-conn  roll-engine"
+      },
+      {
+        "self_percent": 1.07,
+        "symbol": "_mi_page_malloc_zero",
+        "context": "roll-conn  roll-engine"
+      },
+      {
+        "self_percent": 1.06,
+        "symbol": "mi_theap_umalloc",
+        "context": "roll-conn  roll-engine"
+      }
+    ]
+  },
+  {
+    "tag": "pgbench-limiter-baseline-profile-profile-self",
+    "raw": "0389-pgbench-limiter-baseline-profile-profile-self.log",
+    "lost": 0,
+    "samples": 200,
+    "top": [
+      {
+        "self_percent": 8.58,
+        "symbol": "_RNvNtNtCs9sg4cstvzz7_9pg_engine7session4copy15parse_copy_data",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 5.61,
+        "symbol": "_RNvXs2_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNodeNtB7_4Node4next",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 3.64,
+        "symbol": "_RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row16stored_tuple_len",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 3.3,
+        "symbol": "_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 3.19,
+        "symbol": "_mi_page_malloc_zero",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 2.73,
+        "symbol": "mi_free",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 1.76,
+        "symbol": "_RNvMs1_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNode11insert_once",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 1.72,
+        "symbol": "_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add",
+        "context": "roll-flush    roll-engine"
+      },
+      {
+        "self_percent": 1.68,
+        "symbol": "_RNvXs3_NtNtCskADBYZwJmSU_4core4hash3sipINtB5_6HasherNtB5_11Sip13RoundsENtB7_6Hasher5writeCs9sg4cstvzz7_9pg_engine",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 1.63,
+        "symbol": "ZSTD_compressBlock_fast",
+        "context": "roll-flush    roll-engine"
+      },
+      {
+        "self_percent": 1.28,
+        "symbol": "_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec3dml13check_row_rls",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 1.25,
+        "symbol": "_RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs9sg4cstvzz7_9pg_engine",
+        "context": "roll-conn     roll-engine"
+      }
+    ]
+  },
+  {
+    "tag": "pgbench-limiter-candidate-profile-profile-self",
+    "raw": "0408-pgbench-limiter-candidate-profile-profile-self.log",
+    "lost": 0,
+    "samples": 176,
+    "top": [
+      {
+        "self_percent": 8.14,
+        "symbol": "_RNvNtNtCs9sg4cstvzz7_9pg_engine7session4copy15parse_copy_data",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 4.58,
+        "symbol": "_RNvXs2_NtNtCs9sg4cstvzz7_9pg_engine4exec3dmlNtB5_10InsertNodeNtB7_4Node4next",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 3.91,
+        "symbol": "_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 2.72,
+        "symbol": "_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add",
+        "context": "roll-flush    roll-engine"
+      },
+      {
+        "self_percent": 2.32,
+        "symbol": "_RNvMs0_NtNtCs9sg4cstvzz7_9pg_engine7session4copyNtB5_10CopyReader10next_batch",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 2.21,
+        "symbol": "mi_free",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 2.11,
+        "symbol": "_mi_page_malloc_zero",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 1.97,
+        "symbol": "_RNvNtNtCs9sg4cstvzz7_9pg_engine7catalog7relsize15varlena_payload",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 1.88,
+        "symbol": "_RNvMs1_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB5_5Block11decode_with",
+        "context": "roll-flush    roll-engine"
+      },
+      {
+        "self_percent": 1.81,
+        "symbol": "ZSTD_decompressSequences_bmi2.constprop.0",
+        "context": "roll-flush    roll-engine"
+      },
+      {
+        "self_percent": 1.39,
+        "symbol": "_RNvNtNtCskADBYZwJmSU_4core3str5count14do_count_chars",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 1.35,
+        "symbol": "_RNvNtNtCs9sg4cstvzz7_9pg_engine4exec6sizing13inserted_with",
+        "context": "roll-conn     roll-engine"
+      }
+    ]
+  },
+  {
+    "tag": "index-limiter-baseline-profile-profile-self",
+    "raw": "0631-index-limiter-baseline-profile-profile-self.log",
+    "lost": 0,
+    "samples": 92,
+    "top": [
+      {
+        "self_percent": 6.1,
+        "symbol": "0x0000000000172840",
+        "context": "roll-conn     libc.so.6"
+      },
+      {
+        "self_percent": 4.12,
+        "symbol": "0x0000000000172214",
+        "context": "roll-conn     libc.so.6"
+      },
+      {
+        "self_percent": 3.81,
+        "symbol": "0x000000000017221a",
+        "context": "roll-conn     libc.so.6"
+      },
+      {
+        "self_percent": 3.76,
+        "symbol": "_RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row16stored_tuple_len",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 3.71,
+        "symbol": "_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 3.61,
+        "symbol": "_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_",
+        "context": "roll-build-0  roll-engine"
+      },
+      {
+        "self_percent": 3.37,
+        "symbol": "_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine",
+        "context": "roll-build-0  roll-engine"
+      },
+      {
+        "self_percent": 2.68,
+        "symbol": "_RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run",
+        "context": "roll-build-0  roll-engine"
+      },
+      {
+        "self_percent": 2.63,
+        "symbol": "_RNvMs8_NtCs9sg4cstvzz7_9pg_engine7storageNtB5_4Scan8position",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 2.6,
+        "symbol": "_RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row21decode_row_need_spare",
+        "context": "roll-build-0  roll-engine"
+      },
+      {
+        "self_percent": 1.72,
+        "symbol": "_mi_theap_realloc_zero",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 1.66,
+        "symbol": "0x0000000000172233",
+        "context": "roll-build-0  libc.so.6"
+      }
+    ]
+  },
+  {
+    "tag": "index-limiter-candidate-profile-profile-self",
+    "raw": "0655-index-limiter-candidate-profile-profile-self.log",
+    "lost": 0,
+    "samples": 81,
+    "top": [
+      {
+        "self_percent": 6.33,
+        "symbol": "_RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run",
+        "context": "roll-build-0  roll-engine"
+      },
+      {
+        "self_percent": 5.0,
+        "symbol": "_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortToINtNtCsgFX3jaOk65H_5alloc3vec3VechEjENvYB17_NtNtBa_3cmp10PartialOrd2ltECs9sg4cstvzz7_9pg_engine",
+        "context": "roll-build-0  roll-engine"
+      },
+      {
+        "self_percent": 4.87,
+        "symbol": "0x0000000000172214",
+        "context": "roll-conn     libc.so.6"
+      },
+      {
+        "self_percent": 4.82,
+        "symbol": "0x000000000017221a",
+        "context": "roll-conn     libc.so.6"
+      },
+      {
+        "self_percent": 4.76,
+        "symbol": "HUF_buildCTable_wksp",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 4.42,
+        "symbol": "_RNvNtNtCs9sg4cstvzz7_9pg_engine7storage3row16stored_tuple_len",
+        "context": "roll-build-0  roll-engine"
+      },
+      {
+        "self_percent": 3.35,
+        "symbol": "0x000000000017221a",
+        "context": "roll-build-0  libc.so.6"
+      },
+      {
+        "self_percent": 3.33,
+        "symbol": "_RINvNtNtNtNtCskADBYZwJmSU_4core5slice4sort8unstable9quicksort9quicksortTymmENCINvMB8_SB17_16sort_unstable_byNCNvMNtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB1N_7Entries4sort0E0EB1T_",
+        "context": "roll-build-0  roll-engine"
+      },
+      {
+        "self_percent": 3.33,
+        "symbol": "_RNvMs_NtNtNtCs9sg4cstvzz7_9pg_engine7session3ddl8parbuildNtB4_4Plan3run",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 3.17,
+        "symbol": "0x0000000000172840",
+        "context": "roll-conn     libc.so.6"
+      },
+      {
+        "self_percent": 3.16,
+        "symbol": "_RNvMs_NtNtCs9sg4cstvzz7_9pg_engine7storage3sstNtB4_9SstWriter3add",
+        "context": "roll-conn     roll-engine"
+      },
+      {
+        "self_percent": 3.1,
+        "symbol": "mi_theap_malloc_aligned",
+        "context": "roll-build-0  roll-engine"
+      }
+    ]
+  }
+]

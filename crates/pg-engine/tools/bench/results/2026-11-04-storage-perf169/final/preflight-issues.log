@@ -1,0 +1,6 @@
+Pre-timing tool observations/failures retained:
+- sudo: perf: command not found (first capability probe; resolved using owned extracted Debian package and dependencies).
+- Initial command requested not-yet-created owned tools directory as workdir; unified exec rejected process creation with No such file or directory. No command ran; directory then created sequentially.
+- First owned perf execution exit127: missing libopencsd_c_api.so.1; ldd also found libdebuginfod.so.1,libdw.so.1,libpython3.13.so.1.0,libbabeltrace-ctf.so.1,libtraceevent.so.1 absent. Six owned dependency packages unpacked; capability counter probe then passed.
+- pstree unavailable; owned heavy-batch ancestry determined read-only from /proc instead.
+- Build affinity was initially inherited/unrestricted; late baseline descendants were pinned to CPUs14-17. This affects no timing; actual measurement containers strictly verify14-17/20-21 and cgroup controls. No other process affinity changed.

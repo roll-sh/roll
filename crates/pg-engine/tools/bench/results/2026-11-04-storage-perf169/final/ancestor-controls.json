@@ -1,0 +1,12 @@
+{
+  "/sys/fs/cgroup": {
+    "cpuset.cpus.effective": "0-35\n"
+  },
+  "/sys/fs/cgroup/system.slice": {
+    "cpu.max": "max 100000\n",
+    "cpu.weight": "100\n",
+    "cpuset.cpus.effective": "0-35\n",
+    "memory.max": "max\n",
+    "memory.swap.max": "max\n"
+  }
+}

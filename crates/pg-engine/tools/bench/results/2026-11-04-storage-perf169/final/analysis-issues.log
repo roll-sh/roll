@@ -1,0 +1,1 @@
+profiles-summary.json v1 sample-count regex matched Total Lost Samples instead of Samples header. V2 anchors ^# Samples and retains correct195+ samples. Raw profiles unchanged; v1 retained. No timing result depends on parser.

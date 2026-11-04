@@ -1,0 +1,115 @@
+{
+  "base/16384/MANIFEST": {
+    "next_id": 43,
+    "flushed_ts": 2945,
+    "last_ts": 2945,
+    "l0": [],
+    "l1": [
+      {
+        "id": 37,
+        "size": 67492738,
+        "entries": 2010005,
+        "first_key": "0000000000000001fffffffffffffffb",
+        "last_key": "00004011000000002080000000000026c5fffffffffffff482",
+        "min_ts": 1,
+        "max_ts": 2945
+      },
+      {
+        "id": 38,
+        "size": 7583033,
+        "entries": 220030,
+        "first_key": "00004011000000002080000000000026c6fffffffffffff482",
+        "last_key": "0000401100000000208000000000038243fffffffffffff482",
+        "min_ts": 2941,
+        "max_ts": 2941
+      },
+      {
+        "id": 39,
+        "size": 7529371,
+        "entries": 220524,
+        "first_key": "0000401100000000208000000000038244fffffffffffff482",
+        "last_key": "000040110000000020800000000006dfaffffffffffffff482",
+        "min_ts": 2941,
+        "max_ts": 2941
+      },
+      {
+        "id": 40,
+        "size": 7323766,
+        "entries": 222215,
+        "first_key": "000040110000000020800000000006dfb0fffffffffffff482",
+        "last_key": "00004011000000002080000000000a43b6fffffffffffff482",
+        "min_ts": 2941,
+        "max_ts": 2941
+      },
+      {
+        "id": 41,
+        "size": 7328088,
+        "entries": 222215,
+        "first_key": "00004011000000002080000000000a43b7fffffffffffff482",
+        "last_key": "00004011000000002080000000000da7bdfffffffffffff482",
+        "min_ts": 2941,
+        "max_ts": 2941
+      },
+      {
+        "id": 42,
+        "size": 3463788,
+        "entries": 105091,
+        "first_key": "00004011000000002080000000000da7befffffffffffff482",
+        "last_key": "00004011000000002080000000000f4240fffffffffffff482",
+        "min_ts": 2941,
+        "max_ts": 2941
+      }
+    ]
+  },
+  "base/5/MANIFEST": {
+    "next_id": 4,
+    "flushed_ts": 4,
+    "last_ts": 4,
+    "l0": [
+      {
+        "id": 3,
+        "size": 1856,
+        "entries": 31,
+        "first_key": "0000000000000001fffffffffffffffd",
+        "last_key": "0000000000000025fffffffffffffffc",
+        "min_ts": 1,
+        "max_ts": 4
+      }
+    ],
+    "l1": []
+  },
+  "base/4/MANIFEST": {
+    "next_id": 4,
+    "flushed_ts": 3,
+    "last_ts": 3,
+    "l0": [
+      {
+        "id": 3,
+        "size": 1847,
+        "entries": 30,
+        "first_key": "0000000000000001fffffffffffffffd",
+        "last_key": "0000000000000024fffffffffffffffc",
+        "min_ts": 1,
+        "max_ts": 3
+      }
+    ],
+    "l1": []
+  },
+  "base/1/MANIFEST": {
+    "next_id": 4,
+    "flushed_ts": 3,
+    "last_ts": 3,
+    "l0": [
+      {
+        "id": 3,
+        "size": 1847,
+        "entries": 30,
+        "first_key": "0000000000000001fffffffffffffffd",
+        "last_key": "0000000000000024fffffffffffffffc",
+        "min_ts": 1,
+        "max_ts": 3
+      }
+    ],
+    "l1": []
+  }
+}

@@ -1,0 +1,289 @@
+[
+    {
+        "Id": "5c4b93301804c8defad510c0a5e09465ed3a8fae03c0e73097dcac4979c3eda0",
+        "Created": "2026-11-04T14:35:35.669694375Z",
+        "Path": "/home/meszmate/.cache/a169/target-base/dist/roll-engine",
+        "Args": [
+            "--data",
+            "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/data/index-limiter-baseline-profile",
+            "--listen",
+            "127.0.0.1:53390",
+            "--password",
+            "pw",
+            "--cache-mb",
+            "2048",
+            "-c",
+            "max_connections=300"
+        ],
+        "State": {
+            "Status": "running",
+            "Running": true,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 2257195,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-11-04T14:35:35.82500651Z",
+            "FinishedAt": "0001-01-01T00:00:00Z"
+        },
+        "Image": "sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad",
+        "ResolvConfPath": "/var/lib/docker/containers/5c4b93301804c8defad510c0a5e09465ed3a8fae03c0e73097dcac4979c3eda0/resolv.conf",
+        "HostnamePath": "/var/lib/docker/containers/5c4b93301804c8defad510c0a5e09465ed3a8fae03c0e73097dcac4979c3eda0/hostname",
+        "HostsPath": "/var/lib/docker/containers/5c4b93301804c8defad510c0a5e09465ed3a8fae03c0e73097dcac4979c3eda0/hosts",
+        "LogPath": "/var/lib/docker/containers/5c4b93301804c8defad510c0a5e09465ed3a8fae03c0e73097dcac4979c3eda0/5c4b93301804c8defad510c0a5e09465ed3a8fae03c0e73097dcac4979c3eda0-json.log",
+        "Name": "/a169-resume-perf-index-limiter-baseline-profile",
+        "RestartCount": 0,
+        "Driver": "overlayfs",
+        "Platform": "linux",
+        "MountLabel": "",
+        "ProcessLabel": "",
+        "AppArmorProfile": "docker-default",
+        "ExecIDs": null,
+        "HostConfig": {
+            "Binds": [
+                "/home/meszmate/.cache/a169/target-base/dist/roll-engine:/home/meszmate/.cache/a169/target-base/dist/roll-engine:ro",
+                "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/data/index-limiter-baseline-profile:/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/data/index-limiter-baseline-profile",
+                "/usr/share/zoneinfo:/usr/share/zoneinfo:ro"
+            ],
+            "ContainerIDFile": "",
+            "LogConfig": {
+                "Type": "json-file",
+                "Config": {}
+            },
+            "NetworkMode": "host",
+            "PortBindings": {},
+            "RestartPolicy": {
+                "Name": "no",
+                "MaximumRetryCount": 0
+            },
+            "AutoRemove": false,
+            "VolumeDriver": "",
+            "VolumesFrom": null,
+            "ConsoleSize": [
+                0,
+                0
+            ],
+            "CapAdd": null,
+            "CapDrop": null,
+            "CgroupnsMode": "private",
+            "Dns": null,
+            "DnsOptions": [],
+            "DnsSearch": [],
+            "ExtraHosts": null,
+            "GroupAdd": null,
+            "IpcMode": "private",
+            "Cgroup": "",
+            "Links": null,
+            "OomScoreAdj": 0,
+            "PidMode": "",
+            "Privileged": false,
+            "PublishAllPorts": false,
+            "ReadonlyRootfs": false,
+            "SecurityOpt": null,
+            "UTSMode": "",
+            "UsernsMode": "",
+            "ShmSize": 1073741824,
+            "Runtime": "runc",
+            "Isolation": "",
+            "CpuShares": 2,
+            "Memory": 4294967296,
+            "NanoCpus": 0,
+            "CgroupParent": "",
+            "BlkioWeight": 0,
+            "BlkioWeightDevice": [],
+            "BlkioDeviceReadBps": [],
+            "BlkioDeviceWriteBps": [],
+            "BlkioDeviceReadIOps": [],
+            "BlkioDeviceWriteIOps": [],
+            "CpuPeriod": 0,
+            "CpuQuota": 0,
+            "CpuRealtimePeriod": 0,
+            "CpuRealtimeRuntime": 0,
+            "CpusetCpus": "14-17",
+            "CpusetMems": "",
+            "Devices": [],
+            "DeviceCgroupRules": null,
+            "DeviceRequests": null,
+            "MemoryReservation": 0,
+            "MemorySwap": 4294967296,
+            "MemorySwappiness": null,
+            "OomKillDisable": null,
+            "PidsLimit": null,
+            "Ulimits": null,
+            "CpuCount": 0,
+            "CpuPercent": 0,
+            "IOMaximumIOps": 0,
+            "IOMaximumBandwidth": 0,
+            "MaskedPaths": [
+                "/proc/acpi",
+                "/proc/asound",
+                "/proc/interrupts",
+                "/proc/kcore",
+                "/proc/keys",
+                "/proc/latency_stats",
+                "/proc/sched_debug",
+                "/proc/scsi",
+                "/proc/timer_list",
+                "/proc/timer_stats",
+                "/sys/devices/virtual/powercap",
+                "/sys/firmware",
+                "/sys/devices/system/cpu/cpu0/thermal_throttle",
+                "/sys/devices/system/cpu/cpu1/thermal_throttle",
+                "/sys/devices/system/cpu/cpu2/thermal_throttle",
+                "/sys/devices/system/cpu/cpu3/thermal_throttle",
+                "/sys/devices/system/cpu/cpu4/thermal_throttle",
+                "/sys/devices/system/cpu/cpu5/thermal_throttle",
+                "/sys/devices/system/cpu/cpu6/thermal_throttle",
+                "/sys/devices/system/cpu/cpu7/thermal_throttle",
+                "/sys/devices/system/cpu/cpu8/thermal_throttle",
+                "/sys/devices/system/cpu/cpu9/thermal_throttle",
+                "/sys/devices/system/cpu/cpu10/thermal_throttle",
+                "/sys/devices/system/cpu/cpu11/thermal_throttle",
+                "/sys/devices/system/cpu/cpu12/thermal_throttle",
+                "/sys/devices/system/cpu/cpu13/thermal_throttle",
+                "/sys/devices/system/cpu/cpu14/thermal_throttle",
+                "/sys/devices/system/cpu/cpu15/thermal_throttle",
+                "/sys/devices/system/cpu/cpu16/thermal_throttle",
+                "/sys/devices/system/cpu/cpu17/thermal_throttle",
+                "/sys/devices/system/cpu/cpu18/thermal_throttle",
+                "/sys/devices/system/cpu/cpu19/thermal_throttle",
+                "/sys/devices/system/cpu/cpu20/thermal_throttle",
+                "/sys/devices/system/cpu/cpu21/thermal_throttle",
+                "/sys/devices/system/cpu/cpu22/thermal_throttle",
+                "/sys/devices/system/cpu/cpu23/thermal_throttle",
+                "/sys/devices/system/cpu/cpu24/thermal_throttle",
+                "/sys/devices/system/cpu/cpu25/thermal_throttle",
+                "/sys/devices/system/cpu/cpu26/thermal_throttle",
+                "/sys/devices/system/cpu/cpu27/thermal_throttle",
+                "/sys/devices/system/cpu/cpu28/thermal_throttle",
+                "/sys/devices/system/cpu/cpu29/thermal_throttle",
+                "/sys/devices/system/cpu/cpu30/thermal_throttle",
+                "/sys/devices/system/cpu/cpu31/thermal_throttle",
+                "/sys/devices/system/cpu/cpu32/thermal_throttle",
+                "/sys/devices/system/cpu/cpu33/thermal_throttle",
+                "/sys/devices/system/cpu/cpu34/thermal_throttle",
+                "/sys/devices/system/cpu/cpu35/thermal_throttle"
+            ],
+            "ReadonlyPaths": [
+                "/proc/bus",
+                "/proc/fs",
+                "/proc/irq",
+                "/proc/sys",
+                "/proc/sysrq-trigger"
+            ]
+        },
+        "Storage": {
+            "RootFS": {
+                "Snapshot": {
+                    "Name": "overlayfs"
+                }
+            }
+        },
+        "Mounts": [
+            {
+                "Type": "bind",
+                "Source": "/usr/share/zoneinfo",
+                "Destination": "/usr/share/zoneinfo",
+                "Mode": "ro",
+                "RW": false,
+                "Propagation": "rprivate"
+            },
+            {
+                "Type": "bind",
+                "Source": "/home/meszmate/.cache/a169/target-base/dist/roll-engine",
+                "Destination": "/home/meszmate/.cache/a169/target-base/dist/roll-engine",
+                "Mode": "ro",
+                "RW": false,
+                "Propagation": "rprivate"
+            },
+            {
+                "Type": "bind",
+                "Source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/data/index-limiter-baseline-profile",
+                "Destination": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/data/index-limiter-baseline-profile",
+                "Mode": "",
+                "RW": true,
+                "Propagation": "rprivate"
+            }
+        ],
+        "Config": {
+            "Hostname": "ai-server",
+            "Domainname": "",
+            "User": "1000:1000",
+            "AttachStdin": false,
+            "AttachStdout": true,
+            "AttachStderr": true,
+            "Tty": false,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "Env": [
+                "TMPDIR=/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/data/index-limiter-baseline-profile",
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            ],
+            "Cmd": [
+                "/home/meszmate/.cache/a169/target-base/dist/roll-engine",
+                "--data",
+                "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/data/index-limiter-baseline-profile",
+                "--listen",
+                "127.0.0.1:53390",
+                "--password",
+                "pw",
+                "--cache-mb",
+                "2048",
+                "-c",
+                "max_connections=300"
+            ],
+            "Image": "debian@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad",
+            "Volumes": null,
+            "WorkingDir": "",
+            "Entrypoint": [],
+            "Labels": {
+                "agent.lane": "storage_perf169",
+                "agent.worktree": "agent-a76932e8127f6d35b"
+            }
+        },
+        "NetworkSettings": {
+            "SandboxID": "ac0aa33c0657215976c68ff04175fb14bb3500d02e5655dfe9236fe0c23cf2f3",
+            "SandboxKey": "/var/run/docker/netns/default",
+            "Ports": {},
+            "Networks": {
+                "host": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": null,
+                    "DriverOpts": null,
+                    "GwPriority": 0,
+                    "NetworkID": "c90e545142e328aa3940114079eee55659af04b59a6e5304a5bdebd0d5f93dae",
+                    "EndpointID": "fe8563743cd83e7b0b130bf92b0bf6c4180367a81ac0fb4cec0fc155c2663dd8",
+                    "Gateway": "",
+                    "IPAddress": "",
+                    "MacAddress": "",
+                    "IPPrefixLen": 0,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "DNSNames": null
+                }
+            }
+        },
+        "ImageManifestDescriptor": {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": "sha256:4876fdea29cac1a33a3195f1eb1952feb1fca7dd6dd00be3e2f1879cf20d34d2",
+            "size": 1021,
+            "annotations": {
+                "com.docker.official-images.bashbrew.arch": "amd64",
+                "org.opencontainers.image.base.name": "scratch",
+                "org.opencontainers.image.created": "2026-10-20T00:00:00Z",
+                "org.opencontainers.image.revision": "cee78df586385250331cacba8fd1140133c054e5",
+                "org.opencontainers.image.source": "https://github.com/debuerreotype/docker-debian-artifacts.git",
+                "org.opencontainers.image.url": "https://hub.docker.com/_/debian",
+                "org.opencontainers.image.version": "trixie-slim"
+            },
+            "platform": {
+                "architecture": "amd64",
+                "os": "linux"
+            }
+        }
+    }
+]

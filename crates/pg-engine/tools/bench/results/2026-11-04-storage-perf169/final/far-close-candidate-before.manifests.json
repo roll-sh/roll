@@ -1,0 +1,89 @@
+{
+  "base/16384/MANIFEST": {
+    "next_id": 35,
+    "flushed_ts": 2941,
+    "last_ts": 2941,
+    "l0": [
+      {
+        "id": 33,
+        "size": 2944966,
+        "entries": 9925,
+        "first_key": "0000401100000000208000000000000001fffffffffffff482",
+        "last_key": "00004011000000002080000000000026c5fffffffffffff482",
+        "min_ts": 2941,
+        "max_ts": 2941,
+        "commit_ts": 2941
+      },
+      {
+        "id": 34,
+        "size": 3150,
+        "entries": 978,
+        "first_key": "000000000000000200004011fffffffffffff483",
+        "last_key": "000000000000002200004011fffffffffffff6cd",
+        "min_ts": 1963,
+        "max_ts": 2940
+      }
+    ],
+    "l1": [
+      {
+        "id": 25,
+        "size": 67148632,
+        "entries": 2000077,
+        "first_key": "0000000000000001fffffffffffffffb",
+        "last_key": "00004009000000002080000000000f4240fffffffffffffc28",
+        "min_ts": 1,
+        "max_ts": 1962
+      },
+      {
+        "id": 28,
+        "size": 7600861,
+        "entries": 220030,
+        "first_key": "00004011000000002080000000000026c6fffffffffffff482",
+        "last_key": "0000401100000000208000000000038243fffffffffffff482",
+        "min_ts": 2941,
+        "max_ts": 2941,
+        "commit_ts": 2941
+      },
+      {
+        "id": 29,
+        "size": 7553141,
+        "entries": 220524,
+        "first_key": "0000401100000000208000000000038244fffffffffffff482",
+        "last_key": "000040110000000020800000000006dfaffffffffffffff482",
+        "min_ts": 2941,
+        "max_ts": 2941,
+        "commit_ts": 2941
+      },
+      {
+        "id": 30,
+        "size": 7349304,
+        "entries": 222215,
+        "first_key": "000040110000000020800000000006dfb0fffffffffffff482",
+        "last_key": "00004011000000002080000000000a43b6fffffffffffff482",
+        "min_ts": 2941,
+        "max_ts": 2941,
+        "commit_ts": 2941
+      },
+      {
+        "id": 31,
+        "size": 7351714,
+        "entries": 222215,
+        "first_key": "00004011000000002080000000000a43b7fffffffffffff482",
+        "last_key": "00004011000000002080000000000da7bdfffffffffffff482",
+        "min_ts": 2941,
+        "max_ts": 2941,
+        "commit_ts": 2941
+      },
+      {
+        "id": 32,
+        "size": 3476089,
+        "entries": 105091,
+        "first_key": "00004011000000002080000000000da7befffffffffffff482",
+        "last_key": "00004011000000002080000000000f4240fffffffffffff482",
+        "min_ts": 2941,
+        "max_ts": 2941,
+        "commit_ts": 2941
+      }
+    ]
+  }
+}

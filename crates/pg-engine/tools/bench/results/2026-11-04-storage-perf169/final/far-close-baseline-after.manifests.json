@@ -1,0 +1,89 @@
+{
+  "base/16384/MANIFEST": {
+    "next_id": 39,
+    "flushed_ts": 2945,
+    "last_ts": 2945,
+    "l0": [
+      {
+        "id": 38,
+        "size": 165,
+        "entries": 4,
+        "first_key": "000000000000002200004001fffffffffffff481",
+        "last_key": "0000000000000024fffffffffffff47e",
+        "min_ts": 2942,
+        "max_ts": 2945
+      }
+    ],
+    "l1": [
+      {
+        "id": 35,
+        "size": 70902766,
+        "entries": 2108919,
+        "first_key": "0000000000000001fffffffffffffffb",
+        "last_key": "000040110000000020800000000001a928fffffffffffff482",
+        "min_ts": 1,
+        "max_ts": 2941
+      },
+      {
+        "id": 36,
+        "size": 29822193,
+        "entries": 891160,
+        "first_key": "000040110000000020800000000001a929fffffffffffff482",
+        "last_key": "00004011000000002080000000000f4240fffffffffffff482",
+        "min_ts": 2941,
+        "max_ts": 2941
+      }
+    ]
+  },
+  "base/5/MANIFEST": {
+    "next_id": 4,
+    "flushed_ts": 4,
+    "last_ts": 4,
+    "l0": [
+      {
+        "id": 3,
+        "size": 1857,
+        "entries": 31,
+        "first_key": "0000000000000001fffffffffffffffd",
+        "last_key": "0000000000000025fffffffffffffffc",
+        "min_ts": 1,
+        "max_ts": 4
+      }
+    ],
+    "l1": []
+  },
+  "base/4/MANIFEST": {
+    "next_id": 4,
+    "flushed_ts": 3,
+    "last_ts": 3,
+    "l0": [
+      {
+        "id": 3,
+        "size": 1849,
+        "entries": 30,
+        "first_key": "0000000000000001fffffffffffffffd",
+        "last_key": "0000000000000024fffffffffffffffc",
+        "min_ts": 1,
+        "max_ts": 3
+      }
+    ],
+    "l1": []
+  },
+  "base/1/MANIFEST": {
+    "next_id": 4,
+    "flushed_ts": 3,
+    "last_ts": 3,
+    "l0": [
+      {
+        "id": 3,
+        "size": 1849,
+        "entries": 30,
+        "first_key": "0000000000000001fffffffffffffffd",
+        "last_key": "0000000000000024fffffffffffffffc",
+        "min_ts": 1,
+        "max_ts": 3
+      }
+    ],
+    "l1": []
+  }
+}

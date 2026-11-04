@@ -1,0 +1,13 @@
+pgbench (18.6)
+transaction type: /input/idle.sql
+scaling factor: 1
+query mode: simple
+number of clients: 100
+number of threads: 2
+maximum number of tries: 1
+duration: 60 s
+number of transactions actually processed: 100
+number of failed transactions: 0 (0.000%)
+latency average = 60006.424 ms
+initial connection time = 908.533 ms
+tps = 1.666488 (without initial connection time)

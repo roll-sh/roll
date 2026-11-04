@@ -1,0 +1,26 @@
+{
+  "base/16384/0000000000000023.sst": {
+    "bytes": 70902766,
+    "sha256": "a4513eb9c620390dc490f2567083ead0dc8075d5800b58bbdcb16e5c5fccc589"
+  },
+  "base/16384/0000000000000024.sst": {
+    "bytes": 29822193,
+    "sha256": "3149358829508250f3b35feaeaf46be0b1a2b11127dc6a2628271ed274ccd2b2"
+  },
+  "base/16384/0000000000000026.sst": {
+    "bytes": 165,
+    "sha256": "7aecb0491cb7f4ffe27c93ef1aacf852f270281eca2c7264b8e9ca3c23d1cf40"
+  },
+  "base/5/0000000000000003.sst": {
+    "bytes": 1857,
+    "sha256": "ee53091a9778a26ec21205fddc37514591530f45f2bcad4fcdd4015c0dc08501"
+  },
+  "base/4/0000000000000003.sst": {
+    "bytes": 1849,
+    "sha256": "6a9c0bec157ea242128f1a0690513e71dd3c7de6e80701886414e6786c253c5c"
+  },
+  "base/1/0000000000000003.sst": {
+    "bytes": 1849,
+    "sha256": "54b5bada0acb88d3eff2af8e3ce23c7da9e7819100c45a602a2c6457e2fbffaa"
+  }
+}

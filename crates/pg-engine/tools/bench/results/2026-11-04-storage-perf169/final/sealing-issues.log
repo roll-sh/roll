@@ -1,0 +1,4 @@
+2026-11-04T14:30Z first pgbench sealing invocation failed before Python ran:
+nice -n19 taskset -c20-21 python3 seal-v4.py pgbench
+taskset: invalid option -- '2' (exit1).
+Corrected to taskset -c 20-21; no workload or evidence mutation occurred on failed invocation.

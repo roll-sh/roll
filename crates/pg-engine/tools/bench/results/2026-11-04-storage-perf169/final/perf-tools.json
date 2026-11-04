@@ -1,0 +1,34 @@
+{
+  "tools/libopencsd1_1.5.5-1_amd64.deb": {
+    "bytes": 197224,
+    "sha256": "0e6e124ab5834da932d93082b326dbbaf034249e522bddb214ca2bc85808c398"
+  },
+  "tools/libtraceevent1_1%3a1.8.4-2_amd64.deb": {
+    "bytes": 57308,
+    "sha256": "94e6599aefb87b1ef4b514a748e4b1af66a198523352aca1fb6ff19f7506d0d4"
+  },
+  "tools/linux-perf_6.12.113-1_amd64.deb": {
+    "bytes": 5027040,
+    "sha256": "8578cb42625cf6de6943af768b88cbbcff2830d553180979357fbfbe0793363a"
+  },
+  "tools/libbabeltrace1_1.5.11-4+b2_amd64.deb": {
+    "bytes": 175940,
+    "sha256": "ae7119a21627f296fa28a46ece67b01b1cbc87e32e971f8fd7629d0f42d1d4b1"
+  },
+  "tools/libdebuginfod1t64_0.192-4_amd64.deb": {
+    "bytes": 32416,
+    "sha256": "399d156a8a631889c71b1fdeb853d8effc40f812870a0b7b0eb09e04eb0dfa5e"
+  },
+  "tools/libpython3.13_3.13.5-2+deb13u5_amd64.deb": {
+    "bytes": 2159760,
+    "sha256": "aa4cdb7e15f5f445ab268160d428518a4daf2a086ee3e6ea30f6082785236dea"
+  },
+  "tools/libdw1t64_0.192-4_amd64.deb": {
+    "bytes": 254872,
+    "sha256": "6b41d3895b40eff429dd8013f0c13b6e26371a26491f414dbf66ba86c4c2c3f1"
+  },
+  "tools/usr/bin/perf": {
+    "bytes": 10039712,
+    "sha256": "40bba1aa615cb1903d137627c55cbf7b858c135e798b3cb458ff62c68dbe93ad"
+  }
+}

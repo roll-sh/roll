@@ -1,0 +1,14 @@
+Traceback (most recent call last):
+  File "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/launch-v4.py", line 31, in <module>
+    m.main()
+    ~~~~~~^^
+  File "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/runner-v3.py", line 297, in main
+    for side in (['baseline','candidate'] if k%2==0 else ['candidate','baseline']):trial(side,work,k)
+                                                                                   ~~~~~^^^^^^^^^^^^^
+  File "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/runner-v3.py", line 175, in trial
+    start(side,tag)
+    ~~~~~^^^^^^^^^^
+  File "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/runner-v3.py", line 132, in start
+    with socket.socket() as z:z.bind(('127.0.0.1',PORT))
+                              ~~~~~~^^^^^^^^^^^^^^^^^^^^
+OSError: [Errno 98] Address already in use

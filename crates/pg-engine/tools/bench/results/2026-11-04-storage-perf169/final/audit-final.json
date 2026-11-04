@@ -1,0 +1,303 @@
+{
+  "passed": true,
+  "timed_runs": 30,
+  "profile_runs": 6,
+  "validation_checks": 76,
+  "validation_failures": 0,
+  "workload_command_failures": 0,
+  "timed_retries": 0,
+  "protocol_failed_attempts": 1,
+  "negative_control_failures_expected": 3,
+  "owned_containers_created_and_absent": 45,
+  "retained_datasets": 40,
+  "source_binary_stability_checks": 204,
+  "prior_sealed_bundles_verified": 9,
+  "cleanup_absence": [
+    {
+      "id": "a10b103cf34ee7f4e5e812c40cd31220f510d36638e0ad202f4ba1ad6541224c",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: a10b103cf34ee7f4e5e812c40cd31220f510d36638e0ad202f4ba1ad6541224c\n"
+    },
+    {
+      "id": "038a5dc42b398e1058f8a2d9cbbf8fae26ff41b0bfc4ab613c460a72fbb3ab8b",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 038a5dc42b398e1058f8a2d9cbbf8fae26ff41b0bfc4ab613c460a72fbb3ab8b\n"
+    },
+    {
+      "id": "8172c7602eb7c87518aa01c198df1d92ef0ccc161994bb69386aa38e54706cbd",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 8172c7602eb7c87518aa01c198df1d92ef0ccc161994bb69386aa38e54706cbd\n"
+    },
+    {
+      "id": "d60082ace0351125d7e8955bdb1677a6d86d674748f30d8d9487355917418adc",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: d60082ace0351125d7e8955bdb1677a6d86d674748f30d8d9487355917418adc\n"
+    },
+    {
+      "id": "65574b4be26a93115882bf5790399ce20b57737389f27af1a032bdc424f9f762",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 65574b4be26a93115882bf5790399ce20b57737389f27af1a032bdc424f9f762\n"
+    },
+    {
+      "id": "d972fdddebbe00a2aa476e449e1d33c5acbf5bf14355b21c3b19ac8c1076a09a",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: d972fdddebbe00a2aa476e449e1d33c5acbf5bf14355b21c3b19ac8c1076a09a\n"
+    },
+    {
+      "id": "53ad4ce321609b947d7b3183b8b15571ce6a707737066a83896094c2e8311e80",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 53ad4ce321609b947d7b3183b8b15571ce6a707737066a83896094c2e8311e80\n"
+    },
+    {
+      "id": "14347432b45c8062fcc28c1263c1ddc93ffb0a45160aa206615b880618ad00ab",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 14347432b45c8062fcc28c1263c1ddc93ffb0a45160aa206615b880618ad00ab\n"
+    },
+    {
+      "id": "d66da5e97b3aafb241298094eb6314a823c37623344ebfe0f165864eb7f091c7",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: d66da5e97b3aafb241298094eb6314a823c37623344ebfe0f165864eb7f091c7\n"
+    },
+    {
+      "id": "d38f92e68e889f4384a62e3b0d70fdafdb0f8206a5b4bb10b5a798d39db357d3",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: d38f92e68e889f4384a62e3b0d70fdafdb0f8206a5b4bb10b5a798d39db357d3\n"
+    },
+    {
+      "id": "71ce6e840a5fc0bce61f34c4d357b9085c8c1d378826308f2167c9953d6d3ce5",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 71ce6e840a5fc0bce61f34c4d357b9085c8c1d378826308f2167c9953d6d3ce5\n"
+    },
+    {
+      "id": "700efd8e2fadcddafac52883af126a0a336e362521578dea4bf15b6a0bfe19a5",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 700efd8e2fadcddafac52883af126a0a336e362521578dea4bf15b6a0bfe19a5\n"
+    },
+    {
+      "id": "8d66a0553c6b9ec1ff73811d4306e72819bffc4ef7c72311a9ad6b20bd12ac7b",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 8d66a0553c6b9ec1ff73811d4306e72819bffc4ef7c72311a9ad6b20bd12ac7b\n"
+    },
+    {
+      "id": "ed8c0ba00c00523ff92f303528535c0971e7b6b1bc3c19adc520c0c84f0e256e",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: ed8c0ba00c00523ff92f303528535c0971e7b6b1bc3c19adc520c0c84f0e256e\n"
+    },
+    {
+      "id": "2c63b394139c2cc58a9b8b07cc931dbd35e42e6327a69334e0a06a3d3022b056",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 2c63b394139c2cc58a9b8b07cc931dbd35e42e6327a69334e0a06a3d3022b056\n"
+    },
+    {
+      "id": "9c459de5328b68a9ef48ef9fad6c228b68a932da7844b492e150033bb765f18f",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 9c459de5328b68a9ef48ef9fad6c228b68a932da7844b492e150033bb765f18f\n"
+    },
+    {
+      "id": "8c20f16750e0635daad27e8ab5f50bd59b10596caf1fc820fafd995432848a15",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 8c20f16750e0635daad27e8ab5f50bd59b10596caf1fc820fafd995432848a15\n"
+    },
+    {
+      "id": "0307e96b17b82ff182b48b423994792bbaddbd3288cd569c1dccd847cc55030f",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 0307e96b17b82ff182b48b423994792bbaddbd3288cd569c1dccd847cc55030f\n"
+    },
+    {
+      "id": "0b236bc44ca11499c897d5317c1356a7f087fdde8f68b5d50f78cb347ccbe773",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 0b236bc44ca11499c897d5317c1356a7f087fdde8f68b5d50f78cb347ccbe773\n"
+    },
+    {
+      "id": "645367d31c84a02832bc409c3a03bf2c1095f9086088fa0a9d82b0741e3565c3",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 645367d31c84a02832bc409c3a03bf2c1095f9086088fa0a9d82b0741e3565c3\n"
+    },
+    {
+      "id": "55c6be46465d59eebcc29f73cefc2b05eb7a7253d9281b0c0cbabe4613d8fe58",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 55c6be46465d59eebcc29f73cefc2b05eb7a7253d9281b0c0cbabe4613d8fe58\n"
+    },
+    {
+      "id": "e1578db5b4979de730230a62834c71ddb04b37ef22b9e2a9f08bff25c3a61612",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: e1578db5b4979de730230a62834c71ddb04b37ef22b9e2a9f08bff25c3a61612\n"
+    },
+    {
+      "id": "e1b048cc0d5b79a5be7d4ebb2aebba87057da8c1b1b68d687db66d25833d9017",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: e1b048cc0d5b79a5be7d4ebb2aebba87057da8c1b1b68d687db66d25833d9017\n"
+    },
+    {
+      "id": "f97716433ca3e2aff90eee1ed7c259333218c952a7945681aec699117565697f",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: f97716433ca3e2aff90eee1ed7c259333218c952a7945681aec699117565697f\n"
+    },
+    {
+      "id": "4acd5b01a043439ad194b7b18dae8dec6bcd824b12516f2558774803f4ebd7eb",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 4acd5b01a043439ad194b7b18dae8dec6bcd824b12516f2558774803f4ebd7eb\n"
+    },
+    {
+      "id": "4335f8a03c50a998f230fbac772e0a8ab141f1e5031738f2abee72e73f69ac37",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 4335f8a03c50a998f230fbac772e0a8ab141f1e5031738f2abee72e73f69ac37\n"
+    },
+    {
+      "id": "d17857bfde76842c7e41682e82758d9d31d7458b5d0d53545fbe47555e6c1d0c",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: d17857bfde76842c7e41682e82758d9d31d7458b5d0d53545fbe47555e6c1d0c\n"
+    },
+    {
+      "id": "ddbdcb91d63335ebf73f9348dfbc9431373c2c93ac244e471ca7c94c2fd5121d",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: ddbdcb91d63335ebf73f9348dfbc9431373c2c93ac244e471ca7c94c2fd5121d\n"
+    },
+    {
+      "id": "84adad2841b1b037c329f21f9c2654ef1203255ef6170e96a198a0f0837f2124",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 84adad2841b1b037c329f21f9c2654ef1203255ef6170e96a198a0f0837f2124\n"
+    },
+    {
+      "id": "6b79221f8e963f9d72c6c8d08158eb843d3523efdf3936219fde8fe195b411e5",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 6b79221f8e963f9d72c6c8d08158eb843d3523efdf3936219fde8fe195b411e5\n"
+    },
+    {
+      "id": "94c063f80c512dd2a6d7f0394a268fb87ffe31cf4806ab5ca9ce4b71cbe8e467",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 94c063f80c512dd2a6d7f0394a268fb87ffe31cf4806ab5ca9ce4b71cbe8e467\n"
+    },
+    {
+      "id": "108a2a696f21ee6ae8f48f8ec38619352598651f98e5e6bb9762ba1f13e6f7fa",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 108a2a696f21ee6ae8f48f8ec38619352598651f98e5e6bb9762ba1f13e6f7fa\n"
+    },
+    {
+      "id": "00d7e2539d4d0b28a02b60f34837520d086f334e04e806f61071ff5a1f5b55b0",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 00d7e2539d4d0b28a02b60f34837520d086f334e04e806f61071ff5a1f5b55b0\n"
+    },
+    {
+      "id": "23ca11fddbe07f717394c60e4387d17f7deca69bc72f5fee8fce5e050cf4a89a",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 23ca11fddbe07f717394c60e4387d17f7deca69bc72f5fee8fce5e050cf4a89a\n"
+    },
+    {
+      "id": "2e2499e1019f8e7a77ef2a92377227dfecad34b04e517923a469edcfc5eaa98a",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 2e2499e1019f8e7a77ef2a92377227dfecad34b04e517923a469edcfc5eaa98a\n"
+    },
+    {
+      "id": "c98e6ff8a55e37b0bd4e68ff8571f1d02f68ecd590cf98ad17c274302cfaa10c",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: c98e6ff8a55e37b0bd4e68ff8571f1d02f68ecd590cf98ad17c274302cfaa10c\n"
+    },
+    {
+      "id": "5c4b93301804c8defad510c0a5e09465ed3a8fae03c0e73097dcac4979c3eda0",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 5c4b93301804c8defad510c0a5e09465ed3a8fae03c0e73097dcac4979c3eda0\n"
+    },
+    {
+      "id": "1b0fd1283a2d6e4b2954b169c6a5fe666d1f0eaf65fb1445680831d555c0ceab",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 1b0fd1283a2d6e4b2954b169c6a5fe666d1f0eaf65fb1445680831d555c0ceab\n"
+    },
+    {
+      "id": "4bf717762d06353a0d5a0d3dd46bea98767e087f7df2b36b206374dcfbf3045d",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 4bf717762d06353a0d5a0d3dd46bea98767e087f7df2b36b206374dcfbf3045d\n"
+    },
+    {
+      "id": "91342e5ecc27ca34f6b758b97cd69b61da0d8db96b01ee796392bd1df8d9c036",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 91342e5ecc27ca34f6b758b97cd69b61da0d8db96b01ee796392bd1df8d9c036\n"
+    },
+    {
+      "id": "8bdf468e0b1657a5745ded53230f284a2369432e1c2988eb06f7c00603df67c7",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 8bdf468e0b1657a5745ded53230f284a2369432e1c2988eb06f7c00603df67c7\n"
+    },
+    {
+      "id": "f30353cbb65b739c5437b25b4d709cbc9044f3cbb74d4bc2093243d60a9335e9",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: f30353cbb65b739c5437b25b4d709cbc9044f3cbb74d4bc2093243d60a9335e9\n"
+    },
+    {
+      "id": "9ca1a908913e544b7cb0ef6b10c3637fa1aa271427ca9bad70db7aa0c20d5684",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: 9ca1a908913e544b7cb0ef6b10c3637fa1aa271427ca9bad70db7aa0c20d5684\n"
+    },
+    {
+      "id": "bbd1d67566ea5e240ef2818e1ee98f3e423e25778118e570445a37f6edd83f7f",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: bbd1d67566ea5e240ef2818e1ee98f3e423e25778118e570445a37f6edd83f7f\n"
+    },
+    {
+      "id": "eb507234318040be1b4846b0ac33c193e4133f2963a2cdc9632b7fcb66befc82",
+      "exit": 1,
+      "stdout": "[]\n",
+      "stderr": "Error response from daemon: No such container: eb507234318040be1b4846b0ac33c193e4133f2963a2cdc9632b7fcb66befc82\n"
+    }
+  ],
+  "input_sha256": "17122cc009eb57b00500fe1e74cda9cfbe808ed874dbb8676e5ca60c7311049c",
+  "first_attempt": {
+    "exit": 1,
+    "remaining_owned_ids": [],
+    "at": 1793801644.9425983,
+    "runner_sha256": "03b3e864fd380cfb2541869f11516d4a2e4bfc81ae87551455a4ad18b4a7bede",
+    "launcher_sha256": "4f37be0a6e6057e50e87f85c207cc861e981bb21ffda7b73bbe1846d130e53fb"
+  },
+  "final_attempt": {
+    "exit": 0,
+    "remaining_owned_ids": [],
+    "at": 1793803553.056319,
+    "runner_sha256": "384426b342d7b7ea6fa754d93f64f8c14ea5e57e5f29d73e0eaf8e84d803fb85",
+    "launcher_sha256": "15bce5c015e653bb15835d0faa3595cec2ba5aeb2b5fb40543500a703bc9b732"
+  },
+  "at": 1793803671.6254058
+}
