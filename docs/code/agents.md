@@ -256,6 +256,22 @@ in the daemon config (only there: machine settings refuse them, "Machine setting
 status (installed, version, logged in) is reported in `hello` and refreshed on `provider.refresh`;
 logging in happens in a terminal on the canvas.
 
+**Probes never hold up the daemon** (T3's provider registry, which starts from its status cache,
+`apps/server/src/provider/providerStatusCache.ts`, and refreshes each provider on its own). A probe
+can take a while: an ACP agent gets 20 s to answer `initialize`, and one that never does (a broken
+or slow CLI on `PATH`) would otherwise hold up every start. So `roll agent up` says `hello` at once,
+with each provider on offer as `ProviderInfo.checking`, showing what its last probe found (kept in
+`agent.db`, the `settings` table's `provider_probes`) or, with no last probe, not installed with its
+login unknown. Every provider is probed on its own in the background, and each probe that answers
+sends `hello` again (the frame that already carries `MachineInfo`; a reconnect's `hello` is the newest
+info, and probes still running follow on the new link). `machine.configure` probes again without
+waiting. `provider.refresh` says `checking` at once and replies once its probes have answered. A
+newer probe supersedes an older one still running. A command that reads a provider's status
+(delegation: `orchestrator_capabilities`, `delegate_task`) waits for that probe, at most 45 s, and
+then goes on with what's known. Starting a session never waits: the provider's own start says
+whether it works. The dashboard shows a provider being checked as a quiet shimmering "Checking…",
+on the machine card and in machine settings. Code: `agent-host/src/orchestrator/probes.rs`.
+
 ## Delegation (roll's orchestrator MCP)
 
 Agents delegate work to subagents that are ordinary roll threads, so they show up on the canvas

@@ -68,6 +68,8 @@ pub struct FakeProvider {
     /// What the orchestrator configured it with last (the machine's settings over the config).
     configured: Mutex<Option<ProviderConfig>>,
     changed: Arc<Notify>,
+    /// While true, `info` doesn't answer (a slow probe).
+    held: tokio::sync::watch::Sender<bool>,
 }
 
 impl FakeProvider {
@@ -87,7 +89,18 @@ impl FakeProvider {
             turns: Mutex::new(HashMap::new()),
             configured: Mutex::new(None),
             changed: Arc::new(Notify::new()),
+            held: tokio::sync::watch::Sender::new(false),
         })
+    }
+
+    /// `info` waits from now until [`FakeProvider::release_probes`], like a provider whose probe
+    /// takes a while.
+    pub fn hold_probes(&self) {
+        self.held.send_replace(true);
+    }
+
+    pub fn release_probes(&self) {
+        self.held.send_replace(false);
     }
 
     /// How it says it rolls back (`DropTurns` unless set).
@@ -152,6 +165,7 @@ impl Provider for FakeProvider {
     }
 
     async fn info(&self) -> ProviderInfo {
+        let _ = self.held.subscribe().wait_for(|held| !*held).await;
         ProviderInfo {
             id: self.id.clone(),
             name: format!("Fake {}", self.id.0),
@@ -161,6 +175,7 @@ impl Provider for FakeProvider {
             detail: None,
             models: vec![ModelInfo { id: "fake-1".into(), name: "Fake 1".into(), default: true, efforts: Vec::new(), custom: false }],
             capabilities: self.capabilities,
+            checking: false,
         }
     }
 

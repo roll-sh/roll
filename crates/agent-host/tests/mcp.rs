@@ -718,3 +718,22 @@ async fn an_orchestrator_is_told_to_plan_and_delegate_and_its_tasks_to_do_the_wo
     };
     assert!(w.state().await.thread(&ThreadId(id)).unwrap().orchestrator);
 }
+
+/// Delegating while the daemon is still probing its providers waits for the probe rather than
+/// calling the provider unavailable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delegation_waits_for_a_provider_still_being_checked() {
+    use agent_host::Daemon;
+    let codex = manual("codex");
+    codex.hold_probes();
+    let w = world(vec![codex.clone()], "").await;
+    assert!(w.host.info().await.providers[0].checking);
+    lead(&w, "codex", RuntimeMode::FullAccess).await;
+    let mcp = Mcp::of(&codex.session(0).await).await;
+    let caps = tokio::spawn(async move { mcp.ok("orchestrator_capabilities", json!({})).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!caps.is_finished(), "answered before the probe did");
+    codex.release_probes();
+    let caps = tokio::time::timeout(Duration::from_secs(10), caps).await.expect("answered once probed").unwrap();
+    assert_eq!(caps["providers"][0]["available"], true);
+}

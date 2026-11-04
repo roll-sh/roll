@@ -9,6 +9,7 @@ use agent_host::{Daemon, Outbound};
 use agent_proto::*;
 use common::*;
 use std::collections::HashSet;
+use std::time::Duration;
 
 fn manual(id: &str, steer: bool) -> std::sync::Arc<FakeProvider> {
     FakeProvider::with(id, Capabilities { steer, ..Capabilities::default() }, Script::Manual)
@@ -1130,4 +1131,47 @@ async fn machine_settings_are_checked_stored_applied_and_reported_without_creden
     // Turned back on, offered again.
     assert_eq!(run(&host, configure(MachineSettings::default())).await, Reply::Ok);
     assert_eq!(ids(&host.info().await), ["claude", "codex"]);
+}
+
+/// The daemon opens without waiting for its providers' probes: each is `checking` until its probe
+/// answers (and `hello` goes out again then), a restart starts from the last probe, and
+/// `provider.refresh` replies once its probes have answered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn provider_status_fills_in_as_probes_answer() {
+    let home = tempfile::tempdir().unwrap();
+    let codex = FakeProvider::new("codex");
+    codex.hold_probes();
+    let host = open(home.path(), vec![codex.clone()]).await;
+    let p = host.info().await.providers[0].clone();
+    assert!(p.checking && !p.installed && p.auth == AuthStatus::Unknown, "nothing known yet: {p:?}");
+    let mut events = host.subscribe();
+    codex.release_probes();
+    let probed = loop {
+        match tokio::time::timeout(Duration::from_secs(5), events.recv()).await.expect("hello again").unwrap() {
+            Outbound::Info(info) if !info.providers[0].checking => break info.providers[0].clone(),
+            _ => {}
+        }
+    };
+    assert!(probed.installed && probed.name == "Fake codex", "{probed:?}");
+
+    // Checking again: the last probe stays on show, and the reply waits for the new one.
+    codex.hold_probes();
+    let h = host.clone();
+    let refresh = tokio::spawn(async move { run(&h, Command::ProviderRefresh {}).await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!refresh.is_finished(), "replied before the probe answered");
+    let p = host.info().await.providers[0].clone();
+    assert!(p.checking && p.installed && p.name == "Fake codex", "{p:?}");
+    codex.release_probes();
+    assert_eq!(tokio::time::timeout(Duration::from_secs(5), refresh).await.unwrap().unwrap(), Reply::Ok);
+    assert!(!host.info().await.providers[0].checking);
+
+    // After a restart, the last probe until the new one answers.
+    drop(host);
+    let codex = FakeProvider::new("codex");
+    codex.hold_probes();
+    let host = open(home.path(), vec![codex.clone()]).await;
+    let p = host.info().await.providers[0].clone();
+    assert!(p.checking && p.installed && p.name == "Fake codex", "{p:?}");
+    codex.release_probes();
 }

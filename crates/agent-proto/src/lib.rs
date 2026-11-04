@@ -1321,6 +1321,11 @@ pub struct ProviderInfo {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ModelInfo>,
     pub capabilities: Capabilities,
+    /// The daemon is still probing it (it starts, and says hello, without waiting). The rest is
+    /// what the last probe found, kept from before a restart; with no last probe, it is not
+    /// installed and its login unknown until the probe answers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub checking: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

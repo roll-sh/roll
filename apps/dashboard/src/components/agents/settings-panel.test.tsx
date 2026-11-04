@@ -168,6 +168,13 @@ describe("a machine's settings", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("no provider acp:nope on this machine");
   });
 
+  it("says a provider is being checked while its daemon probes it", () => {
+    configured({}, { info: { ...machine().info!, providers: [provider({ checking: true })], settings: machineConfig() } });
+    const providers = screen.getByRole("region", { name: "Providers" });
+    expect(within(providers).getByText("Checking…").className).toContain("shimmer");
+    expect(within(providers).queryByText("2.1.310 · logged in")).not.toBeInTheDocument();
+  });
+
   it("can't change an offline machine's settings, nor an old daemon's, and says so", () => {
     configured({}, { online: false });
     expect(screen.getByText(/ada-mbp is offline: its settings change once it's back/)).toBeInTheDocument();

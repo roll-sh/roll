@@ -9,7 +9,6 @@
 //! credential ([`MachineSettings::check`]).
 
 use super::{Fail, Host, Res};
-use crate::Outbound;
 use crate::config::{Delegation, expand_tilde};
 use crate::provider::{Provider, ProviderConfig};
 use agent_proto::*;
@@ -104,7 +103,9 @@ impl Host {
         *self.settings.lock().unwrap() = settings;
         self.configure_providers();
         self.settings_changed.notify_waiters();
-        self.refresh_info().await;
+        // A provider's binary or variables may have changed: probe again, without waiting.
+        self.probe_providers();
+        self.publish_info().await;
         Ok(Reply::Ok)
     }
 
@@ -115,15 +116,9 @@ impl Host {
         }
     }
 
-    /// Gathers machine info again and sends `hello` with it.
-    pub(crate) async fn refresh_info(&self) {
-        let info = self.machine_info().await;
-        *self.info.lock().unwrap() = info.clone();
-        let _ = self.out.send(Outbound::Info(info));
-    }
-
-    /// What the daemon says about the machine: the providers on offer (turned-off ones left out,
-    /// and never probed; custom models added), and its settings with what they fall back to.
+    /// What the daemon says about the machine: the providers on offer as their probes left them
+    /// (turned-off ones left out, and never probed; custom models added), and its settings with
+    /// what they fall back to.
     pub(crate) async fn machine_info(&self) -> MachineInfo {
         let settings = self.machine_settings();
         let mut offered = Vec::with_capacity(self.providers.len());
@@ -144,7 +139,7 @@ impl Host {
             if !set.enabled {
                 continue;
             }
-            let mut info = provider.info().await;
+            let mut info = self.probes.info(provider.as_ref());
             for m in &set.models {
                 if !info.models.iter().any(|known| known.id == m.id) {
                     let name = m.name.clone().unwrap_or_else(|| m.id.clone());

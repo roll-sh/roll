@@ -472,6 +472,11 @@ export interface ProviderInfo {
   detail: string | null;
   models: ModelInfo[];
   capabilities: Capabilities;
+  /**
+   * The daemon is still probing it (it says hello without waiting). The rest is the last probe's,
+   * or not installed with its login unknown when there was none.
+   */
+  checking?: boolean;
 }
 
 export interface MachineInfo {
@@ -1213,6 +1218,7 @@ const providerInfoD = obj<ProviderInfo>({
   detail: opt(str),
   models: vec(obj<ModelInfo>({ id: str, name: str, default: withDefault(bool, () => false), efforts: vec(str), custom: optional(bool) })),
   capabilities: capabilitiesD,
+  checking: optional(bool),
 });
 const providerSettingsD = obj<ProviderSettings>({
   enabled: optional(bool),

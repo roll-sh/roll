@@ -162,4 +162,15 @@ describe("MachineNode", () => {
     expect(primaryAdd()).toHaveLength(0);
     expect(screen.getByRole("button", { name: "Add a project" })).toBeInTheDocument();
   });
+
+  it("lists the providers the daemon is still checking, calmly", () => {
+    const grok = provider({ id: "acp:grok", name: "Grok Build", installed: false, version: null, auth: "unknown", models: [], checking: true });
+    const m = machine({ info: { ...machine().info!, providers: [provider(), grok] } });
+    renderAgents(<MachineNode machine={m} />, agentsHarness({ machines: [m] }));
+    const list = screen.getByRole("list", { name: "Providers" });
+    const checking = within(list).getByTitle("Checking Grok Build…");
+    expect(within(checking).getByText("Checking…")).toBeInTheDocument();
+    expect(within(checking).getByText("Grok Build").className).toContain("shimmer");
+    expect(within(list).getByLabelText("Logged in")).toBeInTheDocument();
+  });
 });

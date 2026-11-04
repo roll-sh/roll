@@ -37,12 +37,19 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 pub struct Acp {
     name: String,
     cfg: super::LiveConfig,
+    probe_timeout: Duration,
 }
 
 impl Acp {
     /// The agent `[[acp]]` names `name` (provider id `acp:<name>`).
     pub fn new(name: String, cfg: ProviderConfig) -> Self {
-        Self { name, cfg: super::LiveConfig::new(cfg) }
+        Self { name, cfg: super::LiveConfig::new(cfg), probe_timeout: PROBE_TIMEOUT }
+    }
+
+    /// How long the probe waits for `initialize` ([`PROBE_TIMEOUT`] unless set).
+    pub fn with_probe_timeout(mut self, timeout: Duration) -> Self {
+        self.probe_timeout = timeout;
+        self
     }
 
     fn binary(&self) -> PathBuf {
@@ -63,9 +70,9 @@ impl Acp {
     /// not happen as a health-check side effect"; its Grok and Kiro probes do the same).
     async fn probe(&self) -> anyhow::Result<wire::Initialize> {
         let (rpc, _inbound, process) = self.spawn(&[], None)?;
-        let result = tokio::time::timeout(PROBE_TIMEOUT, rpc.request("initialize", session::initialize_params())).await;
+        let result = tokio::time::timeout(self.probe_timeout, rpc.request("initialize", session::initialize_params())).await;
         process.close().await;
-        let answer = result.map_err(|_| anyhow::anyhow!("no answer to initialize within {}s", PROBE_TIMEOUT.as_secs()))??;
+        let answer = result.map_err(|_| anyhow::anyhow!("no answer to initialize within {}s", self.probe_timeout.as_secs_f32()))??;
         Ok(wire::initialize(&answer))
     }
 
@@ -115,6 +122,7 @@ impl Provider for Acp {
             detail: None,
             models: Vec::new(),
             capabilities: Self::base_capabilities(true),
+            checking: false,
         };
         let binary = self.binary();
         if which(&binary).is_none() {

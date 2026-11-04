@@ -321,7 +321,8 @@ impl Host {
         let thread = self.stored_thread(caller)?;
         let limits = self.delegation();
         let depth = self.depth(&thread);
-        let info = self.info.lock().unwrap().clone();
+        self.probed(None).await;
+        let info = self.info.borrow().clone();
         let providers: Vec<Value> = info
             .providers
             .iter()
@@ -452,7 +453,8 @@ impl Host {
         }
 
         let provider = d.provider.unwrap_or_else(|| parent.provider.clone());
-        let info = self.info.lock().unwrap().providers.iter().find(|p| p.id == provider).cloned();
+        self.probed(Some(&provider)).await;
+        let info = self.info.borrow().providers.iter().find(|p| p.id == provider).cloned();
         let Some(info) = info.filter(|p| self.available(p)) else {
             return Err(TaskError::new(
                 "provider_unavailable",

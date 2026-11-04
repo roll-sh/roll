@@ -64,6 +64,22 @@
                 "subagents": true,
                 "mode_switch": false
               }
+            },
+            {
+              "id": "acp:grok",
+              "name": "Grok Build",
+              "installed": false,
+              "auth": "unknown",
+              "capabilities": {
+                "steer": false,
+                "fork": false,
+                "rollback": false,
+                "plan_mode": true,
+                "images": true,
+                "subagents": false,
+                "mode_switch": true
+              },
+              "checking": true
             }
           ],
           "settings": {
@@ -199,6 +215,22 @@
                 "subagents": true,
                 "mode_switch": false
               }
+            },
+            {
+              "id": "acp:grok",
+              "name": "Grok Build",
+              "installed": false,
+              "auth": "unknown",
+              "capabilities": {
+                "steer": false,
+                "fork": false,
+                "rollback": false,
+                "plan_mode": true,
+                "images": true,
+                "subagents": false,
+                "mode_switch": true
+              },
+              "checking": true
             }
           ],
           "settings": {
@@ -335,6 +367,22 @@
                 "subagents": true,
                 "mode_switch": false
               }
+            },
+            {
+              "id": "acp:grok",
+              "name": "Grok Build",
+              "installed": false,
+              "auth": "unknown",
+              "capabilities": {
+                "steer": false,
+                "fork": false,
+                "rollback": false,
+                "plan_mode": true,
+                "images": true,
+                "subagents": false,
+                "mode_switch": true
+              },
+              "checking": true
             }
           ],
           "settings": {
@@ -471,6 +519,22 @@
                 "subagents": true,
                 "mode_switch": false
               }
+            },
+            {
+              "id": "acp:grok",
+              "name": "Grok Build",
+              "installed": false,
+              "auth": "unknown",
+              "capabilities": {
+                "steer": false,
+                "fork": false,
+                "rollback": false,
+                "plan_mode": true,
+                "images": true,
+                "subagents": false,
+                "mode_switch": true
+              },
+              "checking": true
             }
           ],
           "settings": {

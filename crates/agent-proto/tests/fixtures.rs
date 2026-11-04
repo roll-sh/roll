@@ -579,6 +579,7 @@ fn info() -> MachineInfo {
                     custom: true,
                 }],
                 capabilities: Capabilities { steer: true, fork: true, rollback: false, plan_mode: true, images: true, subagents: true, mode_switch: true },
+                checking: false,
             },
             ProviderInfo {
                 id: ProviderId::codex(),
@@ -589,6 +590,19 @@ fn info() -> MachineInfo {
                 detail: Some("Run `codex login`".into()),
                 models: vec![],
                 capabilities: Capabilities { steer: true, fork: true, rollback: true, plan_mode: true, images: true, subagents: true, mode_switch: false },
+                checking: false,
+            },
+            // Still being probed, with no earlier probe to show.
+            ProviderInfo {
+                id: ProviderId("acp:grok".into()),
+                name: "Grok Build".into(),
+                installed: false,
+                version: None,
+                auth: AuthStatus::Unknown,
+                detail: None,
+                models: vec![],
+                capabilities: Capabilities { steer: false, fork: false, rollback: false, plan_mode: true, images: true, subagents: false, mode_switch: true },
+                checking: true,
             },
         ],
         settings: Some(Box::new(MachineConfig {

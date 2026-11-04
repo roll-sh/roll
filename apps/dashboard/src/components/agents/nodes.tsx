@@ -136,6 +136,8 @@ export function MachineNode({ machine }: { machine: Machine }) {
   // A sandbox that isn't connected isn't "offline": it's asleep, stopped, or on its way up.
   const state = machineState(machine);
   const installed = info?.providers.filter((p) => p.installed) ?? [];
+  // Shown too while the daemon is still probing them (it says hello without waiting).
+  const listed = info?.providers.filter((p) => p.installed || p.checking) ?? [];
   const missing = installed.filter((p) => p.auth === "missing");
   const ready = installed.some((p) => p.auth === "ready");
   // A sandbox can't do anything until a provider is logged in: say so up front.
@@ -206,11 +208,17 @@ export function MachineNode({ machine }: { machine: Machine }) {
             <p className="text-[11px] text-subtle">It opens a terminal: follow the link it prints, then paste the code.</p>
           </div>
         ) : (
-          installed.length > 0 && (
+          listed.length > 0 && (
             <ul className="flex flex-wrap gap-1" aria-label="Providers">
-              {installed.map((p) => (
+              {listed.map((p) => (
                 <li key={p.id}>
-                  {p.auth === "missing" ? (
+                  {p.checking ? (
+                    <span className="inline-flex items-center gap-1.5 rounded-md border border-line px-1.5 py-0.5 text-[11px] text-subtle" title={`Checking ${p.name}…`}>
+                      <span className="size-1 rounded-full bg-subtle" aria-hidden />
+                      <span className="shimmer">{p.name}</span>
+                      <span className="sr-only">Checking…</span>
+                    </span>
+                  ) : p.auth === "missing" ? (
                     <button
                       data-nodrag
                       disabled={!machine.online || busy !== null}

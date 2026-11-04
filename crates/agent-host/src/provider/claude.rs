@@ -121,6 +121,7 @@ impl Provider for Claude {
             detail: None,
             models: models::models(None),
             capabilities: capabilities(),
+            checking: false,
         };
         let mut version = self.command(&[]);
         version.arg("--version").stdin(Stdio::null());

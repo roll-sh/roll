@@ -18,6 +18,7 @@
 
 mod handoff;
 mod instructions;
+mod probes;
 mod projects;
 mod queries;
 mod runs;
@@ -51,7 +52,11 @@ pub struct Host {
     store: Store,
     providers: BTreeMap<ProviderId, Arc<dyn Provider>>,
     out: broadcast::Sender<Outbound>,
-    info: std::sync::Mutex<MachineInfo>,
+    /// What `hello` says now; commands that need a provider's probe wait on it (`probes.rs`).
+    info: tokio::sync::watch::Sender<MachineInfo>,
+    probes: probes::Probes,
+    /// One `publish_info` at a time.
+    publishing: AsyncMutex<()>,
     threads: std::sync::Mutex<HashMap<ThreadId, Arc<AsyncMutex<Rt>>>>,
     /// Commands in flight by sender and id, so a retry that races the first call waits for its
     /// receipt.
@@ -237,6 +242,7 @@ impl Host {
         store.prune_receipts(now().saturating_sub(RECEIPT_DAYS * 86_400_000))?;
         let providers: BTreeMap<_, _> = providers.into_iter().map(|p| (p.id(), p)).collect();
         let settings = Host::stored_settings(&store);
+        let probes = probes::Probes::load(&store);
         let (out, _) = broadcast::channel(8192);
         let (mcp, listener) = crate::mcp::Server::bind().await?;
         let (tasks, task_work) = tasks::Tasks::new();
@@ -246,7 +252,7 @@ impl Host {
             store,
             providers,
             out,
-            info: std::sync::Mutex::new(MachineInfo {
+            info: tokio::sync::watch::Sender::new(MachineInfo {
                 hostname: hostname(),
                 os: std::env::consts::OS.into(),
                 arch: std::env::consts::ARCH.into(),
@@ -255,6 +261,8 @@ impl Host {
                 providers: Vec::new(),
                 settings: None,
             }),
+            probes,
+            publishing: AsyncMutex::new(()),
             threads: std::sync::Mutex::new(HashMap::new()),
             inflight: std::sync::Mutex::new(HashMap::new()),
             projects: AsyncMutex::new(()),
@@ -267,8 +275,9 @@ impl Host {
             settings_changed: Arc::new(tokio::sync::Notify::new()),
         });
         host.configure_providers();
-        let info = host.machine_info().await;
-        *host.info.lock().unwrap() = info;
+        // Hello goes out with what's known; each provider's status follows as its probe answers.
+        host.probe_providers();
+        host.publish_info().await;
         host.recover()?;
         host.mcp.start(Arc::downgrade(&host), listener);
         tasks::spawn_worker(Arc::downgrade(&host), task_work);
@@ -577,7 +586,11 @@ impl Host {
             Command::TerminalClose { terminal } => self.terminal_close(&terminal).await,
             Command::TerminalScrollback { terminal } => self.terminal_scrollback(&terminal).await,
             Command::ProviderRefresh {} => {
-                self.refresh_info().await;
+                // Checking again: `hello` says so at once, and the reply comes once every probe
+                // has answered (or stopped waiting).
+                self.probe_providers();
+                self.publish_info().await;
+                self.probed(None).await;
                 Ok(Reply::Ok)
             }
             Command::MachineConfigure { settings } => self.machine_configure(*settings).await,
@@ -708,7 +721,7 @@ impl Host {
 #[async_trait]
 impl crate::Daemon for Host {
     async fn info(&self) -> MachineInfo {
-        self.info.lock().unwrap().clone()
+        self.info.borrow().clone()
     }
 
     async fn since(&self, after: u64, limit: usize) -> anyhow::Result<Vec<Stamped>> {

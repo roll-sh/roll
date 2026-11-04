@@ -97,7 +97,7 @@ fn archive(thread: &str) -> Command {
     Command::ThreadArchive { thread: agent_proto::ThreadId(thread.into()) }
 }
 
-fn start(daemon: Arc<Fake>, api: &str, bearer: &str) -> (tokio::task::JoinHandle<Result<(), LinkError>>, mpsc::UnboundedReceiver<LinkEvent>, oneshot::Sender<()>) {
+fn start(daemon: Arc<dyn Daemon>, api: &str, bearer: &str) -> (tokio::task::JoinHandle<Result<(), LinkError>>, mpsc::UnboundedReceiver<LinkEvent>, oneshot::Sender<()>) {
     let (events, rx) = mpsc::unbounded_channel();
     let (stop, stopped) = oneshot::channel::<()>();
     let cfg = LinkConfig { api: api.into(), token: bearer.into() };
@@ -504,4 +504,47 @@ async fn daemon_and_relay_end_to_end() {
     assert_eq!(relay.req("DELETE", &format!("/v1/code/agents/acme/machines/{mid}"), None).await.0, StatusCode::NO_CONTENT);
     let res = tokio::time::timeout(Duration::from_secs(5), task).await.expect("stopped").unwrap();
     assert!(matches!(res, Err(LinkError::Revoked)), "{res:?}");
+}
+
+// ── a real daemon whose provider is slow to probe ──
+
+/// `roll agent up` says hello without waiting for its providers' probes: an ACP agent that never
+/// answers `initialize` shows as still being checked, and its status follows when the probe
+/// gives up (docs/code/agents.md, "Providers").
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hello_does_not_wait_for_a_stuck_probe() {
+    use agent_host::provider::Provider;
+    use agent_host::provider::acp::Acp;
+    let home = tempfile::tempdir().unwrap();
+    // An agent that starts and never says anything.
+    let toml = "[[acp]]\nname = \"stuck\"\nbinary = \"/bin/sh\"\nargs = [\"-c\", \"exec sleep 600\"]\n";
+    std::fs::write(home.path().join("config.toml"), toml).unwrap();
+    let config = agent_host::config::Config::load_from(home.path().to_path_buf()).unwrap();
+    let agent = config.acp[0].clone();
+    let acp: Arc<dyn Provider> = Arc::new(Acp::new(agent.name, agent.config).with_probe_timeout(Duration::from_secs(2)));
+    let (url, mut links) = scripted("rlm_good").await;
+
+    let started = tokio::time::Instant::now();
+    let host = agent_host::Host::open(config, vec![acp]).await.unwrap();
+    let (_task, _events, _stop) = start(host, &url, "rlm_good");
+    let mut ws = links.recv().await.unwrap();
+    let DaemonFrame::Hello { info, .. } = next(&mut ws).await else { panic!("hello first") };
+    assert!(started.elapsed() < Duration::from_secs(1), "hello took {:?}", started.elapsed());
+    let p = &info.providers[0];
+    assert_eq!(p.id.0, "acp:stuck");
+    assert!(p.checking && !p.installed, "{p:?}");
+    send(&mut ws, &RelayFrame::Welcome { machine: agent_proto::MachineId("mch_1".into()), owner: "acme".into(), resume_from: 0 }).await;
+
+    // The probe gives up after its 2 s, and `hello` comes again with what it found.
+    let p = loop {
+        if let DaemonFrame::Hello { info, .. } = next(&mut ws).await
+            && !info.providers[0].checking
+        {
+            break info.providers[0].clone();
+        }
+    };
+    assert!(started.elapsed() >= Duration::from_secs(2), "{p:?}");
+    assert_eq!(p.auth, agent_proto::AuthStatus::Unknown);
+    let detail = p.detail.unwrap_or_default();
+    assert!(detail.contains("no answer to initialize"), "{detail}");
 }

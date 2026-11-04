@@ -252,6 +252,7 @@ impl Provider for Codex {
             detail: None,
             models: Vec::new(),
             capabilities: self.capabilities(),
+            checking: false,
         };
         match self.cli_version().await {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

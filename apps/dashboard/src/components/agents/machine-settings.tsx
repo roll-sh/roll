@@ -434,7 +434,7 @@ function ProviderCard({ ctx, base, info }: { ctx: Ctx; base: ProviderBase; info:
             <h4 className="font-medium tracking-[-0.01em]">{base.name}</h4>
             {changed && <Note>customized</Note>}
           </div>
-          <p className="truncate text-[12px] text-subtle">{providerStatus(p.enabled, info)}</p>
+          <p className="truncate text-[12px] text-subtle">{p.enabled && info?.checking ? <span className="shimmer">Checking…</span> : providerStatus(p.enabled, info)}</p>
         </div>
         {p.enabled && info?.installed && info.auth === "missing" && (
           <button type="button" disabled={!reachable(ctx.machine) || busy} onClick={login} className="flex h-7 items-center gap-1.5 rounded-md border border-line-2 px-2 text-[12px] hover:bg-fg/[0.06] disabled:opacity-50">
