@@ -1,7 +1,5 @@
-"use client";
-
 import { KeyRound, Plus, RefreshCw, ShieldCheck, Users, Wand2 } from "lucide-react";
-import Link from "next/link";
+import { Link } from "@/components/link";
 import { useState, type ReactNode } from "react";
 import {
   cleanCode,

@@ -1,5 +1,3 @@
-"use client";
-
 import { useCallback, useState, type ReactNode } from "react";
 import {
   EVICTION_POLICIES,

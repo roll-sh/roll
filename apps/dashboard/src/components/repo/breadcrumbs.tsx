@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { Link } from "@/components/link";
 import { treeHref } from "./paths";
 
 /** `repo / dir / dir / file`, every part but the last linked to its tree. */

@@ -1,7 +1,5 @@
-"use client";
-
 import { GitMerge } from "lucide-react";
-import Link from "next/link";
+import { Link } from "@/components/link";
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { formatCount } from "@/lib/redis-api";
 import { firstLine, formatMergeRate, shortId, subscribe, type ChangesetSummary, type LandedEvent } from "@/lib/code-api";

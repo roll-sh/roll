@@ -1,5 +1,3 @@
-"use client";
-
 import { KeyRound, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useState } from "react";
 import { codeApi, type CodeInfo, type OwnerTokenInfo } from "@/lib/code-api";

@@ -1,5 +1,3 @@
-"use client";
-
 import { Download, Square, Upload } from "lucide-react";
 import { useRef, useState } from "react";
 import { formatNum, type MigrateResult, qapi, type Shovel, type SkippedItem } from "@/lib/queues-api";

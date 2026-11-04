@@ -1,5 +1,3 @@
-"use client";
-
 import { ChevronRight, Folder, FolderOpen, Lock, Search } from "lucide-react";
 import { useEffect, useState } from "react";
 import { commandId, expectOk, type FsEntry, type Machine } from "@/lib/agents-api";

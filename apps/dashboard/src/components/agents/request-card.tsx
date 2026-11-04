@@ -1,5 +1,3 @@
-"use client";
-
 import { FileDiff as FileIcon, ListChecks, MessageCircleQuestion, ShieldQuestion, SquareTerminal, Wrench } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import type { Approval, ApprovalAction, Decision, FileChange, Question, Request, RequestResponse } from "@/lib/agents-api";

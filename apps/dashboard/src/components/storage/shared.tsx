@@ -1,7 +1,5 @@
-"use client";
-
 import { Globe } from "lucide-react";
-import Link from "next/link";
+import { Link } from "@/components/link";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { storageApi, type Bucket, type StorageInfo } from "@/lib/storage-api";
 import { errorMessage, getScope, StorageError, subscribe } from "@/lib/storage-session";

@@ -1,5 +1,3 @@
-"use client";
-
 import { ChevronDown, Folder, FolderPlus, Server } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { isBusy, type Machine, type Project } from "@/lib/agents-api";

@@ -1,9 +1,7 @@
-"use client";
-
 import { HorizonMark } from "@roll/brand";
 import { ChevronRight, GitBranch, Moon, Plus } from "lucide-react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "@tanstack/react-router";
+import { Link } from "@/components/link";
 import { useCallback, useEffect, useState } from "react";
 import { formatBytes } from "@/lib/roll-api";
 import {
@@ -54,7 +52,7 @@ function useRedisList() {
 }
 
 export function RedisDatabases() {
-  const router = useRouter();
+  const navigate = useNavigate();
   const { info, dbs, offline, refresh } = useRedisList();
   const { busy, error, run } = useAction(refresh);
   const [creating, setCreating] = useState(false);
@@ -93,7 +91,7 @@ export function RedisDatabases() {
             const db = await run("create", () => redisApi.create(name, settings));
             if (db) {
               setCreating(false);
-              router.push(`/dashboard/redis/${db.id}`);
+              navigate({ href: `/dashboard/redis/${db.id}` });
             }
           }}
         />

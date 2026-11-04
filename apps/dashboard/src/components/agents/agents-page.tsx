@@ -1,8 +1,6 @@
-"use client";
-
 import { DotField, RollLogo, RollMark } from "@roll/brand";
 import { Archive, ArrowLeft, MoreHorizontal, Plus, Server, Share2, X } from "lucide-react";
-import Link from "next/link";
+import { Link } from "@/components/link";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { isBusy } from "@/lib/agents-api";
 import { setActiveClient, type AgentsClient } from "@/lib/agents-client";

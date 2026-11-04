@@ -1,12 +1,9 @@
-"use client";
-
 import { ArrowLeft, Eraser, Link2, RotateCcw, Trash2, Unlink } from "lucide-react";
-import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useNavigate } from "@tanstack/react-router";
+import { Link } from "@/components/link";
 import { useEffect, useState } from "react";
 import {
   type Binding,
-  decodeParam,
   exchangeLabel,
   formatBytes,
   formatNum,
@@ -59,11 +56,8 @@ const RATES: ChartSeries<Sample>[] = [
   { key: "ack", label: "Ack", tone: "subtle", dashed: true },
 ];
 
-export function QueueDetail() {
-  const params = useParams<{ vhost: string; name: string }>();
-  const vhost = decodeParam(params.vhost);
-  const name = decodeParam(params.name);
-  const router = useRouter();
+export function QueueDetail({ vhost, name }: { vhost: string; name: string }) {
+  const navigate = useNavigate();
   const poll = usePoll(`queue:${vhost}\u0000${name}`, async () => ({ q: await qapi.queue(vhost, name), t: Date.now() / 1000 }));
   const { busy, error, setError, run } = useAction();
   const [notice, setNotice] = useState<string | null>(null);
@@ -104,7 +98,7 @@ export function QueueDetail() {
   const remove = async () => {
     if (!q || !confirm(`Delete queue ${q.name}${q.messages ? ` and its ${q.messages.toLocaleString("en-US")} messages` : ""}?`)) return;
     const out = await run("delete", () => qapi.deleteQueue(vhost, name));
-    if (out !== undefined) router.push(`/dashboard/queues/queues?vhost=${encodeURIComponent(vhost)}`);
+    if (out !== undefined) navigate({ href: `/dashboard/queues/queues?vhost=${encodeURIComponent(vhost)}` });
   };
 
   const notFound = poll.error && !q;

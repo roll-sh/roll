@@ -1,5 +1,3 @@
-"use client";
-
 import { TriangleAlert } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { formatBytes, formatUsd } from "@/lib/roll-api";

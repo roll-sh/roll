@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Sharing a thread (docs/code/agents.md, "Shares"): the Share button in a session's header makes a
  * read-only link to a frozen copy of the thread, and `/dashboard/agents/shares` lists an owner's
@@ -7,7 +5,7 @@
  */
 
 import { ExternalLink, Link2, Share2, Trash2, X } from "lucide-react";
-import Link from "next/link";
+import { Link } from "@/components/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { agentsApi, type ShareSummary, type Thread } from "@/lib/agents-api";
 import { codeApi } from "@/lib/code-api";

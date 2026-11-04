@@ -1,8 +1,6 @@
-"use client";
-
 import { CircleDot, Code2, GitCommitHorizontal, GitPullRequest, Search } from "lucide-react";
-import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { useLocation } from "@tanstack/react-router";
+import { Link } from "@/components/link";
 
 /** Code · Commits · Changes · Work, with the current section underlined. */
 export function RepoTabs({
@@ -16,7 +14,7 @@ export function RepoTabs({
   openChanges: number;
   openWork: number;
 }) {
-  const pathname = usePathname() ?? "";
+  const pathname = useLocation({ select: (l) => l.pathname });
   const base = `/${repo}`;
   const tabs = [
     { label: "Code", icon: Code2, href: base, match: (p: string) => p === base || /\/(tree|blob)\//.test(p) },

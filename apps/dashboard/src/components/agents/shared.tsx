@@ -1,5 +1,3 @@
-"use client";
-
 import { Bot, Cloud, Laptop, Server } from "lucide-react";
 import type { DiffStat, Machine, ProviderInfo, RunStatus, ThreadStatus, Usage } from "@/lib/agents-api";
 

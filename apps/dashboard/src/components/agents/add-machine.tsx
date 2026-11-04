@@ -1,7 +1,5 @@
-"use client";
-
 import { ChevronRight, Cloud, KeyRound, Laptop, X } from "lucide-react";
-import Link from "next/link";
+import { Link } from "@/components/link";
 import { useEffect, useRef, useState } from "react";
 import type { Machine } from "@/lib/agents-api";
 import { formatHourly, type SandboxSize } from "@/lib/sandboxes-api";

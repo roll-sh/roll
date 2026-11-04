@@ -1,5 +1,3 @@
-"use client";
-
 import { Check, ChevronDown, Sparkles } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { codeApi, type AiJob, type AiModeSetting, type Change, type ReviewAi } from "@/lib/code-api";

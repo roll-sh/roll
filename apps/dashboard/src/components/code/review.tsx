@@ -1,5 +1,3 @@
-"use client";
-
 import { CircleCheck, CircleDashed, CircleX, Eye, MessageSquare, Pencil, Trash2, UserPlus } from "lucide-react";
 import { forwardRef, useCallback, useEffect, useState } from "react";
 import {

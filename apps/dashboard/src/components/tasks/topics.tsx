@@ -1,5 +1,3 @@
-"use client";
-
 import { Plus, Radio, Trash2, X } from "lucide-react";
 import { useState } from "react";
 import { rel, tasks, type Topic, type TopicEndpoint } from "@/lib/tasks-api";

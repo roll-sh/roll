@@ -1,5 +1,3 @@
-"use client";
-
 import { Plus, X } from "lucide-react";
 import { useState } from "react";
 import { durationLabel, MAX_SESSION_OPTIONS } from "@/lib/storage-api";

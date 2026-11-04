@@ -1,7 +1,5 @@
-"use client";
-
 import { Eye, EyeOff, KeyRound, Plus, RefreshCw, Trash2 } from "lucide-react";
-import Link from "next/link";
+import { Link } from "@/components/link";
 import { useEffect, useState } from "react";
 import {
   agoMs,

@@ -1,5 +1,3 @@
-"use client";
-
 import { DotField, HorizonMark } from "@roll/brand";
 import { useCallback, useEffect, useState } from "react";
 import { tasks, TASKS_API, TasksApiError, type TasksHealth } from "@/lib/tasks-api";

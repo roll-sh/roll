@@ -1,9 +1,7 @@
-"use client";
-
 import { HorizonMark } from "@roll/brand";
 import { ArrowLeft, GitBranch, RotateCcw } from "lucide-react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "@tanstack/react-router";
+import { Link } from "@/components/link";
 import { useCallback, useEffect, useState } from "react";
 import { formatCount } from "@/lib/redis-api";
 import { formatBytes } from "@/lib/roll-api";
@@ -49,9 +47,8 @@ export function StorageBucketLoading() {
   );
 }
 
-export function StorageBucket({ name: rawName }: { name: string }) {
-  const name = decodeURIComponent(rawName);
-  const router = useRouter();
+export function StorageBucket({ name }: { name: string }) {
+  const navigate = useNavigate();
   const { info, buckets, offline, denied, refresh } = useStorage();
   const { busy, error, setError, run } = useAction(refresh);
   const [tab, setTabRaw] = useHashTab<Tab>(TAB_VALUES, "objects");
@@ -175,7 +172,7 @@ export function StorageBucket({ name: rawName }: { name: string }) {
             busy={busy}
             run={run}
             onChanged={refresh}
-            onDeleted={() => router.push("/dashboard/storage")}
+            onDeleted={() => navigate({ href: "/dashboard/storage" })}
           />
         )}
       </div>
@@ -321,7 +318,7 @@ function TrashTab({ bucket, onRestored }: { bucket: Bucket; onRestored: () => vo
 // --- Branches ----------------------------------------------------------------------------------
 
 function BranchesTab({ bucket, all, busy, run }: { bucket: Bucket; all: Bucket[]; busy: string | null; run: Run }) {
-  const router = useRouter();
+  const navigate = useNavigate();
   const children = all.filter((b) => b.parent?.id === bucket.id);
   const [name, setName] = useState(`${bucket.name}-preview`.slice(0, 63));
   const err = bucketNameError(name);
@@ -369,7 +366,7 @@ function BranchesTab({ bucket, all, busy, run }: { bucket: Bucket; all: Bucket[]
             e.preventDefault();
             if (err) return;
             const b = await run("branch", () => storageApi.branch(bucket.name, name));
-            if (b) router.push(href(b.name));
+            if (b) navigate({ href: href(b.name) });
           }}
         >
           <label className="block space-y-1">

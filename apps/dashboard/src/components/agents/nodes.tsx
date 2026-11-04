@@ -1,5 +1,3 @@
-"use client";
-
 import { ArrowUpRight, CircleAlert, Folder, FolderPlus, GitBranch, GitFork, LogIn, MoreHorizontal, Plus, RefreshCw, SquareTerminal, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { coming, isBusy, machineState, reachable, type Machine, type Node, type Project, type ProviderInfo, type Request, type Run, type Thread } from "@/lib/agents-api";

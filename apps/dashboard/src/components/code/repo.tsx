@@ -1,9 +1,7 @@
-"use client";
-
 import { HorizonMark } from "@roll/brand";
 import { ExternalLink, GitMerge, ShieldAlert, ShieldCheck, ShieldQuestion } from "lucide-react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "@tanstack/react-router";
+import { Link } from "@/components/link";
 import { useEffect, useState } from "react";
 import { formatCount } from "@/lib/redis-api";
 import {
@@ -42,7 +40,7 @@ const TABS = ["overview", "work", "changes", "queue", "code", "settings"] as con
 type Tab = (typeof TABS)[number];
 
 export function CodeRepo({ fullName }: { fullName: string }) {
-  const router = useRouter();
+  const navigate = useNavigate();
   const { repo, info, offline, missing, refresh } = useRepo(fullName);
   const { busy, error, setError, run } = useAction(refresh);
   const [tab, setTabRaw] = useState<Tab>("overview");
@@ -159,8 +157,8 @@ export function CodeRepo({ fullName }: { fullName: string }) {
                   tick={tick}
                   busy={busy}
                   run={run}
-                  onRenamed={(full) => router.replace(`/dashboard/code/${full}#settings`)}
-                  onDeleted={() => router.push("/dashboard/code")}
+                  onRenamed={(full) => navigate({ href: `/dashboard/code/${full}#settings`, replace: true })}
+                  onDeleted={() => navigate({ href: "/dashboard/code" })}
                 />
               )}
             </div>

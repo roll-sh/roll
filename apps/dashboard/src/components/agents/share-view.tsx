@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * A shared thread at `/agents/s/<id>`: the conversation, read-only, with a replay (and the canvas
  * of it and its subagents a click away). The page renders the
@@ -12,7 +10,7 @@
 
 import { HorizonMark, RollLogo, useReducedMotion } from "@roll/brand";
 import { ChevronLeft, ChevronRight, Folder, MessageSquare, Network, Pause, Play, RotateCcw, Server } from "lucide-react";
-import Link from "next/link";
+import { Link } from "@/components/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Share } from "@/lib/agents-api";
 import { AgentsClient, type AgentsTransport } from "@/lib/agents-client";

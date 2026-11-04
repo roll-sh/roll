@@ -1,5 +1,3 @@
-"use client";
-
 import { useState } from "react";
 import { formatBytes, formatNum, formatUsd, qapi, type Usage } from "@/lib/queues-api";
 import { usePoll } from "./hooks";

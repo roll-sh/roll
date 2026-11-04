@@ -1,5 +1,3 @@
-"use client";
-
 import { DotField, RollMark, markStates, type MarkState } from "@roll/brand";
 import { AskPanel } from "./ask";
 import { useMarkState } from "./mark-state";

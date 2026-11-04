@@ -1,5 +1,3 @@
-"use client";
-
 import "@xterm/xterm/css/xterm.css";
 import { SquareTerminal, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";

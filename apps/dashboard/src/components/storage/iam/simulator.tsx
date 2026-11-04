@@ -1,5 +1,3 @@
-"use client";
-
 import { CircleCheck, CircleMinus, CircleX, Plus, X } from "lucide-react";
 import { useState } from "react";
 import {

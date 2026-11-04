@@ -6,7 +6,7 @@
 import { ROLL_API } from "./roll-api";
 
 export const TASKS_API = `${ROLL_API}/v1/tasks`;
-const TOKEN = process.env.NEXT_PUBLIC_ROLL_TASKS_TOKEN || undefined;
+const TOKEN = import.meta.env?.VITE_ROLL_TASKS_TOKEN || undefined;
 
 // --- model (crates/tasks/src/model.rs) ---
 

@@ -1,5 +1,3 @@
-"use client";
-
 import { Maximize, Minus, Plus, Shrink } from "lucide-react";
 import {
   forwardRef,

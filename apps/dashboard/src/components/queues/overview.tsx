@@ -1,8 +1,6 @@
-"use client";
-
 import { DotField, RollMark } from "@roll/brand";
 import { ArrowRight } from "lucide-react";
-import Link from "next/link";
+import { Link } from "@/components/link";
 import {
   type Endpoints,
   formatBytes,
