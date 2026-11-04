@@ -1,0 +1,43 @@
+[
+  {
+    "command": [
+      "docker",
+      "inspect",
+      "--format",
+      "{{.Name}} user={{.Config.User}} mounts={{range .Mounts}}{{.Source}}:{{.Destination}} {{end}}",
+      "a166-psql1",
+      "a163-vcli"
+    ],
+    "exit": 0,
+    "stdout": "/a166-psql1 user=1000:1000 mounts=/var/lib/docker/volumes/da680d1d430200f52bf1b59e9ccce9a6bb4c43f5cf4836adc619f95351a60499/_data:/var/lib/postgresql /home/meszmate/.cache/a166/pgr1:/home/meszmate/.cache/a166/pgr1 \n/a163-vcli user=1000:1000 mounts=/var/lib/docker/volumes/08aa5efec5c3149aaf28cd51494375a6644a5095b216adcfdc9fded4beb03fdb/_data:/var/lib/postgresql /home/meszmate/.cache/a163/v:/home/meszmate/.cache/a163/v \n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "docker",
+      "exec",
+      "-w",
+      "/home/meszmate/.cache/a166/resume-pgdump/tap",
+      "a166-psql1",
+      "pg_dump",
+      "--version"
+    ],
+    "exit": 127,
+    "stdout": "OCI runtime exec failed: exec failed: unable to start container process: chdir to cwd (\"/home/meszmate/.cache/a166/resume-pgdump/tap\") set in config.json failed: no such file or directory\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "docker",
+      "exec",
+      "-w",
+      "/home/meszmate/.cache/a166/pgr1/resume-pgdump/tap",
+      "a166-psql1",
+      "pg_dump",
+      "--version"
+    ],
+    "exit": 0,
+    "stdout": "pg_dump (PostgreSQL) 18.6\n",
+    "stderr": ""
+  }
+]
