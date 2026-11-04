@@ -10,7 +10,7 @@ import { MachineIcon } from "./shared";
 import { Select } from "./ui";
 import { useAgents } from "./use-agents";
 
-const LAST_PROJECT = "roll:agents:last-project";
+export const LAST_PROJECT = "roll:agents:last-project";
 const ADD = "+";
 
 /** Where a new agent starts by default: the project asked for, else the last one used, else the one with the newest thread. */

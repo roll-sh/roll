@@ -798,6 +798,29 @@ The surface has three views:
   `Select`, `Menu`, `Popover`, `Combobox`, `Switch` and `Segmented`. Popups float in a
   translucent panel with a soft shadow, grow out of their trigger (scale 0.98 and a fade, 150 ms)
   and honour reduced motion; highlights are a neutral fill and only an "on" state is accent.
+- **The command palette** (T3's CommandPalette; `components/agents/command-palette.tsx`, its
+  logic in `command-palette.logic.ts`, T3's ranking in `lib/palette-search.ts`). ⌘K (Ctrl+K)
+  while the agents are showing, in the popup, at `/dashboard/agents` and in the desktop app's
+  Agents window, or the search button in their bar. It comes before the dashboard's own ⌘K ("Ask
+  roll"), which stays on every page while the agents are closed (⌘J opens them, then ⌘K); a
+  terminal keeps Ctrl+K. Before typing: actions ("Orchestrate…", new agent, new agent in a
+  project, what's waiting, stop, fork or archive the open conversation, add a project right in
+  the palette, add a machine, project and machine settings, archived conversations, fit the
+  canvas) and recent conversations. Typing searches all of that, every submenu's options ("New
+  agent in web"), conversations, projects and machines, ranked like T3 (word starts, joined
+  words, typos only when nothing matches, recent use and what was picked for a query, kept per
+  device); `>` searches actions only. A conversation opens beside the canvas; a project or
+  machine is shown on the canvas. ↑↓, Enter, Backspace to go back, Esc.
+- **Prompting from outside.** Anything typed in the palette is also a goal: "Orchestrate: …"
+  starts an orchestrator (docs above, "Delegation") that plans it and spins up agents, which
+  appear on the canvas under it as they start and leave it as they finish; "New agent: …" starts
+  one agent with it as its prompt. Both go to the last project used (on a machine that can take
+  it; "Somewhere else…" picks another), with its new-thread defaults and full access unless they
+  say otherwise, and the conversation opens beside the canvas. They lead the list when the query
+  reads like a sentence (three words or more) and nothing is named by it exactly, else they come
+  last. The same goal can be typed in the prompt bar at the bottom of the canvas ("What should
+  the agents get done?", Orchestrate or One agent; its project chip opens the palette to pick
+  another).
 
 - **Getting started.** An owner with no machines sees the globe (`RollMark`) and the two ways in
   side by side, the same as "Add machine" on the canvas: connect your computer (install,

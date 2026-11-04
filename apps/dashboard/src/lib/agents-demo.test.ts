@@ -127,4 +127,48 @@ describe("agents demo", () => {
     await until("the work on the thread", () => client.data.threads.get("thr_demo_fork")?.value.work?.number === 77);
     release();
   });
+
+  it("orchestrates a goal: plans, spins up agents under it in their own worktrees, and sums up once they're done", async () => {
+    demo = new DemoOwner(0.01, false);
+    const client = new AgentsClient("demo", demo, (fn) => queueMicrotask(fn));
+    const release = client.hold();
+    await until("the machines", () => client.data.machines.size === 2);
+    const goal = "Add dark mode to the settings page";
+    const { id } = await client.run<{ type: "created"; id: string }>(
+      "mch_demo_ada",
+      { type: "thread.create", project: "prj_demo_roll", provider: "claude", runtime_mode: "full_access", prompt: goal, orchestrator: true },
+      "created",
+    );
+    client.follow("test", [id]);
+    const children = () => [...client.data.threads.values()].map((r) => r.value).filter((t) => t.lineage?.parent === id);
+    await until("three agents", () => children().length === 3, 8000);
+    expect(client.data.threads.get(id)!.value.orchestrator).toBe(true);
+    const first = runsOf(client.data, id)[0];
+    expect(first.prompt).toBe(goal);
+    for (const c of children()) {
+      expect(c).toMatchObject({ orchestrator: false, lineage: { relation: "subagent", root: id, from_run: first.id } });
+      expect(c.worktree?.branch).toMatch(/^roll\//);
+    }
+    // Spread over the machine's providers, each a task node in the plan's run that names its thread.
+    expect(new Set(children().map((c) => c.provider))).toEqual(new Set(["claude", "codex"]));
+    const nodes = () => [...(client.data.nodes.get(id)?.values() ?? [])].map((n) => n.value);
+    await until("the task nodes", () => nodes().filter((n) => n.body.type === "subagent" && n.body.child).length === 3);
+    expect(nodes().map((n) => n.body.type)).toEqual(expect.arrayContaining(["reasoning", "tool", "plan", "message", "subagent"]));
+
+    // The tests agent asks before running them; its node waits with it, and the answer goes on.
+    const asks = () => pendingRequests(client.data).filter((q) => children().some((c) => c.id === q.thread));
+    await until("the tests agent to ask", () => asks().length === 1, 8000);
+    const waiting = nodes().find((n) => n.body.type === "subagent" && n.body.child === asks()[0].thread);
+    expect(waiting?.status).toBe("waiting");
+    await client.run("mch_demo_ada", { type: "request.respond", request: asks()[0].id, response: { type: "decision", decision: "accept" } });
+
+    // Each result wakes the orchestrator; the last wake sums it all up.
+    const done = () => children().every((c) => c.status === "idle") && client.data.threads.get(id)!.value.status === "idle";
+    await until("everything done", () => done() && nodes().some((n) => n.body.type === "message" && n.body.text.startsWith("All done")), 15000);
+    const runs = runsOf(client.data, id);
+    expect(runs.length).toBeGreaterThanOrEqual(2);
+    expect(runs.slice(1).map((r) => r.prompt).join("\n")).toMatch(/Delegated task nod_\w+ \(Build: .*\) \[completed\]/);
+    expect(nodes().filter((n) => n.body.type === "subagent").every((n) => n.status === "completed" && n.body.type === "subagent" && !!n.body.result)).toBe(true);
+    release();
+  });
 });

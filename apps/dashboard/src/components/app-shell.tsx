@@ -58,7 +58,8 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      // The agents take ⌘K for their own palette while they're showing (they call preventDefault).
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k" && !e.defaultPrevented) {
         e.preventDefault();
         setPaletteOpen((o) => !o);
       }

@@ -197,7 +197,110 @@ type Step =
   | { sub: { agent: string; prompt: string; steps: Step[]; result: string } }
   | { ask: Pick<Approval, "action" | "title" | "decisions"> & Partial<Approval> }
   | { questions: Question[] }
-  | { wait: number };
+  | { wait: number }
+  /** Hand tasks to subagents through roll's orchestrator MCP: each is a thread of its own under this one. */
+  | { delegate: DemoTask[] };
+
+/** A task an orchestrator delegates (`delegate_task`): a child thread that runs `steps`. */
+interface DemoTask {
+  title: string;
+  task: string;
+  provider: string;
+  model: string;
+  steps: Step[];
+}
+
+/** One line of a goal, for titles and briefs. */
+function gist(goal: string, max = 60) {
+  const line = goal.trim().split("\n")[0].replace(/[.!?]+$/, "");
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+/**
+ * What an orchestrator does with a goal: look at the project, plan, tell the user, hand three
+ * parts to subagents in their own worktrees (on the machine's other provider where it has one),
+ * and end its turn; each result wakes it (`reviewScript`).
+ */
+function orchestratorScript(goal: string, providers: readonly string[]): Step[] {
+  const g = gist(goal);
+  const other = providers.includes("codex") ? ["codex", "gpt-5.5-codex"] : ["claude", "claude-sonnet-5"];
+  const tasks: DemoTask[] = [
+    {
+      title: `Build: ${gist(goal, 40)}`,
+      task: `Implement this in the project: ${g}.\n\nFollow the patterns around it and keep the change small. Done when it builds and the existing tests pass; report the files you changed.`,
+      provider: "claude",
+      model: "claude-opus-5-5",
+      steps: [
+        { think: "Find where this belongs before touching anything." },
+        { tool: { name: "Grep", kind: "search", title: "settings", output: "src/app/settings/page.tsx\nsrc/components/settings-form.tsx\n", ms: 900 } },
+        { tool: { name: "Read", kind: "read", title: "src/components/settings-form.tsx", ms: 800 } },
+        { tool: { name: "Edit", kind: "edit", title: "src/components/settings-form.tsx", files: [fc("src/components/settings-form.tsx", "modify", "@@ -12,3 +12,9 @@\n   return (\n     <form>\n+      <ThemeSwitch />\n")], ms: 1100 } },
+        { tool: { name: "Bash", kind: "command", title: "pnpm build", output: "▲ Next.js 16.4.1\n✓ Compiled successfully in 9.8s\n", exit: 0, ms: 1800 } },
+        { say: `Done: ${g}. Changed \`src/components/settings-form.tsx\`; the build passes and the existing tests are green.` },
+      ],
+    },
+    {
+      title: `Tests: ${gist(goal, 40)}`,
+      task: `Write tests for: ${g}.\n\nCover the main path and one edge case, next to the existing tests. Done when they pass.`,
+      provider: other[0],
+      model: other[1],
+      steps: [
+        { tool: { name: "shell", kind: "read", title: "ls src/**/*.test.tsx", output: "src/components/settings-form.test.tsx\n", exit: 0, ms: 700 } },
+        { tool: { name: "apply_patch", kind: "edit", title: "src/components/settings-form.test.tsx", files: [fc("src/components/settings-form.test.tsx", "modify", "@@ -40,0 +41,8 @@\n+it(\"remembers the choice\", async () => {\n+  render(<SettingsForm />);\n+});\n")], ms: 1000 } },
+        {
+          ask: {
+            action: "command",
+            title: "Run `pnpm test settings`",
+            command: "pnpm test settings",
+            reason: "Run the new tests",
+            tool: "shell",
+            input: { command: "pnpm test settings" },
+            decisions: ["accept", "accept_for_session", "decline", "cancel"],
+          },
+        },
+        { tool: { name: "shell", kind: "command", title: "pnpm test settings", output: " ✓ src/components/settings-form.test.tsx (6 tests) 412ms\n\n Test Files  1 passed (1)\n      Tests  6 passed (6)\n", exit: 0 } },
+        { say: "Added two tests in `src/components/settings-form.test.tsx` (the main path and a reload); all 6 pass." },
+      ],
+    },
+    {
+      title: `Docs: ${gist(goal, 40)}`,
+      task: `Document this for users: ${g}.\n\nOne short section in the docs where the feature lives, and a line in the changelog.`,
+      provider: "claude",
+      model: "claude-sonnet-5",
+      steps: [
+        { tool: { name: "Read", kind: "read", title: "docs/settings.md", ms: 700 } },
+        { tool: { name: "Edit", kind: "edit", title: "docs/settings.md", files: [fc("docs/settings.md", "modify", "@@ -20,0 +21,4 @@\n+## Appearance\n+\n+Pick light, dark or the system's theme.\n")], ms: 900 } },
+        { tool: { name: "Edit", kind: "edit", title: "CHANGELOG.md", files: [fc("CHANGELOG.md", "modify", "@@ -1,0 +2,1 @@\n+- Settings: choose the theme.\n")], ms: 600 } },
+        { say: "Documented it in `docs/settings.md` (Appearance) and added a changelog line." },
+      ],
+    },
+  ];
+  return [
+    { think: `The goal: "${g}". Look at how the project is laid out before splitting it up.` },
+    { tool: { name: "Bash", kind: "command", title: "git ls-files | head -40", output: "README.md\nsrc/app/settings/page.tsx\nsrc/components/settings-form.tsx\nsrc/components/settings-form.test.tsx\ndocs/settings.md\n", exit: 0, ms: 900 } },
+    { tool: { name: "Read", kind: "read", title: "README.md", ms: 700 } },
+    { plan: `1. Build it (Claude Code, own worktree)\n2. Tests for it (${other[0] === "codex" ? "Codex" : "Claude Code"}, own worktree)\n3. Docs and changelog (Claude Code, own worktree)\n4. Check each result, then sum up` },
+    { say: "The plan: three agents in parallel, each in its own worktree so they never collide. I'll check each result as it comes in." },
+    { tool: { name: "orchestrator_capabilities", kind: "mcp", title: "roll · orchestrator_capabilities", ms: 500 } },
+    { delegate: tasks },
+  ];
+}
+
+/** An orchestrator woken by results: check them, and sum up once nothing is left. */
+function reviewScript(titles: string[], left: number): Step[] {
+  const done = titles.join(", ");
+  return left > 0
+    ? [
+        { think: `${done} finished. Look at the diff before trusting it.` },
+        { tool: { name: "Bash", kind: "command", title: "git diff --stat main...", output: " 2 files changed, 14 insertions(+), 1 deletion(-)\n", exit: 0, ms: 900 } },
+        { say: `${done}: done and checked. Waiting on ${left} more.` },
+      ]
+    : [
+        { think: "Everything is back. Run the whole suite on the combined work." },
+        { tool: { name: "Bash", kind: "command", title: "pnpm test", output: " Test Files  14 passed (14)\n      Tests  128 passed (128)\n", exit: 0, ms: 1600 } },
+        { say: `All done. ${titles.length > 1 ? `${done} finished` : `${done} finished last`}; every part is in its own branch, the whole suite passes, and nothing is left open.` },
+      ];
+}
 
 const flakyScript: Step[] = [
   { think: "The test claims a lease twice from two nodes. If the read and the write aren't in one transaction, both can see no lease and both claim it." },
@@ -378,6 +481,10 @@ export class DemoOwner implements AgentsTransport {
   private log: StreamEvent[] = [];
   private subs = new Set<{ threads: Set<string>; on: (ev: StreamEvent, id: number | null) => void }>();
   private sims = new Map<ThreadId, Sim>();
+  /** Delegated threads still working: the orchestrator they report to and its task node. */
+  private tasks = new Map<ThreadId, { parent: ThreadId; node: Node; title: string }>();
+  /** Results waiting for a busy orchestrator's turn to end (the daemon's queued wake). */
+  private wakes = new Map<ThreadId, string[]>();
   private timers = new Set<ReturnType<typeof setTimeout>>();
   private started = false;
   /** The demo's canvas arrangement: kept for as long as the page is open. */
@@ -1055,7 +1162,9 @@ export class DemoOwner implements AgentsTransport {
       const t = this.thread(sim.thread)!;
       this.patchThread(sim.thread, { status: "waiting", pending_requests: t.pending_requests + 1, activity: body.type === "approval" ? `Waiting: ${body.title}` : "Waiting for your answer" });
       this.patchRun(sim.run, { status: "waiting" });
+      this.followTask(sim.thread, "waiting");
       const answer = await new Promise<RequestResponse>((resolve) => (sim.answer = resolve));
+      this.followTask(sim.thread, "running");
       sim.answer = undefined;
       this.done(n, n.body);
       this.put("request", { ...req, status: "resolved", resolved_at: now(), resolved_by: "ada", response: answer }, this.machineOf(sim.thread));
@@ -1078,6 +1187,83 @@ export class DemoOwner implements AgentsTransport {
       return;
     }
     if ("wait" in step) await this.sleep(step.wait);
+    if ("delegate" in step) {
+      activity(`Delegating to ${step.delegate.length} agents`);
+      const parent = this.thread(sim.thread)!;
+      const machine = this.machineOf(sim.thread);
+      const project = this.get<Project>("project", parent.project);
+      for (const [i, task] of step.delegate.entries()) {
+        const n = this.node(sim, ctx, { type: "subagent", agent: task.provider, prompt: task.task, child: null, result: null }, null);
+        const tid = id("thr_");
+        const path = project?.path ?? parent.cwd;
+        this.put(
+          "thread",
+          {
+            ...parent,
+            id: tid,
+            title: task.title,
+            provider: task.provider,
+            model: task.model,
+            effort: null,
+            interaction_mode: "default",
+            cwd: `${path}/../.roll-worktrees/${tid}`,
+            worktree: { path: `${path}/../.roll-worktrees/${tid}`, branch: `roll/${slug(task.title)}`, base: "f35f34cf" },
+            status: "idle",
+            lineage: { parent: parent.id, relation: "subagent", root: parent.lineage?.root ?? parent.id, from_run: sim.run },
+            orchestrator: false,
+            active_run: null,
+            queued: [],
+            run_count: 0,
+            pending_requests: 0,
+            activity: null,
+            usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
+            context: null,
+            error: null,
+            change: null,
+            work: null,
+            created_at: now(),
+            updated_at: now(),
+            archived_at: null,
+          },
+          machine,
+        );
+        const node = { ...n, body: { type: "subagent" as const, agent: task.provider, prompt: task.task, child: tid, result: null } };
+        this.putNode(node);
+        this.tasks.set(tid, { parent: parent.id, node, title: task.title });
+        this.after(300 + i * 900, () => this.begin(tid, task.task, task.steps));
+        await this.sleep(250);
+      }
+    }
+  }
+
+  /** A delegated thread's task node follows it: waiting while it waits on you. */
+  private followTask(tid: ThreadId, status: "running" | "waiting") {
+    const task = this.tasks.get(tid);
+    if (!task) return;
+    task.node = { ...task.node, status };
+    this.putNode(task.node);
+  }
+
+  /** A delegated thread finished: its node gets the result, and the result wakes the orchestrator. */
+  private taskDone(tid: ThreadId, run: string) {
+    const task = this.tasks.get(tid);
+    if (!task) return;
+    this.tasks.delete(tid);
+    const answer = [...this.records.values()]
+      .map((m) => m.entity)
+      .filter((e): e is Node & { kind: "node" } => e.kind === "node" && e.run === run && e.parent === null && e.body.type === "message")
+      .sort((a, b) => b.ordinal - a.ordinal)[0];
+    const result = answer?.body.type === "message" ? answer.body.text : "Done.";
+    this.putNode({ ...task.node, status: "completed", completed_at: now(), body: { ...(task.node.body as Extract<NodeBody, { type: "subagent" }>), result } });
+    const wake = `Delegated task ${task.node.id} (${task.title}) [completed]:\n${result}`;
+    if (this.sims.has(task.parent)) this.wakes.set(task.parent, [...(this.wakes.get(task.parent) ?? []), wake]);
+    else this.wakeOrchestrator(task.parent, [wake]);
+  }
+
+  private wakeOrchestrator(parent: ThreadId, results: string[]) {
+    const titles = results.map((r) => /\((.*?)\) \[/.exec(r)?.[1] ?? "A task");
+    const left = [...this.tasks.values()].filter((t) => t.parent === parent).length;
+    this.after(400, () => this.begin(parent, results.join("\n\n"), reviewScript(titles, left)));
   }
 
   private finish(sim: Sim) {
@@ -1103,7 +1289,12 @@ export class DemoOwner implements AgentsTransport {
     };
     const [next, ...rest] = t.queued;
     this.patchThread(sim.thread, { status: "idle", active_run: null, activity: null, usage: total, queued: rest });
-    if (next) this.after(500, () => this.begin(sim.thread, next.text, this.reply(next.text), next.attachments));
+    this.taskDone(sim.thread, sim.run);
+    const woken = this.wakes.get(sim.thread);
+    if (woken) {
+      this.wakes.delete(sim.thread);
+      this.wakeOrchestrator(sim.thread, woken);
+    } else if (next) this.after(500, () => this.begin(sim.thread, next.text, this.reply(next.text), next.attachments));
   }
 
   private filesOf(run: string): FileChange[] {
@@ -1176,6 +1367,18 @@ export class DemoOwner implements AgentsTransport {
           sim.stopped = true;
           this.stopRun(sim, "interrupted");
         }
+        // Stopping an orchestrator stops what it delegated (T3's Stop); cancelled tasks wake nobody.
+        this.wakes.delete(c.thread);
+        for (const [child, task] of [...this.tasks]) {
+          if (task.parent !== c.thread) continue;
+          this.tasks.delete(child);
+          this.putNode({ ...task.node, status: "interrupted", completed_at: now() });
+          const s = this.sims.get(child);
+          if (s) {
+            s.stopped = true;
+            this.stopRun(s, "interrupted");
+          }
+        }
         return { type: "ok" };
       }
       case "request.respond": {
@@ -1223,7 +1426,8 @@ export class DemoOwner implements AgentsTransport {
           },
           machine,
         );
-        if (c.prompt) this.after(300, () => this.begin(tid, c.prompt!, this.reply(c.prompt!), c.attachments ?? []));
+        const providers = (this.machines.get(machine)?.info?.providers ?? []).filter((p) => p.installed).map((p) => p.id);
+        if (c.prompt) this.after(300, () => this.begin(tid, c.prompt!, c.orchestrator ? orchestratorScript(c.prompt!, providers) : this.reply(c.prompt!), c.attachments ?? []));
         return { type: "created", id: tid };
       }
       case "thread.configure": {

@@ -1,13 +1,14 @@
 "use client";
 
 import { DotField, RollLogo, RollMark } from "@roll/brand";
-import { Archive, ArrowLeft, MoreHorizontal, PanelRightClose, Pin, PinOff, Plus, Server, Share2, X } from "lucide-react";
+import { Archive, ArrowLeft, MoreHorizontal, PanelRightClose, Pin, PinOff, Plus, Search, Server, Share2, X } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { isBusy } from "@/lib/agents-api";
 import { setActiveClient, type AgentsClient } from "@/lib/agents-client";
 import { deriveGraph, rolling, type GraphNode } from "@/lib/agents-graph";
 import type { Size } from "@/lib/agents-layout";
+import { closePalette, noteThreadOpen, openPalette, togglePalette } from "@/lib/agents-palette";
 import type { AgentsServices } from "@/lib/agents-services";
 import { isNewAgentKey, setAgentsView, useAgentsSurface, type AgentsView } from "@/lib/agents-surface";
 import { ALL, applyView, isPinned, pinKey, pinnedConversations, pinOf, viewStorageKey, type Pin as PinRec } from "@/lib/agents-views";
@@ -15,10 +16,12 @@ import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
 import { useMarkState } from "../mark-state";
 import { AddMachineDialog, AddMachinePaths } from "./add-machine";
 import { AgentsCanvas, type CanvasHandle } from "./agents-canvas";
+import { CommandPalette, type PaletteHost } from "./command-palette";
 import { Menu } from "./menu";
 import { Launcher } from "./new-agent";
 import { PinnedConversation, PinnedDiff, PinnedTerminal } from "./pinned";
 import { MachineNode, ProjectNode, RequestNode, SubagentNode, ThreadNode } from "./nodes";
+import { PromptBar } from "./prompt-bar";
 import { RequestCard } from "./request-card";
 import { SettingsPanel } from "./settings-panel";
 import { useSandboxes } from "./sandbox";
@@ -150,7 +153,11 @@ export function AgentsSurface({
   }, [client, data.threads, shown]);
   useEffect(() => () => client.unfollow("surface"), [client]);
 
-  const openThread = useCallback((thread: string) => setAgentsView({ kind: "thread", thread }), []);
+  const openThread = useCallback((thread: string) => {
+    // How often and how lately, for the command palette's ranking.
+    noteThreadOpen(thread);
+    setAgentsView({ kind: "thread", thread });
+  }, []);
   const close = useCallback(() => setAgentsView({ kind: "canvas" }), []);
   const startNew = useCallback((project?: string, opts?: { machine?: string; at?: { x: number; y: number } }) => {
     const r = root.current?.getBoundingClientRect();
@@ -236,6 +243,23 @@ export function AgentsSurface({
     return () => window.removeEventListener("keydown", onKey);
   }, [shown.kind, close, onClose]);
 
+  // ⌘K: the command palette, while the agents are showing (T3's `commandPalette.toggle`). It
+  // comes first, so the dashboard's own ⌘K ("Ask roll") stays for the page behind. A terminal
+  // keeps Ctrl+K (kill to the end of the line).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey || e.key.toLowerCase() !== "k") return;
+      if (!e.metaKey && (e.target as HTMLElement | null)?.closest?.(".xterm")) return;
+      e.preventDefault();
+      togglePalette();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      closePalette();
+    };
+  }, []);
+
   const onSandbox = useCallback(
     (m: { id: string }) => {
       setAdding(false);
@@ -248,6 +272,16 @@ export function AgentsSurface({
   // Waiting on you isn't running: those show as the waiting count.
   const running = working.filter((t) => t.status !== "waiting").length;
   const archived = [...data.threads.values()].filter((r) => r.value.archived_at !== null).length;
+  const host: PaletteHost = useMemo(
+    () => ({
+      addMachine: () => setAdding(true),
+      showArchived,
+      toggleArchived: () => setShowArchived((s) => !s),
+      archived,
+      fit: () => canvas.current?.fit(),
+    }),
+    [showArchived, archived],
+  );
   const end = (
     <>
       <button onClick={() => startNew()} className="inline-flex h-7 items-center gap-1 rounded-md bg-fg px-2 text-[12px] font-medium text-bg transition hover:opacity-85" title="New agent (⌘N)">
@@ -285,6 +319,16 @@ export function AgentsSurface({
               )}
             </span>
             <span className="ml-auto flex shrink-0 items-center gap-1" data-nodrag>
+              <button
+                onClick={() => openPalette()}
+                className="mr-1 flex h-7 items-center gap-2 rounded-lg bg-fg/[0.05] px-2.5 text-[12px] text-subtle transition-colors hover:bg-fg/[0.08] hover:text-fg max-sm:w-7 max-sm:justify-center max-sm:px-0"
+                title="Search, run an action, or say what to do (⌘K)"
+                aria-label="Command palette"
+              >
+                <Search className="size-3.5 shrink-0" />
+                <span className="max-sm:hidden">Search or ask agents…</span>
+                <kbd className="font-sans text-[11px] text-subtle max-sm:hidden">⌘K</kbd>
+              </button>
               <IconButton label="Add a machine" onClick={() => setAdding(true)}>
                 <Server className="size-4" />
               </IconButton>
@@ -323,6 +367,7 @@ export function AgentsSurface({
                   {launchError}
                 </p>
               )}
+              {!phone && data.machines.size > 0 && shown.kind === "canvas" && <PromptBar />}
             </div>
             {shown.kind === "thread" && threadOpen && (
               <SidePanel phone={phone} label="Conversation">
@@ -347,6 +392,7 @@ export function AgentsSurface({
         </div>
         {adding && <AddMachineDialog onClose={() => setAdding(false)} onCreated={onSandbox} />}
         {shown.kind === "new" && <Launcher key={`${shown.project ?? ""}|${shown.machine ?? ""}|${shown.at?.x ?? ""},${shown.at?.y ?? ""}`} project={shown.project} machine={shown.machine} at={shown.at} onClose={close} />}
+        <CommandPalette host={host} />
       </div>
     </AgentsContext.Provider>
   );
