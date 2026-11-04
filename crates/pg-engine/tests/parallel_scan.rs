@@ -945,3 +945,55 @@ fn vector_batches_body() {
         assert_eq!(a, b, "{q}: serial");
     }
 }
+
+
+#[test]
+fn parallel_workers_use_execution_context_after_parse() {
+    on_session_thread(parallel_workers_use_execution_context_after_parse_inner);
+}
+
+fn parallel_workers_use_execution_context_after_parse_inner() {
+    use pg_engine::{session::Outcome, types::Value};
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let (pid, _, _) = engine.register_backend(None, None);
+    let mut s = engine.connect(pid, "postgres", "postgres", "parse_context").unwrap();
+    s.query("CREATE TABLE p171_parallel AS SELECT g AS a FROM generate_series(1,3000000) g; ANALYZE p171_parallel").unwrap();
+    let sql = "SELECT a FROM p171_parallel WHERE a % 3000000 = 0";
+    fn counts(s: &mut Session) -> (i64, i64) {
+        s.query("SELECT pg_stat_force_next_flush(); SELECT pg_stat_clear_snapshot()").unwrap();
+        let r = s.query("SELECT parallel_workers_to_launch, parallel_workers_launched FROM pg_stat_database WHERE datname = 'postgres'").unwrap();
+        match r.last().unwrap().rows[0].as_slice() {
+            [Value::Int8(a), Value::Int8(b)] => (*a, *b),
+            row => panic!("worker counts: {row:?}"),
+        }
+    }
+    let mut deltas = Vec::new();
+    for (name, before_parse, after_parse) in [
+        ("workers", "SET max_parallel_workers_per_gather=0", "SET max_parallel_workers_per_gather=2"),
+        ("setup", "SET parallel_setup_cost=1000000000", "RESET parallel_setup_cost"),
+    ] {
+        s.query(before_parse).unwrap();
+        s.parse_message(name, sql, &[]).unwrap();
+        s.sync().unwrap();
+        s.query(after_parse).unwrap();
+        let plan = s.query(&format!("EXPLAIN {sql}")).unwrap();
+        println!("{name} current EXPLAIN: {:?}", plan.last().unwrap().rows);
+        assert!(plan.last().unwrap().rows.iter().any(|r| format!("{:?}", r[0]).contains("Gather")), "{plan:?}");
+        let before = counts(&mut s);
+        s.bind_message("", name, Vec::new(), &[], Vec::new()).unwrap();
+        match s.execute_portal("", 0).unwrap().0 {
+            Outcome::Done(q) => assert_eq!(q.rows, vec![vec![Value::Int4(3000000)]]),
+            _ => panic!("one-row statement not completed"),
+        }
+        s.sync().unwrap();
+        let after = counts(&mut s);
+        let delta = (after.0 - before.0, after.1 - before.1);
+        println!("{name}: worker to_launch/launched delta={delta:?}");
+        deltas.push(delta);
+    }
+    drop(s);
+    engine.unregister_backend(pid);
+    engine.shutdown();
+    assert_eq!(deltas, [(2, 2), (2, 2)], "actual worker launches follow settings at first execution");
+}
