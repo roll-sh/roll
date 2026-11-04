@@ -10,7 +10,7 @@ import tempfile
 W = '/home/meszmate/roll/.claude/worktrees/agent-a640c14a8f76f8ea4'
 D = Path('/home/meszmate/.cache/pg-engine-resume-20261104/session_planner')
 PREFIX = 'crates/pg-engine/tools/bench/results/2026-11-04/resume-planner-checkpoint/'
-REF = 'refs/heads/wip/a165-evidence-resume-20261104'
+REF = 'refs/heads/wip/resume-20261104-planner-evidence'
 
 def git(*args, data=None, env=None):
     return subprocess.check_output(['git', '-C', W, *args], input=data, env=env).decode().strip()
@@ -24,10 +24,12 @@ parent checkout; all implementation Git operations instead used the original wor
 OLTP165 recovered clean at 6fde4096. jobA failed (including an executable-copy failure).
 jobB's final HEAVY-EXIT 0 is FALSE SUCCESS: every cargo step failed on a missing AtomicU64
 import. Its debug/release failure logs are preserved. baeee87a fixes only that import;
-current-source validation remains in progress, outside this completed checkpoint.
+complete current-source debug validation has now passed446tests,0failed,18ignored.
+The release/clippy/build/PostgreSQL checks and footprint/performance gates remain pending.
 PostgreSQL18.6 recording of a165_cursor_stream succeeded: nonempty 397-line expected output.
 The other two golden tests return early in recording mode: this is recording evidence,
-not a successful embedded/wire/shuffled comparison. Snapshot 2ef850e8 retains this golden.
+not itself a successful embedded/wire/shuffled comparison. The subsequent complete
+debug suite did pass all three modes; its completed log is exported separately. Snapshot 2ef850e8 retains this golden.
 
 Historical matrix m0/m1 contain partial campaigns and lack raw pgbench output and a
 complete current-source gate set. They cannot establish a performance regression or gain.
@@ -46,11 +48,16 @@ Owner backups were checked with ls-remote: baeee87a wip/a165-resume-20261104,
 2ef850e8 wip/a165-resume-golden-20261104, ec5b9f39 wip/a171-resume-20261104,
 63f7c0b4 wip/a172-resume-20261104. Shared branch and parent/main worktrees were not mutated.
 
-The manifest records exact hashes of every exported artifact. This checkpoint excludes
-the running debug-suite output, so it never snapshots an incomplete log as a finished check.
+The manifest records exact hashes of every exported artifact. This checkpoint includes the completed debug-suite output and exact testedtree.
+The still-running release-suite output is excluded, not reported as a finished check.
 '''
 files = {'README.md': readme.encode(), 'export_checkpoint.py': Path(__file__).read_bytes()}
 sources = {
+    'oltp165/debug-complete.log': str(D / 'check165/debug-test.log'),
+    'oltp165/debug.command': str(D / 'check165/debug-test.command'),
+    'oltp165/debug-summary.json': str(D / 'check165/debug-summary.json'),
+    'oltp165/debug-tested-tree.txt': str(D / 'check165/debug-tested-tree.txt'),
+    'oltp165/reference.txt': str(D / 'check165/reference.txt'),
     'oltp165/jobA.log': '/home/meszmate/.cache/a165/logs/jobA.log',
     'oltp165/jobB.log': '/home/meszmate/.cache/a165/logs/jobB.log',
     'oltp165/test-debug-failed.log': '/home/meszmate/.cache/a165/logs/test-debug.out',
