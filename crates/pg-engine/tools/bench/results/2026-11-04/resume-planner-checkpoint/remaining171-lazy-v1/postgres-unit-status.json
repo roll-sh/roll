@@ -1,0 +1,11 @@
+{
+  "status": "PASS",
+  "executed_unit_checks": true,
+  "summaries": 5,
+  "passed": 24,
+  "failed": 0,
+  "ignored": 0,
+  "pg_engine_execution": false,
+  "service_stack_acceptance": false,
+  "reason": "--unit disablesDocker e2e;notengineorserviceacceptance"
+}

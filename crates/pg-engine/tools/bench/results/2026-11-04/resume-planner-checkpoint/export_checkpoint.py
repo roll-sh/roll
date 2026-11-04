@@ -17,6 +17,9 @@ def git(*args, data=None, env=None):
 
 readme = '''# Recovery and OLTP165 review checkpoint (2026-11-04)
 
+LATEST171 TERMINAL: original full pipeline stays FAILED solelyatClippyAUDIT1/HEAVY1;debug+release457/0/18/61 each passed;laterdist/unitNOTRUNthere. Parent append-only raw-onlydiagnostic comparison14matcheshistorical14 without rerun/source/thresholdchanges. Separatelyauthorizedfirst-runDIST andpnpm--unit bothcompletedcommand0/audit0. ActualdistbinarySHA02155aafc79c86e24696f4f0cae43b10c54774aac4b33c5d7f0dd767a3d06fb3 preserved;unitEXECUTED24/0/0/5,notengine/serviceacceptance. Read-only terminalaudits verify cleanexactcac/treebd48,old9+new11frozenmatch,ownedgroupsgone/slotsreleased. No originalfullPASS claim. ParentfinalacceptanceHELD;batchfinished,no additionalrounds. PLANNER171-LAZY-HANDOFF.md iscurrent;olderprogressparagraphsbelowarehistorical.
+
+
 TERMINAL171 ORIGINAL FULL PIPELINE FAILED/PARTIAL: debug+release each457/0/18/61, command0/audit0/60binaryhashes. Clippy command0 BUT frozen audit1 (29primary-span rows vs14historical), wrapperHEAVY1; dist/unitNOTRUN there. Frozenfailureartifacts UNCHANGED. Supplemental read-only evidence explains24JSONmessages/10exactduplicates/14unique diagnostic identities, with5extra primaryspans; this doesNOTchangefrozenstatus. Sourceexactcac0933b/treebd48e507 clean, all9frozeninputs match, ownedprocessgroupabsent/slotreleased. Parent holds acceptance.
 
 
@@ -460,6 +463,12 @@ for name in ('source.txt', 'tree.txt', 'initial.status', 'startup-controls.json'
 # Separate dist stage is closed; unit output is still active and excluded.
 for name in ('build.log', 'build-audit.log', 'build-artifact.json', 'build-completion.json', 'affinity-observation-dist-build.json'):
     sources['remaining171-lazy-v1/' + name] = str(D / 'remaining171-lazy-v1' / name)
+# Separate remaining-stage run is now fully terminal; raw outputs and ledgers are immutable.
+for artifact in sorted((D / 'remaining171-lazy-v1').iterdir()):
+    if artifact.is_file():
+        sources['remaining171-lazy-v1/' + artifact.name] = str(artifact)
+sources['remaining171-lazy-v1/wrapper.log'] = str(D / 'remaining171-lazy-v1-wrapper.log')
+sources['owners-terminal-status.json'] = str(D / 'owners-terminal-status.json')
 for name, source in sources.items():
     files[name] = Path(source).read_bytes()
 files['manifest.json'] = (json.dumps({name: {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}

@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "b7a11dc5a44fa62901bec3cf3b40ec3688b4b5e8588f9e4f27fc56503cc7fbe6",
-    "bytes": 19331
+    "sha256": "d39cd167a6627fdfd4617ab3790ca1986d997d7a221b2c022815335c49ae4c36",
+    "bytes": 20088
   },
   "baseline171-v1/RESTORED.txt": {
     "sha256": "2ad11b1db92238f171853cadc56294d550edeed718924b1b46054ccb24969691",
@@ -772,8 +772,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "b6a54a788757e9b855e1a46452e1e2476c4fda67e700e554d8ccfc07973d19c9",
-    "bytes": 39743
+    "sha256": "b9d4e1c689499e0e271295a58d9e7e9a97cb2cbb4fc33efef6712ba8db9d239a",
+    "bytes": 40927
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -1531,6 +1531,10 @@
     "sha256": "05525c4c6f34b7872216b672e1f937f18be10617c50e8bb998ffc942aecbbd30",
     "bytes": 6402
   },
+  "owners-terminal-status.json": {
+    "sha256": "76416e4c1044509aa4df2100fb8e07e180d17e6f17c1409477645571adb4b25d",
+    "bytes": 679
+  },
   "parallel171-v2/fixture-v2-backup.json": {
     "sha256": "8e26e028879b6d7bb69f2692a80f75148be0037e8e435c00c32fd473a19d20b6",
     "bytes": 549
@@ -1827,9 +1831,17 @@
     "sha256": "4409070528e5249d7aca2869b2fd67ceeaf88cb77af0311b1588dc1271c2d0bc",
     "bytes": 421
   },
+  "remaining171-lazy-v1/TERMINAL.json": {
+    "sha256": "1dc28127a4ceffbeeb65f5bc1f20993d94a7061407f0a5d9650f4bbc5a54c327",
+    "bytes": 2390
+  },
   "remaining171-lazy-v1/affinity-observation-dist-build.json": {
     "sha256": "8d0eecb906a46f3e5d3143aff4d7d1ce8574ce626394a0416d3f6e7784960394",
     "bytes": 1904
+  },
+  "remaining171-lazy-v1/audit-exits.tsv": {
+    "sha256": "bef226f8291e558a0def281c30bd9d4dc3a955b3e7267b566c790bc9a0847073",
+    "bytes": 36
   },
   "remaining171-lazy-v1/build-artifact.json": {
     "sha256": "fd2a991895a324f9bfc7d2b89a6d037e99dfab711e96bece808c8dd89c6fade0",
@@ -1851,13 +1863,41 @@
     "sha256": "31863c88692878269b54b1f68e78b985b6f79b8732240b72b2fc0b3456079d0b",
     "bytes": 5964
   },
+  "remaining171-lazy-v1/current.status": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
   "remaining171-lazy-v1/disk-before-build.json": {
     "sha256": "c8b5ec2754c989663c98e0464d76f20706a57f08c129f96598efe127e0774d63",
     "bytes": 134
   },
+  "remaining171-lazy-v1/disk-before-postgres-unit.json": {
+    "sha256": "a557fe50cf887431a275d16fa2ec99eddbcb6914a50111b4643434245eaf3403",
+    "bytes": 134
+  },
+  "remaining171-lazy-v1/exits.tsv": {
+    "sha256": "794a6f1c885ce98f2838ebae29a0f4370025a5988761b8c9dbdce3c8f0d828c0",
+    "bytes": 24
+  },
   "remaining171-lazy-v1/initial.status": {
     "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "bytes": 0
+  },
+  "remaining171-lazy-v1/postgres-unit-audit.log": {
+    "sha256": "ad21f83c4905b9e1e832282993da5e57ee6b7789d6bd218f5d1779b563f815d2",
+    "bytes": 25
+  },
+  "remaining171-lazy-v1/postgres-unit-status.json": {
+    "sha256": "daae61c8b91bdf85d5b51c208bc9caf87779ec7d2b07546c9c22962df9198340",
+    "bytes": 259
+  },
+  "remaining171-lazy-v1/postgres-unit.command": {
+    "sha256": "99f2cf965ef407eb3f36a6aa3cf858909f5d8f75396abbd47109bb9d94ac2e3e",
+    "bytes": 21
+  },
+  "remaining171-lazy-v1/postgres-unit.log": {
+    "sha256": "322f6f967ec6f91e65ed515fcc4f372bc56755385be98889c934ca2b4d15eda6",
+    "bytes": 12702
   },
   "remaining171-lazy-v1/source.txt": {
     "sha256": "78174d17a36dd2b5d156154ad2a3f9a0b63682b00cd81be8f3e76329a7b55bcb",
@@ -1874,6 +1914,10 @@
   "remaining171-lazy-v1/tree.txt": {
     "sha256": "63c6acfff48b73fbc9798cc5dec5f150392097ad0d46985d69cca92fc94f4d60",
     "bytes": 41
+  },
+  "remaining171-lazy-v1/wrapper.log": {
+    "sha256": "4fe0df2ef07eec20fd3de6640028af1fadf723ba9f2626dbda09a1bcd4b90b66",
+    "bytes": 9785
   },
   "review165/exits.tsv": {
     "sha256": "590e981aad8108c0420b664caf96c614afb92a3dd4ea61fa456ca11510abfe14",
@@ -1976,8 +2020,8 @@
     "bytes": 4776
   },
   "runners/PLANNER171-LAZY-HANDOFF.md": {
-    "sha256": "9ff152f817b331e521e17618499c3223333c61287db017305cce5e3ac504e759",
-    "bytes": 5256
+    "sha256": "4507603fc1c7461036838c6d50f26db09036b48a12a029cf21dd7ba9a75868c6",
+    "bytes": 6602
   },
   "runners/R3-CASE-MATRIX.md": {
     "sha256": "bab38282c8248db553c43a488f9557d875c95d9a507fb231bf1238c68fbe21bf",
