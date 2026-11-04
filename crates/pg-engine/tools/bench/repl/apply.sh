@@ -98,7 +98,9 @@ while [ $r -lt "$ROUNDS" ]; do
     fi
     got=$(md5s "$p"); same=identical
     [ "$got" = "$want" ] || { log "subscriber $s differs ($got vs $want)"; exit 1; }
-    printf 'round %s pub=%s sub=%s time %s s cpu %.2f s mem %s rows %s\n' "$r" "$PUB" "$s" "$el" "$(awk -v a="$c1" -v b="$c0" 'BEGIN {print a - b}')" "$mem" "$same"
+    # (The subscriber's page counts: the size models' under apply, against PostgreSQL's.)
+    pages=$(q "$p" postgres "SELECT string_agg(c || '=' || pg_relation_size(c::regclass) / 8192, ' ' ORDER BY c) FROM unnest(ARRAY['acc', 'acc_pkey', 'hist', 'hist_pkey', 'hist_aid']) c")
+    printf 'round %s pub=%s sub=%s time %s s cpu %.2f s mem %s rows %s pages %s\n' "$r" "$PUB" "$s" "$el" "$(awk -v a="$c1" -v b="$c0" 'BEGIN {print a - b}')" "$mem" "$same" "$pages"
     q "$p" postgres "ALTER SUBSCRIPTION s_$s DISABLE" >/dev/null
   done
   for s in $SUBS; do q "$(port_of "$s")" postgres "DROP SUBSCRIPTION s_$s" >/dev/null 2>&1 || true; done
