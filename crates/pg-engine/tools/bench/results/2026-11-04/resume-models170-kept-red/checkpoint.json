@@ -1,0 +1,7 @@
+{
+  "head": "ea4093f7128ddf79544fb790cfc63996ffc424a7",
+  "tree": "f3d4e72473cbe194070d8d27e158a69acb260995",
+  "status": "",
+  "time_utc": "2026-11-04T15:03:36.059958+00:00",
+  "note": "Exact clean ea4093f7 tests-only pin; kept tests0/2 exit101. Missing-tree Take::None leaves stale header; header btree_blocks None instead of11. No background builder race. No historical artifacts modified."
+}

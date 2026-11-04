@@ -1,0 +1,7 @@
+{
+  "head": "047c4697e72ce63867257db3668a02c55c77830a",
+  "tree": "02e21166666f10f3c85b3f6b2dda347f61735410",
+  "status": "",
+  "time_utc": "2026-11-04T16:50:28.004551+00:00",
+  "note": "Exact047c4697 clean focusedPASS:vacuum2(ASCII2800/8300+Unicode8300),kept2(directmapremoval/forcedrangecost),existingtoast/model25. PG18.6mainheap270336bytes and allvalues/MD5 match. Indexformationunchanged;163combinedINCLUDEchecksparentowned. Priorred101remainsfailed. Fullnewsourcegates/reviewpending;noacceptance/performanceclaim."
+}

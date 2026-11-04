@@ -1,0 +1,20 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.59s
+     Running tests/big_tables.rs (/home/meszmate/.cache/a163/target/debug/deps/big_tables-56871ac7816feb9b)
+
+running 1 test
+measured serial INCLUDE: estimated=true heap_model=false workers=0: index row size 2816 exceeds btree version 4 maximum 2704 for index "mi_i"
+
+thread 'measured_serial_include_size' (3163383) panicked at crates/pg-engine/src/catalog/relsize.rs:591:9:
+attempt to subtract with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test measured_serial_include_size ... FAILED
+
+failures:
+
+failures:
+    measured_serial_include_size
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.52s
+
+error: test failed, to rerun pass `-p pg-engine --test big_tables`
