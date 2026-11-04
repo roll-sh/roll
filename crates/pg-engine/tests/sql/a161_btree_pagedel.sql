@@ -34,8 +34,9 @@ VACUUM pd;
 SELECT * FROM pd_ix;
 INSERT INTO pd SELECT g, g % 50 FROM generate_series(40001, 52000) g;
 SELECT * FROM pd_ix;
--- Kept across a clean restart is checked by the size-model scripts; here, a rewrite.
+-- REINDEX: new files, a sorted build's pages.
 REINDEX TABLE pd;
 SELECT * FROM pd_ix;
+SELECT relname, relpages, reltuples FROM pg_class WHERE relname IN ('pd', 'pd_pkey', 'pd_v') ORDER BY 1;
 DROP VIEW pd_ix;
 DROP TABLE pd;
