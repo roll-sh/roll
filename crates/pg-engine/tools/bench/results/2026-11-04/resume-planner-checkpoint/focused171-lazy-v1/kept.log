@@ -1,0 +1,16 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running tests/kept_plans.rs (/home/meszmate/.cache/a171/target/debug/deps/kept_plans-b343836d3bffe0ca)
+
+running 8 tests
+test bind_plans_before_checking_result_formats ... ok
+test custom_plans_from_the_analysis ... ok
+Parse seq_page_cost=500; six Binds after RESET: [Int8(1), Int8(5)]
+test generic_cost_uses_choice_context_after_parse ... ok
+test kept_plans_follow_size_changes_across_sessions ... ok
+test extended_custom_plans_run_the_generic_binding ... ok
+test kept_plans_follow_values_sizes_and_ddl ... ok
+test plpgsql_custom_plans_as_the_generic_plan ... ok
+test kept_plans_serve_literals_of_any_length ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.03s
+

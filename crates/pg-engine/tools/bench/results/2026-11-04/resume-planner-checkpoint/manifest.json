@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "83b6d609f0c30a1c0456c025ebd16ca344b3bea967dfb5d2ce843cf6586dc92e",
-    "bytes": 16932
+    "sha256": "ce3bf1b5c310f95fcb67a9f1528eaf9f7adbabe9605e662b297532b6e90c9236",
+    "bytes": 17881
   },
   "baseline171-v1/RESTORED.txt": {
     "sha256": "2ad11b1db92238f171853cadc56294d550edeed718924b1b46054ccb24969691",
@@ -772,8 +772,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "bf9e85d6029016d8610f6677e0c4574cc8046948722e1fe3b4ea6f27b55f2e04",
-    "bytes": 34004
+    "sha256": "e7f5ee492c5162a4a626fc106b2546895e7019ba228f56dcd21f8366e69d67bf",
+    "bytes": 35469
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -894,6 +894,138 @@
   "focus171-v1/wrapper.log": {
     "sha256": "70d060e08709b9ddf36797848b71626643f327391cb2049d86063ba23cd1c33b",
     "bytes": 183
+  },
+  "focused171-lazy-v1/TERMINAL.json": {
+    "sha256": "be76f427b76d09b57f419844d9ac4f09218f8777f3b7eb8c6d71d64d5cb6c075",
+    "bytes": 6573
+  },
+  "focused171-lazy-v1/affinity-observation-build.json": {
+    "sha256": "cc2eae759376aa176da4a6f58e5feab52a1ab8828b5a39f699555f83af799338",
+    "bytes": 1481
+  },
+  "focused171-lazy-v1/affinity-observation-parallel.json": {
+    "sha256": "73bedb19f887813fc458ce62756782f26eb0485ed3bbdbf68376ae740b63972c",
+    "bytes": 1491
+  },
+  "focused171-lazy-v1/clippy-recorded-warning-comparison.json": {
+    "sha256": "98756c91634484e1d2ed7e872ac39ca9fc74bf85c55b359c544127aa6a4553dc",
+    "bytes": 352
+  },
+  "focused171-lazy-v1/clippy-summary.json": {
+    "sha256": "fe0d855b44d12d6ae035c862e3c8ab24e662a46efb546ee33f248297a611aa19",
+    "bytes": 2049
+  },
+  "focused171-lazy-v1/clippy.command": {
+    "sha256": "6aaa493f62315e064a77af71fdd72e82dd72d2d18d832365d5868941a6c2f51e",
+    "bytes": 54
+  },
+  "focused171-lazy-v1/clippy.log": {
+    "sha256": "e2cc330bade44089d7e264d96e0cc8b35aec38eb28c19bf4b3674153ba443626",
+    "bytes": 224967
+  },
+  "focused171-lazy-v1/cost-golden-binary.json": {
+    "sha256": "b4285afe49146b042c14638ff72356e7f6b41ac253da745f09c66ad1e58de171",
+    "bytes": 229
+  },
+  "focused171-lazy-v1/cost-golden.command": {
+    "sha256": "ad27562090e01ef79afa3fde2db9de8606f7d8e34c7233ac7e28662b5b0cd3c3",
+    "bytes": 88
+  },
+  "focused171-lazy-v1/cost-golden.log": {
+    "sha256": "77bb81eff836f35d99e72310d6b20a6b40ad810a893116a98acba2a9e60aa44f",
+    "bytes": 563
+  },
+  "focused171-lazy-v1/current.status": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  "focused171-lazy-v1/exits.tsv": {
+    "sha256": "0ac657bfd6eaf38b98c66b799a0845b392befafb04356b10aad428599c8090d6",
+    "bytes": 96
+  },
+  "focused171-lazy-v1/generic-binary.json": {
+    "sha256": "863c091e47c623b2abeb1607b995003226339a850a673e0838e38d92e78de1d3",
+    "bytes": 233
+  },
+  "focused171-lazy-v1/generic.command": {
+    "sha256": "c6c51a1d3388e59759f6bc92c7119fe1b45449ca473efdcd73d43146417fc123",
+    "bytes": 111
+  },
+  "focused171-lazy-v1/generic.log": {
+    "sha256": "c7bb63b01e79edafcb4afe2fd9f9e097d4716288d1637ef2d7e02e879b5e4902",
+    "bytes": 529
+  },
+  "focused171-lazy-v1/initial.status": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  "focused171-lazy-v1/kept-binary.json": {
+    "sha256": "ed6653a07657a1d79813889c55e71a5f713c3e7d5dc79132ce35ea91d68dec2a",
+    "bytes": 234
+  },
+  "focused171-lazy-v1/kept.command": {
+    "sha256": "0ece12190138e35122575a2941ae8e8a8d4652f90fa60d1cd2bce70022ac031c",
+    "bytes": 58
+  },
+  "focused171-lazy-v1/kept.log": {
+    "sha256": "db899ec8a7fab0128c4d918323c62fac17db05087dc672559b179491c41ea107",
+    "bytes": 788
+  },
+  "focused171-lazy-v1/logical-parallel-binary.json": {
+    "sha256": "fca33e84ade6352d6d141b9a9b168e5b73d720419ccf76e745eca50b1982d256",
+    "bytes": 236
+  },
+  "focused171-lazy-v1/logical-parallel.command": {
+    "sha256": "153868ac34aab876ea2ee43292ab5d9ed3f3361b450be4af1fb3f92443146f5e",
+    "bytes": 84
+  },
+  "focused171-lazy-v1/logical-parallel.log": {
+    "sha256": "92442c9e76b2fced4837810b491ffb914c6ba54e8b103f89d700ff61b49a6808",
+    "bytes": 438
+  },
+  "focused171-lazy-v1/logical-prepared-stream-binary.json": {
+    "sha256": "b7145ed2c29cdef4c0a26e52de6093c795d06035a33f68c0d2456aaa94dba35c",
+    "bytes": 237
+  },
+  "focused171-lazy-v1/logical-prepared-stream.command": {
+    "sha256": "0677d5c1f85f3af53175ad6fcdc4a0345252f60818e79bd3fb642312031206a8",
+    "bytes": 113
+  },
+  "focused171-lazy-v1/logical-prepared-stream.log": {
+    "sha256": "d8e4c23413274d8f9f2a8a9a3e999d2a2a8fb4bbbc497e9aa68c137dccfa9dd2",
+    "bytes": 356
+  },
+  "focused171-lazy-v1/parallel-binary.json": {
+    "sha256": "8a552247ffed6e2c6993cfb8e7990ae2167525dcdc73089bdbf0b57ab3e265ad",
+    "bytes": 236
+  },
+  "focused171-lazy-v1/parallel.command": {
+    "sha256": "a49a9a390cc9dfb5ecb3165e65e07bda89876902c2ed6d2140354b1799084923",
+    "bytes": 120
+  },
+  "focused171-lazy-v1/parallel.log": {
+    "sha256": "99efa389f2306867efa087d7a72754af463bb2f835dd0886eb8bbc7e7a5244c4",
+    "bytes": 1088
+  },
+  "focused171-lazy-v1/source.patch": {
+    "sha256": "274ed69ae8433cdae5d37bb3c1e598efccc888db3cb98e7707ef762b65bf9178",
+    "bytes": 7719
+  },
+  "focused171-lazy-v1/source.txt": {
+    "sha256": "78174d17a36dd2b5d156154ad2a3f9a0b63682b00cd81be8f3e76329a7b55bcb",
+    "bytes": 41
+  },
+  "focused171-lazy-v1/startup-controls.json": {
+    "sha256": "8c5990d0d140dcc55d34df3c51bbd7871900128607ceec7bf79605eac0cb224f",
+    "bytes": 244
+  },
+  "focused171-lazy-v1/tree.txt": {
+    "sha256": "63c6acfff48b73fbc9798cc5dec5f150392097ad0d46985d69cca92fc94f4d60",
+    "bytes": 41
+  },
+  "focused171-lazy-v1/wrapper.log": {
+    "sha256": "ba6322e432cd8351de522e4d1ba66d1644e49a7763847ad2153b7129e675e88f",
+    "bytes": 1645
   },
   "green165r2/a165_cursor_edges.out": {
     "sha256": "d5645e686147eee401fe7c0fbaea659eb0cbfd9dfb5107538dc4f08c11c3caa6",
@@ -1138,6 +1270,22 @@
   "green165v2/source.patch": {
     "sha256": "e8ff98a4a6f50ffb178b9bd8bd21f8dc58b2c9deb9cc94e634785579ec7c4f16",
     "bytes": 31575
+  },
+  "lazy171-candidate/applied-a6fe-correction.patch": {
+    "sha256": "5c9432ebaaccd3d9970da09444fb4bec3e3d7226574499afd05dffb4dc7e6341",
+    "bytes": 13746
+  },
+  "lazy171-candidate/candidate-backup.json": {
+    "sha256": "482811eadd13e1d0005c88a3e2d2b6f6a3bf020516c7195a1d2e1993e6152d8d",
+    "bytes": 271
+  },
+  "lazy171-candidate/net-c861-candidate.patch": {
+    "sha256": "274ed69ae8433cdae5d37bb3c1e598efccc888db3cb98e7707ef762b65bf9178",
+    "bytes": 7719
+  },
+  "lazy171-candidate/source-scope-audit.json": {
+    "sha256": "27c8bf745ea6ee7c4cafc4b169a8649af62ecf42d7dab851105952d379b871fa",
+    "bytes": 1046
   },
   "lock-fix/r2-NOTES.md": {
     "sha256": "a565936afd8b717c5a868105bd56945ed9787d02c50944f3b596f1189fdabef0",
@@ -1643,6 +1791,10 @@
     "sha256": "2407c9207f7f714d156a686597c8a11b8066489ef2c1f67cd435f5a38ea0c0f2",
     "bytes": 4776
   },
+  "runners/PLANNER171-LAZY-HANDOFF.md": {
+    "sha256": "2be3d52e62f1898bed30404d3e67f4665900d0543d247e71ef6bd2336f02cb3a",
+    "bytes": 3744
+  },
   "runners/R3-CASE-MATRIX.md": {
     "sha256": "bab38282c8248db553c43a488f9557d875c95d9a507fb231bf1238c68fbe21bf",
     "bytes": 2489
@@ -1670,6 +1822,10 @@
   "runners/audit165-v3-terminal.py": {
     "sha256": "db687d1b4d303bc178e1f8e7b834df5e8679ac5f658dd82b1738f4ed6e47a2d3",
     "bytes": 4051
+  },
+  "runners/audit171-focused-terminal.py": {
+    "sha256": "3189473fd02799463447a107dd4548573d81ce3736c227c078d07926a6b73f2b",
+    "bytes": 4298
   },
   "runners/baseline171-v1.sh": {
     "sha256": "d09c1ad3b53acfc0b0af8ced1d05d55b644500748dbc1997eb9e57a4d82e1149",
@@ -1794,6 +1950,18 @@
   "runners/focus171-v1.sh": {
     "sha256": "f8ad2b093f2bfb5e4e9655a5c0e922ea570655f248c6cfd399b5331a3692eeea",
     "bytes": 1988
+  },
+  "runners/focused171-lazy-v1-frozen.sha256": {
+    "sha256": "27e0dd514be0cac4f9fd20bbf3ff983fcbbfd1ae25d99d3ff426c54c0a18c191",
+    "bytes": 311
+  },
+  "runners/focused171-lazy-v1-plan.json": {
+    "sha256": "9bc9e1c826aab34382d760456c399860085626af71efe4521c073bd2a39eec3a",
+    "bytes": 525
+  },
+  "runners/focused171-lazy-v1.sh": {
+    "sha256": "cbec3120f661289bb19dc8cc5a043371c36639dd403db9603d5d4a2ec61ef681",
+    "bytes": 5220
   },
   "runners/footprint.sh": {
     "sha256": "afc925795bcc33c12ed2392ed9684d81b83ca8966227c4341577501c2064dd21",

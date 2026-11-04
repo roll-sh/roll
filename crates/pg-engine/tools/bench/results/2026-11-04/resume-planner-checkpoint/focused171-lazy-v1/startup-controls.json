@@ -1,0 +1,20 @@
+{
+  "pid": 1305671,
+  "affinity": [
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    18,
+    19
+  ],
+  "nice": 19,
+  "jobs": "2",
+  "threads": "2",
+  "global_slots": "4",
+  "global_jobs": "2",
+  "free_kib": 164710712,
+  "disk_floor_gib": 30
+}

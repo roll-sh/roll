@@ -1,0 +1,8 @@
+{
+  "candidate_library_warnings": 10,
+  "recorded_c861_release_alltarget_warnings": 14,
+  "candidate_extra_vs_recorded_multiset": [],
+  "same_library_prefix_multiset": true,
+  "comparison_scope": "Read-only against completed c861 release/all-target output;no fresh library-only baseline execution",
+  "candidate_changed_production_warning_paths": []
+}

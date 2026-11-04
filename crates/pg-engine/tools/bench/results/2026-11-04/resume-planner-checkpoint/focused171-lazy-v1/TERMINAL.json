@@ -1,0 +1,224 @@
+{
+  "observed_utc": "2026-11-04T21:10:05.194542+00:00",
+  "source": "cac0933bc4eb5ef87674889542cab271de4615d0",
+  "tree": "bd48e5074887125072d7c23cb09c78fe6fe15c0b",
+  "clean": true,
+  "status": "FOCUSED PASS",
+  "wrapper_exit": 0,
+  "command_exits": {
+    "generic": 0,
+    "parallel": 0,
+    "logical-parallel": 0,
+    "logical-prepared-stream": 0,
+    "kept": 0,
+    "cost-golden": 0,
+    "clippy": 0
+  },
+  "stages": {
+    "generic": {
+      "status": "PASS",
+      "command_exit": 0,
+      "summaries": [
+        [
+          "ok",
+          "1",
+          "0",
+          "0"
+        ]
+      ],
+      "binary": {
+        "binary": "/home/meszmate/.cache/a171/target/debug/deps/kept_plans-b343836d3bffe0ca",
+        "sha256": "9ccfe28d6641705bd27f3786fc5b7ff35f3b800802d0d5256fcf4ef99337d1ae",
+        "mtime_ns": 1793826440100393256,
+        "crate_compiling": true
+      },
+      "binary_matches": true
+    },
+    "parallel": {
+      "status": "PASS",
+      "command_exit": 0,
+      "summaries": [
+        [
+          "ok",
+          "1",
+          "0",
+          "0"
+        ]
+      ],
+      "binary": {
+        "binary": "/home/meszmate/.cache/a171/target/debug/deps/parallel_scan-e11614aaa9489d66",
+        "sha256": "5a19a6fac1ba9d9b985c52a9fb0550b598c414681888051d0109208f871c3254",
+        "mtime_ns": 1793826443936350683,
+        "crate_compiling": true
+      },
+      "binary_matches": true
+    },
+    "logical-parallel": {
+      "status": "PASS",
+      "command_exit": 0,
+      "summaries": [
+        [
+          "ok",
+          "1",
+          "0",
+          "0"
+        ]
+      ],
+      "binary": {
+        "binary": "/home/meszmate/.cache/a171/target/debug/deps/logical_apply-d31cbaf3a1aa102e",
+        "sha256": "3c442e686a41483a2347a846c88d0ee2804415ea963556121fb02574109bf96d",
+        "mtime_ns": 1793826488803853022,
+        "crate_compiling": true
+      },
+      "binary_matches": true
+    },
+    "logical-prepared-stream": {
+      "status": "PASS",
+      "command_exit": 0,
+      "summaries": [
+        [
+          "ok",
+          "1",
+          "0",
+          "0"
+        ]
+      ],
+      "binary": {
+        "binary": "/home/meszmate/.cache/a171/target/debug/deps/logical_apply-d31cbaf3a1aa102e",
+        "sha256": "3c442e686a41483a2347a846c88d0ee2804415ea963556121fb02574109bf96d",
+        "mtime_ns": 1793826488803853022,
+        "crate_compiling": false
+      },
+      "binary_matches": true
+    },
+    "kept": {
+      "status": "PASS",
+      "command_exit": 0,
+      "summaries": [
+        [
+          "ok",
+          "8",
+          "0",
+          "0"
+        ]
+      ],
+      "binary": {
+        "binary": "/home/meszmate/.cache/a171/target/debug/deps/kept_plans-b343836d3bffe0ca",
+        "sha256": "9ccfe28d6641705bd27f3786fc5b7ff35f3b800802d0d5256fcf4ef99337d1ae",
+        "mtime_ns": 1793826440100393256,
+        "crate_compiling": false
+      },
+      "binary_matches": true
+    },
+    "cost-golden": {
+      "status": "PASS",
+      "command_exit": 0,
+      "summaries": [
+        [
+          "ok",
+          "3",
+          "0",
+          "0"
+        ]
+      ],
+      "binary": {
+        "binary": "/home/meszmate/.cache/a171/target/debug/deps/golden-9749ad749af5ca1c",
+        "sha256": "30ba674b4f7923e6708339a58c02044801515fc8e3a68522b089c661cc3c5edc",
+        "mtime_ns": 1793826508543634245,
+        "crate_compiling": true
+      },
+      "binary_matches": true
+    },
+    "clippy": {
+      "status": "PASS",
+      "command_exit": 0,
+      "summary": {
+        "command_exit": 0,
+        "build_finished_success": true,
+        "errors": 0,
+        "warnings": [
+          {
+            "message": "length comparison to zero",
+            "code": "clippy::len_zero",
+            "paths": [
+              "crates/pg-engine/src/sql/binder/expr.rs"
+            ]
+          },
+          {
+            "message": "this loop could be written as a `while let` loop",
+            "code": "clippy::while_let_loop",
+            "paths": [
+              "crates/pg-engine/src/sql/binder/fold.rs"
+            ]
+          },
+          {
+            "message": "the `Err`-variant returned from this function is very large",
+            "code": "clippy::result_large_err",
+            "paths": [
+              "crates/pg-engine/src/sql/binder/optimize.rs"
+            ]
+          },
+          {
+            "message": "the loop variable `j` is used to index `rkeys`",
+            "code": "clippy::needless_range_loop",
+            "paths": [
+              "crates/pg-engine/src/sql/paths/joinpath/partitionwise.rs"
+            ]
+          },
+          {
+            "message": "this `if` statement can be collapsed",
+            "code": "clippy::collapsible_if",
+            "paths": [
+              "crates/pg-engine/src/sql/explain.rs"
+            ]
+          },
+          {
+            "message": "float has excessive precision",
+            "code": "clippy::excessive_precision",
+            "paths": [
+              "crates/pg-engine/src/sql/func/math.rs"
+            ]
+          },
+          {
+            "message": "float has excessive precision",
+            "code": "clippy::excessive_precision",
+            "paths": [
+              "crates/pg-engine/src/sql/func/math.rs"
+            ]
+          },
+          {
+            "message": "float has excessive precision",
+            "code": "clippy::excessive_precision",
+            "paths": [
+              "crates/pg-engine/src/sql/func/math.rs"
+            ]
+          },
+          {
+            "message": "float has excessive precision",
+            "code": "clippy::excessive_precision",
+            "paths": [
+              "crates/pg-engine/src/sql/func/math.rs"
+            ]
+          },
+          {
+            "message": "float has excessive precision",
+            "code": "clippy::excessive_precision",
+            "paths": [
+              "crates/pg-engine/src/sql/func/math.rs"
+            ]
+          }
+        ],
+        "scope": "library Clippy only; no fresh parent warning-comparison run"
+      }
+    }
+  },
+  "problems": [],
+  "owned_process_group_absent": true,
+  "frozen_hashes_match": true,
+  "scope": "Only authorized focused debug tests and libraryClippy;NOTfullgates",
+  "full_gates": "NOTRUN;parentreview+decisionrequired",
+  "production_acceptance": false,
+  "performance_acceptance": false,
+  "serial_bound": "Original assertion unmodified; targeted outcomes do not establish cause of prior failure",
+  "controls": "startup and sampled actual compile/test descendants only;wrapper/heavy housekeeping unrestricted;no exhaustive isolation/performance claim"
+}

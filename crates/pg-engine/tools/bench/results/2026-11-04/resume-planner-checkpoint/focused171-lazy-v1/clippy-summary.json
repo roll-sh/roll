@@ -1,0 +1,78 @@
+{
+  "command_exit": 0,
+  "build_finished_success": true,
+  "errors": 0,
+  "warnings": [
+    {
+      "message": "length comparison to zero",
+      "code": "clippy::len_zero",
+      "paths": [
+        "crates/pg-engine/src/sql/binder/expr.rs"
+      ]
+    },
+    {
+      "message": "this loop could be written as a `while let` loop",
+      "code": "clippy::while_let_loop",
+      "paths": [
+        "crates/pg-engine/src/sql/binder/fold.rs"
+      ]
+    },
+    {
+      "message": "the `Err`-variant returned from this function is very large",
+      "code": "clippy::result_large_err",
+      "paths": [
+        "crates/pg-engine/src/sql/binder/optimize.rs"
+      ]
+    },
+    {
+      "message": "the loop variable `j` is used to index `rkeys`",
+      "code": "clippy::needless_range_loop",
+      "paths": [
+        "crates/pg-engine/src/sql/paths/joinpath/partitionwise.rs"
+      ]
+    },
+    {
+      "message": "this `if` statement can be collapsed",
+      "code": "clippy::collapsible_if",
+      "paths": [
+        "crates/pg-engine/src/sql/explain.rs"
+      ]
+    },
+    {
+      "message": "float has excessive precision",
+      "code": "clippy::excessive_precision",
+      "paths": [
+        "crates/pg-engine/src/sql/func/math.rs"
+      ]
+    },
+    {
+      "message": "float has excessive precision",
+      "code": "clippy::excessive_precision",
+      "paths": [
+        "crates/pg-engine/src/sql/func/math.rs"
+      ]
+    },
+    {
+      "message": "float has excessive precision",
+      "code": "clippy::excessive_precision",
+      "paths": [
+        "crates/pg-engine/src/sql/func/math.rs"
+      ]
+    },
+    {
+      "message": "float has excessive precision",
+      "code": "clippy::excessive_precision",
+      "paths": [
+        "crates/pg-engine/src/sql/func/math.rs"
+      ]
+    },
+    {
+      "message": "float has excessive precision",
+      "code": "clippy::excessive_precision",
+      "paths": [
+        "crates/pg-engine/src/sql/func/math.rs"
+      ]
+    }
+  ],
+  "scope": "library Clippy only; no fresh parent warning-comparison run"
+}

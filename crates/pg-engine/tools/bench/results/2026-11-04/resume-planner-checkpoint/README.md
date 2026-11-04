@@ -1,6 +1,19 @@
 # Recovery and OLTP165 review checkpoint (2026-11-04)
 
 
+LATEST171 LAZYCANDIDATEcac0933b isownerremote-backed/newbranch;netc861productiononly
+session/mod.rs+sql/paths.rs,tests2existingfiles,all4paths122+/1-. Exact7dc53892proposal
+appliedafterPG/correctedcontrols;removesParseprefill/ScanEst,usesfreshdescribeonlyat
+existingplan_costmiss;engine/parallel_part/parentlazyGathersunchanged. Focusedsuccessor
+TERMINALPASSall7commandexits0:generic1/5,registeredparallelboth2/2,eachoriginalfailing
+logical_applycase1PASS,wholekept8,costgoldenONEfileALL3modes3PASS,libraryClippy0/10
+warningsallunchangedpaths/noextrasvsrecordedc861librarysubset. Separateauditorverified
+actualsummaries/binaries/source/frozenhashes/ownedprocessgroupabsent. 15testexecutions/
+6summaries includesgenericagaininkept8;NOTfullgates. Originalserial-boundassertion
+unmodified/unattributed;targetedpassdoesnotestablishpriorcause. SourceacceptanceHELD
+pendingfreshindependentR2+parentdecision;no fullDEBUG/RELEASE/dist/unit/service/bench.
+
+
 LATEST171 REGISTEREDFIXTURE: originalfailedc861control usedconnect(1)withoutbackend
 registration. Identicalc861/a6feenginecode returns no workers forunregisteredleader.
 Separatefixturev2 e7d41432 addsregister/usePID/drop/unregister only;genericunchanged.

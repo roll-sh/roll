@@ -1,0 +1,9 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-ad5ff4bf47e789536/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.61s
+     Running tests/logical_apply.rs (/home/meszmate/.cache/a171/target/debug/deps/logical_apply-d31cbaf3a1aa102e)
+
+running 1 test
+test parallel_apply ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 6.71s
+

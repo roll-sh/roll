@@ -18,6 +18,19 @@ def git(*args, data=None, env=None):
 readme = '''# Recovery and OLTP165 review checkpoint (2026-11-04)
 
 
+LATEST171 LAZYCANDIDATEcac0933b isownerremote-backed/newbranch;netc861productiononly
+session/mod.rs+sql/paths.rs,tests2existingfiles,all4paths122+/1-. Exact7dc53892proposal
+appliedafterPG/correctedcontrols;removesParseprefill/ScanEst,usesfreshdescribeonlyat
+existingplan_costmiss;engine/parallel_part/parentlazyGathersunchanged. Focusedsuccessor
+TERMINALPASSall7commandexits0:generic1/5,registeredparallelboth2/2,eachoriginalfailing
+logical_applycase1PASS,wholekept8,costgoldenONEfileALL3modes3PASS,libraryClippy0/10
+warningsallunchangedpaths/noextrasvsrecordedc861librarysubset. Separateauditorverified
+actualsummaries/binaries/source/frozenhashes/ownedprocessgroupabsent. 15testexecutions/
+6summaries includesgenericagaininkept8;NOTfullgates. Originalserial-boundassertion
+unmodified/unattributed;targetedpassdoesnotestablishpriorcause. SourceacceptanceHELD
+pendingfreshindependentR2+parentdecision;no fullDEBUG/RELEASE/dist/unit/service/bench.
+
+
 LATEST171 REGISTEREDFIXTURE: originalfailedc861control usedconnect(1)withoutbackend
 registration. Identicalc861/a6feenginecode returns no workers forunregisteredleader.
 Separatefixturev2 e7d41432 addsregister/usePID/drop/unregister only;genericunchanged.
@@ -400,6 +413,13 @@ for artifact in sorted((D / 'parallel171-v2').rglob('*')):
         sources['parallel171-v2/' + str(artifact.relative_to(D / 'parallel171-v2'))] = str(artifact)
 sources['parallel171-v2/wrapper.log'] = str(D / 'parallel171-v2-wrapper.log')
 sources['runners/parallel171-v2.sh'] = str(D / 'parallel171-v2.sh')
+for campaign in ('lazy171-candidate', 'focused171-lazy-v1'):
+    for artifact in sorted((D / campaign).iterdir()):
+        if artifact.is_file():
+            sources[campaign + '/' + artifact.name] = str(artifact)
+sources['focused171-lazy-v1/wrapper.log'] = str(D / 'focused171-lazy-v1-wrapper.log')
+for name in ('focused171-lazy-v1.sh', 'focused171-lazy-v1-plan.json', 'focused171-lazy-v1-frozen.sha256', 'audit171-focused-terminal.py', 'PLANNER171-LAZY-HANDOFF.md'):
+    sources['runners/' + name] = str(D / name)
 for name, source in sources.items():
     files[name] = Path(source).read_bytes()
 files['manifest.json'] = (json.dumps({name: {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}

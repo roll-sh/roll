@@ -1,0 +1,16 @@
+{
+  "source": "cac0933bc4eb5ef87674889542cab271de4615d0",
+  "expected_tests": {
+    "generic": 1,
+    "parallel": 1,
+    "logical-parallel": 1,
+    "logical-prepared-stream": 1,
+    "kept": 8,
+    "cost-golden": 3
+  },
+  "clippy": "cargo clippy -p pg-engine --lib --message-format=json",
+  "stop_on_unexpected_failure": true,
+  "named_commands_once": true,
+  "full_gates": "NOTAUTHORIZED;freshindependentreview+parentterminaldecisionrequired",
+  "serial_bound": "unattributed;do not suppress or bypass assertion in source"
+}
