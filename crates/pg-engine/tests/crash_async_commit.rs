@@ -88,8 +88,8 @@ fn kill_during_async_commits() {
     let log = |p: &Path| std::fs::read_to_string(p.join("log")).unwrap_or_default();
     let last = |p: &Path, tag: &str| {
         log(p)
-            .lines()
-            .filter_map(|l| l.strip_prefix(tag).map(|k| k.parse::<i64>().unwrap()))
+            .split_inclusive('\n')
+            .filter_map(|l| l.strip_suffix('\n')?.strip_prefix(tag)?.parse::<i64>().ok())
             .max()
     };
     // Killed at a random moment of a stream of commits (after some synchronous ones), and

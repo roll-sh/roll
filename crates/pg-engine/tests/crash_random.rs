@@ -350,6 +350,18 @@ fn write_log(dir: &Path, log: &[bool]) {
     std::fs::File::open(&f).unwrap().sync_all().unwrap();
 }
 
+#[test]
+fn torn_acknowledgement_is_still_in_flight() {
+    let dir = tempfile::tempdir().unwrap();
+    for tail in ["1", "1 ", "1 c", "1 a"] {
+        std::fs::write(dir.path().join("steps"), format!("0 c\n{tail}")).unwrap();
+        assert_eq!(read_log(dir.path()), vec![true]);
+        append_log(dir.path(), 1, true);
+        assert_eq!(read_log(dir.path()), vec![true, true]);
+        assert_eq!(std::fs::read_to_string(dir.path().join("steps")).unwrap(), "0 c\n1 c\n");
+    }
+}
+
 /// `CRASH_ASYNC=1`: the child commits with synchronous_commit off.
 fn async_commit() -> bool {
     std::env::var("CRASH_ASYNC").is_ok_and(|v| v == "1")
