@@ -1,0 +1,6 @@
+4e588363d065aa9f12dc1b987d22dbf6742dcb9f	refs/heads/wip/combined-index-models-d62e3d3b
+e686696add25112c0d2ce33720bd84f0e04e21bf	refs/heads/wip/combined-index-models-encoding-plain-r3-d62e3d3b
+cace40de4b9df2af42b08027138d9830d17abe9f	refs/heads/wip/combined-index-models-encoding-proof-r2-d62e3d3b
+b43e47a5ba581ac72254d15f39bf7ae4389f35b3	refs/heads/wip/combined-index-models-red-proof-r1-d62e3d3b
+b56ed0fb4c9a6113cfef09504e2b695a1cf17b70	refs/heads/wip/combined-index-models-red-proof-r2-d62e3d3b
+e25c258e759feb28ccb247fa8b10cc25bc7e5810	refs/heads/wip/combined-index-models-source-r1-d62e3d3b

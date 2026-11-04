@@ -1,0 +1,8 @@
+{
+  "commit": "e686696add25112c0d2ce33720bd84f0e04e21bf",
+  "changed_file_hashes_verified": 39,
+  "snapshot_files_verified": 2501,
+  "remote": "e686696add25112c0d2ce33720bd84f0e04e21bf\trefs/heads/wip/combined-index-models-encoding-plain-r3-d62e3d3b\n",
+  "production_matches_cace": true,
+  "scope": "Test-only6/-2delta reviewed; source/encodingoracle still requires runtime"
+}

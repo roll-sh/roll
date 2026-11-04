@@ -1,0 +1,36 @@
+diff --git a/crates/pg-engine/src/exec/sizing/kept.rs b/crates/pg-engine/src/exec/sizing/kept.rs
+index b97cda07..b6fd42de 100644
+--- a/crates/pg-engine/src/exec/sizing/kept.rs
++++ b/crates/pg-engine/src/exec/sizing/kept.rs
+@@ -839,8 +839,8 @@ mod tests {
+         }
+     }
+ 
+-    // Unrun: short individual values avoid index compression; their combined size
+-    // fits in LATIN1 but exceeds 2704 in UTF8. No PG size/layout oracle is claimed.
++    // Unrun: PLAIN prevents heap compression; short values avoid index compression.
++    // The entry fits in LATIN1 but exceeds 2704 in UTF8. No PG oracle is claimed.
+     #[test]
+     fn combined_index_worker_database_encoding() {
+         use crate::exec::rowsize::observe;
+@@ -858,16 +858,20 @@ mod tests {
+                     assert_eq!(s.query("SHOW server_encoding").unwrap()[0].rows, vec![vec![Value::text(encoding)]]);
+                     let columns = (0..16).map(|i| format!("p{i} text")).collect::<Vec<_>>().join(", ");
+                     let include = (0..16).map(|i| format!("p{i}")).collect::<Vec<_>>().join(", ");
++                    let storage = (0..16).map(|i| format!("ALTER TABLE ce ALTER COLUMN p{i} SET STORAGE PLAIN;")).collect::<Vec<_>>().join("\n");
+                     let payload = vec!["repeat('é', 120)"; 16].join(", ");
+                     s.query(&format!("CREATE TABLE ce(k int, {columns}) WITH (parallel_workers=2);
++                        {storage}
+                         INSERT INTO ce SELECT g, {payload} FROM generate_series(1,6000) g")).unwrap();
+                     let t = s.state.db.catalog().tables.values().find(|t| t.name == "ce").unwrap().clone();
++                    assert!(t.columns.iter().skip(1).all(|c| c.storage == Some('p')));
+                     assert!(!is_estimated(t.oid, &s.state.db));
+                     assert!(heap_writes(t.oid, &s.state.db).is_some());
+                     let bytes = if encoding == "LATIN1" { 120 } else { 240 };
+                     assert_eq!(s.query("SELECT octet_length(p0), length(p0) FROM ce WHERE k=1").unwrap()[0].rows,
+                         vec![vec![Value::Int4(bytes), Value::Int4(120)]]);
+                     let leader_encoding = crate::types::collation::database_encoding();
++                    assert_eq!(crate::types::mbconv::server::name(leader_encoding), encoding);
+                     let (result, trace) = observe::capture(workers == 2, || s.query(&format!("CREATE INDEX ce_i ON ce(k) INCLUDE({include})")));
+                     eprintln!("combined_index_worker_database_encoding encoding={encoding} workers={workers}: {trace:#?}");
+                     assert_eq!(crate::types::collation::database_encoding(), leader_encoding);

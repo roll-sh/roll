@@ -1,0 +1,61 @@
+{
+  "time": "2026-11-04T19:58:10.794509+00:00",
+  "shared_source": "fe7b0023c9df19a6dae1e6067ba8454998db48c5",
+  "integration": "HELD; no owner sources integrated in this turn",
+  "performance": "NO broad performance acceptance",
+  "lanes": {
+    "165": {
+      "source": "c8618834",
+      "owner_report": "All9commands terminal0; parentaudited381files380hashes exactraw455/0/18/61debug+release anddistbinary/unit24/5; standaloneverificationCOMPLETE",
+      "limits": "Earlierwire101/R2LOWs retained; no parentintegration/service/performance acceptance"
+    },
+    "167": {
+      "source": "d9e2279c",
+      "focused": "PASS golden3modes/reordered1/libClippy0 ownerseal7eff5c45",
+      "new_review": "R4 N1 static plausible MEDIUM nested InitPlan undercount; owner cache-only preparation assigned; reviewer stale runtime paragraphs corrected",
+      "full": "UNRUN on d9e; original278crash101/pgunitNOTRUN remain independent"
+    },
+    "170": {
+      "source": "1b6a80b9",
+      "focused": "PASS5+2+25/libClippy ownerseal a313c23a",
+      "review": "No newHIGH/MEDIUM in range; measured-parbuild rawheap sizing staticMEDIUM outside range now parent-owned; historicalphysicalfidelity held",
+      "full": "UNRUN on successor"
+    },
+    "163_combined": {
+      "candidate": "e686696a testonly successor of cace;39changedblobhashes/2501snapshotinputs verified and exactremote",
+      "behavioral_red": "b56 actualcompiled101;2workers6000modelreturns0validations; seal4bf103ca",
+      "invalid_attempt": "First intendedcace reusedredbinary invalid; seal834a37fa, no sourceattribution",
+      "actual_green": "cace recompiled fromintendedsnapshot; 28serialparallelcases14realworkerbuilds PASS; exactdifferentbinarybb597bdb; parenttrace/sourceaudit seal0a4f017d",
+      "runtime_obligation": "Focused originalmodeledsizevalidation proof achieved; PG2896/3016/TID oracle/P6-P12/finalacceptance pending",
+      "next": "Delegated frozen e686 selected3tests then fullLIB193pass2ignore onlyifselectedpasses,2testthreads; existinga170target/CPUs4-7,22-25/nice19/jobs2",
+      "encoding": "R3 no productionobjection; PLAIN fixture correctione686 unrun, measuredencodingcoverage/parscanTLS held",
+      "separate_gaps": "Measuredparbuild rawTOASTheapsizing MEDIUM remains outsideoriginalmodeledHIGH; newstats oracle pending"
+    },
+    "166": {
+      "bounded": "PASS",
+      "acceptance": "coverage/perf/finalintegration pending"
+    },
+    "169": {
+      "correctness": "PASS",
+      "performance": "HOLD/INCONCLUSIVE memory/indexoutlier/close topology"
+    },
+    "148": {
+      "performance": "HOLD/INCONCLUSIVE invalidfalsezero"
+    },
+    "149": {
+      "correctness": "focused endpointPASS",
+      "performance": "originalDDL101 unresolved; isolatedtargetNOTRUN/DEFERRED"
+    },
+    "171": {
+      "source": "a6fe3e4e on c861",
+      "focused": "3modes of1realSQLfile +kept7PASS ownerreported",
+      "full": "Pinned fulldebug running lastreported; exactfrozen455map expected, no inferpass",
+      "review": "Two introducedMEDIUMs: Parse-time Gather/settings drift and stalegenericcost atchoice; mechanicaltransplant exact",
+      "action": "Owner told keep source/runnerunchanged untilterminal/export; cache-only minimal lazyfix design/repros requested",
+      "customANY_IN": "Earliercorrectnessdiscrepancies retained, no timing"
+    },
+    "172": "Baseline/research closure queued"
+  },
+  "crash_diagnostic": "R1review found3HIGH diagnostic-onlyproblems; cache-onlyr2 13payloads parenthashverified+backed, freshR2review active; NO runtime",
+  "latest_parent_backup": "0a4f017d4f1bcc506312d1c4f64e4b9975d58ed8"
+}
