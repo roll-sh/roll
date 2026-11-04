@@ -1,5 +1,5 @@
--- Zero planner costs avoid prefetching the outer row before the volatile hash build.
--- The INNER join must narrow the direct catalog scan to its build-side namespace keys.
+-- Zero costs select the PostgreSQL reference shape. The engine uses fixed CPU costs.
+-- The Rust contract test controls build-first execution on a clone of the engine plan.
 SET enable_nestloop = off;
 SET enable_mergejoin = off;
 SET enable_indexscan = off;
