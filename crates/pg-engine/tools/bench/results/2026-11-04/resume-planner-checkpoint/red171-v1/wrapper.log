@@ -1,0 +1,8 @@
+generic	101
+/home/meszmate/.cache/pg-engine-resume-20261104/session_planner/red171-v1/fixtures.patch: OK
+/home/meszmate/.cache/pg-engine-resume-20261104/session_planner/red171-v1.sh: OK
+parallel	101
+/home/meszmate/.cache/pg-engine-resume-20261104/session_planner/red171-v1/fixtures.patch: OK
+/home/meszmate/.cache/pg-engine-resume-20261104/session_planner/red171-v1.sh: OK
+RED171-EXPECTED-FAILURES-CONFIRMED
+HEAVY-EXIT 0

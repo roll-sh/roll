@@ -1,0 +1,22 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-ad5ff4bf47e789536/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.71s
+     Running tests/kept_plans.rs (/home/meszmate/.cache/a171/target/debug/deps/kept_plans-b343836d3bffe0ca)
+
+running 1 test
+Parse seq_page_cost=500; six Binds after RESET: [Int8(0), Int8(6)]
+
+thread 'generic_cost_uses_choice_context_after_parse' (144695) panicked at crates/pg-engine/tests/kept_plans.rs:328:5:
+assertion `left == right` failed
+  left: (Int8(0), Int8(6))
+ right: (Int8(1), Int8(5))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test generic_cost_uses_choice_context_after_parse ... FAILED
+
+failures:
+
+failures:
+    generic_cost_uses_choice_context_after_parse
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.17s
+
+error: test failed, to rerun pass `-p pg-engine --test kept_plans`

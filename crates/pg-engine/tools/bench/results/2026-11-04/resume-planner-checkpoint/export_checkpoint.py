@@ -17,6 +17,15 @@ def git(*args, data=None, env=None):
 
 readme = '''# Recovery and OLTP165 review checkpoint (2026-11-04)
 
+
+171 UPDATE: fulla6fe FAILEDdebug101,partial305pass/2fail/9ignored/33summaries;
+release/Clippy/dist/unitNOTRUN. Separateboundedbehavioralreds reachedassertions:
+generic0/6versus1/5;both Parse/Bindparallelsettingcases0/0workers versus2/2despite
+currentEXPLAINGather2andcorrectrows. Eachcommand101with0pass/1fail,notcompilefailure.
+Productiona6feunchanged;twofixturefilesonly,WIPeb548388remoteverified. RootPGoracle
+pending;no parentbaseline execution or productionrepair yet. Session-onlydesign removes
+eagercost/ScanEst,usesfreshdescribeonlyexistingplan_costcachemiss;parallel_partunchanged.
+
 Evidence only. No source candidate is accepted and no performance advantage is claimed.
 Only completed command outputs are exported. Ongoing diagnostic probe output is excluded.
 
@@ -354,6 +363,12 @@ sources['check165ind-v3/wrapper.log'] = str(D / 'check165ind-v3-wrapper.log')
 for name in ('source.txt', 'tree.txt', 'initial.status', 'startup-controls.json', 'toolchain.txt', 'debug-test.command', 'debug-test.log', 'debug-test-partial-summary.json', 'exits.tsv', 'affinity-observation-debug.json', 'TERMINAL.json'):
     sources['check171-chosen-v1/' + name] = str(D / 'check171-chosen-v1' / name)
 sources['check171-chosen-v1/wrapper.log'] = str(D / 'check171-chosen-v1-wrapper.log')
+for artifact in sorted((D / 'red171-v1').iterdir()):
+    if artifact.is_file():
+        sources['red171-v1/' + artifact.name] = str(artifact)
+sources['red171-v1/wrapper.log'] = str(D / 'red171-v1-wrapper.log')
+for name in ('171-LAZY-COST-DESIGN-pre-session-only.md', '171-regression-fixtures.py', '171-fixture-backup.json', '171-oracle-frozen-fixtures.json', 'red171-v1.sh'):
+    sources['runners/' + name] = str(D / name)
 for name, source in sources.items():
     files[name] = Path(source).read_bytes()
 files['manifest.json'] = (json.dumps({name: {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}

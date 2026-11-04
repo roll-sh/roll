@@ -1,5 +1,14 @@
 # Recovery and OLTP165 review checkpoint (2026-11-04)
 
+
+171 UPDATE: fulla6fe FAILEDdebug101,partial305pass/2fail/9ignored/33summaries;
+release/Clippy/dist/unitNOTRUN. Separateboundedbehavioralreds reachedassertions:
+generic0/6versus1/5;both Parse/Bindparallelsettingcases0/0workers versus2/2despite
+currentEXPLAINGather2andcorrectrows. Eachcommand101with0pass/1fail,notcompilefailure.
+Productiona6feunchanged;twofixturefilesonly,WIPeb548388remoteverified. RootPGoracle
+pending;no parentbaseline execution or productionrepair yet. Session-onlydesign removes
+eagercost/ScanEst,usesfreshdescribeonlyexistingplan_costcachemiss;parallel_partunchanged.
+
 Evidence only. No source candidate is accepted and no performance advantage is claimed.
 Only completed command outputs are exported. Ongoing diagnostic probe output is excluded.
 

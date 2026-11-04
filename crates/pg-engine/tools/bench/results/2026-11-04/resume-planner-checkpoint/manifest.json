@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "7a476133489b485561c3b1bf48bc18d0afe2a373a75265736bcee419a0e20bac",
-    "bytes": 15068
+    "sha256": "318996049fd056e8fdbcc562e321933bebfc72787a44bee519a6d997e04d239a",
+    "bytes": 15661
   },
   "bytea165compare/RESTORED": {
     "sha256": "cfeb0d7a74ac20eb1d46d347c00db409be5f9c5b47ca77e388b2e494a65d91c3",
@@ -684,8 +684,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "6a50eaa26ef2a00eca8f6d537e0271130a0ee294c1d439e83bde20850dd907e6",
-    "bytes": 30889
+    "sha256": "21e93433a2f8d90a63fb0f203bc4321fa1bf639b8611b8411e3832968871bf90",
+    "bytes": 31905
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -1295,6 +1295,58 @@
     "sha256": "e0c3453952b59f524210e2ca71e46c445adb01cf9549dda328a0270cac224056",
     "bytes": 3903
   },
+  "red171-v1/TERMINAL.json": {
+    "sha256": "314d8502679b0a7c6f7ba370a7b7f3a59650a9a0fc14fee4ad43671afdf8548c",
+    "bytes": 739
+  },
+  "red171-v1/current.patch": {
+    "sha256": "2a0032bd6b5c33d0a79bf798c59a8010e92aadc9c9e5e93de7e5be76a68d4725",
+    "bytes": 4309
+  },
+  "red171-v1/exits.tsv": {
+    "sha256": "c71e6be4aee5465a2bb44b85c0fb1eb85d82ad761e887191185b52682536413d",
+    "bytes": 25
+  },
+  "red171-v1/fixtures.patch": {
+    "sha256": "2a0032bd6b5c33d0a79bf798c59a8010e92aadc9c9e5e93de7e5be76a68d4725",
+    "bytes": 4309
+  },
+  "red171-v1/frozen.sha256": {
+    "sha256": "9dba444166d290c167772b8e3f248cd3f089bcea4848314e581f8df57cab7b22",
+    "bytes": 298
+  },
+  "red171-v1/generic.command": {
+    "sha256": "4098bf2cd2983e9df21cb1b9afad8be107ee8619e8aecec93cf0f198c39aa952",
+    "bytes": 110
+  },
+  "red171-v1/generic.log": {
+    "sha256": "d4a4dc6d703d45b68fa03ce053c7a3807f7e874186957535f062d9178ed11fa2",
+    "bytes": 959
+  },
+  "red171-v1/parallel.command": {
+    "sha256": "d6cd522123e31329e3febe1f1e0d5ac523fcf516c01330fad28bbc354af7bd88",
+    "bytes": 119
+  },
+  "red171-v1/parallel.log": {
+    "sha256": "225ec830430b2c7b76946354f01904b6823e8853207fc05dbfd5835419bd85f4",
+    "bytes": 1737
+  },
+  "red171-v1/production.patch": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  "red171-v1/source.txt": {
+    "sha256": "d09d28070c3260e34310ba71d4d8ba3652f95c828aa4a6208a04011a2a2aec30",
+    "bytes": 41
+  },
+  "red171-v1/startup-controls.json": {
+    "sha256": "2abfc3c66d33ccd0f096a84f15a066ab9034592266d5d814c84ce1e75473cce5",
+    "bytes": 149
+  },
+  "red171-v1/wrapper.log": {
+    "sha256": "4409070528e5249d7aca2869b2fd67ceeaf88cb77af0311b1588dc1271c2d0bc",
+    "bytes": 421
+  },
   "review165/exits.tsv": {
     "sha256": "590e981aad8108c0420b664caf96c614afb92a3dd4ea61fa456ca11510abfe14",
     "bytes": 82
@@ -1339,9 +1391,21 @@
     "sha256": "8803e21fb4a4afe7a6aa24c03dd16ad5f73b3a7ff460cb0e1b8b4cd21ace0a8f",
     "bytes": 178
   },
-  "runners/171-LAZY-COST-DESIGN.md": {
+  "runners/171-LAZY-COST-DESIGN-pre-session-only.md": {
     "sha256": "7cb5519ef9c4ed0c6b0f3195d84a75888506b121f0053e84db23131171fe7d58",
     "bytes": 4551
+  },
+  "runners/171-LAZY-COST-DESIGN.md": {
+    "sha256": "127d649d14399b2b3d3a3f1ec0e950271aed01dbbfad5edb6729b6d07b2edb5f",
+    "bytes": 4788
+  },
+  "runners/171-fixture-backup.json": {
+    "sha256": "fde5abefd50fd7af0aedd275437ffdd7c72543faf7de7a1507634441b720e262",
+    "bytes": 209
+  },
+  "runners/171-oracle-frozen-fixtures.json": {
+    "sha256": "c044754c1f695cf92cbfe2ca983b938a2ad2a22c785c4f836832e07f56f93c22",
+    "bytes": 204
   },
   "runners/171-parse-bind-generic.sql": {
     "sha256": "95f51126182f5dbd95750b09b77e664f73cf9089d9cd7e793ae3fc99c5584fcd",
@@ -1350,6 +1414,10 @@
   "runners/171-parse-bind-parallel.sql": {
     "sha256": "5c6cad4a10c8b59420038ca15b12d7a713364c037ac32336d53ccf84f7220220",
     "bytes": 1534
+  },
+  "runners/171-regression-fixtures.py": {
+    "sha256": "e95c3776b8fdb2caf5a7f5895056988fd723ba970ef7377b3739fc090a2f92eb",
+    "bytes": 3918
   },
   "runners/BENCH-PLAN.md": {
     "sha256": "d6b9bc53b55af8be29c09ffbcbab84fedbaf093334579e25e702600b3d9bf5ef",
@@ -1634,6 +1702,10 @@
   "runners/red165r3.sh": {
     "sha256": "dc9aaf8b39329b4d1f7af1efccb38fa2813e184cbeb7cc20e663221883303818",
     "bytes": 2084
+  },
+  "runners/red171-v1.sh": {
+    "sha256": "7ae3442aa569fea7c13cca278d2473dc00d9db0db0f9c74fdbf4353428da5de3",
+    "bytes": 1988
   },
   "runners/review165.sh": {
     "sha256": "42e97f5aaea2826762dc64f0565d025f99c6a5d2315e8aa442acfa5470236693",

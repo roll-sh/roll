@@ -1,0 +1,21 @@
+{
+  "source": "a6fe3e4e626b0552c14320c18211886d1b16ad38",
+  "production_unchanged": true,
+  "fixtures_patch_sha256": "2a0032bd6b5c33d0a79bf798c59a8010e92aadc9c9e5e93de7e5be76a68d4725",
+  "wrapper_pid144108_absent": true,
+  "generic": {
+    "command_exit": 101,
+    "passed": 0,
+    "failed": 1,
+    "assertion": "generic/custom0/6 expected1/5;correct rows"
+  },
+  "parallel": {
+    "command_exit": 101,
+    "passed": 0,
+    "failed": 1,
+    "assertion": "both settings-change cases launched0/0 expected2/2;currentEXPLAINGather2/correctone row"
+  },
+  "runner_exit": 0,
+  "runner_zero_meaning": "both expected failing behavioral assertions reached;not source acceptance",
+  "parent_pg_oracle": "pending;no baseline/repair until terminal"
+}
