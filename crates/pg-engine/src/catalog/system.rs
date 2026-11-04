@@ -2130,15 +2130,345 @@ pub fn class_rows_named(ctx: &ExecCtx, bounds: &NameBounds) -> Result<Option<Vec
     Ok(Some(rows))
 }
 
+/// A pg_class row's oid, relnamespace, relkind and relname: what the statistics views read of
+/// it (`stat_views`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClassKey {
+    pub oid: u32,
+    pub schema: u32,
+    pub kind: u8,
+    pub name: Value,
+    /// reltoastrelid.
+    pub toast: u32,
+}
+
+/// Which of pg_class's relations `class_keys` reads.
+#[derive(Clone, Copy, Debug)]
+pub enum ClassSel<'a> {
+    All,
+    /// The relation of this oid.
+    Oid(u32),
+    /// The relations of this name, in any schema.
+    Named(&'a str),
+}
+
+/// The relkinds (empty: all) and namespaces `class_keys` keeps: the maps holding no kind kept
+/// aren't visited, and a relation's name is made only once it is kept.
+#[derive(Clone, Copy)]
+pub struct ClassKeep<'a> {
+    pub kinds: &'a [u8],
+    pub schema: Option<&'a dyn Fn(u32) -> bool>,
+}
+
+impl ClassKeep<'_> {
+    pub const ALL: ClassKeep<'static> = ClassKeep { kinds: &[], schema: None };
+
+    fn kind(&self, k: u8) -> bool {
+        self.kinds.is_empty() || self.kinds.contains(&k)
+    }
+
+    fn keeps(&self, kind: u8, schema: u32) -> bool {
+        self.kind(kind) && self.schema.is_none_or(|f| f(schema))
+    }
+}
+
+/// pg_class's `ClassKey`s of the relations `sel` picks that `keep` keeps, in no order, read
+/// from the relation maps without generating pg_class's rows (a statistics view's first read
+/// made them all: 190 ms at 10,000 tables against PostgreSQL's 40), a name through the
+/// catalog's name index and an oid by its map. None: a superuser's UPDATE moved rows' oids
+/// (`Catalog::rel_oid_edits`), which only the generated rows show.
+pub fn class_keys(ctx: &ExecCtx, sel: ClassSel, keep: ClassKeep) -> Option<Vec<ClassKey>> {
+    class_keys_checked(ctx, sel, keep, true)
+}
+
+/// `class_keys`, checked against pg_class's generated rows in debug builds when `check`.
+fn class_keys_checked(ctx: &ExecCtx, sel: ClassSel, keep: ClassKeep, check: bool) -> Option<Vec<ClassKey>> {
+    let _ = check;
+    let cat = ctx.catalog();
+    if !cat.rel_oid_edits.is_empty() {
+        return None;
+    }
+    // (Every relation is read: the stored maps' groups at once, on several threads.)
+    if matches!(sel, ClassSel::All) {
+        cat.read_relations();
+    }
+    let mut out = Vec::new();
+    let admits = |r: &Row| match sel {
+        ClassSel::All => true,
+        ClassSel::Oid(o) => super::static_rows::oid_at(r, 0) == o,
+        ClassSel::Named(n) => r[1].as_str() == Some(n),
+    };
+    let kind_at = |r: &Row| if let Value::Char(k) = r[17] { k } else { 0 };
+    let built_in = !matches!(sel, ClassSel::Oid(o) if o >= super::FIRST_USER_OID);
+    for r in (super::static_rows::rows(SysTable::PgClass).iter()).filter(|r| built_in && admits(r)) {
+        let schema = super::static_rows::oid_at(r, 2);
+        if cat.schemas.contains_key(&schema) && keep.keeps(kind_at(r), schema) {
+            let (oid, toast) = (super::static_rows::oid_at(r, 0), super::static_rows::oid_at(r, 13));
+            out.push(ClassKey { oid, schema, kind: kind_at(r), name: r[1].clone(), toast });
+        }
+    }
+    match sel {
+        ClassSel::All => class_keys_of(&cat, None, keep, &mut out),
+        ClassSel::Oid(o) => class_keys_of(&cat, Some(o), keep, &mut out),
+        ClassSel::Named(n) => {
+            for o in cat.relations_named(Some(n), |_| true) {
+                class_keys_of(&cat, Some(o), keep, &mut out);
+            }
+            // (Composite types' and TOAST relations' names aren't in the name index.)
+            for ct in cat.composites.values().filter(|c| c.name == n) {
+                class_keys_of(&cat, Some(ct.relid), keep, &mut out);
+            }
+            if n.starts_with("pg_toast") {
+                for t in cat.toasted() {
+                    for index in [false, true] {
+                        if t.toast_relname(index) == n {
+                            class_keys_of(&cat, Some(t.toast + index as u32), keep, &mut out);
+                        }
+                    }
+                }
+            }
+            out.retain(|k| k.name.as_str() == Some(n));
+            out.sort_by_key(|k| k.oid);
+            out.dedup_by_key(|k| k.oid);
+        }
+    }
+    #[cfg(debug_assertions)]
+    if check {
+        let key = |r: &Row| ClassKey {
+            oid: super::static_rows::oid_at(r, 0),
+            schema: super::static_rows::oid_at(r, 2),
+            kind: kind_at(r),
+            name: r[1].clone(),
+            toast: super::static_rows::oid_at(r, 13),
+        };
+        let mut all: Vec<ClassKey> = (rows_generated_for(SysTable::PgClass, ctx, None).ok()?.iter())
+            .filter(|r| admits(r))
+            .map(key)
+            .filter(|k| keep.keeps(k.kind, k.schema))
+            .collect();
+        let mut got = out.clone();
+        all.sort_by_key(|k| k.oid);
+        got.sort_by_key(|k| k.oid);
+        debug_assert!(all == got, "pg_class's keys of {sel:?}");
+    }
+    Some(out)
+}
+
+/// `class_keys` of the relations `relations_of` lists (of `only` alone when given) that `keep`
+/// keeps.
+fn class_keys_of(cat: &Catalog, only: Option<u32>, keep: ClassKeep, out: &mut Vec<ClassKey>) {
+    let start = out.len();
+    let any = |ks: &[u8]| ks.iter().any(|&k| keep.kind(k));
+    let mut push = |oid: u32, schema: u32, kind: char, toast: u32, name: &dyn Fn() -> String| {
+        if keep.keeps(kind as u8, schema) {
+            out.push(ClassKey { oid, schema, kind: kind as u8, name: nm(name()), toast });
+        }
+    };
+    if any(b"rpf") {
+        for t in pick(&cat.tables, only) {
+            push(t.oid, t.schema, t.relkind(), t.toast, &|| t.name.clone());
+        }
+    }
+    if any(b"vm") {
+        for v in pick(&cat.views, only) {
+            let toast = v.storage.as_ref().map_or(0, |t| t.toast);
+            push(v.oid, v.schema, if v.materialized { 'm' } else { 'v' }, toast, &|| v.name.clone());
+        }
+    }
+    if any(b"S") {
+        for s in pick(&cat.sequences, only) {
+            push(s.oid, s.schema, 'S', 0, &|| s.name.clone());
+        }
+    }
+    if any(b"iI") {
+        for i in pick(&cat.indexes, only) {
+            let t = cat.index_table(i.table);
+            let schema = t.as_ref().map_or(super::PUBLIC_OID, |t| t.schema);
+            let kind = if t.is_some_and(|t| t.partkey.is_some()) { 'I' } else { 'i' };
+            push(i.oid, schema, kind, 0, &|| i.name.clone());
+        }
+    }
+    if any(b"ti") {
+        let toasted: Box<dyn Iterator<Item = &Arc<super::Table>>> = match only {
+            None => Box::new(cat.toasted()),
+            Some(o) => Box::new(cat.toast_owner(o).map(|(t, _)| t).into_iter()),
+        };
+        for t in toasted {
+            for index in [false, true] {
+                let oid = t.toast + index as u32;
+                if only.is_none_or(|o| o == oid) {
+                    let kind = if index { 'i' } else { 't' };
+                    push(oid, cat.toast_schema(t), kind, 0, &|| t.toast_relname(index));
+                }
+            }
+        }
+    }
+    if any(b"c") {
+        for ct in cat.composites.values().filter(|c| only.is_none_or(|o| c.relid == o)) {
+            push(ct.relid, ct.schema, 'c', 0, &|| ct.name.clone());
+        }
+    }
+    for st in SysTable::all().filter(|s| s.oid() >= super::FIRST_USER_OID && only.is_none_or(|o| s.oid() == o)) {
+        push(st.oid(), st.schema(), if st.is_view() { 'v' } else { 'r' }, 0, &|| st.name().to_string());
+    }
+    // (As `generate` keeps them: built-in relations' rows are the static ones.)
+    let mut i = start;
+    while i < out.len() {
+        if out[i].oid < super::FIRST_USER_OID {
+            out.swap_remove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// What a pg_class scan's filter or a hash join above it fixes of the rows it reads
+/// (`exec/nodes.rs` `class_where`): None for a column it doesn't fix.
+#[derive(Default, Clone, Debug)]
+pub struct ClassWhere {
+    pub oids: Option<Vec<u32>>,
+    pub schemas: Option<Vec<u32>>,
+    pub kinds: Option<Vec<u8>>,
+}
+
+/// How many relations' pg_class rows `class_rows_where` generates one by one at most.
+const WHERE_MAX: usize = 8192;
+
+/// pg_class's rows of the relations `w` admits, generated alone, in the order `rows` gives
+/// them: a catalog query's first read of pg_class (no statement has generated this version's
+/// rows yet) of one schema's relations, or of the relations a join's other side names,
+/// needn't make every relation's row (190 ms at 10,000 tables). The relations are found in
+/// the relation maps (`class_keys`). None: `w` fixes nothing, admits more than a quarter of
+/// the rows, or the rows' oids were moved.
+pub fn class_rows_where(ctx: &ExecCtx, w: &ClassWhere) -> Result<Option<Vec<Row>>> {
+    if w.oids.is_none() && w.schemas.is_none() && w.kinds.is_none() {
+        return Ok(None);
+    }
+    // (No kind can match: no row.)
+    if w.kinds.as_ref().is_some_and(|k| k.is_empty()) {
+        return Ok(Some(Vec::new()));
+    }
+    let set = |v: &Option<Vec<u32>>| v.as_ref().map(|v| v.iter().copied().collect::<std::collections::HashSet<u32>>());
+    let (oids, schemas) = (set(&w.oids), set(&w.schemas));
+    let in_schemas = |s: u32| schemas.as_ref().is_none_or(|v| v.contains(&s));
+    let keep = ClassKeep { kinds: w.kinds.as_deref().unwrap_or(&[]), schema: Some(&in_schemas) };
+    let keys = match &w.oids {
+        Some(oids) if oids.len() <= NAMED_MAX => {
+            let mut keys = Vec::new();
+            for &o in oids {
+                match class_keys_checked(ctx, ClassSel::Oid(o), keep, false) {
+                    Some(k) => keys.extend(k),
+                    None => return Ok(None),
+                }
+            }
+            keys
+        }
+        _ => match class_keys_checked(ctx, ClassSel::All, keep, false) {
+            Some(k) => k,
+            None => return Ok(None),
+        },
+    };
+    let total = row_count(SysTable::PgClass, ctx).unwrap_or(keys.len());
+    let admits = |k: &ClassKey| {
+        oids.as_ref().is_none_or(|v| v.contains(&k.oid))
+            && schemas.as_ref().is_none_or(|v| v.contains(&k.schema))
+            && w.kinds.as_ref().is_none_or(|v| v.contains(&k.kind))
+    };
+    let rels: Vec<u32> = keys.iter().filter(|k| admits(k)).map(|k| k.oid).collect();
+    if rels.len() > WHERE_MAX || rels.len().saturating_mul(4) > total {
+        return Ok(None);
+    }
+    let cat = ctx.catalog();
+    let mut keyed: Vec<((u8, u64), u32)> = Vec::with_capacity(rels.len());
+    for r in rels {
+        if let Some(k) = class_position(&cat, r) {
+            keyed.push((k, r));
+        }
+    }
+    drop(cat);
+    keyed.sort_unstable();
+    keyed.dedup();
+    REL_GENERATED.with(|c| c.set(c.get() + 1));
+    let mut rows = Vec::with_capacity(keyed.len());
+    for (_, r) in keyed {
+        rows.extend(rows_generated_for(SysTable::PgClass, ctx, Some(r))?);
+    }
+    #[cfg(debug_assertions)]
+    {
+        let all: Vec<Row> = (rows_generated_for(SysTable::PgClass, ctx, None)?.into_iter())
+            .filter(|r| {
+                admits(&ClassKey {
+                    oid: super::static_rows::oid_at(r, 0),
+                    schema: super::static_rows::oid_at(r, 2),
+                    kind: if let Value::Char(k) = r[17] { k } else { 0 },
+                    name: Value::Null,
+                    toast: 0,
+                })
+            })
+            .collect();
+        debug_assert!(all == rows, "pg_class's rows where {w:?}");
+    }
+    Ok(Some(rows))
+}
+
+/// pg_attribute's rows of relations `rels`, generated relation by relation, in the order
+/// `rows` gives them (Postgres's own relations' rows first, in their static order, then the
+/// user relations' in `class_position` order): what a hash join restricting its outer
+/// pg_attribute scan to some relations reads (`exec/nodes.rs` `LazyRowsNode`), without the
+/// whole catalog made. None: more than a quarter of the relations, or moved oids.
+pub fn attribute_rows_of(ctx: &ExecCtx, rels: &[u32]) -> Result<Option<Vec<Row>>> {
+    let cat = ctx.catalog();
+    if !cat.rel_oid_edits.is_empty() {
+        return Ok(None);
+    }
+    let total = row_count(SysTable::PgClass, ctx).unwrap_or(0);
+    if rels.len() > WHERE_MAX || rels.len().saturating_mul(4) > total {
+        return Ok(None);
+    }
+    static FIRST: OnceLock<std::collections::HashMap<u32, usize>> = OnceLock::new();
+    let first = FIRST.get_or_init(|| {
+        let mut m = std::collections::HashMap::new();
+        for (i, r) in super::static_rows::rows(SysTable::PgAttribute).iter().enumerate() {
+            m.entry(super::static_rows::oid_at(r, 0)).or_insert(i);
+        }
+        m
+    });
+    let mut keyed: Vec<((u8, u64), u32)> = Vec::with_capacity(rels.len());
+    for &r in rels {
+        let k = match r < super::FIRST_USER_OID {
+            true => first.get(&r).map(|&i| (0, i as u64)),
+            false => class_position(&cat, r),
+        };
+        if let Some(k) = k {
+            keyed.push((k, r));
+        }
+    }
+    drop(cat);
+    keyed.sort_unstable();
+    keyed.dedup();
+    REL_GENERATED.with(|c| c.set(c.get() + 1));
+    let mut rows = Vec::new();
+    for (_, r) in keyed {
+        rows.extend(rows_generated_for(SysTable::PgAttribute, ctx, Some(r))?);
+    }
+    #[cfg(debug_assertions)]
+    {
+        let want: std::collections::HashSet<u32> = rels.iter().copied().collect();
+        let all: Vec<Row> = (rows_generated_for(SysTable::PgAttribute, ctx, None)?.into_iter())
+            .filter(|r| want.contains(&super::static_rows::oid_at(r, 0)))
+            .collect();
+        debug_assert!(all == rows, "pg_attribute's rows of {} relations", rels.len());
+    }
+    Ok(Some(rows))
+}
+
 /// The information_schema views generated relation by relation: their `table_schema` and
 /// `table_name` columns.
 pub fn is_rel_columns(table: SysTable) -> Option<(usize, usize)> {
     match table {
         SysTable::IsColumns | SysTable::IsTables => Some((1, 2)),
         // (schemaname, relname: `stat_views`.)
-        t if super::stat_views::generated_here(t) => Some((1, 2)),
-        t if super::stat_views::indexes_here(t) => Some((2, 3)),
-        _ => None,
+        t => super::stat_views::name_columns(t),
     }
 }
 
@@ -2151,19 +2481,15 @@ const IS_NAMED_MAX: usize = 2048;
 /// order `rows` gives them (tables, views, Postgres's own relations): what a query for one
 /// table's columns reads (`WHERE table_schema = 's' AND table_name = 't'`), which
 /// Postgres's view finds through pg_class's name index. None: not such a view, or too many.
-pub fn is_rows_named(
-    table: SysTable,
-    ctx: &ExecCtx,
-    schema: Option<&str>,
-    name: Option<&str>,
-) -> Result<Option<Vec<Row>>> {
+pub fn is_rows_named(table: SysTable, ctx: &ExecCtx, sel: &super::stat_views::StatSel) -> Result<Option<Vec<Row>>> {
     let Some((sk, nk)) = is_rel_columns(table) else { return Ok(None) };
     if super::stat_views::generated_here(table) {
-        return super::stat_views::stat_tables(table, ctx, schema, name).map(Some);
+        return super::stat_views::rows_of(table, ctx, sel).map(Some);
     }
-    if super::stat_views::indexes_here(table) {
-        return super::stat_views::stat_indexes(table, ctx, schema, name).map(Some);
+    if sel.relid.is_some() || sel.indexrelid.is_some() {
+        return Ok(None);
     }
+    let (schema, name) = (sel.schema.as_deref(), sel.name.as_deref());
     let cat = ctx.catalog();
     let in_schema = |s: u32| schema.is_none_or(|n| cat.schema_name(s) == n);
     let mut rels: Vec<(u8, u64, u32)> = Vec::new();
@@ -2411,11 +2737,7 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
         ));
     }
     if super::stat_views::generated_here(table) {
-        out.set(super::stat_views::stat_tables(table, ctx, None, None)?);
-        return Ok(());
-    }
-    if super::stat_views::indexes_here(table) {
-        out.set(super::stat_views::stat_indexes(table, ctx, None, None)?);
+        out.set(super::stat_views::rows_of(table, ctx, &Default::default())?);
         return Ok(());
     }
     if let Some(sql) = sql_views().get(&(schema, table.name())) {

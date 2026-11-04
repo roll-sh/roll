@@ -1364,24 +1364,59 @@ fn sys_shared_scan(
     // relation maps keep (`system::row_count`) without generating any row, and the rows are
     // made only if something reads them (a session's first `count(*)` of pg_class after
     // connecting generated the whole catalog).
-    if filter.is_none()
-        && path.is_none_or(|p| {
-            matches!(p.scan.access, crate::sql::plan::Access::Seq | crate::sql::plan::Access::Unplanned)
-                && !p.ordered
-        })
-        && {
-            use crate::catalog::system::SysTable::*;
-            matches!(table, PgClass | PgAttribute | PgAttrdef | PgIndex)
-        }
-    {
-        return Ok(Some(Box::new(CountedRowsNode {
+    let plain = path.is_none_or(|p| {
+        matches!(p.scan.access, crate::sql::plan::Access::Seq | crate::sql::plan::Access::Unplanned) && !p.ordered
+    });
+    if filter.is_none() && plain && {
+        use crate::catalog::system::SysTable::*;
+        matches!(table, PgClass | PgAttribute | PgAttrdef | PgIndex)
+    } {
+        return Ok(Some(Box::new(LazyRowsNode {
             table,
+            filter: None,
             need: need.map(Rc::from),
             rows: None,
         })));
     }
     let rows = match sys_rel_rows(table, filter, path, ctx)? {
         Some(r) => r,
+        // pg_class's first read in this catalog version: of the relations its filter fixes
+        // alone, or (a filter that can't raise anything) made once a hash join above has
+        // said which relations or schemas it can match (`LazyRowsNode`).
+        None if table == crate::catalog::system::SysTable::PgClass
+            && plain
+            && crate::catalog::system::rows_cached(table, ctx).is_none() =>
+        {
+            let w = match filter {
+                Some(f) => class_where(f, ctx)?,
+                None => Default::default(),
+            };
+            match crate::catalog::system::class_rows_where(ctx, &w)? {
+                Some(r) => Arc::new(crate::catalog::system::SysRows::new(r)),
+                None if filter.is_none_or(quiet_filter) => {
+                    return Ok(Some(Box::new(LazyRowsNode {
+                        table,
+                        filter: filter.cloned(),
+                        need: need.map(Rc::from),
+                        rows: None,
+                    })));
+                }
+                None => crate::catalog::system::rows_shared(table, ctx)?,
+            }
+        }
+        // (pg_attribute's: of the relations a hash join above can match.)
+        None if table == crate::catalog::system::SysTable::PgAttribute
+            && plain
+            && filter.is_none_or(quiet_filter)
+            && crate::catalog::system::rows_cached(table, ctx).is_none() =>
+        {
+            return Ok(Some(Box::new(LazyRowsNode {
+                table,
+                filter: filter.cloned(),
+                need: need.map(Rc::from),
+                rows: None,
+            })));
+        }
         None => crate::catalog::system::rows_shared(table, ctx)?,
     };
     // (The names' bounds only when no index equality picks the rows: they are checked
@@ -1395,18 +1430,7 @@ fn sys_shared_scan(
         Some((_, ix)) => Some(ix.unwrap_or_default()),
         None if named.is_some() => named,
         None => match filter {
-            Some(f) => match sys_equality(f, &rows, true, ctx)? {
-                Some((k, ix)) => {
-                    let nulls = rows.nulls(k);
-                    let mut all: Vec<u32> = ix.unwrap_or_default();
-                    if !nulls.is_empty() {
-                        all.extend(nulls.iter().copied());
-                        all.sort_unstable();
-                    }
-                    Some(all)
-                }
-                None => None,
-            },
+            Some(f) => equality_picked(f, &rows, ctx)?,
             None => None,
         },
     };
@@ -1509,16 +1533,22 @@ fn is_named_rows(
     }
     let mut conj = Vec::new();
     split(f, &mut conj);
-    let (mut schema, mut name): (Option<String>, Option<String>) = (None, None);
+    // (A statistics view's `relid` / `indexrelid`, pinned to an oid as `relname` to a name.)
+    let (rk, xk) = match crate::catalog::stat_views::oid_columns(table) {
+        Some((r, x)) => (Some(r), x),
+        None => (None, None),
+    };
+    let is_key = |k: usize| k == sk || k == nk || Some(k) == rk || Some(k) == xk;
+    let mut sel = crate::catalog::stat_views::StatSel::default();
     for c in conj {
         // (`col = v`, or `col = ANY (array of one v)`: Prisma's `table_schema = ANY ($1)`.)
         let (d, k, other, one) = match c {
             Expr::Call(d, args, _) if args.len() == 2 => match (&args[0], &args[1]) {
-                (Expr::Col(k, _), o) | (o, Expr::Col(k, _)) if *k == sk || *k == nk => (d, *k, o, false),
+                (Expr::Col(k, _), o) | (o, Expr::Col(k, _)) if is_key(*k) => (d, *k, o, false),
                 _ => break,
             },
             Expr::ArrayOp { left, right, op, all: false } => match &**left {
-                Expr::Col(k, _) if *k == sk || *k == nk => (op, *k, &**right, true),
+                Expr::Col(k, _) if is_key(*k) => (op, *k, &**right, true),
                 _ => break,
             },
             _ => break,
@@ -1540,18 +1570,27 @@ fn is_named_rows(
             (true, Value::Array(a)) if a.items.len() == 1 => a.items[0].clone(),
             _ => break,
         };
+        if Some(k) == rk || Some(k) == xk {
+            let Value::Oid(o) = v else { break };
+            let slot = if Some(k) == rk { &mut sel.relid } else { &mut sel.indexrelid };
+            if slot.is_some_and(|x| x != o) {
+                return Ok(Some(Vec::new()));
+            }
+            *slot = Some(o);
+            continue;
+        }
         let Some(s) = v.as_str() else { break };
-        let slot = if k == sk { &mut schema } else { &mut name };
+        let slot = if k == sk { &mut sel.schema } else { &mut sel.name };
         if slot.as_deref().is_some_and(|x| x != s) {
             // (Two different values: no row has both.)
             return Ok(Some(Vec::new()));
         }
         *slot = Some(s.to_string());
     }
-    if schema.is_none() && name.is_none() {
+    if sel.schema.is_none() && sel.name.is_none() && sel.relid.is_none() && sel.indexrelid.is_none() {
         return Ok(None);
     }
-    crate::catalog::system::is_rows_named(table, ctx, schema.as_deref(), name.as_deref())
+    crate::catalog::system::is_rows_named(table, ctx, &sel)
 }
 
 /// `sys_shared_scan`'s node.
@@ -1743,25 +1782,34 @@ impl Node for SharedRowsNode {
     }
 }
 
-/// `sys_shared_scan`'s node for a whole catalog without a filter: its shared rows are taken
-/// (generated if no statement has yet) only when a row is asked for.
-struct CountedRowsNode {
+/// `sys_shared_scan`'s node for a catalog whose rows no statement has made yet: its shared
+/// rows are taken (generated if no statement has yet) only when a row is asked for. Without a
+/// filter, `count(*)` counts the relation maps' rows (`system::row_count`); a hash join above
+/// that restricts pg_class to some relations or schemas first (`restrict_keys`: psql's `\dt`
+/// joins pg_namespace) gets only those relations' rows made (`system::class_rows_where`).
+struct LazyRowsNode {
     table: crate::catalog::system::SysTable,
+    /// (Quiet, `quiet_filter`, unless the table is pg_class without a narrowing filter.)
+    filter: Option<Expr>,
     need: Option<Rc<[bool]>>,
     rows: Option<SharedRowsNode>,
 }
 
-impl CountedRowsNode {
+impl LazyRowsNode {
     fn rows(&mut self, ctx: &ExecCtx) -> Result<&mut SharedRowsNode> {
         if self.rows.is_none() {
             let rows = crate::catalog::system::rows_shared(self.table, ctx)?;
-            self.rows = Some(SharedRowsNode::new(rows, None, None, self.need.clone()));
+            let picked = match &self.filter {
+                Some(f) => equality_picked(f, &rows, ctx)?,
+                None => None,
+            };
+            self.rows = Some(SharedRowsNode::new(rows, picked, self.filter.as_ref(), self.need.clone()));
         }
         Ok(self.rows.as_mut().unwrap())
     }
 }
 
-impl Node for CountedRowsNode {
+impl Node for LazyRowsNode {
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
         self.rows(ctx)?.next(ctx)
     }
@@ -1769,19 +1817,158 @@ impl Node for CountedRowsNode {
     fn count_rest(&mut self, ctx: &ExecCtx) -> Result<Option<u64>> {
         match &mut self.rows {
             Some(r) => r.count_rest(ctx),
-            None => {
+            None if self.filter.is_none() => {
                 let n = crate::catalog::system::row_count(self.table, ctx);
                 // (Nothing is left once counted.)
                 let none = Arc::new(crate::catalog::system::SysRows::new(Vec::new()));
                 self.rows = Some(SharedRowsNode::new(none, None, None, None));
                 Ok(n.map(|n| n as u64))
             }
+            None => self.rows(ctx)?.count_rest(ctx),
         }
     }
 
     fn restrict_keys(&mut self, col: usize, keys: &[u32], ctx: &ExecCtx) -> Result<()> {
+        use crate::catalog::system::SysTable;
+        let quiet = self.filter.as_ref().is_none_or(quiet_filter);
+        let subset = match (self.table, col) {
+            _ if self.rows.is_some() || !quiet => None,
+            (SysTable::PgClass, 0 | 2) => {
+                let mut w = match &self.filter {
+                    Some(f) => class_where(f, ctx)?,
+                    None => Default::default(),
+                };
+                let slot = if col == 0 { &mut w.oids } else { &mut w.schemas };
+                let mut keys = keys.to_vec();
+                if let Some(had) = slot.take() {
+                    keys.retain(|k| had.contains(k));
+                }
+                *slot = Some(keys);
+                crate::catalog::system::class_rows_where(ctx, &w)?
+            }
+            (SysTable::PgAttribute, 0) => crate::catalog::system::attribute_rows_of(ctx, keys)?,
+            _ => None,
+        };
+        if let Some(rows) = subset {
+            let rows = Arc::new(crate::catalog::system::SysRows::new(rows));
+            self.rows = Some(SharedRowsNode::new(rows, None, self.filter.as_ref(), self.need.clone()));
+            return Ok(());
+        }
         self.rows(ctx)?.restrict_keys(col, keys, ctx)
     }
+}
+
+/// The rows of `rows` a filter's first conjunct's equality picks through a hash on its column
+/// (`sys_equality`), with the rows NULL there, in order (None: all of them): for the others the
+/// conjunction is false before anything else in it is evaluated.
+fn equality_picked(f: &Expr, rows: &crate::catalog::system::SysRows, ctx: &ExecCtx) -> Result<Option<Vec<u32>>> {
+    Ok(match sys_equality(f, rows, true, ctx)? {
+        Some((k, ix)) => {
+            let nulls = rows.nulls(k);
+            let mut all: Vec<u32> = ix.unwrap_or_default();
+            if !nulls.is_empty() {
+                all.extend(nulls.iter().copied());
+                all.sort_unstable();
+            }
+            Some(all)
+        }
+        None => None,
+    })
+}
+
+/// What a pg_class filter's conjuncts fix of `oid`, `relnamespace` and `relkind` (`= v`, `=
+/// ANY (v)`, `IN (...)` with values that read no column; `system::class_rows_where`): only
+/// conjuncts after conjuncts that can't raise or show anything (`quiet_filter`), so the rows
+/// left out are rows the filter is false for, with nothing else having shown.
+fn class_where(f: &Expr, ctx: &ExecCtx) -> Result<crate::catalog::system::ClassWhere> {
+    fn split<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+        match e {
+            Expr::And(items) => items.iter().for_each(|i| split(i, out)),
+            e => out.push(e),
+        }
+    }
+    let mut conj = Vec::new();
+    split(f, &mut conj);
+    let mut w = crate::catalog::system::ClassWhere::default();
+    for c in conj {
+        let Some((col, vals)) = class_conjunct(c, ctx)? else {
+            if quiet_filter(c) {
+                continue;
+            }
+            break;
+        };
+        let oids = || vals.iter().filter_map(|v| if let Value::Oid(o) = v { Some(*o) } else { None }).collect::<Vec<u32>>();
+        let both = |had: Option<Vec<u32>>, new: Vec<u32>| match had {
+            Some(h) => new.into_iter().filter(|x| h.contains(x)).collect(),
+            None => new,
+        };
+        match col {
+            0 => w.oids = Some(both(w.oids.take(), oids())),
+            2 => w.schemas = Some(both(w.schemas.take(), oids())),
+            _ => {
+                let kinds: Vec<u8> = vals.iter().filter_map(|v| if let Value::Char(k) = v { Some(*k) } else { None }).collect();
+                w.kinds = Some(match w.kinds.take() {
+                    Some(h) => kinds.into_iter().filter(|x| h.contains(x)).collect(),
+                    None => kinds,
+                });
+            }
+        }
+    }
+    Ok(w)
+}
+
+/// A conjunct comparing pg_class's `oid` (0), `relnamespace` (2) or `relkind` (17) with
+/// values (`class_where`): the column and the values (oids, "char"s). None: not one, or a
+/// value that can't be computed here.
+fn class_conjunct(c: &Expr, ctx: &ExecCtx) -> Result<Option<(usize, Vec<Value>)>> {
+    let col = |e: &Expr| match e {
+        Expr::Col(k, _) if matches!(*k, 0 | 2 | 17) => Some(*k),
+        _ => None,
+    };
+    let fixed = |e: &Expr| {
+        let mut sub = false;
+        e.walk(&mut |x| sub |= matches!(x, Expr::Subquery(_)));
+        !sub && e.columns().is_empty() && !e.is_volatile()
+    };
+    let eq = |d: &crate::sql::func::FuncDef| d.name == "=" && d.oid < crate::catalog::FIRST_USER_OID;
+    // (A value that fails to compute is left to the filter: it raises the error only for the
+    // rows it reaches.)
+    let value = |e: &Expr| crate::sql::expr::eval(e, &[], ctx).ok();
+    let typed = |k: usize, v: &Value| match v {
+        Value::Oid(_) => k != 17,
+        Value::Char(_) => k == 17,
+        _ => v.is_null(),
+    };
+    let (k, vals) = match c {
+        Expr::Call(d, args, _) if args.len() == 2 && eq(d) => {
+            let (k, v) = match (col(&args[0]), col(&args[1])) {
+                (Some(k), _) if fixed(&args[1]) => (k, &args[1]),
+                (_, Some(k)) if fixed(&args[0]) => (k, &args[0]),
+                _ => return Ok(None),
+            };
+            let Some(v) = value(v) else { return Ok(None) };
+            (k, vec![v])
+        }
+        Expr::ArrayOp { left, right, op, all: false } if eq(op) && fixed(right) => {
+            let Some(k) = col(left) else { return Ok(None) };
+            match value(right) {
+                Some(Value::Array(a)) => (k, a.items.to_vec()),
+                Some(Value::Null) => (k, Vec::new()),
+                _ => return Ok(None),
+            }
+        }
+        Expr::InList(x, items, false) if items.iter().all(|(e, d)| eq(d) && fixed(e)) => {
+            let Some(k) = col(x) else { return Ok(None) };
+            let mut vals = Vec::with_capacity(items.len());
+            for (e, _) in items {
+                let Some(v) = value(e) else { return Ok(None) };
+                vals.push(v);
+            }
+            (k, vals)
+        }
+        _ => return Ok(None),
+    };
+    Ok(vals.iter().all(|v| typed(k, v)).then_some((k, vals)))
 }
 
 /// Whether evaluating `e` on a row can't raise an error, a notice or any other effect:
