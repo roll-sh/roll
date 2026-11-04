@@ -1,0 +1,133 @@
+> CREATE TABLE a167_o (k int)
+-- CREATE TABLE
+
+> CREATE TABLE a167_r (rk int, name text)
+-- CREATE TABLE
+
+> CREATE TABLE a167_n (nk int, rk int)
+-- CREATE TABLE
+
+> CREATE TABLE a167_s (sk int, nk int, v int)
+-- CREATE TABLE
+
+> INSERT INTO a167_o SELECT g FROM generate_series(1, 30) g
+-- INSERT 0 30
+
+> INSERT INTO a167_r VALUES (1, 'EUROPE'), (2, 'ASIA'), (3, 'AFRICA')
+-- INSERT 0 3
+
+> INSERT INTO a167_n SELECT g, g % 3 + 1 FROM generate_series(1, 9) g
+-- INSERT 0 9
+
+> INSERT INTO a167_s SELECT g, g % 9 + 1, g * 7 % 100 FROM generate_series(1, 300) g
+-- INSERT 0 300
+
+> CREATE INDEX a167_n_nk ON a167_n (nk)
+-- CREATE INDEX
+
+> ANALYZE a167_o, a167_r, a167_n, a167_s
+-- ANALYZE
+
+> SET enable_hashjoin = off
+-- SET
+
+> SET enable_mergejoin = off
+-- SET
+
+> SET enable_material = off
+-- SET
+
+> SET enable_memoize = off
+-- SET
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+> SELECT o.k, (SELECT min(s.v) FROM a167_r r JOIN (a167_s s JOIN a167_n n ON n.nk = s.nk) ON r.rk = n.rk
+>              WHERE r.name = 'EUROPE' AND s.sk = o.k * 9 + 2) AS m
+> FROM a167_o o
+QUERY PLAN:text
+Seq Scan on a167_o o (actual rows=30.00 loops=1)
+  SubPlan 1
+    ->  Aggregate (actual rows=1.00 loops=30)
+          ->  Nested Loop (actual rows=1.00 loops=30)
+                Join Filter: (r.rk = n.rk)
+                ->  Nested Loop (actual rows=1.00 loops=30)
+                      Join Filter: (n.nk = s.nk)
+                      Rows Removed by Join Filter: 8
+                      ->  Seq Scan on a167_s s (actual rows=1.00 loops=30)
+                            Filter: (sk = ((o.k * 9) + 2))
+                            Rows Removed by Filter: 299
+                      ->  Seq Scan on a167_n n (actual rows=9.00 loops=30)
+                ->  Seq Scan on a167_r r (actual rows=1.00 loops=30)
+                      Filter: (name = 'EUROPE'::text)
+                      Rows Removed by Filter: 2
+-- EXPLAIN
+
+> SELECT o.k, (SELECT min(s.v) FROM a167_r r JOIN (a167_s s JOIN a167_n n ON n.nk = s.nk) ON r.rk = n.rk
+>              WHERE r.name = 'EUROPE' AND s.sk = o.k * 9 + 2) AS m
+> FROM a167_o o ORDER BY o.k
+k:int4 | m:int4
+1 | 77
+2 | 40
+3 | 3
+4 | 66
+5 | 29
+6 | 92
+7 | 55
+8 | 18
+9 | 81
+10 | 44
+11 | 7
+12 | 70
+13 | 33
+14 | 96
+15 | 59
+16 | 22
+17 | 85
+18 | 48
+19 | 11
+20 | 74
+21 | 37
+22 | 0
+23 | 63
+24 | 26
+25 | 89
+26 | 52
+27 | 15
+28 | 78
+29 | 41
+30 | 4
+-- SELECT 30
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+> SELECT o.k, (SELECT count(*) FROM a167_r r JOIN a167_n n ON n.rk = r.rk + o.k % 2 WHERE r.rk < 3) AS c
+> FROM a167_o o WHERE o.k <= 10
+QUERY PLAN:text
+Seq Scan on a167_o o (actual rows=10.00 loops=1)
+  Filter: (k <= 10)
+  Rows Removed by Filter: 20
+  SubPlan 1
+    ->  Aggregate (actual rows=1.00 loops=10)
+          ->  Nested Loop (actual rows=6.00 loops=10)
+                Join Filter: ((r.rk + (o.k % 2)) = n.rk)
+                Rows Removed by Join Filter: 12
+                ->  Seq Scan on a167_r r (actual rows=2.00 loops=10)
+                      Filter: (rk < 3)
+                      Rows Removed by Filter: 1
+                ->  Seq Scan on a167_n n (actual rows=9.00 loops=20)
+-- EXPLAIN
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_mergejoin
+-- RESET
+
+> RESET enable_material
+-- RESET
+
+> RESET enable_memoize
+-- RESET
+
+> DROP TABLE a167_o, a167_r, a167_n, a167_s
+-- DROP TABLE
+
