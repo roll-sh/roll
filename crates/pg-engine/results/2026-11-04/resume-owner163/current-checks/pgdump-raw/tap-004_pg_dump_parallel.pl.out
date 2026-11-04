@@ -1,0 +1,6 @@
+ok 1 - parallel dump
+ok 2 - parallel restore
+ok 3 - parallel dump as inserts
+ok 4 - parallel restore as inserts
+1..4
+
