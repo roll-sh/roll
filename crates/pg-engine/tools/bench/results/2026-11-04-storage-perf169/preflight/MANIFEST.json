@@ -1,0 +1,55 @@
+{
+  "phase": "preflight",
+  "closed": true,
+  "scope": "every bundle file except this manifest; no files may be added",
+  "files": {
+    "0001-negative-sql.log": {
+      "sha256": "c3396700153b6349d5d9da24213d7a20e934494969a60aa3eed37780e622129e",
+      "bytes": 158
+    },
+    "0002-negative-docker.log": {
+      "sha256": "df15fc6bddbed5bd89998f7cb9be180ead86e770b013e573f238a4b0162bcf45",
+      "bytes": 92
+    },
+    "0003-negative-pipeline.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "NEGATIVE-PASS": {
+      "sha256": "b92327e399586c193c1dcc58cbd5cdbe26c15d6ee0e73b289b79b169d1073580",
+      "bytes": 138
+    },
+    "PLAN.md": {
+      "sha256": "08393856aa9c25c337cc999b727264e5dcabc6f00b4d76adbde5cd65521f479e",
+      "bytes": 4255
+    },
+    "baseline.before.json": {
+      "sha256": "9f29a14436b214c4431811599e261949c97433457ea8bc7e2bc1e14fb7a32298",
+      "bytes": 571985
+    },
+    "build.py": {
+      "sha256": "5bde8b169ed32323e05ce703ffedfe62172aeb621bdcd8160f6333a19ba86dfe",
+      "bytes": 2445
+    },
+    "candidate.before.json": {
+      "sha256": "a25fcb8b4fa57f608d8f85e2b1124cd05fdc39b28d28f393bc11cbc1d6ac5522",
+      "bytes": 576785
+    },
+    "commands.jsonl": {
+      "sha256": "e3115512ead5166a95c26b5cd0f6805495f7e0d489f4f8183134dc28ff8e1889",
+      "bytes": 1133
+    },
+    "negative-sql.cid": {
+      "sha256": "4a84e77df2780035dd431d41f41c48515238d5935300c70bff1c5754d1e637a2",
+      "bytes": 64
+    },
+    "runner.py": {
+      "sha256": "212a2ab6f10ff5a8983ed9d0e3ede1fae68d8c644fde74f81fe8465e7f54e640",
+      "bytes": 20874
+    },
+    "seal.py": {
+      "sha256": "ab05a08062fab82ede983fd0722a5e5592aaa75d0aa0b0ec39400b594f978a40",
+      "bytes": 3791
+    }
+  }
+}
