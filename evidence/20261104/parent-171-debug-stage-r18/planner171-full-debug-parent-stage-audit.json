@@ -1,0 +1,19 @@
+{
+  "utc": "2026-11-04T22:09:39.283534+00:00",
+  "source": "cac0933bc4eb5ef87674889542cab271de4615d0",
+  "stage": "debug-test",
+  "command_exit": 0,
+  "stage_audit_exit": 0,
+  "raw_exact_per_binary_map": [
+    457,
+    0,
+    18,
+    61
+  ],
+  "matches_c861_plus_only_two_regression_tests": true,
+  "all_actual_executable_hashes_verified": 60,
+  "source_evidence": "ea36e833f2eeba5fb820cf3abd6e3f1f5e7eaf47",
+  "release_output_inspected": false,
+  "pipeline_acceptance": false,
+  "integration_service_performance_acceptance": false
+}
