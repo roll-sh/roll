@@ -1,0 +1,8 @@
+{
+  "source_head": "fc57bb52e7f87a81aeb4b4112b5b0c712dfa1318",
+  "production_source": "0cd26bfd",
+  "original_tap": "FAILED:7020pass7797fail;Rust exit0 masks failure",
+  "corrected_tap": "PASS:strict authority exit0,14817pass0fail,4complete plans",
+  "pg_e2e": "FAILED101:12pass4fail;external restore/connectivity",
+  "integration": "HELD:parent exact combined source verification"
+}

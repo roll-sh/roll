@@ -1,0 +1,27 @@
+{
+  "rows": [
+    {
+      "file": "001_basic.pl",
+      "passed": 51,
+      "failed": 45
+    },
+    {
+      "file": "002_pg_dump.pl",
+      "passed": 6934,
+      "failed": 7675
+    },
+    {
+      "file": "004_pg_dump_parallel.pl",
+      "passed": 0,
+      "failed": 4
+    },
+    {
+      "file": "005_pg_dump_filterfile.pl",
+      "passed": 35,
+      "failed": 73
+    }
+  ],
+  "passed": 7020,
+  "failed": 7797,
+  "expected_passed": 14817
+}

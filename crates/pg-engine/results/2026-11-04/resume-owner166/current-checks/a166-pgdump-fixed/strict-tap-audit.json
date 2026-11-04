@@ -1,0 +1,46 @@
+{
+  "status": "PASS",
+  "issues": [],
+  "suites": {
+    "001_basic.pl": {
+      "path": "/home/meszmate/.cache/a166/pgr1/resume-pgdump/tap-001_basic.pl.out",
+      "expected": 96,
+      "passed": 96,
+      "failed": 0,
+      "plans": [
+        96
+      ],
+      "issues": []
+    },
+    "002_pg_dump.pl": {
+      "path": "/home/meszmate/.cache/a166/pgr1/resume-pgdump/tap-002_pg_dump.pl.out",
+      "expected": 14609,
+      "passed": 14609,
+      "failed": 0,
+      "plans": [
+        14609
+      ],
+      "issues": []
+    },
+    "004_pg_dump_parallel.pl": {
+      "path": "/home/meszmate/.cache/a166/pgr1/resume-pgdump/tap-004_pg_dump_parallel.pl.out",
+      "expected": 4,
+      "passed": 4,
+      "failed": 0,
+      "plans": [
+        4
+      ],
+      "issues": []
+    },
+    "005_pg_dump_filterfile.pl": {
+      "path": "/home/meszmate/.cache/a166/pgr1/resume-pgdump/tap-005_pg_dump_filterfile.pl.out",
+      "expected": 108,
+      "passed": 108,
+      "failed": 0,
+      "plans": [
+        108
+      ],
+      "issues": []
+    }
+  }
+}

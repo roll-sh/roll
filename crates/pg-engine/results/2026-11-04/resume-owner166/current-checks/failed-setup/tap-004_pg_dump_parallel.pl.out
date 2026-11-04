@@ -1,0 +1,22 @@
+not ok 1 - parallel dump
+not ok 2 - parallel restore
+not ok 3 - parallel dump as inserts
+not ok 4 - parallel restore as inserts
+1..4
+
+# run_log failed: createdb regression_src
+# run_log failed: createdb regression_dest1
+# run_log failed: createdb regression_dest2
+#   Failed test 'parallel dump'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_dump --format directory --no-sync --jobs 2 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/dump1 host=127.0.0.1 port=53325 dbname=regression_src
+#   Failed test 'parallel restore'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_restore --verbose --dbname host=127.0.0.1 port=53325 dbname=regression_dest1 --jobs 3 /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/dump1
+#   Failed test 'parallel dump as inserts'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_dump --format directory --no-sync --jobs 2 --file /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/dump2 --inserts host=127.0.0.1 port=53325 dbname=regression_src
+#   Failed test 'parallel restore as inserts'
+#   at /home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine/tests/pg_dump/perl/PostgreSQL/Test/Utils.pm line 132.
+# command failed: pg_restore --verbose --dbname host=127.0.0.1 port=53325 dbname=regression_dest2 --jobs 3 /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/dump2
+# Looks like you failed 4 tests of 4.

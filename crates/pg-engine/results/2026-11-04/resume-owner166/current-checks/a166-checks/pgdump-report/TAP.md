@@ -1,0 +1,7810 @@
+# pg_dump TAP tests: last run
+
+| file | passed | failed |
+|---|---|---|
+| 001_basic.pl | 51 | 45 |
+| 002_pg_dump.pl | 6934 | 7675 |
+| 004_pg_dump_parallel.pl | 0 | 4 |
+| 005_pg_dump_filterfile.pl | 35 | 73 |
+| total | 7020 | 7797 |
+
+## Failures
+
+- 001_basic.pl: `not ok 1 - pg_dump --help exit code 0`
+- 001_basic.pl: `not ok 4 - pg_dump --version exit code 0`
+- 001_basic.pl: `not ok 8 - pg_dump with invalid option prints error message`
+- 001_basic.pl: `not ok 9 - pg_restore --help exit code 0`
+- 001_basic.pl: `not ok 12 - pg_restore --version exit code 0`
+- 001_basic.pl: `not ok 16 - pg_restore with invalid option prints error message`
+- 001_basic.pl: `not ok 17 - pg_dumpall --help exit code 0`
+- 001_basic.pl: `not ok 20 - pg_dumpall --version exit code 0`
+- 001_basic.pl: `not ok 24 - pg_dumpall with invalid option prints error message`
+- 001_basic.pl: `not ok 26 - pg_dump: too many command-line arguments: matches`
+- 001_basic.pl: `not ok 28 - pg_restore: too many command-line arguments: matches`
+- 001_basic.pl: `not ok 30 - pg_dumpall: too many command-line arguments: matches`
+- 001_basic.pl: `not ok 32 - pg_dump: options -s/--schema-only and -a/--data-only cannot be used together: matches`
+- 001_basic.pl: `not ok 34 - pg_dump: error: options -s/--schema-only and --statistics-only cannot be used together: matches`
+- 001_basic.pl: `not ok 36 - pg_dump: error: options -a/--data-only and --statistics-only cannot be used together: matches`
+- 001_basic.pl: `not ok 38 - pg_dump: options -s/--schema-only and --include-foreign-data cannot be used together: matches`
+- 001_basic.pl: `not ok 40 - pg_dump: options --statistics-only and --no-statistics cannot be used together: matches`
+- 001_basic.pl: `not ok 42 - pg_dump: option --include-foreign-data is not supported with parallel backup: matches`
+- 001_basic.pl: `not ok 44 - pg_restore: error: one of -d/--dbname and -f/--file must be specified: matches`
+- 001_basic.pl: `not ok 46 - pg_restore: options -s/--schema-only and -a/--data-only cannot be used together: matches`
+- 001_basic.pl: `not ok 48 - pg_restore: options -d/--dbname and -f/--file cannot be used together: matches`
+- 001_basic.pl: `not ok 50 - pg_dump: options -c/--clean and -a/--data-only cannot be used together: matches`
+- 001_basic.pl: `not ok 52 - pg_restore: options -c/--clean and -a/--data-only cannot be used together: matches`
+- 001_basic.pl: `not ok 54 - pg_dump: option --if-exists requires option -c/--clean: matches`
+- 001_basic.pl: `not ok 56 - pg_dump: parallel backup only supported by the directory format: matches`
+- 001_basic.pl: `not ok 58 - pg_dump: -j/--jobs must be in range: matches`
+- 001_basic.pl: `not ok 60 - pg_dump: invalid output format: matches`
+- 001_basic.pl: `not ok 62 - pg_restore: -j/--jobs must be in range: matches`
+- 001_basic.pl: `not ok 64 - pg_restore: cannot specify both --single-transaction and multiple jobs: matches`
+- 001_basic.pl: `not ok 66 - pg_dump: invalid --compress: matches`
+- 001_basic.pl: `not ok 68 - pg_dump: invalid compression specification: compression algorithm "none" does not accept a compression level: matches`
+- 001_basic.pl: `not ok 70 - pg_dump: invalid compression specification: must be in range: matches`
+- 001_basic.pl: `not ok 72 - pg_dump: compression is not supported by tar archive format: matches`
+- 001_basic.pl: `not ok 74 - pg_dump: invalid compression specification: must be an integer: matches`
+- 001_basic.pl: `not ok 76 - pg_dump: --extra-float-digits must be in range: matches`
+- 001_basic.pl: `not ok 78 - pg_dump: --rows-per-insert must be in range: matches`
+- 001_basic.pl: `not ok 80 - pg_restore: option --if-exists requires option -c/--clean: matches`
+- 001_basic.pl: `not ok 82 - pg_dump: unrecognized archive format: matches`
+- 001_basic.pl: `not ok 84 - pg_dump: --on-conflict-do-nothing requires --inserts, --rows-per-insert, --column-inserts: matches`
+- 001_basic.pl: `not ok 86 - pg_dumpall: options -g/--globals-only and -r/--roles-only cannot be used together: matches`
+- 001_basic.pl: `not ok 88 - pg_dumpall: options -g/--globals-only and -t/--tablespaces-only cannot be used together: matches`
+- 001_basic.pl: `not ok 90 - pg_dumpall: options -r/--roles-only and -t/--tablespaces-only cannot be used together: matches`
+- 001_basic.pl: `not ok 92 - pg_dumpall: option --if-exists requires option -c/--clean: matches`
+- 001_basic.pl: `not ok 94 - pg_restore: options -C\/--create and -1\/--single-transaction cannot be used together: matches`
+- 001_basic.pl: `not ok 96 - pg_dumpall: option --exclude-database cannot be used together with -g/--globals-only: matches`
+- 002_pg_dump.pl: `not ok 2 - connecting to a non-existent database: matches`
+- 002_pg_dump.pl: `not ok 4 - connecting to an invalid database: matches`
+- 002_pg_dump.pl: `not ok 6 - connecting with an unprivileged user: matches`
+- 002_pg_dump.pl: `not ok 8 - dumping a non-existent schema: matches`
+- 002_pg_dump.pl: `not ok 10 - dumping a non-existent table: matches`
+- 002_pg_dump.pl: `not ok 12 - no matching schemas: matches`
+- 002_pg_dump.pl: `not ok 14 - cannot use --schema-only and --statistics together: matches`
+- 002_pg_dump.pl: `not ok 16 - no matching tables: matches`
+- 002_pg_dump.pl: `not ok 18 - pg_dumpall: option --exclude-database rejects multipart pattern ".": matches`
+- 002_pg_dump.pl: `not ok 20 - pg_dumpall: option --exclude-database rejects multipart database names: matches`
+- 002_pg_dump.pl: `not ok 21 - pg_dump: option -n pg_catalog`
+- 002_pg_dump.pl: `not ok 22 - pg_dumpall: option --exclude-database handles database names with embedded dots`
+- 002_pg_dump.pl: `not ok 24 - pg_dump: option --schema rejects three-part schema names: matches`
+- 002_pg_dump.pl: `not ok 26 - pg_dump: option --schema rejects cross-database multipart schema names: matches`
+- 002_pg_dump.pl: `not ok 28 - pg_dump: option --schema rejects degenerate two-part schema name: ".": matches`
+- 002_pg_dump.pl: `not ok 30 - pg_dump: option --schema rejects cross-database multipart schema names with embedded dots: matches`
+- 002_pg_dump.pl: `not ok 32 - pg_dump: option --schema rejects degenerate three-part schema name: "..": matches`
+- 002_pg_dump.pl: `not ok 34 - pg_dump: option --table rejects four-part table names: matches`
+- 002_pg_dump.pl: `not ok 36 - pg_dump: option --table rejects cross-database three part table names: matches`
+- 002_pg_dump.pl: `not ok 38 - pg_dump: option --table rejects cross-database three part table names with embedded dots: matches`
+- 002_pg_dump.pl: `not ok 39 - binary_upgrade: pg_dump runs`
+- 002_pg_dump.pl: `not ok 40 - binary_upgrade: pg_restore runs`
+- 002_pg_dump.pl: `not ok 41 - binary_upgrade: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 42 - binary_upgrade: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 43 - binary_upgrade: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 44 - binary_upgrade: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 45 - binary_upgrade: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 46 - binary_upgrade: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 47 - binary_upgrade: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 48 - binary_upgrade: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 49 - binary_upgrade: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 50 - binary_upgrade: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 51 - binary_upgrade: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 52 - binary_upgrade: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 53 - binary_upgrade: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 54 - binary_upgrade: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 55 - binary_upgrade: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 56 - binary_upgrade: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 57 - binary_upgrade: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 58 - binary_upgrade: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 59 - binary_upgrade: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 60 - binary_upgrade: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 61 - binary_upgrade: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 62 - binary_upgrade: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 63 - binary_upgrade: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 64 - binary_upgrade: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 65 - binary_upgrade: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 66 - binary_upgrade: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 68 - binary_upgrade: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 69 - binary_upgrade: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 70 - binary_upgrade: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 71 - binary_upgrade: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 72 - binary_upgrade: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 73 - binary_upgrade: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 74 - binary_upgrade: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 75 - binary_upgrade: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 76 - binary_upgrade: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 77 - binary_upgrade: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 78 - binary_upgrade: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 79 - binary_upgrade: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 80 - binary_upgrade: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 81 - binary_upgrade: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 82 - binary_upgrade: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 83 - binary_upgrade: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 84 - binary_upgrade: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 85 - binary_upgrade: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 87 - binary_upgrade: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 88 - binary_upgrade: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 90 - binary_upgrade: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 91 - binary_upgrade: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 92 - binary_upgrade: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 93 - binary_upgrade: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 94 - binary_upgrade: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 95 - binary_upgrade: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 96 - binary_upgrade: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 97 - binary_upgrade: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 98 - binary_upgrade: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 99 - binary_upgrade: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 100 - binary_upgrade: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 101 - binary_upgrade: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 102 - binary_upgrade: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 103 - binary_upgrade: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 104 - binary_upgrade: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 107 - binary_upgrade: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 108 - binary_upgrade: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 109 - binary_upgrade: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 111 - binary_upgrade: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 112 - binary_upgrade: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 113 - binary_upgrade: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 114 - binary_upgrade: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 115 - binary_upgrade: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 116 - binary_upgrade: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 117 - binary_upgrade: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 118 - binary_upgrade: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 119 - binary_upgrade: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 120 - binary_upgrade: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 121 - binary_upgrade: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 123 - binary_upgrade: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 125 - binary_upgrade: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 127 - binary_upgrade: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 128 - binary_upgrade: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 139 - binary_upgrade: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 140 - binary_upgrade: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 141 - binary_upgrade: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 142 - binary_upgrade: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 143 - binary_upgrade: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 144 - binary_upgrade: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 145 - binary_upgrade: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 150 - binary_upgrade: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 151 - binary_upgrade: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 153 - binary_upgrade: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 154 - binary_upgrade: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 155 - binary_upgrade: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 156 - binary_upgrade: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 157 - binary_upgrade: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 158 - binary_upgrade: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 159 - binary_upgrade: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 160 - binary_upgrade: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 161 - binary_upgrade: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 162 - binary_upgrade: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 163 - binary_upgrade: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 164 - binary_upgrade: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 165 - binary_upgrade: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 166 - binary_upgrade: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 167 - binary_upgrade: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 168 - binary_upgrade: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 169 - binary_upgrade: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 170 - binary_upgrade: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 171 - binary_upgrade: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 172 - binary_upgrade: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 173 - binary_upgrade: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 174 - binary_upgrade: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 175 - binary_upgrade: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 176 - binary_upgrade: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 177 - binary_upgrade: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 178 - binary_upgrade: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 179 - binary_upgrade: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 180 - binary_upgrade: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 181 - binary_upgrade: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 182 - binary_upgrade: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 183 - binary_upgrade: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 184 - binary_upgrade: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 185 - binary_upgrade: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 188 - binary_upgrade: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 189 - binary_upgrade: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 191 - binary_upgrade: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 192 - binary_upgrade: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 193 - binary_upgrade: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 194 - binary_upgrade: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 195 - binary_upgrade: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 196 - binary_upgrade: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 197 - binary_upgrade: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 198 - binary_upgrade: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 199 - binary_upgrade: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 201 - binary_upgrade: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 202 - binary_upgrade: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 203 - binary_upgrade: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 204 - binary_upgrade: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 205 - binary_upgrade: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 206 - binary_upgrade: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 207 - binary_upgrade: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 209 - binary_upgrade: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 210 - binary_upgrade: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 211 - binary_upgrade: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 212 - binary_upgrade: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 213 - binary_upgrade: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 214 - binary_upgrade: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 217 - binary_upgrade: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 220 - binary_upgrade: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 221 - binary_upgrade: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 222 - binary_upgrade: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 223 - binary_upgrade: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 224 - binary_upgrade: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 225 - binary_upgrade: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 226 - binary_upgrade: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 227 - binary_upgrade: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 228 - binary_upgrade: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 230 - binary_upgrade: should dump CREATE TYPE dump_test.planets AS ENUM pg_upgrade`
+- 002_pg_dump.pl: `not ok 231 - binary_upgrade: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 232 - binary_upgrade: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 233 - binary_upgrade: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 234 - binary_upgrade: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 235 - binary_upgrade: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 236 - binary_upgrade: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 237 - binary_upgrade: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 257 - binary_upgrade: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 259 - binary_upgrade: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 261 - binary_upgrade: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 262 - binary_upgrade: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 263 - binary_upgrade: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 264 - binary_upgrade: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 265 - binary_upgrade: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 266 - binary_upgrade: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 267 - binary_upgrade: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 268 - binary_upgrade: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 269 - binary_upgrade: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 270 - binary_upgrade: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 272 - binary_upgrade: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 273 - binary_upgrade: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 274 - binary_upgrade: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 282 - binary_upgrade: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 285 - binary_upgrade: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 290 - binary_upgrade: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 292 - binary_upgrade: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 294 - binary_upgrade: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 295 - binary_upgrade: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 296 - binary_upgrade: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 299 - binary_upgrade: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 300 - binary_upgrade: should dump restrict`
+- 002_pg_dump.pl: `not ok 301 - binary_upgrade: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 303 - binary_upgrade: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 304 - clean: pg_dump runs`
+- 002_pg_dump.pl: `not ok 305 - clean: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 306 - clean: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 307 - clean: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 308 - clean: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 309 - clean: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 310 - clean: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 311 - clean: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 312 - clean: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 313 - clean: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 314 - clean: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 315 - clean: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 316 - clean: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 317 - clean: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 318 - clean: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 319 - clean: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 320 - clean: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 321 - clean: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 322 - clean: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 323 - clean: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 324 - clean: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 325 - clean: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 326 - clean: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 327 - clean: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 328 - clean: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 329 - clean: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 330 - clean: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 332 - clean: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 333 - clean: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 334 - clean: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 335 - clean: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 336 - clean: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 337 - clean: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 338 - clean: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 339 - clean: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 340 - clean: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 341 - clean: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 342 - clean: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 343 - clean: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 344 - clean: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 345 - clean: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 346 - clean: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 347 - clean: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 348 - clean: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 349 - clean: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 351 - clean: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 352 - clean: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 354 - clean: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 355 - clean: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 356 - clean: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 357 - clean: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 358 - clean: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 359 - clean: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 360 - clean: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 361 - clean: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 362 - clean: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 363 - clean: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 364 - clean: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 365 - clean: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 366 - clean: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 367 - clean: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 368 - clean: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 371 - clean: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 372 - clean: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 373 - clean: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 375 - clean: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 376 - clean: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 377 - clean: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 378 - clean: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 379 - clean: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 380 - clean: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 381 - clean: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 382 - clean: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 383 - clean: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 384 - clean: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 385 - clean: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 386 - clean: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 387 - clean: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 388 - clean: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 389 - clean: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 390 - clean: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 391 - clean: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 392 - clean: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 393 - clean: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 395 - clean: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 396 - clean: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 397 - clean: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 398 - clean: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 399 - clean: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 400 - clean: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 401 - clean: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 402 - clean: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 403 - clean: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 404 - clean: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 405 - clean: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 406 - clean: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 407 - clean: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 408 - clean: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 409 - clean: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 414 - clean: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 415 - clean: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 417 - clean: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 418 - clean: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 419 - clean: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 420 - clean: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 421 - clean: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 422 - clean: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 423 - clean: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 424 - clean: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 425 - clean: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 426 - clean: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 427 - clean: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 428 - clean: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 429 - clean: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 430 - clean: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 431 - clean: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 432 - clean: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 433 - clean: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 434 - clean: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 435 - clean: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 436 - clean: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 437 - clean: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 438 - clean: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 439 - clean: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 440 - clean: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 441 - clean: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 442 - clean: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 443 - clean: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 444 - clean: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 445 - clean: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 446 - clean: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 447 - clean: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 448 - clean: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 449 - clean: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 452 - clean: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 453 - clean: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 455 - clean: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 456 - clean: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 457 - clean: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 458 - clean: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 459 - clean: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 460 - clean: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 461 - clean: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 462 - clean: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 463 - clean: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 464 - clean: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 465 - clean: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 466 - clean: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 467 - clean: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 468 - clean: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 469 - clean: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 470 - clean: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 471 - clean: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 472 - clean: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 473 - clean: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 474 - clean: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 475 - clean: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 476 - clean: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 477 - clean: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 478 - clean: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 479 - clean: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 480 - clean: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 481 - clean: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 482 - clean: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 484 - clean: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 485 - clean: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 486 - clean: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 487 - clean: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 488 - clean: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 489 - clean: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 490 - clean: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 491 - clean: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 492 - clean: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 493 - clean: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 495 - clean: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 496 - clean: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 497 - clean: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 498 - clean: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 499 - clean: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 500 - clean: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 501 - clean: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 505 - clean: should dump DROP FUNCTION dump_test.pltestlang_call_handler()`
+- 002_pg_dump.pl: `not ok 507 - clean: should dump DROP LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 513 - clean: should dump DROP SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 514 - clean: should dump DROP SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 518 - clean: should dump DROP TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 519 - clean: should dump DROP TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 520 - clean: should dump DROP TABLE test_table`
+- 002_pg_dump.pl: `not ok 521 - clean: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 523 - clean: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 525 - clean: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 526 - clean: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 527 - clean: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 528 - clean: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 529 - clean: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 530 - clean: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 531 - clean: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 532 - clean: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 533 - clean: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 534 - clean: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 536 - clean: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 537 - clean: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 538 - clean: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 546 - clean: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 547 - clean: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 548 - clean: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 549 - clean: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 550 - clean: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 552 - clean: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 554 - clean: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 556 - clean: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 558 - clean: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 559 - clean: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 560 - clean: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 563 - clean: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 564 - clean: should dump restrict`
+- 002_pg_dump.pl: `not ok 565 - clean: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 567 - clean: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 568 - clean_if_exists: pg_dump runs`
+- 002_pg_dump.pl: `not ok 569 - clean_if_exists: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 570 - clean_if_exists: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 571 - clean_if_exists: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 572 - clean_if_exists: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 573 - clean_if_exists: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 574 - clean_if_exists: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 575 - clean_if_exists: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 576 - clean_if_exists: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 577 - clean_if_exists: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 578 - clean_if_exists: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 579 - clean_if_exists: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 580 - clean_if_exists: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 581 - clean_if_exists: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 582 - clean_if_exists: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 583 - clean_if_exists: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 584 - clean_if_exists: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 585 - clean_if_exists: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 586 - clean_if_exists: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 587 - clean_if_exists: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 588 - clean_if_exists: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 589 - clean_if_exists: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 590 - clean_if_exists: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 591 - clean_if_exists: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 592 - clean_if_exists: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 593 - clean_if_exists: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 594 - clean_if_exists: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 596 - clean_if_exists: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 597 - clean_if_exists: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 598 - clean_if_exists: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 599 - clean_if_exists: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 600 - clean_if_exists: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 601 - clean_if_exists: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 602 - clean_if_exists: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 603 - clean_if_exists: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 604 - clean_if_exists: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 605 - clean_if_exists: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 606 - clean_if_exists: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 607 - clean_if_exists: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 608 - clean_if_exists: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 609 - clean_if_exists: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 610 - clean_if_exists: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 611 - clean_if_exists: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 612 - clean_if_exists: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 613 - clean_if_exists: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 615 - clean_if_exists: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 616 - clean_if_exists: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 618 - clean_if_exists: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 619 - clean_if_exists: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 620 - clean_if_exists: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 621 - clean_if_exists: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 622 - clean_if_exists: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 623 - clean_if_exists: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 624 - clean_if_exists: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 625 - clean_if_exists: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 626 - clean_if_exists: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 627 - clean_if_exists: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 628 - clean_if_exists: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 629 - clean_if_exists: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 630 - clean_if_exists: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 631 - clean_if_exists: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 632 - clean_if_exists: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 635 - clean_if_exists: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 636 - clean_if_exists: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 637 - clean_if_exists: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 639 - clean_if_exists: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 640 - clean_if_exists: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 641 - clean_if_exists: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 642 - clean_if_exists: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 643 - clean_if_exists: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 644 - clean_if_exists: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 645 - clean_if_exists: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 646 - clean_if_exists: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 647 - clean_if_exists: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 648 - clean_if_exists: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 649 - clean_if_exists: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 650 - clean_if_exists: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 651 - clean_if_exists: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 652 - clean_if_exists: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 653 - clean_if_exists: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 654 - clean_if_exists: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 655 - clean_if_exists: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 656 - clean_if_exists: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 657 - clean_if_exists: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 659 - clean_if_exists: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 660 - clean_if_exists: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 661 - clean_if_exists: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 662 - clean_if_exists: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 663 - clean_if_exists: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 664 - clean_if_exists: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 665 - clean_if_exists: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 666 - clean_if_exists: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 667 - clean_if_exists: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 668 - clean_if_exists: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 669 - clean_if_exists: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 670 - clean_if_exists: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 671 - clean_if_exists: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 672 - clean_if_exists: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 673 - clean_if_exists: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 678 - clean_if_exists: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 679 - clean_if_exists: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 681 - clean_if_exists: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 682 - clean_if_exists: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 683 - clean_if_exists: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 684 - clean_if_exists: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 685 - clean_if_exists: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 686 - clean_if_exists: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 687 - clean_if_exists: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 688 - clean_if_exists: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 689 - clean_if_exists: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 690 - clean_if_exists: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 691 - clean_if_exists: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 692 - clean_if_exists: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 693 - clean_if_exists: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 694 - clean_if_exists: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 695 - clean_if_exists: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 696 - clean_if_exists: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 697 - clean_if_exists: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 698 - clean_if_exists: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 699 - clean_if_exists: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 700 - clean_if_exists: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 701 - clean_if_exists: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 702 - clean_if_exists: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 703 - clean_if_exists: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 704 - clean_if_exists: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 705 - clean_if_exists: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 706 - clean_if_exists: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 707 - clean_if_exists: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 708 - clean_if_exists: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 709 - clean_if_exists: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 710 - clean_if_exists: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 711 - clean_if_exists: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 712 - clean_if_exists: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 713 - clean_if_exists: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 716 - clean_if_exists: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 717 - clean_if_exists: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 719 - clean_if_exists: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 720 - clean_if_exists: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 721 - clean_if_exists: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 722 - clean_if_exists: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 723 - clean_if_exists: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 724 - clean_if_exists: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 725 - clean_if_exists: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 726 - clean_if_exists: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 727 - clean_if_exists: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 728 - clean_if_exists: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 729 - clean_if_exists: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 730 - clean_if_exists: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 731 - clean_if_exists: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 732 - clean_if_exists: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 733 - clean_if_exists: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 734 - clean_if_exists: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 735 - clean_if_exists: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 736 - clean_if_exists: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 737 - clean_if_exists: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 738 - clean_if_exists: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 739 - clean_if_exists: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 740 - clean_if_exists: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 741 - clean_if_exists: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 742 - clean_if_exists: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 743 - clean_if_exists: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 744 - clean_if_exists: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 745 - clean_if_exists: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 746 - clean_if_exists: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 748 - clean_if_exists: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 749 - clean_if_exists: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 750 - clean_if_exists: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 751 - clean_if_exists: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 752 - clean_if_exists: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 753 - clean_if_exists: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 754 - clean_if_exists: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 755 - clean_if_exists: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 756 - clean_if_exists: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 757 - clean_if_exists: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 759 - clean_if_exists: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 760 - clean_if_exists: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 761 - clean_if_exists: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 762 - clean_if_exists: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 763 - clean_if_exists: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 764 - clean_if_exists: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 765 - clean_if_exists: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 768 - clean_if_exists: should dump DROP FUNCTION IF EXISTS dump_test.pltestlang_call_handler()`
+- 002_pg_dump.pl: `not ok 770 - clean_if_exists: should dump DROP LANGUAGE IF EXISTS pltestlang`
+- 002_pg_dump.pl: `not ok 774 - clean_if_exists: should dump DROP SCHEMA IF EXISTS dump_test`
+- 002_pg_dump.pl: `not ok 775 - clean_if_exists: should dump DROP SCHEMA IF EXISTS dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 780 - clean_if_exists: should dump DROP TABLE IF EXISTS test_second_table`
+- 002_pg_dump.pl: `not ok 781 - clean_if_exists: should dump DROP TABLE IF EXISTS test_table`
+- 002_pg_dump.pl: `not ok 785 - clean_if_exists: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 787 - clean_if_exists: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 789 - clean_if_exists: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 790 - clean_if_exists: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 791 - clean_if_exists: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 792 - clean_if_exists: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 793 - clean_if_exists: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 794 - clean_if_exists: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 795 - clean_if_exists: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 796 - clean_if_exists: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 797 - clean_if_exists: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 798 - clean_if_exists: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 800 - clean_if_exists: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 801 - clean_if_exists: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 802 - clean_if_exists: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 810 - clean_if_exists: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 811 - clean_if_exists: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 812 - clean_if_exists: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 813 - clean_if_exists: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 814 - clean_if_exists: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 816 - clean_if_exists: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 818 - clean_if_exists: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 820 - clean_if_exists: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 822 - clean_if_exists: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 823 - clean_if_exists: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 824 - clean_if_exists: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 827 - clean_if_exists: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 828 - clean_if_exists: should dump restrict`
+- 002_pg_dump.pl: `not ok 829 - clean_if_exists: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 831 - clean_if_exists: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 832 - column_inserts: pg_dump runs`
+- 002_pg_dump.pl: `not ok 844 - column_inserts: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 899 - column_inserts: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 1051 - column_inserts: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 1067 - column_inserts: should dump INSERT INTO test_fifth_table`
+- 002_pg_dump.pl: `not ok 1068 - column_inserts: should dump INSERT INTO test_fourth_table`
+- 002_pg_dump.pl: `not ok 1069 - column_inserts: should dump INSERT INTO test_second_table`
+- 002_pg_dump.pl: `not ok 1070 - column_inserts: should dump INSERT INTO test_table`
+- 002_pg_dump.pl: `not ok 1071 - column_inserts: should dump INSERT INTO test_table_identity`
+- 002_pg_dump.pl: `not ok 1073 - column_inserts: should dump INSERT INTO test_third_table (colnames)`
+- 002_pg_dump.pl: `not ok 1074 - column_inserts: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 1075 - column_inserts: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 1076 - column_inserts: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 1092 - column_inserts: should dump restrict`
+- 002_pg_dump.pl: `not ok 1095 - column_inserts: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 1096 - compression_gzip_custom: pg_dump runs`
+- 002_pg_dump.pl: `not ok 1097 - compression_gzip_custom: data content is gzip-compressed: exit code 0`
+- 002_pg_dump.pl: `not ok 1099 - compression_gzip_custom: data content is gzip-compressed: matches`
+- 002_pg_dump.pl: `not ok 1100 - compression_gzip_custom: pg_restore runs`
+- 002_pg_dump.pl: `not ok 1101 - compression_gzip_custom: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 1102 - compression_gzip_custom: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 1103 - compression_gzip_custom: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 1104 - compression_gzip_custom: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 1105 - compression_gzip_custom: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 1106 - compression_gzip_custom: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 1107 - compression_gzip_custom: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 1108 - compression_gzip_custom: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 1109 - compression_gzip_custom: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 1110 - compression_gzip_custom: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 1111 - compression_gzip_custom: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 1112 - compression_gzip_custom: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 1113 - compression_gzip_custom: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 1114 - compression_gzip_custom: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 1115 - compression_gzip_custom: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 1116 - compression_gzip_custom: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 1117 - compression_gzip_custom: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 1118 - compression_gzip_custom: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 1119 - compression_gzip_custom: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 1120 - compression_gzip_custom: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 1121 - compression_gzip_custom: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 1122 - compression_gzip_custom: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 1123 - compression_gzip_custom: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 1124 - compression_gzip_custom: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 1125 - compression_gzip_custom: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 1126 - compression_gzip_custom: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 1128 - compression_gzip_custom: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 1129 - compression_gzip_custom: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 1130 - compression_gzip_custom: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 1131 - compression_gzip_custom: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 1132 - compression_gzip_custom: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 1133 - compression_gzip_custom: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 1134 - compression_gzip_custom: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 1135 - compression_gzip_custom: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 1136 - compression_gzip_custom: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 1137 - compression_gzip_custom: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 1138 - compression_gzip_custom: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 1139 - compression_gzip_custom: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 1140 - compression_gzip_custom: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 1141 - compression_gzip_custom: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 1142 - compression_gzip_custom: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 1143 - compression_gzip_custom: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 1144 - compression_gzip_custom: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 1145 - compression_gzip_custom: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 1147 - compression_gzip_custom: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 1148 - compression_gzip_custom: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 1150 - compression_gzip_custom: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 1151 - compression_gzip_custom: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 1152 - compression_gzip_custom: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 1153 - compression_gzip_custom: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 1154 - compression_gzip_custom: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 1155 - compression_gzip_custom: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 1156 - compression_gzip_custom: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 1157 - compression_gzip_custom: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 1158 - compression_gzip_custom: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 1159 - compression_gzip_custom: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 1160 - compression_gzip_custom: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 1161 - compression_gzip_custom: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 1162 - compression_gzip_custom: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 1163 - compression_gzip_custom: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 1164 - compression_gzip_custom: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 1167 - compression_gzip_custom: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 1168 - compression_gzip_custom: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 1169 - compression_gzip_custom: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 1171 - compression_gzip_custom: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 1172 - compression_gzip_custom: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 1173 - compression_gzip_custom: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 1174 - compression_gzip_custom: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 1175 - compression_gzip_custom: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 1176 - compression_gzip_custom: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 1177 - compression_gzip_custom: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 1178 - compression_gzip_custom: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 1179 - compression_gzip_custom: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 1180 - compression_gzip_custom: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 1181 - compression_gzip_custom: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 1182 - compression_gzip_custom: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 1183 - compression_gzip_custom: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 1184 - compression_gzip_custom: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 1185 - compression_gzip_custom: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 1186 - compression_gzip_custom: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 1187 - compression_gzip_custom: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 1188 - compression_gzip_custom: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 1189 - compression_gzip_custom: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 1191 - compression_gzip_custom: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 1192 - compression_gzip_custom: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 1193 - compression_gzip_custom: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 1194 - compression_gzip_custom: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 1195 - compression_gzip_custom: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 1196 - compression_gzip_custom: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 1197 - compression_gzip_custom: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 1198 - compression_gzip_custom: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 1199 - compression_gzip_custom: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 1200 - compression_gzip_custom: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 1201 - compression_gzip_custom: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 1202 - compression_gzip_custom: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 1203 - compression_gzip_custom: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 1204 - compression_gzip_custom: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 1205 - compression_gzip_custom: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 1210 - compression_gzip_custom: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 1211 - compression_gzip_custom: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 1213 - compression_gzip_custom: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 1214 - compression_gzip_custom: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 1215 - compression_gzip_custom: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 1216 - compression_gzip_custom: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 1217 - compression_gzip_custom: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 1218 - compression_gzip_custom: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 1219 - compression_gzip_custom: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 1220 - compression_gzip_custom: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 1221 - compression_gzip_custom: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 1222 - compression_gzip_custom: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 1223 - compression_gzip_custom: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 1224 - compression_gzip_custom: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 1225 - compression_gzip_custom: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 1226 - compression_gzip_custom: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 1227 - compression_gzip_custom: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 1228 - compression_gzip_custom: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 1229 - compression_gzip_custom: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 1230 - compression_gzip_custom: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 1231 - compression_gzip_custom: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 1232 - compression_gzip_custom: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 1233 - compression_gzip_custom: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 1234 - compression_gzip_custom: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 1235 - compression_gzip_custom: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 1236 - compression_gzip_custom: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 1237 - compression_gzip_custom: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 1238 - compression_gzip_custom: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 1239 - compression_gzip_custom: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 1240 - compression_gzip_custom: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 1241 - compression_gzip_custom: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 1242 - compression_gzip_custom: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 1243 - compression_gzip_custom: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 1244 - compression_gzip_custom: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 1245 - compression_gzip_custom: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 1248 - compression_gzip_custom: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 1249 - compression_gzip_custom: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 1251 - compression_gzip_custom: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 1252 - compression_gzip_custom: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 1253 - compression_gzip_custom: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 1254 - compression_gzip_custom: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 1255 - compression_gzip_custom: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 1256 - compression_gzip_custom: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 1257 - compression_gzip_custom: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 1258 - compression_gzip_custom: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 1259 - compression_gzip_custom: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 1260 - compression_gzip_custom: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 1261 - compression_gzip_custom: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 1262 - compression_gzip_custom: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 1263 - compression_gzip_custom: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 1264 - compression_gzip_custom: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 1265 - compression_gzip_custom: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 1266 - compression_gzip_custom: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 1267 - compression_gzip_custom: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 1268 - compression_gzip_custom: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 1269 - compression_gzip_custom: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 1270 - compression_gzip_custom: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 1271 - compression_gzip_custom: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 1272 - compression_gzip_custom: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 1273 - compression_gzip_custom: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 1274 - compression_gzip_custom: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 1275 - compression_gzip_custom: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 1276 - compression_gzip_custom: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 1277 - compression_gzip_custom: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 1278 - compression_gzip_custom: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 1280 - compression_gzip_custom: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 1281 - compression_gzip_custom: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 1282 - compression_gzip_custom: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 1283 - compression_gzip_custom: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 1284 - compression_gzip_custom: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 1285 - compression_gzip_custom: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 1286 - compression_gzip_custom: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 1287 - compression_gzip_custom: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 1288 - compression_gzip_custom: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 1289 - compression_gzip_custom: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 1291 - compression_gzip_custom: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 1292 - compression_gzip_custom: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 1293 - compression_gzip_custom: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 1294 - compression_gzip_custom: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 1295 - compression_gzip_custom: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 1296 - compression_gzip_custom: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 1297 - compression_gzip_custom: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 1317 - compression_gzip_custom: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 1319 - compression_gzip_custom: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 1321 - compression_gzip_custom: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 1322 - compression_gzip_custom: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 1323 - compression_gzip_custom: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 1324 - compression_gzip_custom: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 1325 - compression_gzip_custom: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 1326 - compression_gzip_custom: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 1327 - compression_gzip_custom: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 1328 - compression_gzip_custom: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 1329 - compression_gzip_custom: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 1330 - compression_gzip_custom: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 1332 - compression_gzip_custom: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 1333 - compression_gzip_custom: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 1334 - compression_gzip_custom: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 1342 - compression_gzip_custom: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 1343 - compression_gzip_custom: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 1344 - compression_gzip_custom: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 1345 - compression_gzip_custom: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 1346 - compression_gzip_custom: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 1348 - compression_gzip_custom: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 1350 - compression_gzip_custom: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 1352 - compression_gzip_custom: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 1354 - compression_gzip_custom: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 1355 - compression_gzip_custom: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 1356 - compression_gzip_custom: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 1359 - compression_gzip_custom: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 1360 - compression_gzip_custom: should dump restrict`
+- 002_pg_dump.pl: `not ok 1361 - compression_gzip_custom: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 1363 - compression_gzip_custom: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 1364 - compression_gzip_dir: pg_dump runs`
+- 002_pg_dump.pl: `not ok 1365 - compression_gzip_dir: compression commands`
+- 002_pg_dump.pl: `not ok 1367 - compression_gzip_dir: glob check for /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/compression_gzip_dir/*.dat.gz`
+- 002_pg_dump.pl: `not ok 1368 - compression_gzip_dir: pg_restore runs`
+- 002_pg_dump.pl: `not ok 1369 - compression_gzip_dir: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 1370 - compression_gzip_dir: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 1371 - compression_gzip_dir: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 1372 - compression_gzip_dir: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 1373 - compression_gzip_dir: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 1374 - compression_gzip_dir: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 1375 - compression_gzip_dir: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 1376 - compression_gzip_dir: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 1377 - compression_gzip_dir: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 1378 - compression_gzip_dir: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 1379 - compression_gzip_dir: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 1380 - compression_gzip_dir: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 1381 - compression_gzip_dir: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 1382 - compression_gzip_dir: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 1383 - compression_gzip_dir: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 1384 - compression_gzip_dir: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 1385 - compression_gzip_dir: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 1386 - compression_gzip_dir: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 1387 - compression_gzip_dir: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 1388 - compression_gzip_dir: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 1389 - compression_gzip_dir: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 1390 - compression_gzip_dir: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 1391 - compression_gzip_dir: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 1392 - compression_gzip_dir: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 1393 - compression_gzip_dir: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 1394 - compression_gzip_dir: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 1396 - compression_gzip_dir: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 1397 - compression_gzip_dir: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 1398 - compression_gzip_dir: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 1399 - compression_gzip_dir: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 1400 - compression_gzip_dir: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 1401 - compression_gzip_dir: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 1402 - compression_gzip_dir: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 1403 - compression_gzip_dir: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 1404 - compression_gzip_dir: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 1405 - compression_gzip_dir: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 1406 - compression_gzip_dir: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 1407 - compression_gzip_dir: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 1408 - compression_gzip_dir: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 1409 - compression_gzip_dir: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 1410 - compression_gzip_dir: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 1411 - compression_gzip_dir: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 1412 - compression_gzip_dir: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 1413 - compression_gzip_dir: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 1415 - compression_gzip_dir: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 1416 - compression_gzip_dir: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 1418 - compression_gzip_dir: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 1419 - compression_gzip_dir: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 1420 - compression_gzip_dir: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 1421 - compression_gzip_dir: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 1422 - compression_gzip_dir: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 1423 - compression_gzip_dir: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 1424 - compression_gzip_dir: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 1425 - compression_gzip_dir: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 1426 - compression_gzip_dir: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 1427 - compression_gzip_dir: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 1428 - compression_gzip_dir: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 1429 - compression_gzip_dir: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 1430 - compression_gzip_dir: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 1431 - compression_gzip_dir: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 1432 - compression_gzip_dir: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 1435 - compression_gzip_dir: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 1436 - compression_gzip_dir: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 1437 - compression_gzip_dir: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 1439 - compression_gzip_dir: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 1440 - compression_gzip_dir: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 1441 - compression_gzip_dir: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 1442 - compression_gzip_dir: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 1443 - compression_gzip_dir: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 1444 - compression_gzip_dir: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 1445 - compression_gzip_dir: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 1446 - compression_gzip_dir: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 1447 - compression_gzip_dir: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 1448 - compression_gzip_dir: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 1449 - compression_gzip_dir: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 1450 - compression_gzip_dir: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 1451 - compression_gzip_dir: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 1452 - compression_gzip_dir: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 1453 - compression_gzip_dir: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 1454 - compression_gzip_dir: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 1455 - compression_gzip_dir: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 1456 - compression_gzip_dir: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 1457 - compression_gzip_dir: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 1459 - compression_gzip_dir: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 1460 - compression_gzip_dir: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 1461 - compression_gzip_dir: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 1462 - compression_gzip_dir: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 1463 - compression_gzip_dir: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 1464 - compression_gzip_dir: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 1465 - compression_gzip_dir: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 1466 - compression_gzip_dir: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 1467 - compression_gzip_dir: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 1468 - compression_gzip_dir: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 1469 - compression_gzip_dir: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 1470 - compression_gzip_dir: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 1471 - compression_gzip_dir: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 1472 - compression_gzip_dir: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 1473 - compression_gzip_dir: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 1478 - compression_gzip_dir: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 1479 - compression_gzip_dir: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 1481 - compression_gzip_dir: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 1482 - compression_gzip_dir: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 1483 - compression_gzip_dir: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 1484 - compression_gzip_dir: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 1485 - compression_gzip_dir: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 1486 - compression_gzip_dir: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 1487 - compression_gzip_dir: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 1488 - compression_gzip_dir: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 1489 - compression_gzip_dir: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 1490 - compression_gzip_dir: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 1491 - compression_gzip_dir: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 1492 - compression_gzip_dir: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 1493 - compression_gzip_dir: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 1494 - compression_gzip_dir: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 1495 - compression_gzip_dir: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 1496 - compression_gzip_dir: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 1497 - compression_gzip_dir: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 1498 - compression_gzip_dir: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 1499 - compression_gzip_dir: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 1500 - compression_gzip_dir: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 1501 - compression_gzip_dir: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 1502 - compression_gzip_dir: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 1503 - compression_gzip_dir: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 1504 - compression_gzip_dir: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 1505 - compression_gzip_dir: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 1506 - compression_gzip_dir: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 1507 - compression_gzip_dir: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 1508 - compression_gzip_dir: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 1509 - compression_gzip_dir: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 1510 - compression_gzip_dir: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 1511 - compression_gzip_dir: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 1512 - compression_gzip_dir: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 1513 - compression_gzip_dir: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 1516 - compression_gzip_dir: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 1517 - compression_gzip_dir: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 1519 - compression_gzip_dir: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 1520 - compression_gzip_dir: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 1521 - compression_gzip_dir: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 1522 - compression_gzip_dir: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 1523 - compression_gzip_dir: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 1524 - compression_gzip_dir: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 1525 - compression_gzip_dir: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 1526 - compression_gzip_dir: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 1527 - compression_gzip_dir: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 1528 - compression_gzip_dir: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 1529 - compression_gzip_dir: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 1530 - compression_gzip_dir: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 1531 - compression_gzip_dir: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 1532 - compression_gzip_dir: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 1533 - compression_gzip_dir: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 1534 - compression_gzip_dir: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 1535 - compression_gzip_dir: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 1536 - compression_gzip_dir: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 1537 - compression_gzip_dir: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 1538 - compression_gzip_dir: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 1539 - compression_gzip_dir: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 1540 - compression_gzip_dir: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 1541 - compression_gzip_dir: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 1542 - compression_gzip_dir: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 1543 - compression_gzip_dir: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 1544 - compression_gzip_dir: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 1545 - compression_gzip_dir: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 1546 - compression_gzip_dir: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 1548 - compression_gzip_dir: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 1549 - compression_gzip_dir: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 1550 - compression_gzip_dir: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 1551 - compression_gzip_dir: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 1552 - compression_gzip_dir: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 1553 - compression_gzip_dir: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 1554 - compression_gzip_dir: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 1555 - compression_gzip_dir: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 1556 - compression_gzip_dir: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 1557 - compression_gzip_dir: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 1559 - compression_gzip_dir: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 1560 - compression_gzip_dir: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 1561 - compression_gzip_dir: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 1562 - compression_gzip_dir: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 1563 - compression_gzip_dir: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 1564 - compression_gzip_dir: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 1565 - compression_gzip_dir: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 1585 - compression_gzip_dir: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 1587 - compression_gzip_dir: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 1589 - compression_gzip_dir: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 1590 - compression_gzip_dir: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 1591 - compression_gzip_dir: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 1592 - compression_gzip_dir: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 1593 - compression_gzip_dir: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 1594 - compression_gzip_dir: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 1595 - compression_gzip_dir: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 1596 - compression_gzip_dir: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 1597 - compression_gzip_dir: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 1598 - compression_gzip_dir: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 1600 - compression_gzip_dir: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 1601 - compression_gzip_dir: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 1602 - compression_gzip_dir: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 1610 - compression_gzip_dir: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 1611 - compression_gzip_dir: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 1612 - compression_gzip_dir: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 1613 - compression_gzip_dir: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 1614 - compression_gzip_dir: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 1616 - compression_gzip_dir: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 1618 - compression_gzip_dir: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 1620 - compression_gzip_dir: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 1622 - compression_gzip_dir: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 1623 - compression_gzip_dir: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 1624 - compression_gzip_dir: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 1627 - compression_gzip_dir: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 1628 - compression_gzip_dir: should dump restrict`
+- 002_pg_dump.pl: `not ok 1629 - compression_gzip_dir: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 1631 - compression_gzip_dir: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 1632 - compression_gzip_plain: pg_dump runs`
+- 002_pg_dump.pl: `not ok 1633 - compression_gzip_plain: compression commands`
+- 002_pg_dump.pl: `not ok 1634 - compression_gzip_plain: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 1635 - compression_gzip_plain: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 1636 - compression_gzip_plain: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 1637 - compression_gzip_plain: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 1638 - compression_gzip_plain: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 1639 - compression_gzip_plain: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 1640 - compression_gzip_plain: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 1641 - compression_gzip_plain: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 1642 - compression_gzip_plain: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 1643 - compression_gzip_plain: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 1644 - compression_gzip_plain: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 1645 - compression_gzip_plain: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 1646 - compression_gzip_plain: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 1647 - compression_gzip_plain: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 1648 - compression_gzip_plain: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 1649 - compression_gzip_plain: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 1650 - compression_gzip_plain: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 1651 - compression_gzip_plain: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 1652 - compression_gzip_plain: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 1653 - compression_gzip_plain: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 1654 - compression_gzip_plain: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 1655 - compression_gzip_plain: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 1656 - compression_gzip_plain: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 1657 - compression_gzip_plain: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 1658 - compression_gzip_plain: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 1659 - compression_gzip_plain: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 1661 - compression_gzip_plain: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 1662 - compression_gzip_plain: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 1663 - compression_gzip_plain: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 1664 - compression_gzip_plain: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 1665 - compression_gzip_plain: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 1666 - compression_gzip_plain: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 1667 - compression_gzip_plain: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 1668 - compression_gzip_plain: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 1669 - compression_gzip_plain: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 1670 - compression_gzip_plain: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 1671 - compression_gzip_plain: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 1672 - compression_gzip_plain: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 1673 - compression_gzip_plain: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 1674 - compression_gzip_plain: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 1675 - compression_gzip_plain: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 1676 - compression_gzip_plain: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 1677 - compression_gzip_plain: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 1678 - compression_gzip_plain: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 1680 - compression_gzip_plain: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 1681 - compression_gzip_plain: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 1683 - compression_gzip_plain: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 1684 - compression_gzip_plain: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 1685 - compression_gzip_plain: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 1686 - compression_gzip_plain: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 1687 - compression_gzip_plain: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 1688 - compression_gzip_plain: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 1689 - compression_gzip_plain: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 1690 - compression_gzip_plain: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 1691 - compression_gzip_plain: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 1692 - compression_gzip_plain: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 1693 - compression_gzip_plain: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 1694 - compression_gzip_plain: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 1695 - compression_gzip_plain: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 1696 - compression_gzip_plain: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 1697 - compression_gzip_plain: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 1700 - compression_gzip_plain: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 1701 - compression_gzip_plain: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 1702 - compression_gzip_plain: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 1704 - compression_gzip_plain: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 1705 - compression_gzip_plain: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 1706 - compression_gzip_plain: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 1707 - compression_gzip_plain: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 1708 - compression_gzip_plain: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 1709 - compression_gzip_plain: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 1710 - compression_gzip_plain: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 1711 - compression_gzip_plain: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 1712 - compression_gzip_plain: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 1713 - compression_gzip_plain: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 1714 - compression_gzip_plain: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 1715 - compression_gzip_plain: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 1716 - compression_gzip_plain: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 1717 - compression_gzip_plain: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 1718 - compression_gzip_plain: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 1719 - compression_gzip_plain: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 1720 - compression_gzip_plain: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 1721 - compression_gzip_plain: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 1722 - compression_gzip_plain: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 1724 - compression_gzip_plain: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 1725 - compression_gzip_plain: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 1726 - compression_gzip_plain: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 1727 - compression_gzip_plain: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 1728 - compression_gzip_plain: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 1729 - compression_gzip_plain: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 1730 - compression_gzip_plain: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 1731 - compression_gzip_plain: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 1732 - compression_gzip_plain: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 1733 - compression_gzip_plain: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 1734 - compression_gzip_plain: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 1735 - compression_gzip_plain: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 1736 - compression_gzip_plain: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 1737 - compression_gzip_plain: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 1738 - compression_gzip_plain: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 1743 - compression_gzip_plain: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 1744 - compression_gzip_plain: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 1746 - compression_gzip_plain: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 1747 - compression_gzip_plain: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 1748 - compression_gzip_plain: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 1749 - compression_gzip_plain: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 1750 - compression_gzip_plain: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 1751 - compression_gzip_plain: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 1752 - compression_gzip_plain: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 1753 - compression_gzip_plain: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 1754 - compression_gzip_plain: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 1755 - compression_gzip_plain: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 1756 - compression_gzip_plain: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 1757 - compression_gzip_plain: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 1758 - compression_gzip_plain: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 1759 - compression_gzip_plain: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 1760 - compression_gzip_plain: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 1761 - compression_gzip_plain: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 1762 - compression_gzip_plain: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 1763 - compression_gzip_plain: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 1764 - compression_gzip_plain: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 1765 - compression_gzip_plain: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 1766 - compression_gzip_plain: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 1767 - compression_gzip_plain: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 1768 - compression_gzip_plain: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 1769 - compression_gzip_plain: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 1770 - compression_gzip_plain: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 1771 - compression_gzip_plain: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 1772 - compression_gzip_plain: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 1773 - compression_gzip_plain: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 1774 - compression_gzip_plain: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 1775 - compression_gzip_plain: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 1776 - compression_gzip_plain: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 1777 - compression_gzip_plain: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 1778 - compression_gzip_plain: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 1781 - compression_gzip_plain: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 1782 - compression_gzip_plain: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 1784 - compression_gzip_plain: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 1785 - compression_gzip_plain: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 1786 - compression_gzip_plain: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 1787 - compression_gzip_plain: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 1788 - compression_gzip_plain: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 1789 - compression_gzip_plain: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 1790 - compression_gzip_plain: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 1791 - compression_gzip_plain: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 1792 - compression_gzip_plain: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 1793 - compression_gzip_plain: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 1794 - compression_gzip_plain: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 1795 - compression_gzip_plain: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 1796 - compression_gzip_plain: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 1797 - compression_gzip_plain: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 1798 - compression_gzip_plain: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 1799 - compression_gzip_plain: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 1800 - compression_gzip_plain: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 1801 - compression_gzip_plain: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 1802 - compression_gzip_plain: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 1803 - compression_gzip_plain: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 1804 - compression_gzip_plain: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 1805 - compression_gzip_plain: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 1806 - compression_gzip_plain: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 1807 - compression_gzip_plain: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 1808 - compression_gzip_plain: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 1809 - compression_gzip_plain: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 1810 - compression_gzip_plain: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 1811 - compression_gzip_plain: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 1813 - compression_gzip_plain: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 1814 - compression_gzip_plain: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 1815 - compression_gzip_plain: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 1816 - compression_gzip_plain: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 1817 - compression_gzip_plain: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 1818 - compression_gzip_plain: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 1819 - compression_gzip_plain: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 1820 - compression_gzip_plain: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 1821 - compression_gzip_plain: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 1822 - compression_gzip_plain: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 1824 - compression_gzip_plain: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 1825 - compression_gzip_plain: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 1826 - compression_gzip_plain: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 1827 - compression_gzip_plain: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 1828 - compression_gzip_plain: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 1829 - compression_gzip_plain: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 1830 - compression_gzip_plain: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 1850 - compression_gzip_plain: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 1852 - compression_gzip_plain: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 1854 - compression_gzip_plain: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 1855 - compression_gzip_plain: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 1856 - compression_gzip_plain: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 1857 - compression_gzip_plain: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 1858 - compression_gzip_plain: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 1859 - compression_gzip_plain: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 1860 - compression_gzip_plain: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 1861 - compression_gzip_plain: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 1862 - compression_gzip_plain: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 1863 - compression_gzip_plain: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 1865 - compression_gzip_plain: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 1866 - compression_gzip_plain: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 1867 - compression_gzip_plain: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 1875 - compression_gzip_plain: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 1876 - compression_gzip_plain: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 1877 - compression_gzip_plain: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 1878 - compression_gzip_plain: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 1879 - compression_gzip_plain: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 1881 - compression_gzip_plain: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 1883 - compression_gzip_plain: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 1885 - compression_gzip_plain: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 1887 - compression_gzip_plain: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 1888 - compression_gzip_plain: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 1889 - compression_gzip_plain: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 1892 - compression_gzip_plain: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 1893 - compression_gzip_plain: should dump restrict`
+- 002_pg_dump.pl: `not ok 1894 - compression_gzip_plain: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 1896 - compression_gzip_plain: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 1897 - compression_lz4_custom: pg_dump runs`
+- 002_pg_dump.pl: `not ok 1898 - compression_lz4_custom: data content is lz4 compressed: exit code 0`
+- 002_pg_dump.pl: `not ok 1900 - compression_lz4_custom: data content is lz4 compressed: matches`
+- 002_pg_dump.pl: `not ok 1901 - compression_lz4_custom: pg_restore runs`
+- 002_pg_dump.pl: `not ok 1902 - compression_lz4_custom: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 1903 - compression_lz4_custom: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 1904 - compression_lz4_custom: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 1905 - compression_lz4_custom: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 1906 - compression_lz4_custom: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 1907 - compression_lz4_custom: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 1908 - compression_lz4_custom: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 1909 - compression_lz4_custom: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 1910 - compression_lz4_custom: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 1911 - compression_lz4_custom: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 1912 - compression_lz4_custom: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 1913 - compression_lz4_custom: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 1914 - compression_lz4_custom: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 1915 - compression_lz4_custom: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 1916 - compression_lz4_custom: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 1917 - compression_lz4_custom: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 1918 - compression_lz4_custom: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 1919 - compression_lz4_custom: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 1920 - compression_lz4_custom: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 1921 - compression_lz4_custom: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 1922 - compression_lz4_custom: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 1923 - compression_lz4_custom: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 1924 - compression_lz4_custom: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 1925 - compression_lz4_custom: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 1926 - compression_lz4_custom: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 1927 - compression_lz4_custom: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 1929 - compression_lz4_custom: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 1930 - compression_lz4_custom: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 1931 - compression_lz4_custom: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 1932 - compression_lz4_custom: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 1933 - compression_lz4_custom: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 1934 - compression_lz4_custom: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 1935 - compression_lz4_custom: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 1936 - compression_lz4_custom: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 1937 - compression_lz4_custom: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 1938 - compression_lz4_custom: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 1939 - compression_lz4_custom: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 1940 - compression_lz4_custom: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 1941 - compression_lz4_custom: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 1942 - compression_lz4_custom: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 1943 - compression_lz4_custom: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 1944 - compression_lz4_custom: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 1945 - compression_lz4_custom: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 1946 - compression_lz4_custom: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 1948 - compression_lz4_custom: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 1949 - compression_lz4_custom: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 1951 - compression_lz4_custom: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 1952 - compression_lz4_custom: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 1953 - compression_lz4_custom: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 1954 - compression_lz4_custom: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 1955 - compression_lz4_custom: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 1956 - compression_lz4_custom: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 1957 - compression_lz4_custom: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 1958 - compression_lz4_custom: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 1959 - compression_lz4_custom: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 1960 - compression_lz4_custom: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 1961 - compression_lz4_custom: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 1962 - compression_lz4_custom: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 1963 - compression_lz4_custom: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 1964 - compression_lz4_custom: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 1965 - compression_lz4_custom: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 1968 - compression_lz4_custom: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 1969 - compression_lz4_custom: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 1970 - compression_lz4_custom: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 1972 - compression_lz4_custom: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 1973 - compression_lz4_custom: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 1974 - compression_lz4_custom: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 1975 - compression_lz4_custom: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 1976 - compression_lz4_custom: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 1977 - compression_lz4_custom: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 1978 - compression_lz4_custom: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 1979 - compression_lz4_custom: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 1980 - compression_lz4_custom: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 1981 - compression_lz4_custom: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 1982 - compression_lz4_custom: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 1983 - compression_lz4_custom: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 1984 - compression_lz4_custom: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 1985 - compression_lz4_custom: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 1986 - compression_lz4_custom: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 1987 - compression_lz4_custom: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 1988 - compression_lz4_custom: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 1989 - compression_lz4_custom: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 1990 - compression_lz4_custom: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 1992 - compression_lz4_custom: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 1993 - compression_lz4_custom: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 1994 - compression_lz4_custom: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 1995 - compression_lz4_custom: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 1996 - compression_lz4_custom: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 1997 - compression_lz4_custom: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 1998 - compression_lz4_custom: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 1999 - compression_lz4_custom: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 2000 - compression_lz4_custom: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 2001 - compression_lz4_custom: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 2002 - compression_lz4_custom: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 2003 - compression_lz4_custom: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 2004 - compression_lz4_custom: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 2005 - compression_lz4_custom: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 2006 - compression_lz4_custom: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 2011 - compression_lz4_custom: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 2012 - compression_lz4_custom: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 2014 - compression_lz4_custom: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 2015 - compression_lz4_custom: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 2016 - compression_lz4_custom: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 2017 - compression_lz4_custom: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 2018 - compression_lz4_custom: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 2019 - compression_lz4_custom: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 2020 - compression_lz4_custom: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 2021 - compression_lz4_custom: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 2022 - compression_lz4_custom: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 2023 - compression_lz4_custom: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 2024 - compression_lz4_custom: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 2025 - compression_lz4_custom: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 2026 - compression_lz4_custom: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 2027 - compression_lz4_custom: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 2028 - compression_lz4_custom: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 2029 - compression_lz4_custom: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 2030 - compression_lz4_custom: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 2031 - compression_lz4_custom: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 2032 - compression_lz4_custom: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 2033 - compression_lz4_custom: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 2034 - compression_lz4_custom: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 2035 - compression_lz4_custom: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 2036 - compression_lz4_custom: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 2037 - compression_lz4_custom: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 2038 - compression_lz4_custom: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 2039 - compression_lz4_custom: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 2040 - compression_lz4_custom: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 2041 - compression_lz4_custom: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 2042 - compression_lz4_custom: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 2043 - compression_lz4_custom: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 2044 - compression_lz4_custom: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 2045 - compression_lz4_custom: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 2046 - compression_lz4_custom: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 2049 - compression_lz4_custom: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 2050 - compression_lz4_custom: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 2052 - compression_lz4_custom: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 2053 - compression_lz4_custom: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 2054 - compression_lz4_custom: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 2055 - compression_lz4_custom: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 2056 - compression_lz4_custom: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 2057 - compression_lz4_custom: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 2058 - compression_lz4_custom: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 2059 - compression_lz4_custom: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 2060 - compression_lz4_custom: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 2061 - compression_lz4_custom: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 2062 - compression_lz4_custom: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 2063 - compression_lz4_custom: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 2064 - compression_lz4_custom: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 2065 - compression_lz4_custom: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 2066 - compression_lz4_custom: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 2067 - compression_lz4_custom: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 2068 - compression_lz4_custom: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 2069 - compression_lz4_custom: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 2070 - compression_lz4_custom: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 2071 - compression_lz4_custom: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 2072 - compression_lz4_custom: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 2073 - compression_lz4_custom: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 2074 - compression_lz4_custom: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 2075 - compression_lz4_custom: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 2076 - compression_lz4_custom: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 2077 - compression_lz4_custom: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 2078 - compression_lz4_custom: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 2079 - compression_lz4_custom: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 2081 - compression_lz4_custom: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 2082 - compression_lz4_custom: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 2083 - compression_lz4_custom: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 2084 - compression_lz4_custom: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 2085 - compression_lz4_custom: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 2086 - compression_lz4_custom: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 2087 - compression_lz4_custom: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 2088 - compression_lz4_custom: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 2089 - compression_lz4_custom: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 2090 - compression_lz4_custom: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 2092 - compression_lz4_custom: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 2093 - compression_lz4_custom: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 2094 - compression_lz4_custom: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 2095 - compression_lz4_custom: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 2096 - compression_lz4_custom: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 2097 - compression_lz4_custom: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 2098 - compression_lz4_custom: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 2118 - compression_lz4_custom: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 2120 - compression_lz4_custom: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 2122 - compression_lz4_custom: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 2123 - compression_lz4_custom: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 2124 - compression_lz4_custom: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 2125 - compression_lz4_custom: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 2126 - compression_lz4_custom: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 2127 - compression_lz4_custom: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 2128 - compression_lz4_custom: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 2129 - compression_lz4_custom: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 2130 - compression_lz4_custom: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 2131 - compression_lz4_custom: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 2133 - compression_lz4_custom: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 2134 - compression_lz4_custom: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 2135 - compression_lz4_custom: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 2143 - compression_lz4_custom: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 2144 - compression_lz4_custom: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 2145 - compression_lz4_custom: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 2146 - compression_lz4_custom: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 2147 - compression_lz4_custom: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 2149 - compression_lz4_custom: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 2151 - compression_lz4_custom: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 2153 - compression_lz4_custom: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 2155 - compression_lz4_custom: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 2156 - compression_lz4_custom: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 2157 - compression_lz4_custom: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 2160 - compression_lz4_custom: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 2161 - compression_lz4_custom: should dump restrict`
+- 002_pg_dump.pl: `not ok 2162 - compression_lz4_custom: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 2164 - compression_lz4_custom: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 2165 - compression_lz4_dir: pg_dump runs`
+- 002_pg_dump.pl: `not ok 2166 - compression_lz4_plain: pg_dump runs`
+- 002_pg_dump.pl: `not ok 2167 - compression_zstd_custom: pg_dump runs`
+- 002_pg_dump.pl: `not ok 2168 - compression_zstd_custom: data content is zstd compressed: exit code 0`
+- 002_pg_dump.pl: `not ok 2170 - compression_zstd_custom: data content is zstd compressed: matches`
+- 002_pg_dump.pl: `not ok 2171 - compression_zstd_custom: pg_restore runs`
+- 002_pg_dump.pl: `not ok 2172 - compression_zstd_custom: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 2173 - compression_zstd_custom: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 2174 - compression_zstd_custom: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 2175 - compression_zstd_custom: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 2176 - compression_zstd_custom: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 2177 - compression_zstd_custom: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 2178 - compression_zstd_custom: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 2179 - compression_zstd_custom: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 2180 - compression_zstd_custom: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 2181 - compression_zstd_custom: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 2182 - compression_zstd_custom: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 2183 - compression_zstd_custom: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 2184 - compression_zstd_custom: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 2185 - compression_zstd_custom: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 2186 - compression_zstd_custom: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 2187 - compression_zstd_custom: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 2188 - compression_zstd_custom: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 2189 - compression_zstd_custom: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 2190 - compression_zstd_custom: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 2191 - compression_zstd_custom: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 2192 - compression_zstd_custom: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 2193 - compression_zstd_custom: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 2194 - compression_zstd_custom: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 2195 - compression_zstd_custom: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 2196 - compression_zstd_custom: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 2197 - compression_zstd_custom: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 2199 - compression_zstd_custom: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 2200 - compression_zstd_custom: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 2201 - compression_zstd_custom: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 2202 - compression_zstd_custom: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 2203 - compression_zstd_custom: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 2204 - compression_zstd_custom: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 2205 - compression_zstd_custom: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 2206 - compression_zstd_custom: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 2207 - compression_zstd_custom: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 2208 - compression_zstd_custom: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 2209 - compression_zstd_custom: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 2210 - compression_zstd_custom: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 2211 - compression_zstd_custom: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 2212 - compression_zstd_custom: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 2213 - compression_zstd_custom: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 2214 - compression_zstd_custom: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 2215 - compression_zstd_custom: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 2216 - compression_zstd_custom: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 2218 - compression_zstd_custom: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 2219 - compression_zstd_custom: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 2221 - compression_zstd_custom: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 2222 - compression_zstd_custom: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 2223 - compression_zstd_custom: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 2224 - compression_zstd_custom: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 2225 - compression_zstd_custom: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 2226 - compression_zstd_custom: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 2227 - compression_zstd_custom: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 2228 - compression_zstd_custom: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 2229 - compression_zstd_custom: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 2230 - compression_zstd_custom: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 2231 - compression_zstd_custom: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 2232 - compression_zstd_custom: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 2233 - compression_zstd_custom: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 2234 - compression_zstd_custom: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 2235 - compression_zstd_custom: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 2238 - compression_zstd_custom: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 2239 - compression_zstd_custom: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 2240 - compression_zstd_custom: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 2242 - compression_zstd_custom: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 2243 - compression_zstd_custom: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 2244 - compression_zstd_custom: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 2245 - compression_zstd_custom: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 2246 - compression_zstd_custom: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 2247 - compression_zstd_custom: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 2248 - compression_zstd_custom: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 2249 - compression_zstd_custom: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 2250 - compression_zstd_custom: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 2251 - compression_zstd_custom: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 2252 - compression_zstd_custom: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 2253 - compression_zstd_custom: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 2254 - compression_zstd_custom: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 2255 - compression_zstd_custom: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 2256 - compression_zstd_custom: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 2257 - compression_zstd_custom: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 2258 - compression_zstd_custom: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 2259 - compression_zstd_custom: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 2260 - compression_zstd_custom: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 2262 - compression_zstd_custom: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 2263 - compression_zstd_custom: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 2264 - compression_zstd_custom: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 2265 - compression_zstd_custom: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 2266 - compression_zstd_custom: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 2267 - compression_zstd_custom: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 2268 - compression_zstd_custom: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 2269 - compression_zstd_custom: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 2270 - compression_zstd_custom: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 2271 - compression_zstd_custom: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 2272 - compression_zstd_custom: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 2273 - compression_zstd_custom: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 2274 - compression_zstd_custom: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 2275 - compression_zstd_custom: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 2276 - compression_zstd_custom: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 2281 - compression_zstd_custom: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 2282 - compression_zstd_custom: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 2284 - compression_zstd_custom: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 2285 - compression_zstd_custom: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 2286 - compression_zstd_custom: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 2287 - compression_zstd_custom: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 2288 - compression_zstd_custom: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 2289 - compression_zstd_custom: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 2290 - compression_zstd_custom: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 2291 - compression_zstd_custom: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 2292 - compression_zstd_custom: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 2293 - compression_zstd_custom: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 2294 - compression_zstd_custom: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 2295 - compression_zstd_custom: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 2296 - compression_zstd_custom: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 2297 - compression_zstd_custom: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 2298 - compression_zstd_custom: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 2299 - compression_zstd_custom: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 2300 - compression_zstd_custom: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 2301 - compression_zstd_custom: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 2302 - compression_zstd_custom: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 2303 - compression_zstd_custom: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 2304 - compression_zstd_custom: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 2305 - compression_zstd_custom: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 2306 - compression_zstd_custom: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 2307 - compression_zstd_custom: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 2308 - compression_zstd_custom: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 2309 - compression_zstd_custom: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 2310 - compression_zstd_custom: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 2311 - compression_zstd_custom: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 2312 - compression_zstd_custom: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 2313 - compression_zstd_custom: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 2314 - compression_zstd_custom: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 2315 - compression_zstd_custom: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 2316 - compression_zstd_custom: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 2319 - compression_zstd_custom: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 2320 - compression_zstd_custom: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 2322 - compression_zstd_custom: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 2323 - compression_zstd_custom: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 2324 - compression_zstd_custom: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 2325 - compression_zstd_custom: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 2326 - compression_zstd_custom: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 2327 - compression_zstd_custom: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 2328 - compression_zstd_custom: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 2329 - compression_zstd_custom: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 2330 - compression_zstd_custom: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 2331 - compression_zstd_custom: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 2332 - compression_zstd_custom: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 2333 - compression_zstd_custom: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 2334 - compression_zstd_custom: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 2335 - compression_zstd_custom: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 2336 - compression_zstd_custom: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 2337 - compression_zstd_custom: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 2338 - compression_zstd_custom: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 2339 - compression_zstd_custom: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 2340 - compression_zstd_custom: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 2341 - compression_zstd_custom: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 2342 - compression_zstd_custom: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 2343 - compression_zstd_custom: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 2344 - compression_zstd_custom: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 2345 - compression_zstd_custom: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 2346 - compression_zstd_custom: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 2347 - compression_zstd_custom: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 2348 - compression_zstd_custom: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 2349 - compression_zstd_custom: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 2351 - compression_zstd_custom: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 2352 - compression_zstd_custom: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 2353 - compression_zstd_custom: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 2354 - compression_zstd_custom: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 2355 - compression_zstd_custom: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 2356 - compression_zstd_custom: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 2357 - compression_zstd_custom: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 2358 - compression_zstd_custom: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 2359 - compression_zstd_custom: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 2360 - compression_zstd_custom: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 2362 - compression_zstd_custom: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 2363 - compression_zstd_custom: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 2364 - compression_zstd_custom: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 2365 - compression_zstd_custom: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 2366 - compression_zstd_custom: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 2367 - compression_zstd_custom: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 2368 - compression_zstd_custom: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 2388 - compression_zstd_custom: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 2390 - compression_zstd_custom: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 2392 - compression_zstd_custom: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 2393 - compression_zstd_custom: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 2394 - compression_zstd_custom: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 2395 - compression_zstd_custom: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 2396 - compression_zstd_custom: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 2397 - compression_zstd_custom: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 2398 - compression_zstd_custom: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 2399 - compression_zstd_custom: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 2400 - compression_zstd_custom: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 2401 - compression_zstd_custom: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 2403 - compression_zstd_custom: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 2404 - compression_zstd_custom: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 2405 - compression_zstd_custom: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 2413 - compression_zstd_custom: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 2414 - compression_zstd_custom: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 2415 - compression_zstd_custom: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 2416 - compression_zstd_custom: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 2417 - compression_zstd_custom: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 2419 - compression_zstd_custom: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 2421 - compression_zstd_custom: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 2423 - compression_zstd_custom: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 2425 - compression_zstd_custom: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 2426 - compression_zstd_custom: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 2427 - compression_zstd_custom: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 2430 - compression_zstd_custom: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 2431 - compression_zstd_custom: should dump restrict`
+- 002_pg_dump.pl: `not ok 2432 - compression_zstd_custom: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 2434 - compression_zstd_custom: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 2435 - compression_zstd_dir: pg_dump runs`
+- 002_pg_dump.pl: `not ok 2436 - compression_zstd_dir: compression commands`
+- 002_pg_dump.pl: `not ok 2438 - compression_zstd_dir: glob check for /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/compression_zstd_dir/*.dat.zst`
+- 002_pg_dump.pl: `not ok 2439 - compression_zstd_dir: pg_restore runs`
+- 002_pg_dump.pl: `not ok 2440 - compression_zstd_dir: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 2441 - compression_zstd_dir: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 2442 - compression_zstd_dir: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 2443 - compression_zstd_dir: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 2444 - compression_zstd_dir: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 2445 - compression_zstd_dir: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 2446 - compression_zstd_dir: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 2447 - compression_zstd_dir: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 2448 - compression_zstd_dir: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 2449 - compression_zstd_dir: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 2450 - compression_zstd_dir: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 2451 - compression_zstd_dir: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 2452 - compression_zstd_dir: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 2453 - compression_zstd_dir: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 2454 - compression_zstd_dir: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 2455 - compression_zstd_dir: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 2456 - compression_zstd_dir: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 2457 - compression_zstd_dir: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 2458 - compression_zstd_dir: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 2459 - compression_zstd_dir: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 2460 - compression_zstd_dir: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 2461 - compression_zstd_dir: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 2462 - compression_zstd_dir: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 2463 - compression_zstd_dir: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 2464 - compression_zstd_dir: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 2465 - compression_zstd_dir: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 2467 - compression_zstd_dir: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 2468 - compression_zstd_dir: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 2469 - compression_zstd_dir: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 2470 - compression_zstd_dir: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 2471 - compression_zstd_dir: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 2472 - compression_zstd_dir: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 2473 - compression_zstd_dir: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 2474 - compression_zstd_dir: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 2475 - compression_zstd_dir: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 2476 - compression_zstd_dir: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 2477 - compression_zstd_dir: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 2478 - compression_zstd_dir: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 2479 - compression_zstd_dir: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 2480 - compression_zstd_dir: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 2481 - compression_zstd_dir: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 2482 - compression_zstd_dir: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 2483 - compression_zstd_dir: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 2484 - compression_zstd_dir: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 2486 - compression_zstd_dir: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 2487 - compression_zstd_dir: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 2489 - compression_zstd_dir: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 2490 - compression_zstd_dir: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 2491 - compression_zstd_dir: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 2492 - compression_zstd_dir: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 2493 - compression_zstd_dir: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 2494 - compression_zstd_dir: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 2495 - compression_zstd_dir: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 2496 - compression_zstd_dir: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 2497 - compression_zstd_dir: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 2498 - compression_zstd_dir: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 2499 - compression_zstd_dir: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 2500 - compression_zstd_dir: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 2501 - compression_zstd_dir: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 2502 - compression_zstd_dir: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 2503 - compression_zstd_dir: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 2506 - compression_zstd_dir: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 2507 - compression_zstd_dir: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 2508 - compression_zstd_dir: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 2510 - compression_zstd_dir: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 2511 - compression_zstd_dir: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 2512 - compression_zstd_dir: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 2513 - compression_zstd_dir: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 2514 - compression_zstd_dir: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 2515 - compression_zstd_dir: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 2516 - compression_zstd_dir: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 2517 - compression_zstd_dir: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 2518 - compression_zstd_dir: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 2519 - compression_zstd_dir: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 2520 - compression_zstd_dir: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 2521 - compression_zstd_dir: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 2522 - compression_zstd_dir: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 2523 - compression_zstd_dir: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 2524 - compression_zstd_dir: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 2525 - compression_zstd_dir: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 2526 - compression_zstd_dir: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 2527 - compression_zstd_dir: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 2528 - compression_zstd_dir: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 2530 - compression_zstd_dir: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 2531 - compression_zstd_dir: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 2532 - compression_zstd_dir: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 2533 - compression_zstd_dir: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 2534 - compression_zstd_dir: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 2535 - compression_zstd_dir: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 2536 - compression_zstd_dir: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 2537 - compression_zstd_dir: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 2538 - compression_zstd_dir: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 2539 - compression_zstd_dir: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 2540 - compression_zstd_dir: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 2541 - compression_zstd_dir: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 2542 - compression_zstd_dir: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 2543 - compression_zstd_dir: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 2544 - compression_zstd_dir: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 2549 - compression_zstd_dir: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 2550 - compression_zstd_dir: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 2552 - compression_zstd_dir: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 2553 - compression_zstd_dir: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 2554 - compression_zstd_dir: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 2555 - compression_zstd_dir: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 2556 - compression_zstd_dir: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 2557 - compression_zstd_dir: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 2558 - compression_zstd_dir: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 2559 - compression_zstd_dir: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 2560 - compression_zstd_dir: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 2561 - compression_zstd_dir: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 2562 - compression_zstd_dir: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 2563 - compression_zstd_dir: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 2564 - compression_zstd_dir: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 2565 - compression_zstd_dir: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 2566 - compression_zstd_dir: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 2567 - compression_zstd_dir: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 2568 - compression_zstd_dir: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 2569 - compression_zstd_dir: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 2570 - compression_zstd_dir: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 2571 - compression_zstd_dir: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 2572 - compression_zstd_dir: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 2573 - compression_zstd_dir: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 2574 - compression_zstd_dir: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 2575 - compression_zstd_dir: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 2576 - compression_zstd_dir: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 2577 - compression_zstd_dir: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 2578 - compression_zstd_dir: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 2579 - compression_zstd_dir: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 2580 - compression_zstd_dir: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 2581 - compression_zstd_dir: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 2582 - compression_zstd_dir: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 2583 - compression_zstd_dir: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 2584 - compression_zstd_dir: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 2587 - compression_zstd_dir: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 2588 - compression_zstd_dir: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 2590 - compression_zstd_dir: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 2591 - compression_zstd_dir: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 2592 - compression_zstd_dir: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 2593 - compression_zstd_dir: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 2594 - compression_zstd_dir: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 2595 - compression_zstd_dir: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 2596 - compression_zstd_dir: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 2597 - compression_zstd_dir: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 2598 - compression_zstd_dir: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 2599 - compression_zstd_dir: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 2600 - compression_zstd_dir: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 2601 - compression_zstd_dir: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 2602 - compression_zstd_dir: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 2603 - compression_zstd_dir: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 2604 - compression_zstd_dir: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 2605 - compression_zstd_dir: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 2606 - compression_zstd_dir: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 2607 - compression_zstd_dir: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 2608 - compression_zstd_dir: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 2609 - compression_zstd_dir: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 2610 - compression_zstd_dir: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 2611 - compression_zstd_dir: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 2612 - compression_zstd_dir: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 2613 - compression_zstd_dir: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 2614 - compression_zstd_dir: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 2615 - compression_zstd_dir: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 2616 - compression_zstd_dir: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 2617 - compression_zstd_dir: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 2619 - compression_zstd_dir: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 2620 - compression_zstd_dir: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 2621 - compression_zstd_dir: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 2622 - compression_zstd_dir: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 2623 - compression_zstd_dir: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 2624 - compression_zstd_dir: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 2625 - compression_zstd_dir: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 2626 - compression_zstd_dir: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 2627 - compression_zstd_dir: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 2628 - compression_zstd_dir: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 2630 - compression_zstd_dir: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 2631 - compression_zstd_dir: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 2632 - compression_zstd_dir: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 2633 - compression_zstd_dir: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 2634 - compression_zstd_dir: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 2635 - compression_zstd_dir: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 2636 - compression_zstd_dir: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 2656 - compression_zstd_dir: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 2658 - compression_zstd_dir: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 2660 - compression_zstd_dir: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 2661 - compression_zstd_dir: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 2662 - compression_zstd_dir: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 2663 - compression_zstd_dir: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 2664 - compression_zstd_dir: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 2665 - compression_zstd_dir: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 2666 - compression_zstd_dir: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 2667 - compression_zstd_dir: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 2668 - compression_zstd_dir: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 2669 - compression_zstd_dir: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 2671 - compression_zstd_dir: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 2672 - compression_zstd_dir: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 2673 - compression_zstd_dir: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 2681 - compression_zstd_dir: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 2682 - compression_zstd_dir: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 2683 - compression_zstd_dir: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 2684 - compression_zstd_dir: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 2685 - compression_zstd_dir: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 2687 - compression_zstd_dir: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 2689 - compression_zstd_dir: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 2691 - compression_zstd_dir: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 2693 - compression_zstd_dir: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 2694 - compression_zstd_dir: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 2695 - compression_zstd_dir: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 2698 - compression_zstd_dir: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 2699 - compression_zstd_dir: should dump restrict`
+- 002_pg_dump.pl: `not ok 2700 - compression_zstd_dir: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 2702 - compression_zstd_dir: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 2703 - compression_zstd_plain: pg_dump runs`
+- 002_pg_dump.pl: `not ok 2704 - compression_zstd_plain: compression commands`
+- 002_pg_dump.pl: `not ok 2705 - compression_zstd_plain: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 2706 - compression_zstd_plain: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 2707 - compression_zstd_plain: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 2708 - compression_zstd_plain: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 2709 - compression_zstd_plain: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 2710 - compression_zstd_plain: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 2711 - compression_zstd_plain: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 2712 - compression_zstd_plain: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 2713 - compression_zstd_plain: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 2714 - compression_zstd_plain: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 2715 - compression_zstd_plain: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 2716 - compression_zstd_plain: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 2717 - compression_zstd_plain: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 2718 - compression_zstd_plain: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 2719 - compression_zstd_plain: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 2720 - compression_zstd_plain: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 2721 - compression_zstd_plain: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 2722 - compression_zstd_plain: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 2723 - compression_zstd_plain: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 2724 - compression_zstd_plain: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 2725 - compression_zstd_plain: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 2726 - compression_zstd_plain: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 2727 - compression_zstd_plain: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 2728 - compression_zstd_plain: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 2729 - compression_zstd_plain: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 2730 - compression_zstd_plain: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 2732 - compression_zstd_plain: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 2733 - compression_zstd_plain: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 2734 - compression_zstd_plain: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 2735 - compression_zstd_plain: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 2736 - compression_zstd_plain: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 2737 - compression_zstd_plain: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 2738 - compression_zstd_plain: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 2739 - compression_zstd_plain: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 2740 - compression_zstd_plain: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 2741 - compression_zstd_plain: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 2742 - compression_zstd_plain: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 2743 - compression_zstd_plain: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 2744 - compression_zstd_plain: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 2745 - compression_zstd_plain: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 2746 - compression_zstd_plain: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 2747 - compression_zstd_plain: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 2748 - compression_zstd_plain: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 2749 - compression_zstd_plain: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 2751 - compression_zstd_plain: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 2752 - compression_zstd_plain: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 2754 - compression_zstd_plain: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 2755 - compression_zstd_plain: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 2756 - compression_zstd_plain: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 2757 - compression_zstd_plain: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 2758 - compression_zstd_plain: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 2759 - compression_zstd_plain: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 2760 - compression_zstd_plain: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 2761 - compression_zstd_plain: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 2762 - compression_zstd_plain: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 2763 - compression_zstd_plain: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 2764 - compression_zstd_plain: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 2765 - compression_zstd_plain: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 2766 - compression_zstd_plain: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 2767 - compression_zstd_plain: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 2768 - compression_zstd_plain: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 2771 - compression_zstd_plain: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 2772 - compression_zstd_plain: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 2773 - compression_zstd_plain: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 2775 - compression_zstd_plain: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 2776 - compression_zstd_plain: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 2777 - compression_zstd_plain: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 2778 - compression_zstd_plain: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 2779 - compression_zstd_plain: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 2780 - compression_zstd_plain: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 2781 - compression_zstd_plain: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 2782 - compression_zstd_plain: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 2783 - compression_zstd_plain: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 2784 - compression_zstd_plain: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 2785 - compression_zstd_plain: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 2786 - compression_zstd_plain: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 2787 - compression_zstd_plain: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 2788 - compression_zstd_plain: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 2789 - compression_zstd_plain: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 2790 - compression_zstd_plain: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 2791 - compression_zstd_plain: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 2792 - compression_zstd_plain: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 2793 - compression_zstd_plain: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 2795 - compression_zstd_plain: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 2796 - compression_zstd_plain: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 2797 - compression_zstd_plain: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 2798 - compression_zstd_plain: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 2799 - compression_zstd_plain: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 2800 - compression_zstd_plain: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 2801 - compression_zstd_plain: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 2802 - compression_zstd_plain: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 2803 - compression_zstd_plain: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 2804 - compression_zstd_plain: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 2805 - compression_zstd_plain: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 2806 - compression_zstd_plain: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 2807 - compression_zstd_plain: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 2808 - compression_zstd_plain: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 2809 - compression_zstd_plain: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 2814 - compression_zstd_plain: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 2815 - compression_zstd_plain: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 2817 - compression_zstd_plain: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 2818 - compression_zstd_plain: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 2819 - compression_zstd_plain: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 2820 - compression_zstd_plain: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 2821 - compression_zstd_plain: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 2822 - compression_zstd_plain: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 2823 - compression_zstd_plain: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 2824 - compression_zstd_plain: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 2825 - compression_zstd_plain: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 2826 - compression_zstd_plain: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 2827 - compression_zstd_plain: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 2828 - compression_zstd_plain: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 2829 - compression_zstd_plain: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 2830 - compression_zstd_plain: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 2831 - compression_zstd_plain: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 2832 - compression_zstd_plain: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 2833 - compression_zstd_plain: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 2834 - compression_zstd_plain: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 2835 - compression_zstd_plain: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 2836 - compression_zstd_plain: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 2837 - compression_zstd_plain: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 2838 - compression_zstd_plain: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 2839 - compression_zstd_plain: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 2840 - compression_zstd_plain: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 2841 - compression_zstd_plain: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 2842 - compression_zstd_plain: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 2843 - compression_zstd_plain: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 2844 - compression_zstd_plain: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 2845 - compression_zstd_plain: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 2846 - compression_zstd_plain: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 2847 - compression_zstd_plain: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 2848 - compression_zstd_plain: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 2849 - compression_zstd_plain: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 2852 - compression_zstd_plain: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 2853 - compression_zstd_plain: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 2855 - compression_zstd_plain: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 2856 - compression_zstd_plain: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 2857 - compression_zstd_plain: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 2858 - compression_zstd_plain: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 2859 - compression_zstd_plain: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 2860 - compression_zstd_plain: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 2861 - compression_zstd_plain: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 2862 - compression_zstd_plain: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 2863 - compression_zstd_plain: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 2864 - compression_zstd_plain: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 2865 - compression_zstd_plain: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 2866 - compression_zstd_plain: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 2867 - compression_zstd_plain: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 2868 - compression_zstd_plain: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 2869 - compression_zstd_plain: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 2870 - compression_zstd_plain: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 2871 - compression_zstd_plain: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 2872 - compression_zstd_plain: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 2873 - compression_zstd_plain: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 2874 - compression_zstd_plain: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 2875 - compression_zstd_plain: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 2876 - compression_zstd_plain: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 2877 - compression_zstd_plain: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 2878 - compression_zstd_plain: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 2879 - compression_zstd_plain: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 2880 - compression_zstd_plain: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 2881 - compression_zstd_plain: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 2882 - compression_zstd_plain: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 2884 - compression_zstd_plain: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 2885 - compression_zstd_plain: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 2886 - compression_zstd_plain: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 2887 - compression_zstd_plain: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 2888 - compression_zstd_plain: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 2889 - compression_zstd_plain: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 2890 - compression_zstd_plain: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 2891 - compression_zstd_plain: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 2892 - compression_zstd_plain: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 2893 - compression_zstd_plain: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 2895 - compression_zstd_plain: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 2896 - compression_zstd_plain: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 2897 - compression_zstd_plain: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 2898 - compression_zstd_plain: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 2899 - compression_zstd_plain: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 2900 - compression_zstd_plain: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 2901 - compression_zstd_plain: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 2921 - compression_zstd_plain: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 2923 - compression_zstd_plain: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 2925 - compression_zstd_plain: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 2926 - compression_zstd_plain: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 2927 - compression_zstd_plain: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 2928 - compression_zstd_plain: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 2929 - compression_zstd_plain: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 2930 - compression_zstd_plain: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 2931 - compression_zstd_plain: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 2932 - compression_zstd_plain: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 2933 - compression_zstd_plain: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 2934 - compression_zstd_plain: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 2936 - compression_zstd_plain: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 2937 - compression_zstd_plain: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 2938 - compression_zstd_plain: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 2946 - compression_zstd_plain: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 2947 - compression_zstd_plain: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 2948 - compression_zstd_plain: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 2949 - compression_zstd_plain: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 2950 - compression_zstd_plain: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 2952 - compression_zstd_plain: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 2954 - compression_zstd_plain: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 2956 - compression_zstd_plain: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 2958 - compression_zstd_plain: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 2959 - compression_zstd_plain: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 2960 - compression_zstd_plain: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 2963 - compression_zstd_plain: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 2964 - compression_zstd_plain: should dump restrict`
+- 002_pg_dump.pl: `not ok 2965 - compression_zstd_plain: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 2967 - compression_zstd_plain: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 2968 - createdb: pg_dump runs`
+- 002_pg_dump.pl: `not ok 2969 - createdb: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 2970 - createdb: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 2971 - createdb: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 2972 - createdb: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 2973 - createdb: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 2974 - createdb: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 2975 - createdb: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 2976 - createdb: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 2977 - createdb: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 2978 - createdb: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 2979 - createdb: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 2980 - createdb: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 2981 - createdb: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 2982 - createdb: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 2983 - createdb: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 2984 - createdb: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 2985 - createdb: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 2986 - createdb: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 2987 - createdb: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 2988 - createdb: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 2989 - createdb: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 2990 - createdb: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 2991 - createdb: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 2992 - createdb: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 2993 - createdb: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 2994 - createdb: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 2996 - createdb: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 2997 - createdb: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 2998 - createdb: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 2999 - createdb: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 3000 - createdb: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 3001 - createdb: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 3002 - createdb: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 3003 - createdb: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 3004 - createdb: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 3005 - createdb: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 3006 - createdb: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 3007 - createdb: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 3008 - createdb: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 3009 - createdb: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 3010 - createdb: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 3011 - createdb: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 3012 - createdb: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 3013 - createdb: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 3015 - createdb: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 3016 - createdb: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 3018 - createdb: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 3019 - createdb: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 3020 - createdb: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 3021 - createdb: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 3022 - createdb: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 3023 - createdb: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 3024 - createdb: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 3025 - createdb: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 3026 - createdb: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 3027 - createdb: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 3028 - createdb: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 3029 - createdb: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 3030 - createdb: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 3031 - createdb: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 3032 - createdb: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 3033 - createdb: should dump COMMENT ON DATABASE postgres`
+- 002_pg_dump.pl: `not ok 3035 - createdb: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 3036 - createdb: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 3037 - createdb: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 3039 - createdb: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 3040 - createdb: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 3041 - createdb: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 3042 - createdb: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 3043 - createdb: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 3044 - createdb: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 3045 - createdb: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 3046 - createdb: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 3047 - createdb: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 3048 - createdb: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 3049 - createdb: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 3050 - createdb: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 3051 - createdb: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 3052 - createdb: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 3053 - createdb: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 3054 - createdb: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 3055 - createdb: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 3056 - createdb: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 3057 - createdb: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 3059 - createdb: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 3060 - createdb: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 3061 - createdb: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 3062 - createdb: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 3063 - createdb: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 3064 - createdb: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 3065 - createdb: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 3066 - createdb: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 3067 - createdb: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 3068 - createdb: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 3069 - createdb: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 3070 - createdb: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 3071 - createdb: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 3072 - createdb: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 3073 - createdb: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 3076 - createdb: should dump CREATE DATABASE postgres`
+- 002_pg_dump.pl: `not ok 3078 - createdb: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 3079 - createdb: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 3081 - createdb: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 3082 - createdb: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 3083 - createdb: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 3084 - createdb: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 3085 - createdb: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 3086 - createdb: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 3087 - createdb: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 3088 - createdb: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 3089 - createdb: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 3090 - createdb: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 3091 - createdb: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 3092 - createdb: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 3093 - createdb: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 3094 - createdb: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 3095 - createdb: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 3096 - createdb: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 3097 - createdb: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 3098 - createdb: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 3099 - createdb: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 3100 - createdb: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 3101 - createdb: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 3102 - createdb: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 3103 - createdb: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 3104 - createdb: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 3105 - createdb: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 3106 - createdb: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 3107 - createdb: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 3108 - createdb: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 3109 - createdb: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 3110 - createdb: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 3111 - createdb: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 3112 - createdb: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 3113 - createdb: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 3116 - createdb: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 3117 - createdb: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 3119 - createdb: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 3120 - createdb: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 3121 - createdb: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 3122 - createdb: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 3123 - createdb: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 3124 - createdb: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 3125 - createdb: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 3126 - createdb: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 3127 - createdb: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 3128 - createdb: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 3129 - createdb: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 3130 - createdb: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 3131 - createdb: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 3132 - createdb: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 3133 - createdb: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 3134 - createdb: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 3135 - createdb: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 3136 - createdb: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 3137 - createdb: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 3138 - createdb: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 3139 - createdb: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 3140 - createdb: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 3141 - createdb: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 3142 - createdb: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 3143 - createdb: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 3144 - createdb: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 3145 - createdb: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 3146 - createdb: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 3148 - createdb: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 3149 - createdb: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 3150 - createdb: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 3151 - createdb: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 3152 - createdb: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 3153 - createdb: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 3154 - createdb: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 3155 - createdb: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 3156 - createdb: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 3157 - createdb: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 3159 - createdb: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 3160 - createdb: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 3161 - createdb: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 3162 - createdb: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 3163 - createdb: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 3164 - createdb: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 3165 - createdb: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 3185 - createdb: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 3187 - createdb: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 3189 - createdb: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 3190 - createdb: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 3191 - createdb: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 3192 - createdb: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 3193 - createdb: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 3194 - createdb: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 3195 - createdb: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 3196 - createdb: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 3197 - createdb: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 3198 - createdb: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 3200 - createdb: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 3201 - createdb: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 3202 - createdb: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 3210 - createdb: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 3211 - createdb: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 3212 - createdb: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 3213 - createdb: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 3214 - createdb: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 3216 - createdb: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 3218 - createdb: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 3220 - createdb: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 3222 - createdb: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 3223 - createdb: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 3224 - createdb: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 3227 - createdb: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 3228 - createdb: should dump restrict`
+- 002_pg_dump.pl: `not ok 3229 - createdb: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 3231 - createdb: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 3232 - data_only: pg_dump runs`
+- 002_pg_dump.pl: `not ok 3244 - data_only: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 3278 - data_only: should dump ALTER TABLE test_table DISABLE TRIGGER ALL`
+- 002_pg_dump.pl: `not ok 3299 - data_only: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 3321 - data_only: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 3322 - data_only: should dump COPY fk_reference_test_table second`
+- 002_pg_dump.pl: `not ok 3323 - data_only: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 3324 - data_only: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 3325 - data_only: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 3326 - data_only: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 3327 - data_only: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 3328 - data_only: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 3329 - data_only: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 3330 - data_only: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 3451 - data_only: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 3474 - data_only: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 3475 - data_only: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 3476 - data_only: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 3492 - data_only: should dump restrict`
+- 002_pg_dump.pl: `not ok 3495 - data_only: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 3496 - defaults: pg_dump runs`
+- 002_pg_dump.pl: `not ok 3497 - defaults: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 3498 - defaults: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 3499 - defaults: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 3500 - defaults: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 3501 - defaults: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 3502 - defaults: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 3503 - defaults: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 3504 - defaults: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 3505 - defaults: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 3506 - defaults: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 3507 - defaults: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 3508 - defaults: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 3509 - defaults: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 3510 - defaults: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 3511 - defaults: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 3512 - defaults: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 3513 - defaults: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 3514 - defaults: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 3515 - defaults: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 3516 - defaults: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 3517 - defaults: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 3518 - defaults: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 3519 - defaults: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 3520 - defaults: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 3521 - defaults: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 3522 - defaults: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 3524 - defaults: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 3525 - defaults: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 3526 - defaults: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 3527 - defaults: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 3528 - defaults: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 3529 - defaults: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 3530 - defaults: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 3531 - defaults: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 3532 - defaults: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 3533 - defaults: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 3534 - defaults: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 3535 - defaults: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 3536 - defaults: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 3537 - defaults: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 3538 - defaults: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 3539 - defaults: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 3540 - defaults: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 3541 - defaults: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 3543 - defaults: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 3544 - defaults: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 3546 - defaults: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 3547 - defaults: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 3548 - defaults: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 3549 - defaults: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 3550 - defaults: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 3551 - defaults: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 3552 - defaults: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 3553 - defaults: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 3554 - defaults: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 3555 - defaults: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 3556 - defaults: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 3557 - defaults: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 3558 - defaults: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 3559 - defaults: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 3560 - defaults: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 3563 - defaults: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 3564 - defaults: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 3565 - defaults: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 3567 - defaults: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 3568 - defaults: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 3569 - defaults: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 3570 - defaults: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 3571 - defaults: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 3572 - defaults: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 3573 - defaults: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 3574 - defaults: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 3575 - defaults: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 3576 - defaults: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 3577 - defaults: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 3578 - defaults: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 3579 - defaults: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 3580 - defaults: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 3581 - defaults: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 3582 - defaults: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 3583 - defaults: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 3584 - defaults: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 3585 - defaults: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 3587 - defaults: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 3588 - defaults: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 3589 - defaults: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 3590 - defaults: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 3591 - defaults: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 3592 - defaults: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 3593 - defaults: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 3594 - defaults: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 3595 - defaults: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 3596 - defaults: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 3597 - defaults: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 3598 - defaults: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 3599 - defaults: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 3600 - defaults: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 3601 - defaults: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 3606 - defaults: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 3607 - defaults: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 3609 - defaults: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 3610 - defaults: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 3611 - defaults: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 3612 - defaults: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 3613 - defaults: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 3614 - defaults: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 3615 - defaults: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 3616 - defaults: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 3617 - defaults: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 3618 - defaults: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 3619 - defaults: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 3620 - defaults: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 3621 - defaults: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 3622 - defaults: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 3623 - defaults: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 3624 - defaults: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 3625 - defaults: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 3626 - defaults: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 3627 - defaults: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 3628 - defaults: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 3629 - defaults: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 3630 - defaults: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 3631 - defaults: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 3632 - defaults: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 3633 - defaults: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 3634 - defaults: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 3635 - defaults: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 3636 - defaults: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 3637 - defaults: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 3638 - defaults: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 3639 - defaults: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 3640 - defaults: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 3641 - defaults: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 3644 - defaults: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 3645 - defaults: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 3647 - defaults: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 3648 - defaults: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 3649 - defaults: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 3650 - defaults: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 3651 - defaults: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 3652 - defaults: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 3653 - defaults: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 3654 - defaults: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 3655 - defaults: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 3656 - defaults: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 3657 - defaults: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 3658 - defaults: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 3659 - defaults: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 3660 - defaults: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 3661 - defaults: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 3662 - defaults: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 3663 - defaults: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 3664 - defaults: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 3665 - defaults: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 3666 - defaults: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 3667 - defaults: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 3668 - defaults: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 3669 - defaults: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 3670 - defaults: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 3671 - defaults: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 3672 - defaults: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 3673 - defaults: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 3674 - defaults: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 3676 - defaults: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 3677 - defaults: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 3678 - defaults: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 3679 - defaults: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 3680 - defaults: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 3681 - defaults: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 3682 - defaults: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 3683 - defaults: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 3684 - defaults: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 3685 - defaults: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 3687 - defaults: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 3688 - defaults: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 3689 - defaults: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 3690 - defaults: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 3691 - defaults: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 3692 - defaults: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 3693 - defaults: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 3713 - defaults: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 3715 - defaults: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 3717 - defaults: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 3718 - defaults: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 3719 - defaults: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 3720 - defaults: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 3721 - defaults: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 3722 - defaults: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 3723 - defaults: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 3724 - defaults: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 3725 - defaults: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 3726 - defaults: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 3728 - defaults: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 3729 - defaults: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 3730 - defaults: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 3738 - defaults: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 3739 - defaults: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 3740 - defaults: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 3741 - defaults: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 3742 - defaults: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 3744 - defaults: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 3746 - defaults: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 3748 - defaults: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 3750 - defaults: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 3751 - defaults: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 3752 - defaults: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 3755 - defaults: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 3756 - defaults: should dump restrict`
+- 002_pg_dump.pl: `not ok 3757 - defaults: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 3759 - defaults: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 3760 - defaults_custom_format: pg_dump runs`
+- 002_pg_dump.pl: `not ok 3761 - defaults_custom_format: data content is gzip-compressed by default if available: exit code 0`
+- 002_pg_dump.pl: `not ok 3763 - defaults_custom_format: data content is gzip-compressed by default if available: matches`
+- 002_pg_dump.pl: `not ok 3764 - defaults_custom_format: pg_restore runs`
+- 002_pg_dump.pl: `not ok 3765 - defaults_custom_format: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 3766 - defaults_custom_format: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 3767 - defaults_custom_format: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 3768 - defaults_custom_format: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 3769 - defaults_custom_format: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 3770 - defaults_custom_format: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 3771 - defaults_custom_format: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 3772 - defaults_custom_format: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 3773 - defaults_custom_format: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 3774 - defaults_custom_format: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 3775 - defaults_custom_format: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 3776 - defaults_custom_format: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 3777 - defaults_custom_format: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 3778 - defaults_custom_format: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 3779 - defaults_custom_format: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 3780 - defaults_custom_format: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 3781 - defaults_custom_format: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 3782 - defaults_custom_format: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 3783 - defaults_custom_format: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 3784 - defaults_custom_format: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 3785 - defaults_custom_format: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 3786 - defaults_custom_format: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 3787 - defaults_custom_format: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 3788 - defaults_custom_format: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 3789 - defaults_custom_format: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 3790 - defaults_custom_format: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 3792 - defaults_custom_format: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 3793 - defaults_custom_format: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 3794 - defaults_custom_format: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 3795 - defaults_custom_format: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 3796 - defaults_custom_format: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 3797 - defaults_custom_format: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 3798 - defaults_custom_format: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 3799 - defaults_custom_format: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 3800 - defaults_custom_format: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 3801 - defaults_custom_format: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 3802 - defaults_custom_format: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 3803 - defaults_custom_format: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 3804 - defaults_custom_format: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 3805 - defaults_custom_format: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 3806 - defaults_custom_format: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 3807 - defaults_custom_format: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 3808 - defaults_custom_format: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 3809 - defaults_custom_format: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 3811 - defaults_custom_format: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 3812 - defaults_custom_format: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 3814 - defaults_custom_format: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 3815 - defaults_custom_format: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 3816 - defaults_custom_format: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 3817 - defaults_custom_format: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 3818 - defaults_custom_format: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 3819 - defaults_custom_format: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 3820 - defaults_custom_format: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 3821 - defaults_custom_format: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 3822 - defaults_custom_format: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 3823 - defaults_custom_format: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 3824 - defaults_custom_format: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 3825 - defaults_custom_format: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 3826 - defaults_custom_format: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 3827 - defaults_custom_format: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 3828 - defaults_custom_format: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 3831 - defaults_custom_format: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 3832 - defaults_custom_format: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 3833 - defaults_custom_format: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 3835 - defaults_custom_format: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 3836 - defaults_custom_format: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 3837 - defaults_custom_format: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 3838 - defaults_custom_format: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 3839 - defaults_custom_format: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 3840 - defaults_custom_format: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 3841 - defaults_custom_format: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 3842 - defaults_custom_format: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 3843 - defaults_custom_format: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 3844 - defaults_custom_format: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 3845 - defaults_custom_format: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 3846 - defaults_custom_format: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 3847 - defaults_custom_format: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 3848 - defaults_custom_format: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 3849 - defaults_custom_format: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 3850 - defaults_custom_format: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 3851 - defaults_custom_format: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 3852 - defaults_custom_format: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 3853 - defaults_custom_format: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 3855 - defaults_custom_format: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 3856 - defaults_custom_format: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 3857 - defaults_custom_format: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 3858 - defaults_custom_format: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 3859 - defaults_custom_format: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 3860 - defaults_custom_format: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 3861 - defaults_custom_format: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 3862 - defaults_custom_format: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 3863 - defaults_custom_format: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 3864 - defaults_custom_format: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 3865 - defaults_custom_format: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 3866 - defaults_custom_format: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 3867 - defaults_custom_format: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 3868 - defaults_custom_format: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 3869 - defaults_custom_format: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 3874 - defaults_custom_format: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 3875 - defaults_custom_format: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 3877 - defaults_custom_format: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 3878 - defaults_custom_format: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 3879 - defaults_custom_format: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 3880 - defaults_custom_format: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 3881 - defaults_custom_format: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 3882 - defaults_custom_format: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 3883 - defaults_custom_format: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 3884 - defaults_custom_format: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 3885 - defaults_custom_format: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 3886 - defaults_custom_format: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 3887 - defaults_custom_format: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 3888 - defaults_custom_format: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 3889 - defaults_custom_format: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 3890 - defaults_custom_format: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 3891 - defaults_custom_format: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 3892 - defaults_custom_format: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 3893 - defaults_custom_format: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 3894 - defaults_custom_format: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 3895 - defaults_custom_format: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 3896 - defaults_custom_format: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 3897 - defaults_custom_format: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 3898 - defaults_custom_format: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 3899 - defaults_custom_format: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 3900 - defaults_custom_format: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 3901 - defaults_custom_format: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 3902 - defaults_custom_format: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 3903 - defaults_custom_format: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 3904 - defaults_custom_format: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 3905 - defaults_custom_format: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 3906 - defaults_custom_format: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 3907 - defaults_custom_format: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 3908 - defaults_custom_format: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 3909 - defaults_custom_format: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 3912 - defaults_custom_format: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 3913 - defaults_custom_format: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 3915 - defaults_custom_format: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 3916 - defaults_custom_format: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 3917 - defaults_custom_format: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 3918 - defaults_custom_format: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 3919 - defaults_custom_format: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 3920 - defaults_custom_format: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 3921 - defaults_custom_format: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 3922 - defaults_custom_format: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 3923 - defaults_custom_format: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 3924 - defaults_custom_format: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 3925 - defaults_custom_format: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 3926 - defaults_custom_format: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 3927 - defaults_custom_format: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 3928 - defaults_custom_format: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 3929 - defaults_custom_format: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 3930 - defaults_custom_format: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 3931 - defaults_custom_format: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 3932 - defaults_custom_format: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 3933 - defaults_custom_format: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 3934 - defaults_custom_format: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 3935 - defaults_custom_format: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 3936 - defaults_custom_format: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 3937 - defaults_custom_format: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 3938 - defaults_custom_format: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 3939 - defaults_custom_format: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 3940 - defaults_custom_format: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 3941 - defaults_custom_format: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 3942 - defaults_custom_format: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 3944 - defaults_custom_format: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 3945 - defaults_custom_format: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 3946 - defaults_custom_format: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 3947 - defaults_custom_format: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 3948 - defaults_custom_format: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 3949 - defaults_custom_format: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 3950 - defaults_custom_format: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 3951 - defaults_custom_format: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 3952 - defaults_custom_format: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 3953 - defaults_custom_format: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 3955 - defaults_custom_format: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 3956 - defaults_custom_format: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 3957 - defaults_custom_format: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 3958 - defaults_custom_format: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 3959 - defaults_custom_format: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 3960 - defaults_custom_format: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 3961 - defaults_custom_format: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 3981 - defaults_custom_format: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 3983 - defaults_custom_format: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 3985 - defaults_custom_format: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 3986 - defaults_custom_format: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 3987 - defaults_custom_format: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 3988 - defaults_custom_format: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 3989 - defaults_custom_format: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 3990 - defaults_custom_format: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 3991 - defaults_custom_format: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 3992 - defaults_custom_format: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 3993 - defaults_custom_format: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 3994 - defaults_custom_format: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 3996 - defaults_custom_format: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 3997 - defaults_custom_format: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 3998 - defaults_custom_format: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 4006 - defaults_custom_format: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 4007 - defaults_custom_format: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 4008 - defaults_custom_format: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 4009 - defaults_custom_format: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 4010 - defaults_custom_format: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 4012 - defaults_custom_format: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 4014 - defaults_custom_format: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 4016 - defaults_custom_format: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 4018 - defaults_custom_format: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 4019 - defaults_custom_format: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 4020 - defaults_custom_format: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 4023 - defaults_custom_format: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 4024 - defaults_custom_format: should dump restrict`
+- 002_pg_dump.pl: `not ok 4025 - defaults_custom_format: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 4027 - defaults_custom_format: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 4028 - defaults_dir_format: pg_dump runs`
+- 002_pg_dump.pl: `not ok 4030 - defaults_dir_format: glob check for /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/defaults_dir_format/blobs_*.toc`
+- 002_pg_dump.pl: `not ok 4031 - defaults_dir_format: glob check for /home/meszmate/.cache/a166/resume-pgdump/tap/tmp0/defaults_dir_format/*.dat.gz`
+- 002_pg_dump.pl: `not ok 4032 - defaults_dir_format: data content is gzip-compressed by default: exit code 0`
+- 002_pg_dump.pl: `not ok 4034 - defaults_dir_format: data content is gzip-compressed by default: matches`
+- 002_pg_dump.pl: `not ok 4035 - defaults_dir_format: pg_restore runs`
+- 002_pg_dump.pl: `not ok 4036 - defaults_dir_format: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 4037 - defaults_dir_format: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 4038 - defaults_dir_format: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 4039 - defaults_dir_format: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 4040 - defaults_dir_format: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 4041 - defaults_dir_format: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 4042 - defaults_dir_format: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 4043 - defaults_dir_format: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 4044 - defaults_dir_format: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 4045 - defaults_dir_format: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 4046 - defaults_dir_format: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 4047 - defaults_dir_format: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 4048 - defaults_dir_format: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 4049 - defaults_dir_format: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 4050 - defaults_dir_format: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 4051 - defaults_dir_format: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 4052 - defaults_dir_format: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 4053 - defaults_dir_format: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 4054 - defaults_dir_format: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 4055 - defaults_dir_format: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 4056 - defaults_dir_format: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 4057 - defaults_dir_format: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 4058 - defaults_dir_format: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 4059 - defaults_dir_format: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 4060 - defaults_dir_format: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 4061 - defaults_dir_format: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 4063 - defaults_dir_format: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 4064 - defaults_dir_format: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 4065 - defaults_dir_format: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 4066 - defaults_dir_format: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 4067 - defaults_dir_format: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 4068 - defaults_dir_format: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 4069 - defaults_dir_format: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 4070 - defaults_dir_format: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 4071 - defaults_dir_format: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 4072 - defaults_dir_format: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 4073 - defaults_dir_format: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 4074 - defaults_dir_format: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 4075 - defaults_dir_format: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 4076 - defaults_dir_format: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 4077 - defaults_dir_format: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 4078 - defaults_dir_format: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 4079 - defaults_dir_format: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 4080 - defaults_dir_format: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 4082 - defaults_dir_format: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 4083 - defaults_dir_format: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 4085 - defaults_dir_format: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 4086 - defaults_dir_format: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 4087 - defaults_dir_format: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 4088 - defaults_dir_format: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 4089 - defaults_dir_format: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 4090 - defaults_dir_format: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 4091 - defaults_dir_format: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 4092 - defaults_dir_format: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 4093 - defaults_dir_format: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 4094 - defaults_dir_format: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 4095 - defaults_dir_format: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 4096 - defaults_dir_format: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 4097 - defaults_dir_format: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 4098 - defaults_dir_format: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 4099 - defaults_dir_format: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 4102 - defaults_dir_format: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 4103 - defaults_dir_format: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 4104 - defaults_dir_format: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 4106 - defaults_dir_format: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 4107 - defaults_dir_format: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 4108 - defaults_dir_format: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 4109 - defaults_dir_format: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 4110 - defaults_dir_format: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 4111 - defaults_dir_format: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 4112 - defaults_dir_format: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 4113 - defaults_dir_format: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 4114 - defaults_dir_format: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 4115 - defaults_dir_format: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 4116 - defaults_dir_format: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 4117 - defaults_dir_format: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 4118 - defaults_dir_format: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 4119 - defaults_dir_format: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 4120 - defaults_dir_format: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 4121 - defaults_dir_format: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 4122 - defaults_dir_format: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 4123 - defaults_dir_format: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 4124 - defaults_dir_format: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 4126 - defaults_dir_format: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 4127 - defaults_dir_format: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 4128 - defaults_dir_format: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 4129 - defaults_dir_format: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 4130 - defaults_dir_format: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 4131 - defaults_dir_format: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 4132 - defaults_dir_format: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 4133 - defaults_dir_format: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 4134 - defaults_dir_format: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 4135 - defaults_dir_format: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 4136 - defaults_dir_format: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 4137 - defaults_dir_format: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 4138 - defaults_dir_format: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 4139 - defaults_dir_format: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 4140 - defaults_dir_format: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 4145 - defaults_dir_format: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 4146 - defaults_dir_format: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 4148 - defaults_dir_format: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 4149 - defaults_dir_format: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 4150 - defaults_dir_format: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 4151 - defaults_dir_format: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 4152 - defaults_dir_format: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 4153 - defaults_dir_format: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 4154 - defaults_dir_format: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 4155 - defaults_dir_format: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 4156 - defaults_dir_format: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 4157 - defaults_dir_format: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 4158 - defaults_dir_format: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 4159 - defaults_dir_format: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 4160 - defaults_dir_format: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 4161 - defaults_dir_format: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 4162 - defaults_dir_format: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 4163 - defaults_dir_format: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 4164 - defaults_dir_format: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 4165 - defaults_dir_format: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 4166 - defaults_dir_format: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 4167 - defaults_dir_format: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 4168 - defaults_dir_format: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 4169 - defaults_dir_format: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 4170 - defaults_dir_format: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 4171 - defaults_dir_format: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 4172 - defaults_dir_format: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 4173 - defaults_dir_format: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 4174 - defaults_dir_format: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 4175 - defaults_dir_format: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 4176 - defaults_dir_format: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 4177 - defaults_dir_format: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 4178 - defaults_dir_format: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 4179 - defaults_dir_format: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 4180 - defaults_dir_format: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 4183 - defaults_dir_format: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 4184 - defaults_dir_format: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 4186 - defaults_dir_format: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 4187 - defaults_dir_format: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 4188 - defaults_dir_format: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 4189 - defaults_dir_format: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 4190 - defaults_dir_format: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 4191 - defaults_dir_format: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 4192 - defaults_dir_format: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 4193 - defaults_dir_format: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 4194 - defaults_dir_format: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 4195 - defaults_dir_format: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 4196 - defaults_dir_format: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 4197 - defaults_dir_format: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 4198 - defaults_dir_format: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 4199 - defaults_dir_format: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 4200 - defaults_dir_format: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 4201 - defaults_dir_format: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 4202 - defaults_dir_format: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 4203 - defaults_dir_format: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 4204 - defaults_dir_format: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 4205 - defaults_dir_format: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 4206 - defaults_dir_format: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 4207 - defaults_dir_format: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 4208 - defaults_dir_format: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 4209 - defaults_dir_format: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 4210 - defaults_dir_format: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 4211 - defaults_dir_format: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 4212 - defaults_dir_format: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 4213 - defaults_dir_format: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 4215 - defaults_dir_format: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 4216 - defaults_dir_format: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 4217 - defaults_dir_format: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 4218 - defaults_dir_format: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 4219 - defaults_dir_format: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 4220 - defaults_dir_format: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 4221 - defaults_dir_format: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 4222 - defaults_dir_format: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 4223 - defaults_dir_format: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 4224 - defaults_dir_format: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 4226 - defaults_dir_format: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 4227 - defaults_dir_format: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 4228 - defaults_dir_format: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 4229 - defaults_dir_format: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 4230 - defaults_dir_format: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 4231 - defaults_dir_format: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 4232 - defaults_dir_format: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 4252 - defaults_dir_format: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 4254 - defaults_dir_format: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 4256 - defaults_dir_format: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 4257 - defaults_dir_format: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 4258 - defaults_dir_format: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 4259 - defaults_dir_format: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 4260 - defaults_dir_format: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 4261 - defaults_dir_format: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 4262 - defaults_dir_format: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 4263 - defaults_dir_format: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 4264 - defaults_dir_format: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 4265 - defaults_dir_format: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 4267 - defaults_dir_format: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 4268 - defaults_dir_format: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 4269 - defaults_dir_format: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 4277 - defaults_dir_format: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 4278 - defaults_dir_format: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 4279 - defaults_dir_format: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 4280 - defaults_dir_format: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 4281 - defaults_dir_format: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 4283 - defaults_dir_format: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 4285 - defaults_dir_format: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 4287 - defaults_dir_format: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 4289 - defaults_dir_format: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 4290 - defaults_dir_format: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 4291 - defaults_dir_format: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 4294 - defaults_dir_format: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 4295 - defaults_dir_format: should dump restrict`
+- 002_pg_dump.pl: `not ok 4296 - defaults_dir_format: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 4298 - defaults_dir_format: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 4299 - defaults_no_public: pg_dump runs`
+- 002_pg_dump.pl: `not ok 4301 - defaults_no_public_clean: pg_dump runs`
+- 002_pg_dump.pl: `not ok 4303 - defaults_parallel: pg_dump runs`
+- 002_pg_dump.pl: `not ok 4304 - defaults_parallel: pg_restore runs`
+- 002_pg_dump.pl: `not ok 4305 - defaults_parallel: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 4306 - defaults_parallel: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 4307 - defaults_parallel: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 4308 - defaults_parallel: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 4309 - defaults_parallel: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 4310 - defaults_parallel: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 4311 - defaults_parallel: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 4312 - defaults_parallel: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 4313 - defaults_parallel: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 4314 - defaults_parallel: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 4315 - defaults_parallel: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 4316 - defaults_parallel: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 4317 - defaults_parallel: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 4318 - defaults_parallel: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 4319 - defaults_parallel: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 4320 - defaults_parallel: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 4321 - defaults_parallel: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 4322 - defaults_parallel: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 4323 - defaults_parallel: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 4324 - defaults_parallel: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 4325 - defaults_parallel: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 4326 - defaults_parallel: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 4327 - defaults_parallel: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 4328 - defaults_parallel: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 4329 - defaults_parallel: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 4330 - defaults_parallel: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 4332 - defaults_parallel: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 4333 - defaults_parallel: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 4334 - defaults_parallel: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 4335 - defaults_parallel: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 4336 - defaults_parallel: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 4337 - defaults_parallel: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 4338 - defaults_parallel: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 4339 - defaults_parallel: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 4340 - defaults_parallel: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 4341 - defaults_parallel: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 4342 - defaults_parallel: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 4343 - defaults_parallel: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 4344 - defaults_parallel: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 4345 - defaults_parallel: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 4346 - defaults_parallel: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 4347 - defaults_parallel: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 4348 - defaults_parallel: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 4349 - defaults_parallel: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 4351 - defaults_parallel: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 4352 - defaults_parallel: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 4354 - defaults_parallel: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 4355 - defaults_parallel: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 4356 - defaults_parallel: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 4357 - defaults_parallel: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 4358 - defaults_parallel: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 4359 - defaults_parallel: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 4360 - defaults_parallel: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 4361 - defaults_parallel: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 4362 - defaults_parallel: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 4363 - defaults_parallel: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 4364 - defaults_parallel: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 4365 - defaults_parallel: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 4366 - defaults_parallel: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 4367 - defaults_parallel: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 4368 - defaults_parallel: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 4371 - defaults_parallel: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 4372 - defaults_parallel: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 4373 - defaults_parallel: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 4375 - defaults_parallel: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 4376 - defaults_parallel: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 4377 - defaults_parallel: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 4378 - defaults_parallel: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 4379 - defaults_parallel: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 4380 - defaults_parallel: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 4381 - defaults_parallel: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 4382 - defaults_parallel: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 4383 - defaults_parallel: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 4384 - defaults_parallel: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 4385 - defaults_parallel: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 4386 - defaults_parallel: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 4387 - defaults_parallel: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 4388 - defaults_parallel: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 4389 - defaults_parallel: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 4390 - defaults_parallel: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 4391 - defaults_parallel: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 4392 - defaults_parallel: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 4393 - defaults_parallel: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 4395 - defaults_parallel: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 4396 - defaults_parallel: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 4397 - defaults_parallel: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 4398 - defaults_parallel: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 4399 - defaults_parallel: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 4400 - defaults_parallel: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 4401 - defaults_parallel: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 4402 - defaults_parallel: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 4403 - defaults_parallel: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 4404 - defaults_parallel: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 4405 - defaults_parallel: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 4406 - defaults_parallel: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 4407 - defaults_parallel: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 4408 - defaults_parallel: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 4409 - defaults_parallel: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 4414 - defaults_parallel: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 4415 - defaults_parallel: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 4417 - defaults_parallel: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 4418 - defaults_parallel: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 4419 - defaults_parallel: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 4420 - defaults_parallel: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 4421 - defaults_parallel: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 4422 - defaults_parallel: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 4423 - defaults_parallel: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 4424 - defaults_parallel: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 4425 - defaults_parallel: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 4426 - defaults_parallel: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 4427 - defaults_parallel: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 4428 - defaults_parallel: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 4429 - defaults_parallel: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 4430 - defaults_parallel: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 4431 - defaults_parallel: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 4432 - defaults_parallel: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 4433 - defaults_parallel: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 4434 - defaults_parallel: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 4435 - defaults_parallel: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 4436 - defaults_parallel: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 4437 - defaults_parallel: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 4438 - defaults_parallel: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 4439 - defaults_parallel: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 4440 - defaults_parallel: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 4441 - defaults_parallel: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 4442 - defaults_parallel: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 4443 - defaults_parallel: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 4444 - defaults_parallel: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 4445 - defaults_parallel: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 4446 - defaults_parallel: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 4447 - defaults_parallel: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 4448 - defaults_parallel: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 4449 - defaults_parallel: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 4452 - defaults_parallel: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 4453 - defaults_parallel: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 4455 - defaults_parallel: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 4456 - defaults_parallel: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 4457 - defaults_parallel: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 4458 - defaults_parallel: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 4459 - defaults_parallel: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 4460 - defaults_parallel: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 4461 - defaults_parallel: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 4462 - defaults_parallel: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 4463 - defaults_parallel: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 4464 - defaults_parallel: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 4465 - defaults_parallel: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 4466 - defaults_parallel: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 4467 - defaults_parallel: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 4468 - defaults_parallel: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 4469 - defaults_parallel: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 4470 - defaults_parallel: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 4471 - defaults_parallel: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 4472 - defaults_parallel: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 4473 - defaults_parallel: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 4474 - defaults_parallel: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 4475 - defaults_parallel: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 4476 - defaults_parallel: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 4477 - defaults_parallel: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 4478 - defaults_parallel: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 4479 - defaults_parallel: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 4480 - defaults_parallel: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 4481 - defaults_parallel: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 4482 - defaults_parallel: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 4484 - defaults_parallel: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 4485 - defaults_parallel: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 4486 - defaults_parallel: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 4487 - defaults_parallel: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 4488 - defaults_parallel: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 4489 - defaults_parallel: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 4490 - defaults_parallel: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 4491 - defaults_parallel: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 4492 - defaults_parallel: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 4493 - defaults_parallel: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 4495 - defaults_parallel: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 4496 - defaults_parallel: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 4497 - defaults_parallel: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 4498 - defaults_parallel: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 4499 - defaults_parallel: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 4500 - defaults_parallel: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 4501 - defaults_parallel: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 4521 - defaults_parallel: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 4523 - defaults_parallel: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 4525 - defaults_parallel: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 4526 - defaults_parallel: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 4527 - defaults_parallel: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 4528 - defaults_parallel: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 4529 - defaults_parallel: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 4530 - defaults_parallel: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 4531 - defaults_parallel: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 4532 - defaults_parallel: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 4533 - defaults_parallel: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 4534 - defaults_parallel: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 4536 - defaults_parallel: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 4537 - defaults_parallel: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 4538 - defaults_parallel: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 4546 - defaults_parallel: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 4547 - defaults_parallel: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 4548 - defaults_parallel: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 4549 - defaults_parallel: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 4550 - defaults_parallel: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 4552 - defaults_parallel: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 4554 - defaults_parallel: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 4556 - defaults_parallel: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 4558 - defaults_parallel: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 4559 - defaults_parallel: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 4560 - defaults_parallel: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 4563 - defaults_parallel: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 4564 - defaults_parallel: should dump restrict`
+- 002_pg_dump.pl: `not ok 4565 - defaults_parallel: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 4567 - defaults_parallel: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 4568 - defaults_public_owner: pg_dump runs`
+- 002_pg_dump.pl: `not ok 4570 - defaults_public_owner: should dump COMMENT ON SCHEMA public IS NULL`
+- 002_pg_dump.pl: `not ok 4571 - defaults_tar_format: pg_dump runs`
+- 002_pg_dump.pl: `not ok 4572 - defaults_tar_format: pg_restore runs`
+- 002_pg_dump.pl: `not ok 4573 - defaults_tar_format: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 4574 - defaults_tar_format: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 4575 - defaults_tar_format: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 4576 - defaults_tar_format: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 4577 - defaults_tar_format: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 4578 - defaults_tar_format: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 4579 - defaults_tar_format: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 4580 - defaults_tar_format: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 4581 - defaults_tar_format: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 4582 - defaults_tar_format: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 4583 - defaults_tar_format: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 4584 - defaults_tar_format: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 4585 - defaults_tar_format: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 4586 - defaults_tar_format: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 4587 - defaults_tar_format: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 4588 - defaults_tar_format: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 4589 - defaults_tar_format: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 4590 - defaults_tar_format: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 4591 - defaults_tar_format: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 4592 - defaults_tar_format: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 4593 - defaults_tar_format: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 4594 - defaults_tar_format: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 4595 - defaults_tar_format: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 4596 - defaults_tar_format: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 4597 - defaults_tar_format: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 4598 - defaults_tar_format: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 4600 - defaults_tar_format: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 4601 - defaults_tar_format: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 4602 - defaults_tar_format: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 4603 - defaults_tar_format: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 4604 - defaults_tar_format: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 4605 - defaults_tar_format: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 4606 - defaults_tar_format: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 4607 - defaults_tar_format: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 4608 - defaults_tar_format: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 4609 - defaults_tar_format: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 4610 - defaults_tar_format: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 4611 - defaults_tar_format: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 4612 - defaults_tar_format: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 4613 - defaults_tar_format: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 4614 - defaults_tar_format: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 4615 - defaults_tar_format: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 4616 - defaults_tar_format: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 4617 - defaults_tar_format: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 4619 - defaults_tar_format: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 4620 - defaults_tar_format: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 4622 - defaults_tar_format: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 4623 - defaults_tar_format: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 4624 - defaults_tar_format: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 4625 - defaults_tar_format: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 4626 - defaults_tar_format: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 4627 - defaults_tar_format: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 4628 - defaults_tar_format: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 4629 - defaults_tar_format: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 4630 - defaults_tar_format: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 4631 - defaults_tar_format: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 4632 - defaults_tar_format: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 4633 - defaults_tar_format: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 4634 - defaults_tar_format: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 4635 - defaults_tar_format: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 4636 - defaults_tar_format: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 4639 - defaults_tar_format: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 4640 - defaults_tar_format: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 4641 - defaults_tar_format: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 4643 - defaults_tar_format: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 4644 - defaults_tar_format: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 4645 - defaults_tar_format: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 4646 - defaults_tar_format: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 4647 - defaults_tar_format: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 4648 - defaults_tar_format: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 4649 - defaults_tar_format: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 4650 - defaults_tar_format: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 4651 - defaults_tar_format: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 4652 - defaults_tar_format: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 4653 - defaults_tar_format: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 4654 - defaults_tar_format: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 4655 - defaults_tar_format: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 4656 - defaults_tar_format: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 4657 - defaults_tar_format: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 4658 - defaults_tar_format: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 4659 - defaults_tar_format: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 4660 - defaults_tar_format: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 4661 - defaults_tar_format: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 4663 - defaults_tar_format: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 4664 - defaults_tar_format: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 4665 - defaults_tar_format: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 4666 - defaults_tar_format: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 4667 - defaults_tar_format: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 4668 - defaults_tar_format: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 4669 - defaults_tar_format: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 4670 - defaults_tar_format: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 4671 - defaults_tar_format: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 4672 - defaults_tar_format: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 4673 - defaults_tar_format: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 4674 - defaults_tar_format: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 4675 - defaults_tar_format: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 4676 - defaults_tar_format: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 4677 - defaults_tar_format: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 4682 - defaults_tar_format: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 4683 - defaults_tar_format: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 4685 - defaults_tar_format: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 4686 - defaults_tar_format: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 4687 - defaults_tar_format: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 4688 - defaults_tar_format: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 4689 - defaults_tar_format: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 4690 - defaults_tar_format: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 4691 - defaults_tar_format: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 4692 - defaults_tar_format: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 4693 - defaults_tar_format: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 4694 - defaults_tar_format: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 4695 - defaults_tar_format: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 4696 - defaults_tar_format: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 4697 - defaults_tar_format: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 4698 - defaults_tar_format: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 4699 - defaults_tar_format: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 4700 - defaults_tar_format: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 4701 - defaults_tar_format: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 4702 - defaults_tar_format: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 4703 - defaults_tar_format: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 4704 - defaults_tar_format: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 4705 - defaults_tar_format: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 4706 - defaults_tar_format: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 4707 - defaults_tar_format: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 4708 - defaults_tar_format: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 4709 - defaults_tar_format: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 4710 - defaults_tar_format: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 4711 - defaults_tar_format: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 4712 - defaults_tar_format: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 4713 - defaults_tar_format: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 4714 - defaults_tar_format: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 4715 - defaults_tar_format: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 4716 - defaults_tar_format: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 4717 - defaults_tar_format: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 4720 - defaults_tar_format: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 4721 - defaults_tar_format: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 4723 - defaults_tar_format: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 4724 - defaults_tar_format: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 4725 - defaults_tar_format: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 4726 - defaults_tar_format: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 4727 - defaults_tar_format: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 4728 - defaults_tar_format: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 4729 - defaults_tar_format: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 4730 - defaults_tar_format: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 4731 - defaults_tar_format: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 4732 - defaults_tar_format: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 4733 - defaults_tar_format: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 4734 - defaults_tar_format: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 4735 - defaults_tar_format: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 4736 - defaults_tar_format: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 4737 - defaults_tar_format: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 4738 - defaults_tar_format: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 4739 - defaults_tar_format: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 4740 - defaults_tar_format: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 4741 - defaults_tar_format: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 4742 - defaults_tar_format: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 4743 - defaults_tar_format: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 4744 - defaults_tar_format: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 4745 - defaults_tar_format: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 4746 - defaults_tar_format: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 4747 - defaults_tar_format: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 4748 - defaults_tar_format: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 4749 - defaults_tar_format: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 4750 - defaults_tar_format: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 4752 - defaults_tar_format: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 4753 - defaults_tar_format: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 4754 - defaults_tar_format: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 4755 - defaults_tar_format: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 4756 - defaults_tar_format: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 4757 - defaults_tar_format: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 4758 - defaults_tar_format: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 4759 - defaults_tar_format: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 4760 - defaults_tar_format: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 4761 - defaults_tar_format: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 4763 - defaults_tar_format: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 4764 - defaults_tar_format: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 4765 - defaults_tar_format: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 4766 - defaults_tar_format: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 4767 - defaults_tar_format: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 4768 - defaults_tar_format: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 4769 - defaults_tar_format: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 4789 - defaults_tar_format: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 4791 - defaults_tar_format: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 4793 - defaults_tar_format: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 4794 - defaults_tar_format: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 4795 - defaults_tar_format: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 4796 - defaults_tar_format: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 4797 - defaults_tar_format: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 4798 - defaults_tar_format: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 4799 - defaults_tar_format: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 4800 - defaults_tar_format: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 4801 - defaults_tar_format: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 4802 - defaults_tar_format: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 4804 - defaults_tar_format: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 4805 - defaults_tar_format: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 4806 - defaults_tar_format: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 4814 - defaults_tar_format: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 4815 - defaults_tar_format: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 4816 - defaults_tar_format: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 4817 - defaults_tar_format: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 4818 - defaults_tar_format: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 4820 - defaults_tar_format: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 4822 - defaults_tar_format: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 4824 - defaults_tar_format: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 4826 - defaults_tar_format: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 4827 - defaults_tar_format: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 4828 - defaults_tar_format: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 4831 - defaults_tar_format: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 4832 - defaults_tar_format: should dump restrict`
+- 002_pg_dump.pl: `not ok 4833 - defaults_tar_format: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 4835 - defaults_tar_format: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 4836 - exclude_dump_test_schema: pg_dump runs`
+- 002_pg_dump.pl: `not ok 4837 - exclude_dump_test_schema: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 4840 - exclude_dump_test_schema: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 4841 - exclude_dump_test_schema: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 4842 - exclude_dump_test_schema: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 4846 - exclude_dump_test_schema: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 4847 - exclude_dump_test_schema: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 4848 - exclude_dump_test_schema: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 4852 - exclude_dump_test_schema: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 4853 - exclude_dump_test_schema: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 4854 - exclude_dump_test_schema: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 4855 - exclude_dump_test_schema: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 4856 - exclude_dump_test_schema: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 4857 - exclude_dump_test_schema: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 4858 - exclude_dump_test_schema: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 4859 - exclude_dump_test_schema: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 4860 - exclude_dump_test_schema: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 4861 - exclude_dump_test_schema: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 4862 - exclude_dump_test_schema: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 4865 - exclude_dump_test_schema: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 4866 - exclude_dump_test_schema: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 4868 - exclude_dump_test_schema: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 4871 - exclude_dump_test_schema: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 4879 - exclude_dump_test_schema: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 4890 - exclude_dump_test_schema: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 4891 - exclude_dump_test_schema: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 4903 - exclude_dump_test_schema: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 4905 - exclude_dump_test_schema: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 4907 - exclude_dump_test_schema: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 4927 - exclude_dump_test_schema: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 4935 - exclude_dump_test_schema: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 4936 - exclude_dump_test_schema: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 4938 - exclude_dump_test_schema: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 4939 - exclude_dump_test_schema: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 4940 - exclude_dump_test_schema: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 4947 - exclude_dump_test_schema: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 4949 - exclude_dump_test_schema: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 4957 - exclude_dump_test_schema: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 4977 - exclude_dump_test_schema: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 4978 - exclude_dump_test_schema: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 4979 - exclude_dump_test_schema: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 4980 - exclude_dump_test_schema: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 4981 - exclude_dump_test_schema: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 4985 - exclude_dump_test_schema: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 4988 - exclude_dump_test_schema: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 4992 - exclude_dump_test_schema: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 4993 - exclude_dump_test_schema: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 4994 - exclude_dump_test_schema: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 5020 - exclude_dump_test_schema: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 5029 - exclude_dump_test_schema: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 5053 - exclude_dump_test_schema: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 5055 - exclude_dump_test_schema: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 5057 - exclude_dump_test_schema: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 5059 - exclude_dump_test_schema: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 5061 - exclude_dump_test_schema: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 5064 - exclude_dump_test_schema: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 5065 - exclude_dump_test_schema: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 5066 - exclude_dump_test_schema: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 5078 - exclude_dump_test_schema: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 5079 - exclude_dump_test_schema: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 5080 - exclude_dump_test_schema: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 5081 - exclude_dump_test_schema: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 5086 - exclude_dump_test_schema: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 5088 - exclude_dump_test_schema: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 5090 - exclude_dump_test_schema: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 5091 - exclude_dump_test_schema: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 5092 - exclude_dump_test_schema: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 5095 - exclude_dump_test_schema: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 5096 - exclude_dump_test_schema: should dump restrict`
+- 002_pg_dump.pl: `not ok 5099 - exclude_dump_test_schema: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 5100 - exclude_measurement: pg_dump runs`
+- 002_pg_dump.pl: `not ok 5101 - exclude_measurement: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 5102 - exclude_measurement: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 5103 - exclude_measurement: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 5104 - exclude_measurement: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 5105 - exclude_measurement: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 5106 - exclude_measurement: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 5107 - exclude_measurement: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 5108 - exclude_measurement: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 5109 - exclude_measurement: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 5112 - exclude_measurement: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 5113 - exclude_measurement: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 5114 - exclude_measurement: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 5115 - exclude_measurement: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 5116 - exclude_measurement: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 5117 - exclude_measurement: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 5118 - exclude_measurement: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 5119 - exclude_measurement: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 5120 - exclude_measurement: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 5121 - exclude_measurement: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 5122 - exclude_measurement: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 5123 - exclude_measurement: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 5124 - exclude_measurement: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 5125 - exclude_measurement: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 5126 - exclude_measurement: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 5128 - exclude_measurement: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 5129 - exclude_measurement: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 5130 - exclude_measurement: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 5131 - exclude_measurement: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 5132 - exclude_measurement: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 5133 - exclude_measurement: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 5134 - exclude_measurement: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 5136 - exclude_measurement: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 5137 - exclude_measurement: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 5138 - exclude_measurement: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 5139 - exclude_measurement: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 5140 - exclude_measurement: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 5144 - exclude_measurement: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 5145 - exclude_measurement: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 5147 - exclude_measurement: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 5148 - exclude_measurement: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 5150 - exclude_measurement: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 5151 - exclude_measurement: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 5152 - exclude_measurement: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 5153 - exclude_measurement: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 5155 - exclude_measurement: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 5156 - exclude_measurement: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 5157 - exclude_measurement: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 5158 - exclude_measurement: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 5159 - exclude_measurement: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 5160 - exclude_measurement: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 5161 - exclude_measurement: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 5162 - exclude_measurement: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 5163 - exclude_measurement: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 5164 - exclude_measurement: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 5167 - exclude_measurement: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 5168 - exclude_measurement: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 5169 - exclude_measurement: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 5171 - exclude_measurement: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 5172 - exclude_measurement: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 5173 - exclude_measurement: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 5174 - exclude_measurement: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 5175 - exclude_measurement: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 5176 - exclude_measurement: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 5177 - exclude_measurement: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 5178 - exclude_measurement: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 5179 - exclude_measurement: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 5180 - exclude_measurement: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 5181 - exclude_measurement: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 5182 - exclude_measurement: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 5183 - exclude_measurement: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 5184 - exclude_measurement: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 5185 - exclude_measurement: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 5186 - exclude_measurement: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 5187 - exclude_measurement: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 5188 - exclude_measurement: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 5189 - exclude_measurement: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 5192 - exclude_measurement: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 5193 - exclude_measurement: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 5194 - exclude_measurement: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 5195 - exclude_measurement: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 5196 - exclude_measurement: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 5197 - exclude_measurement: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 5198 - exclude_measurement: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 5199 - exclude_measurement: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 5200 - exclude_measurement: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 5201 - exclude_measurement: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 5202 - exclude_measurement: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 5203 - exclude_measurement: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 5204 - exclude_measurement: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 5205 - exclude_measurement: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 5210 - exclude_measurement: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 5211 - exclude_measurement: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 5213 - exclude_measurement: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 5214 - exclude_measurement: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 5215 - exclude_measurement: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 5216 - exclude_measurement: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 5217 - exclude_measurement: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 5218 - exclude_measurement: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 5219 - exclude_measurement: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 5220 - exclude_measurement: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 5223 - exclude_measurement: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 5224 - exclude_measurement: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 5225 - exclude_measurement: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 5226 - exclude_measurement: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 5227 - exclude_measurement: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 5228 - exclude_measurement: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 5229 - exclude_measurement: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 5230 - exclude_measurement: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 5231 - exclude_measurement: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 5232 - exclude_measurement: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 5233 - exclude_measurement: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 5234 - exclude_measurement: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 5235 - exclude_measurement: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 5236 - exclude_measurement: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 5237 - exclude_measurement: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 5238 - exclude_measurement: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 5239 - exclude_measurement: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 5240 - exclude_measurement: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 5241 - exclude_measurement: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 5242 - exclude_measurement: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 5243 - exclude_measurement: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 5244 - exclude_measurement: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 5245 - exclude_measurement: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 5248 - exclude_measurement: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 5249 - exclude_measurement: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 5251 - exclude_measurement: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 5252 - exclude_measurement: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 5253 - exclude_measurement: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 5254 - exclude_measurement: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 5255 - exclude_measurement: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 5256 - exclude_measurement: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 5257 - exclude_measurement: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 5258 - exclude_measurement: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 5259 - exclude_measurement: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 5261 - exclude_measurement: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 5262 - exclude_measurement: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 5263 - exclude_measurement: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 5264 - exclude_measurement: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 5265 - exclude_measurement: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 5266 - exclude_measurement: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 5267 - exclude_measurement: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 5268 - exclude_measurement: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 5269 - exclude_measurement: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 5270 - exclude_measurement: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 5271 - exclude_measurement: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 5272 - exclude_measurement: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 5273 - exclude_measurement: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 5274 - exclude_measurement: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 5275 - exclude_measurement: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 5276 - exclude_measurement: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 5277 - exclude_measurement: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 5278 - exclude_measurement: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 5280 - exclude_measurement: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 5281 - exclude_measurement: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 5282 - exclude_measurement: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 5283 - exclude_measurement: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 5284 - exclude_measurement: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 5285 - exclude_measurement: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 5286 - exclude_measurement: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 5287 - exclude_measurement: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 5288 - exclude_measurement: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 5289 - exclude_measurement: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 5291 - exclude_measurement: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 5292 - exclude_measurement: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 5293 - exclude_measurement: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 5294 - exclude_measurement: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 5295 - exclude_measurement: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 5296 - exclude_measurement: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 5319 - exclude_measurement: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 5321 - exclude_measurement: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 5322 - exclude_measurement: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 5323 - exclude_measurement: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 5326 - exclude_measurement: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 5327 - exclude_measurement: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 5328 - exclude_measurement: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 5329 - exclude_measurement: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 5330 - exclude_measurement: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 5332 - exclude_measurement: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 5333 - exclude_measurement: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 5334 - exclude_measurement: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 5342 - exclude_measurement: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 5343 - exclude_measurement: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 5344 - exclude_measurement: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 5346 - exclude_measurement: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 5348 - exclude_measurement: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 5350 - exclude_measurement: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 5352 - exclude_measurement: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 5354 - exclude_measurement: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 5355 - exclude_measurement: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 5359 - exclude_measurement: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 5360 - exclude_measurement: should dump restrict`
+- 002_pg_dump.pl: `not ok 5361 - exclude_measurement: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 5363 - exclude_measurement: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 5364 - exclude_measurement_data: pg_dump runs`
+- 002_pg_dump.pl: `not ok 5365 - exclude_measurement_data: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 5366 - exclude_measurement_data: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 5367 - exclude_measurement_data: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 5368 - exclude_measurement_data: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 5369 - exclude_measurement_data: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 5370 - exclude_measurement_data: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 5371 - exclude_measurement_data: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 5372 - exclude_measurement_data: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 5373 - exclude_measurement_data: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 5374 - exclude_measurement_data: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 5375 - exclude_measurement_data: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 5376 - exclude_measurement_data: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 5377 - exclude_measurement_data: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 5378 - exclude_measurement_data: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 5379 - exclude_measurement_data: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 5380 - exclude_measurement_data: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 5381 - exclude_measurement_data: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 5382 - exclude_measurement_data: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 5383 - exclude_measurement_data: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 5384 - exclude_measurement_data: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 5385 - exclude_measurement_data: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 5386 - exclude_measurement_data: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 5387 - exclude_measurement_data: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 5388 - exclude_measurement_data: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 5389 - exclude_measurement_data: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 5390 - exclude_measurement_data: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 5392 - exclude_measurement_data: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 5393 - exclude_measurement_data: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 5394 - exclude_measurement_data: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 5395 - exclude_measurement_data: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 5396 - exclude_measurement_data: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 5397 - exclude_measurement_data: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 5398 - exclude_measurement_data: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 5399 - exclude_measurement_data: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 5400 - exclude_measurement_data: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 5401 - exclude_measurement_data: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 5402 - exclude_measurement_data: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 5403 - exclude_measurement_data: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 5404 - exclude_measurement_data: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 5405 - exclude_measurement_data: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 5406 - exclude_measurement_data: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 5407 - exclude_measurement_data: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 5408 - exclude_measurement_data: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 5409 - exclude_measurement_data: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 5411 - exclude_measurement_data: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 5412 - exclude_measurement_data: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 5414 - exclude_measurement_data: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 5415 - exclude_measurement_data: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 5416 - exclude_measurement_data: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 5417 - exclude_measurement_data: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 5418 - exclude_measurement_data: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 5419 - exclude_measurement_data: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 5420 - exclude_measurement_data: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 5421 - exclude_measurement_data: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 5422 - exclude_measurement_data: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 5423 - exclude_measurement_data: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 5424 - exclude_measurement_data: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 5425 - exclude_measurement_data: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 5426 - exclude_measurement_data: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 5427 - exclude_measurement_data: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 5428 - exclude_measurement_data: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 5431 - exclude_measurement_data: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 5432 - exclude_measurement_data: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 5433 - exclude_measurement_data: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 5435 - exclude_measurement_data: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 5436 - exclude_measurement_data: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 5437 - exclude_measurement_data: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 5438 - exclude_measurement_data: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 5439 - exclude_measurement_data: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 5440 - exclude_measurement_data: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 5441 - exclude_measurement_data: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 5442 - exclude_measurement_data: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 5443 - exclude_measurement_data: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 5444 - exclude_measurement_data: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 5445 - exclude_measurement_data: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 5446 - exclude_measurement_data: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 5447 - exclude_measurement_data: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 5448 - exclude_measurement_data: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 5449 - exclude_measurement_data: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 5450 - exclude_measurement_data: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 5451 - exclude_measurement_data: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 5452 - exclude_measurement_data: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 5453 - exclude_measurement_data: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 5456 - exclude_measurement_data: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 5457 - exclude_measurement_data: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 5458 - exclude_measurement_data: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 5459 - exclude_measurement_data: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 5460 - exclude_measurement_data: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 5461 - exclude_measurement_data: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 5462 - exclude_measurement_data: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 5463 - exclude_measurement_data: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 5464 - exclude_measurement_data: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 5465 - exclude_measurement_data: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 5466 - exclude_measurement_data: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 5467 - exclude_measurement_data: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 5468 - exclude_measurement_data: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 5469 - exclude_measurement_data: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 5474 - exclude_measurement_data: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 5475 - exclude_measurement_data: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 5477 - exclude_measurement_data: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 5478 - exclude_measurement_data: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 5479 - exclude_measurement_data: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 5480 - exclude_measurement_data: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 5481 - exclude_measurement_data: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 5482 - exclude_measurement_data: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 5483 - exclude_measurement_data: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 5484 - exclude_measurement_data: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 5485 - exclude_measurement_data: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 5486 - exclude_measurement_data: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 5487 - exclude_measurement_data: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 5488 - exclude_measurement_data: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 5489 - exclude_measurement_data: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 5490 - exclude_measurement_data: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 5491 - exclude_measurement_data: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 5492 - exclude_measurement_data: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 5493 - exclude_measurement_data: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 5494 - exclude_measurement_data: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 5495 - exclude_measurement_data: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 5496 - exclude_measurement_data: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 5497 - exclude_measurement_data: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 5498 - exclude_measurement_data: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 5499 - exclude_measurement_data: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 5500 - exclude_measurement_data: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 5501 - exclude_measurement_data: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 5502 - exclude_measurement_data: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 5503 - exclude_measurement_data: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 5504 - exclude_measurement_data: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 5505 - exclude_measurement_data: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 5506 - exclude_measurement_data: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 5507 - exclude_measurement_data: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 5508 - exclude_measurement_data: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 5509 - exclude_measurement_data: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 5512 - exclude_measurement_data: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 5513 - exclude_measurement_data: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 5515 - exclude_measurement_data: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 5516 - exclude_measurement_data: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 5517 - exclude_measurement_data: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 5518 - exclude_measurement_data: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 5519 - exclude_measurement_data: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 5520 - exclude_measurement_data: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 5521 - exclude_measurement_data: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 5522 - exclude_measurement_data: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 5523 - exclude_measurement_data: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 5524 - exclude_measurement_data: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 5525 - exclude_measurement_data: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 5526 - exclude_measurement_data: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 5527 - exclude_measurement_data: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 5528 - exclude_measurement_data: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 5529 - exclude_measurement_data: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 5530 - exclude_measurement_data: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 5531 - exclude_measurement_data: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 5532 - exclude_measurement_data: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 5533 - exclude_measurement_data: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 5534 - exclude_measurement_data: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 5535 - exclude_measurement_data: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 5536 - exclude_measurement_data: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 5537 - exclude_measurement_data: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 5538 - exclude_measurement_data: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 5539 - exclude_measurement_data: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 5540 - exclude_measurement_data: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 5541 - exclude_measurement_data: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 5542 - exclude_measurement_data: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 5544 - exclude_measurement_data: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 5545 - exclude_measurement_data: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 5546 - exclude_measurement_data: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 5547 - exclude_measurement_data: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 5548 - exclude_measurement_data: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 5549 - exclude_measurement_data: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 5550 - exclude_measurement_data: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 5551 - exclude_measurement_data: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 5552 - exclude_measurement_data: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 5553 - exclude_measurement_data: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 5555 - exclude_measurement_data: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 5556 - exclude_measurement_data: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 5557 - exclude_measurement_data: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 5558 - exclude_measurement_data: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 5559 - exclude_measurement_data: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 5560 - exclude_measurement_data: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 5561 - exclude_measurement_data: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 5581 - exclude_measurement_data: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 5583 - exclude_measurement_data: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 5585 - exclude_measurement_data: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 5586 - exclude_measurement_data: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 5587 - exclude_measurement_data: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 5588 - exclude_measurement_data: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 5589 - exclude_measurement_data: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 5590 - exclude_measurement_data: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 5591 - exclude_measurement_data: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 5592 - exclude_measurement_data: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 5593 - exclude_measurement_data: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 5594 - exclude_measurement_data: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 5596 - exclude_measurement_data: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 5597 - exclude_measurement_data: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 5598 - exclude_measurement_data: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 5606 - exclude_measurement_data: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 5607 - exclude_measurement_data: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 5608 - exclude_measurement_data: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 5609 - exclude_measurement_data: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 5610 - exclude_measurement_data: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 5612 - exclude_measurement_data: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 5614 - exclude_measurement_data: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 5616 - exclude_measurement_data: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 5618 - exclude_measurement_data: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 5619 - exclude_measurement_data: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 5620 - exclude_measurement_data: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 5623 - exclude_measurement_data: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 5624 - exclude_measurement_data: should dump restrict`
+- 002_pg_dump.pl: `not ok 5625 - exclude_measurement_data: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 5627 - exclude_measurement_data: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 5628 - exclude_test_table: pg_dump runs`
+- 002_pg_dump.pl: `not ok 5629 - exclude_test_table: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 5630 - exclude_test_table: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 5631 - exclude_test_table: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 5632 - exclude_test_table: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 5633 - exclude_test_table: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 5634 - exclude_test_table: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 5635 - exclude_test_table: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 5636 - exclude_test_table: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 5637 - exclude_test_table: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 5638 - exclude_test_table: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 5639 - exclude_test_table: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 5640 - exclude_test_table: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 5641 - exclude_test_table: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 5642 - exclude_test_table: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 5643 - exclude_test_table: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 5644 - exclude_test_table: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 5645 - exclude_test_table: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 5646 - exclude_test_table: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 5647 - exclude_test_table: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 5648 - exclude_test_table: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 5649 - exclude_test_table: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 5650 - exclude_test_table: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 5651 - exclude_test_table: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 5652 - exclude_test_table: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 5653 - exclude_test_table: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 5654 - exclude_test_table: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 5656 - exclude_test_table: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 5657 - exclude_test_table: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 5658 - exclude_test_table: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 5660 - exclude_test_table: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 5661 - exclude_test_table: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 5662 - exclude_test_table: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 5663 - exclude_test_table: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 5669 - exclude_test_table: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 5670 - exclude_test_table: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 5671 - exclude_test_table: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 5672 - exclude_test_table: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 5678 - exclude_test_table: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 5679 - exclude_test_table: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 5680 - exclude_test_table: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 5681 - exclude_test_table: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 5682 - exclude_test_table: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 5683 - exclude_test_table: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 5684 - exclude_test_table: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 5685 - exclude_test_table: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 5686 - exclude_test_table: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 5688 - exclude_test_table: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 5689 - exclude_test_table: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 5690 - exclude_test_table: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 5691 - exclude_test_table: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 5692 - exclude_test_table: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 5695 - exclude_test_table: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 5697 - exclude_test_table: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 5699 - exclude_test_table: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 5701 - exclude_test_table: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 5702 - exclude_test_table: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 5703 - exclude_test_table: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 5704 - exclude_test_table: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 5705 - exclude_test_table: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 5706 - exclude_test_table: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 5707 - exclude_test_table: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 5708 - exclude_test_table: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 5709 - exclude_test_table: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 5710 - exclude_test_table: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 5711 - exclude_test_table: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 5712 - exclude_test_table: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 5713 - exclude_test_table: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 5714 - exclude_test_table: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 5715 - exclude_test_table: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 5716 - exclude_test_table: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 5717 - exclude_test_table: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 5719 - exclude_test_table: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 5720 - exclude_test_table: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 5721 - exclude_test_table: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 5722 - exclude_test_table: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 5723 - exclude_test_table: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 5725 - exclude_test_table: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 5726 - exclude_test_table: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 5727 - exclude_test_table: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 5728 - exclude_test_table: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 5729 - exclude_test_table: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 5730 - exclude_test_table: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 5731 - exclude_test_table: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 5732 - exclude_test_table: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 5733 - exclude_test_table: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 5738 - exclude_test_table: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 5739 - exclude_test_table: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 5741 - exclude_test_table: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 5742 - exclude_test_table: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 5743 - exclude_test_table: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 5744 - exclude_test_table: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 5745 - exclude_test_table: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 5746 - exclude_test_table: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 5747 - exclude_test_table: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 5748 - exclude_test_table: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 5749 - exclude_test_table: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 5750 - exclude_test_table: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 5751 - exclude_test_table: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 5752 - exclude_test_table: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 5753 - exclude_test_table: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 5754 - exclude_test_table: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 5755 - exclude_test_table: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 5756 - exclude_test_table: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 5757 - exclude_test_table: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 5758 - exclude_test_table: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 5759 - exclude_test_table: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 5760 - exclude_test_table: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 5761 - exclude_test_table: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 5768 - exclude_test_table: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 5769 - exclude_test_table: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 5770 - exclude_test_table: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 5771 - exclude_test_table: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 5772 - exclude_test_table: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 5773 - exclude_test_table: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 5776 - exclude_test_table: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 5777 - exclude_test_table: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 5779 - exclude_test_table: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 5780 - exclude_test_table: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 5781 - exclude_test_table: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 5783 - exclude_test_table: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 5784 - exclude_test_table: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 5785 - exclude_test_table: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 5786 - exclude_test_table: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 5787 - exclude_test_table: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 5788 - exclude_test_table: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 5789 - exclude_test_table: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 5790 - exclude_test_table: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 5791 - exclude_test_table: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 5792 - exclude_test_table: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 5793 - exclude_test_table: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 5794 - exclude_test_table: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 5795 - exclude_test_table: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 5796 - exclude_test_table: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 5797 - exclude_test_table: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 5798 - exclude_test_table: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 5799 - exclude_test_table: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 5800 - exclude_test_table: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 5802 - exclude_test_table: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 5803 - exclude_test_table: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 5804 - exclude_test_table: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 5805 - exclude_test_table: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 5806 - exclude_test_table: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 5808 - exclude_test_table: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 5809 - exclude_test_table: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 5810 - exclude_test_table: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 5811 - exclude_test_table: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 5812 - exclude_test_table: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 5814 - exclude_test_table: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 5815 - exclude_test_table: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 5816 - exclude_test_table: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 5817 - exclude_test_table: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 5819 - exclude_test_table: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 5820 - exclude_test_table: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 5821 - exclude_test_table: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 5822 - exclude_test_table: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 5823 - exclude_test_table: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 5824 - exclude_test_table: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 5825 - exclude_test_table: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 5845 - exclude_test_table: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 5847 - exclude_test_table: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 5849 - exclude_test_table: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 5850 - exclude_test_table: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 5851 - exclude_test_table: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 5852 - exclude_test_table: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 5853 - exclude_test_table: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 5855 - exclude_test_table: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 5856 - exclude_test_table: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 5857 - exclude_test_table: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 5858 - exclude_test_table: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 5860 - exclude_test_table: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 5861 - exclude_test_table: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 5862 - exclude_test_table: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 5870 - exclude_test_table: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 5871 - exclude_test_table: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 5872 - exclude_test_table: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 5873 - exclude_test_table: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 5874 - exclude_test_table: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 5876 - exclude_test_table: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 5878 - exclude_test_table: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 5880 - exclude_test_table: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 5882 - exclude_test_table: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 5883 - exclude_test_table: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 5884 - exclude_test_table: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 5887 - exclude_test_table: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 5888 - exclude_test_table: should dump restrict`
+- 002_pg_dump.pl: `not ok 5889 - exclude_test_table: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 5891 - exclude_test_table: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 5892 - exclude_test_table_data: pg_dump runs`
+- 002_pg_dump.pl: `not ok 5893 - exclude_test_table_data: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 5894 - exclude_test_table_data: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 5895 - exclude_test_table_data: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 5896 - exclude_test_table_data: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 5897 - exclude_test_table_data: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 5898 - exclude_test_table_data: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 5899 - exclude_test_table_data: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 5900 - exclude_test_table_data: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 5901 - exclude_test_table_data: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 5902 - exclude_test_table_data: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 5903 - exclude_test_table_data: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 5904 - exclude_test_table_data: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 5905 - exclude_test_table_data: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 5906 - exclude_test_table_data: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 5907 - exclude_test_table_data: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 5908 - exclude_test_table_data: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 5909 - exclude_test_table_data: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 5910 - exclude_test_table_data: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 5911 - exclude_test_table_data: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 5912 - exclude_test_table_data: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 5913 - exclude_test_table_data: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 5914 - exclude_test_table_data: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 5915 - exclude_test_table_data: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 5916 - exclude_test_table_data: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 5917 - exclude_test_table_data: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 5918 - exclude_test_table_data: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 5920 - exclude_test_table_data: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 5921 - exclude_test_table_data: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 5922 - exclude_test_table_data: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 5923 - exclude_test_table_data: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 5924 - exclude_test_table_data: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 5925 - exclude_test_table_data: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 5926 - exclude_test_table_data: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 5927 - exclude_test_table_data: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 5928 - exclude_test_table_data: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 5929 - exclude_test_table_data: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 5930 - exclude_test_table_data: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 5931 - exclude_test_table_data: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 5932 - exclude_test_table_data: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 5933 - exclude_test_table_data: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 5934 - exclude_test_table_data: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 5935 - exclude_test_table_data: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 5936 - exclude_test_table_data: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 5937 - exclude_test_table_data: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 5939 - exclude_test_table_data: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 5940 - exclude_test_table_data: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 5942 - exclude_test_table_data: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 5943 - exclude_test_table_data: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 5944 - exclude_test_table_data: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 5945 - exclude_test_table_data: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 5946 - exclude_test_table_data: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 5947 - exclude_test_table_data: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 5948 - exclude_test_table_data: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 5949 - exclude_test_table_data: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 5950 - exclude_test_table_data: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 5951 - exclude_test_table_data: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 5952 - exclude_test_table_data: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 5953 - exclude_test_table_data: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 5954 - exclude_test_table_data: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 5955 - exclude_test_table_data: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 5956 - exclude_test_table_data: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 5959 - exclude_test_table_data: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 5960 - exclude_test_table_data: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 5961 - exclude_test_table_data: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 5963 - exclude_test_table_data: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 5964 - exclude_test_table_data: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 5965 - exclude_test_table_data: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 5966 - exclude_test_table_data: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 5967 - exclude_test_table_data: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 5968 - exclude_test_table_data: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 5969 - exclude_test_table_data: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 5970 - exclude_test_table_data: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 5971 - exclude_test_table_data: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 5972 - exclude_test_table_data: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 5973 - exclude_test_table_data: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 5974 - exclude_test_table_data: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 5975 - exclude_test_table_data: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 5976 - exclude_test_table_data: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 5977 - exclude_test_table_data: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 5978 - exclude_test_table_data: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 5979 - exclude_test_table_data: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 5980 - exclude_test_table_data: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 5981 - exclude_test_table_data: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 5983 - exclude_test_table_data: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 5984 - exclude_test_table_data: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 5985 - exclude_test_table_data: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 5986 - exclude_test_table_data: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 5987 - exclude_test_table_data: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 5989 - exclude_test_table_data: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 5990 - exclude_test_table_data: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 5991 - exclude_test_table_data: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 5992 - exclude_test_table_data: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 5993 - exclude_test_table_data: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 5994 - exclude_test_table_data: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 5995 - exclude_test_table_data: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 5996 - exclude_test_table_data: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 5997 - exclude_test_table_data: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 6002 - exclude_test_table_data: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 6003 - exclude_test_table_data: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 6005 - exclude_test_table_data: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 6006 - exclude_test_table_data: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 6007 - exclude_test_table_data: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 6008 - exclude_test_table_data: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 6009 - exclude_test_table_data: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 6010 - exclude_test_table_data: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 6011 - exclude_test_table_data: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 6012 - exclude_test_table_data: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 6013 - exclude_test_table_data: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 6014 - exclude_test_table_data: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 6015 - exclude_test_table_data: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 6016 - exclude_test_table_data: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 6017 - exclude_test_table_data: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 6018 - exclude_test_table_data: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 6019 - exclude_test_table_data: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 6020 - exclude_test_table_data: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 6021 - exclude_test_table_data: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 6022 - exclude_test_table_data: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 6023 - exclude_test_table_data: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 6024 - exclude_test_table_data: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 6025 - exclude_test_table_data: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 6026 - exclude_test_table_data: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 6027 - exclude_test_table_data: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 6028 - exclude_test_table_data: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 6029 - exclude_test_table_data: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 6030 - exclude_test_table_data: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 6031 - exclude_test_table_data: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 6032 - exclude_test_table_data: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 6033 - exclude_test_table_data: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 6034 - exclude_test_table_data: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 6035 - exclude_test_table_data: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 6036 - exclude_test_table_data: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 6037 - exclude_test_table_data: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 6040 - exclude_test_table_data: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 6041 - exclude_test_table_data: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 6043 - exclude_test_table_data: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 6044 - exclude_test_table_data: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 6045 - exclude_test_table_data: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 6046 - exclude_test_table_data: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 6047 - exclude_test_table_data: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 6048 - exclude_test_table_data: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 6049 - exclude_test_table_data: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 6050 - exclude_test_table_data: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 6051 - exclude_test_table_data: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 6052 - exclude_test_table_data: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 6053 - exclude_test_table_data: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 6054 - exclude_test_table_data: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 6055 - exclude_test_table_data: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 6056 - exclude_test_table_data: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 6057 - exclude_test_table_data: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 6058 - exclude_test_table_data: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 6059 - exclude_test_table_data: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 6060 - exclude_test_table_data: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 6061 - exclude_test_table_data: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 6062 - exclude_test_table_data: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 6063 - exclude_test_table_data: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 6064 - exclude_test_table_data: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 6065 - exclude_test_table_data: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 6066 - exclude_test_table_data: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 6067 - exclude_test_table_data: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 6068 - exclude_test_table_data: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 6069 - exclude_test_table_data: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 6070 - exclude_test_table_data: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 6072 - exclude_test_table_data: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 6073 - exclude_test_table_data: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 6074 - exclude_test_table_data: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 6075 - exclude_test_table_data: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 6076 - exclude_test_table_data: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 6077 - exclude_test_table_data: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 6078 - exclude_test_table_data: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 6079 - exclude_test_table_data: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 6080 - exclude_test_table_data: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 6081 - exclude_test_table_data: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 6083 - exclude_test_table_data: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 6084 - exclude_test_table_data: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 6085 - exclude_test_table_data: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 6086 - exclude_test_table_data: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 6087 - exclude_test_table_data: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 6088 - exclude_test_table_data: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 6089 - exclude_test_table_data: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 6109 - exclude_test_table_data: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 6111 - exclude_test_table_data: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 6113 - exclude_test_table_data: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 6114 - exclude_test_table_data: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 6115 - exclude_test_table_data: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 6116 - exclude_test_table_data: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 6117 - exclude_test_table_data: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 6118 - exclude_test_table_data: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 6119 - exclude_test_table_data: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 6120 - exclude_test_table_data: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 6121 - exclude_test_table_data: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 6122 - exclude_test_table_data: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 6124 - exclude_test_table_data: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 6125 - exclude_test_table_data: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 6126 - exclude_test_table_data: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 6134 - exclude_test_table_data: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 6135 - exclude_test_table_data: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 6136 - exclude_test_table_data: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 6137 - exclude_test_table_data: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 6138 - exclude_test_table_data: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 6140 - exclude_test_table_data: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 6142 - exclude_test_table_data: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 6144 - exclude_test_table_data: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 6146 - exclude_test_table_data: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 6147 - exclude_test_table_data: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 6148 - exclude_test_table_data: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 6151 - exclude_test_table_data: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 6152 - exclude_test_table_data: should dump restrict`
+- 002_pg_dump.pl: `not ok 6153 - exclude_test_table_data: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 6155 - exclude_test_table_data: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 6156 - inserts: pg_dump runs`
+- 002_pg_dump.pl: `not ok 6168 - inserts: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 6223 - inserts: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 6375 - inserts: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 6392 - inserts: should dump INSERT INTO test_fourth_table`
+- 002_pg_dump.pl: `not ok 6396 - inserts: should dump INSERT INTO test_third_table`
+- 002_pg_dump.pl: `not ok 6398 - inserts: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 6399 - inserts: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 6400 - inserts: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 6416 - inserts: should dump restrict`
+- 002_pg_dump.pl: `not ok 6419 - inserts: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 6420 - no_data_no_schema: pg_dump runs`
+- 002_pg_dump.pl: `not ok 6679 - no_data_no_schema: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 6680 - no_data_no_schema: should dump restrict`
+- 002_pg_dump.pl: `not ok 6681 - no_data_no_schema: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 6683 - no_data_no_schema: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 6684 - no_large_objects: pg_dump runs`
+- 002_pg_dump.pl: `not ok 6685 - no_large_objects: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 6686 - no_large_objects: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 6687 - no_large_objects: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 6688 - no_large_objects: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 6689 - no_large_objects: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 6690 - no_large_objects: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 6691 - no_large_objects: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 6692 - no_large_objects: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 6693 - no_large_objects: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 6694 - no_large_objects: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 6695 - no_large_objects: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 6697 - no_large_objects: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 6698 - no_large_objects: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 6699 - no_large_objects: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 6700 - no_large_objects: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 6701 - no_large_objects: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 6702 - no_large_objects: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 6703 - no_large_objects: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 6704 - no_large_objects: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 6705 - no_large_objects: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 6706 - no_large_objects: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 6707 - no_large_objects: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 6708 - no_large_objects: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 6709 - no_large_objects: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 6710 - no_large_objects: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 6712 - no_large_objects: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 6713 - no_large_objects: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 6714 - no_large_objects: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 6715 - no_large_objects: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 6716 - no_large_objects: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 6717 - no_large_objects: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 6718 - no_large_objects: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 6719 - no_large_objects: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 6720 - no_large_objects: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 6721 - no_large_objects: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 6722 - no_large_objects: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 6723 - no_large_objects: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 6724 - no_large_objects: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 6725 - no_large_objects: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 6726 - no_large_objects: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 6727 - no_large_objects: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 6728 - no_large_objects: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 6729 - no_large_objects: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 6731 - no_large_objects: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 6732 - no_large_objects: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 6734 - no_large_objects: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 6735 - no_large_objects: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 6736 - no_large_objects: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 6737 - no_large_objects: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 6738 - no_large_objects: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 6739 - no_large_objects: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 6740 - no_large_objects: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 6741 - no_large_objects: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 6742 - no_large_objects: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 6743 - no_large_objects: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 6744 - no_large_objects: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 6745 - no_large_objects: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 6746 - no_large_objects: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 6747 - no_large_objects: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 6748 - no_large_objects: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 6752 - no_large_objects: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 6753 - no_large_objects: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 6755 - no_large_objects: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 6756 - no_large_objects: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 6757 - no_large_objects: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 6758 - no_large_objects: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 6759 - no_large_objects: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 6760 - no_large_objects: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 6761 - no_large_objects: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 6762 - no_large_objects: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 6763 - no_large_objects: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 6764 - no_large_objects: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 6765 - no_large_objects: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 6766 - no_large_objects: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 6767 - no_large_objects: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 6768 - no_large_objects: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 6769 - no_large_objects: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 6770 - no_large_objects: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 6771 - no_large_objects: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 6772 - no_large_objects: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 6773 - no_large_objects: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 6775 - no_large_objects: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 6776 - no_large_objects: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 6777 - no_large_objects: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 6778 - no_large_objects: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 6779 - no_large_objects: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 6780 - no_large_objects: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 6781 - no_large_objects: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 6782 - no_large_objects: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 6783 - no_large_objects: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 6784 - no_large_objects: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 6785 - no_large_objects: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 6786 - no_large_objects: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 6787 - no_large_objects: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 6788 - no_large_objects: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 6789 - no_large_objects: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 6794 - no_large_objects: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 6795 - no_large_objects: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 6797 - no_large_objects: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 6798 - no_large_objects: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 6799 - no_large_objects: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 6800 - no_large_objects: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 6801 - no_large_objects: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 6802 - no_large_objects: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 6803 - no_large_objects: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 6804 - no_large_objects: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 6805 - no_large_objects: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 6806 - no_large_objects: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 6807 - no_large_objects: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 6808 - no_large_objects: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 6809 - no_large_objects: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 6810 - no_large_objects: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 6811 - no_large_objects: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 6812 - no_large_objects: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 6813 - no_large_objects: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 6814 - no_large_objects: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 6815 - no_large_objects: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 6816 - no_large_objects: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 6817 - no_large_objects: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 6818 - no_large_objects: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 6819 - no_large_objects: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 6820 - no_large_objects: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 6821 - no_large_objects: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 6822 - no_large_objects: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 6823 - no_large_objects: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 6824 - no_large_objects: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 6825 - no_large_objects: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 6826 - no_large_objects: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 6827 - no_large_objects: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 6828 - no_large_objects: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 6829 - no_large_objects: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 6832 - no_large_objects: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 6833 - no_large_objects: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 6835 - no_large_objects: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 6836 - no_large_objects: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 6837 - no_large_objects: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 6838 - no_large_objects: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 6839 - no_large_objects: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 6840 - no_large_objects: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 6841 - no_large_objects: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 6842 - no_large_objects: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 6843 - no_large_objects: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 6844 - no_large_objects: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 6845 - no_large_objects: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 6846 - no_large_objects: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 6847 - no_large_objects: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 6848 - no_large_objects: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 6849 - no_large_objects: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 6850 - no_large_objects: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 6851 - no_large_objects: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 6852 - no_large_objects: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 6853 - no_large_objects: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 6854 - no_large_objects: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 6855 - no_large_objects: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 6856 - no_large_objects: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 6857 - no_large_objects: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 6858 - no_large_objects: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 6859 - no_large_objects: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 6860 - no_large_objects: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 6861 - no_large_objects: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 6862 - no_large_objects: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 6864 - no_large_objects: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 6865 - no_large_objects: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 6866 - no_large_objects: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 6867 - no_large_objects: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 6868 - no_large_objects: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 6869 - no_large_objects: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 6870 - no_large_objects: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 6871 - no_large_objects: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 6872 - no_large_objects: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 6873 - no_large_objects: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 6875 - no_large_objects: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 6876 - no_large_objects: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 6877 - no_large_objects: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 6878 - no_large_objects: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 6879 - no_large_objects: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 6880 - no_large_objects: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 6881 - no_large_objects: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 6901 - no_large_objects: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 6905 - no_large_objects: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 6906 - no_large_objects: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 6907 - no_large_objects: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 6908 - no_large_objects: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 6909 - no_large_objects: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 6910 - no_large_objects: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 6911 - no_large_objects: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 6912 - no_large_objects: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 6913 - no_large_objects: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 6914 - no_large_objects: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 6916 - no_large_objects: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 6917 - no_large_objects: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 6918 - no_large_objects: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 6929 - no_large_objects: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 6930 - no_large_objects: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 6932 - no_large_objects: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 6934 - no_large_objects: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 6936 - no_large_objects: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 6938 - no_large_objects: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 6939 - no_large_objects: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 6940 - no_large_objects: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 6943 - no_large_objects: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 6944 - no_large_objects: should dump restrict`
+- 002_pg_dump.pl: `not ok 6945 - no_large_objects: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 6947 - no_large_objects: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 6948 - no_owner: pg_dump runs`
+- 002_pg_dump.pl: `not ok 6950 - no_owner: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 6951 - no_owner: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 6952 - no_owner: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 6953 - no_owner: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 6955 - no_owner: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 6958 - no_owner: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 6959 - no_owner: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 6963 - no_owner: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 6965 - no_owner: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 6966 - no_owner: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 6967 - no_owner: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 6968 - no_owner: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 6970 - no_owner: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 6971 - no_owner: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 6972 - no_owner: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 6973 - no_owner: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 6974 - no_owner: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 6979 - no_owner: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 6981 - no_owner: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 6982 - no_owner: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 6983 - no_owner: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 6984 - no_owner: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 6985 - no_owner: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 6986 - no_owner: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 6987 - no_owner: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 6988 - no_owner: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 6990 - no_owner: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 6993 - no_owner: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 6995 - no_owner: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 6999 - no_owner: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 7001 - no_owner: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 7002 - no_owner: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 7003 - no_owner: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 7004 - no_owner: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 7005 - no_owner: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 7006 - no_owner: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 7007 - no_owner: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 7008 - no_owner: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 7009 - no_owner: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 7010 - no_owner: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 7011 - no_owner: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 7012 - no_owner: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 7015 - no_owner: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 7016 - no_owner: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 7017 - no_owner: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 7019 - no_owner: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 7020 - no_owner: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 7021 - no_owner: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 7022 - no_owner: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 7023 - no_owner: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 7024 - no_owner: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 7025 - no_owner: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 7026 - no_owner: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 7027 - no_owner: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 7028 - no_owner: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 7029 - no_owner: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 7030 - no_owner: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 7031 - no_owner: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 7032 - no_owner: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 7033 - no_owner: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 7034 - no_owner: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 7035 - no_owner: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 7036 - no_owner: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 7037 - no_owner: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 7039 - no_owner: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 7040 - no_owner: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 7041 - no_owner: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 7042 - no_owner: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 7043 - no_owner: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 7044 - no_owner: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 7045 - no_owner: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 7046 - no_owner: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 7047 - no_owner: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 7048 - no_owner: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 7049 - no_owner: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 7050 - no_owner: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 7051 - no_owner: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 7052 - no_owner: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 7053 - no_owner: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 7058 - no_owner: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 7059 - no_owner: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 7061 - no_owner: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 7062 - no_owner: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 7063 - no_owner: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 7064 - no_owner: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 7065 - no_owner: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 7066 - no_owner: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 7067 - no_owner: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 7068 - no_owner: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 7069 - no_owner: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 7070 - no_owner: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 7071 - no_owner: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 7072 - no_owner: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 7073 - no_owner: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 7074 - no_owner: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 7075 - no_owner: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 7076 - no_owner: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 7077 - no_owner: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 7078 - no_owner: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 7079 - no_owner: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 7080 - no_owner: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 7081 - no_owner: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 7082 - no_owner: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 7083 - no_owner: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 7084 - no_owner: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 7085 - no_owner: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 7086 - no_owner: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 7087 - no_owner: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 7088 - no_owner: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 7089 - no_owner: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 7090 - no_owner: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 7091 - no_owner: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 7092 - no_owner: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 7093 - no_owner: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 7096 - no_owner: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 7097 - no_owner: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 7099 - no_owner: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 7100 - no_owner: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 7101 - no_owner: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 7102 - no_owner: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 7103 - no_owner: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 7104 - no_owner: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 7105 - no_owner: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 7106 - no_owner: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 7107 - no_owner: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 7108 - no_owner: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 7109 - no_owner: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 7110 - no_owner: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 7111 - no_owner: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 7112 - no_owner: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 7113 - no_owner: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 7114 - no_owner: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 7115 - no_owner: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 7116 - no_owner: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 7117 - no_owner: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 7118 - no_owner: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 7119 - no_owner: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 7120 - no_owner: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 7121 - no_owner: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 7122 - no_owner: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 7123 - no_owner: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 7124 - no_owner: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 7125 - no_owner: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 7126 - no_owner: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 7128 - no_owner: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 7129 - no_owner: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 7130 - no_owner: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 7131 - no_owner: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 7132 - no_owner: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 7133 - no_owner: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 7134 - no_owner: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 7135 - no_owner: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 7136 - no_owner: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 7137 - no_owner: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 7139 - no_owner: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 7140 - no_owner: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 7141 - no_owner: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 7142 - no_owner: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 7143 - no_owner: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 7144 - no_owner: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 7145 - no_owner: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 7165 - no_owner: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 7167 - no_owner: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 7169 - no_owner: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 7170 - no_owner: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 7171 - no_owner: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 7172 - no_owner: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 7173 - no_owner: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 7174 - no_owner: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 7175 - no_owner: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 7176 - no_owner: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 7177 - no_owner: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 7178 - no_owner: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 7180 - no_owner: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 7181 - no_owner: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 7182 - no_owner: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 7190 - no_owner: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 7191 - no_owner: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 7192 - no_owner: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 7193 - no_owner: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 7194 - no_owner: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 7196 - no_owner: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 7198 - no_owner: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 7200 - no_owner: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 7202 - no_owner: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 7203 - no_owner: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 7204 - no_owner: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 7207 - no_owner: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 7208 - no_owner: should dump restrict`
+- 002_pg_dump.pl: `not ok 7209 - no_owner: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 7211 - no_owner: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 7212 - no_policies: pg_dump runs`
+- 002_pg_dump.pl: `not ok 7213 - no_policies: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 7214 - no_policies: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 7215 - no_policies: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 7216 - no_policies: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 7217 - no_policies: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 7218 - no_policies: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 7219 - no_policies: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 7220 - no_policies: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 7221 - no_policies: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 7222 - no_policies: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 7223 - no_policies: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 7224 - no_policies: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 7225 - no_policies: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 7226 - no_policies: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 7227 - no_policies: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 7228 - no_policies: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 7229 - no_policies: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 7230 - no_policies: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 7231 - no_policies: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 7232 - no_policies: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 7233 - no_policies: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 7234 - no_policies: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 7235 - no_policies: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 7236 - no_policies: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 7237 - no_policies: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 7238 - no_policies: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 7240 - no_policies: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 7241 - no_policies: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 7242 - no_policies: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 7243 - no_policies: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 7244 - no_policies: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 7245 - no_policies: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 7246 - no_policies: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 7247 - no_policies: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 7248 - no_policies: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 7249 - no_policies: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 7250 - no_policies: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 7251 - no_policies: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 7252 - no_policies: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 7253 - no_policies: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 7254 - no_policies: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 7255 - no_policies: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 7256 - no_policies: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 7257 - no_policies: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 7260 - no_policies: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 7262 - no_policies: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 7263 - no_policies: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 7264 - no_policies: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 7265 - no_policies: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 7266 - no_policies: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 7267 - no_policies: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 7268 - no_policies: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 7269 - no_policies: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 7270 - no_policies: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 7271 - no_policies: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 7272 - no_policies: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 7273 - no_policies: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 7274 - no_policies: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 7275 - no_policies: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 7276 - no_policies: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 7279 - no_policies: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 7281 - no_policies: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 7283 - no_policies: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 7284 - no_policies: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 7285 - no_policies: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 7286 - no_policies: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 7287 - no_policies: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 7288 - no_policies: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 7289 - no_policies: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 7290 - no_policies: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 7291 - no_policies: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 7292 - no_policies: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 7293 - no_policies: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 7294 - no_policies: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 7295 - no_policies: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 7296 - no_policies: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 7297 - no_policies: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 7298 - no_policies: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 7299 - no_policies: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 7300 - no_policies: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 7301 - no_policies: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 7303 - no_policies: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 7304 - no_policies: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 7305 - no_policies: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 7306 - no_policies: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 7307 - no_policies: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 7308 - no_policies: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 7309 - no_policies: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 7310 - no_policies: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 7311 - no_policies: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 7312 - no_policies: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 7313 - no_policies: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 7314 - no_policies: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 7315 - no_policies: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 7316 - no_policies: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 7317 - no_policies: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 7322 - no_policies: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 7323 - no_policies: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 7325 - no_policies: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 7326 - no_policies: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 7327 - no_policies: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 7328 - no_policies: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 7329 - no_policies: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 7330 - no_policies: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 7331 - no_policies: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 7332 - no_policies: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 7333 - no_policies: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 7334 - no_policies: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 7335 - no_policies: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 7336 - no_policies: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 7337 - no_policies: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 7338 - no_policies: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 7339 - no_policies: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 7340 - no_policies: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 7341 - no_policies: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 7342 - no_policies: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 7343 - no_policies: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 7344 - no_policies: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 7345 - no_policies: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 7352 - no_policies: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 7353 - no_policies: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 7354 - no_policies: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 7355 - no_policies: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 7356 - no_policies: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 7357 - no_policies: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 7360 - no_policies: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 7361 - no_policies: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 7363 - no_policies: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 7364 - no_policies: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 7365 - no_policies: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 7366 - no_policies: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 7367 - no_policies: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 7368 - no_policies: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 7369 - no_policies: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 7370 - no_policies: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 7371 - no_policies: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 7372 - no_policies: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 7373 - no_policies: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 7374 - no_policies: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 7375 - no_policies: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 7376 - no_policies: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 7377 - no_policies: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 7378 - no_policies: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 7379 - no_policies: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 7380 - no_policies: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 7381 - no_policies: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 7382 - no_policies: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 7383 - no_policies: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 7384 - no_policies: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 7385 - no_policies: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 7386 - no_policies: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 7387 - no_policies: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 7388 - no_policies: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 7389 - no_policies: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 7390 - no_policies: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 7392 - no_policies: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 7393 - no_policies: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 7394 - no_policies: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 7395 - no_policies: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 7396 - no_policies: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 7397 - no_policies: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 7398 - no_policies: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 7399 - no_policies: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 7400 - no_policies: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 7401 - no_policies: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 7403 - no_policies: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 7404 - no_policies: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 7405 - no_policies: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 7406 - no_policies: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 7407 - no_policies: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 7408 - no_policies: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 7409 - no_policies: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 7429 - no_policies: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 7431 - no_policies: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 7433 - no_policies: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 7434 - no_policies: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 7435 - no_policies: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 7436 - no_policies: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 7437 - no_policies: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 7438 - no_policies: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 7439 - no_policies: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 7440 - no_policies: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 7441 - no_policies: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 7442 - no_policies: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 7444 - no_policies: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 7445 - no_policies: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 7446 - no_policies: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 7454 - no_policies: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 7455 - no_policies: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 7456 - no_policies: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 7457 - no_policies: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 7458 - no_policies: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 7460 - no_policies: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 7462 - no_policies: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 7464 - no_policies: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 7466 - no_policies: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 7467 - no_policies: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 7468 - no_policies: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 7471 - no_policies: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 7472 - no_policies: should dump restrict`
+- 002_pg_dump.pl: `not ok 7473 - no_policies: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 7475 - no_policies: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 7476 - no_policies_restore: pg_dump runs`
+- 002_pg_dump.pl: `not ok 7477 - no_policies_restore: pg_restore runs`
+- 002_pg_dump.pl: `not ok 7478 - no_policies_restore: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 7479 - no_policies_restore: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 7480 - no_policies_restore: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 7481 - no_policies_restore: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 7482 - no_policies_restore: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 7483 - no_policies_restore: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 7484 - no_policies_restore: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 7485 - no_policies_restore: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 7486 - no_policies_restore: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 7487 - no_policies_restore: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 7488 - no_policies_restore: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 7489 - no_policies_restore: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 7490 - no_policies_restore: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 7491 - no_policies_restore: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 7492 - no_policies_restore: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 7493 - no_policies_restore: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 7494 - no_policies_restore: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 7495 - no_policies_restore: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 7496 - no_policies_restore: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 7497 - no_policies_restore: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 7498 - no_policies_restore: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 7499 - no_policies_restore: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 7500 - no_policies_restore: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 7501 - no_policies_restore: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 7502 - no_policies_restore: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 7503 - no_policies_restore: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 7505 - no_policies_restore: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 7506 - no_policies_restore: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 7507 - no_policies_restore: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 7508 - no_policies_restore: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 7509 - no_policies_restore: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 7510 - no_policies_restore: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 7511 - no_policies_restore: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 7512 - no_policies_restore: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 7513 - no_policies_restore: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 7514 - no_policies_restore: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 7515 - no_policies_restore: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 7516 - no_policies_restore: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 7517 - no_policies_restore: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 7518 - no_policies_restore: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 7519 - no_policies_restore: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 7520 - no_policies_restore: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 7521 - no_policies_restore: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 7522 - no_policies_restore: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 7525 - no_policies_restore: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 7527 - no_policies_restore: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 7528 - no_policies_restore: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 7529 - no_policies_restore: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 7530 - no_policies_restore: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 7531 - no_policies_restore: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 7532 - no_policies_restore: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 7533 - no_policies_restore: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 7534 - no_policies_restore: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 7535 - no_policies_restore: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 7536 - no_policies_restore: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 7537 - no_policies_restore: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 7538 - no_policies_restore: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 7539 - no_policies_restore: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 7540 - no_policies_restore: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 7541 - no_policies_restore: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 7544 - no_policies_restore: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 7546 - no_policies_restore: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 7548 - no_policies_restore: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 7549 - no_policies_restore: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 7550 - no_policies_restore: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 7551 - no_policies_restore: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 7552 - no_policies_restore: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 7553 - no_policies_restore: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 7554 - no_policies_restore: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 7555 - no_policies_restore: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 7556 - no_policies_restore: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 7557 - no_policies_restore: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 7558 - no_policies_restore: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 7559 - no_policies_restore: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 7560 - no_policies_restore: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 7561 - no_policies_restore: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 7562 - no_policies_restore: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 7563 - no_policies_restore: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 7564 - no_policies_restore: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 7565 - no_policies_restore: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 7566 - no_policies_restore: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 7568 - no_policies_restore: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 7569 - no_policies_restore: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 7570 - no_policies_restore: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 7571 - no_policies_restore: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 7572 - no_policies_restore: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 7573 - no_policies_restore: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 7574 - no_policies_restore: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 7575 - no_policies_restore: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 7576 - no_policies_restore: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 7577 - no_policies_restore: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 7578 - no_policies_restore: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 7579 - no_policies_restore: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 7580 - no_policies_restore: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 7581 - no_policies_restore: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 7582 - no_policies_restore: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 7587 - no_policies_restore: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 7588 - no_policies_restore: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 7590 - no_policies_restore: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 7591 - no_policies_restore: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 7592 - no_policies_restore: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 7593 - no_policies_restore: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 7594 - no_policies_restore: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 7595 - no_policies_restore: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 7596 - no_policies_restore: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 7597 - no_policies_restore: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 7598 - no_policies_restore: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 7599 - no_policies_restore: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 7600 - no_policies_restore: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 7601 - no_policies_restore: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 7602 - no_policies_restore: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 7603 - no_policies_restore: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 7604 - no_policies_restore: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 7605 - no_policies_restore: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 7606 - no_policies_restore: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 7607 - no_policies_restore: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 7608 - no_policies_restore: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 7609 - no_policies_restore: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 7610 - no_policies_restore: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 7617 - no_policies_restore: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 7618 - no_policies_restore: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 7619 - no_policies_restore: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 7620 - no_policies_restore: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 7621 - no_policies_restore: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 7622 - no_policies_restore: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 7625 - no_policies_restore: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 7626 - no_policies_restore: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 7628 - no_policies_restore: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 7629 - no_policies_restore: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 7630 - no_policies_restore: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 7631 - no_policies_restore: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 7632 - no_policies_restore: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 7633 - no_policies_restore: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 7634 - no_policies_restore: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 7635 - no_policies_restore: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 7636 - no_policies_restore: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 7637 - no_policies_restore: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 7638 - no_policies_restore: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 7639 - no_policies_restore: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 7640 - no_policies_restore: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 7641 - no_policies_restore: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 7642 - no_policies_restore: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 7643 - no_policies_restore: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 7644 - no_policies_restore: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 7645 - no_policies_restore: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 7646 - no_policies_restore: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 7647 - no_policies_restore: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 7648 - no_policies_restore: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 7649 - no_policies_restore: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 7650 - no_policies_restore: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 7651 - no_policies_restore: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 7652 - no_policies_restore: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 7653 - no_policies_restore: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 7654 - no_policies_restore: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 7655 - no_policies_restore: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 7657 - no_policies_restore: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 7658 - no_policies_restore: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 7659 - no_policies_restore: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 7660 - no_policies_restore: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 7661 - no_policies_restore: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 7662 - no_policies_restore: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 7663 - no_policies_restore: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 7664 - no_policies_restore: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 7665 - no_policies_restore: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 7666 - no_policies_restore: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 7668 - no_policies_restore: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 7669 - no_policies_restore: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 7670 - no_policies_restore: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 7671 - no_policies_restore: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 7672 - no_policies_restore: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 7673 - no_policies_restore: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 7674 - no_policies_restore: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 7694 - no_policies_restore: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 7696 - no_policies_restore: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 7698 - no_policies_restore: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 7699 - no_policies_restore: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 7700 - no_policies_restore: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 7701 - no_policies_restore: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 7702 - no_policies_restore: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 7703 - no_policies_restore: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 7704 - no_policies_restore: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 7705 - no_policies_restore: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 7706 - no_policies_restore: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 7707 - no_policies_restore: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 7709 - no_policies_restore: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 7710 - no_policies_restore: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 7711 - no_policies_restore: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 7719 - no_policies_restore: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 7720 - no_policies_restore: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 7721 - no_policies_restore: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 7722 - no_policies_restore: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 7723 - no_policies_restore: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 7725 - no_policies_restore: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 7727 - no_policies_restore: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 7729 - no_policies_restore: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 7731 - no_policies_restore: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 7732 - no_policies_restore: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 7733 - no_policies_restore: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 7736 - no_policies_restore: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 7737 - no_policies_restore: should dump restrict`
+- 002_pg_dump.pl: `not ok 7738 - no_policies_restore: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 7740 - no_policies_restore: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 7741 - no_privs: pg_dump runs`
+- 002_pg_dump.pl: `not ok 7742 - no_privs: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 7747 - no_privs: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 7748 - no_privs: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 7749 - no_privs: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 7750 - no_privs: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 7751 - no_privs: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 7752 - no_privs: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 7753 - no_privs: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 7754 - no_privs: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 7755 - no_privs: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 7756 - no_privs: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 7757 - no_privs: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 7758 - no_privs: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 7759 - no_privs: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 7760 - no_privs: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 7761 - no_privs: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 7762 - no_privs: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 7763 - no_privs: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 7764 - no_privs: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 7765 - no_privs: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 7766 - no_privs: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 7767 - no_privs: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 7769 - no_privs: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 7770 - no_privs: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 7771 - no_privs: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 7772 - no_privs: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 7773 - no_privs: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 7774 - no_privs: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 7775 - no_privs: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 7776 - no_privs: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 7777 - no_privs: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 7778 - no_privs: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 7779 - no_privs: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 7780 - no_privs: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 7781 - no_privs: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 7782 - no_privs: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 7783 - no_privs: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 7784 - no_privs: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 7785 - no_privs: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 7786 - no_privs: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 7788 - no_privs: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 7789 - no_privs: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 7791 - no_privs: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 7792 - no_privs: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 7793 - no_privs: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 7794 - no_privs: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 7795 - no_privs: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 7796 - no_privs: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 7797 - no_privs: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 7798 - no_privs: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 7799 - no_privs: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 7800 - no_privs: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 7801 - no_privs: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 7802 - no_privs: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 7803 - no_privs: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 7804 - no_privs: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 7805 - no_privs: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 7808 - no_privs: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 7809 - no_privs: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 7810 - no_privs: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 7812 - no_privs: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 7813 - no_privs: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 7814 - no_privs: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 7815 - no_privs: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 7816 - no_privs: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 7817 - no_privs: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 7818 - no_privs: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 7819 - no_privs: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 7820 - no_privs: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 7821 - no_privs: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 7822 - no_privs: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 7823 - no_privs: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 7824 - no_privs: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 7825 - no_privs: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 7826 - no_privs: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 7827 - no_privs: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 7828 - no_privs: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 7829 - no_privs: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 7830 - no_privs: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 7832 - no_privs: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 7833 - no_privs: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 7834 - no_privs: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 7835 - no_privs: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 7836 - no_privs: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 7837 - no_privs: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 7838 - no_privs: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 7839 - no_privs: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 7840 - no_privs: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 7841 - no_privs: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 7842 - no_privs: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 7843 - no_privs: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 7844 - no_privs: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 7845 - no_privs: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 7846 - no_privs: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 7851 - no_privs: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 7852 - no_privs: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 7854 - no_privs: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 7855 - no_privs: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 7856 - no_privs: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 7857 - no_privs: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 7858 - no_privs: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 7859 - no_privs: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 7860 - no_privs: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 7861 - no_privs: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 7862 - no_privs: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 7863 - no_privs: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 7864 - no_privs: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 7865 - no_privs: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 7866 - no_privs: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 7867 - no_privs: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 7868 - no_privs: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 7869 - no_privs: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 7870 - no_privs: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 7871 - no_privs: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 7872 - no_privs: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 7873 - no_privs: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 7874 - no_privs: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 7875 - no_privs: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 7876 - no_privs: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 7877 - no_privs: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 7878 - no_privs: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 7879 - no_privs: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 7880 - no_privs: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 7881 - no_privs: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 7882 - no_privs: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 7883 - no_privs: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 7884 - no_privs: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 7885 - no_privs: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 7886 - no_privs: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 7889 - no_privs: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 7890 - no_privs: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 7892 - no_privs: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 7893 - no_privs: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 7894 - no_privs: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 7895 - no_privs: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 7896 - no_privs: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 7897 - no_privs: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 7898 - no_privs: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 7899 - no_privs: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 7900 - no_privs: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 7901 - no_privs: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 7902 - no_privs: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 7903 - no_privs: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 7904 - no_privs: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 7905 - no_privs: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 7906 - no_privs: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 7907 - no_privs: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 7908 - no_privs: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 7909 - no_privs: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 7910 - no_privs: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 7911 - no_privs: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 7912 - no_privs: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 7913 - no_privs: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 7914 - no_privs: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 7915 - no_privs: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 7916 - no_privs: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 7917 - no_privs: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 7918 - no_privs: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 7919 - no_privs: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 7921 - no_privs: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 7922 - no_privs: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 7923 - no_privs: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 7924 - no_privs: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 7925 - no_privs: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 7926 - no_privs: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 7927 - no_privs: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 7928 - no_privs: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 7929 - no_privs: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 7930 - no_privs: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 7932 - no_privs: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 7933 - no_privs: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 7934 - no_privs: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 7935 - no_privs: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 7936 - no_privs: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 7937 - no_privs: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 7938 - no_privs: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 7958 - no_privs: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 7983 - no_privs: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 7984 - no_privs: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 7985 - no_privs: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 7986 - no_privs: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 7987 - no_privs: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 7989 - no_privs: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 7997 - no_privs: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 8000 - no_privs: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 8001 - no_privs: should dump restrict`
+- 002_pg_dump.pl: `not ok 8002 - no_privs: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 8004 - no_privs: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 8005 - no_schema: pg_dump runs`
+- 002_pg_dump.pl: `not ok 8017 - no_schema: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 8072 - no_schema: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 8094 - no_schema: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 8095 - no_schema: should dump COPY fk_reference_test_table second`
+- 002_pg_dump.pl: `not ok 8096 - no_schema: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 8097 - no_schema: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 8098 - no_schema: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 8099 - no_schema: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 8100 - no_schema: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 8101 - no_schema: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 8102 - no_schema: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 8103 - no_schema: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 8224 - no_schema: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 8247 - no_schema: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 8248 - no_schema: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 8249 - no_schema: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 8264 - no_schema: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 8265 - no_schema: should dump restrict`
+- 002_pg_dump.pl: `not ok 8266 - no_schema: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 8268 - no_schema: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 8269 - no_statistics: pg_dump runs`
+- 002_pg_dump.pl: `not ok 8270 - no_statistics: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 8271 - no_statistics: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 8272 - no_statistics: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 8273 - no_statistics: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 8274 - no_statistics: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 8275 - no_statistics: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 8276 - no_statistics: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 8277 - no_statistics: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 8278 - no_statistics: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 8279 - no_statistics: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 8280 - no_statistics: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 8281 - no_statistics: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 8282 - no_statistics: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 8283 - no_statistics: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 8284 - no_statistics: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 8285 - no_statistics: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 8286 - no_statistics: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 8287 - no_statistics: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 8288 - no_statistics: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 8289 - no_statistics: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 8290 - no_statistics: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 8291 - no_statistics: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 8292 - no_statistics: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 8293 - no_statistics: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 8294 - no_statistics: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 8295 - no_statistics: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 8297 - no_statistics: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 8298 - no_statistics: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 8299 - no_statistics: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 8300 - no_statistics: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 8301 - no_statistics: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 8302 - no_statistics: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 8303 - no_statistics: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 8304 - no_statistics: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 8305 - no_statistics: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 8306 - no_statistics: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 8307 - no_statistics: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 8308 - no_statistics: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 8309 - no_statistics: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 8310 - no_statistics: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 8311 - no_statistics: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 8312 - no_statistics: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 8313 - no_statistics: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 8314 - no_statistics: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 8316 - no_statistics: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 8317 - no_statistics: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 8319 - no_statistics: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 8320 - no_statistics: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 8321 - no_statistics: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 8322 - no_statistics: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 8323 - no_statistics: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 8324 - no_statistics: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 8325 - no_statistics: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 8326 - no_statistics: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 8327 - no_statistics: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 8328 - no_statistics: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 8329 - no_statistics: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 8330 - no_statistics: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 8331 - no_statistics: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 8332 - no_statistics: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 8333 - no_statistics: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 8336 - no_statistics: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 8337 - no_statistics: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 8338 - no_statistics: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 8340 - no_statistics: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 8341 - no_statistics: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 8342 - no_statistics: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 8343 - no_statistics: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 8344 - no_statistics: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 8345 - no_statistics: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 8346 - no_statistics: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 8347 - no_statistics: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 8348 - no_statistics: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 8349 - no_statistics: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 8350 - no_statistics: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 8351 - no_statistics: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 8352 - no_statistics: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 8353 - no_statistics: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 8354 - no_statistics: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 8355 - no_statistics: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 8356 - no_statistics: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 8357 - no_statistics: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 8358 - no_statistics: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 8360 - no_statistics: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 8361 - no_statistics: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 8362 - no_statistics: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 8363 - no_statistics: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 8364 - no_statistics: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 8365 - no_statistics: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 8366 - no_statistics: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 8367 - no_statistics: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 8368 - no_statistics: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 8369 - no_statistics: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 8370 - no_statistics: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 8371 - no_statistics: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 8372 - no_statistics: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 8373 - no_statistics: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 8374 - no_statistics: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 8379 - no_statistics: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 8380 - no_statistics: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 8382 - no_statistics: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 8383 - no_statistics: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 8384 - no_statistics: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 8385 - no_statistics: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 8386 - no_statistics: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 8387 - no_statistics: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 8388 - no_statistics: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 8389 - no_statistics: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 8390 - no_statistics: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 8391 - no_statistics: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 8392 - no_statistics: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 8393 - no_statistics: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 8394 - no_statistics: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 8395 - no_statistics: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 8396 - no_statistics: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 8397 - no_statistics: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 8398 - no_statistics: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 8399 - no_statistics: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 8400 - no_statistics: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 8401 - no_statistics: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 8402 - no_statistics: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 8403 - no_statistics: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 8404 - no_statistics: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 8405 - no_statistics: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 8406 - no_statistics: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 8407 - no_statistics: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 8408 - no_statistics: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 8409 - no_statistics: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 8410 - no_statistics: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 8411 - no_statistics: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 8412 - no_statistics: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 8413 - no_statistics: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 8414 - no_statistics: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 8417 - no_statistics: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 8418 - no_statistics: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 8420 - no_statistics: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 8421 - no_statistics: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 8422 - no_statistics: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 8423 - no_statistics: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 8424 - no_statistics: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 8425 - no_statistics: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 8426 - no_statistics: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 8427 - no_statistics: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 8428 - no_statistics: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 8429 - no_statistics: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 8430 - no_statistics: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 8431 - no_statistics: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 8432 - no_statistics: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 8433 - no_statistics: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 8434 - no_statistics: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 8435 - no_statistics: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 8436 - no_statistics: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 8437 - no_statistics: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 8438 - no_statistics: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 8439 - no_statistics: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 8440 - no_statistics: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 8441 - no_statistics: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 8442 - no_statistics: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 8443 - no_statistics: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 8444 - no_statistics: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 8445 - no_statistics: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 8446 - no_statistics: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 8447 - no_statistics: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 8449 - no_statistics: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 8450 - no_statistics: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 8451 - no_statistics: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 8452 - no_statistics: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 8453 - no_statistics: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 8454 - no_statistics: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 8455 - no_statistics: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 8456 - no_statistics: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 8457 - no_statistics: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 8458 - no_statistics: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 8460 - no_statistics: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 8461 - no_statistics: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 8462 - no_statistics: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 8463 - no_statistics: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 8464 - no_statistics: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 8465 - no_statistics: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 8466 - no_statistics: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 8486 - no_statistics: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 8488 - no_statistics: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 8490 - no_statistics: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 8491 - no_statistics: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 8492 - no_statistics: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 8493 - no_statistics: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 8494 - no_statistics: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 8495 - no_statistics: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 8496 - no_statistics: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 8497 - no_statistics: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 8498 - no_statistics: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 8499 - no_statistics: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 8501 - no_statistics: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 8502 - no_statistics: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 8503 - no_statistics: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 8511 - no_statistics: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 8512 - no_statistics: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 8513 - no_statistics: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 8514 - no_statistics: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 8515 - no_statistics: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 8517 - no_statistics: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 8519 - no_statistics: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 8521 - no_statistics: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 8523 - no_statistics: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 8524 - no_statistics: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 8525 - no_statistics: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 8529 - no_statistics: should dump restrict`
+- 002_pg_dump.pl: `not ok 8532 - no_statistics: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 8533 - no_subscriptions: pg_dump runs`
+- 002_pg_dump.pl: `not ok 8534 - no_subscriptions: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 8535 - no_subscriptions: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 8536 - no_subscriptions: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 8537 - no_subscriptions: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 8538 - no_subscriptions: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 8539 - no_subscriptions: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 8540 - no_subscriptions: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 8541 - no_subscriptions: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 8542 - no_subscriptions: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 8543 - no_subscriptions: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 8544 - no_subscriptions: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 8545 - no_subscriptions: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 8546 - no_subscriptions: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 8547 - no_subscriptions: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 8548 - no_subscriptions: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 8549 - no_subscriptions: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 8550 - no_subscriptions: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 8551 - no_subscriptions: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 8552 - no_subscriptions: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 8553 - no_subscriptions: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 8554 - no_subscriptions: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 8555 - no_subscriptions: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 8556 - no_subscriptions: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 8557 - no_subscriptions: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 8558 - no_subscriptions: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 8559 - no_subscriptions: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 8561 - no_subscriptions: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 8562 - no_subscriptions: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 8563 - no_subscriptions: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 8564 - no_subscriptions: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 8565 - no_subscriptions: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 8566 - no_subscriptions: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 8567 - no_subscriptions: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 8568 - no_subscriptions: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 8569 - no_subscriptions: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 8570 - no_subscriptions: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 8571 - no_subscriptions: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 8572 - no_subscriptions: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 8573 - no_subscriptions: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 8574 - no_subscriptions: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 8575 - no_subscriptions: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 8576 - no_subscriptions: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 8577 - no_subscriptions: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 8578 - no_subscriptions: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 8580 - no_subscriptions: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 8581 - no_subscriptions: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 8583 - no_subscriptions: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 8584 - no_subscriptions: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 8585 - no_subscriptions: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 8586 - no_subscriptions: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 8587 - no_subscriptions: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 8588 - no_subscriptions: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 8589 - no_subscriptions: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 8590 - no_subscriptions: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 8591 - no_subscriptions: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 8592 - no_subscriptions: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 8593 - no_subscriptions: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 8594 - no_subscriptions: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 8595 - no_subscriptions: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 8596 - no_subscriptions: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 8597 - no_subscriptions: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 8600 - no_subscriptions: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 8601 - no_subscriptions: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 8602 - no_subscriptions: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 8605 - no_subscriptions: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 8606 - no_subscriptions: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 8607 - no_subscriptions: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 8608 - no_subscriptions: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 8609 - no_subscriptions: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 8610 - no_subscriptions: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 8611 - no_subscriptions: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 8612 - no_subscriptions: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 8613 - no_subscriptions: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 8614 - no_subscriptions: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 8615 - no_subscriptions: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 8616 - no_subscriptions: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 8617 - no_subscriptions: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 8618 - no_subscriptions: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 8619 - no_subscriptions: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 8620 - no_subscriptions: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 8621 - no_subscriptions: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 8622 - no_subscriptions: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 8624 - no_subscriptions: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 8625 - no_subscriptions: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 8626 - no_subscriptions: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 8627 - no_subscriptions: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 8628 - no_subscriptions: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 8629 - no_subscriptions: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 8630 - no_subscriptions: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 8631 - no_subscriptions: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 8632 - no_subscriptions: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 8633 - no_subscriptions: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 8634 - no_subscriptions: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 8635 - no_subscriptions: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 8636 - no_subscriptions: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 8637 - no_subscriptions: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 8638 - no_subscriptions: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 8643 - no_subscriptions: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 8644 - no_subscriptions: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 8646 - no_subscriptions: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 8647 - no_subscriptions: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 8648 - no_subscriptions: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 8649 - no_subscriptions: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 8650 - no_subscriptions: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 8651 - no_subscriptions: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 8652 - no_subscriptions: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 8653 - no_subscriptions: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 8654 - no_subscriptions: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 8655 - no_subscriptions: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 8656 - no_subscriptions: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 8657 - no_subscriptions: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 8658 - no_subscriptions: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 8659 - no_subscriptions: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 8660 - no_subscriptions: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 8661 - no_subscriptions: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 8662 - no_subscriptions: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 8663 - no_subscriptions: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 8664 - no_subscriptions: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 8665 - no_subscriptions: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 8666 - no_subscriptions: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 8667 - no_subscriptions: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 8668 - no_subscriptions: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 8669 - no_subscriptions: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 8670 - no_subscriptions: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 8671 - no_subscriptions: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 8672 - no_subscriptions: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 8673 - no_subscriptions: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 8674 - no_subscriptions: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 8675 - no_subscriptions: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 8676 - no_subscriptions: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 8677 - no_subscriptions: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 8678 - no_subscriptions: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 8681 - no_subscriptions: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 8682 - no_subscriptions: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 8684 - no_subscriptions: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 8685 - no_subscriptions: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 8686 - no_subscriptions: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 8687 - no_subscriptions: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 8688 - no_subscriptions: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 8692 - no_subscriptions: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 8693 - no_subscriptions: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 8694 - no_subscriptions: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 8695 - no_subscriptions: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 8696 - no_subscriptions: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 8697 - no_subscriptions: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 8698 - no_subscriptions: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 8699 - no_subscriptions: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 8700 - no_subscriptions: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 8701 - no_subscriptions: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 8702 - no_subscriptions: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 8703 - no_subscriptions: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 8704 - no_subscriptions: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 8705 - no_subscriptions: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 8706 - no_subscriptions: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 8707 - no_subscriptions: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 8708 - no_subscriptions: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 8709 - no_subscriptions: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 8710 - no_subscriptions: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 8711 - no_subscriptions: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 8713 - no_subscriptions: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 8714 - no_subscriptions: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 8715 - no_subscriptions: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 8716 - no_subscriptions: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 8717 - no_subscriptions: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 8718 - no_subscriptions: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 8719 - no_subscriptions: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 8720 - no_subscriptions: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 8721 - no_subscriptions: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 8722 - no_subscriptions: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 8724 - no_subscriptions: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 8725 - no_subscriptions: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 8726 - no_subscriptions: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 8727 - no_subscriptions: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 8728 - no_subscriptions: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 8729 - no_subscriptions: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 8730 - no_subscriptions: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 8750 - no_subscriptions: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 8752 - no_subscriptions: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 8754 - no_subscriptions: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 8755 - no_subscriptions: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 8756 - no_subscriptions: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 8757 - no_subscriptions: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 8758 - no_subscriptions: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 8759 - no_subscriptions: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 8760 - no_subscriptions: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 8761 - no_subscriptions: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 8762 - no_subscriptions: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 8763 - no_subscriptions: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 8765 - no_subscriptions: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 8766 - no_subscriptions: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 8767 - no_subscriptions: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 8775 - no_subscriptions: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 8776 - no_subscriptions: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 8777 - no_subscriptions: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 8778 - no_subscriptions: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 8779 - no_subscriptions: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 8781 - no_subscriptions: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 8783 - no_subscriptions: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 8785 - no_subscriptions: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 8787 - no_subscriptions: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 8788 - no_subscriptions: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 8789 - no_subscriptions: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 8792 - no_subscriptions: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 8793 - no_subscriptions: should dump restrict`
+- 002_pg_dump.pl: `not ok 8794 - no_subscriptions: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 8796 - no_subscriptions: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 8797 - no_subscriptions_restore: pg_dump runs`
+- 002_pg_dump.pl: `not ok 8798 - no_subscriptions_restore: pg_restore runs`
+- 002_pg_dump.pl: `not ok 8799 - no_subscriptions_restore: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 8800 - no_subscriptions_restore: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 8801 - no_subscriptions_restore: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 8802 - no_subscriptions_restore: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 8803 - no_subscriptions_restore: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 8804 - no_subscriptions_restore: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 8805 - no_subscriptions_restore: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 8806 - no_subscriptions_restore: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 8807 - no_subscriptions_restore: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 8808 - no_subscriptions_restore: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 8809 - no_subscriptions_restore: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 8810 - no_subscriptions_restore: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 8811 - no_subscriptions_restore: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 8812 - no_subscriptions_restore: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 8813 - no_subscriptions_restore: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 8814 - no_subscriptions_restore: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 8815 - no_subscriptions_restore: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 8816 - no_subscriptions_restore: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 8817 - no_subscriptions_restore: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 8818 - no_subscriptions_restore: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 8819 - no_subscriptions_restore: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 8820 - no_subscriptions_restore: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 8821 - no_subscriptions_restore: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 8822 - no_subscriptions_restore: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 8823 - no_subscriptions_restore: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 8824 - no_subscriptions_restore: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 8826 - no_subscriptions_restore: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 8827 - no_subscriptions_restore: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 8828 - no_subscriptions_restore: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 8829 - no_subscriptions_restore: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 8830 - no_subscriptions_restore: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 8831 - no_subscriptions_restore: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 8832 - no_subscriptions_restore: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 8833 - no_subscriptions_restore: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 8834 - no_subscriptions_restore: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 8835 - no_subscriptions_restore: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 8836 - no_subscriptions_restore: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 8837 - no_subscriptions_restore: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 8838 - no_subscriptions_restore: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 8839 - no_subscriptions_restore: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 8840 - no_subscriptions_restore: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 8841 - no_subscriptions_restore: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 8842 - no_subscriptions_restore: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 8843 - no_subscriptions_restore: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 8845 - no_subscriptions_restore: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 8846 - no_subscriptions_restore: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 8848 - no_subscriptions_restore: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 8849 - no_subscriptions_restore: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 8850 - no_subscriptions_restore: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 8851 - no_subscriptions_restore: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 8852 - no_subscriptions_restore: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 8853 - no_subscriptions_restore: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 8854 - no_subscriptions_restore: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 8855 - no_subscriptions_restore: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 8856 - no_subscriptions_restore: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 8857 - no_subscriptions_restore: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 8858 - no_subscriptions_restore: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 8859 - no_subscriptions_restore: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 8860 - no_subscriptions_restore: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 8861 - no_subscriptions_restore: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 8862 - no_subscriptions_restore: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 8865 - no_subscriptions_restore: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 8866 - no_subscriptions_restore: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 8867 - no_subscriptions_restore: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 8870 - no_subscriptions_restore: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 8871 - no_subscriptions_restore: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 8872 - no_subscriptions_restore: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 8873 - no_subscriptions_restore: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 8874 - no_subscriptions_restore: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 8875 - no_subscriptions_restore: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 8876 - no_subscriptions_restore: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 8877 - no_subscriptions_restore: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 8878 - no_subscriptions_restore: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 8879 - no_subscriptions_restore: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 8880 - no_subscriptions_restore: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 8881 - no_subscriptions_restore: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 8882 - no_subscriptions_restore: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 8883 - no_subscriptions_restore: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 8884 - no_subscriptions_restore: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 8885 - no_subscriptions_restore: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 8886 - no_subscriptions_restore: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 8887 - no_subscriptions_restore: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 8889 - no_subscriptions_restore: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 8890 - no_subscriptions_restore: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 8891 - no_subscriptions_restore: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 8892 - no_subscriptions_restore: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 8893 - no_subscriptions_restore: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 8894 - no_subscriptions_restore: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 8895 - no_subscriptions_restore: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 8896 - no_subscriptions_restore: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 8897 - no_subscriptions_restore: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 8898 - no_subscriptions_restore: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 8899 - no_subscriptions_restore: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 8900 - no_subscriptions_restore: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 8901 - no_subscriptions_restore: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 8902 - no_subscriptions_restore: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 8903 - no_subscriptions_restore: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 8908 - no_subscriptions_restore: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 8909 - no_subscriptions_restore: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 8911 - no_subscriptions_restore: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 8912 - no_subscriptions_restore: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 8913 - no_subscriptions_restore: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 8914 - no_subscriptions_restore: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 8915 - no_subscriptions_restore: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 8916 - no_subscriptions_restore: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 8917 - no_subscriptions_restore: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 8918 - no_subscriptions_restore: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 8919 - no_subscriptions_restore: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 8920 - no_subscriptions_restore: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 8921 - no_subscriptions_restore: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 8922 - no_subscriptions_restore: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 8923 - no_subscriptions_restore: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 8924 - no_subscriptions_restore: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 8925 - no_subscriptions_restore: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 8926 - no_subscriptions_restore: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 8927 - no_subscriptions_restore: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 8928 - no_subscriptions_restore: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 8929 - no_subscriptions_restore: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 8930 - no_subscriptions_restore: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 8931 - no_subscriptions_restore: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 8932 - no_subscriptions_restore: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 8933 - no_subscriptions_restore: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 8934 - no_subscriptions_restore: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 8935 - no_subscriptions_restore: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 8936 - no_subscriptions_restore: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 8937 - no_subscriptions_restore: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 8938 - no_subscriptions_restore: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 8939 - no_subscriptions_restore: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 8940 - no_subscriptions_restore: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 8941 - no_subscriptions_restore: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 8942 - no_subscriptions_restore: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 8943 - no_subscriptions_restore: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 8946 - no_subscriptions_restore: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 8947 - no_subscriptions_restore: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 8949 - no_subscriptions_restore: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 8950 - no_subscriptions_restore: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 8951 - no_subscriptions_restore: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 8952 - no_subscriptions_restore: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 8953 - no_subscriptions_restore: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 8957 - no_subscriptions_restore: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 8958 - no_subscriptions_restore: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 8959 - no_subscriptions_restore: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 8960 - no_subscriptions_restore: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 8961 - no_subscriptions_restore: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 8962 - no_subscriptions_restore: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 8963 - no_subscriptions_restore: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 8964 - no_subscriptions_restore: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 8965 - no_subscriptions_restore: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 8966 - no_subscriptions_restore: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 8967 - no_subscriptions_restore: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 8968 - no_subscriptions_restore: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 8969 - no_subscriptions_restore: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 8970 - no_subscriptions_restore: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 8971 - no_subscriptions_restore: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 8972 - no_subscriptions_restore: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 8973 - no_subscriptions_restore: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 8974 - no_subscriptions_restore: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 8975 - no_subscriptions_restore: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 8976 - no_subscriptions_restore: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 8978 - no_subscriptions_restore: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 8979 - no_subscriptions_restore: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 8980 - no_subscriptions_restore: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 8981 - no_subscriptions_restore: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 8982 - no_subscriptions_restore: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 8983 - no_subscriptions_restore: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 8984 - no_subscriptions_restore: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 8985 - no_subscriptions_restore: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 8986 - no_subscriptions_restore: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 8987 - no_subscriptions_restore: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 8989 - no_subscriptions_restore: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 8990 - no_subscriptions_restore: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 8991 - no_subscriptions_restore: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 8992 - no_subscriptions_restore: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 8993 - no_subscriptions_restore: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 8994 - no_subscriptions_restore: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 8995 - no_subscriptions_restore: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 9015 - no_subscriptions_restore: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 9017 - no_subscriptions_restore: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 9019 - no_subscriptions_restore: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 9020 - no_subscriptions_restore: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 9021 - no_subscriptions_restore: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 9022 - no_subscriptions_restore: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 9023 - no_subscriptions_restore: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 9024 - no_subscriptions_restore: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 9025 - no_subscriptions_restore: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 9026 - no_subscriptions_restore: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 9027 - no_subscriptions_restore: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 9028 - no_subscriptions_restore: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 9030 - no_subscriptions_restore: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 9031 - no_subscriptions_restore: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 9032 - no_subscriptions_restore: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 9040 - no_subscriptions_restore: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 9041 - no_subscriptions_restore: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 9042 - no_subscriptions_restore: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 9043 - no_subscriptions_restore: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 9044 - no_subscriptions_restore: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 9046 - no_subscriptions_restore: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 9048 - no_subscriptions_restore: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 9050 - no_subscriptions_restore: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 9052 - no_subscriptions_restore: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 9053 - no_subscriptions_restore: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 9054 - no_subscriptions_restore: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 9057 - no_subscriptions_restore: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 9058 - no_subscriptions_restore: should dump restrict`
+- 002_pg_dump.pl: `not ok 9059 - no_subscriptions_restore: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 9061 - no_subscriptions_restore: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 9062 - no_table_access_method: pg_dump runs`
+- 002_pg_dump.pl: `not ok 9063 - no_table_access_method: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 9064 - no_table_access_method: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 9065 - no_table_access_method: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 9066 - no_table_access_method: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 9067 - no_table_access_method: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 9068 - no_table_access_method: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 9069 - no_table_access_method: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 9070 - no_table_access_method: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 9071 - no_table_access_method: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 9072 - no_table_access_method: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 9073 - no_table_access_method: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 9074 - no_table_access_method: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 9075 - no_table_access_method: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 9076 - no_table_access_method: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 9077 - no_table_access_method: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 9078 - no_table_access_method: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 9079 - no_table_access_method: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 9080 - no_table_access_method: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 9081 - no_table_access_method: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 9082 - no_table_access_method: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 9083 - no_table_access_method: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 9084 - no_table_access_method: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 9085 - no_table_access_method: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 9086 - no_table_access_method: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 9087 - no_table_access_method: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 9088 - no_table_access_method: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 9090 - no_table_access_method: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 9091 - no_table_access_method: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 9092 - no_table_access_method: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 9093 - no_table_access_method: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 9094 - no_table_access_method: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 9095 - no_table_access_method: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 9096 - no_table_access_method: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 9097 - no_table_access_method: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 9098 - no_table_access_method: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 9099 - no_table_access_method: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 9100 - no_table_access_method: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 9101 - no_table_access_method: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 9102 - no_table_access_method: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 9103 - no_table_access_method: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 9104 - no_table_access_method: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 9105 - no_table_access_method: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 9106 - no_table_access_method: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 9107 - no_table_access_method: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 9109 - no_table_access_method: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 9110 - no_table_access_method: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 9112 - no_table_access_method: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 9113 - no_table_access_method: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 9114 - no_table_access_method: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 9115 - no_table_access_method: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 9116 - no_table_access_method: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 9117 - no_table_access_method: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 9118 - no_table_access_method: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 9119 - no_table_access_method: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 9120 - no_table_access_method: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 9121 - no_table_access_method: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 9122 - no_table_access_method: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 9123 - no_table_access_method: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 9124 - no_table_access_method: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 9125 - no_table_access_method: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 9126 - no_table_access_method: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 9129 - no_table_access_method: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 9130 - no_table_access_method: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 9131 - no_table_access_method: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 9133 - no_table_access_method: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 9134 - no_table_access_method: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 9135 - no_table_access_method: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 9136 - no_table_access_method: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 9137 - no_table_access_method: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 9138 - no_table_access_method: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 9139 - no_table_access_method: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 9140 - no_table_access_method: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 9141 - no_table_access_method: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 9142 - no_table_access_method: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 9143 - no_table_access_method: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 9144 - no_table_access_method: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 9145 - no_table_access_method: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 9146 - no_table_access_method: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 9147 - no_table_access_method: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 9148 - no_table_access_method: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 9149 - no_table_access_method: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 9150 - no_table_access_method: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 9151 - no_table_access_method: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 9153 - no_table_access_method: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 9154 - no_table_access_method: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 9155 - no_table_access_method: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 9156 - no_table_access_method: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 9157 - no_table_access_method: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 9158 - no_table_access_method: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 9159 - no_table_access_method: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 9160 - no_table_access_method: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 9161 - no_table_access_method: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 9162 - no_table_access_method: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 9163 - no_table_access_method: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 9164 - no_table_access_method: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 9165 - no_table_access_method: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 9166 - no_table_access_method: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 9167 - no_table_access_method: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 9172 - no_table_access_method: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 9173 - no_table_access_method: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 9175 - no_table_access_method: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 9176 - no_table_access_method: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 9177 - no_table_access_method: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 9178 - no_table_access_method: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 9179 - no_table_access_method: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 9180 - no_table_access_method: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 9181 - no_table_access_method: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 9182 - no_table_access_method: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 9183 - no_table_access_method: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 9184 - no_table_access_method: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 9185 - no_table_access_method: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 9186 - no_table_access_method: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 9187 - no_table_access_method: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 9188 - no_table_access_method: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 9189 - no_table_access_method: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 9190 - no_table_access_method: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 9192 - no_table_access_method: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 9193 - no_table_access_method: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 9194 - no_table_access_method: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 9195 - no_table_access_method: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 9196 - no_table_access_method: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 9197 - no_table_access_method: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 9198 - no_table_access_method: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 9199 - no_table_access_method: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 9200 - no_table_access_method: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 9201 - no_table_access_method: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 9202 - no_table_access_method: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 9203 - no_table_access_method: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 9204 - no_table_access_method: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 9205 - no_table_access_method: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 9206 - no_table_access_method: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 9207 - no_table_access_method: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 9210 - no_table_access_method: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 9211 - no_table_access_method: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 9213 - no_table_access_method: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 9214 - no_table_access_method: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 9215 - no_table_access_method: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 9216 - no_table_access_method: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 9217 - no_table_access_method: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 9218 - no_table_access_method: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 9219 - no_table_access_method: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 9220 - no_table_access_method: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 9221 - no_table_access_method: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 9222 - no_table_access_method: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 9225 - no_table_access_method: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 9226 - no_table_access_method: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 9227 - no_table_access_method: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 9228 - no_table_access_method: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 9229 - no_table_access_method: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 9230 - no_table_access_method: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 9231 - no_table_access_method: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 9232 - no_table_access_method: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 9233 - no_table_access_method: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 9234 - no_table_access_method: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 9235 - no_table_access_method: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 9236 - no_table_access_method: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 9237 - no_table_access_method: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 9238 - no_table_access_method: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 9239 - no_table_access_method: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 9240 - no_table_access_method: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 9242 - no_table_access_method: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 9243 - no_table_access_method: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 9244 - no_table_access_method: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 9245 - no_table_access_method: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 9246 - no_table_access_method: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 9247 - no_table_access_method: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 9248 - no_table_access_method: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 9249 - no_table_access_method: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 9250 - no_table_access_method: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 9251 - no_table_access_method: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 9253 - no_table_access_method: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 9254 - no_table_access_method: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 9255 - no_table_access_method: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 9256 - no_table_access_method: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 9257 - no_table_access_method: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 9258 - no_table_access_method: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 9259 - no_table_access_method: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 9279 - no_table_access_method: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 9281 - no_table_access_method: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 9283 - no_table_access_method: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 9284 - no_table_access_method: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 9285 - no_table_access_method: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 9286 - no_table_access_method: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 9287 - no_table_access_method: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 9288 - no_table_access_method: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 9289 - no_table_access_method: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 9290 - no_table_access_method: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 9291 - no_table_access_method: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 9292 - no_table_access_method: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 9294 - no_table_access_method: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 9295 - no_table_access_method: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 9296 - no_table_access_method: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 9304 - no_table_access_method: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 9305 - no_table_access_method: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 9306 - no_table_access_method: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 9307 - no_table_access_method: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 9308 - no_table_access_method: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 9310 - no_table_access_method: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 9312 - no_table_access_method: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 9314 - no_table_access_method: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 9316 - no_table_access_method: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 9317 - no_table_access_method: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 9318 - no_table_access_method: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 9321 - no_table_access_method: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 9322 - no_table_access_method: should dump restrict`
+- 002_pg_dump.pl: `not ok 9323 - no_table_access_method: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 9325 - no_table_access_method: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 9326 - no_toast_compression: pg_dump runs`
+- 002_pg_dump.pl: `not ok 9327 - no_toast_compression: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 9328 - no_toast_compression: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 9329 - no_toast_compression: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 9330 - no_toast_compression: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 9331 - no_toast_compression: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 9332 - no_toast_compression: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 9333 - no_toast_compression: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 9334 - no_toast_compression: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 9335 - no_toast_compression: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 9336 - no_toast_compression: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 9337 - no_toast_compression: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 9338 - no_toast_compression: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 9339 - no_toast_compression: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 9340 - no_toast_compression: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 9341 - no_toast_compression: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 9342 - no_toast_compression: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 9343 - no_toast_compression: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 9344 - no_toast_compression: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 9345 - no_toast_compression: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 9346 - no_toast_compression: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 9347 - no_toast_compression: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 9348 - no_toast_compression: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 9349 - no_toast_compression: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 9350 - no_toast_compression: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 9351 - no_toast_compression: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 9352 - no_toast_compression: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 9354 - no_toast_compression: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 9355 - no_toast_compression: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 9356 - no_toast_compression: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 9357 - no_toast_compression: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 9358 - no_toast_compression: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 9359 - no_toast_compression: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 9360 - no_toast_compression: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 9361 - no_toast_compression: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 9362 - no_toast_compression: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 9363 - no_toast_compression: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 9364 - no_toast_compression: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 9365 - no_toast_compression: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 9366 - no_toast_compression: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 9367 - no_toast_compression: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 9368 - no_toast_compression: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 9369 - no_toast_compression: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 9370 - no_toast_compression: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 9371 - no_toast_compression: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 9373 - no_toast_compression: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 9374 - no_toast_compression: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 9376 - no_toast_compression: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 9377 - no_toast_compression: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 9378 - no_toast_compression: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 9379 - no_toast_compression: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 9380 - no_toast_compression: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 9381 - no_toast_compression: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 9382 - no_toast_compression: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 9383 - no_toast_compression: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 9384 - no_toast_compression: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 9385 - no_toast_compression: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 9386 - no_toast_compression: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 9387 - no_toast_compression: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 9388 - no_toast_compression: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 9389 - no_toast_compression: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 9390 - no_toast_compression: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 9393 - no_toast_compression: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 9394 - no_toast_compression: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 9395 - no_toast_compression: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 9397 - no_toast_compression: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 9398 - no_toast_compression: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 9399 - no_toast_compression: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 9400 - no_toast_compression: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 9401 - no_toast_compression: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 9402 - no_toast_compression: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 9403 - no_toast_compression: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 9404 - no_toast_compression: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 9405 - no_toast_compression: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 9406 - no_toast_compression: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 9407 - no_toast_compression: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 9408 - no_toast_compression: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 9409 - no_toast_compression: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 9410 - no_toast_compression: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 9411 - no_toast_compression: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 9412 - no_toast_compression: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 9413 - no_toast_compression: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 9414 - no_toast_compression: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 9415 - no_toast_compression: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 9417 - no_toast_compression: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 9418 - no_toast_compression: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 9419 - no_toast_compression: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 9420 - no_toast_compression: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 9421 - no_toast_compression: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 9422 - no_toast_compression: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 9423 - no_toast_compression: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 9424 - no_toast_compression: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 9425 - no_toast_compression: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 9426 - no_toast_compression: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 9427 - no_toast_compression: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 9428 - no_toast_compression: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 9429 - no_toast_compression: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 9430 - no_toast_compression: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 9431 - no_toast_compression: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 9436 - no_toast_compression: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 9437 - no_toast_compression: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 9439 - no_toast_compression: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 9440 - no_toast_compression: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 9441 - no_toast_compression: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 9442 - no_toast_compression: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 9443 - no_toast_compression: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 9444 - no_toast_compression: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 9445 - no_toast_compression: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 9446 - no_toast_compression: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 9447 - no_toast_compression: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 9448 - no_toast_compression: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 9449 - no_toast_compression: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 9450 - no_toast_compression: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 9452 - no_toast_compression: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 9453 - no_toast_compression: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 9454 - no_toast_compression: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 9455 - no_toast_compression: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 9456 - no_toast_compression: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 9457 - no_toast_compression: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 9458 - no_toast_compression: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 9459 - no_toast_compression: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 9460 - no_toast_compression: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 9461 - no_toast_compression: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 9462 - no_toast_compression: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 9463 - no_toast_compression: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 9464 - no_toast_compression: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 9465 - no_toast_compression: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 9466 - no_toast_compression: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 9467 - no_toast_compression: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 9468 - no_toast_compression: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 9469 - no_toast_compression: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 9470 - no_toast_compression: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 9471 - no_toast_compression: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 9474 - no_toast_compression: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 9475 - no_toast_compression: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 9477 - no_toast_compression: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 9478 - no_toast_compression: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 9479 - no_toast_compression: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 9480 - no_toast_compression: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 9481 - no_toast_compression: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 9482 - no_toast_compression: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 9483 - no_toast_compression: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 9484 - no_toast_compression: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 9485 - no_toast_compression: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 9486 - no_toast_compression: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 9487 - no_toast_compression: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 9488 - no_toast_compression: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 9489 - no_toast_compression: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 9491 - no_toast_compression: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 9492 - no_toast_compression: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 9493 - no_toast_compression: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 9494 - no_toast_compression: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 9495 - no_toast_compression: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 9496 - no_toast_compression: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 9497 - no_toast_compression: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 9498 - no_toast_compression: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 9499 - no_toast_compression: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 9500 - no_toast_compression: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 9501 - no_toast_compression: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 9502 - no_toast_compression: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 9503 - no_toast_compression: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 9504 - no_toast_compression: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 9506 - no_toast_compression: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 9507 - no_toast_compression: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 9508 - no_toast_compression: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 9509 - no_toast_compression: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 9510 - no_toast_compression: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 9511 - no_toast_compression: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 9512 - no_toast_compression: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 9513 - no_toast_compression: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 9514 - no_toast_compression: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 9515 - no_toast_compression: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 9517 - no_toast_compression: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 9518 - no_toast_compression: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 9519 - no_toast_compression: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 9520 - no_toast_compression: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 9521 - no_toast_compression: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 9522 - no_toast_compression: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 9523 - no_toast_compression: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 9543 - no_toast_compression: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 9545 - no_toast_compression: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 9547 - no_toast_compression: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 9548 - no_toast_compression: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 9549 - no_toast_compression: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 9550 - no_toast_compression: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 9551 - no_toast_compression: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 9552 - no_toast_compression: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 9553 - no_toast_compression: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 9554 - no_toast_compression: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 9555 - no_toast_compression: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 9556 - no_toast_compression: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 9558 - no_toast_compression: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 9559 - no_toast_compression: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 9560 - no_toast_compression: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 9568 - no_toast_compression: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 9569 - no_toast_compression: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 9570 - no_toast_compression: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 9571 - no_toast_compression: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 9572 - no_toast_compression: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 9574 - no_toast_compression: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 9576 - no_toast_compression: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 9578 - no_toast_compression: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 9580 - no_toast_compression: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 9581 - no_toast_compression: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 9582 - no_toast_compression: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 9585 - no_toast_compression: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 9586 - no_toast_compression: should dump restrict`
+- 002_pg_dump.pl: `not ok 9587 - no_toast_compression: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 9589 - no_toast_compression: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 9590 - only_dump_measurement: pg_dump runs`
+- 002_pg_dump.pl: `not ok 9600 - only_dump_measurement: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 9601 - only_dump_measurement: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 9625 - only_dump_measurement: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 9631 - only_dump_measurement: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 9632 - only_dump_measurement: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 9633 - only_dump_measurement: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 9644 - only_dump_measurement: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 9681 - only_dump_measurement: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 9711 - only_dump_measurement: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 9712 - only_dump_measurement: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 9750 - only_dump_measurement: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 9787 - only_dump_measurement: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 9807 - only_dump_measurement: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 9814 - only_dump_measurement: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 9815 - only_dump_measurement: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 9835 - only_dump_measurement: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 9845 - only_dump_measurement: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 9846 - only_dump_measurement: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 9849 - only_dump_measurement: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 9850 - only_dump_measurement: should dump restrict`
+- 002_pg_dump.pl: `not ok 9853 - only_dump_measurement: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 9854 - only_dump_test_schema: pg_dump runs`
+- 002_pg_dump.pl: `not ok 9856 - only_dump_test_schema: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 9857 - only_dump_test_schema: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 9861 - only_dump_test_schema: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 9862 - only_dump_test_schema: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 9863 - only_dump_test_schema: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 9867 - only_dump_test_schema: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 9868 - only_dump_test_schema: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 9869 - only_dump_test_schema: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 9882 - only_dump_test_schema: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 9885 - only_dump_test_schema: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 9887 - only_dump_test_schema: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 9888 - only_dump_test_schema: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 9890 - only_dump_test_schema: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 9891 - only_dump_test_schema: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 9892 - only_dump_test_schema: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 9893 - only_dump_test_schema: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 9894 - only_dump_test_schema: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 9895 - only_dump_test_schema: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 9896 - only_dump_test_schema: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 9898 - only_dump_test_schema: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 9899 - only_dump_test_schema: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 9901 - only_dump_test_schema: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 9902 - only_dump_test_schema: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 9904 - only_dump_test_schema: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 9905 - only_dump_test_schema: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 9906 - only_dump_test_schema: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 9907 - only_dump_test_schema: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 9910 - only_dump_test_schema: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 9911 - only_dump_test_schema: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 9912 - only_dump_test_schema: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 9913 - only_dump_test_schema: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 9914 - only_dump_test_schema: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 9915 - only_dump_test_schema: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 9916 - only_dump_test_schema: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 9917 - only_dump_test_schema: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 9918 - only_dump_test_schema: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 9922 - only_dump_test_schema: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 9926 - only_dump_test_schema: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 9927 - only_dump_test_schema: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 9928 - only_dump_test_schema: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 9929 - only_dump_test_schema: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 9930 - only_dump_test_schema: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 9931 - only_dump_test_schema: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 9932 - only_dump_test_schema: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 9933 - only_dump_test_schema: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 9934 - only_dump_test_schema: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 9935 - only_dump_test_schema: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 9936 - only_dump_test_schema: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 9937 - only_dump_test_schema: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 9938 - only_dump_test_schema: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 9939 - only_dump_test_schema: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 9940 - only_dump_test_schema: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 9941 - only_dump_test_schema: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 9942 - only_dump_test_schema: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 9943 - only_dump_test_schema: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 9946 - only_dump_test_schema: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 9947 - only_dump_test_schema: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 9948 - only_dump_test_schema: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 9949 - only_dump_test_schema: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 9950 - only_dump_test_schema: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 9951 - only_dump_test_schema: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 9952 - only_dump_test_schema: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 9955 - only_dump_test_schema: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 9959 - only_dump_test_schema: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 9964 - only_dump_test_schema: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 9968 - only_dump_test_schema: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 9969 - only_dump_test_schema: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 9970 - only_dump_test_schema: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 9971 - only_dump_test_schema: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 9972 - only_dump_test_schema: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 9973 - only_dump_test_schema: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 9974 - only_dump_test_schema: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 9976 - only_dump_test_schema: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 9978 - only_dump_test_schema: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 9979 - only_dump_test_schema: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 9980 - only_dump_test_schema: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 9981 - only_dump_test_schema: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 9982 - only_dump_test_schema: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 9983 - only_dump_test_schema: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 9984 - only_dump_test_schema: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 9985 - only_dump_test_schema: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 9986 - only_dump_test_schema: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 9987 - only_dump_test_schema: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 9988 - only_dump_test_schema: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 9989 - only_dump_test_schema: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 9990 - only_dump_test_schema: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 9991 - only_dump_test_schema: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 9992 - only_dump_test_schema: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 9993 - only_dump_test_schema: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 9994 - only_dump_test_schema: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 10002 - only_dump_test_schema: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 10005 - only_dump_test_schema: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 10007 - only_dump_test_schema: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 10008 - only_dump_test_schema: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 10009 - only_dump_test_schema: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 10013 - only_dump_test_schema: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 10014 - only_dump_test_schema: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 10015 - only_dump_test_schema: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 10016 - only_dump_test_schema: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 10017 - only_dump_test_schema: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 10018 - only_dump_test_schema: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 10019 - only_dump_test_schema: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 10020 - only_dump_test_schema: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 10021 - only_dump_test_schema: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 10022 - only_dump_test_schema: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 10023 - only_dump_test_schema: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 10024 - only_dump_test_schema: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 10025 - only_dump_test_schema: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 10026 - only_dump_test_schema: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 10027 - only_dump_test_schema: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 10028 - only_dump_test_schema: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 10029 - only_dump_test_schema: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 10030 - only_dump_test_schema: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 10031 - only_dump_test_schema: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 10032 - only_dump_test_schema: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 10034 - only_dump_test_schema: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 10035 - only_dump_test_schema: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 10036 - only_dump_test_schema: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 10037 - only_dump_test_schema: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 10039 - only_dump_test_schema: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 10040 - only_dump_test_schema: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 10041 - only_dump_test_schema: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 10042 - only_dump_test_schema: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 10043 - only_dump_test_schema: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 10045 - only_dump_test_schema: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 10046 - only_dump_test_schema: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 10048 - only_dump_test_schema: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 10049 - only_dump_test_schema: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 10050 - only_dump_test_schema: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 10051 - only_dump_test_schema: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 10076 - only_dump_test_schema: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 10078 - only_dump_test_schema: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 10080 - only_dump_test_schema: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 10081 - only_dump_test_schema: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 10086 - only_dump_test_schema: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 10087 - only_dump_test_schema: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 10088 - only_dump_test_schema: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 10100 - only_dump_test_schema: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 10102 - only_dump_test_schema: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 10109 - only_dump_test_schema: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 10113 - only_dump_test_schema: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 10114 - only_dump_test_schema: should dump restrict`
+- 002_pg_dump.pl: `not ok 10115 - only_dump_test_schema: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 10117 - only_dump_test_schema: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 10118 - only_dump_test_table: pg_dump runs`
+- 002_pg_dump.pl: `not ok 10149 - only_dump_test_table: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 10154 - only_dump_test_table: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 10155 - only_dump_test_table: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 10156 - only_dump_test_table: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 10157 - only_dump_test_table: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 10158 - only_dump_test_table: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 10163 - only_dump_test_table: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 10165 - only_dump_test_table: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 10166 - only_dump_test_table: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 10177 - only_dump_test_table: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 10186 - only_dump_test_table: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 10190 - only_dump_test_table: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 10214 - only_dump_test_table: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 10252 - only_dump_test_table: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 10253 - only_dump_test_table: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 10254 - only_dump_test_table: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 10255 - only_dump_test_table: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 10256 - only_dump_test_table: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 10257 - only_dump_test_table: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 10269 - only_dump_test_table: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 10291 - only_dump_test_table: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 10303 - only_dump_test_table: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 10344 - only_dump_test_table: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 10373 - only_dump_test_table: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 10377 - only_dump_test_table: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 10378 - only_dump_test_table: should dump restrict`
+- 002_pg_dump.pl: `not ok 10381 - only_dump_test_table: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 10382 - pg_dumpall_dbprivs: pg_dump runs`
+- 002_pg_dump.pl: `not ok 10383 - pg_dumpall_dbprivs: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 10384 - pg_dumpall_dbprivs: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 10385 - pg_dumpall_dbprivs: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 10386 - pg_dumpall_dbprivs: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 10387 - pg_dumpall_dbprivs: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 10388 - pg_dumpall_dbprivs: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 10389 - pg_dumpall_dbprivs: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 10390 - pg_dumpall_dbprivs: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 10391 - pg_dumpall_dbprivs: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 10392 - pg_dumpall_dbprivs: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 10393 - pg_dumpall_dbprivs: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 10394 - pg_dumpall_dbprivs: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 10395 - pg_dumpall_dbprivs: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 10396 - pg_dumpall_dbprivs: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 10397 - pg_dumpall_dbprivs: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 10398 - pg_dumpall_dbprivs: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 10399 - pg_dumpall_dbprivs: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 10400 - pg_dumpall_dbprivs: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 10401 - pg_dumpall_dbprivs: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 10402 - pg_dumpall_dbprivs: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 10403 - pg_dumpall_dbprivs: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 10404 - pg_dumpall_dbprivs: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 10405 - pg_dumpall_dbprivs: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 10406 - pg_dumpall_dbprivs: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 10407 - pg_dumpall_dbprivs: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 10408 - pg_dumpall_dbprivs: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 10409 - pg_dumpall_dbprivs: should dump ALTER ROLE regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 10410 - pg_dumpall_dbprivs: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 10411 - pg_dumpall_dbprivs: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 10412 - pg_dumpall_dbprivs: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 10413 - pg_dumpall_dbprivs: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 10414 - pg_dumpall_dbprivs: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 10415 - pg_dumpall_dbprivs: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 10416 - pg_dumpall_dbprivs: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 10417 - pg_dumpall_dbprivs: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 10418 - pg_dumpall_dbprivs: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 10419 - pg_dumpall_dbprivs: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 10420 - pg_dumpall_dbprivs: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 10421 - pg_dumpall_dbprivs: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 10422 - pg_dumpall_dbprivs: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 10423 - pg_dumpall_dbprivs: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 10424 - pg_dumpall_dbprivs: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 10425 - pg_dumpall_dbprivs: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 10426 - pg_dumpall_dbprivs: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 10427 - pg_dumpall_dbprivs: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 10429 - pg_dumpall_dbprivs: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 10430 - pg_dumpall_dbprivs: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 10432 - pg_dumpall_dbprivs: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 10433 - pg_dumpall_dbprivs: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 10434 - pg_dumpall_dbprivs: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 10435 - pg_dumpall_dbprivs: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 10436 - pg_dumpall_dbprivs: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 10437 - pg_dumpall_dbprivs: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 10438 - pg_dumpall_dbprivs: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 10439 - pg_dumpall_dbprivs: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 10440 - pg_dumpall_dbprivs: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 10441 - pg_dumpall_dbprivs: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 10442 - pg_dumpall_dbprivs: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 10443 - pg_dumpall_dbprivs: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 10444 - pg_dumpall_dbprivs: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 10445 - pg_dumpall_dbprivs: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 10446 - pg_dumpall_dbprivs: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 10449 - pg_dumpall_dbprivs: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 10450 - pg_dumpall_dbprivs: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 10451 - pg_dumpall_dbprivs: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 10452 - pg_dumpall_dbprivs: should dump COMMENT ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 10453 - pg_dumpall_dbprivs: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 10454 - pg_dumpall_dbprivs: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 10455 - pg_dumpall_dbprivs: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 10456 - pg_dumpall_dbprivs: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 10457 - pg_dumpall_dbprivs: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 10458 - pg_dumpall_dbprivs: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 10459 - pg_dumpall_dbprivs: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 10460 - pg_dumpall_dbprivs: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 10461 - pg_dumpall_dbprivs: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 10462 - pg_dumpall_dbprivs: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 10463 - pg_dumpall_dbprivs: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 10464 - pg_dumpall_dbprivs: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 10465 - pg_dumpall_dbprivs: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 10466 - pg_dumpall_dbprivs: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 10467 - pg_dumpall_dbprivs: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 10468 - pg_dumpall_dbprivs: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 10469 - pg_dumpall_dbprivs: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 10470 - pg_dumpall_dbprivs: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 10471 - pg_dumpall_dbprivs: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 10473 - pg_dumpall_dbprivs: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 10474 - pg_dumpall_dbprivs: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 10475 - pg_dumpall_dbprivs: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 10476 - pg_dumpall_dbprivs: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 10477 - pg_dumpall_dbprivs: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 10478 - pg_dumpall_dbprivs: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 10479 - pg_dumpall_dbprivs: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 10480 - pg_dumpall_dbprivs: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 10481 - pg_dumpall_dbprivs: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 10482 - pg_dumpall_dbprivs: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 10483 - pg_dumpall_dbprivs: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 10484 - pg_dumpall_dbprivs: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 10485 - pg_dumpall_dbprivs: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 10486 - pg_dumpall_dbprivs: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 10487 - pg_dumpall_dbprivs: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 10488 - pg_dumpall_dbprivs: should dump CREATE DATABASE dump_test`
+- 002_pg_dump.pl: `not ok 10489 - pg_dumpall_dbprivs: should dump CREATE DATABASE dump_test2 LOCALE = 'C'`
+- 002_pg_dump.pl: `not ok 10492 - pg_dumpall_dbprivs: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 10493 - pg_dumpall_dbprivs: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 10495 - pg_dumpall_dbprivs: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 10496 - pg_dumpall_dbprivs: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 10497 - pg_dumpall_dbprivs: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 10498 - pg_dumpall_dbprivs: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 10499 - pg_dumpall_dbprivs: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 10500 - pg_dumpall_dbprivs: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 10501 - pg_dumpall_dbprivs: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 10502 - pg_dumpall_dbprivs: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 10503 - pg_dumpall_dbprivs: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 10504 - pg_dumpall_dbprivs: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 10505 - pg_dumpall_dbprivs: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 10506 - pg_dumpall_dbprivs: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 10507 - pg_dumpall_dbprivs: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 10508 - pg_dumpall_dbprivs: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 10509 - pg_dumpall_dbprivs: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 10510 - pg_dumpall_dbprivs: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 10511 - pg_dumpall_dbprivs: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 10512 - pg_dumpall_dbprivs: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 10513 - pg_dumpall_dbprivs: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 10514 - pg_dumpall_dbprivs: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 10515 - pg_dumpall_dbprivs: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 10516 - pg_dumpall_dbprivs: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 10517 - pg_dumpall_dbprivs: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 10518 - pg_dumpall_dbprivs: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 10519 - pg_dumpall_dbprivs: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 10520 - pg_dumpall_dbprivs: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 10521 - pg_dumpall_dbprivs: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 10522 - pg_dumpall_dbprivs: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 10523 - pg_dumpall_dbprivs: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 10524 - pg_dumpall_dbprivs: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 10525 - pg_dumpall_dbprivs: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 10526 - pg_dumpall_dbprivs: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 10527 - pg_dumpall_dbprivs: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 10528 - pg_dumpall_dbprivs: should dump CREATE ROLE regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 10529 - pg_dumpall_dbprivs: should dump CREATE ROLE regress_quoted...`
+- 002_pg_dump.pl: `not ok 10530 - pg_dumpall_dbprivs: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 10531 - pg_dumpall_dbprivs: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 10533 - pg_dumpall_dbprivs: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 10534 - pg_dumpall_dbprivs: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 10535 - pg_dumpall_dbprivs: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 10536 - pg_dumpall_dbprivs: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 10537 - pg_dumpall_dbprivs: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 10538 - pg_dumpall_dbprivs: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 10539 - pg_dumpall_dbprivs: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 10540 - pg_dumpall_dbprivs: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 10541 - pg_dumpall_dbprivs: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 10542 - pg_dumpall_dbprivs: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 10543 - pg_dumpall_dbprivs: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 10544 - pg_dumpall_dbprivs: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 10545 - pg_dumpall_dbprivs: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 10546 - pg_dumpall_dbprivs: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 10547 - pg_dumpall_dbprivs: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 10548 - pg_dumpall_dbprivs: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 10549 - pg_dumpall_dbprivs: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 10550 - pg_dumpall_dbprivs: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 10551 - pg_dumpall_dbprivs: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 10552 - pg_dumpall_dbprivs: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 10553 - pg_dumpall_dbprivs: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 10554 - pg_dumpall_dbprivs: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 10555 - pg_dumpall_dbprivs: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 10556 - pg_dumpall_dbprivs: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 10557 - pg_dumpall_dbprivs: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 10558 - pg_dumpall_dbprivs: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 10559 - pg_dumpall_dbprivs: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 10560 - pg_dumpall_dbprivs: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 10561 - pg_dumpall_dbprivs: should dump CREATE TABLESPACE regress_dump_tablespace`
+- 002_pg_dump.pl: `not ok 10562 - pg_dumpall_dbprivs: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 10563 - pg_dumpall_dbprivs: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 10564 - pg_dumpall_dbprivs: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 10565 - pg_dumpall_dbprivs: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 10566 - pg_dumpall_dbprivs: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 10567 - pg_dumpall_dbprivs: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 10568 - pg_dumpall_dbprivs: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 10569 - pg_dumpall_dbprivs: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 10570 - pg_dumpall_dbprivs: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 10571 - pg_dumpall_dbprivs: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 10573 - pg_dumpall_dbprivs: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 10574 - pg_dumpall_dbprivs: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 10575 - pg_dumpall_dbprivs: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 10576 - pg_dumpall_dbprivs: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 10577 - pg_dumpall_dbprivs: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 10578 - pg_dumpall_dbprivs: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 10579 - pg_dumpall_dbprivs: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 10599 - pg_dumpall_dbprivs: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 10601 - pg_dumpall_dbprivs: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 10602 - pg_dumpall_dbprivs: should dump GRANT CREATE ON DATABASE dump_test`
+- 002_pg_dump.pl: `not ok 10603 - pg_dumpall_dbprivs: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 10604 - pg_dumpall_dbprivs: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 10605 - pg_dumpall_dbprivs: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 10606 - pg_dumpall_dbprivs: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 10607 - pg_dumpall_dbprivs: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 10608 - pg_dumpall_dbprivs: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 10609 - pg_dumpall_dbprivs: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 10610 - pg_dumpall_dbprivs: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 10611 - pg_dumpall_dbprivs: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 10612 - pg_dumpall_dbprivs: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 10614 - pg_dumpall_dbprivs: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 10615 - pg_dumpall_dbprivs: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 10616 - pg_dumpall_dbprivs: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 10624 - pg_dumpall_dbprivs: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 10625 - pg_dumpall_dbprivs: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 10626 - pg_dumpall_dbprivs: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 10627 - pg_dumpall_dbprivs: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 10628 - pg_dumpall_dbprivs: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 10630 - pg_dumpall_dbprivs: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 10632 - pg_dumpall_dbprivs: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 10633 - pg_dumpall_dbprivs: should dump REVOKE CONNECT ON DATABASE dump_test FROM public`
+- 002_pg_dump.pl: `not ok 10634 - pg_dumpall_dbprivs: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 10636 - pg_dumpall_dbprivs: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 10637 - pg_dumpall_dbprivs: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 10638 - pg_dumpall_dbprivs: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 10641 - pg_dumpall_dbprivs: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 10642 - pg_dumpall_dbprivs: should dump restrict`
+- 002_pg_dump.pl: `not ok 10643 - pg_dumpall_dbprivs: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 10645 - pg_dumpall_dbprivs: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 10646 - pg_dumpall_exclude: pg_dump runs`
+- 002_pg_dump.pl: `not ok 10647 - pg_dumpall_exclude: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 10648 - pg_dumpall_exclude: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 10649 - pg_dumpall_exclude: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 10650 - pg_dumpall_exclude: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 10651 - pg_dumpall_exclude: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 10652 - pg_dumpall_exclude: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 10653 - pg_dumpall_exclude: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 10654 - pg_dumpall_exclude: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 10655 - pg_dumpall_exclude: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 10656 - pg_dumpall_exclude: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 10657 - pg_dumpall_exclude: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 10658 - pg_dumpall_exclude: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 10659 - pg_dumpall_exclude: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 10660 - pg_dumpall_exclude: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 10661 - pg_dumpall_exclude: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 10662 - pg_dumpall_exclude: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 10663 - pg_dumpall_exclude: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 10664 - pg_dumpall_exclude: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 10665 - pg_dumpall_exclude: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 10666 - pg_dumpall_exclude: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 10667 - pg_dumpall_exclude: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 10668 - pg_dumpall_exclude: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 10669 - pg_dumpall_exclude: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 10670 - pg_dumpall_exclude: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 10671 - pg_dumpall_exclude: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 10672 - pg_dumpall_exclude: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 10673 - pg_dumpall_exclude: should dump ALTER ROLE regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 10674 - pg_dumpall_exclude: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 10675 - pg_dumpall_exclude: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 10676 - pg_dumpall_exclude: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 10677 - pg_dumpall_exclude: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 10678 - pg_dumpall_exclude: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 10679 - pg_dumpall_exclude: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 10680 - pg_dumpall_exclude: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 10681 - pg_dumpall_exclude: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 10682 - pg_dumpall_exclude: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 10683 - pg_dumpall_exclude: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 10684 - pg_dumpall_exclude: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 10685 - pg_dumpall_exclude: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 10686 - pg_dumpall_exclude: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 10687 - pg_dumpall_exclude: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 10688 - pg_dumpall_exclude: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 10689 - pg_dumpall_exclude: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 10690 - pg_dumpall_exclude: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 10691 - pg_dumpall_exclude: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 10693 - pg_dumpall_exclude: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 10694 - pg_dumpall_exclude: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 10696 - pg_dumpall_exclude: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 10697 - pg_dumpall_exclude: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 10698 - pg_dumpall_exclude: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 10699 - pg_dumpall_exclude: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 10700 - pg_dumpall_exclude: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 10701 - pg_dumpall_exclude: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 10702 - pg_dumpall_exclude: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 10703 - pg_dumpall_exclude: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 10704 - pg_dumpall_exclude: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 10705 - pg_dumpall_exclude: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 10706 - pg_dumpall_exclude: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 10707 - pg_dumpall_exclude: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 10708 - pg_dumpall_exclude: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 10709 - pg_dumpall_exclude: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 10710 - pg_dumpall_exclude: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 10713 - pg_dumpall_exclude: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 10714 - pg_dumpall_exclude: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 10715 - pg_dumpall_exclude: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 10716 - pg_dumpall_exclude: should dump COMMENT ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 10717 - pg_dumpall_exclude: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 10718 - pg_dumpall_exclude: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 10719 - pg_dumpall_exclude: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 10720 - pg_dumpall_exclude: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 10721 - pg_dumpall_exclude: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 10722 - pg_dumpall_exclude: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 10723 - pg_dumpall_exclude: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 10724 - pg_dumpall_exclude: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 10725 - pg_dumpall_exclude: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 10726 - pg_dumpall_exclude: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 10727 - pg_dumpall_exclude: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 10728 - pg_dumpall_exclude: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 10729 - pg_dumpall_exclude: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 10730 - pg_dumpall_exclude: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 10731 - pg_dumpall_exclude: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 10732 - pg_dumpall_exclude: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 10733 - pg_dumpall_exclude: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 10734 - pg_dumpall_exclude: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 10735 - pg_dumpall_exclude: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 10737 - pg_dumpall_exclude: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 10738 - pg_dumpall_exclude: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 10739 - pg_dumpall_exclude: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 10740 - pg_dumpall_exclude: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 10741 - pg_dumpall_exclude: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 10742 - pg_dumpall_exclude: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 10743 - pg_dumpall_exclude: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 10744 - pg_dumpall_exclude: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 10745 - pg_dumpall_exclude: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 10746 - pg_dumpall_exclude: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 10747 - pg_dumpall_exclude: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 10748 - pg_dumpall_exclude: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 10749 - pg_dumpall_exclude: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 10750 - pg_dumpall_exclude: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 10751 - pg_dumpall_exclude: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 10756 - pg_dumpall_exclude: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 10757 - pg_dumpall_exclude: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 10759 - pg_dumpall_exclude: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 10760 - pg_dumpall_exclude: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 10761 - pg_dumpall_exclude: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 10762 - pg_dumpall_exclude: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 10763 - pg_dumpall_exclude: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 10764 - pg_dumpall_exclude: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 10765 - pg_dumpall_exclude: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 10766 - pg_dumpall_exclude: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 10767 - pg_dumpall_exclude: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 10768 - pg_dumpall_exclude: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 10769 - pg_dumpall_exclude: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 10770 - pg_dumpall_exclude: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 10771 - pg_dumpall_exclude: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 10772 - pg_dumpall_exclude: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 10773 - pg_dumpall_exclude: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 10774 - pg_dumpall_exclude: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 10775 - pg_dumpall_exclude: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 10776 - pg_dumpall_exclude: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 10777 - pg_dumpall_exclude: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 10778 - pg_dumpall_exclude: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 10779 - pg_dumpall_exclude: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 10780 - pg_dumpall_exclude: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 10781 - pg_dumpall_exclude: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 10782 - pg_dumpall_exclude: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 10783 - pg_dumpall_exclude: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 10784 - pg_dumpall_exclude: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 10785 - pg_dumpall_exclude: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 10786 - pg_dumpall_exclude: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 10787 - pg_dumpall_exclude: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 10788 - pg_dumpall_exclude: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 10789 - pg_dumpall_exclude: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 10790 - pg_dumpall_exclude: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 10791 - pg_dumpall_exclude: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 10792 - pg_dumpall_exclude: should dump CREATE ROLE regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 10793 - pg_dumpall_exclude: should dump CREATE ROLE regress_quoted...`
+- 002_pg_dump.pl: `not ok 10794 - pg_dumpall_exclude: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 10795 - pg_dumpall_exclude: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 10797 - pg_dumpall_exclude: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 10798 - pg_dumpall_exclude: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 10799 - pg_dumpall_exclude: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 10800 - pg_dumpall_exclude: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 10801 - pg_dumpall_exclude: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 10802 - pg_dumpall_exclude: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 10803 - pg_dumpall_exclude: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 10804 - pg_dumpall_exclude: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 10805 - pg_dumpall_exclude: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 10806 - pg_dumpall_exclude: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 10807 - pg_dumpall_exclude: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 10808 - pg_dumpall_exclude: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 10809 - pg_dumpall_exclude: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 10810 - pg_dumpall_exclude: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 10811 - pg_dumpall_exclude: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 10812 - pg_dumpall_exclude: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 10813 - pg_dumpall_exclude: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 10814 - pg_dumpall_exclude: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 10815 - pg_dumpall_exclude: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 10816 - pg_dumpall_exclude: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 10817 - pg_dumpall_exclude: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 10818 - pg_dumpall_exclude: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 10819 - pg_dumpall_exclude: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 10820 - pg_dumpall_exclude: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 10821 - pg_dumpall_exclude: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 10822 - pg_dumpall_exclude: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 10823 - pg_dumpall_exclude: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 10824 - pg_dumpall_exclude: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 10825 - pg_dumpall_exclude: should dump CREATE TABLESPACE regress_dump_tablespace`
+- 002_pg_dump.pl: `not ok 10826 - pg_dumpall_exclude: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 10827 - pg_dumpall_exclude: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 10828 - pg_dumpall_exclude: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 10829 - pg_dumpall_exclude: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 10830 - pg_dumpall_exclude: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 10831 - pg_dumpall_exclude: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 10832 - pg_dumpall_exclude: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 10833 - pg_dumpall_exclude: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 10834 - pg_dumpall_exclude: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 10835 - pg_dumpall_exclude: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 10837 - pg_dumpall_exclude: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 10838 - pg_dumpall_exclude: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 10839 - pg_dumpall_exclude: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 10840 - pg_dumpall_exclude: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 10841 - pg_dumpall_exclude: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 10842 - pg_dumpall_exclude: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 10843 - pg_dumpall_exclude: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 10863 - pg_dumpall_exclude: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 10865 - pg_dumpall_exclude: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 10867 - pg_dumpall_exclude: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 10868 - pg_dumpall_exclude: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 10869 - pg_dumpall_exclude: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 10870 - pg_dumpall_exclude: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 10871 - pg_dumpall_exclude: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 10872 - pg_dumpall_exclude: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 10873 - pg_dumpall_exclude: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 10874 - pg_dumpall_exclude: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 10875 - pg_dumpall_exclude: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 10876 - pg_dumpall_exclude: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 10878 - pg_dumpall_exclude: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 10879 - pg_dumpall_exclude: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 10880 - pg_dumpall_exclude: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 10888 - pg_dumpall_exclude: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 10889 - pg_dumpall_exclude: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 10890 - pg_dumpall_exclude: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 10891 - pg_dumpall_exclude: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 10892 - pg_dumpall_exclude: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 10894 - pg_dumpall_exclude: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 10896 - pg_dumpall_exclude: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 10898 - pg_dumpall_exclude: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 10900 - pg_dumpall_exclude: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 10901 - pg_dumpall_exclude: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 10902 - pg_dumpall_exclude: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 10905 - pg_dumpall_exclude: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 10906 - pg_dumpall_exclude: should dump restrict`
+- 002_pg_dump.pl: `not ok 10907 - pg_dumpall_exclude: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 10909 - pg_dumpall_exclude: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 10910 - pg_dumpall_globals: pg_dump runs`
+- 002_pg_dump.pl: `not ok 10937 - pg_dumpall_globals: should dump ALTER ROLE regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 11056 - pg_dumpall_globals: should dump CREATE ROLE regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 11057 - pg_dumpall_globals: should dump CREATE ROLE regress_quoted...`
+- 002_pg_dump.pl: `not ok 11089 - pg_dumpall_globals: should dump CREATE TABLESPACE regress_dump_tablespace`
+- 002_pg_dump.pl: `not ok 11170 - pg_dumpall_globals: should dump restrict`
+- 002_pg_dump.pl: `not ok 11173 - pg_dumpall_globals: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 11174 - pg_dumpall_globals_clean: pg_dump runs`
+- 002_pg_dump.pl: `not ok 11201 - pg_dumpall_globals_clean: should dump ALTER ROLE regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 11320 - pg_dumpall_globals_clean: should dump CREATE ROLE regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 11321 - pg_dumpall_globals_clean: should dump CREATE ROLE regress_quoted...`
+- 002_pg_dump.pl: `not ok 11353 - pg_dumpall_globals_clean: should dump CREATE TABLESPACE regress_dump_tablespace`
+- 002_pg_dump.pl: `not ok 11379 - pg_dumpall_globals_clean: should dump DROP ROLE regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 11434 - pg_dumpall_globals_clean: should dump restrict`
+- 002_pg_dump.pl: `not ok 11437 - pg_dumpall_globals_clean: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 11438 - role: pg_dump runs`
+- 002_pg_dump.pl: `not ok 11448 - role: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 11449 - role: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 11467 - role: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 11473 - role: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 11481 - role: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 11492 - role: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 11529 - role: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 11559 - role: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 11587 - role: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 11655 - role: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 11663 - role: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 11668 - role: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 11683 - role: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 11693 - role: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 11694 - role: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 11697 - role: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 11698 - role: should dump restrict`
+- 002_pg_dump.pl: `not ok 11701 - role: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 11702 - role_parallel: pg_dump runs`
+- 002_pg_dump.pl: `not ok 11703 - role_parallel: pg_restore runs`
+- 002_pg_dump.pl: `not ok 11713 - role_parallel: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 11714 - role_parallel: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 11732 - role_parallel: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 11738 - role_parallel: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 11746 - role_parallel: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 11757 - role_parallel: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 11794 - role_parallel: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 11824 - role_parallel: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 11852 - role_parallel: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 11920 - role_parallel: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 11928 - role_parallel: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 11933 - role_parallel: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 11948 - role_parallel: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 11958 - role_parallel: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 11959 - role_parallel: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 11962 - role_parallel: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 11963 - role_parallel: should dump restrict`
+- 002_pg_dump.pl: `not ok 11966 - role_parallel: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 11967 - rows_per_insert: pg_dump runs`
+- 002_pg_dump.pl: `not ok 12203 - rows_per_insert: should dump INSERT INTO test_fourth_table`
+- 002_pg_dump.pl: `not ok 12227 - rows_per_insert: should dump restrict`
+- 002_pg_dump.pl: `not ok 12229 - rows_per_insert: should dump test_table with 4-row INSERTs`
+- 002_pg_dump.pl: `not ok 12230 - rows_per_insert: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 12231 - schema_only: pg_dump runs`
+- 002_pg_dump.pl: `not ok 12232 - schema_only: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 12233 - schema_only: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 12234 - schema_only: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 12235 - schema_only: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 12236 - schema_only: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 12237 - schema_only: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 12238 - schema_only: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 12239 - schema_only: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 12240 - schema_only: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 12241 - schema_only: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 12242 - schema_only: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 12244 - schema_only: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 12245 - schema_only: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 12246 - schema_only: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 12247 - schema_only: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 12248 - schema_only: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 12249 - schema_only: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 12250 - schema_only: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 12251 - schema_only: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 12252 - schema_only: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 12253 - schema_only: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 12254 - schema_only: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 12255 - schema_only: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 12256 - schema_only: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 12257 - schema_only: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 12259 - schema_only: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 12260 - schema_only: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 12261 - schema_only: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 12262 - schema_only: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 12263 - schema_only: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 12264 - schema_only: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 12265 - schema_only: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 12266 - schema_only: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 12267 - schema_only: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 12268 - schema_only: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 12269 - schema_only: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 12270 - schema_only: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 12271 - schema_only: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 12272 - schema_only: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 12273 - schema_only: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 12274 - schema_only: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 12275 - schema_only: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 12276 - schema_only: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 12278 - schema_only: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 12279 - schema_only: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 12281 - schema_only: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 12282 - schema_only: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 12283 - schema_only: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 12284 - schema_only: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 12285 - schema_only: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 12286 - schema_only: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 12287 - schema_only: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 12288 - schema_only: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 12289 - schema_only: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 12290 - schema_only: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 12291 - schema_only: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 12292 - schema_only: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 12293 - schema_only: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 12294 - schema_only: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 12295 - schema_only: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 12299 - schema_only: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 12300 - schema_only: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 12302 - schema_only: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 12303 - schema_only: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 12304 - schema_only: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 12305 - schema_only: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 12306 - schema_only: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 12307 - schema_only: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 12308 - schema_only: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 12309 - schema_only: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 12310 - schema_only: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 12311 - schema_only: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 12312 - schema_only: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 12313 - schema_only: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 12314 - schema_only: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 12315 - schema_only: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 12316 - schema_only: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 12317 - schema_only: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 12318 - schema_only: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 12319 - schema_only: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 12330 - schema_only: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 12331 - schema_only: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 12332 - schema_only: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 12333 - schema_only: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 12334 - schema_only: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 12335 - schema_only: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 12336 - schema_only: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 12341 - schema_only: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 12342 - schema_only: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 12344 - schema_only: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 12345 - schema_only: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 12346 - schema_only: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 12347 - schema_only: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 12348 - schema_only: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 12349 - schema_only: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 12350 - schema_only: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 12351 - schema_only: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 12352 - schema_only: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 12353 - schema_only: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 12354 - schema_only: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 12355 - schema_only: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 12356 - schema_only: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 12357 - schema_only: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 12358 - schema_only: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 12359 - schema_only: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 12360 - schema_only: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 12361 - schema_only: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 12362 - schema_only: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 12363 - schema_only: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 12364 - schema_only: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 12365 - schema_only: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 12366 - schema_only: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 12367 - schema_only: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 12368 - schema_only: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 12369 - schema_only: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 12370 - schema_only: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 12371 - schema_only: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 12372 - schema_only: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 12373 - schema_only: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 12374 - schema_only: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 12375 - schema_only: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 12376 - schema_only: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 12379 - schema_only: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 12380 - schema_only: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 12382 - schema_only: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 12383 - schema_only: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 12384 - schema_only: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 12385 - schema_only: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 12386 - schema_only: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 12387 - schema_only: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 12388 - schema_only: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 12389 - schema_only: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 12390 - schema_only: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 12391 - schema_only: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 12392 - schema_only: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 12393 - schema_only: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 12394 - schema_only: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 12395 - schema_only: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 12396 - schema_only: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 12397 - schema_only: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 12398 - schema_only: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 12399 - schema_only: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 12400 - schema_only: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 12401 - schema_only: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 12402 - schema_only: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 12403 - schema_only: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 12404 - schema_only: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 12405 - schema_only: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 12406 - schema_only: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 12407 - schema_only: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 12408 - schema_only: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 12409 - schema_only: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 12411 - schema_only: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 12412 - schema_only: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 12413 - schema_only: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 12414 - schema_only: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 12415 - schema_only: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 12416 - schema_only: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 12417 - schema_only: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 12418 - schema_only: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 12419 - schema_only: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 12420 - schema_only: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 12422 - schema_only: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 12423 - schema_only: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 12424 - schema_only: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 12425 - schema_only: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 12426 - schema_only: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 12427 - schema_only: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 12428 - schema_only: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 12448 - schema_only: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 12452 - schema_only: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 12453 - schema_only: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 12454 - schema_only: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 12455 - schema_only: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 12456 - schema_only: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 12457 - schema_only: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 12458 - schema_only: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 12459 - schema_only: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 12460 - schema_only: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 12461 - schema_only: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 12463 - schema_only: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 12464 - schema_only: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 12465 - schema_only: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 12476 - schema_only: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 12481 - schema_only: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 12483 - schema_only: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 12485 - schema_only: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 12486 - schema_only: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 12487 - schema_only: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 12491 - schema_only: should dump restrict`
+- 002_pg_dump.pl: `not ok 12494 - schema_only: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 12495 - section_data: pg_dump runs`
+- 002_pg_dump.pl: `not ok 12507 - section_data: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 12562 - section_data: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 12584 - section_data: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 12586 - section_data: should dump COPY measurement`
+- 002_pg_dump.pl: `not ok 12587 - section_data: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 12588 - section_data: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 12589 - section_data: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 12590 - section_data: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 12591 - section_data: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 12592 - section_data: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 12593 - section_data: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 12714 - section_data: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 12737 - section_data: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 12738 - section_data: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 12739 - section_data: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 12754 - section_data: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 12755 - section_data: should dump restrict`
+- 002_pg_dump.pl: `not ok 12758 - section_data: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 12759 - section_post_data: pg_dump runs`
+- 002_pg_dump.pl: `not ok 12761 - section_post_data: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 12762 - section_post_data: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 12763 - section_post_data: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE`
+- 002_pg_dump.pl: `not ok 12764 - section_post_data: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role REVOKE SELECT`
+- 002_pg_dump.pl: `not ok 12769 - section_post_data: should dump ALTER INDEX ... ATTACH PARTITION`
+- 002_pg_dump.pl: `not ok 12770 - section_post_data: should dump ALTER INDEX ... ATTACH PARTITION (primary key)`
+- 002_pg_dump.pl: `not ok 12776 - section_post_data: should dump ALTER PUBLICATION pub1 ADD TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 12777 - section_post_data: should dump ALTER PUBLICATION pub1 ADD TABLE test_seventh_table (col3, col2) WHERE (col1 = 1)`
+- 002_pg_dump.pl: `not ok 12778 - section_post_data: should dump ALTER PUBLICATION pub1 ADD TABLE test_sixth_table (col3, col2)`
+- 002_pg_dump.pl: `not ok 12779 - section_post_data: should dump ALTER PUBLICATION pub1 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 12780 - section_post_data: should dump ALTER PUBLICATION pub1 OWNER TO`
+- 002_pg_dump.pl: `not ok 12781 - section_post_data: should dump ALTER PUBLICATION pub3 ADD TABLE test_table`
+- 002_pg_dump.pl: `not ok 12782 - section_post_data: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 12783 - section_post_data: should dump ALTER PUBLICATION pub3 ADD TABLES IN SCHEMA public`
+- 002_pg_dump.pl: `not ok 12784 - section_post_data: should dump ALTER PUBLICATION pub4 ADD TABLE test_second_table WHERE (col2 = 'test');`
+- 002_pg_dump.pl: `not ok 12785 - section_post_data: should dump ALTER PUBLICATION pub4 ADD TABLE test_table WHERE (col1 > 0);`
+- 002_pg_dump.pl: `not ok 12792 - section_post_data: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 12793 - section_post_data: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 12795 - section_post_data: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 12801 - section_post_data: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 12804 - section_post_data: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 12806 - section_post_data: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 12813 - section_post_data: should dump Always trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 12822 - section_post_data: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 12827 - section_post_data: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 12828 - section_post_data: should dump COMMENT ON PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 12830 - section_post_data: should dump COMMENT ON SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 12842 - section_post_data: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 12846 - section_post_data: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 12847 - section_post_data: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 12870 - section_post_data: should dump CREATE EVENT TRIGGER test_event_trigger`
+- 002_pg_dump.pl: `not ok 12880 - section_post_data: should dump CREATE INDEX ... ON measurement_y2006_m2`
+- 002_pg_dump.pl: `not ok 12881 - section_post_data: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 12893 - section_post_data: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 12894 - section_post_data: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 12895 - section_post_data: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 12896 - section_post_data: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 12897 - section_post_data: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 12898 - section_post_data: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 12900 - section_post_data: should dump CREATE PUBLICATION pub1`
+- 002_pg_dump.pl: `not ok 12901 - section_post_data: should dump CREATE PUBLICATION pub2`
+- 002_pg_dump.pl: `not ok 12902 - section_post_data: should dump CREATE PUBLICATION pub3`
+- 002_pg_dump.pl: `not ok 12903 - section_post_data: should dump CREATE PUBLICATION pub4`
+- 002_pg_dump.pl: `not ok 12904 - section_post_data: should dump CREATE PUBLICATION pub5`
+- 002_pg_dump.pl: `not ok 12912 - section_post_data: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 12913 - section_post_data: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 12914 - section_post_data: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 12915 - section_post_data: should dump CREATE SUBSCRIPTION sub1`
+- 002_pg_dump.pl: `not ok 12916 - section_post_data: should dump CREATE SUBSCRIPTION sub2`
+- 002_pg_dump.pl: `not ok 12917 - section_post_data: should dump CREATE SUBSCRIPTION sub3`
+- 002_pg_dump.pl: `not ok 12922 - section_post_data: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 12944 - section_post_data: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 12954 - section_post_data: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 12955 - section_post_data: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 12956 - section_post_data: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 12976 - section_post_data: should dump Disabled trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 13005 - section_post_data: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 13007 - section_post_data: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 13015 - section_post_data: should dump Replica trigger on partition is altered`
+- 002_pg_dump.pl: `not ok 13018 - section_post_data: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 13019 - section_post_data: should dump restrict`
+- 002_pg_dump.pl: `not ok 13020 - section_post_data: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 13022 - section_post_data: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 13023 - section_pre_data: pg_dump runs`
+- 002_pg_dump.pl: `not ok 13024 - section_pre_data: should dump ALTER COLLATION test0 OWNER TO`
+- 002_pg_dump.pl: `not ok 13029 - section_pre_data: should dump ALTER FOREIGN DATA WRAPPER dummy OWNER TO`
+- 002_pg_dump.pl: `not ok 13030 - section_pre_data: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 13031 - section_pre_data: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 13032 - section_pre_data: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 13036 - section_pre_data: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 13037 - section_pre_data: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 13038 - section_pre_data: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 13039 - section_pre_data: should dump ALTER PROCEDURAL LANGUAGE pltestlang OWNER TO`
+- 002_pg_dump.pl: `not ok 13051 - section_pre_data: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 13052 - section_pre_data: should dump ALTER SCHEMA dump_test_second_schema OWNER TO`
+- 002_pg_dump.pl: `not ok 13053 - section_pre_data: should dump ALTER SCHEMA public OWNER TO`
+- 002_pg_dump.pl: `not ok 13054 - section_pre_data: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 13055 - section_pre_data: should dump ALTER SERVER s1 OWNER TO`
+- 002_pg_dump.pl: `not ok 13058 - section_pre_data: should dump ALTER TABLE ONLY dump_test.measurement ATTACH PARTITION measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 13060 - section_pre_data: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 13061 - section_pre_data: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 13062 - section_pre_data: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 13063 - section_pre_data: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 13064 - section_pre_data: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 13066 - section_pre_data: should dump ALTER TABLE measurement_y2006m2 OWNER TO`
+- 002_pg_dump.pl: `not ok 13067 - section_pre_data: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 13071 - section_pre_data: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 13073 - section_pre_data: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 13074 - section_pre_data: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 13075 - section_pre_data: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 13076 - section_pre_data: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 13078 - section_pre_data: should dump COMMENT ON COLLATION test0`
+- 002_pg_dump.pl: `not ok 13079 - section_pre_data: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 13080 - section_pre_data: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 13081 - section_pre_data: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 13082 - section_pre_data: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 13083 - section_pre_data: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 13084 - section_pre_data: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 13085 - section_pre_data: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 13087 - section_pre_data: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 13095 - section_pre_data: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 13096 - section_pre_data: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 13097 - section_pre_data: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 13098 - section_pre_data: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 13099 - section_pre_data: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 13100 - section_pre_data: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 13101 - section_pre_data: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 13102 - section_pre_data: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 13103 - section_pre_data: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 13104 - section_pre_data: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 13105 - section_pre_data: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 13107 - section_pre_data: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 13108 - section_pre_data: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 13109 - section_pre_data: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 13122 - section_pre_data: should dump CREATE ACCESS METHOD gist2`
+- 002_pg_dump.pl: `not ok 13123 - section_pre_data: should dump CREATE ACCESS METHOD regress_test_table_am`
+- 002_pg_dump.pl: `not ok 13124 - section_pre_data: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 13125 - section_pre_data: should dump CREATE CAST FOR timestamptz`
+- 002_pg_dump.pl: `not ok 13126 - section_pre_data: should dump CREATE COLLATION icu_collation`
+- 002_pg_dump.pl: `not ok 13127 - section_pre_data: should dump CREATE COLLATION test0 FROM "C"`
+- 002_pg_dump.pl: `not ok 13128 - section_pre_data: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 13133 - section_pre_data: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 13136 - section_pre_data: should dump CREATE FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 13137 - section_pre_data: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 13138 - section_pre_data: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 13139 - section_pre_data: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 13140 - section_pre_data: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 13141 - section_pre_data: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 13142 - section_pre_data: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 13143 - section_pre_data: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 13146 - section_pre_data: should dump CREATE LANGUAGE pltestlang`
+- 002_pg_dump.pl: `not ok 13147 - section_pre_data: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 13148 - section_pre_data: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 13149 - section_pre_data: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 13150 - section_pre_data: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 13151 - section_pre_data: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 13152 - section_pre_data: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 13153 - section_pre_data: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 13154 - section_pre_data: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 13155 - section_pre_data: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 13156 - section_pre_data: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 13163 - section_pre_data: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 13171 - section_pre_data: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 13172 - section_pre_data: should dump CREATE SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 13174 - section_pre_data: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 13175 - section_pre_data: should dump CREATE SERVER s1 FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 13182 - section_pre_data: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 13183 - section_pre_data: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 13184 - section_pre_data: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 13185 - section_pre_data: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 13187 - section_pre_data: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 13188 - section_pre_data: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 13189 - section_pre_data: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 13190 - section_pre_data: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 13191 - section_pre_data: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 13192 - section_pre_data: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 13193 - section_pre_data: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 13194 - section_pre_data: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 13195 - section_pre_data: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 13196 - section_pre_data: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 13197 - section_pre_data: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 13198 - section_pre_data: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 13199 - section_pre_data: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 13200 - section_pre_data: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 13201 - section_pre_data: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 13203 - section_pre_data: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 13204 - section_pre_data: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 13205 - section_pre_data: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 13206 - section_pre_data: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 13207 - section_pre_data: should dump CREATE TRANSFORM FOR int`
+- 002_pg_dump.pl: `not ok 13209 - section_pre_data: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 13210 - section_pre_data: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 13211 - section_pre_data: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 13212 - section_pre_data: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 13214 - section_pre_data: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 13215 - section_pre_data: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 13216 - section_pre_data: should dump CREATE USER MAPPING FOR regress_dump_test_role SERVER s1`
+- 002_pg_dump.pl: `not ok 13217 - section_pre_data: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 13244 - section_pre_data: should dump GRANT EXECUTE ON FUNCTION pg_sleep() TO regress_dump_test_role`
+- 002_pg_dump.pl: `not ok 13245 - section_pre_data: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 13246 - section_pre_data: should dump GRANT SELECT (proname ...) ON TABLE pg_proc TO public`
+- 002_pg_dump.pl: `not ok 13247 - section_pre_data: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 13248 - section_pre_data: should dump GRANT SELECT ON TABLE measurement_y2006m2`
+- 002_pg_dump.pl: `not ok 13249 - section_pre_data: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 13250 - section_pre_data: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 13251 - section_pre_data: should dump GRANT USAGE ON FOREIGN DATA WRAPPER dummy`
+- 002_pg_dump.pl: `not ok 13252 - section_pre_data: should dump GRANT USAGE ON FOREIGN SERVER s1`
+- 002_pg_dump.pl: `not ok 13253 - section_pre_data: should dump GRANT USAGE ON SCHEMA dump_test_second_schema`
+- 002_pg_dump.pl: `not ok 13255 - section_pre_data: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 13256 - section_pre_data: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 13257 - section_pre_data: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 13268 - section_pre_data: should dump Partition measurement_y2006m2 creation`
+- 002_pg_dump.pl: `not ok 13273 - section_pre_data: should dump REVOKE ALL ON SCHEMA public`
+- 002_pg_dump.pl: `not ok 13275 - section_pre_data: should dump REVOKE EXECUTE ON FUNCTION pg_sleep() FROM public`
+- 002_pg_dump.pl: `not ok 13277 - section_pre_data: should dump REVOKE SELECT ON TABLE pg_proc FROM public`
+- 002_pg_dump.pl: `not ok 13278 - section_pre_data: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 13283 - section_pre_data: should dump restrict`
+- 002_pg_dump.pl: `not ok 13286 - section_pre_data: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 13287 - statistics_only: pg_dump runs`
+- 002_pg_dump.pl: `not ok 13546 - statistics_only: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 13547 - statistics_only: should dump restrict`
+- 002_pg_dump.pl: `not ok 13548 - statistics_only: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 13550 - statistics_only: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 13551 - statistics_only_with_index: pg_dump runs`
+- 002_pg_dump.pl: `not ok 13552 - statistics_only_with_index: pg_restore runs`
+- 002_pg_dump.pl: `not ok 13811 - statistics_only_with_index: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 13812 - statistics_only_with_index: should dump restrict`
+- 002_pg_dump.pl: `not ok 13813 - statistics_only_with_index: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 13815 - statistics_only_with_index: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 13816 - statistics_only_with_schema: pg_dump runs`
+- 002_pg_dump.pl: `not ok 13817 - statistics_only_with_schema: pg_restore runs`
+- 002_pg_dump.pl: `not ok 14076 - statistics_only_with_schema: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 14077 - statistics_only_with_schema: should dump restrict`
+- 002_pg_dump.pl: `not ok 14078 - statistics_only_with_schema: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 14080 - statistics_only_with_schema: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 14081 - statistics_only_with_table: pg_dump runs`
+- 002_pg_dump.pl: `not ok 14082 - statistics_only_with_table: pg_restore runs`
+- 002_pg_dump.pl: `not ok 14341 - statistics_only_with_table: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 14342 - statistics_only_with_table: should dump restrict`
+- 002_pg_dump.pl: `not ok 14345 - statistics_only_with_table: should dump unrestrict`
+- 002_pg_dump.pl: `not ok 14346 - test_schema_plus_large_objects: pg_dump runs`
+- 002_pg_dump.pl: `not ok 14348 - test_schema_plus_large_objects: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT`
+- 002_pg_dump.pl: `not ok 14349 - test_schema_plus_large_objects: should dump ALTER DEFAULT PRIVILEGES FOR ROLE regress_dump_test_role GRANT EXECUTE ON FUNCTIONS`
+- 002_pg_dump.pl: `not ok 14353 - test_schema_plus_large_objects: should dump ALTER FOREIGN TABLE foreign_table ALTER COLUMN c1 OPTIONS`
+- 002_pg_dump.pl: `not ok 14354 - test_schema_plus_large_objects: should dump ALTER FOREIGN TABLE foreign_table OWNER TO`
+- 002_pg_dump.pl: `not ok 14355 - test_schema_plus_large_objects: should dump ALTER FUNCTION dump_test.pltestlang_call_handler() OWNER TO`
+- 002_pg_dump.pl: `not ok 14358 - test_schema_plus_large_objects: should dump ALTER LARGE OBJECT ... OWNER TO`
+- 002_pg_dump.pl: `not ok 14359 - test_schema_plus_large_objects: should dump ALTER OPERATOR CLASS dump_test.op_class OWNER TO`
+- 002_pg_dump.pl: `not ok 14360 - test_schema_plus_large_objects: should dump ALTER OPERATOR FAMILY dump_test.op_family OWNER TO`
+- 002_pg_dump.pl: `not ok 14361 - test_schema_plus_large_objects: should dump ALTER OPERATOR FAMILY dump_test.op_family USING btree`
+- 002_pg_dump.pl: `not ok 14374 - test_schema_plus_large_objects: should dump ALTER SCHEMA dump_test OWNER TO`
+- 002_pg_dump.pl: `not ok 14377 - test_schema_plus_large_objects: should dump ALTER SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 14379 - test_schema_plus_large_objects: should dump ALTER STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 14380 - test_schema_plus_large_objects: should dump ALTER TABLE (partitioned) ADD CONSTRAINT ... FOREIGN KEY`
+- 002_pg_dump.pl: `not ok 14382 - test_schema_plus_large_objects: should dump ALTER TABLE ONLY test_table ADD CONSTRAINT ... PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 14383 - test_schema_plus_large_objects: should dump ALTER TABLE ONLY test_table ALTER COLUMN col1 SET STATISTICS 90`
+- 002_pg_dump.pl: `not ok 14384 - test_schema_plus_large_objects: should dump ALTER TABLE ONLY test_table ALTER COLUMN col2 SET STORAGE`
+- 002_pg_dump.pl: `not ok 14385 - test_schema_plus_large_objects: should dump ALTER TABLE ONLY test_table ALTER COLUMN col3 SET STORAGE`
+- 002_pg_dump.pl: `not ok 14386 - test_schema_plus_large_objects: should dump ALTER TABLE ONLY test_table ALTER COLUMN col4 SET n_distinct`
+- 002_pg_dump.pl: `not ok 14387 - test_schema_plus_large_objects: should dump ALTER TABLE measurement OWNER TO`
+- 002_pg_dump.pl: `not ok 14388 - test_schema_plus_large_objects: should dump ALTER TABLE measurement PRIMARY KEY`
+- 002_pg_dump.pl: `not ok 14390 - test_schema_plus_large_objects: should dump ALTER TABLE test_second_table OWNER TO`
+- 002_pg_dump.pl: `not ok 14391 - test_schema_plus_large_objects: should dump ALTER TABLE test_table CLUSTER ON test_table_pkey`
+- 002_pg_dump.pl: `not ok 14393 - test_schema_plus_large_objects: should dump ALTER TABLE test_table ENABLE ROW LEVEL SECURITY`
+- 002_pg_dump.pl: `not ok 14394 - test_schema_plus_large_objects: should dump ALTER TABLE test_table OWNER TO`
+- 002_pg_dump.pl: `not ok 14396 - test_schema_plus_large_objects: should dump ALTER TEXT SEARCH CONFIGURATION alt_ts_conf1 OWNER TO`
+- 002_pg_dump.pl: `not ok 14397 - test_schema_plus_large_objects: should dump ALTER TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1 ...`
+- 002_pg_dump.pl: `not ok 14398 - test_schema_plus_large_objects: should dump ALTER TEXT SEARCH DICTIONARY alt_ts_dict1 OWNER TO`
+- 002_pg_dump.pl: `not ok 14399 - test_schema_plus_large_objects: should dump ALTER VIEW test_view SET DEFAULT`
+- 002_pg_dump.pl: `not ok 14402 - test_schema_plus_large_objects: should dump COMMENT ON COLUMN dump_test.composite.f1`
+- 002_pg_dump.pl: `not ok 14403 - test_schema_plus_large_objects: should dump COMMENT ON COLUMN dump_test.test_second_table.col1`
+- 002_pg_dump.pl: `not ok 14404 - test_schema_plus_large_objects: should dump COMMENT ON COLUMN dump_test.test_second_table.col2`
+- 002_pg_dump.pl: `not ok 14405 - test_schema_plus_large_objects: should dump COMMENT ON COLUMN dump_test.test_table.col1`
+- 002_pg_dump.pl: `not ok 14406 - test_schema_plus_large_objects: should dump COMMENT ON CONSTRAINT ON DOMAIN (1)`
+- 002_pg_dump.pl: `not ok 14407 - test_schema_plus_large_objects: should dump COMMENT ON CONSTRAINT ON DOMAIN (2)`
+- 002_pg_dump.pl: `not ok 14408 - test_schema_plus_large_objects: should dump COMMENT ON CONSTRAINT ON test_table_chld2`
+- 002_pg_dump.pl: `not ok 14409 - test_schema_plus_large_objects: should dump COMMENT ON CONSTRAINT ON test_table_nn`
+- 002_pg_dump.pl: `not ok 14410 - test_schema_plus_large_objects: should dump COMMENT ON CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 14413 - test_schema_plus_large_objects: should dump COMMENT ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 14414 - test_schema_plus_large_objects: should dump COMMENT ON POLICY p1`
+- 002_pg_dump.pl: `not ok 14418 - test_schema_plus_large_objects: should dump COMMENT ON TABLE dump_test.test_table`
+- 002_pg_dump.pl: `not ok 14419 - test_schema_plus_large_objects: should dump COMMENT ON TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 14420 - test_schema_plus_large_objects: should dump COMMENT ON TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 14421 - test_schema_plus_large_objects: should dump COMMENT ON TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 14422 - test_schema_plus_large_objects: should dump COMMENT ON TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 14423 - test_schema_plus_large_objects: should dump COMMENT ON TYPE dump_test.int42 - Regular`
+- 002_pg_dump.pl: `not ok 14424 - test_schema_plus_large_objects: should dump COMMENT ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 14425 - test_schema_plus_large_objects: should dump COMMENT ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 14426 - test_schema_plus_large_objects: should dump COMMENT ON TYPE dump_test.undefined - Undefined`
+- 002_pg_dump.pl: `not ok 14427 - test_schema_plus_large_objects: should dump CONSTRAINT NOT NULL / NO INHERIT`
+- 002_pg_dump.pl: `not ok 14428 - test_schema_plus_large_objects: should dump CONSTRAINT NOT NULL / NO INHERIT (child1)`
+- 002_pg_dump.pl: `not ok 14429 - test_schema_plus_large_objects: should dump CONSTRAINT NOT NULL / NOT VALID`
+- 002_pg_dump.pl: `not ok 14430 - test_schema_plus_large_objects: should dump CONSTRAINT NOT NULL / NOT VALID (child1)`
+- 002_pg_dump.pl: `not ok 14431 - test_schema_plus_large_objects: should dump CONSTRAINT NOT NULL / NOT VALID (child2)`
+- 002_pg_dump.pl: `not ok 14432 - test_schema_plus_large_objects: should dump CONSTRAINT NOT NULL / NOT VALID (child3)`
+- 002_pg_dump.pl: `not ok 14433 - test_schema_plus_large_objects: should dump CONSTRAINT PRIMARY KEY / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 14434 - test_schema_plus_large_objects: should dump CONSTRAINT UNIQUE / WITHOUT OVERLAPS`
+- 002_pg_dump.pl: `not ok 14435 - test_schema_plus_large_objects: should dump COPY fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 14438 - test_schema_plus_large_objects: should dump COPY test_compression_method`
+- 002_pg_dump.pl: `not ok 14439 - test_schema_plus_large_objects: should dump COPY test_fifth_table`
+- 002_pg_dump.pl: `not ok 14440 - test_schema_plus_large_objects: should dump COPY test_fourth_table`
+- 002_pg_dump.pl: `not ok 14441 - test_schema_plus_large_objects: should dump COPY test_second_table`
+- 002_pg_dump.pl: `not ok 14442 - test_schema_plus_large_objects: should dump COPY test_table`
+- 002_pg_dump.pl: `not ok 14443 - test_schema_plus_large_objects: should dump COPY test_table_identity`
+- 002_pg_dump.pl: `not ok 14444 - test_schema_plus_large_objects: should dump COPY test_third_table`
+- 002_pg_dump.pl: `not ok 14447 - test_schema_plus_large_objects: should dump CREATE AGGREGATE dump_test.newavg`
+- 002_pg_dump.pl: `not ok 14451 - test_schema_plus_large_objects: should dump CREATE CONVERSION dump_test.test_conversion`
+- 002_pg_dump.pl: `not ok 14456 - test_schema_plus_large_objects: should dump CREATE DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 14460 - test_schema_plus_large_objects: should dump CREATE FOREIGN TABLE dump_test.foreign_table SERVER s1`
+- 002_pg_dump.pl: `not ok 14461 - test_schema_plus_large_objects: should dump CREATE FUNCTION ... SUPPORT`
+- 002_pg_dump.pl: `not ok 14462 - test_schema_plus_large_objects: should dump CREATE FUNCTION dump_test.event_trigger_func`
+- 002_pg_dump.pl: `not ok 14463 - test_schema_plus_large_objects: should dump CREATE FUNCTION dump_test.int42_in`
+- 002_pg_dump.pl: `not ok 14464 - test_schema_plus_large_objects: should dump CREATE FUNCTION dump_test.int42_out`
+- 002_pg_dump.pl: `not ok 14465 - test_schema_plus_large_objects: should dump CREATE FUNCTION dump_test.pltestlang_call_handler`
+- 002_pg_dump.pl: `not ok 14466 - test_schema_plus_large_objects: should dump CREATE FUNCTION dump_test.trigger_func`
+- 002_pg_dump.pl: `not ok 14468 - test_schema_plus_large_objects: should dump CREATE INDEX ON ONLY measurement`
+- 002_pg_dump.pl: `not ok 14470 - test_schema_plus_large_objects: should dump CREATE MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 14471 - test_schema_plus_large_objects: should dump CREATE MATERIALIZED VIEW matview_compression`
+- 002_pg_dump.pl: `not ok 14472 - test_schema_plus_large_objects: should dump CREATE MATERIALIZED VIEW matview_fourth`
+- 002_pg_dump.pl: `not ok 14473 - test_schema_plus_large_objects: should dump CREATE MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 14474 - test_schema_plus_large_objects: should dump CREATE MATERIALIZED VIEW matview_third`
+- 002_pg_dump.pl: `not ok 14475 - test_schema_plus_large_objects: should dump CREATE MATERIALIZED VIEW regress_pg_dump_matview_am`
+- 002_pg_dump.pl: `not ok 14476 - test_schema_plus_large_objects: should dump CREATE OPERATOR CLASS dump_test.op_class`
+- 002_pg_dump.pl: `not ok 14477 - test_schema_plus_large_objects: should dump CREATE OPERATOR CLASS dump_test.op_class_custom`
+- 002_pg_dump.pl: `not ok 14478 - test_schema_plus_large_objects: should dump CREATE OPERATOR CLASS dump_test.op_class_empty`
+- 002_pg_dump.pl: `not ok 14479 - test_schema_plus_large_objects: should dump CREATE OPERATOR FAMILY dump_test.op_family`
+- 002_pg_dump.pl: `not ok 14480 - test_schema_plus_large_objects: should dump CREATE POLICY p1 ON test_table`
+- 002_pg_dump.pl: `not ok 14481 - test_schema_plus_large_objects: should dump CREATE POLICY p2 ON test_table FOR SELECT`
+- 002_pg_dump.pl: `not ok 14482 - test_schema_plus_large_objects: should dump CREATE POLICY p3 ON test_table FOR INSERT`
+- 002_pg_dump.pl: `not ok 14483 - test_schema_plus_large_objects: should dump CREATE POLICY p4 ON test_table FOR UPDATE`
+- 002_pg_dump.pl: `not ok 14484 - test_schema_plus_large_objects: should dump CREATE POLICY p5 ON test_table FOR DELETE`
+- 002_pg_dump.pl: `not ok 14485 - test_schema_plus_large_objects: should dump CREATE POLICY p6 ON test_table AS RESTRICTIVE`
+- 002_pg_dump.pl: `not ok 14486 - test_schema_plus_large_objects: should dump CREATE PROCEDURE dump_test.ptest1`
+- 002_pg_dump.pl: `not ok 14494 - test_schema_plus_large_objects: should dump CREATE SCHEMA dump_test`
+- 002_pg_dump.pl: `not ok 14497 - test_schema_plus_large_objects: should dump CREATE SEQUENCE test_table_col1_seq`
+- 002_pg_dump.pl: `not ok 14499 - test_schema_plus_large_objects: should dump CREATE STATISTICS extended_stats_expression`
+- 002_pg_dump.pl: `not ok 14500 - test_schema_plus_large_objects: should dump CREATE STATISTICS extended_stats_no_options`
+- 002_pg_dump.pl: `not ok 14501 - test_schema_plus_large_objects: should dump CREATE STATISTICS extended_stats_options`
+- 002_pg_dump.pl: `not ok 14505 - test_schema_plus_large_objects: should dump CREATE TABLE fk_reference_test_table`
+- 002_pg_dump.pl: `not ok 14506 - test_schema_plus_large_objects: should dump CREATE TABLE measurement PARTITIONED BY`
+- 002_pg_dump.pl: `not ok 14507 - test_schema_plus_large_objects: should dump CREATE TABLE regress_pg_dump_table_am`
+- 002_pg_dump.pl: `not ok 14508 - test_schema_plus_large_objects: should dump CREATE TABLE regress_pg_dump_table_part`
+- 002_pg_dump.pl: `not ok 14509 - test_schema_plus_large_objects: should dump CREATE TABLE table_with_stats`
+- 002_pg_dump.pl: `not ok 14510 - test_schema_plus_large_objects: should dump CREATE TABLE test_compression`
+- 002_pg_dump.pl: `not ok 14511 - test_schema_plus_large_objects: should dump CREATE TABLE test_compression_method`
+- 002_pg_dump.pl: `not ok 14512 - test_schema_plus_large_objects: should dump CREATE TABLE test_fifth_table`
+- 002_pg_dump.pl: `not ok 14513 - test_schema_plus_large_objects: should dump CREATE TABLE test_fourth_table_zero_col`
+- 002_pg_dump.pl: `not ok 14514 - test_schema_plus_large_objects: should dump CREATE TABLE test_inheritance_child`
+- 002_pg_dump.pl: `not ok 14515 - test_schema_plus_large_objects: should dump CREATE TABLE test_inheritance_parent`
+- 002_pg_dump.pl: `not ok 14516 - test_schema_plus_large_objects: should dump CREATE TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 14517 - test_schema_plus_large_objects: should dump CREATE TABLE test_seventh_table`
+- 002_pg_dump.pl: `not ok 14518 - test_schema_plus_large_objects: should dump CREATE TABLE test_sixth_table`
+- 002_pg_dump.pl: `not ok 14519 - test_schema_plus_large_objects: should dump CREATE TABLE test_table`
+- 002_pg_dump.pl: `not ok 14520 - test_schema_plus_large_objects: should dump CREATE TABLE test_table_generated`
+- 002_pg_dump.pl: `not ok 14521 - test_schema_plus_large_objects: should dump CREATE TABLE test_table_generated_child1 (without local columns)`
+- 002_pg_dump.pl: `not ok 14522 - test_schema_plus_large_objects: should dump CREATE TABLE test_table_generated_child2 (with local columns)`
+- 002_pg_dump.pl: `not ok 14523 - test_schema_plus_large_objects: should dump CREATE TABLE test_table_identity`
+- 002_pg_dump.pl: `not ok 14524 - test_schema_plus_large_objects: should dump CREATE TABLE test_third_table_generated_cols`
+- 002_pg_dump.pl: `not ok 14526 - test_schema_plus_large_objects: should dump CREATE TEXT SEARCH CONFIGURATION dump_test.alt_ts_conf1`
+- 002_pg_dump.pl: `not ok 14527 - test_schema_plus_large_objects: should dump CREATE TEXT SEARCH DICTIONARY dump_test.alt_ts_dict1`
+- 002_pg_dump.pl: `not ok 14528 - test_schema_plus_large_objects: should dump CREATE TEXT SEARCH PARSER dump_test.alt_ts_prs1`
+- 002_pg_dump.pl: `not ok 14529 - test_schema_plus_large_objects: should dump CREATE TEXT SEARCH TEMPLATE dump_test.alt_ts_temp1`
+- 002_pg_dump.pl: `not ok 14531 - test_schema_plus_large_objects: should dump CREATE TRIGGER test_trigger`
+- 002_pg_dump.pl: `not ok 14532 - test_schema_plus_large_objects: should dump CREATE TYPE dump_test.composite`
+- 002_pg_dump.pl: `not ok 14533 - test_schema_plus_large_objects: should dump CREATE TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 14534 - test_schema_plus_large_objects: should dump CREATE TYPE dump_test.int42 populated`
+- 002_pg_dump.pl: `not ok 14535 - test_schema_plus_large_objects: should dump CREATE TYPE dump_test.planets AS ENUM`
+- 002_pg_dump.pl: `not ok 14537 - test_schema_plus_large_objects: should dump CREATE TYPE dump_test.textrange AS RANGE`
+- 002_pg_dump.pl: `not ok 14538 - test_schema_plus_large_objects: should dump CREATE TYPE dump_test.undefined`
+- 002_pg_dump.pl: `not ok 14540 - test_schema_plus_large_objects: should dump CREATE VIEW test_view`
+- 002_pg_dump.pl: `not ok 14541 - test_schema_plus_large_objects: should dump Check ordering of a function that depends on a primary key`
+- 002_pg_dump.pl: `not ok 14542 - test_schema_plus_large_objects: should dump Check ordering of a matview that depends on a primary key`
+- 002_pg_dump.pl: `not ok 14543 - test_schema_plus_large_objects: should dump Creation of row-level trigger in partitioned table`
+- 002_pg_dump.pl: `not ok 14565 - test_schema_plus_large_objects: should dump GRANT ALL ON LARGE OBJECT ...`
+- 002_pg_dump.pl: `not ok 14568 - test_schema_plus_large_objects: should dump GRANT INSERT(col1) ON TABLE test_second_table`
+- 002_pg_dump.pl: `not ok 14570 - test_schema_plus_large_objects: should dump GRANT SELECT ON TABLE measurement`
+- 002_pg_dump.pl: `not ok 14572 - test_schema_plus_large_objects: should dump GRANT SELECT ON TABLE test_table`
+- 002_pg_dump.pl: `not ok 14573 - test_schema_plus_large_objects: should dump GRANT USAGE ON DOMAIN dump_test.us_postal_code`
+- 002_pg_dump.pl: `not ok 14578 - test_schema_plus_large_objects: should dump GRANT USAGE ON TYPE dump_test.int42`
+- 002_pg_dump.pl: `not ok 14579 - test_schema_plus_large_objects: should dump GRANT USAGE ON TYPE dump_test.planets - ENUM`
+- 002_pg_dump.pl: `not ok 14580 - test_schema_plus_large_objects: should dump GRANT USAGE ON TYPE dump_test.textrange - RANGE`
+- 002_pg_dump.pl: `not ok 14588 - test_schema_plus_large_objects: should dump LO create (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 14589 - test_schema_plus_large_objects: should dump LO create (with no data)`
+- 002_pg_dump.pl: `not ok 14590 - test_schema_plus_large_objects: should dump LO load (using lo_from_bytea)`
+- 002_pg_dump.pl: `not ok 14592 - test_schema_plus_large_objects: should dump REFRESH MATERIALIZED VIEW matview`
+- 002_pg_dump.pl: `not ok 14594 - test_schema_plus_large_objects: should dump REFRESH MATERIALIZED VIEW matview_second`
+- 002_pg_dump.pl: `not ok 14601 - test_schema_plus_large_objects: should dump REVOKE USAGE ON LANGUAGE plpgsql FROM public`
+- 002_pg_dump.pl: `not ok 14605 - test_schema_plus_large_objects: should dump relstats_on_unanalyzed_tables`
+- 002_pg_dump.pl: `not ok 14606 - test_schema_plus_large_objects: should dump restrict`
+- 002_pg_dump.pl: `not ok 14607 - test_schema_plus_large_objects: should dump statistics_import`
+- 002_pg_dump.pl: `not ok 14609 - test_schema_plus_large_objects: should dump unrestrict`
+- 004_pg_dump_parallel.pl: `not ok 1 - parallel dump`
+- 004_pg_dump_parallel.pl: `not ok 2 - parallel restore`
+- 004_pg_dump_parallel.pl: `not ok 3 - parallel dump as inserts`
+- 004_pg_dump_parallel.pl: `not ok 4 - parallel restore as inserts`
+- 005_pg_dump_filterfile.pl: `not ok 1 - filter file without patterns`
+- 005_pg_dump_filterfile.pl: `not ok 2 - table one dumped`
+- 005_pg_dump_filterfile.pl: `not ok 3 - table two dumped`
+- 005_pg_dump_filterfile.pl: `not ok 4 - table three dumped`
+- 005_pg_dump_filterfile.pl: `not ok 5 - table three one dumped`
+- 005_pg_dump_filterfile.pl: `not ok 6 - dump tables with filter patterns as well as comments and whitespace`
+- 005_pg_dump_filterfile.pl: `not ok 7 - dumped table one`
+- 005_pg_dump_filterfile.pl: `not ok 8 - dumped table two`
+- 005_pg_dump_filterfile.pl: `not ok 12 - content of table two is included`
+- 005_pg_dump_filterfile.pl: `not ok 13 - filter file without patterns`
+- 005_pg_dump_filterfile.pl: `not ok 14 - dumped table one`
+- 005_pg_dump_filterfile.pl: `not ok 15 - dumped table two`
+- 005_pg_dump_filterfile.pl: `not ok 16 - dumped table three`
+- 005_pg_dump_filterfile.pl: `not ok 17 - dump tables with exclusion of a single table`
+- 005_pg_dump_filterfile.pl: `not ok 19 - dumped table two`
+- 005_pg_dump_filterfile.pl: `not ok 20 - dumped table three`
+- 005_pg_dump_filterfile.pl: `not ok 21 - dumped table three_one`
+- 005_pg_dump_filterfile.pl: `not ok 22 - dump tables with wildcard in pattern`
+- 005_pg_dump_filterfile.pl: `not ok 25 - dumped table three`
+- 005_pg_dump_filterfile.pl: `not ok 26 - dumped table three_one`
+- 005_pg_dump_filterfile.pl: `not ok 27 - dump tables with multiline names requiring quoting`
+- 005_pg_dump_filterfile.pl: `not ok 28 - dump table with new line in name`
+- 005_pg_dump_filterfile.pl: `not ok 29 - dump tables with filter`
+- 005_pg_dump_filterfile.pl: `not ok 31 - exclude the public schema`
+- 005_pg_dump_filterfile.pl: `not ok 33 - exclude the public schema with multiple filters`
+- 005_pg_dump_filterfile.pl: `not ok 35 - dump tables with filter`
+- 005_pg_dump_filterfile.pl: `not ok 36 - dump table with multiline strange name`
+- 005_pg_dump_filterfile.pl: `not ok 37 - dump tables with filter`
+- 005_pg_dump_filterfile.pl: `not ok 38 - dump table with multiline strange name`
+- 005_pg_dump_filterfile.pl: `not ok 40 - dump nonexisting foreign server: matches`
+- 005_pg_dump_filterfile.pl: `not ok 41 - dump foreign_data with filter`
+- 005_pg_dump_filterfile.pl: `not ok 42 - dump foreign server`
+- 005_pg_dump_filterfile.pl: `not ok 44 - erroneously exclude foreign server: matches`
+- 005_pg_dump_filterfile.pl: `not ok 46 - invalid syntax: incorrect filter command: matches`
+- 005_pg_dump_filterfile.pl: `not ok 48 - invalid syntax: invalid object type specified: matches`
+- 005_pg_dump_filterfile.pl: `not ok 50 - invalid syntax: missing object identifier pattern: matches`
+- 005_pg_dump_filterfile.pl: `not ok 52 - invalid syntax: extra content after object identifier pattern: matches`
+- 005_pg_dump_filterfile.pl: `not ok 53 - strict names with matching pattern`
+- 005_pg_dump_filterfile.pl: `not ok 54 - no table dumped`
+- 005_pg_dump_filterfile.pl: `not ok 56 - inclusion of non-existing objects with --strict names: matches`
+- 005_pg_dump_filterfile.pl: `not ok 57 - dump tables with exclusion of a database`
+- 005_pg_dump_filterfile.pl: `not ok 59 - database template1 is dumped`
+- 005_pg_dump_filterfile.pl: `not ok 61 - pg_dumpall: option --exclude-database cannot be used together with -g/--globals-only: matches`
+- 005_pg_dump_filterfile.pl: `not ok 63 - invalid syntax: incorrect filter command: matches`
+- 005_pg_dump_filterfile.pl: `not ok 65 - invalid syntax: exclusion of non-existing object type: matches`
+- 005_pg_dump_filterfile.pl: `not ok 67 - invalid syntax: exclusion of unsupported object type: matches`
+- 005_pg_dump_filterfile.pl: `not ok 68 - dump all tables`
+- 005_pg_dump_filterfile.pl: `not ok 69 - restore tables with filter`
+- 005_pg_dump_filterfile.pl: `not ok 70 - wanted table restored`
+- 005_pg_dump_filterfile.pl: `not ok 73 - invalid syntax: inclusion of unallowed object: matches`
+- 005_pg_dump_filterfile.pl: `not ok 75 - invalid syntax: inclusion of unallowed object: matches`
+- 005_pg_dump_filterfile.pl: `not ok 77 - invalid syntax: exclusion of unallowed object: matches`
+- 005_pg_dump_filterfile.pl: `not ok 79 - invalid syntax: exclusion of unallowed object: matches`
+- 005_pg_dump_filterfile.pl: `not ok 80 - dump all objects from sourcedb`
+- 005_pg_dump_filterfile.pl: `not ok 81 - restore function with filter`
+- 005_pg_dump_filterfile.pl: `not ok 82 - wanted function restored`
+- 005_pg_dump_filterfile.pl: `not ok 84 - restore function with filter`
+- 005_pg_dump_filterfile.pl: `not ok 85 - wanted function restored`
+- 005_pg_dump_filterfile.pl: `not ok 86 - restore function with filter`
+- 005_pg_dump_filterfile.pl: `not ok 87 - wanted index restored`
+- 005_pg_dump_filterfile.pl: `not ok 89 - wanted trigger restored`
+- 005_pg_dump_filterfile.pl: `not ok 91 - restore function with filter`
+- 005_pg_dump_filterfile.pl: `not ok 92 - wanted table from schema restored`
+- 005_pg_dump_filterfile.pl: `not ok 93 - wanted sequence from schema restored`
+- 005_pg_dump_filterfile.pl: `not ok 95 - restore function with filter`
+- 005_pg_dump_filterfile.pl: `not ok 98 - wanted table restored`
+- 005_pg_dump_filterfile.pl: `not ok 99 - wanted table restored`
+- 005_pg_dump_filterfile.pl: `not ok 100 - filter file without patterns`
+- 005_pg_dump_filterfile.pl: `not ok 101 - dumped children table`
+- 005_pg_dump_filterfile.pl: `not ok 102 - filter file without patterns`
+- 005_pg_dump_filterfile.pl: `not ok 104 - filter file without patterns`
+- 005_pg_dump_filterfile.pl: `not ok 105 - dumped children table`
+- 005_pg_dump_filterfile.pl: `not ok 108 - dump nonexisting extension: matches`
+
