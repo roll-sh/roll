@@ -1,0 +1,26 @@
+{
+  "utc": "2026-11-04T13:57:05.699606+00:00",
+  "owner": 163,
+  "tested_source_pending": "4c5496833385eb2df038b465b30f7bab4e71595f + a163_review_sizes fixture",
+  "source_mutations": false,
+  "backup": {
+    "commit": "7d1bc479589d8cb481638cf18299dab08d493511",
+    "ref": "wip/resume-20261104-a163-followup-backup1",
+    "ls_remote_verified": true,
+    "committed_evidence_hashes_verified": true
+  },
+  "fixture_checkpoint": {
+    "commit": "9bcf87d23ce96789c9e5b290eeb8a35041b1c0f4",
+    "ref": "wip/resume-20261104-a163-followup-fixture1",
+    "ls_remote_verified": true,
+    "committed_evidence_hashes_verified": true
+  },
+  "red_job": {
+    "heavy_pid": 844740,
+    "state": "QUEUED",
+    "runner": "index163_followup/red.py"
+  },
+  "bitmap_spec": "cache-only draft roll-bitmap-recheck.spec, not tested",
+  "candidate_acceptance": "HELD; reproduction/fixes/exact gates incomplete",
+  "169": "untouched; dedicated parent performance worker owns"
+}

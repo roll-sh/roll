@@ -1,0 +1,141 @@
+{
+  "source_head": "37e9896225915add74cb51e0d966765cdf01d8b4",
+  "status": "EXACT COMMAND OUTCOMES IN results.json; prior failures retained; no performance/combined-service claim",
+  "files": [
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/apply-fix.py",
+      "bytes": 2210,
+      "sha256": "c18d30d1a5f424f105519dbe6a9e00d878236a9b350190c6613078afc36fb565"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/export.py",
+      "bytes": 3382,
+      "sha256": "541dc8ace0d5ff9de12de637ac0e42ad4fbeeb15d6218d8a560d81637d23d7d6"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/red-isolated.py",
+      "bytes": 1637,
+      "sha256": "a55c515298355047754a0f18905ab007a1e0e88bdb7aa26186342c4b1d458b2b"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/red-isolated/a163_review_sizes.actual",
+      "bytes": 3309,
+      "sha256": "8f4226b2655d47c34cc9b87efa01787d4518b4f0aaa6e295bb2af811be519270"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/red-isolated/a163_review_sizes.out",
+      "bytes": 3632,
+      "sha256": "8465075fb6aeb86486ebbb36ac72ba29c0ee5c56e629895082e5a84e88d53ace"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/red-isolated/a163_review_sizes.sql",
+      "bytes": 2040,
+      "sha256": "2415bfa4a31439e917713222c0bd33b9fdbf523c7bc7d11bb741f89d7b4c9104"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/red-isolated/complete",
+      "bytes": 54,
+      "sha256": "68476670545b9d20e9157a42a23c62328a6f70eb182f740648cd2356dd8256de"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/red-isolated/engine-red.log",
+      "bytes": 1462,
+      "sha256": "cfd8a757940122a64e8b107d6b9cb47113ddfd5b48ed5eb9a05391c3fd0a4d96"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/red-isolated/pg18-record.log",
+      "bytes": 424,
+      "sha256": "c0c9a2305675369b3797d52f5c0293b1f6b999dfe920cad03d627dcf35142cb3"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/red-isolated/results.json",
+      "bytes": 581,
+      "sha256": "71b39beaba420efcd37edc8914e7dd4c8f10ca204328b8e4331cfec0f7f5d266"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/red-isolated/source-head",
+      "bytes": 41,
+      "sha256": "4ec11c431964559337cef6f06a7aac1f0fcdfdf834f878849bd8a4b81fc1610d"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/red-isolated/source.diff",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/red.py",
+      "bytes": 1628,
+      "sha256": "8a0bd72584a430241fa648c867c6ed7d1f78705677ed56dee7c78e60adc6104f"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/red/a163_review_sizes.actual",
+      "bytes": 3074,
+      "sha256": "74a299a0b3e34d07a2d95de114fcb9e22a3dcb378b5d6d58d7ef29473ec376a8"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/red/a163_review_sizes.out",
+      "bytes": 3488,
+      "sha256": "c23e800e013624eade1eb14e1c600f245fe80356387a623a10d6762afeea09fc"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/red/a163_review_sizes.sql",
+      "bytes": 1924,
+      "sha256": "d5b3ba7f043eb9ea4523d9e1fa280df456567fc446a707d613a8e598cd6312bf"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/red/complete",
+      "bytes": 54,
+      "sha256": "68476670545b9d20e9157a42a23c62328a6f70eb182f740648cd2356dd8256de"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/red/engine-red.log",
+      "bytes": 1527,
+      "sha256": "4a5f8e01f7c99e496ec043b74c4834fc42ec686849ab9eea15419f7108a1c9aa"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/red/pg18-record.log",
+      "bytes": 424,
+      "sha256": "2469a01173baf77645b229e15bcdc01068cb9cad5509e5d734d84b3d3bb3af87"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/red/results.json",
+      "bytes": 581,
+      "sha256": "71b39beaba420efcd37edc8914e7dd4c8f10ca204328b8e4331cfec0f7f5d266"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/red/source-head",
+      "bytes": 41,
+      "sha256": "4ec11c431964559337cef6f06a7aac1f0fcdfdf834f878849bd8a4b81fc1610d"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/red/source.diff",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/reference-identity.json",
+      "bytes": 1055,
+      "sha256": "0d5b6ef8a0fd2c2d2fb8c4476bbfbe4f7a85460245e7fd121bb974207d393ed2"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/roll-bitmap-recheck.spec",
+      "bytes": 1387,
+      "sha256": "593519df6907df85738bf791c27b364cfe99703814ae1b6b796fc0466c798231"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/snapshot.py",
+      "bytes": 1552,
+      "sha256": "a4d58a40288dff2b5e6d26cc20d15a6982fef13c90527d4012de4dadb27d4053"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/status.json",
+      "bytes": 953,
+      "sha256": "d3918860b13987e453ea2652a963e13a5e4005b4c330bcb7016864b529150f1c"
+    },
+    {
+      "path": "crates/pg-engine/results/2026-11-04/resume-owner163-review-red1/verify.py",
+      "bytes": 3229,
+      "sha256": "556205d7dfd20c3bade2876a9481d4f82552ce5e2c73bd8afb394abfe237f744"
+    }
+  ]
+}

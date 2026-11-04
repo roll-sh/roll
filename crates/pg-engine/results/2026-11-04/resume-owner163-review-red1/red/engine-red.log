@@ -1,0 +1,41 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running tests/golden.rs (/home/meszmate/.cache/a163/target/debug/deps/golden-6af41b6f5ce20b8e)
+
+running 1 test
+
+thread '<unnamed>' (1119039) panicked at crates/pg-engine/tests/golden.rs:191:9:
+1 of 1 golden files differ:
+
+a163_review_sizes.sql:
+   > CREATE INDEX a163_review_i ON a163_review_include (k) INCLUDE (payload)
+ - ERROR 54000: index row size 2816 exceeds btree version 4 maximum 2704 for index "a163_review_i"
+ + -- CREATE INDEX
+ - DETAIL: Index row references tuple (0,1) in relation "a163_review_include".
+ + 
+ - HINT: Values larger than 1/3 of a buffer page cannot be indexed.
+ + > TRUNCATE a163_review_include
+ - Consider a function index of an MD5 hash of the value, or use full text indexing.
+ + -- TRUNCATE TABLE
+ - OBJECTS: schema=public table=a163_review_include constraint=a163_review_i
+ + 
+ - 
+ + > INSERT INTO a163_review_include VALUES (1, a163_review_text(8300))
+ - > TRUNCATE a163_review_include
+ + ERROR 54000: index row requires 8320 bytes, maximum size is 8191
+ - -- TRUNCATE TABLE
+ + 
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'golden' (1119038) panicked at crates/pg-engine/tests/golden.rs:147:10:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+test golden ... FAILED
+
+failures:
+
+failures:
+    golden
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.19s
+
+error: test failed, to rerun pass `-p pg-engine --test golden`

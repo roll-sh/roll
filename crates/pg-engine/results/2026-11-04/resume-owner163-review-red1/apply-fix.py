@@ -1,0 +1,15 @@
+from pathlib import Path
+r=Path('/home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/crates/pg-engine/src')
+p=r/'exec/rowsize.rs';s=p.read_text();s=s.replace('Value::Text(s) => s.len() + 8,','Value::Text(s) if s.is_ascii() => s.len() + 8,')
+s=s.replace('if surely_small(&all) {','if surely_small(&all)\n        && !bix.keys.iter().any(|k| matches!(k.ty(), DataType::Bpchar(_)))\n        && !bix.index.include.iter().any(|&i| matches!(t.columns[i].ty, DataType::Bpchar(_)))\n    {')
+s=s.replace('!e.is_null() && !surely_small(std::slice::from_ref(*e))','!e.is_null() && (matches!(a.elem, DataType::Bpchar(_)) || !surely_small(std::slice::from_ref(*e)))')
+p.write_text(s)
+p=r/'session/ddl/table.rs';s=p.read_text();start=s.index('    pub(super) fn build_index(&mut self');end=s.index('    pub(super) fn duplicate_key',start);a=s[start:end]
+a=a.replace('let mut step = |dkey: &[u8], vals: &[Value]| -> Result<()> {','let mut duplicate = None;\n        let mut step = |dkey: &[u8], vals: &[Value], row: &[Value]| -> Result<()> {')
+a=a.replace('Some(vals), &[], counts','Some(vals), row, counts').replace('&bix, vals, &[], counts','&bix, vals, row, counts')
+a=a.replace('if ix.unique && (ix.nulls_not_distinct','if duplicate.is_none() && ix.unique && (ix.nulls_not_distinct')
+a=a.replace('return Err(self.duplicate_key(t, &bix, first.as_deref().unwrap_or(vals), &ix.name));','// PostgreSQL forms every heap row before its unique sort. A later\n                    // unformable tuple must still win over this duplicate.\n                    duplicate = Some(self.duplicate_key(t, &bix, first.as_deref().unwrap_or(vals), &ix.name));')
+a=a.replace('step(&dkey, &vals)?;','step(&dkey, &vals, &row)?;')
+a=a.replace('        drop(seen);','        drop(seen);\n        if let Some(e) = duplicate {\n            return Err(e);\n        }')
+s=s[:start]+a+s[end:];p.write_text(s)
+p=r/'session/ddl/vacuum.rs';s=p.read_text();s=s.replace("each row's data key and key values of", "each row's data key, key values and row values of");s=s.replace('dyn FnMut(&[u8], &[Value]) -> Result<()>','dyn FnMut(&[u8], &[Value], &[Value]) -> Result<()>');s=s.replace('f(&dkey, &vals)?;','f(&dkey, &vals, &row)?;');p.write_text(s)
