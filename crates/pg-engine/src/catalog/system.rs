@@ -4820,14 +4820,39 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
             }
         }
         PgInherits => {
-            for t in cat.tables.values() {
+            // (The children through the inheritance index, and the indexes attached to
+            // partitioned ones through `IndexIx::attached`, in oid order as the maps have
+            // them: visiting every table and index took a millisecond per read at 10,000
+            // tables, psql's `\d` reads it twice.)
+            let mut rows = Vec::new();
+            let mut kids: Vec<u32> = cat.inheritance().flat_map(|(_, c)| c.iter().copied()).collect();
+            kids.sort_unstable();
+            kids.dedup();
+            for t in kids.iter().filter_map(|k| cat.tables.get(k)) {
                 for (i, p) in t.inherits.iter().enumerate() {
-                    out.push(vec![o(t.oid), o(*p), i4(i as i64 + 1), b(i == 0 && t.detach_pending)]);
+                    rows.push(vec![o(t.oid), o(*p), i4(i as i64 + 1), b(i == 0 && t.detach_pending)]);
                 }
             }
-            for ix in cat.indexes.values().filter(|ix| ix.parent != 0) {
-                out.push(vec![o(ix.oid), o(ix.parent), i4(1), b(false)]);
+            let mut attached: Vec<u32> = (cat.indexes.ix().attached.iter()).flat_map(|(_, c)| c.keys()).collect();
+            attached.sort_unstable();
+            attached.dedup();
+            for ix in attached.iter().filter_map(|i| cat.indexes.get(i)).filter(|ix| ix.parent != 0) {
+                rows.push(vec![o(ix.oid), o(ix.parent), i4(1), b(false)]);
             }
+            #[cfg(debug_assertions)]
+            {
+                let mut all = Vec::new();
+                for t in cat.tables.values() {
+                    for (i, p) in t.inherits.iter().enumerate() {
+                        all.push(vec![o(t.oid), o(*p), i4(i as i64 + 1), b(i == 0 && t.detach_pending)]);
+                    }
+                }
+                for ix in cat.indexes.values().filter(|ix| ix.parent != 0) {
+                    all.push(vec![o(ix.oid), o(ix.parent), i4(1), b(false)]);
+                }
+                debug_assert!(all == rows, "pg_inherits from the inheritance indexes");
+            }
+            out.extend(rows);
         }
         PgRewrite => {
             out.extend(super::static_rows::rows(table).iter().cloned());
