@@ -1,0 +1,29 @@
+{
+  "head": "c1594cc6c9fac649ee76a86d711e1bf880871f08",
+  "stage": "debug",
+  "exit": 0,
+  "passed_tests": 447,
+  "ignored": [
+    "ext::vector::tests::kernel_speed",
+    "ext::vector::tests::reference_fixture",
+    "against_reference",
+    "probe",
+    "reduce",
+    "replay_case",
+    "run",
+    "smoke",
+    "loopback_traffic",
+    "pg_contrib",
+    "pg_dump_roundtrip",
+    "pg_dump_tap",
+    "pg_psql_meta",
+    "pg_isolation",
+    "pg_regress",
+    "pgvector_equality",
+    "restart_cost",
+    "record_reference_transcript"
+  ],
+  "source_unchanged": true,
+  "log_sha256": "1b13d36a4f179e00b0aed377fdde0dcc639c3851a6905a06c6fa808206915ad4",
+  "broader_gates": "release/clippy/crash30/postgres-unit pending; compatibility/performance/footprint not accepted"
+}
