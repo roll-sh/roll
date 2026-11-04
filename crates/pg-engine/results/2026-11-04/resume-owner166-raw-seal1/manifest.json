@@ -1,0 +1,512 @@
+{
+  "utc": "2026-11-04T12:49:47.075842+00:00",
+  "owner": 166,
+  "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+  "head_observed": "fc57bb52e7f87a81aeb4b4112b5b0c712dfa1318",
+  "scope": "new sibling sealed raw evidence only; no source/index/HEAD/worktree mutation",
+  "files": [
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/current-checks/a166-checks/build.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/current-checks/a166-checks/build.log",
+      "bytes": 701,
+      "sha256": "57d477dd70928617d0bc72d321183753cc4ebaccd4906728ac1ee72aff6a289f",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "297e77ea8b9cf7ff60b417ea38b9f7d7d304917b"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/current-checks/a166-checks/clippy.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/current-checks/a166-checks/clippy.log",
+      "bytes": 10446,
+      "sha256": "8f40f5b229ce25ae11e75033184e7bfa86ab4e2bb1aca897db0cb980496bc276",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "14230f11001a968dc6e19c908c646f1f7a0dff73"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/current-checks/a166-checks/focused.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/current-checks/a166-checks/focused.log",
+      "bytes": 13176,
+      "sha256": "197266f7cee8c8fb408433f5bffc0918fa1def5137ae89b8d4d60763e157ecd3",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "abc0d28813fd7b73cfd212dcd75fee77cc7f0564"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/current-checks/a166-checks/pg-e2e.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/current-checks/a166-checks/pg-e2e.log",
+      "bytes": 47122,
+      "sha256": "793da4fef677ccf7fd75d5ad8bc679bc217b0a6cfa2e06c0e1c9eb78b42e9d97",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "c04d1104446290163526fe971099ac88585220c1"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/current-checks/a166-checks/pgdump.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/current-checks/a166-checks/pgdump.log",
+      "bytes": 486,
+      "sha256": "5c44d83d5e4f85976aaacf01f4eb5546031b31194e61a809cb2545130bd55db1",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "b3d1c47c6df6988e73b583720c0c6c55a6a7e2cc"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/current-checks/a166-pgdump-fixed/pgdump-outcomes.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/current-checks/a166-pgdump-fixed/pgdump-outcomes.log",
+      "bytes": 348,
+      "sha256": "3f59fb2f6edaff450d536b5ceb8b49d03b14bbf490367a578e9212debde048d4",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "b066b2b395b3fe132a68ee1612744ea57c85846a"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/current-checks/a166-pgdump-fixed/pgdump.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/current-checks/a166-pgdump-fixed/pgdump.log",
+      "bytes": 538,
+      "sha256": "7307f9e52cf60ae1a806cf91f8979d275c2f4c5da446d5be55cb03309ec3def3",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "0caf4b15ef7578919934366bef5e2bf51c110368"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/current-checks/a166-pgdump-fixed.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/current-checks/a166-pgdump-fixed.log",
+      "bytes": 782,
+      "sha256": "29b5d3ceaef47df2725f0dfec0a7c1ded57b57cf81e07aefb1c24680b0bc6ac2",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "d0b3cc5ff939ba67240c91a6747b98f94602a7ba"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/current-checks/a166-remainder.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/current-checks/a166-remainder.log",
+      "bytes": 2171,
+      "sha256": "e9cfb69fd81b6b9dbfa9999f69b2040020d588be47cc5e5f90a455e2ac92e697",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "46872278a0e72a21230608bbc37f5569664064b2"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/historical-clippy.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/historical-clippy.log",
+      "bytes": 10778,
+      "sha256": "4b2dbfbf3bbfe3285b7de143d07a2c9f2ea602e5baea3954fc4e8b3014e243bd",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": "4b2dbfbf3bbfe3285b7de143d07a2c9f2ea602e5baea3954fc4e8b3014e243bd",
+      "prior_status": "EXACT",
+      "git_blob": "47fd3d67cb3d4b1f0736c5fc4b85e7309464fad2"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/historical-job-d1.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/historical-job-d1.log",
+      "bytes": 287,
+      "sha256": "21858bc218b445476dd0eca31add374c98904fa5e2ba8eca46c948169f68b646",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": "21858bc218b445476dd0eca31add374c98904fa5e2ba8eca46c948169f68b646",
+      "prior_status": "EXACT",
+      "git_blob": "93485772f48ea6e71f51106dd2c328338cb81e3e"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/historical-job-e1.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/historical-job-e1.log",
+      "bytes": 774,
+      "sha256": "8ae7dc3747073b62e91ee9da2cc7f54d5436ab0df0fffb0fabaaf6b64e971d33",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": "8ae7dc3747073b62e91ee9da2cc7f54d5436ab0df0fffb0fabaaf6b64e971d33",
+      "prior_status": "EXACT",
+      "git_blob": "be960a8a1da9ead38085f893789426fdbf5d007f"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/historical-pgdump-failure.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/historical-pgdump-failure.log",
+      "bytes": 695,
+      "sha256": "c747e540084f9895ee4f9a795fef0b2e1ceb97eb63b315b563cd4a7ef7c34ef8",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": "c747e540084f9895ee4f9a795fef0b2e1ceb97eb63b315b563cd4a7ef7c34ef8",
+      "prior_status": "EXACT",
+      "git_blob": "dfdf882a7b1b2952a37bc6957f7eb59371d0f18b"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/historical-regress.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/historical-regress.log",
+      "bytes": 16385,
+      "sha256": "b1e42758b857800ee2f19f4122a4328b86f2da5a1f9cb5c2fd118dc023db0126",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": "b1e42758b857800ee2f19f4122a4328b86f2da5a1f9cb5c2fd118dc023db0126",
+      "prior_status": "EXACT",
+      "git_blob": "0ad08a5ae5926b33d75bb8570278ac72157a80e1"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/historical-test-debug.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/historical-test-debug.log",
+      "bytes": 38413,
+      "sha256": "bc43960e8f400cc10abee762acdb03cbf00030d3a85ca46e1c0bf8456093c4d0",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": "bc43960e8f400cc10abee762acdb03cbf00030d3a85ca46e1c0bf8456093c4d0",
+      "prior_status": "EXACT",
+      "git_blob": "332f26a7dead590d2137ba84a0a0096393837f0b"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/historical-test-release.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/historical-test-release.log",
+      "bytes": 37877,
+      "sha256": "47a1e0c9e1c4a9412289e9632c8f38c5239f49440bd4c6dcd5c8083006f0051a",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": "47a1e0c9e1c4a9412289e9632c8f38c5239f49440bd4c6dcd5c8083006f0051a",
+      "prior_status": "EXACT",
+      "git_blob": "c1a9d1437e6c10cca399ca10f53899c21247a635"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/review-repro/broad-quiet-full/engine.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/review-repro/broad-quiet-full/engine.log",
+      "bytes": 1367,
+      "sha256": "de2ce9ac50b200762ef6e7ba1853ff9eb9f1e64e1186138bb34096cb66727db8",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "f055f1d80fa976a2757e0f4ed19d0d009141b72b"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/review-repro/broad-quiet-full/repro.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/review-repro/broad-quiet-full/repro.log",
+      "bytes": 13,
+      "sha256": "3c737854de412d74a6af1ab6f78aaf9861c4e141d21b5201e7965408cbe35ffd",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "fd427ed89695bf7ea4feacadc6270ac3bd356e12"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/review-repro/cold-catalog/engine.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/review-repro/cold-catalog/engine.log",
+      "bytes": 1369,
+      "sha256": "fb15c12c66bd519f492e9afec48fb34d49f124659243efa293ef7d8f7df3810d",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "38bee4723c704b7cdcf7a600882a7a942506b2f4"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/review-repro/cold-catalog/repro.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/review-repro/cold-catalog/repro.log",
+      "bytes": 13,
+      "sha256": "3c737854de412d74a6af1ab6f78aaf9861c4e141d21b5201e7965408cbe35ffd",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "fd427ed89695bf7ea4feacadc6270ac3bd356e12"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/review-repro/engine.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/review-repro/engine.log",
+      "bytes": 1367,
+      "sha256": "b2de7019578cddb83e6438a78be8ff76975243aa2d6a9e835f7fc3885826fef0",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "1719412f57ee81928dc688dea58447a045d2d86d"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/review-repro/full-join/engine.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/review-repro/full-join/engine.log",
+      "bytes": 1367,
+      "sha256": "ce7d02aba626d80990a9559183e848d32602379707cec99b564e6d87efdd5149",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "5a0c967d4ff2c9b9141f37fc760924224663db8f"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/review-repro/full-join/repro.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/review-repro/full-join/repro.log",
+      "bytes": 13,
+      "sha256": "3c737854de412d74a6af1ab6f78aaf9861c4e141d21b5201e7965408cbe35ffd",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "fd427ed89695bf7ea4feacadc6270ac3bd356e12"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/review-repro/golden-before-fix.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/review-repro/golden-before-fix.log",
+      "bytes": 807,
+      "sha256": "95c5136329d850bf6b0a12b3f627dcd4f07006b3f8b44b92bede4ffe9861163f",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "8d305035063b0135707ed3ba5d1e4919cb8e13a0"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/review-repro/golden-record.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/review-repro/golden-record.log",
+      "bytes": 252,
+      "sha256": "509da7c673eeda5372fcb5e2026639ad6c95505e09ac46a16db9a3b3cbe3cdd2",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "c259c6ebe2116ce9577a5846076c498129cc0694"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/review-repro/golden-regression.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/review-repro/golden-regression.log",
+      "bytes": 605,
+      "sha256": "ab69ce491163c5d3f14a7e56ce9baae82ec0769fccbd34889795541d45c63522",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "12bb07c89a4d5269026ceed2280b0b558fd71774"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/review-repro/repro.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/review-repro/repro.log",
+      "bytes": 13,
+      "sha256": "3c737854de412d74a6af1ab6f78aaf9861c4e141d21b5201e7965408cbe35ffd",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "fd427ed89695bf7ea4feacadc6270ac3bd356e12"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/review-repro/runtime-baseline/engine.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/review-repro/runtime-baseline/engine.log",
+      "bytes": 1367,
+      "sha256": "be54cb938967e2ca71a030f6288accba153aad2691702f81af60668ba385f174",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "36e52139cc1d37161c28bcf110c313aa2fabf888"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/review-repro/runtime-baseline/repro.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/review-repro/runtime-baseline/repro.log",
+      "bytes": 13,
+      "sha256": "3c737854de412d74a6af1ab6f78aaf9861c4e141d21b5201e7965408cbe35ffd",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "fd427ed89695bf7ea4feacadc6270ac3bd356e12"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/review-repro/sorted-outer/engine.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/review-repro/sorted-outer/engine.log",
+      "bytes": 1367,
+      "sha256": "d45c8851eaf71df3abd5d352515bed9a8e21aed80945638035c2785460a3d775",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "24783dcff73dece224f3cd6d0492ec0f4dd74e5a"
+    },
+    {
+      "source": "crates/pg-engine/results/2026-11-04/resume-owner166/review-repro/sorted-outer/repro.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/review-repro/sorted-outer/repro.log",
+      "bytes": 13,
+      "sha256": "3c737854de412d74a6af1ab6f78aaf9861c4e141d21b5201e7965408cbe35ffd",
+      "audited_commit": "962128dde246bd05bcd9ed00f3175e6a299cfb9e",
+      "prior_blob_sha256": null,
+      "prior_status": "MISSING",
+      "git_blob": "fd427ed89695bf7ea4feacadc6270ac3bd356e12"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a166-checks/build.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/a166-checks/build.log",
+      "bytes": 701,
+      "sha256": "57d477dd70928617d0bc72d321183753cc4ebaccd4906728ac1ee72aff6a289f",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "297e77ea8b9cf7ff60b417ea38b9f7d7d304917b"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a166-checks/clippy.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/a166-checks/clippy.log",
+      "bytes": 10446,
+      "sha256": "8f40f5b229ce25ae11e75033184e7bfa86ab4e2bb1aca897db0cb980496bc276",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "14230f11001a968dc6e19c908c646f1f7a0dff73"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a166-checks/focused.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/a166-checks/focused.log",
+      "bytes": 13176,
+      "sha256": "197266f7cee8c8fb408433f5bffc0918fa1def5137ae89b8d4d60763e157ecd3",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "abc0d28813fd7b73cfd212dcd75fee77cc7f0564"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a166-checks/pg-e2e.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/a166-checks/pg-e2e.log",
+      "bytes": 47122,
+      "sha256": "793da4fef677ccf7fd75d5ad8bc679bc217b0a6cfa2e06c0e1c9eb78b42e9d97",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "c04d1104446290163526fe971099ac88585220c1"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a166-checks/pgdump.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/a166-checks/pgdump.log",
+      "bytes": 486,
+      "sha256": "5c44d83d5e4f85976aaacf01f4eb5546031b31194e61a809cb2545130bd55db1",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "b3d1c47c6df6988e73b583720c0c6c55a6a7e2cc"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a166-pgdump-fixed/pgdump-outcomes.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/a166-pgdump-fixed/pgdump-outcomes.log",
+      "bytes": 348,
+      "sha256": "3f59fb2f6edaff450d536b5ceb8b49d03b14bbf490367a578e9212debde048d4",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "b066b2b395b3fe132a68ee1612744ea57c85846a"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a166-pgdump-fixed/pgdump.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/a166-pgdump-fixed/pgdump.log",
+      "bytes": 538,
+      "sha256": "7307f9e52cf60ae1a806cf91f8979d275c2f4c5da446d5be55cb03309ec3def3",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "0caf4b15ef7578919934366bef5e2bf51c110368"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a166-pgdump-fixed.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/a166-pgdump-fixed.log",
+      "bytes": 782,
+      "sha256": "29b5d3ceaef47df2725f0dfec0a7c1ded57b57cf81e07aefb1c24680b0bc6ac2",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "d0b3cc5ff939ba67240c91a6747b98f94602a7ba"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a166-remainder.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/a166-remainder.log",
+      "bytes": 2171,
+      "sha256": "e9cfb69fd81b6b9dbfa9999f69b2040020d588be47cc5e5f90a455e2ac92e697",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "46872278a0e72a21230608bbc37f5569664064b2"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/broad-quiet-full/engine.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/catalog166_review/broad-quiet-full/engine.log",
+      "bytes": 1367,
+      "sha256": "de2ce9ac50b200762ef6e7ba1853ff9eb9f1e64e1186138bb34096cb66727db8",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "f055f1d80fa976a2757e0f4ed19d0d009141b72b"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/broad-quiet-full/repro.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/catalog166_review/broad-quiet-full/repro.log",
+      "bytes": 13,
+      "sha256": "3c737854de412d74a6af1ab6f78aaf9861c4e141d21b5201e7965408cbe35ffd",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "fd427ed89695bf7ea4feacadc6270ac3bd356e12"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/cold-catalog/engine.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/catalog166_review/cold-catalog/engine.log",
+      "bytes": 1369,
+      "sha256": "fb15c12c66bd519f492e9afec48fb34d49f124659243efa293ef7d8f7df3810d",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "38bee4723c704b7cdcf7a600882a7a942506b2f4"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/cold-catalog/repro.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/catalog166_review/cold-catalog/repro.log",
+      "bytes": 13,
+      "sha256": "3c737854de412d74a6af1ab6f78aaf9861c4e141d21b5201e7965408cbe35ffd",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "fd427ed89695bf7ea4feacadc6270ac3bd356e12"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/engine.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/catalog166_review/engine.log",
+      "bytes": 1367,
+      "sha256": "b2de7019578cddb83e6438a78be8ff76975243aa2d6a9e835f7fc3885826fef0",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "1719412f57ee81928dc688dea58447a045d2d86d"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/full-join/engine.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/catalog166_review/full-join/engine.log",
+      "bytes": 1367,
+      "sha256": "ce7d02aba626d80990a9559183e848d32602379707cec99b564e6d87efdd5149",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "5a0c967d4ff2c9b9141f37fc760924224663db8f"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/full-join/repro.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/catalog166_review/full-join/repro.log",
+      "bytes": 13,
+      "sha256": "3c737854de412d74a6af1ab6f78aaf9861c4e141d21b5201e7965408cbe35ffd",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "fd427ed89695bf7ea4feacadc6270ac3bd356e12"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/golden-before-fix.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/catalog166_review/golden-before-fix.log",
+      "bytes": 807,
+      "sha256": "95c5136329d850bf6b0a12b3f627dcd4f07006b3f8b44b92bede4ffe9861163f",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "8d305035063b0135707ed3ba5d1e4919cb8e13a0"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/golden-record.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/catalog166_review/golden-record.log",
+      "bytes": 252,
+      "sha256": "509da7c673eeda5372fcb5e2026639ad6c95505e09ac46a16db9a3b3cbe3cdd2",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "c259c6ebe2116ce9577a5846076c498129cc0694"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/golden-regression.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/catalog166_review/golden-regression.log",
+      "bytes": 605,
+      "sha256": "ab69ce491163c5d3f14a7e56ce9baae82ec0769fccbd34889795541d45c63522",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "12bb07c89a4d5269026ceed2280b0b558fd71774"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/repro.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/catalog166_review/repro.log",
+      "bytes": 13,
+      "sha256": "3c737854de412d74a6af1ab6f78aaf9861c4e141d21b5201e7965408cbe35ffd",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "fd427ed89695bf7ea4feacadc6270ac3bd356e12"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/runtime-baseline/engine.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/catalog166_review/runtime-baseline/engine.log",
+      "bytes": 1367,
+      "sha256": "be54cb938967e2ca71a030f6288accba153aad2691702f81af60668ba385f174",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "36e52139cc1d37161c28bcf110c313aa2fabf888"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/runtime-baseline/repro.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/catalog166_review/runtime-baseline/repro.log",
+      "bytes": 13,
+      "sha256": "3c737854de412d74a6af1ab6f78aaf9861c4e141d21b5201e7965408cbe35ffd",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "fd427ed89695bf7ea4feacadc6270ac3bd356e12"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/sorted-outer/engine.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/catalog166_review/sorted-outer/engine.log",
+      "bytes": 1367,
+      "sha256": "d45c8851eaf71df3abd5d352515bed9a8e21aed80945638035c2785460a3d775",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "24783dcff73dece224f3cd6d0492ec0f4dd74e5a"
+    },
+    {
+      "source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/catalog166_review/sorted-outer/repro.log",
+      "target": "crates/pg-engine/results/2026-11-04/resume-owner166-raw-seal1/cache-raw/catalog166_review/sorted-outer/repro.log",
+      "bytes": 13,
+      "sha256": "3c737854de412d74a6af1ab6f78aaf9861c4e141d21b5201e7965408cbe35ffd",
+      "prior_status": "NEW-RAW-CACHE",
+      "git_blob": "fd427ed89695bf7ea4feacadc6270ac3bd356e12"
+    }
+  ],
+  "manifest_excludes_itself": true
+}

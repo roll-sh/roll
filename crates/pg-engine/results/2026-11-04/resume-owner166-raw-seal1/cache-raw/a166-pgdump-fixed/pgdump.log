@@ -1,0 +1,13 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+     Running tests/pg_dump.rs (/home/meszmate/.cache/a166/target-debug/debug/deps/pg_dump-24d780157db7d64b)
+
+running 1 test
+001_basic.pl: 96 passed, 0 failed
+test pg_dump_tap has been running for over 60 seconds
+002_pg_dump.pl: 14609 passed, 0 failed
+004_pg_dump_parallel.pl: 4 passed, 0 failed
+005_pg_dump_filterfile.pl: 108 passed, 0 failed
+test pg_dump_tap ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 229.31s
+

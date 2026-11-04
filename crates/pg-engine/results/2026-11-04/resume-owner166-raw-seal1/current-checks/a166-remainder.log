@@ -1,0 +1,51 @@
+START build 2026-11-04T11:08:11Z
+build EXIT 0
+   Compiling pg_query v18.0.0 (https://github.com/pganalyze/pg_query.rs?rev=ad0c87ed59c84ec6b42c970bb42d7985b7b5878b#ad0c87ed)
+   Compiling thiserror-impl v2.0.21
+   Compiling tokio-macros v2.7.2
+   Compiling tokio v1.53.3
+   Compiling thiserror v2.0.21
+   Compiling clap v4.6.7
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-ac9369af470e262d2/crates/pg-engine)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 36s
+START focused 2026-11-04T11:10:47Z
+focused EXIT 0
+test golden_shuffled has been running for over 60 seconds
+test golden_shuffled ... ok
+test golden_wire has been running for over 60 seconds
+test golden ... ok
+test golden_wire ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1193.33s
+
+START clippy 2026-11-04T11:33:33Z
+clippy EXIT 0
+2633 | fn parse_vector(s: &str, int2: bool) -> Result<Vec<Value>> {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#items_after_test_module
+     = help: move the items to before the test module was defined
+
+warning: `pg-engine` (lib test) generated 12 warnings (10 duplicates) (run `cargo clippy --fix --lib -p pg-engine --tests -- ` to apply 2 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.28s
+START pgdump 2026-11-04T11:33:34Z
+pgdump EXIT 0
+001_basic.pl: 51 passed, 45 failed
+002_pg_dump.pl: 6934 passed, 7675 failed
+004_pg_dump_parallel.pl: 0 passed, 4 failed
+005_pg_dump_filterfile.pl: 35 passed, 73 failed
+test pg_dump_tap ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 28.91s
+
+START pg-e2e 2026-11-04T11:34:03Z
+pg-e2e EXIT 101
+    restore_in_place_keeps_the_endpoint
+    retention_removes_old_history
+    survives_losing_the_local_disk
+
+test result: FAILED. 12 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 483.30s
+
+error: test failed, to rerun pass `-p pg-control --test e2e`
+[ELIFECYCLE] Command failed with exit code 101.
+HEAVY-EXIT 1

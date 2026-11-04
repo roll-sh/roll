@@ -1,0 +1,13 @@
+commit 0cd26bfd 0 dirty
+== regress 07:49
+Baseline: `tests/regress/results.tsv` (full run of commit `f24d364`, debug build, 2026-11-01 19:09 UTC, reference `t3-d4020b98-regref-f24d3643`). This run: commit `0cd26bf`, debug build. Newly differing units: 0; newly matching: 0.
+pg_regress: 51148/51150 units match (100.0%), report in /home/meszmate/.cache/a166/pgr1/report/REPORT.md
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 1406.11s
+== regress exit 0 08:12
+== dumptap 08:12
+thread 'pg_dump_tap' (12476) panicked at crates/pg-engine/tests/pg_dump.rs:230:5:
+test pg_dump_tap ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+== dumptap exit 101 08:12
+JOB-E-DONE
+HEAVY-EXIT 0
