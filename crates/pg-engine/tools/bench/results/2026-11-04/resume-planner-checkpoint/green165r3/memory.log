@@ -1,0 +1,20 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a640c14a8f76f8ea4/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.63s
+     Running tests/memory_load.rs (/home/meszmate/.cache/a165/target/debug/deps/memory_load-69b55974dfbde33f)
+
+running 4 tests
+default STABLE qual cursor retained: 20000 rows => 20000 stored/4683971 bytes; 100000 rows => 100000 stored/22055318 bytes
+default STABLE qual cursor after CLOSE: -1577 bytes above opened baseline
+test default_cursor_stable_qual_releases_retained_rows_on_close ... ok
+test plain_cursor_restarts_after_own_current_writes ... ok
+selective "NO SCROLL" cursor: scanned100000/qualified1000/stored0/retained10807bytes
+selective "NO SCROLL" cursor CLOSE: -4208bytes above opened baseline
+selective "" cursor: scanned100000/qualified1000/stored100000/retained22053528bytes
+selective "" cursor CLOSE: -4190bytes above opened baseline
+test selective_cursor_qual_memory_and_close ... ok
+streamed cursor retained 0 bytes after 98000 additional rows
+backward fetch of 20000 rows took 145.753565ms
+test streaming_cursor_bounds_keys_and_backward_work ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 82.56s
+

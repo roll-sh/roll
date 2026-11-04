@@ -1,0 +1,22 @@
+{
+  "source": "351af2ac94563fcbb52e080396c74e3371b9c172",
+  "status": "SUPERSEDED",
+  "reason": "R3 confirmed selective NO SCROLL materialization and scalar FROM default-scroll regressions; full suite incomplete, no pass/fail assigned",
+  "owned_processes": {
+    "2142561": [
+      2142517,
+      "/bin/bash /home/meszmate/.cache/pg-engine-resume-20261104/session_planner/check165r2.sh "
+    ],
+    "2142672": [
+      2142561,
+      "/home/meszmate/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo test -p pg-engine "
+    ],
+    "2359500": [
+      2142672,
+      "/home/meszmate/.cache/a165/target/debug/deps/golden-9749ad749af5ca1c "
+    ]
+  },
+  "wrapper": 2142509,
+  "heavy": 2142517,
+  "remaining_processes": {}
+}

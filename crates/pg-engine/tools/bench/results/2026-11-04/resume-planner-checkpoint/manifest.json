@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "b9a08a35852c22a55604f21583ef1946c9809d600c9b7e1869af4d0da605749f",
-    "bytes": 5945
+    "sha256": "ec9c960d946f74003db83f58cd7b83964cf3e81331966d41d0cfededb899edd0",
+    "bytes": 7152
   },
   "check165fixed/SUPERSEDED.json": {
     "sha256": "7f22633dc4bf0ba55a5198297137e6eeaf49c08cebfc42455718ac666b049e8f",
@@ -76,6 +76,46 @@
     "bytes": 93
   },
   "check165r2-runner-error/wrapper-selftest.log": {
+    "sha256": "2819207fe9c2282afd3351414ca5e40d2eb35e561177be1c5ce49c7d55209429",
+    "bytes": 73
+  },
+  "check165r2/SUPERSEDED.json": {
+    "sha256": "c473c54e60d12aaaae9ff724c4907d335e7b35317e7b7058dbc3dd1ada6693b0",
+    "bytes": 731
+  },
+  "check165r2/current.status": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  "check165r2/debug-test.command": {
+    "sha256": "a58cb89f43a482980467f2846f5490a07e7950df8f44eb8825c0aac12cd6eaea",
+    "bytes": 25
+  },
+  "check165r2/debug-test.log": {
+    "sha256": "0817a10a3b9689b306aeb58c1c36aee390fd05dffe8b6a31b7211e0e5d992e94",
+    "bytes": 20605
+  },
+  "check165r2/exits.tsv": {
+    "sha256": "5afdccc0c3a6898bcf901621239b567706c88ec04836a91942b6be918e8e24cb",
+    "bytes": 19
+  },
+  "check165r2/initial.status": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  "check165r2/source.txt": {
+    "sha256": "34d94653dbbfb69b323373fd0759fa984c86e6d911076efdd77de4a24138e7ad",
+    "bytes": 41
+  },
+  "check165r2/tree.txt": {
+    "sha256": "42aea5683f499134295ce51fa8c9010fb0f7d818c334ffa01fdd03d0c3909c9d",
+    "bytes": 41
+  },
+  "check165r2/wrapper-selftest.command": {
+    "sha256": "a5046584e3d8cd4c3f9500836aa760b35402365ec5eccc5d01c164aeab504a4a",
+    "bytes": 93
+  },
+  "check165r2/wrapper-selftest.log": {
     "sha256": "2819207fe9c2282afd3351414ca5e40d2eb35e561177be1c5ce49c7d55209429",
     "bytes": 73
   },
@@ -220,8 +260,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "ce513501a002747858dabede475feec09ed56ccc8ff2b2373228e35c2271b9b3",
-    "bytes": 16731
+    "sha256": "34df2cf66e409a784a6f360db63f2edeb453dd87c585b116c3fd398c18490ea1",
+    "bytes": 18048
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -374,6 +414,74 @@
   "green165r2v2/source.patch": {
     "sha256": "3a805df9195b1ea3eff64286dd1c25b24243a565a79bb4429e68f1d54db5dc7d",
     "bytes": 11883
+  },
+  "green165r3/a165_cursor_edges.out": {
+    "sha256": "e0a1dc53089370d191a7a2a1f626fd2ec1f0fecea24d9b45e77baad7eaa57216",
+    "bytes": 1711
+  },
+  "green165r3/a165_cursor_edges.sql": {
+    "sha256": "1423ec88651fbe34085a8d524a6f31b0587f053194de06a3b08398e462687a0e",
+    "bytes": 1092
+  },
+  "green165r3/a165_cursor_embedded.out": {
+    "sha256": "18508bd5ac750f3a7c67c26b2dac3903dc5dd8826304b9c6b23e22c400a12d08",
+    "bytes": 4299
+  },
+  "green165r3/a165_cursor_embedded.sql": {
+    "sha256": "a9a5bd21a785cfdae88e5efefec8f9b950677f078a3744da3e61569a3dd5e961",
+    "bytes": 1988
+  },
+  "green165r3/a165_cursor_scalar.out": {
+    "sha256": "a91b498a6d6b628cefcc9e4d628b5ff8353a83a86981b573b76a1e055fdeb852",
+    "bytes": 789
+  },
+  "green165r3/a165_cursor_scalar.sql": {
+    "sha256": "55e7a003bff58640e896244545be523fbcf193c5da9ec66af5359501b19f5498",
+    "bytes": 416
+  },
+  "green165r3/current.patch": {
+    "sha256": "75c0d0d5d4a1b08e23fd1465f25947840e95f912f2684d5f1b26ac7a77a30eaf",
+    "bytes": 7745
+  },
+  "green165r3/cursor.command": {
+    "sha256": "b13f258f386b86705fb802b237e1e375d1cdcae2a254272e0cf3de2f21c5f0d0",
+    "bytes": 85
+  },
+  "green165r3/cursor.log": {
+    "sha256": "339cacc4089c113a62af9a623a31ab6c16a6305c61e5d7cb61c8485032d684bc",
+    "bytes": 564
+  },
+  "green165r3/exits.tsv": {
+    "sha256": "50d0e514e29cef63cfa5c178d66cda2e149409a1fc5faf84d4eb378bdf04b67a",
+    "bytes": 25
+  },
+  "green165r3/head.txt": {
+    "sha256": "34d94653dbbfb69b323373fd0759fa984c86e6d911076efdd77de4a24138e7ad",
+    "bytes": 41
+  },
+  "green165r3/lock.command": {
+    "sha256": "f563d0fb0fceeb8419fca7a0e62c78eb5644c5a785a41f1ad9b0c81b374685d3",
+    "bytes": 56
+  },
+  "green165r3/lock.log": {
+    "sha256": "d534c9d3e5a36cba96e32abec1b9159f802ff2591d5f49134b26e66dcd39d89b",
+    "bytes": 637
+  },
+  "green165r3/memory.command": {
+    "sha256": "5515eabac767035db6e5036bb714304e1063b17073ad63edd9e10e3dcd3c3453",
+    "bytes": 67
+  },
+  "green165r3/memory.log": {
+    "sha256": "bb38673c717a6e2ac7f2cc7740aeba4c4856d604f199a89492568647b80c2a24",
+    "bytes": 1251
+  },
+  "green165r3/reference.txt": {
+    "sha256": "121cfc87396a1dc0a77ee635cba80fc31730fa8a0c3117a8e2b73b764cf6aecd",
+    "bytes": 225
+  },
+  "green165r3/source.patch": {
+    "sha256": "75c0d0d5d4a1b08e23fd1465f25947840e95f912f2684d5f1b26ac7a77a30eaf",
+    "bytes": 7745
   },
   "green165v2/cursor.command": {
     "sha256": "b13f258f386b86705fb802b237e1e375d1cdcae2a254272e0cf3de2f21c5f0d0",
@@ -563,6 +671,58 @@
     "sha256": "c4ea863d9b6fcd943c4b5ad1bfec15c9320986f8400a2e5117cf4b2da709ed31",
     "bytes": 31732
   },
+  "red165r3/a165_cursor_scalar.out": {
+    "sha256": "a91b498a6d6b628cefcc9e4d628b5ff8353a83a86981b573b76a1e055fdeb852",
+    "bytes": 789
+  },
+  "red165r3/a165_cursor_scalar.sql": {
+    "sha256": "55e7a003bff58640e896244545be523fbcf193c5da9ec66af5359501b19f5498",
+    "bytes": 416
+  },
+  "red165r3/current.patch": {
+    "sha256": "e0c3453952b59f524210e2ca71e46c445adb01cf9549dda328a0270cac224056",
+    "bytes": 3903
+  },
+  "red165r3/exits.tsv": {
+    "sha256": "a6f65d79adb255e7b15be051087bb36ad74169b53b1967ad5988591a31cd6e2f",
+    "bytes": 31
+  },
+  "red165r3/head.txt": {
+    "sha256": "34d94653dbbfb69b323373fd0759fa984c86e6d911076efdd77de4a24138e7ad",
+    "bytes": 41
+  },
+  "red165r3/memory.command": {
+    "sha256": "8b184221d6912c3af878b4bf0d6201036032f3ee372b8154b54e80909cda3c13",
+    "bytes": 98
+  },
+  "red165r3/memory.log": {
+    "sha256": "ddb331ac1a2b75e454b75b9fb61fd22a2e88f6aedc3866133eaf213228fba9b9",
+    "bytes": 1198
+  },
+  "red165r3/record.command": {
+    "sha256": "657e33f606fc809ad6f9db6cc9d1d07dd0cd2266c2ff35a2b8b3c8306be32a67",
+    "bytes": 140
+  },
+  "red165r3/record.log": {
+    "sha256": "d6256d955d709d4ce6e2ed4785d301499d891fbd044fb5ae42db7c1dbf7a8575",
+    "bytes": 478
+  },
+  "red165r3/reference.txt": {
+    "sha256": "121cfc87396a1dc0a77ee635cba80fc31730fa8a0c3117a8e2b73b764cf6aecd",
+    "bytes": 225
+  },
+  "red165r3/scalar.command": {
+    "sha256": "f7e7cf324c69d21a3bc4694799c89b89c392ac0e30a1d53c7e27f8f39914da18",
+    "bytes": 91
+  },
+  "red165r3/scalar.log": {
+    "sha256": "029a515c0d66b49dd8519a3a53dc815396a41d1d2014a8f6a63c928fb4d2b920",
+    "bytes": 2040
+  },
+  "red165r3/source.patch": {
+    "sha256": "e0c3453952b59f524210e2ca71e46c445adb01cf9549dda328a0270cac224056",
+    "bytes": 3903
+  },
   "review165/exits.tsv": {
     "sha256": "590e981aad8108c0420b664caf96c614afb92a3dd4ea61fa456ca11510abfe14",
     "bytes": 82
@@ -611,6 +771,10 @@
     "sha256": "d6b9bc53b55af8be29c09ffbcbab84fedbaf093334579e25e702600b3d9bf5ef",
     "bytes": 2467
   },
+  "runners/R3-CASE-MATRIX.md": {
+    "sha256": "bab38282c8248db553c43a488f9557d875c95d9a507fb231bf1238c68fbe21bf",
+    "bytes": 2489
+  },
   "runners/audit-footprint.py": {
     "sha256": "037523cd44c6ed24ae24da6ffa204a9fb35f0fa9c17a25013eeed8ea02f56c43",
     "bytes": 1287
@@ -634,6 +798,10 @@
   "runners/check165r2.sh": {
     "sha256": "a78df279e3b8e9b1579b8cddf4043454f275ee052e5afb1dca9d26f2da0a6982",
     "bytes": 2417
+  },
+  "runners/check165r3.sh": {
+    "sha256": "8cac243f117b14bbf911390e510b230728453a9479594b2dc33fad8764b97f49",
+    "bytes": 2703
   },
   "runners/check171.sh": {
     "sha256": "2e118548af8498cc83f162fda45d8928d32f912bb98e46f1c34dd0e901c735a1",
@@ -675,6 +843,10 @@
     "sha256": "e7057e713e0408a9e10086303fa99becdf0b2c69b5f841988757b3a7eea151d8",
     "bytes": 1612
   },
+  "runners/green165r3.sh": {
+    "sha256": "af4c08727a987aed1fbf4a695f5901629f84088554f3ba89eb27c2a6d26aee00",
+    "bytes": 1415
+  },
   "runners/green165v2.sh": {
     "sha256": "5a6789b4a0491a1135f2ca9ce6eaf4a3fcd435f94e57880e61097959c68be6f1",
     "bytes": 1223
@@ -710,6 +882,10 @@
   "runners/prof.sh": {
     "sha256": "9c6e7cdb967e6968e0c8750b6a8daab81c2dbbb7c7beb3d454bc6697bbea1b62",
     "bytes": 2081
+  },
+  "runners/red165r3.sh": {
+    "sha256": "dc9aaf8b39329b4d1f7af1efccb38fa2813e184cbeb7cc20e663221883303818",
+    "bytes": 2084
   },
   "runners/review165.sh": {
     "sha256": "42e97f5aaea2826762dc64f0565d025f99c6a5d2315e8aa442acfa5470236693",

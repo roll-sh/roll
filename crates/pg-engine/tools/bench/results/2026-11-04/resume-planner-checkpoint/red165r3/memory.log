@@ -1,0 +1,25 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a640c14a8f76f8ea4/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.90s
+     Running tests/memory_load.rs (/home/meszmate/.cache/a165/target/debug/deps/memory_load-69b55974dfbde33f)
+
+running 1 test
+selective "NO SCROLL" cursor: scanned100000/qualified1000/stored100000/retained22054343bytes
+selective "NO SCROLL" cursor CLOSE: -2568bytes above opened baseline
+selective "" cursor: scanned100000/qualified1000/stored100000/retained22053528bytes
+selective "" cursor CLOSE: -4190bytes above opened baseline
+
+thread 'selective_cursor_qual_memory_and_close' (3063245) panicked at crates/pg-engine/tests/memory_load.rs:418:5:
+assertion `left == right` failed: NO SCROLL retained rejected scan inputs
+  left: 100000
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test selective_cursor_qual_memory_and_close ... FAILED
+
+failures:
+
+failures:
+    selective_cursor_qual_memory_and_close
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 36.24s
+
+error: test failed, to rerun pass `-p pg-engine --test memory_load`

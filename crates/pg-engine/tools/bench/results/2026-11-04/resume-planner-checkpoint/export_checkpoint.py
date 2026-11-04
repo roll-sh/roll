@@ -69,10 +69,25 @@ DELETE before firstbackward, NOscrollmultiple-reference24000 afterdiscard, keyed
 Default STABLEqual materialization remains O(n):20krows4,683,971bytes;100k22,055,318bytes;
 CLOSE releases them (-1577bytes vsopenedbaseline). NOscroll98kmore rows retained0bytes;
 backward20k143ms is a correctness bound, not an accepted performance comparison.
-The new full gate job is active and its partial outputs are excluded.
-Initial full-runner failed because *test also matched the fakeDocker selftest, applying
-an inappropriate450test-summary assertion. No cargo step ran in that attempt. Exact-name
-summary gating repaired; failed runner/log retained, no false pass claimed.
+The351 fulljob was SUPERSEDED after R3 found selectiveNOscroll retention and scalar
+FROM defaultscroll regressions. Debug incomplete, no fullpass/fail assigned;laterstages
+NOTRUN. Only verified owned root2142561/cargo2142672/golden2359500 were stopped;
+wrapper2142509/heavy2142517 gone, exact cleanupreceipt preserved. Initial full-runner
+failed beforecargo because *test matched fakeDocker selftest;failedrunner retained.
+
+R3 runtime red165r3 confirms scalarPGgolden101(all3modes) and selectiveNOscroll memory101:
+100000scanned/1000matched but100000stored/22,054,343bytes. Case matrix was written before
+source correction, separating backward permission, observable qualrecheck and replay.
+Correction7ffaee17 passes resolvedscroll to cursor setup;non-scroll does not perform
+backward-only splitting. Supported Inner/Left+One+FromCall permit scalar FunctionScan.
+PL/pgSQL factories defer cursor setup until OPEN resolves scrollability.
+Green165r3 passed5goldenfiles×3modes,4locktests,4memorytests. SelectiveNOscroll now
+stored0/10807bytes vs100000scanned/1000matched. Defaultscroll still100000stored/
+22,053,528bytes:O(scanned),notO(result). CLOSE releases the spool. This resource widening
+for newly rechecked observable quals remains an explicit unaccepted limitation;
+no broadspill redesign or global Expr change undertaken. Ownwrite state test proves
+rows discarded beforeUPDATE/DELETE and firstbackward;keyedHOLD claim remains limited.
+Full exact7ffa job active;partial current-source output excluded. Review/gates pending.
 
 Owned cache runners now fail explicitly on logged failures (Bash ! guards do not imply
 errexit). Profiler wrapper records perf/pgbench exits separately. Matrix/scaled scripts
@@ -205,11 +220,11 @@ sources = {
     'fdw172/contrib-base.log': '/home/meszmate/.cache/a172/contrib-base.log',
     'fdw172/REPORT.md': '/home/meszmate/.cache/a172/contrib/run-base/report/REPORT.md',
 }
-for campaign in ('embedded165v2', 'embedded165v3', 'green165r2', 'green165r2v2', 'check165r2-runner-error'):
+for campaign in ('embedded165v2', 'embedded165v3', 'green165r2', 'green165r2v2', 'check165r2-runner-error', 'check165r2', 'red165r3', 'green165r3'):
     for artifact in sorted((D / campaign).iterdir()):
         if artifact.is_file():
             sources[campaign + '/' + artifact.name] = str(artifact)
-for runner in ('embedded165v3.sh', 'green165r2.sh', 'green165r2v2.sh', 'check165r2.sh', 'check165r2-runner-error.sh', 'wrapper-selftest-results.json'):
+for runner in ('embedded165v3.sh', 'green165r2.sh', 'green165r2v2.sh', 'check165r2.sh', 'check165r2-runner-error.sh', 'wrapper-selftest-results.json', 'red165r3.sh', 'green165r3.sh', 'R3-CASE-MATRIX.md', 'check165r3.sh'):
     sources['runners/' + runner] = str(D / runner)
 for name, source in sources.items():
     files[name] = Path(source).read_bytes()
