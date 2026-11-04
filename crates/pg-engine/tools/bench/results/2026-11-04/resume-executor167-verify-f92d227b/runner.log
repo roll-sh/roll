@@ -1,0 +1,3 @@
+{"name": "golden-current", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "parallel-current", "exit": 101, "expected_summary": false, "pass": false}
+HEAVY-EXIT 101

@@ -1,0 +1,23 @@
+{
+  "source": {
+    "head": "3792eaec3ac58e8150080e79731cec2e329e2299",
+    "tree": "8da09c59084e79dcdb2cb323437df0f247475cd3",
+    "status": "",
+    "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "artifacts": {
+    "/home/meszmate/.cache/a167/target/release/deps/golden-09a38f0445a85626": {
+      "sha256": "25fecd86ed4fc248eebb3f5891b0ea814a58f8052855f0a789e3a6900e11a837",
+      "bytes": 85314496,
+      "mtime_ns": 1793796462395762184,
+      "stage": "golden-current"
+    },
+    "/home/meszmate/.cache/a167/target/release/deps/parallel_scan-8d4ffc131bf0eb77": {
+      "sha256": "a483d592025300a49c0735effdf541e4cc427a6046996f211b394296b1ab9356",
+      "bytes": 84798096,
+      "mtime_ns": 1793796467259709202,
+      "stage": "parallel-current"
+    }
+  },
+  "limitation": "Hashes captured after completed stages; original execution logs retain source pin and binary paths."
+}
