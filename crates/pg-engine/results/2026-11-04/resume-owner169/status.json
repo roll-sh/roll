@@ -1,0 +1,9 @@
+{
+  "acceptance": "PENDING",
+  "production_batch": "3459c316 + linked decoding correction in 060c6f4f",
+  "targeted_release": "28 storage and 4 SST tests passed; txn_spill/big_tables/storage_upgrade_batches/drop_storage/toast_storage passed",
+  "proof_tests": "first attempt failed on wrong test-only mvcc_key module import; corrected import awaits rerun",
+  "tombstone_expectation": "requires independent snapshot/conflict/no-resurrection proof before acceptance",
+  "performance": "not remeasured, no faster-than-PG claim",
+  "wrapper": "old HEAVY-EXIT0 masked a real failure; raw failures preserved and local runner fixed"
+}

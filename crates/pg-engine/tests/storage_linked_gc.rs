@@ -1,6 +1,6 @@
 use bytes::Bytes;
-use pg_engine::storage::sst::{SstReader, SstWriter, mvcc_key};
-use pg_engine::storage::{Store, StoreOptions};
+use pg_engine::storage::sst::{SstReader, SstWriter};
+use pg_engine::storage::{Store, StoreOptions, mvcc_key};
 use std::sync::Arc;
 
 #[test]
