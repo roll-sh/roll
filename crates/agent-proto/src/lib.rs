@@ -1154,10 +1154,6 @@ impl Default for ProviderSettings {
     }
 }
 
-fn yes() -> bool {
-    true
-}
-
 fn is_yes(b: &bool) -> bool {
     *b
 }
