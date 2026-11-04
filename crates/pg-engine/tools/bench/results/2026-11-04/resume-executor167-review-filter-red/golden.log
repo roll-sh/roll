@@ -1,0 +1,219 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a6193f5e45a7ae4f1/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 34.32s
+     Running tests/golden.rs (/home/meszmate/.cache/a167/target/debug/deps/golden-9749ad749af5ca1c)
+
+running 3 tests
+test golden ... FAILED
+test golden_shuffled ... FAILED
+test golden_wire ... FAILED
+
+failures:
+
+---- golden stdout ----
+
+thread '<unnamed>' (2782742) panicked at crates/pg-engine/tests/golden.rs:191:9:
+2 of 2 golden files differ:
+
+a167_subplan_nestloop.sql:
+   > FROM a167_o o
+   QUERY PLAN:text
+   Seq Scan on a167_o o (actual rows=30.00 loops=1)
+     SubPlan 1
+       ->  Aggregate (actual rows=1.00 loops=30)
+             ->  Nested Loop (actual rows=1.00 loops=30)
+                   Join Filter: (r.rk = n.rk)
+                   ->  Nested Loop (actual rows=1.00 loops=30)
+                         Join Filter: (n.nk = s.nk)
+                         Rows Removed by Join Filter: 8
+                         ->  Seq Scan on a167_s s (actual rows=1.00 loops=30)
+                               Filter: (sk = ((o.k * 9) + 2))
+ -                             Rows Removed by Filter: 299
+ +                       ->  Seq Scan on a167_n n (actual rows=9.00 loops=30)
+ -                       ->  Seq Scan on a167_n n (actual rows=9.00 loops=30)
+ +                 ->  Seq Scan on a167_r r (actual rows=1.00 loops=30)
+ -                 ->  Seq Scan on a167_r r (actual rows=1.00 loops=30)
+ +                       Filter: (name = 'EUROPE'::text)
+ -                       Filter: (name = 'EUROPE'::text)
+ + -- EXPLAIN
+ -                       Rows Removed by Filter: 2
+ + 
+ - -- EXPLAIN
+ + > SELECT o.k, (SELECT min(s.v) FROM a167_r r JOIN (a167_s s JOIN a167_n n ON n.nk = s.nk) ON r.rk = n.rk
+ - 
+ + >              WHERE r.name = 'EUROPE' AND s.sk = o.k * 9 + 2) AS m
+ - > SELECT o.k, (SELECT min(s.v) FROM a167_r r JOIN (a167_s s JOIN a167_n n ON n.nk = s.nk) ON r.rk = n.rk
+ + > FROM a167_o o ORDER BY o.k
+
+a167_subplan_varied.sql:
+   > FROM a167_o o WHERE o.k <= 6
+   QUERY PLAN:text
+   Seq Scan on a167_o o (actual rows=6.00 loops=1)
+     Filter: (k <= 6)
+     SubPlan 1
+       ->  Aggregate (actual rows=1.00 loops=6)
+             ->  Nested Loop (actual rows=1.00 loops=6)
+                   Join Filter: (r.rk = n.rk)
+                   Rows Removed by Join Filter: 2
+                   ->  Seq Scan on a167_r r (actual rows=0.33 loops=6)
+                         Filter: (rk < (o.k % 3))
+ -                       Rows Removed by Filter: 3
+ +                 ->  Seq Scan on a167_n n (actual rows=9.00 loops=2)
+ -                 ->  Seq Scan on a167_n n (actual rows=9.00 loops=2)
+ + -- EXPLAIN
+ - -- EXPLAIN
+ + 
+ - 
+ + > EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+ - > EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+ + > SELECT o.k, (SELECT count(*) FROM a167_r r JOIN a167_n n ON n.rk = r.rk WHERE r.rk < 2 + o.k % 2)
+ - > SELECT o.k, (SELECT count(*) FROM a167_r r JOIN a167_n n ON n.rk = r.rk WHERE r.rk < 2 + o.k % 2)
+ + > FROM a167_o o WHERE o.k <= 2
+ - > FROM a167_o o WHERE o.k <= 2
+ + QUERY PLAN:text
+ - QUERY PLAN:text
+ + Seq Scan on a167_o o (actual rows=2.00 loops=1)
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'golden' (2782740) panicked at crates/pg-engine/tests/golden.rs:147:10:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+
+---- golden_shuffled stdout ----
+
+thread 'golden_shuffled' (2782741) panicked at crates/pg-engine/tests/golden.rs:373:9:
+GOLDEN_SHUFFLE_SEED=2579: 2 of 2 golden files differ in this order:
+
+a167_subplan_nestloop.sql (file 1 of the order, after ; differs alone too):
+   > FROM a167_o o
+   QUERY PLAN:text
+   Seq Scan on a167_o o (actual rows=30.00 loops=1)
+     SubPlan 1
+       ->  Aggregate (actual rows=1.00 loops=30)
+             ->  Nested Loop (actual rows=1.00 loops=30)
+                   Join Filter: (r.rk = n.rk)
+                   ->  Nested Loop (actual rows=1.00 loops=30)
+                         Join Filter: (n.nk = s.nk)
+                         Rows Removed by Join Filter: 8
+                         ->  Seq Scan on a167_s s (actual rows=1.00 loops=30)
+                               Filter: (sk = ((o.k * 9) + 2))
+ -                             Rows Removed by Filter: 299
+ +                       ->  Seq Scan on a167_n n (actual rows=9.00 loops=30)
+ -                       ->  Seq Scan on a167_n n (actual rows=9.00 loops=30)
+ +                 ->  Seq Scan on a167_r r (actual rows=1.00 loops=30)
+ -                 ->  Seq Scan on a167_r r (actual rows=1.00 loops=30)
+ +                       Filter: (name = 'EUROPE'::text)
+ -                       Filter: (name = 'EUROPE'::text)
+ + -- EXPLAIN
+ -                       Rows Removed by Filter: 2
+ + 
+ - -- EXPLAIN
+ + > SELECT o.k, (SELECT min(s.v) FROM a167_r r JOIN (a167_s s JOIN a167_n n ON n.nk = s.nk) ON r.rk = n.rk
+ - 
+ + >              WHERE r.name = 'EUROPE' AND s.sk = o.k * 9 + 2) AS m
+ - > SELECT o.k, (SELECT min(s.v) FROM a167_r r JOIN (a167_s s JOIN a167_n n ON n.nk = s.nk) ON r.rk = n.rk
+ + > FROM a167_o o ORDER BY o.k
+
+a167_subplan_varied.sql (file 2 of the order, after a167_subplan_nestloop; differs alone too):
+   > FROM a167_o o WHERE o.k <= 6
+   QUERY PLAN:text
+   Seq Scan on a167_o o (actual rows=6.00 loops=1)
+     Filter: (k <= 6)
+     SubPlan 1
+       ->  Aggregate (actual rows=1.00 loops=6)
+             ->  Nested Loop (actual rows=1.00 loops=6)
+                   Join Filter: (r.rk = n.rk)
+                   Rows Removed by Join Filter: 2
+                   ->  Seq Scan on a167_r r (actual rows=0.33 loops=6)
+                         Filter: (rk < (o.k % 3))
+ -                       Rows Removed by Filter: 3
+ +                 ->  Seq Scan on a167_n n (actual rows=9.00 loops=2)
+ -                 ->  Seq Scan on a167_n n (actual rows=9.00 loops=2)
+ + -- EXPLAIN
+ - -- EXPLAIN
+ + 
+ - 
+ + > EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+ - > EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+ + > SELECT o.k, (SELECT count(*) FROM a167_r r JOIN a167_n n ON n.rk = r.rk WHERE r.rk < 2 + o.k % 2)
+ - > SELECT o.k, (SELECT count(*) FROM a167_r r JOIN a167_n n ON n.rk = r.rk WHERE r.rk < 2 + o.k % 2)
+ + > FROM a167_o o WHERE o.k <= 2
+ - > FROM a167_o o WHERE o.k <= 2
+ + QUERY PLAN:text
+ - QUERY PLAN:text
+ + Seq Scan on a167_o o (actual rows=2.00 loops=1)
+
+
+---- golden_wire stdout ----
+
+thread 'golden_wire' (2783102) panicked at crates/pg-engine/tests/golden.rs:191:9:
+2 of 2 golden files differ:
+
+a167_subplan_nestloop.sql:
+   > FROM a167_o o
+   QUERY PLAN:text
+   Seq Scan on a167_o o (actual rows=30.00 loops=1)
+     SubPlan 1
+       ->  Aggregate (actual rows=1.00 loops=30)
+             ->  Nested Loop (actual rows=1.00 loops=30)
+                   Join Filter: (r.rk = n.rk)
+                   ->  Nested Loop (actual rows=1.00 loops=30)
+                         Join Filter: (n.nk = s.nk)
+                         Rows Removed by Join Filter: 8
+                         ->  Seq Scan on a167_s s (actual rows=1.00 loops=30)
+                               Filter: (sk = ((o.k * 9) + 2))
+ -                             Rows Removed by Filter: 299
+ +                       ->  Seq Scan on a167_n n (actual rows=9.00 loops=30)
+ -                       ->  Seq Scan on a167_n n (actual rows=9.00 loops=30)
+ +                 ->  Seq Scan on a167_r r (actual rows=1.00 loops=30)
+ -                 ->  Seq Scan on a167_r r (actual rows=1.00 loops=30)
+ +                       Filter: (name = 'EUROPE'::text)
+ -                       Filter: (name = 'EUROPE'::text)
+ + -- EXPLAIN
+ -                       Rows Removed by Filter: 2
+ + 
+ - -- EXPLAIN
+ + > SELECT o.k, (SELECT min(s.v) FROM a167_r r JOIN (a167_s s JOIN a167_n n ON n.nk = s.nk) ON r.rk = n.rk
+ - 
+ + >              WHERE r.name = 'EUROPE' AND s.sk = o.k * 9 + 2) AS m
+ - > SELECT o.k, (SELECT min(s.v) FROM a167_r r JOIN (a167_s s JOIN a167_n n ON n.nk = s.nk) ON r.rk = n.rk
+ + > FROM a167_o o ORDER BY o.k
+
+a167_subplan_varied.sql:
+   > FROM a167_o o WHERE o.k <= 6
+   QUERY PLAN:text
+   Seq Scan on a167_o o (actual rows=6.00 loops=1)
+     Filter: (k <= 6)
+     SubPlan 1
+       ->  Aggregate (actual rows=1.00 loops=6)
+             ->  Nested Loop (actual rows=1.00 loops=6)
+                   Join Filter: (r.rk = n.rk)
+                   Rows Removed by Join Filter: 2
+                   ->  Seq Scan on a167_r r (actual rows=0.33 loops=6)
+                         Filter: (rk < (o.k % 3))
+ -                       Rows Removed by Filter: 3
+ +                 ->  Seq Scan on a167_n n (actual rows=9.00 loops=2)
+ -                 ->  Seq Scan on a167_n n (actual rows=9.00 loops=2)
+ + -- EXPLAIN
+ - -- EXPLAIN
+ + 
+ - 
+ + > EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+ - > EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+ + > SELECT o.k, (SELECT count(*) FROM a167_r r JOIN a167_n n ON n.rk = r.rk WHERE r.rk < 2 + o.k % 2)
+ - > SELECT o.k, (SELECT count(*) FROM a167_r r JOIN a167_n n ON n.rk = r.rk WHERE r.rk < 2 + o.k % 2)
+ + > FROM a167_o o WHERE o.k <= 2
+ - > FROM a167_o o WHERE o.k <= 2
+ + QUERY PLAN:text
+ - QUERY PLAN:text
+ + Seq Scan on a167_o o (actual rows=2.00 loops=1)
+
+
+
+failures:
+    golden
+    golden_shuffled
+    golden_wire
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.98s
+
+error: test failed, to rerun pass `-p pg-engine --test golden`
