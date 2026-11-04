@@ -636,8 +636,23 @@ pub fn session_temp_schema() -> Option<String> {
     SESSION_TEMP_SCHEMA.with(|t| t.borrow().clone())
 }
 
+/// `set_session_temp_schema` of the session in proc array slot `number` (`pg_temp_<number>`),
+/// without making its name when the thread already has it.
+pub fn set_session_temp_schema_of(number: i32) {
+    if SESSION_TEMP_NUMBER.get() != Some(number) {
+        set_session_temp_schema(&format!("pg_temp_{number}"));
+        SESSION_TEMP_NUMBER.set(Some(number));
+    }
+}
+
+thread_local! {
+    /// The slot `SESSION_TEMP_SCHEMA` was last set for by `set_session_temp_schema_of`.
+    static SESSION_TEMP_NUMBER: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+}
+
 /// Make `pg_temp` mean `schema` for lookups on this thread (the session about to run).
 pub fn set_session_temp_schema(schema: &str) {
+    SESSION_TEMP_NUMBER.set(None);
     SESSION_TEMP_SCHEMA.with(|t| {
         let mut t = t.borrow_mut();
         if t.as_deref() != Some(schema) {

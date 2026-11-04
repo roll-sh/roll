@@ -7722,7 +7722,7 @@ fn joinlist_len(p: &Plan, limit: usize) -> usize {
 
 /// What the binder's `=` for a type depends on: the catalog and the search path. (A `Weak`
 /// keeps the catalog's allocation, so no later catalog can take its address.)
-type EqScope = (std::sync::Weak<crate::catalog::Catalog>, Vec<String>);
+type EqScope = (std::sync::Weak<crate::catalog::Catalog>, crate::catalog::names::SearchPath);
 
 thread_local! {
     /// A join tree's hash key couldn't be rebuilt as a clause while gathering its group
