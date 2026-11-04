@@ -684,8 +684,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "21e93433a2f8d90a63fb0f203bc4321fa1bf639b8611b8411e3832968871bf90",
-    "bytes": 31905
+    "sha256": "9195354188d0c86b5e7d087827828d881f78898f2a777cb65d8f48d98aea8c38",
+    "bytes": 32102
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -1399,6 +1399,14 @@
     "sha256": "127d649d14399b2b3d3a3f1ec0e950271aed01dbbfad5edb6729b6d07b2edb5f",
     "bytes": 4788
   },
+  "runners/171-LAZY-PROPOSED-NOT-APPLIED.json": {
+    "sha256": "04bf2b720df436e17a4498b88b7d9cf34cffbd8c52adfbea4917deae50ef5529",
+    "bytes": 876
+  },
+  "runners/171-LAZY-PROPOSED-NOT-APPLIED.patch": {
+    "sha256": "7dc538928f33e5a3bf3f671e159ea7466c8ea15075ff0afbe4d609999ab0b47e",
+    "bytes": 7935
+  },
   "runners/171-fixture-backup.json": {
     "sha256": "fde5abefd50fd7af0aedd275437ffdd7c72543faf7de7a1507634441b720e262",
     "bytes": 209
@@ -1415,6 +1423,10 @@
     "sha256": "5c6cad4a10c8b59420038ca15b12d7a713364c037ac32336d53ccf84f7220220",
     "bytes": 1534
   },
+  "runners/171-prepare-lazy-patch.py": {
+    "sha256": "58550aa15258f6378cc08b364fca2ad5055f50fe1e3625b72163203fe765a77d",
+    "bytes": 3103
+  },
   "runners/171-regression-fixtures.py": {
     "sha256": "e95c3776b8fdb2caf5a7f5895056988fd723ba970ef7377b3739fc090a2f92eb",
     "bytes": 3918
@@ -1426,6 +1438,10 @@
   "runners/DEFERRED-CURSOR-R4.md": {
     "sha256": "e11a47fe83af96c52e3c57fac0725c752438caacfcf3be0f583934512b165bab",
     "bytes": 1195
+  },
+  "runners/FDW172-BASELINE-HANDOFF.md": {
+    "sha256": "d2b485804c9bbbe191f327eabf401c1d59986a0f1198a648b307e7a038198c2d",
+    "bytes": 2374
   },
   "runners/INDEPENDENT165-HANDOFF.md": {
     "sha256": "2407c9207f7f714d156a686597c8a11b8066489ef2c1f67cd435f5a38ea0c0f2",

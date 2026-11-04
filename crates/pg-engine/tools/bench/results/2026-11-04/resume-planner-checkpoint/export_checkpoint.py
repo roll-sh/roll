@@ -369,6 +369,8 @@ for artifact in sorted((D / 'red171-v1').iterdir()):
 sources['red171-v1/wrapper.log'] = str(D / 'red171-v1-wrapper.log')
 for name in ('171-LAZY-COST-DESIGN-pre-session-only.md', '171-regression-fixtures.py', '171-fixture-backup.json', '171-oracle-frozen-fixtures.json', 'red171-v1.sh'):
     sources['runners/' + name] = str(D / name)
+for name in ('171-prepare-lazy-patch.py', '171-LAZY-PROPOSED-NOT-APPLIED.patch', '171-LAZY-PROPOSED-NOT-APPLIED.json', 'FDW172-BASELINE-HANDOFF.md'):
+    sources['runners/' + name] = str(D / name)
 for name, source in sources.items():
     files[name] = Path(source).read_bytes()
 files['manifest.json'] = (json.dumps({name: {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}

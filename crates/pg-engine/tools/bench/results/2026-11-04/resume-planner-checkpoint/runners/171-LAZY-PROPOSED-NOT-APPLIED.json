@@ -1,0 +1,22 @@
+{
+  "status": "CACHE ONLY; NOT APPLIED OR TESTED",
+  "pinned_source": "a6fe3e4e626b0552c14320c18211886d1b16ad38",
+  "base": "c8618834caf45bc0a34cf9985c07f9bc13b498ef",
+  "correction_paths": [
+    "crates/pg-engine/src/session/mod.rs",
+    "crates/pg-engine/src/sql/binder/dml.rs",
+    "crates/pg-engine/src/sql/binder/mod.rs",
+    "crates/pg-engine/src/sql/binder/select.rs",
+    "crates/pg-engine/src/sql/paths.rs",
+    "crates/pg-engine/src/sql/paths/syscat.rs",
+    "crates/pg-engine/src/sql/plan.rs"
+  ],
+  "net_production_paths_vs_base": [
+    "crates/pg-engine/src/session/mod.rs",
+    "crates/pg-engine/src/sql/paths.rs"
+  ],
+  "parallel_part_byte_identical": true,
+  "no_cache_generations": true,
+  "patch_sha256": "7dc538928f33e5a3bf3f671e159ea7466c8ea15075ff0afbe4d609999ab0b47e",
+  "execution_hold": "RootPGoracle and boundedc861control before production repair"
+}
