@@ -1,0 +1,22 @@
+{
+  "source": "7ffaee17178ae4dfe4819106de2a9e3574cf7a15",
+  "status": "SUPERSEDED",
+  "reason": "Parent chose to defer cursor production delta; prepare independent lock/SearchPath/session slice from shared fe7b0023. Debug full stage incomplete, no full pass/fail; laterstages NOT RUN.",
+  "owned_processes": {
+    "3228093": [
+      3228054,
+      "/bin/bash /home/meszmate/.cache/pg-engine-resume-20261104/session_planner/check165r3.sh "
+    ],
+    "3231665": [
+      3228093,
+      "/home/meszmate/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo test -p pg-engine "
+    ],
+    "3546415": [
+      3231665,
+      "/home/meszmate/.cache/a165/target/debug/deps/golden-9749ad749af5ca1c "
+    ]
+  },
+  "wrapper": 3228053,
+  "heavy": 3228054,
+  "remaining_processes": {}
+}

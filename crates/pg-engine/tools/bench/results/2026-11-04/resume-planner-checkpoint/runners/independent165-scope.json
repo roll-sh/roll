@@ -1,0 +1,61 @@
+{
+  "base": "fe7b0023c9df19a6dae1e6067ba8454998db48c5",
+  "source": "7ffaee17178ae4dfe4819106de2a9e3574cf7a15",
+  "retained_full_delta_paths": [
+    "crates/pg-engine/src/catalog/depend.rs",
+    "crates/pg-engine/src/catalog/mod.rs",
+    "crates/pg-engine/src/catalog/names.rs",
+    "crates/pg-engine/src/catalog/system.rs",
+    "crates/pg-engine/src/engine.rs",
+    "crates/pg-engine/src/exec/mod.rs",
+    "crates/pg-engine/src/exec/pgstat.rs",
+    "crates/pg-engine/src/server.rs",
+    "crates/pg-engine/src/session/litplan.rs",
+    "crates/pg-engine/src/session/mod.rs",
+    "crates/pg-engine/src/session/settings.rs",
+    "crates/pg-engine/src/session/sink.rs",
+    "crates/pg-engine/src/session/state.rs",
+    "crates/pg-engine/src/sql/binder/perms.rs",
+    "crates/pg-engine/src/sql/func/system.rs",
+    "crates/pg-engine/src/sql/func/tsearch.rs",
+    "crates/pg-engine/src/sql/paths/joinpath.rs",
+    "crates/pg-engine/src/txn/locks.rs",
+    "crates/pg-engine/src/txn/mod.rs",
+    "crates/pg-engine/src/txn/twophase.rs"
+  ],
+  "retained_selective": "plpgsql/mod.rs system_query SearchPath type conversion only, from b3a16ef2",
+  "retained_tests": [
+    "tests/twophase.rs: prepared_finish_preserves_reused_backend_lock_owners",
+    "tests/twophase.rs: prepared_waiters_wake_after_finish_and_disconnect"
+  ],
+  "excluded": [
+    "all cursor.rs production delta",
+    "utility.rs for_cursor argument change",
+    "plpgsql cursor OPEN/factory for_cursor changes",
+    "all memory_load cursor additions",
+    "all a165_cursor SQL/out fixtures"
+  ],
+  "dependencies": {
+    "locks": [
+      "txn/mod.rs table_used/borrowed HeldKey/own-xact fast path",
+      "txn/locks.rs FastHolds moved-owner set/AtomicU64/transfer/release",
+      "txn/twophase.rs detached fast_slot reset",
+      "tests/twophase.rs owner/waiter/disconnect matrices"
+    ],
+    "search_path": [
+      "catalog/names.rs SearchPath Arc alias/CatalogNames",
+      "session/state.rs retained shared_search_path + usable memo",
+      "exec/mod.rs usable_path + type conversion",
+      "session/mod.rs Prepared/env paths/retained contexts",
+      "session/litplan.rs retained Arc bind/replan handoff",
+      "mechanical path consumers catalog/depend, catalog/system, exec/sink, sql/func/system,tsearch, sql/paths/joinpath, plpgsql/system_query"
+    ],
+    "session": [
+      "catalog/mod.rs per-backend temp-schema setter",
+      "session/settings.rs hot transaction_timeout",
+      "sql/binder/perms.rs repeated permission check work",
+      "engine.rs/server.rs per-backend activity slot and one shared socket",
+      "exec/pgstat.rs backend-local pending stats slots/lifecycle"
+    ]
+  }
+}

@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "ec9c960d946f74003db83f58cd7b83964cf3e81331966d41d0cfededb899edd0",
-    "bytes": 7152
+    "sha256": "7a84ede289f8b9da0d688cf8c99e3dd0331dec1b06c16b209418dc6bb8535bb2",
+    "bytes": 8284
   },
   "check165fixed/SUPERSEDED.json": {
     "sha256": "7f22633dc4bf0ba55a5198297137e6eeaf49c08cebfc42455718ac666b049e8f",
@@ -116,6 +116,58 @@
     "bytes": 93
   },
   "check165r2/wrapper-selftest.log": {
+    "sha256": "2819207fe9c2282afd3351414ca5e40d2eb35e561177be1c5ce49c7d55209429",
+    "bytes": 73
+  },
+  "check165r3/SUPERSEDED.json": {
+    "sha256": "5cf3cbedee206d62342eb825248834ed1788f8daf241942b6250a839244069d0",
+    "bytes": 781
+  },
+  "check165r3/current.status": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  "check165r3/cursor-compat.command": {
+    "sha256": "988be377811bb0c62d56620c2fe78f4a5d5200b485c9757fd7dca9188cf88047",
+    "bytes": 79
+  },
+  "check165r3/cursor-compat.log": {
+    "sha256": "59d7e24421a990454419a541f86754149f4ce36ffa6035b5452e351d4e38bb64",
+    "bytes": 455
+  },
+  "check165r3/debug-test.command": {
+    "sha256": "a58cb89f43a482980467f2846f5490a07e7950df8f44eb8825c0aac12cd6eaea",
+    "bytes": 25
+  },
+  "check165r3/debug-test.log": {
+    "sha256": "d092416831945328b9c21e07d71ff78388710726d6b6cff3e26475296a29a49e",
+    "bytes": 20529
+  },
+  "check165r3/exits.tsv": {
+    "sha256": "fffb5fa056ac453e4e793e5bed4419d3c04e41255d56d3e177aa228054a689a5",
+    "bytes": 35
+  },
+  "check165r3/initial.status": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  "check165r3/source.txt": {
+    "sha256": "e873c5f4d0626a80070471fcab5b8a503004a87da4eb701cb1190e05b574e308",
+    "bytes": 41
+  },
+  "check165r3/test-env.json": {
+    "sha256": "0abdfd71654f3454fc751a4319a73545947d0840d6b14400e0cb032bfb52a215",
+    "bytes": 309
+  },
+  "check165r3/tree.txt": {
+    "sha256": "7d3538613cf8f13c5ea030f1c9ad87b4a4d317b553f2ab7d6086d4808b5e374f",
+    "bytes": 41
+  },
+  "check165r3/wrapper-selftest.command": {
+    "sha256": "a5046584e3d8cd4c3f9500836aa760b35402365ec5eccc5d01c164aeab504a4a",
+    "bytes": 93
+  },
+  "check165r3/wrapper-selftest.log": {
     "sha256": "2819207fe9c2282afd3351414ca5e40d2eb35e561177be1c5ce49c7d55209429",
     "bytes": 73
   },
@@ -260,8 +312,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "34df2cf66e409a784a6f360db63f2edeb453dd87c585b116c3fd398c18490ea1",
-    "bytes": 18048
+    "sha256": "eb4eeefd0fb29f5c4ff653d23a53e3fbc10c1c6831dee8bf8f09e16b41d42216",
+    "bytes": 19347
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -771,6 +823,10 @@
     "sha256": "d6b9bc53b55af8be29c09ffbcbab84fedbaf093334579e25e702600b3d9bf5ef",
     "bytes": 2467
   },
+  "runners/DEFERRED-CURSOR-R4.md": {
+    "sha256": "e11a47fe83af96c52e3c57fac0725c752438caacfcf3be0f583934512b165bab",
+    "bytes": 1195
+  },
   "runners/R3-CASE-MATRIX.md": {
     "sha256": "bab38282c8248db553c43a488f9557d875c95d9a507fb231bf1238c68fbe21bf",
     "bytes": 2489
@@ -831,6 +887,10 @@
     "sha256": "563251caeeb7295cd33f4843b9c3837dfabbd3b3fb6b3cca8efe06fef17d79b4",
     "bytes": 1863
   },
+  "runners/focus165ind.sh": {
+    "sha256": "92adc7eedcb86450acebe1d2ba124ab89f291698bb6f9d4212eb90260c2ed624",
+    "bytes": 1385
+  },
   "runners/footprint.sh": {
     "sha256": "afc925795bcc33c12ed2392ed9684d81b83ca8966227c4341577501c2064dd21",
     "bytes": 2064
@@ -850,6 +910,22 @@
   "runners/green165v2.sh": {
     "sha256": "5a6789b4a0491a1135f2ca9ce6eaf4a3fcd435f94e57880e61097959c68be6f1",
     "bytes": 1223
+  },
+  "runners/independent165-candidate.patch": {
+    "sha256": "44e7c568fe5e1def3658e8eb9bba898af098d61dc50ce244a096ac0b71771b6b",
+    "bytes": 82171
+  },
+  "runners/independent165-merge-audit.json": {
+    "sha256": "abde076f123125654555851e3a7a683f4ee2143c4e36f16cbee6991e7f340aac",
+    "bytes": 3923
+  },
+  "runners/independent165-scope.json": {
+    "sha256": "01fb1039643ca354d51ad286a56e165be473acad820af1b76f2515edac3eb998",
+    "bytes": 2658
+  },
+  "runners/independent165.patch": {
+    "sha256": "3de2e0493f1b01ff3e021b76a348de822b140300ffd9f758dbf6eda3be59a4d2",
+    "bytes": 82171
   },
   "runners/jobA.sh": {
     "sha256": "6e64edda5461ee08bb02b4e904d149048b4b12d926ceaf590e8eff454768ea52",

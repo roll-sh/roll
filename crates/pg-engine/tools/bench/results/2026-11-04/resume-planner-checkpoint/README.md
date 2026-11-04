@@ -70,7 +70,21 @@ stored0/10807bytes vs100000scanned/1000matched. Defaultscroll still100000stored/
 for newly rechecked observable quals remains an explicit unaccepted limitation;
 no broadspill redesign or global Expr change undertaken. Ownwrite state test proves
 rows discarded beforeUPDATE/DELETE and firstbackward;keyedHOLD claim remains limited.
-Full exact7ffa job active;partial current-source output excluded. Review/gates pending.
+Parent chose option(a), deferring cursor production delta.7ffa fulljob explicitly
+SUPERSEDED with exact owned root3228093/cargo3231665/golden3546415 stopped andwrapper/
+heavygone;debug incomplete,laterstagesNOTRUN. 14cursorfiles×3modecompatibility passed.
+R4 read-only review confirms R3bugs fixed/no newHIGHorMEDIUMcorrectnessbug;O(scanned)
+tradeoff remainsMEDIUM/unaccepted. Future qual-free-input restart option and LOWfrom_call/
+PLrefcursor/FDW error-order hypotheses preserved,not implemented in independentbatch.
+
+Independent candidateab3f64b8 from exactsharedfe7b0023 onownerbranch
+work-a165-independent-20261104, remote wip/a165-independent-resume-20261104 independently
+confirmed. Originalwork-a1657ffa unchanged.22paths:20fullproductiondeltas+onePLsystem_query
+SearchPath typeconversion+preparedbehavior tests. All cursor/utility/PLcursorOPEN/factory
+changes,memorycursoradditions,165cursorgoldens excluded. Three-wayclean;each retained
+added/removedline exactlymatches documentedsource delta (169zero-contexthunks). Newshared
+COPY/scan_need changes preserved;cursor/utility/memory bytesmatchshared. Scope/audit/patch
+included. Focused independentgate active;partialoutputs excluded. Fullgates/reviewpending.
 
 Owned cache runners now fail explicitly on logged failures (Bash ! guards do not imply
 errexit). Profiler wrapper records perf/pgbench exits separately. Matrix/scaled scripts

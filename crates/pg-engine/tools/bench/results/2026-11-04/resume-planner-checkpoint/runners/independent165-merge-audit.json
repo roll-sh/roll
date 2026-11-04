@@ -1,0 +1,144 @@
+{
+  "base": "fe7b0023c9df19a6dae1e6067ba8454998db48c5",
+  "candidate": "ab3f64b8dd92203123f6777ae4a6028d3a3aae67",
+  "original_branch": "work-a165 unchanged at7ffaee17",
+  "changed_paths": 22,
+  "changed_hunks": 169,
+  "three_way_conflicts": false,
+  "added_removed_source_lines_exact": true,
+  "per_path": [
+    {
+      "path": "crates/pg-engine/src/catalog/depend.rs",
+      "source_ref": "7ffaee17",
+      "identical_added_removed_lines": true,
+      "hunks": 1
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/mod.rs",
+      "source_ref": "7ffaee17",
+      "identical_added_removed_lines": true,
+      "hunks": 2
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/names.rs",
+      "source_ref": "7ffaee17",
+      "identical_added_removed_lines": true,
+      "hunks": 4
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/system.rs",
+      "source_ref": "7ffaee17",
+      "identical_added_removed_lines": true,
+      "hunks": 1
+    },
+    {
+      "path": "crates/pg-engine/src/engine.rs",
+      "source_ref": "7ffaee17",
+      "identical_added_removed_lines": true,
+      "hunks": 20
+    },
+    {
+      "path": "crates/pg-engine/src/exec/mod.rs",
+      "source_ref": "7ffaee17",
+      "identical_added_removed_lines": true,
+      "hunks": 10
+    },
+    {
+      "path": "crates/pg-engine/src/exec/pgstat.rs",
+      "source_ref": "7ffaee17",
+      "identical_added_removed_lines": true,
+      "hunks": 19
+    },
+    {
+      "path": "crates/pg-engine/src/plpgsql/mod.rs",
+      "source_ref": "b3a16ef2",
+      "identical_added_removed_lines": true,
+      "hunks": 1
+    },
+    {
+      "path": "crates/pg-engine/src/server.rs",
+      "source_ref": "7ffaee17",
+      "identical_added_removed_lines": true,
+      "hunks": 42
+    },
+    {
+      "path": "crates/pg-engine/src/session/litplan.rs",
+      "source_ref": "7ffaee17",
+      "identical_added_removed_lines": true,
+      "hunks": 8
+    },
+    {
+      "path": "crates/pg-engine/src/session/mod.rs",
+      "source_ref": "7ffaee17",
+      "identical_added_removed_lines": true,
+      "hunks": 9
+    },
+    {
+      "path": "crates/pg-engine/src/session/settings.rs",
+      "source_ref": "7ffaee17",
+      "identical_added_removed_lines": true,
+      "hunks": 3
+    },
+    {
+      "path": "crates/pg-engine/src/session/sink.rs",
+      "source_ref": "7ffaee17",
+      "identical_added_removed_lines": true,
+      "hunks": 1
+    },
+    {
+      "path": "crates/pg-engine/src/session/state.rs",
+      "source_ref": "7ffaee17",
+      "identical_added_removed_lines": true,
+      "hunks": 4
+    },
+    {
+      "path": "crates/pg-engine/src/sql/binder/perms.rs",
+      "source_ref": "7ffaee17",
+      "identical_added_removed_lines": true,
+      "hunks": 4
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/system.rs",
+      "source_ref": "7ffaee17",
+      "identical_added_removed_lines": true,
+      "hunks": 2
+    },
+    {
+      "path": "crates/pg-engine/src/sql/func/tsearch.rs",
+      "source_ref": "7ffaee17",
+      "identical_added_removed_lines": true,
+      "hunks": 1
+    },
+    {
+      "path": "crates/pg-engine/src/sql/paths/joinpath.rs",
+      "source_ref": "7ffaee17",
+      "identical_added_removed_lines": true,
+      "hunks": 1
+    },
+    {
+      "path": "crates/pg-engine/src/txn/locks.rs",
+      "source_ref": "7ffaee17",
+      "identical_added_removed_lines": true,
+      "hunks": 18
+    },
+    {
+      "path": "crates/pg-engine/src/txn/mod.rs",
+      "source_ref": "7ffaee17",
+      "identical_added_removed_lines": true,
+      "hunks": 16
+    },
+    {
+      "path": "crates/pg-engine/src/txn/twophase.rs",
+      "source_ref": "7ffaee17",
+      "identical_added_removed_lines": true,
+      "hunks": 1
+    },
+    {
+      "path": "crates/pg-engine/tests/twophase.rs",
+      "source_ref": "7ffaee17",
+      "identical_added_removed_lines": true,
+      "hunks": 1
+    }
+  ],
+  "excluded_cursor_utility_memory_bytes_equal_shared": true
+}

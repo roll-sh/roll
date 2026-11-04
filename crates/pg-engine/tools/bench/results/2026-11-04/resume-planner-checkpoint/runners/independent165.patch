@@ -1,0 +1,1767 @@
+diff --git a/crates/pg-engine/src/catalog/depend.rs b/crates/pg-engine/src/catalog/depend.rs
+index 7840939a..2e0c9ddb 100644
+--- a/crates/pg-engine/src/catalog/depend.rs
++++ b/crates/pg-engine/src/catalog/depend.rs
+@@ -395,7 +395,7 @@ pub fn depends_in(ctx: &ExecCtx, cat: &Arc<Catalog>, scope: &Scope) -> Vec<Depen
+ fn depends_scoped(ctx: &ExecCtx, cat: &Arc<Catalog>, scope: Option<&Scope>) -> Vec<Depend> {
+     // Stored expressions are read with the session's search_path (a system view's query
+     // runs with pg_catalog's alone).
+-    let session_path = ctx.sess.search_path();
++    let session_path = ctx.sess.shared_search_path();
+     let mut rows = if ctx.search_path == session_path {
+         derived_depends(ctx, cat, scope)
+     } else {
+diff --git a/crates/pg-engine/src/catalog/mod.rs b/crates/pg-engine/src/catalog/mod.rs
+index 02351e77..5efeb477 100644
+--- a/crates/pg-engine/src/catalog/mod.rs
++++ b/crates/pg-engine/src/catalog/mod.rs
+@@ -636,8 +636,23 @@ pub fn session_temp_schema() -> Option<String> {
+     SESSION_TEMP_SCHEMA.with(|t| t.borrow().clone())
+ }
+ 
++/// `set_session_temp_schema` of the session in proc array slot `number` (`pg_temp_<number>`),
++/// without making its name when the thread already has it.
++pub fn set_session_temp_schema_of(number: i32) {
++    if SESSION_TEMP_NUMBER.get() != Some(number) {
++        set_session_temp_schema(&format!("pg_temp_{number}"));
++        SESSION_TEMP_NUMBER.set(Some(number));
++    }
++}
++
++thread_local! {
++    /// The slot `SESSION_TEMP_SCHEMA` was last set for by `set_session_temp_schema_of`.
++    static SESSION_TEMP_NUMBER: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
++}
++
+ /// Make `pg_temp` mean `schema` for lookups on this thread (the session about to run).
+ pub fn set_session_temp_schema(schema: &str) {
++    SESSION_TEMP_NUMBER.set(None);
+     SESSION_TEMP_SCHEMA.with(|t| {
+         let mut t = t.borrow_mut();
+         if t.as_deref() != Some(schema) {
+diff --git a/crates/pg-engine/src/catalog/names.rs b/crates/pg-engine/src/catalog/names.rs
+index a6a16e94..b56984fe 100644
+--- a/crates/pg-engine/src/catalog/names.rs
++++ b/crates/pg-engine/src/catalog/names.rs
+@@ -37,9 +37,13 @@ fn procs_by_name() -> &'static HashMap<&'static str, Vec<(u32, &'static [u32])>>
+     })
+ }
+ 
++/// A search path as a statement holds it: shared, since every statement and context of a
++/// session copies it (`SessionState::shared_search_path`).
++pub type SearchPath = Arc<[String]>;
++
+ pub struct CatalogNames {
+     pub catalog: Arc<Catalog>,
+-    pub search_path: Vec<String>,
++    pub search_path: SearchPath,
+ }
+ 
+ impl CatalogNames {
+@@ -68,10 +72,10 @@ impl CatalogNames {
+             .map(|(_, n, _)| n.to_string())
+     }
+ 
+-    pub fn new(catalog: Arc<Catalog>, search_path: Vec<String>) -> Self {
++    pub fn new(catalog: Arc<Catalog>, search_path: impl Into<SearchPath>) -> Self {
+         CatalogNames {
+             catalog,
+-            search_path,
++            search_path: search_path.into(),
+         }
+     }
+ 
+diff --git a/crates/pg-engine/src/catalog/system.rs b/crates/pg-engine/src/catalog/system.rs
+index 0d8730d0..1974db26 100644
+--- a/crates/pg-engine/src/catalog/system.rs
++++ b/crates/pg-engine/src/catalog/system.rs
+@@ -1640,7 +1640,7 @@ fn rows_key(table: SysTable, ctx: &ExecCtx) -> SysRowsKey {
+     // (pg_depend reads stored texts under the session's path, whatever the statement's.)
+     let path = match table {
+         SysTable::PgDepend => ctx.sess.search_path(),
+-        _ => ctx.search_path.clone(),
++        _ => ctx.search_path.to_vec(),
+     };
+     // The session's own temporary schema leads every session's path under a name of its
+     // own (`pg_temp_<pid>`): one that doesn't exist names nothing, and one that does is
+diff --git a/crates/pg-engine/src/engine.rs b/crates/pg-engine/src/engine.rs
+index cd9bfc6d..c14cf384 100644
+--- a/crates/pg-engine/src/engine.rs
++++ b/crates/pg-engine/src/engine.rs
+@@ -209,15 +209,20 @@ pub struct StartupReport {
+ }
+ 
+ /// A connected client, for pg_stat_activity and cancel / terminate.
++/// A backend's pg_stat_activity entry (`Backend::activity`, `Engine::activity_slot`). Lock
++/// order: the backends table, then an entry.
++pub type ActivitySlot = Arc<Mutex<Activity>>;
++
+ struct Backend {
+     secret: i32,
+     database: u32,
+     cancel: Option<Arc<AtomicBool>>,
+-    socket: Option<TcpStream>,
++    socket: Option<Arc<TcpStream>>,
+     terminated: Arc<AtomicBool>,
+     /// Messages the server loop started reading (`read_counter`).
+     reads: Arc<AtomicU64>,
+-    activity: Activity,
++    /// Its pg_stat_activity entry, under a lock of its own (`ActivitySlot`).
++    activity: ActivitySlot,
+     /// Its proc array slot, once it has one (`assign_proc`).
+     proc: Option<Arc<crate::txn::procs::Proc>>,
+ }
+@@ -656,14 +661,14 @@ impl Engine {
+ 
+     /// Client backends connected (not the engine's own workers).
+     pub fn client_backends(&self) -> usize {
+-        self.backends.lock().values().filter(|b| b.activity.backend_type.is_none()).count()
++        self.backends.lock().values().filter(|b| b.activity.lock().backend_type.is_none()).count()
+     }
+ 
+     /// Immediate shutdown: `message` (quickdie's WARNING) goes to every client backend's
+     /// client, whose connection then closes; the process exits next.
+     pub fn quit_client_backends(&self, message: &[u8]) {
+-        for b in self.backends.lock().values().filter(|b| b.activity.backend_type.is_none()) {
+-            if let Some(mut s) = b.socket.as_ref() {
++        for b in self.backends.lock().values().filter(|b| b.activity.lock().backend_type.is_none()) {
++            if let Some(mut s) = b.socket.as_deref() {
+                 let _ = std::io::Write::write_all(&mut s, message);
+                 let _ = s.shutdown(Shutdown::Both);
+             }
+@@ -673,7 +678,7 @@ impl Engine {
+     /// Fast shutdown: every client backend's session ends ("terminating connection due to
+     /// administrator command").
+     pub fn terminate_client_backends(&self) {
+-        for b in self.backends.lock().values().filter(|b| b.activity.backend_type.is_none()) {
++        for b in self.backends.lock().values().filter(|b| b.activity.lock().backend_type.is_none()) {
+             Self::terminate(b);
+         }
+     }
+@@ -989,7 +994,7 @@ impl Engine {
+     /// Allocate a backend id and cancel key for a new connection.
+     pub fn register_backend(
+         &self,
+-        socket: Option<TcpStream>,
++        socket: Option<Arc<TcpStream>>,
+         client: Option<std::net::SocketAddr>,
+     ) -> (i32, i32, Arc<AtomicBool>) {
+         let pid = self.next_pid.fetch_add(1, Ordering::Relaxed);
+@@ -1014,7 +1019,7 @@ impl Engine {
+                 socket,
+                 terminated: terminated.clone(),
+                 reads: Default::default(),
+-                activity,
++                activity: Arc::new(Mutex::new(activity)),
+                 proc: None,
+             },
+         );
+@@ -1026,7 +1031,7 @@ impl Engine {
+     pub fn assign_proc(&self, pid: i32, kind: crate::txn::procs::ProcKind) -> Arc<crate::txn::procs::Proc> {
+         let p = self.procs.assign(kind, pid);
+         if let Some(b) = self.backends.lock().get_mut(&pid) {
+-            b.activity.proc_number = Some(p.number());
++            b.activity.lock().proc_number = Some(p.number());
+             b.proc = Some(p.clone());
+         }
+         p
+@@ -1090,11 +1095,11 @@ impl Engine {
+             let b = self.backends.lock();
+             let others = b
+                 .iter()
+-                .filter(|(p, b)| **p != pid && b.activity.user == user)
++                .filter(|(p, b)| **p != pid && b.activity.lock().user == user)
+                 .count();
+             let db_others = b
+                 .iter()
+-                .filter(|(p, b)| **p != pid && b.database == entry.oid && b.activity.backend_type.is_none())
++                .filter(|(p, b)| **p != pid && b.database == entry.oid && b.activity.lock().backend_type.is_none())
+                 .count();
+             (others, db_others)
+         };
+@@ -1112,20 +1117,27 @@ impl Engine {
+         if let Some(b) = self.backends.lock().get_mut(&pid) {
+             b.database = entry.oid;
+             b.cancel = Some(session.cancel.clone());
+-            b.activity.progress = Some(session.state.progress.clone());
+-            b.activity.database = dbname.to_string();
+-            b.activity.user = user.to_string();
+-            b.activity.application_name = application_name.to_string();
+-            b.activity.state = "idle".into();
+-            b.activity.state_change = Some(crate::types::datetime::Clock::system().now);
++            let mut a = b.activity.lock();
++            a.progress = Some(session.state.progress.clone());
++            a.database = dbname.to_string();
++            a.user = user.to_string();
++            a.application_name = application_name.to_string();
++            a.state = "idle".into();
++            a.state_change = Some(crate::types::datetime::Clock::system().now);
+         }
+         Ok(session)
+     }
+ 
++    /// Backend `pid`'s pg_stat_activity entry: its server loop updates it per message under
++    /// the entry's own lock (PgBackendStatus's per-backend slot), not the backends table's.
++    pub fn activity_slot(&self, pid: i32) -> Option<ActivitySlot> {
++        self.backends.lock().get(&pid).map(|b| b.activity.clone())
++    }
++
+     /// Update what pg_stat_activity shows for a backend.
+     pub fn set_activity(&self, pid: i32, f: impl FnOnce(&mut Activity)) {
+         if let Some(b) = self.backends.lock().get_mut(&pid) {
+-            f(&mut b.activity);
++            f(&mut b.activity.lock());
+         }
+     }
+ 
+@@ -1144,7 +1156,7 @@ impl Engine {
+                 let Some(c) = b.cancel.as_ref() else { return };
+                 c.store(true, Ordering::Relaxed);
+                 crate::txn::locks::interrupt(c);
+-                if !matches!(b.activity.state.as_str(), "active" | "fastpath function call") {
++                if !matches!(b.activity.lock().state.as_str(), "active" | "fastpath function call") {
+                     return;
+                 }
+                 b.reads.clone()
+@@ -2164,14 +2176,15 @@ impl Cluster for Engine {
+             .values()
+             .filter(|b| b.database != 0)
+             .map(|b| {
+-                let mut a = b.activity.clone();
++                let mut a = b.activity.lock().clone();
+                 a.backend_subxacts = b.proc.as_ref().map_or((0, false), |p| p.subxacts());
+                 // A parallel worker does the leader's work (the engine runs it on the
+                 // leader's thread): what it waits for is what the leader's work does, and a
+                 // leader that doesn't take part waits for its workers.
+                 if let Some(l) = a.leader_pid.and_then(|l| backends.get(&l)) {
+-                    a.wait = l.activity.wait;
+-                    a.backend_xmin = l.activity.backend_xmin;
++                    let l = l.activity.lock();
++                    a.wait = l.wait;
++                    a.backend_xmin = l.backend_xmin;
+                 } else if a.gathering == Some(false) {
+                     a.wait = Some(("IPC", "ExecuteGather"));
+                 }
+@@ -2185,9 +2198,13 @@ impl Cluster for Engine {
+     fn start_parallel_workers(&self, leader: i32, n: usize, max_workers: usize, participating: bool, rels: Arc<[u32]>) -> Vec<i32> {
+         let mut backends = self.backends.lock();
+         let Some(l) = backends.get_mut(&leader) else { return Vec::new() };
+-        l.activity.gathering = Some(participating);
+-        let (database, la) = (l.database, l.activity.clone());
+-        let running = backends.values().filter(|b| b.activity.leader_pid.is_some()).count();
++        let la = {
++            let mut a = l.activity.lock();
++            a.gathering = Some(participating);
++            a.clone()
++        };
++        let database = l.database;
++        let running = backends.values().filter(|b| b.activity.lock().leader_pid.is_some()).count();
+         let now = crate::types::datetime::Clock::system().now;
+         let mut pids = Vec::new();
+         for _ in 0..n.min(max_workers.saturating_sub(running)) {
+@@ -2217,7 +2234,7 @@ impl Cluster for Engine {
+                 ..Activity::default()
+             };
+             let terminated = Arc::new(AtomicBool::new(false));
+-            backends.insert(pid, Backend { secret: 0, database, cancel: None, socket: None, terminated, activity, proc: Some(proc), reads: Default::default() });
++            backends.insert(pid, Backend { secret: 0, database, cancel: None, socket: None, terminated, activity: Arc::new(Mutex::new(activity)), proc: Some(proc), reads: Default::default() });
+             pids.push(pid);
+         }
+         pids
+@@ -2229,7 +2246,7 @@ impl Cluster for Engine {
+             backends.remove(p);
+         }
+         if let Some(l) = backends.get_mut(&leader) {
+-            l.activity.gathering = None;
++            l.activity.lock().gathering = None;
+         }
+     }
+ 
+diff --git a/crates/pg-engine/src/exec/mod.rs b/crates/pg-engine/src/exec/mod.rs
+index 58894151..148e0e84 100644
+--- a/crates/pg-engine/src/exec/mod.rs
++++ b/crates/pg-engine/src/exec/mod.rs
+@@ -336,7 +336,7 @@ pub struct ExecCtx<'a> {
+     pub(crate) temp_cleanup: Rc<spill::TempCleanup>,
+     fmt: FormatCtx,
+     pub params: &'a [Value],
+-    pub search_path: Vec<String>,
++    pub search_path: crate::catalog::names::SearchPath,
+     /// The role whose USAGE privileges `search_path` was filtered by.
+     path_role: u32,
+     outer: RefCell<Vec<Rc<Row>>>,
+@@ -440,13 +440,22 @@ pub struct ExecCtx<'a> {
+ 
+ /// Drop from `path` the schemas the current role may not use: name lookups skip them
+ /// (recomputeNamespacePath's ACL_USAGE check); temporary schemas stay.
+-fn usable_path(catalog: &Catalog, sess: &SessionState, path: &mut Vec<String>) -> u32 {
++fn usable_path(catalog: &Catalog, sess: &SessionState, path: &mut crate::catalog::names::SearchPath) -> u32 {
+     let me = sess.current_role(catalog);
+     if catalog.is_superuser(me) {
+         return me;
+     }
+     let db_owner = sess.db_owner(catalog);
+-    path.retain(|s| match catalog.schema_by_name(s) {
++    // (Worked out once per catalog version, role and path: every statement filters it.)
++    if let Some((v, r, o, from, to)) = &*sess.usable_path_memo.borrow()
++        && (*v, *r, *o) == (catalog.version, me, db_owner)
++        && Arc::ptr_eq(from, path)
++    {
++        *path = to.clone();
++        return me;
++    }
++    let from = path.clone();
++    let usable = |s: &String| match catalog.schema_by_name(s) {
+         Some(sc) => {
+             sc.name.starts_with("pg_temp")
+                 || catalog
+@@ -456,7 +465,11 @@ fn usable_path(catalog: &Catalog, sess: &SessionState, path: &mut Vec<String>) -
+                     != 0
+         }
+         None => true,
+-    });
++    };
++    if !path.iter().all(usable) {
++        *path = path.iter().filter(|s| usable(s)).cloned().collect();
++    }
++    *sess.usable_path_memo.borrow_mut() = Some((catalog.version, me, db_owner, from, path.clone()));
+     me
+ }
+ 
+@@ -733,7 +746,7 @@ impl<'a> ExecCtx<'a> {
+         txn_time: i64,
+         stmt_time: i64,
+     ) -> ExecCtx<'a> {
+-        Self::with_search_path(txn, sess, params, txn_time, stmt_time, sess.search_path())
++        Self::with_search_path(txn, sess, params, txn_time, stmt_time, sess.shared_search_path())
+     }
+ 
+     /// `new`, given the session's search path (`SessionState::search_path`).
+@@ -743,12 +756,13 @@ impl<'a> ExecCtx<'a> {
+         params: &'a [Value],
+         txn_time: i64,
+         stmt_time: i64,
+-        mut search_path: Vec<String>,
++        search_path: impl Into<crate::catalog::names::SearchPath>,
+     ) -> ExecCtx<'a> {
+         let settings = sess.settings.borrow();
+         let mut fmt = settings.format_ctx();
+         drop(settings);
+         let catalog = txn.borrow().catalog();
++        let mut search_path = search_path.into();
+         let path_role = usable_path(&catalog, sess, &mut search_path);
+         let settings = sess.settings.borrow();
+         // statement_timeout's deadline: armed with the statement's other waits when it
+@@ -817,13 +831,13 @@ impl<'a> ExecCtx<'a> {
+     /// earlier in the routine), less the schemas the current role may not use. PL/pgSQL
+     /// and SQL functions bind each statement under it, as plancache revalidates a cached
+     /// plan whose search_path no longer matches (`SearchPathMatchesCurrentEnvironment`).
+-    pub fn session_path(&self) -> Vec<String> {
++    pub fn session_path(&self) -> crate::catalog::names::SearchPath {
+         self.session_path_role().0
+     }
+ 
+     /// `session_path`, and the role whose privileges it was filtered by.
+-    fn session_path_role(&self) -> (Vec<String>, u32) {
+-        let mut path = self.sess.search_path();
++    fn session_path_role(&self) -> (crate::catalog::names::SearchPath, u32) {
++        let mut path = self.sess.shared_search_path();
+         let role = usable_path(&self.catalog(), self.sess, &mut path);
+         (path, role)
+     }
+@@ -951,7 +965,8 @@ impl<'a> ExecCtx<'a> {
+     }
+ 
+     /// A child context (as `child`) that resolves names through `search_path`.
+-    pub fn child_with_path<'b>(&'b self, params: &'b [Value], search_path: Vec<String>) -> ExecCtx<'b> {
++    pub fn child_with_path<'b>(&'b self, params: &'b [Value], search_path: impl Into<crate::catalog::names::SearchPath>) -> ExecCtx<'b> {
++        let search_path = search_path.into();
+         let mut c = self.child(params);
+         c.fmt.names = Some(Arc::new(CatalogNames::new(
+             self.catalog(),
+diff --git a/crates/pg-engine/src/exec/pgstat.rs b/crates/pg-engine/src/exec/pgstat.rs
+index 91c08824..99884a6b 100644
+--- a/crates/pg-engine/src/exec/pgstat.rs
++++ b/crates/pg-engine/src/exec/pgstat.rs
+@@ -236,11 +236,11 @@ pub struct Shared {
+     pub shared_db: DbEntry,
+     /// The cluster's fixed-numbered statistics (locked after this database's).
+     pub fixed: ClusterStats,
+-    /// Backends' counts kept unflushed when they went idle, by process id.
+-    pub unflushed: HashMap<i32, Unflushed>,
+-    /// When a reader flushed an idle backend's counts (its idle timeout), until the
+-    /// backend next reports.
+-    idle_flushed: HashMap<i32, Instant>,
++    /// Backends' counts kept unflushed when they went idle, by process id: each backend's
++    /// own slot (`UnflushedSlot`), registered the first time it keeps counts, so a backend
++    /// keeping counts at each transaction's end or marking itself busy at each statement
++    /// locks its slot, not these statistics (PostgreSQL's pending counts are backend-local).
++    pub unflushed: HashMap<i32, UnflushedSlot>,
+     /// Relations rewritten (new files) since they were last read: a scan reads them in.
+     pub cold: std::collections::HashSet<u32>,
+     /// User tables whose modification counters (n_mod_since_analyze, n_ins_since_vacuum,
+@@ -512,8 +512,13 @@ pub struct Pending {
+     /// pgstat_report_stat's last_flush and pending_since.
+     last_flush: Option<Instant>,
+     pending_since: Option<Instant>,
+-    /// Counts are kept unflushed in `Shared::unflushed`.
++    /// Counts are kept unflushed in `slot`.
+     parked: bool,
++    /// Its slot in `Shared::unflushed`, once registered.
++    slot: Option<UnflushedSlot>,
++    /// The idle timeout autovacuum was last told about (`note_autovacuum`): told once per
++    /// timeout, not at every transaction's end.
++    noted_due: Option<Instant>,
+     /// A snapshot (snapshot mode, with its time) or the entries read (cache mode).
+     snapshot: Option<(i64, Box<Shared>)>,
+     cache: Fetched,
+@@ -1245,8 +1250,13 @@ pub struct Unflushed {
+     slru_zeroed: HashMap<String, i64>,
+     /// When the idle timeout fires (None: the backend is busy).
+     due: Option<Instant>,
++    /// When a reader flushed these counts (the idle timeout), until the backend next reports.
++    idle_flushed: Option<Instant>,
+ }
+ 
++/// A backend's `Unflushed`, locked after `Shared` when both are.
++pub type UnflushedSlot = std::sync::Arc<parking_lot::Mutex<Unflushed>>;
++
+ /// Add pending table counts `c` to `t` (a later transaction's after an earlier's: a
+ /// truncation in the later one starts the live / dead deltas over).
+ pub fn add_pending(t: &mut TabCounts, c: &TabCounts) {
+@@ -1381,8 +1391,10 @@ pub fn take_autovacuum_changes(db: &crate::txn::Database) -> (Vec<u32>, HashMap<
+     let later = s
+         .unflushed
+         .values()
+-        .filter(|u| u.tabs.iter().any(|(r, c)| *r >= crate::catalog::FIRST_USER_OID && modifies(c)))
+-        .filter_map(|u| u.due)
++        .filter_map(|u| {
++            let u = u.lock();
++            u.tabs.iter().any(|(r, c)| *r >= crate::catalog::FIRST_USER_OID && modifies(c)).then_some(u.due).flatten()
++        })
+         .min();
+     if let Some(at) = later {
+         note_autovacuum(&mut s, at);
+@@ -1442,21 +1454,22 @@ fn flush_idle(s: &mut Shared, db: &crate::txn::Database) {
+         return;
+     }
+     let now = Instant::now();
+-    let due: Vec<i32> = s
++    let due: Vec<Unflushed> = s
+         .unflushed
+-        .iter()
+-        .filter(|(_, u)| u.due.is_some_and(|d| d <= now))
+-        .map(|(pid, _)| *pid)
++        .values()
++        .filter_map(|slot| {
++            let mut u = slot.lock();
++            u.due
++                .is_some_and(|d| d <= now)
++                .then(|| std::mem::replace(&mut *u, Unflushed { idle_flushed: Some(now), ..Default::default() }))
++        })
+         .collect();
+     if due.is_empty() {
+         return;
+     }
+     let cat = db.catalog();
+-    for pid in due {
+-        if let Some(u) = s.unflushed.remove(&pid) {
+-            flush(s, u, &cat);
+-            s.idle_flushed.insert(pid, now);
+-        }
++    for u in due {
++        flush(s, u, &cat);
+     }
+ }
+ 
+@@ -1470,18 +1483,14 @@ fn shared(db: &crate::txn::Database) -> parking_lot::MutexGuard<'_, Shared> {
+ /// The backend's counts kept unflushed for table `rel` (pg_stat_get_xact_*'s pending
+ /// entry holds them too).
+ pub fn unflushed_table(sess: &crate::session::state::SessionState, rel: u32) -> Option<TabCounts> {
+-    if !sess.pgstat.borrow().parked {
+-        return None;
+-    }
+-    sess.db.pgstat.lock().unflushed.get(&sess.pid).and_then(|u| u.tabs.get(&rel).copied())
++    let p = sess.pgstat.borrow();
++    p.slot.as_ref().filter(|_| p.parked).and_then(|u| u.lock().tabs.get(&rel).copied())
+ }
+ 
+ /// The backend's counts kept unflushed for function `func`.
+ pub fn unflushed_function(sess: &crate::session::state::SessionState, func: u32) -> Option<FuncCounts> {
+-    if !sess.pgstat.borrow().parked {
+-        return None;
+-    }
+-    sess.db.pgstat.lock().unflushed.get(&sess.pid).and_then(|u| u.funcs.get(&func).copied())
++    let p = sess.pgstat.borrow();
++    p.slot.as_ref().filter(|_| p.parked).and_then(|u| u.lock().funcs.get(&func).copied())
+ }
+ 
+ /// pg_stat_force_next_flush: the backend's next report flushes whatever the interval.
+@@ -1506,11 +1515,9 @@ pub fn count_slru_zeroed(sess: &crate::session::state::SessionState, name: &str,
+ /// A statement starts: a backend that kept counts unflushed isn't idle any more (its
+ /// idle-stats-update timeout is disabled until it is idle again).
+ pub fn busy(sess: &crate::session::state::SessionState) {
+-    if !sess.pgstat.borrow().parked {
+-        return;
+-    }
+-    if let Some(u) = sess.db.pgstat.lock().unflushed.get_mut(&sess.pid) {
+-        u.due = None;
++    let p = sess.pgstat.borrow();
++    if let Some(u) = p.slot.as_ref().filter(|_| p.parked) {
++        u.lock().due = None;
+     }
+ }
+ 
+@@ -1518,6 +1525,9 @@ pub fn busy(sess: &crate::session::state::SessionState) {
+ pub fn session_ends(sess: &crate::session::state::SessionState) {
+     flush_io(sess);
+     report(sess, true, &sess.db.catalog());
++    if sess.pgstat.borrow_mut().slot.take().is_some() {
++        sess.db.pgstat.lock().unflushed.remove(&sess.pid);
++    }
+ }
+ 
+ /// AtEOXact_PgStat and the report that follows when the backend goes idle: the
+@@ -1625,13 +1635,22 @@ fn report(sess: &crate::session::state::SessionState, mut force: bool, cat: &cra
+     {
+         return;
+     }
+-    let mut s = sess.db.pgstat.lock();
++    // (Registered once: from then on keeping counts locks only the backend's slot.)
++    let slot = match &p.slot {
++        Some(slot) => slot.clone(),
++        None => {
++            let slot = UnflushedSlot::default();
++            sess.db.pgstat.lock().unflushed.insert(sess.pid, slot.clone());
++            p.slot = Some(slot.clone());
++            slot
++        }
++    };
++    let mut u = slot.lock();
+     // (An idle timeout flushed what was kept: that was the last flush.)
+-    if let Some(t) = s.idle_flushed.remove(&sess.pid) {
++    if let Some(t) = u.idle_flushed.take() {
+         p.last_flush = Some(t);
+         p.pending_since = None;
+     }
+-    let mut u = s.unflushed.remove(&sess.pid).unwrap_or_default();
+     for (rel, c) in p.tabs.drain() {
+         add_pending(u.tabs.entry(rel).or_default(), &c);
+     }
+@@ -1665,13 +1684,20 @@ fn report(sess: &crate::session::state::SessionState, mut force: bool, cat: &cra
+         // PGSTAT_IDLE_INTERVAL - (now - pending_since).)
+         let due = *p.pending_since.get_or_insert(now) + IDLE_INTERVAL;
+         u.due = Some(due);
+-        if u.tabs.iter().any(|(r, c)| *r >= crate::catalog::FIRST_USER_OID && modifies(c)) {
+-            note_autovacuum(&mut s, due);
+-        }
+-        s.unflushed.insert(sess.pid, u);
++        let tell = p.noted_due != Some(due)
++            && u.tabs.iter().any(|(r, c)| *r >= crate::catalog::FIRST_USER_OID && modifies(c));
++        drop(u);
+         p.parked = true;
++        if tell {
++            p.noted_due = Some(due);
++            note_autovacuum(&mut sess.db.pgstat.lock(), due);
++        }
+         return;
+     }
++    // (The statistics, then the slot: a reader flushing idle backends locks them so.)
++    drop(u);
++    let mut s = sess.db.pgstat.lock();
++    let u = std::mem::take(&mut *slot.lock());
+     flush(&mut s, u, cat);
+     p.parked = false;
+     p.last_flush = Some(now);
+diff --git a/crates/pg-engine/src/server.rs b/crates/pg-engine/src/server.rs
+index f9e87086..1885feb7 100644
+--- a/crates/pg-engine/src/server.rs
++++ b/crates/pg-engine/src/server.rs
+@@ -137,7 +137,7 @@ pub fn set_idle_hook(f: fn()) {
+ /// until the client sends something again) and goes on waiting; one waiting past `deadline`
+ /// (an idle timeout) fails with `IdleTimeout`.
+ struct IdleRead {
+-    s: TcpStream,
++    s: Arc<TcpStream>,
+     armed: bool,
+     deadline: Option<std::time::Instant>,
+ }
+@@ -155,7 +155,7 @@ impl std::fmt::Display for IdleTimeout {
+ impl std::error::Error for IdleTimeout {}
+ 
+ impl IdleRead {
+-    fn new(s: TcpStream) -> std::io::Result<IdleRead> {
++    fn new(s: Arc<TcpStream>) -> std::io::Result<IdleRead> {
+         if IDLE_HOOK.get().is_some() {
+             s.set_read_timeout(Some(IDLE_TRIM))?;
+         }
+@@ -182,7 +182,7 @@ impl Read for IdleRead {
+             self.s.set_read_timeout(self.wait_for())?;
+         }
+         loop {
+-            match self.s.read(buf) {
++            match (&*self.s).read(buf) {
+                 Ok(n) => {
+                     self.armed = true;
+                     return Ok(n);
+@@ -215,7 +215,9 @@ impl Read for IdleRead {
+ 
+ struct Conn {
+     rd: BufReader<IdleRead>,
+-    wr: TcpStream,
++    /// The connection's one socket, which the reader, notices, notifications and the
++    /// backend table share (PostgreSQL's backend has one descriptor per connection).
++    wr: Arc<TcpStream>,
+     out: BytesMut,
+     /// Where the message being written starts (to drop it if a panic cuts it short).
+     partial: Option<usize>,
+@@ -225,8 +227,6 @@ struct Conn {
+     terminated: Option<Arc<AtomicBool>>,
+     /// The backend's count of messages read (`Engine::read_counter`).
+     reads: Option<Arc<std::sync::atomic::AtomicU64>>,
+-    /// The socket, for what goes out while a statement runs (`WireSink`).
+-    live: std::rc::Rc<TcpStream>,
+     /// ReadyForQuery went out and no message came since: the session is idle, and its idle
+     /// timeouts run (only then: not between the messages of an extended query).
+     at_ready: bool,
+@@ -360,7 +360,7 @@ impl Conn {
+ 
+     fn flush(&mut self) -> std::io::Result<()> {
+         if !self.out.is_empty() {
+-            self.wr.write_all(&self.out)?;
++            (&*self.wr).write_all(&self.out)?;
+             self.out.clear();
+         }
+         Ok(())
+@@ -700,15 +700,15 @@ fn handle(
+     let forked = std::time::Instant::now();
+     crate::stack::set_limit(THREAD_STACK - (2 << 20));
+     stream.set_nodelay(true)?;
++    let stream = Arc::new(stream);
+     let mut c = Conn {
+-        rd: BufReader::with_capacity(16 << 10, IdleRead::new(stream.try_clone()?)?),
+-        wr: stream.try_clone()?,
++        rd: BufReader::with_capacity(16 << 10, IdleRead::new(stream.clone())?),
++        wr: stream.clone(),
+         out: BytesMut::with_capacity(8 << 10),
+         partial: None,
+         fatal: false,
+         terminated: None,
+         reads: None,
+-        live: std::rc::Rc::new(stream.try_clone()?),
+         at_ready: false,
+         sent: Vec::new(),
+         repl: None,
+@@ -720,7 +720,7 @@ fn handle(
+     };
+     // Notices a statement raises before it waits for a lock go out then, as Postgres
+     // flushes each notice: after what the connection had buffered (`Conn::unflushed`).
+-    let mut live = stream.try_clone()?;
++    let live = stream.clone();
+     crate::exec::set_notice_sink(Some(Box::new(move |ns: &[Error]| {
+         let mut b = UNFLUSHED.with(|u| std::mem::take(&mut *u.borrow_mut()));
+         if crate::log::active() {
+@@ -736,7 +736,7 @@ fn handle(
+             let len = (b.len() - at) as i32;
+             b[at..at + 4].copy_from_slice(&len.to_be_bytes());
+         }
+-        let _ = live.write_all(&b);
++        let _ = (&*live).write_all(&b);
+     })));
+     struct NoSink;
+     impl Drop for NoSink {
+@@ -754,7 +754,7 @@ fn handle(
+         let code = b.i32().map_err(io_err)?;
+         match code {
+             SSL_REQUEST | GSSENC_REQUEST => {
+-                c.wr.write_all(b"N")?;
++                (&*c.wr).write_all(b"N")?;
+             }
+             CANCEL_REQUEST => {
+                 let (pid, secret) = (b.i32().map_err(io_err)?, b.i32().map_err(io_err)?);
+@@ -819,7 +819,7 @@ fn handle(
+         c.log = crate::log::Conn::new(None, None, true);
+     }
+     let (pid, secret, terminated) =
+-        engine.register_backend(stream.try_clone().ok(), peer);
++        engine.register_backend(Some(stream.clone()), peer);
+     let _guard = BackendGuard {
+         engine: &engine,
+         pid,
+@@ -1018,13 +1018,13 @@ fn handle(
+     // (process_startup_options' NOTICEs: an application_name truncated.)
+     let startup_notices = crate::session::settings::take_name_notices();
+     // Notifications for an idle session go straight to the client.
+-    let wr = c.wr.try_clone()?;
++    let wr = c.wr.clone();
+     s.attach_notifications(Arc::new(move |notes: &[crate::notify::Notification]| {
+         let mut b = BytesMut::new();
+         for n in notes {
+             notification(&mut b, n);
+         }
+-        (&wr).write_all(&b)
++        (&*wr).write_all(&b)
+     }));
+ 
+     c.auth(0, &[]);
+@@ -1410,15 +1410,24 @@ fn activity_state(s: &Session) -> &'static str {
+     }
+ }
+ 
++/// The backend's pg_stat_activity entry, found once per connection (`Engine::activity_slot`).
++type Act = Option<crate::engine::ActivitySlot>;
++
++fn set_activity(act: &Act, f: impl FnOnce(&mut crate::session::state::Activity)) {
++    if let Some(a) = act {
++        f(&mut a.lock());
++    }
++}
++
+ /// pg_stat_activity after a statement: the backend's state, and its application_name as
+ /// the statement left it (SET application_name reports itself: pgstat_report_appname).
+-fn statement_done_activity(engine: &Engine, pid: i32, s: &Session) {
++fn statement_done_activity(act: &Act, s: &Session) {
+     let settings = s.state.settings.borrow();
+     let app = &settings.hot().application_name;
+     let idle = s.status() == TxnStatus::Idle;
+     let (xid, xmin) = s.activity_xids();
+     let now = crate::types::datetime::Clock::system().now;
+-    engine.set_activity(pid, |a| {
++    set_activity(act, |a| {
+         let state = activity_state(s);
+         if a.state != state {
+             a.state = state.into();
+@@ -1437,33 +1446,37 @@ fn statement_done_activity(engine: &Engine, pid: i32, s: &Session) {
+ 
+ /// pg_stat_activity as a statement (or a fastpath call) starts: `state`, its transaction's
+ /// start (now, outside a transaction block), and the xmin a snapshot taken now has.
+-fn start_activity(engine: &Engine, pid: i32, s: &Session, state: &str, sql: Option<String>) {
++fn start_activity(act: &Act, s: &Session, state: &str, sql: Option<&str>) {
+     let now = crate::types::datetime::Clock::system().now;
+-    let xmin = s.state.db.xids().current_xmin();
+     // pgstat_report_activity keeps track_activity_query_size - 1 bytes of the text, cut at a
+     // character boundary (pg_mbcliplen): pgAdmin's dashboard shows the clipped text.
+-    let sql = sql.map(|mut q| {
++    let sql = sql.map(|q| {
+         let max = s.state.settings.borrow().hot().activity_query_size.saturating_sub(1);
+-        if q.len() > max {
+-            let mut n = max;
+-            while !q.is_char_boundary(n) {
+-                n -= 1;
+-            }
+-            q.truncate(n);
++        let mut n = q.len().min(max);
++        while !q.is_char_boundary(n) {
++            n -= 1;
+         }
+-        q
++        &q[..n]
+     });
+-    engine.set_activity(pid, |a| {
++    set_activity(act, |a| {
+         if a.state != state {
+             a.state = state.into();
+             a.state_change = Some(now);
+         }
+-        if let Some(q) = sql {
+-            a.query = q;
++        // (Copied only when it changed: a prepared statement's Bind and Execute name the same.)
++        if let Some(q) = sql
++            && a.query != q
++        {
++            a.query.clear();
++            a.query.push_str(q);
+         }
+         a.query_start = Some(now);
+         a.xact_start.get_or_insert(now);
+-        a.backend_xmin.get_or_insert(xmin);
++        // (The xmin is looked up only when the entry has none: in a transaction, every
++        // message but its first keeps it.)
++        if a.backend_xmin.is_none() {
++            a.backend_xmin = Some(s.state.db.xids().current_xmin());
++        }
+     });
+ }
+ 
+@@ -1478,6 +1491,7 @@ fn message_loop(
+     let mut skipping = false;
+     // The query of the last Parse, for what the server log says of errors after it.
+     let mut last_stmt: Option<String> = None;
++    let act = engine.activity_slot(pid);
+     loop {
+         c.log_sent(Some(s), pid, last_stmt.as_deref());
+         let idle = if std::mem::take(&mut c.at_ready) { s.idle_timeout() } else { None };
+@@ -1543,7 +1557,7 @@ fn message_loop(
+                         continue;
+                     }
+                 };
+-                start_activity(engine, pid, s, "active", Some(sql.clone()));
++                start_activity(&act, s, "active", Some(&sql));
+                 s.start_xact_command();
+                 if let Some(mode) = c.repl
+                     && (crate::repl::cmd::is_command(&sql) || mode == crate::repl::walsender::Mode::Physical)
+@@ -1572,7 +1586,7 @@ fn message_loop(
+                         Err(e) => c.error(&e),
+                     }
+                 }
+-                statement_done_activity(engine, pid, s);
++                statement_done_activity(&act, s);
+                 c.log_sent(Some(s), pid, Some(&sql));
+                 s.finish_xact_command();
+                 // A FATAL error (the session terminating itself) ends the session.
+@@ -1585,12 +1599,12 @@ fn message_loop(
+             b'P' => {
+                 let mut b = Body::new(&body);
+                 last_stmt = b.cstr().ok().and_then(|_| b.cstr().ok()).map(str::to_string);
+-                extended_activity(engine, pid, s, t, &body);
++                extended_activity(&act, s, t, &body);
+                 s.start_xact_command();
+                 guard(c, s, |c, s| parse_msg(c, s, &body))
+             }
+             b'B' => {
+-                extended_activity(engine, pid, s, t, &body);
++                extended_activity(&act, s, t, &body);
+                 s.start_xact_command();
+                 guard(c, s, |c, s| bind_msg(c, s, &body))
+             }
+@@ -1599,7 +1613,7 @@ fn message_loop(
+                 guard(c, s, |c, s| describe_msg(c, s, &body))
+             }
+             b'E' => {
+-                extended_activity(engine, pid, s, t, &body);
++                extended_activity(&act, s, t, &body);
+                 s.start_xact_command();
+                 guard(c, s, |c, s| execute_msg(c, s, &body))
+             }
+@@ -1612,7 +1626,7 @@ fn message_loop(
+                 }
+                 send_notices(c, s);
+                 send_changed(c, s);
+-                statement_done_activity(engine, pid, s);
++                statement_done_activity(&act, s);
+                 s.finish_xact_command();
+                 ready_for_query(c, s)?;
+                 continue;
+@@ -1625,13 +1639,13 @@ fn message_loop(
+             // Copy messages outside COPY are ignored, as Postgres does.
+             b'd' | b'c' | b'f' => continue,
+             b'F' => {
+-                start_activity(engine, pid, s, "fastpath function call", None);
++                start_activity(&act, s, "fastpath function call", None);
+                 let r = guard(c, s, |c, s| fastpath_msg(c, s, &body));
+                 send_notices(c, s);
+                 if let Err(e) = r {
+                     c.error(&e);
+                 }
+-                statement_done_activity(engine, pid, s);
++                statement_done_activity(&act, s);
+                 ready_for_query(c, s)?;
+                 continue;
+             }
+@@ -1666,21 +1680,21 @@ fn message_loop(
+ /// pg_stat_activity while extended-protocol messages run (pgstat_report_activity in
+ /// exec_parse_message / exec_bind_message / exec_execute_message): active, with the
+ /// statement's text, until the Sync's ReadyForQuery.
+-fn extended_activity(engine: &Engine, pid: i32, s: &Session, t: u8, body: &[u8]) {
++fn extended_activity(act: &Act, s: &Session, t: u8, body: &[u8]) {
+     let mut b = Body::new(body);
+     let sql = match t {
+-        b'P' => b.cstr().ok().and_then(|_| b.cstr().ok()).map(str::to_string),
++        b'P' => b.cstr().ok().and_then(|_| b.cstr().ok()),
+         b'B' => b
+             .cstr()
+             .ok()
+             .and_then(|_| b.cstr().ok())
+-            .and_then(|stmt| s.prepared.get(stmt).map(|p| p.sql.clone())),
++            .and_then(|stmt| s.prepared.get(stmt).map(|p| p.sql.as_str())),
+         _ => b
+             .cstr()
+             .ok()
+-            .and_then(|portal| s.portals.get(portal).map(|p| p.stmt.sql.clone())),
++            .and_then(|portal| s.portals.get(portal).map(|p| p.stmt.sql.as_str())),
+     };
+-    start_activity(engine, pid, s, "active", sql);
++    start_activity(act, s, "active", sql);
+ }
+ 
+ /// Run one message's work so that an engine panic becomes an ERROR (XX000) for this
+@@ -1894,7 +1908,7 @@ fn data_rows(c: &mut Conn, s: &Session, r: &QueryResult, formats: &[i16]) -> Res
+ /// the rows as they're made and the rows before an error; memory stays bounded for any
+ /// result: a client that stops reading stops the statement, as a full socket does a backend.
+ struct WireSink {
+-    wr: std::rc::Rc<TcpStream>,
++    wr: Arc<TcpStream>,
+     /// The portal's result formats (an Execute's); empty: text, and a simple query's
+     /// RowDescription goes out first.
+     formats: Vec<i16>,
+@@ -1970,7 +1984,7 @@ impl crate::session::RowSink for WireSink {
+ 
+ /// Run `f` (a statement) with its rows streaming to the client (`WireSink`).
+ fn streamed<T>(c: &mut Conn, s: &mut Session, formats: &[i16], describe: bool, f: impl FnOnce(&mut Session) -> T) -> T {
+-    s.row_sink = Some(Box::new(WireSink { wr: c.live.clone(), formats: formats.to_vec(), describe }));
++    s.row_sink = Some(Box::new(WireSink { wr: c.wr.clone(), formats: formats.to_vec(), describe }));
+     let r = c.unflushed(|| f(s));
+     s.row_sink = None;
+     r
+diff --git a/crates/pg-engine/src/session/litplan.rs b/crates/pg-engine/src/session/litplan.rs
+index e2f4e391..bae6c734 100644
+--- a/crates/pg-engine/src/session/litplan.rs
++++ b/crates/pg-engine/src/session/litplan.rs
+@@ -217,7 +217,7 @@ struct Bound {
+ struct Env {
+     version: u64,
+     settings: u64,
+-    path: Vec<String>,
++    path: crate::catalog::names::SearchPath,
+     who: (u32, bool),
+ }
+ 
+@@ -229,7 +229,7 @@ impl Session {
+         let cat = self.txn.as_ref().unwrap().borrow().next_catalog();
+         let st = self.state.settings.borrow();
+         let who = (self.state.current_role(&cat), st.get_str("row_security") != Some("off"));
+-        Env { version: cat.version, settings: st.generation(), path: self.state.search_path(), who }
++        Env { version: cat.version, settings: st.generation(), path: self.state.shared_search_path(), who }
+     }
+ 
+     /// The plan kept for `p`'s template that fits it now, with the values of its parameters
+@@ -329,9 +329,9 @@ impl Session {
+ 
+     /// Bind `generic` (a template with parameters of `types`), and what the planner read
+     /// (None when it failed, or read a column's data).
+-    fn lit_bind(&mut self, generic: &Node, types: Vec<DataType>, path: &[String]) -> (Option<Bound>, Vec<SizeRead>) {
++    fn lit_bind(&mut self, generic: &Node, types: Vec<DataType>, path: &crate::catalog::names::SearchPath) -> (Option<Bound>, Vec<SizeRead>) {
+         let (bound, reads) = crate::sql::literals::recording(|| {
+-            self.with_ctx_path(&[], Some(path.to_vec()), |ctx| {
++            self.with_ctx_path(&[], Some(path.clone()), |ctx| {
+                 let (bq, unplanned) = analyzed_bound(Binder::new(ctx, types).analyze_statement(generic)?, ctx)?;
+                 Ok(Bound { bq, unplanned })
+             })
+@@ -340,9 +340,9 @@ impl Session {
+     }
+ 
+     /// `u`'s statement planned again, and what the planner read.
+-    fn lit_replan(&mut self, u: &Analyzed, path: &[String]) -> (Option<BoundQuery>, Vec<SizeRead>) {
++    fn lit_replan(&mut self, u: &Analyzed, path: &crate::catalog::names::SearchPath) -> (Option<BoundQuery>, Vec<SizeRead>) {
+         let (bound, reads) =
+-            crate::sql::literals::recording(|| self.with_ctx_path(&[], Some(path.to_vec()), |ctx| u.plan(ctx)));
++            crate::sql::literals::recording(|| self.with_ctx_path(&[], Some(path.clone()), |ctx| u.plan(ctx)));
+         (bound.ok().filter(|_| !reads.contains(&SizeRead::Data)), reads)
+     }
+ 
+@@ -587,7 +587,7 @@ struct SharedEnv {
+     db: u64,
+     version: u64,
+     values: Arc<crate::session::settings::ValuesKey>,
+-    path: Vec<String>,
++    path: crate::catalog::names::SearchPath,
+     who: (u32, bool),
+ }
+ 
+@@ -733,7 +733,7 @@ impl Session {
+     /// What a Parse of `sql` with `oids` found before, with the binding's catalog version,
+     /// search_path and role, when binding it now would find the same; and whether its custom
+     /// plans are that binding.
+-    pub(super) fn param_parsed(&mut self, sql: &str, oids: &[u32]) -> Option<(Parsed, u64, Vec<String>, (u32, bool), bool)> {
++    pub(super) fn param_parsed(&mut self, sql: &str, oids: &[u32]) -> Option<(Parsed, u64, crate::catalog::names::SearchPath, (u32, bool), bool)> {
+         self.param_plans.map.get(sql)?;
+         let env = self.lit_env();
+         let e = self.param_entry(sql, oids)?;
+diff --git a/crates/pg-engine/src/session/mod.rs b/crates/pg-engine/src/session/mod.rs
+index a9c69b70..e59037f2 100644
+--- a/crates/pg-engine/src/session/mod.rs
++++ b/crates/pg-engine/src/session/mod.rs
+@@ -108,7 +108,7 @@ pub struct Prepared {
+     pub param_types: Vec<DataType>,
+     /// Cached binding, valid for a catalog version, search_path, and the role and row_security
+     /// setting (row-level security policies are bound into the plan).
+-    bound: Mutex<Option<(u64, Vec<String>, (u32, bool), Arc<BoundQuery>)>>,
++    bound: Mutex<Option<(u64, crate::catalog::names::SearchPath, (u32, bool), Arc<BoundQuery>)>>,
+     /// The plans it ran (plan cache choices, pg_prepared_statements).
+     plans: Mutex<PlanUses>,
+     /// A simple query's literals and template (`litplan`): its plan may be one kept for the
+@@ -690,7 +690,7 @@ impl Session {
+             txn.lock_timeout = Some(std::time::Duration::from_millis(lt as u64));
+         }
+         // StartTransaction: transaction_timeout runs from here.
+-        let tt = self.state.settings.borrow().int("transaction_timeout");
++        let tt = self.state.settings.borrow().hot().transaction_timeout;
+         if tt > 0 {
+             txn.txn_deadline =
+                 Some(std::time::Instant::now() + std::time::Duration::from_millis(tt as u64));
+@@ -1022,7 +1022,7 @@ impl Session {
+     fn with_ctx_path<T>(
+         &mut self,
+         params: &[Value],
+-        search_path: Option<Vec<String>>,
++        search_path: Option<crate::catalog::names::SearchPath>,
+         f: impl FnOnce(&ExecCtx) -> Result<T>,
+     ) -> Result<T> {
+         self.ensure_txn();
+@@ -1043,7 +1043,7 @@ impl Session {
+         }
+         // (The catalog the statement reads, which `begin_statement` took.)
+         crate::sql::binder::note_catalog(&txn.borrow().catalog());
+-        let search_path = search_path.unwrap_or_else(|| self.state.search_path());
++        let search_path = search_path.unwrap_or_else(|| self.state.shared_search_path());
+         let ctx = ExecCtx::with_search_path(
+             txn,
+             &self.state,
+@@ -1095,7 +1095,7 @@ impl Session {
+     pub fn parse(&mut self, sql: &str) -> Result<Vec<Arc<Prepared>>> {
+         // (`pg_temp` is this session's while it binds, on a thread another session may
+         // have run on: an embedder's Parse / Describe before any execute.)
+-        crate::catalog::set_session_temp_schema(&self.state.temp_schema());
++        crate::catalog::set_session_temp_schema_of(self.state.proc.number());
+         self.sync_lex();
+         let parsed = crate::sql::parse::parse_live_lazy(sql);
+         self.take_lex_warnings();
+@@ -1296,7 +1296,7 @@ impl Session {
+         max_rows: usize,
+     ) -> Result<Outcome> {
+         let before = self.notices.len();
+-        crate::catalog::set_session_temp_schema(&self.state.temp_schema());
++        crate::catalog::set_session_temp_schema_of(self.state.proc.number());
+         // pg_stat_statements (when preloaded): what runs inside is one level down.
+         let tracked = self.pgss_begin(p);
+         let mine = tracked.is_some();
+@@ -1668,7 +1668,7 @@ impl Session {
+             .as_ref()
+             .map(|t| t.borrow().catalog().version)
+             .unwrap_or(0);
+-        let path = self.state.search_path();
++        let path = self.state.shared_search_path();
+         let who = {
+             let cat = self.txn.as_ref().unwrap().borrow().catalog();
+             (self.state.current_role(&cat), self.state.settings.borrow().hot().row_security)
+@@ -2155,7 +2155,7 @@ impl Session {
+     ) -> Result<Arc<Prepared>> {
+         // (`pg_temp` is this session's while it binds, on a thread another session may
+         // have run on: an embedder's Parse / Describe before any execute.)
+-        crate::catalog::set_session_temp_schema(&self.state.temp_schema());
++        crate::catalog::set_session_temp_schema_of(self.state.proc.number());
+         self.waits_armed = false;
+         if !name.is_empty() && self.prepared.contains_key(name) {
+             return Err(Error::new(
+@@ -2439,7 +2439,7 @@ impl Session {
+     fn describe_here(&mut self, p: &Arc<Prepared>) -> Result<Option<Vec<OutCol>>> {
+         // (`pg_temp` is this session's while it binds, on a thread another session may
+         // have run on: an embedder's Parse / Describe before any execute.)
+-        crate::catalog::set_session_temp_schema(&self.state.temp_schema());
++        crate::catalog::set_session_temp_schema_of(self.state.proc.number());
+         let Some(stmt) = p.stmt.as_ref() else {
+             return Ok(None);
+         };
+diff --git a/crates/pg-engine/src/session/settings.rs b/crates/pg-engine/src/session/settings.rs
+index 81d5414f..f094f4a4 100644
+--- a/crates/pg-engine/src/session/settings.rs
++++ b/crates/pg-engine/src/session/settings.rs
+@@ -555,7 +555,7 @@ pub struct Hot {
+ /// A session's search path (`session_search_path`) for a `$user` and backend id: what every
+ /// statement looks names up in, worked out once per change of the settings, user or backend.
+ #[derive(Default)]
+-struct PathMemo(parking_lot::Mutex<Option<(String, i32, Vec<String>)>>);
++struct PathMemo(parking_lot::Mutex<Option<(String, i32, crate::catalog::names::SearchPath)>>);
+ 
+ impl Clone for PathMemo {
+     fn clone(&self) -> Self {
+@@ -2389,7 +2389,7 @@ impl Settings {
+         user: &str,
+         pid: i32,
+         temp: impl FnOnce() -> String,
+-    ) -> Vec<String> {
++    ) -> crate::catalog::names::SearchPath {
+         let d = self.derived();
+         let mut memo = d.path_memo.0.lock();
+         if let Some((u, p, path)) = &*memo
+@@ -2404,6 +2404,7 @@ impl Settings {
+             Some(i) => path[i] = temp,
+             None => path.insert(0, temp),
+         }
++        let path: crate::catalog::names::SearchPath = path.into();
+         *memo = Some((user.to_string(), pid, path.clone()));
+         path
+     }
+diff --git a/crates/pg-engine/src/session/sink.rs b/crates/pg-engine/src/session/sink.rs
+index dc03fb84..c5045ca9 100644
+--- a/crates/pg-engine/src/session/sink.rs
++++ b/crates/pg-engine/src/session/sink.rs
+@@ -92,7 +92,7 @@ pub(crate) fn format_ctx(ctx: &ExecCtx) -> FormatCtx {
+     let mut f = ctx.sess.settings.borrow().format_ctx();
+     f.names = Some(std::sync::Arc::new(crate::catalog::names::CatalogNames::new(
+         ctx.catalog(),
+-        ctx.sess.search_path(),
++        ctx.sess.shared_search_path(),
+     )));
+     f
+ }
+diff --git a/crates/pg-engine/src/session/state.rs b/crates/pg-engine/src/session/state.rs
+index 4e7e5363..c908b3f2 100644
+--- a/crates/pg-engine/src/session/state.rs
++++ b/crates/pg-engine/src/session/state.rs
+@@ -381,6 +381,9 @@ pub struct SessionState {
+     pub temp: Arc<crate::exec::spill::TempUsage>,
+     /// The current transaction used temporary objects (XACT_FLAGS_ACCESSEDTEMPNAMESPACE).
+     pub temp_used: std::cell::Cell<bool>,
++    /// The search path less the schemas a role may not use (`exec::usable_path`), for the
++    /// catalog version, role, database owner and path it was worked out for.
++    pub usable_path_memo: std::cell::RefCell<Option<UsablePath>>,
+     /// The failing statement committed part of its work in transactions of its own (a
+     /// CREATE INDEX CONCURRENTLY whose build failed leaves the index, INVALID): its
+     /// implicit transaction commits when it fails.
+@@ -578,6 +581,7 @@ impl SessionState {
+             pgstat: RefCell::new(crate::exec::pgstat::Pending::new_session()),
+             temp: Arc::default(),
+             temp_used: std::cell::Cell::new(false),
++            usable_path_memo: Default::default(),
+             commit_on_error: std::cell::Cell::new(false),
+             temp_ever: std::cell::Cell::new(false),
+             overexplain: std::cell::Cell::new(false),
+@@ -883,6 +887,12 @@ impl SessionState {
+ 
+     /// The search path, with this session's temporary schema first (or where `pg_temp` is).
+     pub fn search_path(&self) -> Vec<String> {
++        self.shared_search_path().to_vec()
++    }
++
++    /// `search_path`, shared: the session's copy while its settings, user and role stay
++    /// the same (each statement takes one).
++    pub fn shared_search_path(&self) -> crate::catalog::names::SearchPath {
+         // `$user` is the current user (SET ROLE, a SECURITY DEFINER function's owner).
+         let cat = self.db.catalog();
+         let oid = self.current_role(&cat);
+@@ -933,6 +943,9 @@ impl Drop for SessionState {
+     }
+ }
+ 
++/// `SessionState::usable_path_memo`: (catalog version, role, database owner, path, usable part).
++pub type UsablePath = (u64, u32, u32, crate::catalog::names::SearchPath, crate::catalog::names::SearchPath);
++
+ /// A running COPY's progress as pg_stat_get_progress_info('COPY') reports it.
+ #[derive(Clone, Debug, Default)]
+ pub struct CopyProgress {
+diff --git a/crates/pg-engine/src/sql/binder/perms.rs b/crates/pg-engine/src/sql/binder/perms.rs
+index cf953970..e9214a5f 100644
+--- a/crates/pg-engine/src/sql/binder/perms.rs
++++ b/crates/pg-engine/src/sql/binder/perms.rs
+@@ -382,7 +382,10 @@ pub fn check(perms: &Perms, ctx: &ExecCtx) -> Result<()> {
+     lock_relations(perms, ctx)?;
+     // The system views' columns read (see `ExecCtx::sys_cols`).
+     for p in &perms.rels {
+-        if !p.select_cols.is_empty() && crate::catalog::system::SysTable::by_oid(p.oid).is_some() {
++        if !p.select_cols.is_empty()
++            && p.oid < crate::catalog::FIRST_USER_OID
++            && crate::catalog::system::SysTable::by_oid(p.oid).is_some()
++        {
+             ctx.sys_cols
+                 .borrow_mut()
+                 .entry(p.oid)
+@@ -392,12 +395,15 @@ pub fn check(perms: &Perms, ctx: &ExecCtx) -> Result<()> {
+     }
+     let cat = ctx.catalog();
+     let me = ctx.current_user();
+-    let db_owner = ctx.db_owner();
++    // (Looked up only when a check needs it: a superuser's need none.)
++    let owner_cell = std::cell::OnceCell::new();
++    let db_owner = || *owner_cell.get_or_init(|| ctx.db_owner());
+     for p in &perms.rels {
+         let user = p.as_user.unwrap_or(me);
+         if cat.is_superuser(user) {
+             continue;
+         }
++        let db_owner = db_owner();
+         let Some((held, _)) = cat.rel_mask(p.oid, user, db_owner) else {
+             continue;
+         };
+@@ -462,7 +468,7 @@ pub fn check(perms: &Perms, ctx: &ExecCtx) -> Result<()> {
+         if cat.is_superuser(me) {
+             break;
+         }
+-        let (held, _) = cat.obj_mask(ObjKind::Function, *f, me, db_owner);
++        let (held, _) = cat.obj_mask(ObjKind::Function, *f, me, db_owner());
+         if held & acl::EXECUTE == 0 {
+             let (word, name) = match cat.functions.get(f) {
+                 Some(f) => (
+diff --git a/crates/pg-engine/src/sql/func/system.rs b/crates/pg-engine/src/sql/func/system.rs
+index eeaf0306..419f78b6 100644
+--- a/crates/pg-engine/src/sql/func/system.rs
++++ b/crates/pg-engine/src/sql/func/system.rs
+@@ -37,7 +37,7 @@ fn current_schema(_: &[Value], c: &FnCtx) -> Result<Value> {
+     let explicit_temp = crate::session::settings::parse_search_path(&raw, "")
+         .iter()
+         .any(|s| s == "pg_temp");
+-    for s in &c.exec.search_path {
++    for s in c.exec.search_path.iter() {
+         if (explicit_temp || !s.starts_with("pg_temp")) && cat.schema_by_name(s).is_some() {
+             return Ok(text(s.as_str()));
+         }
+@@ -78,7 +78,7 @@ fn current_schemas(a: &[Value], c: &FnCtx) -> Result<Value> {
+             out.push(text("pg_catalog"));
+         }
+     }
+-    for s in &c.exec.search_path {
++    for s in c.exec.search_path.iter() {
+         if is_temp(s) && !explicit_temp {
+             continue;
+         }
+diff --git a/crates/pg-engine/src/sql/func/tsearch.rs b/crates/pg-engine/src/sql/func/tsearch.rs
+index 15d6bb7c..6d31dbe4 100644
+--- a/crates/pg-engine/src/sql/func/tsearch.rs
++++ b/crates/pg-engine/src/sql/func/tsearch.rs
+@@ -87,7 +87,7 @@ impl Lookup {
+     fn new(c: &FnCtx) -> Lookup {
+         Lookup {
+             catalog: c.exec.catalog(),
+-            search_path: c.exec.search_path.clone(),
++            search_path: c.exec.search_path.to_vec(),
+         }
+     }
+ 
+diff --git a/crates/pg-engine/src/sql/paths/joinpath.rs b/crates/pg-engine/src/sql/paths/joinpath.rs
+index 1df8abd9..27bfcc65 100644
+--- a/crates/pg-engine/src/sql/paths/joinpath.rs
++++ b/crates/pg-engine/src/sql/paths/joinpath.rs
+@@ -7707,7 +7707,7 @@ fn joinlist_len(p: &Plan, limit: usize) -> usize {
+ 
+ /// What the binder's `=` for a type depends on: the catalog and the search path. (A `Weak`
+ /// keeps the catalog's allocation, so no later catalog can take its address.)
+-type EqScope = (std::sync::Weak<crate::catalog::Catalog>, Vec<String>);
++type EqScope = (std::sync::Weak<crate::catalog::Catalog>, crate::catalog::names::SearchPath);
+ 
+ thread_local! {
+     /// A join tree's hash key couldn't be rebuilt as a clause while gathering its group
+diff --git a/crates/pg-engine/src/txn/locks.rs b/crates/pg-engine/src/txn/locks.rs
+index 8ac6fd9e..bf86ce43 100644
+--- a/crates/pg-engine/src/txn/locks.rs
++++ b/crates/pg-engine/src/txn/locks.rs
+@@ -19,9 +19,9 @@
+ use super::bulklocks::{BulkLocks, row_tag, untag};
+ use crate::error::{Error, Result, code};
+ use parking_lot::{Condvar, Mutex};
+-use std::collections::HashMap;
++use std::collections::{HashMap, HashSet};
+ use std::sync::Arc;
+-use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+ use std::time::{Duration, Instant};
+ 
+ /// A heavyweight lock mode (lockdefs.h), in Postgres's order.
+@@ -267,9 +267,15 @@ pub struct KeyHolder {
+ 
+ /// The lock on relation `rel` of database `db` (LOCKTAG_RELATION).
+ pub fn relation_key(db: u32, rel: u32) -> Vec<u8> {
+-    let mut k = prefixed(RELATION);
+-    k.extend_from_slice(&db.to_be_bytes());
+-    k.extend_from_slice(&rel.to_be_bytes());
++    relation_key_bytes(db, rel).to_vec()
++}
++
++/// `relation_key`, on the stack.
++pub fn relation_key_bytes(db: u32, rel: u32) -> [u8; 16] {
++    let mut k = [0u8; 16];
++    k[7] = RELATION;
++    k[8..12].copy_from_slice(&db.to_be_bytes());
++    k[12..].copy_from_slice(&rel.to_be_bytes());
+     k
+ }
+ 
+@@ -289,6 +295,11 @@ pub fn xact_key(id: u64) -> Vec<u8> {
+     k
+ }
+ 
++/// The transaction whose lock `key` is (an `xact_key`), if it is one.
++fn xact_key_owner(key: &[u8]) -> Option<u64> {
++    (key.len() == 16 && key[..8] == [0, 0, 0, 0, 0, 0, 0, TRANSACTION]).then(|| u64::from_be_bytes(key[8..].try_into().unwrap()))
++}
++
+ /// A lock on a database object (LOCKTAG_OBJECT).
+ pub fn object_key(db: u32, class: u32, obj: u32, sub: u16) -> Vec<u8> {
+     let mut k = prefixed(OBJECT);
+@@ -438,7 +449,18 @@ impl Hold {
+ /// fast-path locks.
+ pub struct FastSlot {
+     proc: u64,
+-    holds: Mutex<Vec<FastHold>>,
++    holds: Mutex<FastHolds>,
++    /// The transaction whose own lock is held here (`hold_xact_fast`), 0 for none: a request
++    /// for that lock moves it to the main table first (VirtualXactLock's transfer).
++    xact: AtomicU64,
++}
++
++#[derive(Default)]
++struct FastHolds {
++    holds: Vec<FastHold>,
++    /// Owners with holds transferred to the main table, protected by the same mutex as
++    /// transfer and release so another transaction on this backend cannot clear them.
++    moved: HashSet<u64>,
+ }
+ 
+ struct FastHold {
+@@ -854,13 +876,20 @@ impl LockManager {
+             return Some(s.clone());
+         }
+         let mut slots = self.fast.slots.write();
+-        Some(slots.entry(proc).or_insert_with(|| Arc::new(FastSlot { proc, holds: Mutex::new(Vec::new()) })).clone())
++        Some(
++            slots
++                .entry(proc)
++                .or_insert_with(|| {
++                    Arc::new(FastSlot { proc, holds: Mutex::new(FastHolds::default()), xact: AtomicU64::new(0) })
++                })
++                .clone(),
++        )
+     }
+ 
+     /// Backend `proc` is gone: its slot too.
+     pub fn end_proc(&self, proc: u64) {
+         let Some(slot) = self.fast.slots.write().remove(&proc) else { return };
+-        if !slot.holds.lock().is_empty() {
++        if !slot.holds.lock().holds.is_empty() {
+             // (Not expected: what it still held goes to the main table.)
+             let mut s = self.state.lock();
+             Self::move_slot(&mut s, &slot, None);
+@@ -873,7 +902,8 @@ impl LockManager {
+         if mode > LockMode::RowExclusive || !is_local_relation(key) {
+             return false;
+         }
+-        let mut holds = slot.holds.lock();
++        let mut fast = slot.holds.lock();
++        let holds = &mut fast.holds;
+         if self.fast.strong[fast_partition(key)].load(Ordering::SeqCst) != 0 {
+             return false;
+         }
+@@ -887,7 +917,8 @@ impl LockManager {
+     /// Release one of `owner`'s fast-path holds of `key` in `mode`; false when it has none
+     /// there (it is in the main table).
+     pub fn release_fast(&self, slot: &FastSlot, key: &[u8], owner: u64, mode: LockMode) -> bool {
+-        let mut holds = slot.holds.lock();
++        let mut fast = slot.holds.lock();
++        let holds = &mut fast.holds;
+         let Some(i) = holds.iter().position(|h| h.owner == owner && h.mode == mode && h.key == key) else {
+             return false;
+         };
+@@ -898,9 +929,36 @@ impl LockManager {
+         true
+     }
+ 
+-    /// Release every fast-path hold of `owner`.
+-    pub fn release_fast_owner(&self, slot: &FastSlot, owner: u64) {
+-        slot.holds.lock().retain(|h| h.owner != owner);
++    /// Release every fast-path hold of `owner`; true when any of this owner's holds moved
++    /// to the main table meanwhile (they are released there).
++    pub fn release_fast_owner(&self, slot: &FastSlot, owner: u64) -> bool {
++        let mut fast = slot.holds.lock();
++        let holds = &mut fast.holds;
++        holds.retain(|h| h.owner != owner);
++        if slot.xact.load(Ordering::Relaxed) == owner {
++            slot.xact.store(0, Ordering::Relaxed);
++        }
++        fast.moved.remove(&owner)
++    }
++
++    /// Hold transaction `owner`'s own lock (`hold_xact_lock` in Exclusive mode, before its
++    /// first snapshot is registered) on backend `slot`'s fast path, as PostgreSQL's
++    /// VirtualXactLockTableInsert does: nothing of the main table is locked until another
++    /// backend asks for it (`acquire` moves it there first).
++    pub fn hold_xact_fast(&self, slot: &FastSlot, owner: u64) {
++        let mut fast = slot.holds.lock();
++        let holds = &mut fast.holds;
++        holds.push(FastHold { key: xact_key(owner), owner, mode: LockMode::Exclusive, count: 1, seq: next_seq() });
++        slot.xact.store(owner, Ordering::Release);
++    }
++
++    /// Move transaction `owner`'s own lock (`key`) from the fast path of the backend holding
++    /// it, if one does, into the main table.
++    fn move_fast_xact(&self, s: &mut State, key: &[u8], owner: u64) {
++        let slots = self.fast.slots.read();
++        for slot in slots.values().filter(|sl| sl.xact.load(Ordering::Acquire) == owner) {
++            Self::move_slot(s, slot, Some(key));
++        }
+     }
+ 
+     /// Move the fast-path holds of relation `key` (every relation: None) into the main table,
+@@ -913,20 +971,22 @@ impl LockManager {
+     }
+ 
+     fn move_slot(s: &mut State, slot: &FastSlot, key: Option<&[u8]>) {
+-        let mut holds = slot.holds.lock();
++        let mut fast = slot.holds.lock();
++        let holds = &mut fast.holds;
+         if holds.is_empty() {
+             return;
+         }
+         let moved: Vec<FastHold> = match key {
+             Some(k) if holds.iter().any(|h| h.key == k) => {
+-                let (m, kept) = std::mem::take(&mut *holds).into_iter().partition(|h| h.key == k);
++                let (m, kept) = std::mem::take(holds).into_iter().partition(|h| h.key == k);
+                 *holds = kept;
+                 m
+             }
+             Some(_) => return,
+-            None => std::mem::take(&mut *holds),
++            None => std::mem::take(holds),
+         };
+         for h in moved {
++            fast.moved.insert(h.owner);
+             let e = s.locks.entry(h.key).or_default();
+             if let Some(x) = e.holds.iter_mut().find(|x| x.owner == h.owner && x.proc == slot.proc && x.mode == h.mode) {
+                 x.count += h.count;
+@@ -961,6 +1021,10 @@ impl LockManager {
+             s.mark_strong(key);
+             self.move_fast(&mut s, Some(key));
+         }
++        // A transaction's own lock may be on its backend's fast path.
++        if let Some(id) = xact_key_owner(key) {
++            self.move_fast_xact(&mut s, key, id);
++        }
+         if let Some(pid) = pid_of(proc) {
+             s.pids.insert(proc, pid);
+         }
+@@ -1317,8 +1381,10 @@ impl LockManager {
+         if xid != 0 {
+             e.xid = xid;
+         }
+-        if !e.holds.iter().any(|h| h.owner == owner) {
+-            e.holds.push(Hold::new(owner, proc, LockMode::Exclusive, false));
++        // (One moved from the fast path is the transaction id's lock now: not fast-path.)
++        match e.holds.iter_mut().find(|h| h.owner == owner) {
++            Some(h) => h.fastpath = false,
++            None => e.holds.push(Hold::new(owner, proc, LockMode::Exclusive, false)),
+         }
+     }
+ 
+@@ -1817,6 +1883,9 @@ impl LockManager {
+         if let Some(b) = s.bulk.get_mut(&owner) {
+             b.proc = proc;
+         }
++        for slot in self.fast.slots.read().values() {
++            slot.holds.lock().moved.remove(&owner);
++        }
+     }
+ 
+     /// A prepared transaction's dummy backend is gone (COMMIT / ROLLBACK PREPARED).
+@@ -1896,7 +1965,7 @@ impl LockManager {
+     /// Whether anyone holds a lock (for idle detection and tests).
+     pub fn held_count(&self) -> usize {
+         let s = self.state.lock();
+-        let fast: usize = self.fast.slots.read().values().map(|f| f.holds.lock().len()).sum();
++        let fast: usize = self.fast.slots.read().values().map(|f| f.holds.lock().holds.len()).sum();
+         fast + s.locks.len() + s.rows.len() + s.bulk.values().map(BulkLocks::len).sum::<usize>()
+     }
+ 
+diff --git a/crates/pg-engine/src/txn/mod.rs b/crates/pg-engine/src/txn/mod.rs
+index 11ad9cd7..3751e463 100644
+--- a/crates/pg-engine/src/txn/mod.rs
++++ b/crates/pg-engine/src/txn/mod.rs
+@@ -444,7 +444,8 @@ impl Database {
+             catalog_base_cat: None,
+             stmt_catalog: None,
+             read_catalog: None,
+-            locks_held: HashMap::new(),
++            locks_held: hashbrown::HashMap::new(),
++            table_used: false,
+             lock_journal: Vec::new(),
+             fast_slot: std::sync::OnceLock::new(),
+             row_locks: Vec::new(),
+@@ -850,6 +851,16 @@ pub struct DeferredFk {
+ /// A heavyweight lock a transaction holds: its key and mode.
+ pub type HeldLock = (Vec<u8>, LockMode);
+ 
++/// A `HeldLock` looked up by a borrowed key (hashes as the tuple does).
++#[derive(Hash)]
++struct HeldKey<'a>(&'a [u8], LockMode);
++
++impl hashbrown::Equivalent<HeldLock> for HeldKey<'_> {
++    fn equivalent(&self, k: &HeldLock) -> bool {
++        self.0 == k.0.as_slice() && self.1 == k.1
++    }
++}
++
+ pub struct Txn {
+     /// Lock owner id (every transaction has one).
+     pub id: u64,
+@@ -918,7 +929,11 @@ pub struct Txn {
+     /// lock. (Never older than `stmt_catalog`, which stays the base of its DDL.)
+     read_catalog: Option<Arc<Catalog>>,
+     /// Heavyweight locks held, by key and mode, with the subtransaction depth that took them.
+-    locks_held: HashMap<HeldLock, usize>,
++    locks_held: hashbrown::HashMap<HeldLock, usize>,
++    /// Something went to the lock manager's main table (a lock off the fast path, a row lock,
++    /// a key holder, its transaction id's lock): its end releases there. Without it, a
++    /// transaction holding only fast-path locks ends without the main table's mutex.
++    table_used: bool,
+     /// The order they were taken in (released by ROLLBACK TO in reverse).
+     lock_journal: Vec<HeldLock>,
+     /// Its backend's fast-path slot for weak relation locks (`locks::FastSlot`), once looked up.
+@@ -1260,7 +1275,13 @@ impl Txn {
+     /// transaction from its first lock or snapshot on.
+     fn hold_own_xact_lock(&mut self) {
+         if !self.xact_locks.contains(&self.id) {
+-            self.db.locks.hold_xact_lock(self.id, self.id, self.lock_proc(), self.xid);
++            match self.fast() {
++                Some(slot) if self.xid == 0 => self.db.locks.hold_xact_fast(slot, self.id),
++                _ => {
++                    self.table_used = true;
++                    self.db.locks.hold_xact_lock(self.id, self.id, self.lock_proc(), self.xid);
++                }
++            }
+             self.xact_locks.push(self.id);
+         }
+     }
+@@ -1710,6 +1731,7 @@ impl Txn {
+                 self.log = Some(Box::default());
+             }
+             // Its transaction lock, held until it ends (what waiting for it waits on).
++            self.table_used = true;
+             self.db.locks.hold_xact_lock(self.id, self.id, self.lock_proc(), self.xid);
+             if self.sxact {
+                 self.db.ssi.set_xid(self.id, self.xid);
+@@ -2819,10 +2841,11 @@ impl Txn {
+         policy: WaitPolicy,
+         what: &dyn Fn() -> String,
+     ) -> Result<bool> {
+-        let k = (key.to_vec(), mode);
+-        if self.locks_held.contains_key(&k) {
++        // (Held already: what most statements of a transaction find, without a copy of the key.)
++        if self.locks_held.contains_key(&HeldKey(key, mode)) {
+             return Ok(true);
+         }
++        let k = (key.to_vec(), mode);
+         let fast = self.fast().is_some_and(|s| self.db.locks.acquire_fast(s, key, self.id, mode));
+         let got = fast
+             || self.db.locks.acquire(
+@@ -2834,16 +2857,14 @@ impl Txn {
+                 what,
+             )?;
+         if got {
++            self.table_used |= !fast;
+             self.lock_journal.push(k.clone());
+             self.locks_held.insert(k, self.savepoints.len());
+             // A new lock may have waited for DDL that then committed: the statement reads the
+             // catalog as it is now (LockRelationOid's AcceptInvalidationMessages).
+             self.accept_catalog();
+             // Its own lock (the virtual transaction id's), which waiting for it waits on.
+-            if !self.xact_locks.contains(&self.id) {
+-                self.db.locks.hold_xact_lock(self.id, self.id, self.lock_proc(), self.xid);
+-                self.xact_locks.push(self.id);
+-            }
++            self.hold_own_xact_lock();
+         }
+         Ok(got)
+     }
+@@ -3014,6 +3035,7 @@ impl Txn {
+             let holder = self.holder();
+             let xid = self.cur_xid();
+             let proc = self.lock_proc();
++            self.table_used = true;
+             if self.db.locks.hold_compact_unique_key(key, self.id, proc, holder, xid, row_key) {
+                 // (As `lock` and `hold_unique_key` do: the transaction's own lock, which
+                 // waiting for it waits on, and its subtransaction's.)
+@@ -3069,6 +3091,7 @@ impl Txn {
+             }
+         }
+         let kh = locks::KeyHolder { holder, xid, token, row, row_key: row_key.map(<[u8]>::to_vec) };
++        self.table_used = true;
+         self.db.locks.set_key_holder(key, self.id, kh);
+     }
+ 
+@@ -3094,6 +3117,7 @@ impl Txn {
+             }
+         }
+         let kh = locks::KeyHolder { holder, xid, token, row: Some(row), row_key: Some(row_key.to_vec()) };
++        self.table_used = true;
+         self.db.locks.add_excl_entry(con, &key, row_key, self.id, kh);
+         Ok(())
+     }
+@@ -3163,6 +3187,7 @@ impl Txn {
+     /// Row `key` (locked by this transaction) is being updated or deleted by it.
+     pub fn row_modified(&mut self, key: &[u8]) {
+         let holder = self.holder();
++        self.table_used = true;
+         self.db.locks.mark_row_modified(key, self.id, holder);
+     }
+ 
+@@ -3178,7 +3203,7 @@ impl Txn {
+ 
+     /// Lock relation `rel` in `mode` (LockRelationOid) until the transaction ends.
+     pub fn lock_relation(&mut self, rel: u32, mode: LockMode, policy: WaitPolicy, name: &dyn Fn() -> String) -> Result<bool> {
+-        let key = locks::relation_key(self.db.oid, rel);
++        let key = locks::relation_key_bytes(self.db.oid, rel);
+         self.lock(&key, mode, policy, &|| format!("relation \"{}\"", name()))
+     }
+ 
+@@ -3207,6 +3232,7 @@ impl Txn {
+         // with the (sub)transaction, not listed here.
+         let mut compacted = false;
+         let compact = (self.row_locks.len() >= bulklocks::compact_after()).then_some(&mut compacted);
++        self.table_used = true;
+         let got = self.db.locks.lock_row(
+             key,
+             &tuple,
+@@ -3818,8 +3844,13 @@ impl Txn {
+         if self.locks_held.is_empty() && self.row_locks.is_empty() && self.xact_locks.is_empty() {
+             return;
+         }
+-        if let Some(s) = self.fast() {
+-            self.db.locks.release_fast_owner(s, self.id);
++        let moved = self.fast().is_some_and(|s| self.db.locks.release_fast_owner(s, self.id));
++        // (Only fast-path locks and its own lock there: nothing to release in the main table.)
++        if !std::mem::take(&mut self.table_used) && !moved && !self.prepared && self.row_locks.is_empty() {
++            self.locks_held.clear();
++            self.xact_locks.clear();
++            self.lock_journal.clear();
++            return;
+         }
+         let mut keys: Vec<Vec<u8>> = self.locks_held.drain().map(|((k, _), _)| k).collect();
+         keys.sort();
+diff --git a/crates/pg-engine/src/txn/twophase.rs b/crates/pg-engine/src/txn/twophase.rs
+index 92b13050..a76c3132 100644
+--- a/crates/pg-engine/src/txn/twophase.rs
++++ b/crates/pg-engine/src/txn/twophase.rs
+@@ -454,6 +454,7 @@ impl Txn {
+     pub fn detach_prepared(&mut self) {
+         self.prepared = true;
+         self.db.locks.transfer(self.id, self.id);
++        self.fast_slot = std::sync::OnceLock::from(None);
+         self.lock_peer = None;
+         if self.sxact {
+             self.db.ssi.detach(self.id);
+diff --git a/crates/pg-engine/tests/twophase.rs b/crates/pg-engine/tests/twophase.rs
+index 9fb28ec4..1190a745 100644
+--- a/crates/pg-engine/tests/twophase.rs
++++ b/crates/pg-engine/tests/twophase.rs
+@@ -163,3 +163,121 @@ fn prepared_role_changes_finish_after_a_restart() {
+         e.shutdown();
+     });
+ }
++
++/// Finishing a detached prepared transaction must not clear the bookkeeping of a newer
++/// transaction on the same backend. Both pg_locks and a strong waiter can transfer the
++/// newer transaction's fast-path holds before COMMIT/ROLLBACK PREPARED runs elsewhere.
++#[test]
++fn prepared_finish_preserves_reused_backend_lock_owners() {
++    on_thread(|| {
++        for finish in ["COMMIT", "ROLLBACK"] {
++            for strong_waiter in [false, true] {
++                let dir = tempfile::tempdir().unwrap();
++                let e = engine(dir.path(), 5);
++                let mut a = e.connect(1, "postgres", "postgres", "holder").unwrap();
++                let mut finisher = e.connect(2, "postgres", "postgres", "finisher").unwrap();
++                let mut observer = e.connect(3, "postgres", "postgres", "observer").unwrap();
++                let checked = |s: &mut Session, sql: &str| {
++                    let out = run(s, sql);
++                    assert!(!out.contains("ERROR"), "{finish}, strong={strong_waiter}: {out}");
++                };
++                checked(&mut a, "CREATE TABLE t (id int); CREATE TABLE t2 (id int); INSERT INTO t2 VALUES (1)");
++                checked(&mut a, "BEGIN; SELECT * FROM t; PREPARE TRANSACTION 'reuse'; BEGIN; SELECT * FROM t2");
++                let waiter = if strong_waiter {
++                    let e = e.clone();
++                    let waiter = std::thread::Builder::new().stack_size(64 << 20).spawn(move || {
++                        let mut w = e.connect(4, "postgres", "postgres", "waiter").unwrap();
++                        let out = run(&mut w, "SET lock_timeout = '5s'; BEGIN; LOCK TABLE t2 IN ACCESS EXCLUSIVE MODE; COMMIT");
++                        assert!(!out.contains("ERROR"), "{out}");
++                    }).unwrap();
++                    let deadline = std::time::Instant::now() + Duration::from_secs(3);
++                    loop {
++                        // Unlike pg_locks, pg_blocking_pids does not itself transfer every
++                        // fast-path hold: the waiting strong request must do the transfer.
++                        if rows(&mut observer, "SELECT pg_blocking_pids(4)::text") == ["{1}"] {
++                            break;
++                        }
++                        assert!(std::time::Instant::now() < deadline, "strong waiter did not block on backend 1");
++                        std::thread::sleep(Duration::from_millis(10));
++                    }
++                    Some(waiter)
++                } else {
++                    assert_eq!(rows(&mut observer, "SELECT count(*) FROM pg_locks WHERE pid = 1 AND relation = 't2'::regclass AND granted"), ["1"]);
++                    None
++                };
++                checked(&mut finisher, &format!("{finish} PREPARED 'reuse'"));
++                if strong_waiter {
++                    assert_eq!(rows(&mut observer, "SELECT pg_blocking_pids(4)::text"), ["{1}"]);
++                }
++                checked(&mut a, "COMMIT");
++                if let Some(waiter) = waiter {
++                    waiter.join().unwrap();
++                    assert_eq!(rows(&mut observer, "SELECT pg_blocking_pids(4)::text"), ["{}"]);
++                }
++                assert_eq!(rows(&mut observer, "SELECT count(*) FROM pg_locks WHERE pid = 1 AND locktype IN ('relation', 'transactionid', 'virtualxid')"), ["0"], "{finish}, strong={strong_waiter}");
++                checked(&mut observer, "SET statement_timeout = '2s'; CREATE INDEX CONCURRENTLY t2_i ON t2 (id)");
++                checked(&mut observer, "BEGIN; LOCK TABLE t, t2 IN ACCESS EXCLUSIVE MODE NOWAIT; COMMIT");
++                assert_eq!(rows(&mut observer, "SELECT count(*) FROM pg_prepared_xacts"), ["0"]);
++                drop((a, finisher, observer));
++                e.shutdown();
++            }
++        }
++    });
++}
++
++/// Prepared locks outlive the preparing session and wake existing relation/transaction
++/// waiters when another session finishes the prepared transaction, without a restart.
++#[test]
++fn prepared_waiters_wake_after_finish_and_disconnect() {
++    on_thread(|| {
++        for finish in ["COMMIT", "ROLLBACK"] {
++            for disconnect in [false, true] {
++                for row_waiter in [false, true] {
++                    let dir = tempfile::tempdir().unwrap();
++                    let e = engine(dir.path(), 5);
++                    let mut a = e.connect(1, "postgres", "postgres", "preparer").unwrap();
++                    let mut finisher = e.connect(2, "postgres", "postgres", "finisher").unwrap();
++                    let mut observer = e.connect(3, "postgres", "postgres", "observer").unwrap();
++                    let checked = |s: &mut Session, sql: &str| {
++                        let out = run(s, sql);
++                        assert!(!out.contains("ERROR"), "{finish}, disconnect={disconnect}, row={row_waiter}: {out}");
++                    };
++                    checked(&mut a, "CREATE TABLE t (id int PRIMARY KEY, v int); INSERT INTO t VALUES (1, 1)");
++                    checked(&mut a, "BEGIN; UPDATE t SET v = 10 WHERE id = 1; PREPARE TRANSACTION 'wake'");
++                    let preparer = if disconnect { drop(a); None } else { Some(a) };
++                    assert_eq!(rows(&mut observer, "SELECT count(*) FROM pg_prepared_xacts WHERE gid = 'wake'"), ["1"]);
++                    let e2 = e.clone();
++                    let waiter = std::thread::Builder::new().stack_size(64 << 20).spawn(move || {
++                        let mut w = e2.connect(4, "postgres", "postgres", "waiter").unwrap();
++                        let wait = if row_waiter {
++                            "UPDATE t SET v = v + 100 WHERE id = 1"
++                        } else {
++                            "LOCK TABLE t IN ACCESS EXCLUSIVE MODE"
++                        };
++                        let out = run(&mut w, &format!("SET lock_timeout = '5s'; BEGIN; {wait}; COMMIT"));
++                        assert!(!out.contains("ERROR"), "{out}");
++                    }).unwrap();
++                    let deadline = std::time::Instant::now() + Duration::from_secs(3);
++                    loop {
++                        if rows(&mut observer, "SELECT pg_blocking_pids(4)::text") == ["{0}"] {
++                            break;
++                        }
++                        assert!(std::time::Instant::now() < deadline, "waiter did not block on prepared transaction");
++                        std::thread::sleep(Duration::from_millis(10));
++                    }
++                    checked(&mut finisher, &format!("{finish} PREPARED 'wake'"));
++                    waiter.join().unwrap();
++                    assert_eq!(rows(&mut observer, "SELECT pg_blocking_pids(4)::text"), ["{}"]);
++                    assert_eq!(rows(&mut observer, "SELECT count(*) FROM pg_prepared_xacts"), ["0"]);
++                    assert_eq!(rows(&mut observer, "SELECT count(*) FROM pg_locks WHERE pid IS NULL AND locktype IN ('relation', 'transactionid', 'virtualxid')"), ["0"]);
++                    let expected = if finish == "COMMIT" { 10 } else { 1 } + if row_waiter { 100 } else { 0 };
++                    assert_eq!(rows(&mut observer, "SELECT v FROM t WHERE id = 1"), [expected.to_string()]);
++                    checked(&mut observer, "SET statement_timeout = '2s'; CREATE INDEX CONCURRENTLY t_v ON t (v)");
++                    checked(&mut observer, "BEGIN; LOCK TABLE t IN ACCESS EXCLUSIVE MODE NOWAIT; COMMIT");
++                    drop((preparer, finisher, observer));
++                    e.shutdown();
++                }
++            }
++        }
++    });
++}
+diff --git a/crates/pg-engine/src/plpgsql/mod.rs b/crates/pg-engine/src/plpgsql/mod.rs
+index 31b8f457..d4213e92 100644
+--- a/crates/pg-engine/src/plpgsql/mod.rs
++++ b/crates/pg-engine/src/plpgsql/mod.rs
+@@ -5301,7 +5301,7 @@ pub fn system_query(ctx: &ExecCtx, sql: &str) -> Result<(Vec<Row>, Vec<OutCol>)>
+         return Err(crate::error::internal("empty system view"));
+     };
+     let mut child = ctx.child(&[]);
+-    child.search_path = vec!["pg_catalog".into()];
++    child.search_path = ["pg_catalog".to_string()].into();
+     let r = (|| {
+         let mut b = Binder::new(&child, Vec::new());
+         let bq = b.bind_statement(&node)?;
