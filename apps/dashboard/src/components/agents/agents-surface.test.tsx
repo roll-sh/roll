@@ -39,10 +39,10 @@ afterEach(() => {
 });
 
 describe("the agents in the header", () => {
-  it("counts what's running and waiting, and opens the conversation that waits", async () => {
+  it("counts what runs (a thread waiting on you is waiting, not running) and opens the conversation that waits", async () => {
     setup();
-    const pill = screen.getByRole("button", { name: "Agents: 2 running, 1 waiting" });
-    expect(pill).toHaveTextContent("2 running");
+    const pill = screen.getByRole("button", { name: "Agents: 1 running, 1 waiting" });
+    expect(pill).toHaveTextContent("1 running");
     await userEvent.click(pill);
     const popup = screen.getByRole("dialog", { name: "Agents" });
     expect(within(popup).getByRole("region", { name: "Thread Upgrade to Next 16.4" })).toBeInTheDocument();
@@ -51,7 +51,7 @@ describe("the agents in the header", () => {
 
   it("goes back to the canvas with Escape, and closes with Escape again", async () => {
     setup();
-    await userEvent.click(screen.getByRole("button", { name: /Agents: 2 running/ }));
+    await userEvent.click(screen.getByRole("button", { name: /Agents: 1 running/ }));
     const popup = screen.getByRole("dialog", { name: "Agents" });
     // The composer has focus and is empty: Escape still leaves.
     await userEvent.keyboard("{Escape}");

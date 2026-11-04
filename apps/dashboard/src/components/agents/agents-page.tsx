@@ -192,7 +192,9 @@ export function AgentsSurface({
     [focus],
   );
 
-  const { busy, requests } = rolling(data);
+  const { busy: working, requests } = rolling(data);
+  // Waiting on you isn't running: those show as the waiting count.
+  const busy = working.filter((t) => t.status !== "waiting");
   const archived = [...data.threads.values()].filter((r) => r.value.archived_at !== null).length;
   const back = (
     <IconButton label="All agents (Esc)" onClick={close}>

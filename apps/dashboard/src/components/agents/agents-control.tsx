@@ -62,7 +62,9 @@ function Counts({ client }: { client: AgentsClient }) {
   useDesktop(snap && inMain && client.owner !== DEMO_OWNER ? snap.data : null, (key) => key.startsWith("t:") && showAgents({ kind: "thread", thread: key.slice(2) }));
   if (!snap) return <Pill count={0} waiting={0} />;
   const { busy, requests } = rolling(snap.data);
-  return <Pill count={busy.length} waiting={requests.length} first={requests[0]?.thread ?? busy[0]?.id} />;
+  // Waiting on you isn't running: those show as the waiting count.
+  const running = busy.filter((t) => t.status !== "waiting");
+  return <Pill count={running.length} waiting={requests.length} first={requests[0]?.thread ?? running[0]?.id} />;
 }
 
 /** `● 3 running · 1 waiting | + New agent`. */
