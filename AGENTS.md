@@ -254,8 +254,10 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     `roll agent up` (orchestrator, SQLite store, git worktrees and checkpoints, PTYs, the
     orchestrator MCP, the relay link, and the providers in `provider/{codex,claude,acp}`).
     `crates/code-control/src/agents/` is the relay and `/v1/code/agents` (machines, device login,
-    the mirror, SSE, commands, grants, sandboxes, shares). `apps/dashboard` has the canvas at
-    `/dashboard/agents`; `apps/desktop` is the Electron shell around it.
+    the mirror, SSE, commands, grants, sandboxes, shares). `apps/dashboard` has them in the
+    header of every page, opening as a popup (canvas, conversations, new agent; no nav page), and
+    filling the window at `/dashboard/agents`; `apps/desktop` is the Electron shell (roll in its
+    main window, the agents in an Agents window).
   - The daemon owns the truth for its machine; the relay only mirrors full records (upserts keyed
     by id, newest `seq` wins) and forwards commands. Never make the relay decide thread state.
   - Change a wire type in `agent-proto`, then regenerate the fixtures

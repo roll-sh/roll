@@ -91,10 +91,9 @@ function Pill({ count, waiting, first }: { count: number; waiting: number; first
         )}
       </button>
       <span className={`w-px ${live ? "bg-accent/30" : "bg-line"}`} aria-hidden />
-      <button onClick={() => showAgents({ kind: "new" })} className="flex items-center gap-1 px-2.5 text-muted whitespace-nowrap transition-colors hover:bg-panel-2 hover:text-fg" title="Start a new agent">
+      <button onClick={() => showAgents({ kind: "new" })} className="flex items-center gap-1 px-2.5 text-muted whitespace-nowrap transition-colors hover:bg-panel-2 hover:text-fg" title="Start a new agent" aria-label="New agent">
         <Plus className="size-3.5" />
         <span className="max-md:hidden">New agent</span>
-        <span className="sr-only md:hidden">New agent</span>
       </button>
     </div>
   );

@@ -35,7 +35,8 @@ sidebar app.
 - **`roll agent …`** in `crates/roll-cli`: `login`, `up`, `status`, `logout`.
 - **`crates/code-control/src/agents/`**: the relay and the `/v1/code/agents` API, machines and
   machine tokens, device login, sandboxes and shares.
-- **`apps/dashboard`**: the canvas at `/dashboard/agents`, the "rolling" popover in the header,
+- **`apps/dashboard`**: the agents in the header of every page (running, waiting, "New agent"),
+  opening as a popup over the page; the same surface fills the window at `/dashboard/agents`;
   public shares at `/agents/s/<id>` (`src/app/agents/s/[id]`, replayed by `lib/agents-replay.ts`).
 - **`apps/desktop`**: the desktop app (Electron): roll in a main window and the canvas in its own
   Agents window, plus this machine's daemon, a tray and notifications (see "Desktop app").
@@ -486,14 +487,37 @@ settle with them before this is marketed; API keys have no such question.
 
 ## Canvas
 
-`/dashboard/agents`. Machines are anchors; projects hang off machines; threads off projects;
-forks and delegated subagents off their parent thread; provider-native subagents and pending
-requests are satellites of their thread. Edges carry a calm accent pulse while work flows
-through them (`--accent`, 1.6 s loop, off with reduced motion). A thread node opens in place
-into the full session (transcript, composer, diff, terminal); approvals are answered right on
-the node. Positions are laid out automatically and remembered when dragged. One canvas engine
-(canvas 2D + `requestAnimationFrame`, paused offscreen) draws edges, pulses and the dot field;
-node cards are DOM, positioned by the same world transform.
+Agents have no page in the dashboard nav. The header of every page shows how many are running
+and waiting, and "New agent"; either opens the agents as a popup over the page (⌘J toggles it;
+`#agents`, `#agents/new` and `#agents/<thread>` open it from a link, and the popup keeps the URL
+in step). In the desktop app's main window the same control opens the Agents window instead,
+which shows `/dashboard/agents`: the same surface, filling the window. `lib/agents-surface.ts`
+holds what's open, so the header, the popup, the window and deep links agree.
+
+The surface has three views:
+
+- **The canvas.** Machines are anchors; projects hang off machines; threads off projects; forks
+  and delegated subagents off their parent thread; provider-native subagents and pending requests
+  are satellites of their thread. Edges carry a calm accent pulse while work flows through them
+  (`--accent`, 1.6 s loop, off with reduced motion). Cards stay small: a thread's card is its
+  status, title, what it's doing and what it cost; actions on machine and project cards show on
+  hover (always on touch screens). Approvals are answered right on their card; questions say what
+  they ask and open the conversation. Positions are laid out automatically and remembered when
+  dragged. One canvas engine (canvas 2D + `requestAnimationFrame`, paused offscreen) draws edges,
+  pulses and the dot field; cards are DOM, positioned by the same world transform. Navigation is
+  Figma's: scrolling pans (two fingers on a trackpad, any direction; shift turns a mouse wheel
+  sideways), pinching zooms about the fingers (ctrl+wheel in Chromium, Firefox and Electron,
+  gesture events in Safari, two touches on a touch screen), ⌘/ctrl+wheel zooms with a mouse,
+  dragging the background or space-drag pans, and + − 0 1 and the arrows work from the keyboard.
+- **A conversation.** Clicking a thread opens it on its own, filling the surface: the transcript
+  in a centred column, the composer under it, the diff (of the thread or one run) or the thread's
+  terminals beside it. Everything is managed from there: approvals in the transcript, fork, roll
+  back, publish, share, rename, archive, delete, take a work item. The title is a switcher to the
+  other conversations (the ones waiting on you first), so there's no need to go back to the
+  canvas; Escape (or ←) goes back. The canvas stays mounted underneath, so going back is instant.
+- **A new agent.** Pick the machine and project (the last used by default; adding a project is
+  right there), say what to do, and it opens as a conversation. Recent conversations are listed
+  under the composer.
 
 - **Getting started.** An owner with no machines sees the globe (`RollMark`) and the two ways in
   side by side, the same as "Add machine" on the canvas: connect your computer (install,
@@ -508,10 +532,10 @@ node cards are DOM, positioned by the same world transform.
   and `Thread.work`. Publishing shows what landing did as a result, never an error; a thread
   outside a worktree is offered a fork into one first, and new threads in a roll code project
   start in a worktree.
-- **Phones.** Below 640 px an opened thread is a full-screen sheet sized to the visible viewport
-  (the composer stays above the keyboard), one at a time; the oldest waiting request sits at the
-  bottom of the canvas, answerable with one tap; fitting the canvas keeps cards readable (at least
-  55 %) and starts at the machines.
+- **Phones.** Below 640 px the popup is the whole screen; a conversation's actions fold into its
+  menu and the diff or a terminal takes the transcript's place; the oldest waiting request sits at
+  the bottom of the canvas, answerable with one tap; fitting the canvas keeps cards readable (at
+  least 55 %) and starts at the machines.
 
 ## Desktop app
 
