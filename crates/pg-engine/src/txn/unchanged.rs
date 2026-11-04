@@ -16,8 +16,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-/// VACUUMs that took a kept measure instead of reading the table, for tests.
-pub static SKIPS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// VACUUMs on this thread that took a kept measure instead of reading the table.
+    static SKIPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// VACUUMs on this thread that took a kept measure instead of reading the table, for tests
+/// (other tests' VACUUMs, on threads of their own, don't count).
+pub fn skips() -> usize {
+    SKIPS.with(std::cell::Cell::get)
+}
+
+pub(crate) fn note_skip() {
+    SKIPS.with(|c| c.set(c.get() + 1));
+}
 
 /// VACUUMs that took kept xmins instead of reading the table for its frozen xid, for tests.
 pub static XMIN_SKIPS: AtomicUsize = AtomicUsize::new(0);

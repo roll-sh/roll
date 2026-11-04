@@ -8,6 +8,7 @@
 
 use super::Ddl;
 use super::vacuum::RowMeasure;
+use crate::catalog::btsim::Key;
 use crate::catalog::{Index, Table, relsize};
 use crate::error::Result;
 use crate::sql::expr::Expr;
@@ -79,6 +80,11 @@ struct Gathered {
     /// The measure's (sort key, key bytes, index tuple size) of each entry.
     keys: Vec<(u128, Vec<u8>, usize)>,
     parts: Vec<(usize, Part)>,
+    /// A modelled table's keys with their data keys.
+    model: Vec<(Key, Vec<u8>)>,
+    /// The first entry in index order past a btree's third of a page (`rowsize`): its key,
+    /// size and row's data key.
+    oversized: Option<(Vec<u8>, usize, Vec<u8>)>,
 }
 
 /// What every participant needs, shared.
@@ -94,6 +100,9 @@ struct Plan<'a> {
     need: Vec<bool>,
     fmt: crate::types::text::FormatCtx,
     check_nulls: bool,
+    /// The table is modelled: each row's key in the index's model is taken (`sizing::
+    /// btree_from_build` lays the model out from them) in place of the measure.
+    model: bool,
 }
 
 impl Plan<'_> {
@@ -101,6 +110,17 @@ impl Plan<'_> {
     fn row(&self, g: &mut Gathered, part: &mut Part, dkey: &[u8], bytes: &[u8]) -> Result<()> {
         let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, &self.fmt);
         part.rows += 1;
+        if self.model {
+            let row = crate::exec::scan::decode_table_row_need(self.t, bytes, &self.need)?;
+            let vals: Vec<Value> = self.cols.iter().map(|&i| row[i].clone()).collect();
+            let k = crate::exec::scan::index_entry_key(self.t, self.ix, &vals, dkey, self.colls);
+            let checked = !self.check_nulls || !vals.iter().any(Value::is_null);
+            g.entries.push(&k, dkey.len().saturating_sub(8), checked);
+            let ty = |n: usize| self.ix_types.get(n).cloned();
+            let key = crate::exec::sizing::index_key_of(self.t, self.ix, &ty, self.colls, vals, &row, &self.fmt);
+            g.model.push((key, dkey.to_vec()));
+            return Ok(());
+        }
         let stored = crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(bytes)?, &self.types, &self.virt_mask);
         let mut row = match stored {
             Some(_) => crate::exec::scan::decode_table_row_need(self.t, bytes, &self.need)?,
@@ -116,7 +136,14 @@ impl Plan<'_> {
         if sort.len() <= 16 {
             sort = Vec::new();
         }
-        g.keys.push((prefix, sort, relsize::index_tuple(&self.ix_types, &vals, &text)));
+        let size = relsize::index_tuple(&self.ix_types, &vals, &text);
+        if size > crate::exec::rowsize::INDEX_SIZE_MASK {
+            return Err(crate::exec::rowsize::form_error(size));
+        }
+        if size > crate::exec::rowsize::BT_MAX_ITEM && g.oversized.as_ref().is_none_or(|o| k < o.0) {
+            g.oversized = Some((k.clone(), size, dkey.to_vec()));
+        }
+        g.keys.push((prefix, sort, size));
         match stored {
             Some(len) => part.sizes.push(relsize::heap_tuple_of_len(len)),
             None => {
@@ -220,6 +247,14 @@ pub(super) fn index_workers(d: &Ddl, t: &Table, pages: u32) -> usize {
     workers
 }
 
+/// What a parallel build gives: its measure (a table too big to model), or a modelled
+/// table's rows and entries counted with each row's key in the index's model and its data key
+/// (`sizing::btree_from_build`).
+pub(super) enum ParBuilt {
+    Measured(RowMeasure),
+    Modelled { rows: usize, tuples: usize, keys: Vec<(Key, Vec<u8>)> },
+}
+
 /// Gives the reserved workers back to the pool when the build ends.
 struct Release(usize);
 
@@ -231,7 +266,8 @@ impl Drop for Release {
 
 impl Ddl<'_, '_> {
     /// The parallel build of `ix` over `t` (see the module), with up to `workers` workers:
-    /// its measure. None: not for this index (the serial build runs).
+    /// its measure, or (`model`: a modelled table) the rows' keys in the index's model.
+    /// None: not for this index (the serial build runs).
     pub(super) fn build_index_parallel(
         &self,
         t: &Table,
@@ -239,7 +275,8 @@ impl Ddl<'_, '_> {
         bix: &BoundIndex,
         workers: usize,
         progress: &IndexProgress,
-    ) -> Result<Option<RowMeasure>> {
+        model: bool,
+    ) -> Result<Option<ParBuilt>> {
         let cols: Option<Vec<usize>> = bix.keys.iter().map(|k| if let Expr::Col(i, _) = k { Some(*i) } else { None }).collect();
         let (Some(cols), None) = (cols, &bix.predicate) else {
             return Ok(None);
@@ -293,6 +330,7 @@ impl Ddl<'_, '_> {
             need: (0..t.columns.len()).map(|i| needed.contains(&i)).collect(),
             fmt: self.ctx.fmt().clone(),
             check_nulls: ix.unique && !ix.nulls_not_distinct,
+            model,
         };
         let chunks = Mutex::new(chunks);
         let stop = AtomicBool::new(false);
@@ -325,28 +363,52 @@ impl Ddl<'_, '_> {
         let mut parts: Vec<(usize, Part)> = Vec::new();
         let mut keys = Vec::new();
         let mut sorted = Vec::new();
+        let mut model_keys = Vec::new();
+        let mut oversized: Option<(Vec<u8>, usize, Vec<u8>)> = None;
         for g in gathered {
             let g = g?;
+            if let Some(o) = g.oversized
+                && oversized.as_ref().is_none_or(|m| o.0 < m.0)
+            {
+                oversized = Some(o);
+            }
             parts.extend(g.parts);
             keys.push(g.keys);
             sorted.push(g.entries);
+            model_keys.extend(g.model);
         }
         if ix.unique {
             self.unique_check(t, bix, ix, &sorted)?;
         }
+        if let Some((_, n, dkey)) = oversized {
+            let tid = crate::exec::dml::row_tid(t, &dkey, self.ctx);
+            return Err(crate::exec::rowsize::btree_error(t, bix, n, tid, self.ctx));
+        }
         parts.sort_by_key(|p| p.0);
         let rows = parts.iter().map(|p| p.1.rows).sum();
+        if model {
+            let tuples = model_keys.len();
+            crate::exec::pgstat::count_returned(self.ctx, t.oid, tuples as i64);
+            progress.scanned_all(tuples as u64);
+            self.put_runs(&start, sorted)?;
+            progress.loaded(tuples as u64);
+            return Ok(Some(ParBuilt::Modelled { rows, tuples, keys: model_keys }));
+        }
         let live = relsize::heap_pages(parts.into_iter().flat_map(|p| p.1.sizes));
         let tuples = keys.iter().map(Vec::len).sum::<usize>();
         progress.scanned_all(tuples as u64);
         let pages = super::vacuum::btree_pages_sorted(bix, &plan.ix_types, merge_sorted(keys), tuples);
+        self.put_runs(&start, sorted)?;
+        progress.loaded(tuples as u64);
+        Ok(Some(ParBuilt::Measured(RowMeasure::new(rows, live, vec![(ix.oid, pages, tuples as f64)]))))
+    }
+
+    fn put_runs(&self, start: &[u8], sorted: Vec<Entries>) -> Result<()> {
         let runs: Vec<(Vec<u8>, Vec<(u32, u32, u32)>)> = sorted
             .into_iter()
             .map(|e| (e.data, e.ents.into_iter().map(|(_, o, l)| (o, l & 0xffff, (l & !CHECKED) >> 16)).collect()))
             .collect();
-        self.ctx.txn.borrow_mut().put_index_runs(&start, runs)?;
-        progress.loaded(tuples as u64);
-        Ok(Some(RowMeasure::new(rows, live, vec![(ix.oid, pages, tuples as f64)])))
+        self.ctx.txn.borrow_mut().put_index_runs(start, runs)
     }
 
     /// A unique index's duplicates, merging the participants' sorted entries (entries of

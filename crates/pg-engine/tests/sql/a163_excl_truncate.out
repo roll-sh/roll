@@ -1,0 +1,128 @@
+> CREATE EXTENSION IF NOT EXISTS btree_gist
+-- CREATE EXTENSION
+
+> CREATE TABLE a163_bk (id serial, room int, during tsrange, EXCLUDE USING gist (during WITH &&))
+-- CREATE TABLE
+
+> CREATE TABLE a163_rm (id serial, room int, during tsrange, EXCLUDE USING gist (room WITH =, during WITH &&))
+-- CREATE TABLE
+
+> INSERT INTO a163_bk (during) VALUES (tsrange('2026-01-01 00:00', '2026-01-01 10:00'))
+-- INSERT 0 1
+
+> INSERT INTO a163_rm (room, during) VALUES (1, tsrange('2026-01-01 00:00', '2026-01-01 10:00'))
+-- INSERT 0 1
+
+> BEGIN
+-- BEGIN
+
+> TRUNCATE a163_bk
+-- TRUNCATE TABLE
+
+> INSERT INTO a163_bk (during) SELECT tsrange(timestamp '2026-01-01' + g * interval '1 hour',
+>   timestamp '2026-01-01' + (g + 1) * interval '1 hour') FROM generate_series(1, 300) g
+-- INSERT 0 300
+
+> SELECT count(*) FROM a163_bk
+count:int8
+300
+-- SELECT 1
+
+> INSERT INTO a163_bk (during) VALUES (tsrange('2026-01-01 03:30', '2026-01-01 04:30'))
+ERROR 23P01: conflicting key value violates exclusion constraint "a163_bk_during_excl"
+DETAIL: Key (during)=(["2026-01-01 03:30:00","2026-01-01 04:30:00")) conflicts with existing key (during)=(["2026-01-01 03:00:00","2026-01-01 04:00:00")).
+OBJECTS: schema=public table=a163_bk constraint=a163_bk_during_excl
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO a163_bk (during) VALUES (tsrange('2026-02-01 00:00', '2026-02-01 01:00'))
+-- INSERT 0 1
+
+> TRUNCATE a163_bk
+-- TRUNCATE TABLE
+
+> INSERT INTO a163_bk (during) VALUES (tsrange('2026-02-01 00:30', '2026-02-01 00:45'))
+-- INSERT 0 1
+
+> INSERT INTO a163_bk (during) SELECT tsrange(timestamp '2026-03-01' + g * interval '1 hour',
+>   timestamp '2026-03-01' + (g + 1) * interval '1 hour') FROM generate_series(1, 200) g
+-- INSERT 0 200
+
+> DELETE FROM a163_bk WHERE during && tsrange(timestamp '2026-03-01' + interval '50 hours', timestamp '2026-03-01' + interval '52 hours')
+-- DELETE 2
+
+> INSERT INTO a163_bk (during) VALUES (tsrange('2026-03-03 02:30', '2026-03-03 03:30'))
+-- INSERT 0 1
+
+> SAVEPOINT s
+-- SAVEPOINT
+
+> INSERT INTO a163_bk (during) VALUES (tsrange('2026-03-01 10:30', '2026-03-01 11:30'))
+ERROR 23P01: conflicting key value violates exclusion constraint "a163_bk_during_excl"
+DETAIL: Key (during)=(["2026-03-01 10:30:00","2026-03-01 11:30:00")) conflicts with existing key (during)=(["2026-03-01 10:00:00","2026-03-01 11:00:00")).
+OBJECTS: schema=public table=a163_bk constraint=a163_bk_during_excl
+
+> ROLLBACK TO s
+-- ROLLBACK
+
+> INSERT INTO a163_bk (during) VALUES (tsrange('2026-04-01 00:00', '2026-04-01 02:00')),
+>   (tsrange('2026-04-01 01:00', '2026-04-01 03:00'))
+ERROR 23P01: conflicting key value violates exclusion constraint "a163_bk_during_excl"
+DETAIL: Key (during)=(["2026-04-01 01:00:00","2026-04-01 03:00:00")) conflicts with existing key (during)=(["2026-04-01 00:00:00","2026-04-01 02:00:00")).
+OBJECTS: schema=public table=a163_bk constraint=a163_bk_during_excl
+
+> ROLLBACK TO s
+-- ROLLBACK
+
+> COMMIT
+-- COMMIT
+
+> SELECT count(*), min(lower(during)), max(upper(during)) FROM a163_bk
+count:int8 | min:timestamp | max:timestamp
+200 | 2026-02-01 00:30:00 | 2026-03-09 09:00:00
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> TRUNCATE a163_rm
+-- TRUNCATE TABLE
+
+> INSERT INTO a163_rm (room, during) SELECT g % 5, tsrange(timestamp '2026-01-01' + g * interval '1 hour',
+>   timestamp '2026-01-01' + (g + 1) * interval '1 hour') FROM generate_series(1, 200) g
+-- INSERT 0 200
+
+> INSERT INTO a163_rm (room, during) VALUES (7, tsrange('2026-01-01 00:00', '2026-01-01 10:00'))
+-- INSERT 0 1
+
+> SAVEPOINT s
+-- SAVEPOINT
+
+> INSERT INTO a163_rm (room, during) VALUES (2, tsrange('2026-01-01 06:30', '2026-01-01 07:30'))
+ERROR 23P01: conflicting key value violates exclusion constraint "a163_rm_room_during_excl"
+DETAIL: Key (room, during)=(2, ["2026-01-01 06:30:00","2026-01-01 07:30:00")) conflicts with existing key (room, during)=(2, ["2026-01-01 07:00:00","2026-01-01 08:00:00")).
+OBJECTS: schema=public table=a163_rm constraint=a163_rm_room_during_excl
+
+> ROLLBACK TO s
+-- ROLLBACK
+
+> COMMIT
+-- COMMIT
+
+> SELECT room, count(*) FROM a163_rm GROUP BY room ORDER BY room
+room:int4 | count:int8
+0 | 40
+1 | 40
+2 | 40
+3 | 40
+4 | 40
+7 | 1
+-- SELECT 6
+
+> DROP TABLE a163_bk, a163_rm
+-- DROP TABLE
+
