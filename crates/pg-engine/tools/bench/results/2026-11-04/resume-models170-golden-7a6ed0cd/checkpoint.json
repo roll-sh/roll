@@ -1,0 +1,7 @@
+{
+  "head": "b9e2786a1445770577a986b28861141d006f2d6b",
+  "tree": "3a54115b9155b8a6f79e578a29cbc3d504e28833",
+  "status": "",
+  "time_utc": "2026-11-04T12:26:09.732569+00:00",
+  "note": "Preparation only: source7a6ed0cd compiled and PG18.6 expected output recorded. Record mode3pass does NOT verify engine correctness. New source includes expected output; all fresh engine correctness/resource acceptance still pending. Reference pinnedsha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873."
+}
