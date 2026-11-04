@@ -204,7 +204,7 @@ pub fn rel_size(t: &Table, ctx: &ExecCtx) -> RelSize {
         let maxalign = |w: u32| w.div_ceil(8) * 8;
         return RelSize { pages: 10.0, tuples: ((10 * BLCKSZ as u32) / (maxalign(width) + 24)) as f64 };
     }
-    let curpages = crate::exec::sizing::heap_blocks(t, ctx)
+    let curpages = crate::exec::sizing::planned_heap_blocks(t, ctx)
         .ok()
         .flatten()
         .unwrap_or(0);

@@ -203,6 +203,9 @@ pub struct RelFiles {
     kept_stored: HashSet<u32>,
     /// The kept records loaded, by table (a hash: what the close needn't write again).
     kept_hash: HashMap<u32, u64>,
+    /// Kept tables' sizes as their records' headers have them (`kept::sizes`; None: the
+    /// record has none), read before their models are laid out.
+    kept_sizes: HashMap<u32, Option<kept::Sizes>>,
 }
 
 /// A BRIN index's summarized page ranges: those its build covered (the heap's pages then,
@@ -1736,6 +1739,7 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
             .collect();
         rf.btrees.insert(oid, Btree::build(opts, ents));
     }
+    kept::laid_out(rf, t.oid);
     Ok(true)
 }
 
@@ -2950,7 +2954,9 @@ pub fn toast_chunks(t: &Table, ctx: &ExecCtx) -> Result<Vec<(u32, i32, Vec<u8>)>
 
 /// The table's size in pages as modelled (None: not modelled).
 pub fn modelled_blocks(table: u32, ctx: &ExecCtx) -> Option<u32> {
-    ctx.sess.db.relfiles.of(table).read().heaps.get(&table).map(Heap::nblocks)
+    let rf = ctx.sess.db.relfiles.of(table).read();
+    // (A kept table planned from its record's sizes: those, until it is laid out.)
+    rf.heaps.get(&table).map(Heap::nblocks).or_else(|| kept::sizes_read(&rf, table).map(|s| s.heap))
 }
 
 /// The table was emptied (TRUNCATE): new, empty files.
@@ -4349,8 +4355,15 @@ pub fn btree_height(table: u32, index: u32, db: &Database) -> Option<u32> {
 /// index too big to model, the levels a sorted build stacks over its `pages` (inner pages
 /// 70% full of downlinks to keys `key_width` bytes wide: TPC-H's lineitem_pkey has 2).
 pub fn btree_level(table: u32, index: u32, pages: f64, key_width: u32, db: &Database) -> u32 {
-    if let Some(h) = btree_height(table, index, db) {
-        return h;
+    {
+        let rf = db.relfiles.of(table).read();
+        if let Some(bt) = rf.btrees.get(&index) {
+            return bt.height();
+        }
+        // (A kept table not laid out yet: its record's, as its pages were read: `main_blocks_known`.)
+        if let Some(b) = kept::sizes_read(&rf, table).and_then(|s| s.btrees.iter().find(|b| b.0 == index)) {
+            return b.2;
+        }
     }
     let downlink = (8 + key_width as usize).div_ceil(8) * 8 + heapsim::ITEM_ID;
     let fanout = ((heapsim::BLCKSZ - 24 - 16) * 70 / 100 / downlink).max(2) as f64;
@@ -4586,6 +4599,17 @@ fn modelled(rf: &RelFiles, cat: &Catalog, t: &Table) -> bool {
         && rf.heaps.contains_key(&t.oid)
         && t.indexes.iter().all(index_done)
         && t.pkey_index.as_ref().is_none_or(index_done)
+}
+
+/// `heap_blocks` for the planner (estimate_rel_size's RelationGetNumberOfBlocks): a kept
+/// table's pages as its record has them while its models aren't laid out yet (`kept::sizes`),
+/// so planning doesn't wait for the layout. (Readers that need the model itself, its rows'
+/// places or pruning, still lay it out or wait for it: `heap_blocks`.)
+pub fn planned_heap_blocks(t: &Table, ctx: &ExecCtx) -> Result<Option<u32>> {
+    if let Some(n) = main_blocks_known(t.oid, &ctx.catalog(), &ctx.sess.db) {
+        return Ok(Some(n as u32));
+    }
+    heap_blocks(t, ctx)
 }
 
 /// The table's current size in pages (None: not modelled).
@@ -5059,7 +5083,8 @@ pub fn main_blocks_known(oid: u32, cat: &Catalog, db: &Database) -> Option<u64> 
             } else if modelled(&rf, cat, &t) {
                 rf.heaps.get(&t.oid).map(|h| h.nblocks() as u64)
             } else {
-                None
+                drop(rf);
+                kept::sizes(db, cat, &t).map(|s| s.heap as u64)
             }
         }
         Rel::Index(t, _) => {
@@ -5073,7 +5098,9 @@ pub fn main_blocks_known(oid: u32, cat: &Catalog, db: &Database) -> Option<u64> 
             } else if modelled(&rf, cat, &t) {
                 rf.btrees.get(&oid).map(|b| b.nblocks() as u64)
             } else {
-                None
+                drop(rf);
+                let s = kept::sizes(db, cat, &t)?;
+                s.btrees.iter().find(|b| b.0 == oid).map(|b| b.1 as u64)
             }
         }
         _ => None,
