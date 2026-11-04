@@ -1,0 +1,279 @@
+[
+    {
+        "Id": "a10b103cf34ee7f4e5e812c40cd31220f510d36638e0ad202f4ba1ad6541224c",
+        "Created": "2026-11-04T14:11:35.445454334Z",
+        "Path": "docker-entrypoint.sh",
+        "Args": [
+            "sleep",
+            "infinity"
+        ],
+        "State": {
+            "Status": "running",
+            "Running": true,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 1507165,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-11-04T14:11:35.846843305Z",
+            "FinishedAt": "0001-01-01T00:00:00Z"
+        },
+        "Image": "sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873",
+        "ResolvConfPath": "/var/lib/docker/containers/a10b103cf34ee7f4e5e812c40cd31220f510d36638e0ad202f4ba1ad6541224c/resolv.conf",
+        "HostnamePath": "/var/lib/docker/containers/a10b103cf34ee7f4e5e812c40cd31220f510d36638e0ad202f4ba1ad6541224c/hostname",
+        "HostsPath": "/var/lib/docker/containers/a10b103cf34ee7f4e5e812c40cd31220f510d36638e0ad202f4ba1ad6541224c/hosts",
+        "LogPath": "/var/lib/docker/containers/a10b103cf34ee7f4e5e812c40cd31220f510d36638e0ad202f4ba1ad6541224c/a10b103cf34ee7f4e5e812c40cd31220f510d36638e0ad202f4ba1ad6541224c-json.log",
+        "Name": "/a169-resume-perf-client",
+        "RestartCount": 0,
+        "Driver": "overlayfs",
+        "Platform": "linux",
+        "MountLabel": "",
+        "ProcessLabel": "",
+        "AppArmorProfile": "docker-default",
+        "ExecIDs": null,
+        "HostConfig": {
+            "Binds": [
+                "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/input:/input:ro"
+            ],
+            "ContainerIDFile": "",
+            "LogConfig": {
+                "Type": "json-file",
+                "Config": {}
+            },
+            "NetworkMode": "host",
+            "PortBindings": {},
+            "RestartPolicy": {
+                "Name": "no",
+                "MaximumRetryCount": 0
+            },
+            "AutoRemove": false,
+            "VolumeDriver": "",
+            "VolumesFrom": null,
+            "ConsoleSize": [
+                0,
+                0
+            ],
+            "CapAdd": null,
+            "CapDrop": null,
+            "CgroupnsMode": "private",
+            "Dns": null,
+            "DnsOptions": [],
+            "DnsSearch": [],
+            "ExtraHosts": null,
+            "GroupAdd": null,
+            "IpcMode": "private",
+            "Cgroup": "",
+            "Links": null,
+            "OomScoreAdj": 0,
+            "PidMode": "",
+            "Privileged": false,
+            "PublishAllPorts": false,
+            "ReadonlyRootfs": false,
+            "SecurityOpt": null,
+            "UTSMode": "",
+            "UsernsMode": "",
+            "ShmSize": 1073741824,
+            "Runtime": "runc",
+            "Isolation": "",
+            "CpuShares": 2,
+            "Memory": 2147483648,
+            "NanoCpus": 0,
+            "CgroupParent": "",
+            "BlkioWeight": 0,
+            "BlkioWeightDevice": [],
+            "BlkioDeviceReadBps": [],
+            "BlkioDeviceWriteBps": [],
+            "BlkioDeviceReadIOps": [],
+            "BlkioDeviceWriteIOps": [],
+            "CpuPeriod": 0,
+            "CpuQuota": 0,
+            "CpuRealtimePeriod": 0,
+            "CpuRealtimeRuntime": 0,
+            "CpusetCpus": "20-21",
+            "CpusetMems": "",
+            "Devices": [],
+            "DeviceCgroupRules": null,
+            "DeviceRequests": null,
+            "MemoryReservation": 0,
+            "MemorySwap": 2147483648,
+            "MemorySwappiness": null,
+            "OomKillDisable": null,
+            "PidsLimit": null,
+            "Ulimits": null,
+            "CpuCount": 0,
+            "CpuPercent": 0,
+            "IOMaximumIOps": 0,
+            "IOMaximumBandwidth": 0,
+            "MaskedPaths": [
+                "/proc/acpi",
+                "/proc/asound",
+                "/proc/interrupts",
+                "/proc/kcore",
+                "/proc/keys",
+                "/proc/latency_stats",
+                "/proc/sched_debug",
+                "/proc/scsi",
+                "/proc/timer_list",
+                "/proc/timer_stats",
+                "/sys/devices/virtual/powercap",
+                "/sys/firmware",
+                "/sys/devices/system/cpu/cpu0/thermal_throttle",
+                "/sys/devices/system/cpu/cpu1/thermal_throttle",
+                "/sys/devices/system/cpu/cpu2/thermal_throttle",
+                "/sys/devices/system/cpu/cpu3/thermal_throttle",
+                "/sys/devices/system/cpu/cpu4/thermal_throttle",
+                "/sys/devices/system/cpu/cpu5/thermal_throttle",
+                "/sys/devices/system/cpu/cpu6/thermal_throttle",
+                "/sys/devices/system/cpu/cpu7/thermal_throttle",
+                "/sys/devices/system/cpu/cpu8/thermal_throttle",
+                "/sys/devices/system/cpu/cpu9/thermal_throttle",
+                "/sys/devices/system/cpu/cpu10/thermal_throttle",
+                "/sys/devices/system/cpu/cpu11/thermal_throttle",
+                "/sys/devices/system/cpu/cpu12/thermal_throttle",
+                "/sys/devices/system/cpu/cpu13/thermal_throttle",
+                "/sys/devices/system/cpu/cpu14/thermal_throttle",
+                "/sys/devices/system/cpu/cpu15/thermal_throttle",
+                "/sys/devices/system/cpu/cpu16/thermal_throttle",
+                "/sys/devices/system/cpu/cpu17/thermal_throttle",
+                "/sys/devices/system/cpu/cpu18/thermal_throttle",
+                "/sys/devices/system/cpu/cpu19/thermal_throttle",
+                "/sys/devices/system/cpu/cpu20/thermal_throttle",
+                "/sys/devices/system/cpu/cpu21/thermal_throttle",
+                "/sys/devices/system/cpu/cpu22/thermal_throttle",
+                "/sys/devices/system/cpu/cpu23/thermal_throttle",
+                "/sys/devices/system/cpu/cpu24/thermal_throttle",
+                "/sys/devices/system/cpu/cpu25/thermal_throttle",
+                "/sys/devices/system/cpu/cpu26/thermal_throttle",
+                "/sys/devices/system/cpu/cpu27/thermal_throttle",
+                "/sys/devices/system/cpu/cpu28/thermal_throttle",
+                "/sys/devices/system/cpu/cpu29/thermal_throttle",
+                "/sys/devices/system/cpu/cpu30/thermal_throttle",
+                "/sys/devices/system/cpu/cpu31/thermal_throttle",
+                "/sys/devices/system/cpu/cpu32/thermal_throttle",
+                "/sys/devices/system/cpu/cpu33/thermal_throttle",
+                "/sys/devices/system/cpu/cpu34/thermal_throttle",
+                "/sys/devices/system/cpu/cpu35/thermal_throttle"
+            ],
+            "ReadonlyPaths": [
+                "/proc/bus",
+                "/proc/fs",
+                "/proc/irq",
+                "/proc/sys",
+                "/proc/sysrq-trigger"
+            ]
+        },
+        "Storage": {
+            "RootFS": {
+                "Snapshot": {
+                    "Name": "overlayfs"
+                }
+            }
+        },
+        "Mounts": [
+            {
+                "Type": "bind",
+                "Source": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_perf169/input",
+                "Destination": "/input",
+                "Mode": "ro",
+                "RW": false,
+                "Propagation": "rprivate"
+            },
+            {
+                "Type": "volume",
+                "Name": "04e5c6f7bba42b8b8e275a33452230adf8bd7b3e276a23b6abb2187839b99e3f",
+                "Source": "/var/lib/docker/volumes/04e5c6f7bba42b8b8e275a33452230adf8bd7b3e276a23b6abb2187839b99e3f/_data",
+                "Destination": "/var/lib/postgresql",
+                "Driver": "local",
+                "Mode": "",
+                "RW": true,
+                "Propagation": ""
+            }
+        ],
+        "Config": {
+            "Hostname": "ai-server",
+            "Domainname": "",
+            "User": "",
+            "AttachStdin": false,
+            "AttachStdout": true,
+            "AttachStderr": true,
+            "ExposedPorts": {
+                "5432/tcp": {}
+            },
+            "Tty": false,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "Env": [
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "GOSU_VERSION=1.19",
+                "LANG=en_US.utf8",
+                "PG_MAJOR=18",
+                "PG_VERSION=18.6",
+                "PG_SHA256=555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f",
+                "DOCKER_PG_LLVM_DEPS=llvm21-dev \t\tclang21",
+                "PGDATA=/var/lib/postgresql/18/docker"
+            ],
+            "Cmd": [
+                "sleep",
+                "infinity"
+            ],
+            "Image": "postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873",
+            "Volumes": {
+                "/var/lib/postgresql": {}
+            },
+            "WorkingDir": "/",
+            "Entrypoint": [
+                "docker-entrypoint.sh"
+            ],
+            "Labels": {
+                "agent.lane": "storage_perf169",
+                "agent.worktree": "agent-a76932e8127f6d35b"
+            },
+            "StopSignal": "SIGINT"
+        },
+        "NetworkSettings": {
+            "SandboxID": "fff277607a86d400ef14e60d672233530feb76f2f30b2d538987a19613f5d08e",
+            "SandboxKey": "/var/run/docker/netns/default",
+            "Ports": {},
+            "Networks": {
+                "host": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": null,
+                    "DriverOpts": null,
+                    "GwPriority": 0,
+                    "NetworkID": "c90e545142e328aa3940114079eee55659af04b59a6e5304a5bdebd0d5f93dae",
+                    "EndpointID": "27350e1d93dea06302156283b5e04c37cf58916cc07af71cc0959c33d499697d",
+                    "Gateway": "",
+                    "IPAddress": "",
+                    "MacAddress": "",
+                    "IPPrefixLen": 0,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "DNSNames": null
+                }
+            }
+        },
+        "ImageManifestDescriptor": {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": "sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66",
+            "size": 2678,
+            "annotations": {
+                "com.docker.official-images.bashbrew.arch": "amd64",
+                "org.opencontainers.image.base.digest": "sha256:d56c381f961d307a21b3ca004cf1e3910f106644aefb1f43e654c8a56c4fd395",
+                "org.opencontainers.image.base.name": "alpine:3.24",
+                "org.opencontainers.image.created": "2026-09-17T21:27:08Z",
+                "org.opencontainers.image.revision": "e00e1bd34ec5c8a8e7ad89b273b3d42efaf6d5bc",
+                "org.opencontainers.image.source": "https://github.com/docker-library/postgres.git#e00e1bd34ec5c8a8e7ad89b273b3d42efaf6d5bc:18/alpine3.24",
+                "org.opencontainers.image.url": "https://hub.docker.com/_/postgres",
+                "org.opencontainers.image.version": "18.6-alpine3.24"
+            },
+            "platform": {
+                "architecture": "amd64",
+                "os": "linux"
+            }
+        }
+    }
+]
