@@ -4838,6 +4838,11 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
             // tables, psql's `\d` reads it twice.)
             let mut rows = Vec::new();
             let mut kids: Vec<u32> = cat.inheritance().flat_map(|(_, c)| c.iter().copied()).collect();
+            // (A detach view leaves partitions out of their parents' children lists; their
+            // rows are still there, detach pending.)
+            if let Some(v) = &cat.view {
+                kids.extend(v.omitted.iter().map(|&(_, c)| c));
+            }
             kids.sort_unstable();
             kids.dedup();
             for t in kids.iter().filter_map(|k| cat.tables.get(k)) {
