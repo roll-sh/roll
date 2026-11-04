@@ -216,8 +216,10 @@ impl Plan<'_> {
             #[cfg(test)]
             if first {
                 first = false;
-                if let Some(o) = &self.observed {
-                    o.completed_first(_participant)?;
+                if let Some(o) = &self.observed
+                    && !o.completed_first(_participant)?
+                {
+                    return Ok(g);
                 }
             }
         }

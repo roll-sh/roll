@@ -18,6 +18,7 @@ pub(crate) struct Participant {
     pub expanded_text: usize,
     pub minimum: Option<Candidate>,
     pub error: Option<Error>,
+    pub coordinator_aborted: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -101,7 +102,7 @@ impl Observer {
         }
     }
 
-    fn wait<'a>(&self, mut s: std::sync::MutexGuard<'a, State>, ready: impl Fn(&State) -> bool) -> Result<std::sync::MutexGuard<'a, State>> {
+    fn wait<'a>(&self, mut s: std::sync::MutexGuard<'a, State>, id: usize, ready: impl Fn(&State) -> bool) -> Result<Option<std::sync::MutexGuard<'a, State>>> {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !ready(&s) && s.trace.gate_error.is_none() && s.aborted.is_none() {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -112,13 +113,14 @@ impl Observer {
             }
             s = self.changed.wait_timeout(s, left).unwrap().0;
         }
-        if let Some(e) = &s.aborted {
-            return Err(e.clone());
-        }
         if let Some(e) = &s.trace.gate_error {
             return Err(crate::error::internal(e));
         }
-        Ok(s)
+        if s.aborted.is_some() {
+            s.trace.participants.entry(id).or_default().coordinator_aborted = true;
+            return Ok(None);
+        }
+        Ok(Some(s))
     }
 
     // Reserve the first three chunks in participant order. Nobody can consume another
@@ -128,25 +130,26 @@ impl Observer {
             return Ok(chunks.lock().unwrap().pop_front());
         }
         let s = self.state.lock().unwrap();
-        let mut s = self.wait(s, |s| s.claimed == id)?;
+        let Some(mut s) = self.wait(s, id, |s| s.claimed == id)? else { return Ok(None) };
         let next = chunks.lock().unwrap().pop_front();
         if next.is_none() {
             s.trace.gate_error = Some("fewer than three chunks".into());
         }
         s.claimed += 1;
         self.changed.notify_all();
-        drop(self.wait(s, |s| s.claimed == 3)?);
+        let Some(s) = self.wait(s, id, |s| s.claimed == 3)? else { return Ok(None) };
+        drop(s);
         Ok(next)
     }
 
-    pub(crate) fn completed_first(&self, id: usize) -> Result<()> {
+    pub(crate) fn completed_first(&self, id: usize) -> Result<bool> {
         if self.coordinate {
             let mut s = self.state.lock().unwrap();
             s.completed.insert(id);
             self.changed.notify_all();
-            drop(self.wait(s, |s| s.completed.len() == 3)?);
+            return Ok(self.wait(s, id, |s| s.completed.len() == 3)?.is_some());
         }
-        Ok(())
+        Ok(true)
     }
 
     pub(crate) fn chunk(&self, id: usize, chunk: usize) {
@@ -180,6 +183,9 @@ impl Observer {
 
     pub(crate) fn error(&self, id: usize, error: &Error) {
         let mut s = self.state.lock().unwrap();
+        if s.trace.gate_error.is_some() {
+            return;
+        }
         s.trace.participants.entry(id).or_default().error = Some(error.clone());
         // Release every waiter if a participant fails in its first chunk.
         s.aborted = Some(error.clone());
