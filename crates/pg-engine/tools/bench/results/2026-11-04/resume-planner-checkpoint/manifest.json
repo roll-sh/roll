@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "495c2d94133ea6564bf6c4ae27b3665b7e23b8aff0e7a6e2d59e59121dccee91",
-    "bytes": 10144
+    "sha256": "18a1799851018087cc55a52457b6a16f9b140cdd0e2ba2ae96af9b68a7b22de4",
+    "bytes": 10258
   },
   "bytea165compare/RESTORED": {
     "sha256": "cfeb0d7a74ac20eb1d46d347c00db409be5f9c5b47ca77e388b2e494a65d91c3",
@@ -99,6 +99,10 @@
     "sha256": "353f870df69398a58d5c13b340f10c906ede8765c897115c2019af29069b4356",
     "bytes": 4667
   },
+  "check165ind-v2/affinity-observation-release-tests.json": {
+    "sha256": "efc4a5884ecdf9ef70627f875e3853b49b0c2fa1ec6a21002c2ec6b069bcc7bb",
+    "bytes": 7383
+  },
   "check165ind-v2/affinity-observation-release.json": {
     "sha256": "26ffd3d1345877066ea87ac78cc255dfb3877fd54205978453b8e599033ce842",
     "bytes": 14628
@@ -122,6 +126,22 @@
   "check165ind-v2/initial.status": {
     "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "bytes": 0
+  },
+  "check165ind-v2/release-completed-exits.tsv": {
+    "sha256": "e32cfa9a9c13bbd3fd8a48aae7954d0a11188718cac2eba4133af9a4c83e6ef9",
+    "bytes": 28
+  },
+  "check165ind-v2/release-test-summary.json": {
+    "sha256": "a3acdd6802a54cc9ea7a202afd48191f90954ddfcb187fc78d318efd84cac3ff",
+    "bytes": 3947
+  },
+  "check165ind-v2/release-test.command": {
+    "sha256": "71a6025a4acfc80b9d5ef058f083ab8feef2ac79b82048d5d6534c9385b0d572",
+    "bytes": 35
+  },
+  "check165ind-v2/release-test.log": {
+    "sha256": "9b4df466a78cf49ef2a55eee1470ed65416bdea870559a1d886a8352b54f74bd",
+    "bytes": 37567
   },
   "check165ind-v2/source.txt": {
     "sha256": "cfeb0d7a74ac20eb1d46d347c00db409be5f9c5b47ca77e388b2e494a65d91c3",
@@ -392,8 +412,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "4e7d2488bf0494b34330ede4b0585fa1592b5d783effbdad83ab01bfa581587a",
-    "bytes": 21907
+    "sha256": "abc8cecf3467be13f1bd94e33ee73e691444227fdce046386220e09349c0120b",
+    "bytes": 22168
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
