@@ -986,7 +986,7 @@ fn reordered_heaps_through_batches() {
 /// by the statement's thread, its rows go to the workers a fill at a time and through the
 /// batch kernels, as a table's stored in order do.
 fn reordered_heaps_through_batches_inner() {
-    use pg_engine::exec::parscan::{VECTOR_ROWS, without_vectors};
+    use pg_engine::exec::parscan::{LIST_FILL_ROWS, VECTOR_ROWS, without_vectors};
     let dir = tempfile::tempdir().unwrap();
     let engine = open(dir.path());
     let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
@@ -1015,8 +1015,10 @@ fn reordered_heaps_through_batches_inner() {
     s.query("SET max_parallel_workers_per_gather = 2").unwrap();
     let started = pg_engine::exec::parscan::started();
     let before = VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed);
+    let list_before = LIST_FILL_ROWS.load(std::sync::atomic::Ordering::Relaxed);
     let parallel = run(&mut s);
     assert!(pg_engine::exec::parscan::started() > started, "reordered heap ran in workers");
+    assert!(LIST_FILL_ROWS.load(std::sync::atomic::Ordering::Relaxed) > list_before, "reordered ListFill source supplied rows");
     assert!(VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed) > before, "rows went through column batches");
     let rows = without_vectors(|| run(&mut s));
     for (((q, a), b), c) in REORDERED_QUERIES.iter().zip(&serial).zip(&parallel).zip(&rows) {

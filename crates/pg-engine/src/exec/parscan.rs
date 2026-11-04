@@ -229,11 +229,16 @@ impl From<Chunk> for Source {
 /// the batch kernels take them as they take a table's.
 pub struct ListFill(pub std::vec::IntoIter<(Vec<u8>, bytes::Bytes)>);
 
+/// Reordered heap rows actually filled into batches (tests distinguish this source).
+pub static LIST_FILL_ROWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl FillRows for ListFill {
     fn fill(&mut self, b: &mut RowBatch, max: usize) -> Result<()> {
+        let before = b.len();
         for (k, v) in self.0.by_ref().take(max) {
             b.push(&k, v);
         }
+        LIST_FILL_ROWS.fetch_add((b.len() - before) as u64, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 }
