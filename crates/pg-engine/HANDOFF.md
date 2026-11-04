@@ -5886,6 +5886,34 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     613 / 616, cube 316, pgvector 915 / 915 (own reference, `OPTFLAGS=""`), pgvector_equality
     480 / 480, every TPC-H SF1 hash equal to PostgreSQL's, pgbench unchanged
     (BENCH.md).
+- **Scan cost, round 3, batch 3: cursors kept across ranges and rescans, dense fetches as
+  stored, the per-scan Fetcher** (round 24, agent 149; BENCH.md "Scan cost, round 3"):
+  - Kept cursors: `storage::Scan::reseek(start, end, ts)` moves a merging scan to another
+    range at the same snapshot. The sources the new range needs are the ones a new scan would
+    have (`sources`), and each it had already keeps its place (`Cursor::reseek`: a memtable's
+    read again from `start`; a file's stays in its block when `start` falls in it, else is
+    positioned afresh); range deletions are the new range's. False (make a new scan): a hot
+    range's rows, another snapshot, the transaction's own range deletions.
+    `Txn::reseek_snap(&mut TxnScan, start, end, snap)` does it for a forward `scan_snap`
+    (the own-write overlay and toast source rebuilt; false with spilled writes). The scan
+    node keeps an ended range's iterator in `spare`, and `seek` reads on with it: the next
+    range of a multi-range index scan, a skip scan's seek, and a nested loop's rescan
+    (`rescan_index` keeps the iterator instead of dropping it, and keeps `toast`; the
+    Fetcher restarts). Test `storage::tests::reseek_reads_as_a_new_scan`.
+  - Dense fetches as stored: `fetch_dense(keys, raw = true)` reads keys close together a
+    batch at a time by reference (from 4 keys) where the table isn't tracked; a row with
+    values out of line makes it give up, and `fetch_rows` puts them back as before.
+  - The heap model's fetches go through a per-scan `sizing::Fetcher` (agent 151's) with the
+    row's stored TID (`fetched_at`), made at the first fetch; `Fetcher::restart` on rescan.
+  - Left: the reseek still builds the new range's source list to compare with the old one
+    (`sources`, then dropping the unused cursors: ~2% of a nested loop's lookups); a kept
+    cursor for the inner rows' fetch (`fetch_kept`, in the next batch); point-lookup cost
+    inside the store is agent 169's.
+  - Verified (debug engine, on top of 4ac4d685..f0563cd8's base): crate tests debug and
+    release 60 / 60, crash_random seeds 1-30, spill tests with `ROLL_TXN_SPILL_BYTES=4096`,
+    clippy (none in these files), difftest smoke, isolation 138 / 139 specs with roll-*,
+    1,805 / 1,806 permutations, pg_dump_tap 14,817 / 14,817, pgvector_equality 480 / 480,
+    every TPC-H SF1 hash equal to PostgreSQL's, pgbench unchanged.
 
 ## Repository layout
 
