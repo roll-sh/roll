@@ -1,0 +1,7 @@
+{
+  "head": "0595bf7325b0b4cde8d02d9f8e51ebd17b528d05",
+  "tree": "774b978c229b40536e4a0c7286b38e928f2d789c",
+  "status": "",
+  "time_utc": "2026-11-04T16:01:14.044955+00:00",
+  "note": "Exact0595bf73 clean: parallel10,build,full debug PASS with actual per-command exits/summaries/binaries. Release/clippy/crash30/pgunit still running/pending. Review weighted-inner MEDIUM remains. No readiness/performance claim; source pin untouched."
+}

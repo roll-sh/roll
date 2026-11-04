@@ -1,0 +1,7 @@
+{
+  "head": "c1594cc6c9fac649ee76a86d711e1bf880871f08",
+  "tree": "58ff6a42818f23863213a7f3a14b8d13abfde466",
+  "status": "",
+  "time_utc": "2026-11-04T14:29:47.038905+00:00",
+  "note": "configured exact-source stages PASS; review HOLD; no readiness/performance claim; varying SubPlan outer loops; reordered ListFill path proof"
+}

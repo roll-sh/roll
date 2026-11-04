@@ -1,0 +1,7 @@
+{
+  "head": "fe9842b3d6665ef194eaa923eefbff35c6b3ed69",
+  "tree": "b57eb92cb37e9f85bdb3d8c7eb953beb5698663e",
+  "status": "",
+  "time_utc": "2026-11-04T14:51:44.228345+00:00",
+  "note": "Source checkpoint only; focused golden/path verification pending. Compile-red evidence preserved in sibling directory."
+}

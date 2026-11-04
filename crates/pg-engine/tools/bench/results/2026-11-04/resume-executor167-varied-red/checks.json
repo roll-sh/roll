@@ -1,0 +1,56 @@
+[
+  {
+    "stage": "reference",
+    "command": [
+      "/home/meszmate/.cache/a167/target/debug/deps/golden-9749ad749af5ca1c",
+      "golden",
+      "--exact",
+      "--nocapture"
+    ],
+    "GOLDEN_RECORD": "127.0.0.1:53343",
+    "GOLDEN_FILTER": "a167_subplan_varied",
+    "exit": 0,
+    "expected_exit": 0,
+    "effective_child_cpus": [
+      4,
+      5,
+      6,
+      7,
+      22,
+      23,
+      24,
+      25
+    ],
+    "summaries": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.08s"
+    ],
+    "log_sha256": "ff401bdceb46db27df4c5f4da9fb2669257e116dc8b9bd45b59846755ad9b4c8"
+  },
+  {
+    "stage": "engine",
+    "command": [
+      "/home/meszmate/.cache/a167/target/debug/deps/golden-9749ad749af5ca1c",
+      "golden",
+      "--exact",
+      "--nocapture"
+    ],
+    "GOLDEN_RECORD": null,
+    "GOLDEN_FILTER": "a167_subplan_varied",
+    "exit": 101,
+    "expected_exit": 101,
+    "effective_child_cpus": [
+      4,
+      5,
+      6,
+      7,
+      22,
+      23,
+      24,
+      25
+    ],
+    "summaries": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.12s"
+    ],
+    "log_sha256": "9d99fadca62b1cd6880fd218c9df1b597a4aa5b7c3bbb4ca91b84d68c8919146"
+  }
+]
