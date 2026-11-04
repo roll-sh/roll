@@ -800,3 +800,204 @@ async fn the_context_window_follows_the_conversation() {
     turn(&w, &fork_session, &forked, &[]).await;
     assert_eq!(w.state().await.thread(&forked).unwrap().context, None);
 }
+
+const DAY: Millis = 86_400_000;
+
+fn now_ms() -> Millis {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
+}
+
+fn approval(command: &str) -> RequestBody {
+    RequestBody::Approval(Approval {
+        action: ApprovalAction::Command,
+        title: format!("Run `{command}`"),
+        command: Some(command.into()),
+        cwd: None,
+        files: Vec::new(),
+        reason: None,
+        tool: None,
+        input: serde_json::Value::Null,
+        decisions: vec![Decision::Accept, Decision::Decline],
+    })
+}
+
+#[tokio::test]
+async fn settling_by_hand_and_what_brings_a_thread_back() {
+    let codex = manual("codex", Capabilities::default());
+    let w = World::new(vec![codex.clone()]).await;
+    let thread = w.thread("codex", Some("one"), false).await;
+    let session = codex.session(0).await;
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Running).await;
+    let settle = Command::ThreadSettle { thread: thread.clone() };
+    assert!(is_err(&w.run(settle.clone()).await, ErrorCode::Conflict), "a running thread doesn't settle");
+    session.emit(ProviderEvent::Request { id: "rpc-1".into(), item: None, body: approval("ls") });
+    w.wait_thread(&thread, |t| t.pending_requests == 1).await;
+    assert!(is_err(&w.run(settle.clone()).await, ErrorCode::Conflict), "nor one waiting on its user");
+    w.send(&thread, "and then this", SendMode::Queue).await;
+    answer(&w, &thread).await;
+    assert!(is_err(&w.run(settle.clone()).await, ErrorCode::Conflict), "nor one with a queued message");
+    session.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Running && t.run_count == 2).await;
+    session.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
+    let before = w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle).await;
+
+    // Opening it isn't activity.
+    assert_eq!(w.run(Command::ThreadVisit { thread: thread.clone() }).await, Reply::Ok);
+    let visited = w.state().await.thread(&thread).unwrap().clone();
+    assert!(visited.inbox.visited_at.is_some_and(|v| v >= before.updated_at));
+    assert_eq!(visited.updated_at, before.updated_at);
+
+    assert_eq!(w.run(settle.clone()).await, Reply::Ok);
+    let t = w.state().await.thread(&thread).unwrap().clone();
+    let Some(Settle::Settled { at, by: SettledBy::User }) = t.inbox.settle else { panic!("{:?}", t.inbox) };
+    assert!(session.calls().contains(&Call::Close), "a settled thread lets go of its session");
+    assert_eq!(w.run(settle.clone()).await, Reply::Ok);
+    let again = w.state().await.thread(&thread).unwrap().inbox.settle;
+    assert_eq!(again, Some(Settle::Settled { at, by: SettledBy::User }), "settling again keeps when");
+
+    // Un-settled by hand: kept active, so the sweep leaves it alone.
+    assert_eq!(w.run(Command::ThreadUnsettle { thread: thread.clone() }).await, Reply::Ok);
+    assert!(matches!(w.state().await.thread(&thread).unwrap().inbox.settle, Some(Settle::Active { .. })));
+    w.host.settle_round(now_ms() + 30 * DAY).await;
+    assert!(matches!(w.state().await.thread(&thread).unwrap().inbox.settle, Some(Settle::Active { .. })));
+
+    // A message brings a settled thread back, and spends "keep it active".
+    assert_eq!(w.run(settle).await, Reply::Ok);
+    w.send(&thread, "one more thing", SendMode::Queue).await;
+    let t = w.wait_thread(&thread, |t| t.status == ThreadStatus::Running).await;
+    assert_eq!(t.inbox.settle, None);
+    assert_eq!(codex.sessions().len(), 2, "a new session picks the conversation up");
+}
+
+/// Accepts the thread's pending request.
+async fn answer(w: &World, thread: &ThreadId) {
+    let request = w.state().await.requests(thread).into_iter().find(|r| r.status == RequestStatus::Pending).unwrap();
+    let respond = Command::RequestRespond { request: request.id, response: Response::Decision { decision: Decision::Accept, message: None } };
+    assert_eq!(w.run(respond).await, Reply::Ok);
+    w.wait_thread(thread, |t| t.pending_requests == 0).await;
+}
+
+#[tokio::test]
+async fn snoozes_wake_on_time_or_early() {
+    let codex = manual("codex", Capabilities::default());
+    let w = World::new(vec![codex.clone()]).await;
+    let thread = w.thread("codex", Some("one"), false).await;
+    let session = codex.session(0).await;
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Running).await;
+    session.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle).await;
+    let snooze = |until| Command::ThreadSnooze { thread: thread.clone(), until };
+    assert!(is_err(&w.run(snooze(now_ms() - 1)).await, ErrorCode::Invalid), "the past");
+    assert!(is_err(&w.run(snooze(now_ms() + 400 * DAY)).await, ErrorCode::Invalid), "more than a year");
+
+    // Settled, then snoozed: it wakes into the inbox.
+    assert_eq!(w.run(Command::ThreadSettle { thread: thread.clone() }).await, Reply::Ok);
+    let until = now_ms() + 3_600_000;
+    assert_eq!(w.run(snooze(until)).await, Reply::Ok);
+    let t = w.state().await.thread(&thread).unwrap().clone();
+    assert_eq!(t.inbox.settle, None);
+    assert_eq!(t.inbox.snooze.map(|s| s.until), Some(until));
+    w.host.settle_round(until - 1).await;
+    assert!(w.state().await.thread(&thread).unwrap().inbox.snooze.is_some(), "not yet");
+    w.host.settle_round(until).await;
+    let t = w.state().await.thread(&thread).unwrap().clone();
+    assert_eq!((t.inbox.snooze, t.inbox.woke_at), (None, Some(until)));
+
+    // Woken by hand: no "woke".
+    assert_eq!(w.run(snooze(now_ms() + DAY)).await, Reply::Ok);
+    assert_eq!(w.run(Command::ThreadUnsnooze { thread: thread.clone() }).await, Reply::Ok);
+    let t = w.state().await.thread(&thread).unwrap().clone();
+    assert_eq!((t.inbox.snooze, t.inbox.woke_at), (None, Some(until)));
+
+    // A request wakes a snoozed run early, and nothing waiting on its user snoozes.
+    w.send(&thread, "two", SendMode::Queue).await;
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Running).await;
+    let session = codex.sessions().pop().unwrap();
+    assert_eq!(w.run(snooze(now_ms() + DAY)).await, Reply::Ok, "a running thread snoozes");
+    let snoozed_at = now_ms();
+    session.emit(ProviderEvent::Request { id: "rpc-1".into(), item: None, body: approval("ls") });
+    let t = w.wait_thread(&thread, |t| t.pending_requests == 1).await;
+    assert!(t.inbox.snooze.is_none() && t.inbox.woke_at.is_some_and(|at| at >= snoozed_at), "{:?}", t.inbox);
+    assert!(is_err(&w.run(snooze(now_ms() + DAY)).await, ErrorCode::Conflict));
+
+    // So does a failure.
+    answer(&w, &thread).await;
+    assert_eq!(w.run(snooze(now_ms() + DAY)).await, Reply::Ok);
+    session.emit(ProviderEvent::TurnEnded(TurnEnd::Failed("boom".into())));
+    let t = w.wait_thread(&thread, |t| t.status == ThreadStatus::Error).await;
+    assert!(t.inbox.snooze.is_none() && t.inbox.woke_at.is_some());
+
+    // A message ends a snooze.
+    assert_eq!(w.run(snooze(now_ms() + DAY)).await, Reply::Ok);
+    w.send(&thread, "three", SendMode::Queue).await;
+    assert!(w.wait_thread(&thread, |t| t.status == ThreadStatus::Running).await.inbox.snooze.is_none());
+}
+
+#[tokio::test]
+async fn threads_settle_by_themselves_after_days_without_activity_or_when_their_change_ends() {
+    let fake = FakeProvider::new("codex");
+    let w = World::new(vec![fake]).await;
+    async fn idle(w: &World, prompt: &str) -> ThreadId {
+        let thread = w.thread("codex", Some(prompt), false).await;
+        w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle && t.run_count == 1).await;
+        thread
+    }
+    let plain = idle(&w, "a").await;
+    let kept = idle(&w, "b").await;
+    let manual_ = idle(&w, "c").await;
+    let archived = idle(&w, "d").await;
+    let snoozed = idle(&w, "e").await;
+    let last = w.state().await.runs(&plain)[0].completed_at.unwrap();
+    assert_eq!(w.run(Command::ThreadUnsettle { thread: kept.clone() }).await, Reply::Ok);
+    assert_eq!(w.run(Command::ThreadAutoSettle { thread: manual_.clone(), enabled: false }).await, Reply::Ok);
+    assert!(w.state().await.thread(&manual_).unwrap().inbox.manual);
+    assert_eq!(w.run(Command::ThreadArchive { thread: archived.clone() }).await, Reply::Ok);
+    let wake = now_ms() + 5 * DAY;
+    assert_eq!(w.run(Command::ThreadSnooze { thread: snoozed.clone(), until: wake }).await, Reply::Ok);
+
+    let settle_of = |s: &Records, t: &ThreadId| s.thread(t).unwrap().inbox.settle;
+    w.host.settle_round(last + 3 * DAY - 1).await;
+    assert_eq!(settle_of(&w.state().await, &plain), None, "three days aren't up");
+    w.host.settle_round(now_ms() + 3 * DAY).await;
+    let s = w.state().await;
+    let plain_settled = settle_of(&s, &plain);
+    let Some(Settle::Settled { at, by: SettledBy::Inactivity }) = plain_settled else { panic!("{plain_settled:?}") };
+    assert!(at >= last, "dated at its last activity");
+    assert!(matches!(settle_of(&s, &kept), Some(Settle::Active { .. })));
+    for t in [&manual_, &archived, &snoozed] {
+        assert_eq!(settle_of(&s, t), None);
+    }
+    // A snooze that woke counts as activity.
+    w.host.settle_round(wake).await;
+    w.host.settle_round(wake + 3 * DAY - 1).await;
+    assert_eq!(settle_of(&w.state().await, &snoozed), None);
+    w.host.settle_round(wake + 3 * DAY).await;
+    assert_eq!(settle_of(&w.state().await, &snoozed), Some(Settle::Settled { at: wake, by: SettledBy::Inactivity }));
+
+    // The project's rules: a day, or never; landed changes settle unless that's off.
+    let rules = |after_days, on_land| Command::ProjectUpdate {
+        project: w.project.clone(),
+        name: None,
+        settings: Some(ProjectSettings { auto_settle: AutoSettle { after_days, on_land }, ..ProjectSettings::default() }),
+    };
+    assert!(is_err(&w.run(rules(Some(91), true)).await, ErrorCode::Invalid));
+    assert!(is_err(&w.run(rules(Some(0), true)).await, ErrorCode::Invalid));
+    let one = idle(&w, "f").await;
+    let two = idle(&w, "g").await;
+    assert_eq!(w.run(rules(None, false)).await, Reply::Ok);
+    w.host.settle_round(now_ms() + 365 * DAY).await;
+    assert_eq!(settle_of(&w.state().await, &one), None, "never");
+    let ended = |thread: &ThreadId, landed| Command::ThreadChangeEnded { thread: thread.clone(), landed };
+    assert_eq!(w.run(ended(&one, true)).await, Reply::Ok);
+    assert_eq!(settle_of(&w.state().await, &one), None, "on_land is off");
+    assert_eq!(w.run(ended(&one, false)).await, Reply::Ok);
+    assert!(matches!(settle_of(&w.state().await, &one), Some(Settle::Settled { by: SettledBy::Closed, .. })));
+    assert_eq!(w.run(rules(Some(1), true)).await, Reply::Ok);
+    assert_eq!(w.run(ended(&two, true)).await, Reply::Ok);
+    assert!(matches!(settle_of(&w.state().await, &two), Some(Settle::Settled { by: SettledBy::Landed, .. })));
+    assert_eq!(w.run(ended(&kept, true)).await, Reply::Ok);
+    assert!(matches!(settle_of(&w.state().await, &kept), Some(Settle::Active { .. })), "kept active by hand");
+    let three = idle(&w, "h").await;
+    w.host.settle_round(now_ms() + DAY + 60_000).await;
+    assert!(matches!(settle_of(&w.state().await, &three), Some(Settle::Settled { by: SettledBy::Inactivity, .. })));
+}

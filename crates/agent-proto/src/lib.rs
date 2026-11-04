@@ -210,6 +210,42 @@ pub struct ProjectSettings {
     /// Commands for the project's checkout or a thread's worktree (T3's project scripts).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scripts: Vec<ProjectScript>,
+    /// When the daemon settles the project's threads by itself.
+    #[serde(default)]
+    pub auto_settle: AutoSettle,
+}
+
+/// When threads settle by themselves (T3's `sidebarAutoSettleAfterDays` and
+/// `sidebarAutoSettleOnMerge`, per project). A thread that is busy, waiting on its user, has
+/// queued messages, is snoozed, archived, settled or un-settled by hand, or has auto-settle off
+/// never settles by itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutoSettle {
+    /// Settle a thread after this many days without activity (a message, a run starting or
+    /// ending, a snooze waking); `null` never. 1 to 90.
+    #[serde(default = "AutoSettle::default_days")]
+    pub after_days: Option<u16>,
+    /// Settle a thread when its change lands. A closed change always settles it.
+    #[serde(default = "yes")]
+    pub on_land: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl AutoSettle {
+    pub const MAX_DAYS: u16 = 90;
+
+    fn default_days() -> Option<u16> {
+        Some(3)
+    }
+}
+
+impl Default for AutoSettle {
+    fn default() -> Self {
+        AutoSettle { after_days: AutoSettle::default_days(), on_land: true }
+    }
 }
 
 /// What a new thread in a project starts with; an unset field falls back to the client's last
@@ -378,6 +414,76 @@ pub struct Thread {
     pub updated_at: Millis,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<Millis>,
+    /// Settled, snoozed, seen (docs/code/agents.md, "Settling").
+    #[serde(default)]
+    pub inbox: Box<Inbox>,
+}
+
+/// Where a thread sits in its owner's inbox: T3 Code's settle and snooze state
+/// (`settledOverride`, `snoozedUntil`, `lastSnoozeWakeAt`, `lastVisitedAt`,
+/// `autoSettleDisabledAt` on its `AppThread`). The daemon keeps it, so every device agrees.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Inbox {
+    /// Settled, or kept active by hand. Unset: the daemon settles it once it has been inactive
+    /// long enough or its change landed or closed (the project's [`AutoSettle`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle: Option<Settle>,
+    /// Out of sight until `until`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snooze: Option<Snooze>,
+    /// When a snooze last woke by itself (its time came, or a request or a failure woke it
+    /// early): the thread reads "Woke" until it is visited after this, and inactivity counts
+    /// from here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub woke_at: Option<Millis>,
+    /// When someone last opened the conversation (`thread.visit`): runs that ended after it are
+    /// unread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visited_at: Option<Millis>,
+    /// The daemon never settles this thread by itself (`thread.auto_settle`).
+    #[serde(default)]
+    pub manual: bool,
+}
+
+impl Inbox {
+    pub fn is_settled(&self) -> bool {
+        matches!(self.settle, Some(Settle::Settled { .. }))
+    }
+
+    /// Snoozed and not yet due at `now`.
+    pub fn is_snoozed(&self, now: Millis) -> bool {
+        self.snooze.is_some_and(|s| s.until > now)
+    }
+}
+
+/// A settle decision that sticks until new activity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Settle {
+    /// On the settled shelf since `at` (for an automatic settle, the thread's last activity).
+    Settled { at: Millis, by: SettledBy },
+    /// Un-settled by hand at `at`: auto-settle leaves it alone until it is active again.
+    Active { at: Millis },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettledBy {
+    /// `thread.settle`.
+    User,
+    /// Nothing happened in it for the project's `auto_settle.after_days`.
+    Inactivity,
+    /// Its roll code change landed.
+    Landed,
+    /// Its roll code change was closed.
+    Closed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Snooze {
+    pub until: Millis,
+    /// When it was snoozed.
+    pub at: Millis,
 }
 
 /// For `skip_serializing_if`: a flag that's off isn't written, so records without it read the same.
@@ -1085,6 +1191,32 @@ pub enum Command {
     /// Delete a thread, its records and its worktree (the branch stays).
     #[serde(rename = "thread.delete")]
     ThreadDelete { thread: ThreadId },
+    /// Put a thread on the settled shelf (T3's `thread.settle`). Refused while it runs, waits on
+    /// its user or has queued messages. Its idle provider session is closed; a new message
+    /// brings it back.
+    #[serde(rename = "thread.settle")]
+    ThreadSettle { thread: ThreadId },
+    /// Take a thread off the settled shelf and keep it active: auto-settle leaves it alone until
+    /// it is active again.
+    #[serde(rename = "thread.unsettle")]
+    ThreadUnsettle { thread: ThreadId },
+    /// Hide a thread until `until` (T3's `thread.snooze`). Refused while it waits on its user or
+    /// has queued messages, and for a time that isn't in the future (at most a year ahead).
+    #[serde(rename = "thread.snooze")]
+    ThreadSnooze { thread: ThreadId, until: Millis },
+    /// Wake a snoozed thread now.
+    #[serde(rename = "thread.unsnooze")]
+    ThreadUnsnooze { thread: ThreadId },
+    /// The conversation was opened: `inbox.visited_at` is now. Doesn't count as activity.
+    #[serde(rename = "thread.visit")]
+    ThreadVisit { thread: ThreadId },
+    /// Let the daemon settle the thread by itself, or never.
+    #[serde(rename = "thread.auto_settle")]
+    ThreadAutoSettle { thread: ThreadId, enabled: bool },
+    /// The thread's roll code change landed (`landed`) or was closed. Sent by the relay; the
+    /// daemon settles the thread if auto-settle allows it.
+    #[serde(rename = "thread.change_ended")]
+    ThreadChangeEnded { thread: ThreadId, landed: bool },
 
     /// Send a message: starts a run when idle; otherwise queues it or steers the active run.
     #[serde(rename = "message.send")]

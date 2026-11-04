@@ -394,6 +394,22 @@ pub(super) async fn follow_owner(code: &Code, owner_id: &str) {
         if l.change.as_ref() != Some(&view) || view.status.is_settled() {
             relink(code, owner_id, &l.machine_id, &l.thread, LinkUpdate::Change { id, view: &view }).await;
         }
+        if view.status.is_settled() {
+            change_ended(code, &l, id, view.status == ChangeStatus::Landed).await;
+        }
+    }
+}
+
+/// Tell the thread's daemon that its change landed or closed, once (the link stops being
+/// followed), so the daemon can settle the thread by its project's rules (docs/code/agents.md,
+/// "Settling"). Best effort: a machine that is offline misses it, and inactivity settles the
+/// thread later.
+async fn change_ended(code: &Code, l: &store::LinkRow, change: &str, landed: bool) {
+    let command = Command::ThreadChangeEnded { thread: agent_proto::ThreadId(l.thread.clone()), landed };
+    let id = format!("change-ended-{}-{change}", l.thread);
+    let reply = code.agents.command(&l.machine_id, id, "roll".into(), command, None, std::time::Duration::from_secs(10)).await;
+    if let Reply::Error(e) = reply {
+        tracing::debug!(thread = %l.thread, error = ?e, "agents: telling a thread its change ended");
     }
 }
 

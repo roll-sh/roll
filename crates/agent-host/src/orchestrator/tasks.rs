@@ -515,6 +515,7 @@ impl Host {
             created_at: at,
             updated_at: at,
             archived_at: None,
+            inbox: Box::default(),
         };
         let active = prt.active.as_mut().expect("checked above");
         let node = Node {

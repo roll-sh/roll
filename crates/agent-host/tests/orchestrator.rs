@@ -951,6 +951,7 @@ async fn project_settings_are_checked_and_the_setup_script_runs_in_new_worktrees
             script("setup", "Install", "printf '%s|%s' \"$ROLL_PROJECT_ROOT\" \"$ROLL_WORKTREE_PATH\" > setup.out", true),
             script("lint", "Lint", "printf '%s' \"$ROLL_PROJECT_ROOT\" > lint.out", false),
         ],
+        auto_settle: AutoSettle { after_days: Some(7), on_land: false },
     };
     let update = |name: Option<&str>, settings: Option<ProjectSettings>| Command::ProjectUpdate {
         project: w.project.clone(),

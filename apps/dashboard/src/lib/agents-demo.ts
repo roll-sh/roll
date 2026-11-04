@@ -38,7 +38,7 @@ import type {
   ThreadId,
   Todo,
 } from "./agents-api";
-import { NO_SETTINGS, reachable } from "./agents-api";
+import { DEFAULT_AUTO_SETTLE, EMPTY_INBOX, NO_SETTINGS, reachable } from "./agents-api";
 import type { AgentsTransport } from "./agents-client";
 import { memoryCanvas, type AgentsServices, type RepoChoice } from "./agents-services";
 import { ApiError } from "./code-api";
@@ -440,7 +440,37 @@ export class DemoOwner implements AgentsTransport {
     const t = this.thread(tid);
     if (!t) return;
     const { kind: _k, ...rest } = t as Thread & { kind?: string };
-    this.put("thread", { ...rest, ...patch, updated_at: now() }, this.machineOf(tid));
+    const next: Thread = { ...rest, ...patch, updated_at: now() };
+    // A request or a failure ends a snooze early, as the daemon does.
+    if (next.inbox.snooze && ((patch.pending_requests ?? 0) > 0 || patch.status === "error")) next.inbox = { ...next.inbox, snooze: null, woke_at: now() };
+    this.put("thread", next, this.machineOf(tid));
+  }
+
+  /** The inbox changed. `touch: false` keeps `updated_at` (opening a conversation isn't activity). */
+  private patchInbox(tid: ThreadId, patch: Partial<Thread["inbox"]>, touch = true) {
+    const t = this.thread(tid);
+    if (!t) return;
+    const { kind: _k, ...rest } = t as Thread & { kind?: string };
+    this.put("thread", { ...rest, inbox: { ...t.inbox, ...patch }, updated_at: touch ? now() : t.updated_at }, this.machineOf(tid));
+  }
+
+  /** What keeps a thread in the inbox whatever the user wants (the daemon's checks). */
+  private parkable(t: Thread, what: string, running: boolean): Reply | null {
+    const no = (why: string): Reply => ({ type: "error", code: "conflict", message: `the thread ${why} before ${what}` });
+    if (t.archived_at) return no("is archived: unarchive it");
+    if (t.pending_requests > 0) return no("is waiting on an approval or question: answer it");
+    if (t.queued.length) return no("has a queued message: send it or remove it from the queue");
+    if (running && t.status !== "idle" && t.status !== "error") return no("is still running: stop it");
+    return null;
+  }
+
+  /** Wake a snooze when its time comes (the daemon's sweep). */
+  private wakeAt(tid: ThreadId, until: number) {
+    const ms = until - now();
+    if (ms > 2 ** 31 - 1) return;
+    this.after(Math.max(0, ms), () => {
+      if (this.thread(tid)?.inbox.snooze?.until === until) this.patchInbox(tid, { snooze: null, woke_at: until });
+    });
   }
 
   /** Auto-pull's rules, pretended: a dirty checkout is skipped, a clean one comes up to date. */
@@ -753,6 +783,7 @@ export class DemoOwner implements AgentsTransport {
             { id: "setup", name: "Install", command: "pnpm install", icon: "configure", on_worktree: true },
             { id: "test", name: "Test", command: "cargo test -p roll-cli", icon: "test", on_worktree: false },
           ],
+          auto_settle: DEFAULT_AUTO_SETTLE,
         },
         pull: {
           at: t0 - 6 * 60_000,
@@ -798,6 +829,7 @@ export class DemoOwner implements AgentsTransport {
       created_at: t0,
       updated_at: t0,
       archived_at: null,
+      inbox: { ...EMPTY_INBOX },
       ...over,
     });
 
@@ -825,6 +857,33 @@ export class DemoOwner implements AgentsTransport {
     this.put("thread", base("thr_demo_ci", "prj_demo_infra", "Move CI to roll checks", "codex", "gpt-5.5-codex", { created_at: t0 + 7000, interaction_mode: "plan", cwd: "/home/roll/infra" }), BOX);
     this.put("thread", base("thr_demo_old", "prj_demo_web", "Spike: edge middleware", "codex", "gpt-5.5", { created_at: t0, archived_at: t0 + 100 }), MBP);
 
+    // The inbox: settled threads (by hand, after days without activity, a landed change),
+    // a snoozed one, and one whose snooze just woke.
+    const DAY = 86_400_000;
+    const shelved = (tid: string, pid: string, title: string, provider: string, model: string, ago: number, inbox: Partial<Thread["inbox"]>, over: Partial<Thread> = {}) => {
+      const at = now() - ago;
+      const machine = pid === "prj_demo_infra" ? BOX : MBP;
+      this.put("thread", base(tid, pid, title, provider, model, { created_at: at - 600_000, updated_at: at, run_count: 1, inbox: { ...EMPTY_INBOX, visited_at: at, ...inbox }, ...over }), machine);
+      const usage = { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null };
+      this.put("run", { id: `run_${tid}`, thread: tid, ordinal: 1, provider, model, status: "completed", prompt: title, attachments: [], steers: [], requested_at: at - 600_000, started_at: at - 600_000, completed_at: at, checkpoint: null, stat: null, usage, context: null, error: null }, machine);
+      this.putNode({ id: `nod_${tid}`, thread: tid, run: `run_${tid}`, parent: null, ordinal: 1, status: "completed", started_at: at - 1000, completed_at: at, body: { type: "message", text: `Done: ${title.toLowerCase()}.` } });
+    };
+    const settled = (by: "user" | "inactivity" | "landed", ago: number) => ({ settle: { state: "settled" as const, at: now() - ago, by } });
+    shelved("thr_demo_tokio", "prj_demo_roll", "Bump tokio to 1.48", "codex", "gpt-5.5-codex", 2 * DAY, settled("landed", 2 * DAY), {
+      change: { repo: "acme/roll", number: 39, status: "landed", url: "/acme/roll/changes/39", detail: null },
+    });
+    shelved("thr_demo_docs", "prj_demo_roll", "Document the merge queue", "claude", "claude-opus-5-5", 4 * DAY, settled("inactivity", 4 * DAY));
+    shelved("thr_demo_zoom", "prj_demo_web", "Tune the canvas zoom curve", "claude", "claude-sonnet-5", 26 * 3_600_000, settled("user", 26 * 3_600_000));
+    const older = ["Rename the queue metrics", "Drop the legacy blob cache", "Fix a typo in the CLI help", "Trim the Docker image", "Pin the Rust toolchain", "Cache pnpm in CI", "Split the e2e suite", "Retry flaky clone tests", "Add a --quiet flag", "Upgrade Geist", "Fix the 404 page", "Tidy the README"];
+    older.forEach((title, i) => {
+      const ago = (6 + i * 2) * DAY;
+      shelved(`thr_demo_old${i}`, i % 3 === 2 ? "prj_demo_web" : "prj_demo_roll", title, i % 2 ? "claude" : "codex", i % 2 ? "claude-sonnet-5" : "gpt-5.5-codex", ago, settled("inactivity", ago));
+    });
+    const tomorrow = new Date(now() + DAY);
+    tomorrow.setHours(9, 0, 0, 0);
+    shelved("thr_demo_e2e", "prj_demo_web", "Review the flaky e2e retries", "codex", "gpt-5.5", 3 * 3_600_000, { snooze: { until: tomorrow.getTime(), at: now() - 3 * 3_600_000 } });
+    shelved("thr_demo_keys", "prj_demo_infra", "Rotate the staging keys", "claude", "claude-opus-5-5", 2 * DAY, { visited_at: now() - 2 * DAY, woke_at: now() - 20 * 60_000 });
+
     if (this.keepAlive) this.idle();
     this.after(400, () => this.begin("thr_demo_flaky", "The queue test fails one time in ten. Find out why and fix it.", flakyScript));
     this.after(1200, () => this.begin("thr_demo_next", "Upgrade the web app to Next 16.4", nextScript));
@@ -836,7 +895,7 @@ export class DemoOwner implements AgentsTransport {
     this.after(7000, () => {
       if (this.sims.size < 2) {
         const idle = [...this.records.values()]
-          .filter((m) => m.entity.kind === "thread" && m.entity.status === "idle" && m.entity.archived_at === null && this.machines.get(m.machine)?.online)
+          .filter((m) => m.entity.kind === "thread" && m.entity.status === "idle" && m.entity.archived_at === null && !m.entity.inbox.settle && !m.entity.inbox.snooze && this.machines.get(m.machine)?.online)
           .map((m) => m.entity.id);
         const tid = idle[turn % Math.max(1, idle.length)];
         const run = autoRuns[turn % autoRuns.length];
@@ -884,7 +943,8 @@ export class DemoOwner implements AgentsTransport {
       { id: rid, thread: tid, ordinal, provider: t.provider, model: t.model, status: "running", prompt, attachments, steers: [], requested_at: now(), started_at: now(), completed_at: null, checkpoint: null, stat: null, usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null }, context: null, error: null },
       this.machineOf(tid),
     );
-    this.patchThread(tid, { status: "running", active_run: rid, run_count: ordinal, activity: "Thinking", error: null });
+    // Any new run is activity: off the settled shelf.
+    this.patchThread(tid, { status: "running", active_run: rid, run_count: ordinal, activity: "Thinking", error: null, inbox: { ...t.inbox, settle: null } });
     void this.play(sim, script, { ordinal: 0, files: [] }).then(() => this.finish(sim));
   }
 
@@ -1089,6 +1149,8 @@ export class DemoOwner implements AgentsTransport {
       case "message.send": {
         const t = this.thread(c.thread);
         if (!t) return notFound("thread");
+        // A message brings the thread back: off the settled shelf, out of its snooze.
+        if (t.inbox.settle || t.inbox.snooze) this.patchInbox(c.thread, { settle: null, snooze: null });
         const busy = t.status !== "idle" && t.status !== "error";
         if (!busy) {
           this.begin(c.thread, c.text, this.reply(c.text), c.attachments ?? []);
@@ -1157,6 +1219,7 @@ export class DemoOwner implements AgentsTransport {
             created_at: now(),
             updated_at: now(),
             archived_at: null,
+            inbox: { ...EMPTY_INBOX },
           },
           machine,
         );
@@ -1200,6 +1263,47 @@ export class DemoOwner implements AgentsTransport {
       case "thread.archive":
         this.patchThread(c.thread, { archived_at: now() });
         return { type: "ok" };
+      case "thread.settle": {
+        const t = this.thread(c.thread);
+        if (!t) return notFound("thread");
+        const refused = this.parkable(t, "settling", true);
+        if (refused) return refused;
+        this.patchInbox(c.thread, { settle: t.inbox.settle?.state === "settled" ? t.inbox.settle : { state: "settled", at: now(), by: "user" }, snooze: null });
+        return { type: "ok" };
+      }
+      case "thread.unsettle":
+        if (!this.thread(c.thread)) return notFound("thread");
+        this.patchInbox(c.thread, { settle: { state: "active", at: now() } });
+        return { type: "ok" };
+      case "thread.snooze": {
+        const t = this.thread(c.thread);
+        if (!t) return notFound("thread");
+        if (c.until <= now()) return { type: "error", code: "invalid", message: "choose a time in the future to snooze until" };
+        const refused = this.parkable(t, "snoozing", false);
+        if (refused) return refused;
+        this.patchInbox(c.thread, { snooze: { until: c.until, at: now() }, settle: t.inbox.settle?.state === "settled" ? null : t.inbox.settle });
+        this.wakeAt(c.thread, c.until);
+        return { type: "ok" };
+      }
+      case "thread.unsnooze":
+        if (!this.thread(c.thread)) return notFound("thread");
+        this.patchInbox(c.thread, { snooze: null });
+        return { type: "ok" };
+      case "thread.visit":
+        if (!this.thread(c.thread)) return notFound("thread");
+        this.patchInbox(c.thread, { visited_at: now() }, false);
+        return { type: "ok" };
+      case "thread.auto_settle":
+        if (!this.thread(c.thread)) return notFound("thread");
+        this.patchInbox(c.thread, { manual: !c.enabled });
+        return { type: "ok" };
+      case "thread.change_ended": {
+        const t = this.thread(c.thread);
+        if (!t) return notFound("thread");
+        if (!t.inbox.settle && !t.inbox.manual && !t.inbox.snooze && !t.archived_at && !this.parkable(t, "settling", true))
+          this.patchInbox(c.thread, { settle: { state: "settled", at: t.updated_at, by: c.landed ? "landed" : "closed" } });
+        return { type: "ok" };
+      }
       case "thread.unarchive":
         this.patchThread(c.thread, { archived_at: null });
         return { type: "ok" };
@@ -1235,7 +1339,11 @@ export class DemoOwner implements AgentsTransport {
         change("checking", "2 of 3 checks running");
         if (c.land) {
           this.after(2500, () => change("queued", "1st in the merge queue"));
-          this.after(6000, () => change("landed", null));
+          // Landed: the relay tells the daemon, which settles the thread.
+          this.after(6000, () => {
+            change("landed", null);
+            this.handle(machine, { type: "thread.change_ended", thread: c.thread, landed: true });
+          });
         } else this.after(4000, () => change("ready", "All 3 checks passed"));
         const landing: Landing | null = c.land ? { status: "queued", message: "Queued: it lands once its batch passes the checks.", blockers: [] } : null;
         return { type: "published", branch: t.worktree?.branch ?? `roll/${slug(t.title)}`, commit: "4b825dc6", change: number, url, landing };
@@ -1280,7 +1388,7 @@ export class DemoOwner implements AgentsTransport {
       case "project.update": {
         const p = this.get<Project>("project", c.project);
         if (!p) return notFound("project");
-        const settings = c.settings ? { auto_pull: c.settings.auto_pull, defaults: c.settings.defaults ?? {}, scripts: c.settings.scripts ?? [] } : p.settings;
+        const settings = c.settings ? { auto_pull: c.settings.auto_pull, defaults: c.settings.defaults ?? {}, scripts: c.settings.scripts ?? [], auto_settle: c.settings.auto_settle ?? DEFAULT_AUTO_SETTLE } : p.settings;
         const next = { ...p, name: c.name?.trim() || p.name, settings, updated_at: now() };
         this.put("project", next, machine);
         if (settings.auto_pull && !p.settings.auto_pull) this.after(600, () => this.demoPull(c.project, machine));

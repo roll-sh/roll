@@ -67,6 +67,7 @@ impl Host {
             created_at: at,
             updated_at: at,
             archived_at: None,
+            inbox: Box::default(),
         };
         self.store.put_thread_state(&id, &Private { auto_title, ..Private::default() })?;
         let in_worktree = thread.worktree.is_some();
@@ -237,6 +238,7 @@ impl Host {
             created_at: at_ms,
             updated_at: at_ms,
             archived_at: None,
+            inbox: Box::default(),
         };
         // Nothing is forked yet: the fork's first session forks the parent's native conversation
         // when it can, else hands the summary over (T3's lazy fork resolution).

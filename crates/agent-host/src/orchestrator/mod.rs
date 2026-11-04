@@ -21,6 +21,7 @@ mod instructions;
 mod projects;
 mod queries;
 mod runs;
+mod settle;
 mod tasks;
 mod terminals;
 mod threads;
@@ -251,6 +252,7 @@ impl Host {
         host.mcp.start(Arc::downgrade(&host), listener);
         tasks::spawn_worker(Arc::downgrade(&host), task_work);
         projects::spawn_puller(Arc::downgrade(&host), host.config.pull_every());
+        settle::spawn_sweeper(Arc::downgrade(&host));
         Ok(host)
     }
 
@@ -526,6 +528,13 @@ impl Host {
                 self.stop_tasks(&thread).await;
                 self.thread_delete(&thread).await.map(|()| Reply::Ok)
             }
+            Command::ThreadSettle { thread } => self.thread_settle(&thread).await,
+            Command::ThreadUnsettle { thread } => self.thread_unsettle(&thread).await,
+            Command::ThreadSnooze { thread, until } => self.thread_snooze(&thread, until).await,
+            Command::ThreadUnsnooze { thread } => self.thread_unsnooze(&thread).await,
+            Command::ThreadVisit { thread } => self.thread_visit(&thread).await,
+            Command::ThreadAutoSettle { thread, enabled } => self.thread_auto_settle(&thread, enabled).await,
+            Command::ThreadChangeEnded { thread, landed } => self.thread_change_ended(&thread, landed).await,
             Command::MessageSend { thread, text, attachments, mode } => {
                 self.message_send(&thread, text, attachments, mode).await
             }

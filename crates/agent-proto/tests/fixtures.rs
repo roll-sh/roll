@@ -58,6 +58,7 @@ fn project() -> Project {
                 ProjectScript { id: "setup".into(), name: "Install".into(), command: "pnpm install".into(), icon: ScriptIcon::Configure, on_worktree: true },
                 ProjectScript { id: "test".into(), name: "Test".into(), command: "cargo test".into(), icon: ScriptIcon::Test, on_worktree: false },
             ],
+            auto_settle: AutoSettle { after_days: None, on_land: false },
         },
         pull: Some(PullResult { at: T, outcome: PullOutcome::Pulled { branch: "main".into(), from: "8ea39e4d".into(), to: "f35f34cf".into(), commits: 3 } }),
         created_at: T,
@@ -108,7 +109,44 @@ fn thread() -> Thread {
         created_at: T,
         updated_at: T,
         archived_at: None,
+        inbox: Box::new(Inbox { visited_at: Some(T - 60_000), ..Inbox::default() }),
     }
+}
+
+/// A settled thread, and one snoozed after a snooze woke it once.
+fn shelved() -> Vec<Thread> {
+    let idle = |n: &str| Thread {
+        id: ThreadId::from_suffix(n),
+        status: ThreadStatus::Idle,
+        lineage: None,
+        active_run: None,
+        queued: vec![],
+        pending_requests: 0,
+        activity: None,
+        change: None,
+        work: None,
+        ..thread()
+    };
+    vec![
+        Thread {
+            inbox: Box::new(Inbox {
+                settle: Some(Settle::Settled { at: T - 3 * 86_400_000, by: SettledBy::Inactivity }),
+                visited_at: Some(T - 4 * 86_400_000),
+                ..Inbox::default()
+            }),
+            ..idle("00000000000000a1")
+        },
+        Thread {
+            inbox: Box::new(Inbox {
+                settle: Some(Settle::Active { at: T - 7_200_000 }),
+                snooze: Some(Snooze { until: T + 3_600_000, at: T }),
+                woke_at: Some(T - 3_600_000),
+                visited_at: Some(T),
+                manual: true,
+            }),
+            ..idle("00000000000000a2")
+        },
+    ]
 }
 
 fn run_rec() -> Run {
@@ -151,6 +189,8 @@ fn entities() -> Vec<Entity> {
     vec![
         Entity::Project(project()),
         Entity::Thread(thread()),
+        Entity::Thread(shelved()[0].clone()),
+        Entity::Thread(shelved()[1].clone()),
         Entity::Run(run_rec()),
         Entity::Node(node_rec(1, None, NodeStatus::Completed, NodeBody::Message { text: "Looking at the test.".into() })),
         Entity::Node(node_rec(2, None, NodeStatus::Completed, NodeBody::Reasoning { text: "The lease expires…".into() })),
@@ -353,6 +393,13 @@ fn commands() -> Vec<Command> {
         Command::ThreadArchive { thread: thr() },
         Command::ThreadUnarchive { thread: thr() },
         Command::ThreadDelete { thread: thr() },
+        Command::ThreadSettle { thread: thr() },
+        Command::ThreadUnsettle { thread: thr() },
+        Command::ThreadSnooze { thread: thr(), until: T + 3_600_000 },
+        Command::ThreadUnsnooze { thread: thr() },
+        Command::ThreadVisit { thread: thr() },
+        Command::ThreadAutoSettle { thread: thr(), enabled: false },
+        Command::ThreadChangeEnded { thread: thr(), landed: true },
         Command::MessageSend { thread: thr(), text: "also update the docs".into(), attachments: vec![], mode: SendMode::Steer },
         Command::MessageUnqueue { thread: thr(), message: "q1".into() },
         Command::RunInterrupt { thread: thr() },
@@ -388,6 +435,13 @@ fn covered_command(c: &Command) {
         | Command::ThreadArchive { .. }
         | Command::ThreadUnarchive { .. }
         | Command::ThreadDelete { .. }
+        | Command::ThreadSettle { .. }
+        | Command::ThreadUnsettle { .. }
+        | Command::ThreadSnooze { .. }
+        | Command::ThreadUnsnooze { .. }
+        | Command::ThreadVisit { .. }
+        | Command::ThreadAutoSettle { .. }
+        | Command::ThreadChangeEnded { .. }
         | Command::MessageSend { .. }
         | Command::MessageUnqueue { .. }
         | Command::RunInterrupt { .. }
@@ -706,7 +760,7 @@ fn every_variant_of_every_tagged_enum_is_sampled() {
     let tags = |v: serde_json::Value, key: &str| -> std::collections::BTreeSet<String> {
         v.as_array().unwrap().iter().map(|x| x[key].as_str().unwrap().to_string()).collect()
     };
-    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 26, "commands");
+    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 33, "commands");
     assert_eq!(tags(serde_json::to_value(replies()).unwrap(), "type").len(), 10, "replies");
     assert_eq!(tags(serde_json::to_value(entities()).unwrap(), "kind").len(), 8, "entities");
     let bodies: std::collections::BTreeSet<String> = entities()
@@ -721,10 +775,26 @@ fn scopes_and_threads() {
     for e in entities() {
         let detail = matches!(e.kind(), EntityKind::Node | EntityKind::Checkpoint);
         assert_eq!(e.scope() == Scope::Detail, detail, "{:?}", e.kind());
-        if !matches!(e, Entity::Project(_) | Entity::Terminal(_)) {
-            assert_eq!(e.thread(), Some(&thr()), "{:?}", e.kind());
+        match &e {
+            Entity::Project(_) | Entity::Terminal(_) => {}
+            Entity::Thread(t) => assert_eq!(e.thread(), Some(&t.id)),
+            _ => assert_eq!(e.thread(), Some(&thr()), "{:?}", e.kind()),
         }
     }
+}
+
+#[test]
+fn records_from_before_settling_parse() {
+    let mut thread = serde_json::to_value(thread()).unwrap();
+    thread.as_object_mut().unwrap().remove("inbox");
+    assert_eq!(*serde_json::from_value::<Thread>(thread).unwrap().inbox, Inbox::default());
+    // Projects from before keep T3's defaults: three days, and on landing.
+    let settings: ProjectSettings = serde_json::from_value(json!({ "auto_pull": true })).unwrap();
+    assert_eq!(settings.auto_settle, AutoSettle { after_days: Some(3), on_land: true });
+    let never: AutoSettle = serde_json::from_value(json!({ "after_days": null })).unwrap();
+    assert_eq!(never, AutoSettle { after_days: None, on_land: true });
+    assert_eq!(serde_json::to_value(never).unwrap(), json!({ "after_days": null, "on_land": true }), "never stays never");
+    assert_eq!(serde_json::to_value(ProjectSettings::default()).unwrap()["auto_settle"], json!({ "after_days": 3, "on_land": true }));
 }
 
 #[test]

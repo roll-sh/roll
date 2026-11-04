@@ -48,6 +48,12 @@ pub(crate) fn agent_may(command: &Command, current: Option<(RuntimeMode, Interac
         | Command::ThreadFork { .. }
         | Command::ThreadArchive { .. }
         | Command::ThreadUnarchive { .. }
+        | Command::ThreadSettle { .. }
+        | Command::ThreadUnsettle { .. }
+        | Command::ThreadSnooze { .. }
+        | Command::ThreadUnsnooze { .. }
+        | Command::ThreadVisit { .. }
+        | Command::ThreadAutoSettle { .. }
         | Command::MessageSend { .. }
         | Command::MessageUnqueue { .. }
         | Command::RunInterrupt { .. }
@@ -62,6 +68,7 @@ pub(crate) fn agent_may(command: &Command, current: Option<(RuntimeMode, Interac
         Command::ProjectUpdate { .. } => owner_only("change a project's settings"),
         Command::ProjectPull { .. } => owner_only("pull a project's checkout"),
         Command::ThreadDelete { .. } => owner_only("delete threads"),
+        Command::ThreadChangeEnded { .. } => owner_only("say a thread's change ended"),
         Command::RequestRespond { .. } => owner_only("answer a thread's approvals and questions"),
         Command::CheckpointRollback { .. } => owner_only("roll a thread's files back"),
         Command::TerminalOpen { .. } | Command::TerminalInput { .. } | Command::TerminalResize { .. } | Command::TerminalClose { .. } | Command::TerminalScrollback { .. } => {
@@ -116,6 +123,13 @@ mod tests {
             (json!({ "type": "thread.archive", "thread": t }), None, true),
             (json!({ "type": "thread.unarchive", "thread": t }), None, true),
             (json!({ "type": "thread.delete", "thread": t }), None, false),
+            (json!({ "type": "thread.settle", "thread": t }), None, true),
+            (json!({ "type": "thread.unsettle", "thread": t }), None, true),
+            (json!({ "type": "thread.snooze", "thread": t, "until": 1 }), None, true),
+            (json!({ "type": "thread.unsnooze", "thread": t }), None, true),
+            (json!({ "type": "thread.visit", "thread": t }), None, true),
+            (json!({ "type": "thread.auto_settle", "thread": t, "enabled": false }), None, true),
+            (json!({ "type": "thread.change_ended", "thread": t, "landed": true }), None, false),
             (json!({ "type": "message.send", "thread": t, "text": "go" }), full, true),
             (json!({ "type": "message.unqueue", "thread": t, "message": "q1" }), None, true),
             (json!({ "type": "run.interrupt", "thread": t }), None, true),

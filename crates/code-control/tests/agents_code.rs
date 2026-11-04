@@ -14,7 +14,7 @@ use agent_host::provider::Provider;
 use agent_host::provider::fake::{FakeProvider, Script};
 use agent_host::provider::{ProviderEvent, TurnEnd};
 use agent_host::relay::{LinkConfig, LinkEvent};
-use agent_proto::{Capabilities, ChangeStatus, Entity, LandingStatus, Project, Reply, Thread, ThreadStatus};
+use agent_proto::{Capabilities, ChangeStatus, Entity, LandingStatus, Project, Reply, Settle, SettledBy, Thread, ThreadStatus};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{App, app_with, git};
@@ -310,6 +310,9 @@ async fn published_threads_become_changes_that_land_through_the_queue() {
     assert_eq!((s, b.as_slice()), (StatusCode::OK, b"done\n".as_slice()));
     let (_, c) = w.req("GET", &format!("{APP}/changes/{n}"), None).await;
     assert_eq!(c["state"], "landed");
+    // The relay tells the daemon, which settles the thread (its project's auto-settle).
+    let t = stream.until(&thread, "settled", |t| matches!(t.inbox.settle, Some(Settle::Settled { by: SettledBy::Landed, .. }))).await;
+    assert_eq!(t.change.map(|c| c.status), Some(ChangeStatus::Landed));
 
     // The daemon's own updates of the thread keep what roll code knows about it.
     let (s, v) = w.cmd(json!({ "type": "thread.configure", "thread": thread, "title": "Renamed" })).await;

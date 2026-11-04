@@ -63,7 +63,11 @@
         "title": "Fix the flaky queue test"
       },
       "created_at": 1762000000000,
-      "updated_at": 1762000000000
+      "updated_at": 1762000000000,
+      "inbox": {
+        "visited_at": 1761999940000,
+        "manual": false
+      }
     }
   },
   {

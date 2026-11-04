@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { agentsSurface, resetAgentsSurface } from "@/lib/agents-surface";
 import type { Command, Project, Reply } from "@/lib/agents-api";
+import { NO_SETTINGS } from "@/lib/agents-api";
 import { Composer } from "./composer";
 import { ProjectNode } from "./nodes";
 import { NewProject } from "./project-new";
@@ -14,7 +15,7 @@ import { agentsHarness, fakeServices, renderAgents } from "@/test/agents-render"
 const updates = (h: ReturnType<typeof agentsHarness>) => h.command.mock.calls.map((c) => c[2]).filter((c): c is Extract<Command, { type: "project.update" }> => c.type === "project.update");
 
 const withSettings = (over: Partial<Project["settings"]> = {}, rest: Partial<Project> = {}) =>
-  project({ git: { branch: "main", head: "f35f34cf", remote: null, dirty: false }, settings: { auto_pull: false, defaults: {}, scripts: [], ...over }, ...rest });
+  project({ git: { branch: "main", head: "f35f34cf", remote: null, dirty: false }, settings: { ...NO_SETTINGS, ...over }, ...rest });
 
 describe("pullText", () => {
   const at = T0 - 6 * 60_000;
@@ -50,7 +51,7 @@ describe("ProjectSettingsForm", () => {
       {
         type: "project.update",
         project: "prj_1",
-        settings: { auto_pull: true, defaults: {}, scripts: [{ id: "test", name: "Test", command: "cargo test", icon: "test", on_worktree: false }] },
+        settings: { auto_pull: true, defaults: {}, scripts: [{ id: "test", name: "Test", command: "cargo test", icon: "test", on_worktree: false }], auto_settle: { after_days: 3, on_land: true } },
       },
     ]);
   });
@@ -171,7 +172,7 @@ describe("project settings on the canvas", () => {
     expect(offer).toBeChecked();
     await userEvent.click(within(await screen.findByRole("list", { name: "Repos" })).getByRole("button", { name: /^roll/ }));
     await waitFor(() => expect(onAdded).toHaveBeenCalledWith("prj_new"));
-    expect(updates(h)).toEqual([{ type: "project.update", project: "prj_new", settings: { auto_pull: true, defaults: {}, scripts: [] } }]);
+    expect(updates(h)).toEqual([{ type: "project.update", project: "prj_new", settings: { auto_pull: true, defaults: {}, scripts: [], auto_settle: { after_days: 3, on_land: true } } }]);
   });
 
   it("an add with the offer turned off sends no settings", async () => {

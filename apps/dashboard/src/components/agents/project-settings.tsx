@@ -153,7 +153,7 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
   const [error, setError] = useState<string | null>(null);
   const saved = useMemo(() => new Set(project.settings.scripts.map((s) => s.id)), [project.settings.scripts]);
 
-  const settings: ProjectSettings = { auto_pull: autoPull, defaults, scripts };
+  const settings: ProjectSettings = { ...project.settings, auto_pull: autoPull, defaults, scripts };
   const changed = name.trim() !== project.name || canon(settings) !== canon(project.settings);
   const scriptsOk = scripts.every((s) => s.name.trim() && s.command.trim());
   const branch = project.git?.branch && project.git.branch !== "HEAD" ? project.git.branch : "the default branch";

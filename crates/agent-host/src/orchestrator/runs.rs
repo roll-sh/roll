@@ -187,6 +187,13 @@ impl Host {
             return Err(Fail::Invalid("the message is empty".into()));
         }
         let mut rt = self.lock(thread).await?;
+        // A message brings the thread back: off the settled shelf, out of its snooze (T3).
+        let inbox = &mut rt.thread.inbox;
+        if inbox.settle.is_some() || inbox.snooze.is_some() {
+            inbox.settle = None;
+            inbox.snooze = None;
+            self.put_thread(&mut rt)?;
+        }
         let input = TurnInput { text, attachments };
         if rt.active.is_none() {
             let run = self.start_run(&mut rt, input).await?;
@@ -259,6 +266,8 @@ impl Host {
         thread.status = ThreadStatus::Starting;
         thread.error = None;
         thread.activity = None;
+        // Any new run (a queued message, a delegated task) is activity: off the settled shelf.
+        thread.inbox.settle = None;
         if rt.private.auto_title {
             thread.title = super::title_from(&input.text, &input.attachments);
             rt.private.auto_title = false;
@@ -764,6 +773,7 @@ impl Host {
         rt.thread.pending_requests = active.pending();
         rt.thread.activity = active.activity();
         rt.thread.updated_at = at;
+        super::settle::wake_early(&mut rt.thread.inbox, at);
         let run = Entity::Run(active.run.clone());
         self.put(vec![Entity::Node(node), Entity::Request(request), run, Entity::Thread(rt.thread.clone())])?;
         Ok(Some(rid_out))
@@ -878,6 +888,9 @@ impl Host {
         batch.push(Entity::Run(run.clone()));
         let thread = &mut rt.thread;
         thread.status = if status == RunStatus::Failed { ThreadStatus::Error } else { ThreadStatus::Idle };
+        if status == RunStatus::Failed {
+            super::settle::wake_early(&mut thread.inbox, at);
+        }
         thread.error = error;
         thread.active_run = None;
         thread.pending_requests = 0;

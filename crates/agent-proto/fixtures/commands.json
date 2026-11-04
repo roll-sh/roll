@@ -16,7 +16,11 @@
     "project": "prj_1234567890abcdef",
     "name": "roll",
     "settings": {
-      "auto_pull": true
+      "auto_pull": true,
+      "auto_settle": {
+        "after_days": 3,
+        "on_land": true
+      }
     }
   },
   {
@@ -69,6 +73,37 @@
   {
     "type": "thread.delete",
     "thread": "thr_a1b2c3d4e5f60718"
+  },
+  {
+    "type": "thread.settle",
+    "thread": "thr_a1b2c3d4e5f60718"
+  },
+  {
+    "type": "thread.unsettle",
+    "thread": "thr_a1b2c3d4e5f60718"
+  },
+  {
+    "type": "thread.snooze",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "until": 1762003600000
+  },
+  {
+    "type": "thread.unsnooze",
+    "thread": "thr_a1b2c3d4e5f60718"
+  },
+  {
+    "type": "thread.visit",
+    "thread": "thr_a1b2c3d4e5f60718"
+  },
+  {
+    "type": "thread.auto_settle",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "enabled": false
+  },
+  {
+    "type": "thread.change_ended",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "landed": true
   },
   {
     "type": "message.send",

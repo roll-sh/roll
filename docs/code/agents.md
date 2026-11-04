@@ -511,7 +511,67 @@ it or replaces its settings whole, and replies once the record is stored. Code:
   script: it runs in each new worktree (new threads, forks and delegated tasks with one) beside the
   agent, as T3's `ProjectSetupScriptRunner` does for `async` scripts (roll doesn't make the agent
   wait). A script that can't start never fails the thread.
+- **Auto-settle** (`auto_settle`): when the project's threads settle by themselves ("Settling").
 - Shares leave a project's settings and last pull out (a command can hold anything).
+
+## Settling
+
+Threads settle like T3 Code's (`ThreadSettlementService.ts`, the settle and snooze commands of
+`Orchestrator.ts`, `threadSettled.ts`, `Sidebar.logic.ts` there): finished work leaves the canvas
+for the settled shelf, by hand or by itself, and comes back the moment anything happens in it. The
+state is `Thread.inbox` on the daemon's record, so every device agrees; the relay only mirrors it.
+Code: `agent-host/src/orchestrator/settle.rs`; the threads sidebar is
+`components/agents/threads-sidebar.tsx`, its rules `lib/agents-inbox.ts`.
+
+- **The record** (`Inbox`): `settle` is unset (the daemon decides), `settled {at, by}` (`by`:
+  `user`, `inactivity`, `landed`, `closed`) or `active {at}` (un-settled by hand: auto-settle leaves
+  it alone until it is active again), T3's `settledOverride` with its times. `snooze {until, at}`,
+  `woke_at` (a snooze that ended by itself: the thread reads "Woke" until it is visited after
+  that), `visited_at` (`thread.visit`, when the conversation was last opened; runs that ended after
+  it are unread) and `manual` (auto-settle off for the thread, T3's `autoSettleDisabledAt`).
+- **By hand.** `thread.settle` is refused (`conflict`) while the thread runs, waits on its user or
+  has queued messages, and for an archived thread (T3's checks and reasons). It closes the idle
+  provider session, as T3 detaches it; settling a settled thread keeps its time. `thread.unsettle`
+  sets `active`. `thread.auto_settle {enabled}` turns auto-settle off or on for one thread.
+- **What brings a thread back.** Every new run (a message, a queued message draining, a delegated
+  task) clears `settle`, `active` included, as T3 clears the override on every dispatch. A message
+  also ends a snooze. A request or a failed run ends a snooze early and records `woke_at` (T3's
+  `isThreadSnoozeWokenEarly`); a completed run doesn't. A settled thread never has a request: it
+  can't settle while one waits, and it has to run to get one.
+- **Snooze.** `thread.snooze {until}` hides a thread until then (in the future, at most a year
+  ahead), refused while it waits on its user or has queued messages; a settled thread snoozed comes
+  back to the inbox when it wakes. `thread.unsnooze` wakes it now (no "Woke"). T3's clients work
+  out when a snooze is over; roll's daemon does it in its sweep and records `woke_at`, so every
+  device shows the same thing at the same time.
+- **Automatically** (T3's rules, per project: `ProjectSettings.auto_settle {after_days, on_land}`,
+  T3's `sidebarAutoSettleAfterDays` and `sidebarAutoSettleOnMerge`, default 3 days and on). The
+  daemon sweeps every minute: due snoozes wake, and a thread settles (`by: inactivity`) once its
+  last activity is `after_days` old (1 to 90; `null` never). Activity is a run being asked for,
+  starting or ending, the thread's creation, or a snooze waking; renaming, visiting or settling
+  isn't, so opening a thread neither delays nor blocks it. The run's outcome doesn't matter
+  (completed, failed or interrupted), as in T3. Only a thread with no `settle`, auto-settle on, not
+  archived, not snoozed, not busy, waiting on nobody and with nothing queued settles by itself; it
+  is dated at its last activity, so the shelf reads in the order things happened.
+- **Changes.** When a thread's roll code change lands or closes, the relay's follower (which
+  stops following it then) sends `thread.change_ended {landed}` once, and the daemon settles the
+  thread by the same rules (`by: landed` when `on_land`, `closed` always), T3's settle on a merged
+  or closed PR. It's best effort: a machine that is offline then misses it, and inactivity settles
+  the thread later. T3's `keepPullRequests` isn't kept: the daemon doesn't know a thread's change.
+- **Seen.** The dashboard sends `thread.visit` when a conversation opens and when a run of the open
+  one ends; it isn't activity and leaves `updated_at` alone. Agent tokens may settle, snooze and
+  visit (they're thread work, like archive); `thread.change_ended` is the owner's.
+- **The dashboard.** Settled and snoozed threads leave the canvas (their requests can't exist;
+  a thread brought back by new activity comes back). The threads sidebar, left of the canvas and
+  toggled with its button or ⌘B (remembered; a sheet on a phone), lists each project's threads as
+  T3's sidebar does: active first (newest activity first) with their status (working, waiting for
+  you, failed, woke, done and unread), then a collapsed "Snoozed" shelf with each thread's time
+  left, then a collapsed "Settled" shelf, newest first, ten at a time and then 25 more per "Show
+  more" (the older settled). A shelf's open state is remembered; a collapsed shelf still shows the
+  open thread. Clicking a row opens the conversation in the side panel. A row's menu and the
+  conversation's menu settle, un-settle, snooze (T3's presets: in 1 hour, in 3 hours, this evening,
+  tomorrow, next week, or a custom time or duration) and wake. ⌘⇧S settles the open thread and
+  opens the next one in the sidebar's order (wrapping, skipping settled and snoozed ones; the
+  canvas when there's none), T3's settle and advance; on a settled thread it un-settles it.
 
 ## Sandboxes
 

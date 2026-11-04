@@ -82,7 +82,19 @@ export interface ProjectSettings {
   defaults: ThreadDefaults;
   /** Commands for the checkout or a thread's worktree (T3's project scripts). */
   scripts: ProjectScript[];
+  /** When the daemon settles the project's threads by itself. */
+  auto_settle: AutoSettle;
 }
+
+/** T3's auto-settle settings, per project. */
+export interface AutoSettle {
+  /** Days without activity before a thread settles; `null` never (1–90). */
+  after_days: number | null;
+  /** Settle a thread when its change lands (a closed change always settles it). */
+  on_land: boolean;
+}
+
+export const DEFAULT_AUTO_SETTLE: AutoSettle = { after_days: 3, on_land: true };
 
 /** Unset fields fall back to the composer's last choice. */
 export interface ThreadDefaults {
@@ -119,7 +131,7 @@ export interface PullResult {
   outcome: PullOutcome;
 }
 
-export const NO_SETTINGS: ProjectSettings = { auto_pull: false, defaults: {}, scripts: [] };
+export const NO_SETTINGS: ProjectSettings = { auto_pull: false, defaults: {}, scripts: [], auto_settle: DEFAULT_AUTO_SETTLE };
 
 export type RuntimeMode = "full_access" | "auto_edit" | "ask";
 export type InteractionMode = "default" | "plan";
@@ -204,7 +216,32 @@ export interface Thread {
   created_at: Millis;
   updated_at: Millis;
   archived_at: Millis | null;
+  /** Settled, snoozed, seen: kept by the daemon, so every device agrees. */
+  inbox: Inbox;
 }
+
+/** Where a thread sits in the inbox (T3's settle and snooze state). */
+export interface Inbox {
+  /** Settled, or kept active by hand; `null`: the daemon settles it by the project's rules. */
+  settle: Settle | null;
+  snooze: Snooze | null;
+  /** When a snooze last woke by itself: "Woke" until visited after it. */
+  woke_at: Millis | null;
+  /** When the conversation was last opened (`thread.visit`). */
+  visited_at: Millis | null;
+  /** The daemon never settles it by itself. */
+  manual: boolean;
+}
+
+export type SettledBy = "user" | "inactivity" | "landed" | "closed";
+export type Settle = { state: "settled"; at: Millis; by: SettledBy } | { state: "active"; at: Millis };
+
+export interface Snooze {
+  until: Millis;
+  at: Millis;
+}
+
+export const EMPTY_INBOX: Inbox = { settle: null, snooze: null, woke_at: null, visited_at: null, manual: false };
 
 export type ChangeStatus = "checking" | "failing" | "blocked" | "ready" | "queued" | "landed" | "conflict" | "closed";
 
@@ -509,7 +546,7 @@ export type Command =
       type: "project.update";
       project: ProjectId;
       name?: string;
-      settings?: { auto_pull: boolean; defaults?: ThreadDefaults; scripts?: ProjectScript[] };
+      settings?: { auto_pull: boolean; defaults?: ThreadDefaults; scripts?: ProjectScript[]; auto_settle?: AutoSettle };
     }
   | { type: "project.pull"; project: ProjectId }
   | {
@@ -541,6 +578,13 @@ export type Command =
   | { type: "thread.archive"; thread: ThreadId }
   | { type: "thread.unarchive"; thread: ThreadId }
   | { type: "thread.delete"; thread: ThreadId }
+  | { type: "thread.settle"; thread: ThreadId }
+  | { type: "thread.unsettle"; thread: ThreadId }
+  | { type: "thread.snooze"; thread: ThreadId; until: Millis }
+  | { type: "thread.unsnooze"; thread: ThreadId }
+  | { type: "thread.visit"; thread: ThreadId }
+  | { type: "thread.auto_settle"; thread: ThreadId; enabled: boolean }
+  | { type: "thread.change_ended"; thread: ThreadId; landed: boolean }
   | { type: "message.send"; thread: ThreadId; text: string; attachments?: Attachment[]; mode?: SendMode }
   | { type: "message.unqueue"; thread: ThreadId; message: string }
   | { type: "run.interrupt"; thread: ThreadId }
@@ -800,11 +844,21 @@ const projectScriptD = obj<ProjectScript>({
   icon: withDefault(literal("play", "test", "lint", "configure", "build", "debug"), () => "play" as const),
   on_worktree: withDefault(bool, () => false),
 });
-const settingsFields = { auto_pull: withDefault(bool, () => false), defaults: optional(threadDefaultsD), scripts: optional(array(projectScriptD)) };
+const autoSettleD = obj<AutoSettle>({
+  after_days: withDefault(nullable(int), () => DEFAULT_AUTO_SETTLE.after_days),
+  on_land: withDefault(bool, () => true),
+});
+const settingsFields = {
+  auto_pull: withDefault(bool, () => false),
+  defaults: optional(threadDefaultsD),
+  scripts: optional(array(projectScriptD)),
+  auto_settle: optional(autoSettleD),
+};
 const projectSettingsD = obj<ProjectSettings>({
   auto_pull: settingsFields.auto_pull,
   defaults: withDefault(threadDefaultsD, () => ({})),
   scripts: vec(projectScriptD),
+  auto_settle: withDefault(autoSettleD, () => ({ ...DEFAULT_AUTO_SETTLE })),
 });
 const pullOutcomeD: Decoder<PullOutcome> = tagged("status", {
   pulled: obj<{ branch: string; from: string; to: string; commits: number }>({ branch: str, from: str, to: str, commits: int }),
@@ -875,6 +929,21 @@ const threadD = obj<Thread>({
   created_at: int,
   updated_at: int,
   archived_at: opt(int),
+  inbox: withDefault(
+    obj<Inbox>({
+      settle: opt(
+        tagged("state", {
+          settled: obj<{ at: Millis; by: SettledBy }>({ at: int, by: literal("user", "inactivity", "landed", "closed") }),
+          active: obj<{ at: Millis }>({ at: int }),
+        } satisfies Record<Settle["state"], Decoder<object>>),
+      ),
+      snooze: opt(obj<Snooze>({ until: int, at: int })),
+      woke_at: opt(int),
+      visited_at: opt(int),
+      manual: withDefault(bool, () => false),
+    }),
+    () => ({ ...EMPTY_INBOX }),
+  ),
 });
 const diffStatD = obj<DiffStat>({ files: int, additions: int, deletions: int });
 const runD = obj<Run>({
@@ -1090,6 +1159,13 @@ export const commandD: Decoder<Command> = tagged("type", {
   "thread.archive": cmd<"thread.archive">(obj({ thread: str })),
   "thread.unarchive": cmd<"thread.unarchive">(obj({ thread: str })),
   "thread.delete": cmd<"thread.delete">(obj({ thread: str })),
+  "thread.settle": cmd<"thread.settle">(obj({ thread: str })),
+  "thread.unsettle": cmd<"thread.unsettle">(obj({ thread: str })),
+  "thread.snooze": cmd<"thread.snooze">(obj({ thread: str, until: int })),
+  "thread.unsnooze": cmd<"thread.unsnooze">(obj({ thread: str })),
+  "thread.visit": cmd<"thread.visit">(obj({ thread: str })),
+  "thread.auto_settle": cmd<"thread.auto_settle">(obj({ thread: str, enabled: bool })),
+  "thread.change_ended": cmd<"thread.change_ended">(obj({ thread: str, landed: bool })),
   "message.send": cmd<"message.send">(
     obj({ thread: str, text: str, attachments: optional(array(attachmentD)), mode: optional(literal("queue", "steer")) }),
   ),

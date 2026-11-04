@@ -321,7 +321,11 @@
                 "icon": "test",
                 "on_worktree": false
               }
-            ]
+            ],
+            "auto_settle": {
+              "after_days": null,
+              "on_land": false
+            }
           },
           "pull": {
             "at": 1762000000000,
