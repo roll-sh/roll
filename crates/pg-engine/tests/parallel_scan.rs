@@ -952,7 +952,6 @@ fn vector_batches_body() {
     s.query("UPDATE v SET d = '-infinity' WHERE id % 509 = 0").unwrap();
     s.query("SET max_parallel_workers_per_gather = 0").unwrap();
     let run = |s: &mut Session| VECTOR_QUERIES.iter().map(|q| out(s, q)).collect::<Vec<_>>();
-    let parallel = run(&mut s);
     let rows = without_vectors(|| run(&mut s));
     let before = VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed);
     let batched = run(&mut s);

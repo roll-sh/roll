@@ -582,8 +582,9 @@ impl Instr {
 
     /// Counts contributed by one collected inner run, including nested cached runs.
     pub(crate) fn rescan_delta(&self, before: &HashMap<usize, NodeStats>) -> Vec<(usize, NodeStats)> {
-        self.nodes.borrow().iter().filter_map(|(&key, now)| {
-            let old = before.get(&key).copied().unwrap_or_default();
+        let nodes = self.nodes.borrow();
+        before.iter().filter_map(|(&key, old)| {
+            let now = nodes.get(&key).copied().unwrap_or_default();
             let delta = NodeStats {
                 loops: now.loops.saturating_sub(old.loops),
                 rows: now.rows.saturating_sub(old.rows),
