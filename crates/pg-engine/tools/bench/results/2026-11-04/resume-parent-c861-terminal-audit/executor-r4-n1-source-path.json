@@ -1,0 +1,28 @@
+{
+  "time": "2026-11-04T19:24:32.654743+00:00",
+  "source": "d9e2279c",
+  "finding": "R4 N1 nested parameterless InitPlan replay undercount",
+  "evidence_level": "Owner read-only committed source assessment, not runtime reproduction",
+  "source_path": [
+    {
+      "location": "paths.rs:6936-6940",
+      "fact": "MIN/MAX may synthesize Expr::Subquery params=[] while index bounds retain Outer refs"
+    },
+    {
+      "location": "mod.rs:1350",
+      "fact": "run_with_params pushes fresh Rc frame"
+    },
+    {
+      "location": "enclosing_cache",
+      "fact": "reads_enclosing routes nested params=[] plan to whole-stack Rc identity cache, missing on each new frame"
+    },
+    {
+      "location": "d9e walker",
+      "fact": "!s.params.is_empty() drops this plan from replay ownership"
+    }
+  ],
+  "next": "Cache-only tiny MIN/MAX index fixture with statement-cache/CTE controls and stable pre-existing-frame guard; no source edits or execution",
+  "runtime_erratum": "Sealed d9e focused7eff and 1b6 focuseda313 PASS stand; stale R4 runtime paragraphs superseded",
+  "held": "N1 static MEDIUM remains; original278crash101 independent; no broadfull successor or parbuild mutation",
+  "parent_build": "a170 target remains parent-reserved for combined corrected-red/final proof"
+}

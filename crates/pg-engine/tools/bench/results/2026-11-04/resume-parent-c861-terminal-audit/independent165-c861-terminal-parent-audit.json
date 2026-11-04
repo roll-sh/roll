@@ -1,0 +1,86 @@
+{
+  "time": "2026-11-04T19:28:58.590335+00:00",
+  "evidence_commit": "7237a4c8a8fd1c9542ad27f0b254559f5ed84b37",
+  "prefix": "crates/pg-engine/tools/bench/results/2026-11-04/resume-planner-checkpoint/",
+  "files": 381,
+  "manifest_hashes": 380,
+  "closed_membership": true,
+  "all_committed_hashes": true,
+  "changed_paths": 17,
+  "all_changed_paths_evidence_only": true,
+  "raw_exit_audit": {
+    "lifecycle": "0",
+    "prepared": "0",
+    "statistics": "0",
+    "end-monitoring": "0",
+    "debug-test": "0",
+    "release-test": "0",
+    "clippy": "0",
+    "build": "0",
+    "postgres-unit": "0"
+  },
+  "raw_per_binary_maps": {
+    "debug-test": {
+      "totals": [
+        455,
+        0,
+        18,
+        61
+      ],
+      "every_binary_matches": true,
+      "raw_sha256": "3811d231d28bf448aa2aa1f6ae753f53f01c2b776fb5edf674a118ad871725ae"
+    },
+    "release-test": {
+      "totals": [
+        455,
+        0,
+        18,
+        61
+      ],
+      "every_binary_matches": true,
+      "raw_sha256": "25d6767f43e06c550787b3776cbffe05c4734f0c96b91d92b9c9471f420aa9a6"
+    }
+  },
+  "unit_raw_counts": [
+    [
+      11,
+      0,
+      0
+    ],
+    [
+      3,
+      0,
+      0
+    ],
+    [
+      10,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0
+    ]
+  ],
+  "unit_executed": true,
+  "unit_pgengine_or_service_acceptance": false,
+  "dist_binary_live_and_recorded_sha256": "63e672d757b7ac4da113a78307ee6908fcdbb275deb4d78ce114a3afd90c2d9c",
+  "owner_source_clean_exact_c861": true,
+  "standalone_gate": "PASS parent raw/object audit",
+  "integration_acceptance": false,
+  "performance_acceptance": false,
+  "limits": [
+    "Earlier wire101 retained without attribution",
+    "R2LOW livePIDslotdisplacement and fastpath assertions retained",
+    "Does not clear278crash failure on different source",
+    "No final combined runtime/service/performance claim"
+  ],
+  "remote_evidence_exact": true,
+  "remote_source_exact": true
+}
