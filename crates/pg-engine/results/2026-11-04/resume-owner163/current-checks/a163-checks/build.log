@@ -1,0 +1,16 @@
+   Compiling syn v3.0.9
+   Compiling rustix v1.1.5
+   Compiling tempfile v3.27.0
+   Compiling prost-build v0.13.5
+   Compiling bindgen v0.66.1
+   Compiling serde_derive v1.0.229
+   Compiling serde v1.0.229
+   Compiling clap_derive v4.6.7
+   Compiling thiserror-impl v2.0.21
+   Compiling pg_query v18.0.0 (https://github.com/pganalyze/pg_query.rs?rev=ad0c87ed59c84ec6b42c970bb42d7985b7b5878b#ad0c87ed)
+   Compiling tokio-macros v2.7.2
+   Compiling tokio v1.53.3
+   Compiling thiserror v2.0.21
+   Compiling clap v4.6.7
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a3512214927146502/crates/pg-engine)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 51s
