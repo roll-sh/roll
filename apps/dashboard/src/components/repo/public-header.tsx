@@ -1,8 +1,6 @@
-"use client";
-
 import { HorizonMark, RollLogo } from "@roll/brand";
 import { LucideProvider } from "lucide-react";
-import Link from "next/link";
+import { Link } from "@/components/link";
 import type { ReactNode } from "react";
 import { useMarkState } from "../mark-state";
 

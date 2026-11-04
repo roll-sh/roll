@@ -1,5 +1,3 @@
-"use client";
-
 import { Play, Square, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Machine, SandboxInfo } from "@/lib/agents-api";

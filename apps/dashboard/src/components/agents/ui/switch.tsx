@@ -1,5 +1,3 @@
-"use client";
-
 /** Ported from T3 Code's `components/ui/switch.tsx` (MIT): on is roll's accent; the thumb slides, and squashes a little while pressed. */
 
 import { Switch as SwitchPrimitive } from "@base-ui/react/switch";

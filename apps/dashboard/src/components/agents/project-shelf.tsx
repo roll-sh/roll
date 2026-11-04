@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The shelf (docs/code/agents.md, "Settling"; `lib/agents-shelf.ts`): a "Shelf" control in the
  * canvas toolbar, next to Display, opening a popover with every settled, snoozed and archived

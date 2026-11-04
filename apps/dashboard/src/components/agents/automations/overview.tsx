@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * One automation's overview, the page between the list and its builder or runs: what starts it
  * and when it next runs, what it does (the steps in words), where it works, and its recent runs,

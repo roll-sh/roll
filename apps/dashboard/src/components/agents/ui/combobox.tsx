@@ -1,5 +1,3 @@
-"use client";
-
 /** Ported from T3 Code's `components/ui/combobox.tsx` (MIT), in roll's colours: a searchable list. */
 
 import { Combobox as ComboboxPrimitive } from "@base-ui/react/combobox";

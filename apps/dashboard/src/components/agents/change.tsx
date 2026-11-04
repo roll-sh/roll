@@ -1,5 +1,3 @@
-"use client";
-
 import { Switch } from "./ui";
 import { ArrowUpRight, ClipboardList, GitPullRequest, X } from "lucide-react";
 import { useRef, useState } from "react";

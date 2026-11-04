@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Projects and machines as roll shows them everywhere (docs/code/agents-design.md, "Identity"):
  * a project's logo, else its monogram (or emoji) on its colour; a machine's kind on its colour.
@@ -30,7 +28,7 @@ export function ProjectIcon({ project, className = "size-4" }: { project: Projec
   if (face.kind === "logo" && broken !== face.url) {
     return (
       <span aria-hidden data-identity="logo" className={`inline-flex shrink-0 items-center justify-center ${className}`} style={tint(face.color)}>
-        {/* eslint-disable-next-line @next/next/no-img-element -- a data: URL from the record; an <img> never runs an SVG's scripts */}
+        {/* A data: URL from the record; an <img> never runs an SVG's scripts */}
         <img src={face.url} alt="" draggable={false} onError={() => setBroken(face.url)} className="size-full rounded-[25%] object-contain shadow-[0_0_0_1px_var(--line-2)]" />
       </span>
     );

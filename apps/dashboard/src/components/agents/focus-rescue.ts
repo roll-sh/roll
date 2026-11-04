@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Keyboard focus never falls to the page when what had it goes away: Settle on a row (the row
  * moves to its shelf), Discard (its bar goes), an endpoint saved or removed (its form or row goes).

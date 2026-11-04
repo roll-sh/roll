@@ -156,7 +156,8 @@ const ODD_KEYS = [
 
 describe("ROLL_API", () => {
   it("defaults to the local rolld", () => {
-    assert.equal(ROLL_API, process.env.NEXT_PUBLIC_ROLL_API ?? "http://127.0.0.1:7070");
+    // Node runs this module as is: no bundler, so no `VITE_ROLL_API` built in.
+    assert.equal(ROLL_API, "http://127.0.0.1:7070");
   });
 });
 

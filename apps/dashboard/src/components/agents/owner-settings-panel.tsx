@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The owner's agents settings in the side panel (`{ kind: "settings", target: "owner" }`,
  * `#agents/settings/owner`, ⌘,): what follows the user to every device, T3 Code's client settings

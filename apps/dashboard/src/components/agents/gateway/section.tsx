@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The Gateway section of the owner's settings (docs/code/gateway.md): roll's model gateway on one
  * of the owner's computers. Without a plan, a way into setup (`GatewaySetup`). With one: the

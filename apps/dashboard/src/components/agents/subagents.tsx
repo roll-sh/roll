@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Subagents in the conversation, as T3 Code shows them (`V2LifecycleRow.tsx`'s
  * `SubagentTimelineLink`, `TimelineV2EventRow.tsx`, `ProviderSubagentBar.tsx`; MIT). A subagent is

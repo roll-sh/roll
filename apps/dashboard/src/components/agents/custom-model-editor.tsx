@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * A custom model's name and options (T3 Code's `CustomModelEditor.tsx`, MIT), opened from its chip
  * in machine settings ("Edit name and options"): the display name, then the options the composer

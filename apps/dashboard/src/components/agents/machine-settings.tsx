@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * A machine's settings in the side panel (`{ kind: "settings", target: "m:<id>" }`), T3 Code's
  * settings for what lives on a machine (`SettingsPanels.tsx`, `ProviderSettingsForm.tsx`,

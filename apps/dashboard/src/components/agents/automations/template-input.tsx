@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * A template field (docs/code/automations.md, "Templates"): text where `{{ … }}` reads a variable.
  * The variables show in the accent as you type them; typing `{{` (or the `{}` button) opens a

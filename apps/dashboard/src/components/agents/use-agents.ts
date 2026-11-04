@@ -1,5 +1,3 @@
-"use client";
-
 import { createContext, useContext, useEffect, useRef, useSyncExternalStore } from "react";
 import type { MachineId, Thread } from "@/lib/agents-api";
 import type { AgentsClient, AgentsSnapshot } from "@/lib/agents-client";

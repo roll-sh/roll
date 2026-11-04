@@ -1,5 +1,3 @@
-"use client";
-
 import { HorizonMark } from "@roll/brand";
 import { ArrowUp, Check } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";

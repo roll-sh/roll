@@ -1,5 +1,3 @@
-"use client";
-
 import { Regex, Search } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { codeApi, type SearchResult } from "@/lib/code-api";

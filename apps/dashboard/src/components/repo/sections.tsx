@@ -1,16 +1,12 @@
+import { Link } from "@/components/link";
 import { BookOpen, GitCommitHorizontal, History } from "lucide-react";
-import Link from "next/link";
-import { notFound } from "next/navigation";
 import { firstLine, shortId, type ChangesetSummary, type Repo } from "@/lib/code-api";
-import { getTree, orNull, serverCode } from "@/lib/code-server";
-import { requestNow } from "@/lib/now";
+import type { DirectoryData, Doc } from "@/lib/code-server";
 import { formatCount } from "@/lib/redis-api";
 import { ago } from "@/lib/time";
 import { FileTable } from "./file-table";
 import { KeysTarget } from "./finder";
 import { changesetHref, commitsHref, treeHref } from "./paths";
-
-const README = /^readme(\.(md|markdown|mdx|txt|rst))?$/i;
 
 /** The latest change under a path: author, message, id and age, plus a link to the history. */
 export function LastChangeBar({
@@ -62,15 +58,8 @@ export function LastChangeBar({
 }
 
 /** A directory at a revision, with its last change on top and its README below. */
-export async function Directory({ repo, rev, path }: { repo: Repo; rev: string; path: string }) {
+export function Directory({ repo, rev, path, data: { tree, last, readme, now } }: { repo: Repo; rev: string; path: string; data: DirectoryData }) {
   const full = repo.full_name;
-  const [tree, log, now] = await Promise.all([
-    getTree(full, rev, path),
-    orNull(serverCode.log(full, { rev, path: path || undefined, limit: 1 })),
-    requestNow(),
-  ]);
-  if (!tree) notFound();
-  const readme = tree.entries.find((e) => e.kind === "file" && README.test(e.name));
   return (
     <div className="space-y-6">
       <KeysTarget rev={rev} permalink={treeHref(full, tree.changeset, path)} />
@@ -84,23 +73,21 @@ export async function Directory({ repo, rev, path }: { repo: Repo; rev: string; 
             repo={full}
             rev={rev}
             path={path}
-            last={log?.items[0] ?? null}
+            last={last}
             // The history behind this revision (generation counts from 0 at the root), not every
             // changeset in the repo, so it matches the commits page it links to.
-            count={path || !log?.items[0] ? undefined : log.items[0].generation + 1}
+            count={path || !last ? undefined : last.generation + 1}
             now={now}
           />
         }
       />
-      {readme && <Readme repo={full} rev={tree.changeset} path={readme.path} name={readme.name} />}
+      {readme && <Readme doc={readme} name={readme.name} />}
     </div>
   );
 }
 
 /** A README (or any markdown file), rendered by the API and styled by `.markdown`. */
-export async function Readme({ repo, rev, path, name, bare = false }: { repo: string; rev: string; path: string; name?: string; bare?: boolean }) {
-  const doc = await orNull(serverCode.readme(repo, rev, path));
-  if (!doc) return null;
+export function Readme({ doc, name, bare = false }: { doc: Doc; name?: string; bare?: boolean }) {
   // The API sanitizes this HTML (see docs/code/http-api.md).
   const body = <div className="markdown px-6 py-6 sm:px-10 sm:py-8" dangerouslySetInnerHTML={{ __html: doc.html }} />;
   if (bare) return body;
@@ -128,4 +115,3 @@ export function TableSkeleton({ rows = 6 }: { rows?: number }) {
     </div>
   );
 }
-

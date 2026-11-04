@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Messages waiting for the active run (T3 Code's `QueuedRunsControl.tsx`, MIT), attached on top
  * of the composer: each one can go now ("Send now": into the running turn, T3's promote to

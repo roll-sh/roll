@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Height that animates when what's inside grows or shrinks (T3 Code's `AnimatedHeight.tsx`, MIT):
  * the wrapper gets the content's measured height in px and transitions it (200 ms ease-out),

@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Ported from T3 Code's `components/ui/toggle-group.tsx` and `toggle.tsx` (MIT): the segmented
  * control. `Segmented`'s pressed look is one thumb sliding from choice to choice (`SlidingThumb`);

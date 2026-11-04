@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The machines that use the gateway (docs/code/gateway.md, "Machines that use it"): the notice
  * over them, then each one's URL, providers, when it last sent a request and why joining failed,

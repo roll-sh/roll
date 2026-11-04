@@ -1,5 +1,3 @@
-"use client";
-
 import type { MarkState } from "@roll/brand";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 

@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The transcript, as T3 Code's message timeline (`components/chat/MessagesTimeline.tsx`,
  * `TimelineWorkGroupRows.tsx`, `WorkLog.tsx`, `ProposedPlanCard.tsx`, `ChangedFilesCard.tsx`; MIT):
@@ -281,7 +279,6 @@ function UserMessage({ run, steers, editFrom }: { run: Run; steers: readonly str
         {run.attachments.length > 0 && (
           <div className="mb-2 flex flex-wrap justify-end gap-1.5">
             {run.attachments.map((a, i) => (
-              // eslint-disable-next-line @next/next/no-img-element
               <img key={i} src={`data:${a.mime};base64,${a.data}`} alt={a.name} className="size-16 rounded-lg border border-line object-cover" />
             ))}
           </div>

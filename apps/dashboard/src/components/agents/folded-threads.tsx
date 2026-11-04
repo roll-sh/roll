@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The canvas at scale (docs/code/agents.md, "Canvas"; `foldQuiet` and `groupByStatus` in
  * lib/agents-graph.ts). In the overview a busy project shows what's working, waiting on you,

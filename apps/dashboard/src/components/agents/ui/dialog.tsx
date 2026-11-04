@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Ported from T3 Code's `components/ui/dialog.tsx` and `dialog-styles.ts` (MIT), in roll's
  * tokens (docs/code/agents-design.md, "Dialogs and the palette"): the scrim, then a centred

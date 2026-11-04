@@ -1,5 +1,3 @@
-"use client";
-
 import { HorizonMark, RollMark } from "@roll/brand";
 import { Check, KeyRound, Laptop } from "lucide-react";
 import { useEffect, useState } from "react";

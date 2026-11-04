@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Requests, answered in place as T3 Code does (MIT): an approval is a row in the work log with
  * Approve and Decline beside it and the rest in a menu (T3's pending-approval row in

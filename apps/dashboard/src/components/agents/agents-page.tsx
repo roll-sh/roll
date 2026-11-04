@@ -1,9 +1,7 @@
-"use client";
-
 import { DotField, HorizonMark, RollMark, useReducedMotion } from "@roll/brand";
 import { AnimatePresence, motion, useIsPresent } from "motion/react";
 import { Archive, ArrowLeft, ChevronDown, ChevronUp, MoreHorizontal, PanelRightClose, Pin, PinOff, Plus, Search, Server, Settings, Share2, X, Zap } from "lucide-react";
-import Link from "next/link";
+import { Link } from "@/components/link";
 import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { isBusy, reachable, type Thread } from "@/lib/agents-api";
 import { POP_IN, POP_OUT } from "@/lib/agents-motion";

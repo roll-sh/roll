@@ -76,7 +76,7 @@ describe("checkProjectIcon", () => {
 });
 
 describe("the identity palette (globals.css)", () => {
-  const css = readFileSync(join(process.cwd(), "src/app/globals.css"), "utf8");
+  const css = readFileSync(join(process.cwd(), "src/globals.css"), "utf8");
   const tokens = [...css.matchAll(/--id-([a-z]+):\s*oklch\(([\d.]+)\s+([\d.]+)\s+([\d.]+)\)/g)].map((m) => ({ name: m[1], l: +m[2], c: +m[3], h: +m[4] }));
 
   it("has no orange, amber or yellow, and nothing that reads as the accent's blue (busy)", () => {

@@ -1,5 +1,3 @@
-"use client";
-
 import { closeTopLayer } from "./escape-layers";
 import { useMemo } from "react";
 import type { Machine, Project } from "@/lib/agents-api";

@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Upstreams (docs/code/gateway.md, "Upstreams"): the editor (kind presets, the fields each kind
  * needs, its key) and, in the Gateway section, each upstream with its health (circuit, cooling,

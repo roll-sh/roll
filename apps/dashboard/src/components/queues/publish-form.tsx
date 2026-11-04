@@ -1,5 +1,3 @@
-"use client";
-
 import { Send } from "lucide-react";
 import { useState } from "react";
 import { exchangeLabel, type PublishResult, qapi } from "@/lib/queues-api";

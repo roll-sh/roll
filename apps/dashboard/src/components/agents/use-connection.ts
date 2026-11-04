@@ -1,5 +1,3 @@
-"use client";
-
 import { useEffect, useState } from "react";
 import { codeApi } from "@/lib/code-api";
 import { getToken, subscribeToken } from "@/lib/code-token";

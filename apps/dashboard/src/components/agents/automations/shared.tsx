@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * What the Automations view's parts share: the store hook, trigger and step icons, the run status
  * dot and pill, the seven-day strip, and small buttons. docs/code/automations-ui.md is the design.

@@ -1,5 +1,3 @@
-"use client";
-
 import { ChevronDown, ChevronRight, Plus, Send, Trash2 } from "lucide-react";
 import { useEffect, useLayoutEffect, useState } from "react";
 import { codeApi, WEBHOOK_EVENTS, type Repo, type Webhook } from "@/lib/code-api";

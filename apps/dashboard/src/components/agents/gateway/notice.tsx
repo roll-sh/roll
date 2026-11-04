@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * THE NOTICE (docs/code/gateway.md, "THE NOTICE"; the user's explicit requirement): everywhere a
  * machine uses roll's model gateway, roll says plainly that its AI requests go out from the

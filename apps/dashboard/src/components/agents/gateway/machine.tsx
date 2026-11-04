@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The gateway where a machine's own settings show it (docs/code/gateway.md):
  *

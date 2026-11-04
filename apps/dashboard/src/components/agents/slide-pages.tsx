@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Pages that replace each other in one place (the ⌘K palette's views, the automations sheet's
  * stack): the new page slides 16px in from the side it comes from while the old one slides the

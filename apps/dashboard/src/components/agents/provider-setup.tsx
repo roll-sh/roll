@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * What to do when an agent can't run on a machine yet (`lib/agents-setup.ts`): no provider
  * installed, or none logged in. The machine card, the launcher and a project's actions show it

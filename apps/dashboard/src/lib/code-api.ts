@@ -1139,10 +1139,10 @@ const qs = (q: Record<string, string | number | undefined | null>) => {
 };
 
 /**
- * The API against one base URL: the browser talks to `NEXT_PUBLIC_ROLL_API`, server components to
+ * The API against one base URL: the browser talks to `VITE_ROLL_API`, server functions to
  * `ROLL_API_URL` (see code-server.ts). Requests aren't cached; pass `token` (or a function that
- * reads it) for private repos and writes. `before` runs ahead of every request: the server passes
- * `connection()` so reads happen at request time. `onUnauthorized` hears every 401.
+ * reads it) for private repos and writes. `before` runs ahead of every request.
+ * `onUnauthorized` hears every 401.
  */
 export function createCodeApi(
   base: string,

@@ -1,5 +1,3 @@
-"use client";
-
 import { ArrowUp, Bot, FolderPlus, Workflow, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { reachable } from "@/lib/agents-api";

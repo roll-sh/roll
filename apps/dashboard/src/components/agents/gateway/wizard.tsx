@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Setting up the gateway (docs/code/gateway.md): five steps in one dialog.
  *

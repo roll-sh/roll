@@ -1,13 +1,11 @@
-"use client";
-
 import { ChevronDown, GitBranch } from "lucide-react";
-import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { codeApi, shortId, type Ref } from "@/lib/code-api";
+import { useNavigate } from "@tanstack/react-router";
 
 /** Switch the page to another ref, keeping the section and path. `to` builds the URL for a rev. */
 export function RefPicker({ repo, rev, kind, path = "" }: { repo: string; rev: string; kind: "tree" | "blob" | "commits"; path?: string }) {
-  const router = useRouter();
+  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [refs, setRefs] = useState<Ref[] | null>(null);
   const box = useRef<HTMLDivElement>(null);
@@ -66,7 +64,7 @@ export function RefPicker({ repo, rev, kind, path = "" }: { repo: string; rev: s
                     aria-selected={r.name === rev}
                     onClick={() => {
                       setOpen(false);
-                      router.push(to(r.name));
+                      navigate({ href: to(r.name) });
                     }}
                     className={`flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left font-mono text-[12px] hover:bg-panel-2 ${
                       r.name === rev ? "text-fg" : "text-muted"

@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The automations sheet: everything about automations in one right sheet beside the canvas (the
  * conversation's frame and motion, `SidePanel` in agents-page.tsx), a stack you go into and back

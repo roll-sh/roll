@@ -1,5 +1,3 @@
-"use client";
-
 import { FolderPlus, Server, X } from "lucide-react";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Machine, Project } from "@/lib/agents-api";

@@ -1,5 +1,3 @@
-"use client";
-
 import { ArrowUpRight, CircleAlert, FolderGit2, FolderPlus, GitBranch, GitFork, GitPullRequest, LogIn, MoreHorizontal, Plus, RefreshCw, Settings2, SquareTerminal } from "lucide-react";
 import { memo, useCallback, useMemo, useState, type ReactNode } from "react";
 import { useToolsArmed } from "./card-tools";

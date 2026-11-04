@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { Link } from "@/components/link";
 import { formatCount } from "@/lib/redis-api";
 import type { Repo } from "@/lib/code-api";
 import { GitHubMark, VisibilityBadge } from "../code/shared";

@@ -1,5 +1,3 @@
-"use client";
-
 import { useEffect, useRef, useState } from "react";
 import { formatCount } from "@/lib/redis-api";
 import { formatBytes } from "@/lib/roll-api";

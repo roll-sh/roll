@@ -1,5 +1,3 @@
-"use client";
-
 import { DotField, HorizonMark } from "@roll/brand";
 import { Check, Copy, Eye, EyeOff } from "lucide-react";
 import { useState, type ReactNode } from "react";

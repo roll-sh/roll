@@ -1,5 +1,3 @@
-"use client";
-
 import { ArrowDownFromLine, ArrowDownWideNarrow, ArrowRightFromLine, ArrowUpNarrowWide, Bookmark, ChevronDown, ChevronRight, Columns3, Focus as FocusIcon, ListFilter, Network, Pencil, Pin as PinIcon, PinOff, Plus, Rows3, Search, SlidersHorizontal, Trash2, X, ArrowLeft, ArrowRight, FileDiff as DiffIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentsServices } from "@/lib/agents-services";

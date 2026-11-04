@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The canvas from above (docs/code/agents.md, "Canvas"): every card as a small block in its place,
  * what's working or waiting in the accent, and the part on screen outlined. It shows only while the

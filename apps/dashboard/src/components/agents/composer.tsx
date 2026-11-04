@@ -1,5 +1,3 @@
-"use client";
-
 import { Bot, Check, CornerUpRight, ListPlus, Paperclip, PencilRuler, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
@@ -639,7 +637,6 @@ export function Composer({
           <ul className="flex flex-wrap gap-1.5 px-4 pt-3.5" aria-label="Attachments">
             {attachments.map((a, i) => (
               <li key={`${a.name}-${i}`} className="group relative transition-[opacity,scale] duration-300 ease-drawer starting:scale-95 starting:opacity-0 motion-reduce:transition-none">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={`data:${a.mime};base64,${a.data}`} alt={a.name} className="size-12 rounded-lg border border-line-2 object-cover" />
                 <button
                   type="button"

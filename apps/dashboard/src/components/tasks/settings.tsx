@@ -1,5 +1,3 @@
-"use client";
-
 import { Eye, EyeOff, KeyRound, Plus, RotateCw, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { rel, tasks, TASKS_API, type ApiKey } from "@/lib/tasks-api";

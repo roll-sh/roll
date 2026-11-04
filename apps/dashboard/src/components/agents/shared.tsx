@@ -1,5 +1,3 @@
-"use client";
-
 import type { DiffStat, ProviderInfo, Run, RunStatus, ThreadStatus, Usage } from "@/lib/agents-api";
 import { delegatedTasks } from "@/lib/agents-worklog";
 

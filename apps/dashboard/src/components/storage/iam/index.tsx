@@ -1,6 +1,4 @@
-"use client";
-
-import Link from "next/link";
+import { Link } from "@/components/link";
 import { storageApi } from "@/lib/storage-api";
 import { StorageError } from "@/lib/storage-session";
 import { AppShell } from "../../app-shell";

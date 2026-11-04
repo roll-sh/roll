@@ -1,5 +1,3 @@
-"use client";
-
 import { RollLogo } from "@roll/brand";
 import {
   Activity,
@@ -21,9 +19,9 @@ import {
   Workflow,
   X,
 } from "lucide-react";
-import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { Suspense, useEffect, useState, type ReactNode } from "react";
+import { useLocation } from "@tanstack/react-router";
+import { Link } from "@/components/link";
+import { useEffect, useState, type ReactNode } from "react";
 import { AgentsControl } from "./agents/agents-control";
 import { useShownOwner } from "./agents/use-connection";
 import { OwnerSwitcher } from "./agents/owner-switcher";
@@ -91,9 +89,7 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
               {shown?.admin && <span className="text-[11px] text-subtle">admin</span>}
             </div>
           )}
-          <Suspense fallback={<Nav pathname={null} />}>
-            <CurrentNav />
-          </Suspense>
+          <Nav />
           <p className="mt-auto px-2 text-[11px] text-subtle">Usage · 41% of Pro plan</p>
         </aside>
 
@@ -152,18 +148,14 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
   );
 }
 
-/** Nav with the current section highlighted. The pathname is request data on dynamic routes, so
- * this streams in under Suspense while the rest of the shell renders statically. */
-function CurrentNav() {
-  return <Nav pathname={usePathname()} />;
-}
-
-function Nav({ pathname }: { pathname: string | null }) {
+/** Nav with the current section highlighted. */
+function Nav() {
+  const pathname = useLocation({ select: (l) => l.pathname });
   return (
     <nav className="mt-5 space-y-0.5">
       {nav.map(({ label, icon: Icon, href }) => {
         const active =
-          !!href && !!pathname && (href === pathname || (href !== "/dashboard" && pathname.startsWith(`${href}/`)));
+          !!href && (href === pathname || (href !== "/dashboard" && pathname.startsWith(`${href}/`)));
         const cls = `flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-[13px] transition ${
           active ? "bg-panel-2 text-fg" : "text-muted hover:bg-panel-2 hover:text-fg"
         }`;

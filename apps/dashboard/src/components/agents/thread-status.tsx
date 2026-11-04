@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * A thread's status as T3 Code shows it on its rows (T3's `Sidebar.logic.ts`
  * `resolveThreadStatusPill` and `ThreadStatusIndicators.tsx`, MIT). In roll's colours: what needs

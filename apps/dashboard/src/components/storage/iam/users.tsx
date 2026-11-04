@@ -1,7 +1,5 @@
-"use client";
-
 import { KeyRound, Plus, RefreshCw, ShieldCheck, Users, Wand2 } from "lucide-react";
-import Link from "next/link";
+import { Link } from "@/components/link";
 import { useState, type ReactNode } from "react";
 import {
   cleanCode,
@@ -581,7 +579,7 @@ function EnableDevice({
       </p>
       <div className="flex flex-wrap items-start gap-4">
         {device.QRCodePNG && (
-          // A data URL from the API: next/image adds nothing here.
+          // A data URL from the API.
           <img
             src={qrDataUrl(device.QRCodePNG)}
             alt={`QR code for ${device.SerialNumber}`}

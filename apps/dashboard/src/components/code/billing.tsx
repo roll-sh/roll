@@ -1,5 +1,3 @@
-"use client";
-
 import { KeyRound } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { codeApi, type AiProvider, type Billing, type OnCap, type Pricing, type ReviewProvider, type Usage } from "@/lib/code-api";

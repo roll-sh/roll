@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Runs: an automation's history and one run's detail, live. The detail is T3's work log turned
  * into a timeline (GitHub Actions' steps, n8n's input/output): each step's state, timing and

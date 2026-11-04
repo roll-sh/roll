@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * One automation's builder, a level of the automations sheet (`#agents/automations/<id>/edit`):
  * its name, switch and Run in the header, then Build (the builder, with Test) and Settings
