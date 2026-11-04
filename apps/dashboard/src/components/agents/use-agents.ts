@@ -4,6 +4,7 @@ import { createContext, useContext, useEffect, useRef, useSyncExternalStore } fr
 import type { MachineId, Thread } from "@/lib/agents-api";
 import type { AgentsClient, AgentsSnapshot } from "@/lib/agents-client";
 import type { AgentsServices } from "@/lib/agents-services";
+import { DEFAULT_OWNER_SETTINGS, type OwnerSettings, type OwnerSettingsState } from "@/lib/owner-settings";
 import type { SandboxesState } from "./sandbox";
 import { useMarkState } from "../mark-state";
 
@@ -47,6 +48,16 @@ export interface AgentsCtx {
   sandboxes?: SandboxesState;
   /** A phone-sized screen: tighter bars, one panel at a time. */
   phone?: boolean;
+  /** The owner's agents settings (`lib/owner-settings.ts`); unset: the defaults (a share, tests). */
+  prefs?: OwnerPrefs;
+}
+
+/** The owner's settings and how to change them. */
+export type OwnerPrefs = OwnerSettingsState & { save: (patch: Partial<OwnerSettings>) => Promise<void> };
+
+/** The owner's settings in effect (the defaults until they load, or without any). */
+export function usePrefs(): OwnerSettings {
+  return useContext(AgentsContext)?.prefs?.settings ?? DEFAULT_OWNER_SETTINGS;
 }
 
 export const AgentsContext = createContext<AgentsCtx | null>(null);

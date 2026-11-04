@@ -6,6 +6,7 @@ import { commandId, expectOk, NO_SETTINGS, type FsEntry, type Machine } from "@/
 import type { RepoChoice } from "@/lib/agents-services";
 import { btn, input, primary } from "../ui";
 import { shortPath } from "./shared";
+import { Switch } from "./ui";
 import { useAgents } from "./use-agents";
 
 type Tab = "folder" | "clone" | "new";
@@ -59,7 +60,7 @@ export function NewProject({ machine, onClose, onAdded }: { machine: Machine; on
       {tab === "clone" && <CloneRepo machine={machine} onClose={onClose} onAdded={added} />}
       {tab === "new" && <NewRepo machine={machine} onClose={onClose} onAdded={added} demo={demo} />}
       <label className="flex items-start gap-1.5 border-t border-line px-0.5 pt-2 text-[12px] text-muted" title="You can change it later in the project's settings">
-        <input type="checkbox" checked={autoPull} onChange={(e) => setPull(e.target.checked)} className="mt-0.5 accent-[var(--accent)]" />
+        <Switch size="sm" className="mt-0.5" checked={autoPull} onCheckedChange={setPull} aria-label="Pull merged changes" />
         <span>
           Pull merged changes
           <span className="block text-[11px] text-subtle">Fast-forwards the default branch while the checkout has no local changes.</span>
@@ -291,7 +292,7 @@ function NewRepo({ machine, onClose, onAdded, demo }: Step & { demo: boolean }) 
       </div>
       <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description (optional)" aria-label="Description" className={`${input} w-full py-1 text-[12px]`} />
       <label className="flex items-center gap-1.5 text-[12px] text-muted">
-        <input type="checkbox" checked={priv} onChange={(e) => setPriv(e.target.checked)} className="accent-[var(--accent)]" /> Private
+        <Switch size="sm" checked={priv} onCheckedChange={setPriv} aria-label="Private" /> Private
       </label>
       <div className="flex items-center gap-1.5">
         <button type="submit" disabled={busy !== null || !valid} className={primary}>

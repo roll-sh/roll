@@ -37,7 +37,7 @@ function state(s: Sandbox, hours = 12.5): SandboxesState {
 const sandboxMachine = (status: Sandbox["status"], over: Partial<Machine> = {}) =>
   machine({
     name: "box",
-    info: { hostname: "box", os: "linux", arch: "x86_64", version: "0.1.0", home: "/home/roll", providers: [provider(), provider({ id: "codex", name: "Codex" })] },
+    info: { hostname: "box", os: "linux", arch: "x86_64", version: "0.1.0", home: "/home/roll", providers: [provider(), provider({ id: "codex", name: "Codex" })], settings: null },
     sandbox: { backend: "docker", size: "standard", status, hourly_cents: 3 },
     ...over,
   });
@@ -129,6 +129,7 @@ describe("a sandbox machine on the canvas", () => {
         version: "0.1.0",
         home: "/home/roll",
         providers: [provider({ auth: "missing" }), provider({ id: "codex", name: "Codex", auth: "missing" })],
+        settings: null,
       },
     });
     const h = agentsHarness({ machines: [m], reply: () => ({ type: "created", id: "trm_9" }), ctx: { services: fakeServices(), sandboxes: state(sb()) } });

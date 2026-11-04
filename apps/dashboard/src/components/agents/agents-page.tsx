@@ -1,7 +1,7 @@
 "use client";
 
 import { DotField, HorizonMark, RollMark } from "@roll/brand";
-import { Archive, ArrowLeft, MoreHorizontal, PanelRightClose, Pin, PinOff, Plus, Search, Server, Share2, X } from "lucide-react";
+import { Archive, ArrowLeft, MoreHorizontal, PanelRightClose, Pin, PinOff, Plus, Search, Server, Settings, Share2, X } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { isBusy } from "@/lib/agents-api";
@@ -13,6 +13,7 @@ import type { AgentsServices } from "@/lib/agents-services";
 import { isNewAgentKey, setAgentsView, useAgentsSurface, type AgentsView } from "@/lib/agents-surface";
 import { ALL, applyView, isPinned, pinKey, pinnedConversations, pinOf, viewStorageKey, type Pin as PinRec } from "@/lib/agents-views";
 import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
+import { useOwnerSettings } from "@/lib/owner-settings";
 import { useMarkState, useMarkStateValue } from "../mark-state";
 import { AddMachineDialog, AddMachinePaths } from "./add-machine";
 import { AgentsCanvas, type CanvasHandle } from "./agents-canvas";
@@ -134,7 +135,7 @@ export function AgentsSurface({
   }, [gone]);
   const shown: AgentsView = gone ? { kind: "canvas" } : view;
   // The card beside the open panel, selected on the canvas.
-  const selected = shown.kind === "thread" ? `t:${shown.thread}` : shown.kind === "settings" ? shown.target : undefined;
+  const selected = shown.kind === "thread" ? `t:${shown.thread}` : shown.kind === "settings" && shown.target !== "owner" ? shown.target : undefined;
   useEffect(() => {
     if (!selected) return;
     // Once the panel has made the canvas narrower.
@@ -191,9 +192,10 @@ export function AgentsSurface({
     [chrome, startNew],
   );
 
+  const prefs = useOwnerSettings(services?.settings, client.owner, data.settings?.revision ?? 0);
   const ctx: AgentsCtx = useMemo(
-    () => ({ client, owner: client.owner, demo, openThread, close, startNew, focus, services, sandboxes, phone }),
-    [client, demo, openThread, close, startNew, focus, services, sandboxes, phone],
+    () => ({ client, owner: client.owner, demo, openThread, close, startNew, focus, services, sandboxes, phone, prefs }),
+    [client, demo, openThread, close, startNew, focus, services, sandboxes, phone, prefs],
   );
 
   // ⌘N / ⌘⇧O (T3's `chat.new`): the launcher, except in a terminal.
@@ -354,6 +356,9 @@ export function AgentsSurface({
               </button>
               <IconButton label="Add a machine" onClick={() => setAdding(true)}>
                 <Server className="size-4" strokeWidth={1.75} />
+              </IconButton>
+              <IconButton label="Agents settings (⌘,)" onClick={() => setAgentsView({ kind: "settings", target: "owner" })}>
+                <Settings className="size-4" />
               </IconButton>
               <Menu
                 label="More"

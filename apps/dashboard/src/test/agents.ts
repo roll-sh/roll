@@ -3,6 +3,8 @@ import type {
   Checkpoint,
   Entity,
   Machine,
+  MachineConfig,
+  MachineSettings,
   Mirrored,
   Node,
   NodeBody,
@@ -37,12 +39,38 @@ export function provider(over: Partial<ProviderInfo> = {}): ProviderInfo {
   };
 }
 
+/**
+ * A machine's settings as its daemon reports them: Claude Code and Codex, `config.toml` setting
+ * Claude's API key (by name only), nothing set from roll unless `set` says.
+ */
+export function machineConfig(set: MachineSettings = {}, over: Partial<MachineConfig> = {}): MachineConfig {
+  return {
+    set,
+    base: {
+      worktree_dir: "/Users/ada/.local/share/roll/agent/worktrees",
+      branch_prefix: "roll",
+      clone_dir: "/Users/ada/roll",
+      pull_every: 60,
+      max_depth: 3,
+      max_children: 6,
+      git_name: "Ada",
+      git_email: null,
+    },
+    providers: [
+      { id: "claude", name: "Claude Code", binary: null, args: 0, env: ["ANTHROPIC_API_KEY"] },
+      { id: "codex", name: "Codex", binary: "/opt/homebrew/bin/codex", args: 1, env: [] },
+    ],
+    config_path: "/Users/ada/.local/share/roll/agent/config.toml",
+    ...over,
+  };
+}
+
 export function machine(over: Partial<Machine> = {}): Machine {
   return {
     id: M1,
     name: "ada-mbp",
     online: true,
-    info: { hostname: "ada-mbp", os: "macos", arch: "aarch64", version: "0.1.0", home: "/Users/ada", providers: [provider()] },
+    info: { hostname: "ada-mbp", os: "macos", arch: "aarch64", version: "0.1.0", home: "/Users/ada", providers: [provider()], settings: null },
     sandbox: null,
     created_at: T0,
     last_seen: T0,

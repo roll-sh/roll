@@ -6,7 +6,10 @@ import { createPortal } from "react-dom";
 import { activeClient, DEMO_OWNER, type AgentsClient } from "@/lib/agents-client";
 import { rolling } from "@/lib/agents-graph";
 import { agentsSurface, hashFor, hideAgents, isNewAgentKey, showAgents, useAgentsSurface, viewFromHash } from "@/lib/agents-surface";
+import { useAgentNotifications } from "@/lib/agents-notify";
+import type { AgentsServices } from "@/lib/agents-services";
 import { desktop, useDesktop } from "@/lib/desktop";
+import { useOwnerSettings } from "@/lib/owner-settings";
 import { AgentsSurface, CenterNote } from "./agents-page";
 import { useAgentsSnapshot, useHold, useMarkDriver } from "./use-agents";
 import { useAgentsConnection, useDemoParam } from "./use-connection";
@@ -14,8 +17,9 @@ import { useAgentsConnection, useDemoParam } from "./use-connection";
 /**
  * The agents in the header of every dashboard page: how many are running and waiting, and "New
  * agent". Either opens the agents popup over the page (in the desktop app, the Agents window).
- * ⌘J toggles it; `#agents`, `#agents/new` and `#agents/<thread>` open it from a link. It also
- * drives the shared logo (thinking while anything runs, success when a run completes).
+ * ⌘J toggles it, ⌘, opens the agents settings; `#agents`, `#agents/new` and `#agents/<thread>`
+ * open it from a link. It also drives the shared logo (thinking while anything runs, success when
+ * a run completes) and, by the owner's settings, the browser's notifications.
  */
 export function AgentsControl() {
   const demo = useDemoParam();
@@ -33,7 +37,14 @@ export function AgentsControl() {
         showAgents({ kind: "new" });
         return;
       }
-      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "j") return;
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+      if (e.key === ",") {
+        // T3's ⌘, (its desktop menu's "Settings…"): the agents settings, beside the canvas.
+        e.preventDefault();
+        showAgents({ kind: "settings", target: "owner" });
+        return;
+      }
+      if (e.key.toLowerCase() !== "j") return;
       e.preventDefault();
       if (agentsSurface.get().open) hideAgents();
       else showAgents({ kind: "canvas" });
@@ -53,16 +64,19 @@ export function AgentsControl() {
 
   return (
     <>
-      {client ? <Counts client={client} /> : <Pill count={0} waiting={0} />}
+      {client ? <Counts client={client} services={conn.services ?? undefined} /> : <Pill count={0} waiting={0} />}
       <Popup client={conn.client} services={conn.services} error={conn.error} demo={demo} />
     </>
   );
 }
 
-function Counts({ client }: { client: AgentsClient }) {
+function Counts({ client, services }: { client: AgentsClient; services: AgentsServices | undefined }) {
   useHold(client);
   const snap = useAgentsSnapshot(client);
   useMarkDriver(snap);
+  // Notifications by the owner's settings, from every page (not only while the popup is open).
+  const prefs = useOwnerSettings(services?.settings, client.owner, snap?.data.settings?.revision ?? 0);
+  useAgentNotifications(snap?.data ?? null, prefs.settings.notifications, (thread) => showAgents({ kind: "thread", thread }));
   // The tray, badge and notifications of the desktop app's main window (a no-op in a browser).
   const inMain = typeof window !== "undefined" && desktop()?.window === "main";
   useDesktop(snap && inMain && client.owner !== DEMO_OWNER ? snap.data : null, (key) => key.startsWith("t:") && showAgents({ kind: "thread", thread: key.slice(2) }));

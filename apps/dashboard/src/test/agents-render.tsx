@@ -4,7 +4,7 @@ import type { ReactElement } from "react";
 import { vi, type Mock } from "vitest";
 import type { Command, Machine, MachineId, Mirrored, Reply } from "@/lib/agents-api";
 import { AgentsClient, type AgentsTransport } from "@/lib/agents-client";
-import { memoryCanvas, type AgentsServices } from "@/lib/agents-services";
+import { memoryCanvas, memorySettings, type AgentsServices } from "@/lib/agents-services";
 import type { SandboxSize } from "@/lib/sandboxes-api";
 import { AgentsContext, type AgentsCtx } from "@/components/agents/use-agents";
 import { machine as machineFixture, M1 } from "./agents";
@@ -46,13 +46,20 @@ export function renderAgents(ui: ReactElement, h: AgentsHarness) {
 
 /**
  * Services with every call a mock; `over` replaces some. Sandboxes: one size, none rented, docker.
- * The canvas is kept in memory (revisions and conflicts as the relay does them), behind mocks.
+ * The canvas and the owner's settings are kept in memory (revisions and conflicts as the relay does
+ * them), behind mocks.
  */
 export function fakeServices(
-  over: Omit<Partial<AgentsServices>, "sandboxes" | "canvas"> & { sandboxes?: Partial<AgentsServices["sandboxes"]>; canvas?: Partial<AgentsServices["canvas"]> } = {},
+  over: Omit<Partial<AgentsServices>, "sandboxes" | "canvas" | "settings" | "machines"> & {
+    sandboxes?: Partial<AgentsServices["sandboxes"]>;
+    canvas?: Partial<AgentsServices["canvas"]>;
+    settings?: Partial<AgentsServices["settings"]>;
+    machines?: Partial<AgentsServices["machines"]>;
+  } = {},
 ): AgentsServices {
-  const { sandboxes, canvas, ...rest } = over;
+  const { sandboxes, canvas, settings, machines, ...rest } = over;
   const kept = memoryCanvas();
+  const prefs = memorySettings();
   return {
     sandboxes: {
       list: vi.fn(async () => ({ sandboxes: [], sizes: [SIZE], max: 5, backend: "docker" })),
@@ -67,7 +74,13 @@ export function fakeServices(
     createProject: vi.fn(),
     takeWork: vi.fn(async () => null),
     releaseWork: vi.fn(async () => {}),
+    machines: {
+      rename: vi.fn(async (_o: string, id: MachineId, name: string) => ({ ...machineFixture(), id, name })),
+      remove: vi.fn(async () => {}),
+      ...machines,
+    },
     canvas: { load: vi.fn(kept.load), save: vi.fn(kept.save), ...canvas },
+    settings: { load: vi.fn(prefs.load), save: vi.fn(prefs.save), ...settings },
     ...rest,
   };
 }

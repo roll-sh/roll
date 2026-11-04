@@ -1,21 +1,13 @@
 "use client";
 
-import { ArrowDownToLine, Bug, Check, CircleAlert, FlaskConical, Hammer, ListChecks, Pause, Play, Plus, Settings2, Trash2, X } from "lucide-react";
+import { ArrowDownToLine, Bug, Check, CircleAlert, FlaskConical, Hammer, ListChecks, Pause, Play, Plus, Settings2, Trash2 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
-import {
-  type InteractionMode,
-  type Machine,
-  type Project,
-  type ProjectScript,
-  type ProjectSettings,
-  type PullResult,
-  type RuntimeMode,
-  reachable,
-  type ScriptIcon,
-  type ThreadDefaults,
-} from "@/lib/agents-api";
-import { btn, input, primary } from "../ui";
-import { ago, shortPath } from "./shared";
+import { type Machine, type Project, type ProjectScript, type ProjectSettings, type PullResult, reachable, type ScriptIcon, type ThreadDefaults } from "@/lib/agents-api";
+import { btn, primary } from "../ui";
+import { DefaultsRows } from "./machine-settings";
+import { field, SettingRow, SettingsSection, type Setting } from "./settings-ui";
+import { ago } from "./shared";
+import { Select, Switch } from "./ui";
 import { useAgents } from "./use-agents";
 
 /**
@@ -34,11 +26,21 @@ export const SCRIPT_ICONS: { id: ScriptIcon; label: string; icon: ReactNode }[] 
   { id: "debug", label: "Debug", icon: <Bug /> },
 ];
 
-const RUNTIME: { id: RuntimeMode; label: string }[] = [
-  { id: "full_access", label: "Full access" },
-  { id: "auto_edit", label: "Auto edit" },
-  { id: "ask", label: "Ask" },
-];
+/** The project's rows (T3's project scope of the same settings). */
+const P = {
+  name: { id: "project.name", title: "Name", section: "Project", description: "How the project is called on the canvas." },
+  autoPull: { id: "project.auto-pull", title: "Pull merged changes automatically", section: "Pull merged changes" },
+  model: { id: "project.model", title: "Model", section: "New threads", description: "What a new agent in this project starts with. Default: the machine's, then yours." },
+  permissions: { id: "project.permissions", title: "Permissions", section: "New threads" },
+  mode: { id: "project.mode", title: "Plan first", section: "New threads" },
+  workspace: { id: "project.workspace", title: "Workspace", section: "New threads" },
+  scripts: {
+    id: "project.scripts",
+    title: "Scripts",
+    section: "Scripts",
+    description: "Commands for this checkout or a thread's worktree. A setup script runs in each new worktree, beside the agent.",
+  },
+} satisfies Record<string, Setting>;
 
 /** What the last pull did, in one quiet line; `null` when there is nothing to say. */
 export function pullText(pull: PullResult | null, now = Date.now()): { text: string; tone: "ok" | "skip" | "fail" } | null {
@@ -85,61 +87,6 @@ const canon = (v: unknown) =>
       : x,
   );
 
-function Switch({ on, onChange, label }: { on: boolean; onChange: (on: boolean) => void; label: string }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={on}
-      aria-label={label}
-      onClick={() => onChange(!on)}
-      className={`relative h-[18px] w-8 shrink-0 rounded-full border transition-colors duration-150 ${on ? "border-accent bg-accent" : "border-line-2 bg-panel-2"}`}
-    >
-      <span className={`absolute top-[2px] size-3 rounded-full transition-[left] duration-150 ease-out ${on ? "left-[15px] bg-white" : "left-[2px] bg-subtle"}`} />
-    </button>
-  );
-}
-
-function Section({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
-  return (
-    <section className="space-y-2.5 border-t border-line px-4 py-4">
-      <div>
-        <h3 className="text-[13px] font-medium tracking-[-0.01em]">{title}</h3>
-        {hint && <p className="mt-0.5 text-[12px] text-subtle">{hint}</p>}
-      </div>
-      {children}
-    </section>
-  );
-}
-
-function Segmented<T extends string>({ label, value, options, onChange }: { label: string; value: T; options: { id: T; label: string }[]; onChange: (v: T) => void }) {
-  return (
-    <div role="radiogroup" aria-label={label} className="inline-flex flex-wrap gap-0.5 rounded-lg border border-line bg-bg p-0.5 text-[12px]">
-      {options.map((o) => (
-        <button
-          key={o.id}
-          type="button"
-          role="radio"
-          aria-checked={value === o.id}
-          onClick={() => onChange(o.id)}
-          className={`rounded-md px-2 py-1 transition ${value === o.id ? "bg-panel-2 text-fg" : "text-subtle hover:text-fg"}`}
-        >
-          {o.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function Row({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-      <span className="w-24 shrink-0 text-[12px] text-muted">{label}</span>
-      {children}
-    </div>
-  );
-}
-
 /** The settings of one project, edited and saved whole. `onDone` after a save or a cancel. */
 export function ProjectSettingsForm({ project, machine, onDone }: { project: Project; machine: Machine | undefined; onDone?: () => void }) {
   const { client } = useAgents();
@@ -176,13 +123,6 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
       client.run(machine!.id, { type: "project.update", project: project.id, name: name.trim() !== project.name ? name.trim() : undefined, settings }, "ok"),
     ).then((ok) => ok && onDone?.());
 
-  const provider = providers.find((p) => p.id === defaults.provider);
-  const setDefault = (patch: Partial<ThreadDefaults>) =>
-    setDefaults((d) => {
-      const next: ThreadDefaults = { ...d, ...patch };
-      for (const k of Object.keys(next) as (keyof ThreadDefaults)[]) if (next[k] === undefined) delete next[k];
-      return next;
-    });
   const patchScript = (id: string, patch: Partial<ProjectScript>) => setScripts((all) => all.map((s) => (s.id === id ? { ...s, ...patch } : s)));
 
   return (
@@ -193,159 +133,101 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
         if (changed && scriptsOk && online) void save();
       }}
     >
-      <div className="space-y-1.5 px-4 pb-4">
-        <label className="block text-[12px] text-muted" htmlFor={`project-name-${project.id}`}>
-          Name
-        </label>
-        <input id={`project-name-${project.id}`} value={name} onChange={(e) => setName(e.target.value)} className={`${input} w-full`} spellCheck={false} />
-        <p className="truncate font-mono text-[11px] text-subtle" title={project.path}>
-          {project.repo ? `${project.repo.owner}/${project.repo.repo} · ` : ""}
-          {shortPath(project.path, machine?.info?.home)}
-        </p>
-      </div>
+      <SettingsSection title="Name" ids={[P.name.id]}>
+        <SettingRow
+          s={P.name}
+          control={<input id={`project-name-${project.id}`} aria-label="Name" value={name} onChange={(e) => setName(e.target.value)} className={`${field} w-56`} spellCheck={false} />}
+        />
+      </SettingsSection>
 
-      <Section title="Pull merged changes" hint={`Keeps ${branch} current: when a change lands, roll fast-forwards this checkout, but only while it's on ${branch} with no local changes or commits.`}>
-        <div className="flex items-center gap-3">
-          <Switch on={autoPull} onChange={setAutoPull} label="Pull merged changes automatically" />
-          <span className="text-[12.5px] text-muted">{autoPull ? "On" : "Off"}</span>
-          <button
-            type="button"
-            disabled={!online || busy !== null}
-            onClick={() => act("pull", () => client.run(machine!.id, { type: "project.pull", project: project.id }, "pulled"))}
-            className={`${btn} ml-auto`}
-          >
-            <ArrowDownToLine className="size-3.5" />
-            {busy === "pull" ? <span className="shimmer">Pulling…</span> : "Pull now"}
-          </button>
-        </div>
-        <PullLine pull={project.pull} />
-      </Section>
+      <SettingsSection title="Pull merged changes" ids={[P.autoPull.id]}>
+        <SettingRow
+          s={{ ...P.autoPull, description: `Keeps ${branch} current: when a change lands, roll fast-forwards this checkout, but only while it's on ${branch} with no local changes or commits.` }}
+          control={
+            <>
+              <button type="button" disabled={!online || busy !== null} onClick={() => act("pull", () => client.run(machine!.id, { type: "project.pull", project: project.id }, "pulled"))} className={btn}>
+                <ArrowDownToLine className="size-3.5" />
+                {busy === "pull" ? <span className="shimmer">Pulling…</span> : "Pull now"}
+              </button>
+              <Switch checked={autoPull} onCheckedChange={setAutoPull} aria-label="Pull merged changes automatically" />
+            </>
+          }
+        >
+          <PullLine pull={project.pull} className="mt-2" />
+        </SettingRow>
+      </SettingsSection>
 
-      <Section title="New threads" hint="What a new agent in this project starts with. Default keeps the composer's own choice.">
-        <Row label="Provider">
-          <select
-            aria-label="Default provider"
-            value={defaults.provider ?? ""}
-            onChange={(e) => setDefault({ provider: e.target.value || undefined, model: undefined, effort: undefined })}
-            className={`${input} py-1 text-[12.5px]`}
-          >
-            <option value="">Default</option>
-            {providers.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-            {defaults.provider && !provider && <option value={defaults.provider}>{defaults.provider} (not on this machine)</option>}
-          </select>
-          {provider && provider.models.length > 0 && (
-            <select aria-label="Default model" value={defaults.model ?? ""} onChange={(e) => setDefault({ model: e.target.value || undefined })} className={`${input} py-1 text-[12.5px]`}>
-              <option value="">Default model</option>
-              {provider.models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}
-                </option>
-              ))}
-            </select>
-          )}
-        </Row>
-        <Row label="Workspace">
-          <Segmented
-            label="Where new threads work"
-            value={defaults.worktree === undefined ? "default" : defaults.worktree ? "worktree" : "checkout"}
-            options={[
-              { id: "default", label: "Default" },
-              { id: "checkout", label: "This checkout" },
-              { id: "worktree", label: "New worktree" },
-            ]}
-            onChange={(v) => setDefault({ worktree: v === "default" ? undefined : v === "worktree" })}
-          />
-        </Row>
-        <Row label="Permissions">
-          <Segmented
-            label="Permissions for new threads"
-            value={defaults.runtime_mode ?? "default"}
-            options={[{ id: "default", label: "Default" }, ...RUNTIME]}
-            onChange={(v) => setDefault({ runtime_mode: v === "default" ? undefined : (v as RuntimeMode) })}
-          />
-        </Row>
-        <Row label="Mode">
-          <Segmented
-            label="Interaction mode for new threads"
-            value={defaults.interaction_mode ?? "default_mode"}
-            options={[
-              { id: "default_mode", label: "Default" },
-              { id: "plan", label: "Plan first" },
-            ]}
-            onChange={(v) => setDefault({ interaction_mode: v === "plan" ? ("plan" as InteractionMode) : undefined })}
-          />
-        </Row>
-      </Section>
+      <SettingsSection title="New threads" ids={[P.model.id, P.permissions.id, P.mode.id, P.workspace.id]}>
+        <DefaultsRows rows={P} defaults={defaults} providers={providers} disabled={false} onChange={setDefaults} />
+      </SettingsSection>
 
-      <Section title="Scripts" hint="Commands for this checkout or a thread's worktree. A setup script runs in each new worktree, beside the agent.">
-        {scripts.length > 0 && (
-          <ul className="space-y-2" aria-label="Scripts">
-            {scripts.map((s) => (
-              <li key={s.id} className="space-y-1.5 rounded-lg border border-line bg-bg p-2">
-                <div className="flex items-center gap-1.5">
-                  <span className="grid size-6 shrink-0 place-items-center text-subtle [&>svg]:size-3.5">{SCRIPT_ICONS.find((i) => i.id === s.icon)?.icon}</span>
-                  <input value={s.name} onChange={(e) => patchScript(s.id, { name: e.target.value })} placeholder="Name" aria-label="Script name" className={`${input} min-w-0 flex-1 py-1 text-[12.5px]`} />
-                  <select value={s.icon} onChange={(e) => patchScript(s.id, { icon: e.target.value as ScriptIcon })} aria-label="Script icon" className={`${input} py-1 text-[12px]`}>
-                    {SCRIPT_ICONS.map((i) => (
-                      <option key={i.id} value={i.id}>
-                        {i.label}
-                      </option>
-                    ))}
-                  </select>
-                  {saved.has(s.id) && (
+      <SettingsSection title="Scripts" ids={[P.scripts.id]}>
+        <SettingRow s={P.scripts}>
+          {scripts.length > 0 && (
+            <ul className="mt-2.5 space-y-2" aria-label="Scripts">
+              {scripts.map((s) => (
+                <li key={s.id} className="space-y-1.5 rounded-lg border border-line bg-bg p-2">
+                  <div className="flex items-center gap-1.5">
+                    <Select
+                      label="Script icon"
+                      className="w-28 min-w-0"
+                      value={s.icon}
+                      icon={<span className="grid size-4 place-items-center text-subtle [&>svg]:size-3.5">{SCRIPT_ICONS.find((i) => i.id === s.icon)?.icon}</span>}
+                      onChange={(icon) => patchScript(s.id, { icon })}
+                      options={SCRIPT_ICONS.map((i) => ({ value: i.id, label: i.label }))}
+                    />
+                    <input value={s.name} onChange={(e) => patchScript(s.id, { name: e.target.value })} placeholder="Name" aria-label="Script name" className={`${field} min-w-0 flex-1`} />
+                    {saved.has(s.id) && (
+                      <button
+                        type="button"
+                        title={`Run ${s.name} in a terminal`}
+                        aria-label={`Run ${s.name}`}
+                        disabled={!online || busy !== null}
+                        onClick={() => act(`run:${s.id}`, () => client.run(machine!.id, { type: "terminal.open", project: project.id, script: s.id, cols: 100, rows: 26 }, "created"))}
+                        className="grid size-7 place-items-center rounded-md text-subtle transition hover:bg-panel-2 hover:text-fg disabled:opacity-30"
+                      >
+                        <Play className="size-3.5" />
+                      </button>
+                    )}
                     <button
                       type="button"
-                      title={`Run ${s.name} in a terminal`}
-                      aria-label={`Run ${s.name}`}
-                      disabled={!online || busy !== null}
-                      onClick={() => act(`run:${s.id}`, () => client.run(machine!.id, { type: "terminal.open", project: project.id, script: s.id, cols: 100, rows: 26 }, "created"))}
-                      className="grid size-7 place-items-center rounded-md text-subtle transition hover:bg-panel-2 hover:text-fg disabled:opacity-30"
+                      title="Remove"
+                      aria-label={`Remove ${s.name || "script"}`}
+                      onClick={() => setScripts((all) => all.filter((x) => x.id !== s.id))}
+                      className="grid size-7 place-items-center rounded-md text-subtle transition hover:bg-panel-2 hover:text-danger"
                     >
-                      <Play className="size-3.5" />
+                      <Trash2 className="size-3.5" />
                     </button>
-                  )}
-                  <button
-                    type="button"
-                    title="Remove"
-                    aria-label={`Remove ${s.name || "script"}`}
-                    onClick={() => setScripts((all) => all.filter((x) => x.id !== s.id))}
-                    className="grid size-7 place-items-center rounded-md text-subtle transition hover:bg-panel-2 hover:text-danger"
-                  >
-                    <Trash2 className="size-3.5" />
-                  </button>
-                </div>
-                <input
-                  value={s.command}
-                  onChange={(e) => patchScript(s.id, { command: e.target.value })}
-                  placeholder="pnpm test"
-                  aria-label="Script command"
-                  spellCheck={false}
-                  className={`${input} w-full py-1 font-mono text-[12px]`}
-                />
-                <label className="flex items-center gap-1.5 text-[12px] text-muted">
+                  </div>
                   <input
-                    type="checkbox"
-                    checked={s.on_worktree}
-                    // One setup script: T3 runs the first one.
-                    onChange={(e) => setScripts((all) => all.map((x) => ({ ...x, on_worktree: x.id === s.id ? e.target.checked : e.target.checked ? false : x.on_worktree })))}
-                    className="accent-[var(--accent)]"
+                    value={s.command}
+                    onChange={(e) => patchScript(s.id, { command: e.target.value })}
+                    placeholder="pnpm test"
+                    aria-label="Script command"
+                    spellCheck={false}
+                    className={`${field} w-full font-mono text-[12px]`}
                   />
-                  Run in each new worktree (setup)
-                </label>
-              </li>
-            ))}
-          </ul>
-        )}
-        <button type="button" onClick={() => setScripts((all) => [...all, { id: newScriptId(), name: "", command: "", icon: "play", on_worktree: false }])} className={btn}>
-          <Plus className="size-3.5" /> Add a script
-        </button>
-      </Section>
+                  <label className="flex items-center gap-2 text-[12px] text-muted">
+                    <Switch
+                      size="sm"
+                      checked={s.on_worktree}
+                      aria-label="Run in each new worktree (setup)"
+                      // One setup script: T3 runs the first one.
+                      onCheckedChange={(on) => setScripts((all) => all.map((x) => ({ ...x, on_worktree: x.id === s.id ? on : on ? false : x.on_worktree })))}
+                    />
+                    Run in each new worktree (setup)
+                  </label>
+                </li>
+              ))}
+            </ul>
+          )}
+          <button type="button" onClick={() => setScripts((all) => [...all, { id: newScriptId(), name: "", command: "", icon: "play", on_worktree: false }])} className={`${btn} mt-2.5`}>
+            <Plus className="size-3.5" /> Add a script
+          </button>
+        </SettingRow>
+      </SettingsSection>
 
-      <div className="flex items-center gap-1.5 border-t border-line px-4 pt-4">
+      <div className="flex items-center gap-1.5">
         <button type="submit" disabled={!changed || !scriptsOk || !online || busy !== null || !name.trim()} className={primary}>
           {busy === "save" ? <span className="shimmer">Saving…</span> : "Save"}
         </button>
@@ -356,7 +238,7 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
         )}
         {!online && <span className="ml-auto text-[12px] text-subtle">{machine?.name ?? "The machine"} is offline</span>}
       </div>
-      {error && <p className="px-4 pt-2 text-[12px] text-danger">{error}</p>}
+      {error && <p className="pt-2 text-[12px] text-danger">{error}</p>}
     </form>
   );
 }

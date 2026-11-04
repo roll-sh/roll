@@ -31,7 +31,7 @@ import { ShareButton } from "./share";
 import { modelName, providerName, Stat, StatusDot, threadStatusLabel, usageLine } from "./shared";
 import { TerminalView } from "./terminal";
 import { EmptyTranscript, RunView, type TranscriptActions } from "./transcript";
-import { useAgents } from "./use-agents";
+import { useAgents, usePrefs } from "./use-agents";
 
 /** What sits beside the transcript: a diff (of one run, or `null` for the whole thread) or a terminal. */
 type Side = { kind: "diff"; run: string | null } | { kind: "terminal"; id: string } | null;
@@ -248,6 +248,7 @@ function TitleBar({
   setError: (e: string | null) => void;
 }) {
   const { client, openThread, close, demo, owner, services, readOnly = false, phone = false } = useAgents();
+  const prefs = usePrefs();
   const data = client.data;
   const [renaming, setRenaming] = useState<string | null>(null);
   const [panel, setPanel] = useState<"publish" | "work" | null>(null);
@@ -382,7 +383,8 @@ function TitleBar({
                 },
                 {
                   label: "Delete",
-                  confirm: "Delete this thread?",
+                  // The owner's "Confirm before deleting a thread".
+                  confirm: prefs.confirm_delete ? "Delete this thread?" : undefined,
                   icon: <Trash2 />,
                   danger: true,
                   disabled: !online,

@@ -32,6 +32,18 @@ describe("pullText", () => {
   });
 });
 
+/** Opens the select named `label` and picks `option` (T3's selects, not native ones). */
+async function pick(label: string, option: string) {
+  await userEvent.click(screen.getByRole("combobox", { name: label }));
+  await userEvent.click(await screen.findByRole("option", { name: option }));
+}
+
+/** Opens the model picker and picks a model. */
+async function pickModel(name: RegExp) {
+  await userEvent.click(screen.getByRole("button", { name: /^Model:/ }));
+  await userEvent.click(await screen.findByRole("option", { name }));
+}
+
 describe("ProjectSettingsForm", () => {
   it("turns auto-pull on and saves the settings whole", async () => {
     const h = agentsHarness();
@@ -61,21 +73,21 @@ describe("ProjectSettingsForm", () => {
     const m = machine({ info: { ...machine().info!, providers: [provider(), provider({ id: "codex", name: "Codex", models: [] })] } });
     renderAgents(<ProjectSettingsForm project={withSettings()} machine={m} />, h);
     const save = screen.getByRole("button", { name: "Save" });
-    await userEvent.click(within(screen.getByRole("radiogroup", { name: "Where new threads work" })).getByRole("radio", { name: "New worktree" }));
+    const workspace = () => within(screen.getByRole("group", { name: "Where new threads work" }));
+    await userEvent.click(workspace().getByRole("button", { name: "Worktree" }));
     expect(save).toBeEnabled();
-    await userEvent.click(within(screen.getByRole("radiogroup", { name: "Where new threads work" })).getByRole("radio", { name: "Default" }));
+    await userEvent.click(workspace().getByRole("button", { name: "Default" }));
     expect(save).toBeDisabled();
 
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Default provider" }), "claude");
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Default model" }), "claude-sonnet-5");
-    await userEvent.click(within(screen.getByRole("radiogroup", { name: "Where new threads work" })).getByRole("radio", { name: "This checkout" }));
-    await userEvent.click(within(screen.getByRole("radiogroup", { name: "Permissions for new threads" })).getByRole("radio", { name: "Ask" }));
-    await userEvent.click(within(screen.getByRole("radiogroup", { name: "Interaction mode for new threads" })).getByRole("radio", { name: "Plan first" }));
-    // Another provider forgets the model picked for the first.
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Default provider" }), "codex");
-    expect(screen.queryByRole("combobox", { name: "Default model" })).not.toBeInTheDocument();
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Default provider" }), "claude");
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Default model" }), "claude-sonnet-5");
+    // The model comes from T3's model picker; its reset forgets provider, model and effort.
+    await pickModel(/Sonnet 5/);
+    expect(screen.getByRole("button", { name: /^Model: Sonnet 5/ })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Reset to default: Model" }));
+    expect(save).toBeDisabled();
+    await pickModel(/Sonnet 5/);
+    await userEvent.click(workspace().getByRole("button", { name: "Checkout" }));
+    await pick("Permissions for new threads", "Ask");
+    await userEvent.click(within(screen.getByRole("group", { name: "Interaction mode for new threads" })).getByRole("button", { name: "Plan first" }));
     await userEvent.click(save);
     await waitFor(() => expect(updates(h)).toHaveLength(1));
     expect(updates(h)[0].settings?.defaults).toEqual({ provider: "claude", model: "claude-sonnet-5", worktree: false, runtime_mode: "ask", interaction_mode: "plan" });
@@ -97,10 +109,11 @@ describe("ProjectSettingsForm", () => {
     const commands = screen.getAllByRole("textbox", { name: "Script command" });
     await userEvent.type(names[1], "Install");
     await userEvent.type(commands[1], "pnpm install");
-    await userEvent.selectOptions(screen.getAllByRole("combobox", { name: "Script icon" })[1], "configure");
+    await userEvent.click(screen.getAllByRole("combobox", { name: "Script icon" })[1]);
+    await userEvent.click(await screen.findByRole("option", { name: "Setup" }));
     // A new script can't run before it's saved.
     expect(screen.queryByRole("button", { name: "Run Install" })).not.toBeInTheDocument();
-    const setup = screen.getAllByRole("checkbox", { name: "Run in each new worktree (setup)" });
+    const setup = screen.getAllByRole("switch", { name: "Run in each new worktree (setup)" });
     await userEvent.click(setup[1]);
     expect(setup[0]).not.toBeChecked();
     expect(setup[1]).toBeChecked();
@@ -166,7 +179,7 @@ describe("project settings on the canvas", () => {
     const h = agentsHarness({ reply, ctx: { services: fakeServices({ repos: vi.fn(async () => repos) }) } });
     const onAdded = vi.fn();
     renderAgents(<NewProject machine={machine()} onClose={vi.fn()} onAdded={onAdded} />, h);
-    const offer = screen.getByRole("checkbox", { name: /Pull merged changes/ });
+    const offer = screen.getByRole("switch", { name: /Pull merged changes/ });
     expect(offer).not.toBeChecked();
     await userEvent.click(screen.getByRole("tab", { name: "Clone a repo" }));
     expect(offer).toBeChecked();

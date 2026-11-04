@@ -20,6 +20,8 @@ import type {
   FsEntry,
   Machine,
   MachineId,
+  MachineInfo,
+  MachineSettings,
   Mirrored,
   Node,
   NodeBody,
@@ -40,7 +42,8 @@ import type {
 } from "./agents-api";
 import { DEFAULT_AUTO_SETTLE, EMPTY_INBOX, NO_SETTINGS, reachable } from "./agents-api";
 import type { AgentsTransport } from "./agents-client";
-import { memoryCanvas, type AgentsServices, type RepoChoice } from "./agents-services";
+import { memoryCanvas, memorySettings, type AgentsServices, type RepoChoice } from "./agents-services";
+import { offeredProviders, settingsError } from "./machine-settings";
 import { ApiError } from "./code-api";
 import type { Sandbox, SandboxSize } from "./sandboxes-api";
 
@@ -112,6 +115,24 @@ const DEMO_REPOS: RepoChoice[] = [
   { owner: "acme", name: "infra", full_name: "acme/infra", description: null, visibility: "private", updated_at: 1_761_800_000 },
   { owner: "acme", name: "docs", full_name: "acme/docs", description: "Guides and the API reference", visibility: "public", updated_at: 1_761_700_000 },
 ];
+
+/**
+ * What a demo daemon reports about its providers and settings, as `roll agent up` does: the
+ * providers that are on (custom models added), and the settings with what they fall back to.
+ * `fileEnv` is what its `config.toml` sets, by name.
+ */
+function demoConfig(home: string, all: readonly ProviderInfo[], set: MachineSettings, fileEnv: Record<string, string[]> = {}): Pick<MachineInfo, "providers" | "settings"> {
+  const data = `${home}/.local/share/roll/agent`;
+  return {
+    providers: offeredProviders(all, set),
+    settings: {
+      set,
+      base: { worktree_dir: `${data}/worktrees`, branch_prefix: "roll", clone_dir: `${home}/roll`, pull_every: 60, max_depth: 3, max_children: 6, git_name: home.startsWith("/Users/") ? "Ada Lovelace" : null, git_email: null },
+      providers: all.map((p) => ({ id: p.id, name: p.name, binary: p.id.startsWith("acp:") ? p.id.slice(4) : null, args: p.id.startsWith("acp:") ? 1 : 0, env: fileEnv[p.id] ?? [] })),
+      config_path: `${data}/config.toml`,
+    },
+  };
+}
 
 const MBP = "mch_demo_ada";
 const BOX = "mch_demo_box";
@@ -489,6 +510,10 @@ export class DemoOwner implements AgentsTransport {
   private started = false;
   /** The demo's canvas arrangement: kept for as long as the page is open. */
   private canvas = memoryCanvas();
+  /** The demo owner's agents settings, the same. */
+  private settings = memorySettings();
+  /** Every provider each demo machine has, on or off (its info lists the ones on). */
+  private allProviders = new Map<MachineId, ProviderInfo[]>();
   /**
    * `speed` scales every delay (tests run the demo fast); `keepAlive` starts new work whenever
    * the canvas goes quiet.
@@ -755,7 +780,7 @@ export class DemoOwner implements AgentsTransport {
                   arch: "x86_64",
                   version: "0.1.0",
                   home: "/home/roll",
-                  providers: [claude(keys.has("ANTHROPIC_API_KEY") ? "ready" : "missing"), codex(keys.has("OPENAI_API_KEY") ? "ready" : "missing")],
+                  ...owner.catalog(mid, "/home/roll", [claude(keys.has("ANTHROPIC_API_KEY") ? "ready" : "missing"), codex(keys.has("OPENAI_API_KEY") ? "ready" : "missing")]),
                 },
               },
             ),
@@ -823,8 +848,29 @@ export class DemoOwner implements AgentsTransport {
       async releaseWork(_o, thread) {
         owner.patchThread(thread, { work: null });
       },
+      machines: {
+        async rename(_o, mid, name) {
+          const m = owner.machines.get(mid);
+          if (!m) throw new ApiError("no such machine", 404, null);
+          const next = { ...m, name: name.trim() || m.name };
+          owner.machines.set(mid, next);
+          owner.emit({ type: "machine", cursor: ++owner.cursor, machine: next });
+          return next;
+        },
+        async remove(_o, mid) {
+          if (!owner.machines.delete(mid)) throw new ApiError("no such machine", 404, null);
+          owner.emit({ type: "machine_removed", cursor: ++owner.cursor, machine: mid });
+        },
+      },
       canvas: owner.canvas,
+      settings: owner.settings,
     };
+  }
+
+  /** A demo machine's providers and settings (none set yet), keeping the full list for `machine.configure`. */
+  private catalog(mid: MachineId, home: string, all: ProviderInfo[], fileEnv?: Record<string, string[]>) {
+    this.allProviders.set(mid, all);
+    return demoConfig(home, all, {}, fileEnv);
   }
 
   // ── seed ──
@@ -837,7 +883,7 @@ export class DemoOwner implements AgentsTransport {
       id: MBP,
       name: "ada-mbp",
       online: true,
-      info: { hostname: "ada-mbp", os: "macos", arch: "aarch64", version: "0.1.0", home: "/Users/ada", providers: [claude(), codex(), gemini] },
+      info: { hostname: "ada-mbp", os: "macos", arch: "aarch64", version: "0.1.0", home: "/Users/ada", ...this.catalog(MBP, "/Users/ada", [claude(), codex(), gemini], { claude: ["ANTHROPIC_API_KEY"] }) },
       sandbox: null,
       created_at: t0,
       last_seen: now(),
@@ -846,7 +892,7 @@ export class DemoOwner implements AgentsTransport {
       id: BOX,
       name: "build-box",
       online: true,
-      info: { hostname: "build-box", os: "linux", arch: "x86_64", version: "0.1.0", home: "/home/roll", providers: [codex(), claude("missing")] },
+      info: { hostname: "build-box", os: "linux", arch: "x86_64", version: "0.1.0", home: "/home/roll", ...this.catalog(BOX, "/home/roll", [codex(), claude("missing")]) },
       sandbox: { backend: "agent37", size: "standard", status: "running", hourly_cents: 3 },
       created_at: t0,
       last_seen: now(),
@@ -1635,11 +1681,25 @@ export class DemoOwner implements AgentsTransport {
       case "provider.refresh": {
         const m = this.machines.get(machine);
         if (m?.info) {
-          const info = { ...m.info, providers: m.info.providers.map((p) => (p.auth === "missing" ? { ...p, auth: "ready" as const, detail: "Logged in" } : p)) };
-          const next = { ...m, info };
+          const all = (this.allProviders.get(machine) ?? m.info.providers).map((p) => (p.auth === "missing" ? { ...p, auth: "ready" as const, detail: "Logged in" } : p));
+          this.allProviders.set(machine, all);
+          const set = m.info.settings?.set ?? {};
+          const next = { ...m, info: { ...m.info, providers: offeredProviders(all, set) } };
           this.machines.set(machine, next);
           this.emit({ type: "machine", cursor: ++this.cursor, machine: next });
         }
+        return { type: "ok" };
+      }
+      case "machine.configure": {
+        const m = this.machines.get(machine);
+        if (!m?.info) return notFound("machine");
+        const error = settingsError(c.settings);
+        if (error) return { type: "error", code: "invalid", message: error };
+        const all = this.allProviders.get(machine) ?? m.info.providers;
+        const fileEnv = Object.fromEntries((m.info.settings?.providers ?? []).map((p) => [p.id, p.env]));
+        const next = { ...m, info: { ...m.info, ...demoConfig(m.info.home, all, c.settings, fileEnv) } };
+        this.machines.set(machine, next);
+        this.emit({ type: "machine", cursor: ++this.cursor, machine: next });
         return { type: "ok" };
       }
     }

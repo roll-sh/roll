@@ -18,7 +18,8 @@ import { ContextMeter } from "./context-meter";
 import { DEFAULT_RUNTIME_MODE, ModelPicker, PermissionsMenu, resolveModel, type ModelChoice } from "./model-picker";
 import { pickByDigit, pill, QuestionsPanel, quiet, useQuestionFlow } from "./request-card";
 import { Switch } from "./ui";
-import { useAgents } from "./use-agents";
+import { newThreadDefaults } from "@/lib/owner-settings";
+import { useAgents, usePrefs } from "./use-agents";
 
 /** What a new thread starts with (the `thread.create` fields the composer picks). */
 export interface NewThreadFields {
@@ -101,14 +102,21 @@ export function Composer({
   autoFocus?: boolean;
 }) {
   const { client } = useAgents();
+  const prefs = usePrefs();
   const providers = useMemo(() => (mode.machine?.info?.providers ?? []).filter((p) => p.installed), [mode.machine]);
   const thread = mode.kind === "thread" ? mode.thread : null;
   const key = thread ? thread.id : `new:${mode.kind === "new" ? mode.project.id : ""}`;
 
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  // A new thread starts from its project's defaults (project settings), else the usual choices.
-  const defaults = mode.kind === "new" ? mode.project.settings?.defaults : undefined;
+  // A new thread starts from its project's defaults, then its machine's, then the owner's (settings), else the usual choices.
+  const defaults =
+    mode.kind === "new"
+      ? newThreadDefaults(
+          [mode.project.settings?.defaults, mode.machine?.info?.settings?.set.defaults, prefs.defaults],
+          providers.map((p) => p.id),
+        )
+      : undefined;
   const preset = defaults?.provider && providers.some((p) => p.id === defaults.provider) ? defaults : undefined;
   const [provider, setProvider] = useState<string>(() => thread?.provider ?? preset?.provider ?? defaultProvider(providers)?.id ?? "");
   const [model, setModel] = useState<string | null>(thread?.model ?? preset?.model ?? null);
@@ -169,8 +177,9 @@ export function Composer({
   const machineOnline = reachable(mode.machine);
   const state = mode.machine ? machineState(mode.machine) : "offline";
   const loggedOut = info && info.auth === "missing";
-  // A follow-up while running steers; with ⌘/Ctrl it queues. Waiting on an approval, it always steers (redirects).
-  const queues = (mod: boolean) => running && !approvalWaiting && mod;
+  // A follow-up while running steers; with ⌘/Ctrl it queues (the owner's "While a run is going" can
+  // swap the two). Waiting on an approval, it always steers (redirects).
+  const queues = (mod: boolean) => running && !approvalWaiting && (prefs.follow_up === "queue" ? !mod : mod);
 
   const configure = (patch: Partial<Pick<Thread, "provider" | "model" | "effort" | "runtime_mode" | "interaction_mode">>) => {
     if (!thread || !mode.machine) return;
@@ -351,10 +360,12 @@ export function Composer({
           onKeyDown={(e) => {
             if (e.nativeEvent.isComposing || e.keyCode === 229) return;
             if (question && pickByDigit(flow, e, value !== "")) return;
-            if (e.key === "Enter" && !e.shiftKey && !e.altKey) {
+            // The owner's send key (T3's `sendShortcut`): Enter, or ⌘/Ctrl+Enter (then Enter breaks the line).
+            const mod = e.metaKey || e.ctrlKey;
+            if (e.key === "Enter" && !e.shiftKey && !e.altKey && (prefs.send === "enter" || mod || question)) {
               e.preventDefault();
               if (question) void answer();
-              else void submit(e.metaKey || e.ctrlKey);
+              else void submit(prefs.send === "enter" && mod);
             } else if (e.key === "Tab" && e.shiftKey && (caps?.plan_mode ?? true)) {
               e.preventDefault();
               togglePlan();

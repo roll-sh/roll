@@ -61,7 +61,7 @@ describe("NewProject", () => {
     expect(screen.getByRole("button", { name: "Create and clone" })).toBeDisabled();
     await userEvent.type(screen.getByRole("textbox", { name: "Repo name" }), "site");
     await userEvent.type(screen.getByRole("textbox", { name: "Description" }), "The site");
-    await userEvent.click(screen.getByRole("checkbox", { name: "Private" }));
+    await userEvent.click(screen.getByRole("switch", { name: "Private" }));
     await userEvent.click(screen.getByRole("button", { name: "Create and clone" }));
     await waitFor(() => expect(onAdded).toHaveBeenCalledWith("prj_site"));
     expect(createProject).toHaveBeenCalledWith("acme", "mch_1", { id: expect.stringMatching(/^cmd_/), repo: { name: "site", description: "The site", visibility: "public" } });
