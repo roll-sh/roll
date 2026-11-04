@@ -1525,8 +1525,11 @@ pub fn busy(sess: &crate::session::state::SessionState) {
 pub fn session_ends(sess: &crate::session::state::SessionState) {
     flush_io(sess);
     report(sess, true, &sess.db.catalog());
-    if sess.pgstat.borrow_mut().slot.take().is_some() {
-        sess.db.pgstat.lock().unflushed.remove(&sess.pid);
+    if let Some(slot) = sess.pgstat.borrow_mut().slot.take() {
+        let mut shared = sess.db.pgstat.lock();
+        if shared.unflushed.get(&sess.pid).is_some_and(|current| std::sync::Arc::ptr_eq(current, &slot)) {
+            shared.unflushed.remove(&sess.pid);
+        }
     }
 }
 
