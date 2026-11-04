@@ -1,0 +1,9 @@
+{
+  "path": "crates/pg-engine/tests/wire.rs",
+  "baseline": "fe7b0023c9df19a6dae1e6067ba8454998db48c5",
+  "candidate": "ab3f64b8dd92203123f6777ae4a6028d3a3aae67",
+  "byte_identical": true,
+  "sha256": "2dcc4e12789f5443ea464827634ab58ffd7c4c77492d127c25bcf7ff5df4ab87",
+  "source_excerpt": "3776:         assert!(back == big);\n3777:         let text = c.simple_query(\"SELECT decode(repeat('ff01', 8 << 20), 'hex')\").await.unwrap();\n3778:         let hex = text\n3779:             .iter()\n3780:             .find_map(|m| match m {\n3781:                 SimpleQueryMessage::Row(r) => r.get(0),\n3782:                 _ => None,\n3783:             })\n3784:             .unwrap();\n3785:         assert_eq!((hex.len(), &hex[..8]), (2 + (32 << 20), \"\\\\xff01ff\"));\n3786:         assert!(started.elapsed() < Duration::from_secs(20), \"{:?}\", started.elapsed());\n3787:     });\n3788:     s.engine.shutdown();\n3789: }\n3790: \n3791: /// port and listen_addresses are where the server listens (as `postgres -h -p` sets them), and",
+  "scope": "Committed-source threshold check only; no test rerun or timing attribution"
+}
