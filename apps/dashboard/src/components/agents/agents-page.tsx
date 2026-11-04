@@ -685,7 +685,7 @@ function defaultSize(n: GraphNode): Size {
     case "subagent":
       return { w: 240, h: 72 };
     case "request":
-      return { w: 320, h: 150 };
+      return { w: 352, h: 150 };
     case "terminal":
       return { w: 620, h: 380 };
     case "pin":

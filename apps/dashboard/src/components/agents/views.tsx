@@ -220,7 +220,7 @@ export function ViewsBar({ views: v, data, active, phone }: { views: CanvasViews
   const filters = filterCount(v.filter);
 
   return (
-    <div ref={bar} className="relative flex h-10 shrink-0 items-center gap-2 border-b border-line px-2" data-nodrag>
+    <div ref={bar} className="chrome-in relative z-10 flex h-11 shrink-0 items-center gap-2 border-b border-line px-2" data-nodrag>
       <div ref={tabs} role="tablist" aria-label="Canvas views" className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none]">
         {views.map((view, i) => {
           const selected = view.id === v.current.id;
@@ -241,7 +241,7 @@ export function ViewsBar({ views: v, data, active, phone }: { views: CanvasViews
           return (
             <div
               key={view.id}
-              className={`group/tab flex shrink-0 items-center rounded-md transition-colors duration-150 ${selected ? "bg-panel-2 text-fg" : "text-muted hover:bg-panel-2/60 hover:text-fg"} ${dragging === view.id ? "opacity-50" : ""}`}
+              className={`group/tab flex shrink-0 items-center rounded-md border transition-colors duration-150 ${selected ? "border-line-2 bg-panel-2 text-fg shadow-card inset-shadow-highlight" : "border-transparent text-muted hover:bg-fg/[0.04] hover:text-fg"} ${dragging === view.id ? "opacity-50" : ""}`}
               draggable={view.id !== ALL}
               onDragStart={(e) => {
                 setDragging(view.id);
@@ -265,11 +265,11 @@ export function ViewsBar({ views: v, data, active, phone }: { views: CanvasViews
                 onClick={() => select(view.id)}
                 onDoubleClick={() => view.id !== ALL && setRenaming(view.id)}
                 title={i < 9 ? `${view.name} (⌥${i + 1})` : view.name}
-                className="flex h-7 items-center gap-1.5 px-2.5 text-[12.5px] font-medium tracking-[-0.01em] whitespace-nowrap"
+                className="flex h-[26px] items-center gap-1.5 px-2.5 text-[12.5px] font-[510] tracking-[-0.01em] whitespace-nowrap"
               >
                 {view.name}
                 {count !== null && count > 0 && (
-                  <span className={`rounded-full px-1.5 py-px font-mono text-[10px] tabular-nums ${waiting ? "bg-accent/15 text-accent" : "bg-panel-3 text-muted"}`} aria-label={`${count} thread${count === 1 ? "" : "s"}`}>
+                  <span className={`grid h-4 min-w-4 place-items-center rounded-full px-1 font-mono text-[10px] tabular-nums ${waiting ? "bg-accent/15 text-accent" : "bg-fg/[0.07] text-muted"}`} aria-label={`${count} thread${count === 1 ? "" : "s"}`}>
                     {count}
                   </span>
                 )}
@@ -302,15 +302,15 @@ export function ViewsBar({ views: v, data, active, phone }: { views: CanvasViews
           );
         })}
         {saved.length < MAX_VIEWS && (
-          <button onClick={() => setEditor({ mode: "new" })} title="New view (⌥S)" aria-label="New view" className="grid size-7 shrink-0 place-items-center rounded-md text-subtle transition hover:bg-panel-2 hover:text-fg">
-            <Plus className="size-3.5" />
+          <button onClick={() => setEditor({ mode: "new" })} title="New view (⌥S)" aria-label="New view" className="grid size-7 shrink-0 place-items-center rounded-md text-subtle transition-colors duration-150 hover:bg-fg/[0.05] hover:text-fg">
+            <Plus className="size-3.5" strokeWidth={1.75} />
           </button>
         )}
       </div>
       <div className="flex shrink-0 items-center gap-1">
         {!phone && (
-          <label className="flex h-7 w-52 items-center gap-1.5 rounded-md border border-line bg-bg px-2 text-subtle transition-colors focus-within:border-line-2 focus-within:text-fg">
-            <Search className="size-3.5 shrink-0" />
+          <label className="flex h-7 w-56 items-center gap-1.5 rounded-md border border-line bg-fg/[0.03] px-2 text-subtle inset-shadow-highlight transition-colors duration-150 hover:border-line-2 focus-within:border-accent/50 focus-within:text-fg">
+            <Search className="size-3.5 shrink-0" strokeWidth={1.75} />
             <input
               ref={field}
               value={v.filter.text ?? ""}
@@ -333,9 +333,9 @@ export function ViewsBar({ views: v, data, active, phone }: { views: CanvasViews
           aria-expanded={!!editor}
           aria-label={onAll ? "Filters" : `${v.current.name} filters`}
           title="Filters"
-          className={`flex h-7 items-center gap-1 rounded-md px-2 text-[12px] transition hover:bg-panel-2 hover:text-fg ${filters ? "text-fg" : "text-subtle"} ${editor ? "bg-panel-2" : ""}`}
+          className={`flex h-7 items-center gap-1 rounded-md px-2 text-[12px] transition-colors duration-150 hover:bg-fg/[0.05] hover:text-fg ${filters ? "text-fg" : "text-subtle"} ${editor ? "bg-fg/[0.07]" : ""}`}
         >
-          <SlidersHorizontal className="size-3.5" />
+          <SlidersHorizontal className="size-3.5" strokeWidth={1.75} />
           {filters > 0 && <span className="font-mono text-[10.5px] text-accent tabular-nums">{filters}</span>}
         </button>
         {draftActive && (

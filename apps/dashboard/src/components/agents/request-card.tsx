@@ -220,7 +220,7 @@ function ApprovalForm({
           </div>
         </form>
       ) : (
-        <div className="flex flex-wrap items-center gap-1.5">
+        <div className={`flex flex-wrap items-center gap-1.5 ${compact ? "[&>button]:px-2 [&>button]:py-1 [&>button]:text-[12px]" : ""}`}>
           {has("accept") && (
             <button type="button" disabled={busy} onClick={() => void decide("accept")} className={primary}>
               {busy ? <span className="shimmer">Sending…</span> : decisionLabel.accept}

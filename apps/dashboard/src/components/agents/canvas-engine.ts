@@ -194,7 +194,7 @@ export class CanvasEngine {
     this.accent = resolveColor(cssVar(c, "--accent", "#4c8dff"));
     this.ground = resolveColor(cssVar(c, "--canvas", "#0d0e10"));
     const lum = (0.2126 * this.ground[0] + 0.7152 * this.ground[1] + 0.0722 * this.ground[2]) / 255;
-    this.dotAlpha = lum > 0.5 ? 0.22 : 0.17;
+    this.dotAlpha = lum > 0.5 ? 0.26 : 0.24;
     this.kick();
   }
 

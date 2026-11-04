@@ -537,7 +537,7 @@ export function RequestNode({ request }: { request: Request }) {
     );
   }
   return (
-    <Card width={320} label="Waiting for you">
+    <Card width={352} label="Waiting for you">
       <div className="px-3.5 py-3" data-nodrag>
         <RequestCard
           request={request}
