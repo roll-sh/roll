@@ -344,10 +344,12 @@ function ModelRow({ model, provider, favorite, selected, starOnHover }: { model:
 const COLUMN_ROW =
   "flex h-8 w-full shrink-0 cursor-pointer items-center gap-2 rounded-sm px-2 text-left text-[13px] text-fg outline-none hover:bg-fg/[0.08] focus-visible:bg-fg/[0.08] aria-checked:bg-fg/[0.06]";
 
+const EFFORT_LABELS: Record<string, string> = { xhigh: "Extra high", xlow: "Extra low" };
+
 /** The picked model's effort levels (T3's `ComposerEffortColumn`). */
 function EffortColumn({ model, effort, onPick }: { model: ModelInfo | undefined; effort: string | null; onPick: (effort: string | null) => void }) {
   const levels: { id: string | null; label: string }[] = model?.efforts.length
-    ? [{ id: null, label: "Default" }, ...model.efforts.map((e) => ({ id: e, label: e[0].toUpperCase() + e.slice(1) }))]
+    ? [{ id: null, label: "Default" }, ...model.efforts.map((e) => ({ id: e, label: EFFORT_LABELS[e] ?? e[0].toUpperCase() + e.slice(1) }))]
     : [];
   const picked = levels.some((l) => l.id === effort) ? effort : null;
   return (

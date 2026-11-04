@@ -5,7 +5,7 @@ import { useEffect, useLayoutEffect, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { activeClient, DEMO_OWNER, type AgentsClient } from "@/lib/agents-client";
 import { rolling } from "@/lib/agents-graph";
-import { agentsSurface, hashFor, hideAgents, showAgents, useAgentsSurface, viewFromHash } from "@/lib/agents-surface";
+import { agentsSurface, hashFor, hideAgents, isNewAgentKey, showAgents, useAgentsSurface, viewFromHash } from "@/lib/agents-surface";
 import { desktop, useDesktop } from "@/lib/desktop";
 import { AgentsSurface, CenterNote } from "./agents-page";
 import { useAgentsSnapshot, useHold, useMarkDriver } from "./use-agents";
@@ -27,6 +27,12 @@ export function AgentsControl() {
   // ⌘J, and links that open the popup (before the popup writes its own state into the URL).
   useLayoutEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // ⌘N / ⌘⇧O: a new agent from any page (the open surface handles it itself).
+      if (isNewAgentKey(e) && !agentsSurface.get().open && !(e.target as HTMLElement | null)?.closest?.(".xterm")) {
+        e.preventDefault();
+        showAgents({ kind: "new" });
+        return;
+      }
       if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "j") return;
       e.preventDefault();
       if (agentsSurface.get().open) hideAgents();

@@ -766,9 +766,20 @@ The surface has three views:
   back, publish, share, rename, archive, delete, take a work item. The title is a switcher to the
   other conversations (the ones waiting on you first), so there's no need to go back to the
   canvas; Escape (or ←) goes back. The canvas stays mounted underneath, so going back is instant.
-- **A new agent.** Pick the machine and project (the last used by default; adding a project is
-  right there), say what to do, and it opens as a conversation. Recent conversations are listed
-  under the composer.
+- **A new agent: the launcher** (`new-agent.tsx`). A small composer pops over the canvas (the
+  canvas stays live under it): the machine and project as pickers (the asked-for one, else the
+  last used; adding a project is right there), the model picker, permissions, plan and worktree
+  from the project's defaults. Enter starts it: the popup closes and the new thread opens in the
+  side panel, selected on the canvas. It opens from "New agent" (the surface's header and the
+  header pill), ⌘N or ⌘⇧O (T3's `chat.new` bindings; not in a terminal), `#agents/new`, the + on
+  a machine card (preset to that machine) or a project card (preset to that project). **Drag to
+  launch:** the same + is a handle: dragged out of the card it draws a calm dashed accent line
+  to the pointer ("New agent here"), and dropped on empty canvas it opens the launcher there for
+  that project or machine (on a card nothing starts; Escape cancels). A thread card's fork
+  handle does the same with `thread.fork` (T3's fork from the latest point): click or drop, and
+  the fork opens beside the canvas. The canvas keeps its own card drag (reordering siblings);
+  launch handles are buttons, so the two never mix. The line has no animation, so reduced
+  motion changes nothing.
 - **The model picker** (`model-picker.tsx`, T3's `ProviderModelPicker`, `ModelPickerContent`,
   `ModelListRow`, `ModelPickerSidebar` and the docked effort column of `ComposerModelEffort`).
   The trigger names the provider, the model and its effort. The popup has a sidebar (Favorites,

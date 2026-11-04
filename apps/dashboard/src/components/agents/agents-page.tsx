@@ -9,14 +9,14 @@ import { setActiveClient, type AgentsClient } from "@/lib/agents-client";
 import { deriveGraph, rolling, type GraphNode } from "@/lib/agents-graph";
 import type { Size } from "@/lib/agents-layout";
 import type { AgentsServices } from "@/lib/agents-services";
-import { setAgentsView, useAgentsSurface, type AgentsView } from "@/lib/agents-surface";
+import { isNewAgentKey, setAgentsView, useAgentsSurface, type AgentsView } from "@/lib/agents-surface";
 import { ALL, applyView, isPinned, pinKey, pinnedConversations, pinOf, viewStorageKey, type Pin as PinRec } from "@/lib/agents-views";
 import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
 import { useMarkState } from "../mark-state";
 import { AddMachineDialog, AddMachinePaths } from "./add-machine";
 import { AgentsCanvas, type CanvasHandle } from "./agents-canvas";
 import { Menu } from "./menu";
-import { NewAgent } from "./new-agent";
+import { Launcher } from "./new-agent";
 import { PinnedConversation, PinnedDiff, PinnedTerminal } from "./pinned";
 import { MachineNode, ProjectNode, RequestNode, SubagentNode, ThreadNode } from "./nodes";
 import { RequestCard } from "./request-card";
@@ -111,12 +111,12 @@ export function AgentsSurface({
   const phone = usePhone();
   const sandboxes = useSandboxes(services, client.owner, data);
   const { view } = useAgentsSurface();
-  const [newIn, setNewIn] = useState<string | undefined>(undefined);
   const [adding, setAdding] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [sidebar, setSidebar] = useSidebarOpen(phone);
   const canvas = useRef<CanvasHandle>(null);
   const views = useCanvasViews(services.canvas, client.owner, data.canvas?.revision ?? 0);
+  const root = useRef<HTMLDivElement>(null);
   const pendingFocus = useRef<string | null>(initialFocus ?? null);
 
   const threadOpen = view.kind === "thread" ? data.threads.get(view.thread) : undefined;
@@ -152,9 +152,10 @@ export function AgentsSurface({
 
   const openThread = useCallback((thread: string) => setAgentsView({ kind: "thread", thread }), []);
   const close = useCallback(() => setAgentsView({ kind: "canvas" }), []);
-  const startNew = useCallback((project?: string) => {
-    setNewIn(project);
-    setAgentsView({ kind: "new" });
+  const startNew = useCallback((project?: string, opts?: { machine?: string; at?: { x: number; y: number } }) => {
+    const r = root.current?.getBoundingClientRect();
+    const at = opts?.at && r ? { x: Math.round(opts.at.x - r.left), y: Math.round(opts.at.y - r.top) } : undefined;
+    setAgentsView({ kind: "new", ...(project ? { project } : {}), ...(opts?.machine ? { machine: opts.machine } : {}), ...(at ? { at } : {}) });
   }, []);
   const focus = useCallback(
     (key: string) => {
@@ -184,6 +185,42 @@ export function AgentsSurface({
     [client, demo, openThread, close, startNew, focus, services, sandboxes, phone],
   );
 
+  // ⌘N / ⌘⇧O (T3's `chat.new`): the launcher, except in a terminal.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!isNewAgentKey(e) || (e.target as HTMLElement | null)?.closest?.(".xterm")) return;
+      e.preventDefault();
+      startNew();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [startNew]);
+
+  // A card's handle dropped on the canvas: the launcher there for that project or machine, or a
+  // fork of that thread (T3's fork from the latest point), opened beside the canvas.
+  const [launchError, setLaunchError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!launchError) return;
+    const t = setTimeout(() => setLaunchError(null), 5000);
+    return () => clearTimeout(t);
+  }, [launchError]);
+  const onLaunch = useCallback(
+    (source: string, at: { x: number; y: number }) => {
+      const id = source.slice(2);
+      if (source.startsWith("p:")) startNew(id, { at });
+      else if (source.startsWith("m:")) startNew(undefined, { machine: id, at });
+      else if (source.startsWith("t:")) {
+        const m = client.data.threads.get(id)?.machine;
+        if (!m) return;
+        client
+          .run<{ type: "created"; id: string }>(m, { type: "thread.fork", thread: id }, "created")
+          .then((r) => openThread(r.id))
+          .catch((e: Error) => setLaunchError(`Couldn't fork: ${e.message}`));
+      }
+    },
+    [client, startNew, openThread],
+  );
+
   // Escape: back to the canvas, and from the canvas out of the popup. Not while typing, except in
   // an empty composer (it has focus in a conversation, so Escape would never leave otherwise).
   useEffect(() => {
@@ -211,19 +248,12 @@ export function AgentsSurface({
   // Waiting on you isn't running: those show as the waiting count.
   const running = working.filter((t) => t.status !== "waiting").length;
   const archived = [...data.threads.values()].filter((r) => r.value.archived_at !== null).length;
-  const back = (
-    <IconButton label="All agents (Esc)" onClick={close}>
-      <ArrowLeft className="size-4" />
-    </IconButton>
-  );
   const end = (
     <>
-      {shown.kind !== "new" && (
-        <button onClick={() => startNew()} className="inline-flex h-7 items-center gap-1 rounded-md bg-fg px-2 text-[12px] font-medium text-bg transition hover:opacity-85" title="New agent">
-          <Plus className="size-3.5" strokeWidth={2} />
-          <span className="max-sm:sr-only">New agent</span>
-        </button>
-      )}
+      <button onClick={() => startNew()} className="inline-flex h-7 items-center gap-1 rounded-md bg-fg px-2 text-[12px] font-medium text-bg transition hover:opacity-85" title="New agent (⌘N)">
+        <Plus className="size-3.5" strokeWidth={2} />
+        <span className="max-sm:sr-only">New agent</span>
+      </button>
       {onClose && (
         <IconButton label="Close (Esc)" onClick={onClose}>
           <X className="size-4" />
@@ -234,12 +264,10 @@ export function AgentsSurface({
 
   return (
     <AgentsContext.Provider value={ctx}>
-      <div className="relative flex h-full min-h-0 flex-col bg-bg text-fg">
+      <div ref={root} className="relative flex h-full min-h-0 flex-col bg-bg text-fg">
         {/* The full window drives the logo itself (in the popup, the header already does). */}
         {chrome === "window" && <MarkDriver client={client} />}
-        {shown.kind === "new" && <NewAgent key={newIn ?? ""} project={newIn} start={back} end={end} />}
-        {/* The canvas stays mounted under a new agent's composer, so going back is instant and keeps the view. */}
-        <div className={`min-h-0 flex-1 flex-col ${shown.kind === "new" ? "hidden" : "flex"}`}>
+        <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-3" data-drag-region>
             {chrome === "window" && <WindowHome />}
             <SidebarToggle open={sidebar} onToggle={() => setSidebar(!sidebar)} />
@@ -277,9 +305,24 @@ export function AgentsSurface({
               {data.machines.size === 0 && snap.conn !== "connecting" ? (
                 <Empty demo={demo} onCreated={onSandbox} />
               ) : (
-                <CanvasView canvasRef={canvas} data={data} showArchived={showArchived} views={views} pendingFocus={pendingFocus} visible={shown.kind !== "new"} selected={selected} phone={phone} />
+                <CanvasView
+                  canvasRef={canvas}
+                  data={data}
+                  showArchived={showArchived}
+                  views={views}
+                  pendingFocus={pendingFocus}
+                  visible={shown.kind !== "new"}
+                  selected={selected}
+                  phone={phone}
+                  onLaunch={onLaunch}
+                />
               )}
               {phone && shown.kind === "canvas" && requests.length > 0 && <PhoneWaiting client={client} />}
+              {launchError && (
+                <p role="alert" className="rise absolute bottom-4 left-4 z-10 rounded-lg border border-danger/40 bg-panel px-3 py-2 text-[12px] text-danger">
+                  {launchError}
+                </p>
+              )}
             </div>
             {shown.kind === "thread" && threadOpen && (
               <SidePanel phone={phone} label="Conversation">
@@ -303,6 +346,7 @@ export function AgentsSurface({
           </div>
         </div>
         {adding && <AddMachineDialog onClose={() => setAdding(false)} onCreated={onSandbox} />}
+        {shown.kind === "new" && <Launcher key={`${shown.project ?? ""}|${shown.machine ?? ""}|${shown.at?.x ?? ""},${shown.at?.y ?? ""}`} project={shown.project} machine={shown.machine} at={shown.at} onClose={close} />}
       </div>
     </AgentsContext.Provider>
   );
@@ -384,6 +428,7 @@ function CanvasView({
   visible,
   selected,
   phone,
+  onLaunch,
 }: {
   canvasRef: React.RefObject<CanvasHandle | null>;
   data: AgentsClient["data"];
@@ -393,6 +438,7 @@ function CanvasView({
   visible: boolean;
   selected?: string;
   phone: boolean;
+  onLaunch?: (source: string, at: { x: number; y: number }) => void;
 }) {
   const { client, owner } = useAgents();
   const view = views.current;
@@ -507,6 +553,7 @@ function CanvasView({
           defaultSize={sizeOf}
           active={visible}
           selected={selected}
+          onLaunch={onLaunch}
           overlay={empty && <EmptyView name={view.id === ALL ? null : view.name} waitingOnly={filter.status?.length === 1 && filter.status[0] === "waiting"} onAll={() => (view.id === ALL ? views.setFilter({}) : views.select(ALL))} />}
         />
       </div>

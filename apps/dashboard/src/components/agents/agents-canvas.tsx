@@ -71,8 +71,13 @@ export const AgentsCanvas = forwardRef<
     active?: boolean;
     /** The card whose conversation or settings are open beside it. */
     selected?: string;
+    /**
+     * A card's launch handle (`data-launch="p:…"`, `m:…`, `t:…`) dragged out and dropped on empty
+     * canvas, with where (client coordinates). A plain click on the handle stays a click.
+     */
+    onLaunch?: (source: string, at: Point) => void;
   }
->(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, fitKey, render, defaultSize, onEscape, overlay, active = true, selected }, ref) {
+>(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, fitKey, render, defaultSize, onEscape, overlay, active = true, selected, onLaunch }, ref) {
   const reduced = useReducedMotion();
   const container = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -297,10 +302,33 @@ export const AgentsCanvas = forwardRef<
     list: string[];
     centres: Map<string, number>;
   } | null>(null);
+  // Dragging a launch handle out of a card: where it started, and the ghost line drawn meanwhile.
+  const launch = useRef<{ source: string; id: number; start: Point; from: Point; moved: boolean } | null>(null);
+  const [ghost, setGhost] = useState<{ source: string; from: Point; to: Point; over: boolean } | null>(null);
+  useEffect(() => {
+    if (!ghost) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      launch.current = null;
+      setGhost(null);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [ghost]);
   const onPointerDown = (ev: React.PointerEvent) => {
     const e = engine.current;
     if (!e || ev.button !== 0) return;
     const t = ev.target as HTMLElement;
+    // A launch handle: a drag from it draws a line to where a new agent (or a fork) would start.
+    const handle = onLaunch ? t.closest<HTMLElement>("[data-launch]") : null;
+    if (handle?.dataset.launch) {
+      const r = container.current!.getBoundingClientRect();
+      const h = handle.getBoundingClientRect();
+      launch.current = { source: handle.dataset.launch, id: ev.pointerId, start: { x: ev.clientX, y: ev.clientY }, from: { x: h.left + h.width / 2 - r.left, y: h.top + h.height / 2 - r.top }, moved: false };
+      return;
+    }
     if (!t.closest("[data-drag]") || t.closest("button, a, input, textarea, select, [data-nodrag]")) return;
     const card = t.closest<HTMLElement>("[data-card]");
     const key = card?.dataset.key;
@@ -313,6 +341,16 @@ export const AgentsCanvas = forwardRef<
     drag.current = { key, id: ev.pointerId, start: toWorld(e.view, ev.clientX - r.left, ev.clientY - r.top), from, moved: false, el: card!, parent, list, centres };
   };
   const onPointerMove = (ev: React.PointerEvent) => {
+    const l = launch.current;
+    if (l && l.id === ev.pointerId) {
+      if (!l.moved && Math.hypot(ev.clientX - l.start.x, ev.clientY - l.start.y) < 6) return;
+      // Capture once it's a drag, so the handle's click still works.
+      if (!l.moved) container.current!.setPointerCapture?.(ev.pointerId);
+      l.moved = true;
+      const r = container.current!.getBoundingClientRect();
+      setGhost({ source: l.source, from: l.from, to: { x: ev.clientX - r.left, y: ev.clientY - r.top }, over: overCard(ev.clientX, ev.clientY) });
+      return;
+    }
     const d = drag.current;
     const e = engine.current;
     if (!d || !e || d.id !== ev.pointerId) return;
@@ -331,6 +369,17 @@ export const AgentsCanvas = forwardRef<
     setPreview((cur) => (cur && cur.parent === d.parent && cur.list.join() === list.join() ? cur : { parent: d.parent, list }));
   };
   const onPointerUp = (ev: React.PointerEvent) => {
+    const l = launch.current;
+    if (l && l.id === ev.pointerId) {
+      launch.current = null;
+      setGhost(null);
+      if (!l.moved) return;
+      swallowClick();
+      // Dropped on a card (or the drag was cancelled): nothing starts.
+      if (ev.type === "pointercancel" || overCard(ev.clientX, ev.clientY)) return;
+      onLaunch?.(l.source, { x: ev.clientX, y: ev.clientY });
+      return;
+    }
     const d = drag.current;
     const e = engine.current;
     if (!d || !e || d.id !== ev.pointerId) return;
@@ -439,6 +488,7 @@ export const AgentsCanvas = forwardRef<
         ))}
       </div>
       {overlay}
+      {ghost && <LaunchGhost {...ghost} />}
       <div className="absolute right-4 bottom-4 flex items-center gap-0.5 rounded-lg border border-line bg-panel/90 p-0.5 text-muted backdrop-blur">
         <ToolButton label="Zoom out (−)" onClick={() => engine.current?.zoomBy(0.8)}>
           <Minus className="size-3.5" />
@@ -465,6 +515,45 @@ export const AgentsCanvas = forwardRef<
     </div>
   );
 });
+
+/** Whether a point (client coordinates) is on a card. */
+function overCard(x: number, y: number): boolean {
+  return !!document.elementFromPoint?.(x, y)?.closest("[data-card]");
+}
+
+/** The click a drag ends in, swallowed. */
+function swallowClick() {
+  const swallow = (c: MouseEvent) => {
+    c.stopPropagation();
+    c.preventDefault();
+  };
+  window.addEventListener("click", swallow, { capture: true, once: true });
+  setTimeout(() => window.removeEventListener("click", swallow, { capture: true }), 0);
+}
+
+/**
+ * The line from a launch handle to the pointer, calm: a dashed accent line, a dot where it would
+ * start, and what letting go does. Over a card it fades (nothing starts there).
+ */
+function LaunchGhost({ source, from, to, over }: { source: string; from: Point; to: Point; over: boolean }) {
+  const label = over ? "Drop on empty canvas" : source.startsWith("t:") ? "Fork here" : "New agent here";
+  return (
+    <>
+      <svg aria-hidden className="fade-in pointer-events-none absolute inset-0 z-20 h-full w-full">
+        <line x1={from.x} y1={from.y} x2={to.x} y2={to.y} stroke="var(--accent)" strokeOpacity={over ? 0.25 : 0.7} strokeWidth={1.5} strokeDasharray="4 5" strokeLinecap="round" />
+        <circle cx={from.x} cy={from.y} r={3} fill="var(--accent)" fillOpacity={over ? 0.3 : 0.9} />
+        <circle cx={to.x} cy={to.y} r={6} fill="var(--accent)" fillOpacity={over ? 0.05 : 0.15} stroke="var(--accent)" strokeOpacity={over ? 0.3 : 0.8} />
+      </svg>
+      <div
+        role="status"
+        className={`pointer-events-none absolute z-20 rounded-md border border-line-2 bg-panel/95 px-2 py-1 text-[11.5px] whitespace-nowrap shadow-[0_8px_24px_-12px_rgb(0_0_0/0.6)] ${over ? "text-subtle" : "text-fg"}`}
+        style={{ left: to.x + 14, top: to.y + 12 }}
+      >
+        {label}
+      </div>
+    </>
+  );
+}
 
 /** Whether `r` (world) shows at all in a `viewport` seen through `v`. */
 function overlaps(r: { x: number; y: number; w: number; h: number }, v: View, viewport: { w: number; h: number }) {

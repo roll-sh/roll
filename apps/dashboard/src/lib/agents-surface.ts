@@ -10,10 +10,15 @@ import { openAgentsWindow } from "./desktop";
 
 /**
  * What the surface shows: the canvas alone, the canvas with one conversation or one machine's or
- * project's settings in the side panel (`target` is its canvas key, `m:…` or `p:…`), or a new
- * agent's composer.
+ * project's settings in the side panel (`target` is its canvas key, `m:…` or `p:…`), or the
+ * launcher over the canvas: preset to a project or a machine, and opened where something was
+ * dropped (`at`, in the surface's coordinates) when it was dragged out of a card.
  */
-export type AgentsView = { kind: "canvas" } | { kind: "thread"; thread: string } | { kind: "settings"; target: string } | { kind: "new" };
+export type AgentsView =
+  | { kind: "canvas" }
+  | { kind: "thread"; thread: string }
+  | { kind: "settings"; target: string }
+  | { kind: "new"; project?: string; machine?: string; at?: { x: number; y: number } };
 
 export interface AgentsSurface {
   /** The popup is showing (the full-window surface ignores this). */
@@ -30,8 +35,16 @@ function set(next: AgentsSurface) {
   for (const l of listeners) l();
 }
 
-export const sameView = (a: AgentsView, b: AgentsView) =>
-  a.kind === b.kind && (a.kind !== "thread" || a.thread === (b as typeof a).thread) && (a.kind !== "settings" || a.target === (b as typeof a).target);
+export const sameView = (a: AgentsView, b: AgentsView) => {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "thread") return a.thread === (b as typeof a).thread;
+  if (a.kind === "settings") return a.target === (b as typeof a).target;
+  if (a.kind === "new") {
+    const c = b as typeof a;
+    return a.project === c.project && a.machine === c.machine && a.at?.x === c.at?.x && a.at?.y === c.at?.y;
+  }
+  return true;
+};
 
 export const agentsSurface = {
   subscribe(fn: () => void) {
@@ -44,7 +57,7 @@ export const agentsSurface = {
 /** Open the agents (on `view`, else where they were). In the desktop app's main window this opens the Agents window. */
 export function showAgents(view?: AgentsView) {
   const v = view ?? state.view;
-  if (openAgentsWindow(v.kind === "thread" ? { kind: "thread", thread: v.thread } : v.kind === "settings" ? { kind: "canvas" } : v)) return;
+  if (openAgentsWindow(v.kind === "thread" ? { kind: "thread", thread: v.thread } : v.kind === "settings" ? { kind: "canvas" } : { kind: v.kind })) return;
   set({ open: true, view: v });
 }
 
@@ -83,6 +96,13 @@ export function hashFor(view: AgentsView): string {
     case "thread":
       return `#agents/${encodeURIComponent(view.thread)}`;
   }
+}
+
+/** ⌘N or ⌘⇧O (Ctrl elsewhere): a new agent, T3's `chat.new` bindings. */
+export function isNewAgentKey(e: KeyboardEvent): boolean {
+  if (!(e.metaKey || e.ctrlKey) || e.altKey) return false;
+  const k = e.key.toLowerCase();
+  return (k === "n" && !e.shiftKey) || (k === "o" && e.shiftKey);
 }
 
 /** For tests. */

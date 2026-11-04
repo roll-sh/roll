@@ -74,7 +74,8 @@ function HoverActions({ children, className = "" }: { children: ReactNode; class
   );
 }
 
-function Tool({ label, onClick, disabled, children }: { label: string; onClick: () => void; disabled?: boolean; children: ReactNode }) {
+/** A card's button; `launch` also makes it a handle to drag onto the canvas (`p:…`, `m:…`, `t:…`). */
+function Tool({ label, onClick, disabled, launch, children }: { label: string; onClick: () => void; disabled?: boolean; launch?: string; children: ReactNode }) {
   return (
     <button
       onClick={(e) => {
@@ -84,7 +85,8 @@ function Tool({ label, onClick, disabled, children }: { label: string; onClick: 
       disabled={disabled}
       title={label}
       aria-label={label}
-      className="grid size-6 place-items-center rounded-md transition hover:bg-panel-2 hover:text-fg disabled:opacity-30 [&>svg]:size-3.5"
+      data-launch={disabled ? undefined : launch}
+      className={`grid size-6 place-items-center rounded-md transition hover:bg-panel-2 hover:text-fg disabled:opacity-30 [&>svg]:size-3.5 ${launch && !disabled ? "cursor-grab active:cursor-grabbing" : ""}`}
     >
       {children}
     </button>
@@ -115,7 +117,7 @@ const OS_NAMES: Record<string, string> = { macos: "macOS", linux: "Linux", windo
 
 export function MachineNode({ machine }: { machine: Machine }) {
   const { client, busy, error, run } = useRun();
-  const { focus } = useAgents();
+  const { focus, startNew } = useAgents();
   const [adding, setAdding] = useState(false);
   const info = machine.info;
   const sandbox = machine.sandbox;
@@ -140,31 +142,37 @@ export function MachineNode({ machine }: { machine: Machine }) {
     });
   return (
     <Card width={272} tone={state === "offline" ? "muted" : undefined} label={`Machine ${machine.name}`}>
-      <div className="flex items-center gap-2 px-3.5 pt-3">
+      <div className="relative flex items-center gap-2 px-3.5 pt-3">
         <MachineIcon machine={machine} className="size-4 text-muted" />
         <span className="min-w-0 flex-1 truncate font-medium tracking-[-0.01em]">{machine.name}</span>
-        <HoverActions>
-          <Tool label="Machine settings" onClick={() => setAgentsView({ kind: "settings", target: `m:${machine.id}` })}>
-            <Settings2 />
-          </Tool>
-        </HoverActions>
-        {machine.online && (
-          <HoverActions className="-ml-1.5">
-            <Tool label="Add a project" onClick={() => setAdding(true)}>
-              <FolderPlus />
-            </Tool>
-            <Tool label="Open a terminal" disabled={busy !== null} onClick={openTerminal}>
-              <SquareTerminal />
-            </Tool>
-            <Tool label="Check providers again (after a login)" disabled={busy !== null} onClick={() => run("refresh", () => client.run(machine.id, { type: "provider.refresh" }))}>
-              <RefreshCw className={busy === "refresh" ? "animate-spin motion-reduce:animate-none" : ""} />
-            </Tool>
-          </HoverActions>
-        )}
         <span className="flex shrink-0 items-center gap-1.5 text-[11px] text-subtle">
           <StatusDot status={machine.online ? "online" : "offline"} />
           <span className={coming(state) ? "shimmer" : ""}>{state}</span>
         </span>
+        {/* Over the status while the pointer is on the card, so the name keeps its room. */}
+        <HoverActions className="pointer-events-none absolute top-2.5 right-2.5 rounded-md bg-panel pl-1 group-hover/card:pointer-events-auto focus-within:pointer-events-auto [@media(hover:none)]:pointer-events-auto">
+          {startNew && reachable(machine) && (
+            <Tool label="New agent on this machine (or drag onto the canvas)" launch={`m:${machine.id}`} onClick={() => startNew(undefined, { machine: machine.id })}>
+              <Plus />
+            </Tool>
+          )}
+          {machine.online && (
+            <>
+              <Tool label="Add a project" onClick={() => setAdding(true)}>
+                <FolderPlus />
+              </Tool>
+              <Tool label="Open a terminal" disabled={busy !== null} onClick={openTerminal}>
+                <SquareTerminal />
+              </Tool>
+              <Tool label="Check providers again (after a login)" disabled={busy !== null} onClick={() => run("refresh", () => client.run(machine.id, { type: "provider.refresh" }))}>
+                <RefreshCw className={busy === "refresh" ? "animate-spin motion-reduce:animate-none" : ""} />
+              </Tool>
+            </>
+          )}
+          <Tool label="Machine settings" onClick={() => setAgentsView({ kind: "settings", target: `m:${machine.id}` })}>
+            <Settings2 />
+          </Tool>
+        </HoverActions>
       </div>
       <div className="space-y-2.5 px-3.5 pt-1 pb-3">
         {os && <p className="truncate font-mono text-[11px] text-subtle">{os}</p>}
@@ -249,7 +257,7 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
         <span className="min-w-0 flex-1 truncate font-medium tracking-[-0.01em]">{project.name}</span>
         <HoverActions>
           {startNew && (
-            <Tool label="New agent here" disabled={!online} onClick={() => startNew(project.id)}>
+            <Tool label="New agent here (or drag onto the canvas)" launch={`p:${project.id}`} disabled={!online} onClick={() => startNew(project.id)}>
               <Plus />
             </Tool>
           )}
@@ -351,9 +359,17 @@ function StatsRows({ stats, providers }: { stats: ProjectStats; providers: reado
  * opened yet gives it T3's completed tone: a green border.
  */
 export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machine | undefined }) {
-  const { client, openThread } = useAgents();
+  const { client, openThread, startNew, readOnly } = useAgents();
   const data = client.data;
   const providers = providersFor(data, machine?.id);
+  const { run: runFork, error: forkError } = useRun();
+  // A fork from the card (T3's fork from the latest point): click, or drag the handle onto the canvas.
+  const forkable = !!startNew && !readOnly && thread.archived_at === null && reachable(machine) && providers.find((p) => p.id === thread.provider)?.capabilities.fork !== false;
+  const fork = () =>
+    runFork("fork", async () => {
+      const r = await client.run<{ type: "created"; id: string }>(machine!.id, { type: "thread.fork", thread: thread.id }, "created");
+      openThread(r.id);
+    });
   const running = isRunning(thread.status);
   const lastRun = thread.active_run ? data.runs.get(thread.active_run)?.value : latestRun(data.runs.values(), thread.id);
   const pending = [...data.requests.values()].map((r) => r.value).filter((r) => r.thread === thread.id && r.status === "pending");
@@ -382,6 +398,13 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
         </div>
         <div className="mt-1.5 flex items-start gap-2">
           <p className="line-clamp-2 min-w-0 flex-1 text-[13.5px] leading-snug font-medium tracking-[-0.01em]">{thread.title}</p>
+          {forkable && (
+            <HoverActions className="-my-0.5">
+              <Tool label="Fork (or drag onto the canvas)" launch={`t:${thread.id}`} onClick={fork}>
+                <GitFork />
+              </Tool>
+            </HoverActions>
+          )}
           {thread.pending_requests > 0 && (
             <span className="mt-px shrink-0 rounded-full bg-accent px-1.5 py-px font-mono text-[10.5px] font-semibold text-white tabular-nums" title={`${thread.pending_requests} waiting for you`}>
               {thread.pending_requests}
@@ -437,6 +460,11 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
             {thread.context && <ContextMeter context={thread.context} size={12} label />}
           </span>
         </p>
+        {forkError && (
+          <p role="alert" className="mt-1.5 text-[11.5px] text-danger">
+            Couldn&apos;t fork: {forkError}
+          </p>
+        )}
       </div>
     </Card>
   );

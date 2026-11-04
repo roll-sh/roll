@@ -33,8 +33,8 @@ export interface AgentsCtx {
   openThread: (thread: string) => void;
   /** Back to the canvas. */
   close: () => void;
-  /** The new-agent composer, in a project when given. */
-  startNew?: (project?: string) => void;
+  /** The launcher, preset to a project (or a machine), opened where something was dropped (`at`, client coordinates). */
+  startNew?: (project?: string, opts?: { machine?: string; at?: { x: number; y: number } }) => void;
   /** Show the canvas on a node (`m:mch_…`, `x:trm_…`, …); a thread's key opens its conversation. */
   focus: (key: string) => void;
   /** A shared thread's replay (`/agents/s/<id>`): nothing can be sent, only looked at. */

@@ -3,12 +3,12 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { agentsSurface, resetAgentsSurface } from "@/lib/agents-surface";
 import { setActiveClient } from "@/lib/agents-client";
-import { approval, M1, machine, mirrored, project, run, thread } from "@/test/agents";
+import { approval, machine, mirrored, project, run, thread } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents, type AgentsHarness } from "@/test/agents-render";
 import { MarkStateProvider } from "../mark-state";
 import { AgentsControl } from "./agents-control";
 import { CanvasEngine } from "./canvas-engine";
-import { defaultProject, NewAgent } from "./new-agent";
+import { defaultProject, Launcher } from "./new-agent";
 
 let conn: { client: AgentsHarness["client"] | null; services: ReturnType<typeof fakeServices> | null; error: string | null } = { client: null, services: null, error: null };
 vi.mock("./use-connection", () => ({ useAgentsConnection: () => conn, useDemoParam: () => false }));
@@ -63,10 +63,10 @@ describe("the agents in the header", () => {
     expect(window.location.hash).toBe("");
   });
 
-  it("\"New agent\" opens the composer; ⌘J toggles the canvas; #agents links open it", async () => {
+  it("\"New agent\" opens the launcher; ⌘J toggles the canvas; #agents links open it", async () => {
     setup();
     await userEvent.click(screen.getByRole("button", { name: "New agent" }));
-    expect(screen.getByRole("heading", { name: "What should the agent do?" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "New agent" })).toBeInTheDocument();
     await userEvent.keyboard("{Meta>}j{/Meta}");
     expect(screen.queryByRole("dialog")).toBeNull();
     await userEvent.keyboard("{Meta>}j{/Meta}");
@@ -137,15 +137,16 @@ describe("a new agent", () => {
 
   it("creates the thread where it was pointed and opens its conversation", async () => {
     const h = agentsHarness({ entities: [mirrored("project", project(), 1)], reply: () => ({ type: "created", id: "thr_new" }) });
-    renderAgents(<NewAgent />, h);
-    expect(screen.getByRole("combobox", { name: "Machine" })).toHaveValue(M1);
+    renderAgents(<Launcher onClose={vi.fn()} />, h);
+    expect(screen.getByRole("combobox", { name: "Machine" })).toHaveTextContent("ada-mbp");
+    expect(screen.getByRole("combobox", { name: "Project" })).toHaveTextContent("roll");
     await userEvent.type(screen.getByRole("textbox", { name: "Message" }), "Make the tests faster{Enter}");
     expect(h.command.mock.calls.at(-1)?.[2]).toMatchObject({ type: "thread.create", project: "prj_1", prompt: "Make the tests faster" });
     await vi.waitFor(() => expect(h.openThread).toHaveBeenCalledWith("thr_new"));
   });
 
   it("with no machine yet, offers the ways to connect one", () => {
-    renderAgents(<NewAgent />, agentsHarness({ machines: [] }));
+    renderAgents(<Launcher onClose={vi.fn()} />, agentsHarness({ machines: [] }));
     expect(screen.getByRole("heading", { name: "Connect a machine first" })).toBeInTheDocument();
   });
 });

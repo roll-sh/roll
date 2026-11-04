@@ -88,6 +88,6 @@ describe("ProjectNode", () => {
     unmount();
     renderAgents(<ProjectNode project={project()} machine={machine()} />, agentsHarness({ entities: [mirrored("thread", thread(), 1)], ctx: { startNew } }));
     expect(screen.queryByRole("button", { name: "Start an agent" })).toBeNull();
-    expect(screen.getByRole("button", { name: "New agent here" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^New agent here/ })).toBeInTheDocument();
   });
 });
