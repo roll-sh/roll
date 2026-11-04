@@ -1,0 +1,10 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a0718617fe2ff9006/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 51.63s
+     Running unittests src/lib.rs (/home/meszmate/.cache/a170/target/debug/deps/pg_engine-357a2b04731fc140)
+
+running 2 tests
+test exec::sizing::kept::tests::header_pages_are_available_before_layout ... ok
+test exec::sizing::kept::tests::missing_tree_discards_header_before_row_rebuild ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 189 filtered out; finished in 0.65s
+
