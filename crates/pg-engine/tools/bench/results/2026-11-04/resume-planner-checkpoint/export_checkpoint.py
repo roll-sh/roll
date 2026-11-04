@@ -28,6 +28,12 @@ is not claimed. Arc::ptr_eq now removes only the registeredslot owned by the end
 Focused corrected lifecycle2/prepared4/idle-statistics1/end-monitoring1 allpassed.
 Frozen fullv3 expected455/0/18/61 reconciles ab3's453/18/60 plus ONLY2tests/newbinary.
 Fullv3 isactive; partial full outputs excluded. Current sourceacceptance remainsHELD.
+Incremental staticR2 c861 vsab3 found noHIGH/MEDIUM; didnotrun gates. Its not-runstage
+statement is historical and focused2+4+1+1nowpassed;455map remains expected,notfullPASS.
+ResidualLOW: new samePIDregistration can displace STILL-LIVE oldslot, delaying its idle
+counts untilflush/end; no wirePIDoverlap claim. Fast-own checks assertblocking/ungranted
+waiter/release but onlyPRINT locktype/mode,do notassertfastpath parity. OtherreviewLOWs
+are retained;no newsource/probes/rounds/services/benchmarks whilev3pinned.
 Afterab3 terminal/rawexport, futurelaunch assessment identified heavy.sh has noaffinity.
 v3 usesexisting taskset8-13,18-19, startupchecks nice19/jobs2/testthreads<=2 andaffinity.
 Observed4focuseddescendantprocesses/12threads allwithin thataffinity; existingglobal4slots/
@@ -293,6 +299,8 @@ sources['runners/audit165-terminal.py'] = str(D / 'audit165-terminal.py')
 for name in ('a165_independent_low.rs', 'probe165-low.sh', 'ind165-future-launch-controls.json', 'c8618834-slot-ownership.patch', 'check165ind-v3.sh', 'ind165-v3-expected-per-binary.json', 'ind165-v3-count-reconciliation.json', 'ind165-v3-frozen-runner.sha256'):
     sources['runners/' + name] = str(D / name)
 sources['probe165-low/wrapper.log'] = str(D / 'probe165-low-wrapper.log')
+for name in ('oltp-independent-source-review-r2-result.json', 'independent-review-r2-erratum.md'):
+    sources['runners/' + name] = str(D / name)
 for name in ('source.txt', 'tree.txt', 'initial.status', 'startup-controls.json', 'affinity-observation-focused.json', 'lifecycle.command', 'lifecycle.log', 'prepared.command', 'prepared.log', 'statistics.command', 'statistics.log', 'end-monitoring.command', 'end-monitoring.log', 'focused-completed-exits.tsv'):
     sources['check165ind-v3/' + name] = str(D / 'check165ind-v3' / name)
 for name, source in sources.items():

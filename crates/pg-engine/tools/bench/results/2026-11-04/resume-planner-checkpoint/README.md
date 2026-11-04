@@ -11,6 +11,12 @@ is not claimed. Arc::ptr_eq now removes only the registeredslot owned by the end
 Focused corrected lifecycle2/prepared4/idle-statistics1/end-monitoring1 allpassed.
 Frozen fullv3 expected455/0/18/61 reconciles ab3's453/18/60 plus ONLY2tests/newbinary.
 Fullv3 isactive; partial full outputs excluded. Current sourceacceptance remainsHELD.
+Incremental staticR2 c861 vsab3 found noHIGH/MEDIUM; didnotrun gates. Its not-runstage
+statement is historical and focused2+4+1+1nowpassed;455map remains expected,notfullPASS.
+ResidualLOW: new samePIDregistration can displace STILL-LIVE oldslot, delaying its idle
+counts untilflush/end; no wirePIDoverlap claim. Fast-own checks assertblocking/ungranted
+waiter/release but onlyPRINT locktype/mode,do notassertfastpath parity. OtherreviewLOWs
+are retained;no newsource/probes/rounds/services/benchmarks whilev3pinned.
 Afterab3 terminal/rawexport, futurelaunch assessment identified heavy.sh has noaffinity.
 v3 usesexisting taskset8-13,18-19, startupchecks nice19/jobs2/testthreads<=2 andaffinity.
 Observed4focuseddescendantprocesses/12threads allwithin thataffinity; existingglobal4slots/
