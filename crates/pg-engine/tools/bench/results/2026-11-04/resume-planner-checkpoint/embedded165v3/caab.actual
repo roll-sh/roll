@@ -1,0 +1,176 @@
+> create table a165_checked (id int primary key)
+-- CREATE TABLE
+
+> insert into a165_checked values (1), (2), (3)
+-- INSERT 0 3
+
+> create function a165_domain_notice(int) returns bool immutable language plpgsql as $$
+> begin raise notice 'domain check %', $1; return true; end $$
+-- CREATE FUNCTION
+
+> create domain a165_noticing_int as int check (a165_domain_notice(value))
+-- CREATE DOMAIN
+
+> explain (verbose, costs off) declare d scroll cursor for select id from a165_checked where id::a165_noticing_int > 0
+QUERY PLAN:text
+Seq Scan on public.a165_checked
+  Output: id
+  Filter: (((a165_checked.id)::a165_noticing_int)::integer > 0)
+-- EXPLAIN
+
+> begin
+-- BEGIN
+
+> declare d scroll cursor for select id from a165_checked where id::a165_noticing_int > 0
+-- DECLARE CURSOR
+
+> fetch all from d
+NOTICE 00000: domain check 1
+CONTEXT: PL/pgSQL function a165_domain_notice(integer) line 2 at RAISE
+NOTICE 00000: domain check 2
+CONTEXT: PL/pgSQL function a165_domain_notice(integer) line 2 at RAISE
+NOTICE 00000: domain check 3
+CONTEXT: PL/pgSQL function a165_domain_notice(integer) line 2 at RAISE
+id:int4
+1
+2
+3
+-- FETCH 3
+
+> fetch backward 1 from d
+NOTICE 00000: domain check 1
+CONTEXT: PL/pgSQL function a165_domain_notice(integer) line 2 at RAISE
+NOTICE 00000: domain check 2
+CONTEXT: PL/pgSQL function a165_domain_notice(integer) line 2 at RAISE
+NOTICE 00000: domain check 3
+CONTEXT: PL/pgSQL function a165_domain_notice(integer) line 2 at RAISE
+id:int4
+3
+-- FETCH 1
+
+> fetch backward all from d
+id:int4
+1
+2
+-- FETCH 2
+
+> rollback
+-- ROLLBACK
+
+> create function a165_equal_notice(int, int) returns bool stable language plpgsql as $$
+> begin raise notice 'custom equality %, %', $1, $2; return $1 operator(pg_catalog.=) $2; end $$
+-- CREATE FUNCTION
+
+> create operator public.=== (leftarg = int, rightarg = int, function = a165_equal_notice)
+-- CREATE OPERATOR
+
+> explain (verbose, costs off) declare o scroll cursor for select id operator(public.===) any(array[2, 3]) from a165_checked
+QUERY PLAN:text
+Seq Scan on public.a165_checked
+  Output: (a165_equal_notice(id, 2) OR a165_equal_notice(id, 3))
+-- EXPLAIN
+
+> begin
+-- BEGIN
+
+> declare o scroll cursor for select id operator(public.===) any(array[2, 3]) from a165_checked
+-- DECLARE CURSOR
+
+> fetch all from o
+NOTICE 00000: custom equality 1, 2
+CONTEXT: PL/pgSQL function a165_equal_notice(integer,integer) line 2 at RAISE
+NOTICE 00000: custom equality 1, 3
+CONTEXT: PL/pgSQL function a165_equal_notice(integer,integer) line 2 at RAISE
+NOTICE 00000: custom equality 2, 2
+CONTEXT: PL/pgSQL function a165_equal_notice(integer,integer) line 2 at RAISE
+NOTICE 00000: custom equality 3, 2
+CONTEXT: PL/pgSQL function a165_equal_notice(integer,integer) line 2 at RAISE
+NOTICE 00000: custom equality 3, 3
+CONTEXT: PL/pgSQL function a165_equal_notice(integer,integer) line 2 at RAISE
+?column?:bool
+f
+t
+t
+-- FETCH 3
+
+> fetch backward 1 from o
+NOTICE 00000: custom equality 3, 2
+CONTEXT: PL/pgSQL function a165_equal_notice(integer,integer) line 2 at RAISE
+NOTICE 00000: custom equality 3, 3
+CONTEXT: PL/pgSQL function a165_equal_notice(integer,integer) line 2 at RAISE
+?column?:bool
+t
+-- FETCH 1
+
+> fetch backward all from o
+NOTICE 00000: custom equality 2, 2
+CONTEXT: PL/pgSQL function a165_equal_notice(integer,integer) line 2 at RAISE
+NOTICE 00000: custom equality 1, 2
+CONTEXT: PL/pgSQL function a165_equal_notice(integer,integer) line 2 at RAISE
+NOTICE 00000: custom equality 1, 3
+CONTEXT: PL/pgSQL function a165_equal_notice(integer,integer) line 2 at RAISE
+?column?:bool
+f
+t
+-- FETCH 2
+
+> rollback
+-- ROLLBACK
+
+> create operator public.= (leftarg = int, rightarg = int, function = a165_equal_notice)
+-- CREATE OPERATOR
+
+> begin
+-- BEGIN
+
+> set local search_path = public, pg_catalog
+-- SET
+
+> explain (verbose, costs off) declare i scroll cursor for select id in (2, 3) from a165_checked
+QUERY PLAN:text
+Seq Scan on public.a165_checked
+  Output: (id = ANY ('{2,3}'::integer[]))
+-- EXPLAIN
+
+> declare i scroll cursor for select id in (2, 3) from a165_checked
+-- DECLARE CURSOR
+
+> fetch all from i
+?column?:bool
+f
+t
+t
+-- FETCH 3
+
+> fetch backward 1 from i
+?column?:bool
+t
+-- FETCH 1
+
+> fetch backward all from i
+?column?:bool
+f
+t
+-- FETCH 2
+
+> rollback
+-- ROLLBACK
+
+> drop operator public.= (int, int)
+-- DROP OPERATOR
+
+> drop operator public.=== (int, int)
+-- DROP OPERATOR
+
+> drop function a165_equal_notice(int, int)
+-- DROP FUNCTION
+
+> drop domain a165_noticing_int
+-- DROP DOMAIN
+
+> drop function a165_domain_notice(int)
+-- DROP FUNCTION
+
+> drop table a165_checked
+-- DROP TABLE
+

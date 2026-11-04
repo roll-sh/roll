@@ -54,12 +54,16 @@ The exact clean caab source full DEBUG suite completed448passed/0failed/18ignore
 Obsolete dist was cancelled as SUPERSEDED after R2. pnpm was NOT RUN. All resource/performance gates remain pending.
 
 Source acceptance is HELD on a confirmed predicate coverage gap: Expr::walk does not
-inspect DomainCoerce.checks or embedded operator FuncDefs. The runtime effect has NOT
-been proved. The first bounded domain shape probe retained3rows and FAILED its replay-path
-assertion, so establishes NO runtime bug proof. Its source, referenceidentity and output are
-retained. A diagnostic follow-up with plan tracing is active; no predicate fix applied.
-The full caab job is terminal and its production source has only temporary diagnostic tracing
-added for this follow-up. No diagnostic source is accepted. No global Expr walker redesign is planned.
+inspect DomainCoerce.checks or embedded operator FuncDefs. The runtime effect is PROVEN by embedded165v3 against actual PG18.6. In
+SELECT id FROM t WHERE id::noticing_int > 0, a domain CHECK calls an IMMUTABLE
+PLpgSQL function raising NOTICE. Trace plain=true/rerun=true and zero retained rows
+establish the replay path. First BACKWARD1 emits check3 on PG but check1,2,3 on caab;
+next BACKWARD ALL emits check2,1 on PG but none on caab. Shape/record exited0,
+comparison exited101 in all3modes. The expected-red wrapper exits0 without claiming
+parity. v2 also preserves unrelated custom ANY EXPLAIN and public.= IN lookup gaps.
+The first domain projection probe failed its shape prerequisite and establishes no
+runtime proof. All diagnostic output/source is preserved. No predicate fix is applied
+in this checkpoint. Full caab job is terminal; temporary tracing is not accepted source.
 
 Owned cache runners now fail explicitly on logged failures (Bash ! guards do not imply
 errexit). Profiler wrapper records perf/pgbench exits separately. Matrix/scaled scripts
@@ -193,6 +197,12 @@ sources = {
     'fdw172/contrib-base.log': '/home/meszmate/.cache/a172/contrib-base.log',
     'fdw172/REPORT.md': '/home/meszmate/.cache/a172/contrib/run-base/report/REPORT.md',
 }
+for campaign in ('embedded165v2', 'embedded165v3'):
+    for artifact in sorted((D / campaign).iterdir()):
+        if artifact.is_file():
+            sources[campaign + '/' + artifact.name] = str(artifact)
+for runner in ('embedded165v3.sh',):
+    sources['runners/' + runner] = str(D / runner)
 for name, source in sources.items():
     files[name] = Path(source).read_bytes()
 files['manifest.json'] = (json.dumps({name: {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}

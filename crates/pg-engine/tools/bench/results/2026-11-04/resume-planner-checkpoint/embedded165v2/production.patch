@@ -1,0 +1,14 @@
+diff --git a/crates/pg-engine/src/session/cursor.rs b/crates/pg-engine/src/session/cursor.rs
+index 7c4c444b..0a13e839 100644
+--- a/crates/pg-engine/src/session/cursor.rs
++++ b/crates/pg-engine/src/session/cursor.rs
+@@ -642,6 +642,9 @@ impl Cursor {
+         c.projected = lazy.project.is_some();
+         c.plain = lazy.project.is_none() && lazy.qual.is_none() && !lazy.fill;
+         c.rerun = scroll && c.plain && replayable(&lazy.plan);
++        if c.text.contains("noticing") || c.text.contains("a165_checked") {
++            eprintln!("A165 EMBEDDED PLAN plain={} rerun={} coerce={} {:?}", c.plain, c.rerun, lazy.coerce.is_some(), lazy.plan);
++        }
+         c.lazy = Some(lazy);
+         c
+     }
