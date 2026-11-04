@@ -1,0 +1,7 @@
+{
+  "head": "641c593cb20c0f1a5656f26a772e09fb90e6da14",
+  "tree": "2d787307cdc6edb24f66556dcf4d9bd2e3fdabe0",
+  "status": "",
+  "time_utc": "2026-11-04T18:18:41.482344+00:00",
+  "note": "Test-only641c593c, production Rust/Cargo identical to failed278. Runtime probe not yet executed. Failed seed14 directory/oracle not identified: harness TempDir unwinds; surviving two tempdirs predate crash stage and attribution unknown. No cleanup/rerun. Raw409-byte surviving MANIFEST backed up unchanged and explicitly unattributed. Crash acceptance hold remains; no causal attribution."
+}

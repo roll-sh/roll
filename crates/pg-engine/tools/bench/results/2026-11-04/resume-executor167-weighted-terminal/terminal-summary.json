@@ -1,0 +1,53 @@
+{
+  "status": "FAILED",
+  "head": "278a28966a8921da90c6ead9cfeb3f332306d788",
+  "checks": [
+    {
+      "name": "build",
+      "exit": 0,
+      "pass": true,
+      "passed_tests": 0,
+      "elapsed_s": 62.33984303474426
+    },
+    {
+      "name": "debug",
+      "exit": 0,
+      "pass": true,
+      "passed_tests": 447,
+      "elapsed_s": 2509.833936214447
+    },
+    {
+      "name": "release",
+      "exit": 0,
+      "pass": true,
+      "passed_tests": 447,
+      "elapsed_s": 1663.368530511856
+    },
+    {
+      "name": "clippy",
+      "exit": 0,
+      "pass": true,
+      "passed_tests": 0,
+      "elapsed_s": 31.516379833221436
+    },
+    {
+      "name": "crash30",
+      "exit": 101,
+      "pass": false,
+      "passed_tests": 0,
+      "elapsed_s": 103.51968383789062
+    }
+  ],
+  "crash_actual_summaries": [
+    "test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 103.15s"
+  ],
+  "skipped": [
+    "postgres-unit"
+  ],
+  "known_new_warning": "parallel_scan.rs955 unused parallel plus unasserted extra pass",
+  "holds": [
+    "R3 InitPlan/CTE MEDIUM",
+    "seed14 round2 crash recovery mismatch: attribution unproven",
+    "No integration/performance/resource acceptance"
+  ]
+}

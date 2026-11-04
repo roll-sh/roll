@@ -1,0 +1,65 @@
+[
+  {
+    "stage": "existing-owned",
+    "argv": [
+      "docker",
+      "ps",
+      "-aq",
+      "--filter",
+      "name=^/a167170-resume-reference$"
+    ],
+    "env": null,
+    "exit": 0,
+    "expected_exit": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "stage": "image",
+    "argv": [
+      "docker",
+      "image",
+      "inspect",
+      "sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
+    ],
+    "env": null,
+    "exit": 0,
+    "expected_exit": 0,
+    "sha256": "40df7e9f9995ec3f5c9695b548a2f7239d1cb6458a5b9c492e22dfec2497c02b"
+  },
+  {
+    "stage": "create",
+    "argv": [
+      "docker",
+      "run",
+      "--rm",
+      "-d",
+      "--name",
+      "a167170-resume-reference",
+      "--label",
+      "agent.worktree=agent-a6193f5e45a7ae4f1",
+      "--label",
+      "agent.task=resume-execution-models-narrow-reference",
+      "--memory",
+      "512m",
+      "--cpus",
+      "2",
+      "--cpuset-cpus",
+      "4-7,22-25",
+      "-p",
+      "127.0.0.1:53345:5432",
+      "-e",
+      "POSTGRES_PASSWORD=pw",
+      "--entrypoint",
+      "/usr/bin/nice",
+      "sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873",
+      "-n",
+      "19",
+      "docker-entrypoint.sh",
+      "postgres"
+    ],
+    "env": null,
+    "exit": 127,
+    "expected_exit": 0,
+    "sha256": "7232a950a7e1ba0094811cf4fbf37007b72367573a25bed3bb65014cdd52fbc9"
+  }
+]

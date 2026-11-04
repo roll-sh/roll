@@ -1,0 +1,40 @@
+[
+  {
+    "name": "a167-goldens",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "pg-engine",
+      "--test",
+      "golden"
+    ],
+    "env": {
+      "GOLDEN_FILTER": "a167_"
+    },
+    "source_before": {
+      "head": "1f17968b285ddcb3f63e13cc7eec4465898014f5",
+      "tree": "3b9db908154e3a919462f3bb45d899a2e642bdd0",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "1f17968b285ddcb3f63e13cc7eec4465898014f5",
+      "tree": "3b9db908154e3a919462f3bb45d899a2e642bdd0",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 101,
+    "expected_summary": false,
+    "test_summaries": [],
+    "fatal_lines": [
+      "error[E0606]: casting `&std::boxed::Box<plan::ScanPlan>` as `*const plan::ScanPlan` is invalid",
+      "error: could not compile `pg-engine` (lib) due to 1 previous error"
+    ],
+    "elapsed_s": 9.432904243469238,
+    "log_sha256": "b9eaa9e9d04bb718d73de0bf376af3910fa18af2eac80facad19ea3fdf6a2f73",
+    "binaries": {},
+    "passed_tests": 0,
+    "pass": false
+  }
+]

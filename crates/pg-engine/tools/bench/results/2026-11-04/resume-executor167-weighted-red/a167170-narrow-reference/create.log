@@ -1,0 +1,4 @@
+2c5156fdf3c3116bce779db4cf6a595af5c21c9d3b20b71411f0846813cd925f
+docker: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: exec: "/usr/bin/nice": stat /usr/bin/nice: no such file or directory
+
+Run 'docker run --help' for more information

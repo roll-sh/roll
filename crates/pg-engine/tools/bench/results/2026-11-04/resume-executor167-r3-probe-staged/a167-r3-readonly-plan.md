@@ -1,0 +1,9 @@
+# R3 bounded follow-up, prepared while278 pinned
+
+Do not launch or edit owner source until278 terminal and raw exported. Full gates cannot clear InitPlan/CTE MEDIUM. Existing repeated weighted test remains required after ownership repair.
+
+Counter ownership: include right_plan Arc addresses and ScanPlan addresses, recursively its ordinary plan_inputs and rescanned correlated SubPlan expression plans (include locally owned With producers explicitly; plan_inputs(With) alone omits them); exclude parameterless/enclosing-cache plans and externally defined CTE producer bodies. Snapshot only these keys, including absent keys with zero so first opens are captured. Keep saturating additive deltas; no query execution changes. Preserve nested-loop covariance correction and existing correlated tests. Avoid changing ExecCtx constructors/catalog APIs. Need inspect index bounds/bitmap expressions rather than assume node_exprs(Scan) is complete. Runtime classification has special unparameterized reads_cte branch inside an outer frame; do not silently infer cached solely from params.is_empty if scope proves it reachable.
+
+L1 read-only reachability: planner attempts plan_joins_limited on every Join; reconstructed JNode sets methodSome and material explicitly. Serial fallback remains possible at joinpath.rs8680 when raw_leaves>COLLAPSE_LIMIT(8), at missing equality/gather failure, or lateral topology. paths.rs5515 merely visits fallback children; it does not set root method/material. Thus methodNone is not proven unreachable. Common2/3-table probes should be fully planned. A nine-item plain crossjoin is smallest structural fallback candidate, with enable_material=on and parallel disabled; assess realPG shape after terminal only. No new Gather/partialNL expansion or claim.
+
+After pinned run, remove only unused parallel run at parallel_scan955, retaining intended reordered-test run. Preserve full runner warning as new diagnostic; do not label278 warning-free.

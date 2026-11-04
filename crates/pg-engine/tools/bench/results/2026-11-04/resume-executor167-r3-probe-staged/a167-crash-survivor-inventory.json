@@ -1,0 +1,158 @@
+{
+  "time_unix": 1793815990.9151056,
+  "tmpdir": "/home/meszmate/.cache/a167/tmp",
+  "entries": [
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/.tmp7rN1I1",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793809101347206722
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/.tmps8mnCV",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793814953692657410
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/node-compile-cache",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793801663394529431
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-objects-crud-1793801771318143760",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793801771317332523
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-objects-crud-1793809456006290653",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793809456003245708
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-objects-history-1793801771402486649",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793801771401331592
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-objects-history-1793809456070092656",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793809456067244999
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-objects-segments-1793801771404212705",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793801771585329553
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-objects-segments-1793809456070807595",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793809456251242963
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-objects-stream-1793801771318204615",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793801771705328223
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-objects-stream-1793809456007769416",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793809456359241767
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-objects-sweep-1793801771660034601",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793801771661328710
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-objects-sweep-1793809456347922849",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793809456343241944
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-objects-zstd-1793801771322278566",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793801771349332169
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-objects-zstd-1793809456009030406",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793809456019245531
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-store-bases-t_hzg82uvak5d6",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793801771281332922
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-store-bases-t_xdqrid5543w2",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793809455971246062
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-store-flush-t_rfahfri9ryxz",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793801771305332656
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-store-flush-t_s9qnuxca66um",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793809455987245884
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-store-lsn-t_6cji2der9ea7",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793809455979245974
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-store-lsn-t_m7mr8557fstt",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793801771293332789
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-store-migrate-t_n8dvjiuheg68",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793809455987245884
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-store-migrate-t_nvvfenui5z7q",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793801771301332700
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-store-roundtrip-t_dnwu3xkk87fv",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793801771285332878
+    },
+    {
+      "path": "/home/meszmate/.cache/a167/tmp/roll-store-roundtrip-t_hum8q8k8tmfh",
+      "directory": true,
+      "bytes": 4096,
+      "mtime_ns": 1793809455975246018
+    }
+  ],
+  "owned_crash_processes": [],
+  "limitation": "crash_random.rs561 uses tempfile::tempdir per seed; normal panic unwinding drops TempDir. No failed data path is printed in raw output. No cleanup or rerun performed."
+}

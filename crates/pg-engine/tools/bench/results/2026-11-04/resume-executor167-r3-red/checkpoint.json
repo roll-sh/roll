@@ -1,0 +1,7 @@
+{
+  "head": "1137c6185453556e8ed538b273becf9c003dfdff",
+  "tree": "a78302d36faaed909f50f3d2d604bf934c9fa7aa",
+  "status": "",
+  "time_utc": "2026-11-04T18:32:49.566177+00:00",
+  "note": "Actual source production278 (test-only1137c618) FAILED101. InitPlan loops6vsPG1, CTE full actual preserved. BinarySHA verified against pinned278debug; Rust/Cargo unchanged. Correlated control PGloops54 recorded. Prior crash30 remains FAILED101, pgunit NOTRUN. Optional nine-item PGfallback had noMaterialize and does not closeL1. No acceptance/performance claim."
+}
