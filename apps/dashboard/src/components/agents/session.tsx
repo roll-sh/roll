@@ -134,8 +134,8 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
                 <EmptyTranscript>{readOnly ? "No runs yet." : "Nothing yet. Say what to do below."}</EmptyTranscript>
               ) : (
                 <div className="space-y-9">
-                  {runs.map((r) => (
-                    <RunView key={r.id} run={r} tree={nodeTree(data, thread.id, r.id)} requests={requests} checkpoint={cpByRun.get(r.id)} now={now} actions={actions} busyThread={busy} />
+                  {runs.map((r, i) => (
+                    <RunView key={r.id} run={r} tree={nodeTree(data, thread.id, r.id)} requests={requests} checkpoint={cpByRun.get(r.id)} now={now} actions={actions} busyThread={busy} last={i === runs.length - 1} />
                   ))}
                 </div>
               )}
