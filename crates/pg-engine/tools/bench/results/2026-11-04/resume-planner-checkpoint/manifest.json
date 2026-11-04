@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "63d42769c8157be3f8eecd836dbdde561bebfc62009168793755760c96ab4949",
-    "bytes": 12461
+    "sha256": "cc174276fa74a4ebdd2e151dc0ebdcb6466b261ff2c528ad6c7abe13fe27ad8f",
+    "bytes": 12848
   },
   "bytea165compare/RESTORED": {
     "sha256": "cfeb0d7a74ac20eb1d46d347c00db409be5f9c5b47ca77e388b2e494a65d91c3",
@@ -227,6 +227,22 @@
     "sha256": "3e774eb0bfc708a1951b2e4b31bfdc017c0b3a1eb8997b1385a3bdd6d57861b2",
     "bytes": 15442
   },
+  "check165ind-v3/clippy-completed-exits.tsv": {
+    "sha256": "008969b360482999408f346d06b31ef01c94ef23a2497b11e61f33ad75a5924f",
+    "bytes": 90
+  },
+  "check165ind-v3/clippy-warning-audit.json": {
+    "sha256": "76bba23761971c07f5a07599181edda29119d960b228cf39d7334b79f2c047ca",
+    "bytes": 2266
+  },
+  "check165ind-v3/clippy.command": {
+    "sha256": "1b86d70e59e973e8d8af181830282fc52041d009cee30d84e2d7169430dd0de1",
+    "bytes": 51
+  },
+  "check165ind-v3/clippy.log": {
+    "sha256": "d52cab17d1b06a3d8752710f312960c84800b2298b9699f9c7dde0b2be0070f6",
+    "bytes": 10548
+  },
   "check165ind-v3/debug-completed-exits.tsv": {
     "sha256": "42456510f4141f0308ece97274d31ff45cc1354f67baf98a1777ff284b956be5",
     "bytes": 66
@@ -274,6 +290,18 @@
   "check165ind-v3/prepared.log": {
     "sha256": "862a1e2f38eace861f4151202fb35c0037c2f1be4f0f6865ac737f5f61677bc3",
     "bytes": 637
+  },
+  "check165ind-v3/release-test-summary.json": {
+    "sha256": "bc6bf6b62bea0d9fd5535c474a2d3bb6130082b56156f3e90593a2087b663fe4",
+    "bytes": 4016
+  },
+  "check165ind-v3/release-test.command": {
+    "sha256": "71a6025a4acfc80b9d5ef058f083ab8feef2ac79b82048d5d6534c9385b0d572",
+    "bytes": 35
+  },
+  "check165ind-v3/release-test.log": {
+    "sha256": "25d6767f43e06c550787b3776cbffe05c4734f0c96b91d92b9c9471f420aa9a6",
+    "bytes": 37913
   },
   "check165ind-v3/source.txt": {
     "sha256": "49394069af749b24ce95a69d4c65cd733842bda023217085b84d50a156c9862d",
@@ -556,8 +584,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "5c0cf1331a49cf741c65cb16c86e26bf823536ee9fde6d01e362c838de67218f",
-    "bytes": 26288
+    "sha256": "80013cdd05b1d70bfedc1513bce83edd2e85cc723391f3591805418f9e10f9a5",
+    "bytes": 27126
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -1183,6 +1211,10 @@
     "sha256": "d0552c0742a0bac7cee1838c7c54ad2c283a15497a70d06eee9aa2e8354b1476",
     "bytes": 4445
   },
+  "runners/ab3-dist-artifact-preserved.json": {
+    "sha256": "d899185b275fab9332908f8fa17499252bb32f4c98e33a401e73d7faa5330720",
+    "bytes": 376
+  },
   "runners/audit-footprint.py": {
     "sha256": "037523cd44c6ed24ae24da6ffa204a9fb35f0fa9c17a25013eeed8ea02f56c43",
     "bytes": 1287
@@ -1250,6 +1282,10 @@
   "runners/check171.sh": {
     "sha256": "2e118548af8498cc83f162fda45d8928d32f912bb98e46f1c34dd0e901c735a1",
     "bytes": 1686
+  },
+  "runners/clippy-v3-bookkeeping-failure.json": {
+    "sha256": "7e422054aa1e3f2e028f84367466c16a18fa68a7f83d6763f23915ec9d9b5021",
+    "bytes": 335
   },
   "runners/conn1000-before-resource-repair.sh": {
     "sha256": "2e32afd04a990a441f17d7661e352254c26e38b0588e4b9c590a67cd69c973d9",

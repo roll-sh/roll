@@ -27,10 +27,14 @@ expected1; endingnewsession flushed1. Actualred101 retained. NormalwirePIDreuse 
 is not claimed. Arc::ptr_eq now removes only the registeredslot owned by the ending session.
 Focused corrected lifecycle2/prepared4/idle-statistics1/end-monitoring1 allpassed.
 Frozen fullv3 expected455/0/18/61 reconciles ab3's453/18/60 plus ONLY2tests/newbinary.
-Fullv3 DEBUG completed455/0/18/61,command0;every frozen perbinary summary matched.
-Release active; partial release/follow-on outputs excluded. Current sourceacceptance remainsHELD.
+Fullv3 DEBUG andRELEASE eachcompleted455/0/18/61,command0;every frozen perbinary summary matched.
+Release all-targetClippy0,same14message/pathdiagnosticmultiset ascompletedab3,no correctedpathdiagnostic.
+Bookkeeping sequencecomparison initiallyFAILED on reversedbench/difftest diagnosticorder;
+firstexport stoppedbeforeGit writes on missingauditfile. Bothfailures retained; no source,
+frozengate orthreshold changed,no gate rerun. Diagnosticmultiplicities match,orderdoesnot.
+Distactive;partialdist/unit outputsexcluded. Current sourceacceptance remainsHELD.
 Incremental staticR2 c861 vsab3 found noHIGH/MEDIUM; didnotrun gates. Its not-runstage
-statement is historical: focused2+4+1+1andfullDEBUG455map nowpassed;release/fullpipelinepending.
+statement is historical: focused2+4+1+1,fullDEBUG/RELEASE455maps andClippy nowpassed;fullpipelinepending.
 ResidualLOW: new samePIDregistration can displace STILL-LIVE oldslot, delaying its idle
 counts untilflush/end; no wirePIDoverlap claim. Fast-own checks assertblocking/ungranted
 waiter/release but onlyPRINT locktype/mode,do notassertfastpath parity. OtherreviewLOWs
@@ -307,6 +311,10 @@ for name in ('source.txt', 'tree.txt', 'initial.status', 'startup-controls.json'
 for name in ('debug-test.command', 'debug-test.log', 'debug-test-summary.json', 'debug-completed-exits.tsv', 'affinity-observation-debug.json'):
     sources['check165ind-v3/' + name] = str(D / 'check165ind-v3' / name)
 sources['runners/audit165-v3-terminal.py'] = str(D / 'audit165-v3-terminal.py')
+sources['runners/ab3-dist-artifact-preserved.json'] = str(D / 'ab3-dist-artifact-preserved.json')
+sources['runners/clippy-v3-bookkeeping-failure.json'] = str(D / 'clippy-v3-bookkeeping-failure.json')
+for name in ('release-test.command', 'release-test.log', 'release-test-summary.json', 'clippy.command', 'clippy.log', 'clippy-completed-exits.tsv', 'clippy-warning-audit.json'):
+    sources['check165ind-v3/' + name] = str(D / 'check165ind-v3' / name)
 for name, source in sources.items():
     files[name] = Path(source).read_bytes()
 files['manifest.json'] = (json.dumps({name: {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}

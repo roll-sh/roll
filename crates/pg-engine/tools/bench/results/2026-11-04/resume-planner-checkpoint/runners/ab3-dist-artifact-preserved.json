@@ -1,0 +1,7 @@
+{
+  "source": "ab3f64b8dd92203123f6777ae4a6028d3a3aae67",
+  "artifact": "/home/meszmate/.cache/a165/bin/roll-engine-ab3f64b8",
+  "sha256": "d4f2d31068d282cc28f98bfd77bcbb4ba85cd5d6492940ad13a7f279e5168b32",
+  "bytes": 69448968,
+  "reason": "Preserve completed prior-source dist artifact before frozen c861 runner replaces its working destination; no runner/source mutation"
+}

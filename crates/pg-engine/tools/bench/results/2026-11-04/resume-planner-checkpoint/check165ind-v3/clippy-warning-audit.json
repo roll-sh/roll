@@ -1,0 +1,66 @@
+{
+  "command_exit": 0,
+  "diagnostic_count": 14,
+  "diagnostics": [
+    {
+      "message": "length comparison to zero",
+      "path": "crates/pg-engine/src/sql/binder/expr.rs"
+    },
+    {
+      "message": "this loop could be written as a `while let` loop",
+      "path": "crates/pg-engine/src/sql/binder/fold.rs"
+    },
+    {
+      "message": "the `Err`-variant returned from this function is very large",
+      "path": "crates/pg-engine/src/sql/binder/optimize.rs"
+    },
+    {
+      "message": "the loop variable `j` is used to index `rkeys`",
+      "path": "crates/pg-engine/src/sql/paths/joinpath/partitionwise.rs"
+    },
+    {
+      "message": "this `if` statement can be collapsed",
+      "path": "crates/pg-engine/src/sql/explain.rs"
+    },
+    {
+      "message": "float has excessive precision",
+      "path": "crates/pg-engine/src/sql/func/math.rs"
+    },
+    {
+      "message": "float has excessive precision",
+      "path": "crates/pg-engine/src/sql/func/math.rs"
+    },
+    {
+      "message": "float has excessive precision",
+      "path": "crates/pg-engine/src/sql/func/math.rs"
+    },
+    {
+      "message": "float has excessive precision",
+      "path": "crates/pg-engine/src/sql/func/math.rs"
+    },
+    {
+      "message": "float has excessive precision",
+      "path": "crates/pg-engine/src/sql/func/math.rs"
+    },
+    {
+      "message": "items after a test module",
+      "path": "crates/pg-engine/src/types/json.rs"
+    },
+    {
+      "message": "items after a test module",
+      "path": "crates/pg-engine/src/types/text.rs"
+    },
+    {
+      "message": "using `chunks_exact` with a constant chunk size",
+      "path": "crates/pg-engine/tools/bench/bench.rs"
+    },
+    {
+      "message": "useless use of `format!`",
+      "path": "crates/pg-engine/tests/difftest/round8.rs"
+    }
+  ],
+  "same_message_path_multiset_as_completed_ab3": true,
+  "same_sequence_as_ab3": false,
+  "diagnostics_in_corrected_paths": [],
+  "limitations": "Initial bookkeeping audit asserted diagnostic sequence and FAILED because the bench and difftest target diagnostics arrived in reverse order; export then failed on absent audit files before any Git write/push. Multiset comparison preserves multiplicities; no source/gate/threshold changed and no gate rerun."
+}

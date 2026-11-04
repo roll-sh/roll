@@ -1,0 +1,8 @@
+{
+  "status": "FAILED",
+  "scope": "bookkeeping only; not Clippy command",
+  "first_audit": "sequence comparison assertion",
+  "first_export": "FileNotFoundError for clippy-completed-exits.tsv; no Git mutation",
+  "resolved": "same14diagnostic multiset, changed target output order only",
+  "source_or_frozen_runner_modified": false
+}
