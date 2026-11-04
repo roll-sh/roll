@@ -1,0 +1,8 @@
+{
+  "time": "2026-11-04T19:39:17.317380+00:00",
+  "assessment": "All N1 cache-only preparation manifest hashes match; fixture unexecuted",
+  "scope": "No source/target mutations; no new runtimeproof",
+  "N1": "StaticMEDIUM supported; minimal frame-depth design needs named repro and statement/CTE/stableframe controls",
+  "crash_draft_review": "HIGH/MEDIUM diagnostic-only findings require cache-onlyr2 correction, no runtime",
+  "source_holds": "Focused d9e/1b6 passes remain; original278crash101 independent"
+}

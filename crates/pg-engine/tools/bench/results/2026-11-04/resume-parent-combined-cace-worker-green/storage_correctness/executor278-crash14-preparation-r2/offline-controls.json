@@ -1,0 +1,100 @@
+{
+  "status": "PROPOSED_ONLY_NOT_EXECUTED",
+  "scope": "Pure journal parser and injected read-result controls. No engine, storage, crash, SSI, service, or container.",
+  "cause_claim": false,
+  "cases": [
+    {
+      "name": "complete_records",
+      "hex": "3020630a3120610a",
+      "original_expected_flags": [
+        true,
+        false
+      ],
+      "diagnostic_expected_valid": true
+    },
+    {
+      "name": "truncated_final_marker",
+      "hex": "3020630a3120",
+      "original_expected_flags": [
+        true,
+        false
+      ],
+      "diagnostic_expected_valid": false,
+      "meaning": "Original parser treats an incomplete record as aborted. This does not establish an original-run torn append."
+    },
+    {
+      "name": "missing_terminator_committed",
+      "hex": "3020630a312063",
+      "original_expected_flags": [
+        true,
+        true
+      ],
+      "diagnostic_expected_valid": false
+    },
+    {
+      "name": "wrong_record_id",
+      "hex": "3020630a393920630a",
+      "original_expected_flags": [
+        true,
+        true
+      ],
+      "diagnostic_expected_valid": false
+    },
+    {
+      "name": "injected_read_error",
+      "input": "Err(PermissionDenied), injected without chmod or real filesystem access",
+      "original_expected_flags": [],
+      "diagnostic_expected_read_error": true,
+      "meaning": "A recorded error differs from a valid empty journal even though the original oracle returns the same flags."
+    },
+    {
+      "name": "invalid_utf8",
+      "hex": "ff",
+      "original_read_to_string_expected": "InvalidData",
+      "original_expected_flags": [],
+      "diagnostic_expected_valid": false
+    },
+    {
+      "name": "merged_partial_marker_then_commit",
+      "segments_text": [
+        "0 c\n1 ",
+        "2 c\n"
+      ],
+      "segments_hex": [
+        "3020630a3120",
+        "3220630a"
+      ],
+      "hex": "3020630a31203220630a",
+      "original_expected_flags": [
+        true,
+        true
+      ],
+      "expected_logical_records": 3,
+      "original_expected_records": 2,
+      "diagnostic_expected_valid": false,
+      "meaning": "Legacy parser accepts suffix c on merged line, losing one index. Audit flags wrong field count; no repair and no cause attribution."
+    },
+    {
+      "name": "merged_unterminated_commit_then_abort",
+      "segments_text": [
+        "0 c\n1 c",
+        "2 a\n"
+      ],
+      "segments_hex": [
+        "3020630a312063",
+        "3220610a"
+      ],
+      "hex": "3020630a3120633220610a",
+      "original_expected_flags": [
+        true,
+        false
+      ],
+      "expected_logical_records": 3,
+      "original_expected_records": 2,
+      "diagnostic_expected_valid": false,
+      "meaning": "Merged status c2 is invalid; legacy suffix parser returns false. Audit only; no cause attribution."
+    }
+  ],
+  "minimal_future_proof": "Under separate authorization, exercise only the existing parse expression on these inputs and audit the injected Result error path. Assert exact old flags and rejection/error annotation. Do not add a recovery fix or count this as a cause demonstration.",
+  "execution": "NONE: these are specified expectations, not results; no parser/control code was run."
+}

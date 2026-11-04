@@ -1,0 +1,21 @@
+{
+  "time_utc": "2026-11-04T19:30:48.905432+00:00",
+  "source_before_after_equal": true,
+  "source_after": {
+    "head": "d9e2279c9d5b55a21add46fe4632aa73e3f3c849",
+    "tree": "3fc7ca2415d8d9e538044696428036c4d195fc7b",
+    "status": "",
+    "files": {
+      "crates/pg-engine/src/exec/mod.rs": "223b7118ef6724e6a1d366311842109db0bf58a0cc6c9d67dcb89e9019d45e11",
+      "crates/pg-engine/src/exec/nodes.rs": "806af79c4269de29d570edca310150a2267a25f3b576cabcae971df7232a2973",
+      "crates/pg-engine/src/sql/paths.rs": "d812a5dc3576ab3ddfd82d901eeb613b4a3ca16128ef2da698b5e00348a3306b"
+    }
+  },
+  "runtime_tests_or_probes_executed": [],
+  "source_edits": [],
+  "target_access": [],
+  "child_tasks": [],
+  "sql_status": "Draft only; not parsed or executed; no PG golden asserted",
+  "review_runtime_erratum": "Sealed d9e focused green 7eff5c45 and 1b6 focused green a313c23a stand; N1 remains static/unconfirmed",
+  "cache_only": true
+}

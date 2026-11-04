@@ -1,0 +1,55 @@
+{
+  "status": "PREPARATION_ONLY_UNCOMPILED_UNFORMATTED_UNRUN",
+  "revision": "r2",
+  "base_source": "278a28966a8921da90c6ead9cfeb3f332306d788",
+  "base_tree": "95a87e3cacd4100a09adc93f5c5362e7de2900b4",
+  "original_failed_evidence": "aa48d3c9be313a6a67810e6d6d69b1f633685823",
+  "original_failed_test_binary_sha256": "a35916fbfff20bcbe555d5a5c1d77d0688d24686f9696a1148ce2e1c8ec59ec5",
+  "original_failure": "exit 101 remains unattributed; no pass clears it; no storage-cause claim",
+  "original_r1_immutable": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/executor278-crash14-preparation-r1",
+  "r1_payload_checksums_unchanged": true,
+  "r1_sha256sums_sha256": "20d5d29c6eded640b068072789df0c2b6ff1d4cfb15fb8ab140367731867ea0c",
+  "review_task_id": "node:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Adelegate-task%3Apg-resume-20261104-crash14-diagnostic-review-r1",
+  "review_result_sha256": "ca002ca6b98fcb41d4cbdd60d57ecf3f05a35f47bcb9d4c3b9eb4f9dd76b4d50",
+  "patch_sha256": "39874369088f5115d45232a3e5f5e477cc356eef50eef3aae34c27cd0dbea533",
+  "source_manifest_sha256": "3be04abcd9235e3bb4eb956ef804b6119de2b6fc9e456b88e67369778dd700d6",
+  "test_only_paths": [
+    "crates/pg-engine/tests/crash_random.rs",
+    "crates/pg-engine/tests/support/crash14_diagnostic.rs"
+  ],
+  "production_input_count": 882,
+  "production_changes": [],
+  "performed": [
+    "Read full cached independent r1 review and r1 sourcecopies/documents",
+    "Created r2 sibling cache-only sourcecopies, two-file patch, documents and manifests",
+    "Read-only exact Git commit/tree and blob-byte identity checks for original harness and 882 listed inputs",
+    "Textual inspection and cache-artifact SHA256 checks only; no candidate/parser execution"
+  ],
+  "not_performed": [
+    "Source checkout/index/ref/target writes",
+    "Patch application to any source tree",
+    "Builds/tests/parser controls/rustfmt",
+    "Services/containers/crash/SSI/storage probes/reruns",
+    "Child agents",
+    "Push/export"
+  ],
+  "future_limits": {
+    "capture_root": "NEW persistent disk cache, never tmpfs",
+    "free_disk_floor_gib": 30,
+    "hard_capture_budget_gib": 12,
+    "minimum_initial_free_gib": 42,
+    "image_data_byte_cap_gib": 2,
+    "event_channel_cap_mib": 256,
+    "overall_deadline": "20-minute whole process group; TERM then KILL after 5 seconds",
+    "child_watchdogs": "300 seconds from entry; 5 seconds after arm; diagnostic only"
+  },
+  "limitations": [
+    "All r2 candidate code remains uncompiled/unformatted/unrun",
+    "r1 review found no known compile blockers in r1 only",
+    "Instrumentation changes binary, timing and crash boundary",
+    "Seed alone cannot reproduce retained original; seed+journal is not all interrupted state",
+    "Full models retained at boundaries; SQL digest/length events do not prove exact killed instruction",
+    "After-check/failure SQL consists of separate snapshots; timeouts/errors/caps mean incomplete evidence",
+    "SIGKILL is not power loss; planned versus watchdog SIGKILL not distinguished"
+  ]
+}

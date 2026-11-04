@@ -1,0 +1,11 @@
+{
+  "file": "/home/meszmate/.cache/pg-engine-resume-20261104/combined-proof-r2/green-src/crates/pg-engine/src/lib.rs",
+  "before_mtime_ns": 1793819519355421236,
+  "after_mtime_ns": 1793821427622386459,
+  "source_bytes_unchanged": {
+    "commit": "cace40de4b9df2af42b08027138d9830d17abe9f",
+    "files": 2501,
+    "all_match": true,
+    "manifest_sha256": "3f3da522ab5481f6b4eed3cf66c5a14bcd4e5ddb7ce9ebb2313bb57cb52023ee"
+  }
+}

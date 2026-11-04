@@ -1,0 +1,17 @@
+{
+  "compiled_from_intended_snapshot": true,
+  "finished": "2026-11-04T19:46:09.746683+00:00",
+  "command_exit": 0,
+  "source_after": {
+    "commit": "cace40de4b9df2af42b08027138d9830d17abe9f",
+    "files": 2501,
+    "all_match": true,
+    "manifest_sha256": "3f3da522ab5481f6b4eed3cf66c5a14bcd4e5ddb7ce9ebb2313bb57cb52023ee"
+  },
+  "raw_sha256": "33e6449fcf7ca0da96145f94053527697d3db3eec7a660e377c7bc9f52d3a8e8",
+  "binary": [],
+  "test_summaries": [
+    "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 194 filtered out; finished in 5.28s"
+  ],
+  "assessment": "UNASSESSED; raw compile/test result must be inspected; focused proof is not full acceptance"
+}
