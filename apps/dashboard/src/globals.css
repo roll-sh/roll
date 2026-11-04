@@ -3,6 +3,25 @@
 @import "@fontsource-variable/geist";
 @import "@fontsource-variable/geist-mono";
 
+/* What a glyph Geist lacks (→, ✓…) and the text before the font loads render in: Arial, sized
+   to Geist's metrics so nothing shifts when it swaps in. */
+@font-face {
+  font-family: "Geist Fallback";
+  src: local("Arial");
+  ascent-override: 95.94%;
+  descent-override: 28.16%;
+  line-gap-override: 0%;
+  size-adjust: 104.76%;
+}
+@font-face {
+  font-family: "Geist Mono Fallback";
+  src: local("Arial");
+  ascent-override: 74.67%;
+  descent-override: 21.92%;
+  line-gap-override: 0%;
+  size-adjust: 134.59%;
+}
+
 :root {
   --bg: #000000;
   --fg: #ededed;
@@ -15,8 +34,8 @@
   --accent: #4c8dff;
   --ok: #3ddc84;
   --danger: #ff3b30;
-  --font-geist-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
-  --font-geist-mono: "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-geist-sans: "Geist Variable", "Geist Fallback";
+  --font-geist-mono: "Geist Mono Variable", "Geist Mono Fallback";
   color-scheme: dark;
 }
 

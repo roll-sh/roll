@@ -5,7 +5,7 @@ and the desktop app's Agents window. Everything else in the dashboard follows AG
 "Aesthetics" (quiet, flat, no shadows). The agents surface is the one place that has depth,
 because the user asked for it: "better designed than Linear", with T3 Code's look and motion.
 
-The tokens are in `apps/dashboard/src/app/globals.css`. The surface is scoped by `[data-agents]`
+The tokens are in `apps/dashboard/src/globals.css`. The surface is scoped by `[data-agents]`
 (on the popup's dialog and on the full-window page). Inside the scope, the shared tokens (`--bg`,
 `--panel`, `--line`, `--muted`…) take the agents values, so a plain `bg-panel` or `border-line`
 in an agents component already sits on the right layer. The agents-only tokens are on `:root` too,

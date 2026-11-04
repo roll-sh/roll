@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { avatarSvg, horizonSvg, markSvg } from "../src/geometry.ts";
 
 const out = new URL("../assets/", import.meta.url);
-const icon = new URL("../../../apps/dashboard/src/app/icon.svg", import.meta.url);
+const icon = new URL("../../../apps/dashboard/public/icon.svg", import.meta.url);
 const accent = "#4c8dff";
 
 const files: Record<string, string> = {

@@ -12,9 +12,9 @@ PKGS=(-p agent-proto -p agent-host -p model-gateway
 # rolld is linted by the other suites; linting it here would also lint every service it links.
 CLIPPY_PKGS=("${PKGS[@]:0:${#PKGS[@]}-2}")
 
-# The web part, the same in both gates and sharing one stamp: typecheck (TypeScript 7, ~3 s; the
-# end to end build skips Next's own check because of it), the dashboard's vitest and the desktop's.
-WEB_PATHS=(apps/dashboard/src apps/dashboard/test apps/dashboard/package.json apps/dashboard/vitest.config.mts apps/dashboard/tsconfig.json
+# The web part, the same in both gates and sharing one stamp: typecheck (TypeScript 7, ~3 s; Vite's
+# build doesn't type check, so this is the only check), the dashboard's vitest and the desktop's.
+WEB_PATHS=(apps/dashboard/src apps/dashboard/test apps/dashboard/package.json apps/dashboard/vite.config.ts apps/dashboard/vitest.config.mts apps/dashboard/tsconfig.json
            apps/desktop/src apps/desktop/test apps/desktop/package.json apps/desktop/tsconfig.json
            packages/brand/src packages/brand/package.json pnpm-lock.yaml scripts/typecheck.mjs scripts/lib/gate.sh)
 
