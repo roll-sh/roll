@@ -2831,7 +2831,18 @@ impl AggNode {
             };
             aggs.push((arg, a.def.skip_nulls, empty));
         }
-        let spec = Arc::new(super::partial::Spec { keys, trim, aggs, seq });
+        // (Groups that come out sorted on all their keys, which only equal values make
+        // equal, of aggregates that don't see their rows' order: the rows can come in any.)
+        let free = !seq
+            && colls.iter().all(Option::is_none)
+            && self.groups.iter().all(|g| !equal_apart(&g.ty()))
+            && self.aggs.iter().all(order_insensitive)
+            && (self.groups.is_empty()
+                || self.plan.as_ref().is_some_and(|p| {
+                    let sorted = super::pghash::agg_estimate(p, ctx).sorted;
+                    sorted.is_some_and(|s| (0..self.groups.len()).all(|i| s.iter().any(|k| k.0 == i)))
+                }));
+        let spec = Arc::new(super::partial::Spec { keys, trim, aggs, seq, free });
         Ok(match proj {
             Some(_) => input.pipeline_projected(spec, ctx)?,
             None => input.pipeline(Vec::new(), Some(spec), ctx)?,

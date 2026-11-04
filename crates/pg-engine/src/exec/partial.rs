@@ -217,6 +217,10 @@ pub struct Spec {
     pub aggs: Vec<(Option<K>, bool, Partial)>,
     /// Whether the executor's thread reads `Part::seq` (the hash table's order model).
     pub seq: bool,
+    /// The rows' order changes nothing (groups that come out sorted on all their keys, keys
+    /// equal only when alike, exact aggregates whose results don't depend on their rows'
+    /// order): a worker's part may take the rows of several of its chunks.
+    pub free: bool,
 }
 
 /// A bpchar key's value as its groups compare it.
@@ -555,6 +559,11 @@ impl<'a> Partials<'a> {
     /// Rows aggregated in the part so far.
     pub fn rows(&self) -> usize {
         self.part.rows
+    }
+
+    /// The groups in the part so far.
+    pub fn groups(&self) -> usize {
+        self.part.groups.len()
     }
 
     /// Row `r` of the column batch `b` (one that passed the filter, not odd) aggregated by

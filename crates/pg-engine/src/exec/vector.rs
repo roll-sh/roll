@@ -31,7 +31,7 @@ pub enum VN {
     Op(NumOp, Box<[VN; 2]>),
 }
 
-/// A row's exact number as `VN::at` gives it (None: `Out`; Some(None): NULL).
+/// A row's exact number as `VN::eval` gives it (None: `Out`; Some(None): NULL).
 pub type Num = Option<Option<(i128, u32)>>;
 
 /// An operand of a date / timestamp comparison (`VB::Instant`): a date column or a
@@ -87,26 +87,8 @@ impl VN {
         })
     }
 
-    /// Row `r`'s number (Some(None): NULL; None: not one, or past an i128: `Out`).
-    #[inline]
-    pub fn at(&self, b: &ColBatch, r: usize) -> Option<Option<(i128, u32)>> {
-        match self {
-            VN::Col(i) => num_at(col_at(b, *i)?, r),
-            VN::Const(c) => Some(*c),
-            VN::Op(op, args) => {
-                // (Both operands before a NULL one: `K::num`'s order.)
-                let (a, b) = (args[0].at(b, r)?, args[1].at(b, r)?);
-                let (Some((x, sx)), Some((y, sy))) = (a, b) else {
-                    return Some(None);
-                };
-                Some(Some(num_op(*op, x, sx, y, sy)?))
-            }
-        }
-    }
-}
-
-impl VN {
-    /// Each row of `sel`'s number into `out` (by row: `at`'s), a column at a time.
+    /// Each row of `sel`'s number into `out` (by row; None: not one, or past an i128:
+    /// `Out`), a column at a time.
     pub fn eval(&self, b: &ColBatch, sel: &[u32], out: &mut [Num]) {
         match self {
             VN::Col(i) => {
