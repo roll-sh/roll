@@ -974,6 +974,15 @@ mod tests {
                 assert_eq!(after_update[0], before_update[0], "UPDATE must not add an INSERT count: {sql}");
                 assert_eq!(after_update[5], before_update[5], "UPDATE must not add ins_since_vacuum: {sql}");
             }
+            let before_speculative = size_failure_stats(&mut s);
+            let error = s.query(&format!("INSERT INTO cs VALUES (5, cs_text({len})) ON CONFLICT DO NOTHING")).unwrap_err();
+            assert_eq!(error.code, "54000");
+            assert!(error.message.starts_with(message), "{error:?}");
+            let speculative = size_failure_stats(&mut s);
+            let delta: Vec<_> = speculative.iter().zip(&before_speculative).map(|(a, b)| a - b).collect();
+            eprintln!("PG oracle pending: size stats len={len}, speculative no-conflict INSERT observed delta={delta:?}, error={error:?}");
+            assert_eq!(delta, vec![1, 0, 0, 0, 1, 1], "failed speculative insertion counts once");
+            assert_eq!(s.query("SELECT count(*) FROM cs").unwrap()[0].rows, vec![vec![Value::Int8(2)]]);
         }
     }
 }
