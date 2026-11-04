@@ -48,7 +48,7 @@ describe("a sandbox machine on the canvas", () => {
     const panel = screen.getByRole("group", { name: "Sandbox" });
     expect(within(panel).getByText("Running")).toBeInTheDocument();
     expect(within(panel).getByText("$0.03/h")).toBeInTheDocument();
-    expect(within(panel).getByText("standard · 2 vCPU · 4 GB · 20 GB disk")).toBeInTheDocument();
+    expect(within(panel).getByText("standard · 2 vCPU · 4 GB")).toHaveAttribute("title", "20 GB disk");
     expect(within(panel).getByText("12.5 h")).toBeInTheDocument();
     expect(within(panel).getByText("$0.38")).toBeInTheDocument();
   });
