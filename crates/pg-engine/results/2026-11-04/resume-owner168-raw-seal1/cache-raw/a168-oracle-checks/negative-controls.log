@@ -1,0 +1,15 @@
+
+running 1 test
+
+thread 'recovery_oracle_rejects_partial_and_lost_acknowledged_transactions' (2789675) panicked at crates/pg-engine/tests/crash_random.rs:526:9:
+seed 3: step 0 (Commit) in flight: txlog row true, but the rows are some of its writes (a partial transaction)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'recovery_oracle_rejects_partial_and_lost_acknowledged_transactions' (2789675) panicked at crates/pg-engine/tests/crash_random.rs:509:5:
+assertion `left == right` failed: seed 3: txlog against the steps logged as committed
+  left: []
+ right: [0]
+test recovery_oracle_rejects_partial_and_lost_acknowledged_transactions ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.10s
+

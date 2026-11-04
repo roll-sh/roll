@@ -1,0 +1,43 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-ae7cd3533d1c88d16/crates/pg-engine)
+    Finished `release` profile [optimized] target(s) in 12.16s
+     Running tests/crash_async_commit.rs (/home/meszmate/.cache/a168/target/release/deps/crash_async_commit-e6a0b66042336cfc)
+
+running 2 tests
+test crash_async_child ... ok
+test kill_during_async_commits ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.84s
+
+     Running tests/crash_ctids.rs (/home/meszmate/.cache/a168/target/release/deps/crash_ctids-ee57a5c19499bb43)
+
+running 6 tests
+test crash_ctids_child ... ok
+test ctids_survive_a_restart ... ok
+test old_duplicate_ctids_repaired_once ... ok
+test ctids_survive_a_crash ... ok
+test vacuum_full_after_rolled_back_updates ... ok
+test prepared_ctids_survive_a_restart ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.50s
+
+     Running tests/crash_unlogged.rs (/home/meszmate/.cache/a168/target/release/deps/crash_unlogged-9bc26f232f158f4f)
+
+running 4 tests
+test crash_unlogged_child ... ok
+test crash_unlogged_prepared_child ... ok
+test prepared_writes_to_unlogged_tables_lost_in_a_crash ... ok
+test unlogged_relations_reset_after_a_crash ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/models_kept.rs (/home/meszmate/.cache/a168/target/release/deps/models_kept-798a076deffbdc89)
+
+running 5 tests
+test kept_models_not_used_when_stale ... ok
+test kept_models_match_models_never_restarted ... ok
+test models_after_a_crash_keep_the_rows_in_place ... ok
+test vacuum_freeze_keeps_page_state_across_restart ... ok
+test nulls_not_distinct_cleanup_survives_restart ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.30s
+

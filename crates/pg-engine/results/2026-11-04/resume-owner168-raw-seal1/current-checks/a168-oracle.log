@@ -1,0 +1,50 @@
+START build-release 2026-11-04T12:03:28Z
+build-release EXIT 0
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-ae7cd3533d1c88d16/crates/pg-engine)
+    Finished `release` profile [optimized] target(s) in 4.96s
+  Executable tests/crash_random.rs (/home/meszmate/.cache/a168/target/release/deps/crash_random-9e1c55c41accce42)
+START negative-controls 2026-11-04T12:03:34Z
+negative-controls EXIT 0
+assertion `left == right` failed: seed 3: txlog against the steps logged as committed
+  left: []
+ right: [0]
+test recovery_oracle_rejects_partial_and_lost_acknowledged_transactions ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.10s
+
+START original-failure 2026-11-04T12:03:34Z
+original-failure EXIT 0
+in flight: step 855; txlog max Int4(855)|Int8(802)
+txlog row by seq scan: Int8(1)
+inspect: ok
+test crash_inspect ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.63s
+
+START log-regression 2026-11-04T12:03:34Z
+log-regression EXIT 0
+
+running 1 test
+test torn_acknowledgement_is_still_in_flight ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+START controls-debug 2026-11-04T12:03:34Z
+controls-debug EXIT 0
+assertion `left == right` failed: seed 3: txlog against the steps logged as committed
+  left: []
+ right: [0]
+test recovery_oracle_rejects_partial_and_lost_acknowledged_transactions ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.25s
+
+START clippy 2026-11-04T12:03:37Z
+clippy EXIT 0
+    |             ^^^^^^^^^^^^ help: try: `expect_err`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#err_expect
+    = note: `#[warn(clippy::err_expect)]` on by default
+
+warning: `pg-engine` (test "crash_random") generated 1 warning (run `cargo clippy --fix --test "crash_random" -p pg-engine -- ` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 18.24s
+HEAVY-EXIT 0

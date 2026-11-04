@@ -1,0 +1,3 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-ae7cd3533d1c88d16/crates/pg-engine)
+    Finished `release` profile [optimized] target(s) in 5.17s
+  Executable tests/crash_random.rs (/home/meszmate/.cache/a168/target/release/deps/crash_random-9e1c55c41accce42)

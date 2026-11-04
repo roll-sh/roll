@@ -1,0 +1,149 @@
+START crash-build 2026-11-04T10:47:29Z
+crash-build EXIT 0
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-ae7cd3533d1c88d16/crates/pg-engine)
+    Finished `release` profile [optimized] target(s) in 5.76s
+  Executable tests/crash_random.rs (/home/meszmate/.cache/a168/target/release/deps/crash_random-9e1c55c41accce42)
+START ack-regression 2026-11-04T10:47:35Z
+ack-regression EXIT 0
+
+running 1 test
+test torn_acknowledgement_is_still_in_flight ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+
+START sync-1 2026-11-04T10:47:35Z
+sync-1 EXIT 0
+
+running 1 test
+test random_crashes has been running for over 60 seconds
+test random_crashes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 256.25s
+
+START sync-2 2026-11-04T10:51:51Z
+sync-2 EXIT 0
+
+running 1 test
+test random_crashes has been running for over 60 seconds
+test random_crashes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 240.61s
+
+START sync-3 2026-11-04T10:55:52Z
+sync-3 EXIT 0
+
+running 1 test
+test random_crashes has been running for over 60 seconds
+test random_crashes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 243.83s
+
+START sync-4 2026-11-04T10:59:56Z
+sync-4 EXIT 0
+
+running 1 test
+test random_crashes has been running for over 60 seconds
+test random_crashes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 201.77s
+
+START sync-5 2026-11-04T11:03:17Z
+sync-5 EXIT 0
+
+running 1 test
+test random_crashes has been running for over 60 seconds
+test random_crashes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 186.51s
+
+START sync-6 2026-11-04T11:06:24Z
+sync-6 EXIT 0
+
+running 1 test
+test random_crashes has been running for over 60 seconds
+test random_crashes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 187.58s
+
+START sync-7 2026-11-04T11:09:32Z
+sync-7 EXIT 0
+
+running 1 test
+test random_crashes has been running for over 60 seconds
+test random_crashes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 213.74s
+
+START sync-8 2026-11-04T11:13:05Z
+sync-8 EXIT 0
+
+running 1 test
+test random_crashes has been running for over 60 seconds
+test random_crashes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 194.35s
+
+START sync-9 2026-11-04T11:16:20Z
+sync-9 EXIT 0
+
+running 1 test
+test random_crashes has been running for over 60 seconds
+test random_crashes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 195.33s
+
+START sync-10 2026-11-04T11:19:35Z
+sync-10 EXIT 0
+
+running 1 test
+test random_crashes has been running for over 60 seconds
+test random_crashes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 199.68s
+
+START async 2026-11-04T11:22:55Z
+async EXIT 0
+
+running 1 test
+test random_crashes has been running for over 60 seconds
+test random_crashes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 213.41s
+
+START targeted-debug 2026-11-04T11:26:28Z
+targeted-debug EXIT 0
+test kept_models_match_models_never_restarted ... ok
+test models_after_a_crash_keep_the_rows_in_place ... ok
+test vacuum_freeze_keeps_page_state_across_restart ... ok
+test nulls_not_distinct_cleanup_survives_restart ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.27s
+
+START targeted-release 2026-11-04T11:27:54Z
+targeted-release EXIT 0
+test kept_models_match_models_never_restarted ... ok
+test models_after_a_crash_keep_the_rows_in_place ... ok
+test vacuum_freeze_keeps_page_state_across_restart ... ok
+test nulls_not_distinct_cleanup_survives_restart ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.30s
+
+START clippy 2026-11-04T11:28:11Z
+clippy EXIT 0
+    |                         ^^^^^^^^^^^^^^^^^^^^^ help: consider using `.to_string()`: `"\\s2 BEGIN".to_string()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#useless_format
+    = note: `#[warn(clippy::useless_format)]` on by default
+
+warning: `pg-engine` (test "difftest") generated 1 warning (run `cargo clippy --fix --test "difftest" -p pg-engine -- ` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3m 52s
+START pg-e2e 2026-11-04T11:32:04Z
+pg-e2e EXIT 101
+    retention_removes_old_history
+    survives_losing_the_local_disk
+
+test result: FAILED. 12 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 481.34s
+
+error: test failed, to rerun pass `-p pg-control --test e2e`
+[ELIFECYCLE] Command failed with exit code 101.
+HEAVY-EXIT 1
