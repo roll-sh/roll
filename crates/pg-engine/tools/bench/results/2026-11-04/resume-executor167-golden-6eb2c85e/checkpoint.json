@@ -1,0 +1,7 @@
+{
+  "head": "f92d227bd7e9e35d9e524be852adf8508518f89d",
+  "tree": "b8b768ae2d8514a1ce6e886ba01c40b89a3be347",
+  "status": "",
+  "time_utc": "2026-11-04T12:22:14.784311+00:00",
+  "note": "Preparation completed: source6eb2c85e compiled and PostgreSQL18.6 expected output recorded; three record-mode harness passes are NOT engine correctness passes. Historical failure remains unconfirmed. New source HEAD includes recorded output; fresh engine verification still pending. PostgreSQL reference pinnedsha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873. No performance or footprint acceptance."
+}
