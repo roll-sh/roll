@@ -1399,15 +1399,15 @@ impl Ddl<'_, '_> {
             && crate::exec::sizing::btree_blocks(t.oid, ix.oid, db).is_none()
     }
 
-    /// `measure_rows`, handing `each` (when given) each row's data key and key values of
-    /// the one index measured, as its measure computes them: an index build's own pass
+    /// `measure_rows`, handing `each` (when given) the data key, index values and decoded
+    /// row of the one index measured, as its measure computes them: a build's own pass
     /// (`measures_in_build`), so the rows are read and the keys computed once. None (nothing
     /// read): the index isn't measured by its keys alone after all.
     pub(super) fn measure_rows_with(
         &self,
         t: &Table,
         indexes: Option<Option<u32>>,
-        mut each: Option<&mut dyn FnMut(&[u8], &[Value]) -> Result<()>>,
+        mut each: Option<&mut dyn FnMut(&[u8], &[Value], &[Value]) -> Result<()>>,
     ) -> Result<Option<RowMeasure>> {
         let db = &self.ctx.sess.db;
         let blocks = crate::exec::sizing::heap_blocks(t, self.ctx);
@@ -1581,7 +1581,7 @@ impl Ddl<'_, '_> {
                     continue;
                 };
                 if let Some(f) = each.as_mut() {
-                    f(&dkey, &vals)?;
+                    f(&dkey, &vals, &row)?;
                 }
                 ix.tuples += 1;
                 if let Some(keys) = &mut ix.btree_keys {

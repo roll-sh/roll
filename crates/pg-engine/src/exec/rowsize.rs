@@ -26,12 +26,13 @@ const GIN_MAX_ITEM: usize = 2712;
 /// pg_opclass of GIN's array_ops.
 const GIN_ARRAY_OPS: u32 = 10064;
 
-/// An upper bound on an entry of `vals` under which no limit can be reached (None: size it).
+/// An upper bound on unpadded values under which no limit can be reached. Non-ASCII
+/// text uses the full sizing path because database encoding can change its byte length.
 fn surely_small(vals: &[Value]) -> bool {
     let mut n = 16usize;
     for v in vals {
         n += match v {
-            Value::Text(s) => s.len() + 8,
+            Value::Text(s) if s.is_ascii() => s.len() + 8,
             Value::Bytea(b) => b.len() + 8,
             Value::Null | Value::Bool(_) | Value::Int2(_) | Value::Int4(_) | Value::Int8(_) | Value::Float4(_) | Value::Float8(_) => 8,
             Value::Date(_) | Value::Timestamp(_) | Value::Timestamptz(_) | Value::Uuid(_) | Value::Oid(_) => 16,
@@ -52,7 +53,10 @@ pub fn form_error(size: usize) -> Error {
 fn btree_size(t: &Table, bix: &BoundIndex, vals: &[Value], row: &[Value], ctx: &ExecCtx) -> Option<usize> {
     let include = bix.index.include.iter().map(|&i| row.get(i).cloned().unwrap_or(Value::Null));
     let all: Vec<Value> = vals.iter().cloned().chain(include).collect();
-    if surely_small(&all) {
+    if surely_small(&all)
+        && !bix.keys.iter().any(|k| matches!(k.ty(), DataType::Bpchar(_)))
+        && !bix.index.include.iter().any(|&i| matches!(t.columns[i].ty, DataType::Bpchar(_)))
+    {
         return None;
     }
     let mut types: Vec<DataType> = bix.keys.iter().map(|k| k.ty()).collect();
@@ -72,7 +76,7 @@ pub fn on_form(t: &Table, bix: &BoundIndex, vals: Option<&[Value]>, row: &[Value
             Some(n) if n > INDEX_SIZE_MASK => Err(form_error(n)),
             _ => Ok(()),
         },
-        "gin" => gin_entries(bix, vals, ctx),
+        "gin" => gin_form_error(bix, vals, ctx).map_or(Ok(()), |e| Err(e.error)),
         _ => Ok(()),
     }
 }
@@ -112,9 +116,23 @@ pub fn btree_error(t: &Table, bix: &BoundIndex, size: usize, (b, o): (u32, u16),
     .constraint(name)
 }
 
+/// The first oversized GIN key, retained across a build's heap rows without retaining
+/// all extracted keys. INSERT reports it immediately; a build reports it in key order.
+pub struct GinFormError {
+    column: usize,
+    key: Value,
+    pub error: Error,
+}
+
+impl GinFormError {
+    pub fn precedes(&self, other: &Self) -> bool {
+        self.column.cmp(&other.column).then_with(|| self.key.cmp_total(&other.key)).is_lt()
+    }
+}
+
 /// GinFormTuple of each key array_ops extracts from `vals` (in the keys' order, as
 /// ginExtractEntries sorts them), without a posting list (a build's posting tree's case).
-fn gin_entries(bix: &BoundIndex, vals: &[Value], ctx: &ExecCtx) -> Result<()> {
+pub fn gin_form_error(bix: &BoundIndex, vals: &[Value], ctx: &ExecCtx) -> Option<GinFormError> {
     let one = bix.keys.len() == 1;
     for (i, v) in vals.iter().enumerate() {
         let (Value::Array(a), Some(c)) = (v, bix.index.columns.get(i)) else { continue };
@@ -122,7 +140,9 @@ fn gin_entries(bix: &BoundIndex, vals: &[Value], ctx: &ExecCtx) -> Result<()> {
         if !matches!(c.opclass, 0 | GIN_ARRAY_OPS) || type_layout(&a.elem).0 > 0 {
             continue;
         }
-        let mut big: Vec<&Value> = a.items.iter().filter(|e| !e.is_null() && !surely_small(std::slice::from_ref(*e))).collect();
+        let mut big: Vec<&Value> = a.items.iter().filter(|e| {
+            !e.is_null() && (matches!(a.elem, DataType::Bpchar(_)) || !surely_small(std::slice::from_ref(*e)))
+        }).collect();
         if big.is_empty() {
             continue;
         }
@@ -135,15 +155,19 @@ fn gin_entries(bix: &BoundIndex, vals: &[Value], ctx: &ExecCtx) -> Result<()> {
                 false => index_tuple(&[DataType::Int2, a.elem.clone()], &[Value::Int2(i as i16 + 1), e.clone()], &text),
             };
             if n > INDEX_SIZE_MASK {
-                return Err(form_error(n));
+                return Some(GinFormError { column: i, key: e.clone(), error: form_error(n) });
             }
             if n > GIN_MAX_ITEM {
-                return Err(Error::new(
-                    code::PROGRAM_LIMIT_EXCEEDED,
-                    format!("index row size {n} exceeds maximum {GIN_MAX_ITEM} for index \"{}\"", bix.index.name),
-                ));
+                return Some(GinFormError {
+                    column: i,
+                    key: e.clone(),
+                    error: Error::new(
+                        code::PROGRAM_LIMIT_EXCEEDED,
+                        format!("index row size {n} exceeds maximum {GIN_MAX_ITEM} for index \"{}\"", bix.index.name),
+                    ),
+                });
             }
         }
     }
-    Ok(())
+    None
 }

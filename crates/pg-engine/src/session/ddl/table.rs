@@ -3720,13 +3720,23 @@ impl Ddl<'_, '_> {
         // (A btree entry past a third of a page fails as the build loads its entries, after
         // the unique check: the first in index order, `rowsize`. Its key and size, the row.)
         let mut oversized: Option<(Vec<u8>, usize, Vec<u8>)> = None;
-        let mut step = |dkey: &[u8], vals: &[Value]| -> Result<()> {
+        let mut duplicate = None;
+        let mut gin_error: Option<crate::exec::rowsize::GinFormError> = None;
+        let mut step = |dkey: &[u8], vals: &[Value], row: &[Value]| -> Result<()> {
             crate::exec::pgstat::count_returned(counts, t.oid, 1);
             entries += 1;
             progress.scanned(entries);
-            crate::exec::rowsize::on_form(t, &bix, Some(vals), &[], counts)?;
+            if ix.method == "gin" {
+                if let Some(e) = crate::exec::rowsize::gin_form_error(&bix, vals, counts)
+                    && gin_error.as_ref().is_none_or(|first| e.precedes(first))
+                {
+                    gin_error = Some(e);
+                }
+            } else {
+                crate::exec::rowsize::on_form(t, &bix, Some(vals), row, counts)?;
+            }
             if ix.method == "btree"
-                && let Some(n) = crate::exec::rowsize::btree_oversized(t, &bix, vals, &[], counts)?
+                && let Some(n) = crate::exec::rowsize::btree_oversized(t, &bix, vals, row, counts)?
             {
                 let k = index_entry_key(t, ix, vals, dkey, &bix.colls);
                 if oversized.as_ref().is_none_or(|o| k < o.0) {
@@ -3740,13 +3750,15 @@ impl Ddl<'_, '_> {
                     return Err(crate::exec::dml::quadrant_error());
                 }
             }
-            if ix.unique && (ix.nulls_not_distinct || !vals.iter().any(Value::is_null)) {
+            if duplicate.is_none() && ix.unique && (ix.nulls_not_distinct || !vals.iter().any(Value::is_null)) {
                 let first = seen.insert(unique_key(vals), dkey, |d| {
                     Ok(stored_values(d)?.map(|v| unique_key(&v)))
                 })?;
                 if let Some(first) = first {
                     let first = stored_values(&first)?;
-                    return Err(self.duplicate_key(t, &bix, first.as_deref().unwrap_or(vals), &ix.name));
+                    // PostgreSQL forms every heap row before its unique sort. A later
+                    // unformable tuple must still win over this duplicate.
+                    duplicate = Some(self.duplicate_key(t, &bix, first.as_deref().unwrap_or(vals), &ix.name));
                 }
             }
             if crate::exec::scan::stores_entries(&bix) {
@@ -3805,7 +3817,7 @@ impl Ddl<'_, '_> {
                 let (dkey, row) = r?;
                 rows += 1;
                 if let Some(vals) = index_values(&bix, &row, self)? {
-                    step(&dkey, &vals)?;
+                    step(&dkey, &vals, &row)?;
                     if let Some((_, keys)) = &mut model_keys {
                         keys.push((crate::exec::sizing::btree_key(t, &bix, vals, &row, ctx), dkey));
                     }
@@ -3828,6 +3840,12 @@ impl Ddl<'_, '_> {
             }
         }
         drop(seen);
+        if let Some(e) = gin_error {
+            return Err(e.error);
+        }
+        if let Some(e) = duplicate {
+            return Err(e);
+        }
         if let Some((_, n, dkey)) = oversized {
             let tid = crate::exec::dml::row_tid(t, &dkey, self.ctx);
             return Err(crate::exec::rowsize::btree_error(t, &bix, n, tid, self.ctx));

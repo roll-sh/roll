@@ -5679,8 +5679,7 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     as for a unique violation. Golden `a163_index_row_size`. Probed and not modelled: GiST
     (btree_gist's text key fails with XX000 "failed to add item to index page" past about 4
     kB, and 8191 past 8 kB), BRIN (a summary of its range's min and max past 8,152 bytes fails
-    the build: "index row size 19216 exceeds maximum 8152"); INCLUDE columns in a build's
-    check (not passed to the build's step). Hash (a hash code) and SP-GiST text_ops (long
+    the build: "index row size 19216 exceeds maximum 8152"). Hash (a hash code) and SP-GiST text_ops (long
     values are split into prefixes) never fail, as in the engine.
   - btree_gist KNN over time and interval columns reads nearest-first: the grid places them
     (`search::ord_key`; an interval by its span as interval_cmp orders them, as a float's
@@ -7414,3 +7413,26 @@ directory. Shared heavy slots and jobs remain 4 and 2. The full Docker recovery
 suite was not repeated under the user's instruction; its parent baseline remains
 twelve passes and four WAL HTTP timeout failures. Nothing was pushed and no PR
 was created.
+
+
+### Agent 163 bounded review follow-up (2026-11-04)
+
+Serial index builds pass decoded INCLUDE columns through both ordinary and measured
+callbacks. Btree tuple formation (8191 bytes) precedes the build's uniqueness error;
+the 2704-byte check remains after uniqueness. The size shortcut excludes bpchar padding
+and non-ASCII encoding conversions. The char(2800)/2650-byte reference fixture already
+matched the prior source; its presence does not establish a prior user-visible failure.
+A PG18.6 probe also confirmed that two oversized GIN heap rows report the first sorted
+key, not the first heap row. Builds retain the earliest oversized key and error, without
+retaining all extracted keys. This models a single accumulation batch; error priority
+across PostgreSQL maintenance_work_mem flush boundaries remains unmodelled.
+
+Two retained migration/performance limits: an unchanged VACUUM measure can conservatively
+retain may_toast=true indefinitely, losing its skip optimization. Previously stored entries
+for indexes now classified as nonstored are ignored by current readers but consume disk
+until REINDEX or DROP INDEX. No wrong returned rows have been demonstrated from those
+orphan entries; this batch does not rewrite existing databases to reclaim them.
+
+New reference fixtures: a163_review_sizes and roll-bitmap-recheck (row locks, concurrent
+changed versions/EPQ, BitmapOr and UPDATE). Their exact outcomes are recorded in the
+owner's review-followup evidence; source integration and performance remain parent gates.
