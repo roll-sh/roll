@@ -107,22 +107,11 @@ impl Key {
     /// `atts`: per-attribute encodings; `sizes[k]`: the MAXALIGNed index tuple size
     /// holding the first k+1 attributes.
     pub fn new(atts: &[Vec<u8>], sizes: &[usize]) -> Key {
-        let len: usize = atts.iter().map(Vec::len).sum();
-        let mut buf = Vec::with_capacity(2 + 2 * (atts.len() + sizes.len()) + len);
-        buf.push(atts.len() as u8);
-        buf.push(sizes.len() as u8);
-        let mut end = 0u16;
-        for a in atts {
-            end += a.len() as u16;
-            buf.extend_from_slice(&end.to_le_bytes());
-        }
-        for &z in sizes {
-            buf.extend_from_slice(&(z as u16).to_le_bytes());
-        }
-        for a in atts {
-            buf.extend_from_slice(a);
-        }
-        Key::wrap(&buf)
+        debug_assert_eq!(atts.len(), sizes.len());
+        Key::build_in(&mut Vec::new(), atts.len(), |i, buf| {
+            buf.extend_from_slice(&atts[i]);
+            sizes[i]
+        })
     }
 }
 
@@ -131,13 +120,29 @@ impl Key {
     /// is the only allocation): `att(i, buf)` appends attribute i's encoding to `buf` and
     /// returns the MAXALIGNed size of an index tuple holding attributes 0..=i (`new`'s
     /// `sizes`).
+    ///
+    /// An attribute's encoding longer than `ATT_MAX` keeps its first bytes and a hash of the
+    /// rest (a value that long is compressed in a PostgreSQL index tuple, whose size `att`
+    /// gives as it is): the key's bytes stay within its u16 offsets for any number of
+    /// attributes, equal values stay equal, and only values alike in their first
+    /// `ATT_MAX` bytes order by hash. Sizes past u16 (a tuple PostgreSQL rejects) are capped.
     pub fn build_in(buf: &mut Vec<u8>, natts: usize, mut att: impl FnMut(usize, &mut Vec<u8>) -> usize) -> Key {
+        let natts = natts.min(u8::MAX as usize);
         let head = 2 + 4 * natts;
         buf.clear();
         buf.resize(head, 0);
         (buf[0], buf[1]) = (natts as u8, natts as u8);
         for i in 0..natts {
-            let size = att(i, buf) as u16;
+            let start = buf.len();
+            let size = att(i, buf).min(u16::MAX as usize) as u16;
+            if buf.len() - start > ATT_MAX {
+                use std::hash::Hasher;
+                // (SipHash with fixed keys: the same in every process, kept images too.)
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                h.write(&buf[start + ATT_MAX - 8..]);
+                buf.truncate(start + ATT_MAX - 8);
+                buf.extend_from_slice(&h.finish().to_be_bytes());
+            }
             let end = (buf.len() - head) as u16;
             buf[2 + 2 * i..4 + 2 * i].copy_from_slice(&end.to_le_bytes());
             buf[2 + 2 * (natts + i)..4 + 2 * (natts + i)].copy_from_slice(&size.to_le_bytes());
@@ -145,6 +150,10 @@ impl Key {
         Key::wrap(buf)
     }
 }
+
+/// The bytes a key keeps of one attribute's encoding (`Key::build_in`): INDEX_MAX_KEYS (32)
+/// of them fit the key's u16 offsets.
+const ATT_MAX: usize = 1800;
 
 impl std::ops::Deref for Key {
     type Target = KeyBytes;
@@ -2626,6 +2635,26 @@ mod tests {
         assert!(w.holds());
         drop(b);
         assert!(!w.holds());
+    }
+
+    /// Keys of any length (a 100 kB text key, many attributes of it) fit the key's u16
+    /// offsets: equal values give equal keys, values that differ past their kept bytes
+    /// still differ, and sizes past u16 are capped (no panic, no wrapped length).
+    #[test]
+    fn long_keys_fit() {
+        let big = |c: u8, n: usize| vec![c; n];
+        let a = Key::new(&[big(7, 100_000), big(8, 70_000), big(9, 10)], &[2712, 70_016, 80_000]);
+        let b = Key::new(&[big(7, 100_000), big(8, 70_000), big(9, 10)], &[2712, 70_016, 80_000]);
+        let mut other = big(7, 100_000);
+        other[99_999] = 6;
+        let c = Key::new(&[other, big(8, 70_000), big(9, 10)], &[2712, 70_016, 80_000]);
+        assert!(a.as_bytes().len() < 1 << 16);
+        assert_eq!(a.as_bytes(), b.as_bytes());
+        assert_ne!(a.as_bytes(), c.as_bytes());
+        assert_eq!(a.size(), u16::MAX as usize);
+        let many: Vec<Vec<u8>> = (0..32).map(|i| big(i, 5_000)).collect();
+        let k = Key::new(&many, &[64; 32]);
+        assert_eq!(Key::from_bytes(k.as_bytes()).map(|x| x.as_bytes().to_vec()), Some(k.as_bytes().to_vec()));
     }
 
     /// VACUUM deletes the leaves it empties (and parents left without children) the way
