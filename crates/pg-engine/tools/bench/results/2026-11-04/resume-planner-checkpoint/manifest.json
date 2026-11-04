@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "2ffa4528bfe5d95550a2e77fc95cc1af6c495f11c28a49be012b9f6299665480",
-    "bytes": 18782
+    "sha256": "b7a11dc5a44fa62901bec3cf3b40ec3688b4b5e8588f9e4f27fc56503cc7fbe6",
+    "bytes": 19331
   },
   "baseline171-v1/RESTORED.txt": {
     "sha256": "2ad11b1db92238f171853cadc56294d550edeed718924b1b46054ccb24969691",
@@ -772,8 +772,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "e9b914d64730146d9f2ce9f6c7108dcd3581c782f4015312aa79243040995b37",
-    "bytes": 37980
+    "sha256": "d4724f24eb07eb4ac99a14d89ad44b0b9c0502c1c81bdbe821e9eb5165259171",
+    "bytes": 38859
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -1027,6 +1027,10 @@
     "sha256": "ba6322e432cd8351de522e4d1ba66d1644e49a7763847ad2153b7129e675e88f",
     "bytes": 1645
   },
+  "full171-lazy-v1/TERMINAL.json": {
+    "sha256": "72e051eb6438d4b40fded6d5d44213e41ee76da44497cc2c94fe624e19bae960",
+    "bytes": 2531
+  },
   "full171-lazy-v1/affinity-observation-debug-build.json": {
     "sha256": "0ea4e923294bf501444eff41a8385efb8e5f99b1e47baf001e2a1236ca36b4e1",
     "bytes": 2236
@@ -1042,6 +1046,34 @@
   "full171-lazy-v1/affinity-observation-release-tests.json": {
     "sha256": "c8543dcbb436b82a89109393d4dcfffda529b3ffa2845de473f5ec52e801046f",
     "bytes": 1921
+  },
+  "full171-lazy-v1/audit-exits.tsv": {
+    "sha256": "b111a326065e03a6e8f43331274e7a37499747f41734fd5a1201601b2fc99226",
+    "bytes": 55
+  },
+  "full171-lazy-v1/clippy-audit.log": {
+    "sha256": "ea947da1d83d72656615a611d01ccb1180d288e7c8431fe0ffb2244ef341595e",
+    "bytes": 4740
+  },
+  "full171-lazy-v1/clippy-mismatch-readonly-analysis.json": {
+    "sha256": "d09a8f06cfc2053fc80cff3a089e45d2ff507daff8afcf2adf337ba495974cb6",
+    "bytes": 2493
+  },
+  "full171-lazy-v1/clippy-warning-audit.json": {
+    "sha256": "9d7dc9771ca30de1aa789a69757cb002cae6f7844fae26bccc4087d0e7dbefe5",
+    "bytes": 5362
+  },
+  "full171-lazy-v1/clippy.command": {
+    "sha256": "1cee7517f854a75686cbba6a19dc79f13a76942a9c3fd67cc4317be8936ed02c",
+    "bytes": 73
+  },
+  "full171-lazy-v1/clippy.log": {
+    "sha256": "b276908063ca9ecfd121336af8f77200fc04888cc117eb40398809583451996f",
+    "bytes": 363509
+  },
+  "full171-lazy-v1/current.status": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
   },
   "full171-lazy-v1/debug-test-audit.log": {
     "sha256": "e0cd2a3735867ab91821c5791525506c194d756946af2f4daaf295f55be06e41",
@@ -1067,6 +1099,10 @@
     "sha256": "360eca2f114d5e1faa171bab6948a1d36362ba35ef9f8289d322e8f4ff4e41f4",
     "bytes": 38570
   },
+  "full171-lazy-v1/disk-before-clippy.json": {
+    "sha256": "a3803fb791466720240de1402c4762a771f05bfc1911378792e6bc38705cdf21",
+    "bytes": 134
+  },
   "full171-lazy-v1/disk-before-debug-test.json": {
     "sha256": "3b7ace71210be77b6ecf45db5cc6c25f6dd99bf0ba6efb9315e687a6be9669ca",
     "bytes": 134
@@ -1074,6 +1110,10 @@
   "full171-lazy-v1/disk-before-release-test.json": {
     "sha256": "e390f2ab2bef03dd2b0b01953ea207f09da8b36c6d62ff89706ad46c2469407e",
     "bytes": 134
+  },
+  "full171-lazy-v1/exits.tsv": {
+    "sha256": "093461a98ae1f8ded9992f808e72edd8c2741280c6a2ff8df17ab35a9ba76627",
+    "bytes": 37
   },
   "full171-lazy-v1/initial.status": {
     "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1118,6 +1158,10 @@
   "full171-lazy-v1/tree.txt": {
     "sha256": "63c6acfff48b73fbc9798cc5dec5f150392097ad0d46985d69cca92fc94f4d60",
     "bytes": 41
+  },
+  "full171-lazy-v1/wrapper.log": {
+    "sha256": "5cc36559a56e6766b6d2f341b75beee06bd295ece76cb50aac7ce6b0e539043d",
+    "bytes": 4385
   },
   "green165r2/a165_cursor_edges.out": {
     "sha256": "d5645e686147eee401fe7c0fbaea659eb0cbfd9dfb5107538dc4f08c11c3caa6",
@@ -1884,8 +1928,8 @@
     "bytes": 4776
   },
   "runners/PLANNER171-LAZY-HANDOFF.md": {
-    "sha256": "0ef2ecc3470b76ee2d95c985902727a718a6948ed9826951176a2baabd71d1c6",
-    "bytes": 4363
+    "sha256": "9ff152f817b331e521e17618499c3223333c61287db017305cce5e3ac504e759",
+    "bytes": 5256
   },
   "runners/R3-CASE-MATRIX.md": {
     "sha256": "bab38282c8248db553c43a488f9557d875c95d9a507fb231bf1238c68fbe21bf",

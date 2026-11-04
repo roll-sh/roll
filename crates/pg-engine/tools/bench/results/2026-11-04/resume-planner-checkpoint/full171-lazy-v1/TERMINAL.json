@@ -1,0 +1,91 @@
+{
+  "observed_utc": "2026-11-04T22:37:27.881108+00:00",
+  "status": "FAILED/PARTIAL",
+  "source": "cac0933bc4eb5ef87674889542cab271de4615d0",
+  "tree": "bd48e5074887125072d7c23cb09c78fe6fe15c0b",
+  "clean": true,
+  "wrapper_exit": 1,
+  "command_exits": {
+    "debug-test": 0,
+    "release-test": 0,
+    "clippy": 0
+  },
+  "audit_exits": {
+    "debug-test-audit": 0,
+    "release-test-audit": 0,
+    "clippy-audit": 1
+  },
+  "stages": {
+    "debug-test": {
+      "status": "PASS",
+      "command_exit": 0,
+      "stage_audit_exit": 0,
+      "summary": {
+        "passed": 457,
+        "failed": 0,
+        "ignored": 18,
+        "summaries": 61
+      },
+      "full_per_binary_map_matches": true,
+      "binary_count": 60,
+      "binary_mismatches": [],
+      "disk_before": {
+        "observed_utc": "2026-11-04T21:23:04.633922+00:00",
+        "available_kib": 149512864,
+        "floor_kib": 31457280,
+        "pass_floor": true
+      }
+    },
+    "release-test": {
+      "status": "PASS",
+      "command_exit": 0,
+      "stage_audit_exit": 0,
+      "summary": {
+        "passed": 457,
+        "failed": 0,
+        "ignored": 18,
+        "summaries": 61
+      },
+      "full_per_binary_map_matches": true,
+      "binary_count": 60,
+      "binary_mismatches": [],
+      "disk_before": {
+        "observed_utc": "2026-11-04T22:07:10.557732+00:00",
+        "available_kib": 196805140,
+        "floor_kib": 31457280,
+        "pass_floor": true
+      }
+    },
+    "clippy": {
+      "status": "FAILED",
+      "command_exit": 0,
+      "stage_audit_exit": 1,
+      "disk_before": {
+        "observed_utc": "2026-11-04T22:34:38.903890+00:00",
+        "available_kib": 196442828,
+        "floor_kib": 31457280,
+        "pass_floor": true
+      }
+    },
+    "build": {
+      "status": "NOTRUN after fail-fast stop",
+      "command_exit": null
+    },
+    "postgres-unit": {
+      "status": "NOTRUN after fail-fast stop",
+      "command_exit": null
+    }
+  },
+  "problems": [
+    "clippy"
+  ],
+  "frozen_inputs_match": true,
+  "owned_process_group_absent": true,
+  "own_heavy_slot_released": true,
+  "source_integration_acceptance": false,
+  "performance_acceptance": false,
+  "service_acceptance": false,
+  "serial_bound": "Priorcauseunattributed;originalfailurepreserved;fullresultdoesnotestablishcausality",
+  "controls": "Onlystartupandrecordedsamples;wrapper/heavyhousekeepingunrestricted;no lifetimeisolation/performanceclaim",
+  "configuration": "ordinaryunfiltereddefaults only;no separatelyconfiguredstress/diagnostic/seed14/probe"
+}

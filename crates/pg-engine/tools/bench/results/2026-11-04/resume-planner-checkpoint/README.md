@@ -1,5 +1,8 @@
 # Recovery and OLTP165 review checkpoint (2026-11-04)
 
+TERMINAL171 ORIGINAL FULL PIPELINE FAILED/PARTIAL: debug+release each457/0/18/61, command0/audit0/60binaryhashes. Clippy command0 BUT frozen audit1 (29primary-span rows vs14historical), wrapperHEAVY1; dist/unitNOTRUN there. Frozenfailureartifacts UNCHANGED. Supplemental read-only evidence explains24JSONmessages/10exactduplicates/14unique diagnostic identities, with5extra primaryspans; this doesNOTchangefrozenstatus. Sourceexactcac0933b/treebd48e507 clean, all9frozeninputs match, ownedprocessgroupabsent/slotreleased. Parent holds acceptance.
+
+
 
 171FULLGATE UPDATE: DEBUG andRELEASE eachcompleted457/0/18/61,eachcommand0+stageaudit0,60actualbinaryhashes/profile. Clippy is active;dist/unitNOTCOMPLETE. Active laterstage raw excluded. No fullpipelinepass.
 
