@@ -2188,9 +2188,23 @@ fn class_keys_checked(ctx: &ExecCtx, sel: ClassSel, keep: ClassKeep, check: bool
     if !cat.rel_oid_edits.is_empty() {
         return None;
     }
-    // (Every relation is read: the stored maps' groups at once, on several threads.)
+    // (Every relation of the kinds kept is read: those maps' groups at once, on several
+    // threads, and not the others': a statistics view of tables parsed every index's,
+    // function's and comment's entry too.)
     if matches!(sel, ClassSel::All) {
-        cat.read_relations();
+        let any = |ks: &[u8]| ks.iter().any(|&k| keep.kind(k));
+        if any(b"rpftiI") {
+            cat.tables.read_all();
+        }
+        if any(b"vmti") {
+            cat.views.read_all();
+        }
+        if any(b"S") {
+            cat.sequences.read_all();
+        }
+        if any(b"iI") {
+            cat.indexes.read_all();
+        }
     }
     let mut out = Vec::new();
     let admits = |r: &Row| match sel {
