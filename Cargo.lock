@@ -44,6 +44,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-host"
+version = "0.1.0"
+dependencies = [
+ "agent-proto",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "code-control",
+ "diffy",
+ "futures-util",
+ "hex",
+ "libc",
+ "parking_lot",
+ "pg-storage",
+ "rand 0.8.8",
+ "reqwest",
+ "rusqlite",
+ "rustls-native-certs",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-rustls 0.26.6",
+ "tokio-tungstenite 0.30.0",
+ "toml",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "agent-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1513,6 +1554,8 @@ dependencies = [
 name = "code-control"
 version = "0.1.0"
 dependencies = [
+ "agent-host",
+ "agent-proto",
  "ammonia",
  "anyhow",
  "async-trait",
@@ -1549,6 +1592,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-tungstenite 0.30.0",
  "toml",
  "tower",
  "tower-http 0.7.1",
@@ -6086,6 +6130,8 @@ dependencies = [
 name = "roll-cli"
 version = "0.1.0"
 dependencies = [
+ "agent-host",
+ "agent-proto",
  "anyhow",
  "aws-sdk-s3",
  "axum",
@@ -6110,6 +6156,7 @@ dependencies = [
  "s3-control",
  "s3-server",
  "s3-store",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -7670,7 +7717,11 @@ checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
 dependencies = [
  "futures-util",
  "log",
+ "rustls 0.23.46",
+ "rustls-native-certs",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls 0.26.6",
  "tungstenite 0.30.0",
 ]
 
@@ -7898,6 +7949,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.10.3",
+ "rustls 0.23.46",
+ "rustls-pki-types",
  "sha1 0.11.0",
  "thiserror",
 ]

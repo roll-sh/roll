@@ -1,0 +1,16 @@
+[
+  {
+    "user_code": "WXYZ-2345",
+    "name": "ada-mbp",
+    "hostname": "ada-mbp.local",
+    "os": "macos",
+    "created_at": 1762000000000,
+    "expires_at": 1762000900000
+  },
+  {
+    "user_code": "BCDF-GHJK",
+    "name": "machine",
+    "created_at": 1762000000000,
+    "expires_at": 1762000900000
+  }
+]

@@ -1,0 +1,13 @@
+{"native_thread":"fx-session-01"}
+{"model":"anthropic/claude-opus-5.5"}
+{"item":{"body":{"files":[{"change":"modify","path":".claude-denied-write.txt"}],"input":{"content":"approval fixture","path":".claude-denied-write.txt"},"kind":"edit","name":"write_file","title":"Writing","type":"tool"},"id":"toolu_01UGENWURULQ8Y3F7F8Npwzg","parent":null,"status":"running"}}
+{"request":{"body":{"action":"file_change","decisions":["accept","accept_for_session","decline","cancel"],"files":[{"change":"modify","path":".claude-denied-write.txt"}],"input":{"content":"approval fixture","path":".claude-denied-write.txt"},"title":"Edit .claude-denied-write.txt","tool":"write_file","type":"approval"},"id":"1001","item":"toolu_01UGENWURULQ8Y3F7F8Npwzg"}}
+{"output_delta":{"item":"toolu_01UGENWURULQ8Y3F7F8Npwzg","text":"{\"error\":{\"type\":\"tool_permission_denied\",\"tool_name\":\"write_file\",\"message\":\"Permission denied by user\",\"reason\":\"user_denied\",\"denied\":true,\"suggestion\":\"The tool did not run. Do not retry unchanged; explain the denial or use a safer allowed alternative.\"}}"}}
+{"item":{"body":{"files":[{"change":"modify","path":".claude-denied-write.txt"}],"input":{"content":"approval fixture","path":".claude-denied-write.txt"},"kind":"edit","name":"write_file","output":"{\"error\":{\"type\":\"tool_permission_denied\",\"tool_name\":\"write_file\",\"message\":\"Permission denied by user\",\"reason\":\"user_denied\",\"denied\":true,\"suggestion\":\"The tool did not run. Do not retry unchanged; explain the denial or use a safer allowed alternative.\"}}","title":"Writing","type":"tool"},"id":"toolu_01UGENWURULQ8Y3F7F8Npwzg","parent":null,"status":"failed"}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:1:1","text":"write permission denied"}}
+{"item":{"body":{"text":"write permission denied","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"item":{"body":{"text":"write permission denied","type":"message"},"id":"msg:1:1","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":0,"input_tokens":39437,"output_tokens":89}}
+{"turn_ended":"completed"}
+{"exited":null}

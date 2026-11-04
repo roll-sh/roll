@@ -1,0 +1,24 @@
+{"native_thread":"01a1a29d-f503-7a50-bfd3-cac8e231900d"}
+{"model":"gpt-6.1-sol"}
+{"item":{"body":{"text":"","type":"message"},"id":"msg_065dfed3bfa58369016aea245bc11881919ce98e43f516d6af","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg_065dfed3bfa58369016aea245bc11881919ce98e43f516d6af","text":"I"}}
+{"text_delta":{"item":"msg_065dfed3bfa58369016aea245bc11881919ce98e43f516d6af","text":"’ll"}}
+{"text_delta":{"item":"msg_065dfed3bfa58369016aea245bc11881919ce98e43f516d6af","text":" run"}}
+{"text_delta":{"item":"msg_065dfed3bfa58369016aea245bc11881919ce98e43f516d6af","text":" the"}}
+{"text_delta":{"item":"msg_065dfed3bfa58369016aea245bc11881919ce98e43f516d6af","text":" command"}}
+{"text_delta":{"item":"msg_065dfed3bfa58369016aea245bc11881919ce98e43f516d6af","text":" now"}}
+{"text_delta":{"item":"msg_065dfed3bfa58369016aea245bc11881919ce98e43f516d6af","text":"."}}
+{"item":{"body":{"text":"I’ll run the command now.","type":"message"},"id":"msg_065dfed3bfa58369016aea245bc11881919ce98e43f516d6af","parent":null,"status":"completed"}}
+{"item":{"body":{"input":{"command":"/bin/bash -lc 'touch roll-approval.txt'","cwd":"/home/replay-user/work"},"kind":"command","name":"commandExecution","title":"touch roll-approval.txt","type":"tool"},"id":"exec-c299c64f-6628-4369-a3a2-1acd88c6c6e8","parent":null,"status":"running"}}
+{"item":{"body":{"input":{"command":"/bin/bash -lc 'touch roll-approval.txt'","cwd":"/home/replay-user/work"},"kind":"command","name":"commandExecution","title":"touch roll-approval.txt","type":"tool"},"id":"exec-c299c64f-6628-4369-a3a2-1acd88c6c6e8","parent":null,"status":"waiting"}}
+{"request":{"body":{"action":"command","command":"/bin/bash -lc 'touch roll-approval.txt'","cwd":"/home/replay-user/work","decisions":["accept","accept_for_session","decline","cancel"],"input":null,"title":"Run `touch roll-approval.txt`","type":"approval"},"id":"0","item":"exec-c299c64f-6628-4369-a3a2-1acd88c6c6e8"}}
+{"item":{"body":{"input":{"command":"/bin/bash -lc 'touch roll-approval.txt'","cwd":"/home/replay-user/work"},"kind":"command","name":"commandExecution","title":"touch roll-approval.txt","type":"tool"},"id":"exec-c299c64f-6628-4369-a3a2-1acd88c6c6e8","parent":null,"status":"running"}}
+{"item":{"body":{"exit_code":0,"input":{"command":"/bin/bash -lc 'touch roll-approval.txt'","cwd":"/home/replay-user/work"},"kind":"command","name":"commandExecution","title":"touch roll-approval.txt","type":"tool"},"id":"exec-c299c64f-6628-4369-a3a2-1acd88c6c6e8","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":0,"input_tokens":16220,"output_tokens":45}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg_065dfed3bfa58369016aea246221b881919e82fd16486d2cc6","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg_065dfed3bfa58369016aea246221b881919e82fd16486d2cc6","text":"done"}}
+{"item":{"body":{"text":"done","type":"message"},"id":"msg_065dfed3bfa58369016aea246221b881919e82fd16486d2cc6","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":16128,"input_tokens":32543,"output_tokens":50}}
+{"turn_ref":"01a1a29d-f53c-7b42-b208-08205dddfc4c"}
+{"turn_ended":"completed"}
+{"exited":null}

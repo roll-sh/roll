@@ -401,13 +401,39 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     ("owner_tokens", "id", "TEXT"),
     ("owner_tokens", "prefix", "TEXT"),
     ("owner_tokens", "last_used_at", "INTEGER"),
+    // Databases from before device logins said which machine asks.
+    ("agent_logins", "hostname", "TEXT"),
+    ("agent_logins", "os", "TEXT"),
+    // Agents databases from before sandboxes.
+    ("agent_machines", "sandbox", "TEXT"),
+    // Agents databases from before work item claims were kept alive.
+    ("agent_links", "claimant", "TEXT"),
+    // Agents databases from before grants named the one ref they push.
+    ("agent_grants", "push_ref", "TEXT"),
+    // Agents databases from before logins were capped per client.
+    ("agent_logins", "client", "TEXT"),
+    // Agents databases from before the mirror's quota.
+    ("agent_machines", "records", "INTEGER NOT NULL DEFAULT 0"),
+    ("agent_machines", "size", "INTEGER NOT NULL DEFAULT 0"),
+    // Sandboxes from before they slept when idle.
+    ("agent_sandboxes", "last_active_at", "INTEGER"),
 ];
 
 impl Db {
     /// Open control.db in `sql`: create what's missing and bring old databases up to date.
     /// Every node of a cluster may do this at once.
     pub fn open(sql: code_sql::Db) -> Result<Db> {
-        for schema in [SCHEMA, crate::review::store::SCHEMA, crate::ai::store::SCHEMA, crate::webhooks::SCHEMA, crate::broken::SCHEMA, crate::mcp::SCHEMA] {
+        for schema in [
+            SCHEMA,
+            crate::review::store::SCHEMA,
+            crate::ai::store::SCHEMA,
+            crate::webhooks::SCHEMA,
+            crate::broken::SCHEMA,
+            crate::mcp::SCHEMA,
+            crate::agents::SCHEMA,
+            crate::agents::share::SCHEMA,
+            crate::agents::sandbox::store::SCHEMA,
+        ] {
             sql.ensure_schema(schema)?;
         }
         for (table, column, decl) in COLUMNS {
@@ -980,6 +1006,18 @@ impl Db {
         Ok(self.sql.query_row("SELECT lease_s FROM work_items WHERE id = ?", [id], |r| r.get(0)).optional()?.flatten())
     }
 
+    /// Renew `claimant`'s lease on a work item to `until`, only while they still hold it (claimed
+    /// by them, lease not run out). One statement, so it never revives or overwrites a claim
+    /// that moved meanwhile. True if renewed.
+    pub fn renew_lease(&self, id: &str, claimant: &str, until: i64) -> Result<bool> {
+        let t = now();
+        let n = self.sql.execute(
+            "UPDATE work_items SET lease_until = ?, updated_at = ? WHERE id = ? AND state = 'claimed' AND claimed_by = ? AND lease_until >= ?",
+            params![until, t, id, claimant, t],
+        )?;
+        Ok(n == 1)
+    }
+
     pub fn set_lease_len(&self, id: &str, lease_s: i64) -> Result<()> {
         self.sql.execute("UPDATE work_items SET lease_s = ? WHERE id = ?", params![lease_s, id])?;
         Ok(())
@@ -1007,6 +1045,27 @@ impl Db {
             params![title, body, draft, now(), id],
         )?;
         Ok(())
+    }
+
+    /// The change does work item `work_id` (as if it had been opened with it): it links the
+    /// change unless it does another one already, and the item moves to `review` if it was open
+    /// or claimed. False when the change does another item.
+    pub fn link_work(&self, change_id: &str, work_id: &str) -> Result<bool> {
+        let t = now();
+        self.write(|c| {
+            let linked = c.execute(
+                "UPDATE changes SET work_item = ?1, updated_at = ?2 WHERE id = ?3 AND (work_item IS NULL OR work_item = ?1)",
+                params![work_id, t, change_id],
+            )?;
+            if linked == 0 {
+                return Ok(false);
+            }
+            c.execute(
+                "UPDATE work_items SET state = 'review', lease_until = NULL, updated_at = ? WHERE id = ? AND state IN ('open', 'claimed')",
+                params![t, work_id],
+            )?;
+            Ok(true)
+        })
     }
 
     /// A writer approved running `head` of an untrusted change.

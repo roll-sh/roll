@@ -1,0 +1,73 @@
+[
+  {
+    "machine": {
+      "id": "mch_fedcba0987654321",
+      "name": "ada-mbp",
+      "online": true,
+      "info": {
+        "hostname": "ada-mbp",
+        "os": "macos",
+        "arch": "aarch64",
+        "version": "0.1.0",
+        "home": "/Users/ada",
+        "providers": [
+          {
+            "id": "claude",
+            "name": "Claude Code",
+            "installed": true,
+            "version": "2.1.310",
+            "auth": "ready",
+            "models": [
+              {
+                "id": "claude-opus-5-5",
+                "name": "Opus 5.5",
+                "default": true,
+                "efforts": [
+                  "low",
+                  "medium",
+                  "high",
+                  "max"
+                ]
+              }
+            ],
+            "capabilities": {
+              "steer": true,
+              "fork": true,
+              "rollback": false,
+              "plan_mode": true,
+              "images": true,
+              "subagents": true,
+              "mode_switch": true
+            }
+          },
+          {
+            "id": "codex",
+            "name": "Codex",
+            "installed": true,
+            "version": "0.164.0",
+            "auth": "missing",
+            "detail": "Run `codex login`",
+            "capabilities": {
+              "steer": true,
+              "fork": true,
+              "rollback": true,
+              "plan_mode": true,
+              "images": true,
+              "subagents": true,
+              "mode_switch": false
+            }
+          }
+        ]
+      },
+      "sandbox": {
+        "backend": "agent37",
+        "size": "2cpu-4gb",
+        "status": "running",
+        "hourly_cents": 3
+      },
+      "created_at": 1762000000000,
+      "last_seen": 1762000000000
+    },
+    "owner": "acme"
+  }
+]

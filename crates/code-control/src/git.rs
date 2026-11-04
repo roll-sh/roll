@@ -85,6 +85,19 @@ fn rejected(name: &str, reason: impl Into<String>) -> RefStatus {
 #[async_trait]
 impl GitBackend for GitAdapter {
     async fn authorize(&self, repo: &str, credentials: Option<&Credentials>, access: Access) -> GitResult<Option<String>> {
+        // An agent machine's grant: its one repo, fetch (and push if it may), as the machine's
+        // agent. Always scoped, even on an open daemon; looked up on every request.
+        if let Some(c) = credentials.filter(|c| c.password.starts_with(crate::agents::GRANT_PREFIX)) {
+            let g = crate::agents::grant(&self.code, &c.password).map_err(internal)?.ok_or(GitError::Unauthorized)?;
+            let r = self.repo(repo)?;
+            if r.id != g.repo_id {
+                return Err(GitError::NotFound(repo.into()));
+            }
+            if access == Access::Write && !g.push {
+                return Err(GitError::Forbidden(format!("this machine's grant for {} only fetches", r.full_name())));
+            }
+            return Ok(Some(format!("agent:{}", g.machine_name)));
+        }
         let caller = self.code.caller(credentials.map(|c| c.password.as_str())).map_err(|_| GitError::Unauthorized)?;
         let r = self.repo(repo)?;
         if !Code::can_read(&caller, &r) {
@@ -163,9 +176,33 @@ impl GitBackend for GitAdapter {
         }
     }
 
-    async fn receive(&self, repo: &str, req: ReceiveRequest) -> GitResult<ReceiveOutcome> {
+    async fn receive(&self, repo: &str, mut req: ReceiveRequest) -> GitResult<ReceiveOutcome> {
         let r = self.repo(repo)?;
         let mut out = ReceiveOutcome::default();
+        // A machine's grant pushes the one ref it names (its thread's branch): create or update,
+        // never a delete, the default branch, another branch or a tag. Looked up again here.
+        if let Some(c) = req.credentials.as_ref().filter(|c| c.password.starts_with(crate::agents::GRANT_PREFIX)) {
+            let g = crate::agents::grant(&self.code, &c.password).map_err(internal)?.ok_or(GitError::Unauthorized)?;
+            if g.repo_id != r.id {
+                return Err(GitError::NotFound(repo.into()));
+            }
+            let allowed = |u: &code_git::RefUpdate| !u.is_delete() && g.push_ref.as_deref() == Some(u.name.as_str());
+            if req.updates.iter().any(|u| !allowed(u)) {
+                let why = match &g.push_ref {
+                    Some(name) => format!("this machine's grant only pushes {name}"),
+                    None => "this machine's grant only fetches".into(),
+                };
+                if req.atomic {
+                    out.refs = req.updates.iter().map(|u| rejected(&u.name, if allowed(u) { "atomic push failed".into() } else { why.clone() })).collect();
+                    return Ok(out);
+                }
+                out.refs.extend(req.updates.iter().filter(|u| !allowed(u)).map(|u| rejected(&u.name, why.clone())));
+                req.updates.retain(|u| allowed(u));
+                if req.updates.is_empty() {
+                    return Ok(out);
+                }
+            }
+        }
         if !req.objects.is_empty() {
             let objects = req.objects.into_iter().map(|o| (kind_to_store(o.kind), o.data)).collect();
             if let Err(e) = self.code.store.import_git(&r.id, objects).await {

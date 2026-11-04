@@ -498,3 +498,332 @@ async fn github_webhook_statuses() {
     assert_eq!(a.send(hook("ping", "d-3", ping, SECRET)).await.status(), OK);
     assert_eq!(a.send(hook("ping", "d-3", ping, SECRET)).await.status(), OK, "a redelivery");
 }
+
+/// The agents routes (`agents/api.rs`, `agents/share.rs`) for every kind of caller. Reads
+/// (machines, state, events, shares) are the owner's tokens' (agents included) and 404 to
+/// everyone else; commands are the owner's tokens' too, 403/401 for others, and an agent's only
+/// drive threads (never terminals, files outside projects, approvals, projects, rollbacks or a
+/// higher mode: agents/policy.rs); managing machines,
+/// looking up and approving logins, and making and revoking shares is the owner's, not its
+/// agents'. Starting and polling a login and reading a share by its link look at no caller; bad
+/// tokens, machine tokens included, are 401 everywhere else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agents_routes_follow_the_auth_matrix() {
+    let w = world().await;
+    let a = &w.a;
+    let (s, m) = a.req("POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "box" })), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED, "{m}");
+    let mid = m["machine"]["id"].as_str().unwrap().to_string();
+    let machine = m["token"].as_str().unwrap().to_string();
+    let base = "/v1/code/agents/acme";
+    let body = json!({ "name": "x", "user_code": "BCDF-GHJK", "id": "c1", "command": { "type": "provider.refresh" } });
+    let reads = [format!("{base}/machines"), format!("{base}/state"), format!("{base}/events"), format!("{base}/shares")];
+    let command = format!("{base}/machines/{mid}/commands");
+    let manages = [
+        ("POST", format!("{base}/machines")),
+        ("PATCH", format!("{base}/machines/{mid}")),
+        ("DELETE", format!("{base}/machines/{mid}")),
+        ("POST", format!("{base}/login/approve")),
+        ("POST", format!("{base}/login/deny")),
+        ("GET", format!("{base}/login/BCDF-GHJK")),
+        ("POST", format!("{base}/threads/thr_x/shares")),
+        ("DELETE", format!("{base}/shares/shr_x")),
+    ];
+    let (acme, agent, other, app_in) = (Some(w.acme.as_str()), Some(w.agent.as_str()), Some(w.other.as_str()), Some(w.app_in.as_str()));
+    let denied = StatusCode::UNAUTHORIZED;
+    for (who, who_token, read, drive) in [
+        ("admin", Some(ADMIN), OK, StatusCode::SERVICE_UNAVAILABLE),
+        ("owner", acme, OK, StatusCode::SERVICE_UNAVAILABLE),
+        ("agent", agent, OK, FORBIDDEN),
+        ("review app", app_in, NOT_FOUND, FORBIDDEN),
+        ("another owner", other, NOT_FOUND, FORBIDDEN),
+        ("anonymous", None, NOT_FOUND, denied),
+    ] {
+        for p in &reads {
+            assert_eq!(call(a, "GET", p, None, who_token).await, read, "{who}: GET {p}");
+        }
+        // The machine isn't connected: allowed callers get its `machine_offline`.
+        assert_eq!(call(a, "POST", &command, Some(&body), who_token).await, drive, "{who}: POST {command}");
+    }
+    // Agents drive threads (here: the machine is offline, so `machine_offline`), but whatever
+    // reaches past a thread's own work, or raises its mode, is the owner's (agents/policy.rs).
+    let cmd = |c: Value| json!({ "id": "c2", "command": c });
+    let agents_drive = [
+        json!({ "type": "thread.create", "project": "prj_1", "provider": "codex", "runtime_mode": "auto_edit" }),
+        json!({ "type": "thread.configure", "thread": "thr_1", "runtime_mode": "ask" }),
+        json!({ "type": "thread.fork", "thread": "thr_1" }),
+        json!({ "type": "thread.archive", "thread": "thr_1" }),
+        json!({ "type": "message.send", "thread": "thr_1", "text": "go" }),
+        json!({ "type": "run.interrupt", "thread": "thr_1" }),
+        json!({ "type": "thread.publish", "thread": "thr_1", "message": "m" }),
+        json!({ "type": "fs.list", "project": "prj_1", "path": "" }),
+        json!({ "type": "diff.get", "thread": "thr_1" }),
+    ];
+    let owners_only = [
+        json!({ "type": "thread.create", "project": "prj_1", "provider": "codex" }),
+        json!({ "type": "thread.configure", "thread": "thr_1", "runtime_mode": "full_access" }),
+        json!({ "type": "thread.delete", "thread": "thr_1" }),
+        json!({ "type": "terminal.open", "command": "curl https://example.com/x | sh", "cols": 80, "rows": 24 }),
+        json!({ "type": "terminal.scrollback", "terminal": "trm_1" }),
+        json!({ "type": "fs.list", "path": "/" }),
+        json!({ "type": "request.respond", "request": "req_1", "response": { "type": "decision", "decision": "accept_for_session" } }),
+        json!({ "type": "project.add", "path": "/" }),
+        json!({ "type": "project.remove", "project": "prj_1" }),
+        json!({ "type": "provider.refresh" }),
+        json!({ "type": "checkpoint.rollback", "thread": "thr_1", "checkpoint": "chk_1" }),
+    ];
+    for c in agents_drive {
+        for who_token in [acme, agent] {
+            assert_eq!(call(a, "POST", &command, Some(&cmd(c.clone())), who_token).await, StatusCode::SERVICE_UNAVAILABLE, "{who_token:?}: {c}");
+        }
+    }
+    for c in owners_only {
+        assert_eq!(call(a, "POST", &command, Some(&cmd(c.clone())), acme).await, StatusCode::SERVICE_UNAVAILABLE, "owner: {c}");
+        assert_eq!(call(a, "POST", &command, Some(&cmd(c.clone())), agent).await, FORBIDDEN, "agent: {c}");
+    }
+    let projects = format!("{base}/machines/{mid}/projects");
+    assert_eq!(call(a, "POST", &projects, Some(&json!({ "id": "p1", "repo": { "name": "fresh" } })), agent).await, FORBIDDEN, "agent: POST {projects}");
+    for (who, who_token, want) in [("agent", agent, FORBIDDEN), ("review app", app_in, FORBIDDEN), ("another owner", other, FORBIDDEN), ("anonymous", None, denied)] {
+        for (m, p) in &manages {
+            assert_eq!(call(a, m, p, Some(&body), who_token).await, want, "{who}: {m} {p}");
+        }
+    }
+    for bad in ["rlc_0000", "rla_0000", "hunter2", w.revoked.as_str(), machine.as_str()] {
+        let all = reads.iter().map(|p| ("GET", p.clone())).chain([("POST", command.clone())]).chain(manages.iter().cloned());
+        for (m, p) in all {
+            assert_eq!(call(a, m, &p, Some(&body), Some(bad)).await, denied, "{bad}: {m} {p}");
+        }
+        assert_eq!(call(a, "POST", "/v1/code/agents/login", None, Some(bad)).await, OK);
+        assert_eq!(call(a, "POST", "/v1/code/agents/login/poll", Some(&json!({ "device_code": "rld_x" })), Some(bad)).await, OK);
+        assert_eq!(call(a, "GET", "/v1/code/agents/shares/shr_x", None, Some(bad)).await, NOT_FOUND);
+    }
+    for who_token in [Some(ADMIN), acme, agent, other, app_in, None] {
+        assert_eq!(call(a, "GET", "/v1/code/agents/shares/shr_x", None, who_token).await, NOT_FOUND, "{who_token:?}");
+    }
+    // The owner manages (an unknown login code, thread or share is a 404 after the check).
+    for (m, p) in &manages {
+        let want = match (*m, p.as_str()) {
+            ("POST", p) if p.ends_with("/machines") => StatusCode::CREATED,
+            ("PATCH", _) => OK,
+            ("DELETE", p) if p.contains("/machines/") => StatusCode::NO_CONTENT,
+            _ => NOT_FOUND,
+        };
+        assert_eq!(call(a, m, p, Some(&body), acme).await, want, "owner: {m} {p}");
+    }
+    // The link: only machine tokens (without an upgrade, the token's machine).
+    assert_eq!(call(a, "GET", "/v1/code/agents/connect", None, Some(&machine)).await, denied, "revoked by the owner above");
+    assert_eq!(call(a, "GET", "/v1/code/agents/connect", None, acme).await, denied);
+    assert_eq!(call(a, "GET", "/v1/code/agents/connect", None, None).await, denied);
+    for who_token in [Some(ADMIN), acme, agent, other, None] {
+        assert_eq!(call(a, "DELETE", "/v1/code/agents/connect", None, who_token).await, denied, "{who_token:?}");
+    }
+}
+
+/// The sandbox routes (`agents/sandbox/api.rs`): all of them are the owner's (Code::manages), not
+/// its agents'; 401 for anonymous callers and bad tokens (machine tokens too), 403 for everyone
+/// else. Here no backend is set up: creating is a 503 and an unknown sandbox a 404, after the check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sandbox_routes_follow_the_auth_matrix() {
+    let w = world().await;
+    let a = &w.a;
+    let (s, m) = a.req("POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "box" })), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED, "{m}");
+    let machine = m["token"].as_str().unwrap().to_string();
+    let base = "/v1/code/agents/acme/sandboxes";
+    let routes = [
+        ("GET", base.to_string(), OK),
+        ("GET", format!("{base}/usage"), OK),
+        ("POST", base.to_string(), StatusCode::SERVICE_UNAVAILABLE),
+        ("POST", format!("{base}/sbx_nope/start"), NOT_FOUND),
+        ("POST", format!("{base}/sbx_nope/stop"), NOT_FOUND),
+        ("DELETE", format!("{base}/sbx_nope"), NOT_FOUND),
+    ];
+    let body = json!({ "name": "s" });
+    for (who, token) in [("admin", Some(ADMIN)), ("owner", Some(w.acme.as_str()))] {
+        for (m, p, want) in &routes {
+            assert_eq!(call(a, m, p, Some(&body), token).await, *want, "{who}: {m} {p}");
+        }
+    }
+    let denied = StatusCode::UNAUTHORIZED;
+    for (who, token, want) in [
+        ("agent", Some(w.agent.as_str()), FORBIDDEN),
+        ("review app", Some(w.app_in.as_str()), FORBIDDEN),
+        ("another owner", Some(w.other.as_str()), FORBIDDEN),
+        ("anonymous", None, denied),
+        ("revoked", Some(w.revoked.as_str()), denied),
+        ("machine", Some(machine.as_str()), denied),
+        ("garbage", Some("hunter2"), denied),
+    ] {
+        for (m, p, _) in &routes {
+            assert_eq!(call(a, m, p, Some(&body), token).await, want, "{who}: {m} {p}");
+        }
+    }
+}
+
+/// A command to a connected test daemon, answered `ok`: the grant it came with.
+async fn granted(a: &App, d: &mut common::daemon::Daemon, mid: &str, command: Value, token: &str) -> Option<agent_proto::CodeGrant> {
+    use tower::ServiceExt;
+    let router = a.router.clone();
+    let req = Request::post(format!("/v1/code/agents/acme/machines/{mid}/commands"))
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(json!({ "id": format!("c-{}", rand::random::<u64>()), "command": command }).to_string()))
+        .unwrap();
+    let sent = tokio::spawn(async move { router.oneshot(req).await.unwrap().status() });
+    let Some(agent_proto::RelayFrame::Command { id, grant, .. }) = d.recv().await else { panic!("expected a command") };
+    d.send(&agent_proto::DaemonFrame::Reply { id, result: agent_proto::Reply::Ok }).await;
+    assert_eq!(sent.await.unwrap(), OK);
+    grant.map(|g| *g)
+}
+
+fn command_path(mid: &str) -> String {
+    format!("/v1/code/agents/acme/machines/{mid}/commands")
+}
+
+/// `GET /git/acme/{repo}.git/info/refs?service=…` with a bearer token: git's first request.
+async fn git_refs(a: &App, repo: &str, service: &str, token: &str) -> StatusCode {
+    let req = Request::get(format!("/git/acme/{repo}.git/info/refs?service={service}")).header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap();
+    a.send(req).await.status()
+}
+
+/// A machine's grant (minted by the relay for one command) opens git for its one repo, pushes
+/// only when the command's sender may write and then only the thread's own branch, never opens the API, and ends when it expires or
+/// the machine is revoked. The routes that start repos and give threads work are the commands'.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_grants_follow_the_auth_matrix() {
+    use agent_proto::{Entity, RepoRef, Stamped};
+    let w = world().await;
+    let a = &w.a;
+    let url = a.serve().await;
+    let (s, m) = a.req("POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "box" })), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED, "{m}");
+    let (mid, machine) = (m["machine"]["id"].as_str().unwrap().to_string(), m["token"].as_str().unwrap().to_string());
+    let (mut d, _) = common::daemon::Daemon::connect(&url, &machine).await;
+    // The daemon's records: a project that is a checkout of acme/priv, and a thread in it.
+    let project: Entity = serde_json::from_value(json!({
+        "kind": "project", "id": "prj_1", "name": "priv", "path": "/src/priv", "repo": { "owner": "acme", "repo": "priv" }, "created_at": 1, "updated_at": 1
+    }))
+    .unwrap();
+    let thread: Entity = serde_json::from_value(json!({
+        "kind": "thread", "id": "thr_1", "project": "prj_1", "title": "t", "provider": "codex", "model": null, "runtime_mode": "full_access",
+        "interaction_mode": "default", "cwd": "/src/priv-t", "worktree": { "path": "/src/priv-t", "branch": "roll/t", "base": "abc" },
+        "status": "idle", "run_count": 0, "pending_requests": 0, "created_at": 1, "updated_at": 1
+    }))
+    .unwrap();
+    // Threads that can't be published as a branch of their own: no worktree, or on main.
+    let mut on_main = thread.clone();
+    let mut no_worktree = thread.clone();
+    if let (Entity::Thread(m), Entity::Thread(n)) = (&mut on_main, &mut no_worktree) {
+        (m.id, n.id) = (agent_proto::ThreadId("thr_main".into()), agent_proto::ThreadId("thr_here".into()));
+        m.worktree.as_mut().unwrap().branch = "main".into();
+        n.worktree = None;
+    }
+    d.upsert(vec![Stamped { seq: 1, entity: project }, Stamped { seq: 2, entity: thread }, Stamped { seq: 3, entity: on_main }, Stamped { seq: 4, entity: no_worktree }]).await;
+    let publish = json!({ "type": "thread.publish", "thread": "thr_1", "message": "m" });
+
+    // Publishing, by the owner or its agent: a grant that pushes to acme/priv and nothing else.
+    let mut push = String::new();
+    for who in [&w.acme, &w.agent] {
+        let g = granted(a, &mut d, &mid, publish.clone(), who).await.expect("a grant");
+        assert!(g.write && g.token.starts_with("rlg_") && g.url.ends_with("/acme/priv.git"), "{g:?}");
+        assert_eq!(g.repo, RepoRef { owner: "acme".into(), repo: "priv".into() });
+        assert_eq!(git_refs(a, "priv", "git-upload-pack", &g.token).await, OK);
+        assert_eq!(git_refs(a, "priv", "git-receive-pack", &g.token).await, OK);
+        assert_eq!(git_refs(a, "pub", "git-upload-pack", &g.token).await, NOT_FOUND);
+        for p in ["/v1/code/repos/acme/priv", "/v1/code/agents/acme/state", "/v1/code/repos/acme/priv/changes"] {
+            assert_eq!(call(a, "GET", p, None, Some(&g.token)).await, UNAUTHORIZED, "{p}");
+        }
+        push = g.token;
+    }
+    // A publish grant pushes the thread's branch and nothing else: not main, another branch or a
+    // tag, never a delete, and an atomic push with any of those pushes nothing.
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let remote = format!("{url}/git/acme/priv.git");
+    let header = format!("http.extraHeader=Authorization: Bearer {push}");
+    let with_grant = |args: &[&str]| {
+        let mut all = vec!["-c", header.as_str()];
+        all.extend_from_slice(args);
+        common::git_raw(home.path(), work.path(), &all)
+    };
+    assert!(with_grant(&["clone", "-q", &remote, "."]).status.success());
+    let main_before = common::git(home.path(), work.path(), &["rev-parse", "origin/main"]);
+    common::write(work.path(), "agent.txt", "work\n");
+    common::git(home.path(), work.path(), &["add", "-A"]);
+    common::git(home.path(), work.path(), &["commit", "-q", "-m", "agent work"]);
+    for refspec in ["HEAD:refs/heads/main", "HEAD:refs/heads/elsewhere", "HEAD:refs/tags/v9"] {
+        let out = with_grant(&["push", &remote, refspec]);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success() && err.contains("only pushes refs/heads/roll/t"), "{refspec}: {err}");
+    }
+    let out = with_grant(&["push", "--atomic", &remote, "HEAD:refs/heads/roll/t", "HEAD:refs/heads/main"]);
+    assert!(!out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = with_grant(&["push", &remote, "HEAD:refs/heads/roll/t"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = with_grant(&["push", &remote, ":refs/heads/roll/t"]);
+    assert!(!out.status.success(), "a delete: {}", String::from_utf8_lossy(&out.stderr));
+    let refs = String::from_utf8(with_grant(&["ls-remote", &remote]).stdout).unwrap();
+    assert!(refs.contains("refs/heads/roll/t") && !refs.contains("elsewhere") && !refs.contains("refs/tags/v9"), "{refs}");
+    assert!(refs.lines().any(|l| l == format!("{}\trefs/heads/main", main_before.trim())), "main moved: {refs}");
+    for thread in ["thr_main", "thr_here"] {
+        let body = json!({ "id": format!("c-{thread}"), "command": { "type": "thread.publish", "thread": thread, "message": "m" } });
+        let want = if thread == "thr_main" { StatusCode::BAD_REQUEST } else { StatusCode::OK };
+        if want == StatusCode::OK {
+            assert!(granted(a, &mut d, &mid, body["command"].clone(), &w.acme).await.is_none(), "no worktree: no grant");
+        } else {
+            assert_eq!(call(a, "POST", &command_path(&mid), Some(&body), Some(&w.acme)).await, want, "{thread}");
+        }
+    }
+
+    // Cloning: fetch only.
+    let clone = json!({ "type": "project.add", "path": "", "clone": { "owner": "acme", "repo": "pub" } });
+    let g = granted(a, &mut d, &mid, clone, &w.acme).await.expect("a grant");
+    assert!(!g.write);
+    assert_eq!(git_refs(a, "pub", "git-upload-pack", &g.token).await, OK);
+    assert_eq!(git_refs(a, "pub", "git-receive-pack", &g.token).await, FORBIDDEN);
+    // Commands that touch no repo get none.
+    assert!(granted(a, &mut d, &mid, json!({ "type": "provider.refresh" }), &w.acme).await.is_none());
+    // Only the machine owner's own repos, and ones that exist.
+    let (s, v) = a.req("POST", "/v1/code/repos", Some(json!({ "owner": "other", "name": "theirs" })), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let command = command_path(&mid);
+    for (repo, want) in [("other/theirs", StatusCode::BAD_REQUEST), ("acme/nope", NOT_FOUND)] {
+        let (owner, name) = repo.split_once('/').unwrap();
+        let body = json!({ "id": "c-refused", "command": { "type": "project.add", "path": "", "clone": { "owner": owner, "repo": name } } });
+        assert_eq!(call(a, "POST", &command, Some(&body), Some(&w.acme)).await, want, "{repo}");
+    }
+    // An expired grant, and tokens that look like one.
+    let priv_id = a.req("GET", "/v1/code/repos/acme/priv", None, Some(ADMIN)).await.1["id"].as_str().unwrap().to_string();
+    let expired = "rlg_0000000000000000000000000000000000000000000000ff";
+    let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(expired.as_bytes()));
+    code_control::agents::store::insert_grant(a.code.db.sql(), &hash, &mid, &priv_id, Some("refs/heads/roll/t"), 1).unwrap();
+    for t in [expired, "rlg_nope"] {
+        assert_eq!(git_refs(a, "priv", "git-upload-pack", t).await, UNAUTHORIZED, "{t}");
+    }
+
+    // Starting a repo on a machine and giving a thread work: who may drive the agents.
+    let base = "/v1/code/agents/acme";
+    let projects = format!("{base}/machines/{mid}/projects");
+    let work = format!("{base}/threads/thr_1/work");
+    let (start, take) = (json!({ "id": "p1", "repo": { "name": "fresh" } }), json!({ "work": w.ids["priv.work"] }));
+    for (who, token, want) in [
+        ("review app", Some(w.app_in.as_str()), FORBIDDEN),
+        ("another owner", Some(w.other.as_str()), FORBIDDEN),
+        ("anonymous", None, UNAUTHORIZED),
+        ("revoked", Some(w.revoked.as_str()), UNAUTHORIZED),
+        ("a grant", Some(push.as_str()), UNAUTHORIZED),
+    ] {
+        assert_eq!(call(a, "POST", &projects, Some(&start), token).await, want, "{who}: POST {projects}");
+        assert_eq!(call(a, "POST", &work, Some(&take), token).await, want, "{who}: POST {work}");
+        assert_eq!(call(a, "DELETE", &work, None, token).await, want, "{who}: DELETE {work}");
+    }
+    assert_eq!(call(a, "POST", &work, Some(&take), Some(&w.acme)).await, OK);
+    assert_eq!(call(a, "DELETE", &work, None, Some(&w.agent)).await, StatusCode::NO_CONTENT);
+    assert_eq!(call(a, "POST", &format!("{base}/threads/thr_nope/work"), Some(&take), Some(&w.acme)).await, NOT_FOUND);
+    assert_eq!(call(a, "POST", &format!("{base}/machines/mch_nope/projects"), Some(&start), Some(&w.acme)).await, NOT_FOUND);
+    assert_eq!(call(a, "POST", &projects, Some(&json!({ "id": "p2" })), Some(&w.acme)).await, StatusCode::BAD_REQUEST);
+
+    // Revoking the machine ends its grants at once.
+    assert_eq!(call(a, "DELETE", &format!("{base}/machines/{mid}"), None, Some(ADMIN)).await, StatusCode::NO_CONTENT);
+    assert_eq!(git_refs(a, "priv", "git-upload-pack", &push).await, UNAUTHORIZED);
+}

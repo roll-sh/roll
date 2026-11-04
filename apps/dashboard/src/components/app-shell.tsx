@@ -25,6 +25,7 @@ import {
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Suspense, useEffect, useState, type ReactNode } from "react";
+import { AgentsControl } from "./agents/agents-control";
 import { AskPanel } from "./ask";
 import { useMarkState } from "./mark-state";
 
@@ -46,8 +47,12 @@ const nav = [
   { label: "Settings", icon: Settings },
 ];
 
-/** Sidebar, top bar and the ⌘K "Ask roll" palette shared by every dashboard page. */
-export function AppShell({ crumb, actions, children }: { crumb: ReactNode; actions?: ReactNode; children: ReactNode }) {
+/**
+ * Sidebar, top bar and the ⌘K "Ask roll" palette shared by every dashboard page. The top bar
+ * holds the agents (running, waiting, "New agent"; ⌘J opens them over the page). `bleed` gives
+ * the page the whole area under the top bar instead of the centred column.
+ */
+export function AppShell({ crumb, actions, bleed = false, children }: { crumb: ReactNode; actions?: ReactNode; bleed?: boolean; children: ReactNode }) {
   const { state } = useMarkState();
   const [paletteOpen, setPaletteOpen] = useState(false);
 
@@ -65,7 +70,7 @@ export function AppShell({ crumb, actions, children }: { crumb: ReactNode; actio
 
   return (
     <LucideProvider strokeWidth={1.5}>
-      <div className="flex min-h-svh">
+      <div className={`flex ${bleed ? "h-svh overflow-hidden" : "min-h-svh"}`}>
         <aside className="sticky top-0 hidden h-svh w-60 shrink-0 flex-col border-r border-line bg-panel px-3 py-4 md:flex">
           <Link href="/" className="px-2 py-1" aria-label="roll home">
             <RollLogo state={state} size={19} />
@@ -91,16 +96,21 @@ export function AppShell({ crumb, actions, children }: { crumb: ReactNode; actio
             </span>
             <button
               onClick={() => setPaletteOpen(true)}
-              className="ml-auto flex w-full max-w-xs items-center gap-2 rounded-lg border border-line bg-panel px-3 py-1.5 text-[13px] text-subtle hover:border-line-2"
+              className="ml-auto flex w-full max-w-xs min-w-0 items-center gap-2 rounded-lg border border-line bg-panel px-3 py-1.5 text-[13px] text-subtle hover:border-line-2"
             >
-              <Search className="size-3.5" />
-              <span className="flex-1 text-left">Ask roll…</span>
-              <kbd className="rounded border border-line px-1.5 font-mono text-[10px]">⌘K</kbd>
+              <Search className="size-3.5 shrink-0" />
+              <span className="flex-1 truncate text-left">Ask roll…</span>
+              <kbd className="rounded border border-line px-1.5 font-mono text-[10px] max-sm:hidden">⌘K</kbd>
             </button>
+            <AgentsControl />
             {actions}
           </header>
 
-          <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8">{children}</main>
+          {bleed ? (
+            <main className="relative min-h-0 flex-1">{children}</main>
+          ) : (
+            <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8">{children}</main>
+          )}
         </div>
 
         {paletteOpen && (

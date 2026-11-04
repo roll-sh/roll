@@ -1,0 +1,43 @@
+[package]
+name = "agent-host"
+description = "roll code agents: the daemon behind `roll agent up` (orchestrator, providers, worktrees, checkpoints, terminals, relay link)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+agent-proto.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+base64.workspace = true
+diffy.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+libc.workspace = true
+rand.workspace = true
+rusqlite.workspace = true
+rustls-native-certs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
+toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+code-control.workspace = true
+parking_lot.workspace = true
+pg-storage.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
+tower.workspace = true
+
+# Its own fake `claude` (see the file): it runs its tests from `main`.
+[[test]]
+name = "claude"
+harness = false

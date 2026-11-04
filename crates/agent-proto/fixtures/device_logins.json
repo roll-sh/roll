@@ -1,0 +1,9 @@
+[
+  {
+    "device_code": "dc_0123456789abcdef0123456789abcdef",
+    "user_code": "WXYZ-2345",
+    "verification_uri": "https://roll.sh/dashboard/agents/connect?code=WXYZ-2345",
+    "interval": 2,
+    "expires_in": 600
+  }
+]

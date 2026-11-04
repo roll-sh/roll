@@ -4,7 +4,7 @@
 /// app's own routes. Mirrors `apps/dashboard/src/lib/reserved-names.ts`; change both together.
 pub const RESERVED: &[&str] = &[
     // Routes and files in apps/dashboard/src/app.
-    "dashboard", "icon.svg", "favicon.ico", "_next",
+    "dashboard", "icon.svg", "favicon.ico", "_next", "install.sh",
     // Next.js and web conventions.
     "api", "robots.txt", "sitemap.xml", "manifest.json", "manifest.webmanifest", ".well-known", "opengraph-image",
     "twitter-image", "apple-icon", "static", "assets", "public",
@@ -19,7 +19,7 @@ pub const RESERVED: &[&str] = &[
     "trending", "gist", "gists", "sponsors",
     // Products and dashboard sections.
     "databases", "postgres", "redis", "queues", "tasks", "streams", "kafka", "functions", "deployments", "edge", "logs",
-    "observability", "previews",
+    "observability", "previews", "agents", "shares",
     // roll itself.
     "roll", "rollsh", "roll-sh", "www", "mail", "app", "apps", "cdn", "v1", "health", "root", "system",
 ];

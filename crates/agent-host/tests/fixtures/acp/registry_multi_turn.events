@@ -1,0 +1,13 @@
+{"native_thread":"grok-replay-session-1"}
+{"model":"grok-build"}
+{"item":{"body":{"text":"","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:1:1","text":"first fixture turn complete"}}
+{"item":{"body":{"text":"first fixture turn complete","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"item":{"body":{"text":"first fixture turn complete","type":"message"},"id":"msg:1:1","parent":null,"status":"completed"}}
+{"turn_ended":"completed"}
+{"item":{"body":{"text":"","type":"message"},"id":"msg:2:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:2:1","text":"second fixture turn complete"}}
+{"item":{"body":{"text":"second fixture turn complete","type":"message"},"id":"msg:2:1","parent":null,"status":"running"}}
+{"item":{"body":{"text":"second fixture turn complete","type":"message"},"id":"msg:2:1","parent":null,"status":"completed"}}
+{"turn_ended":"completed"}
+{"exited":null}

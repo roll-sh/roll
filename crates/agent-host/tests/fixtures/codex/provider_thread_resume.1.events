@@ -1,0 +1,15 @@
+{"native_thread":"01a0d5ef-62bd-7c20-861b-0528ff7d86bd"}
+{"model":"gpt-6-luna"}
+{"item":{"body":{"text":"","type":"message"},"id":"msg_0b6c69e800b2ec4c016ab5be52efd887d092b6695452f82b22","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be52efd887d092b6695452f82b22","text":"provider"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be52efd887d092b6695452f82b22","text":" thread"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be52efd887d092b6695452f82b22","text":" resume"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be52efd887d092b6695452f82b22","text":" fixture"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be52efd887d092b6695452f82b22","text":" first"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be52efd887d092b6695452f82b22","text":" turn"}}
+{"text_delta":{"item":"msg_0b6c69e800b2ec4c016ab5be52efd887d092b6695452f82b22","text":" complete"}}
+{"item":{"body":{"text":"provider thread resume fixture first turn complete","type":"message"},"id":"msg_0b6c69e800b2ec4c016ab5be52efd887d092b6695452f82b22","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":21248,"input_tokens":21421,"output_tokens":11}}
+{"turn_ref":"01a0d5ef-637e-7ba2-bf9a-5534a6f98a83"}
+{"turn_ended":"completed"}
+{"exited":null}

@@ -93,7 +93,7 @@ impl Code {
     }
 }
 
-fn too_many(msg: &str) -> Box<Response> {
+pub(crate) fn too_many(msg: &str) -> Box<Response> {
     let mut r = (StatusCode::TOO_MANY_REQUESTS, Json(json!({ "error": msg }))).into_response();
     r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
     Box::new(r)

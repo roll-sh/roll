@@ -67,7 +67,7 @@ fn every_route_tool_and_event_has_tests_in_the_map() {
     let mut missing = Vec::new();
 
     let mut all = BTreeSet::new();
-    for f in ["crates/code-control/src/api.rs", "crates/code-control/src/review/api.rs", "crates/code-control/src/ai/api.rs", "crates/code-control/src/mcp.rs", "crates/code-git/src/server.rs"] {
+    for f in ["crates/code-control/src/api.rs", "crates/code-control/src/review/api.rs", "crates/code-control/src/ai/api.rs", "crates/code-control/src/agents/api.rs", "crates/code-control/src/agents/sandbox/api.rs", "crates/code-control/src/mcp.rs", "crates/code-git/src/server.rs"] {
         all.extend(routes(&read(f)));
     }
     assert!(all.len() > 100, "found only {} routes: is the parser still right?", all.len());
@@ -78,7 +78,7 @@ fn every_route_tool_and_event_has_tests_in_the_map() {
         }
     }
     let tools: Vec<String> = code_control::mcp::tools().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-    assert_eq!(tools.len(), 22);
+    assert_eq!(tools.len(), 31);
     for t in &tools {
         if !has_row(&rows, t) {
             missing.push(format!("MCP tool {t}"));

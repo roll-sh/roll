@@ -1350,3 +1350,108 @@ async fn health_follows_each_node() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
+
+type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// A daemon's link through `base`: hello, then the welcome's `resume_from`. `None` while the
+/// owner's agents are between nodes (the upgrade answers 503) or the link closes at once.
+async fn agent_link(base: &str, bearer: &str) -> Option<(Ws, u64)> {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+    let mut req = format!("{}/v1/code/agents/connect", base.replace("http://", "ws://")).into_client_request().unwrap();
+    req.headers_mut().insert("authorization", format!("Bearer {bearer}").parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.ok()?;
+    let hello = agent_proto::DaemonFrame::Hello {
+        protocol: agent_proto::PROTOCOL,
+        info: agent_proto::MachineInfo { hostname: "box".into(), os: "linux".into(), arch: "x86_64".into(), version: "0".into(), home: "/".into(), providers: vec![] },
+    };
+    ws.send(Message::text(serde_json::to_string(&hello).unwrap())).await.ok()?;
+    match ws.next().await? {
+        Ok(Message::Text(t)) => match serde_json::from_str(t.as_str()).ok()? {
+            agent_proto::RelayFrame::Welcome { resume_from, .. } => Some((ws, resume_from)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The next frame of a link that isn't a ping: a relay frame, or the close code.
+async fn agent_recv(ws: &mut Ws) -> Result<agent_proto::RelayFrame, Option<u16>> {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+    loop {
+        match tokio::time::timeout(Duration::from_secs(20), ws.next()).await.expect("a frame within 20 s") {
+            Some(Ok(Message::Text(t))) => match serde_json::from_str(t.as_str()).unwrap() {
+                agent_proto::RelayFrame::Ping => continue,
+                f => return Ok(f),
+            },
+            Some(Ok(Message::Close(c))) => return Err(c.map(|c| u16::from(c.code))),
+            Some(Ok(_)) => continue,
+            _ => return Err(None),
+        }
+    }
+}
+
+/// An owner's agents run on the node holding `agents:<owner id>` (docs/code/cluster.md): a
+/// machine's link through any node lands there, commands and event streams through every other
+/// node reach it, and when the lease moves the link is told to reconnect (1012) and lands on the
+/// new holder, resuming where the mirror is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn an_owners_agents_follow_their_lease() {
+    use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+    let net = net("agents", 3).await;
+    net.ok(0, "POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" }))).await;
+    let m = net.ok(1, "POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "box" }))).await;
+    let (mid, minted) = (m["machine"]["id"].as_str().unwrap().to_string(), m["token"].as_str().unwrap().to_string());
+    let key = format!("agents:{}", net.nodes[0].code.owner_or_404("acme").unwrap().id);
+    let o = net.owner(&key).expect("adding the machine took the lease");
+    let (p, q) = ((o + 1) % 3, (o + 2) % 3);
+
+    let (mut ws, from) = agent_link(&net.nodes[p].url, &minted).await.expect("connected through another node");
+    assert_eq!(from, 0);
+    until("the link is on the holder", Duration::from_secs(10), || net.nodes[o].code.agents.online(&mid)).await;
+    assert!(!net.nodes[p].code.agents.online(&mid) && !net.nodes[q].code.agents.online(&mid));
+
+    let mut events = net.http.get(format!("{}/v1/code/agents/acme/events", net.nodes[q].url)).send().await.unwrap();
+    assert_eq!(events.status().as_u16(), 200);
+    let project = json!({ "kind": "project", "id": "prj_1", "name": "x", "path": "/x", "created_at": 1, "updated_at": 1 });
+    let batch = json!({ "type": "entities", "items": [{ "seq": 1, "entity": project }] });
+    ws.send(Message::text(batch.to_string())).await.unwrap();
+    assert_eq!(agent_recv(&mut ws).await, Ok(agent_proto::RelayFrame::Ack { seq: 1 }));
+    let mut seen = String::new();
+    while !seen.contains("prj_1") {
+        let chunk = tokio::time::timeout(Duration::from_secs(10), events.chunk()).await.expect("an event").unwrap().expect("open");
+        seen.push_str(&String::from_utf8_lossy(&chunk));
+    }
+
+    // A command through the third node reaches the daemon and its reply comes back.
+    let cmd = json!({ "id": "c1", "command": { "type": "provider.refresh" } });
+    let (http, url, path) = (net.http.clone(), net.nodes[q].url.clone(), format!("/v1/code/agents/acme/machines/{mid}/commands"));
+    let sent = tokio::spawn(async move { req(&http, &url, "POST", &path, Some(cmd)).await });
+    match agent_recv(&mut ws).await {
+        Ok(agent_proto::RelayFrame::Command { id, .. }) => {
+            let reply = agent_proto::DaemonFrame::Reply { id, result: agent_proto::Reply::Ok };
+            ws.send(Message::text(serde_json::to_string(&reply).unwrap())).await.unwrap();
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(sent.await.unwrap(), (StatusCode::OK, json!({ "type": "ok" })));
+
+    // The lease moves: the link is told to reconnect, and comes back on whoever holds it next.
+    assert!(net.nodes[o].cluster().handoff(&key));
+    assert_eq!(agent_recv(&mut ws).await, Err(Some(1012)));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (_ws, from) = loop {
+        if let Some(l) = agent_link(&net.nodes[p].url, &minted).await {
+            break l;
+        }
+        assert!(Instant::now() < deadline, "never reconnected");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(from, 1, "resumes after what the mirror holds");
+    let n = net.owner(&key).expect("someone holds it again");
+    assert!(net.nodes[n].code.agents.online(&mid));
+    let (_, list) = net.req(q, "GET", "/v1/code/agents/acme/machines", None).await;
+    assert_eq!(list[0]["online"], true, "{list}");
+}

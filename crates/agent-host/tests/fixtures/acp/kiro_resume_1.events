@@ -1,0 +1,10 @@
+{"native_thread":"sess_00000000-0000-4000-8000-000000000001"}
+{"model":"claude-haiku-4.5"}
+{"item":{"body":{"text":"","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:1:1","text":"provider"}}
+{"item":{"body":{"text":"provider","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:1:1","text":" thread resume fixture first turn complete"}}
+{"item":{"body":{"text":"provider thread resume fixture first turn complete","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"item":{"body":{"text":"provider thread resume fixture first turn complete","type":"message"},"id":"msg:1:1","parent":null,"status":"completed"}}
+{"turn_ended":"completed"}
+{"exited":null}

@@ -1,0 +1,19 @@
+[
+  {
+    "type": "text",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "node": "nod_0000000000000001",
+    "text": "Looking"
+  },
+  {
+    "type": "output",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "node": "nod_0000000000000007",
+    "text": "test result: ok\n"
+  },
+  {
+    "type": "terminal",
+    "terminal": "trm_7777777777777777",
+    "data": "G1szMm0="
+  }
+]

@@ -146,6 +146,8 @@ code-control = { path = "crates/code-control" }
 code-preview = { path = "crates/code-preview" }
 code-index = { path = "crates/code-index" }
 code-review = { path = "crates/code-review" }
+agent-proto = { path = "crates/agent-proto" }
+agent-host = { path = "crates/agent-host" }
 aes-gcm = "0.10"
 toml = "1"
 http-body-util = "0.1"

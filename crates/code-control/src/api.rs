@@ -146,6 +146,7 @@ pub fn router(code: Arc<Code>) -> Router {
         .route("/v1/code/github/setup", get(github_setup))
         .merge(crate::review::api::routes())
         .merge(crate::ai::api::routes())
+        .merge(crate::agents::api::routes())
         // Writes carry file contents (base64 for binary): room for a file of MAX_WRITE_FILE.
         // The webhook route sets its own limit.
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY))
@@ -158,6 +159,10 @@ pub fn router(code: Arc<Code>) -> Router {
     if code.cluster().is_some() {
         all = all.layer(axum::middleware::from_fn_with_state(code.clone(), crate::cluster::route));
     }
+    // The agents relay calls the rest of the API on a caller's behalf, like MCP tools. It's a
+    // request extension on the outer router, so `all` itself never holds it (no cycle).
+    let calls = crate::agents::ApiRouter(all.clone());
+    let all = all.layer(axum::Extension(calls));
     // MCP tools call the rest of the API on the caller's behalf (so they're routed the same way).
     let mcp = crate::mcp::routes(code.clone(), all.clone()).layer(axum::extract::DefaultBodyLimit::max(MAX_BODY));
     let health = Router::new().route("/v1/code/health", get(health)).layer(cors()).with_state(code.clone());
@@ -789,13 +794,7 @@ async fn audit(State(code): S, caller: Caller, Path((owner, repo)): Path<(String
 
 async fn events(State(code): S, caller: Caller, parts: Parts, Path((owner, repo)): Path<(String, String)>) -> Result<Response> {
     let r = code.readable(&caller, &owner, &repo)?;
-    // A stream forwarded by another node counts against the client that node saw (verified).
-    let peer = match parts.extensions.get::<code_cluster::Forwarded>() {
-        Some(f) => f.client.as_deref().and_then(|c| c.parse::<std::net::IpAddr>().ok()).map(|ip| std::net::SocketAddr::new(ip, 0)),
-        None => parts.extensions.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0),
-    };
-    let key = crate::streams::key(&caller, token(&parts).as_deref(), &parts.headers, peer, code.config.trust_forwarded_for);
-    let permit = match code.stream_permit(key) {
+    let permit = match code.stream_permit(stream_key(&code, &caller, &parts)) {
         Ok(p) => p,
         Err(resp) => return Ok(*resp),
     };
@@ -847,6 +846,16 @@ impl Code {
             "count": l.count,
         })
     }
+}
+
+/// Who an event stream counts against ([`crate::streams::key`]). A stream forwarded by another
+/// node counts against the client that node saw (verified).
+pub(crate) fn stream_key(code: &Code, caller: &Caller, parts: &Parts) -> String {
+    let peer = match parts.extensions.get::<code_cluster::Forwarded>() {
+        Some(f) => f.client.as_deref().and_then(|c| c.parse::<std::net::IpAddr>().ok()).map(|ip| std::net::SocketAddr::new(ip, 0)),
+        None => parts.extensions.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0),
+    };
+    crate::streams::key(caller, token(parts).as_deref(), &parts.headers, peer, code.config.trust_forwarded_for)
 }
 
 // ── GitHub (phase 2) ──

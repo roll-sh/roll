@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MISSING, classify, proxy } from "./proxy";
+import { MISSING, classify, proxy, shareOf } from "./proxy";
 import { RESERVED_NAMES } from "./lib/reserved-names";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -68,6 +68,22 @@ describe("proxy", () => {
     );
     const res = await proxy(new NextRequest("https://roll.sh/acme/web"));
     expect(res.headers.get("x-middleware-next")).toBe("1");
+  });
+
+  it("gives an unknown or revoked share a real 404, and lets a known one through", async () => {
+    const calls = answer(404, { error: "share shr_x not found" });
+    const res = await proxy(new NextRequest("https://roll.sh/agents/s/shr_x"));
+    expect(calls[0]).toMatch(/\/v1\/code\/agents\/shares\/shr_x$/);
+    expect(res.headers.get("x-middleware-rewrite")).toBe(`https://roll.sh${MISSING}`);
+    answer(200);
+    const ok = await proxy(new NextRequest("https://roll.sh/agents/s/shr_y"));
+    expect(ok.headers.get("x-middleware-next")).toBe("1");
+  });
+
+  it("finds share pages only", () => {
+    expect(shareOf("/agents/s/shr_1")).toBe("shr_1");
+    expect(shareOf("/agents/s/shr_1/")).toBe("shr_1");
+    for (const p of ["/agents/s", "/agents/s/", "/agents/s/shr_1/opengraph-image", "/dashboard/agents", "/agents/s/%E0%A4%A"]) expect(shareOf(p), p).toBeNull();
   });
 
   it("doesn't call the API for app routes", async () => {

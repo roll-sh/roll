@@ -1,0 +1,49 @@
+[
+  {
+    "type": "welcome",
+    "machine": "mch_fedcba0987654321",
+    "owner": "acme",
+    "resume_from": 40
+  },
+  {
+    "type": "ack",
+    "seq": 41
+  },
+  {
+    "type": "notice",
+    "message": "roll didn't keep 3 of this machine's records"
+  },
+  {
+    "type": "command",
+    "id": "cmd_1",
+    "by": "acme",
+    "command": {
+      "type": "run.interrupt",
+      "thread": "thr_a1b2c3d4e5f60718"
+    }
+  },
+  {
+    "type": "command",
+    "id": "cmd_2",
+    "by": "agent:bot",
+    "command": {
+      "type": "thread.publish",
+      "thread": "thr_a1b2c3d4e5f60718",
+      "message": "Fix the flaky queue test",
+      "land": true
+    },
+    "grant": {
+      "repo": {
+        "owner": "acme",
+        "repo": "roll"
+      },
+      "url": "https://roll.sh/acme/roll.git",
+      "token": "rlg_0123456789abcdef0123456789abcdef0123456789abcdef",
+      "write": true,
+      "expires_at": 1762000600000
+    }
+  },
+  {
+    "type": "ping"
+  }
+]

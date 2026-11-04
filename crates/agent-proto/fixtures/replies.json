@@ -1,0 +1,82 @@
+[
+  {
+    "type": "ok"
+  },
+  {
+    "type": "created",
+    "id": "thr_a1b2c3d4e5f60718"
+  },
+  {
+    "type": "diff",
+    "stat": {
+      "files": 1,
+      "additions": 1,
+      "deletions": 0
+    },
+    "files": [
+      {
+        "path": "README.md",
+        "change": "add",
+        "diff": "@@ -0,0 +1 @@\n+hi\n"
+      }
+    ],
+    "truncated": false
+  },
+  {
+    "type": "entries",
+    "entries": [
+      {
+        "name": "src",
+        "dir": true,
+        "size": 0
+      },
+      {
+        "name": "Cargo.toml",
+        "dir": false,
+        "size": 812
+      }
+    ]
+  },
+  {
+    "type": "file",
+    "path": "README.md",
+    "text": "hi\n",
+    "size": 3
+  },
+  {
+    "type": "git_status",
+    "branch": "roll/fix",
+    "ahead": 2,
+    "behind": 0,
+    "files": [
+      {
+        "path": "README.md",
+        "change": "add",
+        "diff": "@@ -0,0 +1 @@\n+hi\n"
+      }
+    ]
+  },
+  {
+    "type": "published",
+    "branch": "roll/fix",
+    "commit": "9fceb02d",
+    "change": 42,
+    "url": "https://roll.sh/acme/roll/changes/42",
+    "landing": {
+      "status": "blocked",
+      "message": "change #42 can't land yet",
+      "blockers": [
+        "needs an approving review"
+      ]
+    }
+  },
+  {
+    "type": "scrollback",
+    "data": "JCBscwo="
+  },
+  {
+    "type": "error",
+    "code": "machine_offline",
+    "message": "the machine isn't connected"
+  }
+]

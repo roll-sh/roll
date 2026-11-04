@@ -167,7 +167,7 @@ GET  /v1/code/repos/{owner}/{repo}/changes?state= → Change[]
 POST /v1/code/repos/{owner}/{repo}/changes {title, body?, changeset | (base + message + files), work_item?, author?, draft?} → Change
 GET  /v1/code/repos/{owner}/{repo}/changes/{number} → Change
 GET  /v1/code/changes/{id} → Change (404 when missing)
-PATCH /v1/code/changes/{id} {title?, body?, draft?} → Change          marking a queued change draft dequeues it
+PATCH /v1/code/changes/{id} {title?, body?, draft?, work_item?} → Change    marking a queued change draft dequeues it; work_item (wi_…, of the change's repo) links it as if it had been opened with it: 409 if it does another item or is landed/closed
 POST /v1/code/changes/{id}/approve-run → Change                       writers; recorded in the audit log
 POST /v1/code/changes/{id}/revise {changeset | (base + message + files)} → Change
 POST /v1/code/changes/{id}/land {bypass?, lane?} → same bodies as /land (409 if landed or closed)
@@ -537,6 +537,218 @@ GET    /v1/code/repos/{owner}/{repo}/statuses/{rev} → {changeset, git_commit, 
   (`$BUILDKITE_COMMIT`) and GitHub Actions-style runners (`$GITHUB_SHA`) all expose the commit.
   To trigger CI from roll, add a webhook for `push` (branches) and `landed` (main).
 
+## Agents
+
+roll code agents (docs/code/agents.md): machines running `roll agent up` connect out to the relay,
+which mirrors their records so the canvas loads a snapshot and streams what changes, and forwards
+commands to them. The wire types are `agent_proto` (Rust) and `apps/dashboard/src/lib/agents-api.ts`;
+times in these shapes are **milliseconds** (`Millis`), unlike the rest of this API.
+
+```
+POST /v1/code/agents/login {name?, hostname?, os? /* what the machine says about itself, one line, ≤ 64 */}
+       → DeviceLogin {device_code /* rld_… */, user_code /* "BCDF-GHJK" */,
+       verification_uri /* {web}/dashboard/agents/connect?code=… */, interval: 5, expires_in: 900}
+       No caller needed. 429 (Retry-After) while 20 logins from the client's address (an IPv6 address's
+       /64; `X-Forwarded-For` only with trust_forwarded_for, as for event streams) are waiting; when
+       10,000 are waiting in all, the oldest pending login of the address with the most goes to make
+       room (never a refusal for everyone). 400 a non-string field.
+POST /v1/code/agents/login/poll {device_code} → LoginPoll
+       {status: "pending"} | {status: "approved", token /* rlm_…, handed out once */, machine /* mch_… */, owner}
+       | {status: "denied"} | {status: "expired"} /* also for an unknown code and after the token was handed out */
+GET  /v1/code/agents/{owner}/login/{user_code} → PendingLogin {user_code, name, hostname?, os?, created_at, expires_at}
+       which machine asks, shown before approving ("Approve ada-mbp (macOS)?")
+POST /v1/code/agents/{owner}/login/approve {user_code /* any case, dash optional */, name?} → 204
+POST /v1/code/agents/{owner}/login/deny {user_code} → 204
+       All three need Code::manages (the owner or admin, not agent tokens); 404 when no pending login has the code.
+
+GET    /v1/code/agents/{owner}/machines → [Machine]   oldest first; owner's tokens (agents too), else 404
+POST   /v1/code/agents/{owner}/machines {name?} → 201 {machine: Machine, token /* rlm_…, shown once */}
+       ("Add machine", sandboxes); 422 past 200 machines
+PATCH  /v1/code/agents/{owner}/machines/{machine} {name} → Machine
+DELETE /v1/code/agents/{owner}/machines/{machine} → 204: the token stops working, the live link closes now
+       (close code 4401), the machine's mirrored records are dropped, and streams get machine_removed.
+       POST, PATCH and DELETE need Code::manages: 401 anonymous, 403 agent tokens and other owners.
+
+Machine = {id, name, online: bool /* its link is up */, info?: MachineInfo /* from its last hello */,
+           sandbox?: SandboxInfo, created_at, last_seen?}
+           A name is trimmed, one line, 1–64 characters.
+
+GET /v1/code/agents/{owner}/state?threads=thr_a,thr_b → State {cursor, machines: [Machine], entities: [Mirrored]}
+       Mirrored = {cursor, machine, entity: Entity}. The shell (projects, threads, runs, requests,
+       terminals) always; detail (nodes, checkpoints) only for the listed threads (at most 200).
+       Tombstones aren't in the snapshot. Owner's tokens (agents too), else 404.
+GET /v1/code/agents/{owner}/events?threads=…&after=<cursor> → SSE, events named by their `type`:
+       event: entity           id: <cursor>   data: {type: "entity", cursor, machine, entity}
+       event: machine          id: <cursor>   data: {type: "machine", cursor, machine: Machine}
+       event: machine_removed  id: <cursor>   data: {type: "machine_removed", cursor, machine: mch_…}
+       event: delta            (no id)        data: {type: "delta", machine, delta: Delta}
+       Load /state, then open /events?after=<state.cursor>: a snapshot plus everything with a newer
+       cursor is complete. A reconnect with Last-Event-ID (EventSource sends it) first gets what
+       changed since, from the mirror (each record once, at its newest), then goes on live; cursors
+       only ascend. Without either, only what happens from now on. `entity` events include tombstones
+       ({kind: "removed", entity, id, thread?}). Text and output deltas only for the listed threads;
+       terminal deltas always. Deltas are never replayed. Stream limits as for repo events (429).
+       With both `?after=` and Last-Event-ID (the canvas sends both on a reconnect) the stream resumes
+       after the newer; a Last-Event-ID that isn't a number is ignored, an `after` that isn't is a 400.
+
+POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, command: Command} → Reply
+       Forwarded to the machine's daemon; waits up to 30 s for its reply. `id` (1–128 characters) is
+       the idempotency key, per sender: retrying with the same id never runs the command twice (the
+       daemon keeps receipts by sender and id), a retry while the first waits shares its reply (another
+       sender's command with that id waiting is a 409 conflict), and a link that drops and comes back
+       within the wait gets the command again. Owner's tokens, agent tokens too (401 anonymous, 403
+       others; 404 an unknown or revoked machine). The daemon is told who sent it: the owner's name,
+       `agent:<name>`, or `admin`.
+       Agent tokens drive threads only (403 otherwise, docs/code/agents.md "Machines, login and
+       tokens"): `thread.create` in `ask` or `auto_edit` (not `full_access`, the default),
+       `thread.configure` only lowering the thread's modes, `thread.fork`, `thread.archive`,
+       `thread.unarchive`, `message.send`, `message.unqueue`, `run.interrupt`, `thread.publish`,
+       `diff.get`, `git.status`, and `fs.list`/`fs.read` in a project. The rest (`terminal.*`,
+       `fs.list` without a project, `request.respond`, `project.add`, `project.remove`,
+       `thread.delete`, `checkpoint.rollback`, `provider.refresh`) needs Code::manages.
+       200 with the Reply, or Reply.Error {type: "error", code, message, error /* = message */} with
+       not_found 404, invalid 400, conflict 409, provider 422, internal 502,
+       machine_offline 503 (not connected), timeout 504 (no reply in time).
+       A sandbox machine that is asleep, stopped by its owner, or on its way down is woken by any
+       command (also `project.add` through …/projects and the MCP tools, which call this route): the
+       sandbox is set running (Machine.sandbox.status "starting" on the stream) and the request is held
+       until its daemon's link is up, at most ROLL_SANDBOX_WAKE_TIMEOUT (180 s), then the command goes
+       out once and waits for its reply as usual (so allow for 180 + 30 s; a proxy in front of the API
+       must too). A wake that runs out answers machine_offline "the sandbox is still waking up …; send
+       the command again with the same id": the sandbox keeps waking, and the same id is safe to send
+       again. A sandbox being deleted (or failed) never wakes: machine_offline at once.
+       Commands on a roll code repo (docs/code/agents.md, "Agents in roll code"): `project.add` with
+       `clone: {owner, repo}` and `thread.publish` in a project that is a roll code repo carry a grant
+       for that repo to the daemon. The repo must be the machine's owner's (400 otherwise, 404 when it
+       doesn't exist or the caller can't read it); publishing needs write access to it (403). A
+       clone's grant only fetches; a publish's pushes only the thread's worktree branch (400 when that
+       is the repo's default branch; a thread without a worktree gets none).
+       `thread.publish` answers Published {branch, commit, change: number | null /* the branch's open
+       change */, url: string | null, landing?: Landing /* with land: true */};
+       Landing = {status: "landed" | "queued" | "blocked" | "conflict" | "failed", message, blockers: string[]}:
+       the land goes through POST /v1/code/changes/{id}/land with the caller's token (the merge queue on a
+       queue repo, the landing rules otherwise), and a blocked or conflicting land is still a 200.
+
+POST /v1/code/agents/{owner}/machines/{machine}/projects {id /* idempotency key */, repo: {name, description?,
+       visibility?, default_branch?}, path?, name?} → Reply (200, as for commands)
+       Creates the repo (POST /v1/code/repos on the caller's behalf: its 403/422 pass through; a 409, the
+       repo already existing, is a retry and goes on), lands a README as the first commit if the repo has
+       no history, and clones it onto the machine as a project
+       (`project.add` with `clone`). Code::manages (401 anonymous, 403 agent tokens and others,
+       404 an unknown machine, 400 without id or repo.name).
+POST   /v1/code/agents/{owner}/threads/{thread}/work {work?: "wi_…" | "owner/repo#N", repo?: "owner/name",
+       labels?, lease_s?, agent?} → WorkItem | 204
+       The thread takes a work item: `work` (read as the caller: 404 if it can't), or the next open one
+       claimed from `repo` (POST …/work/claim as `agent`, default the caller's agent or
+       `agent:<machine name>`; 204 when none matches). It must be one of the owner's repos (400), and
+       becomes the thread's `work`. 400 with neither; 404 an unknown thread. A claim the item has when
+       the thread takes it is kept alive (renewed by its lease length once half is left) while the
+       thread works: running, or idle under 10 minutes, not archived, its machine connected. Then
+       it runs out like any other. A `thread.publish` links the branch's change to the item
+       (PATCH /v1/code/changes/{id} {work_item} as the sender), so landing it completes the item.
+DELETE /v1/code/agents/{owner}/threads/{thread}/work → 204: the thread lets go of it (the claim stays,
+       no longer kept alive).
+       Both: owner's tokens, agent tokens too (401 anonymous, 403 others).
+
+Thread.change = {repo /* owner/name */, number, status: "checking" | "failing" | "blocked" | "ready" | "queued"
+       | "landed" | "conflict" | "closed", url, detail: string | null} and Thread.work = {id, repo, number,
+       title} are filled by the relay from roll code (the daemon never sets them) and follow the change
+       as it moves, as new `entity` events on the stream.
+
+Grants (`rlg_…`) only open git, for their one repo: fetch, and push for a publish. Every API route
+answers 401 to one, even on an open daemon. They expire after 10 minutes and stop at once when the
+machine is revoked.
+
+GET /v1/code/agents/connect    the daemon's WebSocket (Authorization: Bearer rlm_…; only machine tokens,
+       looked up on every connect: 401 otherwise). Without an upgrade: 200 MachineLogin {machine: Machine,
+       owner}, the machine the token opens (`roll agent login --machine-token`). Text frames of
+       DaemonFrame / RelayFrame JSON: hello → welcome {machine, owner, resume_from}, entities → ack,
+       delta, command → reply, ping/pong (every 20 s; 60 s of silence closes). Frames up to 16 MiB.
+       Close codes: 4400 protocol error (wrong version, no hello), 4401 revoked (stop, don't retry),
+       4409 replaced by a newer link of the same machine, 1012 reconnect (the owner moved nodes).
+DELETE /v1/code/agents/connect → 204   a machine revokes itself with its own token (`roll agent logout`):
+       the same as DELETE …/machines/{machine}; 401 for any other token.
+```
+
+**Shares** are read-only copies of a thread behind a public link, `{web}/agents/s/<id>`
+(docs/code/agents.md, "Shares").
+
+```
+POST   /v1/code/agents/{owner}/threads/{thread}/shares {subtree?: bool} → 201 ShareSummary
+       Freezes the thread's records from the mirror (with `subtree`, the subagent threads it delegated to,
+       recursively, at most 64 threads; forks are separate threads and stay out). Terminals, attachments'
+       bytes and queued messages are left out; the machine's home directory and any /home/<user>,
+       /Users/<user> or /root starting a path become `~` in every string. Over 4 MiB, tool outputs and
+       diffs are cut to their ends (`trimmed: true`); still over is a 422, as is a 501st share.
+       Code::manages; 404 when the mirror has no such thread.
+GET    /v1/code/agents/{owner}/shares → [ShareSummary]   newest first; owner's tokens (agents too), else 404
+DELETE /v1/code/agents/{owner}/shares/{id} → 204          Code::manages; the link stops working at once
+GET    /v1/code/agents/shares/{id} → Share               no caller needed; `Cache-Control: no-store`; 404 unknown
+
+ShareSummary = {id /* shr_ + 24 hex */, title, thread, subtree, url /* {web}/agents/s/<id> */, threads, runs,
+                bytes, created_at, created_by}
+Share = {id, owner, title, thread, subtree, machine: {name, os?}, created_at, trimmed,
+         entities: [Entity] /* project, threads, then runs, requests, checkpoints and nodes as they happened */}
+```
+
+A share is a copy: later work on the thread, revoking its machine or deleting the thread leave it as
+it was. `shares` (like `login`) is a reserved owner name, so `/v1/code/agents/shares/…` never names an
+owner, and it isn't routed by owner in a cluster.
+
+In a cluster every `/v1/code/agents/{owner}/…` request and every machine link of the owner run on the
+node holding the lease `agents:<owner id>` (docs/code/cluster.md).
+
+### Sandboxes
+
+Machines roll hosts for an owner (docs/code/agents.md, "Sandboxes"): each is a container running
+`roll agent up` with a machine of its own, so it also appears in `/machines`, `/state` and `/events`
+with `Machine.sandbox` set. Every route needs Code::manages (401 anonymous, 403 agent tokens and other
+owners). Requests record what the owner wants; the owner's reconciler makes the backend match (at
+once for start, stop and delete; creates in the background) and every change of what the canvas
+shows is a `machine` event. Times are milliseconds.
+
+```
+GET    /v1/code/agents/{owner}/sandboxes → {sandboxes: [Sandbox] /* oldest first */, sizes: [Size] /* the first is the default */,
+       max /* per owner */, backend: "agent37" | "docker" | null /* null: sandboxes are off */}
+POST   /v1/code/agents/{owner}/sandboxes {name?, size? /* a Size name */, env?: {NAME: "value"}}
+       → 201 {sandbox: Sandbox /* status "creating" */, machine: Machine}
+       env is passed to the sandbox only (e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY): sealed with ROLL_SECRET_KEY
+       until the backend has it, then dropped; never returned. At most 32 names (uppercase, digits, _),
+       values one line of at most 4096 characters, 32 KiB in all; ROLL_*, AGENT37_*, HOME, USER, PATH,
+       SHELL and IS_SANDBOX are reserved. 400 bad name, size or env; 422 at the owner's limit (deleting
+       ones count until gone) or without ROLL_SECRET_KEY on the server; 503 sandboxes are off.
+POST   /v1/code/agents/{owner}/sandboxes/{id}/start → Sandbox   desired "running" (asleep ones too: a wake now);
+       409 while it's being deleted
+POST   /v1/code/agents/{owner}/sandboxes/{id}/stop  → Sandbox   desired "stopped" (running time stops being billed;
+       a command to it starts it again)
+DELETE /v1/code/agents/{owner}/sandboxes/{id} → 204 the backend deleted it and its data, and its machine is
+       revoked (machine_removed); 202 Sandbox ("deleting") while the backend is still at it (retried).
+       Removing a sandbox's machine (DELETE …/machines/{machine}, or `roll agent logout` in it) deletes the
+       sandbox the same way. 404 for an unknown or deleted sandbox.
+GET    /v1/code/agents/{owner}/sandboxes/usage?month=YYYY-MM (default: this UTC month)
+       → {owner, month, sandboxes: [{sandbox, name, size, hourly_cents, running_ms, running_hours, price_usd}],
+          totals: {running_ms, running_hours, price_usd}}
+       Running time as the reconciler saw it (it looks every 30 s), deleted sandboxes included; price_usd is
+       hours × hourly_cents / 100, rounded to a hundredth of a cent (0.0001). 400 for a malformed month.
+
+Sandbox = {id /* sbx_… */, name, machine /* mch_… */, backend, size: Size,
+           status: "creating" | "starting" | "running" | "stopped" | "failed" | "deleting" /* = Machine.sandbox.status */,
+           desired: "running" | "stopped" | "asleep" | "deleted" /* asleep: the reconciler stopped it while idle */,
+           stopped_reason?: "idle" | "owner" /* while stopped: asleep, or the owner's stop */,
+           error?: string /* the backend's last complaint */,
+           created_at, updated_at, last_active_at? /* its machine last did something; it sleeps a window after */}
+SandboxInfo = {backend, size /* a Size name */, status /* as Sandbox.status */, hourly_cents,
+               stopped_reason? /* as Sandbox.stopped_reason */}   (Machine.sandbox)
+Size = {name /* "standard" */, cpu, memory_gb, disk_gb, hourly_cents /* price per running hour, US cents */}
+```
+
+A `failed` sandbox stays until it's deleted (a refused create isn't tried again). One that stopped on
+its own while it should run is started again. A running one goes to sleep (desired "asleep", status
+"stopped", stopped_reason "idle") once its machine has done nothing for ROLL_SANDBOX_IDLE_STOP (5 min;
+`0` keeps sandboxes up): no thread on it starting or running (a thread waiting on its user is idle),
+no command for it and no terminal output. "starting" is a stopped sandbox on its way up again (a wake,
+or start); its machine comes online once its daemon connects. Asleep, it isn't billed.
+
 ## MCP
 
 `/v1/code/mcp` is an MCP server (Streamable HTTP, JSON-RPC 2.0) whose tools call this API on the
@@ -606,6 +818,9 @@ The browser calls `/v1/code/*` directly: reads, SSE and raw blob links. Allow an
 - Anonymous requests can read public repos.
 - Review app tokens (`rla_…`) are always the app, even on an open daemon: they read the repos the
   app is installed on (private ones too) and review their changes, nothing else.
+- Agent machine grants (`rlg_…`, minted by the relay inside a command; see Agents) are always
+  scoped too: git for one repo, as `agent:<machine name>`, pushing at most one ref (the thread's
+  branch: never the default branch, a tag or a delete), never the API (401).
 - When `auth.required` is true, the dashboard shows a sign-in button. It keeps the token in
   localStorage, sends it as `Bearer`, and opens the prompt on any 401. The event stream uses
   `fetch`, not `EventSource`, so it can send the header too.

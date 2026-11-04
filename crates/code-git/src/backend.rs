@@ -150,6 +150,9 @@ pub struct ReceiveRequest {
     pub options: Vec<String>,
     /// Who pushed, as returned by [`GitBackend::authorize`].
     pub pusher: Option<String>,
+    /// The credentials the push came with, for a backend whose credentials allow some refs and
+    /// not others (it looks them up again: authorizing said only "may push to this repo").
+    pub credentials: Option<Credentials>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
