@@ -108,6 +108,14 @@ impl RowBatch {
         }
     }
 
+    /// Row `i`'s value as `Bytes`: a slice of the buffer holding it (a copy of a copied one).
+    pub fn value_bytes(&self, i: usize) -> Bytes {
+        match self.value_in(i) {
+            (v, Some((buf, off))) => buf.slice(off..off + v.len()),
+            (v, None) => Bytes::copy_from_slice(v),
+        }
+    }
+
     /// The last row's key.
     pub fn last_key(&self) -> Option<&[u8]> {
         let n = self.ents.len();
