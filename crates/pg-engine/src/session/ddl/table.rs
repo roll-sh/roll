@@ -3759,31 +3759,39 @@ impl Ddl<'_, '_> {
         let scope = IndexScope::enter(&bix, self);
         progress.scanning();
         // (With workers, as max_parallel_maintenance_workers has it: `parbuild`.)
-        let parallel = match self.measures_in_build(t, ix) && !quad {
+        // (A modelled table's btree in the workers too: its model laid out from the keys they
+        // take, `sizing::btree_from_build`, as the serial pass below takes them.)
+        let ctx = self.ctx;
+        let measures = self.measures_in_build(t, ix);
+        let writes = (ix.method == "btree").then(|| crate::exec::sizing::heap_writes(t.oid, &ctx.sess.db)).flatten();
+        let parallel = match (measures || (writes.is_some() && ix.id != 0)) && !quad {
             true => match super::parbuild::index_workers(self, t, crate::exec::sizing::heap_blocks(t, self.ctx)?.unwrap_or(0)) {
                 0 => None,
-                w => self.build_index_parallel(t, ix, &bix, w, &progress)?,
+                w => self.build_index_parallel(t, ix, &bix, w, &progress, !measures)?,
             },
             false => None,
         };
         // (A parallel build reports its own scan's end and its load.)
         let serial = parallel.is_none();
-        let measured = if parallel.is_some() {
-            parallel
-        } else if self.measures_in_build(t, ix) {
-            self.measure_rows_with(t, Some(Some(ix.oid)), Some(&mut step))?
-        } else {
-            None
+        let mut model_keys = writes.map(|w| (w, Vec::new()));
+        let mut par_counted = None;
+        let measured = match parallel {
+            Some(super::parbuild::ParBuilt::Measured(m)) => Some(m),
+            Some(super::parbuild::ParBuilt::Modelled { rows, tuples, keys }) => {
+                par_counted = Some((rows, tuples));
+                model_keys = model_keys.map(|(w, _)| (w, keys));
+                None
+            }
+            None if measures => self.measure_rows_with(t, Some(Some(ix.oid)), Some(&mut step))?,
+            None => None,
         };
         let mut rows = 0usize;
         // (A modelled table's btree: its model from this pass's keys, not from a second read
         // of the rows: `sizing::btree_from_build`.)
-        let ctx = self.ctx;
-        let mut model_keys = (measured.is_none() && ix.method == "btree")
-            .then(|| crate::exec::sizing::heap_writes(t.oid, &ctx.sess.db))
-            .flatten()
-            .map(|w| (w, Vec::new()));
-        if measured.is_none() {
+        if measured.is_some() {
+            model_keys = None;
+        }
+        if measured.is_none() && par_counted.is_none() {
             // (Only the columns its keys, predicate and INCLUDE columns read are decoded.)
             let mut cols = std::collections::HashSet::new();
             crate::exec::sizing::index_columns(&bix, &mut cols);
@@ -3819,7 +3827,7 @@ impl Ddl<'_, '_> {
         if serial {
             progress.loaded(entries);
         }
-        let counted = measured.is_none().then_some((rows, entries as usize));
+        let counted = par_counted.or_else(|| measured.is_none().then_some((rows, entries as usize)));
         let prebuilt = model_keys.and_then(|(w, keys)| crate::exec::sizing::btree_from_build(t, &bix, keys, w, &ctx.sess.db));
         self.index_built_from(t, ix, measured, counted, prebuilt)
     }
