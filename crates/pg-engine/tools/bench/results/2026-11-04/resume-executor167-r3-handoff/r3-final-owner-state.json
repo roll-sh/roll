@@ -1,0 +1,26 @@
+{
+  "148": {
+    "worktree": "/home/meszmate/roll/.claude/worktrees/agent-ad1ff70de0f5338c1",
+    "branch": "work-a148",
+    "head": "2bc84a5a554287de1afbce96a23aa596ce381fd0",
+    "status": ""
+  },
+  "149": {
+    "worktree": "/home/meszmate/roll/.claude/worktrees/agent-a814fa71b51112148",
+    "branch": "work-a149",
+    "head": "26f4bfac98647989ecff63ef234ec2a8a96d5771",
+    "status": ""
+  },
+  "167": {
+    "worktree": "/home/meszmate/roll/.claude/worktrees/agent-a6193f5e45a7ae4f1",
+    "branch": "work-a167",
+    "head": "d9e2279c9d5b55a21add46fe4632aa73e3f3c849",
+    "status": ""
+  },
+  "170": {
+    "worktree": "/home/meszmate/roll/.claude/worktrees/agent-a0718617fe2ff9006",
+    "branch": "work-a170",
+    "head": "1b6a80b9918db481d27527511d70ae716b1bdecf",
+    "status": ""
+  }
+}

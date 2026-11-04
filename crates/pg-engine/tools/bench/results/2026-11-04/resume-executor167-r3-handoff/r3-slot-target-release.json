@@ -1,0 +1,10 @@
+{
+  "time_utc": "2026-11-04T19:05:12.316200+00:00",
+  "owned_active_build_test_reference_processes": [],
+  "owned_167_reference_containers": "",
+  "targets_released_to_parent": [
+    "/home/meszmate/.cache/a167/target",
+    "/home/meszmate/.cache/a170/target"
+  ],
+  "next_action": "No broaderfullsuccessor queued; parentcombinedcompile/libproof takespriority."
+}

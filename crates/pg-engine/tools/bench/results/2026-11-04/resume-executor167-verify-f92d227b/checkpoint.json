@@ -1,0 +1,7 @@
+{
+  "head": "f92d227bd7e9e35d9e524be852adf8508518f89d",
+  "tree": "b8b768ae2d8514a1ce6e886ba01c40b89a3be347",
+  "status": "",
+  "time_utc": "2026-11-04T12:34:24.792317+00:00",
+  "note": "PINNED SOURCE FAILURE. Currentf92d227b engine golden passed3/3; parallel_scan failed3 with7passed, command exit101. Broader stages NOT RUN. No correctness/resource/performance acceptance. Original historical failure and prior golden-record evidence retained unchanged."
+}

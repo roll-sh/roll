@@ -1,0 +1,79 @@
+[
+  {
+    "name": "golden-current",
+    "command": [
+      "cargo",
+      "test",
+      "--release",
+      "-p",
+      "pg-engine",
+      "--test",
+      "golden"
+    ],
+    "env": {
+      "GOLDEN_FILTER": "a167_"
+    },
+    "source_before": {
+      "head": "3792eaec3ac58e8150080e79731cec2e329e2299",
+      "tree": "8da09c59084e79dcdb2cb323437df0f247475cd3",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "3792eaec3ac58e8150080e79731cec2e329e2299",
+      "tree": "8da09c59084e79dcdb2cb323437df0f247475cd3",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 448.6119759082794,
+    "log_sha256": "9eda78dc82b3b5870b12d9f7fc8b6eb34e1d7da283702d044f06b57eb85f130b",
+    "passed_tests": 3,
+    "pass": true
+  },
+  {
+    "name": "parallel-current",
+    "command": [
+      "cargo",
+      "test",
+      "--release",
+      "-p",
+      "pg-engine",
+      "--test",
+      "parallel_scan"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "3792eaec3ac58e8150080e79731cec2e329e2299",
+      "tree": "8da09c59084e79dcdb2cb323437df0f247475cd3",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "3792eaec3ac58e8150080e79731cec2e329e2299",
+      "tree": "8da09c59084e79dcdb2cb323437df0f247475cd3",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 101,
+    "expected_summary": false,
+    "test_summaries": [
+      "test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 53.05s"
+    ],
+    "fatal_lines": [
+      "failures:",
+      "failures:",
+      "test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 53.05s",
+      "error: test failed, to rerun pass `-p pg-engine --test parallel_scan`"
+    ],
+    "elapsed_s": 57.81670093536377,
+    "log_sha256": "8c7119ce4e1319e7ab58f2b9087f760982e51617facade2a86f70e0cf9136648",
+    "passed_tests": 0,
+    "pass": false
+  }
+]

@@ -1,0 +1,93 @@
+> CREATE TABLE a167_o (k int)
+-- CREATE TABLE
+
+> CREATE TABLE a167_r (rk int)
+-- CREATE TABLE
+
+> CREATE TABLE a167_n (nk int, rk int)
+-- CREATE TABLE
+
+> INSERT INTO a167_o SELECT g FROM generate_series(1, 6) g
+-- INSERT 0 6
+
+> INSERT INTO a167_r VALUES (1), (2), (3)
+-- INSERT 0 3
+
+> INSERT INTO a167_n SELECT g, g % 3 + 1 FROM generate_series(1, 9) g
+-- INSERT 0 9
+
+> ANALYZE a167_o, a167_r, a167_n
+-- ANALYZE
+
+> SET enable_hashjoin = off
+-- SET
+
+> SET enable_mergejoin = off
+-- SET
+
+> SET enable_material = off
+-- SET
+
+> SET enable_memoize = off
+-- SET
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+> SELECT * FROM a167_o o LEFT JOIN a167_n n ON n.rk=o.k AND n.nk < (SELECT max(rk)*3 FROM a167_r)
+QUERY PLAN:text
+Nested Loop Left Join (actual rows=11.00 loops=1)
+  Join Filter: (n.rk = o.k)
+  Rows Removed by Join Filter: 40
+  InitPlan 1
+    ->  Aggregate (actual rows=1.00 loops=6)
+          ->  Seq Scan on a167_r (actual rows=3.00 loops=6)
+  ->  Seq Scan on a167_o o (actual rows=6.00 loops=1)
+  ->  Seq Scan on a167_n n (actual rows=8.00 loops=6)
+        Filter: (nk < (InitPlan 1).col1)
+        Rows Removed by Filter: 1
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+> SELECT * FROM a167_o o LEFT JOIN a167_n n ON n.rk=o.k
+>  AND n.nk < (SELECT max(r.rk+n.rk) FROM a167_r r)
+QUERY PLAN:text
+Nested Loop Left Join (actual rows=8.00 loops=1)
+  Join Filter: (n.rk = o.k)
+  Rows Removed by Join Filter: 25
+  ->  Seq Scan on a167_o o (actual rows=6.00 loops=1)
+  ->  Seq Scan on a167_n n (actual rows=5.00 loops=6)
+        Filter: (nk < (SubPlan 1))
+        Rows Removed by Filter: 4
+        SubPlan 1
+          ->  Aggregate (actual rows=1.00 loops=54)
+                ->  Seq Scan on a167_r r (actual rows=3.00 loops=54)
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+> WITH c AS MATERIALIZED (SELECT * FROM a167_n)
+> SELECT * FROM a167_o o LEFT JOIN c ON c.rk=o.k
+QUERY PLAN:text
+Nested Loop Left Join (actual rows=12.00 loops=1)
+  Join Filter: (c.rk = o.k)
+  Rows Removed by Join Filter: 45
+  CTE c
+    ->  Seq Scan on a167_n (actual rows=54.00 loops=1)
+  ->  Seq Scan on a167_o o (actual rows=6.00 loops=1)
+  ->  CTE Scan on c (actual rows=9.00 loops=6)
+        Storage: Memory  Maximum Storage: 17kB
+-- EXPLAIN
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_mergejoin
+-- RESET
+
+> RESET enable_material
+-- RESET
+
+> RESET enable_memoize
+-- RESET
+
+> DROP TABLE a167_o, a167_r, a167_n
+-- DROP TABLE
+

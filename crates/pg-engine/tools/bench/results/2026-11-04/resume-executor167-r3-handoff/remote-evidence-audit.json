@@ -1,0 +1,584 @@
+{
+  "bulk148": {
+    "remote_commit": "65b84c7980f9d8c6417fdede6982bdeaca85822e",
+    "bundles": [
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-bulk148-script-repair",
+        "files": 31,
+        "manifest_entries": 30,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-bulk148",
+        "files": 95,
+        "manifest_entries": 94,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      }
+    ],
+    "pass": true
+  },
+  "scan149": {
+    "remote_commit": "0e050abf42ed7d90471b4377c6e675d41b788127",
+    "bundles": [
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-scan149-baseline-binary-identity",
+        "files": 4,
+        "manifest_entries": 3,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-scan149-baseline-transfer-f0563cd8",
+        "files": 8,
+        "manifest_entries": 7,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-scan149-ddl-deferred",
+        "files": 11,
+        "manifest_entries": 10,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-scan149-ddl-readonly",
+        "files": 7,
+        "manifest_entries": 6,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-scan149-endpoint-26f4bfac",
+        "files": 12,
+        "manifest_entries": 11,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-scan149-endpoint-red",
+        "files": 22,
+        "manifest_entries": 21,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-scan149-verify-2a854a48",
+        "files": 9,
+        "manifest_entries": 8,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-scan149",
+        "files": 18,
+        "manifest_entries": 17,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      }
+    ],
+    "pass": true
+  },
+  "executor167": {
+    "remote_commit": "7eff5c458b216892900c7b7f55f0c2e01d00a8d1",
+    "bundles": [
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-debug-c1594cc6",
+        "files": 15,
+        "manifest_entries": 14,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-fixture-c1594cc6",
+        "files": 3,
+        "manifest_entries": 2,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-golden-6eb2c85e",
+        "files": 10,
+        "manifest_entries": 9,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-r3-compile-red",
+        "files": 8,
+        "manifest_entries": 7,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-r3-focused-green",
+        "files": 11,
+        "manifest_entries": 10,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-r3-pointer-fix",
+        "files": 3,
+        "manifest_entries": 2,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-r3-probe-staged",
+        "files": 9,
+        "manifest_entries": 8,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-r3-red",
+        "files": 28,
+        "manifest_entries": 27,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-r3-repair",
+        "files": 3,
+        "manifest_entries": 2,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-repair-3792eaec",
+        "files": 3,
+        "manifest_entries": 2,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-review-compile-red",
+        "files": 8,
+        "manifest_entries": 7,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-review-filter-red",
+        "files": 8,
+        "manifest_entries": 7,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-review-focused-green",
+        "files": 9,
+        "manifest_entries": 8,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-review-progress1",
+        "files": 8,
+        "manifest_entries": 7,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-review-progress2",
+        "files": 9,
+        "manifest_entries": 8,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-review-progress3",
+        "files": 11,
+        "manifest_entries": 10,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-review-repair-source",
+        "files": 2,
+        "manifest_entries": 1,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-review-terminal",
+        "files": 14,
+        "manifest_entries": 13,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-targeted-c1594cc6",
+        "files": 10,
+        "manifest_entries": 9,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-terminal-c1594cc6",
+        "files": 19,
+        "manifest_entries": 18,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-varied-red",
+        "files": 11,
+        "manifest_entries": 10,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-verify-3792eaec",
+        "files": 10,
+        "manifest_entries": 9,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-verify-f92d227b",
+        "files": 9,
+        "manifest_entries": 8,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-weighted-focused",
+        "files": 9,
+        "manifest_entries": 8,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-weighted-progress",
+        "files": 11,
+        "manifest_entries": 10,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-weighted-red",
+        "files": 35,
+        "manifest_entries": 34,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-weighted-source",
+        "files": 3,
+        "manifest_entries": 2,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167-weighted-terminal",
+        "files": 16,
+        "manifest_entries": 15,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-executor167",
+        "files": 9,
+        "manifest_entries": 8,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      }
+    ],
+    "pass": true
+  },
+  "models170": {
+    "remote_commit": "a313c23a74ead82ab9fc76184fb4d10219145758",
+    "bundles": [
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-golden-7a6ed0cd",
+        "files": 8,
+        "manifest_entries": 7,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-kept-focused-green",
+        "files": 9,
+        "manifest_entries": 8,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-kept-red",
+        "files": 8,
+        "manifest_entries": 7,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-kept-repair-source",
+        "files": 2,
+        "manifest_entries": 1,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-r3-design",
+        "files": 6,
+        "manifest_entries": 5,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-r3-focused-green",
+        "files": 13,
+        "manifest_entries": 12,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-r3-red",
+        "files": 8,
+        "manifest_entries": 7,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-r3-reference",
+        "files": 21,
+        "manifest_entries": 20,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-r3-repair",
+        "files": 3,
+        "manifest_entries": 2,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-repair-3bb04519",
+        "files": 3,
+        "manifest_entries": 2,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-review-progress1",
+        "files": 11,
+        "manifest_entries": 10,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-review-progress2",
+        "files": 12,
+        "manifest_entries": 11,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-review-regression-source",
+        "files": 2,
+        "manifest_entries": 1,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-review-terminal",
+        "files": 17,
+        "manifest_entries": 16,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-targeted-3bb04519",
+        "files": 13,
+        "manifest_entries": 12,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-targeted-b9e2786a",
+        "files": 10,
+        "manifest_entries": 9,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-terminal-3bb04519",
+        "files": 20,
+        "manifest_entries": 19,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-vacuum-focused",
+        "files": 10,
+        "manifest_entries": 9,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-vacuum-readonly",
+        "files": 14,
+        "manifest_entries": 13,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-vacuum-red",
+        "files": 27,
+        "manifest_entries": 26,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-vacuum-source",
+        "files": 3,
+        "manifest_entries": 2,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170-verify-b9e2786a",
+        "files": 20,
+        "manifest_entries": 19,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      },
+      {
+        "directory": "crates/pg-engine/tools/bench/results/2026-11-04/resume-models170",
+        "files": 9,
+        "manifest_entries": 8,
+        "extra": [],
+        "missing": [],
+        "bad": [],
+        "pass": true
+      }
+    ],
+    "pass": true
+  }
+}

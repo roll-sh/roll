@@ -1,0 +1,7 @@
+{
+  "head": "0595bf7325b0b4cde8d02d9f8e51ebd17b528d05",
+  "tree": "774b978c229b40536e4a0c7286b38e928f2d789c",
+  "status": "",
+  "time_utc": "2026-11-04T15:26:10.041924+00:00",
+  "note": "Completed stages only, all recorded exit0/pass with expected summaries. Full debug and later gates still RUNNING/PENDING; no readiness. No active log copied, source pin unchanged."
+}

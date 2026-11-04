@@ -1,0 +1,88 @@
+[
+  {
+    "name": "a167-goldens",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "pg-engine",
+      "--test",
+      "golden"
+    ],
+    "env": {
+      "GOLDEN_FILTER": "a167_"
+    },
+    "source_before": {
+      "head": "278a28966a8921da90c6ead9cfeb3f332306d788",
+      "tree": "95a87e3cacd4100a09adc93f5c5362e7de2900b4",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "278a28966a8921da90c6ead9cfeb3f332306d788",
+      "tree": "95a87e3cacd4100a09adc93f5c5362e7de2900b4",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.46s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 62.38203763961792,
+    "log_sha256": "7747333740c149883fd9024dc9efd9e58dc8e4cb5277bab8472125a1704b1f95",
+    "binaries": {
+      "/home/meszmate/.cache/a167/target/debug/deps/golden-9749ad749af5ca1c": {
+        "sha256": "34c97e86e9c504adafe67e2a7c3df5f62e97e9f51f235c1c8e03005c31f0f5a7",
+        "bytes": 321412880
+      }
+    },
+    "passed_tests": 3,
+    "pass": true
+  },
+  {
+    "name": "reordered-path",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "pg-engine",
+      "--test",
+      "parallel_scan",
+      "reordered_heaps_through_batches",
+      "--",
+      "--exact",
+      "--nocapture"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "278a28966a8921da90c6ead9cfeb3f332306d788",
+      "tree": "95a87e3cacd4100a09adc93f5c5362e7de2900b4",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "278a28966a8921da90c6ead9cfeb3f332306d788",
+      "tree": "95a87e3cacd4100a09adc93f5c5362e7de2900b4",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 16.60s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 18.398287296295166,
+    "log_sha256": "c61db3565358faadd24649f80b1b57b2a8ea1b2103a3b744fd4e84dbe98b8223",
+    "binaries": {
+      "/home/meszmate/.cache/a167/target/debug/deps/parallel_scan-e11614aaa9489d66": {
+        "sha256": "405f973fa7b003eba0f487d4dc41ad67af7acb84b9da91c5c3e3357648459035",
+        "bytes": 319785056
+      }
+    },
+    "passed_tests": 1,
+    "pass": true
+  }
+]

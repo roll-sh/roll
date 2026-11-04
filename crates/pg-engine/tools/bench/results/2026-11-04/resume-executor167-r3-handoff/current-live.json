@@ -1,0 +1,24 @@
+{
+  "time_utc": "2026-11-04T19:07:24.725344+00:00",
+  "owner_heads": {
+    "148": "2bc84a5a",
+    "149": "26f4bfac",
+    "167": "d9e2279c",
+    "170": "1b6a80b9"
+  },
+  "remote_refs": {
+    "bulk148": "65b84c7980f9d8c6417fdede6982bdeaca85822e",
+    "scan149": "0e050abf42ed7d90471b4377c6e675d41b788127",
+    "executor167": "7eff5c458b216892900c7b7f55f0c2e01d00a8d1",
+    "models170": "a313c23a74ead82ab9fc76184fb4d10219145758"
+  },
+  "active": "NONE; narrowR3jobs terminal/exported,targets released torootcombinedpriority",
+  "deferred": "149 DDL target NOT RUN due overlap; no repeat",
+  "holds": [
+    "Exact278 fullgate FAILED101 crashseed14round2,pgunitNOTRUN; attributionunproven,storagegroupread-onlytriage; no rerun",
+    "167exactd9efocusedPASS,fullgatesUNRUN,independentreviewpending,L1notclosed",
+    "170exact1b6focusedACTIVE,broaderfullgatesUNRUN;pre-droplargetoast/current-policyphysicalrecomputationlimitsheld;combined163HIGHparentowned",
+    "149timingDEFERREDtargetNOTRUN;original101preserved;148INCONCLUSIVEinvaliddiskzero",
+    "Parentcombinedworkerfirstafterfocusedterminalexportandexplicitrelease;no broadfullsuccessor/perf/service/crash/SSI/storageexecution"
+  ]
+}

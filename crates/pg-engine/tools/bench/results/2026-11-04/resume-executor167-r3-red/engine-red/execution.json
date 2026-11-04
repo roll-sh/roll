@@ -1,0 +1,22 @@
+{
+  "nice": 19,
+  "effective_cpus": [
+    4,
+    5,
+    6,
+    7,
+    22,
+    23,
+    24,
+    25
+  ],
+  "command": [
+    "/home/meszmate/.cache/a167/target/debug/deps/golden-9749ad749af5ca1c",
+    "golden",
+    "--exact",
+    "--nocapture"
+  ],
+  "env": {
+    "GOLDEN_FILTER": "a167_subplan_owned"
+  }
+}

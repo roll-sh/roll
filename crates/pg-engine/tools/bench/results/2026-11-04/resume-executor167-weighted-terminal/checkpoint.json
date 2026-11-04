@@ -1,0 +1,7 @@
+{
+  "head": "278a28966a8921da90c6ead9cfeb3f332306d788",
+  "tree": "95a87e3cacd4100a09adc93f5c5362e7de2900b4",
+  "status": "",
+  "time_utc": "2026-11-04T18:10:29.343654+00:00",
+  "note": "TERMINAL SOURCE FAILED. Build/debug447/release447 each18ignored/Clippy passed, known new warning retained. Crash30 exit101,1passed1failed seed14round2 recovered2833vs2832 with value mismatches; attribution unproven. Fail-fast skipped postgres-unit. R3 InitPlan/CTE MEDIUM remains. No readiness/timing/resource claim. Original raw logs unchanged."
+}

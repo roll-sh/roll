@@ -1,0 +1,7 @@
+{
+  "head": "1f17968b285ddcb3f63e13cc7eec4465898014f5",
+  "tree": "3b9db908154e3a919462f3bb45d899a2e642bdd0",
+  "status": "",
+  "time_utc": "2026-11-04T18:49:41.077433+00:00",
+  "note": "Exact1f17968b FAILED101 E0606: Box<ScanPlan> pointer needs dereference. No tests ran; remainingfocusedstages skipped. Localimplementationerror, no attribution to sharedsource or oldheads. Originalcrashgap held independently."
+}
