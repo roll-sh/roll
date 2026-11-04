@@ -434,6 +434,8 @@ for name in ('full171-lazy-v1.sh', 'full171-stage-audit.py', 'full171-preflight.
     sources['runners/' + name] = str(D / name)
 for name in ('source.txt', 'tree.txt', 'initial.status', 'startup-controls.json', 'toolchain.txt', 'disk-before-debug-test.json', 'affinity-observation-debug-build.json'):
     sources['full171-lazy-v1/' + name] = str(D / 'full171-lazy-v1' / name)
+sources['runners/audit171-full-terminal.py'] = str(D / 'audit171-full-terminal.py')
+sources['full171-lazy-v1/affinity-observation-debug-golden.json'] = str(D / 'full171-lazy-v1/affinity-observation-debug-golden.json')
 for name, source in sources.items():
     files[name] = Path(source).read_bytes()
 files['manifest.json'] = (json.dumps({name: {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}
