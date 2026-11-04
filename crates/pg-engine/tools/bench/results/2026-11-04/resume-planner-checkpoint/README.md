@@ -97,7 +97,8 @@ frozen453/0/18/60. Successorcheck165ind-v2 uses exact perbinary map/auditor, sel
 against oldcaab448summary, frozenrunnerhashes preserved. Per-candidate stack check scoped
 pnpm test:pg --unit; stamp skip explicitlySKIP/noexecution; no service-stack orpgengine
 acceptance. One final forced service gate held. Exactab3 fullgate nowactive,partialcurrent
-outputs excluded;source/review/gates pending.
+outputs excluded;fullgates pending. Independent exactab3 static review found noHIGH/MEDIUM,
+22paths/cursor exclusionverified;rawresult andcount/reviewer-scopeerratum retained.
 
 Owned cache runners now fail explicitly on logged failures (Bash ! guards do not imply
 errexit). Profiler wrapper records perf/pgbench exits separately. Matrix/scaled scripts

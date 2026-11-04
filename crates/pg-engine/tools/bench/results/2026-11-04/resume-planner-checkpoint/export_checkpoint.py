@@ -114,7 +114,8 @@ frozen453/0/18/60. Successorcheck165ind-v2 uses exact perbinary map/auditor, sel
 against oldcaab448summary, frozenrunnerhashes preserved. Per-candidate stack check scoped
 pnpm test:pg --unit; stamp skip explicitlySKIP/noexecution; no service-stack orpgengine
 acceptance. One final forced service gate held. Exactab3 fullgate nowactive,partialcurrent
-outputs excluded;source/review/gates pending.
+outputs excluded;fullgates pending. Independent exactab3 static review found noHIGH/MEDIUM,
+22paths/cursor exclusionverified;rawresult andcount/reviewer-scopeerratum retained.
 
 Owned cache runners now fail explicitly on logged failures (Bash ! guards do not imply
 errexit). Profiler wrapper records perf/pgbench exits separately. Matrix/scaled scripts
@@ -251,7 +252,7 @@ for campaign in ('embedded165v2', 'embedded165v3', 'green165r2', 'green165r2v2',
     for artifact in sorted((D / campaign).iterdir()):
         if artifact.is_file():
             sources[campaign + '/' + artifact.name] = str(artifact)
-for runner in ('embedded165v3.sh', 'green165r2.sh', 'green165r2v2.sh', 'check165r2.sh', 'check165r2-runner-error.sh', 'wrapper-selftest-results.json', 'red165r3.sh', 'green165r3.sh', 'R3-CASE-MATRIX.md', 'check165r3.sh', 'independent165.patch', 'independent165-scope.json', 'independent165-merge-audit.json', 'independent165-candidate.patch', 'DEFERRED-CURSOR-R4.md', 'focus165ind.sh', 'bytea165compare.py', 'check165ind.sh', 'check165ind-v2.sh', 'audit165-summary.py', 'ind165-expected-per-binary.json', 'ind165-test-count-reconciliation.json', 'ind165-frozen-runner.sha256', 'count-map-verification.json', 'count-map-check165fixed.json', 'caab-auditor-selfcheck.json'):
+for runner in ('embedded165v3.sh', 'green165r2.sh', 'green165r2v2.sh', 'check165r2.sh', 'check165r2-runner-error.sh', 'wrapper-selftest-results.json', 'red165r3.sh', 'green165r3.sh', 'R3-CASE-MATRIX.md', 'check165r3.sh', 'independent165.patch', 'independent165-scope.json', 'independent165-merge-audit.json', 'independent165-candidate.patch', 'DEFERRED-CURSOR-R4.md', 'focus165ind.sh', 'bytea165compare.py', 'check165ind.sh', 'check165ind-v2.sh', 'audit165-summary.py', 'ind165-expected-per-binary.json', 'ind165-test-count-reconciliation.json', 'ind165-frozen-runner.sha256', 'count-map-verification.json', 'count-map-check165fixed.json', 'caab-auditor-selfcheck.json', 'oltp-independent-source-review-r1-result.json', 'independent-review-erratum.md'):
     sources['runners/' + runner] = str(D / runner)
 for name, source in sources.items():
     files[name] = Path(source).read_bytes()
