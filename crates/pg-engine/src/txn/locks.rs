@@ -21,7 +21,7 @@ use crate::error::{Error, Result, code};
 use parking_lot::{Condvar, Mutex};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// A heavyweight lock mode (lockdefs.h), in Postgres's order.
