@@ -705,7 +705,7 @@ mod tests {
                 SELECT left(string_agg(md5(g::text), '' ORDER BY g), n)
                 FROM generate_series(1, (n+31)/32) g $$").unwrap();
             s.query("CREATE TABLE ci(k int, payload text) WITH (parallel_workers=2)").unwrap();
-            let (key, payload, unique, direction) = match case {
+            let (key, payload, unique, direction): (String, String, &str, &str) = match case {
                 BuildCase::Include(n) => ("g".into(), format!("CASE WHEN g=6000 THEN ci_text({n}) ELSE 'small' END"), "", ""),
                 BuildCase::Duplicate(n) => ("CASE WHEN g=2 THEN 1 ELSE g END".into(),
                     format!("CASE WHEN g=6000 THEN ci_text({n}) ELSE 'small' END"), "UNIQUE ", ""),
