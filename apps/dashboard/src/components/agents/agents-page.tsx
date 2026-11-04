@@ -320,13 +320,13 @@ export function AgentsSurface({
         {/* The full window drives the logo itself (in the popup, the header already does). */}
         {chrome === "window" && <MarkDriver client={client} />}
         <div className="flex min-h-0 flex-1 flex-col">
-          <header className="chrome-in relative z-10 flex h-12 shrink-0 items-center gap-3 pr-2 pl-2" data-drag-region>
+          <header className="chrome-in relative z-10 flex h-12 shrink-0 items-center gap-3 pr-2 pl-2 max-sm:gap-2 max-sm:pr-1 max-sm:pl-1" data-drag-region>
             <span className="flex shrink-0 items-center gap-2.5">
               <SidebarToggle open={sidebar} onToggle={() => setSidebar(!sidebar)} />
               {chrome === "window" ? <WindowHome /> : <HeaderMark />}
               <h2 className="text-[14px] font-[590] tracking-[-0.02em]">Agents</h2>
             </span>
-            <span className="h-4 w-px shrink-0 bg-line-2" aria-hidden />
+            <span className="h-4 w-px shrink-0 bg-line-2 max-sm:hidden" aria-hidden />
             <span className="flex min-w-0 items-center gap-2 text-[12.5px] text-muted">
               <span className={`size-1.5 shrink-0 rounded-full ${snap.conn === "live" ? (running ? "pulse-dot bg-accent" : "bg-ok") : snap.conn === "error" ? "bg-danger" : "bg-subtle"}`} aria-hidden />
               <span className="truncate">
@@ -336,14 +336,14 @@ export function AgentsSurface({
                 <button
                   onClick={() => openThread(requests[0].thread)}
                   aria-label={`${requests.length} waiting for you`}
-                  className="inline-flex h-[22px] shrink-0 items-center gap-1.5 rounded-full border border-accent/30 bg-accent/10 pr-2 pl-1 text-[11.5px] font-medium text-accent transition-colors duration-150 hover:bg-accent/20"
+                  className="inline-flex h-[22px] shrink-0 items-center gap-1.5 rounded-full border border-accent/30 bg-accent/10 pr-2 pl-1 text-[11.5px] max-sm:pr-1 font-medium text-accent transition-colors duration-150 hover:bg-accent/20"
                   data-nodrag
                 >
                   <span className="grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 font-mono text-[10px] font-semibold text-white tabular-nums">{requests.length}</span>
-                  waiting for you
+                  <span className="max-sm:hidden">waiting for you</span>
                 </button>
               )}
-              {demo && <span className="shrink-0 rounded-[5px] border border-line-2 px-1.5 text-[10px] leading-[18px] font-medium tracking-[0.06em] text-subtle uppercase">Demo</span>}
+              {demo && <span className="shrink-0 rounded-[5px] max-sm:hidden border border-line-2 px-1.5 text-[10px] leading-[18px] font-medium tracking-[0.06em] text-subtle uppercase">Demo</span>}
             </span>
             <span className="ml-auto flex shrink-0 items-center gap-0.5 text-muted" data-nodrag>
               <button
@@ -356,16 +356,21 @@ export function AgentsSurface({
                 <span className="min-w-0 flex-1 truncate text-left max-sm:hidden">Search or ask agents…</span>
                 <kbd className="rounded-[4px] border border-line-2 bg-fg/[0.04] px-1 font-sans text-[10.5px] leading-[16px] text-subtle max-sm:hidden">⌘K</kbd>
               </button>
-              <IconButton label="Add a machine" onClick={() => setAdding(true)}>
-                <Server className="size-4" strokeWidth={1.75} />
-              </IconButton>
-              <IconButton label="Agents settings (⌘,)" onClick={() => setAgentsView({ kind: "settings", target: "owner" })}>
-                <Settings className="size-4" />
-              </IconButton>
+              {/* On a phone these are under More; the bar keeps its room for what is live. */}
+              <span className="flex max-sm:hidden">
+                <IconButton label="Add a machine" onClick={() => setAdding(true)}>
+                  <Server className="size-4" strokeWidth={1.75} />
+                </IconButton>
+                <IconButton label="Agents settings (⌘,)" onClick={() => setAgentsView({ kind: "settings", target: "owner" })}>
+                  <Settings className="size-4" strokeWidth={1.75} />
+                </IconButton>
+              </span>
               <Menu
                 label="More"
                 trigger={<MoreHorizontal className="size-4" strokeWidth={1.75} />}
                 items={[
+                  phone && { label: "Add a machine", icon: <Server />, onSelect: () => setAdding(true) },
+                  phone && { label: "Agents settings", icon: <Settings />, onSelect: () => setAgentsView({ kind: "settings", target: "owner" }) },
                   archived > 0 && { label: `${showArchived ? "Hide" : "Show"} archived (${archived})`, icon: <Archive />, onSelect: () => setShowArchived((s) => !s) },
                   !demo && { label: "Shared links", icon: <Share2 />, onSelect: () => window.location.assign(`/dashboard/agents/shares?owner=${encodeURIComponent(client.owner)}`) },
                 ]}

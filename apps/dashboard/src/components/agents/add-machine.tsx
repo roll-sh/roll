@@ -41,10 +41,10 @@ export function AddMachinePaths({ onCreated }: { onCreated?: (m: Machine) => voi
 
 function Path({ icon, title, lead, children }: { icon: React.ReactNode; title: string; lead: string; children: React.ReactNode }) {
   return (
-    <section className="flex min-w-0 flex-col gap-3 rounded-xl border border-line bg-panel p-4" aria-label={title}>
-      <div className="flex items-center gap-2">
-        {icon}
-        <h2 className="text-[14px] font-semibold tracking-[-0.02em]">{title}</h2>
+    <section className="flex min-w-0 flex-col gap-3 rounded-xl border border-line-2 bg-panel p-4 shadow-card inset-shadow-highlight" aria-label={title}>
+      <div className="flex items-center gap-2.5">
+        <span className="grid size-7 shrink-0 place-items-center rounded-lg border border-line bg-panel-2 text-muted inset-shadow-highlight [&>svg]:size-3.5">{icon}</span>
+        <h2 className="text-[14px] font-[590] tracking-[-0.02em]">{title}</h2>
       </div>
       <p className="text-[12.5px] leading-relaxed text-muted">{lead}</p>
       {children}
@@ -63,7 +63,7 @@ function ConnectComputer() {
     >
       <ol className="space-y-1.5">
         {steps.map((cmd, i) => (
-          <li key={cmd} className="flex items-center gap-1 rounded-lg border border-line bg-bg py-1.5 pr-1 pl-2.5">
+          <li key={cmd} className="flex items-center gap-1 rounded-lg border border-line bg-fg/[0.03] py-1.5 pr-1 pl-2.5">
             <span className="w-3 shrink-0 font-mono text-[10.5px] text-subtle">{i + 1}</span>
             <code className="min-w-0 flex-1 truncate font-mono text-[11.5px]" title={cmd}>
               {cmd}
@@ -136,7 +136,7 @@ function RentSandbox({ onCreated }: { onCreated?: (m: Machine) => void }) {
           }
         }}
       >
-        <fieldset className="space-y-1.5">
+        <fieldset className="min-w-0 space-y-1.5">
           <legend className="sr-only">Size</legend>
           {list.sizes.map((s) => (
             <SizeOption key={s.name} size={s} checked={s.name === chosen?.name} onChange={() => setSize(s.name)} />
@@ -182,10 +182,13 @@ function RentSandbox({ onCreated }: { onCreated?: (m: Machine) => void }) {
 function SizeOption({ size, checked, onChange }: { size: SandboxSize; checked: boolean; onChange: () => void }) {
   return (
     <label
-      className={`flex cursor-pointer items-center gap-2.5 rounded-lg border px-3 py-2 text-[12.5px] transition ${checked ? "border-line-2 bg-panel-2" : "border-line hover:border-line-2"}`}
+      className={`flex min-w-0 cursor-pointer items-center gap-2.5 rounded-lg border px-3 py-2 text-[12.5px] transition-colors duration-150 has-focus-visible:outline-2 has-focus-visible:outline-accent/70 ${checked ? "border-accent/45 bg-accent/[0.06]" : "border-line hover:border-line-2 hover:bg-fg/[0.03]"}`}
     >
-      <input type="radio" name="sandbox-size" checked={checked} onChange={onChange} className="accent-[var(--accent)]" />
-      <span className="font-medium">{size.name}</span>
+      <input type="radio" name="sandbox-size" checked={checked} onChange={onChange} className="sr-only" />
+      <span aria-hidden className={`grid size-3.5 shrink-0 place-items-center rounded-full border transition-colors duration-150 ${checked ? "border-accent bg-accent" : "border-line-3"}`}>
+        <span className={`size-1.5 rounded-full bg-white transition-transform duration-150 ${checked ? "scale-100" : "scale-0"}`} />
+      </span>
+      <span className="font-[510]">{size.name}</span>
       <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-subtle">
         {size.cpu} vCPU · {size.memory_gb} GB · {size.disk_gb} GB disk
       </span>
@@ -204,19 +207,22 @@ export function AddMachineDialog({ onClose, onCreated }: { onClose: () => void; 
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
   return (
-    <div className="absolute inset-0 z-30 overflow-y-auto bg-bg/70 backdrop-blur-sm" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
+    <div className="fade-in absolute inset-0 z-30 overflow-y-auto bg-(--scrim) backdrop-blur-[3px]" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
       <div
         ref={panel}
         tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-label="Add a machine"
-        className="rise mx-auto my-4 w-[min(760px,calc(100%-1.5rem))] space-y-4 outline-none sm:my-16"
+        className="sheet-in mx-auto my-4 w-[min(760px,calc(100%-1.5rem))] space-y-4 rounded-2xl border border-line-2 bg-sheet p-5 shadow-sheet inset-shadow-highlight outline-none sm:my-[10vh]"
       >
-        <div className="flex items-center gap-2">
-          <h2 className="text-xl font-semibold tracking-[-0.045em]">Add a machine</h2>
-          <button onClick={onClose} aria-label="Close" className="ml-auto grid size-8 place-items-center rounded-lg text-subtle hover:bg-panel-2 hover:text-fg">
-            <X className="size-4" />
+        <div className="flex items-start gap-2">
+          <div className="space-y-1">
+            <h2 className="text-[17px] font-[590] tracking-[-0.025em]">Add a machine</h2>
+            <p className="text-[12.5px] text-muted">Run agents on your own computer, or on a sandbox roll hosts for you.</p>
+          </div>
+          <button onClick={onClose} aria-label="Close" className="-mt-1 -mr-1 ml-auto grid size-8 place-items-center rounded-lg text-subtle transition-colors duration-150 hover:bg-fg/[0.06] hover:text-fg">
+            <X className="size-4" strokeWidth={1.75} />
           </button>
         </div>
         <AddMachinePaths onCreated={onCreated} />
