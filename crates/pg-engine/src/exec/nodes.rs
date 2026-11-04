@@ -565,6 +565,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                     *nright,
                 );
                 nl.key = Arc::as_ptr(plan) as usize;
+                nl.report_rescans = !meta.material && !matches!(kind, JoinKind::Right | JoinKind::Full);
                 nl.keep = join_keep(need, cond.as_ref(), *nleft + *nright);
                 if let Some(m) = meta.memoize.as_ref().filter(|_| !params.is_empty()) {
                     nl.memo = Some(Memoize {
@@ -3836,6 +3837,9 @@ struct NestLoopNode {
     nleft: usize,
     nright: usize,
     right: Option<Rc<Vec<Row>>>,
+    /// Without a displayed Materialize, report each actual reuse of this run's input.
+    report_rescans: bool,
+    right_stats: Vec<(usize, super::NodeStats)>,
     right_matched: Vec<bool>,
     /// The outer row, its inner rows (with the next one's place) and whether one matched.
     cur: Option<(Row, InnerRows, bool)>,
@@ -3919,6 +3923,8 @@ impl NestLoopNode {
             nleft,
             nright,
             right: None,
+            report_rescans: false,
+            right_stats: Vec::new(),
             right_matched: Vec::new(),
             cur: None,
             inner: None,
@@ -4052,10 +4058,17 @@ impl NestLoopNode {
             return Ok(rows);
         }
         if self.right.is_none() {
+            let instr = ctx.instr.borrow().clone().filter(|_| self.report_rescans);
+            let before = instr.as_ref().map(|i| i.nodes.borrow().clone());
             let rows = self.collect_right(ctx)?;
+            if let (Some(instr), Some(before)) = (instr, before) {
+                self.right_stats = instr.rescan_delta(&before);
+            }
             self.material_stats(&rows, ctx);
             self.right_matched = vec![false; rows.len()];
             self.right = Some(Rc::new(rows));
+        } else if let Some(instr) = ctx.instr.borrow().as_ref() {
+            instr.repeat_rescan(&self.right_stats);
         }
         Ok(self.right.clone().unwrap())
     }

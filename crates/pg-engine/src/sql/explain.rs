@@ -512,9 +512,6 @@ struct ExNode {
     cte_id: Option<usize>,
     /// An Append member's columns as a node above names them (a set operation's sort).
     out_names: Vec<String>,
-    /// A nested loop whose inner side the executor reads once and keeps (no Materialize
-    /// shown, not parameterized): Postgres rescans it for every outer row.
-    inner_cached: bool,
     node_type: &'static str,
     strategy: Option<&'static str>,
     partial_mode: Option<&'static str>,
@@ -16671,11 +16668,6 @@ impl Builder<'_, '_> {
             r.node = mn;
         }
         n.subplans.append(&mut self.pending);
-        n.inner_cached = method == JoinMethod::NestLoop
-            && !lateral
-            && !material
-            && meta.memoize.is_none()
-            && !matches!(kind, JoinKind::Right | JoinKind::Full);
         // The rows' order: a nested loop's or merge join's outer side's (an inner merge
         // join's keys are equal on both sides: either names it).
         if method != JoinMethod::Hash && !matches!(kind, JoinKind::Full) && (kind != JoinKind::Right || swapped) {
@@ -18255,9 +18247,6 @@ struct Render<'r> {
     /// and the leader when it participates).
     procs: u64,
     leader: bool,
-    /// Inside a nested loop's inner side the executor ran once for all the outer rows:
-    /// the scans Postgres makes of it.
-    rescans: (u64, u64),
     /// A nested loop's inner Materialize about to be shown: the outer rows, each a rescan
     /// of it (its input read once).
     mat_loops: Option<u64>,
@@ -18268,19 +18257,9 @@ struct Render<'r> {
 }
 
 impl Render<'_> {
-    fn scale_rescans(&self, value: u64) -> u64 {
-        value * self.rescans.0 / self.rescans.1
-    }
-
     fn stats(&self, key: Option<usize>) -> Option<NodeStats> {
         let mut s = self.instr?.get(key?)?;
-        let scale = |v| self.scale_rescans(v);
-        s.loops = scale(s.loops * self.procs);
-        s.rows = scale(s.rows);
-        s.removed = scale(s.removed);
-        s.searches = scale(s.searches);
-        s.fetches = scale(s.fetches);
-        s.pages = scale(s.pages);
+        s.loops = s.loops.saturating_mul(self.procs);
         (s.loops > 0).then_some(s)
     }
 
@@ -18320,27 +18299,14 @@ impl Render<'_> {
         }
     }
 
-    /// Render a node's children, the inner side of a nested loop the executor read once
-    /// as the outer rows' many scans of it.
     fn children_of(&mut self, n: &ExNode, f: &mut dyn FnMut(&mut Self, &ExNode)) {
-        let saved = self.rescans;
         for (i, c) in n.initplans.iter().chain(&n.children).chain(&n.subplans).enumerate() {
-            let inner = n.inner_cached && i == n.initplans.len() + 1;
-            if inner {
-                // Keep the exact ratio until scaling totals: varying outer row counts
-                // across SubPlan runs need not average to a whole number.
-                let raw = |k: Option<usize>| k.and_then(|k| self.instr?.get(k));
-                let outer_rows = raw(n.children.first().and_then(|o| o.key)).map_or(0, |s| s.rows);
-                let reads = raw(c.key).map_or(1, |s| s.loops.max(1));
-                self.rescans = (saved.0 * outer_rows, saved.1 * reads);
-            }
             if n.node_type == "Nested Loop" && i == n.initplans.len() + 1 && c.node_type == "Materialize" {
                 let outer_rows = n.children.first().and_then(|o| self.stats(o.key)).map_or(0, |s| s.rows);
                 self.mat_loops = Some(outer_rows);
             }
             f(self, c);
             self.mat_loops = None;
-            self.rescans = saved;
         }
     }
 
@@ -18363,11 +18329,11 @@ impl Render<'_> {
                 Removed::Scan(k) => self
                     .instr
                     .and_then(|i| i.get(*k))
-                    .map_or(0, |s| self.scale_rescans(s.removed)),
+                    .map_or(0, |s| s.removed),
                 Removed::Diff(k) => self
                     .instr
                     .and_then(|i| i.get(*k))
-                    .map_or(0, |s| self.scale_rescans(s.rows).saturating_sub(st.rows)),
+                    .map_or(0, |s| s.rows.saturating_sub(st.rows)),
             })
             .sum();
         (total as f64 / st.loops as f64).round()
@@ -20886,7 +20852,6 @@ pub fn explain(
         instr,
         w: Writer::new(o.format),
         procs: 1,
-        rescans: (1, 1),
         mat_loops: None,
         leader: crate::sql::paths::parallel::ParCfg::read(ctx).leader,
         jg: super::joins::JoinGucs::read(ctx),
