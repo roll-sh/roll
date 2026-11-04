@@ -1,0 +1,23 @@
+[
+  {
+    "case": "matrix",
+    "exit": 1,
+    "calls": "['inspect', 'a165-resume-matrix-pg']\n",
+    "stdout": "",
+    "stderr": "existing container: a165-resume-matrix-pg\n"
+  },
+  {
+    "case": "scaled",
+    "exit": 1,
+    "calls": "['inspect', 'a165-conn']\n",
+    "stdout": "",
+    "stderr": "existing a165-conn; refusing to replace\n"
+  },
+  {
+    "case": "profiler",
+    "exit": 1,
+    "calls": "['inspect', 'a165-perf']\n['inspect', '-f', '{{.State.Pid}}', 'a165-resume']\n['run', '--rm', '--network', 'host', '--cpuset-cpus', '12-13,18-19', '-e', 'PGPASSWORD=pw', '-v', '/home/meszmate/.cache/a165/bench:/home/meszmate/.cache/a165/bench', 'postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873', 'pgbench', '-h', '127.0.0.1', '-p', '53301', '-U', 'postgres', '-n', '-M', 'simple', '-c', '1', '-j', '1', '-T', '5', '-S', 'postgres']\n['exec', 'a165-perf', 'perf', 'record', '-F', '999', '-g', '-p', '12345', '-o', '/home/meszmate/.cache/a165/perf/wrapper-selftest.data', '--', 'sleep', '1']\n",
+    "stdout": "",
+    "stderr": ""
+  }
+]

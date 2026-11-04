@@ -1,7 +1,7 @@
 {
   "README.md": {
-    "sha256": "d58bc140801a7e6f3d450a1975e4781f2038caaaf40b94ad9fec39686d5ed7c5",
-    "bytes": 5325
+    "sha256": "b9a08a35852c22a55604f21583ef1946c9809d600c9b7e1869af4d0da605749f",
+    "bytes": 5945
   },
   "check165fixed/SUPERSEDED.json": {
     "sha256": "7f22633dc4bf0ba55a5198297137e6eeaf49c08cebfc42455718ac666b049e8f",
@@ -50,6 +50,34 @@
   "check165fixed/tree.txt": {
     "sha256": "0662b53ce16326094c91d35608f44059b2715bb609df884cece5b27852e4d8b5",
     "bytes": 41
+  },
+  "check165r2-runner-error/exits.tsv": {
+    "sha256": "5afdccc0c3a6898bcf901621239b567706c88ec04836a91942b6be918e8e24cb",
+    "bytes": 19
+  },
+  "check165r2-runner-error/initial.status": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  "check165r2-runner-error/source.txt": {
+    "sha256": "34d94653dbbfb69b323373fd0759fa984c86e6d911076efdd77de4a24138e7ad",
+    "bytes": 41
+  },
+  "check165r2-runner-error/tree.txt": {
+    "sha256": "42aea5683f499134295ce51fa8c9010fb0f7d818c334ffa01fdd03d0c3909c9d",
+    "bytes": 41
+  },
+  "check165r2-runner-error/wrapper-selftest-summary.json": {
+    "sha256": "7ce034e111f7cfc1bc17bff3c9bd7c328818bde1ef0daa6f54adf6da1e276a58",
+    "bytes": 67
+  },
+  "check165r2-runner-error/wrapper-selftest.command": {
+    "sha256": "a5046584e3d8cd4c3f9500836aa760b35402365ec5eccc5d01c164aeab504a4a",
+    "bytes": 93
+  },
+  "check165r2-runner-error/wrapper-selftest.log": {
+    "sha256": "2819207fe9c2282afd3351414ca5e40d2eb35e561177be1c5ce49c7d55209429",
+    "bytes": 73
   },
   "embedded165/cursor_replay_probe.rs": {
     "sha256": "be8240164ee8f786b529810e08a5c5bdd34342d9cb3e16e9cede465e5673bd55",
@@ -192,8 +220,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "e250b5eebf691c91451dcb5a34dd4cafde1d9910258d535ac976417eca273625",
-    "bytes": 15939
+    "sha256": "ce513501a002747858dabede475feec09ed56ccc8ff2b2373228e35c2271b9b3",
+    "bytes": 16731
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -210,6 +238,142 @@
   "fdw172/contrib-base.log": {
     "sha256": "414bfbf97451483a9ca786a92585064a0b096fe9f311faddc01f0c8709b1a91f",
     "bytes": 739
+  },
+  "green165r2/a165_cursor_edges.out": {
+    "sha256": "d5645e686147eee401fe7c0fbaea659eb0cbfd9dfb5107538dc4f08c11c3caa6",
+    "bytes": 1636
+  },
+  "green165r2/a165_cursor_edges.sql": {
+    "sha256": "7cf1382843ae4823656e931681264ec1e79281d7d491b98be64d754a9eba4d25",
+    "bytes": 1091
+  },
+  "green165r2/a165_cursor_embedded.out": {
+    "sha256": "d92dcdefa04b06cfc27c636eaeb2aa0ed407f9e7d99246edd9910f80bffa0326",
+    "bytes": 3843
+  },
+  "green165r2/a165_cursor_embedded.sql": {
+    "sha256": "e24341d7357a2ce005dada3b1f507397576d5381ce1616752c5e9a270560dcaf",
+    "bytes": 1745
+  },
+  "green165r2/current.patch": {
+    "sha256": "27eb6472a44b3478872f0f21370af9425c359d76012c8c53c044b581b58b8c0e",
+    "bytes": 11895
+  },
+  "green165r2/cursor.command": {
+    "sha256": "b13f258f386b86705fb802b237e1e375d1cdcae2a254272e0cf3de2f21c5f0d0",
+    "bytes": 85
+  },
+  "green165r2/cursor.log": {
+    "sha256": "1355712540c119d6bb49f3e157086ad435267c42de7380a97efb5345d719a81e",
+    "bytes": 452
+  },
+  "green165r2/exits.tsv": {
+    "sha256": "46771a22b4fc17ee251ad8a4d1b193b0dc172a5bf4fb2ec6001bb0afa4247ccd",
+    "bytes": 34
+  },
+  "green165r2/head.txt": {
+    "sha256": "1b60ab8719a9c8cdd0801fc6c167edc4fff1fdc283b40e4c329d7d73e555d461",
+    "bytes": 41
+  },
+  "green165r2/lock.command": {
+    "sha256": "f563d0fb0fceeb8419fca7a0e62c78eb5644c5a785a41f1ad9b0c81b374685d3",
+    "bytes": 56
+  },
+  "green165r2/lock.log": {
+    "sha256": "f43892723483f3ed9fabf69dbbf7f06d6a16997973eeb3c49a22456e2d2f78e6",
+    "bytes": 637
+  },
+  "green165r2/memory.command": {
+    "sha256": "5515eabac767035db6e5036bb714304e1063b17073ad63edd9e10e3dcd3c3453",
+    "bytes": 67
+  },
+  "green165r2/memory.log": {
+    "sha256": "a05d194770e41111eae16702da44870fd5bb38f790a9a8b3ecd2c7e75f7e77c8",
+    "bytes": 842
+  },
+  "green165r2/record.command": {
+    "sha256": "34acb3855166e59fc408df5202e7b793ec64032cd19aac5eb49ee80e4cee75a6",
+    "bytes": 134
+  },
+  "green165r2/record.log": {
+    "sha256": "c9f1e71d94d67d3c085011bd7cf35b7090292a13cdefda4a239a3c7e58d1d9c5",
+    "bytes": 954
+  },
+  "green165r2/reference.txt": {
+    "sha256": "121cfc87396a1dc0a77ee635cba80fc31730fa8a0c3117a8e2b73b764cf6aecd",
+    "bytes": 225
+  },
+  "green165r2/source.patch": {
+    "sha256": "27eb6472a44b3478872f0f21370af9425c359d76012c8c53c044b581b58b8c0e",
+    "bytes": 11895
+  },
+  "green165r2v2/a165_cursor_edges.out": {
+    "sha256": "e0a1dc53089370d191a7a2a1f626fd2ec1f0fecea24d9b45e77baad7eaa57216",
+    "bytes": 1711
+  },
+  "green165r2v2/a165_cursor_edges.sql": {
+    "sha256": "1423ec88651fbe34085a8d524a6f31b0587f053194de06a3b08398e462687a0e",
+    "bytes": 1092
+  },
+  "green165r2v2/a165_cursor_embedded.out": {
+    "sha256": "18508bd5ac750f3a7c67c26b2dac3903dc5dd8826304b9c6b23e22c400a12d08",
+    "bytes": 4299
+  },
+  "green165r2v2/a165_cursor_embedded.sql": {
+    "sha256": "a9a5bd21a785cfdae88e5efefec8f9b950677f078a3744da3e61569a3dd5e961",
+    "bytes": 1988
+  },
+  "green165r2v2/current.patch": {
+    "sha256": "3a805df9195b1ea3eff64286dd1c25b24243a565a79bb4429e68f1d54db5dc7d",
+    "bytes": 11883
+  },
+  "green165r2v2/cursor.command": {
+    "sha256": "b13f258f386b86705fb802b237e1e375d1cdcae2a254272e0cf3de2f21c5f0d0",
+    "bytes": 85
+  },
+  "green165r2v2/cursor.log": {
+    "sha256": "942f99224766d7a971a5598f047ac74d553a81bb29478c99c072d33e68c03c77",
+    "bytes": 452
+  },
+  "green165r2v2/exits.tsv": {
+    "sha256": "46771a22b4fc17ee251ad8a4d1b193b0dc172a5bf4fb2ec6001bb0afa4247ccd",
+    "bytes": 34
+  },
+  "green165r2v2/head.txt": {
+    "sha256": "1b60ab8719a9c8cdd0801fc6c167edc4fff1fdc283b40e4c329d7d73e555d461",
+    "bytes": 41
+  },
+  "green165r2v2/lock.command": {
+    "sha256": "f563d0fb0fceeb8419fca7a0e62c78eb5644c5a785a41f1ad9b0c81b374685d3",
+    "bytes": 56
+  },
+  "green165r2v2/lock.log": {
+    "sha256": "aaf049b650d40006a3dc30b5c7c77a7e317400246d1322dfd943e73177b4bef1",
+    "bytes": 637
+  },
+  "green165r2v2/memory.command": {
+    "sha256": "5515eabac767035db6e5036bb714304e1063b17073ad63edd9e10e3dcd3c3453",
+    "bytes": 67
+  },
+  "green165r2v2/memory.log": {
+    "sha256": "d94d8a39199c7691fbe1a20b1890a0fc40198d679d6553ea6dd81411993d749f",
+    "bytes": 843
+  },
+  "green165r2v2/record.command": {
+    "sha256": "34acb3855166e59fc408df5202e7b793ec64032cd19aac5eb49ee80e4cee75a6",
+    "bytes": 134
+  },
+  "green165r2v2/record.log": {
+    "sha256": "d7179790cadfc5d90cfd1d0f71f527ab99ea77930c6b85850001ae7162854b23",
+    "bytes": 954
+  },
+  "green165r2v2/reference.txt": {
+    "sha256": "121cfc87396a1dc0a77ee635cba80fc31730fa8a0c3117a8e2b73b764cf6aecd",
+    "bytes": 225
+  },
+  "green165r2v2/source.patch": {
+    "sha256": "3a805df9195b1ea3eff64286dd1c25b24243a565a79bb4429e68f1d54db5dc7d",
+    "bytes": 11883
   },
   "green165v2/cursor.command": {
     "sha256": "b13f258f386b86705fb802b237e1e375d1cdcae2a254272e0cf3de2f21c5f0d0",
@@ -463,6 +627,14 @@
     "sha256": "e00a23e70c1bed4995eea4baf81ca5b859a79d41816643d49ce78c88edc1b504",
     "bytes": 1923
   },
+  "runners/check165r2-runner-error.sh": {
+    "sha256": "6d51b4952acb2d7e122d03a444b8e3da48b6474eaa710cd538091c17b732c771",
+    "bytes": 2388
+  },
+  "runners/check165r2.sh": {
+    "sha256": "a78df279e3b8e9b1579b8cddf4043454f275ee052e5afb1dca9d26f2da0a6982",
+    "bytes": 2417
+  },
   "runners/check171.sh": {
     "sha256": "2e118548af8498cc83f162fda45d8928d32f912bb98e46f1c34dd0e901c735a1",
     "bytes": 1686
@@ -494,6 +666,14 @@
   "runners/footprint.sh": {
     "sha256": "afc925795bcc33c12ed2392ed9684d81b83ca8966227c4341577501c2064dd21",
     "bytes": 2064
+  },
+  "runners/green165r2.sh": {
+    "sha256": "5725dc31c990eb7651fb1809738593f0d7c3aa012a639d3bf520d5fe9799ba7f",
+    "bytes": 1610
+  },
+  "runners/green165r2v2.sh": {
+    "sha256": "e7057e713e0408a9e10086303fa99becdf0b2c69b5f841988757b3a7eea151d8",
+    "bytes": 1612
   },
   "runners/green165v2.sh": {
     "sha256": "5a6789b4a0491a1135f2ca9ce6eaf4a3fcd435f94e57880e61097959c68be6f1",
@@ -542,6 +722,10 @@
   "runners/stop165-followon.py": {
     "sha256": "a3bb532d90d41c0e8d45c42369da60e9e91133c5d6bc5bffa16930a234d9919c",
     "bytes": 2648
+  },
+  "runners/wrapper-selftest-results.json": {
+    "sha256": "033e72df9d2c1d9a2d2548cfbd48d2b02d4fa7c3274270c51c5f034f9d3a8ae7",
+    "bytes": 1071
   },
   "runners/wrapper-selftest.py": {
     "sha256": "b80c34606a241ba33e69032c61cb0ae7b336c0a97b3af747fad7c8d828340bf0",

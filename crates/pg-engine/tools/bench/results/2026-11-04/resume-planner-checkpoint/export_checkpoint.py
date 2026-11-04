@@ -53,23 +53,31 @@ The exact clean caab source full DEBUG suite completed448passed/0failed/18ignore
 60summaries, command exit0. Release also completed448/0/18/60; release all-target Clippy exited0 withwarnings.
 Obsolete dist was cancelled as SUPERSEDED after R2. pnpm was NOT RUN. All resource/performance gates remain pending.
 
-Source acceptance is HELD on a confirmed predicate coverage gap: Expr::walk does not
-inspect DomainCoerce.checks or embedded operator FuncDefs. The runtime effect is PROVEN by embedded165v3 against actual PG18.6. In
-SELECT id FROM t WHERE id::noticing_int > 0, a domain CHECK calls an IMMUTABLE
-PLpgSQL function raising NOTICE. Trace plain=true/rerun=true and zero retained rows
-establish the replay path. First BACKWARD1 emits check3 on PG but check1,2,3 on caab;
-next BACKWARD ALL emits check2,1 on PG but none on caab. Shape/record exited0,
-comparison exited101 in all3modes. The expected-red wrapper exits0 without claiming
-parity. v2 also preserves unrelated custom ANY EXPLAIN and public.= IN lookup gaps.
-The first domain projection probe failed its shape prerequisite and establishes no
-runtime proof. All diagnostic output/source is preserved. No predicate fix is applied
-in this checkpoint. Full caab job is terminal; temporary tracing is not accepted source.
+Source acceptance remains HELD pending review and full gates for corrected351af2ac.
+R2's runtime predicate defect is PROVEN by embedded165v3 against actual PG18.6.
+Domain CHECK in a scan qualifier emitted check1,2,3 on caab's first BACKWARD1,
+where PG emitted only check3; the following BACKWARD ALL emitted none vs PG2,1.
+Shape/record exited0, comparison101 in all3modes. Diagnostic patches/output are preserved.
+Unrelated custom ANY EXPLAIN/public.= IN lookup gaps are preserved separately in v2.
+
+351af2ac adds cursor-local embedded operator/domain safety and rechecks observable quals,
+blocks rerun for Lazy.coerce, restricts transparent Join kinds to Inner, and returns an
+internal error for a missing streamed current key. No global Expr walker changes.
+Focused green165r2v2 passed PGrecord,4goldenfiles in3modes,4locktests and2memorytests.
+Goldens cover domain, domainIN/LIMIT, runtime STABLE customANY, builtinIN, ownUPDATE/
+DELETE before firstbackward, NOscrollmultiple-reference24000 afterdiscard, keyedWITHHOLD.
+Default STABLEqual materialization remains O(n):20krows4,683,971bytes;100k22,055,318bytes;
+CLOSE releases them (-1577bytes vsopenedbaseline). NOscroll98kmore rows retained0bytes;
+backward20k143ms is a correctness bound, not an accepted performance comparison.
+The new full gate job is active and its partial outputs are excluded.
+Initial full-runner failed because *test also matched the fakeDocker selftest, applying
+an inappropriate450test-summary assertion. No cargo step ran in that attempt. Exact-name
+summary gating repaired; failed runner/log retained, no false pass claimed.
 
 Owned cache runners now fail explicitly on logged failures (Bash ! guards do not imply
 errexit). Profiler wrapper records perf/pgbench exits separately. Matrix/scaled scripts
 refuse existing resources, clean only recorded created IDs, and preserve prior data.
-These additional resource/exit repairs passed bash syntax checks only; fakeDocker
-selftests are prepared, NOT RUN. No frozen measurement thresholds were changed.
+Three fakeDocker propagation/ownership selftests now pass; results and exact runner are preserved. No frozen measurement thresholds were changed.
 The planned matrix remains2interleaved rounds, exploratory only; no winner or causal
 speedup can be claimed without the required repetitions, work checks and limiter evidence.
 Historical m0/m1 are partial campaigns without complete raw pgbench/source gates and
@@ -197,11 +205,11 @@ sources = {
     'fdw172/contrib-base.log': '/home/meszmate/.cache/a172/contrib-base.log',
     'fdw172/REPORT.md': '/home/meszmate/.cache/a172/contrib/run-base/report/REPORT.md',
 }
-for campaign in ('embedded165v2', 'embedded165v3'):
+for campaign in ('embedded165v2', 'embedded165v3', 'green165r2', 'green165r2v2', 'check165r2-runner-error'):
     for artifact in sorted((D / campaign).iterdir()):
         if artifact.is_file():
             sources[campaign + '/' + artifact.name] = str(artifact)
-for runner in ('embedded165v3.sh',):
+for runner in ('embedded165v3.sh', 'green165r2.sh', 'green165r2v2.sh', 'check165r2.sh', 'check165r2-runner-error.sh', 'wrapper-selftest-results.json'):
     sources['runners/' + runner] = str(D / runner)
 for name, source in sources.items():
     files[name] = Path(source).read_bytes()

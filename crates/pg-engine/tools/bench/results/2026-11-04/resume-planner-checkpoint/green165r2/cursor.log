@@ -1,0 +1,13 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/golden.rs (/home/meszmate/.cache/a165/target/debug/deps/golden-9749ad749af5ca1c)
+
+running 3 tests
+4 golden files match
+test golden ... ok
+4 golden files match in a shuffled order (seed 2579)
+test golden_shuffled ... ok
+4 golden files match
+test golden_wire ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.38s
+

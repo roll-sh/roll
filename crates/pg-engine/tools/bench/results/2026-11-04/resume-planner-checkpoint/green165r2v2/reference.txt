@@ -1,0 +1,2 @@
+4c7dfb3163fe4fc80a56903c187c33bee8e67d48cee599baa4e3ec66bad53edd sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+PostgreSQL 18.6 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
