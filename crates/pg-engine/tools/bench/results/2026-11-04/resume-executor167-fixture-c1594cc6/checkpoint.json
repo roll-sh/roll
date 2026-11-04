@@ -1,0 +1,7 @@
+{
+  "head": "c1594cc6c9fac649ee76a86d711e1bf880871f08",
+  "tree": "58ff6a42818f23863213a7f3a14b8d13abfde466",
+  "status": "",
+  "time_utc": "2026-11-04T12:51:56.918456+00:00",
+  "note": "Unverified test fixture repair only on top of3792eaec chunk-statistics fix. Padding ensures modeled heap exceeds8MB worker threshold; explicit relation-size and worker-start assertions. No weakened vector assertion. Acceptance pending."
+}

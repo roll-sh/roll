@@ -1,0 +1,7 @@
+{
+  "head": "c1594cc6c9fac649ee76a86d711e1bf880871f08",
+  "tree": "58ff6a42818f23863213a7f3a14b8d13abfde466",
+  "status": "",
+  "time_utc": "2026-11-04T13:49:58.620171+00:00",
+  "note": "PARTIAL CHECKPOINT exactc1594cc6 full debug PASS exit0 with positive test summaries and unchanged source. Release/clippy/crash30/postgres-unit still pending. Prior failures retained. No performance/resource acceptance."
+}
