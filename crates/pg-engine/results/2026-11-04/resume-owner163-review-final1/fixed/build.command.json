@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "cargo",
+    "build",
+    "-p",
+    "pg-engine",
+    "--bin",
+    "roll-engine"
+  ],
+  "env": {},
+  "cwd": "/home/meszmate/roll/.claude/worktrees/agent-a3512214927146502",
+  "source_head": "37e9896225915add74cb51e0d966765cdf01d8b4"
+}

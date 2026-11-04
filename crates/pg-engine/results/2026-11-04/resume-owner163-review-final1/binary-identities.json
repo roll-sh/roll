@@ -1,0 +1,12 @@
+[
+  {
+    "path": "/home/meszmate/.cache/a163/target/debug/roll-engine",
+    "bytes": 332631408,
+    "sha256": "de6a88969bf1ef4d941989f721c687af40a44b6f461d4be001a4e191c1678b47"
+  },
+  {
+    "path": "/home/meszmate/.cache/a163/target/release/roll-engine",
+    "bytes": 86435808,
+    "sha256": "85517a6226c9f5b0b61aa9bb305cc450f5350098f3850b7b8c16b6adfd973b06"
+  }
+]
