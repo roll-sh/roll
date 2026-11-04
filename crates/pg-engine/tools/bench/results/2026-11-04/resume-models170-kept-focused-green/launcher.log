@@ -1,0 +1,4 @@
+{"name": "kept", "exit": 0, "expected_summary": true, "pass": true}
+{"name": "models-kept", "exit": 0, "expected_summary": true, "pass": true}
+BATCH_CHECKS_PASSED
+HEAVY-EXIT 0

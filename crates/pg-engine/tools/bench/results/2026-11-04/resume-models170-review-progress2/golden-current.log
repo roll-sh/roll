@@ -1,0 +1,10 @@
+    Finished `release` profile [optimized] target(s) in 0.13s
+     Running tests/golden.rs (/home/meszmate/.cache/a170/target/release/deps/golden-09a38f0445a85626)
+
+running 3 tests
+test golden ... ok
+test golden_shuffled ... ok
+test golden_wire ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.10s
+

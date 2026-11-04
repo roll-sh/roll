@@ -1,0 +1,86 @@
+[
+  {
+    "name": "kept",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "pg-engine",
+      "--lib",
+      "exec::sizing::kept::tests::",
+      "--",
+      "--nocapture"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 189 filtered out; finished in 0.65s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 52.37418270111084,
+    "log_sha256": "130a0a78ff8067df21fb00e53938e9089ad8c701c851eda7c9ac5685a3b9e8a1",
+    "binaries": {
+      "/home/meszmate/.cache/a170/target/debug/deps/pg_engine-357a2b04731fc140": {
+        "sha256": "e9fcc336d3625d751981fedb74ad12ac5069957eeb79a905b4e5a0fa89052a97",
+        "bytes": 318184456
+      }
+    },
+    "passed_tests": 2,
+    "pass": true
+  },
+  {
+    "name": "models-kept",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "pg-engine",
+      "--test",
+      "models_kept",
+      "--",
+      "--nocapture"
+    ],
+    "env": {},
+    "source_before": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_after": {
+      "head": "c66a076833291eaad99bdcfa7ed885ed2a68cb2c",
+      "tree": "7a39f48954dd61c2ee0f0f558240fc66312e9d7c",
+      "status": "",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exit": 0,
+    "expected_summary": true,
+    "test_summaries": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.57s"
+    ],
+    "fatal_lines": [],
+    "elapsed_s": 73.33621644973755,
+    "log_sha256": "0b4be50a80ad7996038d770825a7049433c2ac89e9d319ef02d73918aa2b8afc",
+    "binaries": {
+      "/home/meszmate/.cache/a170/target/debug/deps/models_kept-81be20026cb60eb7": {
+        "sha256": "d4a0b64ecbb2480127453e13fd15e93bdc471214f24b66280c69c07726f76149",
+        "bytes": 320035528
+      }
+    },
+    "passed_tests": 6,
+    "pass": true
+  }
+]

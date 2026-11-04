@@ -1,0 +1,19 @@
+{
+  "argv": [
+    "cargo",
+    "test",
+    "-p",
+    "pg-engine",
+    "--test",
+    "big_tables",
+    "--",
+    "--exact",
+    "measured_serial_include_size",
+    "--nocapture"
+  ],
+  "env": {
+    "CARGO_TARGET_DIR": "/home/meszmate/.cache/a163/target",
+    "RUST_BACKTRACE": "1"
+  },
+  "source": "a54718cadcd4407b93fc5fd7f976a6268e2e31de\n"
+}
