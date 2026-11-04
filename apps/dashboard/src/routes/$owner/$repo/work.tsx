@@ -1,8 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { Link } from "@/components/link";
 import { createServerFn } from "@tanstack/react-start";
 import { Bot } from "lucide-react";
 import { SourceBadge } from "@/components/code/shared";
+import { Link } from "@/components/link";
 import { changeHref } from "@/components/repo/paths";
 import { TableSkeleton } from "@/components/repo/sections";
 import type { WorkItem } from "@/lib/code-api";

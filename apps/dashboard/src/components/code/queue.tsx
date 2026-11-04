@@ -1,6 +1,6 @@
 import { ArrowUpToLine, CircleX, GitMerge, Pause, Play, X } from "lucide-react";
-import { Link } from "@/components/link";
 import { useEffect, useState } from "react";
+import { Link } from "@/components/link";
 import { formatCount } from "@/lib/redis-api";
 import { codeApi, shortId, type CodeInfo, type Queue, type QueueEntry, type Repo } from "@/lib/code-api";
 import { batchSegments, canWrite, formatWait, queueBusy, queueHeadline, queueLanes, waitSeconds } from "@/lib/queue";

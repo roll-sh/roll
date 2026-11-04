@@ -1,6 +1,6 @@
 import { ChevronRight, Cloud, KeyRound, Laptop } from "lucide-react";
-import { Link } from "@/components/link";
 import { useEffect, useRef, useState } from "react";
+import { Link } from "@/components/link";
 import { flushSync } from "react-dom";
 import type { EndpointProfile, Machine } from "@/lib/agents-api";
 import { NewSandboxGatewayNotice } from "./gateway/machine";

@@ -1,8 +1,8 @@
 import { HorizonMark } from "@roll/brand";
 import { GitBranch, GitCompare, RefreshCw, RotateCcw } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
-import { Link } from "@/components/link";
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "@/components/link";
 import { branchTree, descendants, formatSpan, nosqlApi, validName, type NosqlDb, type NosqlDiff } from "@/lib/nosql-api";
 import { diffKind } from "@/lib/nosql-cql";
 import { ago, btn, Confirm, CopyButton, input, Panel, primary, useCopy } from "../ui";

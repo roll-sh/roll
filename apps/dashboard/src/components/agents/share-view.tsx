@@ -10,8 +10,8 @@
 
 import { HorizonMark, RollLogo, useReducedMotion } from "@roll/brand";
 import { ChevronLeft, ChevronRight, Folder, MessageSquare, Network, Pause, Play, RotateCcw, Server } from "lucide-react";
-import { Link } from "@/components/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "@/components/link";
 import { AgentsClient, type AgentsTransport } from "@/lib/agents-client";
 import { absorbChildren, deriveGraph, foldQuiet, newestRuns, SHOWN_THREADS, type GraphNode } from "@/lib/agents-graph";
 import { isBusy, type Share } from "@/lib/agents-api";

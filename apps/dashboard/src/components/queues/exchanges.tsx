@@ -1,6 +1,6 @@
 import { Link2, Plus, Trash2, Unlink } from "lucide-react";
-import { Link } from "@/components/link";
 import { useMemo, useState } from "react";
+import { Link } from "@/components/link";
 import { type Binding, type Exchange, exchangeLabel, formatNum, formatRate, qapi, queueHref } from "@/lib/queues-api";
 import { ArgumentsEditor, argsFromRows, type ArgRow, EXCHANGE_ARGS } from "./args-editor";
 import { useAction, usePoll } from "./hooks";

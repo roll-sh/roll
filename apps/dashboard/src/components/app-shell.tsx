@@ -20,8 +20,8 @@ import {
   X,
 } from "lucide-react";
 import { useLocation } from "@tanstack/react-router";
-import { Link } from "@/components/link";
 import { useEffect, useState, type ReactNode } from "react";
+import { Link } from "@/components/link";
 import { AgentsControl } from "./agents/agents-control";
 import { useShownOwner } from "./agents/use-connection";
 import { OwnerSwitcher } from "./agents/owner-switcher";

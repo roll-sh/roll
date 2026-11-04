@@ -1,8 +1,8 @@
 import { HorizonMark } from "@roll/brand";
 import { ArrowLeft, ChevronRight, ExternalLink, Lock, Plus, Search } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
-import { Link } from "@/components/link";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { Link } from "@/components/link";
 import { formatCount } from "@/lib/redis-api";
 import {
   codeApi,

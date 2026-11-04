@@ -1,11 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { Link } from "@/components/link";
 import { createServerFn } from "@tanstack/react-start";
 import { Database, ExternalLink, GitMergeConflict, MemoryStick } from "lucide-react";
 import { DiffViewer } from "@/components/code/diff";
 import { ReviewStatusView, ReviewTimeline } from "@/components/code/review";
 import { SearchForm } from "@/components/code/search";
 import { BlockerList, ChangeStateBadge, CheckIcon, ChecksSummary, GitHubMark, QueuePill } from "@/components/code/shared";
+import { Link } from "@/components/link";
 import { KeysTarget } from "@/components/repo/finder";
 import { changeHref, changesetHref } from "@/components/repo/paths";
 import { TableSkeleton } from "@/components/repo/sections";
