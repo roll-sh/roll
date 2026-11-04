@@ -10,21 +10,26 @@ import css from "../globals.css?url";
 
 export const Route = createRootRoute({
   validateSearch: anySearch,
-  head: ({ matches }) => ({
-    meta: [
-      { charSet: "utf-8" },
-      { name: "viewport", content: "width=device-width, initial-scale=1" },
-      // A page's own title replaces this one; a 404 has none of its own.
-      { title: matches.some((m) => isNotFound(m.error)) ? titled("Not found") : "roll" },
-      { name: "description", content: "Serverless infrastructure for everything." },
-    ],
-    links: [
-      { rel: "preload", href: geistSans, as: "font", type: "font/woff2", crossOrigin: "anonymous" },
-      { rel: "preload", href: geistMono, as: "font", type: "font/woff2", crossOrigin: "anonymous" },
-      { rel: "stylesheet", href: css },
-      { rel: "icon", href: "/icon.svg", sizes: "any", type: "image/svg+xml" },
-    ],
-  }),
+  head: ({ matches }) => {
+    // A 404: a loader's `notFound()`, or a path no route matches (`_notFound`, the router's own mark).
+    const missing = matches.some((m) => m._notFound || isNotFound(m.error));
+    return {
+      meta: [
+        { charSet: "utf-8" },
+        { name: "viewport", content: "width=device-width, initial-scale=1" },
+        // A page's own title replaces this one; a 404 has none of its own.
+        { title: missing ? titled("Not found") : "roll" },
+        { name: "description", content: "Serverless infrastructure for everything." },
+        ...(missing ? [{ name: "robots", content: "noindex" }] : []),
+      ],
+      links: [
+        { rel: "preload", href: geistSans, as: "font", type: "font/woff2", crossOrigin: "anonymous" },
+        { rel: "preload", href: geistMono, as: "font", type: "font/woff2", crossOrigin: "anonymous" },
+        { rel: "stylesheet", href: css },
+        { rel: "icon", href: "/icon.svg", sizes: "any", type: "image/svg+xml" },
+      ],
+    };
+  },
   shellComponent: Document,
   component: Outlet,
   notFoundComponent: NotFound,
