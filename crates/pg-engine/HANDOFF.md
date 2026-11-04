@@ -7088,6 +7088,90 @@ cheaper and its read side lock-free.
     is the size models' share for its budget: about 93 bytes a modelled row with a primary
     key.
 
+## Size models, round 5 (round 24, agent 161)
+
+BENCH.md "Size models, round 5" has the numbers and the scripts (`tools/bench/sizing/`, which
+replace 151's deleted ones). Round 4's seven commits were verified first (release crate
+tests 440 / 0 / 18, regress 51,148 / 51,150 with 0 units changed, isolation 121 / 122,
+pg_dump_tap 14,817); `crash_random` failed intermittently there and on the commit before round
+4 alike (below).
+
+- **The limit stays at 400,000** (`ROLL_MODEL_MAX_VERSIONS` now sets it for an operator or a
+  measurement; run.sh's `ENGINE_ENV` passes it into the engine's container). Lifted, COPY,
+  CREATE INDEX, VACUUM, tpcb-like, the apply-like mix and the skip scan are now at or below
+  the 400k column; still above it: the primary key (a modelled table's build is the serial
+  one, `measures_in_build` sends only estimated tables to `parbuild`'s workers), DELETE of
+  10%, the first statement after a restart (0.24-0.25 s at 1M rows), simple-update (+5-30%)
+  and the peak memory of the pgbench runs (340-550 MB against 220-390 at 400k; PostgreSQL 250-280).
+- **Dead heads** (agent 149's apply-like profile: the InitPlan `min(hid)` walked hist's dead
+  head in `Btree::kill` / `kill_needed`, 37% of CPU): leaves count their entries that aren't
+  LP_DEAD (`Leaf::live`), a walk passes a leaf with none whole, and `DeadHead` remembers
+  where a walk from the start finds its first live leaf (forgotten when an insert lands in a
+  leaf with no live entry, and by every VACUUM scan). `kill` and `kill_needed` share
+  `kill_walk`. In the mix's steady state the models are now 0.9% of the engine's samples;
+  the rest is the executor's `parscan` / storage's dead ranges (149's, 160's). The mix's
+  first seconds after its setup measure the setup's million-row load being written out:
+  `lift.sh` warms up first now (151's 3.8 ms per transaction was mostly that).
+- **Reads don't wait for upkeep** (agent 150's burst profile): `fetched`, `Fetcher`,
+  `mark_passed` and `scanned_pages` take the models' write lock with `try_write` and skip the
+  pruning or LP_DEAD marks when it is held, as heap_page_prune_opt skips a page it can't lock
+  for cleanup and _bt_killitems marks only what it can; `scanned_pages` checks its pages under
+  the read lock first. A single session's results don't change unless a background job
+  (the kept-model builder, autovacuum) holds the lock at that moment; concurrent sessions
+  prune and mark a little less, as PostgreSQL's do under contention. An index scan's first two marking ranges are
+  one walk (`Kills::queue`).
+- **Cheaper big models**: KeyMap slots keep their key hash's top half (`slot`, `table_hash`:
+  the table grows without reading the arena; COPY's rehash was 11% of a modelled load) and a
+  lookup searches forward from the cursor only within `FORWARD_MAX` rows (random lookups
+  galloped through the arena); an update that keeps its key reuses the row its lookup found
+  (`Heap::locate_row`, `KeyMap::set_tid`); `Lps::settle` in one pass; kept records decode
+  rows into one key buffer (`kept::KeptRows`, `heapsim::restored_from`); index keys encode in
+  a per-thread buffer (`Key::build_in`, `relsize::IndexTupleSize`: one allocation per key);
+  an index build on a modelled table lays its btree model out from its own pass
+  (`sizing::btree_from_build`, kept by `index_built` while `Heap::writes` says the heap is as
+  the pass saw it) instead of `ensure` reading every row again; the build's unique-key set
+  uses the fast hasher.
+- **VACUUM deletes btree pages** (`Btree::vacuum_scan`, `delete_empty_pages`): a leaf left
+  empty goes in block order unless it is the rightmost on its level or the rightmost child
+  of its parent without being the only one (an only child goes with its parent chain,
+  _bt_lock_subtree_parent); the parent's downlink then leads to the right sibling and the
+  right sibling's goes; the block stays (None, counted as pgstatindex's deleted_pages, free
+  space for pgstattuple). Deleted pages carry their safexid (the next xid); a scan
+  (btbulkdelete's, or btvacuumcleanup's when more than 5% of the index is deleted and not yet
+  free: `needs_cleanup`) records the recyclable ones in the index's free space map
+  (`heapsim::Fsm`, now shared: `record_free_index_page`, `get_free_index_page`,
+  `vacuum_all`), and splits take pages from it before extending (`alloc`). The index's fsm
+  fork is the map's; images mark deleted pages in the map (flags 16). Golden
+  `a161_btree_pagedel`. At 300,000 rows the mixed workload's pgstatindex now matches
+  deleted_pages (162 / 162) but has one empty leaf PostgreSQL doesn't (1,613 + 1 against
+  1,614 + 0) after its VACUUM: not found yet.
+- **Long keys and REINDEX**: an attribute's encoding past 1,800 bytes keeps its start and a
+  hash of the rest in the model's key (`btsim::ATT_MAX`; agent 146's test_decoding toast key
+  over 64 kB overflowed the u16 offsets), sizes past u16 are capped; REINDEX now lays its
+  indexes' models out afresh through `index_built` (151's "REINDEX can retain old model
+  sizes").
+- **crash_random** fails about one run in four (seeds 1-30 x 4), on 359c14e0 (before round 4)
+  as on round 4: after recovery a table shows writes of a step the harness logged as not
+  committed (seed 9, round 2, after step 805: values, a key move and an insert of step 804;
+  seed 11 round 1 after step 345; seed 14 round 1 after step 407; seed 27 round 1 after step
+  236). Every scan agrees with every other and ctids are distinct: storage / recovery or the
+  harness's settle step, not the models. The harness now prints the rows that differ.
+- **Verified**: the final code (13e620f2, the commits as pushed): release crate tests 444
+  passed / 0 failed / 18 ignored (the golden included), full regress on a private reference
+  51,148 / 51,150 with 0 units changed against results.tsv, the models' unit tests in debug.
+  The batch before the last three commits (b5aeaf72, which only add the long-key cap and the
+  REINDEX layout): debug crate tests (failing only on the golden's REINDEX part, fixed since),
+  difftest smoke, isolation 121 / 122 (1,647 / 1,648 permutations), pg_dump_tap 14,817,
+  clippy with no warning in a file this round touched. memory_load's
+  `hash_join_spilling_bounds_the_build_heap` failed once in four runs (its heap counter sees
+  other threads); crash_random as above.
+- **Left**: the primary key / CREATE INDEX of a modelled table in `parbuild`'s workers (the
+  model's keys from the workers' sorted runs); DELETE's per-row upkeep; a lazy layout at
+  open (item 5: the record's page counts in a header, reads deferred); the KeyMap's random
+  lookups (1.5% of lifted simple-update: three a transaction); the 300k empty-leaf
+  difference above; lifting, once the lift table's rows are all at or below the 400k column;
+  index-only `count(*)` over lineitem needs the table modelled first.
+
 ## Starting prompt for the next agent
 
 Paste this into the new agent, from the repository root on branch

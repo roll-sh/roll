@@ -7383,6 +7383,90 @@ after-VACUUM checks found `mw1_pkey` 1,785 / 1,784 and mw2's index reltuples (no
 Still different, outside these checks: pgstatindex's empty / deleted leaf pages after a
 VACUUM empties btree pages (the model doesn't delete or recycle them).
 
+## Size models, round 5 (round 24, agent 161)
+
+HANDOFF.md, "Size models, round 5", has what changed.
+
+**The scripts** (`tools/bench/sizing/`, replacing agent 151's deleted `~/.cache/a151/scripts`):
+
+- `lift.sh <label> <pg|engine> [checks]`: one server, fresh, in a container (the engine as
+  run.sh's `ENGINE_DOCKER`: the dist binary bind-mounted, the same cpuset, CPU weight and
+  slice as PostgreSQL's), CPU from its cgroup's `cpu.stat`, peak anon + shmem sampled every
+  0.5 s. Checks: `bulk` (`pgbench -i -s $SCALE` a phase at a time: COPY g, VACUUM v,
+  primary key p; then CREATE INDEX on bid, DELETE of every tenth row, VACUUM, a clean
+  restart and the first statement's `\timing`), `pgbench` (select-only, simple-update,
+  tpcb-like at $CLIENTS clients, $SECS s, `-M prepared`), `apply` (agent 152's apply-like
+  statements, `apply.sql`, on `extra_setup.sql`'s tables), `skip` (agent 144's skip scan,
+  `count(*) FROM skip_t WHERE ts = K` on index (g, ts) over 1M rows, the median of 10).
+- `liftcmp.sh <out> [checks]`: the lift table: PostgreSQL, the engine at its limit and the
+  engine with `ROLL_MODEL_MAX_VERSIONS` lifted, `$ROUNDS` interleaved rounds, one row per
+  check (CPU ms per transaction for the pgbench checks, else CPU s; peak MB).
+- `mw.py`: the page-count workload (round 2's mixed workload, mw1's row count as a
+  parameter), against a reference container or an engine it starts; diff the two outputs.
+- `ROLL_MODEL_MAX_VERSIONS` (new, read once at start): the engine's model limit, so one
+  binary measures both columns. run.sh's `ENGINE_ENV` passes it into the container.
+
+**The lift table** (`liftcmp.sh`, 2 interleaved rounds, scale 10 = 1M accounts, engine and
+PostgreSQL 18.6 in containers on cores 8-11, clients on 0-3, the dist build of b5aeaf72, other
+agents' builds running at nice 19; CPU s, or CPU ms per transaction; peak anon + shmem MB):
+
+| check | 400k | lifted | PostgreSQL | round 4: 400k / lifted |
+|---|---|---|---|---|
+| COPY 1M (g) | 1.89 / 2.53 s | 2.04 / 2.22 s | 0.83 / 0.79 s | 1.77 / 2.66 |
+| VACUUM (v) | 0.35 / 0.35 s | 0.51 / 0.20 s | 0.15 / 0.17 s | 0.67 / 0.76 |
+| primary key (p) | 0.66 / 0.78 s | 2.62 / 2.61 s | 0.58 / 0.52 s | 0.77 / 1.66 |
+| CREATE INDEX (bid) | 1.06 / 1.52 s | 1.20 / 1.19 s | 0.40 / 0.43 s | 0.91 / 1.68 |
+| DELETE 10% | 0.61 / 0.69 s | 0.81 / 1.15 s | 0.15 / 0.16 s | 0.98 / 1.44 |
+| VACUUM after DELETE | 0.92 / 0.98 s | 0.38 / 0.39 s | 0.27 / 0.26 s | |
+| first statement after restart | 9 / 13 ms | 246 / 240 ms | 2.1 / 1.6 ms | 20 / 310 |
+| select-only c8 | 0.051 / 0.057 ms, 391 / 370 MB | 0.051 / 0.050 ms, 338 / 545 MB | 0.042 / 0.053 ms, 246 / 246 MB | |
+| simple-update c8 | 0.246 / 0.280 ms, 254 / 218 MB | 0.325 / 0.264 ms, 339 / 345 MB | 0.191 / 0.242 ms, 274 / 264 MB | 0.24 / 0.30 |
+| tpcb-like c8 | 0.452 / 0.603 ms, 250 / 262 MB | 0.468 / 0.560 ms, 388 / 372 MB | 0.275 / 0.329 ms, 277 / 263 MB | 0.49 / 0.56 |
+| apply-like c8, after a warm-up | 0.324 / 0.393 ms, 202 / 219 MB | 0.356 / 0.417 ms, 391 / 398 MB | 0.240 / 0.257 ms, 342 / 320 MB | 3.80 / 4.11 (no warm-up) |
+| skip scan, warm | 1.27 / 1.82 ms | 1.15 / 1.30 ms | 0.64 / 0.27 ms | 1.2 / 2.0 |
+
+The rounds moved by up to 30% between identical runs (the machine's load), so read the
+pairs, not single cells. Lifted, COPY, VACUUM, CREATE INDEX, tpcb-like, the apply-like mix and
+the skip scan are at the 400k numbers or below them; the primary key (4x), DELETE, the first
+statement after a restart, simple-update and the peaks are not, so the limit stays.
+Round 4's apply-like row measured the setup's million-row load being written out (the first
+20 s after `extra_setup.sql`: 4.0 ms per transaction; the runs after it 0.33-0.35 ms on the
+host): `lift.sh` warms up first now, and the engine is then within 1.3-1.5x of PostgreSQL.
+The lifted primary key is 1.3 s of CPU in a release build on the host and 2.6-2.7 s in the
+dist build, on the host too (`profphase.sh`-style runs of the same phase): the dist build's
+profile spends it in the build's unique-key set and point reads of the store, which the
+release build's doesn't show. Not explained yet.
+
+**Host profiles** (release with line tables, engine on 8-11 under nice 19, pgbench on 0-3,
+the same binary both ways; CPU of the engine process):
+
+| | 400k | lifted |
+|---|---|---|
+| simple-update c8, ms CPU / txn (round 1 / this round's build) | 0.369 / 0.301 | 0.416 / 0.327 |
+| model code's own samples, simple-update | 2.1% / 2.0% | 8.5% / 7.3% |
+| COPY (g), s CPU (round 1 / this round's build) | 2.20 / 2.19 | 2.89 / 2.29 |
+| primary key (p), s CPU (round 1 / this round's build) | 0.77 / 0.75 | 1.53 / 1.31 |
+| DELETE 10%, s CPU | | 1.09 (KeyMap::find 9.6%: two lookups a row, one since) |
+
+Round 1 is the tree before KeyMap's slot hashes and bounded forward search, the one-pass
+model of index builds and the GiST check; "this round's build" has them. What is left in the
+lifted primary key is the serial build itself: big (estimated) tables build in `parbuild`'s
+workers, modelled ones read their rows on one thread and check unique keys in a hash set.
+
+**The apply-like mix's steady state** (host, release, 8 clients): 0.33-0.35 ms of engine CPU
+per transaction; the models are 0.9% of its samples (agent 149 measured 37% in the dead
+head's walks before this round); the rest is the executor's and storage's.
+
+**tpcb-like at 32 clients** (scale 10, the 400k limit, host release): model code 3.0% of the
+on-CPU samples, `scanned_pages` 0.44% of it, the parking_lot slow paths 0.2%. The off-CPU
+(sched_switch) recording didn't unwind past the futex calls, so its attribution is open.
+
+**Page counts against PostgreSQL 18.6** (`mw.py`, STATS=1): at 60,000 rows every line matches
+(pages per fork, ctids, EXPLAIN costs, pgstatindex, reltuples), before and after a restart.
+At 300,000 rows everything matches but mw1_pkey's pgstatindex after the VACUUM: deleted_pages
+162 on both (before this round the model deleted none), leaf pages 1,613 + 1 empty against
+1,614 + 0 (with PostgreSQL's autovacuum off too).
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:
