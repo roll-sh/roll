@@ -25,9 +25,9 @@ step planupdate { EXPLAIN (COSTS OFF) UPDATE rb SET id=id+1000 WHERE v=1 AND id<
 step lock { SELECT id FROM rb WHERE v=1 AND id<5 FOR UPDATE; }
 step lockor { SELECT id FROM rb WHERE (v=1 OR w=1) AND id<5 FOR UPDATE; }
 step update { UPDATE rb SET id=id+1000 WHERE v=1 AND id<5 RETURNING id; }
-step plainor { SELECT id FROM rb WHERE (v=1 OR w=1) AND id<5 ORDER BY id; }
+step plainor { SELECT id FROM rb WHERE (v=1 OR w=1) AND id<5 ORDER BY id,v,w; }
 step filterlock { SELECT id FROM rb WHERE v=1 AND id<5 FOR UPDATE; }
-step final { SELECT id,v,w FROM rb WHERE id IN (1,2,1001,1002) ORDER BY id; }
+step final { SELECT id,v,w FROM rb WHERE id IN (1,2,1001,1002) ORDER BY id,v,w; }
 
 permutation planlock begin change lock commit final
 permutation planor plainor begin change lockor commit plainor final
