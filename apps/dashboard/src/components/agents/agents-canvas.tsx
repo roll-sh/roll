@@ -1,6 +1,6 @@
 "use client";
 
-import { Maximize, Minus, Plus, Shrink } from "lucide-react";
+import { ListRestart, Maximize, Minus, Plus } from "lucide-react";
 import {
   forwardRef,
   useCallback,
@@ -15,18 +15,32 @@ import {
 import { useReducedMotion } from "@roll/brand";
 import type { Graph, GraphNode } from "@/lib/agents-graph";
 import {
+  arrange,
   bounds,
+  dropIndex,
   fitView,
-  loadPositions,
-  savePositions,
+  loadOrder,
+  loadView,
+  moveTo,
+  parseOrder,
+  ROOTS,
+  saveOrder,
+  saveView,
   tidyLayout,
   toWorld,
-  withManual,
+  withOrder,
+  type Order,
   type Point,
   type Size,
   type View,
 } from "@/lib/agents-layout";
 import { CanvasEngine, type SceneMeta } from "./canvas-engine";
+
+/** Where the order is kept besides this device (roll, so every device shows the same). */
+export interface OrderSync {
+  load: () => Promise<unknown>;
+  save: (order: Order) => void;
+}
 
 export interface CanvasHandle {
   /** Pan (and zoom) so a node is in view; `zoom` sets the scale. */
@@ -36,15 +50,18 @@ export interface CanvasHandle {
 
 /**
  * The canvas: the engine's canvas underneath, the cards in a world layer on top, placed by the
- * tidy layout plus whatever the user dragged (remembered per owner). Keyboard: + / − zoom, 0 is
- * 100 %, 1 fits, arrows pan, Escape calls `onEscape`.
+ * tidy layout in the order the user dragged cards into (a card moves among its siblings, so
+ * nothing ever overlaps). The order is remembered per owner (and synced through `sync`), the
+ * view per device. Keyboard: + / − zoom, 0 is 100 %, 1 fits, arrows pan, ⌥↑ / ⌥↓ move the
+ * focused card among its siblings, Escape calls `onEscape`.
  */
 export const AgentsCanvas = forwardRef<
   CanvasHandle,
   {
     graph: Graph;
-    /** Where dragged positions are remembered. */
+    /** Where the order and the view are remembered. */
     storageKey: string;
+    sync?: OrderSync;
     render: (node: GraphNode) => ReactNode;
     defaultSize: (node: GraphNode) => Size;
     onEscape?: () => void;
@@ -52,24 +69,56 @@ export const AgentsCanvas = forwardRef<
     /** Off while something covers the canvas: its keys go to that instead. */
     active?: boolean;
   }
->(function AgentsCanvas({ graph, storageKey, render, defaultSize, onEscape, overlay, active = true }, ref) {
+>(function AgentsCanvas({ graph, storageKey, sync, render, defaultSize, onEscape, overlay, active = true }, ref) {
   const reduced = useReducedMotion();
   const container = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const world = useRef<HTMLDivElement>(null);
   const engine = useRef<CanvasEngine | null>(null);
   const [sizes, setSizes] = useState<Map<string, Size>>(() => new Map());
-  const [manual, setManual] = useState<Record<string, Point>>({});
+  const [order, setOrderState] = useState<Order>({});
+  // While a card is dragged: its siblings in the order it would drop into.
+  const [preview, setPreview] = useState<{ parent: string; list: string[] } | null>(null);
   const [zoom, setZoom] = useState(1);
   const fitted = useRef(false);
+  const viewChanged = useRef<((v: View) => void) | null>(null);
+  const syncRef = useRef(sync);
+  syncRef.current = sync;
 
-  useEffect(() => setManual(loadPositions(storageKey)), [storageKey]);
+  useEffect(() => {
+    setOrderState(loadOrder(storageKey));
+    let live = true;
+    syncRef.current
+      ?.load()
+      .then((doc) => {
+        if (!live || doc === null || doc === undefined) return;
+        const o = parseOrder(doc);
+        saveOrder(storageKey, o);
+        setOrderState(o);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [storageKey]);
+
+  const setOrder = useCallback(
+    (next: Order) => {
+      setOrderState(next);
+      saveOrder(storageKey, next);
+      syncRef.current?.save(next);
+    },
+    [storageKey],
+  );
 
   useLayoutEffect(() => {
     if (!container.current || !canvas.current || !world.current) return;
     const e = new CanvasEngine(container.current, canvas.current, world.current, {
       reducedMotion: reduced,
-      onView: (v: View) => setZoom((z) => (Math.abs(z - v.k) > 0.005 ? v.k : z)),
+      onView: (v: View) => {
+        setZoom((z) => (Math.abs(z - v.k) > 0.005 ? v.k : z));
+        viewChanged.current?.(v);
+      },
       onSizes: (changed) =>
         setSizes((prev) => {
           const next = new Map(prev);
@@ -100,10 +149,8 @@ export const AgentsCanvas = forwardRef<
     [sizes, defaultSize, graph],
   );
 
-  const positions = useMemo(() => {
-    const auto = tidyLayout(graph, (k) => (graph.nodes.has(k) ? sizeOf(k) : { w: 0, h: 0 }));
-    return withManual(graph, auto, manual);
-  }, [graph, sizeOf, manual]);
+  const arranged = useMemo(() => arrange(graph, preview ? withOrder(order, preview.parent, preview.list) : order), [graph, order, preview]);
+  const positions = useMemo(() => tidyLayout(arranged, (k) => (graph.nodes.has(k) ? sizeOf(k) : { w: 0, h: 0 })), [arranged, graph, sizeOf]);
 
   useEffect(() => {
     const e = engine.current;
@@ -143,7 +190,14 @@ export const AgentsCanvas = forwardRef<
     if (!fitted.current) {
       if (sizes.size === 0) return;
       fitted.current = true;
-      fit(false);
+      // Back where it was left on this device, if that still shows some of the canvas.
+      const e = engine.current;
+      const saved = loadView(storageKey);
+      const r = bounds(positions, sizeOf);
+      if (e && saved && r && overlaps(r, saved, e.viewport)) {
+        following.current = false;
+        e.setView(saved, false);
+      } else fit(false);
       return;
     }
     if (!following.current) return;
@@ -166,6 +220,20 @@ export const AgentsCanvas = forwardRef<
     };
   }, []);
 
+  // The view is remembered once the user moves it (not while it follows new work).
+  useEffect(() => {
+    let t: ReturnType<typeof setTimeout> | undefined;
+    viewChanged.current = (v) => {
+      if (following.current || !fitted.current) return;
+      clearTimeout(t);
+      t = setTimeout(() => saveView(storageKey, v), 400);
+    };
+    return () => {
+      clearTimeout(t);
+      viewChanged.current = null;
+    };
+  }, [storageKey]);
+
   const focus = useCallback(
     (key: string, k?: number) => {
       const e = engine.current;
@@ -184,8 +252,28 @@ export const AgentsCanvas = forwardRef<
 
   useImperativeHandle(ref, () => ({ focus, fit: () => fit(true) }), [focus, fit]);
 
-  // Dragging cards by their handle ([data-drag]); buttons and fields inside keep their clicks.
-  const drag = useRef<{ key: string; id: number; start: Point; from: Point; moved: boolean; el: HTMLElement } | null>(null);
+  // A card's siblings in the order shown.
+  const siblingsOf = useCallback(
+    (key: string) => {
+      const parent = graph.nodes.get(key)?.parent ?? ROOTS;
+      return { parent, list: [...(parent === ROOTS ? arranged.roots : (arranged.nodes.get(parent)?.children ?? []))] };
+    },
+    [graph, arranged],
+  );
+
+  // Dragging a card by its handle ([data-drag]) moves it among its siblings: they make room as it
+  // passes them and it drops into the gap. Buttons and fields inside keep their clicks.
+  const drag = useRef<{
+    key: string;
+    id: number;
+    start: Point;
+    from: Point;
+    moved: boolean;
+    el: HTMLElement;
+    parent: string;
+    list: string[];
+    centres: Map<string, number>;
+  } | null>(null);
   const onPointerDown = (ev: React.PointerEvent) => {
     const e = engine.current;
     if (!e || ev.button !== 0) return;
@@ -196,7 +284,10 @@ export const AgentsCanvas = forwardRef<
     const from = key && e.positionOf(key);
     if (!key || !from) return;
     const r = container.current!.getBoundingClientRect();
-    drag.current = { key, id: ev.pointerId, start: toWorld(e.view, ev.clientX - r.left, ev.clientY - r.top), from, moved: false, el: card! };
+    const { parent, list } = siblingsOf(key);
+    // Where the siblings are as the drag starts: the gap moves, what it's measured against doesn't.
+    const centres = new Map(list.map((k) => [k, (positions.get(k)?.y ?? 0) + sizeOf(k).h / 2]));
+    drag.current = { key, id: ev.pointerId, start: toWorld(e.view, ev.clientX - r.left, ev.clientY - r.top), from, moved: false, el: card!, parent, list, centres };
   };
   const onPointerMove = (ev: React.PointerEvent) => {
     const d = drag.current;
@@ -210,7 +301,11 @@ export const AgentsCanvas = forwardRef<
     // Capture only once it's a drag, so a plain click still reaches the card.
     if (!d.moved) d.el.setPointerCapture(ev.pointerId);
     d.moved = true;
-    e.setDrag(d.key, { x: d.from.x + dx, y: d.from.y + dy });
+    const at = { x: d.from.x + dx, y: d.from.y + dy };
+    e.setDrag(d.key, at);
+    if (d.list.length < 2) return;
+    const list = moveTo(d.list, d.key, dropIndex(d.list, d.key, at.y + sizeOf(d.key).h / 2, (k) => d.centres.get(k) ?? 0));
+    setPreview((cur) => (cur && cur.parent === d.parent && cur.list.join() === list.join() ? cur : { parent: d.parent, list }));
   };
   const onPointerUp = (ev: React.PointerEvent) => {
     const d = drag.current;
@@ -218,13 +313,9 @@ export const AgentsCanvas = forwardRef<
     if (!d || !e || d.id !== ev.pointerId) return;
     drag.current = null;
     if (!d.moved) return;
-    const p = e.positionOf(d.key)!;
     e.setDrag(d.key, null);
-    setManual((m) => {
-      const next = { ...m, [d.key]: { x: Math.round(p.x), y: Math.round(p.y) } };
-      savePositions(storageKey, next);
-      return next;
-    });
+    if (preview && preview.list.join() !== d.list.join()) setOrder(withOrder(order, preview.parent, preview.list));
+    setPreview(null);
     // The drag ends in a click on the card; swallow it.
     const swallow = (c: MouseEvent) => {
       c.stopPropagation();
@@ -234,17 +325,33 @@ export const AgentsCanvas = forwardRef<
     setTimeout(() => window.removeEventListener("click", swallow, { capture: true }), 0);
   };
 
-  const tidy = () => {
-    setManual({});
-    savePositions(storageKey, {});
-  };
+  /** ⌥↑ / ⌥↓ on a focused card. */
+  const nudge = useCallback(
+    (key: string, by: number) => {
+      const { parent, list } = siblingsOf(key);
+      const i = list.indexOf(key);
+      if (i < 0 || i + by < 0 || i + by >= list.length) return;
+      setOrder(withOrder(order, parent, moveTo(list, key, i + by)));
+    },
+    [siblingsOf, order, setOrder],
+  );
+
+  const tidy = () => setOrder({});
 
   // Keyboard, when nothing editable has focus.
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
       const e = engine.current;
       const el = ev.target as HTMLElement | null;
-      if (!e || !active || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+      if (!e || !active || ev.metaKey || ev.ctrlKey) return;
+      if (ev.altKey) {
+        const key = el?.closest<HTMLElement>("[data-card]")?.dataset.key;
+        if (key && (ev.key === "ArrowUp" || ev.key === "ArrowDown")) {
+          ev.preventDefault();
+          nudge(key, ev.key === "ArrowUp" ? -1 : 1);
+        }
+        return;
+      }
       if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.closest("[role=dialog]:not([data-surface]), [role=menu], [role=listbox], .xterm"))) return;
       const step = 80;
       switch (ev.key) {
@@ -285,9 +392,9 @@ export const AgentsCanvas = forwardRef<
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [fit, onEscape, active]);
+  }, [fit, onEscape, active, nudge]);
 
-  const hasManual = Object.keys(manual).length > 0;
+  const arrangedByUser = Object.keys(order).length > 0;
 
   return (
     <div
@@ -326,15 +433,22 @@ export const AgentsCanvas = forwardRef<
         <ToolButton label="Fit everything (1)" onClick={() => fit(true)}>
           <Maximize className="size-3.5" />
         </ToolButton>
-        {hasManual && (
-          <ToolButton label="Tidy: forget dragged positions" onClick={tidy}>
-            <Shrink className="size-3.5" />
+        {arrangedByUser && (
+          <ToolButton label="Back to the default order" onClick={tidy}>
+            <ListRestart className="size-3.5" />
           </ToolButton>
         )}
       </div>
     </div>
   );
 });
+
+/** Whether `r` (world) shows at all in a `viewport` seen through `v`. */
+function overlaps(r: { x: number; y: number; w: number; h: number }, v: View, viewport: { w: number; h: number }) {
+  const x0 = r.x * v.k + v.x;
+  const y0 = r.y * v.k + v.y;
+  return x0 < viewport.w && y0 < viewport.h && x0 + r.w * v.k > 0 && y0 + r.h * v.k > 0;
+}
 
 function ToolButton({ label, onClick, children }: { label: string; onClick: () => void; children: ReactNode }) {
   return (

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { deriveGraph, keyOf, rolling } from "./agents-graph";
-import { bounds, fitView, tidyLayout, withManual, zoomAt } from "./agents-layout";
+import { deriveGraph, keyOf, projectStats, rolling } from "./agents-graph";
+import { arrange, bounds, dropIndex, fitView, mergeOrder, moveTo, ROOTS, tidyLayout, withOrder, zoomAt } from "./agents-layout";
 import { applyEvents, emptyData, follow } from "./agents-store";
 import { approval, ev, machine, node, project, run, terminal, thread } from "@/test/agents";
 
@@ -38,20 +38,37 @@ describe("agents graph", () => {
     expect(g.edges.find((e) => e.to === "t:thr_2")).toMatchObject({ dashed: true, busy: false });
   });
 
-  it("pulses busy work and the anchors above it", () => {
+  it("animates only what runs: not the machine and project above it, not what waits on you", () => {
     const g = deriveGraph(sample());
     expect(g.nodes.get("t:thr_1")!.busy).toBe(true);
-    expect(g.nodes.get("p:prj_1")!.busy).toBe(true);
-    expect(g.nodes.get("m:mch_1")!.busy).toBe(true);
-    expect(g.nodes.get("m:mch_2")!.busy).toBe(false);
+    expect(g.nodes.get("p:prj_1")!.busy).toBe(false);
+    expect(g.nodes.get("m:mch_1")!.busy).toBe(false);
+    expect(g.nodes.get("r:req_1")!.busy).toBe(false);
     expect(g.edges.find((e) => e.to === "t:thr_1")!.busy).toBe(true);
+    expect(g.edges.find((e) => e.to === "p:prj_1")!.busy).toBe(false);
     expect(g.edges.find((e) => e.to === "t:thr_3")!.busy).toBe(false);
+    const waiting = applyEvents(sample(), [ev("thread", thread({ status: "waiting", active_run: "run_1", created_at: 10 }), 20)]);
+    expect(deriveGraph(waiting).nodes.get("t:thr_1")!.busy).toBe(false);
   });
 
   it("moves an open thread's requests into the session and shows archived threads on request", () => {
     const g = deriveGraph(sample(), { expanded: new Set(["thr_1"]), showArchived: true });
     expect(g.nodes.has(keyOf.request("req_1"))).toBe(false);
     expect(g.nodes.has("t:thr_old")).toBe(true);
+  });
+
+  it("sums up a project like T3 does: its threads, the PRs they made, the agents in it", () => {
+    const change = { repo: "acme/roll", number: 41, status: "ready" as const, url: "/acme/roll/changes/41", detail: null };
+    const d = applyEvents(sample(), [
+      ev("thread", thread({ id: "thr_3", title: "Docs", created_at: 30, provider: "codex", model: "gpt-5.5-codex", change, usage: { input_tokens: 1, output_tokens: 1, cached_tokens: 0, cost_usd: 0.5 } }), 20),
+      ev("thread", thread({ id: "thr_2", title: "Fork", status: "waiting", created_at: 20, lineage: { parent: "thr_1", relation: "fork", root: "thr_1", from_run: "run_1" } }), 21),
+    ]);
+    const s = projectStats(d, "prj_1");
+    expect(s).toMatchObject({ threads: 3, running: 1, waiting: 1, cost_usd: 0.5 });
+    expect(s.changes.map((c) => c.number)).toEqual([41]);
+    expect(s.agents.map((a) => [a.provider, a.threads])).toEqual([["claude", 2], ["codex", 1]]);
+    // Archived threads don't count.
+    expect(projectStats(d, "prj_1").threads).toBe(3);
   });
 
   it("lists what's rolling", () => {
@@ -86,13 +103,51 @@ describe("agents layout", () => {
     expect(p.get("a2")!.y).toBeGreaterThanOrEqual(p.get("a1")!.y + 40 + 10);
   });
 
-  it("moves a dragged node and its subtree", () => {
-    const auto = tidyLayout(tree, size);
-    const m = withManual(tree, auto, { a2: { x: 900, y: 900 } });
-    expect(m.get("a2")).toEqual({ x: 900, y: 900 });
-    const d = { x: 900 - auto.get("a2")!.x, y: 900 - auto.get("a2")!.y };
-    expect(m.get("a2x")).toEqual({ x: auto.get("a2x")!.x + d.x, y: auto.get("a2x")!.y + d.y });
-    expect(m.get("a1")).toEqual(auto.get("a1"));
+  it("lines depths up in columns, so cousins of different widths never overlap", () => {
+    const t = {
+      roots: ["m"],
+      nodes: new Map([
+        ["m", { children: ["narrow", "wide"] }],
+        ["narrow", { children: ["n1"] }],
+        ["wide", { children: ["w1"] }],
+        ["n1", { children: [] }],
+        ["w1", { children: [] }],
+      ]),
+    };
+    const sz = (k: string) => (k === "wide" ? { w: 400, h: 40 } : { w: 100, h: 40 });
+    const p = tidyLayout(t, sz, { gapX: 50, gapY: 10 });
+    expect(p.get("n1")!.x).toBe(p.get("w1")!.x);
+    expect(p.get("w1")!.x).toBe(p.get("wide")!.x + 400 + 50);
+    const keys = [...p.keys()];
+    for (const a of keys)
+      for (const b of keys) {
+        if (a === b) continue;
+        const [pa, pb, sa, sb] = [p.get(a)!, p.get(b)!, sz(a), sz(b)];
+        const apart = pa.x + sa.w <= pb.x || pb.x + sb.w <= pa.x || pa.y + sa.h <= pb.y || pb.y + sb.h <= pa.y;
+        expect(apart, `${a} and ${b} overlap`).toBe(true);
+      }
+  });
+
+  it("keeps the user's order among siblings; new work keeps its default place", () => {
+    // The user put c above a; b and the new n were never moved.
+    expect(mergeOrder(["n", "a", "b", "c"], ["c", "b", "a"])).toEqual(["n", "c", "b", "a"]);
+    expect(mergeOrder(["a", "b"], ["gone", "b", "a"])).toEqual(["b", "a"]);
+    expect(mergeOrder(["a", "b"], undefined)).toEqual(["a", "b"]);
+    const o = withOrder(withOrder({}, ROOTS, ["b", "a"]), "a", ["a2", "a1"]);
+    const t = arrange(tree, o);
+    expect(t.roots).toEqual(["b", "a"]);
+    expect(t.nodes.get("a")!.children).toEqual(["a2", "a1"]);
+    const p = tidyLayout(t, size, { gapX: 50, gapY: 10, rootGap: 30 });
+    expect(p.get("b")!.y).toBeLessThan(p.get("a")!.y);
+    expect(p.get("a2")!.y).toBeLessThan(p.get("a1")!.y);
+  });
+
+  it("drops a dragged card after the siblings it passed", () => {
+    const centres = new Map([["a", 20], ["b", 100], ["c", 180]]);
+    const at = (y: number) => moveTo(["a", "b", "c"], "a", dropIndex(["a", "b", "c"], "a", y, (k) => centres.get(k)!));
+    expect(at(30)).toEqual(["a", "b", "c"]);
+    expect(at(120)).toEqual(["b", "a", "c"]);
+    expect(at(400)).toEqual(["b", "c", "a"]);
   });
 
   it("fits and zooms about a point", () => {

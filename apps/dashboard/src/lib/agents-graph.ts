@@ -5,7 +5,7 @@
  * their thread (or project, or machine). Pure; `agents-layout.ts` places it.
  */
 
-import { isBusy, type MachineId, type Node, type Request, type Thread } from "./agents-api";
+import { isBusy, isRunning, type MachineId, type Node, type ProjectId, type ProviderId, type Request, type Thread, type ThreadChange } from "./agents-api";
 import { pendingRequests, runsOf, type AgentsData } from "./agents-store";
 
 export type GraphKind = "machine" | "project" | "thread" | "subagent" | "request" | "terminal";
@@ -19,7 +19,7 @@ export interface GraphNode {
   machine: MachineId;
   parent: string | null;
   children: string[];
-  /** Work is flowing through it: it pulses, and so does the edge into it. */
+  /** It's working right now (a running thread or subagent, a booting sandbox): it pulses, and so does the edge into it. Nothing else animates. */
   busy: boolean;
   /** Why the edge into it exists (forks draw dashed). */
   relation: "fork" | "subagent" | null;
@@ -66,8 +66,11 @@ export function deriveGraph(data: AgentsData, opts: GraphOptions = {}): Graph {
   };
 
   const machines = [...data.machines.values()].map((r) => r.value).sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-  // A sandbox pulses while it boots.
-  for (const m of machines) add({ key: keyOf.machine(m.id), kind: "machine", id: m.id, machine: m.id, parent: null, busy: m.sandbox?.status === "creating", relation: null });
+  // A sandbox pulses while it boots or wakes.
+  for (const m of machines) {
+    const s = m.sandbox?.status;
+    add({ key: keyOf.machine(m.id), kind: "machine", id: m.id, machine: m.id, parent: null, busy: s === "creating" || s === "starting", relation: null });
+  }
 
   const projects = [...data.projects.values()].sort((a, b) => a.value.name.localeCompare(b.value.name) || a.value.id.localeCompare(b.value.id));
   for (const r of projects) {
@@ -106,7 +109,7 @@ export function deriveGraph(data: AgentsData, opts: GraphOptions = {}): Graph {
       id: t.id,
       machine: r.machine,
       parent,
-      busy: isBusy(t.status),
+      busy: isRunning(t.status),
       relation: parent.startsWith("t:") ? (t.lineage?.relation ?? null) : null,
     });
   };
@@ -149,7 +152,7 @@ export function deriveGraph(data: AgentsData, opts: GraphOptions = {}): Graph {
   for (const q of pendingRequests(data)) {
     const tk = keyOf.thread(q.thread);
     if (!nodes.has(tk) || expanded.has(q.thread)) continue;
-    add({ key: keyOf.request(q.id), kind: "request", id: q.id, machine: nodes.get(tk)!.machine, parent: tk, busy: true, relation: null });
+    add({ key: keyOf.request(q.id), kind: "request", id: q.id, machine: nodes.get(tk)!.machine, parent: tk, busy: false, relation: null });
   }
 
   // Terminals: on their thread, else their project, else their machine (provider logins).
@@ -163,20 +166,12 @@ export function deriveGraph(data: AgentsData, opts: GraphOptions = {}): Graph {
     add({ key: keyOf.terminal(t.id), kind: "terminal", id: t.id, machine: r.machine, parent, busy: false, relation: null });
   }
 
-  // Children in insertion order (already sorted per kind); busy flows up to the anchors.
+  // Children in insertion order (already sorted per kind).
   const roots: string[] = [];
   for (const n of nodes.values()) {
     if (n.parent) nodes.get(n.parent)!.children.push(n.key);
     else roots.push(n.key);
   }
-  const rollUp = (key: string): boolean => {
-    const n = nodes.get(key)!;
-    let any = n.busy;
-    for (const c of n.children) any = rollUp(c) || any;
-    if (n.kind === "machine" || n.kind === "project") n.busy = any;
-    return any;
-  };
-  roots.forEach(rollUp);
 
   const edges: GraphEdge[] = [];
   for (const n of nodes.values()) {
@@ -197,4 +192,37 @@ export function rolling(data: AgentsData): Rolling {
   for (const r of data.threads.values()) if (isBusy(r.value.status) && r.value.archived_at === null) busy.push(r.value);
   busy.sort((a, b) => b.updated_at - a.updated_at);
   return { busy, requests: pendingRequests(data) };
+}
+
+/** What a project's card says about it (like T3's project stats): its work, its PRs, its agents. */
+export interface ProjectStats {
+  threads: number;
+  running: number;
+  waiting: number;
+  /** The roll code changes (PRs) its threads were published as, newest thread first. */
+  changes: ThreadChange[];
+  /** The agents working in it (by provider, with the models used), most threads first. */
+  agents: { provider: ProviderId; models: (string | null)[]; threads: number }[];
+  /** Spent across its threads, when the providers say (Claude does). */
+  cost_usd: number | null;
+}
+
+export function projectStats(data: AgentsData, project: ProjectId): ProjectStats {
+  const out: ProjectStats = { threads: 0, running: 0, waiting: 0, changes: [], agents: [], cost_usd: null };
+  const agents = new Map<string, ProjectStats["agents"][number]>();
+  const threads = [...data.threads.values()].map((r) => r.value).filter((t) => t.project === project && t.archived_at === null);
+  threads.sort((a, b) => b.updated_at - a.updated_at);
+  for (const t of threads) {
+    out.threads++;
+    if (isRunning(t.status)) out.running++;
+    else if (t.status === "waiting") out.waiting++;
+    if (t.change) out.changes.push(t.change);
+    const a = agents.get(t.provider) ?? { provider: t.provider, models: [], threads: 0 };
+    a.threads++;
+    if (!a.models.includes(t.model)) a.models.push(t.model);
+    agents.set(t.provider, a);
+    if (t.usage.cost_usd != null) out.cost_usd = (out.cost_usd ?? 0) + t.usage.cost_usd;
+  }
+  out.agents = [...agents.values()].sort((a, b) => b.threads - a.threads);
+  return out;
 }

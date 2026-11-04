@@ -194,7 +194,7 @@ export function AgentsSurface({
 
   const { busy: working, requests } = rolling(data);
   // Waiting on you isn't running: those show as the waiting count.
-  const busy = working.filter((t) => t.status !== "waiting");
+  const running = working.filter((t) => t.status !== "waiting").length;
   const archived = [...data.threads.values()].filter((r) => r.value.archived_at !== null).length;
   const back = (
     <IconButton label="All agents (Esc)" onClick={close}>
@@ -233,9 +233,9 @@ export function AgentsSurface({
             {chrome === "window" && <WindowHome />}
             <h2 className="text-[13.5px] font-semibold tracking-[-0.02em]">Agents</h2>
             <span className="flex min-w-0 items-center gap-2 text-[12px] text-subtle">
-              <span className={`size-1.5 shrink-0 rounded-full ${snap.conn === "live" ? (busy.length ? "pulse-dot bg-accent" : "bg-ok") : snap.conn === "error" ? "bg-danger" : "bg-subtle"}`} aria-hidden />
+              <span className={`size-1.5 shrink-0 rounded-full ${snap.conn === "live" ? (running ? "pulse-dot bg-accent" : "bg-ok") : snap.conn === "error" ? "bg-danger" : "bg-subtle"}`} aria-hidden />
               <span className="truncate">
-                {snap.conn === "live" ? (busy.length ? `${busy.length} running` : "All idle") : snap.conn === "error" ? (snap.error ?? "Can't reach roll") : "Reconnecting…"}
+                {snap.conn === "live" ? (running ? `${running} running` : "All idle") : snap.conn === "error" ? (snap.error ?? "Can't reach roll") : "Reconnecting…"}
                 {demo && " · demo"}
               </span>
               {requests.length > 0 && (

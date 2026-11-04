@@ -568,12 +568,18 @@ The surface has three views:
 
 - **The canvas.** Machines are anchors; projects hang off machines; threads off projects; forks
   and delegated subagents off their parent thread; provider-native subagents and pending requests
-  are satellites of their thread. Edges carry a calm accent pulse while work flows through them
-  (`--accent`, 1.6 s loop, off with reduced motion). Cards stay small: a thread's card is its
-  status, title, what it's doing and what it cost; actions on machine and project cards show on
-  hover (always on touch screens). Approvals are answered right on their card; questions say what
-  they ask and open the conversation. Positions are laid out automatically and remembered when
-  dragged. One canvas engine (canvas 2D + `requestAnimationFrame`, paused offscreen) draws edges,
+  are satellites of their thread. Only what is running right now moves: a running thread or
+  subagent (and the edge into it) and a booting sandbox carry a calm accent pulse (`--accent`,
+  1.6 s loop, off with reduced motion); the machine and project above them, and anything waiting
+  on you, keep still. Cards stay small: a thread's card is its status, title, what it's doing and
+  what it cost; a project's card sums it up like T3's project view (threads, running and
+  waiting, the PRs its threads made, the agents working in it); actions on machine and project
+  cards show on hover (always on touch screens). Approvals are answered right on their card;
+  questions say what they ask and open the conversation. The layout is a tidy tree in columns
+  (one per depth, as wide as its widest card), so cards never overlap. Dragging a card moves it
+  among its siblings (they make room as it passes; ⌥↑/⌥↓ do the same from the keyboard); that
+  order is remembered per owner and synced through roll, new work keeps its default place
+  (newest first), and the view is remembered per device. One canvas engine (canvas 2D + `requestAnimationFrame`, paused offscreen) draws edges,
   pulses and the dot field; cards are DOM, positioned by the same world transform. Navigation is
   Figma's: scrolling pans (two fingers on a trackpad, any direction; shift turns a mouse wheel
   sideways), pinching zooms about the fingers (ctrl+wheel in Chromium, Firefox and Electron,

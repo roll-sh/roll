@@ -133,7 +133,9 @@ export const sandboxUsageD = obj<SandboxUsage>({
 });
 
 /** What a sandbox costs per running hour, as shown: `$0.03/h`, `$1.20/h`. */
-export function formatHourly(cents: number): string {
+export function formatHourly(cents: number | undefined): string {
+  // A server from before hourly prices sends none: say nothing rather than "$NaN/h".
+  if (cents === undefined || !Number.isFinite(cents)) return "";
   return `$${(cents / 100).toFixed(2)}/h`;
 }
 

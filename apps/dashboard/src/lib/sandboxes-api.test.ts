@@ -81,6 +81,7 @@ describe("sandboxes api", () => {
   it("formats prices and says what can be done", () => {
     expect(formatHourly(3)).toBe("$0.03/h");
     expect(formatHourly(10)).toBe("$0.10/h");
+    expect(formatHourly(undefined)).toBe("");
     expect(formatHourly(120)).toBe("$1.20/h");
     expect(canStop(sandbox())).toBe(true);
     expect(canStart(sandbox())).toBe(false);

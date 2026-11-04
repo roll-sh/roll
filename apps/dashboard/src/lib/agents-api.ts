@@ -1082,6 +1082,8 @@ export const shareSummaryD = obj<ShareSummary>({
 // ── helpers ──
 
 export const isBusy = (s: ThreadStatus) => s === "starting" || s === "running" || s === "waiting";
+/** Working right now (not waiting on anyone): what the canvas animates and the header counts. */
+export const isRunning = (s: ThreadStatus) => s === "starting" || s === "running";
 export const isRunTerminal = (s: RunStatus) =>
   s === "completed" || s === "interrupted" || s === "failed" || s === "cancelled" || s === "rolled_back";
 

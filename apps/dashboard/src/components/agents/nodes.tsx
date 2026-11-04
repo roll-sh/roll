@@ -1,11 +1,12 @@
 "use client";
 
-import { ArrowUpRight, CircleAlert, Folder, FolderPlus, GitBranch, GitFork, LogIn, MoreHorizontal, Plus, RefreshCw, SquareTerminal, Trash2 } from "lucide-react";
+import { ArrowUpRight, CircleAlert, Folder, FolderPlus, GitBranch, GitFork, GitPullRequest, LogIn, MoreHorizontal, Plus, RefreshCw, SquareTerminal, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
-import { coming, isBusy, machineState, reachable, type Machine, type Node, type Project, type ProviderInfo, type Request, type Run, type Thread } from "@/lib/agents-api";
+import { coming, isRunning, machineState, reachable, type Machine, type Node, type Project, type ProviderInfo, type Request, type Run, type Thread } from "@/lib/agents-api";
+import { projectStats, type ProjectStats } from "@/lib/agents-graph";
 import { providersFor } from "@/lib/agents-store";
 import { primary } from "../ui";
-import { ChangeChip, WorkChip } from "./change";
+import { ChangeChip, changeStatusLabel, WorkChip } from "./change";
 import { Menu } from "./menu";
 import { NewProject } from "./project-new";
 import { RequestCard } from "./request-card";
@@ -231,7 +232,7 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
   const { startNew, demo } = useAgents();
   // An asleep sandbox counts: what's sent to it wakes it.
   const online = reachable(machine);
-  const threads = [...client.data.threads.values()].some((r) => r.value.project === project.id);
+  const stats = projectStats(client.data, project.id);
   return (
     <Card width={256} label={`Project ${project.name}`}>
       <div className="flex items-center gap-2 px-3.5 pt-3">
@@ -283,7 +284,8 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
           </a>
         )}
       </div>
-      {!threads && startNew && online && (
+      {stats.threads > 0 && <StatsRows stats={stats} providers={providersFor(client.data, machine?.id)} />}
+      {!stats.threads && startNew && online && (
         <div className="px-3 pb-3">
           <button data-nodrag onClick={() => startNew(project.id)} className={`${primary} w-full justify-center`}>
             <Plus className="size-3.5" /> Start an agent
@@ -295,19 +297,55 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
   );
 }
 
+/** Its work, the PRs it made and the agents in it. */
+function StatsRows({ stats, providers }: { stats: ProjectStats; providers: readonly ProviderInfo[] }) {
+  const landed = stats.changes.filter((c) => c.status === "landed").length;
+  const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+  return (
+    <div className="mx-3.5 mb-3 space-y-1 border-t border-line pt-2.5 text-[11px] text-subtle">
+      <p className="flex items-center gap-1.5">
+        <span className="min-w-0 truncate">
+          {plural(stats.threads, "thread", "threads")}
+          {stats.running > 0 && <span className="text-fg"> · {stats.running} running</span>}
+          {stats.waiting > 0 && <span className="text-muted"> · {stats.waiting} waiting</span>}
+        </span>
+        {stats.changes.length > 0 && (
+          <span className="ml-auto flex shrink-0 items-center gap-1" title={stats.changes.map((c) => `#${c.number} ${changeStatusLabel[c.status]}`).join(" · ")}>
+            <GitPullRequest className="size-3" />
+            {plural(stats.changes.length, "PR", "PRs")}
+            {landed > 0 && <span className="text-ok">· {landed} landed</span>}
+          </span>
+        )}
+      </p>
+      <p className="truncate" aria-label="Agents in this project">
+        {stats.agents.map((a, i) => (
+          <span key={a.provider} title={`${plural(a.threads, "thread", "threads")}: ${a.models.map((m) => modelName(providers, a.provider, m) ?? "default model").join(", ")}`}>
+            {i > 0 && " · "}
+            <span className="text-muted">{providerName(providers, a.provider)}</span>
+            {a.threads > 1 && <span className="font-mono tabular-nums"> ×{a.threads}</span>}
+          </span>
+        ))}
+        {stats.cost_usd != null && <span className="font-mono tabular-nums"> · ${stats.cost_usd.toFixed(2)}</span>}
+      </p>
+    </div>
+  );
+}
+
 // ── thread ──
 
 export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machine | undefined }) {
   const { client, openThread } = useAgents();
   const providers = providersFor(client.data, machine?.id);
-  const busy = isBusy(thread.status);
+  // Only running work moves; a thread waiting on you says so and keeps still.
+  const running = isRunning(thread.status);
+  const waiting = thread.status === "waiting";
   const lastRun = thread.active_run ? client.data.runs.get(thread.active_run)?.value : latestRun(client.data.runs.values(), thread.id);
   const usage = usageLine(thread.usage);
   const model = modelName(providers, thread.provider, thread.model);
   return (
     <Card
       width={296}
-      tone={thread.status === "error" ? "error" : busy ? "busy" : thread.archived_at ? "muted" : undefined}
+      tone={thread.status === "error" ? "error" : running ? "busy" : thread.archived_at ? "muted" : undefined}
       onClick={() => openThread(thread.id)}
       label={`Thread ${thread.title}`}
     >
@@ -321,13 +359,15 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
             </span>
           )}
         </div>
-        <p className={`mt-1 truncate pl-3.5 text-[12px] ${busy ? "" : "text-muted"}`}>
+        <p className={`mt-1 truncate pl-3.5 text-[12px] ${running || waiting ? "" : "text-muted"}`}>
           {thread.error ? (
             <span className="flex items-center gap-1 text-danger">
               <CircleAlert className="size-3 shrink-0" /> <span className="truncate">{thread.error}</span>
             </span>
-          ) : busy ? (
+          ) : running ? (
             <span className="shimmer">{thread.activity ?? threadStatusLabel[thread.status]}</span>
+          ) : waiting ? (
+            (thread.activity ?? threadStatusLabel.waiting)
           ) : lastRun ? (
             lastRun.prompt
           ) : (
@@ -395,7 +435,7 @@ export function RequestNode({ request }: { request: Request }) {
   if (request.body.type === "questions" && !readOnly) {
     const qs = request.body.questions;
     return (
-      <Card width={280} tone="busy" label="Waiting for you" onClick={() => openThread(request.thread)}>
+      <Card width={280} label="Waiting for you" onClick={() => openThread(request.thread)}>
         <div className="px-3.5 py-3">
           <p className="flex items-center gap-1.5 text-[11px] text-subtle">
             <span className="size-1.5 shrink-0 rounded-full bg-accent" aria-hidden />
@@ -409,7 +449,7 @@ export function RequestNode({ request }: { request: Request }) {
     );
   }
   return (
-    <Card width={320} tone="busy" label="Waiting for you">
+    <Card width={320} label="Waiting for you">
       <div className="px-3.5 py-3" data-nodrag>
         <RequestCard
           request={request}

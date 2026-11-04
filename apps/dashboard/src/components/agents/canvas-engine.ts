@@ -70,6 +70,8 @@ export class CanvasEngine {
   private els = new Map<string, HTMLElement>();
   private cur = new Map<string, Point>();
   private tgt = new Map<string, Point>();
+  /** The layout's targets, before a drag holds one card. */
+  private slots: ReadonlyMap<string, Point> = new Map();
   private size = new Map<string, Size>();
   private meta = new Map<string, SceneMeta>();
   private edges: SceneEdge[] = [];
@@ -231,7 +233,10 @@ export class CanvasEngine {
         this.cur.set(k, this.opts.reducedMotion ? p : { ...from });
       }
     }
+    this.slots = targets;
     this.tgt = new Map(targets);
+    // The dragged card stays under the pointer while the others make room.
+    if (this.drag) this.tgt.set(this.drag.key, this.drag.p);
     this.meta = new Map(meta);
     this.edges = edges;
     this.anyBusy = [...meta.values()].some((m) => m.busy);
@@ -241,9 +246,16 @@ export class CanvasEngine {
   /** Hold a node under the pointer while it's dragged (`null` lets it go back to its target). */
   setDrag(key: string, p: Point | null) {
     this.drag = p ? { key, p } : null;
+    // Above its siblings while it's carried.
+    const el = this.els.get(key);
+    if (el) el.style.zIndex = p ? "10" : "";
     if (p) {
       this.cur.set(key, p);
       this.tgt.set(key, p);
+    } else {
+      // Let go: it settles into its place in the layout.
+      const slot = this.slots.get(key);
+      if (slot) this.tgt.set(key, slot);
     }
     this.kick();
   }

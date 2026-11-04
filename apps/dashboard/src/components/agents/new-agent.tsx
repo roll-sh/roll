@@ -2,7 +2,7 @@
 
 import { ChevronDown, Folder, FolderPlus, Server } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
-import { isBusy, type Machine, type Project } from "@/lib/agents-api";
+import { isBusy, isRunning, type Machine, type Project } from "@/lib/agents-api";
 import { input } from "../ui";
 import { AddMachinePaths } from "./add-machine";
 import { Composer } from "./composer";
@@ -157,7 +157,7 @@ export function NewAgent({ project: wanted, start, end }: { project?: string; st
                         <button onClick={() => openThread(t.id)} className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left hover:bg-panel">
                           <StatusDot status={t.status} className="shrink-0" />
                           <span className="min-w-0 flex-1 truncate text-[13px]">{t.title}</span>
-                          <span className="shrink-0 truncate text-[11.5px] text-subtle">{isBusy(t.status) ? <span className="shimmer">{t.activity ?? "working"}</span> : data.projects.get(t.project)?.value.name}</span>
+                          <span className="shrink-0 truncate text-[11.5px] text-subtle">{isRunning(t.status) ? <span className="shimmer">{t.activity ?? "working"}</span> : data.projects.get(t.project)?.value.name}</span>
                         </button>
                       </li>
                     ))}

@@ -1,7 +1,7 @@
 /**
  * Placing the canvas graph: a tidy tree that grows to the right (machines on the left, then
- * projects, threads, and their satellites), with nodes of any size; manual positions the user
- * dragged to, remembered per owner; and the view math (pan, zoom about a point, zoom to fit).
+ * projects, threads, and their satellites), with nodes of any size; the order the user dragged
+ * cards into among their siblings; and the view math (pan, zoom about a point, zoom to fit).
  * Pure apart from the localStorage helpers.
  */
 
@@ -40,7 +40,8 @@ export interface LayoutOptions {
 
 /**
  * Top-left corners for every node reachable from the roots. Each subtree takes the height of
- * its children stacked (or its own, if taller) and its root sits centred on them.
+ * its children stacked (or its own, if taller) and its root sits centred on them. Depths are
+ * columns as wide as their widest card, so cards line up and no two ever overlap.
  */
 export function tidyLayout(tree: TreeLike, size: (key: string) => Size, opts: LayoutOptions = {}): Map<string, Point> {
   const gapX = opts.gapX ?? 72;
@@ -48,64 +49,97 @@ export function tidyLayout(tree: TreeLike, size: (key: string) => Size, opts: La
   const rootGap = opts.rootGap ?? 64;
   const span = new Map<string, number>();
   const childBlock = new Map<string, number>();
-  const visiting = new Set<string>();
+  const depth = new Map<string, number>();
+  const colW: number[] = [];
 
-  const measure = (key: string): number => {
+  const measure = (key: string, d: number): number => {
     const known = span.get(key);
     if (known !== undefined) return known;
-    if (visiting.has(key)) return 0;
-    visiting.add(key);
-    const kids = tree.nodes.get(key)?.children ?? [];
+    if (depth.has(key)) return 0;
+    depth.set(key, d);
+    const { w, h } = size(key);
+    colW[d] = Math.max(colW[d] ?? 0, w);
+    const kids = (tree.nodes.get(key)?.children ?? []).filter((c) => !depth.has(c));
     let block = 0;
-    kids.forEach((c, i) => (block += measure(c) + (i ? gapY : 0)));
-    const s = Math.max(size(key).h, block);
+    kids.forEach((c, i) => (block += measure(c, d + 1) + (i ? gapY : 0)));
+    const s = Math.max(h, block);
     childBlock.set(key, block);
     span.set(key, s);
     return s;
   };
+  for (const r of tree.roots) measure(r, 0);
+  const colX = [0];
+  for (let d = 1; d < colW.length; d++) colX[d] = colX[d - 1] + (colW[d - 1] ?? 0) + gapX;
 
   const out = new Map<string, Point>();
-  const place = (key: string, x: number, top: number) => {
+  const place = (key: string, top: number) => {
     if (out.has(key)) return;
     const s = span.get(key)!;
-    const { w, h } = size(key);
-    out.set(key, { x, y: top + (s - h) / 2 });
-    const kids = tree.nodes.get(key)?.children ?? [];
+    const d = depth.get(key)!;
+    out.set(key, { x: colX[d], y: top + (s - size(key).h) / 2 });
     let y = top + (s - (childBlock.get(key) ?? 0)) / 2;
-    for (const c of kids) {
-      place(c, x + w + gapX, y);
+    for (const c of tree.nodes.get(key)?.children ?? []) {
+      if (depth.get(c) !== d + 1 || out.has(c)) continue;
+      place(c, y);
       y += span.get(c)! + gapY;
     }
   };
 
   let top = 0;
   for (const r of tree.roots) {
-    measure(r);
-    place(r, 0, top);
+    if (out.has(r)) continue;
+    place(r, top);
     top += span.get(r)! + rootGap;
   }
   return out;
 }
 
+// ── the user's arrangement ──
+
+/** Where the roots' order is kept in an `Order`. */
+export const ROOTS = "";
+
 /**
- * Apply the user's manual positions: a dragged node goes where it was dropped, and everything
- * under it moves with it (unless it was dragged itself).
+ * How the user arranged the canvas: per parent key (`ROOTS` for the machines), its children in the
+ * order they were put in. Cards only ever move among their siblings, so the layout stays tidy.
  */
-export function withManual(tree: TreeLike, auto: ReadonlyMap<string, Point>, manual: Readonly<Record<string, Point>>): Map<string, Point> {
-  const out = new Map<string, Point>();
-  const walk = (key: string, dx: number, dy: number) => {
-    const a = auto.get(key);
-    if (!a || out.has(key)) return;
-    const m = manual[key];
-    if (m) {
-      dx = m.x - a.x;
-      dy = m.y - a.y;
-    }
-    out.set(key, { x: a.x + dx, y: a.y + dy });
-    for (const c of tree.nodes.get(key)?.children ?? []) walk(c, dx, dy);
-  };
-  for (const r of tree.roots) walk(r, 0, 0);
-  return out;
+export type Order = Readonly<Record<string, readonly string[]>>;
+
+/**
+ * `defaults` in the user's order: the children they placed keep their order, in the slots those
+ * children take by default, and the ones they never placed (new work) keep their default place.
+ */
+export function mergeOrder(defaults: readonly string[], saved: readonly string[] | undefined): string[] {
+  if (!saved?.length) return [...defaults];
+  const here = new Set(defaults);
+  const placed = saved.filter((k) => here.has(k));
+  const isPlaced = new Set(placed);
+  let i = 0;
+  return defaults.map((k) => (isPlaced.has(k) ? placed[i++] : k));
+}
+
+/** The tree with every node's children (and the roots) in the user's order. */
+export function arrange<T extends { children: readonly string[] }>(
+  tree: { roots: readonly string[]; nodes: ReadonlyMap<string, T> },
+  order: Order,
+): TreeLike {
+  const nodes = new Map<string, { children: readonly string[] }>();
+  for (const [k, n] of tree.nodes) nodes.set(k, { children: order[k] ? mergeOrder(n.children, order[k]) : n.children });
+  return { roots: mergeOrder(tree.roots, order[ROOTS]), nodes };
+}
+
+/** `list` with `key` moved to `index` (counted without `key`). */
+export function moveTo(list: readonly string[], key: string, index: number): string[] {
+  const rest = list.filter((k) => k !== key);
+  rest.splice(Math.max(0, Math.min(rest.length, index)), 0, key);
+  return rest;
+}
+
+/** Where a sibling dragged with its centre at `y` drops: after every other sibling whose centre is above it. */
+export function dropIndex(siblings: readonly string[], key: string, y: number, centre: (key: string) => number): number {
+  let i = 0;
+  for (const s of siblings) if (s !== key && centre(s) < y) i++;
+  return i;
 }
 
 export function bounds(pos: ReadonlyMap<string, Point>, size: (key: string) => Size, only?: Iterable<string>): Rect | null {
@@ -130,7 +164,6 @@ export const MAX_ZOOM = 2;
 
 export const clampZoom = (k: number) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, k));
 
-/** The view that shows `r` inside a `vw`×`vh` viewport with `pad` around it, at most at `maxK`. */
 /**
  * The view that shows `r` whole, at most `maxK`. With `minK` (a phone, where everything at once
  * would be unreadable) it never zooms out past that; what doesn't fit then starts at the top left,
@@ -152,34 +185,67 @@ export function zoomAt(v: View, k: number, sx: number, sy: number): View {
 
 export const toWorld = (v: View, sx: number, sy: number): Point => ({ x: (sx - v.x) / v.k, y: (sy - v.y) / v.k });
 
-// ── remembered positions ──
+// ── remembered on this device ──
 
-const POS_KEY = (owner: string) => `roll:agents:positions:${owner}`;
-const MAX_REMEMBERED = 500;
+const ORDER_KEY = (owner: string) => `roll:agents:order:${owner}`;
+const VIEW_KEY = (owner: string) => `roll:agents:view:${owner}`;
+/** Parents whose order is kept, at most (the least recently arranged go first). */
+const MAX_PARENTS = 500;
 
-export function loadPositions(owner: string): Record<string, Point> {
+/** The order as a document: what's kept here and synced to roll. Anything malformed is dropped. */
+export function parseOrder(v: unknown): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  if (!v || typeof v !== "object" || Array.isArray(v)) return out;
+  for (const [k, list] of Object.entries(v as Record<string, unknown>)) {
+    if (Array.isArray(list)) out[k] = list.filter((x): x is string => typeof x === "string").slice(0, 1000);
+  }
+  return out;
+}
+
+/** `order` with `parent`'s children set to `list`, most recent last, bounded. */
+export function withOrder(order: Order, parent: string, list: readonly string[]): Record<string, string[]> {
+  const next: Record<string, string[]> = {};
+  for (const [k, v] of Object.entries(order)) if (k !== parent) next[k] = [...v];
+  next[parent] = [...list];
+  const keys = Object.keys(next);
+  for (const k of keys.slice(0, Math.max(0, keys.length - MAX_PARENTS))) delete next[k];
+  return next;
+}
+
+function readJson(key: string): unknown {
   try {
-    const raw = localStorage.getItem(POS_KEY(owner));
-    const v = raw ? (JSON.parse(raw) as unknown) : null;
-    if (!v || typeof v !== "object") return {};
-    const out: Record<string, Point> = {};
-    for (const [k, p] of Object.entries(v as Record<string, unknown>)) {
-      const q = p as Point;
-      if (q && Number.isFinite(q.x) && Number.isFinite(q.y)) out[k] = { x: q.x, y: q.y };
-    }
-    return out;
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
   } catch {
-    return {};
+    return null;
   }
 }
 
-export function savePositions(owner: string, positions: Record<string, Point>) {
+function writeJson(key: string, v: unknown) {
   try {
-    const entries = Object.entries(positions);
-    const kept = entries.slice(Math.max(0, entries.length - MAX_REMEMBERED));
-    if (kept.length) localStorage.setItem(POS_KEY(owner), JSON.stringify(Object.fromEntries(kept)));
-    else localStorage.removeItem(POS_KEY(owner));
+    if (v === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, JSON.stringify(v));
   } catch {
-    // Private mode or full: positions just aren't remembered.
+    // Private mode or full: it just isn't remembered.
   }
+}
+
+export function loadOrder(owner: string): Record<string, string[]> {
+  // Free positions (from before cards only moved among their siblings) made overlaps: forget them.
+  writeJson(`roll:agents:positions:${owner}`, null);
+  return parseOrder(readJson(ORDER_KEY(owner)));
+}
+
+export function saveOrder(owner: string, order: Order) {
+  writeJson(ORDER_KEY(owner), Object.keys(order).length ? order : null);
+}
+
+/** The view is per device: a phone and a laptop frame the canvas differently. */
+export function loadView(owner: string): View | null {
+  const v = readJson(VIEW_KEY(owner)) as View | null;
+  return v && [v.x, v.y, v.k].every(Number.isFinite) ? { x: v.x, y: v.y, k: clampZoom(v.k) } : null;
+}
+
+export function saveView(owner: string, v: View | null) {
+  writeJson(VIEW_KEY(owner), v && { x: Math.round(v.x), y: Math.round(v.y), k: Math.round(v.k * 1000) / 1000 });
 }
