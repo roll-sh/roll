@@ -66,5 +66,19 @@
     "validated": true,
     "summaries": [],
     "log_sha256": "6550ac98c0565a76aa6b6f55afda79e006c2da07ff46d5f27784c8b03bc50f10"
+  },
+  {
+    "name": "release-golden",
+    "exit": 0,
+    "validated": true,
+    "summaries": [
+      [
+        "ok",
+        "3",
+        "0",
+        "0"
+      ]
+    ],
+    "log_sha256": "d8214f566c390ebe0ffbcbbeb3453d5f20f943c10a78e0b1b2e1508f53ce213e"
   }
 ]
