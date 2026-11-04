@@ -32,6 +32,16 @@ pub struct StatSel {
     pub name: Option<String>,
     pub relid: Option<u32>,
     pub indexrelid: Option<u32>,
+    /// The columns the query reads (None: all): the others are NULL, not made (`count(*)`
+    /// read every relation's statistics entry and its indexes').
+    pub reads: Option<Vec<bool>>,
+}
+
+impl StatSel {
+    /// Whether any of columns `cols` is read.
+    fn reads_any(&self, cols: std::ops::Range<usize>) -> bool {
+        self.reads.as_ref().is_none_or(|r| cols.clone().any(|c| r.get(c).copied().unwrap_or(true)))
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -222,8 +232,22 @@ pub fn row_estimate(table: SysTable, ctx: &ExecCtx) -> Option<f64> {
 }
 
 /// The view's rows, in relation oid order (pg_stat_*_tables' grouping sorts by c.oid; the
-/// indexes views by (relid, indexrelid)); of the relations `sel` fixes alone.
+/// indexes views by (relid, indexrelid)); of the relations `sel` fixes alone, and of the
+/// columns it reads (`StatSel::reads`: the others NULL).
 pub fn rows_of(table: SysTable, ctx: &ExecCtx, sel: &StatSel) -> Result<Vec<Row>> {
+    let rows = rows_made(table, ctx, sel)?;
+    // (The relations' columns, which no statistics change between the two reads.)
+    #[cfg(debug_assertions)]
+    if sel.reads.is_some() {
+        let n = if matches!(shape(table), Some((Shape::Indexes | Shape::IoIndexes, _))) { 5 } else { 3 };
+        let all = rows_made(table, ctx, &StatSel { reads: None, ..sel.clone() })?;
+        let heads = |rs: &[Row]| rs.iter().map(|r| r[..n].to_vec()).collect::<Vec<_>>();
+        debug_assert!(heads(&all) == heads(&rows), "{}'s rows of the columns read", table.name());
+    }
+    Ok(rows)
+}
+
+fn rows_made(table: SysTable, ctx: &ExecCtx, sel: &StatSel) -> Result<Vec<Row>> {
     let (shape, part) = shape(table).expect("a statistics view generated here");
     let indexes = matches!(shape, Shape::Indexes | Shape::IoIndexes);
     // An index named by its oid: its table's rows, of that index.
@@ -271,8 +295,14 @@ pub fn rows_of(table: SysTable, ctx: &ExecCtx, sel: &StatSel) -> Result<Vec<Row>
     if shape == Shape::IoTables {
         of.extend(rels.iter().map(|k| k.toast).filter(|&t| t != 0));
     }
+    // Whether any statistics column is read (`count(*)` reads none: no entry is fetched).
+    let width = table.columns().len();
+    let first = if indexes { 5 } else { 3 };
+    let stats = sel.reads_any(first..width);
+    let unread = || std::iter::repeat_n(Value::Null, width - first);
     let ixs = match shape {
         Shape::IoSequences => HashMap::default(),
+        _ if !indexes && !stats => HashMap::default(),
         _ => indexes_of(ctx, &of, false),
     };
     let fetch = |oid: u32| pgstat::fetch_table(ctx, oid);
@@ -303,8 +333,12 @@ pub fn rows_of(table: SysTable, ctx: &ExecCtx, sel: &StatSel) -> Result<Vec<Row>
             }
             for &ix in ixs.get(&k.oid).into_iter().flatten().filter(|&&i| wanted(i)) {
                 let Some(ixname) = ixnames.get(&ix) else { continue };
-                let e = fetch(ix);
                 let head = [Value::Oid(k.oid), Value::Oid(ix), schema.clone(), k.name.clone(), ixname.clone()];
+                if !stats {
+                    out.push(head.into_iter().chain(unread()).collect());
+                    continue;
+                }
+                let e = fetch(ix);
                 let c = |f: fn(&TabEntry) -> i64| Value::Int8(e.as_ref().map_or(0, f));
                 out.push(match shape {
                     Shape::Indexes => {
@@ -334,8 +368,12 @@ pub fn rows_of(table: SysTable, ctx: &ExecCtx, sel: &StatSel) -> Result<Vec<Row>
         if !part_keeps(part, &schema) {
             continue;
         }
-        let e = fetch(k.oid);
         let head = [Value::Oid(k.oid), schema, k.name.clone()];
+        if !stats {
+            out.push(head.into_iter().chain(unread()).collect());
+            continue;
+        }
+        let e = fetch(k.oid);
         match shape {
             Shape::Tables => out.push(head.into_iter().chain(stat_tables_tail(ctx, &e, ixs.get(&k.oid))).collect()),
             Shape::IoSequences => {

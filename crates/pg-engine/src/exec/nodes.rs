@@ -121,8 +121,15 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             if let Some(node) = sys_shared_scan(*table, filter.as_ref(), path.as_deref(), need, ctx)? {
                 return Ok(node);
             }
-            let mut rows = match is_named_rows(*table, filter.as_ref(), ctx)? {
+            // (A statistics view makes only the columns read above or by the filter:
+            // `count(*)` of one fetched every relation's statistics, `stat_views::rows_of`.)
+            let reads = stat_reads(*table, filter.as_ref(), need);
+            let mut rows = match is_named_rows(*table, filter.as_ref(), reads.as_deref(), ctx)? {
                 Some(r) => r,
+                None if reads.is_some() => {
+                    let sel = crate::catalog::stat_views::StatSel { reads, ..Default::default() };
+                    crate::catalog::stat_views::rows_of(*table, ctx, &sel)?
+                }
                 None => crate::catalog::system::rows(*table, ctx)?,
             };
             // An index scan reads only the rows its conditions select, and checks the filter
@@ -1511,14 +1518,36 @@ fn sys_named(rows: &crate::catalog::system::SysRows, bounds: &crate::catalog::sy
         .collect()
 }
 
+/// The columns of statistics view `table` (`stat_views::generated_here`) a scan's parent reads
+/// (`need`) and its filter reads: the ones `stat_views::rows_of` makes. None: all of them, or
+/// not such a view.
+fn stat_reads(table: crate::catalog::system::SysTable, filter: Option<&Expr>, need: Option<&[bool]>) -> Option<Vec<bool>> {
+    if !crate::catalog::stat_views::generated_here(table) {
+        return None;
+    }
+    let mut reads = need?.to_vec();
+    if let Some(f) = filter {
+        for (i, r) in filter_reads(f)?.iter().enumerate() {
+            match reads.get_mut(i) {
+                Some(x) => *x |= *r,
+                None if *r => return None,
+                None => {}
+            }
+        }
+    }
+    Some(reads)
+}
+
 /// The rows of an information_schema view generated per relation
 /// (`system::is_rel_columns`) whose filter starts with equalities fixing `table_schema`
 /// and/or `table_name` (`WHERE table_schema = 's' AND table_name = 't'`): those relations'
 /// alone (`system::is_rows_named`). Only leading conjuncts are read, so the rows left out
 /// are those for which the filter stops at one of them, false, as it did over every row.
+/// `reads`: a statistics view's columns read (`stat_reads`).
 fn is_named_rows(
     table: crate::catalog::system::SysTable,
     filter: Option<&Expr>,
+    reads: Option<&[bool]>,
     ctx: &ExecCtx,
 ) -> Result<Option<Vec<Row>>> {
     let Some((sk, nk)) = crate::catalog::system::is_rel_columns(table) else {
@@ -1539,7 +1568,7 @@ fn is_named_rows(
         None => (None, None),
     };
     let is_key = |k: usize| k == sk || k == nk || Some(k) == rk || Some(k) == xk;
-    let mut sel = crate::catalog::stat_views::StatSel::default();
+    let mut sel = crate::catalog::stat_views::StatSel { reads: reads.map(<[bool]>::to_vec), ..Default::default() };
     for c in conj {
         // (`col = v`, or `col = ANY (array of one v)`: Prisma's `table_schema = ANY ($1)`.)
         let (d, k, other, one) = match c {
