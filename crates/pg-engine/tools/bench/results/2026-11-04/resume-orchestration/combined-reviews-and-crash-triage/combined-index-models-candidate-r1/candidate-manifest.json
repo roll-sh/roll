@@ -1,0 +1,238 @@
+{
+  "status": "UNTESTED WIP CANDIDATE; not source acceptance or performance evidence",
+  "base": "fe7b0023c9df19a6dae1e6067ba8454998db48c5",
+  "head": "4e588363d065aa9f12dc1b987d22dbf6742dcb9f",
+  "tree": "9013eae0ab2902d1ed66e6038ef0494574f1b331",
+  "branch": "feat/combined-index-validation",
+  "committed_bytes_match_worktree": true,
+  "files": [
+    {
+      "path": "crates/pg-engine/src/catalog/btsim.rs",
+      "blob": "572e90908cd3203516cb40a5c36f0f5195404435",
+      "sha256": "fb1a93745709d6b2c1c30d97c396d145c6781e329852485f998cc6c4e5631ca9",
+      "bytes": 104173
+    },
+    {
+      "path": "crates/pg-engine/src/catalog/ginsim.rs",
+      "blob": "1c7b609a7cadf01a2e8372707b27858dd6083997",
+      "sha256": "9a18d32462a1610791eada821f94fbe53a218912eea2ebfa55c1a1f58d07c2b5",
+      "bytes": 18713
+    },
+    {
+      "path": "crates/pg-engine/src/error.rs",
+      "blob": "da8fdf287a751b62078eec21da6e1cabd5cee9e2",
+      "sha256": "ef4ddf09dc921bbccd3e4a8d29384bd4608879e747595beae3d44d8d91d4987e",
+      "bytes": 23957
+    },
+    {
+      "path": "crates/pg-engine/src/exec/dml.rs",
+      "blob": "89b0876d773c9ad5315532fe73c2b2e9f40dcd43",
+      "sha256": "8e3abc26bf2370bebb3c841637de3b3c94178392eb6138f7d8ef4032335b5023",
+      "bytes": 218443
+    },
+    {
+      "path": "crates/pg-engine/src/exec/mod.rs",
+      "blob": "1b0d265ab5102287c2bef9f9fe8c96b40dcb6a5f",
+      "sha256": "9e77bb31462c9380411443fd30601438844a5c5c6cf91de6c4e6d2cb6627896e",
+      "bytes": 74435
+    },
+    {
+      "path": "crates/pg-engine/src/exec/pgstat.rs",
+      "blob": "8bc98a5ae4613dd1bfce5f98817ec7532eccb85d",
+      "sha256": "86ec5cc668ae088590cc40c91f29c0677c828a5ce8084ed0672fdc828304376c",
+      "bytes": 62392
+    },
+    {
+      "path": "crates/pg-engine/src/exec/replication.rs",
+      "blob": "72ed22a6255630c40feb06d0a6a4d2abaf3b5ee8",
+      "sha256": "77995bcc70fdd126a56a2c9b9627693ce5e0273b689befa31ab74a52a12ce09a",
+      "bytes": 21536
+    },
+    {
+      "path": "crates/pg-engine/src/exec/rowsize.rs",
+      "blob": "dcdbc13bdd7137c9b0466422a7c33f8b16965203",
+      "sha256": "62fa259c5cc29835bca6647d4b157b5ba090eebe3a05e8327957619d679c97ce",
+      "bytes": 10112
+    },
+    {
+      "path": "crates/pg-engine/src/exec/rowsize/observe.rs",
+      "blob": "bc32e40fb38b67c50acc08dda072e83e03e2376c",
+      "sha256": "3c89a0c3c3f95856b0aa30538f8804721e2bdcf7ec3be71fca222a5e5bda27f1",
+      "bytes": 7087
+    },
+    {
+      "path": "crates/pg-engine/src/exec/scan.rs",
+      "blob": "4ff9271205b04f32d8972eeb8e8e0014a900be9c",
+      "sha256": "16dc638242f9199ada437ad58184d9056db071a49cb3e8236d4f9f155bfbbb03",
+      "bytes": 220569
+    },
+    {
+      "path": "crates/pg-engine/src/exec/search.rs",
+      "blob": "28e5e3851ce2945e5ed3471f1e0298f75288fb0c",
+      "sha256": "66132cc4732f697f42c750bc2f52a15362ab7c00fd240fa4b765bf25642f87d4",
+      "bytes": 53446
+    },
+    {
+      "path": "crates/pg-engine/src/exec/sizing.rs",
+      "blob": "719422c938f61df6f7c146608cd7717b50e67a01",
+      "sha256": "cf2e1fb98e26cebda3d3d8ab7957f6537a6b091f61393d260ec0d11b2b441aa1",
+      "bytes": 214942
+    },
+    {
+      "path": "crates/pg-engine/src/exec/sizing/kept.rs",
+      "blob": "d40874aac0150213267c563e20984899a601acac",
+      "sha256": "bbd1c34fcebcccec2001a683f656f397049633e66951a57d624a7c8aed7f1541",
+      "bytes": 35590
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/objects.rs",
+      "blob": "3ae4bb09e556468ff37a88f1505cb073e0a7e2ab",
+      "sha256": "c553a26b345891871377a4b711e2981b31281f8de5cf0f716764596c924ca451",
+      "bytes": 303223
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/parbuild.rs",
+      "blob": "ae9c24d7cb4875e35089818ed4bb7ed52f67d46b",
+      "sha256": "fa1ffe3eca580232c6dd5b435a663bb7ed1d9d5e79b70edec31d69e71ad81984",
+      "bytes": 21768
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/table.rs",
+      "blob": "7d36569cdc6486de946e0058f9574026b1981e93",
+      "sha256": "8a6e8542e07048b6a0aca7db49a76561f51c8f2957da63f981e64be34817babc",
+      "bytes": 478640
+    },
+    {
+      "path": "crates/pg-engine/src/session/ddl/vacuum.rs",
+      "blob": "afd713dde65e1665a7b85791335adc62b77b0878",
+      "sha256": "9eea476c4a15097628f7d3b9f163dd9e7109ffc05be2d313f09297ed352bab0d",
+      "bytes": 87264
+    },
+    {
+      "path": "crates/pg-engine/src/sql/costs.rs",
+      "blob": "ba767452fa2d57872d49d7739eac9ffbf4a67555",
+      "sha256": "380cbc552599f5a68635dd3cffcda7c2e7d224859fe30ca2bb32b1a2fc0aaa52",
+      "bytes": 94679
+    },
+    {
+      "path": "crates/pg-engine/src/sql/literals.rs",
+      "blob": "a3daf234efed8d0d95eae7e22565762423ddfbf4",
+      "sha256": "af76e0f378a4ff8eb0feaf36d991dd30b147cdd244681c2bdb977cce47610c05",
+      "bytes": 21834
+    },
+    {
+      "path": "crates/pg-engine/src/storage/mod.rs",
+      "blob": "fd84c1e311cf464ec149e14d9f2e5238a0f3836f",
+      "sha256": "19e6bfe648840c02d2e8642fdb4db39dba362c7cfa212ae0eb7ab0b79f13c55b",
+      "bytes": 152045
+    },
+    {
+      "path": "crates/pg-engine/src/storage/row.rs",
+      "blob": "89353d38f6b63db5819506ae1e3e7fe8265f7331",
+      "sha256": "8a2a8f9d0093336b1309bb9a3384e8be720b66a9df58a4cadbcb591105383ece",
+      "bytes": 37654
+    },
+    {
+      "path": "crates/pg-engine/src/txn/mod.rs",
+      "blob": "5b7b4b81c1031c711a7c9b56da1b805e1d3cdb50",
+      "sha256": "a86313acf910833e4d9ff26bed458f562acd34f726f229950ccacc3192c4a076",
+      "bytes": 178973
+    },
+    {
+      "path": "crates/pg-engine/src/txn/unchanged.rs",
+      "blob": "177f0b20517eb1ff69462a789390076ffdd787cd",
+      "sha256": "d42d7984c50926b1a6ff9496fab301e40017ff8ea180c3a96a9ba4d10dadbd02",
+      "bytes": 6152
+    },
+    {
+      "path": "crates/pg-engine/tests/big_tables.rs",
+      "blob": "83438bb56db82eae3deb855d8e3285cb4fac1300",
+      "sha256": "902f868115c55d96cbb8c2a541d8e30786fcf4e186a4a13d62231985bbbbc236",
+      "bytes": 39349
+    },
+    {
+      "path": "crates/pg-engine/tests/isolation/specs/roll-bitmap-recheck.spec",
+      "blob": "bd7828881a550c56d6ac958c4d855c5e8e5101b4",
+      "sha256": "0a31c66efb9d976b921bb083b4c210d505167a208557bb4134e2d5899f3375bc",
+      "bytes": 1991
+    },
+    {
+      "path": "crates/pg-engine/tests/models_kept.rs",
+      "blob": "898e9527dcfeb058fd3309ad0e09c4349132689a",
+      "sha256": "97be57cc219aaf23272202ad4b93ceb088a991294e70191dd22e5d035c06834f",
+      "bytes": 11723
+    },
+    {
+      "path": "crates/pg-engine/tests/sql/a163_excl_truncate.out",
+      "blob": "41f22ab9290d48481842eeb5697f4b9130f3e12a",
+      "sha256": "bffacbb932ad00ca1764f0f238cf838fdea776b8b722bedbf6d04f121baa9c5f",
+      "bytes": 4192
+    },
+    {
+      "path": "crates/pg-engine/tests/sql/a163_excl_truncate.sql",
+      "blob": "2a7c4e9b2f05605f41867c307a0ee7a7733168a3",
+      "sha256": "8bbec53ae7aec90f05b2f3ad6b0e499771c2fcb9058e05c59e1c03190da85621",
+      "bytes": 2778
+    },
+    {
+      "path": "crates/pg-engine/tests/sql/a163_index_row_size.out",
+      "blob": "d2b29b82f390a3f60f0f46212313a7f005ad6fc6",
+      "sha256": "89a8841a82c6fc12b0e40179263dd031b9600375a314eaece60539a61a81cf4e",
+      "bytes": 13812
+    },
+    {
+      "path": "crates/pg-engine/tests/sql/a163_index_row_size.sql",
+      "blob": "fb05bccaf4b0d77ec427bda908169e5d660ccc69",
+      "sha256": "9fdcac0e04bfb8ce0ae355c88fbdb206c542b6ee7a344a9096d1fe165b0d9f3d",
+      "bytes": 6576
+    },
+    {
+      "path": "crates/pg-engine/tests/sql/a163_knn_time_interval.out",
+      "blob": "4a6cd920dc423fa751f3444455b70f653f96fcd4",
+      "sha256": "25f39166e88b7d8964dc4c70f44963a4d3a7c64a80123b926e463b6d2df2f5d0",
+      "bytes": 4218
+    },
+    {
+      "path": "crates/pg-engine/tests/sql/a163_knn_time_interval.sql",
+      "blob": "1e02e653f1c58e3a2c1ad19dc390d7ce3dc0d8b7",
+      "sha256": "162c8c5d3cb9f71df9cd27f8a33368204041a51be3be8f6b195e1ef95fc0c2e4",
+      "bytes": 2478
+    },
+    {
+      "path": "crates/pg-engine/tests/sql/a163_review_concurrent.out",
+      "blob": "c9b82316b7ab9902a2001883939b603d59455202",
+      "sha256": "07c264a11c99c9ec70e5eb2e4931b8040ed8924045dcb744de6326d3a0372e34",
+      "bytes": 3513
+    },
+    {
+      "path": "crates/pg-engine/tests/sql/a163_review_concurrent.sql",
+      "blob": "5e44dd7af074d55c3e8182028792532f9667f605",
+      "sha256": "741452e540aca412a4effa588002fefbe8fe9447487ed1f11a01933c0540ae65",
+      "bytes": 2344
+    },
+    {
+      "path": "crates/pg-engine/tests/sql/a163_review_sizes.out",
+      "blob": "fea1bf46dae15e6245bd14cec729ceb56c5fd071",
+      "sha256": "8465075fb6aeb86486ebbb36ac72ba29c0ee5c56e629895082e5a84e88d53ace",
+      "bytes": 3632
+    },
+    {
+      "path": "crates/pg-engine/tests/sql/a163_review_sizes.sql",
+      "blob": "5f2a8ac13847c2534f6f31bd064a01018415de24",
+      "sha256": "2415bfa4a31439e917713222c0bd33b9fdbf523c7bc7d11bb741f89d7b4c9104",
+      "bytes": 2040
+    },
+    {
+      "path": "crates/pg-engine/tests/sql/a170_btree_empty_leaf.out",
+      "blob": "e5734ad59b86f657936c8e5a03ace90caa2f0d4c",
+      "sha256": "8dc91760f38a7bdd262f902f39b5bff4ce49c197e8a84a8a237247e3ccf9c1cc",
+      "bytes": 1203
+    },
+    {
+      "path": "crates/pg-engine/tests/sql/a170_btree_empty_leaf.sql",
+      "blob": "4d314cc3cad754cbdb642fe79ff19c8af95b099e",
+      "sha256": "2a976fb4541af889f3fc29693d03291c6b539c155eb1c6790be07a12bd1cc0e1",
+      "bytes": 942
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "commit": "aa48d3c9be313a6a67810e6d6d69b1f633685823",
+  "ref": "refs/heads/wip/resume-20261104-executor167",
+  "remote_exact": true,
+  "payloads": 15,
+  "closed_membership": true,
+  "all_hashes_verified": true,
+  "manifest_sha256": "744ec9e1d56bbe56b28dcda16104791cf6f9c5b0be6c5a1963d16e2ceccfa16a",
+  "stages": [
+    {
+      "name": "build",
+      "exit": 0,
+      "passed": true
+    },
+    {
+      "name": "debug",
+      "exit": 0,
+      "passed": true
+    },
+    {
+      "name": "release",
+      "exit": 0,
+      "passed": true
+    },
+    {
+      "name": "clippy",
+      "exit": 0,
+      "passed": true
+    },
+    {
+      "name": "crash30",
+      "exit": 101,
+      "passed": false
+    }
+  ],
+  "batch": "FAILED101 crash30",
+  "postgres_unit": "NOT RUN failfast",
+  "source_attribution": "NONE; durability gap held",
+  "scope": "Parent committed-evidence integrity audit only, no reruns"
+}

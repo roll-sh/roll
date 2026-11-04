@@ -1,0 +1,65 @@
+{
+  "shared": {
+    "head": "fe7b0023c9df19a6dae1e6067ba8454998db48c5",
+    "clean": true,
+    "new_shared_source_integrated": false
+  },
+  "parent_candidate": {
+    "worktree": "/home/meszmate/worktrees/roll/t3-d62e3d3b",
+    "branch": "feat/combined-index-validation",
+    "reviewed_commit": "4e588363d065aa9f12dc1b987d22dbf6742dcb9f",
+    "backup": "wip/combined-index-models-d62e3d3b",
+    "execution": "NONE; uncompiled/untested",
+    "successor_task": "node:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Athread-send%3Apg-resume-20261104-combined-proof-r1-fixes",
+    "followup": "combined-source-r1-fix-disposition.json",
+    "required_fixes": [
+      "MEDIUM: test max_parallel_workers2 collides with global ACTIVE; keep requested maintenance workers2 but raise test global allowance",
+      "MEDIUM: DML on_form/on_insert failed INSERT paths need accepted pgstat accounting",
+      "MEDIUM: btree_size_of types allocation must follow surely_small/bpchar fast return",
+      "print trace before unexpected-success panic",
+      "DESC real winner must be middle participant, not always last"
+    ],
+    "red_reference": "b4dfee71 has predicted original HIGH; prepare test-only corrected red sibling, no observed red yet",
+    "known_gaps": "047VACUUM excluded; rawLoad/COPY and dropped/historicalTOAST remain held; GIN byte/C/singlebatch; PG min2896/TID oracle absent"
+  },
+  "owners": {
+    "independent165": {
+      "source": "c8618834caf45bc0a34cf9985c07f9bc13b498ef",
+      "review": "R2 noHIGH/MEDIUM, removal fixed; older samePID still-live registration displacement LOW persists",
+      "focused": "2+4+1+1 PASS owner report",
+      "debug": "455/0/18/61 PASS owner raw audited, latest evidence0eaae0b3",
+      "release": "compiling; no terminal result",
+      "historical": "ab3 all5gates parent-audited; priorwire101 retained; oldCPU0-35 no isolation. New owner taskset8-13,18-19 asserted/observed."
+    },
+    "executor167": {
+      "production": "278a28966a8921da90c6ead9cfeb3f332306d788",
+      "batch": "FAILED101 crash30; build/debug447/release447/ClippyPASS; pgunitNOTRUN",
+      "seal": "aa48d3c9be313a6a67810e6d6d69b1f633685823",
+      "r3_actual_red": "InitPlan loops6 vsPG1; externalCTE54rows vsPG9, correlated54loops matches; testonly1137c618; backup7cc634dc",
+      "next": "scoped owned subtree/correlated replay fix plus stray955 cleanup; no broad full before parent slot coordination"
+    },
+    "models170": {
+      "source": "047c4697e72ce63867257db3668a02c55c77830a",
+      "r3_actual_red": "2pass3fail: generic dropped live33 vsPG667; COPYfive2000B andMAIN8150 both HeapPacker overflow",
+      "next": "preserve rawsmallgeneric droppedbytes; Load declines optional large raw measurement via sized=false, preserves hooks; narrow focused then release target/slot"
+    },
+    "scan149": {
+      "state": "NOT RUN/DEFERRED isolation exit3; original101 and6003 unresolved; no retry"
+    },
+    "storage169": {
+      "state": "INCONCLUSIVE/HOLD, no accepted broad performance win"
+    }
+  },
+  "durability": {
+    "state": "unattributed failure, first observed postopen+settle;691journal length not verifiedkillstep; childpassguardnoop",
+    "evidence": "executor278-crash14-triage-result.json; execution_models/executor278-crash14-triage-clarification.json",
+    "retention": "no seed14 steps/image identified; two unrelated tmp dirs predate failure; inventoryacff1024",
+    "preparation": "retained-crash-diagnostic-plan-only.json; cache-only patch/design, no actual rerun/probe authorization"
+  },
+  "scheduling": {
+    "priority": "owner narrow R3 red/fix/focused sequential jobs and terminal exports, then root combined compile/lib proofs before broad owner full successors",
+    "constraints": "existing targets only; heavy slots/nice19/jobs2/threads2 with actual cpuset guard; no concurrent compilers on same target; root no cargo launched",
+    "queued": "parent-worker-check-queue.json"
+  },
+  "acceptance": "HELD; final combined engine build/test/clippy/fullregression/isolation/dump/service/performance NOT RUN"
+}

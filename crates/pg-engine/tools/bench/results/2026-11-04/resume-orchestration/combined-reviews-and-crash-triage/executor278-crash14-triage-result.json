@@ -1,0 +1,30 @@
+{
+  "taskId": "node:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Athread-send%3Apg-resume-20261104-executor278-crash14-coordination",
+  "childThreadId": "thread:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Adelegate-task%3Apg-resume-20261104-storage_correctness-r1",
+  "childRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A9e5a6feb-d435-4514-ac9d-07c1b03b444b%253Adelegate-task%253Apg-resume-20261104-storage_correctness-r1:ordinal:4",
+  "childNodeId": "node:delegated-task:command%3Amcp%3A9e5a6feb-d435-4514-ac9d-07c1b03b444b%3Athread-send%3Apg-resume-20261104-executor278-crash14-coordination",
+  "status": "completed",
+  "workState": "result_available",
+  "hasPendingChildRuns": false,
+  "latestTerminalRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A9e5a6feb-d435-4514-ac9d-07c1b03b444b%253Adelegate-task%253Apg-resume-20261104-storage_correctness-r1:ordinal:4",
+  "latestTerminalStatus": "completed",
+  "latestTerminalSummary": null,
+  "latestTerminalResultContextTransferId": null,
+  "providerInstanceId": "codex",
+  "model": "gpt-6.1-sol",
+  "options": [
+    {
+      "id": "reasoningEffort",
+      "value": "high"
+    },
+    {
+      "id": "serviceTier",
+      "value": "default"
+    }
+  ],
+  "summary": "Read-only triage complete; findings sent to parent.\n\n- **Confirmed:** sealed `aa48d3c9` raw hashes match. Source `278a2896` crash30 remains **FAILED101**; pgunit was not run.\n- **First observed divergence:** seed14, third crash round, after recovery **and settlement**, before follow-on steps. Actual2,833 rows versus expected2,832, with changed values and distinct CTIDs.\n- **Unknown:** first divergent operation, actual killed step, and last CHECKPOINT. The seal contains no `steps` journal, SQL trace, model dump, or crashed database. Remaining temporary directories are unidentified.\n- **Concrete oracle ambiguity:** the harness interprets an incomplete journal line as aborted and ignores recorded step numbers. This could corrupt expectations, but retained evidence does not establish that it happened.\n- **Smallest future proof:** one parent-authorized seed14 diagnostic preserving the crashed image and journal before reopening, then comparing recovered rows/txlog before and after settlement.\n\nNo source attribution established. No builds, tests, services, probes, edits, or deletions performed.",
+  "resultContextTransferId": "context-transfer:type:subagent_result:source-thread:thread%3Adelegated-task%3Acommand%253Amcp%253A9e5a6feb-d435-4514-ac9d-07c1b03b444b%253Adelegate-task%253Apg-resume-20261104-storage_correctness-r1:target-thread:ef773c6d-b273-413f-96df-4136f8b05569:c8b2483f-39a2-4f9e-84c9-1e0abb820bf5",
+  "hasPendingQuestion": false,
+  "pendingApproval": null,
+  "waitTimedOut": false
+}

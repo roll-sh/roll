@@ -1,0 +1,30 @@
+{
+  "source": "278a28966a8921da90c6ead9cfeb3f332306d788",
+  "seal": "aa48d3c9be313a6a67810e6d6d69b1f633685823",
+  "crash_log_sha256": "89a33b495917f4b3f0b74817044c43d74498fc3b532eca33874ce145986fa8ea",
+  "crash_binary_sha256": "a35916fbfff20bcbe555d5a5c1d77d0688d24686f9696a1148ce2e1c8ec59ec5",
+  "batch": "FAILED101; parent harness1fail and child environment-guard no-op1pass",
+  "unit": "NOT RUN",
+  "earliest_observed": "seed14 zero-based round2 (third crash), after open/connect AND settle(), first a seqscan full-row comparison; no follow-on100steps",
+  "label691": "read_log().len after settle marker, not a verified killed step or last checkpoint; no original journal retained",
+  "last_successful_full_check": "round1 after50 clean-restart steps, then shutdown; round2 initial open and writes had no full checks",
+  "observed": {
+    "actual_rows": 2833,
+    "expected_rows": 2832,
+    "ctids_distinct": 2833,
+    "forced_setting_aggregate_rows": 2833,
+    "forced_setting_sum_id": 9288629278,
+    "missing_extra_samples": "capped5; wrong values and keys; no full indexed row equality or actual plan shape proof"
+  },
+  "retention": "seal15payloads+manifest has no steps/SQL/model/WAL/SST/DB or child output; postinventory two temp dirs predate failedstage, no seed14 path identified; no deletes",
+  "oracle_ambiguities": [
+    "read_log ignores numeric IDs/newline completeness",
+    "any line not ending ' c' treated aborted",
+    "log marker append+sync follows SQL/model application; interrupted write could corrupt expectations",
+    "settle reconciles txlog at parsed length, not all earlier markers",
+    "read errors become empty log"
+  ],
+  "attribution": "NONE; possibilities include clean close/open, live SQL, recovery, oracle/settle; no causal evidence",
+  "followup": "cache-only retained diagnostic design; NO crash/SSI/storage probe authorized by this receipt",
+  "provenance": "Detailed owner read-only triage and inventory reports; parent saved without claiming runtime reproduction"
+}

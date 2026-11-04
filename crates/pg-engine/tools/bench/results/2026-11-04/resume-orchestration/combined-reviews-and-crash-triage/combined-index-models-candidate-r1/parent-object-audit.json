@@ -1,0 +1,20 @@
+{
+  "candidate": "4e588363d065aa9f12dc1b987d22dbf6742dcb9f",
+  "base": "fe7b0023c9df19a6dae1e6067ba8454998db48c5",
+  "changed_blobs": 38,
+  "all_committed_blob_hashes_lengths_worktree_bytes_verified": true,
+  "manifest_matches_complete_changed_membership": true,
+  "remote_exact": true,
+  "candidate_clean": true,
+  "preservation_records_consistent": 27,
+  "parent_reverified_full_blobs": [
+    "crates/pg-engine/src/storage/sst.rs",
+    "crates/pg-engine/src/repl/decode.rs",
+    "crates/pg-engine/src/types/binary.rs",
+    "crates/pg-engine/tests/sql/a162_stats_dead.sql",
+    "crates/pg-engine/tests/sql/a162_stats_dead.out"
+  ],
+  "partial_preservation_checks": "Owner records internally consistent; semantic preservation also under independent source review",
+  "execution": "NOT RUN",
+  "acceptance": false
+}
