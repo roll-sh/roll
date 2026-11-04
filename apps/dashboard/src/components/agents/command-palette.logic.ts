@@ -195,16 +195,16 @@ export function filterGroups(input: FilterInput): PaletteGroup[] {
   const goals = input.goals ?? [];
   if (goals.length === 0 || input.inSubmenu || input.query.startsWith(">")) return groups;
   const group: PaletteGroup = { value: "goal", label: "Ask agents", items: goals };
-  return goalsFirst(input.query, best) ? [group, ...groups] : [...groups, group];
+  return goalsFirst(best) ? [group, ...groups] : [...groups, group];
 }
 
 /**
- * Whether the goal rows lead: when nothing else matched, or when the query reads like a sentence
- * (three words or more) and nothing is named exactly by it.
+ * Whether the goal rows lead: when nothing has every word typed at a word start (only typos,
+ * hits inside words, or nothing at all). A sentence rarely names a row that way, and a name or a
+ * command ("upgr", "switch view running") does.
  */
-export function goalsFirst(query: string, best: number): boolean {
-  const words = foldSearchQuery(query).split(" ").filter(Boolean).length;
-  return best === 0 || (words >= 3 && best < 3);
+export function goalsFirst(best: number): boolean {
+  return best < 2;
 }
 
 function searchGroups(input: FilterInput): Filtered {

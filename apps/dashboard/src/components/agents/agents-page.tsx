@@ -279,8 +279,11 @@ export function AgentsSurface({
       toggleArchived: () => setShowArchived((s) => !s),
       archived,
       fit: () => canvas.current?.fit(),
+      views: views.views,
+      view: views.current.id,
+      selectView: views.select,
     }),
-    [showArchived, archived],
+    [showArchived, archived, views.views, views.current.id, views.select],
   );
   const end = (
     <>

@@ -817,7 +817,7 @@ The surface has three views:
   one agent with it as its prompt. Both go to the last project used (on a machine that can take
   it; "Somewhere else…" picks another), with its new-thread defaults and full access unless they
   say otherwise, and the conversation opens beside the canvas. They lead the list when the query
-  reads like a sentence (three words or more) and nothing is named by it exactly, else they come
+  names nothing (no row has every word typed at a word start: a sentence, a typo), else they come
   last. The same goal can be typed in the prompt bar at the bottom of the canvas ("What should
   the agents get done?", Orchestrate or One agent; its project chip opens the palette to pick
   another).

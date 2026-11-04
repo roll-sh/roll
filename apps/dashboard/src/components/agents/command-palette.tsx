@@ -7,10 +7,13 @@ import {
   ArrowUp,
   Bell,
   Bot,
+  Check,
   ChevronLeft,
   ChevronRight,
+  CircleCheck,
   Folder,
   FolderPlus,
+  LayoutGrid,
   GitFork,
   Maximize,
   MessageSquare,
@@ -55,6 +58,10 @@ export interface PaletteHost {
   toggleArchived: () => void;
   archived: number;
   fit: () => void;
+  /** The canvas's views (All, then the saved ones) and the one showing. */
+  views: readonly { id: string; name: string }[];
+  view: string;
+  selectView: (id: string) => void;
 }
 
 /**
@@ -205,6 +212,14 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
       requests.length > 0 && { kind: "action", value: "action:waiting", title: `Answer what's waiting (${requests.length})`, searchTerms: ["approval", "question", "request", "waiting"], icon: <Bell className="size-4 text-accent" />, run: () => openThread(requests[0].thread) },
       !!open && isBusy(open.status) && { kind: "action", value: "action:stop", title: `Stop “${open.title}”`, searchTerms: ["interrupt", "cancel"], icon: <Square className={ICON} />, run: () => client.run(at, { type: "run.interrupt", thread: open.id }) },
       !!open && { kind: "action", value: "action:fork", title: `Fork “${open.title}”`, searchTerms: ["branch", "copy"], icon: <GitFork className={ICON} />, run: async () => openThread((await client.run<{ type: "created"; id: string }>(at, { type: "thread.fork", thread: open.id, worktree: !!open.worktree }, "created")).id) },
+      !!open && {
+        kind: "action",
+        value: "action:settle",
+        title: open.inbox.settle?.state === "settled" ? `Unsettle “${open.title}”` : `Settle “${open.title}”`,
+        searchTerms: ["done", "inbox", "resolve"],
+        icon: <CircleCheck className={ICON} />,
+        run: () => client.run(at, { type: open.inbox.settle?.state === "settled" ? "thread.unsettle" : "thread.settle", thread: open.id }),
+      },
       !!open && { kind: "action", value: "action:archive", title: open.archived_at === null ? `Archive “${open.title}”` : `Unarchive “${open.title}”`, searchTerms: ["settle", "hide", "done"], icon: open.archived_at === null ? <Archive className={ICON} /> : <ArchiveRestore className={ICON} />, run: () => client.run(at, { type: open.archived_at === null ? "thread.archive" : "thread.unarchive", thread: open.id }) },
       addProject,
       { kind: "action", value: "action:add-machine", title: "Add machine", searchTerms: ["connect", "computer", "sandbox", "rent"], icon: <Server className={ICON} />, run: host.addMachine },
@@ -218,6 +233,31 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
         view: { label: "Machine settings", placeholder: "Which machine?", groups: [{ value: "machines", label: "Machines", items: machines.map((m) => ({ kind: "action" as const, value: `machine-settings:${m.id}`, title: m.name, icon: <MachineIcon machine={m} className={ICON} />, run: () => setAgentsView({ kind: "settings", target: `m:${m.id}` }) })) }] },
       },
       host.archived > 0 && { kind: "action", value: "action:archived", title: host.showArchived ? "Hide archived conversations" : `Show archived conversations (${host.archived})`, searchTerms: ["settled", "archive"], icon: <Archive className={ICON} />, run: host.toggleArchived },
+      host.views.length > 1 && {
+        kind: "submenu",
+        value: "action:views",
+        title: "Switch view",
+        searchTerms: ["canvas", "filter", "layout"],
+        icon: <LayoutGrid className={ICON} />,
+        view: {
+          label: "Switch view",
+          placeholder: "Which view?",
+          groups: [
+            {
+              value: "views",
+              label: "Views",
+              items: host.views.map((v) => ({
+                kind: "action" as const,
+                value: `view:${v.id}`,
+                title: v.name,
+                trailing: v.id === host.view ? <Check className="size-3.5 text-subtle" /> : undefined,
+                icon: <LayoutGrid className={ICON} />,
+                run: () => (setAgentsView({ kind: "canvas" }), host.selectView(v.id)),
+              })),
+            },
+          ],
+        },
+      },
       { kind: "action", value: "action:fit", title: "Fit the canvas", searchTerms: ["zoom", "view", "overview", "all"], icon: <Maximize className={ICON} />, shortcut: "1", run: () => (setAgentsView({ kind: "canvas" }), host.fit()) },
     ];
     const opens = threadOpens();

@@ -119,6 +119,24 @@ describe("the agents' command palette", () => {
     expect(creates(h)[0]).toMatchObject({ prompt: "Bump the lockfile and run the tests", runtime_mode: "full_access" });
   });
 
+  it("switches the canvas's view, and settles the open conversation", async () => {
+    const h = setup();
+    await userEvent.keyboard("{Meta>}k{/Meta}");
+    // A submenu's option is a row of its own.
+    await userEvent.type(screen.getByRole("combobox"), "switch view running");
+    expect(selected()).toHaveTextContent("Switch view: Running");
+    await userEvent.keyboard("{Enter}");
+    expect(screen.getByRole("tab", { name: /Running/ })).toHaveAttribute("aria-selected", "true");
+
+    await waitFor(() => expect(agentsPalette.get().open).toBe(false));
+    act(() => showAgents({ kind: "thread", thread: "thr_1" }));
+    await userEvent.keyboard("{Meta>}k{/Meta}");
+    await userEvent.type(screen.getByRole("combobox"), ">settle");
+    expect(selected()).toHaveTextContent("Settle “Fix the flaky queue test”");
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(h.command.mock.calls.map((c) => c[2])).toContainEqual({ type: "thread.settle", thread: "thr_1" }));
+  });
+
   it("opens straight into 'Orchestrate…' with what was typed, and lists where it can go", async () => {
     setup();
     await userEvent.keyboard("{Meta>}k{/Meta}");

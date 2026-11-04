@@ -40,12 +40,11 @@ describe("the command palette's search", () => {
     expect(titles(search("new agent in web"))[0]).toEqual(["Suggestions", ["New agent in web"]]);
   });
 
-  it("puts the goal rows first when the query reads like a sentence or nothing matches", () => {
-    expect(goalsFirst("roll", 2)).toBe(false);
-    expect(goalsFirst("add dark mode to settings", 2)).toBe(true);
-    expect(goalsFirst("add dark mode to settings", 3)).toBe(false);
-    expect(goalsFirst("zzz", 0)).toBe(true);
+  it("puts the goal rows first when nothing has every word at a word start", () => {
+    expect([0, 1, 2, 3].map(goalsFirst)).toEqual([true, true, false, false]);
     expect(search("zzzz")[0].label).toBe("Ask agents");
+    expect(search("add dark mode to the settings page")[0].label).toBe("Ask agents");
+    expect(search("fix flaky")[0].label).toBe("Threads");
   });
 
   it("limits '>' to actions and offers no goal for it", () => {
@@ -86,7 +85,7 @@ describe("a goal from outside a conversation", () => {
   });
 
   it("starts one agent from the project's defaults", () => {
-    const p = { ...target.project, repo: { owner: "acme", repo: "roll" }, settings: { auto_pull: false, scripts: [], defaults: { provider: "claude", model: "claude-sonnet-5", effort: "high", runtime_mode: "auto_edit" as const, interaction_mode: "plan" as const } } };
+    const p = { ...target.project, repo: { owner: "acme", repo: "roll" }, settings: { ...target.project.settings, defaults: { provider: "claude", model: "claude-sonnet-5", effort: "high", runtime_mode: "auto_edit" as const, interaction_mode: "plan" as const } } };
     expect(goalCommand("agent", "fix it", { ...target, project: p })).toEqual({
       type: "thread.create",
       project: "prj_1",
