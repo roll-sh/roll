@@ -1,0 +1,12 @@
+{
+  "wrapper_pid": 3890750,
+  "process_group": 3890750,
+  "runner": "/home/meszmate/.cache/pg-engine-resume-20261104/session_planner/remaining171-lazy-v1.sh",
+  "runner_sha256": "9752e82277596b5b5d385b809a49907c0a4fa254fc727041aa07620029197e66",
+  "frozen_manifest_sha256": "078e1a41c728859d05e6fea9c7cdc45195652a43df80c7f129d709ce78880835",
+  "source": "cac0933bc4eb5ef87674889542cab271de4615d0",
+  "tree": "bd48e5074887125072d7c23cb09c78fe6fe15c0b",
+  "failure_export": "77e28dd9dbf75727edbefbec1b614f60f2d896f4",
+  "observed_utc": "2026-11-04T22:41:35.751587+00:00",
+  "scope": "Separate first-run dist/unit only; original frozen pipeline FAILED retained"
+}

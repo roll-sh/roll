@@ -1,0 +1,26 @@
+{
+  "pid": 3890775,
+  "affinity": [
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    18,
+    19
+  ],
+  "nice": 19,
+  "jobs": "2",
+  "threads": "2",
+  "global_slots": "4",
+  "global_jobs": "2",
+  "test_config": {
+    "CARGO_PROFILE_DEV_DEBUG": "line-tables-only",
+    "RUST_TEST_THREADS": "2"
+  },
+  "nondefault_override_keys": [],
+  "golden_filter_unset": true,
+  "golden_record_unset": true,
+  "crash_default": "no CRASH_* inherited;normal source defaults only"
+}

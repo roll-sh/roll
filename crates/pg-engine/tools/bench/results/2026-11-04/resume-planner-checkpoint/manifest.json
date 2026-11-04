@@ -772,8 +772,8 @@
     "bytes": 4011
   },
   "export_checkpoint.py": {
-    "sha256": "d4724f24eb07eb4ac99a14d89ad44b0b9c0502c1c81bdbe821e9eb5165259171",
-    "bytes": 38859
+    "sha256": "78b3f17e11e6b567ea8bd30c9b48892fdfb3ed33c7d547cd7dcd6365fa5ec88a",
+    "bytes": 39449
   },
   "fdw172/REPORT.md": {
     "sha256": "cc57a154800c562a85fc11e0cee8748382aa2e64b5d6a6b37caaff76ffb16d84",
@@ -1827,6 +1827,34 @@
     "sha256": "4409070528e5249d7aca2869b2fd67ceeaf88cb77af0311b1588dc1271c2d0bc",
     "bytes": 421
   },
+  "remaining171-lazy-v1/build.command": {
+    "sha256": "a07bb951576e7a8a4b2043e5eec8b2f6254bb57f0a4e9636e781ce351d7f7927",
+    "bytes": 59
+  },
+  "remaining171-lazy-v1/disk-before-build.json": {
+    "sha256": "c8b5ec2754c989663c98e0464d76f20706a57f08c129f96598efe127e0774d63",
+    "bytes": 134
+  },
+  "remaining171-lazy-v1/initial.status": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  "remaining171-lazy-v1/source.txt": {
+    "sha256": "78174d17a36dd2b5d156154ad2a3f9a0b63682b00cd81be8f3e76329a7b55bcb",
+    "bytes": 41
+  },
+  "remaining171-lazy-v1/startup-controls.json": {
+    "sha256": "b51a01da90c672d2ce51428065d0151a5b08cec505a3957db76f07f5a6f1626e",
+    "bytes": 466
+  },
+  "remaining171-lazy-v1/toolchain.txt": {
+    "sha256": "db19261270b0428d1cffd44795917261238eab88402716d4f372b5b1c1350a6d",
+    "bytes": 232
+  },
+  "remaining171-lazy-v1/tree.txt": {
+    "sha256": "63c6acfff48b73fbc9798cc5dec5f150392097ad0d46985d69cca92fc94f4d60",
+    "bytes": 41
+  },
   "review165/exits.tsv": {
     "sha256": "590e981aad8108c0420b664caf96c614afb92a3dd4ea61fa456ca11510abfe14",
     "bytes": 82
@@ -1966,6 +1994,10 @@
   "runners/audit171-full-terminal.py": {
     "sha256": "890601a483b13d0e3862b2bad068e4d298fbb6d20740bdcc78b5333c0248cd5e",
     "bytes": 5585
+  },
+  "runners/audit171-remaining-terminal.py": {
+    "sha256": "cdf0dc64a3ec70852202a7858b288cd56c338355318ad4646a231674019637bd",
+    "bytes": 5188
   },
   "runners/baseline171-v1.sh": {
     "sha256": "d09c1ad3b53acfc0b0af8ced1d05d55b644500748dbc1997eb9e57a4d82e1149",
@@ -2274,6 +2306,30 @@
   "runners/red171-v1.sh": {
     "sha256": "7ae3442aa569fea7c13cca278d2473dc00d9db0db0f9c74fdbf4353428da5de3",
     "bytes": 1988
+  },
+  "runners/remaining171-frozen.sha256": {
+    "sha256": "078e1a41c728859d05e6fea9c7cdc45195652a43df80c7f129d709ce78880835",
+    "bytes": 1758
+  },
+  "runners/remaining171-launch.json": {
+    "sha256": "ed23d842035a5b0b22d66f035c94cc1052e4a7f6abd610cec83cc53f7b57c6b7",
+    "bytes": 661
+  },
+  "runners/remaining171-lazy-v1.sh": {
+    "sha256": "9752e82277596b5b5d385b809a49907c0a4fa254fc727041aa07620029197e66",
+    "bytes": 4910
+  },
+  "runners/remaining171-parent-clippy-posthoc.json": {
+    "sha256": "c07e2343f2cd366dffe68f671b5c0f88669262d1c806d33b11836dc0f8c15dd9",
+    "bytes": 7059
+  },
+  "runners/remaining171-plan.json": {
+    "sha256": "39663d266d29df878d18fbf1e95d56750642a453abd52242b63112c74ce79da2",
+    "bytes": 1201
+  },
+  "runners/remaining171-stage-audit.py": {
+    "sha256": "c4fbb84605f3c703eae37a354229c29995f7b6d9f19e05b22006b699e704f542",
+    "bytes": 1505
   },
   "runners/review165.sh": {
     "sha256": "42e97f5aaea2826762dc64f0565d025f99c6a5d2315e8aa442acfa5470236693",

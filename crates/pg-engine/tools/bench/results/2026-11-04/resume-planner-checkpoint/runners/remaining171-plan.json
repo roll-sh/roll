@@ -1,0 +1,40 @@
+{
+  "source": "cac0933bc4eb5ef87674889542cab271de4615d0",
+  "tree": "bd48e5074887125072d7c23cb09c78fe6fe15c0b",
+  "commands": [
+    {
+      "stage": "build",
+      "argv": [
+        "cargo",
+        "build",
+        "--profile",
+        "dist",
+        "-p",
+        "pg-engine",
+        "--bin",
+        "roll-engine"
+      ],
+      "profile": "dist",
+      "fresh_intended_crate_required": true
+    },
+    {
+      "stage": "postgres-unit",
+      "argv": [
+        "pnpm",
+        "test:pg",
+        "--unit"
+      ],
+      "classification": "EXECUTED24/0/0/5 or stampSKIP;never forced"
+    }
+  ],
+  "original_pipeline_status": "FAILED/PARTIAL;Clippy command0/audit1/HEAVY1;dist/unitNOTRUN there",
+  "failure_export": "77e28dd9dbf75727edbefbec1b614f60f2d896f4",
+  "posthoc_comparison": "append-only parent existing-raw comparison;no Clippy rerun/threshold/source changes",
+  "disk_floor_gib": 30,
+  "before_each_stage": true,
+  "controls": "existinga171target/tmp/shared4slots/jobs2/nice19/testthreads2/taskset8-13,18-19;housekeepingunrestricted;samplesonly",
+  "no_retry": true,
+  "source_edits": false,
+  "debug_release_clippy_rerun": false,
+  "integration_performance_service_acceptance": false
+}

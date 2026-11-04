@@ -452,6 +452,11 @@ for artifact in sorted((D / 'full171-lazy-v1').iterdir()):
     if artifact.is_file():
         sources['full171-lazy-v1/' + artifact.name] = str(artifact)
 sources['full171-lazy-v1/wrapper.log'] = str(D / 'full171-lazy-v1-wrapper.log')
+# Separate DIST/UNIT launch only: exclude both active raw outputs until terminal.
+for name in ('remaining171-lazy-v1.sh', 'remaining171-stage-audit.py', 'remaining171-plan.json', 'remaining171-parent-clippy-posthoc.json', 'remaining171-frozen.sha256', 'remaining171-launch.json', 'audit171-remaining-terminal.py'):
+    sources['runners/' + name] = str(D / name)
+for name in ('source.txt', 'tree.txt', 'initial.status', 'startup-controls.json', 'toolchain.txt', 'disk-before-build.json', 'build.command'):
+    sources['remaining171-lazy-v1/' + name] = str(D / 'remaining171-lazy-v1' / name)
 for name, source in sources.items():
     files[name] = Path(source).read_bytes()
 files['manifest.json'] = (json.dumps({name: {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}
