@@ -1,0 +1,18 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running tests/pg_dump.rs (/home/meszmate/.cache/a166/target-debug/debug/deps/pg_dump-24d780157db7d64b)
+
+running 1 test
+
+thread 'pg_dump_tap' (12476) panicked at crates/pg-engine/tests/pg_dump.rs:230:5:
+no pg_dump TAP tests in /home/meszmate/.cache/a166/pgr1/src-repo (git sparse-checkout add src/bin/pg_dump)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test pg_dump_tap ... FAILED
+
+failures:
+
+failures:
+    pg_dump_tap
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p pg-engine --test pg_dump`
