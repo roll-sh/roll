@@ -1,0 +1,18 @@
+{
+  "observed_at": "2026-11-04T13:21:29.503377+00:00",
+  "tested_head": "3997cf00a2a301fed65f00469625ff14f223f227",
+  "commit": "4b99a106682194ff180f28da70720825f962e8af",
+  "ref": "refs/heads/wip/resume-20261104-a162-dump5",
+  "files": 59,
+  "manifest_hashes": 58,
+  "committed_blobs_verified": true,
+  "confirmed": true,
+  "attempts": [
+    {
+      "push_exit": 0,
+      "ls_remote_exit": 0,
+      "ls_remote": "4b99a106682194ff180f28da70720825f962e8af\trefs/heads/wip/resume-20261104-a162-dump5",
+      "stderr": ""
+    }
+  ]
+}
