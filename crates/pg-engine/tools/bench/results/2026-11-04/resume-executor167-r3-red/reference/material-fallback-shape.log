@@ -1,0 +1,44 @@
+CREATE TABLE
+INSERT 0 6
+CREATE TABLE
+INSERT 0 9
+ANALYZE
+SET
+SET
+SET
+SET
+SET
+Aggregate (actual rows=1.00 loops=1)
+  ->  Nested Loop (actual rows=18.00 loops=1)
+        ->  Nested Loop (actual rows=2.00 loops=1)
+              ->  Nested Loop (actual rows=2.00 loops=1)
+                    ->  Nested Loop (actual rows=2.00 loops=1)
+                          ->  Nested Loop (actual rows=2.00 loops=1)
+                                ->  Nested Loop (actual rows=2.00 loops=1)
+                                      ->  Nested Loop (actual rows=2.00 loops=1)
+                                            ->  Nested Loop (actual rows=2.00 loops=1)
+                                                  ->  Seq Scan on a167_o o1 (actual rows=2.00 loops=1)
+                                                        Filter: (k <= 2)
+                                                        Rows Removed by Filter: 4
+                                                  ->  Seq Scan on a167_o o2 (actual rows=1.00 loops=2)
+                                                        Filter: (k <= 1)
+                                                        Rows Removed by Filter: 5
+                                            ->  Seq Scan on a167_o o3 (actual rows=1.00 loops=2)
+                                                  Filter: (k <= 1)
+                                                  Rows Removed by Filter: 5
+                                      ->  Seq Scan on a167_o o4 (actual rows=1.00 loops=2)
+                                            Filter: (k <= 1)
+                                            Rows Removed by Filter: 5
+                                ->  Seq Scan on a167_o o5 (actual rows=1.00 loops=2)
+                                      Filter: (k <= 1)
+                                      Rows Removed by Filter: 5
+                          ->  Seq Scan on a167_o o6 (actual rows=1.00 loops=2)
+                                Filter: (k <= 1)
+                                Rows Removed by Filter: 5
+                    ->  Seq Scan on a167_o o7 (actual rows=1.00 loops=2)
+                          Filter: (k <= 1)
+                          Rows Removed by Filter: 5
+              ->  Seq Scan on a167_o o8 (actual rows=1.00 loops=2)
+                    Filter: (k <= 1)
+                    Rows Removed by Filter: 5
+        ->  Seq Scan on a167_n n (actual rows=9.00 loops=2)

@@ -1,0 +1,163 @@
+[
+  {
+    "stage": "existing-owned",
+    "argv": [
+      "docker",
+      "ps",
+      "-aq",
+      "--filter",
+      "name=^/a167170-r3-reference$"
+    ],
+    "env": null,
+    "exit": 0,
+    "expected_exit": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "stage": "image",
+    "argv": [
+      "docker",
+      "image",
+      "inspect",
+      "sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
+    ],
+    "env": null,
+    "exit": 0,
+    "expected_exit": 0,
+    "sha256": "40df7e9f9995ec3f5c9695b548a2f7239d1cb6458a5b9c492e22dfec2497c02b"
+  },
+  {
+    "stage": "create",
+    "argv": [
+      "docker",
+      "run",
+      "--rm",
+      "-d",
+      "--name",
+      "a167170-r3-reference",
+      "--label",
+      "agent.worktree=agent-a6193f5e45a7ae4f1",
+      "--label",
+      "agent.task=resume-execution-models-narrow-reference",
+      "--memory",
+      "512m",
+      "--cpus",
+      "2",
+      "--cpuset-cpus",
+      "4-7,22-25",
+      "-p",
+      "127.0.0.1:53345:5432",
+      "-e",
+      "POSTGRES_PASSWORD=pw",
+      "--entrypoint",
+      "/bin/nice",
+      "sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873",
+      "-n",
+      "19",
+      "docker-entrypoint.sh",
+      "postgres"
+    ],
+    "env": null,
+    "exit": 0,
+    "expected_exit": 0,
+    "sha256": "c112c1d286276b2b6b0b8c8be245b70dce5fa2b0b99606fce680b7f909b54f8a"
+  },
+  {
+    "stage": "inspect",
+    "argv": [
+      "docker",
+      "inspect",
+      "a167170-r3-reference"
+    ],
+    "env": null,
+    "exit": 0,
+    "expected_exit": 0,
+    "sha256": "24e1814f971e1d368cb667286bee93e1ba66d557f17030e5b1a398e26c9acfae"
+  },
+  {
+    "stage": "version",
+    "argv": [
+      "docker",
+      "exec",
+      "a167170-r3-reference",
+      "psql",
+      "-U",
+      "postgres",
+      "-At",
+      "-c",
+      "SELECT version()"
+    ],
+    "env": null,
+    "exit": 0,
+    "expected_exit": 0,
+    "sha256": "0f37c16b74ded4679bd176522cf6fa3071ff40a66eac0e1f6c2b03f8e4959350"
+  },
+  {
+    "stage": "owned-record",
+    "argv": [
+      "/home/meszmate/.cache/a167/target/debug/deps/golden-9749ad749af5ca1c",
+      "golden",
+      "--exact",
+      "--nocapture"
+    ],
+    "env": {
+      "GOLDEN_RECORD": "127.0.0.1:53345",
+      "GOLDEN_PASSWORD": "pw",
+      "GOLDEN_FILTER": "a167_subplan_owned"
+    },
+    "exit": 0,
+    "expected_exit": 0,
+    "sha256": "a06d30abd8475d891e74ca6e236b23d30abf2d4c4cb8ed05b301d208134a46c7"
+  },
+  {
+    "stage": "drop-copy-reference",
+    "argv": [
+      "docker",
+      "exec",
+      "-i",
+      "a167170-r3-reference",
+      "psql",
+      "-U",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1"
+    ],
+    "env": null,
+    "exit": 0,
+    "expected_exit": 0,
+    "sha256": "94afa713cf18940bff13e83f6a5711931d2aadbc046dd08f6230882b0a76f09b"
+  },
+  {
+    "stage": "material-fallback-shape",
+    "argv": [
+      "docker",
+      "exec",
+      "-i",
+      "a167170-r3-reference",
+      "psql",
+      "-U",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1"
+    ],
+    "env": null,
+    "exit": 0,
+    "expected_exit": 0,
+    "sha256": "e5391166ce08584bb7aed00a287985b98658e62415a7c7b95006b5ed5bc62e47"
+  },
+  {
+    "stage": "cleanup",
+    "argv": [
+      "docker",
+      "rm",
+      "-f",
+      "a167170-r3-reference"
+    ],
+    "env": null,
+    "exit": 0,
+    "expected_exit": 0,
+    "sha256": "b0e16001132fe14ab198f9327e657a5b4f8b7bbaefb0e3e90fb0d524fdfe1f09"
+  }
+]

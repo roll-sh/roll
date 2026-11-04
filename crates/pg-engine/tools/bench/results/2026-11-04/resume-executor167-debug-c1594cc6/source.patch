@@ -1,0 +1,1408 @@
+diff --git a/crates/pg-engine/src/exec/agg.rs b/crates/pg-engine/src/exec/agg.rs
+index 60dfc17e..2a75b63d 100644
+--- a/crates/pg-engine/src/exec/agg.rs
++++ b/crates/pg-engine/src/exec/agg.rs
+@@ -2831,7 +2831,23 @@ impl AggNode {
+             };
+             aggs.push((arg, a.def.skip_nulls, empty));
+         }
+-        let spec = Arc::new(super::partial::Spec { keys, trim, aggs, seq });
++        // (Groups that come out sorted on all their keys, which only equal values make
++        // equal, of aggregates that don't see their rows' order: the rows can come in any.
++        // A redundant key's value is its group's row's, whichever row comes first.)
++        let red = self.redundant_keys(ctx);
++        let free = !seq
++            && self.aggs.iter().all(order_insensitive)
++            && self
++                .groups
++                .iter()
++                .enumerate()
++                .all(|(i, g)| red[i] || shows_alike(g, colls.get(i).and_then(Option::as_ref), proj.as_deref()))
++            && (self.groups.is_empty()
++                || self.plan.as_ref().is_some_and(|p| {
++                    let e = super::pghash::agg_estimate(p, ctx);
++                    e.sorted.as_ref().is_some_and(|s| (0..self.groups.len()).all(|i| red[i] || s.iter().any(|k| k.0 == i)))
++                }));
++        let spec = Arc::new(super::partial::Spec { keys, trim, aggs, seq, free });
+         Ok(match proj {
+             Some(_) => input.pipeline_projected(spec, ctx)?,
+             None => input.pipeline(Vec::new(), Some(spec), ctx)?,
+@@ -2970,7 +2986,11 @@ impl AggNode {
+             // 0, under a nondeterministic collation) show.
+             let presort = presort.or_else(|| {
+                 // (Estimated only when it can matter: a plain aggregate has one group.)
+-                let shown = colls.iter().any(Option::is_some) || self.groups.iter().any(|g| equal_apart(&g.ty()));
++                let shown = self
++                    .groups
++                    .iter()
++                    .zip(&colls)
++                    .any(|(g, c)| !shows_alike(g, c.as_ref(), input.projection()));
+                 if self.groups.is_empty() || (!shown && self.aggs.iter().all(order_insensitive)) {
+                     return None;
+                 }
+@@ -3081,11 +3101,20 @@ impl AggNode {
+                             let mut map = Vec::with_capacity(p.groups.len());
+                             let mut parts = Vec::with_capacity(p.groups.len());
+                             for (k, st) in p.groups {
+-                                let hk = if nondet { group_key(&k, &colls) } else { k.clone() };
+-                                let h = index.hash(&hk);
+-                                let gi = match find_group!(h, &hk) {
+-                                    Some(i) => i,
+-                                    None => new_group!(h, k, hk),
++                                // (The key compared is the key itself unless normalised.)
++                                let gi = if nondet {
++                                    let hk = group_key(&k, &colls);
++                                    let h = index.hash(&hk);
++                                    match find_group!(h, &hk) {
++                                        Some(i) => i,
++                                        None => new_group!(h, k, hk),
++                                    }
++                                } else {
++                                    let h = index.hash(&k);
++                                    match find_group!(h, &k) {
++                                        Some(i) => i,
++                                        None => new_group!(h, k, Vec::new()),
++                                    }
+                                 };
+                                 map.push(gi);
+                                 parts.push(st);
+@@ -3673,6 +3702,39 @@ fn through_projection(e: &crate::sql::expr::Expr, proj: &[crate::sql::expr::Expr
+ /// exact sums and averages, min / max of types whose equal values are the same).
+ /// Whether two equal values of type `t` can look different (interval_eq, numeric_eq,
+ /// float8eq over -0 / 0, jsonb's numbers, arrays and ranges of them).
++/// Whether equal values of group key `g` (compared as `coll` has them) always look alike, so
++/// that its group shows the same value whichever of its rows comes first.
++fn shows_alike(g: &crate::sql::expr::Expr, coll: Option<&KeyNorm>, proj: Option<&[crate::sql::expr::Expr]>) -> bool {
++    match coll {
++        None => !key_equal_apart(g, proj),
++        // (A char(n) value is always padded to n: equal ones are the same string.)
++        Some(KeyNorm::Bpchar(None)) => matches!(g.ty(), crate::types::DataType::Bpchar(n) if n > 0),
++        Some(_) => false,
++    }
++}
++
++/// Whether a group key's values may be equal and look different (`equal_apart` of its type,
++/// unless the expression only makes whole numbers: EXTRACT of a date's field; a column of
++/// the projection `proj` below, its expression).
++fn key_equal_apart(e: &crate::sql::expr::Expr, proj: Option<&[crate::sql::expr::Expr]>) -> bool {
++    let mut x = e;
++    while let crate::sql::expr::Expr::Relabel(y, _) = x {
++        x = y;
++    }
++    if let (crate::sql::expr::Expr::Col(i, _), Some(p)) = (x, proj)
++        && let Some(y) = p.get(*i)
++    {
++        return key_equal_apart(y, None);
++    }
++    if let crate::sql::expr::Expr::Call(def, args, _) = x
++        && let [_, arg] = &args[..]
++        && crate::sql::func::datetime::extracts_whole(def.imp, &arg.ty())
++    {
++        return false;
++    }
++    equal_apart(&e.ty())
++}
++
+ fn equal_apart(t: &crate::types::DataType) -> bool {
+     use crate::types::DataType as D;
+     match t {
+diff --git a/crates/pg-engine/src/exec/lookup.rs b/crates/pg-engine/src/exec/lookup.rs
+index 18013088..3d86fc32 100644
+--- a/crates/pg-engine/src/exec/lookup.rs
++++ b/crates/pg-engine/src/exec/lookup.rs
+@@ -207,6 +207,7 @@ impl Lookup {
+                 need_raw: None,
+                 topk: None,
+                 toast: None,
++                vplan: Default::default(),
+             },
+             filter,
+             cond: cond_k,
+diff --git a/crates/pg-engine/src/exec/parscan.rs b/crates/pg-engine/src/exec/parscan.rs
+index 336895e3..f054f0b4 100644
+--- a/crates/pg-engine/src/exec/parscan.rs
++++ b/crates/pg-engine/src/exec/parscan.rs
+@@ -123,6 +123,9 @@ pub struct Decode {
+     /// The rows come as stored (`TxnScan::raw`): the out-of-line values of the columns
+     /// read come from here, read by each worker for the rows it keeps (`LazyBuf::reader`).
+     pub toast: Option<Arc<crate::txn::toast::Source>>,
++    /// The batch kernels (`Pre`), compiled by the first chunk for all of them (None
++    /// inside: none fit).
++    pub vplan: std::sync::OnceLock<Option<Arc<super::vector::AggPlan>>>,
+ }
+ 
+ /// A chunk's bounded heap of a bounded sort's keys (`Decode::topk`). A row its heap
+@@ -222,6 +225,19 @@ impl From<Chunk> for Source {
+     }
+ }
+ 
++/// Rows in a list (a modelled heap's rows put in heap order, `ScanNode`) a fill at a time:
++/// the batch kernels take them as they take a table's.
++pub struct ListFill(pub std::vec::IntoIter<(Vec<u8>, bytes::Bytes)>);
++
++impl FillRows for ListFill {
++    fn fill(&mut self, b: &mut RowBatch, max: usize) -> Result<()> {
++        for (k, v) in self.0.by_ref().take(max) {
++            b.push(&k, v);
++        }
++        Ok(())
++    }
++}
++
+ /// A table's rows in [range) through `FillRows`, as a bulk read when `bulk`.
+ pub fn fill_source<F: FillRows + 'static>(f: F, bulk: bool) -> Source {
+     Source::Fill(if bulk { Box::new(crate::storage::batch::BulkFill(f)) } else { Box::new(f) })
+@@ -235,7 +251,7 @@ const FILL: usize = 256;
+ /// (`pipe::Probe::int_key_col`). A row they can't decide (`odd`: a value its column's
+ /// vector can't hold, one out of line; or a filter outcome `Out`) goes through the row path.
+ struct Pre<'a> {
+-    plan: super::vector::AggPlan,
++    plan: Arc<super::vector::AggPlan>,
+     probe: Option<&'a super::pipe::Probe>,
+     types: &'a [crate::types::DataType],
+     missing: Vec<Value>,
+@@ -243,6 +259,9 @@ struct Pre<'a> {
+     odd: Vec<bool>,
+     sel: Vec<u32>,
+     tri: Vec<super::vector::Tri>,
++    /// Per aggregate argument (`AggPlan::args`), each row's exact number (by row; the
++    /// rows the filter passes), computed a column at a time.
++    nums: Vec<Vec<super::vector::Num>>,
+     /// Rows decoded, and of them the ones the batch did (dropped or aggregated): the rest
+     /// are decoded again by the row path, so a chunk where the batch does too few stops
+     /// using it (`worth`).
+@@ -266,26 +285,14 @@ impl<'a> Pre<'a> {
+     /// a scan whose rows are made (None: when a filter or a probe can drop rows). None:
+     /// nothing a batch kernel does.
+     fn new(d: &'a Decode, spec: Option<&super::partial::Spec>) -> Option<Pre<'a>> {
+-        if !vectors()
+-            || d.ios.is_some()
+-            || !d.raw.is_empty()
+-            || d.topk.is_some()
+-            || (spec.is_some() && !d.extra.is_empty())
+-            || (d.filtered && d.filter.is_none())
+-        {
++        if !vectors() {
+             return None;
+         }
+         let probe = match d.stages.first().map(|s| &**s) {
+             Some(super::pipe::Stage::Hash(p)) => p.int_key_col().map(|c| (c, p)),
+             _ => None,
+         };
+-        if !d.stages.is_empty() && probe.is_none() && (spec.is_some() || d.filter.is_none()) {
+-            return None;
+-        }
+-        if spec.is_none() && probe.is_none() && d.filter.is_none() {
+-            return None;
+-        }
+-        let plan = super::vector::AggPlan::compile(&d.types, d.filter.as_ref(), d.filtered, spec, probe.map(|p| p.0))?;
++        let plan = d.vplan.get_or_init(|| Pre::compile(d, spec, probe.map(|p| p.0)).map(Arc::new)).clone()?;
+         Some(Pre {
+             plan,
+             probe: probe.map(|p| p.1),
+@@ -295,12 +302,32 @@ impl<'a> Pre<'a> {
+             odd: Vec::new(),
+             sel: Vec::new(),
+             tri: Vec::new(),
++            nums: Vec::new(),
+             seen: 0,
+             done: 0,
+             off: false,
+         })
+     }
+ 
++    /// `new`'s kernels (the same for every chunk of the scan: `Decode::vplan` keeps them).
++    fn compile(d: &Decode, spec: Option<&super::partial::Spec>, probe: Option<usize>) -> Option<super::vector::AggPlan> {
++        if d.ios.is_some()
++            || !d.raw.is_empty()
++            || d.topk.is_some()
++            || (spec.is_some() && !d.extra.is_empty())
++            || (d.filtered && d.filter.is_none())
++        {
++            return None;
++        }
++        if !d.stages.is_empty() && probe.is_none() && (spec.is_some() || d.filter.is_none()) {
++            return None;
++        }
++        if spec.is_none() && probe.is_none() && d.filter.is_none() {
++            return None;
++        }
++        super::vector::AggPlan::compile(&d.types, d.filter.as_ref(), d.filtered, spec, probe)
++    }
++
+     /// Rows `rows` of `b` decoded, `odd` and `tri` (by row of the run) filled.
+     fn decode(&mut self, b: &RowBatch, rows: std::ops::Range<usize>) {
+         use super::vector::Tri;
+@@ -327,6 +354,18 @@ impl<'a> Pre<'a> {
+         if let Some(f) = &self.plan.filter {
+             f.eval(&self.cols, &self.sel, &mut self.tri);
+         }
++        // (The aggregates' arguments over the rows the filter passes.)
++        if self.plan.args.iter().any(|a| matches!(a, super::vector::AggArg::Num(_))) {
++            let live: Vec<u32> = self.sel.iter().copied().filter(|r| self.tri[*r as usize] == Tri::T).collect();
++            self.nums.resize_with(self.plan.args.len(), Vec::new);
++            for (a, v) in self.plan.args.iter().zip(&mut self.nums) {
++                if let super::vector::AggArg::Num(k) = a {
++                    v.clear();
++                    v.resize(n, None);
++                    k.eval(&self.cols, &live, v);
++                }
++            }
++        }
+     }
+ 
+     /// What decoded row `r` comes to: `DROP` when it gives nothing (the filter rejects it,
+@@ -834,12 +873,15 @@ type Item = (Row, u8, bool, u32);
+ pub enum Piece {
+     Row(Row, u8, bool, u32),
+     Part(super::partial::Part),
++    /// Rows read in chunk order, independently of carried aggregate states.
++    Read(u64),
+ }
+ 
+ enum Msg {
+     Rows(Vec<Item>),
+     Seg(super::partial::Seg),
+     Err(Error),
++    Read(u64),
+     /// The chunk's end, after this many dropped rows.
+     Done(u32, u32),
+ }
+@@ -868,6 +910,9 @@ pub struct ParScan {
+     /// A scan whose chunks run on the executor's thread, one when its rows are asked for
+     /// (`start_inline`): no workers.
+     inline: Option<Box<Inline>>,
++    /// The parts workers carried across their chunks (`Spec::free`), sent as they run out
++    /// of chunks: read once every chunk is done.
++    late: Option<Receiver<Msg>>,
+ }
+ 
+ /// What an inline scan's chunks run with (a worker's own state, `work`).
+@@ -911,24 +956,59 @@ pub fn inline_started() -> u64 {
+     INLINE.load(std::sync::atomic::Ordering::Relaxed)
+ }
+ 
+-fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::atomic::AtomicBool>) {
++fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::atomic::AtomicBool>, late: Option<Sender<Msg>>) {
+     let stopped = || stop.load(std::sync::atomic::Ordering::Relaxed);
+     // (One for the worker's chunks: its lookups' cache lasts.)
+     let mut scratch = super::pipe::Scratch::default();
+     let mut lazy = LazyBuf::new(&d);
+     let mut batch = RowBatch::default();
++    // An aggregation the rows' order doesn't matter to (`Spec::free`): the worker's part
++    // takes the rows of all its chunks, sent with a chunk once it holds `CARRY_GROUPS`
++    // groups, and on the scan's `late` channel once no chunk is left.
++    let mut carry = late.as_ref().and(d.spec.as_deref()).map(super::partial::Partials::new);
+     loop {
+         let job = match jobs.lock() {
+             Ok(rx) => rx.recv(),
+             Err(_) => return,
+         };
+-        let Ok(job) = job else { return };
+-        if stopped() || !run_job(job, &d, &stopped, &mut scratch, &mut lazy, &mut batch) {
++        let Ok(job) = job else {
++            if let (Some(pa), Some(late)) = (&mut carry, &late)
++                && let Some(p) = pa.take()
++            {
++                let _ = late.send(Msg::Seg(super::partial::Seg::Part(p)));
++            }
++            return;
++        };
++        if stopped() {
+             return;
+         }
++        match (&mut carry, &d.spec) {
++            (Some(pa), Some(spec)) => {
++                let Job { mut scan, out } = job;
++                batch.clear();
++                let mut rd = Reader::new(&mut scan, &mut batch, usize::MAX);
++                if !work_partial(&mut rd, &out, &d, spec, &stopped, &mut scratch, &mut lazy, Some(pa))
++                    || out.send(Msg::Done(0, 0)).is_err()
++                {
++                    return;
++                }
++                CARRIED_CHUNKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++            }
++            _ => {
++                if !run_job(job, &d, &stopped, &mut scratch, &mut lazy, &mut batch) {
++                    return;
++                }
++            }
++        }
+     }
+ }
+ 
++/// The groups a worker's carried part (`Spec::free`) holds before it is sent.
++const CARRY_GROUPS: usize = 1 << 16;
++
++/// Chunks whose rows went to a worker's carried part (`Spec::free`; tests: which path ran).
++pub static CARRIED_CHUNKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++
+ /// One chunk of a scan: its rows (or an aggregating scan's parts) sent to the job's `out`,
+ /// on a worker or (`ParScan::inline`) the executor's thread. False: nothing reads them
+ /// (the scan was dropped).
+@@ -955,7 +1035,7 @@ fn run_rows(
+ ) -> bool {
+     {
+         if let Some(spec) = &d.spec {
+-            return work_partial(scan, &out, d, spec, stopped, scratch, lazy);
++            return work_partial(scan, &out, d, spec, stopped, scratch, lazy, None);
+         }
+         let mut batch = Vec::with_capacity(BATCH);
+         // (Rows read since the last item sent.)
+@@ -1162,26 +1242,46 @@ fn filter_pass<R: super::kernel::Cols + ?Sized>(d: &Decode, row: &R) -> Option<b
+ const PART_ROWS: usize = 1 << 16;
+ 
+ /// A chunk aggregated (`partial`): false when nothing receives any more.
+-fn work_partial(
++/// `carry`: the worker's part, kept across its chunks (`work`): sent only once it is large,
++/// and the chunk's end is the caller's to send.
++#[allow(clippy::too_many_arguments)]
++fn work_partial<'s>(
+     scan: &mut Reader<'_>,
+     out: &Sender<Msg>,
+     d: &Decode,
+-    spec: &super::partial::Spec,
++    spec: &'s super::partial::Spec,
+     stopped: &dyn Fn() -> bool,
+     scratch: &mut super::pipe::Scratch,
+     lazy: &mut LazyBuf,
++    carry: Option<&mut super::partial::Partials<'s>>,
+ ) -> bool {
+     use super::partial::{Partials, Seg};
+-    let mut pa = Partials::new(spec);
++    let carried = carry.is_some();
++    let mut own = None;
++    let pa = match carry {
++        Some(c) => c,
++        None => own.insert(Partials::new(spec)),
++    };
+     // (Rows read and not counted in a part yet.)
+     let mut read = 0u64;
+     let send_part = |pa: &mut Partials, read: &mut u64| {
+-        pa.read(std::mem::take(read));
++        let read = std::mem::take(read);
++        if carried {
++            // Aggregate states may span chunks; their statistics must still reach the
++            // coordinator in chunk order, before a later chunk's error stops the scan.
++            if read != 0 && out.send(Msg::Read(read)).is_err() {
++                return false;
++            }
++        } else {
++            pa.read(read);
++        }
+         match pa.take() {
+             Some(p) => out.send(Msg::Seg(Seg::Part(p))).is_ok(),
+             None => true,
+         }
+     };
++    // (A part is sent past `PART_ROWS` rows; a carried one past `CARRY_GROUPS` groups.)
++    let full = |pa: &Partials| if carried { pa.groups() >= CARRY_GROUPS } else { pa.rows() >= PART_ROWS };
+     let top = d.stages.len() as u8;
+     // (Rows a part can't take: sent in their place, the part so far first.)
+     let mut serial: Vec<(Row, u8, bool)> = Vec::new();
+@@ -1201,7 +1301,7 @@ fn work_partial(
+         if let Some(pre) = &mut pre {
+             let run = match scan.next_run() {
+                 Some(Ok(run)) => run,
+-                Some(Err(e)) => return send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok(),
++                Some(Err(e)) => return send_part(pa, &mut read) && out.send(Msg::Err(e)).is_ok(),
+                 None => break,
+             };
+             n += run.len();
+@@ -1221,20 +1321,20 @@ fn work_partial(
+                 let aggregated = !pre.odd[r]
+                     && pre.tri[r] == Tri::T
+                     && pre.plan.probe.is_none()
+-                    && pa.batch_row(&pre.plan, &pre.cols, r);
++                    && pa.batch_row(&pre.plan, &pre.cols, &pre.nums, r);
+                 if aggregated {
+                     taken += 1;
+                 } else {
+                     let (k, v) = scan.batch.get(i);
+-                    if let Err(e) = partial_row(d, &mut pa, &mut serial, scratch, lazy, top, k, v) {
+-                        return send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok();
++                    if let Err(e) = partial_row(d, pa, &mut serial, scratch, lazy, top, k, v) {
++                        return send_part(pa, &mut read) && out.send(Msg::Err(e)).is_ok();
+                     }
+                 }
+                 if !serial.is_empty() {
+-                    if !send_part(&mut pa, &mut read) || out.send(Msg::Seg(Seg::Rows(std::mem::take(&mut serial)))).is_err() {
++                    if !send_part(pa, &mut read) || out.send(Msg::Seg(Seg::Rows(std::mem::take(&mut serial)))).is_err() {
+                         return false;
+                     }
+-                } else if pa.rows() >= PART_ROWS && !send_part(&mut pa, &mut read) {
++                } else if full(pa) && !send_part(pa, &mut read) {
+                     return false;
+                 }
+             }
+@@ -1251,21 +1351,24 @@ fn work_partial(
+         read += 1;
+         let (k, v) = match r {
+             Ok(e) => e,
+-            Err(e) => return send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok(),
++            Err(e) => return send_part(pa, &mut read) && out.send(Msg::Err(e)).is_ok(),
+         };
+-        if let Err(e) = partial_row(d, &mut pa, &mut serial, scratch, lazy, top, k, v) {
+-            return send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok();
++        if let Err(e) = partial_row(d, pa, &mut serial, scratch, lazy, top, k, v) {
++            return send_part(pa, &mut read) && out.send(Msg::Err(e)).is_ok();
+         }
+         if !serial.is_empty() {
+-            if !send_part(&mut pa, &mut read) || out.send(Msg::Seg(Seg::Rows(std::mem::take(&mut serial)))).is_err() {
++            if !send_part(pa, &mut read) || out.send(Msg::Seg(Seg::Rows(std::mem::take(&mut serial)))).is_err() {
+                 return false;
+             }
+-        } else if pa.rows() >= PART_ROWS && !send_part(&mut pa, &mut read) {
++        } else if full(pa) && !send_part(pa, &mut read) {
+             return false;
+         }
+     }
+     scratch.flush(&d.stages);
+-    send_part(&mut pa, &mut read) && out.send(Msg::Done(0, 0)).is_ok()
++    if carried {
++        return read == 0 || out.send(Msg::Read(read)).is_ok();
++    }
++    send_part(pa, &mut read) && out.send(Msg::Done(0, 0)).is_ok()
+ }
+ 
+ /// Whether aggregating scans read fills as column batches (`vector`; tests compare both).
+@@ -1383,15 +1486,23 @@ impl ParScan {
+         let rx = Arc::new(Mutex::new(rx));
+         let d = Arc::new(d);
+         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
++        let (late_tx, late) = match d.spec.as_ref().is_some_and(|s| s.free) {
++            true => {
++                let (tx, rx) = channel();
++                (Some(tx), Some(rx))
++            }
++            false => (None, None),
++        };
+         let workers = (0..workers)
+             .filter_map(|i| {
+-                let (rx, d, stop) = (rx.clone(), d.clone(), stop.clone());
++                let (rx, d, stop, late) = (rx.clone(), d.clone(), stop.clone(), late_tx.clone());
+                 std::thread::Builder::new()
+                     .name(format!("roll-scan-{i}"))
+-                    .spawn(move || work(rx, d, stop))
++                    .spawn(move || work(rx, d, stop, late))
+                     .ok()
+             })
+             .collect::<Vec<_>>();
++        drop(late_tx);
+         // (Threads that didn't start go back to the pool.)
+         ACTIVE.fetch_sub(reserved - workers.len(), std::sync::atomic::Ordering::AcqRel);
+         if workers.is_empty() {
+@@ -1412,6 +1523,7 @@ impl ParScan {
+             skipped: 0,
+             stop,
+             inline: None,
++            late,
+         };
+         let ahead = workers.len() * AHEAD + 1;
+         p.workers = workers;
+@@ -1438,6 +1550,7 @@ impl ParScan {
+             skipped: 0,
+             stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+             inline: Some(Box::new(Inline { cur: None, d: Arc::new(d), scratch: Default::default(), lazy, batch: RowBatch::default() })),
++            late: None,
+         }
+     }
+ 
+@@ -1458,6 +1571,11 @@ impl ParScan {
+         if let Some(tx) = &self.jobs {
+             let _ = tx.send(Job { scan, out });
+         }
++        // (The last chunk handed out: workers end once the chunks are taken, sending the
++        // parts they carried.)
++        if self.pending.is_empty() && self.late.is_some() {
++            self.jobs = None;
++        }
+     }
+ 
+     /// The next row or part (None: the scan's end).
+@@ -1491,15 +1609,25 @@ impl ParScan {
+                 }
+             }
+             let Some(rx) = self.results.front() else {
++                // (Every chunk done: the parts the workers carried, until all have ended.)
++                if let Some(late) = &self.late {
++                    match late.recv() {
++                        Ok(Msg::Seg(Seg::Part(p))) => return Ok(Some(Piece::Part(p))),
++                        Ok(_) => return Err(internal("a parallel scan's late message")),
++                        Err(_) => self.late = None,
++                    }
++                }
+                 return Ok(None);
+             };
+             match rx.recv() {
++                Ok(Msg::Read(read)) => return Ok(Some(Piece::Read(read))),
+                 Ok(Msg::Rows(rows)) => self.batch = rows.into_iter(),
+                 Ok(Msg::Seg(Seg::Part(p))) => return Ok(Some(Piece::Part(p))),
+                 Ok(Msg::Seg(Seg::Rows(rows))) => self.seg = rows.into_iter(),
+                 Ok(Msg::Err(e)) => {
+                     self.results.clear();
+                     self.pending.clear();
++                    self.late = None;
+                     if let Some(i) = &mut self.inline {
+                         i.cur = None;
+                     }
+diff --git a/crates/pg-engine/src/exec/partial.rs b/crates/pg-engine/src/exec/partial.rs
+index 9a94fb51..304277c6 100644
+--- a/crates/pg-engine/src/exec/partial.rs
++++ b/crates/pg-engine/src/exec/partial.rs
+@@ -217,6 +217,10 @@ pub struct Spec {
+     pub aggs: Vec<(Option<K>, bool, Partial)>,
+     /// Whether the executor's thread reads `Part::seq` (the hash table's order model).
+     pub seq: bool,
++    /// The rows' order changes nothing (groups that come out sorted on all their keys, keys
++    /// equal only when alike, exact aggregates whose results don't depend on their rows'
++    /// order): a worker's part may take the rows of several of its chunks.
++    pub free: bool,
+ }
+ 
+ /// A bpchar key's value as its groups compare it.
+@@ -557,18 +561,29 @@ impl<'a> Partials<'a> {
+         self.part.rows
+     }
+ 
++    /// The groups in the part so far.
++    pub fn groups(&self) -> usize {
++        self.part.groups.len()
++    }
++
+     /// Row `r` of the column batch `b` (one that passed the filter, not odd) aggregated by
+     /// `plan` (`vector::AggPlan`, compiled from this spec), as `row` would aggregate it
+     /// (true), or nothing changed (false: the caller hands the row to `row`, in its place).
+-    pub fn batch_row(&mut self, plan: &super::vector::AggPlan, b: &crate::storage::cols::ColBatch, r: usize) -> bool {
++    pub fn batch_row(
++        &mut self,
++        plan: &super::vector::AggPlan,
++        b: &crate::storage::cols::ColBatch,
++        nums: &[Vec<super::vector::Num>],
++        r: usize,
++    ) -> bool {
+         use super::vector::AggArg;
+         self.vals.clear();
+-        for (arg, (_, skip, _)) in plan.args.iter().zip(&self.spec.aggs) {
++        for (i, (arg, (_, skip, _))) in plan.args.iter().zip(&self.spec.aggs).enumerate() {
+             let v = match arg {
+                 // (count(*)'s: a non-NULL stand-in.)
+                 AggArg::Star => Some((1, 0)),
+                 AggArg::Count(c) => (!b.cols[*c].as_ref().is_none_or(|c| c.nulls[r])).then_some((1, 0)),
+-                AggArg::Num(n) => match n.at(b, r) {
++                AggArg::Num(_) => match nums[i][r] {
+                     Some(v) => v,
+                     None => return false,
+                 },
+diff --git a/crates/pg-engine/src/exec/scan.rs b/crates/pg-engine/src/exec/scan.rs
+index 40bc0e53..41e2a528 100644
+--- a/crates/pg-engine/src/exec/scan.rs
++++ b/crates/pg-engine/src/exec/scan.rs
+@@ -3368,6 +3368,7 @@ impl ScanNode {
+                     raw: Vec::new(),
+                     topk: None,
+                     toast: None,
++                    vplan: Default::default(),
+                 };
+                 let buf = super::parscan::LazyBuf::new(&d);
+                 let cmps = d.filter.as_ref().and_then(super::kernel::StoredCmps::of);
+@@ -3900,14 +3901,14 @@ impl ScanNode {
+             drop(txn);
+             heap_order(&p.table, &mut rows, false, ctx);
+             let per = rows.len().div_ceil(ParScan::chunks(workers)).max(1);
+-            let mut it = rows.into_iter().map(Ok);
++            let mut it = rows.into_iter();
+             let mut out = Vec::new();
+             loop {
+                 let c: Vec<_> = it.by_ref().take(per).collect();
+                 if c.is_empty() {
+                     break;
+                 }
+-                out.push(super::parscan::Source::Rows(Box::new(c.into_iter())));
++                out.push(super::parscan::Source::Fill(Box::new(super::parscan::ListFill(c.into_iter()))));
+             }
+             out
+         } else {
+@@ -3967,6 +3968,7 @@ impl ScanNode {
+             raw: computed.raw,
+             topk: computed.topk,
+             toast,
++            vplan: Default::default(),
+         };
+         if inline {
+             return Ok(Some(ParScan::start_inline(scans, d)));
+@@ -4072,6 +4074,7 @@ impl ScanNode {
+             need_raw: None,
+             topk: None,
+             toast: None,
++            vplan: Default::default(),
+         };
+         Ok(ParScan::start(scans, workers, pool, d))
+     }
+@@ -4143,6 +4146,7 @@ impl ScanNode {
+             need_raw: None,
+             topk: None,
+             toast: None,
++            vplan: Default::default(),
+         };
+         let par = ParScan::start(scans, workers, pool, d);
+         // (No worker started: the keys are read here after all.)
+@@ -4181,6 +4185,7 @@ impl ScanNode {
+                 return Ok(None);
+             };
+             match piece {
++                Piece::Read(read) => self.count_read(read as i64, ctx),
+                 Piece::Part(p) => {
+                     self.count_read(p.read as i64, ctx);
+                     return Ok(Some(super::pipe::Item::Part(p)));
+diff --git a/crates/pg-engine/src/exec/vector.rs b/crates/pg-engine/src/exec/vector.rs
+index 65c9009e..f46cd16e 100644
+--- a/crates/pg-engine/src/exec/vector.rs
++++ b/crates/pg-engine/src/exec/vector.rs
+@@ -31,6 +31,16 @@ pub enum VN {
+     Op(NumOp, Box<[VN; 2]>),
+ }
+ 
++/// A row's exact number as `VN::eval` gives it (None: `Out`; Some(None): NULL).
++pub type Num = Option<Option<(i128, u32)>>;
++
++/// An operand of a date / timestamp comparison (`VB::Instant`): a date column or a
++/// constant, as a number (None: NULL).
++pub enum Inst {
++    Date(usize),
++    Const(Option<i64>),
++}
++
+ /// An operand of a comparison: a column or a constant.
+ pub enum Leaf {
+     Col(usize, DataType),
+@@ -58,6 +68,9 @@ pub enum VB {
+     Like { col: usize, pat: Box<crate::sql::func::string::LikePattern>, neg: bool },
+     /// `col = ANY (array)` / `col <> ALL (array)` of exact numbers (None: a NULL item).
+     NumIn { col: usize, items: Vec<Option<(i128, u32)>>, neg: bool },
++    /// A comparison of dates, or of dates and timestamps (`ts`: as `ops::p_instant`s, a date
++    /// its timestamp; else a date's day number), strict: as integers.
++    Instant { test: fn(Ordering) -> bool, args: Box<[Inst; 2]>, ts: bool },
+     /// Any other pure binary call returning bool over fixed-width columns and constants:
+     /// each column's value made (no allocation) and `f` called, as `K::Call` calls it.
+     Call { f: PureFn, args: Box<[Leaf; 2]>, strict: bool },
+@@ -74,19 +87,68 @@ impl VN {
+         })
+     }
+ 
+-    /// Row `r`'s number (Some(None): NULL; None: not one, or past an i128: `Out`).
+-    #[inline]
+-    pub fn at(&self, b: &ColBatch, r: usize) -> Option<Option<(i128, u32)>> {
++    /// Each row of `sel`'s number into `out` (by row; None: not one, or past an i128:
++    /// `Out`), a column at a time.
++    pub fn eval(&self, b: &ColBatch, sel: &[u32], out: &mut [Num]) {
+         match self {
+-            VN::Col(i) => num_at(col_at(b, *i)?, r),
+-            VN::Const(c) => Some(*c),
+-            VN::Op(op, args) => {
+-                // (Both operands before a NULL one: `K::num`'s order.)
+-                let (a, b) = (args[0].at(b, r)?, args[1].at(b, r)?);
+-                let (Some((x, sx)), Some((y, sy))) = (a, b) else {
+-                    return Some(None);
++            VN::Col(i) => {
++                let Some(c) = col_at(b, *i) else {
++                    return sel.iter().for_each(|&r| out[r as usize] = None);
+                 };
+-                Some(Some(num_op(*op, x, sx, y, sy)?))
++                macro_rules! each {
++                    ($v:expr, $f:expr) => {
++                        for &r in sel {
++                            let r = r as usize;
++                            out[r] = Some(if c.nulls[r] { None } else { Some($f($v[r])) });
++                        }
++                    };
++                }
++                match &c.data {
++                    ColData::I32(v) => each!(v, |x: i32| (x as i128, 0)),
++                    ColData::I64(v) => each!(v, |x: i64| (x as i128, 0)),
++                    ColData::Num(v) => each!(v, |x: (i128, u32)| x),
++                    _ => sel.iter().for_each(|&r| out[r as usize] = None),
++                }
++            }
++            VN::Const(k) => sel.iter().for_each(|&r| out[r as usize] = Some(*k)),
++            VN::Op(op, args) => {
++                args[0].eval(b, sel, out);
++                let mut y = vec![None; out.len()];
++                args[1].eval(b, sel, &mut y);
++                for &r in sel {
++                    let r = r as usize;
++                    // (Both operands before a NULL one: `K::num`'s order.)
++                    out[r] = match (out[r], y[r]) {
++                        (Some(Some((x, sx))), Some(Some((y, sy)))) => num_op(*op, x, sx, y, sy).map(Some),
++                        (Some(_), Some(_)) => Some(None),
++                        _ => None,
++                    };
++                }
++            }
++        }
++    }
++}
++
++impl Inst {
++    fn compile(k: &K, types: &[DataType], ts: bool) -> Option<Inst> {
++        Some(match k {
++            K::Col(i) if matches!(types.get(*i), Some(DataType::Date)) => Inst::Date(*i),
++            K::Const(Value::Null) => Inst::Const(None),
++            K::Const(Value::Date(d)) => Inst::Const(Some(if ts { crate::sql::func::ops::date_instant(*d) } else { *d as i64 })),
++            K::Const(Value::Timestamp(t)) if ts => Inst::Const(Some(*t)),
++            _ => return None,
++        })
++    }
++
++    /// Row `r`'s number (Some(None): NULL; None: not a date column).
++    #[inline]
++    fn at(&self, b: &ColBatch, r: usize, ts: bool) -> Option<Option<i64>> {
++        match self {
++            Inst::Const(k) => Some(*k),
++            Inst::Date(i) => {
++                let c = col_at(b, *i)?;
++                let ColData::Date(v) = &c.data else { return None };
++                Some((!c.nulls[r]).then(|| if ts { crate::sql::func::ops::date_instant(v[r]) } else { v[r] as i64 }))
+             }
+         }
+     }
+@@ -254,6 +316,15 @@ impl VB {
+                     let k = text_const(k, bp)??;
+                     return Some(VB::Str { test, col, k, bp, col_first });
+                 }
++                let inst = crate::sql::func::ops::dt_cmp(*f)
++                    .map(|t| (t, true))
++                    .or_else(|| str_cmp(*f).filter(|(_, bp)| !bp).map(|(t, _)| (t, false)));
++                if let (Some((test, ts)), true) = (inst, *strict)
++                    && let (Some(x), Some(y)) = (Inst::compile(&args[0], types, ts), Inst::compile(&args[1], types, ts))
++                    && (matches!(x, Inst::Date(_)) || matches!(y, Inst::Date(_)))
++                {
++                    return Some(VB::Instant { test, args: Box::new([x, y]), ts });
++                }
+                 VB::Call { f: *f, args: Box::new([Leaf::compile(&args[0], types)?, Leaf::compile(&args[1], types)?]), strict: *strict }
+             }
+             K::InList(x, list, neg) => {
+@@ -375,9 +446,13 @@ impl VB {
+                 }
+             }
+             VB::NumCmp { test, args } => {
++                let mut x = vec![None; b.len];
++                let mut y = vec![None; b.len];
++                args[0].eval(b, sel, &mut x);
++                args[1].eval(b, sel, &mut y);
+                 for &r in sel {
+                     let r = r as usize;
+-                    out[r] = match (args[0].at(b, r), args[1].at(b, r)) {
++                    out[r] = match (x[r], y[r]) {
+                         (Some(Some((x, sx))), Some(Some((y, sy)))) => match scaled_cmp(x, sx, y, sy) {
+                             Some(o) if test(o) => Tri::T,
+                             Some(_) => Tri::F,
+@@ -461,6 +536,17 @@ impl VB {
+                     };
+                 }
+             }
++            VB::Instant { test, args, ts } => {
++                for &r in sel {
++                    let r = r as usize;
++                    out[r] = match (args[0].at(b, r, *ts), args[1].at(b, r, *ts)) {
++                        (Some(Some(x)), Some(Some(y))) if test(x.cmp(&y)) => Tri::T,
++                        (Some(Some(_)), Some(Some(_))) => Tri::F,
++                        (Some(_), Some(_)) => Tri::N,
++                        _ => Tri::Out,
++                    };
++                }
++            }
+             VB::Call { f, args, strict } => {
+                 for &r in sel {
+                     let r = r as usize;
+@@ -490,6 +576,10 @@ impl VB {
+             VB::Not(a) => a.cols(out),
+             VB::IsNull(c, _) | VB::Col(c) | VB::Str { col: c, .. } | VB::StrIn { col: c, .. } | VB::NumIn { col: c, .. } | VB::Like { col: c, .. } => out.push(*c),
+             VB::NumCmp { args, .. } => args.iter().for_each(|a| a.cols(out)),
++            VB::Instant { args, .. } => out.extend(args.iter().filter_map(|a| match a {
++                Inst::Date(c) => Some(*c),
++                Inst::Const(_) => None,
++            })),
+             VB::Call { args, .. } => out.extend(args.iter().filter_map(|l| match l {
+                 Leaf::Col(c, _) => Some(*c),
+                 Leaf::Const(_) => None,
+diff --git a/crates/pg-engine/src/sql/explain.rs b/crates/pg-engine/src/sql/explain.rs
+index a4091e95..0fca262b 100644
+--- a/crates/pg-engine/src/sql/explain.rs
++++ b/crates/pg-engine/src/sql/explain.rs
+@@ -18322,8 +18322,16 @@ impl Render<'_> {
+         for (i, c) in n.initplans.iter().chain(&n.children).chain(&n.subplans).enumerate() {
+             let inner = n.inner_cached && i == n.initplans.len() + 1;
+             if inner {
+-                let outer_rows = n.children.first().and_then(|o| self.stats(o.key)).map_or(0, |s| s.rows);
+-                self.rescans = saved * outer_rows;
++                // (Postgres scans it once per outer row; the executor read it once per run of
++                // the join, which runs many times inside a SubPlan: the outer rows of a run.)
++                let raw = |k: Option<usize>| k.and_then(|k| self.instr?.get(k));
++                let outer_rows = raw(n.children.first().and_then(|o| o.key)).map_or(0, |s| s.rows);
++                let reads = raw(c.key).map_or(1, |s| s.loops.max(1));
++                let per = match outer_rows {
++                    0 => 0,
++                    r => ((r + reads / 2) / reads).max(1),
++                };
++                self.rescans = saved * per;
+             }
+             if n.node_type == "Nested Loop" && i == n.initplans.len() + 1 && c.node_type == "Materialize" {
+                 let outer_rows = n.children.first().and_then(|o| self.stats(o.key)).map_or(0, |s| s.rows);
+diff --git a/crates/pg-engine/src/sql/func/datetime.rs b/crates/pg-engine/src/sql/func/datetime.rs
+index 42f9a06d..d15c79ab 100644
+--- a/crates/pg-engine/src/sql/func/datetime.rs
++++ b/crates/pg-engine/src/sql/func/datetime.rs
+@@ -580,6 +580,12 @@ fn p_date_part(x: &Value, y: &Value, _: &crate::types::DataType) -> Result<Value
+     part_value_local(text_arg(x), y, false)
+ }
+ 
++/// Whether `imp` is EXTRACT and its argument a date: every field of a date is a whole number,
++/// so its numerics are equal only when they look alike (scale 0).
++pub fn extracts_whole(imp: super::FnImpl, arg: &crate::types::DataType) -> bool {
++    std::ptr::fn_addr_eq(imp, extract as super::FnImpl) && matches!(arg, crate::types::DataType::Date)
++}
++
+ /// `ops::pure` for EXTRACT and date_part (a timestamptz's fields are left to the session).
+ pub(super) fn pure(imp: super::FnImpl) -> Option<super::ops::PureFn> {
+     let table: [(super::FnImpl, super::ops::PureFn); 2] = [(extract, p_extract), (date_part, p_date_part)];
+diff --git a/crates/pg-engine/src/sql/func/ops.rs b/crates/pg-engine/src/sql/func/ops.rs
+index 3fe954b0..71cc863d 100644
+--- a/crates/pg-engine/src/sql/func/ops.rs
++++ b/crates/pg-engine/src/sql/func/ops.rs
+@@ -1465,6 +1465,25 @@ fn p_dt_ge(x: &Value, y: &Value, _: &T) -> Result<Value> {
+     Ok(Value::Bool(p_dtcmp(x, y)? != Ordering::Less))
+ }
+ 
++/// A date as `p_instant` compares it with a timestamp (no `Value` made: `exec::vector`).
++pub fn date_instant(d: i32) -> i64 {
++    date_to_ts(d).unwrap_or(datetime::TS_POS_INF)
++}
++
++/// The test of the ordering `f` is when it is a date / timestamp comparison (`p_dt_*`:
++/// operands compared as `p_instant`s).
++pub fn dt_cmp(f: PureFn) -> Option<fn(Ordering) -> bool> {
++    let table: [(PureFn, fn(Ordering) -> bool); 6] = [
++        (p_dt_eq, |o| o == Ordering::Equal),
++        (p_dt_ne, |o| o != Ordering::Equal),
++        (p_dt_lt, |o| o == Ordering::Less),
++        (p_dt_le, |o| o != Ordering::Greater),
++        (p_dt_gt, |o| o == Ordering::Greater),
++        (p_dt_ge, |o| o != Ordering::Less),
++    ];
++    table.iter().find(|(p, _)| std::ptr::fn_addr_eq(*p, f)).map(|(_, t)| *t)
++}
++
+ /// numeric's +, − and × (the operators `exec::kernel` computes in an i128).
+ pub fn num_op(imp: super::FnImpl) -> Option<crate::exec::kernel::NumOp> {
+     use crate::exec::kernel::NumOp;
+diff --git a/crates/pg-engine/src/storage/cols.rs b/crates/pg-engine/src/storage/cols.rs
+index cbc05ade..4f4d0752 100644
+--- a/crates/pg-engine/src/storage/cols.rs
++++ b/crates/pg-engine/src/storage/cols.rs
+@@ -164,40 +164,105 @@ fn row_values(bytes: &[u8]) -> Option<&[u8]> {
+     bytes.get(pos..)
+ }
+ 
+-/// The value at `data[pos]` into `col`'s typed slot (false: it doesn't fit: odd).
++/// The value at `data[*pos]` into `col`'s typed slot, `*pos` moved past it (false: it doesn't
++/// fit, `*pos` unchanged: odd). A string's bytes stay where they are: in `buf` (the block
++/// buffer `data` is in, at `base`), else copied into `own` (buffer 0).
+ #[inline]
+-fn push_typed(col: &mut Col, own: &mut Vec<u8>, data: &[u8], pos: usize) -> bool {
+-    let t = data[pos];
+-    let le = |n: usize| data.get(pos + 1..pos + 1 + n);
++fn push_typed(col: &mut Col, own: &mut Vec<u8>, data: &[u8], pos: &mut usize, buf: Option<(u32, usize)>) -> bool {
++    let p = *pos;
++    let t = data[p];
++    macro_rules! fixed {
++        ($v:expr, $ty:ty, $n:expr, $conv:expr) => {{
++            let Some(x) = data.get(p + 1..p + 1 + $n) else { return false };
++            let x = <$ty>::from_le_bytes(x.try_into().unwrap());
++            $v.push($conv(x));
++            *pos = p + 1 + $n;
++        }};
++    }
+     match (&mut col.data, t) {
+-        (ColData::I32(v), tag::INT4) => v.push(i32::from_le_bytes(le(4).and_then(|x| x.try_into().ok()).unwrap_or_default())),
+-        (ColData::I32(v), tag::INT2) => v.push(i16::from_le_bytes(le(2).and_then(|x| x.try_into().ok()).unwrap_or_default()) as i32),
+-        (ColData::Date(v), tag::DATE) => v.push(i32::from_le_bytes(le(4).and_then(|x| x.try_into().ok()).unwrap_or_default())),
+-        (ColData::I64(v), tag::INT8) => v.push(i64::from_le_bytes(le(8).and_then(|x| x.try_into().ok()).unwrap_or_default())),
+-        (ColData::F64(v), tag::FLOAT8) => v.push(f64::from_le_bytes(le(8).and_then(|x| x.try_into().ok()).unwrap_or_default())),
+-        (ColData::F64(v), tag::FLOAT4) => v.push(f32::from_le_bytes(le(4).and_then(|x| x.try_into().ok()).unwrap_or_default()) as f64),
+-        (ColData::Bool(v), tag::TRUE | tag::FALSE) => v.push(t == tag::TRUE),
+-        (ColData::Num(v), tag::NUMERIC) => match super::row::peek_num(data, pos) {
+-            Some(Some(n)) => v.push(n),
+-            _ => return false,
+-        },
++        (ColData::I32(v), tag::INT4) => fixed!(v, i32, 4, |x| x),
++        (ColData::I32(v), tag::INT2) => fixed!(v, i16, 2, |x: i16| x as i32),
++        (ColData::Date(v), tag::DATE) => fixed!(v, i32, 4, |x| x),
++        (ColData::I64(v), tag::INT8) => fixed!(v, i64, 8, |x| x),
++        (ColData::F64(v), tag::FLOAT8) => fixed!(v, f64, 8, |x| x),
++        (ColData::F64(v), tag::FLOAT4) => fixed!(v, f32, 4, |x: f32| x as f64),
++        (ColData::Bool(v), tag::TRUE | tag::FALSE) => {
++            v.push(t == tag::TRUE);
++            *pos = p + 1;
++        }
++        (ColData::Num(v), tag::NUMERIC) => {
++            // (Scale and length in a byte each, the common case; `peek_num` otherwise.)
++            let (sc, n) = match (data.get(p + 1), data.get(p + 2)) {
++                (Some(&sc), Some(&n)) if sc < 0x80 && n < 0x80 => (sc as u32, n as usize),
++                _ => {
++                    let Some(Some(x)) = super::row::peek_num(data, p) else { return false };
++                    let mut q = p + 1;
++                    if get_varint(data, &mut q).is_err() {
++                        return false;
++                    }
++                    let Ok(len) = get_varint(data, &mut q) else { return false };
++                    v.push(x);
++                    *pos = q + len as usize;
++                    return true;
++                }
++            };
++            let Some(x) = data.get(p + 3..p + 3 + n) else { return false };
++            // (Two's complement, little-endian, none longer than an i128's.)
++            if n > 16 {
++                return false;
++            }
++            let fill = if n > 0 && x[n - 1] & 0x80 != 0 { 0xFF } else { 0 };
++            let mut w = [fill; 16];
++            w[..n].copy_from_slice(x);
++            v.push((i128::from_le_bytes(w), sc));
++            *pos = p + 3 + n;
++        }
+         (ColData::Bytes(v), tag::TEXT | tag::BYTEA) => {
+-            let mut p = pos + 1;
+-            let Ok(n) = get_varint(data, &mut p) else { return false };
+-            let Some(x) = data.get(p..p + n as usize) else { return false };
+-            let s = own.len() as u32;
+-            own.extend_from_slice(x);
+-            v.push((0, s, own.len() as u32));
++            let mut q = p + 1;
++            let Ok(n) = get_varint(data, &mut q) else { return false };
++            let e = q + n as usize;
++            if e > data.len() {
++                return false;
++            }
++            match buf {
++                Some((b, base)) => v.push((b, (base + q) as u32, (base + e) as u32)),
++                None => {
++                    let s = own.len() as u32;
++                    own.extend_from_slice(&data[q..e]);
++                    v.push((0, s, own.len() as u32));
++                }
++            }
++            *pos = e;
++        }
++        (ColData::Values(v), _) => {
++            let mut q = p;
++            match super::row::decode_value(data, &mut q) {
++                Ok(x) => v.push(x),
++                Err(_) => return false,
++            }
++            *pos = q;
+         }
+-        (ColData::Values(v), _) => match super::row::decode_value(data, &mut pos.clone()) {
+-            Ok(x) => v.push(x),
+-            Err(_) => return false,
+-        },
+         _ => return false,
+     }
+     true
+ }
+ 
++/// `row::skip_value_fast` with numerics stepped over in place too.
++#[inline]
++fn skip(data: &[u8], pos: &mut usize) -> Result<()> {
++    let p = *pos;
++    if data.get(p) == Some(&tag::NUMERIC)
++        && let (Some(&sc), Some(&n)) = (data.get(p + 1), data.get(p + 2))
++        && sc < 0x80
++        && n < 0x80
++        && p + 3 + (n as usize) <= data.len()
++    {
++        *pos = p + 3 + n as usize;
++        return Ok(());
++    }
++    super::row::skip_value_fast(data, pos)
++}
++
+ /// Rows `rows` of `batch` as columns into `out`: the columns `need` marks, decoded as
+ /// `types` declares them, a column a row was stored without as `missing`'s value.
+ pub fn decode_cols(
+@@ -229,42 +294,56 @@ pub fn decode_cols(
+     out.bufs.clear();
+     out.ext.clear();
+     out.own.clear();
++    // (Buffer 0 is `own`, put in place at the end; the block buffers rows are in follow,
++    // each once while consecutive rows share it.)
++    out.bufs.push(Bytes::new());
+     let upto = need.iter().take(ncols).rposition(|b| *b).map_or(0, |c| c + 1);
+     for (r, i) in rows.enumerate() {
+-        let (_, bytes) = batch.get(i);
++        let (bytes, inbuf) = batch.value_in(i);
+         let ext = matches!(bytes.first(), Some(&(ROW_HEADER_EXT | ROW_HEADER_TID_EXT)));
+         if ext {
+             out.ext.push(r as u32);
+         }
+         let data = row_values(bytes).ok_or_else(|| crate::error::internal("stored row without a header"))?;
++        let buf = inbuf.map(|(b, _)| {
++            let last = out.bufs.last().unwrap();
++            if out.bufs.len() == 1 || last.as_ptr() != b.as_ptr() || last.len() != b.len() {
++                out.bufs.push(b.clone());
++            }
++            ((out.bufs.len() - 1) as u32, data.as_ptr() as usize - b.as_ptr() as usize)
++        });
+         let mut pos = 0;
+         let n = get_varint(data, &mut pos)? as usize;
+         for c in 0..upto {
++            let Some(col) = out.cols[c].as_mut() else {
++                if c < n {
++                    skip(data, &mut pos)?;
++                }
++                continue;
++            };
+             let present = c < n;
+-            let at = pos;
+-            if present && c + 1 < upto {
+-                super::row::skip_value_fast(data, &mut pos)?;
+-            }
+-            let Some(col) = out.cols[c].as_mut() else { continue };
+-            if ext || (present && data.get(at) == Some(&tag::NULL)) {
+-                col.nulls.push(true);
+-                col.data.push_default();
++            if present && !ext && data.get(pos) != Some(&tag::NULL) && push_typed(col, &mut out.own, data, &mut pos, buf) {
++                col.nulls.push(false);
+                 continue;
+             }
+-            if !present || !push_typed(col, &mut out.own, data, at) {
+-                let v = match present {
+-                    true => super::row::decode_value(data, &mut at.clone())?,
+-                    false => missing.get(c).cloned().unwrap_or(Value::Null),
+-                };
+-                col.nulls.push(v.is_null());
++            if ext || (present && data.get(pos) == Some(&tag::NULL)) {
++                if present {
++                    skip(data, &mut pos)?;
++                }
++                col.nulls.push(true);
+                 col.data.push_default();
+-                col.odd.push((r as u32, v));
+                 continue;
+             }
+-            col.nulls.push(false);
++            let v = match present {
++                true => super::row::decode_value(data, &mut pos)?,
++                false => missing.get(c).cloned().unwrap_or(Value::Null),
++            };
++            col.nulls.push(v.is_null());
++            col.data.push_default();
++            col.odd.push((r as u32, v));
+         }
+     }
+-    out.bufs.push(Bytes::from(std::mem::take(&mut out.own)));
++    out.bufs[0] = Bytes::from(std::mem::take(&mut out.own));
+     Ok(())
+ }
+ 
+diff --git a/crates/pg-engine/tests/parallel_scan.rs b/crates/pg-engine/tests/parallel_scan.rs
+index 1ef58beb..f028a38a 100644
+--- a/crates/pg-engine/tests/parallel_scan.rs
++++ b/crates/pg-engine/tests/parallel_scan.rs
+@@ -258,6 +258,13 @@ const JOIN_QUERIES: &[&str] = &[
+     "SELECT g2, sum(CASE WHEN g2 = 1 THEN v ELSE 0 END), sum(v) FROM (SELECT b.g % 5 AS g2, b.x * 2 AS v FROM big b JOIN dim d ON b.g = d.k) t GROUP BY g2",
+     "SELECT n, sum(CASE WHEN n = 'name 1' THEN v END) FROM (SELECT d.name AS n, b.x + 1 AS v FROM big b JOIN dim d ON b.g = d.k) t GROUP BY n",
+     "SELECT count(*), sum(e) FROM (SELECT 100000 / (b.id - 419950) AS e FROM big b JOIN dim d ON b.g = d.k) t",
++    // Groupings sorted on their keys (as TPC-H q13's): a worker's part takes the rows of
++    // all its chunks; an outer join's unmatched rows; NULL keys.
++    "SELECT c, count(*) FROM (SELECT b.id % 150000 AS k, count(d.k) AS c FROM big b LEFT JOIN dim d ON b.g = d.k GROUP BY 1) t GROUP BY c ORDER BY 2 DESC, 1",
++    "SELECT k, n, s FROM (SELECT d.k, count(b.id) AS n, sum(b.g) AS s FROM big b RIGHT JOIN dim d ON b.g = d.k + 30 AND b.id % 7 = 0 GROUP BY d.k) t ORDER BY n DESC, k LIMIT 15",
++    "SELECT n, count(*) FROM (SELECT CASE WHEN b.id % 9 = 0 THEN NULL ELSE b.id % 120000 END AS k, count(*) AS n FROM big b JOIN dim d ON b.g = d.k GROUP BY 1) t GROUP BY n ORDER BY n",
++    // A char(n) key (padded alike: no presort) among many groups.
++    "SELECT c, count(*), sum(n), sum(s) FROM (SELECT b.c, b.id % 60000 AS k, count(*) AS n, sum(b.x) AS s FROM big b JOIN dim d ON b.g = d.k GROUP BY 1, 2) t GROUP BY c ORDER BY c",
+ ];
+ 
+ #[test]
+@@ -296,8 +303,13 @@ fn parallel_joins_match_serial_inner() {
+     let stat_serial = seq_read(&mut s);
+     s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+     let vrows = pg_engine::exec::parscan::VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed);
++    let carried = pg_engine::exec::parscan::CARRIED_CHUNKS.load(std::sync::atomic::Ordering::Relaxed);
+     let parallel = run(&mut s);
+     assert!(pg_engine::exec::parscan::pipelined() > before, "join probes ran in the workers");
++    assert!(
++        pg_engine::exec::parscan::CARRIED_CHUNKS.load(std::sync::atomic::Ordering::Relaxed) > carried,
++        "sorted groupings took several chunks a part"
++    );
+     assert!(
+         pg_engine::exec::parscan::VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed) > vrows,
+         "probes looked up from column batches"
+@@ -892,6 +904,11 @@ const VECTOR_QUERIES: &[&str] = &[
+     "SELECT count(*), sum(id) FROM v WHERE t NOT LIKE '%3' AND t LIKE 'k_'",
+     "SELECT count(*) FROM v WHERE t LIKE 'k1\\'",
+     "SELECT c, count(*) FROM v WHERE c::bpchar IN ('ab', 'zz') GROUP BY c",
++    // Dates against timestamps and dates (NULL and infinite dates among them).
++    "SELECT ok, count(*), sum(a) FROM v WHERE d >= date '2024-02-01' AND d < date '2024-02-01' + interval '1' month GROUP BY ok",
++    "SELECT count(*), sum(id) FROM v WHERE d < timestamp '2024-01-15 12:00' OR d > timestamp 'infinity' OR d >= 'infinity'::date",
++    "SELECT a, count(*) FROM v WHERE d <> date '2024-01-05' AND d <= date '2024-12-31' GROUP BY a",
++    "SELECT count(*) FROM v WHERE d > timestamp '-infinity' AND d IS NOT NULL",
+ ];
+ 
+ #[test]
+@@ -930,6 +947,9 @@ fn vector_batches_body() {
+     .unwrap();
+     s.query("UPDATE v SET t = 'u' || id, x = x + 1 WHERE id % 211 = 0").unwrap();
+     s.query("DELETE FROM v WHERE id % 307 = 0").unwrap();
++    s.query("UPDATE v SET d = NULL WHERE id % 401 = 0").unwrap();
++    s.query("UPDATE v SET d = 'infinity' WHERE id % 503 = 0").unwrap();
++    s.query("UPDATE v SET d = '-infinity' WHERE id % 509 = 0").unwrap();
+     s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+     let run = |s: &mut Session| VECTOR_QUERIES.iter().map(|q| out(s, q)).collect::<Vec<_>>();
+     let rows = without_vectors(|| run(&mut s));
+@@ -945,3 +965,63 @@ fn vector_batches_body() {
+         assert_eq!(a, b, "{q}: serial");
+     }
+ }
++
++const REORDERED_QUERIES: &[&str] = &[
++    "SELECT count(*), sum(x), sum(id) FROM r WHERE d >= date '2024-03-01' AND d < date '2024-03-01' + interval '2' month",
++    "SELECT g, count(*), sum(x) FROM r WHERE x < 40.5 AND t LIKE 'r1%' GROUP BY g ORDER BY g",
++    "SELECT id, g, x FROM r WHERE x > 99.5 AND d <> date '2024-01-09'",
++    "SELECT q.w, count(*), sum(r.x) FROM r JOIN q ON r.g = q.k WHERE r.d < timestamp '2024-04-01 06:00' GROUP BY q.w ORDER BY 1",
++    "SELECT r.id, q.w FROM r JOIN q ON r.g = q.k WHERE r.x = 12.25",
++    // A key of EXTRACT over a date through a projection (whole numbers: no presort).
++    "SELECT m, w, count(*), sum(x) FROM (SELECT extract(month FROM r.d) AS m, q.w, r.x FROM r JOIN q ON r.g = q.k) t GROUP BY m, w ORDER BY m, w",
++    "SELECT extract(day FROM d), count(*), sum(id) FROM r WHERE x > 50 GROUP BY 1 ORDER BY 1",
++];
++
++#[test]
++fn reordered_heaps_through_batches() {
++    on_session_thread(reordered_heaps_through_batches_inner);
++}
++
++/// A modelled heap whose later rows went into earlier pages' free space: read in heap order
++/// by the statement's thread, its rows go to the workers a fill at a time and through the
++/// batch kernels, as a table's stored in order do.
++fn reordered_heaps_through_batches_inner() {
++    use pg_engine::exec::parscan::{VECTOR_ROWS, without_vectors};
++    let dir = tempfile::tempdir().unwrap();
++    let engine = open(dir.path());
++    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
++    s.query(
++        "CREATE TABLE r (id int, g int, x numeric(10, 2), d date, t text, pad text); \
++         INSERT INTO r SELECT i, i % 23, (i % 4000) / 40.0, date '2024-01-01' + i % 150, 'r' || (i % 300), repeat('x', 96) \
++         FROM generate_series(1, 90000) i; \
++         DELETE FROM r WHERE id % 3 = 0",
++    )
++    .unwrap();
++    s.query("VACUUM r").unwrap();
++    s.query(
++        "INSERT INTO r SELECT i, i % 23, CASE WHEN i % 17 = 0 THEN NULL ELSE (i % 4000) / 40.0 END, \
++         CASE WHEN i % 19 = 0 THEN NULL ELSE date '2024-01-01' + i % 150 END, 'r' || (i % 300), repeat('x', 96) \
++         FROM generate_series(90001, 120000) i; \
++         CREATE TABLE q (k int PRIMARY KEY, w int); INSERT INTO q SELECT k, k % 4 FROM generate_series(0, 15) k; \
++         ANALYZE r; ANALYZE q",
++    )
++    .unwrap();
++    // Reordered heaps below 8 MB stay serial; padding makes these workers exercise
++    // ListFill and the column batches while the row count stays within the model cap.
++    assert_eq!(out(&mut s, "SELECT pg_relation_size('r') >= 8 * 1024 * 1024"), ["[Bool(true)]"]);
++    let run = |s: &mut Session| -> Vec<Vec<String>> { REORDERED_QUERIES.iter().map(|q| out(s, q)).collect() };
++    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
++    let serial = run(&mut s);
++    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
++    let started = pg_engine::exec::parscan::started();
++    let before = VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed);
++    let parallel = run(&mut s);
++    assert!(pg_engine::exec::parscan::started() > started, "reordered heap ran in workers");
++    assert!(VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed) > before, "rows went through column batches");
++    let rows = without_vectors(|| run(&mut s));
++    for (((q, a), b), c) in REORDERED_QUERIES.iter().zip(&serial).zip(&parallel).zip(&rows) {
++        assert_eq!(a, b, "{q}");
++        assert_eq!(c, b, "{q}: column batches");
++    }
++    assert!(serial[2].len() > 10, "{:?}", serial[2]);
++}
+diff --git a/crates/pg-engine/tests/sql/a167_subplan_nestloop.out b/crates/pg-engine/tests/sql/a167_subplan_nestloop.out
+new file mode 100644
+index 00000000..c74c1a8d
+--- /dev/null
++++ b/crates/pg-engine/tests/sql/a167_subplan_nestloop.out
+@@ -0,0 +1,133 @@
++> CREATE TABLE a167_o (k int)
++-- CREATE TABLE
++
++> CREATE TABLE a167_r (rk int, name text)
++-- CREATE TABLE
++
++> CREATE TABLE a167_n (nk int, rk int)
++-- CREATE TABLE
++
++> CREATE TABLE a167_s (sk int, nk int, v int)
++-- CREATE TABLE
++
++> INSERT INTO a167_o SELECT g FROM generate_series(1, 30) g
++-- INSERT 0 30
++
++> INSERT INTO a167_r VALUES (1, 'EUROPE'), (2, 'ASIA'), (3, 'AFRICA')
++-- INSERT 0 3
++
++> INSERT INTO a167_n SELECT g, g % 3 + 1 FROM generate_series(1, 9) g
++-- INSERT 0 9
++
++> INSERT INTO a167_s SELECT g, g % 9 + 1, g * 7 % 100 FROM generate_series(1, 300) g
++-- INSERT 0 300
++
++> CREATE INDEX a167_n_nk ON a167_n (nk)
++-- CREATE INDEX
++
++> ANALYZE a167_o, a167_r, a167_n, a167_s
++-- ANALYZE
++
++> SET enable_hashjoin = off
++-- SET
++
++> SET enable_mergejoin = off
++-- SET
++
++> SET enable_material = off
++-- SET
++
++> SET enable_memoize = off
++-- SET
++
++> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
++> SELECT o.k, (SELECT min(s.v) FROM a167_r r JOIN (a167_s s JOIN a167_n n ON n.nk = s.nk) ON r.rk = n.rk
++>              WHERE r.name = 'EUROPE' AND s.sk = o.k * 9 + 2) AS m
++> FROM a167_o o
++QUERY PLAN:text
++Seq Scan on a167_o o (actual rows=30.00 loops=1)
++  SubPlan 1
++    ->  Aggregate (actual rows=1.00 loops=30)
++          ->  Nested Loop (actual rows=1.00 loops=30)
++                Join Filter: (r.rk = n.rk)
++                ->  Nested Loop (actual rows=1.00 loops=30)
++                      Join Filter: (n.nk = s.nk)
++                      Rows Removed by Join Filter: 8
++                      ->  Seq Scan on a167_s s (actual rows=1.00 loops=30)
++                            Filter: (sk = ((o.k * 9) + 2))
++                            Rows Removed by Filter: 299
++                      ->  Seq Scan on a167_n n (actual rows=9.00 loops=30)
++                ->  Seq Scan on a167_r r (actual rows=1.00 loops=30)
++                      Filter: (name = 'EUROPE'::text)
++                      Rows Removed by Filter: 2
++-- EXPLAIN
++
++> SELECT o.k, (SELECT min(s.v) FROM a167_r r JOIN (a167_s s JOIN a167_n n ON n.nk = s.nk) ON r.rk = n.rk
++>              WHERE r.name = 'EUROPE' AND s.sk = o.k * 9 + 2) AS m
++> FROM a167_o o ORDER BY o.k
++k:int4 | m:int4
++1 | 77
++2 | 40
++3 | 3
++4 | 66
++5 | 29
++6 | 92
++7 | 55
++8 | 18
++9 | 81
++10 | 44
++11 | 7
++12 | 70
++13 | 33
++14 | 96
++15 | 59
++16 | 22
++17 | 85
++18 | 48
++19 | 11
++20 | 74
++21 | 37
++22 | 0
++23 | 63
++24 | 26
++25 | 89
++26 | 52
++27 | 15
++28 | 78
++29 | 41
++30 | 4
++-- SELECT 30
++
++> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
++> SELECT o.k, (SELECT count(*) FROM a167_r r JOIN a167_n n ON n.rk = r.rk + o.k % 2 WHERE r.rk < 3) AS c
++> FROM a167_o o WHERE o.k <= 10
++QUERY PLAN:text
++Seq Scan on a167_o o (actual rows=10.00 loops=1)
++  Filter: (k <= 10)
++  Rows Removed by Filter: 20
++  SubPlan 1
++    ->  Aggregate (actual rows=1.00 loops=10)
++          ->  Nested Loop (actual rows=6.00 loops=10)
++                Join Filter: ((r.rk + (o.k % 2)) = n.rk)
++                Rows Removed by Join Filter: 12
++                ->  Seq Scan on a167_r r (actual rows=2.00 loops=10)
++                      Filter: (rk < 3)
++                      Rows Removed by Filter: 1
++                ->  Seq Scan on a167_n n (actual rows=9.00 loops=20)
++-- EXPLAIN
++
++> RESET enable_hashjoin
++-- RESET
++
++> RESET enable_mergejoin
++-- RESET
++
++> RESET enable_material
++-- RESET
++
++> RESET enable_memoize
++-- RESET
++
++> DROP TABLE a167_o, a167_r, a167_n, a167_s
++-- DROP TABLE
++
+diff --git a/crates/pg-engine/tests/sql/a167_subplan_nestloop.sql b/crates/pg-engine/tests/sql/a167_subplan_nestloop.sql
+new file mode 100644
+index 00000000..3dc9c630
+--- /dev/null
++++ b/crates/pg-engine/tests/sql/a167_subplan_nestloop.sql
+@@ -0,0 +1,36 @@
++-- A nested loop whose inner side isn't parameterized (Postgres rescans it per outer row; the
++-- executor reads it once per run of the join) inside a SubPlan run many times: EXPLAIN
++-- ANALYZE's loops and rows are per outer row of each run, not of all runs squared (TPC-H
++-- q02's region / nation join).
++CREATE TABLE a167_o (k int);
++CREATE TABLE a167_r (rk int, name text);
++CREATE TABLE a167_n (nk int, rk int);
++CREATE TABLE a167_s (sk int, nk int, v int);
++INSERT INTO a167_o SELECT g FROM generate_series(1, 30) g;
++INSERT INTO a167_r VALUES (1, 'EUROPE'), (2, 'ASIA'), (3, 'AFRICA');
++INSERT INTO a167_n SELECT g, g % 3 + 1 FROM generate_series(1, 9) g;
++INSERT INTO a167_s SELECT g, g % 9 + 1, g * 7 % 100 FROM generate_series(1, 300) g;
++CREATE INDEX a167_n_nk ON a167_n (nk);
++ANALYZE a167_o, a167_r, a167_n, a167_s;
++SET enable_hashjoin = off;
++SET enable_mergejoin = off;
++SET enable_material = off;
++SET enable_memoize = off;
++
++EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
++SELECT o.k, (SELECT min(s.v) FROM a167_r r JOIN (a167_s s JOIN a167_n n ON n.nk = s.nk) ON r.rk = n.rk
++             WHERE r.name = 'EUROPE' AND s.sk = o.k * 9 + 2) AS m
++FROM a167_o o;
++SELECT o.k, (SELECT min(s.v) FROM a167_r r JOIN (a167_s s JOIN a167_n n ON n.nk = s.nk) ON r.rk = n.rk
++             WHERE r.name = 'EUROPE' AND s.sk = o.k * 9 + 2) AS m
++FROM a167_o o ORDER BY o.k;
++-- two outer rows per run of the join
++EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
++SELECT o.k, (SELECT count(*) FROM a167_r r JOIN a167_n n ON n.rk = r.rk + o.k % 2 WHERE r.rk < 3) AS c
++FROM a167_o o WHERE o.k <= 10;
++
++RESET enable_hashjoin;
++RESET enable_mergejoin;
++RESET enable_material;
++RESET enable_memoize;
++DROP TABLE a167_o, a167_r, a167_n, a167_s;

@@ -1,0 +1,273 @@
+diff --git a/crates/pg-engine/src/exec/mod.rs b/crates/pg-engine/src/exec/mod.rs
+index dca2b520..710c467c 100644
+--- a/crates/pg-engine/src/exec/mod.rs
++++ b/crates/pg-engine/src/exec/mod.rs
+@@ -582,8 +582,9 @@ impl Instr {
+ 
+     /// Counts contributed by one collected inner run, including nested cached runs.
+     pub(crate) fn rescan_delta(&self, before: &HashMap<usize, NodeStats>) -> Vec<(usize, NodeStats)> {
+-        self.nodes.borrow().iter().filter_map(|(&key, now)| {
+-            let old = before.get(&key).copied().unwrap_or_default();
++        let nodes = self.nodes.borrow();
++        before.iter().filter_map(|(&key, old)| {
++            let now = nodes.get(&key).copied().unwrap_or_default();
+             let delta = NodeStats {
+                 loops: now.loops.saturating_sub(old.loops),
+                 rows: now.rows.saturating_sub(old.rows),
+diff --git a/crates/pg-engine/src/exec/nodes.rs b/crates/pg-engine/src/exec/nodes.rs
+index 011e01e4..5d3fc08e 100644
+--- a/crates/pg-engine/src/exec/nodes.rs
++++ b/crates/pg-engine/src/exec/nodes.rs
+@@ -3870,6 +3870,97 @@ enum InnerRows {
+     Stream(Rc<Row>),
+ }
+ 
++/// Snapshot only work owned by this inner input. Lazy InitPlans and enclosing CTE
++/// producers can run during collection, but are not rescanned with the input.
++fn rescan_snapshot(plan: &Arc<Plan>, instr: &super::Instr, enclosing: bool) -> HashMap<usize, super::NodeStats> {
++    use crate::sql::expr::SubqueryKind;
++    use crate::sql::plan::{Access, BitmapQual, IndexBounds};
++
++    fn bounds<'a>(b: &'a IndexBounds, exprs: &mut Vec<&'a Expr>) {
++        exprs.extend(b.eq.iter().chain(&b.any));
++        exprs.extend(b.lower.iter().chain(&b.upper).map(|v| &v.0));
++        exprs.extend(b.order.iter().map(|k| &k.expr));
++        if let Some(skip) = &b.skip {
++            bounds(&skip.bounds, exprs);
++        }
++    }
++    fn bitmap<'a>(q: &'a BitmapQual, exprs: &mut Vec<&'a Expr>, instr: &super::Instr, before: &mut HashMap<usize, super::NodeStats>) {
++        let key = q as *const BitmapQual as usize;
++        before.insert(key, instr.get(key).unwrap_or_default());
++        match q {
++            BitmapQual::Index { quals, pred, bounds: b, .. } => {
++                exprs.extend(quals.iter().flat_map(|q| [&q.expr, &q.orig]));
++                exprs.extend(pred);
++                bounds(b, exprs);
++            }
++            BitmapQual::And(inputs) | BitmapQual::Or(inputs) => {
++                for q in inputs {
++                    bitmap(q, exprs, instr, before);
++                }
++            }
++        }
++    }
++    fn visit(p: &Arc<Plan>, instr: &super::Instr, enclosing: bool, before: &mut HashMap<usize, super::NodeStats>) {
++        let key = Arc::as_ptr(p) as usize;
++        if before.contains_key(&key) {
++            return;
++        }
++        before.insert(key, instr.get(key).unwrap_or_default());
++        let mut exprs = Vec::new();
++        crate::sql::explain::node_exprs(p, &mut exprs);
++        if let Plan::Scan(s) = p.as_ref() {
++            let key = s as *const crate::sql::plan::ScanPlan as usize;
++            before.insert(key, instr.get(key).unwrap_or_default());
++            exprs.extend(s.current_of.as_ref());
++            if let Some((_, b)) = &s.index {
++                bounds(b, &mut exprs);
++            }
++            match &s.access {
++                Access::Index { quals, .. } => exprs.extend(quals.iter().flat_map(|q| [&q.expr, &q.orig])),
++                Access::Bitmap(q, _) => bitmap(q, &mut exprs, instr, before),
++                Access::Tid { quals, .. } | Access::TidRange(quals) => exprs.extend(quals),
++                _ => {}
++            }
++        }
++        if let Plan::Join { meta, .. } = p.as_ref()
++            && meta.memoize.is_some()
++        {
++            before.insert(key + 1, instr.get(key + 1).unwrap_or_default());
++        }
++        for e in exprs {
++            e.walk(&mut |e| {
++                if let Expr::Subquery(s) = e {
++                    // Enclosing-only parameters are cached per outer frame. ANY/ALL
++                    // with parameters are SubPlans, rescanned at every call.
++                    let mut rescanned = !enclosing || matches!(s.kind, SubqueryKind::Any | SubqueryKind::All);
++                    for param in &s.params {
++                        param.walk(&mut |e| match e {
++                            Expr::Col(..) | Expr::Subquery(_) => rescanned = true,
++                            Expr::Call(d, ..) if d.volatility == 'v' => rescanned = true,
++                            _ => {}
++                        });
++                    }
++                    if !s.params.is_empty() && rescanned {
++                        visit(&s.plan, instr, true, before);
++                    }
++                }
++            });
++        }
++        // CTEs defined here are owned here; a CteScan alone does not own its producer.
++        if let Plan::With { ctes, .. } = p.as_ref() {
++            for (_, p) in ctes {
++                visit(p, instr, enclosing, before);
++            }
++        }
++        for child in crate::sql::explain::plan_inputs(p) {
++            visit(child, instr, enclosing, before);
++        }
++    }
++    let mut before = HashMap::default();
++    visit(plan, instr, enclosing, &mut before);
++    before
++}
++
+ impl NestLoopNode {
+     /// Whether the inner side is read as ExecNestLoop reads it: rescanned per outer row
+     /// (ExecReScan with the new parameters) and its rows taken as the join asks, not
+@@ -4059,7 +4150,7 @@ impl NestLoopNode {
+         }
+         if self.right.is_none() {
+             let instr = ctx.instr.borrow().clone().filter(|_| self.report_rescans);
+-            let before = instr.as_ref().map(|i| i.nodes.borrow().clone());
++            let before = instr.as_ref().map(|i| rescan_snapshot(&self.right_plan, i, !ctx.outer.borrow().is_empty()));
+             let rows = self.collect_right(ctx)?;
+             if let (Some(instr), Some(before)) = (instr, before) {
+                 self.right_stats = instr.rescan_delta(&before);
+diff --git a/crates/pg-engine/tests/parallel_scan.rs b/crates/pg-engine/tests/parallel_scan.rs
+index 98bd9ced..1a6d169d 100644
+--- a/crates/pg-engine/tests/parallel_scan.rs
++++ b/crates/pg-engine/tests/parallel_scan.rs
+@@ -952,7 +952,6 @@ fn vector_batches_body() {
+     s.query("UPDATE v SET d = '-infinity' WHERE id % 509 = 0").unwrap();
+     s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+     let run = |s: &mut Session| VECTOR_QUERIES.iter().map(|q| out(s, q)).collect::<Vec<_>>();
+-    let parallel = run(&mut s);
+     let rows = without_vectors(|| run(&mut s));
+     let before = VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed);
+     let batched = run(&mut s);
+diff --git a/crates/pg-engine/tests/sql/a167_subplan_owned.out b/crates/pg-engine/tests/sql/a167_subplan_owned.out
+new file mode 100644
+index 00000000..6c411970
+--- /dev/null
++++ b/crates/pg-engine/tests/sql/a167_subplan_owned.out
+@@ -0,0 +1,93 @@
++> CREATE TABLE a167_o (k int)
++-- CREATE TABLE
++
++> CREATE TABLE a167_r (rk int)
++-- CREATE TABLE
++
++> CREATE TABLE a167_n (nk int, rk int)
++-- CREATE TABLE
++
++> INSERT INTO a167_o SELECT g FROM generate_series(1, 6) g
++-- INSERT 0 6
++
++> INSERT INTO a167_r VALUES (1), (2), (3)
++-- INSERT 0 3
++
++> INSERT INTO a167_n SELECT g, g % 3 + 1 FROM generate_series(1, 9) g
++-- INSERT 0 9
++
++> ANALYZE a167_o, a167_r, a167_n
++-- ANALYZE
++
++> SET enable_hashjoin = off
++-- SET
++
++> SET enable_mergejoin = off
++-- SET
++
++> SET enable_material = off
++-- SET
++
++> SET enable_memoize = off
++-- SET
++
++> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
++> SELECT * FROM a167_o o LEFT JOIN a167_n n ON n.rk=o.k AND n.nk < (SELECT max(rk)*3 FROM a167_r)
++QUERY PLAN:text
++Nested Loop Left Join (actual rows=11.00 loops=1)
++  Join Filter: (n.rk = o.k)
++  Rows Removed by Join Filter: 40
++  InitPlan 1
++    ->  Aggregate (actual rows=1.00 loops=1)
++          ->  Seq Scan on a167_r (actual rows=3.00 loops=1)
++  ->  Seq Scan on a167_o o (actual rows=6.00 loops=1)
++  ->  Seq Scan on a167_n n (actual rows=8.00 loops=6)
++        Filter: (nk < (InitPlan 1).col1)
++        Rows Removed by Filter: 1
++-- EXPLAIN
++
++> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
++> SELECT * FROM a167_o o LEFT JOIN a167_n n ON n.rk=o.k
++>  AND n.nk < (SELECT max(r.rk+n.rk) FROM a167_r r)
++QUERY PLAN:text
++Nested Loop Left Join (actual rows=8.00 loops=1)
++  Join Filter: (n.rk = o.k)
++  Rows Removed by Join Filter: 25
++  ->  Seq Scan on a167_o o (actual rows=6.00 loops=1)
++  ->  Seq Scan on a167_n n (actual rows=5.00 loops=6)
++        Filter: (nk < (SubPlan 1))
++        Rows Removed by Filter: 4
++        SubPlan 1
++          ->  Aggregate (actual rows=1.00 loops=54)
++                ->  Seq Scan on a167_r r (actual rows=3.00 loops=54)
++-- EXPLAIN
++
++> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
++> WITH c AS MATERIALIZED (SELECT * FROM a167_n)
++> SELECT * FROM a167_o o LEFT JOIN c ON c.rk=o.k
++QUERY PLAN:text
++Nested Loop Left Join (actual rows=12.00 loops=1)
++  Join Filter: (c.rk = o.k)
++  Rows Removed by Join Filter: 45
++  CTE c
++    ->  Seq Scan on a167_n (actual rows=9.00 loops=1)
++  ->  Seq Scan on a167_o o (actual rows=6.00 loops=1)
++  ->  CTE Scan on c (actual rows=9.00 loops=6)
++        Storage: Memory  Maximum Storage: 17kB
++-- EXPLAIN
++
++> RESET enable_hashjoin
++-- RESET
++
++> RESET enable_mergejoin
++-- RESET
++
++> RESET enable_material
++-- RESET
++
++> RESET enable_memoize
++-- RESET
++
++> DROP TABLE a167_o, a167_r, a167_n
++-- DROP TABLE
++
+diff --git a/crates/pg-engine/tests/sql/a167_subplan_owned.sql b/crates/pg-engine/tests/sql/a167_subplan_owned.sql
+new file mode 100644
+index 00000000..e3c6e0b7
+--- /dev/null
++++ b/crates/pg-engine/tests/sql/a167_subplan_owned.sql
+@@ -0,0 +1,29 @@
++-- Cached nested-loop inputs across SubPlan runs with varying outer row counts.
++CREATE TABLE a167_o (k int);
++CREATE TABLE a167_r (rk int);
++CREATE TABLE a167_n (nk int, rk int);
++INSERT INTO a167_o SELECT g FROM generate_series(1, 6) g;
++INSERT INTO a167_r VALUES (1), (2), (3);
++INSERT INTO a167_n SELECT g, g % 3 + 1 FROM generate_series(1, 9) g;
++ANALYZE a167_o, a167_r, a167_n;
++SET enable_hashjoin = off;
++SET enable_mergejoin = off;
++SET enable_material = off;
++SET enable_memoize = off;
++
++-- Once-only InitPlan first evaluated by a cached inner scan.
++EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
++SELECT * FROM a167_o o LEFT JOIN a167_n n ON n.rk=o.k AND n.nk < (SELECT max(rk)*3 FROM a167_r);
++-- A genuinely correlated SubPlan in the inner filter must retain per-rescan counts.
++EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
++SELECT * FROM a167_o o LEFT JOIN a167_n n ON n.rk=o.k
++ AND n.nk < (SELECT max(r.rk+n.rk) FROM a167_r r);
++-- The CTE producer is owned by the outer query level, while its CTE Scan is rescanned.
++EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
++WITH c AS MATERIALIZED (SELECT * FROM a167_n)
++SELECT * FROM a167_o o LEFT JOIN c ON c.rk=o.k;
++RESET enable_hashjoin;
++RESET enable_mergejoin;
++RESET enable_material;
++RESET enable_memoize;
++DROP TABLE a167_o, a167_r, a167_n;

@@ -1,0 +1,6 @@
+{
+  "path": "/home/meszmate/.cache/a167/target/debug/deps/golden-9749ad749af5ca1c",
+  "sha256": "e8427752e14282685c6ed68163fe4b21e705ca0bcf61f84073dcf1854dcb3eca",
+  "compiled_source": "0595bf7325b0b4cde8d02d9f8e51ebd17b528d05",
+  "limitation": "New runtime SQL golden added after compiled source; production Rust/Cargo verified identical."
+}

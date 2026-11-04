@@ -1,0 +1,56 @@
+{
+  "worktree": "/home/meszmate/roll/.claude/worktrees/agent-a6193f5e45a7ae4f1",
+  "head": "1f17968b285ddcb3f63e13cc7eec4465898014f5",
+  "output": "/home/meszmate/.cache/pg-engine-resume-20261104/execution_models/a167-owned-focused",
+  "env": {
+    "TMPDIR": "/home/meszmate/.cache/a167/tmp",
+    "CARGO_TARGET_DIR": "/home/meszmate/.cache/a167/target",
+    "CARGO_BUILD_JOBS": "2",
+    "RUST_TEST_THREADS": "2"
+  },
+  "stages": [
+    {
+      "name": "a167-goldens",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "pg-engine",
+        "--test",
+        "golden"
+      ],
+      "expect": "^test result: ok\\. 3 passed;",
+      "env": {
+        "GOLDEN_FILTER": "a167_"
+      }
+    },
+    {
+      "name": "reordered-path",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "pg-engine",
+        "--test",
+        "parallel_scan",
+        "reordered_heaps_through_batches",
+        "--",
+        "--exact"
+      ],
+      "expect": "^test result: ok\\. 1 passed;",
+      "env": {}
+    },
+    {
+      "name": "clippy-lib",
+      "command": [
+        "cargo",
+        "clippy",
+        "-p",
+        "pg-engine",
+        "--lib"
+      ],
+      "expect": "Finished .* profile",
+      "env": {}
+    }
+  ]
+}

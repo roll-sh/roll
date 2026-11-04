@@ -1,0 +1,18 @@
+{
+  "worktree": "/home/meszmate/roll/.claude/worktrees/agent-a6193f5e45a7ae4f1",
+  "head": "1137c6185453556e8ed538b273becf9c003dfdff",
+  "output": "/home/meszmate/.cache/pg-engine-resume-20261104/execution_models/a167-owned-red",
+  "command": [
+    "/home/meszmate/.cache/a167/target/debug/deps/golden-9749ad749af5ca1c",
+    "golden",
+    "--exact",
+    "--nocapture"
+  ],
+  "env": {
+    "GOLDEN_FILTER": "a167_subplan_owned"
+  },
+  "binary": "/home/meszmate/.cache/a167/target/debug/deps/golden-9749ad749af5ca1c",
+  "binary_sha256": "34c97e86e9c504adafe67e2a7c3df5f62e97e9f51f235c1c8e03005c31f0f5a7",
+  "binary_source": "278a28966a8921da90c6ead9cfeb3f332306d788",
+  "pattern": "Aggregate \\(actual rows=1\\.00 loops=6\\)|Seq Scan on a167_n \\(actual rows=54\\.00 loops=1\\)"
+}

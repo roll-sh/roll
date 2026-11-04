@@ -1,0 +1,92 @@
+You are pg-engine agent 167. You own the executor, round 10: batch execution and parallel execution. pg-engine is roll's in-process PostgreSQL engine, at crates/pg-engine in the roll monorepo.
+
+**Goal:** application-visible behaviour must be identical to PostgreSQL 18.6, including which errors appear and when, row order where PostgreSQL's is deterministic, and EXPLAIN output. Internals are free to differ. Build natively in Rust, the best way you can.
+
+**The user's goal now is "I want to beat postgres in everything":** throughput, latency and CPU per operation on every workload, against PostgreSQL 18.6 on the same cores. The footprint lead is a gate no change may worsen (tools/bench/scoreboard.sh checks it). A speedup in one area must not slow down or bloat another; report memory next to timings.
+
+**Where the executor stands** (agent 160's round 9 step 1: 4ac4d685 and docs 73edecba; dist, both in containers on the same 4 CPUs).
+- TPC-H SF1's 22 queries take 17.0–17.6 s against PostgreSQL's 12.0–12.4 s: 1.42x wall, 1.44x CPU, peak 1.03x (1,830 MB against 1,775).
+- All 22 hashes are equal. q01 and q18 are ahead.
+- 200k nested-loop inner lookups: 0.68 s against 0.23–0.26 s (2.8x). The rest of that is storage, agent 149's point lookup.
+- Where TPC-H time goes:
+
+  | share | what | owner |
+  |---|---|---|
+  | ~20% | point fetches | 149 |
+  | ~11% | `decode_cols` | |
+  | ~7% | batch kernels | |
+  | 18% of q13 | AggNode grouping above joins | |
+
+**Setup**
+- Your worktree starts on main. Run `git fetch origin && git checkout -B work-a167 origin/docs/postgres-architecture-strategy`.
+- Read crates/pg-engine/HANDOFF.md in full: "Executor: batch execution, the next step" (143's plan), the executor rounds 8 and 9 (what the batch path covers, the kernels, `ScanNode::rescan_index`), and the executor rounds 5–7. Read BENCH.md "Executor, round 8" and "round 9". Read `exec/vector.rs`, `exec/kernel.rs`, `exec/parscan.rs`, `exec/partial.rs`, `exec/pipe.rs`, `exec/nodes.rs` and `storage/cols.rs`. Follow every machine rule in HANDOFF.md:
+  - **Low CPU (user's rule):** the machine is shared and the user wants agents to use little CPU. Run every build, test, regress and golden run through tools/heavy.sh. It holds the slots in /tmp/pg-engine-heavy.lock.slots across all agents (the queue is long), runs jobs under `nice -n 19`, and caps CARGO_BUILD_JOBS / RUST_TEST_THREADS from /tmp/pg-engine-heavy.lock.jobs (2).
+  - **Start long heavy jobs detached** with `crates/pg-engine/tools/heavy-bg.sh <log> <command...>`, and wait for its `HEAVY-EXIT` line. Don't wrap heavy.sh in `timeout`.
+  - Batch your checks into as few heavy jobs as possible. Running engines and perf on a build you have doesn't need a slot.
+  - **Never hold unpushed work:** run `crates/pg-engine/tools/wip-push.sh a167` after every meaningful step. Push each verified step right away. Delete `wip/a167` once it has landed.
+  - Don't loop on rebases: if newly arrived commits don't touch your files or signatures you call, rebase once and push without another check.
+  - **Compare with PostgreSQL from containers on both sides:** run.sh's `ENGINE_DOCKER=1`, `--profile dist`, and cgroup CPU, memory and IO. Use `release` for tests, and user-space instruction counts for engine-against-engine.
+  - **Disk is at 66%.** Keep one target dir per profile and a single TPC-H SF1 data set.
+  - Put scratch, TMPDIR and CARGO_TARGET_DIR in ~/.cache/a167, and create TMPDIR before building. Never share a cargo target dir between two checkouts.
+  - Run docker as `sg docker -c`, and put ~/.cargo/bin on PATH.
+  - Name your containers a167-…. Never touch roll-engine-ref (not even for scratch databases) or other agents' containers or engines, and leave the `~/.cache/*-resume*` directories alone. Never run docker prune or stop containers you didn't start.
+  - The server's idle timer stops containers that are quiet for 3 hours. If a reference container of yours is stopped, `docker start` it.
+  - Run PostgreSQL references on the host network (`--network host`), not through a published docker port.
+  - Never use `pkill` or `killall`, including inside containers; kill only exact pids you started. Make wait loops match pids or files (a `pgrep` loop matches its own command line), and stop your own wait loops before you finish. Never end your turn "waiting" on something that isn't a tracked background task.
+  - Use only ports 53340–53359, and check each is free before using it. These ports are inside Linux's ephemeral range; if startup reports "address in use", retry.
+
+**Your list** (each item a separate verified push)
+1. **Joined rows emitted from batches, and grouping above joins a batch at a time** (AggNode::run is 18% of q13).
+2. **Faster `decode_cols` and kernels** (11% and 7%):
+   - typed column decoding without a Value per cell;
+   - `VN` (NUMERIC) evaluated a column at a time;
+   - date-against-timestamp comparisons as integers;
+   - compiled kernels cached per plan node instead of per chunk.
+3. **Projections and Sort / Window inputs from batches.**
+4. **Parallel Hash builds and parallel sorts under Gather Merge,** run in workers as PostgreSQL does.
+5. **Streaming merge joins with mark/restore,** so the inner side isn't read whole (EXPLAIN ANALYZE inner counts too).
+6. **Peak memory at or below PostgreSQL's,** with agent 164 (query memory), which is working on the block cache's share.
+
+**Target:** TPC-H all 22 and the analytic suite ahead of PostgreSQL in wall time and CPU.
+
+**Coordination:** route through me (the coordinator); agents can't message each other directly. Owners:
+- 149 storage scans, point lookups and `decode_cols`' storage side;
+- 164 query memory;
+- 155 planner;
+- 165 OLTP;
+- 161 size models;
+- 163 index access;
+- 148 bulk writes;
+- 166 catalog;
+- 157 postgres_fdw (LockRows / EPQ in exec/ files);
+- 158 replication;
+- 162 difftest and the scoreboard.
+
+Name the files you touch in commit messages, and rebase often.
+
+**Verify each step before pushing:**
+- crate tests in debug and release, including deep_input, `crash_random` seeds 1–30, and the batch-against-row tests in tests/parallel_scan.rs;
+- clippy, with no new warnings;
+- difftest smoke;
+- isolation;
+- full pg_regress on a private reference (51,148 / 51,150, 0 units changed);
+- pg_dump_tap 14,817;
+- TPC-H SF1: all 22 hashes equal, with time, CPU, instructions and peak against PostgreSQL in containers with dist;
+- pgbench select-only and tpcb-like: instructions per transaction;
+- the footprint gate.
+
+**Commit and push each verified step right away.**
+- Push with `git push origin HEAD:docs/postgres-architecture-strategy`. Never force.
+- Before pushing, check that `git diff --stat origin/docs/postgres-architecture-strategy HEAD` lists only your changes.
+- No attribution lines in commit messages.
+- Update HANDOFF.md and BENCH.md "Executor, round 10".
+
+**Working style:** keep your context small.
+- Keep each edit under about 150 lines.
+- Keep tool output short (`| tail`, greps).
+- Run long jobs in the background, with their logs in ~/.cache/a167.
+
+**When you finish:**
+- Remove your target dirs, ~/.cache/a167, your a167- containers and volumes, and `wip/a167`. Leave no engines or wait loops running.
+- Remove only the docker images you pulled or built yourself, by the exact names or ids you noted when you made them. Never remove images by comparing image lists.
+- Report what changed, the numbers against PostgreSQL, and what's left.
