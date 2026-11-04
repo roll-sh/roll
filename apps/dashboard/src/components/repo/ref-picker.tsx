@@ -1,7 +1,7 @@
+import { useNavigate } from "@tanstack/react-router";
 import { ChevronDown, GitBranch } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { codeApi, shortId, type Ref } from "@/lib/code-api";
-import { useNavigate } from "@tanstack/react-router";
 
 /** Switch the page to another ref, keeping the section and path. `to` builds the URL for a rev. */
 export function RefPicker({ repo, rev, kind, path = "" }: { repo: string; rev: string; kind: "tree" | "blob" | "commits"; path?: string }) {

@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { Link } from "@/components/link";
 import { createServerFn } from "@tanstack/react-start";
 import { DiffViewer } from "@/components/code/diff";
+import { Link } from "@/components/link";
 import { CopyLine } from "@/components/repo/clone-box";
 import { KeysTarget } from "@/components/repo/finder";
 import { changesetHref, treeHref } from "@/components/repo/paths";

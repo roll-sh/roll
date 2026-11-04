@@ -1,7 +1,7 @@
 import { HorizonMark, RollLogo } from "@roll/brand";
 import { LucideProvider } from "lucide-react";
-import { Link } from "@/components/link";
 import type { ReactNode } from "react";
+import { Link } from "@/components/link";
 import { useMarkState } from "../mark-state";
 
 /** The roll.sh frame for public pages: Horizon logo, an optional crumb, and a quiet footer. */

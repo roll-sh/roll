@@ -1,8 +1,8 @@
 import { HorizonMark } from "@roll/brand";
 import { ArrowLeft, GitBranch, Moon } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
-import { Link } from "@/components/link";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Link } from "@/components/link";
 import { nosqlApi, type NosqlDb, type NosqlInfo, type NosqlSchema } from "@/lib/nosql-api";
 import { AppShell } from "../app-shell";
 import { ago, btn, Connecting, EmptyPanel, ErrorNote, Offline } from "../ui";

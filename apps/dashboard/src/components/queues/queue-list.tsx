@@ -1,7 +1,7 @@
 import { ArrowDown, ArrowUp, Plus, Search } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
-import { Link } from "@/components/link";
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "@/components/link";
 import { formatBytes, formatNum, formatRate, qapi, type Queue, queueHref, type QueueType } from "@/lib/queues-api";
 import { ArgumentsEditor, argsFromRows, type ArgRow, QUEUE_ARGS } from "./args-editor";
 import { useAction, usePoll } from "./hooks";

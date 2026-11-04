@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { Link } from "@/components/link";
 import { createServerFn } from "@tanstack/react-start";
 import { ChangeStateIcon, ChecksSummary, SourceBadge } from "@/components/code/shared";
+import { Link } from "@/components/link";
 import { changeHref } from "@/components/repo/paths";
 import { TableSkeleton } from "@/components/repo/sections";
 import { sortChanges, type Change } from "@/lib/code-api";

@@ -1,7 +1,7 @@
 import { ArrowLeft, Eraser, Link2, RotateCcw, Trash2, Unlink } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
-import { Link } from "@/components/link";
 import { useEffect, useState } from "react";
+import { Link } from "@/components/link";
 import {
   type Binding,
   exchangeLabel,

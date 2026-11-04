@@ -1,5 +1,5 @@
-import { Link } from "@/components/link";
 import { BookOpen, GitCommitHorizontal, History } from "lucide-react";
+import { Link } from "@/components/link";
 import { firstLine, shortId, type ChangesetSummary, type Repo } from "@/lib/code-api";
 import type { DirectoryData, Doc } from "@/lib/code-server";
 import { formatCount } from "@/lib/redis-api";

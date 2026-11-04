@@ -1,8 +1,8 @@
 import { HorizonMark } from "@roll/brand";
 import { ExternalLink, GitMerge, ShieldAlert, ShieldCheck, ShieldQuestion } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
-import { Link } from "@/components/link";
 import { useEffect, useState } from "react";
+import { Link } from "@/components/link";
 import { formatCount } from "@/lib/redis-api";
 import {
   cloneCommand,

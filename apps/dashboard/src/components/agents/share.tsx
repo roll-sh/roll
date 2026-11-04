@@ -5,8 +5,8 @@
  */
 
 import { ExternalLink, Link2, Share2, Trash2, X } from "lucide-react";
-import { Link } from "@/components/link";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Link } from "@/components/link";
 import { agentsApi, type ShareSummary, type Thread } from "@/lib/agents-api";
 import { codeApi } from "@/lib/code-api";
 import { btn, CopyButton, ErrorNote, Panel, primary, useCopy } from "../ui";
