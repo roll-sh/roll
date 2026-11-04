@@ -963,3 +963,51 @@ fn vector_batches_body() {
         assert_eq!(a, b, "{q}: serial");
     }
 }
+
+const REORDERED_QUERIES: &[&str] = &[
+    "SELECT count(*), sum(x), sum(id) FROM r WHERE d >= date '2024-03-01' AND d < date '2024-03-01' + interval '2' month",
+    "SELECT g, count(*), sum(x) FROM r WHERE x < 40.5 AND t LIKE 'r1%' GROUP BY g ORDER BY g",
+    "SELECT id, g, x FROM r WHERE x > 99.5 AND d <> date '2024-01-09'",
+    "SELECT q.w, count(*), sum(r.x) FROM r JOIN q ON r.g = q.k WHERE r.d < timestamp '2024-04-01 06:00' GROUP BY q.w ORDER BY 1",
+    "SELECT r.id, q.w FROM r JOIN q ON r.g = q.k WHERE r.x = 12.25",
+];
+
+#[test]
+fn reordered_heaps_through_batches() {
+    on_session_thread(reordered_heaps_through_batches_inner);
+}
+
+/// A modelled heap whose later rows went into earlier pages' free space: read in heap order
+/// by the statement's thread, its rows go to the workers a fill at a time and through the
+/// batch kernels, as a table's stored in order do.
+fn reordered_heaps_through_batches_inner() {
+    use pg_engine::exec::parscan::{VECTOR_ROWS, without_vectors};
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query(
+        "CREATE TABLE r (id int, g int, x numeric(10, 2), d date, t text); \
+         INSERT INTO r SELECT i, i % 23, (i % 4000) / 40.0, date '2024-01-01' + i % 150, 'r' || (i % 300) \
+         FROM generate_series(1, 90000) i; \
+         DELETE FROM r WHERE id % 3 = 0; VACUUM r; \
+         INSERT INTO r SELECT i, i % 23, CASE WHEN i % 17 = 0 THEN NULL ELSE (i % 4000) / 40.0 END, \
+         CASE WHEN i % 19 = 0 THEN NULL ELSE date '2024-01-01' + i % 150 END, 'r' || (i % 300) \
+         FROM generate_series(90001, 120000) i; \
+         CREATE TABLE q (k int PRIMARY KEY, w int); INSERT INTO q SELECT k, k % 4 FROM generate_series(0, 15) k; \
+         ANALYZE r; ANALYZE q",
+    )
+    .unwrap();
+    let run = |s: &mut Session| -> Vec<Vec<String>> { REORDERED_QUERIES.iter().map(|q| out(s, q)).collect() };
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let serial = run(&mut s);
+    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    let before = VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed);
+    let parallel = run(&mut s);
+    assert!(VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed) > before, "rows went through column batches");
+    let rows = without_vectors(|| run(&mut s));
+    for (((q, a), b), c) in REORDERED_QUERIES.iter().zip(&serial).zip(&parallel).zip(&rows) {
+        assert_eq!(a, b, "{q}");
+        assert_eq!(c, b, "{q}: column batches");
+    }
+    assert!(serial[2].len() > 10, "{:?}", serial[2]);
+}

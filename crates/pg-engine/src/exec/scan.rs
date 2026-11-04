@@ -3901,14 +3901,14 @@ impl ScanNode {
             drop(txn);
             heap_order(&p.table, &mut rows, false, ctx);
             let per = rows.len().div_ceil(ParScan::chunks(workers)).max(1);
-            let mut it = rows.into_iter().map(Ok);
+            let mut it = rows.into_iter();
             let mut out = Vec::new();
             loop {
                 let c: Vec<_> = it.by_ref().take(per).collect();
                 if c.is_empty() {
                     break;
                 }
-                out.push(super::parscan::Source::Rows(Box::new(c.into_iter())));
+                out.push(super::parscan::Source::Fill(Box::new(super::parscan::ListFill(c.into_iter()))));
             }
             out
         } else {

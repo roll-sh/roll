@@ -225,6 +225,19 @@ impl From<Chunk> for Source {
     }
 }
 
+/// Rows in a list (a modelled heap's rows put in heap order, `ScanNode`) a fill at a time:
+/// the batch kernels take them as they take a table's.
+pub struct ListFill(pub std::vec::IntoIter<(Vec<u8>, bytes::Bytes)>);
+
+impl FillRows for ListFill {
+    fn fill(&mut self, b: &mut RowBatch, max: usize) -> Result<()> {
+        for (k, v) in self.0.by_ref().take(max) {
+            b.push(&k, v);
+        }
+        Ok(())
+    }
+}
+
 /// A table's rows in [range) through `FillRows`, as a bulk read when `bulk`.
 pub fn fill_source<F: FillRows + 'static>(f: F, bulk: bool) -> Source {
     Source::Fill(if bulk { Box::new(crate::storage::batch::BulkFill(f)) } else { Box::new(f) })

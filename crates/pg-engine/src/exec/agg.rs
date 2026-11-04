@@ -3092,11 +3092,20 @@ impl AggNode {
                             let mut map = Vec::with_capacity(p.groups.len());
                             let mut parts = Vec::with_capacity(p.groups.len());
                             for (k, st) in p.groups {
-                                let hk = if nondet { group_key(&k, &colls) } else { k.clone() };
-                                let h = index.hash(&hk);
-                                let gi = match find_group!(h, &hk) {
-                                    Some(i) => i,
-                                    None => new_group!(h, k, hk),
+                                // (The key compared is the key itself unless normalised.)
+                                let gi = if nondet {
+                                    let hk = group_key(&k, &colls);
+                                    let h = index.hash(&hk);
+                                    match find_group!(h, &hk) {
+                                        Some(i) => i,
+                                        None => new_group!(h, k, hk),
+                                    }
+                                } else {
+                                    let h = index.hash(&k);
+                                    match find_group!(h, &k) {
+                                        Some(i) => i,
+                                        None => new_group!(h, k, Vec::new()),
+                                    }
                                 };
                                 map.push(gi);
                                 parts.push(st);
