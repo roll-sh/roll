@@ -142,7 +142,7 @@ describe("a sandbox machine on the canvas", () => {
     await userEvent.click(within(login).getByRole("button", { name: "Log in to Claude Code" }));
     expect(h.command).toHaveBeenLastCalledWith("mch_1", expect.any(String), expect.objectContaining({ command: "claude /login" }));
     // Logged in somewhere the daemon didn't see (the daemon checks again when a terminal exits).
-    await userEvent.click(within(login).getByRole("button", { name: /Check again/ }));
+    await userEvent.click(within(login).getByRole("button", { name: /check again/i }));
     expect(h.command).toHaveBeenLastCalledWith("mch_1", expect.any(String), { type: "provider.refresh" });
   });
 });

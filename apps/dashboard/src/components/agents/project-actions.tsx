@@ -12,13 +12,14 @@
  * machine" (`AddProjectToMachineDialog.tsx`); roll can bring the machine too.
  */
 
-import { ArrowDownToLine, ArrowUpRight, Archive, Check, Cloud, Focus, Pin, PinOff, Plus, Settings2, Trash2 } from "lucide-react";
+import { ArrowDownToLine, ArrowUpRight, Archive, Check, Cloud, Focus, KeyRound, Pin, PinOff, Plus, Settings2, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { commandId, expectOk, reachable, type Machine, type Project, type PullOutcome, type Reply } from "@/lib/agents-api";
 import type { AgentsData } from "@/lib/agents-store";
 import { shelfOf } from "@/lib/agents-inbox";
 import { closeProjectDialog, openProjectDialog, useProjectDialog } from "@/lib/agents-project-dialogs";
 import { openShelf } from "@/lib/agents-shelf";
+import { canRunAgents, readiness } from "@/lib/agents-setup";
 import { setAgentsView } from "@/lib/agents-surface";
 import { formatHourly } from "@/lib/sandboxes-api";
 import { btn, input, primary } from "../ui";
@@ -28,6 +29,7 @@ import { AddProjectDialog } from "./project-new";
 import type { MenuItem } from "./menu";
 import { showInboxToast } from "./threads-sidebar";
 import { Dialog } from "./ui/dialog";
+import { openMachineSettings } from "./provider-setup";
 import { useAgents, type AgentsCtx } from "./use-agents";
 
 /** How many of a project's conversations are settled, snoozed or archived. */
@@ -64,6 +66,7 @@ export function projectActions(env: ProjectActionsEnv, project: Project, opts: {
   const machineId = client.data.projects.get(project.id)?.machine;
   const machine = machineId ? client.data.machines.get(machineId)?.value : undefined;
   const online = reachable(machine);
+  const setup = readiness(machine);
   const kept = canvas.kept(project.id);
   const shelved = shelvedIn(client.data, project.id);
   const pull = async () => {
@@ -76,7 +79,13 @@ export function projectActions(env: ProjectActionsEnv, project: Project, opts: {
     }
   };
   const items: (MenuItem | false)[] = [
-    !!startNew && !readOnly && { label: "New agent here", icon: <Plus />, disabled: !online, onSelect: () => startNew(project.id) },
+    !!startNew && !readOnly && { label: "New agent here", icon: <Plus />, disabled: !canRunAgents(machine), onSelect: () => startNew(project.id) },
+    // Online but nothing to run an agent with: the step that fixes it, right under.
+    !readOnly && !!machine && (setup.state === "none" || setup.state === "login") && {
+      label: setup.state === "none" ? `Set up a provider on ${machine.name}…` : `Log in to a provider on ${machine.name}…`,
+      icon: <KeyRound />,
+      onSelect: () => openMachineSettings(machine.id, "Providers"),
+    },
     !!services && !readOnly && !!project.repo && { label: "New sandbox for this project", icon: <Cloud />, onSelect: () => openProjectDialog({ kind: "sandbox", project: project.id }) },
     !!focusProject && { label: "Focus on this project only", icon: <Focus />, onSelect: () => focusProject(project.id) },
     !!canvas.keep && { label: kept ? "Unpin from the canvas" : "Pin to the canvas", icon: kept ? <PinOff /> : <Pin />, onSelect: () => canvas.keep?.(project.id, !kept) },

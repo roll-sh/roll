@@ -6,6 +6,8 @@ import type { Machine, Project } from "@/lib/agents-api";
 import { AddMachinePaths } from "./add-machine";
 import { Composer } from "./composer";
 import { openProjectDialog } from "@/lib/agents-project-dialogs";
+import { readiness } from "@/lib/agents-setup";
+import { ProviderSetup } from "./provider-setup";
 import { MachineIcon, ProjectIcon } from "./identity";
 import { Select } from "./ui";
 import { defaultProject, lastProject, rememberProject, usableIn, useStartThread } from "./new-thread";
@@ -125,6 +127,9 @@ export function Launcher({ project: wanted, machine: wantedMachine, at, onClose 
               }}
             />
           </div>
+        ) : machine && needsSetup(machine) ? (
+          // Nothing could run the prompt there yet: the next step instead of a composer that fails.
+          <ProviderSetup machine={machine} className="mx-1" />
         ) : inProject && machine ? (
           <Composer
             key={inProject.id}
@@ -134,7 +139,7 @@ export function Launcher({ project: wanted, machine: wantedMachine, at, onClose 
         ) : (
           <Offline machine={machine} onAdd={addProject} />
         )}
-        {inProject && machine && (
+        {inProject && machine && !needsSetup(machine) && (
           <p className="flex flex-wrap gap-x-3 px-2 pt-2 text-[11px] text-subtle">
             <span>
               <Kbd>Enter</Kbd> starts it
@@ -158,6 +163,9 @@ export function Launcher({ project: wanted, machine: wantedMachine, at, onClose 
 function Kbd({ children }: { children: string }) {
   return <kbd className="rounded border border-line px-1 font-sans text-[10.5px] text-muted">{children}</kbd>;
 }
+
+/** Online, but no provider installed or none logged in. */
+const needsSetup = (m: Machine) => m.online && ["none", "login"].includes(readiness(m).state);
 
 function Offline({ machine, onAdd }: { machine: Machine | undefined; onAdd: () => void }) {
   return (

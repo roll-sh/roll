@@ -11,7 +11,8 @@
 
 import { ChevronRight, FolderPlus, MoreHorizontal, Pin, Plus } from "lucide-react";
 import { createContext, useContext, useState, type ReactNode } from "react";
-import { reachable, type Machine, type Project } from "@/lib/agents-api";
+import type { Machine, Project } from "@/lib/agents-api";
+import { canRunAgents } from "@/lib/agents-setup";
 import { setAgentsView } from "@/lib/agents-surface";
 import { ProjectIcon } from "./identity";
 import { Menu } from "./menu";
@@ -99,9 +100,9 @@ export function MoreProjects({ machine, onAdd }: { machine: Machine; onAdd?: () 
 function ProjectRow({ project, machine, onDone }: { project: Project; machine: Machine; onDone: () => void }) {
   const { startNew } = useAgents();
   const { kept, keep } = useCanvasProjects();
-  const online = reachable(machine);
   const settings = () => (onDone(), setAgentsView({ kind: "settings", target: `p:${project.id}` }));
-  const start = startNew && online ? () => (onDone(), startNew(project.id)) : null;
+  // Only where an agent can run: else the row opens settings, and its ⋯ says what to set up.
+  const start = startNew && canRunAgents(machine) ? () => (onDone(), startNew(project.id)) : null;
   const actions = useProjectActions(project);
   const where = project.repo ? `${project.repo.owner}/${project.repo.repo}` : shortPath(project.path, machine.info?.home);
   return (

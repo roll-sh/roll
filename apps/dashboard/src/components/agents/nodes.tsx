@@ -7,7 +7,7 @@ import { projectStats, type ProjectStats } from "@/lib/agents-graph";
 import { providersFor } from "@/lib/agents-store";
 import { setAgentsView } from "@/lib/agents-surface";
 import { deliveredLabel } from "@/lib/agents-worklog";
-import { primary } from "../ui";
+import { btn, primary } from "../ui";
 import { AutomationChip, useThreadOrigin } from "./automations/chip";
 import { ChangeChip, changeStatusLabel, WorkChip } from "./change";
 import { ContextMeter } from "./context-meter";
@@ -23,6 +23,8 @@ import { machineColor, projectColor } from "@/lib/agents-identity";
 import { useAgents } from "./use-agents";
 import { MoreProjects } from "./machine-projects";
 import { useProjectActions } from "./project-actions";
+import { openMachineSettings, ProviderSetup } from "./provider-setup";
+import { canRunAgents, notReadyReason, readiness } from "@/lib/agents-setup";
 
 /**
  * The frame every canvas card shares: flat panel, hairline border, the whole card a drag handle.
@@ -162,13 +164,11 @@ export function MachineNode({ machine }: { machine: Machine }) {
   const os = info ? `${OS_NAMES[info.os] ?? info.os} · ${info.arch} · roll ${info.version}` : sandbox ? null : "Never connected";
   // A sandbox that isn't connected isn't "offline": it's asleep, stopped, or on its way up.
   const state = machineState(machine);
-  const installed = info?.providers.filter((p) => p.installed) ?? [];
   // Shown too while the daemon is still probing them (it says hello without waiting).
   const listed = info?.providers.filter((p) => p.installed || p.checking) ?? [];
-  const missing = installed.filter((p) => p.auth === "missing");
-  const ready = installed.some((p) => p.auth === "ready");
-  // A sandbox can't do anything until a provider is logged in: say so up front.
-  const loginFirst = !!sandbox && machine.online && missing.length > 0 && !ready;
+  // Can't run an agent yet (no provider installed, or none logged in): the next step comes first.
+  const ready = readiness(machine);
+  const setup = machine.online && (ready.state === "none" || ready.state === "login");
   const login = (p: ProviderInfo) =>
     run(`login:${p.id}`, async () => {
       const r = await client.run<{ type: "created"; id: string }>(machine.id, { type: "terminal.open", command: loginCommand(p, !!sandbox), cols: 100, rows: 26 }, "created");
@@ -220,23 +220,9 @@ export function MachineNode({ machine }: { machine: Machine }) {
           </p>
         )}
         {sandbox && <SandboxPanel machine={machine} />}
-        {loginFirst ? (
-          <div className="space-y-2 rounded-lg border border-accent/35 px-3 py-2.5" role="group" aria-label="Log in to a provider">
-            <p className="text-[12px]">Log in to a provider to start working here.</p>
-            <div className="flex flex-wrap gap-1.5">
-              {missing.map((p) => (
-                <button key={p.id} data-nodrag disabled={busy !== null} onClick={() => login(p)} className={primary}>
-                  <LogIn className="size-3.5" /> {busy === `login:${p.id}` ? <span className="shimmer">Opening…</span> : `Log in to ${p.name}`}
-                </button>
-              ))}
-            </div>
-            <p className="text-[11px] text-subtle">
-              It opens a terminal: follow the link it prints, then paste the code. The card moves on when it&apos;s done.{" "}
-              <button data-nodrag disabled={busy !== null} onClick={() => run("refresh", () => client.run(machine.id, { type: "provider.refresh" }))} className="text-muted underline-offset-2 hover:text-fg hover:underline disabled:opacity-40">
-                {busy === "refresh" ? <span className="shimmer">Checking…</span> : "Logged in elsewhere? Check again"}
-              </button>
-            </p>
-          </div>
+        {setup ? (
+          // No provider, or none logged in: an agent can't run here yet; say what to do next.
+          <ProviderSetup machine={machine} />
         ) : (
           listed.length > 0 && (
             <ul className="flex flex-wrap gap-1" aria-label="Providers">
@@ -273,8 +259,8 @@ export function MachineNode({ machine }: { machine: Machine }) {
           )
         )}
         <MoreProjects machine={machine} onAdd={add} />
-        {machine.online && projects === 0 && !loginFirst && (
-          <button data-nodrag onClick={add} className={`${primary} w-full justify-center`}>
+        {machine.online && projects === 0 && (
+          <button data-nodrag onClick={add} className={`${setup ? btn : primary} w-full justify-center`}>
             <FolderPlus className="size-3.5" /> Add a project
           </button>
         )}
@@ -291,6 +277,8 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
   const { startNew, demo } = useAgents();
   // An asleep sandbox counts: what's sent to it wakes it.
   const online = reachable(machine);
+  // Online is not enough: an agent needs a provider installed and logged in there.
+  const runnable = canRunAgents(machine);
   const stats = projectStats(client.data, project.id);
   // The same actions everywhere a project shows (its settled and archived conversations among them).
   const actions = useProjectActions(project, { remove: () => void run("remove", () => client.run(machine!.id, { type: "project.remove", project: project.id })) });
@@ -301,7 +289,7 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
         <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold tracking-[-0.015em]">{project.name}</span>
         <HoverActions>
           {startNew && (
-            <Tool label="New agent here (or drag onto the canvas)" launch={`p:${project.id}`} disabled={!online} onClick={() => startNew(project.id)}>
+            <Tool label={runnable ? "New agent here (or drag onto the canvas)" : (notReadyReason(machine) ?? "New agent here")} launch={`p:${project.id}`} disabled={!runnable} onClick={() => startNew(project.id)}>
               <Plus />
             </Tool>
           )}
@@ -336,9 +324,19 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
       {project.settings.auto_pull && project.pull && <PullLine pull={project.pull} className="mx-3 mb-3 -mt-1" />}
       {!stats.threads && startNew && online && (
         <div className="px-3 pb-3">
-          <button data-nodrag onClick={() => startNew(project.id)} className={`${primary} w-full justify-center`}>
-            <Plus className="size-3.5" /> Start an agent
-          </button>
+          {runnable ? (
+            <button data-nodrag onClick={() => startNew(project.id)} className={`${primary} w-full justify-center`}>
+              <Plus className="size-3.5" /> Start an agent
+            </button>
+          ) : (
+            // The machine can't run one yet: its card has the steps; this says where.
+            <p className="text-[11.5px] text-subtle">
+              {notReadyReason(machine)}.{" "}
+              <button type="button" data-nodrag onClick={() => openMachineSettings(machine!.id, "Providers")} className="text-muted underline-offset-2 hover:text-fg hover:underline">
+                Set one up
+              </button>
+            </p>
+          )}
         </div>
       )}
       {error && <p className="px-3 pb-3 text-[12px] text-danger">{error}</p>}

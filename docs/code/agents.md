@@ -1594,6 +1594,19 @@ The surface has three views:
   on the project: Start an agent there, Open settings, or Add another. Pull merged changes is
   offered on the way, on for a clone and off for a folder.
 
+  **A machine that can't run an agent** (`readiness` in `lib/agents-setup.ts`, `ProviderSetup` in
+  `provider-setup.tsx`): online with no provider installed, or with providers but none logged in
+  (a login the daemon reports as unknown counts as usable). It can still hold projects, but
+  nothing offers a launch that would fail. Its card leads with what to do: log in to each
+  installed provider (a terminal on the machine running its login; a sandbox's device login),
+  add an agent from the ACP registry or use an endpoint or gateway (machine settings, opened at
+  Providers with "Add agent" open, or at Endpoints), or check again after doing it elsewhere;
+  "Add a project" stays, no longer the primary button. Its projects' + and "Start an agent" say
+  why not ("No agent provider on ada-mbp yet. Set one up"), their actions disable "New agent
+  here" and offer "Set up a provider on ada-mbp…" (or "Log in to a provider…") under it, a
+  folded project's row opens its settings instead of starting, and the launcher shows the same
+  steps in place of the composer.
+
   **Display** (Linear's display options; `DisplayMenu` in `views.tsx`, `applyDisplay` in
   `lib/agents-views.ts`). Each view has its own, kept with it in the canvas document, in a
   popover beside the filters:

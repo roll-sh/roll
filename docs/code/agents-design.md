@@ -207,6 +207,7 @@ state, or draw a project's logo inline (only in an `<img>`).
   shimmering, its time in mono at the right; next: subtle; failed: `danger`).
 - **"Only roll" chips:** focusing a project puts a raised chip in the views bar ("Only" muted,
   the name, an ×) and the same chip atop the sidebar's list.
+- **"Can't run an agent here":** the machine card's one accent-bordered panel (`border-accent/35`, 8px radius; the only accent on the card): a 12px sentence, the primary step (Log in to …, or Add from the ACP registry) and a quiet bordered "Use an endpoint or gateway", then an 11px subtle line with the rest as underline-on-hover links. The same panel in the launcher; a project card says it in one 11.5px subtle line with "Set one up".
 - **Add a project:** the 520px dialog: "On" and a machine `Select` (several online), a
   full-width `Segmented` (Folder, Clone a repo, New repo), lists in a 192px inset well
   (`bg-bg`, hairline, 8px radius; rows 28–32px, a project's own folder or repo marked "project"
