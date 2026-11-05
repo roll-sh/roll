@@ -550,6 +550,8 @@ export interface ModelInfo {
   images?: boolean;
   /** One of the machine's custom models (its settings), not one the provider lists. */
   custom?: boolean;
+  /** Listed by an endpoint the provider uses (its name), not by the provider itself. */
+  via?: string;
 }
 
 /** A model the provider would offer after an update. */
@@ -599,6 +601,74 @@ export interface MachineInfo {
   providers: ProviderInfo[];
   /** The machine's settings (`null`: a daemon from before machine settings). */
   settings: MachineConfig | null;
+  /** The daemon's X25519 public key (base64url): endpoint keys are sealed to it (`agents-seal.ts`). */
+  seal_key?: string;
+}
+
+// ── endpoints (docs/code/agents.md, "Endpoints"; agent-proto `endpoint.rs`) ──
+
+/** What an endpoint speaks: which variables a provider gets and how its models are listed. */
+export type EndpointKind = "anthropic" | "openai" | "cliproxy" | "custom";
+
+/** An endpoint as the owner sets it: everything but the key. */
+export interface EndpointSpec {
+  /** `[a-z0-9_-]`, at most 64; the same id on several machines is one profile applied to them. */
+  id: string;
+  name: string;
+  kind: EndpointKind;
+  base_url: string;
+  /** The providers that use it (a provider uses at most one endpoint on a machine). */
+  providers?: ProviderId[];
+  /** `custom`: the variable the base URL goes in. */
+  url_env?: string;
+  /** `custom`: the variable the key goes in. */
+  key_env?: string;
+  /** The key is read on the machine from 1Password (`op://vault/item/field`). */
+  key_ref?: string;
+}
+
+/** A key sealed to one daemon (`roll-seal-v1`; `agents-seal.ts`). The relay only ever sees this. */
+export interface SealedSecret {
+  v: number;
+  epk: string;
+  nonce: string;
+  ct: string;
+}
+
+/** What `endpoint.set` does to the endpoint's key. */
+export type KeyChange = { type: "keep" } | { type: "clear" } | { type: "set"; sealed: SealedSecret };
+
+/** Where an endpoint's key comes from. Never any part of the key. */
+export type KeyState = "none" | "sealed" | "reference";
+
+export interface EndpointModel {
+  id: string;
+  name?: string;
+}
+
+/** An endpoint as its daemon reports it. */
+export interface EndpointInfo extends EndpointSpec {
+  key: KeyState;
+  /** What its `/models` listed at the last check. */
+  models?: EndpointModel[];
+  checked_at?: Millis;
+  /** Why the last check failed (never holds the key). */
+  error?: string;
+}
+
+/** `endpoint.check`'s answer. */
+export interface EndpointCheck {
+  ok: boolean;
+  models: number;
+  ms: number;
+  error?: string;
+}
+
+/** An owner's endpoint kept on the relay without a key, to apply to machines. */
+export interface EndpointProfile extends EndpointSpec {
+  /** Offered first, and picked, in the new-sandbox dialog. */
+  sandbox_default?: boolean;
+  updated_at: Millis;
 }
 
 // ── machine settings (docs/code/agents.md, "Machine settings") ──
@@ -611,8 +681,10 @@ export interface MachineConfig {
   base: SettingsBase;
   /** Every provider the daemon has, on or off. */
   providers: ProviderBase[];
-  /** The daemon's `config.toml`: API keys and base URLs are set there, never through roll. */
+  /** The daemon's `config.toml` on the machine: its own API keys and base URLs stay there. */
   config_path: string;
+  /** The endpoints set from roll, with whether each has a key (never the key). */
+  endpoints?: EndpointInfo[];
 }
 
 export interface SettingsBase {
@@ -829,6 +901,11 @@ export type Command =
   | { type: "provider.refresh" }
   /** Replace the machine's settings whole; the reply comes after its `hello` with them. */
   | { type: "machine.configure"; settings: MachineSettings }
+  /** Add or replace an endpoint and change its key (sealed to the daemon; `agents-seal.ts`). */
+  | { type: "endpoint.set"; endpoint: EndpointSpec; key?: KeyChange }
+  | { type: "endpoint.remove"; endpoint: string }
+  /** Ask the endpoint for its models now (answers `endpoint_checked`). */
+  | { type: "endpoint.check"; endpoint: string }
   | { type: "diff.get"; thread: ThreadId; run?: RunId }
   | { type: "fs.list"; project?: ProjectId; path: string }
   | { type: "fs.read"; project: ProjectId; path: string }
@@ -903,6 +980,7 @@ export type Reply =
   | ({ type: "pulled" } & PullResult)
   | { type: "written"; path: string }
   | { type: "scrollback"; data: string }
+  | ({ type: "endpoint_checked" } & EndpointCheck)
   | { type: "error"; code: ErrorCode; message: string };
 
 // ── deltas and the stream ──
@@ -1114,6 +1192,7 @@ const modelInfoWireD = obj<ModelInfo & { efforts: string[] }>({
   legacy: optional(bool),
   images: optional(bool),
   custom: optional(bool),
+  via: optional(str),
 });
 /** Daemons from before option descriptors send a model's reasoning levels alone, as `efforts` (agent-proto reads them the same way). */
 const modelInfoD: Decoder<ModelInfo> = (v, p, ctx) => {
@@ -1462,6 +1541,33 @@ const machineSettingsD = obj<MachineSettings>({
   git_name: optional(str),
   git_email: optional(str),
 });
+const endpointKindD = literal("anthropic", "openai", "cliproxy", "custom");
+const endpointSpecFields = {
+  id: str,
+  name: str,
+  kind: endpointKindD,
+  base_url: str,
+  providers: optional(array(str)),
+  url_env: optional(str),
+  key_env: optional(str),
+  key_ref: optional(str),
+};
+const endpointSpecD = obj<EndpointSpec>(endpointSpecFields);
+const sealedSecretD = obj<SealedSecret>({ v: int, epk: str, nonce: str, ct: str });
+const keyChangeD: Decoder<KeyChange> = tagged("type", {
+  keep: obj<object>({}),
+  clear: obj<object>({}),
+  set: obj<{ sealed: SealedSecret }>({ sealed: sealedSecretD }),
+} satisfies Record<KeyChange["type"], Decoder<object>>);
+const endpointInfoD = obj<EndpointInfo>({
+  ...endpointSpecFields,
+  key: withDefault(literal("none", "sealed", "reference"), () => "none" as const),
+  models: optional(array(obj<EndpointModel>({ id: str, name: optional(str) }))),
+  checked_at: optional(int),
+  error: optional(str),
+});
+const endpointCheckD = obj<EndpointCheck>({ ok: bool, models: withDefault(int, () => 0), ms: withDefault(int, () => 0), error: optional(str) });
+export const endpointProfileD = obj<EndpointProfile>({ ...endpointSpecFields, sandbox_default: optional(bool), updated_at: withDefault(int, () => 0) });
 const machineConfigD = obj<MachineConfig>({
   set: machineSettingsD,
   base: obj<SettingsBase>({
@@ -1476,6 +1582,7 @@ const machineConfigD = obj<MachineConfig>({
   }),
   providers: array(obj<ProviderBase>({ id: str, name: str, binary: opt(str), args: withDefault(int, () => 0), env: vec(str) })),
   config_path: str,
+  endpoints: optional(array(endpointInfoD)),
 });
 const machineInfoD = obj<MachineInfo>({
   hostname: str,
@@ -1485,6 +1592,7 @@ const machineInfoD = obj<MachineInfo>({
   home: str,
   providers: array(providerInfoD),
   settings: opt(machineConfigD),
+  seal_key: optional(str),
 });
 export const machineD = obj<Machine>({
   id: str,
@@ -1579,6 +1687,9 @@ export const commandD: Decoder<Command> = tagged("type", {
   "terminal.close": cmd<"terminal.close">(obj({ terminal: str })),
   "provider.refresh": cmd<"provider.refresh">(obj({})),
   "machine.configure": cmd<"machine.configure">(obj({ settings: machineSettingsD })),
+  "endpoint.set": cmd<"endpoint.set">(obj({ endpoint: endpointSpecD, key: optional(keyChangeD) })),
+  "endpoint.remove": cmd<"endpoint.remove">(obj({ endpoint: str })),
+  "endpoint.check": cmd<"endpoint.check">(obj({ endpoint: str })),
   "diff.get": cmd<"diff.get">(obj({ thread: str, run: optional(str) })),
   "fs.list": cmd<"fs.list">(obj({ project: optional(str), path: str })),
   "fs.read": cmd<"fs.read">(obj({ project: str, path: str })),
@@ -1610,6 +1721,7 @@ export const replyD: Decoder<Reply> = tagged("type", {
   }),
   scrollback: obj<{ data: string }>({ data: str }),
   written: obj<{ path: string }>({ path: str }),
+  endpoint_checked: endpointCheckD,
   pulled: pullResultD,
   error: obj<{ code: ErrorCode; message: string }>({
     code: literal("not_found", "invalid", "conflict", "provider", "machine_offline", "timeout", "internal"),

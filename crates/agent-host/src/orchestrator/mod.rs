@@ -263,6 +263,7 @@ impl Host {
                 home: String::new(),
                 providers: Vec::new(),
                 settings: None,
+                seal_key: None,
             }),
             probes,
             publishing: AsyncMutex::new(()),
@@ -607,6 +608,9 @@ impl Host {
                 Ok(Reply::Ok)
             }
             Command::MachineConfigure { settings } => self.machine_configure(*settings).await,
+            Command::EndpointSet { .. } | Command::EndpointRemove { .. } | Command::EndpointCheck { .. } => {
+                Err(Fail::Invalid("this roll agent doesn't take endpoints yet: update it".into()))
+            }
             Command::DiffGet { thread, run } => self.diff_get(&thread, run.as_ref()).await,
             Command::FsList { project, path } => self.fs_list(project.as_ref(), &path).await,
             Command::FsRead { project, path } => self.fs_read(&project, &path).await,

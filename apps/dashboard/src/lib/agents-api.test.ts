@@ -29,6 +29,7 @@ import {
   type MachineState,
   type SandboxStatus,
   type StreamEvent,
+  endpointProfileD,
 } from "./agents-api";
 import { httpTransport } from "./agents-client";
 import { decode, type Decoder } from "./decode";
@@ -42,6 +43,7 @@ const decoders: Record<string, Decoder<unknown>> = {
   "daemon_frames.json": daemonFrameD,
   "deltas.json": deltaD,
   "device_logins.json": deviceLoginD,
+  "endpoint_profiles.json": endpointProfileD,
   "entities.json": entityD,
   "login_polls.json": loginPollD,
   "machine_logins.json": machineLoginD,
@@ -127,6 +129,9 @@ describe("agent-proto fixtures", () => {
       "terminal.close": true,
       "provider.refresh": true,
       "machine.configure": true,
+      "endpoint.set": true,
+      "endpoint.remove": true,
+      "endpoint.check": true,
       "diff.get": true,
       "fs.list": true,
       "fs.read": true,

@@ -575,8 +575,19 @@ async fn command(
     }
     // Machine settings never carry a credential: refused here, before they reach the machine
     // (the daemon checks again).
-    if let agent_proto::Command::MachineConfigure { settings } = &req.command {
-        (**settings).clone().check().map_err(Error::Invalid)?;
+    match &req.command {
+        agent_proto::Command::MachineConfigure { settings } => {
+            (**settings).clone().check().map_err(Error::Invalid)?;
+        }
+        // An endpoint's key arrives sealed to the daemon: the relay can only check its shape
+        // and forwards it without keeping it (docs/code/agents.md, "Endpoints").
+        agent_proto::Command::EndpointSet { endpoint, key } => {
+            endpoint.clone().check().map_err(Error::Invalid)?;
+            if let agent_proto::KeyChange::Set { sealed } = key {
+                sealed.check().map_err(Error::Invalid)?;
+            }
+        }
+        _ => {}
     }
     super::code::follow(&code);
     let granted = super::code::grant_for(&code, &caller, &m, &req.command)?;

@@ -60,7 +60,12 @@ id! {
 }
 
 pub mod automation;
+pub mod endpoint;
 pub mod identity;
+
+pub use endpoint::{
+    EndpointCheck, EndpointInfo, EndpointKind, EndpointModel, EndpointProfile, EndpointSpec, KeyChange, KeyState, SEAL_VERSION, SealedSecret, endpoint_limits,
+};
 pub use identity::{IdentityColor, MachineAppearance, MachineKind, ProjectIcon, ProjectLogo};
 
 /// A provider instance on a machine: `codex`, `claude`, or `acp:<name>` (an ACP agent from the
@@ -1085,6 +1090,11 @@ pub struct MachineInfo {
     /// The machine's settings (unset: a daemon from before machine settings).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<Box<MachineConfig>>,
+    /// The daemon's X25519 public key (base64url, 32 bytes): endpoint keys are sealed to it
+    /// ([`SealedSecret`]), so only this daemon can open them. Unset: a daemon from before
+    /// endpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seal_key: Option<String>,
 }
 
 /// A machine's settings as its daemon reports them (docs/code/agents.md, "Machine settings"):
@@ -1098,9 +1108,12 @@ pub struct MachineConfig {
     pub base: SettingsBase,
     /// Every provider the daemon has, on or off.
     pub providers: Vec<ProviderBase>,
-    /// The daemon's `config.toml` on the machine: API keys and base URLs are set there (or in a
-    /// sandbox's sealed env), never through roll.
+    /// The daemon's `config.toml` on the machine: its own API keys and base URLs stay there.
     pub config_path: String,
+    /// The endpoints set from roll ([`EndpointSpec`]), with whether each has a key (never the
+    /// key) and the models it listed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<EndpointInfo>,
 }
 
 /// What a machine's settings fall back to.
@@ -1422,6 +1435,9 @@ pub struct ModelInfo {
     /// One of the machine's custom models (its settings), not one the provider lists.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub custom: bool,
+    /// Listed by an endpoint the provider uses (its name), not by the provider itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 fn is_true(b: &bool) -> bool {
@@ -1448,6 +1464,8 @@ struct ModelInfoWire {
     images: bool,
     #[serde(default)]
     custom: bool,
+    #[serde(default)]
+    via: Option<String>,
 }
 
 impl From<ModelInfoWire> for ModelInfo {
@@ -1456,14 +1474,14 @@ impl From<ModelInfoWire> for ModelInfo {
         if !w.efforts.is_empty() && !options.iter().any(|o| o.role() == Some(OptionRole::Reasoning)) {
             options.insert(0, ModelOption::reasoning(w.efforts.iter().map(|e| OptionChoice::new(e, &effort_label(e))).collect(), None));
         }
-        ModelInfo { id: w.id, name: w.name, short_name: w.short_name, default: w.default, options, legacy: w.legacy, images: w.images, custom: w.custom }
+        ModelInfo { id: w.id, name: w.name, short_name: w.short_name, default: w.default, options, legacy: w.legacy, images: w.images, custom: w.custom, via: w.via }
     }
 }
 
 impl ModelInfo {
     /// A model with no options.
     pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
-        ModelInfo { id: id.into(), name: name.into(), short_name: None, default: false, options: Vec::new(), legacy: false, images: true, custom: false }
+        ModelInfo { id: id.into(), name: name.into(), short_name: None, default: false, options: Vec::new(), legacy: false, images: true, custom: false, via: None }
     }
 
     /// Its reasoning option, if it has one.
@@ -1895,6 +1913,21 @@ pub enum Command {
     /// stored and applied them and sent `hello` again with them.
     #[serde(rename = "machine.configure")]
     MachineConfigure { settings: Box<MachineSettings> },
+    /// Add or replace an endpoint ([`EndpointSpec`]) and change its key ([`KeyChange`]); the
+    /// providers it lists use it from their next process. Replies once the daemon has stored it
+    /// and sent `hello` again; its models are listed in the background.
+    #[serde(rename = "endpoint.set")]
+    EndpointSet {
+        endpoint: EndpointSpec,
+        #[serde(default, skip_serializing_if = "endpoint::key_change_is_keep")]
+        key: KeyChange,
+    },
+    /// Remove an endpoint and its key; its providers go back to their own login.
+    #[serde(rename = "endpoint.remove")]
+    EndpointRemove { endpoint: String },
+    /// Ask the endpoint for its models now (answers `endpoint_checked`, and keeps what it lists).
+    #[serde(rename = "endpoint.check")]
+    EndpointCheck { endpoint: String },
 
     // Queries.
     /// The diff of a run (checkpoint before → after), or of the whole thread when `run` is
@@ -1971,6 +2004,8 @@ pub enum Reply {
         /// Base64.
         data: String,
     },
+    /// What `endpoint.check` found.
+    EndpointChecked(EndpointCheck),
     Error(ReplyError),
 }
 

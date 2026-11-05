@@ -458,6 +458,11 @@ fn commands() -> Vec<Command> {
         Command::TerminalClose { terminal: trm() },
         Command::ProviderRefresh {},
         Command::MachineConfigure { settings: Box::new(settings()) },
+        Command::EndpointSet { endpoint: endpoint_spec(), key: KeyChange::Set { sealed: sealed() } },
+        Command::EndpointSet { endpoint: EndpointSpec { providers: vec![ProviderId::claude()], ..endpoint_spec() }, key: KeyChange::Keep },
+        Command::EndpointSet { endpoint: endpoint_spec(), key: KeyChange::Clear },
+        Command::EndpointRemove { endpoint: "cliproxy".into() },
+        Command::EndpointCheck { endpoint: "cliproxy".into() },
         Command::DiffGet { thread: thr(), run: Some(run()) },
         Command::FsList { project: None, path: "/home/ada".into() },
         Command::FsRead { project: prj(), path: "README.md".into() },
@@ -501,6 +506,9 @@ fn covered_command(c: &Command) {
         | Command::TerminalClose { .. }
         | Command::ProviderRefresh {}
         | Command::MachineConfigure { .. }
+        | Command::EndpointSet { .. }
+        | Command::EndpointRemove { .. }
+        | Command::EndpointCheck { .. }
         | Command::DiffGet { .. }
         | Command::FsList { .. }
         | Command::FsRead { .. }
@@ -538,6 +546,8 @@ fn replies() -> Vec<Reply> {
         Reply::Pulled(PullResult { at: T, outcome: PullOutcome::Failed { message: "fetching origin failed: could not resolve host".into() } }),
         Reply::Written { path: "docs/plans/fix-the-queue.md".into() },
         Reply::Scrollback { data: "JCBscwo=".into() },
+        Reply::EndpointChecked(EndpointCheck { ok: true, models: 42, ms: 180, error: None }),
+        Reply::EndpointChecked(EndpointCheck { ok: false, models: 0, ms: 10_000, error: Some("the endpoint answered 401 Unauthorized".into()) }),
         Reply::Error(ReplyError { code: ErrorCode::MachineOffline, message: "the machine isn't connected".into() }),
     ]
 }
@@ -554,6 +564,7 @@ fn covered_reply(r: &Reply) {
         | Reply::Pulled(_)
         | Reply::Written { .. }
         | Reply::Scrollback { .. }
+        | Reply::EndpointChecked(_)
         | Reply::Error(_) => {}
     }
 }
@@ -634,6 +645,7 @@ fn info() -> MachineInfo {
                     legacy: false,
                     images: true,
                     custom: false,
+                    via: None,
                 }, ModelInfo {
                     id: "claude-sonnet-4-6".into(),
                     name: "Claude Sonnet 4.6".into(),
@@ -653,7 +665,9 @@ fn info() -> MachineInfo {
                     legacy: true,
                     images: false,
                     custom: false,
-                }, ModelInfo { custom: true, ..ModelInfo::new("claude-opus-5-5-20261101", "Opus 5.5 (pinned)") }],
+                    via: None,
+                }, ModelInfo { custom: true, ..ModelInfo::new("claude-opus-5-5-20261101", "Opus 5.5 (pinned)") },
+                ModelInfo { via: Some("CLIProxyAPI".into()), ..ModelInfo::new("gemini-2.5-pro", "gemini-2.5-pro") }],
                 update_required: vec![UpdateRequired { id: "claude-haiku-5-5".into(), name: "Claude Haiku 5.5".into(), min_version: "2.1.293".into() }],
                 capabilities: Capabilities { steer: true, fork: true, rollback: false, plan_mode: true, images: true, subagents: true, mode_switch: true, compact: true },
                 checking: false,
@@ -701,7 +715,55 @@ fn info() -> MachineInfo {
                 ProviderBase { id: ProviderId::codex(), name: "Codex".into(), binary: Some("/opt/homebrew/bin/codex".into()), args: 1, env: vec![] },
             ],
             config_path: "/Users/ada/.local/share/roll/agent/config.toml".into(),
+            endpoints: vec![
+                EndpointInfo {
+                    spec: endpoint_spec(),
+                    key: KeyState::Sealed,
+                    models: vec![EndpointModel { id: "gemini-2.5-pro".into(), name: None }, EndpointModel { id: "gpt-5.5".into(), name: Some("GPT-5.5".into()) }],
+                    checked_at: Some(T),
+                    error: None,
+                },
+                EndpointInfo {
+                    spec: EndpointSpec {
+                        id: "gemini".into(),
+                        name: "Gemini key".into(),
+                        kind: EndpointKind::Custom,
+                        base_url: "https://generativelanguage.googleapis.com".into(),
+                        providers: vec![ProviderId("acp:gemini".into())],
+                        url_env: None,
+                        key_env: Some("GEMINI_API_KEY".into()),
+                        key_ref: Some("op://Dev/Gemini/credential".into()),
+                    },
+                    key: KeyState::Reference,
+                    models: vec![],
+                    checked_at: None,
+                    error: Some("1Password: the op CLI isn't signed in".into()),
+                },
+            ],
         })),
+        seal_key: Some("hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr066SpjqqbTmo".into()),
+    }
+}
+
+fn endpoint_spec() -> EndpointSpec {
+    EndpointSpec {
+        id: "cliproxy".into(),
+        name: "CLIProxyAPI".into(),
+        kind: EndpointKind::Cliproxy,
+        base_url: "http://100.64.0.7:8317".into(),
+        providers: vec![ProviderId::claude(), ProviderId::codex()],
+        url_env: None,
+        key_env: None,
+        key_ref: None,
+    }
+}
+
+fn sealed() -> SealedSecret {
+    SealedSecret {
+        v: SEAL_VERSION,
+        epk: "3p7bfXt9wbTTW2HC7OQ1Nz-DQ8hbeGdNrfx-FG-IK08".into(),
+        nonce: "AAECAwQFBgcICQoL".into(),
+        ct: "bm90IGEgcmVhbCBrZXksIGp1c3QgYSBzaGFwZQ".into(),
     }
 }
 
@@ -878,6 +940,17 @@ fn fixtures() {
     );
     check("machine_logins", vec![MachineLogin { machine: machine(), owner: "acme".into() }]);
     check(
+        "endpoint_profiles",
+        vec![
+            EndpointProfile { spec: endpoint_spec(), sandbox_default: true, updated_at: T },
+            EndpointProfile {
+                spec: EndpointSpec { id: "gw".into(), name: "Team gateway".into(), kind: EndpointKind::Openai, base_url: "https://gw.example.com/v1".into(), providers: vec![ProviderId::codex()], url_env: None, key_env: None, key_ref: None },
+                sandbox_default: false,
+                updated_at: T,
+            },
+        ],
+    );
+    check(
         "shares",
         vec![Share {
             id: "shr_0123456789abcdef01234567".into(),
@@ -914,8 +987,8 @@ fn every_variant_of_every_tagged_enum_is_sampled() {
     let tags = |v: serde_json::Value, key: &str| -> std::collections::BTreeSet<String> {
         v.as_array().unwrap().iter().map(|x| x[key].as_str().unwrap().to_string()).collect()
     };
-    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 38, "commands");
-    assert_eq!(tags(serde_json::to_value(replies()).unwrap(), "type").len(), 11, "replies");
+    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 41, "commands");
+    assert_eq!(tags(serde_json::to_value(replies()).unwrap(), "type").len(), 12, "replies");
     assert_eq!(tags(serde_json::to_value(entities()).unwrap(), "kind").len(), 8, "entities");
     let bodies: std::collections::BTreeSet<String> = entities()
         .iter()

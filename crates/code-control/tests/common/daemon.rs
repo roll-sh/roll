@@ -8,7 +8,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 pub fn info() -> MachineInfo {
-    MachineInfo { hostname: "box".into(), os: "linux".into(), arch: "x86_64".into(), version: "0.1.0".into(), home: "/home/me".into(), providers: vec![], settings: None }
+    MachineInfo { hostname: "box".into(), os: "linux".into(), arch: "x86_64".into(), version: "0.1.0".into(), home: "/home/me".into(), providers: vec![], settings: None, seal_key: None }
 }
 
 pub struct Daemon {

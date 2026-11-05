@@ -97,6 +97,12 @@
                 "name": "Opus 5.5 (pinned)",
                 "default": false,
                 "custom": true
+              },
+              {
+                "id": "gemini-2.5-pro",
+                "name": "gemini-2.5-pro",
+                "default": false,
+                "via": "CLIProxyAPI"
               }
             ],
             "update_required": [
@@ -212,8 +218,45 @@
               "args": 1
             }
           ],
-          "config_path": "/Users/ada/.local/share/roll/agent/config.toml"
-        }
+          "config_path": "/Users/ada/.local/share/roll/agent/config.toml",
+          "endpoints": [
+            {
+              "id": "cliproxy",
+              "name": "CLIProxyAPI",
+              "kind": "cliproxy",
+              "base_url": "http://100.64.0.7:8317",
+              "providers": [
+                "claude",
+                "codex"
+              ],
+              "key": "sealed",
+              "models": [
+                {
+                  "id": "gemini-2.5-pro"
+                },
+                {
+                  "id": "gpt-5.5",
+                  "name": "GPT-5.5"
+                }
+              ],
+              "checked_at": 1762000000000
+            },
+            {
+              "id": "gemini",
+              "name": "Gemini key",
+              "kind": "custom",
+              "base_url": "https://generativelanguage.googleapis.com",
+              "providers": [
+                "acp:gemini"
+              ],
+              "key_env": "GEMINI_API_KEY",
+              "key_ref": "op://Dev/Gemini/credential",
+              "key": "reference",
+              "error": "1Password: the op CLI isn't signed in"
+            }
+          ]
+        },
+        "seal_key": "hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr066SpjqqbTmo"
       },
       "sandbox": {
         "backend": "agent37",

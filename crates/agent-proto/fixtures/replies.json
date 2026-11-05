@@ -104,6 +104,19 @@
     "data": "JCBscwo="
   },
   {
+    "type": "endpoint_checked",
+    "ok": true,
+    "models": 42,
+    "ms": 180
+  },
+  {
+    "type": "endpoint_checked",
+    "ok": false,
+    "models": 0,
+    "ms": 10000,
+    "error": "the endpoint answered 401 Unauthorized"
+  },
+  {
     "type": "error",
     "code": "machine_offline",
     "message": "the machine isn't connected"

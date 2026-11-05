@@ -172,7 +172,9 @@ impl Host {
                 base,
                 providers,
                 config_path: self.config.home.join("config.toml").display().to_string(),
+                endpoints: Vec::new(),
             })),
+            seal_key: None,
         }
     }
 }

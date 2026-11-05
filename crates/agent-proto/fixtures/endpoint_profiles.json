@@ -1,0 +1,24 @@
+[
+  {
+    "id": "cliproxy",
+    "name": "CLIProxyAPI",
+    "kind": "cliproxy",
+    "base_url": "http://100.64.0.7:8317",
+    "providers": [
+      "claude",
+      "codex"
+    ],
+    "sandbox_default": true,
+    "updated_at": 1762000000000
+  },
+  {
+    "id": "gw",
+    "name": "Team gateway",
+    "kind": "openai",
+    "base_url": "https://gw.example.com/v1",
+    "providers": [
+      "codex"
+    ],
+    "updated_at": 1762000000000
+  }
+]
