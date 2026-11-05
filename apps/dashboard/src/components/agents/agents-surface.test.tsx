@@ -49,6 +49,26 @@ describe("the agents in the header", () => {
     expect(window.location.hash).toBe("#agents/thr_2");
   });
 
+  it("with no machines yet, shows the first-run screen and doesn't call nothing \"All idle\"", async () => {
+    const h = agentsHarness({ machines: [] });
+    conn = { client: h.client, services: fakeServices(), error: null };
+    renderAgents(
+      <MarkStateProvider>
+        <AgentsControl />
+      </MarkStateProvider>,
+      h,
+    );
+    await userEvent.click(screen.getByRole("button", { name: /^Agents:/ }));
+    // Connected, with nothing (the harness's relay never says its stream is open).
+    act(() => h.client.show(h.client.data));
+    const popup = screen.getByRole("dialog", { name: "Agents" });
+    const start = within(popup).getByRole("region", { name: "Get started" });
+    expect(start).toHaveTextContent("Connect your computer");
+    expect(start).toHaveTextContent("Rent a sandbox");
+    expect(popup).not.toHaveTextContent("All idle");
+    expect(popup).toHaveTextContent("No machines yet");
+  });
+
   it("goes back to the canvas with Escape, and closes with Escape again", async () => {
     setup();
     await userEvent.click(screen.getByRole("button", { name: /Agents: 1 running/ }));

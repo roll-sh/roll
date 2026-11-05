@@ -94,6 +94,21 @@ describe("agents demo", () => {
     release();
   });
 
+  it("starts with no machines when asked (?demo=empty, the first-run screen) and a sandbox is the first", async () => {
+    demo = new DemoOwner(0.01, false, true);
+    const client = new AgentsClient("demo", demo, (fn) => queueMicrotask(fn));
+    const release = client.hold();
+    const services = demo.services();
+    expect((await services.sandboxes.list("demo")).sandboxes).toEqual([]);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(client.data.machines.size).toBe(0);
+    expect(client.data.threads.size).toBe(0);
+    const { machine } = await services.sandboxes.create("demo", { name: "first", env: {} });
+    await until("it to boot", () => client.data.machines.get(machine.id)?.value.online === true);
+    expect(client.data.machines.size).toBe(1);
+    release();
+  });
+
   it("rents sandboxes that boot into machines, and follows a published change to landed", async () => {
     demo = new DemoOwner(0.01, false);
     const client = new AgentsClient("demo", demo, (fn) => queueMicrotask(fn));

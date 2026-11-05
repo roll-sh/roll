@@ -328,9 +328,9 @@ export function AgentsSurface({
             </span>
             <span className="h-4 w-px shrink-0 bg-line-2 max-sm:hidden" aria-hidden />
             <span className="flex min-w-0 items-center gap-2 text-[12.5px] text-muted">
-              <span className={`size-1.5 shrink-0 rounded-full ${snap.conn === "live" ? (running ? "pulse-dot bg-accent" : "bg-ok") : snap.conn === "error" ? "bg-danger" : "bg-subtle"}`} aria-hidden />
+              <span className={`size-1.5 shrink-0 rounded-full ${snap.conn === "live" ? (running ? "pulse-dot bg-accent" : data.machines.size ? "bg-ok" : "bg-subtle") : snap.conn === "error" ? "bg-danger" : "bg-subtle"}`} aria-hidden />
               <span className="truncate">
-                {snap.conn === "live" ? (running ? `${running} running` : "All idle") : snap.conn === "error" ? (snap.error ?? "Can't reach roll") : "Reconnecting…"}
+                {snap.conn === "live" ? (running ? `${running} running` : data.machines.size ? "All idle" : "No machines yet") : snap.conn === "error" ? (snap.error ?? "Can't reach roll") : "Reconnecting…"}
               </span>
               {requests.length > 0 && (
                 <button

@@ -516,11 +516,12 @@ export class DemoOwner implements AgentsTransport {
   private allProviders = new Map<MachineId, ProviderInfo[]>();
   /**
    * `speed` scales every delay (tests run the demo fast); `keepAlive` starts new work whenever
-   * the canvas goes quiet.
+   * the canvas goes quiet; `empty` starts with no machines (`?demo=empty`: the first-run screen).
    */
   constructor(
     private speed = 1,
     private keepAlive = true,
+    private empty = false,
   ) {}
 
   // ── records ──
@@ -878,6 +879,7 @@ export class DemoOwner implements AgentsTransport {
   private start() {
     if (this.started) return;
     this.started = true;
+    if (this.empty) return;
     const t0 = now() - 3_600_000;
     this.machines.set(MBP, {
       id: MBP,

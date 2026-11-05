@@ -8,12 +8,15 @@ import { httpServices, type AgentsServices } from "@/lib/agents-services";
 
 const LAST_OWNER = "roll:agents:owner";
 
-/** The demo's in-memory owner, shared by its client and its services (loaded only when asked for). */
+/**
+ * The demo's in-memory owner, shared by its client and its services (loaded only when asked for).
+ * `?demo=empty` starts it with no machines, to see the first-run screen.
+ */
 let demo: Promise<{ client: AgentsClient; services: AgentsServices }> | null = null;
 
 function loadDemo() {
   demo ??= import("@/lib/agents-demo").then(({ DemoOwner }) => {
-    const owner = new DemoOwner();
+    const owner = new DemoOwner(1, true, new URLSearchParams(window.location.search).get("demo") === "empty");
     return { client: clientFor(DEMO_OWNER, () => owner), services: owner.services() };
   });
   return demo;
