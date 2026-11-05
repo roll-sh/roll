@@ -76,7 +76,7 @@ describe("the ACP registry in the demo", () => {
     demo = new DemoOwner(0.01, false);
     const client = new AgentsClient("demo", demo, (fn) => queueMicrotask(fn));
     const release = client.hold();
-    await vi.waitFor(() => expect(client.data.machines.size).toBe(2));
+    await vi.waitFor(() => expect(client.data.machines.has("mch_demo_box")).toBe(true));
     const box = () => client.data.machines.get("mch_demo_box")!.value.info!;
     expect(box().settings?.registry).toEqual([]);
 

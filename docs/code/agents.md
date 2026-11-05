@@ -1284,6 +1284,14 @@ three minutes for the sandbox's seal key ("Setting up CLIProxyAPI…", `applyWhe
 applies it; closed first, a quiet notice says it wasn't applied. The model picker tags endpoint
 models "via <name>".
 
+**roll's own gateway** (docs/code/gateway.md) builds on endpoints. One of the owner's computers
+runs `crates/model-gateway` inside its daemon, with the owner's API keys sealed to it. Every machine
+that joins gets the endpoint `roll-gateway` of kind `gateway`, with a client key minted on the
+gateway's computer and sealed straight to the joining machine (the relay passes the box on, as for
+any endpoint). Everywhere a machine uses it, the dashboard says that its AI requests go out from
+that computer (`GatewayNotice`). The gateway never holds a Claude.ai or ChatGPT login: those stay
+on each machine, as above.
+
 ## Owner settings
 
 What follows the user to every device (T3's client settings that roll has a use for) is one
