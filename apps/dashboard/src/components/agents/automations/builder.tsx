@@ -687,7 +687,7 @@ function PathInput({ value, onChange, variables, invalid }: { value: string; onC
         className={cn(fieldClass, "w-full font-mono text-[12px]", invalid && "border-danger/50")}
       />
       {open && options.length > 0 && (
-        <ul role="listbox" aria-label="Fields" className="pop absolute inset-x-0 top-full z-[140] mt-1 max-h-56 min-w-64 overflow-y-auto rounded-[10px] border border-outline p-1 glass shadow-pop inset-shadow-highlight" onMouseDown={(e) => e.preventDefault()}>
+        <ul role="listbox" aria-label="Fields" className="pop absolute inset-x-0 top-full z-[140] mt-1 max-h-56 min-w-64 overflow-y-auto rounded-[10px] border border-outline bg-panel-2 p-1 shadow-pop inset-shadow-highlight" onMouseDown={(e) => e.preventDefault()}>
           {options.map((v, i) => (
             <li key={v.path} role="option" aria-selected={i === index} onMouseEnter={() => setIndex(i)} onClick={() => (onChange(v.path), setOpen(false))} className={cn("flex min-h-7 cursor-pointer items-center gap-2 rounded-md px-2 font-mono text-[12px]", i === index && "bg-fg/[0.08]")}>
               <span className="truncate">{v.path}</span>

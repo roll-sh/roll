@@ -42,14 +42,20 @@ export function AutomationPanel({ view, onClose }: { view: AutomationsView & { o
   const automation = isNew ? null : (automations.get(view.open) ?? null);
   const ctx = useTemplateContext();
   const key = isNew ? `new:${view.template ?? ""}` : view.open;
+  // A template is built once per opening, and again only when the owner's machines first arrive
+  // (a deep link opens before the first snapshot), not as machines come and go.
+  const haveMachines = ctx.machines.length > 0;
   const base = useMemo<AutomationSpec>(() => {
     if (automation) return specOf(automation);
     const t = TEMPLATES.find((x) => x.id === view.template);
     return t ? t.build(ctx) : blankSpec();
-    // The template is built once per opening, not again as machines come and go.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [automation, view.template]);
+  }, [automation, view.template, haveMachines]);
   const [draft, setDraftState] = useState<AutomationSpec>(() => drafts.get(key) ?? base);
+  // Not edited yet: follow the template as it's rebuilt with real machines.
+  useEffect(() => {
+    if (!automation && !drafts.has(key)) setDraftState(base);
+  }, [base, automation, key]);
   const setDraft = (next: AutomationSpec) => {
     setDraftState(next);
     drafts.set(key, next);

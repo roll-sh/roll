@@ -9,7 +9,7 @@
  */
 
 import { Braces } from "lucide-react";
-import { useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { insertVariable, matchVariables, openTemplate, templateParts, type Variable } from "@/lib/automations-ui";
 import { cn } from "../ui";
 
@@ -50,6 +50,12 @@ export function TemplateInput({
   const caretAfter = useRef<number | null>(null);
   const list = useId();
   const options = useMemo(() => (pick ? matchVariables(variables, pick.query).slice(0, 40) : []), [pick, variables]);
+  // An open picker sits under the field: bring it into the panel's view (jsdom has no scrolling).
+  const listEl = useRef<HTMLUListElement>(null);
+  const open = !!pick && options.length > 0;
+  useEffect(() => {
+    if (open) listEl.current?.scrollIntoView?.({ block: "nearest" });
+  }, [open]);
 
   useLayoutEffect(() => {
     const c = caretAfter.current;
@@ -144,7 +150,7 @@ export function TemplateInput({
   const parts = templateParts(value);
   return (
     <div className="relative">
-      <div className={cn(box, "relative pr-8", error ? "border-danger/50" : "border-line-2")}>
+      <div className={cn(box, "relative pr-8", error && !open ? "border-danger/50" : "border-line-2")}>
         <div
           ref={back}
           aria-hidden
@@ -177,9 +183,10 @@ export function TemplateInput({
       {pick && options.length > 0 && (
         <ul
           id={list}
+          ref={listEl}
           role="listbox"
           aria-label="Variables"
-          className="pop absolute inset-x-0 top-full z-[140] mt-1 max-h-64 overflow-y-auto rounded-[10px] border border-outline p-1 glass shadow-pop inset-shadow-highlight"
+          className="pop absolute inset-x-0 top-full z-[140] mt-1 max-h-64 overflow-y-auto rounded-[10px] border border-outline bg-panel-2 p-1 shadow-pop inset-shadow-highlight"
           onMouseDown={(e) => e.preventDefault()}
         >
           {options.map((v, i) => {
@@ -213,7 +220,7 @@ export function TemplateInput({
           })}
         </ul>
       )}
-      {error ? (
+      {error && !open ? (
         <p className="mt-1 text-[11.5px] text-danger">{error}</p>
       ) : preview != null ? (
         <p className="mt-1 line-clamp-2 font-mono text-[11px] break-all text-subtle" title={preview}>
