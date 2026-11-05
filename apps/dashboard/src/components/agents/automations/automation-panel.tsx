@@ -386,7 +386,7 @@ function RunButton({ automation, manual }: { automation: Automation; manual: boo
       </PopoverTrigger>
       <PopoverPopup side="bottom" align="end" sideOffset={6} aria-label="Run it now" className="w-80 p-3">
         <p className="text-[13px] font-[590] tracking-[-0.01em]">Run {automation.name}</p>
-        <p className="mt-0.5 text-[12px] text-subtle">{manual ? "Give it a prompt, or JSON; templates read it as event.data.input." : "A run by hand; its conditions still apply."}</p>
+        <p className="mt-0.5 text-[12px] text-subtle">{manual ? "Give it a prompt (event.data.input.prompt), or JSON (event.data.input)." : "A run by hand; its conditions still apply."}</p>
         <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}

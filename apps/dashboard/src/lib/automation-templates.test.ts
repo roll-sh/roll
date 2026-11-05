@@ -11,6 +11,9 @@ import { decode } from "./decode";
 const SOURCES = Object.fromEntries(CHATOPS_CATALOG.triggers.map((t) => [t.source, t]));
 const STEPS = Object.fromEntries(CHATOPS_CATALOG.steps.map((s) => [s.kind, s.config as { properties: Record<string, unknown>; required?: string[] }]));
 
+/** Fields a template can't fill: only the owner knows them (their own Slack member id). */
+const OWNER_FILLS: Record<string, string[]> = { "slack.notify": ["to"] };
+
 const isBuiltIn = (k: string): k is BuiltInStepKind => (STEP_KINDS as readonly string[]).includes(k);
 
 const ctx: TemplateContext = {
@@ -58,12 +61,14 @@ describe("chat ops' automation templates", () => {
       expect(known, `step kind ${s.kind}`).toBeDefined();
       const config = s.config as Record<string, unknown>;
       for (const k of Object.keys(config)) expect(Object.keys(known.properties), `${s.kind}.${k}`).toContain(k);
-      for (const k of known.required ?? []) expect(config[k], `${s.kind} needs ${k}`).toBeTruthy();
+      // Required fields are filled, except what only the owner knows (left for the builder to ask).
+      for (const k of known.required ?? []) if (!OWNER_FILLS[s.kind]?.includes(k)) expect(config[k], `${s.kind} needs ${k}`).toBeTruthy();
       used.add(s.kind.split(".")[0]);
     }
     expect([...used]).toEqual([t.integration]);
-    // The builder's own checks, on a server that has chat ops.
-    expect(validate(built, withChatops(withBuiltIns(null)))).toEqual({});
+    // The builder's own checks, on a server that has chat ops: only the owner's own fields are asked for.
+    const asked = Object.keys(validate(built, withChatops(withBuiltIns(null))));
+    expect(asked).toEqual(steps.flatMap((s, i) => (OWNER_FILLS[s.kind] ?? []).filter((k) => !(s.config as Record<string, unknown>)[k]).map(() => expect.stringContaining(`${i}`))));
   });
 
   it("run on the owner's computer and hand agent.start's output to the chat steps", () => {

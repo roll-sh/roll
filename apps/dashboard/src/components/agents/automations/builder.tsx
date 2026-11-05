@@ -430,8 +430,9 @@ function TriggerBody({
     case "manual":
       return (
         <p className="text-[12.5px] leading-relaxed text-muted">
-          From the <b className="font-medium text-soft">Run</b> button here, <code className="font-mono text-[11.5px] text-soft">roll agent automation run {slugOf(name)}</code>, or the MCP tool. What you pass in is{" "}
-          <code className="font-mono text-[11.5px] text-accent">{"{{ event.data.input }}"}</code>.
+          From the <b className="font-medium text-soft">Run</b> button here, <code className="font-mono text-[11.5px] text-soft">roll agent automation run {slugOf(name)}</code>, or the MCP tool. A prompt typed in is{" "}
+          <code className="font-mono text-[11.5px] text-accent">{"{{ event.data.input.prompt }}"}</code>; JSON passed in is{" "}
+          <code className="font-mono text-[11.5px] text-accent">{"{{ event.data.input }}"}</code> (its fields, <code className="font-mono text-[11.5px] text-accent">{"{{ event.data.input.<field> }}"}</code>).
         </p>
       );
     case "schedule": {

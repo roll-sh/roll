@@ -168,8 +168,9 @@ export const CHATOPS_TEMPLATES: AutomationTemplate[] = [
     integration: "slack",
     build: () =>
       spec("Agents in my Slack DMs", "A DM when an agent waits on me, fails or is done.", { type: "agent", events: ["thread.waiting", "thread.failed", "thread.done"] }, [
-        // The machine and thread come from the agent event; `to` is your Slack member id.
-        step("notify", "slack.notify", { to: "U0123456789" }),
+        // The machine and thread come from the agent event; `to` is your Slack member id, which only
+        // you know: left empty, so the builder asks for it before it's created (a made-up id DMs nobody).
+        step("notify", "slack.notify", { to: "" }),
       ]),
   },
   {
