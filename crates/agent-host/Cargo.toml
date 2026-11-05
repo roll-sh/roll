@@ -22,7 +22,8 @@ hkdf.workspace = true
 image = { workspace = true, features = ["ico"] }
 libc.workspace = true
 rand.workspace = true
-# Endpoints' model lists (`endpoints.rs`).
+# Endpoints' model lists (`endpoints.rs`); the fake orchestrator (`provider/fake.rs`) calls the
+# MCP server the way an agent does.
 reqwest = { workspace = true, features = ["rustls"] }
 rusqlite.workspace = true
 rustls-native-certs.workspace = true
@@ -41,7 +42,6 @@ zeroize = { workspace = true, features = ["serde"] }
 code-control.workspace = true
 parking_lot.workspace = true
 pg-storage.workspace = true
-reqwest.workspace = true
 tempfile.workspace = true
 tower.workspace = true
 

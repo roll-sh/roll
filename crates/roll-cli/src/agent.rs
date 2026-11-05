@@ -9,8 +9,10 @@
 //! the login and whether roll still accepts it; `logout` revokes the machine and forgets it.
 //!
 //! `ROLL_AGENT_FAKE=1` is for tests only (`pnpm test:agents`): `up` offers the fake providers of
-//! `agent_host::provider::fake` (`fake`, which plays a scripted turn with an approval and an edit,
-//! and `echo`) instead of the real ones, so nothing calls a model.
+//! `agent_host::provider::fake` (`fake`, which plays a scripted turn with an approval and an edit;
+//! `echo`; and `orchestrate`, an orchestrator that delegates two parts through roll's real
+//! orchestrator MCP server and sums up their results) instead of the real ones, so nothing calls a
+//! model.
 
 use agent_host::provider::Provider;
 use agent_host::relay::{self, LinkConfig, LinkEvent};
@@ -295,7 +297,11 @@ fn fake_providers() -> Option<Vec<Arc<dyn Provider>>> {
         return None;
     }
     let caps = agent_proto::Capabilities::default();
-    Some(vec![FakeProvider::with("fake", caps, Script::Demo), FakeProvider::with("echo", caps, Script::Echo)])
+    Some(vec![
+        FakeProvider::with("fake", caps, Script::Demo),
+        FakeProvider::with("echo", caps, Script::Echo),
+        FakeProvider::with("orchestrate", caps, Script::Orchestrate),
+    ])
 }
 
 async fn up(api: &str) -> anyhow::Result<()> {
@@ -307,7 +313,7 @@ async fn up(api: &str) -> anyhow::Result<()> {
     let home = config.home.clone();
     let providers = match fake_providers() {
         Some(fake) => {
-            eprintln!("roll agent: ROLL_AGENT_FAKE is set: offering only the test providers (fake, echo)");
+            eprintln!("roll agent: ROLL_AGENT_FAKE is set: offering only the test providers (fake, echo, orchestrate)");
             fake
         }
         None => providers(&config),

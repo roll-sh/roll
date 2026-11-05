@@ -4,19 +4,25 @@
 //! `TurnRef`, `TurnEnded(Completed)`); [`Script::Manual`] only records what it was sent and lets
 //! the test emit events through the [`FakeSession`] handle; [`Script::Demo`] plays a whole turn
 //! across processes (`ROLL_AGENT_FAKE=1 roll agent up`, for `pnpm test:agents`): streamed text, a
-//! command that asks for approval, an edit to a file in the workspace, and a context report. All answer `interrupt` with
+//! command that asks for approval, an edit to a file in the workspace, and a context report.
+//! [`Script::Orchestrate`] is an orchestrator model (`ROLL_AGENT_FAKE=1 roll agent up` offers it
+//! as `orchestrate`): on an orchestrator thread it plans, calls roll's real orchestrator MCP server
+//! over HTTP the way Codex or Claude would (`orchestrator_capabilities`, then an async
+//! `delegate_task` per part), ends its turn, and sums up once every part's result has woken it;
+//! anywhere else (its subagents) it does the task itself. All answer `interrupt` with
 //! `TurnEnded(Interrupted)` when a turn is running, like the real providers. A session started
 //! with `fork` is a new conversation; the test reads what it was forked from (or the turn it
 //! resumed at) in its `config`. Turn refs are numbered per conversation, across its sessions.
 
-use super::{Item, Provider, ProviderConfig, ProviderEvent, RollbackStyle, Session, SessionConfig, TurnEnd, TurnInput};
+use super::{Item, McpServer, Provider, ProviderConfig, ProviderEvent, RollbackStyle, Session, SessionConfig, TurnEnd, TurnInput};
 use agent_proto::{
     Approval, ApprovalAction, AuthStatus, Capabilities, ChangeKind, ContextUsage, Decision, FileChange, InteractionMode, ModelInfo, ModelOption, NodeBody,
     NodeStatus, OptionChoice, OptionRole, ProviderId, ProviderInfo, RequestBody, Response, RuntimeMode, ToolCall, ToolKind, Usage,
 };
 use async_trait::async_trait;
+use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{Notify, mpsc};
@@ -31,6 +37,15 @@ pub enum Script {
     /// writes `ROLL_DEMO.md` (the prompt) in the session's directory, then completes; declined,
     /// it says so and completes.
     Demo,
+    /// On an orchestrator thread with roll's MCP server, a goal turn says its plan, calls
+    /// `orchestrator_capabilities`, delegates `Part 1 of 2: <goal>` and `Part 2 of 2: <goal>`
+    /// (async, titled `Part 1`/`Part 2`, to its own provider unless
+    /// [`FakeProvider::delegate_to`] names another; a goal with [`FAIL`] in it gives part 2
+    /// [`FAIL`] too), reports refusals, and completes. A wake turn (`Delegated task …`) notes each
+    /// result, and once every part it delegated has reported, ends with `All 2 parts done.` or
+    /// `<k> of 2 failed.`. Any other session (a subagent, a plain thread) answers
+    /// `Done: <task>` after a beat, or fails its turn when the task has [`FAIL`] in it.
+    Orchestrate,
 }
 
 /// What a [`Script::Demo`] (or Echo) turn answers on its own when sent exactly this: the endpoint
@@ -56,6 +71,23 @@ pub fn env_report(env: &[(String, String)]) -> String {
     lines.sort();
     if lines.is_empty() { "no endpoint variables".into() } else { lines.join("\n") }
 }
+
+/// A task with this in it makes a [`Script::Orchestrate`] subagent fail its turn.
+pub const FAIL: &str = "[fail]";
+/// What a failing [`Script::Orchestrate`] subagent's run ends with (its task's result).
+pub const FAILED: &str = "the task asked to fail";
+/// How many parts a [`Script::Orchestrate`] goal is split into.
+const PARTS: usize = 2;
+/// The heading of an orchestrator thread's instructions (`orchestrator/instructions.rs`): how a
+/// session knows it leads, as a real model does.
+const LEADS: &str = "## You are the orchestrator";
+/// How a wake's results start (`orchestrator/tasks.rs`, `wake_text`).
+const WAKE: &str = "Delegated task ";
+/// How long a [`Script::Orchestrate`] subagent works, so its parent's async `delegate_task`
+/// returns before the result and the result wakes it.
+const WORK: Duration = Duration::from_millis(100);
+/// The most of an MCP reply a [`Script::Orchestrate`] session reads.
+const MCP_REPLY_MAX: usize = 1 << 20;
 
 /// The file a [`Script::Demo`] turn writes.
 pub const DEMO_FILE: &str = "ROLL_DEMO.md";
@@ -97,6 +129,31 @@ pub struct FakeProvider {
     held: tokio::sync::watch::Sender<bool>,
     /// What `info` says about the login.
     auth: Mutex<AuthStatus>,
+    /// The provider [`Script::Orchestrate`] sessions started from now on delegate to.
+    delegate_to: Mutex<Option<String>>,
+    /// What each native conversation of [`Script::Orchestrate`] delegated and heard back.
+    orchestrations: Mutex<HashMap<String, Arc<Mutex<Orchestration>>>>,
+}
+
+/// One [`Script::Orchestrate`] conversation's tasks, kept across its sessions.
+#[derive(Default)]
+struct Orchestration {
+    /// Task ids, in the order it delegated them.
+    tasks: Vec<String>,
+    /// Task id → the status its result came with.
+    done: HashMap<String, String>,
+}
+
+impl Orchestration {
+    /// The closing line, once every task it delegated has reported.
+    fn summary(&self) -> Option<String> {
+        if self.tasks.is_empty() || !self.tasks.iter().all(|t| self.done.contains_key(t)) {
+            return None;
+        }
+        let failed = self.tasks.iter().filter(|t| self.done[*t] != "completed").count();
+        let n = self.tasks.len();
+        Some(if failed == 0 { format!("All {n} parts done.") } else { format!("{failed} of {n} failed.") })
+    }
 }
 
 impl FakeProvider {
@@ -118,7 +175,15 @@ impl FakeProvider {
             changed: Arc::new(Notify::new()),
             held: tokio::sync::watch::Sender::new(false),
             auth: Mutex::new(AuthStatus::Ready),
+            delegate_to: Mutex::new(None),
+            orchestrations: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// [`Script::Orchestrate`] sessions started from now on name this provider in
+    /// `delegate_task` (they leave it out, inheriting their own, by default).
+    pub fn delegate_to(&self, provider: &str) {
+        *self.delegate_to.lock().unwrap() = Some(provider.into());
     }
 
     /// What the next probe says about the login (logged out with `Missing`).
@@ -231,6 +296,7 @@ impl Provider for FakeProvider {
         let mut sessions = self.sessions.lock().unwrap();
         let native = cfg.resume.clone().unwrap_or_else(|| format!("{}-native-{}", self.id.0, sessions.len()));
         let turns = self.turns.lock().unwrap().entry(native.clone()).or_default().clone();
+        let orchestration = self.orchestrations.lock().unwrap().entry(native.clone()).or_default().clone();
         let session = FakeSession {
             index: sessions.len(),
             config: cfg,
@@ -244,6 +310,9 @@ impl Provider for FakeProvider {
                 demo: Mutex::new(None),
                 items: Mutex::new(0),
                 turns,
+                generation: AtomicU32::new(0),
+                orchestration,
+                delegate_to: self.delegate_to.lock().unwrap().clone(),
                 changed: self.changed.clone(),
             }),
         };
@@ -273,6 +342,11 @@ struct Inner {
     announced: AtomicBool,
     items: Mutex<u32>,
     turns: Arc<AtomicU32>,
+    /// Bumped by every `send`: a [`Script::Orchestrate`] turn still going after an interrupt
+    /// stops instead of running into the next turn.
+    generation: AtomicU32,
+    orchestration: Arc<Mutex<Orchestration>>,
+    delegate_to: Option<String>,
     changed: Arc<Notify>,
 }
 
@@ -455,6 +529,190 @@ impl FakeSession {
         self.emit(ProviderEvent::Context(ContextUsage { used_tokens: used, max_tokens: Some(200_000), total_processed_tokens: None, ..Default::default() }));
         self.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
     }
+
+    /// The turn `generation` is still the running one (not interrupted, no newer turn).
+    fn live(&self, generation: u32) -> bool {
+        self.inner.running.load(Ordering::SeqCst) && self.inner.generation.load(Ordering::SeqCst) == generation
+    }
+
+    /// Ends turn `generation` with `text` as its answer, unless it was interrupted meanwhile.
+    fn conclude(&self, generation: u32, text: &str, end: TurnEnd) {
+        if !self.live(generation) {
+            return;
+        }
+        let id = self.next_item();
+        self.emit(self.message(&id, "", NodeStatus::Running));
+        self.emit(ProviderEvent::TextDelta { item: id.clone(), text: text.into() });
+        self.emit(self.message(&id, text, NodeStatus::Completed));
+        self.emit(ProviderEvent::TurnEnded(end));
+    }
+
+    /// A [`Script::Orchestrate`] turn.
+    async fn orchestrate(self, said: String, generation: u32) {
+        let leads = self.config.instructions.as_deref().is_some_and(|i| i.contains(LEADS));
+        let server = self.config.mcp.iter().find(|s| s.name == "roll").cloned();
+        if said.starts_with(WAKE) {
+            return self.woken(&said, generation);
+        }
+        let (true, Some(server)) = (leads, server) else {
+            // A subagent does the work itself.
+            tokio::time::sleep(WORK).await;
+            if said.contains(FAIL) {
+                return self.conclude(generation, "Couldn't finish: the task asked me to fail.", TurnEnd::Failed(FAILED.into()));
+            }
+            return self.conclude(generation, &format!("Done: {said}"), TurnEnd::Completed);
+        };
+        tokio::time::sleep(DEMO_STEP).await;
+        let id = self.next_item();
+        let plan = format!("Plan: {PARTS} parts, each delegated to a subagent.");
+        self.emit(self.message(&id, &plan, NodeStatus::Completed));
+        let mcp = match Mcp::connect(&server).await {
+            Ok(mcp) => mcp,
+            Err(e) => return self.conclude(generation, &format!("roll's MCP server didn't answer: {e:#}"), TurnEnd::Failed(format!("{e:#}"))),
+        };
+        let caps = match self.tool(&mcp, "orchestrator_capabilities", json!({})).await {
+            Ok((caps, false)) => caps,
+            Ok((v, true)) => return self.conclude(generation, &format!("No capabilities: {v}"), TurnEnd::Completed),
+            Err(e) => return self.conclude(generation, &format!("No capabilities: {e:#}"), TurnEnd::Completed),
+        };
+        if caps["can_delegate"] != true {
+            return self.conclude(generation, "I can't delegate from here, so nothing was started.", TurnEnd::Completed);
+        }
+        let failing = said.contains(FAIL);
+        let goal = said.replace(FAIL, "");
+        let goal = goal.trim();
+        let mut lines = Vec::new();
+        for n in 1..=PARTS {
+            if !self.live(generation) {
+                return;
+            }
+            let fail = if failing && n == PARTS { format!(" {FAIL}") } else { String::new() };
+            let mut args = json!({ "task": format!("Part {n} of {PARTS}: {goal}{fail}"), "title": format!("Part {n}") });
+            if let Some(provider) = &self.inner.delegate_to {
+                args["provider"] = json!(provider);
+            }
+            match self.tool(&mcp, "delegate_task", args).await {
+                Ok((v, false)) => {
+                    let task = v["task_id"].as_str().unwrap_or_default().to_string();
+                    let status = v["status"].as_str().unwrap_or_default();
+                    let mut o = self.inner.orchestration.lock().unwrap();
+                    o.tasks.push(task.clone());
+                    // Finished already: the result came back here rather than as a wake.
+                    if v["result"].is_string() && !matches!(status, "queued" | "running" | "waiting") {
+                        o.done.insert(task.clone(), status.to_string());
+                    }
+                    lines.push(format!("Part {n} is task {task} [{status}]."));
+                }
+                Ok((v, true)) => lines.push(format!("Part {n} wasn't delegated: {}: {}", v["error"]["code"].as_str().unwrap_or("?"), v["error"]["message"].as_str().unwrap_or(""))),
+                Err(e) => lines.push(format!("Part {n} wasn't delegated: {e:#}")),
+            }
+        }
+        let o = self.inner.orchestration.lock().unwrap();
+        let next = match o.summary() {
+            Some(summary) => summary,
+            None if o.tasks.is_empty() => "No part could be delegated.".into(),
+            None => "Their results will wake me.".into(),
+        };
+        drop(o);
+        lines.push(next);
+        self.conclude(generation, &lines.join("\n"), TurnEnd::Completed);
+    }
+
+    /// A [`Script::Orchestrate`] wake: notes each result it carries.
+    fn woken(&self, said: &str, generation: u32) {
+        let mut lines = Vec::new();
+        let mut o = self.inner.orchestration.lock().unwrap();
+        for (task, title, status) in said.lines().filter_map(wake_result) {
+            o.done.insert(task.into(), status.into());
+            lines.push(format!("{title} {status}."));
+        }
+        lines.extend(o.summary());
+        drop(o);
+        self.conclude(generation, &lines.join("\n"), TurnEnd::Completed);
+    }
+
+    /// Calls an MCP tool as an item of the turn: running, then completed (failed when refused).
+    async fn tool(&self, mcp: &Mcp, name: &str, arguments: Value) -> anyhow::Result<(Value, bool)> {
+        let id = self.next_item();
+        let item = |status, output: Option<String>| {
+            let body = NodeBody::Tool(ToolCall {
+                name: format!("mcp__roll__{name}"),
+                kind: ToolKind::Mcp,
+                title: name.into(),
+                input: arguments.clone(),
+                output,
+                exit_code: None,
+                files: Vec::new(),
+            });
+            ProviderEvent::Item(Item { id: id.clone(), parent: None, status, body })
+        };
+        self.emit(item(NodeStatus::Running, None));
+        let called = mcp.call(name, arguments.clone()).await;
+        match &called {
+            Ok((v, refused)) => self.emit(item(if *refused { NodeStatus::Failed } else { NodeStatus::Completed }, Some(v.to_string()))),
+            Err(e) => self.emit(item(NodeStatus::Failed, Some(format!("{e:#}")))),
+        }
+        called
+    }
+}
+
+/// One result line of a wake: `Delegated task <id> (<title>) [<status>]…` → (id, title, status).
+fn wake_result(line: &str) -> Option<(&str, &str, &str)> {
+    let (task, rest) = line.strip_prefix(WAKE)?.split_once(' ')?;
+    let close = rest.rfind(") [")?;
+    let title = rest.get(..close)?.strip_prefix('(')?;
+    let status = rest.get(close + 3..)?.split(']').next()?;
+    Some((task, title, status))
+}
+
+/// The little Streamable HTTP MCP client an agent has: JSON replies, read up to
+/// [`MCP_REPLY_MAX`].
+struct Mcp {
+    http: reqwest::Client,
+    server: McpServer,
+    ids: AtomicU64,
+}
+
+impl Mcp {
+    async fn connect(server: &McpServer) -> anyhow::Result<Mcp> {
+        let http = reqwest::Client::builder().timeout(Duration::from_secs(60)).build()?;
+        let mcp = Mcp { http, server: server.clone(), ids: AtomicU64::new(0) };
+        let init = json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "roll-fake", "version": "0" } });
+        mcp.rpc("initialize", init).await?;
+        mcp.post(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).await?;
+        Ok(mcp)
+    }
+
+    async fn post(&self, body: Value) -> anyhow::Result<Vec<u8>> {
+        let mut request = self.http.post(&self.server.url).header("Accept", "application/json, text/event-stream").json(&body);
+        for (k, v) in &self.server.headers {
+            request = request.header(k, v);
+        }
+        let mut response = request.send().await?;
+        anyhow::ensure!(response.status().is_success(), "HTTP {}", response.status());
+        let mut read = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            anyhow::ensure!(read.len() + chunk.len() <= MCP_REPLY_MAX, "a reply over {MCP_REPLY_MAX} bytes");
+            read.extend_from_slice(&chunk);
+        }
+        Ok(read)
+    }
+
+    async fn rpc(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+        let id = self.ids.fetch_add(1, Ordering::SeqCst);
+        let read = self.post(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })).await?;
+        let mut reply: Value = serde_json::from_slice(&read)?;
+        if let Some(e) = reply.get("error") {
+            anyhow::bail!("{method}: {e}");
+        }
+        Ok(reply["result"].take())
+    }
+
+    /// `tools/call`: the structured result, and whether the tool refused.
+    async fn call(&self, tool: &str, arguments: Value) -> anyhow::Result<(Value, bool)> {
+        let mut result = self.rpc("tools/call", json!({ "name": tool, "arguments": arguments })).await?;
+        Ok((result["structuredContent"].take(), result["isError"].as_bool().unwrap_or(false)))
+    }
 }
 
 #[async_trait]
@@ -465,6 +723,7 @@ impl Session for FakeSession {
             self.emit(ProviderEvent::NativeThread { id: self.inner.native.clone() });
         }
         self.inner.running.store(true, Ordering::SeqCst);
+        let generation = self.inner.generation.fetch_add(1, Ordering::SeqCst) + 1;
         // What the user said, not the context roll handed over in front of it.
         let said = input.text.rsplit_once("</roll-context>\n\n").map_or(input.text.as_str(), |(_, said)| said);
         match self.inner.script {
@@ -472,6 +731,9 @@ impl Session for FakeSession {
             Script::Echo => self.echo(said),
             Script::Demo => {
                 tokio::spawn(self.clone().demo_start(said.to_string()));
+            }
+            Script::Orchestrate => {
+                tokio::spawn(self.clone().orchestrate(said.to_string(), generation));
             }
             Script::Manual => {}
         }
@@ -592,5 +854,52 @@ mod tests {
         s.respond(&id, &Response::Decision { decision: Decision::Decline, message: None }).await.unwrap();
         until(&mut rx, |e| matches!(e, ProviderEvent::TurnEnded(TurnEnd::Completed))).await;
         assert!(!other.path().join(DEMO_FILE).exists());
+    }
+
+    fn answered(events: &[ProviderEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                ProviderEvent::Item(Item { status: NodeStatus::Completed, body: NodeBody::Message { text }, .. }) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Outside an orchestrator thread it does the task itself (no MCP calls), failing on request;
+    /// a wake's results count towards the summary only for tasks it delegated.
+    #[tokio::test]
+    async fn orchestrate_does_a_subagents_task_itself_and_reads_wakes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = FakeProvider::with("orchestrate", Capabilities::default(), Script::Orchestrate);
+        let (s, mut rx) = p.start(config(dir.path())).await.unwrap();
+        s.send(TurnInput { text: "Part 1 of 2: ship it".into(), attachments: Vec::new() }).await.unwrap();
+        let got = until(&mut rx, |e| matches!(e, ProviderEvent::TurnEnded(_))).await;
+        assert_eq!(answered(&got), ["Done: Part 1 of 2: ship it"]);
+        assert!(!got.iter().any(|e| matches!(e, ProviderEvent::Item(Item { body: NodeBody::Tool(_), .. }))), "{got:?}");
+        assert_eq!(got.last(), Some(&ProviderEvent::TurnEnded(TurnEnd::Completed)));
+
+        s.send(TurnInput { text: format!("Part 2 of 2: ship it {FAIL}"), attachments: Vec::new() }).await.unwrap();
+        let got = until(&mut rx, |e| matches!(e, ProviderEvent::TurnEnded(_))).await;
+        assert_eq!(got.last(), Some(&ProviderEvent::TurnEnded(TurnEnd::Failed(FAILED.into()))));
+
+        // An interrupted turn stops where it is.
+        s.send(TurnInput { text: "slow".into(), attachments: Vec::new() }).await.unwrap();
+        s.interrupt().await.unwrap();
+        let got = until(&mut rx, |e| matches!(e, ProviderEvent::TurnEnded(_))).await;
+        assert_eq!(got.last(), Some(&ProviderEvent::TurnEnded(TurnEnd::Interrupted)));
+        tokio::time::sleep(WORK * 2).await;
+        assert!(rx.try_recv().is_err(), "nothing after the interrupt");
+
+        assert_eq!(wake_result("Delegated task nod_1 (Part (a)) [failed]:"), Some(("nod_1", "Part (a)", "failed")));
+        assert_eq!(wake_result("Delegated task nod_2 (B) [completed]. Use task_status with task_id nod_2 to read the result."), Some(("nod_2", "B", "completed")));
+        assert_eq!(wake_result("Done: x"), None);
+        let mut o = Orchestration { tasks: vec!["nod_1".into(), "nod_2".into()], done: HashMap::new() };
+        o.done.insert("nod_1".into(), "completed".into());
+        assert_eq!(o.summary(), None);
+        o.done.insert("nod_2".into(), "failed".into());
+        assert_eq!(o.summary().as_deref(), Some("1 of 2 failed."));
+        o.done.insert("nod_2".into(), "completed".into());
+        assert_eq!(o.summary().as_deref(), Some("All 2 parts done."));
     }
 }

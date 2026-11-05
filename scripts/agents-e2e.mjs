@@ -2,7 +2,9 @@
 // free ports with a throwaway home. rolld --code-only; an owner; `roll agent login` approved
 // through the API (after looking the pending login up); `ROLL_AGENT_FAKE=1 roll agent up`; then
 // over HTTP and SSE: project add → thread create → a streamed run → its approval answered → the
-// checkpoint and its diff → a share → the share read anonymously; the dashboard in a production
+// checkpoint and its diff → a share → the share read anonymously → "Orchestrate" on the fake
+// orchestrator (two subagent threads through the daemon's real MCP server, their completion, the
+// wake and the summary); the dashboard in a production
 // build against that rolld (`/dashboard/agents`, the share page, its preview image, a missing
 // share's 404); and `roll agent logout`, which stops `up`.
 //
@@ -220,7 +222,7 @@ async function main() {
     return m?.online && m.info ? m : null;
   });
   const providers = online.info.providers.map((p) => p.id).sort();
-  check(JSON.stringify(providers) === JSON.stringify(["echo", "fake"]), `providers: ${providers}`);
+  check(JSON.stringify(providers) === JSON.stringify(["echo", "fake", "orchestrate"]), `providers: ${providers}`);
   log("daemon online with the fake providers");
 
   // ── a project in a git repo, a thread ──
@@ -281,6 +283,56 @@ async function main() {
   check(!share.text.includes(homedir()), "the share has no home directory in it");
   check(share.json.entities.some((e) => e.kind === "node" && e.body.type === "tool" && e.body.files?.some((f) => f.path === "ROLL_DEMO.md")), "the share has the edit");
   log(`shared as ${shared.json.id} (${shared.json.bytes} bytes)`);
+
+  // ── Orchestrate: the fake orchestrator delegates two parts through the daemon's real MCP server ──
+  // Threads and runs are on every stream; the orchestrator's nodes (its subagent nodes, its
+  // messages) come with its id in `threads`.
+  const mark = await req("GET", "/v1/code/agents/acme/state");
+  check(mark.status === 200, `state: ${mark.status} ${mark.text}`);
+  const orch = await command(machine, { type: "thread.create", project: prj.id, provider: "orchestrate", runtime_mode: "auto_edit", orchestrator: true, prompt: "Ship dark mode" });
+  check(orch.type === "created", `thread.create (orchestrator): ${JSON.stringify(orch)}`);
+  const lead = orch.id;
+  const watch = sse(`/v1/code/agents/acme/events?threads=${lead}&after=${mark.json.cursor}`);
+  const seen = { threads: new Map(), runs: new Map(), nodes: new Map() };
+  const orchestration = () => {
+    const kids = [...seen.threads.values()].filter((t) => t.lineage?.parent === lead && t.lineage.relation === "subagent");
+    const tasks = [...seen.nodes.values()].filter((n) => n.thread === lead && n.body.type === "subagent");
+    const leadThread = seen.threads.get(lead);
+    const said = [...seen.nodes.values()].filter((n) => n.thread === lead && n.body.type === "message" && n.status === "completed").map((n) => n.body.text);
+    return { kids, tasks, leadThread, said };
+  };
+  // Waits (bounded) for one step of the orchestration, saying where it got to otherwise.
+  const step = async (what, done, ms = 60_000) => {
+    if (done(orchestration())) return;
+    try {
+      await watch.until(what, (e) => {
+        if (e.event === "entity") {
+          const x = e.data.entity;
+          if (x.kind === "thread") seen.threads.set(x.id, x);
+          else if (x.kind === "run") seen.runs.set(x.id, x);
+          else if (x.kind === "node") seen.nodes.set(x.id, x);
+        }
+        return done(orchestration());
+      }, ms);
+    } catch (e) {
+      const o = orchestration();
+      const kids = o.kids.map((k) => `${k.title}: ${k.status}, ${k.run_count} runs${k.active_run ? ", running" : ""}`);
+      fail(`${e.message} (orchestrator ${o.leadThread?.status ?? "unseen"}; children [${kids.join("; ")}]; tasks [${o.tasks.map((n) => n.status).join(", ")}]; said ${JSON.stringify(o.said)})`);
+    }
+  };
+  await step("the orchestrator's 2 subagent threads", (o) => o.kids.length === 2);
+  check(orchestration().kids.every((k) => k.provider === "orchestrate" && !k.orchestrator), "the parts are plain subagents");
+  log(`orchestrator ${lead} delegated: ${orchestration().kids.map((k) => `${k.id} (${k.title})`).join(", ")}`);
+  await step("both parts to complete", (o) => {
+    const finished = o.kids.every((k) => k.run_count >= 1 && !k.active_run && [...seen.runs.values()].some((r) => r.thread === k.id && r.status === "completed"));
+    return finished && o.tasks.length === 2 && o.tasks.every((n) => n.status === "completed");
+  });
+  log("both parts completed; their subagent nodes too");
+  await step("the orchestrator's summary", (o) => o.leadThread && !o.leadThread.active_run && o.leadThread.run_count >= 2 && o.said.some((t) => t.endsWith("All 2 parts done.")));
+  const wakes = [...seen.runs.values()].filter((r) => r.thread === lead && r.prompt.startsWith("Delegated task "));
+  check(wakes.length >= 1 && wakes.every((r) => r.status === "completed"), `wake runs: ${JSON.stringify(wakes.map((r) => r.status))}`);
+  watch.close();
+  log(`orchestrator woke ${wakes.length}x and summed up: ${JSON.stringify(orchestration().said.at(-1))}`);
 
   // ── the dashboard, production build, against this rolld ──
   if (withDashboard) {

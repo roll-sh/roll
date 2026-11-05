@@ -4,7 +4,7 @@
 
 mod common;
 
-use agent_host::provider::fake::{Call, FakeProvider, FakeSession, Script};
+use agent_host::provider::fake::{Call, FAIL, FAILED, FakeProvider, FakeSession, Script};
 use agent_host::provider::{Item, ProviderEvent, TurnEnd};
 use agent_proto::*;
 use common::*;
@@ -751,4 +751,187 @@ async fn delegation_waits_for_a_provider_still_being_checked() {
     codex.release_probes();
     let caps = tokio::time::timeout(Duration::from_secs(10), caps).await.expect("answered once probed").unwrap();
     assert_eq!(caps["providers"][0]["available"], true);
+}
+
+/// An orchestrator on the fake orchestrator model (`Script::Orchestrate`, `orchestrate` under
+/// `ROLL_AGENT_FAKE=1 roll agent up`), which calls the MCP server itself.
+fn orchestrate() -> Arc<FakeProvider> {
+    FakeProvider::with("orchestrate", Capabilities::default(), Script::Orchestrate)
+}
+
+/// "Orchestrate" with `goal` on `provider`.
+async fn orchestrator(w: &World, provider: &str, goal: &str) -> ThreadId {
+    let reply = w
+        .run(Command::ThreadCreate {
+            project: w.project.clone(),
+            provider: ProviderId(provider.into()),
+            model: None,
+            effort: None,
+            options: Default::default(),
+            runtime_mode: RuntimeMode::AutoEdit,
+            interaction_mode: InteractionMode::Default,
+            worktree: false,
+            title: None,
+            prompt: Some(goal.into()),
+            attachments: Vec::new(),
+            orchestrator: true,
+        })
+        .await;
+    let Reply::Created { id } = reply else { panic!("thread.create: {reply:?}") };
+    ThreadId(id)
+}
+
+/// A thread's finished messages, oldest run first.
+fn messages(s: &Records, thread: &ThreadId) -> Vec<String> {
+    let runs: Vec<RunId> = s.runs(thread).into_iter().map(|r| r.id).collect();
+    let mut nodes = s.nodes(thread);
+    nodes.sort_by_key(|n| (runs.iter().position(|r| r == &n.run), n.ordinal));
+    nodes
+        .into_iter()
+        .filter_map(|n| match n.body {
+            NodeBody::Message { text } if n.status == NodeStatus::Completed => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A thread's MCP tool calls, in order: (tool, status).
+fn tool_calls(s: &Records, thread: &ThreadId) -> Vec<(String, NodeStatus)> {
+    s.nodes(thread)
+        .into_iter()
+        .filter_map(|n| match n.body {
+            NodeBody::Tool(t) if t.kind == ToolKind::Mcp => Some((t.title, n.status)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The subagent threads under `parent`, by title.
+fn children(s: &Records, parent: &ThreadId) -> Vec<Thread> {
+    let mut children: Vec<Thread> = s
+        .live
+        .values()
+        .filter_map(|e| match e {
+            Entity::Thread(t) if t.lineage.as_ref().is_some_and(|l| &l.parent == parent && l.relation == Relation::Subagent) => {
+                Some(t.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    children.sort_by(|a, b| a.title.cmp(&b.title));
+    children
+}
+
+fn task_of(s: &Records, parent: &ThreadId, child: &ThreadId) -> Node {
+    subagent_nodes(s, parent)
+        .into_iter()
+        .find(|n| matches!(&n.body, NodeBody::Subagent { child: Some(c), .. } if c == child))
+        .expect("the child's task node")
+}
+
+/// Waits (up to 10 s) until the orchestrator is idle with its last message ending in `line`.
+async fn summed_up(w: &World, lead: &ThreadId, line: &str) -> Records {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let s = w.state().await;
+        let idle = s.thread(lead).is_some_and(|t| t.active_run.is_none() && t.run_count > 0);
+        if idle && messages(&s, lead).last().is_some_and(|m| m.ends_with(line)) {
+            return s;
+        }
+        if tokio::time::Instant::now() > deadline {
+            let runs: Vec<_> = s.runs(lead).into_iter().map(|r| (r.status, r.prompt, r.error)).collect();
+            let kids: Vec<_> = children(&s, lead).into_iter().map(|t| (t.title, t.status, t.run_count)).collect();
+            let nodes: Vec<_> = s.nodes(lead).into_iter().map(|n| (n.status, n.body)).collect();
+            panic!("the orchestrator never said {line:?}:\nruns {runs:#?}\nchildren {kids:?}\nnodes {nodes:#?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The whole loop as a real orchestrator model drives it, through the HTTP server:
+/// capabilities, two async tasks that become subagent threads under the orchestrator, their
+/// `subagent` nodes following them to completed, the results waking the orchestrator (in one
+/// wake or two), and its summary once both are in.
+#[tokio::test]
+async fn the_fake_orchestrator_delegates_through_the_server_and_sums_up_when_every_part_is_back() {
+    let lead_provider = orchestrate();
+    let w = world(vec![lead_provider.clone()], "").await;
+    let lead = orchestrator(&w, "orchestrate", "Ship dark mode").await;
+    let s = summed_up(&w, &lead, "All 2 parts done.").await;
+
+    let runs = s.runs(&lead);
+    assert_eq!(runs[0].prompt, "Ship dark mode");
+    assert!(runs.len() >= 2 && runs.iter().all(|r| r.status == RunStatus::Completed), "{runs:?}");
+    assert!(runs[1..].iter().all(|r| r.prompt.starts_with("Delegated task ")), "{runs:?}");
+    let woke = runs[1..].iter().map(|r| r.prompt.as_str()).collect::<Vec<_>>().join("\n\n");
+    let mcp = |tool: &str, status| (tool.to_string(), status);
+    assert_eq!(tool_calls(&s, &lead), [
+        mcp("orchestrator_capabilities", NodeStatus::Completed),
+        mcp("delegate_task", NodeStatus::Completed),
+        mcp("delegate_task", NodeStatus::Completed)
+    ]);
+
+    let kids = children(&s, &lead);
+    assert_eq!(kids.len(), 2, "{kids:?}");
+    assert_eq!(subagent_nodes(&s, &lead).len(), 2);
+    for (i, kid) in kids.iter().enumerate() {
+        let (n, task) = (i + 1, format!("Part {} of 2: Ship dark mode", i + 1));
+        assert_eq!((kid.title.clone(), kid.provider.0.as_str(), kid.orchestrator), (format!("Part {n}"), "orchestrate", false));
+        assert_eq!(kid.lineage.as_ref().unwrap().from_run.as_ref(), Some(&runs[0].id));
+        let run = &s.runs(&kid.id)[0];
+        assert_eq!((run.prompt.as_str(), run.status), (task.as_str(), RunStatus::Completed));
+        let node = task_of(&s, &lead, &kid.id);
+        assert_eq!((node.status, &node.run), (NodeStatus::Completed, &runs[0].id));
+        assert_eq!(node_result(&node), Some(format!("Done: {task}")));
+        assert!(woke.contains(&format!("Delegated task {} (Part {n}) [completed]:\nDone: {task}", node.id)), "{woke}");
+        // A subagent does the work and delegates nothing.
+        assert!(subagent_nodes(&s, &kid.id).is_empty() && tool_calls(&s, &kid.id).is_empty());
+    }
+    let told: Vec<String> = lead_provider.sessions().iter().filter_map(|x| x.config.instructions.clone()).collect();
+    assert_eq!(told.iter().filter(|t| t.contains("## You are the orchestrator")).count(), 1);
+    assert_eq!(told.iter().filter(|t| t.contains("## You are a subagent")).count(), 2);
+}
+
+/// A subagent whose run fails: its node fails with the run's error as the result, the wake says
+/// `[failed]`, and the orchestrator still finishes, counting it.
+#[tokio::test]
+async fn a_failing_part_reports_failed_to_the_orchestrator() {
+    let w = world(vec![orchestrate()], "").await;
+    let lead = orchestrator(&w, "orchestrate", &format!("Ship dark mode {FAIL}")).await;
+    let s = summed_up(&w, &lead, "1 of 2 failed.").await;
+    let kids = children(&s, &lead);
+    assert_eq!(kids.len(), 2);
+    assert_eq!((s.runs(&kids[0].id)[0].status, s.runs(&kids[1].id)[0].status), (RunStatus::Completed, RunStatus::Failed));
+    assert_eq!(task_of(&s, &lead, &kids[0].id).status, NodeStatus::Completed);
+    let failed = task_of(&s, &lead, &kids[1].id);
+    assert_eq!((failed.status, node_result(&failed).as_deref()), (NodeStatus::Failed, Some(FAILED)));
+    assert!(failed.completed_at.is_some());
+    let woke: String = s.runs(&lead)[1..].iter().map(|r| r.prompt.clone()).collect();
+    assert!(woke.contains(&format!("Delegated task {} (Part 2) [failed]:\n{FAILED}", failed.id)), "{woke}");
+    assert!(s.runs(&lead).iter().all(|r| r.status == RunStatus::Completed));
+}
+
+/// Parts for a provider that is logged out, or not on the machine at all, are refused with
+/// `provider_unavailable`: no thread starts, nothing wakes the orchestrator, and its turn ends.
+#[tokio::test]
+async fn parts_for_an_unavailable_provider_are_refused_and_the_orchestrator_still_ends_its_turn() {
+    let lead_provider = orchestrate();
+    let echo = FakeProvider::new("echo");
+    echo.set_auth(AuthStatus::Missing);
+    let w = world(vec![lead_provider.clone(), echo], "").await;
+    for provider in ["echo", "gemini"] {
+        lead_provider.delegate_to(provider);
+        let lead = orchestrator(&w, "orchestrate", "Ship dark mode").await;
+        let s = summed_up(&w, &lead, "No part could be delegated.").await;
+        let said = messages(&s, &lead).pop().unwrap();
+        assert_eq!(said.matches("wasn't delegated: provider_unavailable: ").count(), 2, "{said}");
+        assert!(said.contains(&format!("provider {provider} isn't installed and logged in")), "{said}");
+        let refused = ("delegate_task".to_string(), NodeStatus::Failed);
+        assert_eq!(tool_calls(&s, &lead)[1..], [refused.clone(), refused]);
+        assert!(children(&s, &lead).is_empty() && subagent_nodes(&s, &lead).is_empty());
+        settle().await;
+        let s = w.state().await;
+        assert_eq!(s.thread(&lead).unwrap().run_count, 1, "nothing woke it");
+        assert_eq!(s.runs(&lead)[0].status, RunStatus::Completed);
+    }
 }

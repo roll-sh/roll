@@ -1363,6 +1363,9 @@ login tests drive a fake `roll` process (`apps/desktop/test/fake-roll.mjs`).
 | child approvals are requests on the child (not the parent), end a sync wait with `pending_request`, the node waits; answered on the canvas the task finishes; a timed-out wait leaves the task running | `agent-host/tests/mcp.rs::child_approvals_are_requests_on_the_child_and_end_a_sync_wait` |
 | delegation limits: unknown provider or model, an option the model doesn't take (`option_unavailable`) or the effort as an option, mode escalation, `max_children`, delegating without a running turn; narrowed modes; options picked for the child; `orchestrator_capabilities` lists each model's efforts and options; worktree children from the caller's HEAD; `task_send` follow-ups run in the same child and wake again | `agent-host/tests/mcp.rs::limits_providers_models_modes_worktrees_and_follow_ups`, `agent-host/src/orchestrator/tasks.rs` tests, `agent-host/src/config.rs` tests |
 | orchestrators (`thread.create {orchestrator}`, "Orchestrate" on the canvas): the flag on the thread and kept by a fork, the run records only the goal, its sessions get the orchestrator's instructions, its tasks the subagent's, a plain thread only how delegation works; its tasks' results wake it | `agent-host/tests/mcp.rs::an_orchestrator_is_told_to_plan_and_delegate_and_its_tasks_to_do_the_work`, `agent-host/src/orchestrator/instructions.rs` tests |
+| the fake orchestrator model (`Script::Orchestrate`, `orchestrate` under `ROLL_AGENT_FAKE=1`) drives a real delegation over the MCP server's HTTP: capabilities, then two async `delegate_task`s as MCP tool nodes; two `subagent` child threads (parent = the orchestrator, `from_run` = its first run, not orchestrators, delegating nothing); their nodes follow them to completed with the child's answer; the results wake the orchestrator (`Delegated task <id> (<title>) [completed]`) and it sums up once every part is back; subagent sessions do the task themselves, fail on request, and stop at an interrupt | `agent-host/tests/mcp.rs::the_fake_orchestrator_delegates_through_the_server_and_sums_up_when_every_part_is_back`, `agent-host/src/provider/fake.rs::orchestrate_does_a_subagents_task_itself_and_reads_wakes` |
+| a delegated part whose run fails: node `failed` with the run's error as its result, the wake says `[failed]`, the orchestrator finishes counting it | `agent-host/tests/mcp.rs::a_failing_part_reports_failed_to_the_orchestrator` |
+| parts for a logged-out or missing provider: `provider_unavailable` refusals (failed tool nodes), no child thread, no wake, the orchestrator's turn completes | `agent-host/tests/mcp.rs::parts_for_an_unavailable_provider_are_refused_and_the_orchestrator_still_ends_its_turn` |
 
 ## Agents end to end (`pnpm test:agents`, `scripts/agents-e2e.mjs`)
 
@@ -1372,13 +1375,14 @@ only the scripted fake providers (`ROLL_AGENT_FAKE=1`).
 | Step | Checked |
 | --- | --- |
 | `roll agent login` | the pending lookup shows its name, hostname and OS; approved through the API; `agent.json` saved |
-| `roll agent up` | online with the `fake` and `echo` providers |
+| `roll agent up` | online with the `fake`, `echo` and `orchestrate` providers |
 | project add, thread create | replies `created`; the thread reaches the snapshot |
 | a streamed run | text deltas on `/events?threads=…&after=…`, the approval request pending, nothing written before it's answered |
 | the approval answered | the run completes with a checkpoint (stat 1 file, +1), the checkpoint record, the file in the project |
 | `diff.get` of the run | `ROLL_DEMO.md` added with the prompt |
 | a reconnect with `?after=` and a newer `Last-Event-ID` | resumes after the newer |
 | a share | the link on the web app, read anonymously (`no-store`), every record kind, the edit, no home directory |
+| "Orchestrate" (`thread.create {orchestrator: true, provider: "orchestrate"}`) | over `/events` (60 s bound): 2 subagent threads under the orchestrator (`orchestrate`, not orchestrators), their runs and `subagent` nodes completed, a completed wake run, the orchestrator idle with `All 2 parts done.` |
 | the dashboard (`next build`, `next start`) | `/dashboard/agents` 200 with its title; the share page 200 titled after the thread, OpenGraph and `noindex`; its preview image a PNG; a missing share 404 |
 | `roll agent logout` | `up` stops (exit 1, "roll agent login"), the machine is gone, the share stays |
 | `install.sh` (`scripts/test-agents.sh`) | from a local release: this machine's asset, checksum checked, installed and runs; a wrong checksum installs nothing |

@@ -476,6 +476,11 @@ server (`docs/orchestration-v2/orchestrator-mcp-server.md` there), ported in
   user's goal, and its tasks are ordinary subagents on the canvas under it. T3 has no such role
   (its threads delegate when the user asks them to); roll adds it so a goal typed outside any
   conversation becomes agents on the canvas.
+- **Tested end to end** without a model: `ROLL_AGENT_FAKE=1 roll agent up` also offers
+  `orchestrate` (`provider::fake::Script::Orchestrate`), a fake orchestrator model that calls this
+  server over HTTP as Codex or Claude would (`orchestrator_capabilities`, then an async
+  `delegate_task` per part), ends its turn, and sums up once both parts' results have woken it.
+  `scripts/agents-e2e.mjs` drives it through rolld and the relay.
 
 ## Machines, login and tokens
 
