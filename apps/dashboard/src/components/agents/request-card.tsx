@@ -11,7 +11,7 @@
  */
 
 import { Check, ChevronDown, FileDiff as FileIcon, ListChecks, MessageCircleQuestion, Shield, ShieldQuestion, SquareTerminal, Wrench } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { Approval, ApprovalAction, Decision, FileChange, Question, Request, RequestResponse } from "@/lib/agents-api";
 import type { FileDiff } from "@/lib/code-api";
 import { FileDiffView } from "../code/diff";
@@ -404,6 +404,20 @@ export function pickByDigit(flow: QuestionFlow, e: React.KeyboardEvent, typing: 
 export function QuestionsPanel({ flow, context, children }: { flow: QuestionFlow; context?: ReactNode; children?: ReactNode }) {
   const q = flow.question;
   const sel = flow.picked(q);
+  // Moving on unmounts the option that had focus: give it to the new question's (keyboard users
+  // keep going with arrows and Enter), unless it went somewhere else on purpose.
+  const options = useRef<HTMLDivElement>(null);
+  const first = useRef(true);
+  useLayoutEffect(() => {
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    const el = options.current;
+    const active = document.activeElement;
+    if (!el || (active && active !== document.body)) return;
+    (el.querySelector<HTMLElement>('[aria-checked="true"]') ?? el.querySelector<HTMLElement>("button"))?.focus();
+  }, [q.id]);
   return (
     <div role="group" aria-label="Questions from the agent" className="min-w-0">
       {context && <div className="mb-1 min-w-0 truncate text-[11.5px] text-subtle">{context}</div>}
@@ -417,7 +431,7 @@ export function QuestionsPanel({ flow, context, children }: { flow: QuestionFlow
         )}
       </div>
       <p className="mt-1.5 text-[13.5px] leading-snug text-fg/85">{q.question}</p>
-      <div role={q.multi ? "group" : "radiogroup"} aria-label={q.header} className="mt-1.5 -mx-1.5 flex flex-col">
+      <div ref={options} role={q.multi ? "group" : "radiogroup"} aria-label={q.header} className="mt-1.5 -mx-1.5 flex flex-col">
         {q.options.map((o, k) => {
           const on = sel.includes(o.label);
           return (

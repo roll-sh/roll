@@ -26,6 +26,7 @@ import { readyPlan } from "@/lib/agents-plan";
 import { DiffViewer } from "../code/diff";
 import { input } from "../ui";
 import { ChangeChip, PublishForm, TakeWorkForm, WorkChip } from "./change";
+import { useEscapeLayer } from "./escape-layers";
 import { Composer } from "./composer";
 import { Menu } from "./menu";
 import { useInboxMenu } from "./threads-sidebar";
@@ -72,6 +73,8 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
   const now = clock ?? wall;
 
   const [side, setSide] = useState<Side>(null);
+  // Escape closes the diff or terminal beside the chat before the conversation.
+  useEscapeLayer(side !== null, () => setSide(null));
   // Another conversation starts with nothing beside it, and on its own transcript.
   useEffect(() => setSide(null), [thread.id]);
   // A provider subagent's own transcript, in place of the conversation (T3 opens it as a thread).
@@ -435,6 +438,7 @@ function TitleBar({
   const data = client.data;
   const [renaming, setRenaming] = useState<string | null>(null);
   const [panel, setPanel] = useState<"publish" | "work" | null>(null);
+  useEscapeLayer(panel !== null, () => setPanel(null));
   useEffect(() => setPanel(null), [thread.id]);
   const mid = machine?.id;
   // An asleep sandbox counts: what's sent to it wakes it.

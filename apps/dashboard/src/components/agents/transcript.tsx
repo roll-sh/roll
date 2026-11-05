@@ -27,6 +27,7 @@ import {
   X,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
+import { useEscapeLayer } from "./escape-layers";
 import type { Checkpoint, FileChange, Node, Request, RequestResponse, Run } from "@/lib/agents-api";
 import { formatContextTokens } from "@/lib/agents-context";
 import type { NodeTree } from "@/lib/agents-store";
@@ -131,6 +132,7 @@ export function RunView({
 /** Under a finished run (T3's assistant meta row): how it ended, what it cost, copy, fork, roll back. */
 function RunMeta({ run, tree, checkpoint, actions, busyThread, last }: { run: Run; tree: NodeTree[]; checkpoint: Checkpoint | undefined; actions: TranscriptActions; busyThread: boolean; last: boolean }) {
   const [confirmRollback, setConfirmRollback] = useState(false);
+  useEscapeLayer(confirmRollback, () => setConfirmRollback(false));
   const answer = [...tree].reverse().find((t) => t.node.body.type === "message")?.node.body;
   const usage = usageLine(run.usage);
   return (

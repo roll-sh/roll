@@ -1168,7 +1168,8 @@ The surface has three views:
   there: fork, roll
   back, publish, share, rename, archive, delete, take a work item. The title is a switcher to the
   other conversations (the ones waiting on you first), so there's no need to go back to the
-  canvas; Escape (or ←) goes back. The canvas stays mounted underneath, so going back is instant.
+  canvas; Escape (or ←) goes back, after closing what's open inside it first (the diff or a
+  terminal beside it, a confirm, a form; the newest first). The canvas stays mounted underneath, so going back is instant.
 - **A new agent: the launcher** (`new-agent.tsx`). A small composer pops over the canvas (the
   canvas stays live under it): the machine and project as pickers (the asked-for one, else the
   last used; adding a project is right there), the model picker, permissions, plan and worktree

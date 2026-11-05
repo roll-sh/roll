@@ -33,6 +33,7 @@ import { PendingRequest } from "./pending-request";
 import { SettingsPanel } from "./settings-panel";
 import { useSandboxes } from "./sandbox";
 import { Conversation, IconButton } from "./session";
+import { closeTopLayer } from "./escape-layers";
 import { CloseTerminal, TerminalNode } from "./terminal";
 import { threadDone } from "./thread-status";
 import { SidebarToggle, ThreadsSidebar, useSidebarOpen } from "./threads-sidebar";
@@ -248,9 +249,16 @@ export function AgentsSurface({
     [client, demo, openThread, close, startNew, focus, focusProject, services, sandboxes, phone, prefs],
   );
 
-  // ⌘N / ⌘⇧O (T3's `chat.new`): the launcher, except in a terminal.
+  // ⌘N / ⌘⇧O (T3's `chat.new`): the launcher, except in a terminal. ⌘, (T3's "Settings…"): the
+  // owner's settings beside the canvas; the header control does it on other pages, this on the
+  // full page and the desktop app's Agents window.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key === ",") {
+        e.preventDefault();
+        setAgentsView({ kind: "settings", target: "owner" });
+        return;
+      }
       if (!isNewAgentKey(e) || (e.target as HTMLElement | null)?.closest?.(".xterm")) return;
       e.preventDefault();
       startNew();
@@ -290,8 +298,14 @@ export function AgentsSurface({
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || e.defaultPrevented) return;
       const el = e.target as HTMLElement | null;
+      if (el?.closest(".xterm, [role=dialog]:not([data-surface]), [role=listbox], [role=menu]")) return;
+      // The innermost thing open in a conversation first (a diff, a confirm, a form), even from a field.
+      if (closeTopLayer()) {
+        e.preventDefault();
+        return;
+      }
       const typing = el && (el.isContentEditable || /^(INPUT|SELECT)$/.test(el.tagName) || (el.tagName === "TEXTAREA" && (el as HTMLTextAreaElement).value !== ""));
-      if (typing || el?.closest(".xterm, [role=dialog]:not([data-surface]), [role=listbox], [role=menu]")) return;
+      if (typing) return;
       // An open automation closes to the list first; the list goes back to the canvas.
       if (shown.kind === "automations" && shown.open) setAgentsView({ kind: "automations", list: shown.list });
       else if (shown.kind !== "canvas") close();

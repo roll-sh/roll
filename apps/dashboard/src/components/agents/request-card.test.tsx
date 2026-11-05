@@ -86,6 +86,15 @@ describe("RequestCard", () => {
     expect(onRespond).toHaveBeenCalledWith({ type: "answers", answers: { db: "Postgres", checks: "Unit tests, Clippy, fmt" } });
   });
 
+  it("keeps the keyboard on the questions when a choice moves on", async () => {
+    render(<RequestCard request={question()} onRespond={vi.fn(async () => {})} />);
+    screen.getByRole("radio", { name: /Postgres/ }).focus();
+    await userEvent.keyboard("{Enter}");
+    expect(await screen.findByText("What should run after the fix?")).toBeInTheDocument();
+    // The picked option went away with its question: the next one's first option has focus.
+    expect(screen.getByRole("checkbox", { name: /Unit tests/ })).toHaveFocus();
+  });
+
   it("in the conversation, leaves questions to the composer's panel", () => {
     render(<RequestCard request={question()} onRespond={async () => {}} hostedQuestions />);
     expect(screen.getByText("Asked 2 questions")).toBeInTheDocument();

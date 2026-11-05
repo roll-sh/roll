@@ -84,6 +84,19 @@ describe("the agents in the header", () => {
     expect(window.location.hash).toBe("");
   });
 
+  it("Escape closes what's open inside a conversation first (the diff, the publish form), then the conversation", async () => {
+    setup();
+    await userEvent.click(screen.getByRole("button", { name: /Agents: 1 running/ }));
+    const panel = screen.getByRole("complementary", { name: "Conversation" });
+    await userEvent.click(within(panel).getByRole("button", { name: "Diff" }));
+    expect(within(panel).getByRole("complementary", { name: "Diff" })).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    expect(within(panel).queryByRole("complementary", { name: "Diff" })).toBeNull();
+    expect(agentsSurface.get().view).toMatchObject({ kind: "thread" });
+    await userEvent.keyboard("{Escape}");
+    expect(agentsSurface.get().view).toEqual({ kind: "canvas" });
+  });
+
   it("opens a conversation whose record comes after the reply (a fork), and leaves one that's deleted", async () => {
     const h = setup();
     await userEvent.click(screen.getByRole("button", { name: /Agents: 1 running/ }));
@@ -235,6 +248,21 @@ describe("the canvas under a trackpad", () => {
 });
 
 describe("the agents page (/dashboard/agents)", () => {
+  it("⌘, opens the owner's settings there too (the header control isn't on that page)", async () => {
+    const h = agentsHarness({ entities, follow: ["thr_1", "thr_2"] });
+    conn = { client: h.client, services: fakeServices(), error: null };
+    window.history.replaceState(null, "", "/dashboard/agents");
+    renderAgents(
+      <MarkStateProvider>
+        <AgentsPage />
+      </MarkStateProvider>,
+      h,
+    );
+    await screen.findByLabelText("Agents canvas");
+    await userEvent.keyboard("{Control>},{/Control}");
+    expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "owner" });
+  });
+
   it("follows #agents links as the popup does: where it opens, and one followed later", async () => {
     const h = agentsHarness({ entities, follow: ["thr_1", "thr_2"] });
     conn = { client: h.client, services: fakeServices(), error: null };

@@ -724,7 +724,7 @@ function CardSlot({ node, engine, selected, children }: { node: GraphNode; engin
       data-kind={node.kind}
       data-selected={selected || undefined}
       tabIndex={-1}
-      className="absolute top-0 left-0 rounded-xl outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent/70"
+      className="absolute top-0 left-0 rounded-xl outline-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent/70"
       style={{ transform: "translate3d(-99999px,0,0)" }}
     >
       <div className="rise">{children}</div>
