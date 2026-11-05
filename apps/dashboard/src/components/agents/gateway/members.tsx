@@ -10,7 +10,7 @@
 import { LogOut, Plus, X } from "lucide-react";
 import { useState } from "react";
 import { reachable, type ClientSeen, type GatewayPlan, type Machine } from "@/lib/agents-api";
-import { reachProblem, urlChoices } from "@/lib/agents-gateway";
+import { hostedSandbox, reachProblem, urlChoices } from "@/lib/agents-gateway";
 import { MachineIcon } from "../identity";
 import { Note } from "../settings-ui";
 import { ago } from "../shared";
@@ -135,12 +135,12 @@ export function MembersList({
               setPick(v);
               setUrl(null);
             }}
-            options={candidates.map((m) => ({ value: m.id, label: m.name, disabled: !reachable(m) }))}
+            options={candidates.map((m) => ({ value: m.id, label: m.name, disabled: !reachable(m) || hostedSandbox(m), hint: hostedSandbox(m) ? "Can't reach it" : undefined }))}
           />
           {picked && choices.length > 0 && (
             <Select label="Reached at" className="w-48" value={url ?? choices[0].url} onChange={setUrl} options={choices.map((c) => ({ value: c.url, label: c.label, hint: c.url }))} />
           )}
-          <button type="button" disabled={!picked || busy !== null || !choices.length} onClick={() => picked && void join(picked, url ?? choices[0]?.url).then(() => setPick(null))} className={smallBtn}>
+          <button type="button" disabled={!picked || busy !== null || !choices.length || !!reachProblem(picked, plan)} onClick={() => picked && void join(picked, url ?? choices[0]?.url).then(() => setPick(null))} className={smallBtn}>
             <Plus className="size-3.5" /> {busy?.startsWith("join:") ? <span className="shimmer">Joining…</span> : "Use the gateway"}
           </button>
         </div>

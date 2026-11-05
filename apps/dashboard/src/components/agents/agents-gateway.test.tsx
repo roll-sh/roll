@@ -155,10 +155,26 @@ describe("the notice, wherever a machine uses the gateway", () => {
 
   it("in the new-sandbox dialog when new sandboxes join", async () => {
     const h = agentsHarness({ machines: [HOST], ctx: { services: fakeServices({ gateway: memoryGateway(PLAN).api }) } });
-    renderAgents(<NewSandboxGatewayNotice />, h);
+    renderAgents(<NewSandboxGatewayNotice backend="docker" />, h);
     await waitFor(() =>
       expect(document.body.textContent).toContain("All AI requests from new sandboxes go out from ai-server. Providers see ai-server's network and IP address, not the sandboxes'. If ai-server is offline, requests from new sandboxes fail until it's back."),
     );
+  });
+
+  it("in the new-sandbox dialog, says a sandbox roll hosts can't reach it (and won't join)", async () => {
+    const h = agentsHarness({ machines: [HOST], ctx: { services: fakeServices({ gateway: memoryGateway(PLAN).api }) } });
+    renderAgents(<NewSandboxGatewayNotice backend="agent37" />, h);
+    await waitFor(() => expect(document.body.textContent).toContain("Sandboxes roll hosts can't reach your gateway on ai-server: this one uses its own keys or login."));
+    expect(document.body.textContent).not.toContain("All AI requests from new sandboxes");
+  });
+
+  it("never offers a hosted sandbox as a member: it's listed as unreachable and can't be added", async () => {
+    const hosted: Machine = { ...LAPTOP, id: "mch_box", name: "build-box", sandbox: { backend: "agent37", size: "small", status: "running", hourly_cents: 3 } as Machine["sandbox"] };
+    const gw = memoryGateway(PLAN);
+    const h = agentsHarness({ machines: [HOST, hosted], ctx: { services: fakeServices({ gateway: gw.api }) } });
+    renderAgents(<MembersList plan={{ ...PLAN, members: [] }} host={HOST} port={8790} machines={[HOST, hosted]} seen={[]} onChange={async () => {}} />, h);
+    macClick(screen.getByRole("combobox", { name: "A machine to add" }));
+    expect(await screen.findByRole("option", { name: /build-box/ })).toHaveAttribute("aria-disabled", "true");
   });
 });
 

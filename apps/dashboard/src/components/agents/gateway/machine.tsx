@@ -138,10 +138,15 @@ export function GatewayEndpointItem({ machine, endpoint: e, providerName }: { ma
   );
 }
 
-/** The new-sandbox dialog: new sandboxes join the gateway as they first connect (`new_sandboxes`). */
-export function NewSandboxGatewayNotice() {
+/**
+ * The new-sandbox dialog: new sandboxes join the gateway as they first connect (`new_sandboxes`).
+ * Sandboxes roll hosts elsewhere (`backend` isn't `docker`) can't reach it, and never join.
+ */
+export function NewSandboxGatewayNotice({ backend }: { backend: string }) {
   const g = useGatewayPlan();
   if (!g.plan?.new_sandboxes) return null;
+  if (backend !== "docker")
+    return <p className="text-[11.5px] text-subtle">Sandboxes roll hosts can&apos;t reach your gateway on {g.host?.name ?? "your computer"}: this one uses its own keys or login.</p>;
   return (
     <GatewayNotice host={g.host?.name ?? "your gateway's computer"} who={{ kind: "sandboxes" }} fallback={!!g.plan.fallback}>
       <p className="text-[11.5px] text-subtle">It joins as it first connects, with a key of its own. Change this in Gateway settings.</p>

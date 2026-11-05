@@ -312,6 +312,28 @@ async fn a_new_sandbox_joins_the_gateway_on_its_hello() {
     assert!(tokio::time::timeout(std::time::Duration::from_millis(300), h.recv()).await.is_err(), "joined once");
 }
 
+/// A sandbox roll hosts elsewhere (not `docker` on the owner's computer) has no route to the
+/// gateway: its hello doesn't join it, and joining it by hand is refused with why.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hosted_sandbox_never_joins_a_gateway_it_cant_reach() {
+    let w = world().await;
+    let (host, host_token) = w.machine("studio").await;
+    let (sandbox, sandbox_token) = w.machine("build-box").await;
+    let info = json!({ "backend": "agent37", "size": "small", "status": "running", "hourly_cents": 3 });
+    w.a.code.db.sql().execute("UPDATE agent_machines SET sandbox = ? WHERE id = ?", code_sql::params![info.to_string(), sandbox]).unwrap();
+    let mut p = plan(&host, "http://gw.tailnet:8790");
+    p["new_sandboxes"] = json!(true);
+    assert_eq!(w.req("PUT", "/v1/code/agents/acme/gateway", Some(p), &w.owner).await.0, StatusCode::OK);
+    let mut h = connect(&w.url, &host_token, hello(1)).await;
+    let _s = connect(&w.url, &sandbox_token, hello(3)).await;
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(500), h.recv()).await.is_err(), "no client issued for it");
+    let (s, v) = w.req("POST", "/v1/code/agents/acme/gateway/members", Some(json!({ "machine": sandbox })), &w.owner).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert!(v.to_string().contains("can't reach your computers"), "{v}");
+    let (_, p) = w.req("GET", "/v1/code/agents/acme/gateway", None, &w.owner).await;
+    assert!(p.get("members").is_none_or(|m| m == &json!([])), "{p}");
+}
+
 /// `gateway.*` commands through `…/commands`: the relay checks their shape before they reach the
 /// host (settings that would listen everywhere, a key that isn't a sealed box, a seal key that
 /// isn't one) and agents can't send them; a sealed upstream key reaches the host as it was sent.

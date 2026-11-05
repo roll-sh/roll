@@ -131,6 +131,11 @@ pub(super) async fn join(State(code): State<Arc<Code>>, caller: Caller, Path(own
 pub(crate) async fn join_machine(code: &Code, owner_id: &str, member: &MachineRow, url: Option<String>, providers: Vec<ProviderId>, by: &str) -> Result<GatewayPlan> {
     let db = code.db.sql();
     let p = plan(db, owner_id)?.ok_or_else(no_plan)?;
+    // A gateway's URLs are the owner's network (Tailscale, a LAN, Docker's bridge): a sandbox roll
+    // hosts elsewhere can't reach them (docs/code/gateway.md, "Sandboxes").
+    if let Some(s) = member.sandbox.as_ref().filter(|s| s.backend != "docker") {
+        return Err(Error::Conflict(format!("{} is a sandbox hosted by roll ({}): it can't reach your computers, so it can't use the gateway; give it its own keys or login", member.name, s.backend)));
+    }
     let host = match store::machine(db, &p.host.0)? {
         Some(h) if h.owner_id == owner_id && !h.revoked => h,
         _ => return Err(Error::Conflict("the gateway's host is gone: set the gateway up on another machine".into())),

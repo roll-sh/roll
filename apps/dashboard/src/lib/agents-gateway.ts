@@ -448,9 +448,12 @@ export function urlFor(address: string, port: number): string {
  * to the owner's computers (docs/code/gateway.md, "Hosted sandboxes"); anything else needs an
  * address in the plan.
  */
+/** A sandbox roll hosts elsewhere (not Docker on the owner's computer): no route to the gateway. */
+export const hostedSandbox = (machine: Pick<Machine, "sandbox">): boolean => !!machine.sandbox && machine.sandbox.backend !== "docker";
+
 export function reachProblem(machine: Machine, plan: Pick<GatewayPlan, "host" | "urls">): string | null {
   if (machine.id === plan.host) return null;
-  if (machine.sandbox && machine.sandbox.backend !== "docker") return "A hosted sandbox can't reach your computers: give it its own keys or login.";
+  if (hostedSandbox(machine)) return "A hosted sandbox can't reach your computers: give it its own keys or login.";
   if (!(plan.urls ?? []).length) return "Add an address it can reach the gateway at (Tailscale, LAN or Docker) first.";
   return null;
 }

@@ -129,7 +129,9 @@ A member machine has an ordinary endpoint (agents.md, "Endpoints"):
   the endpoint, on its own login or keys, and its status says so. A running session keeps what it
   started with.
 - **New sandboxes.** With `new_sandboxes` on, a sandbox joins when its daemon first says hello. The
-  relay spawns the join on the node holding the owner's agents lease.
+  relay spawns the join on the node holding the owner's agents lease. A sandbox roll hosts elsewhere
+  (a backend other than `docker`) has no route to the gateway ("Reachability"): the relay never
+  joins it, and a join asked for by hand is refused (409) with why.
 
 ## Reachability
 
