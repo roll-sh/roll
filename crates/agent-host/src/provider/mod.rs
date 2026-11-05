@@ -27,6 +27,7 @@ pub mod acp;
 pub mod claude;
 pub mod codex;
 pub mod fake;
+pub mod muse;
 pub mod opencode;
 pub mod pi;
 pub mod usage;
