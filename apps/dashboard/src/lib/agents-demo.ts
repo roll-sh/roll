@@ -8,6 +8,7 @@
 import { avatarSvg } from "@roll/brand/geometry";
 import { checkProjectIcon } from "./agents-identity";
 import type {
+  EndpointInfo,
   PullOutcome,
   PullResult,
   Approval,
@@ -48,6 +49,7 @@ import type { AgentsTransport } from "./agents-client";
 import { DemoAutomations } from "./automations-demo";
 import { memoryCanvas, memorySettings, type AgentsServices, type RepoChoice } from "./agents-services";
 import { offeredProviders, settingsError } from "./machine-settings";
+import { checkEndpoint, demoModels, incompatible, setEndpoint, withEndpoints } from "./agents-endpoints";
 import { PLAN_IMPLEMENTATION_PREFIX, planTitle } from "./agents-plan";
 import { ApiError } from "./code-api";
 import { memoryLinear, type LinearStatus, type LinearTeam } from "./linear-api";
@@ -293,6 +295,8 @@ function demoConfig(home: string, all: readonly ProviderInfo[], set: MachineSett
 }
 
 const MBP = "mch_demo_ada";
+/** The demo daemons' seal key (a test key's public half): the demo never opens what is sealed to it. */
+const DEMO_SEAL_KEY = "KMIZzg7UJuV-Nxs3gUarEXCHzKlAkKSSSCaXrdLz4zg";
 const BOX = "mch_demo_box";
 
 const DIFF_QUEUE = `@@ -88,13 +88,17 @@ impl Queue {
@@ -993,6 +997,7 @@ export class DemoOwner implements AgentsTransport {
                   arch: "x86_64",
                   version: "0.1.0",
                   home: "/home/roll",
+                  seal_key: DEMO_SEAL_KEY,
                   ...owner.catalog(mid, "/home/roll", [claude(keys.has("ANTHROPIC_API_KEY") ? "ready" : "missing"), codex(keys.has("OPENAI_API_KEY") ? "ready" : "missing")]),
                 },
               },
@@ -1110,18 +1115,20 @@ export class DemoOwner implements AgentsTransport {
       id: MBP,
       name: "ada-mbp",
       online: true,
-      info: { hostname: "ada-mbp", os: "macos", arch: "aarch64", version: "0.1.0", home: "/Users/ada", ...this.catalog(MBP, "/Users/ada", [claude(), codex(), gemini, grok], { claude: ["ANTHROPIC_API_KEY"] }) },
+      info: { hostname: "ada-mbp", os: "macos", arch: "aarch64", version: "0.1.0", home: "/Users/ada", seal_key: DEMO_SEAL_KEY, ...this.catalog(MBP, "/Users/ada", [claude(), codex(), gemini, grok], { claude: ["ANTHROPIC_API_KEY"] }) },
       sandbox: null,
       // Picked in its settings (the rest of the demo shows colours made from the record).
       appearance: { color: "slate" },
       created_at: t0,
       last_seen: now(),
     });
+    // Gemini CLI on ada-mbp goes through the owner's CLIProxyAPI ("Endpoints").
+    this.layEndpoints(MBP, [{ id: "cliproxy", name: "CLIProxyAPI", kind: "cliproxy", base_url: "http://100.64.0.7:8317", providers: ["acp:gemini"], key: "sealed", models: demoModels("cliproxy"), checked_at: t0 }], false);
     this.machines.set(BOX, {
       id: BOX,
       name: "build-box",
       online: true,
-      info: { hostname: "build-box", os: "linux", arch: "x86_64", version: "0.1.0", home: "/home/roll", ...this.catalog(BOX, "/home/roll", [codex(), claude("missing")]) },
+      info: { hostname: "build-box", os: "linux", arch: "x86_64", version: "0.1.0", home: "/home/roll", seal_key: DEMO_SEAL_KEY, ...this.catalog(BOX, "/home/roll", [codex(), claude("missing")]) },
       sandbox: { backend: "agent37", size: "standard", status: "running", hourly_cents: 3 },
       appearance: {},
       created_at: t0,
@@ -1332,7 +1339,7 @@ export class DemoOwner implements AgentsTransport {
     const all = (this.allProviders.get(machine) ?? m.info.providers).map((p) => (p.auth === "missing" && which(p) ? { ...p, auth: "ready" as const, detail: "Logged in" } : p));
     this.allProviders.set(machine, all);
     const set = m.info.settings?.set ?? {};
-    const next = { ...m, info: { ...m.info, providers: offeredProviders(all, set) } };
+    const next = { ...m, info: { ...m.info, providers: withEndpoints(offeredProviders(all, set), m.info.settings?.endpoints ?? []) } };
     this.machines.set(machine, next);
     this.emit({ type: "machine", cursor: ++this.cursor, machine: next });
   }
@@ -2074,12 +2081,61 @@ export class DemoOwner implements AgentsTransport {
         if (error) return { type: "error", code: "invalid", message: error };
         const all = this.allProviders.get(machine) ?? m.info.providers;
         const fileEnv = Object.fromEntries((m.info.settings?.providers ?? []).map((p) => [p.id, p.env]));
-        const next = { ...m, info: { ...m.info, ...demoConfig(m.info.home, all, c.settings, fileEnv) } };
+        const config = demoConfig(m.info.home, all, c.settings, fileEnv);
+        const endpoints = m.info.settings?.endpoints ?? [];
+        const next = { ...m, info: { ...m.info, providers: withEndpoints(config.providers, endpoints), settings: config.settings && { ...config.settings, endpoints } } };
         this.machines.set(machine, next);
         this.emit({ type: "machine", cursor: ++this.cursor, machine: next });
         return { type: "ok" };
       }
+      // Endpoints as the daemon keeps them: the demo can't open a sealed key (nothing can but the
+      // daemon), so it only notes that one is set.
+      case "endpoint.set": {
+        const m = this.machines.get(machine);
+        if (!m?.info?.settings) return notFound("machine");
+        const checked = checkEndpoint(c.endpoint);
+        if ("error" in checked) return { type: "error", code: "invalid", message: checked.error };
+        const all = this.allProviders.get(machine) ?? m.info.providers;
+        for (const p of checked.spec.providers ?? []) {
+          if (!all.some((x) => x.id === p)) return { type: "error", code: "invalid", message: `no provider ${p} on this machine` };
+          const why = incompatible(p, checked.spec.kind);
+          if (why) return { type: "error", code: "invalid", message: `${why}: use an endpoint it speaks or CLIProxyAPI` };
+        }
+        if (checked.spec.key_ref && c.key?.type === "set") return { type: "error", code: "invalid", message: "an endpoint's key is sealed or a 1Password reference, not both" };
+        const list = m.info.settings.endpoints ?? [];
+        const old = list.find((e) => e.id === checked.spec.id);
+        if (!old && list.length >= 32) return { type: "error", code: "invalid", message: "a machine has at most 32 endpoints" };
+        const kept = old?.key === "sealed" ? "sealed" : "none";
+        const key = checked.spec.key_ref ? "reference" : c.key?.type === "set" ? "sealed" : c.key?.type === "clear" ? "none" : kept;
+        const next: EndpointInfo = { ...checked.spec, key, models: demoModels(checked.spec.kind), checked_at: now() };
+        this.layEndpoints(machine, setEndpoint(list, next));
+        return { type: "ok" };
+      }
+      case "endpoint.remove": {
+        const m = this.machines.get(machine);
+        const list = m?.info?.settings?.endpoints ?? [];
+        if (!list.some((e) => e.id === c.endpoint)) return notFound("endpoint");
+        this.layEndpoints(machine, list.filter((e) => e.id !== c.endpoint));
+        return { type: "ok" };
+      }
+      case "endpoint.check": {
+        const e = this.machines.get(machine)?.info?.settings?.endpoints?.find((x) => x.id === c.endpoint);
+        if (!e) return notFound("endpoint");
+        if (e.kind === "custom") return { type: "endpoint_checked", ok: false, models: 0, ms: 0, error: "a custom endpoint doesn't list models: add them as custom models" };
+        return { type: "endpoint_checked", ok: true, models: (e.models ?? []).length, ms: 140 };
+      }
     }
+  }
+
+  /** A machine's endpoints replaced, and its providers as the daemon would report them. */
+  private layEndpoints(machine: MachineId, endpoints: EndpointInfo[], emit = true) {
+    const m = this.machines.get(machine);
+    if (!m?.info?.settings) return;
+    const all = this.allProviders.get(machine) ?? m.info.providers;
+    const providers = withEndpoints(offeredProviders(all, m.info.settings.set), endpoints);
+    const next = { ...m, info: { ...m.info, providers, settings: { ...m.info.settings, endpoints } } };
+    this.machines.set(machine, next);
+    if (emit) this.emit({ type: "machine", cursor: ++this.cursor, machine: next });
   }
 }
 

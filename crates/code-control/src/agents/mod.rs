@@ -12,6 +12,7 @@ pub mod api;
 pub mod automations;
 pub mod linear;
 pub mod docs;
+pub mod endpoints;
 mod code;
 mod link;
 mod policy;

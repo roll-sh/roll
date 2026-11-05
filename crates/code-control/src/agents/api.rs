@@ -15,7 +15,7 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -49,6 +49,8 @@ pub fn routes() -> Router<Arc<Code>> {
         .route("/v1/code/agents/{owner}/events", get(events))
         .route("/v1/code/agents/{owner}/canvas", get(super::docs::get_canvas).put(super::docs::put_canvas))
         .route("/v1/code/agents/{owner}/settings", get(super::docs::get_settings).put(super::docs::put_settings))
+        .route("/v1/code/agents/{owner}/endpoints", get(super::endpoints::list_profiles))
+        .route("/v1/code/agents/{owner}/endpoints/{id}", put(super::endpoints::put_profile).delete(super::endpoints::delete_profile))
         .route("/v1/code/agents/{owner}/threads/{thread}/shares", post(share::create))
         .route("/v1/code/agents/{owner}/shares", get(share::list))
         .route("/v1/code/agents/{owner}/shares/{id}", delete(share::revoke))

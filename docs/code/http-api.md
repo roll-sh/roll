@@ -619,6 +619,19 @@ PUT /v1/code/agents/{owner}/settings {settings: object, revision?: int} → Save
        writers, 400/401/403/404), at most 32 KiB of compact JSON (413), announced on /events as
        `settings`. The dashboard's schema (lib/owner-settings.ts); roll keeps nothing secret there.
 
+GET /v1/code/agents/{owner}/endpoints → [EndpointProfile]
+PUT /v1/code/agents/{owner}/endpoints/{id} EndpointProfile → EndpointProfile
+DELETE /v1/code/agents/{owner}/endpoints/{id} → 204
+       The owner's endpoint profiles (docs/code/agents.md, "Endpoints"): {name, kind: anthropic |
+       openai | cliproxy | custom, base_url, providers?, url_env?, key_env?, key_ref?, sandbox_default?,
+       updated_at}, oldest first. Never a key: one sent with a profile is dropped, not stored. The
+       path names it (`[a-z0-9_-]`, at most 64); 400 for a spec `EndpointSpec::check` refuses (a URL
+       that isn't http(s) or holds credentials, a custom endpoint naming no variable, …) and past 32
+       per owner. `sandbox_default` on one takes it off the others. GET: the owner's tokens, agents
+       too (404 others); PUT and DELETE: Code::manages (401 anonymous, 403 agent tokens and other
+       owners; 404 deleting one that isn't there). Applying a profile to a machine is `endpoint.set`
+       through …/commands, with the key sealed to that machine in the browser.
+
 POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, command: Command} → Reply
        Forwarded to the machine's daemon; waits up to 30 s for its reply. `id` (1–128 characters) is
        the idempotency key, per sender: retrying with the same id never runs the command twice (the
@@ -627,6 +640,9 @@ POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, com
        within the wait gets the command again. Owner's tokens, agent tokens too (401 anonymous, 403
        others; 404 an unknown or revoked machine). The daemon is told who sent it: the owner's name,
        `agent:<name>`, or `admin`.
+       `endpoint.set {endpoint, key?}` (owner only): 400 before it reaches the machine for a spec
+       `EndpointSpec::check` refuses or a `key.sealed` that isn't a roll-seal-v1 box (the relay can't
+       open one; it forwards it and keeps nothing). `endpoint.check` answers `endpoint_checked`.
        Agent tokens drive threads only (403 otherwise, docs/code/agents.md "Machines, login and
        tokens"): `thread.create` in `ask` or `auto_edit` (not `full_access`, the default),
        `thread.configure` only lowering the thread's modes, `thread.fork`, `thread.archive`,

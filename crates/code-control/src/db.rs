@@ -436,6 +436,7 @@ impl Db {
             crate::agents::share::SCHEMA,
             crate::agents::sandbox::store::SCHEMA,
             crate::agents::docs::SCHEMA,
+            crate::agents::endpoints::SCHEMA,
             crate::agents::automations::SCHEMA,
             crate::agents::linear::SCHEMA,
         ] {

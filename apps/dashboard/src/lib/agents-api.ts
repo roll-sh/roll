@@ -2045,6 +2045,14 @@ export function createAgentsApi(
         throw e;
       }
     },
+    /** The owner's endpoint profiles (never a key; docs/code/agents.md, "Endpoints"). */
+    endpoints: async (owner: string): Promise<EndpointProfile[]> => decode(array(endpointProfileD), await call("GET", `${ag(owner)}/endpoints`)),
+    /** Add or replace a profile (owners only). A key never goes here: it's sealed to each machine (`agents-seal.ts`). */
+    saveEndpoint: async (owner: string, profile: Omit<EndpointProfile, "updated_at">): Promise<EndpointProfile> =>
+      decode(endpointProfileD, await call("PUT", `${ag(owner)}/endpoints/${encodeURIComponent(profile.id)}`, profile)),
+    removeEndpoint: async (owner: string, id: string): Promise<void> => {
+      await call("DELETE", `${ag(owner)}/endpoints/${encodeURIComponent(id)}`);
+    },
     /** The owner's agents settings (`settings: null` before the first save). */
     settings: async (owner: string) => decode(savedSettingsD, await call("GET", `${ag(owner)}/settings`)),
     /**

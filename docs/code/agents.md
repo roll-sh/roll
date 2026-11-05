@@ -852,8 +852,15 @@ the owner's own, set on the owner's own machines, and a sandbox is one owner's m
   uses the endpoint offers them after its own, with `ModelInfo.via` = the endpoint's name (the picker
   shows it), and its status says "via <name>". A private or tailnet address is fine: the daemon calls
   it; roll's relay never calls an endpoint. Errors name the failure, never a key.
-- **Who**: the owner (`Code::manages`); agent tokens can't set, remove or check endpoints
-  (`agents/policy.rs`).
+- **Profiles** (`EndpointProfile`, `code-control/src/agents/endpoints.rs`, `GET`/`PUT`/`DELETE
+  /v1/code/agents/{owner}/endpoints[/{id}]`): the owner's endpoints kept on the relay without a key
+  (one sent with a profile is dropped by the parser), at most 32, one of them the default for new
+  sandboxes. Applying a profile to machines sends `endpoint.set` with the profile's spec (same id) to
+  each, the key typed once and sealed to each machine separately in the browser; a machine shows which
+  profile its endpoint came from by the id. A new sandbox has no daemon yet: the dialog applies the
+  chosen profile once the sandbox's `hello` brings its seal key.
+- **Who**: the owner (`Code::manages`); agent tokens can't set, remove or check endpoints, or change
+  profiles (`agents/policy.rs`, `agents/endpoints.rs`); they can read profiles.
 
 ## Owner settings
 

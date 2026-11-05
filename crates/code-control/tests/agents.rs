@@ -1201,3 +1201,72 @@ async fn machine_settings_go_to_the_daemon_and_credentials_never_do() {
     let set = &state["machines"][0]["info"]["settings"]["set"];
     assert_eq!((&set["branch_prefix"], &set["providers"]["codex"]["enabled"]), (&json!("ada"), &json!(false)), "{state}");
 }
+
+/// Endpoints on the relay (docs/code/agents.md, "Endpoints"): the owner's profiles keep no key
+/// (one sent with a profile is dropped), one is the sandboxes' default, and agents can't change
+/// them; `endpoint.set` reaches the daemon with the sealed box exactly as sent, after the relay
+/// refused a malformed box or spec itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn endpoint_profiles_keep_no_key_and_sealed_keys_pass_through() {
+    let w = std::sync::Arc::new(world().await);
+    let base = "/v1/code/agents/acme/endpoints";
+    let (s, v) = w.req("GET", base, None, &w.owner).await;
+    assert_eq!((s, v), (StatusCode::OK, json!([])));
+
+    let profile = json!({ "name": " CLIProxyAPI ", "kind": "cliproxy", "base_url": "http://100.64.0.7:8317/", "providers": ["claude", "codex"],
+        "sandbox_default": true, "key": "sk-should-vanish", "api_key": "sk-should-vanish" });
+    let (s, v) = w.req("PUT", &format!("{base}/cliproxy"), Some(profile), &w.owner).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!((v["id"].as_str(), v["name"].as_str(), v["base_url"].as_str()), (Some("cliproxy"), Some("CLIProxyAPI"), Some("http://100.64.0.7:8317")));
+    let gw = json!({ "name": "Gateway", "kind": "openai", "base_url": "https://gw.example/v1", "providers": ["codex"], "sandbox_default": true });
+    assert_eq!(w.req("PUT", &format!("{base}/gw"), Some(gw), &w.owner).await.0, StatusCode::OK);
+    let (_, list) = w.req("GET", base, None, &w.agent).await;
+    assert!(!list.to_string().contains("sk-should-vanish"), "{list}");
+    let defaults: Vec<&str> = list.as_array().unwrap().iter().filter(|p| p["sandbox_default"] == true).map(|p| p["id"].as_str().unwrap()).collect();
+    assert_eq!(defaults, ["gw"], "one default: {list}");
+
+    // Refused: a bad spec, a key in the URL, an agent, another owner, nobody.
+    for bad in [json!({ "name": "x", "kind": "openai", "base_url": "ftp://x" }), json!({ "name": "x", "kind": "openai", "base_url": "https://u:sk-1@gw" }), json!({ "name": "x" })] {
+        assert_eq!(w.req("PUT", &format!("{base}/bad"), Some(bad.clone()), &w.owner).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    assert_eq!(w.req("PUT", &format!("{base}/BadId"), Some(json!({ "name": "x", "kind": "openai", "base_url": "https://gw" })), &w.owner).await.0, StatusCode::BAD_REQUEST);
+    let ok = json!({ "name": "x", "kind": "openai", "base_url": "https://gw" });
+    assert_eq!(w.req("PUT", &format!("{base}/x"), Some(ok.clone()), &w.agent).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(w.req("PUT", &format!("{base}/x"), Some(ok.clone()), &w.other).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(w.req("DELETE", &format!("{base}/gw"), None, &w.agent).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(w.req("GET", base, None, &w.other).await.0, StatusCode::NOT_FOUND);
+    // At most 32.
+    for i in 0..30 {
+        assert_eq!(w.req("PUT", &format!("{base}/e{i}"), Some(ok.clone()), &w.owner).await.0, StatusCode::OK);
+    }
+    let (s, v) = w.req("PUT", &format!("{base}/one-too-many"), Some(ok.clone()), &w.owner).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(w.req("PUT", &format!("{base}/e0"), Some(ok), &w.owner).await.0, StatusCode::OK, "replacing one is fine");
+    assert_eq!(w.req("DELETE", &format!("{base}/gw"), None, &w.owner).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(w.req("DELETE", &format!("{base}/gw"), None, &w.owner).await.0, StatusCode::NOT_FOUND);
+
+    // Applying one: the sealed box goes to the daemon as it was sent.
+    let (id, minted) = w.machine("box").await;
+    let (mut d, _) = Daemon::connect(&w.url, &minted).await;
+    let path = format!("/v1/code/agents/acme/machines/{id}/commands");
+    let sealed = json!({ "v": 1, "epk": "A".repeat(43), "nonce": "B".repeat(16), "ct": "C".repeat(48) });
+    let set = |cid: &str, sealed: Value| {
+        json!({ "id": cid, "command": { "type": "endpoint.set", "endpoint": { "id": "cliproxy", "name": "CLIProxyAPI", "kind": "cliproxy", "base_url": "http://100.64.0.7:8317", "providers": ["claude"] }, "key": { "type": "set", "sealed": sealed } } })
+    };
+    let (s, v) = w.req("POST", &path, Some(set("k0", json!({ "v": 1, "epk": "x", "nonce": "y", "ct": "sk-plaintext" }))), &w.owner).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    assert!(!v.to_string().contains("sk-plaintext"), "{v}");
+    let (s, v) = w.req("POST", &path, Some(set("k1", sealed.clone())), &w.agent).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    let pending = {
+        let (w, path, body) = (w.clone(), path.clone(), set("k2", sealed.clone()));
+        tokio::spawn(async move { w.req("POST", &path, Some(body), &w.owner).await })
+    };
+    let Some(RelayFrame::Command { id: cid, command, .. }) = d.recv().await else { panic!("no endpoint.set") };
+    assert_eq!(cid, "k2", "nothing refused went out");
+    let Command::EndpointSet { endpoint, key } = *command else { panic!("not endpoint.set: {command:?}") };
+    assert_eq!(endpoint.id, "cliproxy");
+    assert_eq!(serde_json::to_value(&key).unwrap(), json!({ "type": "set", "sealed": sealed }));
+    d.send(&DaemonFrame::Reply { id: "k2".into(), result: Reply::Ok }).await;
+    assert_eq!(pending.await.unwrap(), (StatusCode::OK, json!({ "type": "ok" })));
+}

@@ -505,7 +505,8 @@ async fn github_webhook_statuses() {
 /// drive threads (never terminals, files outside projects, approvals, projects, rollbacks or a
 /// higher mode: agents/policy.rs); managing machines, looking up and approving logins, making
 /// and revoking shares, arranging the canvas and changing the agents settings (reading them is a
-/// read), and changing a machine's settings, is the owner's, not its agents'. Starting and polling a login and reading a share by its link look at no caller; bad
+/// read), changing a machine's settings and its endpoints, and the owner's endpoint profiles (reading
+/// them is a read), is the owner's, not its agents'. Starting and polling a login and reading a share by its link look at no caller; bad
 /// tokens, machine tokens included, are 401 everywhere else.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agents_routes_follow_the_auth_matrix() {
@@ -517,7 +518,7 @@ async fn agents_routes_follow_the_auth_matrix() {
     let machine = m["token"].as_str().unwrap().to_string();
     let base = "/v1/code/agents/acme";
     let body = json!({ "name": "x", "user_code": "BCDF-GHJK", "id": "c1", "command": { "type": "provider.refresh" }, "canvas": {}, "settings": {} });
-    let reads = [format!("{base}/machines"), format!("{base}/state"), format!("{base}/events"), format!("{base}/shares"), format!("{base}/canvas"), format!("{base}/settings")];
+    let reads = [format!("{base}/machines"), format!("{base}/state"), format!("{base}/events"), format!("{base}/shares"), format!("{base}/canvas"), format!("{base}/settings"), format!("{base}/endpoints")];
     let command = format!("{base}/machines/{mid}/commands");
     let manages = [
         ("POST", format!("{base}/machines")),
@@ -530,6 +531,8 @@ async fn agents_routes_follow_the_auth_matrix() {
         ("DELETE", format!("{base}/shares/shr_x")),
         ("PUT", format!("{base}/canvas")),
         ("PUT", format!("{base}/settings")),
+        ("PUT", format!("{base}/endpoints/gw")),
+        ("DELETE", format!("{base}/endpoints/gw")),
     ];
     let (acme, agent, other, app_in) = (Some(w.acme.as_str()), Some(w.agent.as_str()), Some(w.other.as_str()), Some(w.app_in.as_str()));
     let denied = StatusCode::UNAUTHORIZED;
@@ -576,6 +579,9 @@ async fn agents_routes_follow_the_auth_matrix() {
         json!({ "type": "project.remove", "project": "prj_1" }),
         json!({ "type": "provider.refresh" }),
         json!({ "type": "machine.configure", "settings": { "providers": { "codex": { "enabled": false } } } }),
+        json!({ "type": "endpoint.set", "endpoint": { "id": "gw", "name": "Gateway", "kind": "openai", "base_url": "https://gw.example/v1" } }),
+        json!({ "type": "endpoint.remove", "endpoint": "gw" }),
+        json!({ "type": "endpoint.check", "endpoint": "gw" }),
         json!({ "type": "checkpoint.rollback", "thread": "thr_1", "checkpoint": "chk_1" }),
     ];
     for c in agents_drive {
@@ -611,10 +617,13 @@ async fn agents_routes_follow_the_auth_matrix() {
         let want = match (*m, p.as_str()) {
             ("POST", p) if p.ends_with("/machines") => StatusCode::CREATED,
             ("PATCH", _) | ("PUT", _) => OK,
-            ("DELETE", p) if p.contains("/machines/") => StatusCode::NO_CONTENT,
+            // The profile the PUT before it made.
+            ("DELETE", p) if p.contains("/machines/") || p.contains("/endpoints/") => StatusCode::NO_CONTENT,
             _ => NOT_FOUND,
         };
-        assert_eq!(call(a, m, p, Some(&body), acme).await, want, "owner: {m} {p}");
+        let endpoint = json!({ "name": "Gateway", "kind": "openai", "base_url": "https://gw.example/v1" });
+        let body = if p.contains("/endpoints/") { &endpoint } else { &body };
+        assert_eq!(call(a, m, p, Some(body), acme).await, want, "owner: {m} {p}");
     }
     // The link: only machine tokens (without an upgrade, the token's machine).
     assert_eq!(call(a, "GET", "/v1/code/agents/connect", None, Some(&machine)).await, denied, "revoked by the owner above");
