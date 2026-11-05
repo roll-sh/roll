@@ -63,7 +63,7 @@ describe("roll code on a thread", () => {
     const h = agentsHarness({ reply, entities: [mirrored("project", inRepo, 1), mirrored("thread", t, 2)], follow: ["thr_1"], ctx: { services: fakeServices() } });
     renderAgents(<Conversation thread={t} machine={machine()} />, h);
     await userEvent.click(screen.getByRole("button", { name: "More" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Publish as a change" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Publish as a change" }));
     const form = screen.getByRole("form", { name: "Publish" });
     expect(within(form).getByRole("textbox", { name: "Commit message" })).toHaveValue("Fix the flaky queue test");
     await userEvent.click(within(form).getByRole("checkbox", { name: "and land" }));
@@ -81,7 +81,7 @@ describe("roll code on a thread", () => {
     const h = agentsHarness({ reply: () => ({ type: "created", id: "thr_fork" }), entities: [mirrored("project", inRepo, 1), mirrored("thread", t, 2)], follow: ["thr_1"] });
     renderAgents(<Conversation thread={t} machine={machine()} />, h);
     await userEvent.click(screen.getByRole("button", { name: "More" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Publish as a change" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Publish as a change" }));
     await userEvent.click(screen.getByRole("button", { name: "Fork into a worktree" }));
     expect(h.command).toHaveBeenLastCalledWith("mch_1", expect.any(String), { type: "thread.fork", thread: "thr_1", worktree: true });
     await waitFor(() => expect(h.openThread).toHaveBeenCalledWith("thr_fork"));
@@ -93,7 +93,7 @@ describe("roll code on a thread", () => {
     const h = agentsHarness({ entities: [mirrored("project", inRepo, 1), mirrored("thread", t, 2)], follow: ["thr_1"], ctx: { services: fakeServices({ takeWork }) } });
     renderAgents(<Conversation thread={t} machine={machine()} />, h);
     await userEvent.click(screen.getByRole("button", { name: "More" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Take a work item" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Take a work item" }));
     await userEvent.click(screen.getByRole("button", { name: "Claim the next in acme/roll" }));
     expect(await screen.findByText("Nothing open to claim in acme/roll.")).toBeInTheDocument();
     expect(takeWork).toHaveBeenLastCalledWith("acme", "thr_1", { repo: "acme/roll" });
@@ -113,7 +113,7 @@ describe("roll code on a thread", () => {
     expect(within(view).getByRole("textbox", { name: "Message" })).toBeInTheDocument();
     expect(within(view).queryByRole("button", { name: "Publish as a roll code change" })).toBeNull();
     await userEvent.click(within(view).getByRole("button", { name: "More" }));
-    expect(screen.getByRole("menuitem", { name: "Publish as a change" })).toBeInTheDocument();
+    expect(await screen.findByRole("menuitem", { name: "Publish as a change" })).toBeInTheDocument();
   });
 
   it("a fresh fork with no runs isn't stuck loading", () => {

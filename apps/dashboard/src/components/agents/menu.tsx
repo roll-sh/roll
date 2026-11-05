@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
+import { Menu as Root, MenuItem as Item, MenuPopup, MenuTrigger } from "./ui/menu";
 
 export interface MenuItem {
   label: string;
@@ -12,7 +13,11 @@ export interface MenuItem {
   confirm?: string;
 }
 
-/** A small popover menu under its trigger: closes on a pick, a click outside or Escape. */
+/**
+ * A small menu under its trigger, on the agents' Base UI menu (`ui/menu.tsx`): portalled, so a
+ * scrolling strip (the views bar) or a stacked header never clips it or takes its taps; arrow
+ * keys, Home/End and typing move through it; it closes on a pick, a click outside or Escape.
+ */
 export function Menu({
   trigger,
   label,
@@ -28,69 +33,44 @@ export function Menu({
 }) {
   const [open, setOpen] = useState(false);
   const [armed, setArmed] = useState<string | null>(null);
-  const box = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: PointerEvent) => !box.current?.contains(e.target as Node) && setOpen(false);
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.stopPropagation();
-      setOpen(false);
-    };
-    window.addEventListener("pointerdown", onDown, true);
-    window.addEventListener("keydown", onKey, true);
-    return () => {
-      window.removeEventListener("pointerdown", onDown, true);
-      window.removeEventListener("keydown", onKey, true);
-    };
-  }, [open]);
-  useEffect(() => {
-    if (!open) setArmed(null);
-  }, [open]);
   const shown = items.filter((i): i is MenuItem => !!i);
   return (
-    <div ref={box} className={`relative ${className}`} data-nodrag>
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label={label}
-        title={label}
-        className={`grid size-7 place-items-center rounded-md text-subtle transition-colors duration-150 hover:bg-fg/[0.07] hover:text-fg ${open ? "bg-fg/[0.07] text-fg" : ""}`}
+    <span className={`relative inline-flex ${className}`} data-nodrag>
+      <Root
+        open={open}
+        onOpenChange={(o) => {
+          setOpen(o);
+          if (!o) setArmed(null);
+        }}
       >
-        {trigger}
-      </button>
-      {open && (
-        <div
-          role="menu"
+        <MenuTrigger
           aria-label={label}
-          className={`pop absolute top-full z-50 mt-1.5 min-w-48 rounded-[10px] border border-outline p-1 shadow-pop inset-shadow-highlight glass ${align === "end" ? "right-0" : "left-0"}`}
+          title={label}
+          className={`grid size-7 place-items-center rounded-md text-subtle transition-colors duration-150 hover:bg-fg/[0.07] hover:text-fg ${open ? "bg-fg/[0.07] text-fg" : ""}`}
         >
+          {trigger}
+        </MenuTrigger>
+        <MenuPopup aria-label={label} align={align} sideOffset={6} className="min-w-48">
           {shown.map((i) => {
             const asking = armed === i.label;
             return (
-              <button
+              <Item
                 key={i.label}
-                type="button"
-                role="menuitem"
                 disabled={i.disabled}
+                variant={i.danger ? "destructive" : "default"}
+                closeOnClick={!i.confirm || asking}
                 onClick={() => {
                   if (i.confirm && !asking) return setArmed(i.label);
-                  setOpen(false);
                   i.onSelect();
                 }}
-                className={`flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-100 disabled:opacity-35 ${
-                  i.danger ? "text-danger hover:bg-danger/10" : "text-fg hover:bg-fg/[0.07]"
-                }`}
               >
                 <span className={`grid size-3.5 place-items-center [&>svg]:size-3.5 [&>svg]:stroke-[1.75] ${i.danger ? "" : "text-muted"}`}>{i.icon}</span>
                 {asking ? i.confirm : i.label}
-              </button>
+              </Item>
             );
           })}
-        </div>
-      )}
-    </div>
+        </MenuPopup>
+      </Root>
+    </span>
   );
 }

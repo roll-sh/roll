@@ -1199,7 +1199,8 @@ The surface has three views:
   settings, and moving them to an owner-level record is the one seam to change.
 - **Controls.** The agents surface uses T3's own controls, never native `<select>`s or
   checkboxes: `components/agents/ui/` ports T3's `components/ui` (Base UI) to roll's colours —
-  `Select`, `Menu`, `Popover`, `Combobox`, `Switch` and `Segmented`. Popups float in a
+  `Select`, `Menu`, `Popover`, `Combobox`, `Switch` and `Segmented`. The small action menus (`menu.tsx`: a
+  view tab's, More, ⋯, cards') are that `Menu` too, portalled, so nothing clips them. Popups float in a
   translucent panel with a soft shadow, grow out of their trigger (scale 0.98 and a fade, 150 ms)
   and honour reduced motion; highlights are a neutral fill and only an "on" state is accent.
 - **The command palette** (T3's CommandPalette; `components/agents/command-palette.tsx`, its

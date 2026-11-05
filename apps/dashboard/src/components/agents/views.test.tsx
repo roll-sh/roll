@@ -79,16 +79,22 @@ describe("canvas views", () => {
 
     await userEvent.click(tab(/Next work/));
     await userEvent.click(screen.getByRole("button", { name: "Next work options" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    // The menu floats outside the views bar (which scrolls sideways and clipped it), and the
+    // keyboard moves through it.
+    const menu = await screen.findByRole("menu");
+    expect(screen.getByRole("tablist", { name: "Canvas views" }).contains(menu)).toBe(false);
+    await userEvent.keyboard("{ArrowDown}");
+    expect(within(menu).getAllByRole("menuitem").some((i) => i === document.activeElement)).toBe(true);
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Rename" }));
     const name = screen.getByRole("textbox", { name: "View name" });
     await userEvent.clear(name);
     await userEvent.type(name, "Frontend{Enter}");
     await userEvent.click(screen.getByRole("button", { name: "Frontend options" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Move left" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Move left" }));
     expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["All", "Waiting on me1", "Frontend1", "Running1"]);
     await userEvent.click(screen.getByRole("button", { name: "Frontend options" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Delete view" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Delete “Frontend”?" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete view" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete “Frontend”?" }));
     expect(screen.queryByRole("tab", { name: /Frontend/ })).toBeNull();
     expect(tab("All")).toHaveAttribute("aria-selected", "true");
     await waitFor(() => expect((lastSaved(services)!.views as unknown[]).length).toBe(2));
@@ -310,7 +316,7 @@ describe("moving around the canvas from the keyboard", () => {
     expect(card("Fix the flaky queue test")).toBeInTheDocument();
     const roll = screen.getByLabelText("Project roll").closest<HTMLElement>("[data-card]")!;
     await userEvent.click(within(roll).getByRole("button", { name: "Project" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Focus (F)" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Focus (F)" }));
     expect(card("Dark mode")).toBeNull();
   });
 });

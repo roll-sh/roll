@@ -137,13 +137,13 @@ describe("the conversation's menu", () => {
     const h = agentsHarness({ entities: [mirrored("project", project(), 1), mirrored("thread", t, 2), mirrored("run", run({ thread: "thr_a", status: "completed" }), 3)] });
     renderAgents(<Conversation thread={t} machine={machine()} />, h);
     await userEvent.click(screen.getAllByRole("button", { name: "More" })[0]);
-    await userEvent.click(screen.getByRole("menuitem", { name: "Snooze…" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Snooze…" }));
     const dialog = await screen.findByRole("dialog", { name: "Snooze" });
     await userEvent.click(within(dialog).getByRole("button", { name: /Tomorrow/ }));
     await waitFor(() => expect(sent(h).some((c) => c.type === "thread.snooze")).toBe(true));
     await userEvent.click(screen.getAllByRole("button", { name: "More" })[0]);
     await act(async () => {
-      await userEvent.click(screen.getByRole("menuitem", { name: "Settle" }));
+      await userEvent.click(await screen.findByRole("menuitem", { name: "Settle" }));
     });
     await waitFor(() => expect(sent(h)).toContainEqual({ type: "thread.settle", thread: "thr_a" }));
   });

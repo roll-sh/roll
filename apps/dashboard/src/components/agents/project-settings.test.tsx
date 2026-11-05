@@ -163,7 +163,7 @@ describe("project settings on the canvas", () => {
     const h = agentsHarness({ entities: [mirrored("project", p, 1)] });
     renderAgents(<ProjectNode project={p} machine={machine()} />, h);
     await userEvent.click(screen.getByRole("button", { name: "Project" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Settings" }));
     expect(agentsSurface.get().view).toEqual({ kind: "settings", target: `p:${p.id}` });
     const onClose = vi.fn();
     renderAgents(<SettingsPanel target={`p:${p.id}`} onClose={onClose} />, h);

@@ -188,9 +188,9 @@ describe("Conversation", () => {
     const h = agentsHarness({ entities, follow: ["thr_1"] });
     renderAgents(<Conversation thread={busy} machine={machine()} />, h);
     await userEvent.click(screen.getByRole("button", { name: "More" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
     expect(h.command).not.toHaveBeenCalled();
-    await userEvent.click(screen.getByRole("menuitem", { name: "Delete this thread?" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete this thread?" }));
     expect(h.command.mock.calls.at(-1)?.[2]).toEqual({ type: "thread.delete", thread: "thr_1" });
     await vi_wait();
     expect(h.close).toHaveBeenCalled();
