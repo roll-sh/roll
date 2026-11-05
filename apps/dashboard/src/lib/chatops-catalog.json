@@ -187,6 +187,13 @@
           },
           "number": {
             "description": "Issue or pull request number; unset: the event's.",
+            "format": "lookup",
+            "lookup": {
+              "kind": "issues",
+              "parent": "repo",
+              "source": "github"
+            },
+            "title": "Issue or pull request",
             "type": [
               "integer",
               "string"
@@ -194,6 +201,12 @@
           },
           "repo": {
             "description": "A GitHub-connected repo of the owner; unset: the event's.",
+            "format": "lookup",
+            "lookup": {
+              "kind": "repos",
+              "source": "github"
+            },
+            "title": "Repo",
             "type": "string"
           }
         },
@@ -217,13 +230,28 @@
         "properties": {
           "add": {
             "description": "Labels to add.",
+            "format": "lookup",
             "items": {
               "type": "string"
             },
+            "lookup": {
+              "create": true,
+              "kind": "labels",
+              "parent": "repo",
+              "source": "github"
+            },
+            "title": "Add labels",
             "type": "array"
           },
           "number": {
             "description": "Issue or pull request number; unset: the event's.",
+            "format": "lookup",
+            "lookup": {
+              "kind": "issues",
+              "parent": "repo",
+              "source": "github"
+            },
+            "title": "Issue or pull request",
             "type": [
               "integer",
               "string"
@@ -231,13 +259,26 @@
           },
           "remove": {
             "description": "Labels to take off.",
+            "format": "lookup",
             "items": {
               "type": "string"
             },
+            "lookup": {
+              "kind": "labels",
+              "parent": "repo",
+              "source": "github"
+            },
+            "title": "Remove labels",
             "type": "array"
           },
           "repo": {
             "description": "A GitHub-connected repo of the owner; unset: the event's.",
+            "format": "lookup",
+            "lookup": {
+              "kind": "repos",
+              "source": "github"
+            },
+            "title": "Repo",
             "type": "string"
           }
         },
@@ -275,6 +316,12 @@
           },
           "repo": {
             "description": "A GitHub-connected repo of the owner; unset: the event's.",
+            "format": "lookup",
+            "lookup": {
+              "kind": "repos",
+              "source": "github"
+            },
+            "title": "Repo",
             "type": "string"
           },
           "title": {
@@ -303,6 +350,16 @@
         "properties": {
           "context": {
             "description": "The status's name (default roll/automation).",
+            "format": "lookup",
+            "lookup": {
+              "extras": [
+                {
+                  "id": "roll/automation",
+                  "label": "roll/automation"
+                }
+              ]
+            },
+            "title": "Context",
             "type": "string"
           },
           "description": {
@@ -311,6 +368,12 @@
           },
           "repo": {
             "description": "A GitHub-connected repo of the owner; unset: the event's.",
+            "format": "lookup",
+            "lookup": {
+              "kind": "repos",
+              "source": "github"
+            },
+            "title": "Repo",
             "type": "string"
           },
           "sha": {
@@ -745,23 +808,43 @@
           },
           "branches": {
             "description": "check.failed: on these branches.",
+            "format": "lookup",
             "items": {
               "type": "string"
             },
+            "lookup": {
+              "kind": "branches",
+              "parent": "repos",
+              "source": "github"
+            },
+            "title": "Branches",
             "type": "array"
           },
           "labels": {
             "description": "issue.labeled: one of these labels; issue.opened: having one.",
+            "format": "lookup",
             "items": {
               "type": "string"
             },
+            "lookup": {
+              "kind": "labels",
+              "parent": "repos",
+              "source": "github"
+            },
+            "title": "Labels",
             "type": "array"
           },
           "repos": {
             "description": "Repos (names); unset: every connected repo.",
+            "format": "lookup",
             "items": {
               "type": "string"
             },
+            "lookup": {
+              "kind": "repos",
+              "source": "github"
+            },
+            "title": "Repos",
             "type": "array"
           }
         },

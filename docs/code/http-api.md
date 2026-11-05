@@ -959,8 +959,21 @@ GET    /v1/code/agents/{owner}/lookup/{source}/{kind}?q=&parent=&cursor=&ids=&li
                  username or nickname prefix, searched at Discord; none: by user id, cursor the
                  last id; ids looked up one by one; bots left out; avatar from Discord's CDN;
                  needs the Server Members Intent, else `unavailable`).
+         github: only the owner's GitHub-connected repos, with their installation's token (an
+                 installation spans tenants). parent: a repo as the GitHub steps take it (app,
+                 acme/app) or its GitHub name; another owner's or an unknown repo is a 404; none:
+                 the first page of each connected repo (up to 5), grouped by repo. The cursor is
+                 GitHub's page number; q and ids read up to 5 pages of 100 and keep what matches.
+                 repos (roll's name, GitHub's as hint; no GitHub call), branches, labels (#colour,
+                 description as hint), users (assignees), reviewers (People: collaborators, then
+                 Teams), teams (org/slug; a user's repo has none), milestones (id: number),
+                 workflows (id: the file name, key: GitHub's id), environments, issues (open
+                 issues and pull requests; q or ids "#12" look the number up). No App or no
+                 connected repo: not_connected; 401/403: reconnect, naming the permission;
+                 403/429 with x-ratelimit-remaining 0 or retry-after: rate_limited (never waited out).
 POST   /v1/code/agents/{owner}/lookup/{source}/{kind} {name, parent?, color?} → Item
-       Make one where roll can (linear/labels: a team's when parent names one, else the workspace's).
+       Make one where roll can (linear/labels: a team's when parent names one, else the workspace's;
+       github/labels: on parent, or the owner's only connected repo; 409 GitHub has it already).
        The owner's cached pages of the source are dropped (connecting, updating or removing a
        Slack or Discord install drops that platform's too). 400 no name (≤ 80 chars); 422 not
        connected or a kind roll doesn't make (nothing of Slack's or Discord's).

@@ -17,6 +17,7 @@
 //!   request from a roll change (pushing its head as a branch first).
 
 use crate::agents::automations::{NewEvent, OwnerRef, Registry, StepContext, StepKind, StepOutcome, TriggerSource};
+use crate::agents::lookup::Pick;
 use crate::github::{Hub, Link, link_of};
 use crate::model::RepoRow;
 use crate::{Code, Result};
@@ -243,7 +244,7 @@ fn connected(code: &Code, owner_id: &str) -> Vec<RepoRow> {
     crate::github::linked_repos(code).map(|rs| rs.into_iter().filter(|r| r.owner_id == owner_id && link_of(r).is_some_and(|l| l.connected)).collect()).unwrap_or_default()
 }
 
-fn names(r: &RepoRow, name: &str) -> bool {
+pub(crate) fn names(r: &RepoRow, name: &str) -> bool {
     name.eq_ignore_ascii_case(&r.name) || name.eq_ignore_ascii_case(&r.full_name())
 }
 
@@ -264,9 +265,9 @@ impl TriggerSource for GitHubTrigger {
             config: json!({
                 "type": "object",
                 "properties": {
-                    "repos": { "type": "array", "items": { "type": "string" }, "description": "Repos (names); unset: every connected repo." },
-                    "labels": { "type": "array", "items": { "type": "string" }, "description": "issue.labeled: one of these labels; issue.opened: having one." },
-                    "branches": { "type": "array", "items": { "type": "string" }, "description": "check.failed: on these branches." },
+                    "repos": Pick::from(SOURCE, "repos").many("Repos", "Repos (names); unset: every connected repo."),
+                    "labels": Pick { parent: Some("repos"), ..Pick::from(SOURCE, "labels") }.many("Labels", "issue.labeled: one of these labels; issue.opened: having one."),
+                    "branches": Pick { parent: Some("repos"), ..Pick::from(SOURCE, "branches") }.many("Branches", "check.failed: on these branches."),
                     "anyone": { "type": "boolean", "description": "Issues from anyone, not just people who can push." }
                 }
             }),
@@ -383,16 +384,19 @@ impl GitHubStep {
 
     fn schema(&self) -> Value {
         let s = |d: &str| json!({ "type": "string", "description": d });
-        let repo = s("A GitHub-connected repo of the owner; unset: the event's.");
-        let number = json!({ "type": ["integer", "string"], "description": "Issue or pull request number; unset: the event's." });
-        let list = |d: &str| json!({ "type": "array", "items": { "type": "string" }, "description": d });
+        let repo = Pick::from(SOURCE, "repos").one("Repo", "A GitHub-connected repo of the owner; unset: the event's.");
+        // A number, or a template (`{{event.data.number}}`): kept as either.
+        let mut number = Pick { parent: Some("repo"), ..Pick::from(SOURCE, "issues") }.one("Issue or pull request", "Issue or pull request number; unset: the event's.");
+        number["type"] = json!(["integer", "string"]);
+        let labels = |title: &str, d: &str, create: bool| Pick { parent: Some("repo"), create, ..Pick::from(SOURCE, "labels") }.many(title, d);
         let (props, required) = match self.kind {
             Kind::Comment => (json!({ "repo": repo, "number": number, "body": s("Markdown (a template).") }), json!(["body"])),
-            Kind::Label => (json!({ "repo": repo, "number": number, "add": list("Labels to add."), "remove": list("Labels to take off.") }), json!([])),
+            Kind::Label => (json!({ "repo": repo, "number": number, "add": labels("Add labels", "Labels to add.", true), "remove": labels("Remove labels", "Labels to take off.", false) }), json!([])),
             Kind::Status => (
                 json!({
                     "repo": repo, "sha": s("The commit; unset: the event's."), "state": { "type": "string", "enum": ["pending", "success", "failure", "error"] },
-                    "context": s("The status's name (default roll/automation)."), "description": s("One line."), "target_url": s("A link.")
+                    "context": Pick { extras: &[("roll/automation", "roll/automation")], ..Pick::default() }.one("Context", "The status's name (default roll/automation)."),
+                    "description": s("One line."), "target_url": s("A link.")
                 }),
                 json!(["state"]),
             ),

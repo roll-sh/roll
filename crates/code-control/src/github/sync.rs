@@ -621,6 +621,7 @@ fn set_connected(code: &Arc<Code>, filter: impl Fn(&Link) -> bool, connected: bo
             l.mirror.state = if connected { "pending".into() } else { "paused".into() };
             l.mirror.error = (!connected).then(|| why.to_string());
         })?;
+        code.lookups_changed(&r.owner_id, "github");
         if code.cluster().is_some() && !code.owns_repo(&r.id) {
             // The repo's owner starts or stops its mirror.
             code.kick_owner(&r.id);

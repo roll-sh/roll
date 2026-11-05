@@ -324,6 +324,7 @@ impl Code {
         }
         if github.is_some() {
             crate::github::connected(self, &row.id);
+            self.lookups_changed(&row.owner_id, "github");
         }
         Ok(row)
     }
@@ -339,6 +340,10 @@ impl Code {
                     return Err(Error::Conflict(format!("{}/{n} already exists", r.owner)));
                 }
                 r.name = n;
+                if r.github.is_some() {
+                    // The pickers' GitHub repos go by name.
+                    self.lookups_changed(&r.owner_id, "github");
+                }
             }
         }
         if let Some(d) = patch.get("description") {
@@ -370,6 +375,9 @@ impl Code {
         let r = self.writable(caller, owner, name)?;
         self.check_manage(caller, &r)?;
         crate::github::forget(self, &r.id);
+        if r.github.is_some() {
+            self.lookups_changed(&r.owner_id, "github");
+        }
         if let Some(i) = &self.ai.index {
             i.remove(&r.id);
         }

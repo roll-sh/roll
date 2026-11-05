@@ -42,6 +42,12 @@ struct Mock {
     perms: Mutex<HashMap<String, String>>,
     /// Review comments that start a thread (REST ids), for GraphQL's `reviewThreads`.
     thread_roots: Mutex<Vec<u64>>,
+    /// Pickers: labels made through roll, the list pages read (`path?page=n`), GitHub's rate
+    /// limit while set, and the org's teams refused (no Members permission) while set.
+    made_labels: Mutex<Vec<Value>>,
+    reads: Mutex<Vec<String>>,
+    rate_limited: std::sync::atomic::AtomicBool,
+    teams_forbidden: std::sync::atomic::AtomicBool,
 }
 
 type S = State<Arc<Mock>>;
@@ -227,6 +233,105 @@ async fn permission(State(m): S, Path((_o, _r, user)): Path<(String, String, Str
     }
 }
 
+// ── what pickers list ──
+
+type ListQuery = axum::extract::Query<HashMap<String, String>>;
+
+/// A list as GitHub pages it (`per_page`, `page`, a `Link` to the next), or its rate limit.
+fn listing(m: &Mock, path: &str, q: &HashMap<String, String>, all: Vec<Value>, key: Option<&str>) -> Response {
+    let per: usize = q.get("per_page").and_then(|p| p.parse().ok()).unwrap_or(30);
+    let page: usize = q.get("page").and_then(|p| p.parse().ok()).unwrap_or(1);
+    m.reads.lock().push(format!("{path}?page={page}"));
+    if m.rate_limited.load(Ordering::SeqCst) {
+        let mut res = (StatusCode::FORBIDDEN, Json(json!({ "message": "API rate limit exceeded for installation ID 7." }))).into_response();
+        res.headers_mut().insert("x-ratelimit-remaining", "0".parse().unwrap());
+        res.headers_mut().insert("x-ratelimit-reset", (chrono::Utc::now().timestamp() + 60).to_string().parse().unwrap());
+        return res;
+    }
+    let chunk: Vec<Value> = all.iter().skip((page - 1) * per).take(per).cloned().collect();
+    let body = match key {
+        None => Value::Array(chunk),
+        Some(k) => json!({ "total_count": all.len(), k: chunk }),
+    };
+    let mut res = Json(body).into_response();
+    if page * per < all.len() {
+        let next = format!("<{}/api{path}?per_page={per}&page={}>; rel=\"next\"", m.base.lock(), page + 1);
+        res.headers_mut().insert("link", next.parse().unwrap());
+    }
+    res
+}
+
+async fn list_branches(State(m): S, Path((o, r)): Path<(String, String)>, axum::extract::Query(q): ListQuery) -> Response {
+    let b = |name: &str, protected: bool| json!({ "name": name, "commit": { "sha": "0".repeat(40) }, "protected": protected });
+    listing(&m, &format!("/repos/{o}/{r}/branches"), &q, vec![b("main", true), b("feature", false), b("release/1.0", true)], None)
+}
+
+fn seed_labels(m: &Mock) -> Vec<Value> {
+    let mut all = vec![
+        json!({ "id": 1, "name": "bug", "color": "d73a4a", "description": "Something isn't working" }),
+        json!({ "id": 2, "name": "docs", "color": "0075ca", "description": null }),
+        json!({ "id": 3, "name": "P1", "color": "b60205" }),
+    ];
+    all.extend(m.made_labels.lock().iter().cloned());
+    all
+}
+
+async fn list_labels(State(m): S, Path((o, r)): Path<(String, String)>, axum::extract::Query(q): ListQuery) -> Response {
+    listing(&m, &format!("/repos/{o}/{r}/labels"), &q, seed_labels(&m), None)
+}
+
+async fn create_label(State(m): S, Path((o, r)): Path<(String, String)>, Json(b): Json<Value>) -> Response {
+    record(&m, "POST", format!("/repos/{o}/{r}/labels"), b.clone());
+    if seed_labels(&m).iter().any(|l| l["name"] == b["name"]) {
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "message": "Validation Failed", "errors": [{ "code": "already_exists" }] }))).into_response();
+    }
+    let l = json!({ "id": 100, "name": b["name"], "color": b["color"].as_str().unwrap_or("ededed"), "description": null });
+    m.made_labels.lock().push(l.clone());
+    (StatusCode::CREATED, Json(l)).into_response()
+}
+
+async fn list_assignees(State(m): S, Path((o, r)): Path<(String, String)>, axum::extract::Query(q): ListQuery) -> Response {
+    let people = vec![
+        json!({ "login": "ada", "id": 1, "type": "User", "avatar_url": "https://avatars.githubusercontent.com/u/1" }),
+        json!({ "login": "octo-bot", "id": 2, "type": "Bot", "avatar_url": "http://insecure.example/x.png" }),
+    ];
+    listing(&m, &format!("/repos/{o}/{r}/assignees"), &q, people, None)
+}
+
+async fn list_collaborators(State(m): S, Path((o, r)): Path<(String, String)>, axum::extract::Query(q): ListQuery) -> Response {
+    let people = vec![json!({ "login": "ada", "id": 1, "type": "User" }), json!({ "login": "grace", "id": 3, "type": "User" })];
+    listing(&m, &format!("/repos/{o}/{r}/collaborators"), &q, people, None)
+}
+
+async fn list_teams(State(m): S, Path(org): Path<String>, axum::extract::Query(q): ListQuery) -> Response {
+    if m.teams_forbidden.load(Ordering::SeqCst) {
+        return (StatusCode::FORBIDDEN, Json(json!({ "message": "Resource not accessible by integration" }))).into_response();
+    }
+    let teams = vec![json!({ "id": 1, "slug": "core", "name": "Core" }), json!({ "id": 2, "slug": "web", "name": "Web platform" })];
+    listing(&m, &format!("/orgs/{org}/teams"), &q, teams, None)
+}
+
+async fn list_milestones(State(m): S, Path((o, r)): Path<(String, String)>, axum::extract::Query(q): ListQuery) -> Response {
+    let all = vec![
+        json!({ "number": 1, "title": "v1.0", "state": "open", "due_on": "2026-12-01T08:00:00Z", "open_issues": 3 }),
+        json!({ "number": 2, "title": "Later", "state": "open", "due_on": null, "open_issues": 4 }),
+    ];
+    listing(&m, &format!("/repos/{o}/{r}/milestones"), &q, all, None)
+}
+
+async fn list_workflows(State(m): S, Path((o, r)): Path<(String, String)>, axum::extract::Query(q): ListQuery) -> Response {
+    let all = vec![
+        json!({ "id": 11, "name": "CI", "path": ".github/workflows/ci.yml", "state": "active" }),
+        json!({ "id": 12, "name": "Nightly", "path": ".github/workflows/nightly.yml", "state": "disabled_manually" }),
+    ];
+    listing(&m, &format!("/repos/{o}/{r}/actions/workflows"), &q, all, Some("workflows"))
+}
+
+async fn list_environments(State(m): S, Path((o, r)): Path<(String, String)>, axum::extract::Query(q): ListQuery) -> Response {
+    let all = vec![json!({ "id": 1, "name": "production" }), json!({ "id": 2, "name": "staging" })];
+    listing(&m, &format!("/repos/{o}/{r}/environments"), &q, all, Some("environments"))
+}
+
 async fn count_pushes(State(m): S, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     if req.uri().path().ends_with("/git-receive-pack") {
         if m.fail_pushes.load(Ordering::SeqCst) {
@@ -254,6 +359,14 @@ async fn github_mock() -> GitHub {
         .route("/installation/repositories", get(installation_repos))
         .route("/repos/{o}/{r}", get(repo))
         .route("/repos/{o}/{r}/branches/{b}", get(branch))
+        .route("/repos/{o}/{r}/branches", get(list_branches))
+        .route("/repos/{o}/{r}/labels", get(list_labels).post(create_label))
+        .route("/repos/{o}/{r}/assignees", get(list_assignees))
+        .route("/repos/{o}/{r}/collaborators", get(list_collaborators))
+        .route("/repos/{o}/{r}/milestones", get(list_milestones))
+        .route("/repos/{o}/{r}/actions/workflows", get(list_workflows))
+        .route("/repos/{o}/{r}/environments", get(list_environments))
+        .route("/orgs/{org}/teams", get(list_teams))
         .route("/repos/{o}/{r}/issues", get(issues))
         .route("/repos/{o}/{r}/issues/{n}", get(issue).patch(patch_issue))
         .route("/repos/{o}/{r}/issues/{n}/comments", post(comment))
@@ -1863,4 +1976,147 @@ async fn automation_steps_comment_label_status_and_open_a_pull_request() {
     assert_eq!(linked["github_pr"], pr["number"]);
     run("github.pr", json!({ "change": n }), "p2").await;
     assert_eq!(calls("POST", "/repos/acme/app/pulls"), 1, "one pull request per change");
+}
+
+// ── pickers (agents::lookup::github) ──
+
+/// The pickers' GitHub lookups go through the owner's connected repos with the installation's
+/// token (never in an answer): repos, branches (GitHub's pages), labels (made here, which drops
+/// the cached ones), assignees, reviewers (people and teams), teams, milestones, workflows,
+/// environments, issues and pull requests (by number too), stored values resolved. Another
+/// owner's repo is a 404; a missing permission says which; a rate limit is said and GitHub left
+/// alone until then; a repo GitHub lost access to asks to connect it again at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pickers_look_up_github_through_the_owners_repos() {
+    let (a, g, _tmp, _w, _main) = connected_with_automation().await;
+    let admin = Some("admin-secret");
+    let base = "/v1/code/agents/acme/lookup/github";
+    let answers = Arc::new(Mutex::new(Vec::<String>::new()));
+    let get = |path: String| {
+        let (a, answers) = (&a, answers.clone());
+        async move {
+            let (s, v) = a.req("GET", &path, None, admin).await;
+            answers.lock().push(v.to_string());
+            (s, v)
+        }
+    };
+    let ids = |v: &Value| v["items"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    let reads = |m: &Mock, path: &str| m.reads.lock().iter().filter(|r| r.starts_with(path)).count();
+
+    // The owner's connected repos: roll's names, GitHub's in the hint (roll alone answers).
+    let (s, v) = get(format!("{base}/repos")).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["items"], json!([{ "id": "acme/app", "label": "acme/app", "key": "app", "hint": "acme/app", "icon": "repo" }]));
+
+    // Branches: GitHub's pages (the cursor is its page number); the default one says so.
+    let (_, v) = get(format!("{base}/branches?parent=app&limit=2")).await;
+    assert_eq!((ids(&v), v["next"].as_str()), (vec!["main".to_string(), "feature".into()], Some("2")), "{v}");
+    assert_eq!(v["items"][0]["hint"], "default");
+    let (_, v) = get(format!("{base}/branches?parent=acme/app&limit=2&cursor=2")).await;
+    assert_eq!((ids(&v), v.get("next")), (vec!["release/1.0".to_string()], None));
+    assert!(g.mock.reads.lock().contains(&"/repos/acme/app/branches?page=2".to_string()));
+    // A search reads GitHub's pages of 100 and keeps what matches.
+    let (_, v) = get(format!("{base}/branches?parent=app&q=REL")).await;
+    assert_eq!(ids(&v), ["release/1.0"]);
+    let (s, _) = get(format!("{base}/branches?parent=app&cursor=https://evil.example/")).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a cursor is a page number, never a URL");
+
+    // Labels with their colour; the second look is the cache's; making one shows it at once.
+    let (_, v) = get(format!("{base}/labels?parent=app")).await;
+    assert_eq!(v["items"][0], json!({ "id": "bug", "label": "bug", "hint": "Something isn't working", "color": "#d73a4a" }));
+    assert_eq!(reads(&g.mock, "/repos/acme/app/labels"), 1);
+    get(format!("{base}/labels?parent=app")).await;
+    assert_eq!(reads(&g.mock, "/repos/acme/app/labels"), 1, "served from the cache");
+    let (s, v) = a.req("POST", &format!("{base}/labels"), Some(json!({ "name": "needs qa", "parent": "app", "color": "#4c8dff" })), admin).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v, json!({ "id": "needs qa", "label": "needs qa", "color": "#4c8dff" }));
+    assert_eq!(g.mock.calls.lock().iter().find(|c| c.1 == "/repos/acme/app/labels").unwrap().2, json!({ "name": "needs qa", "color": "4c8dff" }));
+    let (_, v) = get(format!("{base}/labels?parent=app")).await;
+    assert!(ids(&v).contains(&"needs qa".to_string()) && reads(&g.mock, "/repos/acme/app/labels") == 2, "{v}");
+    let (s, _) = a.req("POST", &format!("{base}/labels"), Some(json!({ "name": "bug", "parent": "app" })), admin).await;
+    assert_eq!(s, StatusCode::CONFLICT, "GitHub has it already");
+    let (s, _) = a.req("POST", &format!("{base}/branches"), Some(json!({ "name": "x", "parent": "app" })), admin).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "roll only makes labels");
+    // A field's stored values resolve (a trigger's labels without a repo: every connected repo's).
+    let (_, v) = get(format!("{base}/labels?ids=bug,P1")).await;
+    assert_eq!(ids(&v), ["bug", "P1"]);
+    assert!(v["items"][0].get("group").is_none(), "one connected repo: its rows as they are");
+
+    // People: only https pictures, bots say so; reviewers are people, then the org's teams.
+    let (_, v) = get(format!("{base}/users?parent=app")).await;
+    assert_eq!(v["items"][0], json!({ "id": "ada", "label": "ada", "avatar": "https://avatars.githubusercontent.com/u/1", "icon": "user" }));
+    assert_eq!(v["items"][1], json!({ "id": "octo-bot", "label": "octo-bot", "hint": "bot", "icon": "user" }));
+    let (_, v) = get(format!("{base}/reviewers?parent=app")).await;
+    assert_eq!(ids(&v), ["ada", "grace", "acme/core", "acme/web"]);
+    assert_eq!((v["items"][0]["group"].as_str(), v["items"][2]["group"].as_str()), (Some("People"), Some("Teams")));
+    let (_, v) = get(format!("{base}/teams?parent=app&q=platform")).await;
+    assert_eq!(v["items"], json!([{ "id": "acme/web", "label": "Web platform", "key": "web", "hint": "@acme/web", "icon": "team" }]));
+
+    // Milestones, workflows (by file), environments.
+    let (_, v) = get(format!("{base}/milestones?parent=app")).await;
+    assert_eq!(v["items"][0], json!({ "id": "1", "label": "v1.0", "key": "v1.0", "hint": "due 2026-12-01", "icon": "milestone" }));
+    assert_eq!(v["items"][1]["hint"], "4 open");
+    let (_, v) = get(format!("{base}/workflows?parent=app")).await;
+    assert_eq!(v["items"][0], json!({ "id": "ci.yml", "label": "CI", "key": "11", "hint": ".github/workflows/ci.yml", "icon": "workflow" }));
+    assert_eq!(v["items"][1]["hint"], "disabled · .github/workflows/nightly.yml");
+    let (_, v) = get(format!("{base}/environments?parent=app")).await;
+    assert_eq!(ids(&v), ["production", "staging"]);
+
+    // Open issues and pull requests; a number is looked up as it is.
+    {
+        let mut issues = g.mock.issues.lock();
+        issues.push(issue_json(21, "Login 500s on Safari", "open", &["bug"]));
+        let mut pr = issue_json(22, "Cache sessions", "open", &[]);
+        pr["pull_request"] = json!({ "url": "x" });
+        issues.push(pr);
+    }
+    let (_, v) = get(format!("{base}/issues?parent=app&q=safari")).await;
+    assert_eq!(v["items"], json!([{ "id": "21", "label": "Login 500s on Safari", "key": "#21", "hint": "#21" }]));
+    let (_, v) = get(format!("{base}/issues?parent=app&q=%2322")).await;
+    assert_eq!((v["items"][0]["label"].as_str(), v["items"][0]["icon"].as_str()), (Some("Cache sessions"), Some("pull")));
+    let (_, v) = get(format!("{base}/issues?parent=app&ids=21,%23999")).await;
+    assert_eq!(ids(&v), ["21"], "a number GitHub doesn't know is left out");
+
+    // Another owner's repo is out of reach, whoever asks and however it's named.
+    a.req("POST", "/v1/code/owners", Some(json!({ "name": "evil", "kind": "org" })), admin).await;
+    a.req("POST", "/v1/code/repos", Some(json!({ "owner": "evil", "name": "app" })), admin).await;
+    for path in [format!("{base}/branches?parent=evil/app"), "/v1/code/agents/evil/lookup/github/branches?parent=acme/app".into(), "/v1/code/agents/evil/lookup/github/labels?parent=app".into()] {
+        let (s, v) = get(path.clone()).await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "{path}: {v}");
+    }
+    let (_, v) = get("/v1/code/agents/evil/lookup/github/repos".into()).await;
+    assert_eq!(v["problem"]["code"], "not_connected", "{v}");
+    let (s, _) = get(format!("{base}/stars?parent=app")).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // A permission the App lacks: said, naming it; reviewers still list the people.
+    g.mock.teams_forbidden.store(true, Ordering::SeqCst);
+    let (_, v) = get(format!("{base}/teams?parent=app&q=co")).await;
+    assert_eq!(v["problem"]["code"], "reconnect", "{v}");
+    assert!(v["problem"]["message"].as_str().unwrap().contains("Members"), "{v}");
+    let (_, v) = get(format!("{base}/reviewers?parent=app&q=a")).await;
+    assert_eq!(ids(&v), ["ada", "grace"], "{v}");
+
+    // GitHub's rate limit: said quietly, and nothing goes to GitHub until it resets.
+    g.mock.rate_limited.store(true, Ordering::SeqCst);
+    let before = g.mock.reads.lock().len();
+    let (s, v) = get(format!("{base}/labels?parent=app&q=zz")).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["problem"]["code"], "rate_limited", "{v}");
+    assert!((1..=60).contains(&v["problem"]["retry_after"].as_u64().unwrap()), "{v}");
+    assert_eq!(g.mock.reads.lock().len(), before + 1);
+    let (_, v) = get(format!("{base}/branches?parent=app&q=yy")).await;
+    assert_eq!(v["problem"]["code"], "rate_limited");
+    let (_, v) = get(format!("{base}/milestones?parent=app&q=v")).await;
+    assert_eq!(v["problem"]["code"], "rate_limited");
+    assert_eq!(g.mock.reads.lock().len(), before + 1, "GitHub is left alone while it said to wait");
+
+    // GitHub loses access to the repo: the cached rows go, and the picker asks to connect again.
+    let account = json!({ "login": "acme", "id": 1, "type": "Organization" });
+    let removed = json!({ "action": "removed", "installation": { "id": INSTALLATION, "account": account }, "repositories_added": [], "repositories_removed": [repo_json(&g.mock)] });
+    assert_eq!(hook(&a, "installation_repositories", "pk-1", &removed, SECRET).await, StatusCode::OK);
+    let (_, v) = get(format!("{base}/labels?parent=app")).await;
+    assert_eq!((v["problem"]["code"].as_str(), v["items"].as_array().map(Vec::len)), (Some("reconnect"), Some(0)), "{v}");
+
+    assert!(answers.lock().iter().all(|v| !v.contains("ghs_test")), "the installation token never leaves the server");
 }

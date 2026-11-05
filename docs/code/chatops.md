@@ -153,6 +153,11 @@ click (`apps/dashboard/src/lib/automation-templates.ts`).
   (`review`, `fix`, `resolve`, …; docs/code/reviews.md).
 - **Tenancy.** An installation spans tenants. Steps reach it only through one of the automation
   owner's own connected repos, and listing or connecting installations stays admin-only.
+- **Pickers.** The trigger's repos, labels and branches and the steps' repo, issue or pull
+  request, labels (made from the picker on add) and status context are pickers over
+  `…/lookup/github/*` (docs/code/http-api.md, "Lookups"), which asks GitHub only about the
+  owner's connected repos, with their installation's token. Numbers and templates
+  (`{{event.data.number}}`) still work as before.
 - The App needs the `check_run` and `status` events (besides the ones it had) for `check.failed`,
   and `Pull requests: write` and `Commit statuses: write` for the steps.
 

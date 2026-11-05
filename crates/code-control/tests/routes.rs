@@ -1027,3 +1027,39 @@ async fn linear_routes_follow_the_auth_matrix() {
         }
     }
 }
+
+/// The pickers' GitHub lookups are Code::manages like the rest of the owner's integrations (an
+/// installation spans tenants: only who manages the owner may look through its repos). With no
+/// GitHub App on this server: a quiet 200 to list, a 422 to make a label; unknown kinds 404.
+#[tokio::test]
+async fn github_lookups_follow_the_auth_matrix() {
+    let w = world().await;
+    let a = &w.a;
+    let base = "/v1/code/agents/acme/lookup/github";
+    let routes = [
+        ("GET", format!("{base}/repos"), OK),
+        ("GET", format!("{base}/branches?parent=app"), OK),
+        ("GET", format!("{base}/reviewers"), OK),
+        ("POST", format!("{base}/labels"), StatusCode::UNPROCESSABLE_ENTITY),
+        ("GET", format!("{base}/stars"), NOT_FOUND),
+    ];
+    let body = json!({ "name": "s", "parent": "app" });
+    for (who, token) in [("admin", Some(ADMIN)), ("owner", Some(w.acme.as_str()))] {
+        for (m, p, want) in &routes {
+            assert_eq!(call(a, m, p, Some(&body), token).await, *want, "{who}: {m} {p}");
+        }
+    }
+    let denied = StatusCode::UNAUTHORIZED;
+    for (who, token, want) in [
+        ("agent", Some(w.agent.as_str()), FORBIDDEN),
+        ("review app", Some(w.app_in.as_str()), FORBIDDEN),
+        ("another owner", Some(w.other.as_str()), FORBIDDEN),
+        ("anonymous", None, denied),
+        ("revoked", Some(w.revoked.as_str()), denied),
+        ("garbage", Some("hunter2"), denied),
+    ] {
+        for (m, p, _) in &routes {
+            assert_eq!(call(a, m, p, Some(&body), token).await, want, "{who}: {m} {p}");
+        }
+    }
+}

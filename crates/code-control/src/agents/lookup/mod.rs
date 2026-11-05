@@ -17,6 +17,7 @@
 //!   take a typed value. Unknown sources or kinds are 404s, a missing `parent` a 400.
 
 mod discord;
+mod github;
 mod linear;
 mod rollcode;
 mod slack;
@@ -369,7 +370,7 @@ impl Code {
 // ── the routes ──
 
 /// The sources and kinds there are, for 404s that say what is.
-const SOURCES: &[(&str, &[&str])] = &[("linear", linear::KINDS), ("code", rollcode::KINDS), ("slack", slack::KINDS), ("discord", discord::KINDS)];
+const SOURCES: &[(&str, &[&str])] = &[("linear", linear::KINDS), ("code", rollcode::KINDS), ("slack", slack::KINDS), ("discord", discord::KINDS), ("github", github::KINDS)];
 
 fn known(source: &str, kind: &str) -> Result<()> {
     let Some((_, kinds)) = SOURCES.iter().find(|(s, _)| *s == source) else {
@@ -387,6 +388,7 @@ async fn fetch(code: &Code, owner_id: &str, source: &str, kind: &str, q: &Query)
         "code" => rollcode::list(code, owner_id, kind, q).await,
         "slack" => slack::list(code, owner_id, kind, q).await,
         "discord" => discord::list(code, owner_id, kind, q).await,
+        "github" => github::list(code, owner_id, kind, q).await,
         _ => Err(Failure::Refused(Error::NotFound(format!("lookup source {source:?}")))),
     }
 }
@@ -442,6 +444,7 @@ async fn create(State(code): S, caller: Caller, Path((owner, source, kind)): Pat
     let made = match source.as_str() {
         "linear" => linear::create(&code, &o.id, &kind, &new).await,
         "slack" | "discord" => Err(Failure::Refused(Error::Unprocessable(format!("roll can't make {source} {kind}")))),
+        "github" => github::create(&code, &o.id, &kind, &new).await,
         _ => Err(Failure::Refused(Error::NotFound(format!("lookup source {source:?}")))),
     };
     match made {
