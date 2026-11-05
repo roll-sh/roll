@@ -83,6 +83,7 @@ interface Common {
   recents?: string;
   disabled?: boolean;
   error?: string;
+  /** Its size where it sits (`w-48`, `min-w-0 flex-1`); full width when not given. */
   className?: string;
   /** Show ids in mono (a value that's an id, not a name). */
   mono?: boolean;
@@ -356,7 +357,7 @@ export function Picker(props: PickerProps) {
         if (!next) reset();
       }}
     >
-      <div className={cn("relative w-full", className)} data-picker>
+      <div className={cn("relative", className ?? "w-full")} data-picker>
         {props.multiple ? (
           <div className={cn(field, "flex min-h-8 flex-wrap items-center gap-1 py-1 ps-1", error && "border-danger/50", disabled && "opacity-60")}>
             {props.value.map((v, i) => (
@@ -606,8 +607,9 @@ function OneValue({ value, option, mono }: { value: string; option: PickerOption
   return (
     <span className="flex min-w-0 flex-1 items-center gap-2">
       <Lead option={option} />
-      <span className="min-w-0 truncate">{option.label}</span>
-      {option.hint && <span className="min-w-0 shrink truncate text-[11.5px] text-subtle">{option.hint}</span>}
+      {/* The name keeps its room; the hint gets what's left. */}
+      <span className="min-w-0 max-w-full shrink-0 truncate">{option.label}</span>
+      {option.hint && <span className="min-w-0 flex-1 truncate text-[11.5px] text-subtle">{option.hint}</span>}
     </span>
   );
 }
