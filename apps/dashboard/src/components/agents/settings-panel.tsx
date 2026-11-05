@@ -1,12 +1,14 @@
 "use client";
 
 import { closeTopLayer } from "./escape-layers";
+import { useMemo } from "react";
 import type { Machine, Project } from "@/lib/agents-api";
+import type { AgentsData } from "@/lib/agents-store";
 import { ProjectIcon } from "./identity";
-import { MachineSettingsPanel } from "./machine-settings";
-import { OwnerSettingsPanel } from "./owner-settings-panel";
+import { machineSettingItems, MachineSettingsPanel } from "./machine-settings";
+import { ownerSettingItems, OwnerSettingsPanel } from "./owner-settings-panel";
 import { ProjectSettingsForm } from "./project-settings";
-import { SettingRow, SettingsPage, SettingsSection } from "./settings-ui";
+import { SettingRow, SettingsPage, SettingsSection, type SettingsElsewhere } from "./settings-ui";
 import { shortPath } from "./shared";
 import { useAgents, useAgentsSnapshot } from "./use-agents";
 
@@ -20,11 +22,12 @@ export function SettingsPanel({ target, onClose }: { target: string; onClose: ()
   const { client } = useAgents();
   // Its own subscription: what the daemon says back (a machine's `hello`) shows at once.
   const data = useAgentsSnapshot(client)?.data ?? client.data;
-  if (target === "owner") return <OwnerSettingsPanel onClose={onClose} />;
+  const elsewhere = useElsewhere(data, target);
+  if (target === "owner") return <OwnerSettingsPanel onClose={onClose} elsewhere={elsewhere} />;
   const id = target.slice(2);
   if (target.startsWith("m:")) {
     const machine = data.machines.get(id)?.value;
-    return machine ? <MachineSettingsPanel machine={machine} onClose={onClose} /> : <Gone onClose={onClose} />;
+    return machine ? <MachineSettingsPanel key={machine.id} machine={machine} onClose={onClose} elsewhere={elsewhere} /> : <Gone onClose={onClose} />;
   }
   if (target.startsWith("p:")) {
     const r = data.projects.get(id);
@@ -39,6 +42,20 @@ export function SettingsPanel({ target, onClose }: { target: string; onClose: ()
     );
   }
   return <Gone onClose={onClose} />;
+}
+
+/** The settings pages other than `target`, for its search: the owner's, then each machine's. */
+function useElsewhere(data: AgentsData, target: string): SettingsElsewhere[] {
+  const { services } = useAgents();
+  const machines = useMemo(() => [...data.machines.values()].map((r) => r.value).sort((a, b) => a.name.localeCompare(b.name)), [data.machines]);
+  return useMemo(() => {
+    const pages: SettingsElsewhere[] = [
+      // Its machine rows only point at the machines' own pages, which are listed themselves.
+      { target: "owner", title: "Agents settings", items: ownerSettingItems(machines, services).filter((i) => !i.id.startsWith("machine.")) },
+      ...machines.map((m) => ({ target: `m:${m.id}`, title: m.name, items: machineSettingItems(m.info?.settings ?? null, !!m.sandbox) })),
+    ];
+    return pages.filter((p) => p.target !== target);
+  }, [machines, services, target]);
 }
 
 function Gone({ onClose }: { onClose: () => void }) {

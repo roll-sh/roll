@@ -39,7 +39,7 @@ import { CustomModelEditor } from "./custom-model-editor";
 import { ProviderLogo } from "./provider-logo";
 import { UsageLimitBars } from "./usage-limits";
 import { SandboxPanel } from "./sandbox";
-import { field, Note, SaveState, SettingRow, SettingsPage, SettingsSection, TextField, useSearching, useShown, type Setting } from "./settings-ui";
+import { field, Note, SaveState, SettingRow, SettingsPage, SettingsSection, TextField, useSearching, useShown, type Setting, type SettingsElsewhere } from "./settings-ui";
 import { loginCommand } from "./shared";
 import { ColorPicker, KindPicker, MachineIcon } from "./identity";
 import { machineColor, machineKind } from "@/lib/agents-identity";
@@ -142,7 +142,8 @@ const providerRows = (p: ProviderBase) => [
   ...(compacts(p) ? [S.autoCompact(p), S.idleCompaction(p)] : []),
 ];
 
-function items(config: MachineConfig | null, sandbox: boolean): Setting[] {
+/** Every row of a machine's settings, for its search and the other pages' (`elsewhere`). */
+export function machineSettingItems(config: MachineConfig | null, sandbox: boolean): Setting[] {
   const providers = config?.providers ?? [];
   return [
     S.name,
@@ -205,7 +206,7 @@ const RUNTIME: { value: RuntimeMode; label: string }[] = [
   { value: "ask", label: "Ask" },
 ];
 
-export function MachineSettingsPanel({ machine, onClose }: { machine: Machine; onClose: () => void }) {
+export function MachineSettingsPanel({ machine, onClose, elsewhere }: { machine: Machine; onClose: () => void; elsewhere?: readonly SettingsElsewhere[] }) {
   const { client, services, owner } = useAgents();
   const config = machine.info?.settings ?? null;
   const set = useMemo(() => config?.set ?? {}, [config]);
@@ -242,10 +243,10 @@ export function MachineSettingsPanel({ machine, onClose }: { machine: Machine; o
         ? `This machine's roll is too old to change its settings from here: update it and run roll agent up again.`
         : "Not connected yet."
       : null;
-  const all = useMemo(() => items(config, !!machine.sandbox), [config, machine.sandbox]);
+  const all = useMemo(() => machineSettingItems(config, !!machine.sandbox), [config, machine.sandbox]);
   const ctx: Ctx = { machine, config, set, editable, save, editEndpoint: setEndpointEdit };
   return (
-    <SettingsPage icon={<MachineIcon machine={machine} tile className="size-5" />} title={machine.name} subtitle="Machine settings" onClose={onClose} items={all}>
+    <SettingsPage icon={<MachineIcon machine={machine} tile className="size-5" />} title={machine.name} subtitle="Machine settings" onClose={onClose} items={all} elsewhere={elsewhere}>
       <SaveState saving={saving} error={error} offline={offline} />
       <SettingsSection title="Machine" ids={[S.name.id, S.color.id, S.kind.id, S.system.id, S.remove.id]}>
         <SettingRow

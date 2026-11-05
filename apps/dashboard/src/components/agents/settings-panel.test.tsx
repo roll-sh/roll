@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Command, EndpointInfo, EndpointProfile, Machine, MachineSettings, Reply } from "@/lib/agents-api";
@@ -239,6 +239,20 @@ describe("a machine's settings", () => {
     await userEvent.keyboard("{Escape}");
     expect(search).toHaveValue("");
     expect(screen.getByRole("region", { name: "Providers" })).toBeInTheDocument();
+  });
+
+  it("finds what's on another settings page too, and opens it with the same search", async () => {
+    const { h } = configured();
+    await userEvent.type(screen.getByRole("searchbox", { name: "Search settings" }), "notifications");
+    const other = screen.getByRole("region", { name: "In other settings" });
+    expect(screen.queryByText("No settings found")).not.toBeInTheDocument();
+    expect(within(other).getByText("Not here, but in")).toBeInTheDocument();
+    macClick(within(other).getByRole("button", { name: /Agents settings/ }));
+    expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "owner" });
+    cleanup();
+    renderAgents(<SettingsPanel target="owner" onClose={vi.fn()} />, h);
+    expect(screen.getByRole("searchbox", { name: "Search settings" })).toHaveValue("notifications");
+    expect(screen.getByRole("region", { name: "General" })).toBeInTheDocument();
   });
 
   it("says why the daemon refused a change", async () => {

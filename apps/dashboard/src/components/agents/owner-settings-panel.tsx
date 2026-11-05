@@ -13,7 +13,8 @@
 
 import { ChevronRight, SlidersHorizontal } from "lucide-react";
 import { useMemo, useState, useSyncExternalStore } from "react";
-import { reachable, type ProviderInfo } from "@/lib/agents-api";
+import { reachable, type Machine, type ProviderInfo } from "@/lib/agents-api";
+import type { AgentsServices } from "@/lib/agents-services";
 import { setAgentsView } from "@/lib/agents-surface";
 import { desktop } from "@/lib/desktop";
 import { DEFAULT_OWNER_SETTINGS, RESTORABLE, type NotifyMode, type OwnerSettings } from "@/lib/owner-settings";
@@ -22,7 +23,7 @@ import { LINEAR_SETTINGS, LinearSettingsSection } from "./linear-settings";
 import { ENDPOINT_SETTINGS, EndpointProfilesSection } from "./endpoint-settings";
 import { GATEWAY_SETTINGS, GatewaySection } from "./gateway/section";
 import { DefaultsRows } from "./machine-settings";
-import { SaveState, SettingRow, SettingsPage, SettingsSection, useSearching, type Setting } from "./settings-ui";
+import { SaveState, SettingRow, SettingsPage, SettingsSection, useSearching, type Setting, type SettingsElsewhere } from "./settings-ui";
 import { MachineIcon } from "./identity";
 import { Segmented, Select, Switch } from "./ui";
 import { useAgents } from "./use-agents";
@@ -83,7 +84,28 @@ function usePermission(): NotificationPermission | "unsupported" {
   );
 }
 
-export function OwnerSettingsPanel({ onClose }: { onClose: () => void }) {
+/** Every row of the owner's settings, for its search and the other pages' (`elsewhere`). */
+export function ownerSettingItems(machines: readonly Machine[], services: AgentsServices | null | undefined): Setting[] {
+  return [
+    S.notify,
+    S.confirmDelete,
+    S.send,
+    S.followUp,
+    S.model,
+    S.permissions,
+    S.mode,
+    S.workspace,
+    ...machines.map((m) => ({ id: `machine.${m.id}`, title: m.name, section: "Machines", terms: ["machine settings", "providers", m.info?.os ?? "", m.sandbox ? "sandbox" : "computer"] })),
+    ...(services ? [ENDPOINT_SETTINGS.owner] : []),
+    ...(services?.gateway ? Object.values(GATEWAY_SETTINGS) : []),
+    ...(services ? Object.values(INTEGRATION_SETTINGS) : []),
+    ...(services ? LINEAR_SETTINGS : []),
+    S.keyboard,
+    S.restore,
+  ];
+}
+
+export function OwnerSettingsPanel({ onClose, elsewhere }: { onClose: () => void; elsewhere?: readonly SettingsElsewhere[] }) {
   const { client, owner, prefs, services } = useAgents();
   const settings = prefs?.settings ?? DEFAULT_OWNER_SETTINGS;
   const [saving, setSaving] = useState(false);
@@ -95,26 +117,7 @@ export function OwnerSettingsPanel({ onClose }: { onClose: () => void }) {
     for (const m of machines) for (const p of m.info?.providers ?? []) if (!byId.has(p.id)) byId.set(p.id, p);
     return [...byId.values()];
   }, [machines]);
-  const items = useMemo<Setting[]>(
-    () => [
-      S.notify,
-      S.confirmDelete,
-      S.send,
-      S.followUp,
-      S.model,
-      S.permissions,
-      S.mode,
-      S.workspace,
-      ...machines.map((m) => ({ id: `machine.${m.id}`, title: m.name, section: "Machines", terms: ["machine settings", "providers", m.info?.os ?? "", m.sandbox ? "sandbox" : "computer"] })),
-      ...(services ? [ENDPOINT_SETTINGS.owner] : []),
-      ...(services?.gateway ? Object.values(GATEWAY_SETTINGS) : []),
-      ...(services ? Object.values(INTEGRATION_SETTINGS) : []),
-      ...(services ? LINEAR_SETTINGS : []),
-      S.keyboard,
-      S.restore,
-    ],
-    [machines, services],
-  );
+  const items = useMemo(() => ownerSettingItems(machines, services), [machines, services]);
 
   const save = async (patch: Partial<OwnerSettings>) => {
     if (!prefs) return;
@@ -133,7 +136,7 @@ export function OwnerSettingsPanel({ onClose }: { onClose: () => void }) {
   const disabled = !prefs?.loaded;
 
   return (
-    <SettingsPage icon={<SlidersHorizontal className="size-4 text-muted" />} title="Agents settings" subtitle={`${owner} · on every device`} onClose={onClose} items={items}>
+    <SettingsPage icon={<SlidersHorizontal className="size-4 text-muted" />} title="Agents settings" subtitle={`${owner} · on every device`} onClose={onClose} items={items} elsewhere={elsewhere}>
       <SaveState saving={saving} error={error ?? prefs?.error ?? null} offline={!prefs ? "Sign in to keep settings." : null} />
       <SettingsSection title="General" ids={[S.notify.id, S.confirmDelete.id]}>
         <SettingRow

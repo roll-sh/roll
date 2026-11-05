@@ -5,11 +5,14 @@
  * panel: a search box over sections; a section is a title over a grouped card; a row is its title
  * and description on the left and its control on the right (stacked when narrow), with a reset
  * button when it differs from its default. Searching keeps the rows that match (T3's
- * `searchSettings`) in their sections and hides the rest.
+ * `searchSettings`) in their sections and hides the rest. T3's settings are one page; here they're
+ * the owner's and each machine's, so a search also lists what matches on the others (`elsewhere`),
+ * each opening that page with the same search.
  */
 
-import { RotateCcw, Search, X } from "lucide-react";
+import { ChevronRight, RotateCcw, Search, X } from "lucide-react";
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { setAgentsView } from "@/lib/agents-surface";
 import { searchSettings, type SettingItem } from "@/lib/settings-search";
 import { IconButton } from "./session";
 import { cn } from "./ui";
@@ -30,6 +33,16 @@ export function useShown(ids: readonly string[]): boolean {
 /** The search's words, to open what holds a match (a provider's details). */
 export const useSearching = () => useContext(SearchCtx).query.trim().length > 0;
 
+/** Another settings page, for the search: its target (`owner`, `m:<id>`), its name, its rows. */
+export interface SettingsElsewhere {
+  target: string;
+  title: string;
+  items: readonly Setting[];
+}
+
+/** The search a page opened from another page's results starts with. */
+let carried = "";
+
 export function SettingsPage({
   icon,
   title,
@@ -37,6 +50,7 @@ export function SettingsPage({
   onClose,
   items,
   search = true,
+  elsewhere,
   children,
 }: {
   icon: ReactNode;
@@ -47,11 +61,21 @@ export function SettingsPage({
   items: readonly Setting[];
   /** Offer the search box (a short page needs none). */
   search?: boolean;
+  /** The other settings pages, searched too. */
+  elsewhere?: readonly SettingsElsewhere[];
   children: ReactNode;
 }) {
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(() => {
+    const q = carried;
+    carried = "";
+    return q;
+  });
   const box = useRef<HTMLInputElement>(null);
   const matches = useMemo(() => (query.trim() ? new Set(searchSettings(query, items).map((i) => i.id)) : null), [query, items]);
+  const others = useMemo(
+    () => (query.trim() && elsewhere ? elsewhere.map((e) => ({ ...e, hits: searchSettings(query, e.items) })).filter((e) => e.hits.length > 0) : []),
+    [query, elsewhere],
+  );
   // T3: `/` or ⌘/Ctrl+F searches the settings.
   useEffect(() => {
     if (!search) return;
@@ -106,7 +130,31 @@ export function SettingsPage({
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pt-3 pb-8" data-scroll>
         <SearchCtx.Provider value={{ query, matches }}>
-          {matches && matches.size === 0 ? <p className="py-10 text-center text-[13px] text-subtle">No settings found</p> : children}
+          {matches && matches.size === 0 ? others.length === 0 && <p className="py-10 text-center text-[13px] text-subtle">No settings found</p> : children}
+          {others.length > 0 && (
+            <section className="mb-6" aria-label="In other settings">
+              <h3 className="mb-2 px-0.5 text-[12px] font-medium text-soft">{matches?.size === 0 ? "Not here, but in" : "Also in"}</h3>
+              <div className="divide-y divide-line overflow-hidden rounded-xl border border-line-2 bg-raised shadow-card inset-shadow-highlight">
+                {others.map((o) => (
+                  <button
+                    key={o.target}
+                    type="button"
+                    onClick={() => {
+                      carried = query;
+                      setAgentsView({ kind: "settings", target: o.target });
+                    }}
+                    className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-fg/[0.03] focus-visible:bg-fg/[0.04] focus-visible:outline-none"
+                  >
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[13px] font-[510] text-fg">{o.title}</span>
+                      <span className="block truncate text-[12px] text-muted">{o.hits.map((h) => h.title).join(", ")}</span>
+                    </span>
+                    <ChevronRight className="size-4 shrink-0 text-subtle" strokeWidth={1.5} aria-hidden />
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
         </SearchCtx.Provider>
       </div>
     </div>
