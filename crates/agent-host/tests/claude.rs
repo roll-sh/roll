@@ -1158,6 +1158,7 @@ fn render(e: &ProviderEvent) -> String {
     match e {
         ProviderEvent::NativeThread { id } => format!("thread {id}"),
         ProviderEvent::Model { model } => format!("model {model}"),
+        ProviderEvent::Catalog { models } => format!("catalog {}", models.len()),
         ProviderEvent::Item(i) => {
             let status = match i.status {
                 NodeStatus::Running => "running",

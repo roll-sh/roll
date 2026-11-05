@@ -183,6 +183,10 @@ pub enum ProviderEvent {
     NativeThread { id: String },
     /// The model the provider actually uses, once it says.
     Model { model: String },
+    /// The models a live session offers, with their options, where the provider's probe can't
+    /// learn them without opening a session (ACP agents; T3's live configuration). The daemon
+    /// keeps them for the provider's version and offers them from then on.
+    Catalog { models: Vec<ModelInfo> },
     /// An item appeared or changed: the full item each time (adapters accumulate streamed text
     /// into it and also send `TextDelta`s for smoothness).
     Item(Item),

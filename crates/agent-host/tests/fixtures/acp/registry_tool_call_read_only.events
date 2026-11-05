@@ -1,5 +1,6 @@
 {"native_thread":"grok-replay-session-1"}
 {"model":"grok-build"}
+{"catalog":[{"default":true,"id":"grok-build","name":"Grok Build"}]}
 {"item":{"body":{"text":"","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
 {"text_delta":{"item":"msg:1:1","text":"Reading both files now.\n"}}
 {"item":{"body":{"text":"Reading both files now.\n","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}

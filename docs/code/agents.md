@@ -321,9 +321,20 @@ options, like a change of effort, starts the next turn in a new session.
   A picked tier goes on `turn/start` as `serviceTier`. A custom slug borrows the first model's
   options.
 - **ACP agents** apply a thread's options to their own config options of the same id
-  (`acp/policy.rs`), when the option offers the value. Their probe stops at `initialize`, so they
-  describe no options before a session. T3 reads them from a session's workspace snapshot; roll
-  doesn't yet.
+  (`acp/policy.rs`), when the option offers the value. An agent names its models and options only
+  in a session (`session/new`'s `configOptions`, or v1's session models). T3's probe opens one in
+  its own directory to find out; roll's probe stops at `initialize`, because a probe session lands
+  in the agent's history and may need a login, so it never opens a session or signs in as a side
+  effect. Instead the first session the user opens tells the daemon (T3's live configuration,
+  `applyAcpRegistryLiveConfiguration`): the session sends `ProviderEvent::Catalog`
+  (`acp/catalog.rs`, T3's `acpProviderOptionDescriptors`: the model option's choices as models, the
+  current one the default; a `thought_level` as the reasoning levels; every other select or switch
+  as an option of the agent's own id; modes, the model and Kiro's Autopilot stay roll's controls;
+  16 options, 64 choices, 256-byte texts), and the daemon keeps it per agent and version in
+  `agent.db` (`provider_catalogs`), sends `hello` again, and offers it whenever a probe of that
+  version lists no models, after restarts too. Until then the picker says "Gemini CLI lists its
+  models once a session starts: start a thread with its default model, and they show here
+  after."
 
 **Provider logos.** The picker draws T3's provider logos (`components/agents/provider-logos.tsx`,
 generated from T3's path data) in the text's colour, like every mark on the agents surface. roll

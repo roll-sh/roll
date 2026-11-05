@@ -1,5 +1,6 @@
 {"native_thread":"grok-replay-session-1"}
 {"model":"grok-build"}
+{"catalog":[{"default":true,"id":"grok-build","name":"Grok Build"}]}
 {"item":{"body":{"input":{"command":"printf 'codex app-server approval fixture' > .codex-probe-write-action.txt"},"kind":"command","name":"execute","title":"printf 'codex app-server approval fixture' > .codex-probe-write-action.txt","type":"tool"},"id":"write-probe","parent":null,"status":"running"}}
 {"request":{"body":{"action":"command","command":"printf 'codex app-server approval fixture' > .codex-probe-write-action.txt","cwd":"<workspace>","decisions":["accept","accept_for_session","decline","cancel"],"input":{"command":"printf 'codex app-server approval fixture' > .codex-probe-write-action.txt"},"title":"Run `printf 'codex app-server approval fixture' > .codex-probe-write-action.txt`","tool":"execute","type":"approval"},"id":"1001","item":"write-probe"}}
 {"item":{"body":{"exit_code":0,"input":{"command":"printf 'codex app-server approval fixture' > .codex-probe-write-action.txt"},"kind":"command","name":"execute","title":"printf 'codex app-server approval fixture' > .codex-probe-write-action.txt","type":"tool"},"id":"write-probe","parent":null,"status":"completed"}}

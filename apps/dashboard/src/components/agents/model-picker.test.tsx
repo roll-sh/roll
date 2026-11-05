@@ -7,7 +7,7 @@ import { reasoningLevels } from "@/lib/agents-model-options";
 import { MAX_RECENT, modelPrefs } from "@/lib/agents-models";
 import { provider } from "@/test/agents";
 import { agentsHarness, renderAgents } from "@/test/agents-render";
-import { ModelPicker, PermissionsMenu, choiceOf, updateNotice, type ModelChoice } from "./model-picker";
+import { ModelPicker, PermissionsMenu, choiceOf, providerNotice, updateNotice, type ModelChoice } from "./model-picker";
 
 const fast: ModelOption = { type: "boolean", id: "fastMode", label: "Fast Mode", default: false, role: "speed" };
 const context: ModelOption = {
@@ -276,6 +276,14 @@ describe("update notices", () => {
     expect(updateNotice(p)).toBe("Update Claude Code to v2.1.310 or newer to use Haiku 5.5, Opus 6, and Sonnet 6.");
     expect(updateNotice(p, "haiku")).toBe("Update Claude Code to v2.1.293 or newer to use Haiku 5.5.");
     expect(updateNotice(p, "zzz")).toBeNull();
+  });
+});
+
+describe("an ACP agent before its first session", () => {
+  it("says its models come with a session (roll never opens one to find out)", () => {
+    const gemini = provider({ id: "acp:gemini", name: "Gemini CLI", models: [] });
+    expect(providerNotice(gemini)?.text).toBe("Gemini CLI lists its models once a session starts: start a thread with its default model, and they show here after.");
+    expect(providerNotice(provider({ models: [] }))?.text).toBe("Claude Code reported no models.");
   });
 });
 

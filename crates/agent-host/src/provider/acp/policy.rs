@@ -143,7 +143,7 @@ pub fn mode_option(config: &[ConfigOption]) -> Option<&ConfigOption> {
     config.iter().find(|o| o.category.as_deref() == Some("mode") && matches!(o.value, ConfigValue::Select { .. }))
 }
 
-fn effort_option(config: &[ConfigOption]) -> Option<&ConfigOption> {
+pub fn effort_option(config: &[ConfigOption]) -> Option<&ConfigOption> {
     config.iter().find(|o| {
         matches!(o.value, ConfigValue::Select { .. })
             && (matches!(o.id.as_str(), "effort" | "effortLevel" | "reasoning_effort" | "thought_level")

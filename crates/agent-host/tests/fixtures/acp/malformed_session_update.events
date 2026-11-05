@@ -1,5 +1,6 @@
 {"native_thread":"grok-replay-session-1"}
 {"model":"grok-build"}
+{"catalog":[{"default":true,"id":"grok-build","name":"Grok Build"},{"default":false,"id":"grok-composer-2.5-fast","name":"Grok Composer 2.5 Fast"}]}
 {"item":{"body":{"text":"","type":"reasoning"},"id":"thought:1:1","parent":null,"status":"running"}}
 {"text_delta":{"item":"thought:1:1","text":"I should "}}
 {"item":{"body":{"text":"I should ","type":"reasoning"},"id":"thought:1:1","parent":null,"status":"running"}}

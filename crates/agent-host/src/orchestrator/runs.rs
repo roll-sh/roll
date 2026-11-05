@@ -668,6 +668,16 @@ impl Host {
                     active.run_dirty = true;
                 }
             }
+            ProviderEvent::Catalog { models } => {
+                if self.probes.learn(&rt.thread.provider, models, &self.store) {
+                    let me = self.me.clone();
+                    tokio::spawn(async move {
+                        if let Some(host) = me.upgrade() {
+                            host.publish_info().await;
+                        }
+                    });
+                }
+            }
             ProviderEvent::Item(item) => self.on_item(rt, item)?,
             ProviderEvent::TextDelta { item, text } => {
                 if let Some(node) = rt.active.as_ref().and_then(|a| a.items.get(&item)) {

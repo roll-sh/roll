@@ -129,6 +129,8 @@ pub struct FakeProvider {
     held: tokio::sync::watch::Sender<bool>,
     /// What `info` says about the login.
     auth: Mutex<AuthStatus>,
+    /// `info` lists no models (an ACP agent, which says them only in a session).
+    unlisted: std::sync::atomic::AtomicBool,
     /// The provider [`Script::Orchestrate`] sessions started from now on delegate to.
     delegate_to: Mutex<Option<String>>,
     /// What each native conversation of [`Script::Orchestrate`] delegated and heard back.
@@ -175,6 +177,7 @@ impl FakeProvider {
             changed: Arc::new(Notify::new()),
             held: tokio::sync::watch::Sender::new(false),
             auth: Mutex::new(AuthStatus::Ready),
+            unlisted: std::sync::atomic::AtomicBool::new(false),
             delegate_to: Mutex::new(None),
             orchestrations: Mutex::new(HashMap::new()),
         })
@@ -184,6 +187,11 @@ impl FakeProvider {
     /// `delegate_task` (they leave it out, inheriting their own, by default).
     pub fn delegate_to(&self, provider: &str) {
         *self.delegate_to.lock().unwrap() = Some(provider.into());
+    }
+
+    /// From now on `info` lists no models, as an ACP agent's probe can't.
+    pub fn unlist_models(&self) {
+        self.unlisted.store(true, Ordering::SeqCst);
     }
 
     /// What the next probe says about the login (logged out with `Missing`).
@@ -264,7 +272,8 @@ impl Provider for FakeProvider {
 
     async fn info(&self) -> ProviderInfo {
         let _ = self.held.subscribe().wait_for(|held| !*held).await;
-        ProviderInfo {
+        let unlisted = self.unlisted.load(Ordering::SeqCst);
+        let mut info = ProviderInfo {
             id: self.id.clone(),
             name: format!("Fake {}", self.id.0),
             installed: true,
@@ -285,7 +294,11 @@ impl Provider for FakeProvider {
             update_required: Vec::new(),
             capabilities: self.capabilities,
             checking: false,
+        };
+        if unlisted {
+            info.models.clear();
         }
+        info
     }
 
     async fn start(&self, cfg: SessionConfig) -> anyhow::Result<(Box<dyn Session>, mpsc::Receiver<ProviderEvent>)> {

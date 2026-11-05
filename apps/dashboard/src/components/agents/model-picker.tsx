@@ -78,6 +78,8 @@ export function providerNotice(p: ProviderInfo): { text: string; command?: strin
   if (p.checking && !p.installed) return { text: `Checking ${p.name}…`, checking: true };
   if (!p.installed) return { text: p.detail ?? `${p.name} isn't installed on this machine.` };
   if (p.auth === "missing") return { text: `${p.name} isn't logged in. Log in from a terminal on the machine:`, command: loginCommand(p) };
+  // An ACP agent names its models only in a session: the first one it opens tells the machine.
+  if (p.models.length === 0 && p.id.startsWith("acp:")) return { text: `${p.name} lists its models once a session starts: start a thread with its default model, and they show here after.` };
   if (p.models.length === 0) return { text: p.detail ?? `${p.name} reported no models.` };
   return null;
 }

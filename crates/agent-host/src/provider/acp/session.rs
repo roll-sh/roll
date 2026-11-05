@@ -160,6 +160,12 @@ pub(super) async fn open(
     if let Some(model) = tr.current_model() {
         let _ = queue.send(ProviderEvent::Model { model });
     }
+    // What the agent offers, as it set the session up (before roll's choices are written): the
+    // models and options the picker shows from now on (`catalog.rs`).
+    let models = super::catalog::models(&tr.config, tr.models.as_ref());
+    if !models.is_empty() {
+        let _ = queue.send(ProviderEvent::Catalog { models });
+    }
     let client = Arc::new(Client::new(tr.cwd().to_path_buf(), cfg.env.clone()));
     let inner = Arc::new(Inner {
         rpc,

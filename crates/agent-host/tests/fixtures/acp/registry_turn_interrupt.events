@@ -1,4 +1,5 @@
 {"native_thread":"grok-replay-session-1"}
 {"model":"grok-build"}
+{"catalog":[{"default":true,"id":"grok-build","name":"Grok Build"}]}
 {"turn_ended":"interrupted"}
 {"exited":null}

@@ -1,5 +1,6 @@
 {"native_thread":"grok-replay-session-1"}
 {"model":"grok-build"}
+{"catalog":[{"default":true,"id":"grok-build","name":"Grok Build"}]}
 {"item":{"body":{"text":"","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
 {"text_delta":{"item":"msg:1:1","text":"I'll track the three steps and inspect both files."}}
 {"item":{"body":{"text":"I'll track the three steps and inspect both files.","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}

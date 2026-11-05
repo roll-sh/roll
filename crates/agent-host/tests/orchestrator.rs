@@ -505,6 +505,54 @@ async fn command_ids_are_idempotent() {
     assert_eq!(w.host.run("err".into(), "owner".into(), missing).await, first);
 }
 
+/// T3's live configuration for an ACP agent: its probe can't list models without a session, so
+/// what a session offered (`ProviderEvent::Catalog`) is what the machine offers from then on,
+/// published at once and kept across a restart for the same version.
+#[tokio::test]
+async fn a_sessions_catalog_fills_in_a_probe_without_models() {
+    let fake = FakeProvider::with("acp:fake", Capabilities::default(), Script::Manual);
+    fake.unlist_models();
+    let w = World::new(vec![fake.clone()]).await;
+    let models = |info: &MachineInfo| info.providers.iter().find(|p| p.id.0 == "acp:fake").map(|p| p.models.clone()).unwrap_or_default();
+    assert!(models(&w.host.info().await).is_empty());
+
+    let thread = w.thread("acp:fake", Some("hi"), false).await;
+    let session = fake.session(0).await;
+    let offered = vec![ModelInfo {
+        default: true,
+        options: vec![ModelOption::reasoning(vec![OptionChoice::new("low", "Low"), OptionChoice::new("high", "High")], Some("high"))],
+        ..ModelInfo::new("grok-4.7", "Grok 4.7")
+    }];
+    session.emit(ProviderEvent::Catalog { models: offered.clone() });
+    session.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle).await;
+    // Published by itself: the next hello says them.
+    assert_eq!(offered_soon(&w.host, models).await, offered);
+
+    // A restart probes again (no models) and still offers them, for the same version.
+    let home = w.home.clone();
+    let World { host, dirs, .. } = w;
+    drop(host);
+    let fake2 = FakeProvider::with("acp:fake", Capabilities::default(), Script::Manual);
+    fake2.unlist_models();
+    let host = open(&home, vec![fake2]).await;
+    assert_eq!(offered_soon(&host, models).await, offered);
+    drop(dirs);
+}
+
+/// What the machine info offers once `pick` finds something in it (at most 10 s).
+async fn offered_soon(host: &agent_host::Host, pick: impl Fn(&MachineInfo) -> Vec<ModelInfo>) -> Vec<ModelInfo> {
+    for _ in 0..200 {
+        let info = host.info().await;
+        let found = pick(&info);
+        if !found.is_empty() && info.providers.iter().all(|p| !p.checking) {
+            return found;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    pick(&host.info().await)
+}
+
 #[tokio::test]
 async fn a_restart_interrupts_running_runs_and_resumes_the_native_thread() {
     let fake = manual("codex", false);

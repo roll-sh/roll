@@ -420,6 +420,7 @@ fn event_json(e: &ProviderEvent) -> Value {
     match e {
         ProviderEvent::NativeThread { id } => json!({ "native_thread": id }),
         ProviderEvent::Model { model } => json!({ "model": model }),
+        ProviderEvent::Catalog { models } => json!({ "catalog": models }),
         ProviderEvent::Item(i) => json!({ "item": { "id": i.id, "parent": i.parent, "status": i.status, "body": i.body } }),
         ProviderEvent::TextDelta { item, text } => json!({ "text_delta": { "item": item, "text": text } }),
         ProviderEvent::OutputDelta { item, text } => json!({ "output_delta": { "item": item, "text": text } }),

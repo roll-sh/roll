@@ -8,11 +8,14 @@
 //! - A newer probe supersedes one still running, whose answer is dropped.
 //! - Every probe that finishes sends `hello` again with the machine info.
 //! - A command that reads a provider's info waits for its probe, at most [`PROBE_WAIT`].
+//! - What a live session offered ([`Probes::learn`], ACP agents' models and options, which
+//!   `initialize` doesn't say) is kept per provider and version, and fills in a probe that found
+//!   no models (T3's `applyAcpRegistryLiveConfiguration`).
 
 use super::Host;
 use crate::Outbound;
 use crate::provider::Provider;
-use agent_proto::{AuthStatus, ProviderId, ProviderInfo};
+use agent_proto::{AuthStatus, ModelInfo, ProviderId, ProviderInfo};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,6 +23,8 @@ use std::time::Duration;
 
 /// The store key of the last probes.
 const KEY: &str = "provider_probes";
+/// The store key of what live sessions offered.
+const LEARNED: &str = "provider_catalogs";
 /// How long a command waits for a probe. Longer than any provider's own timeouts (a `--version`
 /// and then a 20 s probe), so it only runs out when a probe is stuck.
 const PROBE_WAIT: Duration = Duration::from_secs(45);
@@ -28,6 +33,16 @@ const PROBE_WAIT: Duration = Duration::from_secs(45);
 pub(crate) struct Probes {
     state: std::sync::Mutex<BTreeMap<ProviderId, Probe>>,
     next: AtomicU64,
+    /// What live sessions offered, by provider.
+    learned: std::sync::Mutex<BTreeMap<ProviderId, Learned>>,
+}
+
+/// A live session's models, for the provider version that offered them.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Learned {
+    #[serde(default)]
+    version: Option<String>,
+    models: Vec<ModelInfo>,
 }
 
 #[derive(Default)]
@@ -46,7 +61,27 @@ impl Probes {
             None
         }).unwrap_or_default();
         let state = last.into_iter().map(|(id, info)| (id, Probe { last: Some(info), running: None })).collect();
-        Probes { state: std::sync::Mutex::new(state), next: AtomicU64::new(0) }
+        let learned: BTreeMap<ProviderId, Learned> = store.setting(LEARNED).unwrap_or_else(|e| {
+            tracing::warn!("ignoring the stored provider catalogs: {e:#}");
+            None
+        }).unwrap_or_default();
+        Probes { state: std::sync::Mutex::new(state), next: AtomicU64::new(0), learned: std::sync::Mutex::new(learned) }
+    }
+
+    /// A live session of `provider` offered `models`: kept (and stored) for the version its last
+    /// probe found. True when that changed what the provider offers.
+    pub(crate) fn learn(&self, provider: &ProviderId, models: Vec<ModelInfo>, store: &crate::store::Store) -> bool {
+        let version = self.state.lock().unwrap().get(provider).and_then(|p| p.last.as_ref()).and_then(|i| i.version.clone());
+        let next = Learned { version, models };
+        let mut learned = self.learned.lock().unwrap();
+        if learned.get(provider) == Some(&next) {
+            return false;
+        }
+        learned.insert(provider.clone(), next);
+        if let Err(e) = store.put_setting(LEARNED, &*learned) {
+            tracing::warn!("couldn't keep the provider catalogs: {e:#}");
+        }
+        true
     }
 
     /// What's known about `provider` now.
@@ -66,6 +101,16 @@ impl Probes {
             checking: false,
         });
         info.checking = probe.is_some_and(|p| p.running.is_some());
+        drop(state);
+        // A probe that can't list models without a session: what the last one offered, if it
+        // was this version.
+        if info.models.is_empty()
+            && info.installed
+            && let Some(learned) = self.learned.lock().unwrap().get(&provider.id())
+            && learned.version == info.version
+        {
+            info.models = learned.models.clone();
+        }
         info
     }
 }

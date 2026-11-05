@@ -14,6 +14,7 @@
 //! - `client`: `fs/*` and `terminal/*`, confined to the workspace.
 //! - `session`: opening a session and the `Session` methods.
 
+mod catalog;
 mod client;
 mod policy;
 mod rpc;
