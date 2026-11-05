@@ -256,6 +256,11 @@ impl Store {
         )?;
         Ok(())
     }
+
+    pub fn delete_setting(&self, key: &str) -> anyhow::Result<()> {
+        self.db().execute("DELETE FROM settings WHERE key = ?1", [key])?;
+        Ok(())
+    }
 }
 
 /// `agent.db` holds endpoint keys (`endpoints.rs`): only its user reads it. SQLite gives its

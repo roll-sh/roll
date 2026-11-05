@@ -814,3 +814,139 @@ async fn an_endpoint_key_sealed_to_the_daemon_reaches_the_fake_provider_and_noth
     let db = e.data.join("agent.db");
     assert_eq!(std::fs::metadata(&db).unwrap().permissions().mode() & 0o777, 0o600);
 }
+
+/// roll's model gateway end to end (docs/code/gateway.md): `roll agent up` hosts it in front of a
+/// mock Anthropic upstream on loopback (its key sealed to the daemon for that upstream), the owner
+/// joins the same machine through the relay route (the daemon mints a client key sealed to itself
+/// as its `roll-gateway` endpoint key), and the fake provider's Messages request goes through the
+/// gateway with that key. The upstream sees its own key, never the client's; usage is counted by
+/// the thread; and neither key is in anything the relay keeps or the daemon prints.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_fake_provider_talks_through_the_gateway_its_daemon_hosts() {
+    use axum::response::IntoResponse;
+    use std::net::{Ipv4Addr, SocketAddr};
+    const UPSTREAM_KEY: &str = "sk-ant-e2e-gateway-91c4d2";
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let log = seen.clone();
+    let app = axum::Router::new().route(
+        "/v1/messages",
+        axum::routing::post(move |headers: axum::http::HeaderMap, body: axum::Json<Value>| {
+            let log = log.clone();
+            async move {
+                let key = headers.get("x-api-key").or_else(|| headers.get("authorization")).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                log.lock().unwrap().push(key.clone());
+                if !key.contains(UPSTREAM_KEY) {
+                    return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                }
+                axum::Json(json!({ "id": "msg_e2e", "type": "message", "role": "assistant", "model": body.0["model"], "content": [{ "type": "text", "text": "ok from upstream" }],
+                    "stop_reason": "end_turn", "stop_sequence": null, "usage": { "input_tokens": 21, "output_tokens": 4 } }))
+                .into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await.unwrap();
+    let upstream = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let port = tokio::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await.unwrap().local_addr().unwrap().port();
+    let gateway_url = format!("http://{}", SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
+
+    let env = env().await;
+    let e = &env;
+    e.login("studio").await;
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&e.login).unwrap()).unwrap();
+    let machine = saved["machine"].as_str().unwrap().to_string();
+    let path = format!("/v1/code/agents/acme/machines/{machine}/commands");
+    let mut c = e.cmd(&["agent", "up"]);
+    c.env("ROLL_AGENT_FAKE", "1");
+    let mut daemon = c.spawn().unwrap();
+    let printed = lines(&mut daemon);
+    let info = |f: Box<dyn Fn(&Value) -> bool + Send>, what: &'static str| async move {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let m = e.machines().await.pop().unwrap_or_default();
+            if m["online"].as_bool() == Some(true) && f(&m["info"]) {
+                return m["info"].clone();
+            }
+            assert!(Instant::now() < deadline, "never {what}: {m}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    let seal_key = info(Box::new(|i| i["seal_key"].is_string()), "said its seal key").await["seal_key"].as_str().unwrap().to_string();
+
+    // The owner sets the gateway up on this machine, and its upstream's key.
+    let settings = json!({ "enabled": true, "port": port, "upstreams": [{ "id": "anthropic", "name": "Anthropic", "kind": "anthropic_compatible",
+        "base_url": upstream, "models": ["claude-*"], "allow_private": true }] });
+    let (s, r) = e.req("POST", &path, Some(json!({ "id": "g1", "command": { "type": "gateway.configure", "settings": settings } }))).await;
+    assert_eq!((s.as_u16(), r["type"].as_str()), (200, Some("ok")), "{r}");
+    let sealed = agent_host::endpoints::seal_with(&seal_key, &agent_host::gateway::upstream_key_context("anthropic"), UPSTREAM_KEY).unwrap();
+    let (s, r) = e.req("POST", &path, Some(json!({ "id": "g2", "command": { "type": "gateway.key", "upstream": "anthropic", "key": { "type": "set", "sealed": sealed } } }))).await;
+    assert_eq!((s.as_u16(), r["type"].as_str()), (200, Some("ok")), "{r}");
+    info(Box::new(|i| i["settings"]["gateway"]["run"]["state"] == "running" && i["settings"]["gateway"]["keys"][0]["key"] == "sealed"), "ran the gateway").await;
+
+    // The plan, then this machine joins it (through loopback: it's the host).
+    let plan = json!({ "host": machine, "urls": [{ "label": "This computer", "url": gateway_url }], "fallback": true, "acknowledged_at": 1 });
+    let (s, r) = e.req("PUT", "/v1/code/agents/acme/gateway", Some(plan)).await;
+    assert_eq!(s.as_u16(), 200, "{r}");
+    let (s, r) = e.req("POST", "/v1/code/agents/acme/gateway/members", Some(json!({ "machine": machine, "providers": ["fake"] }))).await;
+    assert_eq!(s.as_u16(), 200, "{r}");
+    assert!(r["members"][0]["client"].as_str().is_some_and(|c| c.starts_with("gwc_")), "{r}");
+    let joined = info(Box::new(|i| i["settings"]["endpoints"].as_array().is_some_and(|l| l.iter().any(|ep| ep["id"] == "roll-gateway" && ep["key"] == "sealed"))), "joined").await;
+    let fake = joined["providers"].as_array().unwrap().iter().find(|p| p["id"] == "fake").unwrap().clone();
+    assert_eq!(fake["detail"], "via roll gateway on studio", "{fake}");
+
+    // The fake provider's request goes through the gateway.
+    let project = e.dir.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let (_, r) = e.req("POST", &path, Some(json!({ "id": "p1", "command": { "type": "project.add", "path": project, "name": "proj" } }))).await;
+    let project_id = r["id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
+    let probe = agent_host::provider::fake::GATEWAY_PROBE;
+    let create = json!({ "id": "t1", "command": { "type": "thread.create", "project": project_id, "provider": "fake", "runtime_mode": "ask", "prompt": probe } });
+    let (s, r) = e.req("POST", &path, Some(create)).await;
+    assert_eq!(s.as_u16(), 200, "{r}");
+    let thread = r["id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let answer = loop {
+        let (_, state) = e.req("GET", &format!("/v1/code/agents/acme/state?threads={thread}"), None).await;
+        let text = state["entities"].as_array().unwrap().iter().filter_map(|m| m["entity"]["body"]["text"].as_str()).find(|t| t.starts_with("gateway:")).map(str::to_string);
+        if let Some(t) = text {
+            break t;
+        }
+        assert!(Instant::now() < deadline, "the fake never answered the probe");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(answer, "gateway: 200 ok from upstream");
+    {
+        let keys = seen.lock().unwrap();
+        assert!(!keys.is_empty() && keys.iter().all(|k| k.contains(UPSTREAM_KEY)), "the upstream got its own key: {keys:?}");
+        assert!(!keys.iter().any(|k| k.contains("rgk_")), "never the client's");
+    }
+    // Usage was counted by the thread.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (s, r) = e.req("POST", &path, Some(json!({ "id": "u1", "command": { "type": "gateway.usage", "from": 0, "to": 4_000_000_000_000u64, "by": "thread" } }))).await;
+        assert_eq!(s.as_u16(), 200, "{r}");
+        if let Some(row) = r["rows"].as_array().and_then(|rows| rows.iter().find(|row| row["key"] == thread.as_str())) {
+            assert_eq!((row["input_tokens"].as_u64(), row["output_tokens"].as_u64()), (Some(21), Some(4)), "{row}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "no usage for {thread}: {r}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Neither key is in anything the relay keeps, its state, or what the daemon printed.
+    let (_, state) = e.req("GET", "/v1/code/agents/acme/state", None).await;
+    for needle in [UPSTREAM_KEY, "rgk_"] {
+        assert!(!state.to_string().contains(needle), "{needle}");
+        assert_eq!(files_holding(&e.dir.path().join("home"), needle), Vec::<PathBuf>::new(), "{needle}");
+        assert_eq!(files_holding(&e.dir.path().join("objects"), needle), Vec::<PathBuf>::new(), "{needle}");
+    }
+    // SAFETY: signalling the child this test started.
+    unsafe { libc::kill(daemon.id() as i32, libc::SIGINT) };
+    let status = tokio::task::spawn_blocking(move || wait_for(&mut daemon, Duration::from_secs(10))).await.unwrap().expect("stopped");
+    assert!(status.success(), "{status:?}");
+    let printed: Vec<String> = printed.try_iter().collect();
+    assert!(!printed.iter().any(|l| l.contains(UPSTREAM_KEY) || l.contains("rgk_")), "{printed:?}");
+    // The gateway's own database holds only the client key's hash (the daemon keeps the key
+    // itself as its endpoint's, in its private agent.db).
+    assert_eq!(files_holding(&e.data.join("gateway"), "rgk_"), Vec::<PathBuf>::new());
+}

@@ -32,6 +32,9 @@ impl Host {
         let Some(provider) = self.providers.get(id) else { return cfg };
         let live = self.endpoints.lock().unwrap().iter().find(|l| l.stored.spec.serves(id)).cloned();
         let Some(live) = live else { return cfg };
+        if self.fallen_back(&live) {
+            return cfg;
+        }
         let key = live.key();
         match provider.endpoint_use(&live.stored.spec, key.as_ref().map(|k| k.expose())) {
             Ok(using) => using.apply(cfg),
@@ -107,6 +110,8 @@ impl Host {
         list.push(live);
         self.save_endpoints(&list)?;
         *self.endpoints.lock().unwrap() = list;
+        // A gateway set again (a new key, another URL) is asked again before it's relied on.
+        self.gateway_health.forget(&spec.base_url);
         self.configure_providers();
         self.probe_providers();
         self.publish_info().await;

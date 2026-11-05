@@ -11,6 +11,7 @@ use tokio::sync::broadcast;
 pub mod config;
 pub mod endpoints;
 pub mod fs;
+pub mod gateway;
 pub mod mcp;
 pub mod git;
 pub mod logo;

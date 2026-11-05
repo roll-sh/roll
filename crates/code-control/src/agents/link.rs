@@ -113,6 +113,8 @@ pub(crate) async fn serve(code: Arc<Code>, machine: MachineRow, mut socket: WebS
         _ => machine.seq,
     };
     let welcome = RelayFrame::Welcome { machine: MachineId(machine.id.clone()), owner: owner.name.clone(), resume_from };
+    // A new sandbox joins the owner's gateway when the owner said so (in the background).
+    super::gateway::sandbox_hello(&code, &machine);
     let ended = if socket.send(text(&welcome)).await.is_ok() { run(&code, &machine, &mut socket, attached.rx, &attached.close).await } else { End::Gone };
     match ended {
         End::Revoked => close(socket, CLOSE_REVOKED, "the machine was revoked").await,

@@ -13,6 +13,7 @@ pub mod automations;
 pub mod linear;
 pub mod docs;
 pub mod endpoints;
+pub mod gateway;
 mod code;
 mod link;
 mod policy;
