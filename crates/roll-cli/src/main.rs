@@ -1,6 +1,7 @@
 mod agent;
 mod automation;
 mod code;
+mod gateway;
 mod stream;
 mod tasks;
 
@@ -45,6 +46,9 @@ enum Cmd {
     /// Source control for agents: repos, changes, work items, landing.
     #[command(subcommand)]
     Code(code::Code),
+    /// roll's model gateway from a config file, on a machine without `roll agent up` (`serve`,
+    /// `client add|list|revoke`).
+    Gateway(gateway::Gateway),
     /// Serverless Postgres.
     #[command(subcommand, alias = "pg")]
     Db(Db),
@@ -349,6 +353,7 @@ async fn main() -> anyhow::Result<()> {
     let cmd = match cli.cmd {
         Cmd::Db(cmd) => cmd,
         Cmd::Agent(cmd) => return agent::run(&api.base, cli.json, cmd).await,
+        Cmd::Gateway(cmd) => return gateway::run(cli.json, cmd).await,
         Cmd::Code(cmd) => {
             // `--token` on the command line wins; otherwise ROLL_CODE_TOKEN (not the tasks token).
             let token = if token_flag { cli.token } else { std::env::var("ROLL_CODE_TOKEN").ok() };
