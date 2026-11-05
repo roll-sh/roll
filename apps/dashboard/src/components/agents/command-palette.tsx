@@ -292,7 +292,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
       },
       addProject,
       { kind: "action", value: "action:add-machine", title: "Add machine", searchTerms: ["connect", "computer", "sandbox", "rent"], icon: <Server className={ICON} />, run: host.addMachine },
-      !!auto.store && { kind: "action", value: "action:automations", title: "Automations", searchTerms: ["workflow", "trigger", "schedule", "cron", "webhook", "zap", "rules"], icon: <Zap className={ICON} />, run: () => setAgentsView({ kind: "automations" }) },
+      !!auto.store && { kind: "action", value: "action:automations", title: "Automations", searchTerms: ["workflow", "trigger", "schedule", "cron", "webhook", "zap", "rules"], icon: <Zap className={ICON} />, shortcut: "A", run: () => setAgentsView({ kind: "automations" }) },
       !!auto.store && { kind: "action", value: "action:new-automation", title: "New automation", searchTerms: ["workflow", "trigger", "schedule", "template"], icon: <Plus className={ICON} />, run: () => setAgentsView({ kind: "automations", open: "new" }) },
       auto.automations.size > 0 && {
         kind: "submenu",
