@@ -579,3 +579,27 @@ async fn discord_interactions_are_verified_and_reach_the_inbox() {
     let (_, v) = send(&w.a, req(&click, &ts, None)).await;
     assert_eq!(v["type"], 9, "{v}");
 }
+
+/// The dashboard's copy of chat ops' catalog entries (`apps/dashboard/src/lib/chatops-catalog.json`:
+/// its demo and template tests) is what the registry says. `ROLL_FIXTURES=write` rewrites it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_dashboard_has_chat_ops_catalog() {
+    let a = app_with(|_| {});
+    chatops::register(&a.code);
+    let owner = OwnerRef { id: "own_x".into(), name: "x".into() };
+    let c = a.code.automations.registry.catalog(&owner);
+    let mut triggers: Vec<Value> = c.triggers.iter().filter(|t| ["slack", "discord", "github"].contains(&t.source.as_str())).map(|t| serde_json::to_value(t).unwrap()).collect();
+    let mut steps: Vec<Value> = c.steps.iter().filter(|s| s.integration.is_some()).map(|s| serde_json::to_value(s).unwrap()).collect();
+    // What needs setting up is per owner: not the fixture's business.
+    for v in triggers.iter_mut().chain(steps.iter_mut()) {
+        v.as_object_mut().unwrap().remove("needs_setup");
+    }
+    assert_eq!((triggers.len(), steps.len()), (3, 13));
+    let want = json!({ "triggers": triggers, "steps": steps });
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/dashboard/src/lib/chatops-catalog.json");
+    if std::env::var("ROLL_FIXTURES").as_deref() == Ok("write") {
+        std::fs::write(&path, serde_json::to_string_pretty(&want).unwrap() + "\n").unwrap();
+    }
+    let have: Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("the fixture (ROLL_FIXTURES=write)")).unwrap();
+    assert_eq!(have, want, "apps/dashboard/src/lib/chatops-catalog.json is stale: ROLL_FIXTURES=write cargo test -p code-control --test chatops");
+}

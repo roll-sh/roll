@@ -100,7 +100,7 @@ export const CHATOPS_TEMPLATES: AutomationTemplate[] = [
     title: "@roll on a GitHub issue: a sandbox, then a PR",
     description: "@roll in an issue comment starts an agent in a new sandbox on the repo. When it's done, its work is opened as a pull request and linked from the issue.",
     trigger: "github",
-    steps: ["agent.start", "agent.wait", "agent.publish", "github.pr", "github.comment"],
+    steps: ["agent.start", "agent.wait", "agent.publish", "github.pr", "github.comment", "github.comment"],
     integration: "github",
     build: () =>
       spec(
@@ -132,7 +132,7 @@ export const CHATOPS_TEMPLATES: AutomationTemplate[] = [
     title: "A check fails on main: an agent fixes it",
     description: "When a GitHub check fails on main, an agent in a sandbox fixes the cause and queues the fix to land; a commit status says how it went.",
     trigger: "github",
-    steps: ["agent.start", "agent.wait", "agent.publish", "github.status"],
+    steps: ["agent.start", "agent.wait", "agent.publish", "github.status", "github.status"],
     integration: "github",
     build: () =>
       spec(

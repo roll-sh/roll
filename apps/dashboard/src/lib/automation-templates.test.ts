@@ -1,34 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { CHATOPS_TEMPLATES, TEMPLATES, type TemplateContext } from "./automation-templates";
 import { automationSpecD, STEP_CONFIGS, STEP_KINDS, type BuiltInStepKind } from "./automations-api";
+import { withBuiltIns, validate } from "./automations-ui";
+import { CHATOPS_CATALOG, withChatops } from "./chatops-catalog";
 import { decode } from "./decode";
 
-/**
- * Chat ops' step kinds and their configs' keys (`additionalProperties: false`), as registered in
- * crates/code-control/src/chatops/{slack,discord,github}.rs.
- */
-const INTEGRATION_STEPS: Record<string, { keys: string[]; required: string[] }> = {
-  "slack.post": { keys: ["team", "channel", "text", "blocks", "thread_ts"], required: ["channel", "text"] },
-  "slack.update": { keys: ["team", "channel", "ts", "text", "blocks"], required: ["channel", "ts", "text"] },
-  "slack.reply": { keys: ["team", "channel", "thread_ts", "text", "blocks"], required: ["text"] },
-  "slack.dm": { keys: ["team", "user", "text", "blocks"], required: ["user", "text"] },
-  "slack.status": { keys: ["team", "machine", "thread", "channel", "thread_ts", "ts"], required: ["machine", "thread"] },
-  "slack.notify": { keys: ["team", "to", "machine", "thread", "text"], required: ["to"] },
-  "discord.post": { keys: ["guild", "channel", "user", "text"], required: ["text"] },
-  "discord.status": { keys: ["guild", "machine", "thread", "channel", "message"], required: ["machine", "thread"] },
-  "discord.notify": { keys: ["guild", "channel", "user", "machine", "thread"], required: [] },
-  "github.comment": { keys: ["repo", "number", "body"], required: ["body"] },
-  "github.label": { keys: ["repo", "number", "add", "remove"], required: [] },
-  "github.status": { keys: ["repo", "sha", "state", "context", "description", "target_url"], required: ["state"] },
-  "github.pr": { keys: ["repo", "change", "title", "body", "draft"], required: ["change"] },
-};
-
-/** Integration trigger sources: their events and config keys. */
-const SOURCES: Record<string, { events: string[]; config: string[] }> = {
-  slack: { events: ["command", "mention", "message", "reaction"], config: ["team", "channels", "reactions"] },
-  discord: { events: ["command"], config: ["guild", "channels"] },
-  github: { events: ["issue.opened", "issue.labeled", "comment.mention", "review.requested", "check.failed"], config: ["repos", "labels", "branches", "anyone"] },
-};
+/** Chat ops' trigger sources and step kinds, from the server's registry (chatops-catalog.json). */
+const SOURCES = Object.fromEntries(CHATOPS_CATALOG.triggers.map((t) => [t.source, t]));
+const STEPS = Object.fromEntries(CHATOPS_CATALOG.steps.map((s) => [s.kind, s.config as { properties: Record<string, unknown>; required?: string[] }]));
 
 const isBuiltIn = (k: string): k is BuiltInStepKind => (STEP_KINDS as readonly string[]).includes(k);
 
@@ -57,8 +36,9 @@ describe("chat ops' automation templates", () => {
     if (trigger.type === "integration") {
       const src = SOURCES[trigger.source];
       expect(src, `trigger source ${trigger.source}`).toBeDefined();
-      for (const e of trigger.events) expect(src.events).toContain(e);
-      for (const k of Object.keys(trigger.config as object)) expect(src.config).toContain(k);
+      for (const e of trigger.events) expect(src.events.map((x) => x.kind)).toContain(e);
+      const props = Object.keys((src.config as { properties: object }).properties);
+      for (const k of Object.keys(trigger.config as object)) expect(props).toContain(k);
       used.add(trigger.source);
     }
     const ids = new Set<string>();
@@ -72,14 +52,16 @@ describe("chat ops' automation templates", () => {
         decode(STEP_CONFIGS[s.kind], s.config, { strict: true });
         continue;
       }
-      const known = INTEGRATION_STEPS[s.kind];
+      const known = STEPS[s.kind];
       expect(known, `step kind ${s.kind}`).toBeDefined();
       const config = s.config as Record<string, unknown>;
-      for (const k of Object.keys(config)) expect(known.keys, `${s.kind}.${k}`).toContain(k);
-      for (const k of known.required) expect(config[k], `${s.kind} needs ${k}`).toBeTruthy();
+      for (const k of Object.keys(config)) expect(Object.keys(known.properties), `${s.kind}.${k}`).toContain(k);
+      for (const k of known.required ?? []) expect(config[k], `${s.kind} needs ${k}`).toBeTruthy();
       used.add(s.kind.split(".")[0]);
     }
     expect([...used]).toEqual([t.integration]);
+    // The builder's own checks, on a server that has chat ops.
+    expect(validate(built, withChatops(withBuiltIns(null)))).toEqual({});
   });
 
   it("run on the owner's computer and hand agent.start's output to the chat steps", () => {

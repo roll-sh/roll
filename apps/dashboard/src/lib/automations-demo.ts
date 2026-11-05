@@ -7,6 +7,7 @@
  * server's (`template.rs`, `filter.rs`), enough for "Test" to show something true-looking.
  */
 
+import { withChatops } from "./chatops-catalog";
 import type { Command, Machine, MachineId, Reply, StreamEvent, ThreadStatus } from "./agents-api";
 import {
   isRunFinal,
@@ -60,8 +61,9 @@ const agentStart = (over: Record<string, unknown>) => ({
   ...over,
 });
 
-/** The demo catalog: the built-ins, plus integrations that aren't connected yet. */
-const CATALOG: Catalog = withBuiltIns({
+/** The demo catalog: the built-ins, plus integrations (the demo has Slack and GitHub connected, as its
+ * integration cards say; Linear and Discord aren't). */
+const CATALOG: Catalog = withChatops(withBuiltIns({
   triggers: [
     ...BUILT_IN_TRIGGERS,
     {
@@ -75,14 +77,6 @@ const CATALOG: Catalog = withBuiltIns({
       config: { type: "object", properties: { team: { type: "string", title: "Team", description: "Its key, e.g. ENG. Empty: every team." } } },
       needs_setup: true,
     },
-    {
-      source: "slack",
-      title: "Slack",
-      description: "/roll, mentions of @roll, and messages in a channel.",
-      events: [ev("command", "/roll command", ["text", "user", "channel"])],
-      config: { type: "object", properties: { channel: { type: "string", title: "Channel" } } },
-      needs_setup: true,
-    },
   ],
   steps: [
     {
@@ -94,17 +88,8 @@ const CATALOG: Catalog = withBuiltIns({
       integration: "linear",
       needs_setup: true,
     },
-    {
-      kind: "slack.post",
-      title: "Post to Slack",
-      description: "A message in a channel or a thread.",
-      config: { type: "object", required: ["channel", "text"], properties: { channel: { type: "string", title: "Channel", format: "template" }, text: { type: "string", title: "Message", format: "template-long" } } },
-      output: ["ts", "permalink"],
-      integration: "slack",
-      needs_setup: true,
-    },
   ],
-});
+}), (i) => i === "slack" || i === "github");
 
 export class DemoAutomations {
   private automations = new Map<string, Automation>();
