@@ -33,6 +33,24 @@ async fn turn(w: &World, session: &FakeSession, thread: &ThreadId, files: &[(&st
 }
 
 #[tokio::test]
+async fn a_repository_with_no_commits_yet_starts_its_threads_in_the_project_folder() {
+    // A fresh `git init` (or an empty roll code repo, cloned): nothing to branch a worktree from.
+    let fake = FakeProvider::new("codex");
+    let w = World::with_repo(vec![fake.clone()], false).await;
+    sh(&w.repo, &["init", "-q", "-b", "main"]);
+    let thread = w.thread("codex", Some("Write the first file"), true).await;
+    let t = w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle && t.run_count == 1).await;
+    assert!(t.worktree.is_none(), "{:?}", t.worktree);
+    assert_eq!(t.cwd, w.repo.to_string_lossy());
+    // Once there's a commit, a thread gets its worktree again.
+    std::fs::write(w.repo.join("README.md"), "hi\n").unwrap();
+    sh(&w.repo, &["add", "."]);
+    sh(&w.repo, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "first"]);
+    let next = w.thread("codex", None, true).await;
+    assert!(w.state().await.thread(&next).unwrap().worktree.is_some());
+}
+
+#[tokio::test]
 async fn worktree_threads_get_a_branch_and_delete_leaves_only_tombstones_and_the_branch() {
     let fake = FakeProvider::new("codex");
     let w = World::new(vec![fake.clone()]).await;

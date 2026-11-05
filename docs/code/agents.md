@@ -1423,7 +1423,8 @@ The surface has three views:
 - **roll code.** Thread cards and sessions show `Thread.change` (a chip linking to the change)
   and `Thread.work`. Publishing shows what landing did as a result, never an error; a thread
   outside a worktree is offered a fork into one first, and new threads in a roll code project
-  start in a worktree.
+  start in a worktree (a repository with no commits yet has nothing to branch from: its threads work
+  in the project folder until there's a commit).
 - **Phones.** Below 640 px the popup is the whole screen; a conversation's actions fold into its
   menu and the diff or a terminal takes the transcript's place; the oldest waiting request sits at
   the bottom of the canvas, answerable with one tap (it folds to one line; the zoom bar moves to the

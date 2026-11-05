@@ -51,7 +51,12 @@ impl Host {
         let given = spec.title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
         let auto_title = given.is_none() && prompt.is_none();
         let title = given.unwrap_or_else(|| super::title_from(prompt.as_deref().unwrap_or(""), &attachments));
-        let worktree = if spec.worktree { Some(self.make_worktree(&project, &id, &title, None).await?) } else { None };
+        // A repository with no commits yet has nothing to branch a worktree from, and nothing one
+        // would protect: the thread works in the project folder (it can fork into a worktree once
+        // there's a commit). A folder that isn't a repository still says it can't have worktrees.
+        let repo = Path::new(&project.path);
+        let unborn = git::root(repo).await.is_some() && git::head(repo).await?.is_none();
+        let worktree = if spec.worktree && !unborn { Some(self.make_worktree(&project, &id, &title, None).await?) } else { None };
         let at = now();
         let thread = Thread {
             id: id.clone(),
