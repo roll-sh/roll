@@ -77,12 +77,16 @@ export async function setEndpointOn(client: AgentsClient, machine: Machine, spec
   await client.run(machine.id, { type: "endpoint.set", endpoint: spec, key: change }, "ok");
 }
 
-/** A profile as one machine takes it: the same id, its providers cut to those the machine has and can use. */
+/**
+ * A profile as one machine takes it: the same id, its providers cut to those the machine has and
+ * can use, and that the gateway doesn't manage there (that's Gateway settings' to change).
+ */
 export function profileFor(profile: EndpointSpec, machine: Machine): EndpointSpec {
   const have = new Set(machineProviders(machine).map((p) => p.id));
+  const gateway = (p: ProviderId) => profile.kind !== "gateway" && endpointOf(machine.info, p)?.kind === "gateway";
   return specOf(
     profile,
-    (profile.providers ?? []).filter((p) => have.has(p) && !incompatible(p, profile.kind)),
+    (profile.providers ?? []).filter((p) => have.has(p) && !incompatible(p, profile.kind) && !gateway(p)),
   );
 }
 
@@ -210,6 +214,7 @@ export function EndpointEditor({
   taken,
   providers,
   uses,
+  managed,
   withKey,
   replaceKey = false,
   pick,
@@ -225,6 +230,8 @@ export function EndpointEditor({
   providers: readonly { id: ProviderId; name: string }[];
   /** The endpoint a provider uses now, by name (choosing this one takes it from that one). */
   uses?: (p: ProviderId) => string | undefined;
+  /** Providers the gateway manages on this machine: changed only in Gateway settings. */
+  managed?: (p: ProviderId) => boolean;
   withKey: boolean;
   /** Open with the key field showing (Replace). */
   replaceKey?: boolean;
@@ -330,7 +337,7 @@ export function EndpointEditor({
         {providers.length ? (
           <ul className="space-y-0.5" aria-label="Providers that use it">
             {providers.map((p) => {
-              const why = incompatible(p.id, kind);
+              const why = incompatible(p.id, kind) ?? (kind !== "gateway" && managed?.(p.id) ? "Managed in Gateway settings" : null);
               const other = uses?.(p.id);
               const now = other && other !== initial?.name ? other : undefined;
               return (
@@ -478,6 +485,7 @@ export function MachineEndpoints({ machine, editing, onEdit }: { machine: Machin
       taken={list.map((e) => e.id)}
       providers={providers}
       uses={(p) => endpointOf(machine.info, p)?.name}
+      managed={(p) => endpointOf(machine.info, p)?.kind === "gateway"}
       withKey
       onSave={save}
       onCancel={() => onEdit(null)}

@@ -5,12 +5,12 @@
  */
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { Command, EndpointInfo, GatewayPlan, LogEntry, Machine, Reply, UsageReport } from "@/lib/agents-api";
+import type { Command, EndpointInfo, EndpointSpec, GatewayPlan, LogEntry, Machine, Reply, UsageReport } from "@/lib/agents-api";
 import type { GatewayApi, GatewayCommands } from "@/lib/agents-gateway";
 import { machine, machineConfig, provider, SEAL_KEY } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents } from "@/test/agents-render";
 import { macClick } from "@/test/mac-click";
-import { MachineEndpoints } from "./endpoint-settings";
+import { MachineEndpoints, profileFor } from "./endpoint-settings";
 import { RequestLog, TAIL_MS } from "./gateway/log";
 import { MembersList } from "./gateway/members";
 import { NewSandboxGatewayNotice, ProviderGatewayNote } from "./gateway/machine";
@@ -140,6 +140,16 @@ describe("the notice, wherever a machine uses the gateway", () => {
     expect(within(row).getByText("managed")).toBeInTheDocument();
     expect(within(row).queryByRole("button", { name: /Edit|Remove/ })).toBeNull();
     expect(within(row).getByRole("button", { name: /Manage in Gateway settings/ })).toBeInTheDocument();
+  });
+
+  it("can't be undone from another endpoint: the editor and Apply to machines leave the gateway's providers alone", () => {
+    const h = agentsHarness({ machines: [member], ctx: { services: fakeServices() } });
+    renderAgents(<MachineEndpoints machine={member} editing={{}} onEdit={() => {}} />, h);
+    const claude = screen.getByRole("checkbox", { name: /Claude Code/ });
+    expect(claude).toBeDisabled();
+    expect(claude.closest("label")).toHaveTextContent("Managed in Gateway settings");
+    const profile = { id: "proxy", name: "Proxy", kind: "anthropic", base_url: "http://proxy:8317", providers: ["claude"] } as EndpointSpec;
+    expect(profileFor(profile, member).providers ?? []).toEqual([]);
   });
 
   it("under a provider that goes through it, with fallback", () => {
