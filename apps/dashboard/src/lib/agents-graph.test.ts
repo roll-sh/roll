@@ -49,6 +49,15 @@ describe("agents graph", () => {
     expect(deriveGraph(d, { docked: "thr_3" }).nodes.has("x:trm_t")).toBe(true);
   });
 
+  it("a login on the machine that finished cleanly leaves the canvas; a failed one stays", () => {
+    const done = (code: number) => applyEvents(sample(), [ev("terminal", terminal({ id: "trm_login", project: null, title: "codex login", status: "exited", exit_code: code }), 20)]);
+    expect(deriveGraph(done(0)).nodes.has("x:trm_login")).toBe(false);
+    expect(deriveGraph(done(1)).nodes.has("x:trm_login")).toBe(true);
+    // A project's terminal that exited stays (its output is what you look at).
+    const d = applyEvents(sample(), [ev("terminal", terminal({ status: "exited", exit_code: 0 }), 20)]);
+    expect(deriveGraph(d).nodes.has("x:trm_1")).toBe(true);
+  });
+
   it("animates only what runs: not the machine and project above it, not what waits on you", () => {
     const g = deriveGraph(sample());
     expect(g.nodes.get("t:thr_1")!.busy).toBe(true);

@@ -172,11 +172,14 @@ export function deriveGraph(data: AgentsData, opts: GraphOptions = {}): Graph {
     add({ key: keyOf.request(q.id), kind: "request", id: q.id, machine: nodes.get(tk)!.machine, parent: tk, busy: false, relation: null });
   }
 
-  // Terminals: on their thread, else their project, else their machine (provider logins).
+  // Terminals: on their thread, else their project, else their machine (provider logins). One on
+  // the machine that finished cleanly (a login that went through) has nothing left to show; a
+  // failed one stays, with its output.
   const terminals = [...data.terminals.values()].sort((a, b) => a.value.created_at - b.value.created_at);
   for (const r of terminals) {
     const t = r.value;
     if (t.thread && t.thread === opts.docked) continue;
+    if (!t.thread && !t.project && t.status === "exited" && t.exit_code === 0) continue;
     const parent = [t.thread && keyOf.thread(t.thread), t.project && keyOf.project(t.project), keyOf.machine(r.machine)].find(
       (k): k is string => !!k && nodes.has(k),
     );
