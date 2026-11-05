@@ -316,3 +316,20 @@ describe("permissions", () => {
     expect(onChange).toHaveBeenCalledWith("ask");
   });
 });
+
+describe("models an endpoint lists", () => {
+  it("say which endpoint they come from, beside the Custom tag", async () => {
+    const gemini = provider({
+      id: "acp:gemini",
+      name: "Gemini CLI",
+      models: [
+        { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", default: true, options: [] },
+        { id: "gemini-3-flash", name: "gemini-3-flash", default: false, options: [], via: "CLIProxyAPI" },
+      ],
+    });
+    renderAgents(<Picker list={[gemini]} initial={choiceOf("acp:gemini")} />, agentsHarness());
+    const popup = await open();
+    expect(within(within(popup).getByRole("option", { name: /gemini-3-flash/ })).getByText("via CLIProxyAPI")).toBeInTheDocument();
+    expect(within(within(popup).getByRole("option", { name: /Gemini 2\.5 Pro/ })).queryByText(/^via /)).toBeNull();
+  });
+});

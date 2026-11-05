@@ -517,6 +517,11 @@ function ModelRow({
           <span className="sr-only">, {model.providerName}</span>
         </span>
         {info.custom && <span className="shrink-0 rounded border border-line-2 px-1 text-[10px] leading-4 text-subtle">Custom</span>}
+        {info.via && (
+          <span className="max-w-32 shrink-0 truncate rounded border border-line-2 px-1 text-[10px] leading-4 text-subtle" title={`Listed by the endpoint ${info.via}`}>
+            via {info.via}
+          </span>
+        )}
         {info.images === false && <span className="shrink-0 text-[10.5px] text-subtle">Text only</span>}
       </span>
       {why ? (
