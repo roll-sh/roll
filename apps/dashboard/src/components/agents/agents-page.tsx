@@ -10,6 +10,7 @@ import { collapseUnused, deriveGraph, rolling, type GraphNode } from "@/lib/agen
 import { runsOf } from "@/lib/agents-store";
 import type { Direction, Size } from "@/lib/agents-layout";
 import { closePalette, noteThreadOpen, openPalette, togglePalette } from "@/lib/agents-palette";
+import { useKeyboard } from "@/lib/keyboard-inset";
 import { lastInputWasKeyboard } from "@/lib/input-modality";
 import type { AgentsServices } from "@/lib/agents-services";
 import { isNewAgentKey, newAgentHint, setAgentsView, useAgentsSurface, viewFromHash, type AgentsView, type AutomationsView } from "@/lib/agents-surface";
@@ -1049,6 +1050,7 @@ function PhoneWaiting({ client }: { client: AgentsClient }) {
   const data = client.data;
   const { requests } = rolling(data);
   const [folded, setFolded] = useState(false);
+  const keyboard = useKeyboard();
   const q = requests[0];
   const t = data.threads.get(q.thread);
   // Folds to one line over the prompt bar, so the canvas under it can be read and moved (its zoom
@@ -1067,7 +1069,19 @@ function PhoneWaiting({ client }: { client: AgentsClient }) {
       </button>
     );
   return (
-    <div className="rise relative max-h-[55dvh] overflow-y-auto rounded-2xl border border-outline bg-raised px-3.5 py-3 shadow-pop" aria-label="Waiting for you" data-phone-waiting>
+    <div
+      className="rise relative max-h-[55dvh] overflow-y-auto rounded-2xl border border-outline bg-raised px-3.5 py-3 shadow-pop"
+      // With the keyboard up, what's left of the screen above the prompt bar; typing an answer
+      // keeps Previous and Submit in sight.
+      style={keyboard.inset ? { maxHeight: Math.max(160, keyboard.visible - 132) } : undefined}
+      onFocus={(e) => {
+        if (!(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)) return;
+        const submit = e.target.closest("form")?.querySelector<HTMLElement>("button[type=submit]");
+        requestAnimationFrame(() => submit?.scrollIntoView({ block: "nearest" }));
+      }}
+      aria-label="Waiting for you"
+      data-phone-waiting
+    >
       <button onClick={() => setFolded(true)} aria-label="Fold" title="Fold" className="absolute top-1.5 right-1.5 grid size-9 place-items-center rounded-full text-muted hover:text-fg">
         <ChevronDown className="size-4" />
       </button>

@@ -4,6 +4,7 @@ import { ArrowUp, Bot, FolderPlus, Workflow, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { reachable } from "@/lib/agents-api";
 import { openPalette } from "@/lib/agents-palette";
+import { useKeyboard } from "@/lib/keyboard-inset";
 import { ProjectIcon } from "./identity";
 import { ModelPicker, type ModelChoice } from "./model-picker";
 import { choiceOn, installedProviders, newThreadSettings, placedProjects, targetLabel, type Target } from "./new-thread";
@@ -33,13 +34,14 @@ const KINDS = [
  * for what went wrong, and a toolbar. Centred over the canvas when it's wide; across it, above the
  * zoom controls, when it's narrow (a side panel open, a small window, a phone), with `above`
  * (the phone's "Waiting for you", which sends the zoom controls to the top) stacked over it. `ref` is the whole dock, for the canvas to keep
- * its cards clear of.
+ * its cards clear of. An on-screen keyboard (iOS covers what's at the bottom) lifts the dock over it.
  */
 export function PromptBar({ ref, above }: { ref?: Ref<HTMLDivElement>; above?: ReactNode }) {
   const { client, owner } = useAgents();
   // Its own subscription: what it shows can't hang on whoever renders it.
   const data = useAgentsSnapshot(client)?.data ?? client.data;
   const prefs = usePrefs();
+  const keyboard = useKeyboard();
   const { target: fallback, targets } = useGoalTargets();
   const launch = useLaunchGoal();
   const [draft, setDraft] = useState<GoalDraft>(emptyGoalDraft);
@@ -166,7 +168,7 @@ export function PromptBar({ ref, above }: { ref?: Ref<HTMLDivElement>; above?: R
   const offline = !!target && !reachable(target.machine);
 
   return (
-    <div ref={ref} className="@container/bar pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-center gap-2 px-3" data-nodrag>
+    <div ref={ref} className="@container/bar pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-center gap-2 px-3" style={keyboard.inset ? { bottom: keyboard.inset } : undefined} data-nodrag>
       {above && <div className="pointer-events-auto w-full">{above}</div>}
       <form
         ref={box}

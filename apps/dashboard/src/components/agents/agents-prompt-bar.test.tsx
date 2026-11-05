@@ -131,6 +131,30 @@ describe("the prompt bar", () => {
     expect(ids()[2]).toBe(ids()[1]);
   });
 
+  it("rises over an on-screen keyboard (iOS covers what's at the bottom) and settles back when it goes", async () => {
+    const vv = Object.assign(new EventTarget(), { height: window.innerHeight, offsetTop: 0, scale: 1 });
+    const was = Object.getOwnPropertyDescriptor(window, "visualViewport");
+    Object.defineProperty(window, "visualViewport", { value: vv, configurable: true });
+    try {
+      renderAgents(<PromptBar />, harness());
+      const dock = screen.getByRole("form", { name: "Ask agents" }).parentElement!;
+      expect(dock.style.bottom).toBe("");
+      act(() => {
+        vv.height = window.innerHeight - 300;
+        vv.dispatchEvent(new Event("resize"));
+      });
+      expect(dock.style.bottom).toBe("300px");
+      act(() => {
+        vv.height = window.innerHeight;
+        vv.dispatchEvent(new Event("resize"));
+      });
+      expect(dock.style.bottom).toBe("");
+    } finally {
+      if (was) Object.defineProperty(window, "visualViewport", was);
+      else delete (window as { visualViewport?: unknown }).visualViewport;
+    }
+  });
+
   it("can stop waiting for a start that hangs; the draft stays", async () => {
     let release: (r: Reply) => void = () => {};
     const h = harness((c) => (c.type === "thread.create" ? new Promise<Reply>((r) => (release = r)) : { type: "ok" }));
