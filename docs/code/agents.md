@@ -1075,23 +1075,28 @@ Code: `agent-host/src/orchestrator/settle.rs`; the threads sidebar is
   tomorrow, next week, or a custom time or duration) and wake. ⌘⇧S settles the open thread and
   opens the next one in the sidebar's order (wrapping, skipping settled and snoozed ones; the
   canvas when there's none), T3's settle and advance; on a settled thread it un-settles it.
-- **A project's shelf on the canvas** (`components/agents/project-shelf.tsx`). What left the canvas
-  stays with its project: the card's last line counts it ("Settled 10 · Snoozed 1 · Archived 2"),
-  and clicking the project's name (or that line) opens the shelf on the card, a tab per shelf, ten
-  rows and 25 more per "Show more". Focusing the project (F, ⌘K "Focus a project…" or "Settled
-  and archived in…") opens it too; which shelves are open is remembered per device
-  (`lib/agents-shelf.ts`). A row opens the conversation in the side panel with its transcript,
-  diffs and checkpoints as they were; its button restores it (un-settle, wake or unarchive). The
+- **The shelf** (`components/agents/project-shelf.tsx`, `lib/agents-shelf.ts`). What left the
+  canvas stays off it: no project card carries a list. "Shelf" in the canvas toolbar, beside
+  Display, counts what's settled, snoozed and archived (the focused project's while one fills the
+  canvas; no control when nothing is) and opens a popover with every one of them, grouped by
+  project, a tab per shelf, 40 rows and then 60 more per "Show more". The search matches every word
+  in the title or the project's name; ↑/↓ walk the rows, Enter opens the conversation in the side
+  panel with its transcript, diffs and checkpoints as they were, and ⌘Enter (or a row's button)
+  restores it (un-settle, wake or unarchive). A project's ⋯ menu ("Settled and archived (12)"),
+  ⌘K "Settled and archived in…" and a project's header in the popover open it narrowed to that
+  project, with a chip whose × widens it again (`?shelf` or `?shelf=<project>` in the URL opens it,
+  the demo's way in). Linear keeps its archive behind one control, not
+  on each team; T3 has the Settled shelf in its sidebar, which roll's sidebar keeps too. The
   conversation itself says where it is above the composer, T3's "Settled 2d ago" line with
   Un-settle (Wake, Unarchive), and that its worktree was cleaned up and comes back with the next
   message.
 - **Archive** is T3's: a thread leaves the inbox and the canvas, its session and terminals close;
   unarchive brings it back as it was. T3 lists archived threads in settings; roll keeps them on an
-  "Archived" shelf per project in the sidebar and on the project's card, and ⌘K finds them.
+  "Archived" shelf per project in the sidebar and on the toolbar's shelf, and ⌘K finds them.
   Delete asks first (the owner's "Confirm before deleting a thread", T3's text plus what roll
   keeps: the branch, and a worktree with uncommitted changes).
 - **Undo** (T3's `showThreadUndoNotice.ts`): settling, snoozing, archiving and restoring show one
-  notice at a time for 5 seconds, from wherever they were done (the sidebar, a card's shelf, the
+  notice at a time for 5 seconds, from wherever they were done (the sidebar, the shelf, the
   conversation's menu, ⌘K); Undo or ⌘Z (outside a text field) puts the thread back.
 
 ## Machine settings

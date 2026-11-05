@@ -47,6 +47,7 @@ import {
 } from "@/lib/agents-views";
 import type { Order } from "@/lib/agents-layout";
 import { Menu } from "./menu";
+import { ShelfControl } from "./project-shelf";
 import { Popover, PopoverPopup, PopoverTrigger, Segmented, Switch } from "./ui";
 
 /** How long edits wait before they go to roll (typing a filter, resizing a card). */
@@ -202,7 +203,7 @@ export function ViewsBar({
   active: boolean;
   phone: boolean;
   /** The project filling the canvas: a chip that lets go of it. */
-  focused?: { name: string; clear: () => void };
+  focused?: { id: string; name: string; clear: () => void };
 }) {
   const [editor, setEditor] = useState<null | { mode: "new" | "edit" }>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -362,6 +363,7 @@ export function ViewsBar({
             />
           </label>
         )}
+        <ShelfControl data={data} focused={focused?.id ?? null} phone={phone} />
         <DisplayMenu display={v.current.display} phone={phone} onChange={v.setDisplay} />
         <button
           onClick={() => setEditor((e) => (e ? null : { mode: "edit" }))}

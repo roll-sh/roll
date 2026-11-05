@@ -60,7 +60,7 @@ import { MachineIcon, ProjectIcon } from "./identity";
 import { useAgents } from "./use-agents";
 import { useInboxActions } from "./threads-sidebar";
 import { inbox, shelfOf, type Shelf } from "@/lib/agents-inbox";
-import { setShelfOpen } from "@/lib/agents-shelf";
+import { openShelf } from "@/lib/agents-shelf";
 
 const SHELF_NAME: Record<Exclude<Shelf, "active">, string> = { settled: "Settled", snoozed: "Snoozed", archived: "Archived" };
 
@@ -189,7 +189,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
     const projectRecord = data.projects.get(t.project)?.value;
     const project = projectRecord?.name;
     const branch = t.worktree?.branch;
-    // A conversation off the canvas says which shelf it's on (its project's card lists it there).
+    // A conversation off the canvas says which shelf it's on (the toolbar's Shelf lists it).
     const shelf = shelfOf(t, now);
     const parts = [
       shelf === "active" ? null : SHELF_NAME[shelf],
@@ -283,8 +283,8 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
                 title: g.project.name,
                 description: (["settled", "snoozed", "archived"] as const).filter((s) => g[s].length).map((s) => `${SHELF_NAME[s]} ${g[s].length}`).join(" · "),
                 icon: <ProjectIcon project={g.project} className="size-4" />,
-                // The project fills the canvas with its shelf open on its card.
-                run: () => (setAgentsView({ kind: "canvas" }), host.focusProject(g.project.id), setShelfOpen(g.project.id, true)),
+                // The canvas, with the toolbar's shelf open on just this project.
+                run: () => (setAgentsView({ kind: "canvas" }), openShelf(g.project.id)),
               })),
             },
           ],

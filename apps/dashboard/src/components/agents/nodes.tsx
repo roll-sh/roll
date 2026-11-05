@@ -1,7 +1,7 @@
 "use client";
 
-import { ArrowUpRight, CircleAlert, Focus, FolderGit2, FolderPlus, GitBranch, GitFork, GitPullRequest, LogIn, MoreHorizontal, Plus, RefreshCw, Settings2, SquareTerminal, Trash2 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { Archive, ArrowUpRight, CircleAlert, Focus, FolderGit2, FolderPlus, GitBranch, GitFork, GitPullRequest, LogIn, MoreHorizontal, Plus, RefreshCw, Settings2, SquareTerminal, Trash2 } from "lucide-react";
+import { useMemo, useState, type ReactNode } from "react";
 import { coming, isRunning, machineState, reachable, type IdentityColor, type Machine, type Node, type Project, type ProviderInfo, type Request, type Run, type Thread } from "@/lib/agents-api";
 import { projectStats, type ProjectStats } from "@/lib/agents-graph";
 import { providersFor } from "@/lib/agents-store";
@@ -20,8 +20,8 @@ import { orchestration, OrchestratorChip, StatusPill, threadDone, threadPill } f
 import { MachineIcon, ProjectIcon, tint as tintStyle } from "./identity";
 import { machineColor, projectColor } from "@/lib/agents-identity";
 import { useAgents } from "./use-agents";
-import { ProjectShelf, useProjectShelf } from "./project-shelf";
-import { setShelfOpen, useShelfOpen } from "@/lib/agents-shelf";
+import { openShelf } from "@/lib/agents-shelf";
+import { shelfOf } from "@/lib/agents-inbox";
 
 /**
  * The frame every canvas card shares: flat panel, hairline border, the whole card a drag handle.
@@ -297,26 +297,13 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
   // An asleep sandbox counts: what's sent to it wakes it.
   const online = reachable(machine);
   const stats = projectStats(client.data, project.id);
-  // Its settled, snoozed and archived conversations: clicking the project opens them here.
-  const shelf = useProjectShelf(project.id);
-  const shelfOpen = useShelfOpen(project.id);
+  // Its settled, snoozed and archived conversations: on the toolbar's shelf, not on the card.
+  const shelved = useShelvedCount(project.id);
   return (
     <Card width={256} tint={projectColor(project)} label={`Project ${project.name}`}>
       <TintedHeader>
         <ProjectIcon project={project} className="size-6" />
-        {shelf ? (
-          <button
-            type="button"
-            data-nodrag
-            onClick={() => setShelfOpen(project.id, !shelfOpen)}
-            title={shelfOpen ? "Hide its settled and archived conversations" : "Show its settled and archived conversations"}
-            className="min-w-0 flex-1 truncate text-left text-[13.5px] font-semibold tracking-[-0.015em] hover:underline hover:decoration-line-2 hover:underline-offset-4"
-          >
-            {project.name}
-          </button>
-        ) : (
-          <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold tracking-[-0.015em]">{project.name}</span>
-        )}
+        <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold tracking-[-0.015em]">{project.name}</span>
         <HoverActions>
           {startNew && (
             <Tool label="New agent here (or drag onto the canvas)" launch={`p:${project.id}`} disabled={!online} onClick={() => startNew(project.id)}>
@@ -337,6 +324,7 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
             items={[
               { label: "Settings", icon: <Settings2 />, onSelect: () => setAgentsView({ kind: "settings", target: `p:${project.id}` }) },
               !!focusProject && { label: "Focus (F)", icon: <Focus />, onSelect: () => focusProject?.(project.id) },
+              shelved > 0 && { label: `Settled and archived (${shelved})`, icon: <Archive />, onSelect: () => openShelf(project.id) },
               {
                 label: "Remove from roll",
                 confirm: "Remove? (the folder stays)",
@@ -368,7 +356,6 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
       </div>
       {stats.threads > 0 && <StatsRows stats={stats} providers={providersFor(client.data, machine?.id)} />}
       {project.settings.auto_pull && project.pull && <PullLine pull={project.pull} className="mx-3 mb-3 -mt-1" />}
-      {shelf && <ProjectShelf project={project.id} group={shelf} />}
       {!stats.threads && startNew && online && (
         <div className="px-3 pb-3">
           <button data-nodrag onClick={() => startNew(project.id)} className={`${primary} w-full justify-center`}>
@@ -379,6 +366,18 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
       {error && <p className="px-3 pb-3 text-[12px] text-danger">{error}</p>}
     </Card>
   );
+}
+
+/** How many of a project's conversations are settled, snoozed or archived (its ⋯ menu opens them on the shelf). */
+function useShelvedCount(project: string): number {
+  const { client } = useAgents();
+  const threads = client.data.threads;
+  return useMemo(() => {
+    const now = Date.now();
+    let n = 0;
+    for (const r of threads.values()) if (r.value.project === project && r.value.lineage?.relation !== "subagent" && shelfOf(r.value, now) !== "active") n++;
+    return n;
+  }, [threads, project]);
 }
 
 /** Its work, the PRs it made and the agents in it. */

@@ -38,7 +38,6 @@ import { closeTopLayer } from "./escape-layers";
 import { CloseTerminal, TerminalNode } from "./terminal";
 import { threadDone } from "./thread-status";
 import { SidebarToggle, ThreadsSidebar, useSidebarOpen } from "./threads-sidebar";
-import { setShelfOpen } from "@/lib/agents-shelf";
 import { AgentsContext, useAgents, useAgentsSnapshot, useHold, useMarkDriver, type AgentsCtx } from "./use-agents";
 import { useAgentsConnection } from "./use-connection";
 import { PinTools, useCanvasViews, ViewsBar, type CanvasViews } from "./views";
@@ -268,8 +267,6 @@ export function AgentsSurface({
   const focusProject = useCallback((project: string | null) => {
     setFocused(project);
     if (project) setAgentsView({ kind: "canvas" });
-    // Its settled and archived conversations open on its card (docs/code/agents.md, "Settling").
-    if (project) setShelfOpen(project, true);
   }, []);
   const focusedGone = focused !== null && !data.projects.has(focused);
   useEffect(() => {
@@ -831,7 +828,7 @@ function CanvasView({
   const empty = graph.nodes.size === 0 && whole.nodes.size > 0;
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <ViewsBar views={views} data={data} active={visible} phone={phone} focused={focused ? { name: data.projects.get(focused)?.value.name ?? "project", clear: () => onFocus(null) } : undefined} />
+      <ViewsBar views={views} data={data} active={visible} phone={phone} focused={focused ? { id: focused, name: data.projects.get(focused)?.value.name ?? "project", clear: () => onFocus(null) } : undefined} />
       <div className="relative min-h-0 flex-1">
         <AgentsCanvas
           ref={canvasRef}

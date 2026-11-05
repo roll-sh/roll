@@ -2,8 +2,9 @@ import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 import { EMPTY_INBOX, type Thread } from "@/lib/agents-api";
-import { resetShelves, setShelfOpen } from "@/lib/agents-shelf";
+import { openShelf, resetShelves, shelfList } from "@/lib/agents-shelf";
 import { ProjectNode } from "./nodes";
+import { ShelfControl } from "./project-shelf";
 import { InboxToast, ShelfStrip, showInboxToast } from "./threads-sidebar";
 import { machine, mirrored, project, thread } from "@/test/agents";
 import { agentsHarness, renderAgents, type AgentsHarness } from "@/test/agents-render";
@@ -13,6 +14,7 @@ const H = 3_600_000;
 const D = 24 * H;
 const box = (over: Partial<Thread["inbox"]>) => ({ ...EMPTY_INBOX, ...over });
 const settledAt = (at: number, by: "user" | "inactivity" = "user") => box({ settle: { state: "settled", at, by } });
+const WEB = project({ id: "prj_web", name: "web", path: "/Users/ada/web" });
 
 function world(extra: Thread[] = []) {
   const threads = [
@@ -21,15 +23,18 @@ function world(extra: Thread[] = []) {
     thread({ id: "thr_s2", title: "Document the queue", inbox: settledAt(NOW - D) }),
     thread({ id: "thr_z", title: "Review retries", inbox: box({ snooze: { until: NOW + 3 * H, at: NOW } }) }),
     thread({ id: "thr_a", title: "Spike: edge middleware", archived_at: NOW - 5 * D }),
+    thread({ id: "thr_w", project: WEB.id, title: "Upgrade Next", inbox: settledAt(NOW - 3 * D) }),
     ...extra,
   ];
-  return agentsHarness({ entities: [mirrored("project", project({ name: "roll" }), 1), ...threads.map((t, i) => mirrored("thread", t, i + 2))] });
+  return agentsHarness({
+    entities: [mirrored("project", project({ name: "roll" }), 1), mirrored("project", WEB, 2), ...threads.map((t, i) => mirrored("thread", t, i + 3))],
+  });
 }
 
-function card(h: AgentsHarness) {
+function toolbar(h: AgentsHarness, focused: string | null = null) {
   return renderAgents(
     <>
-      <ProjectNode project={project({ name: "roll" })} machine={machine()} />
+      <ShelfControl data={h.client.data} focused={focused} phone={false} />
       <InboxToast />
     </>,
     h,
@@ -37,6 +42,7 @@ function card(h: AgentsHarness) {
 }
 
 const sent = (h: AgentsHarness) => h.command.mock.calls.map(([, , c]) => c);
+const options = () => screen.getAllByRole("option").map((o) => o.getAttribute("aria-label"));
 
 afterEach(() => {
   resetShelves();
@@ -44,64 +50,109 @@ afterEach(() => {
   localStorage.clear();
 });
 
-describe("a project's shelf on the canvas", () => {
-  it("counts what left the canvas, and clicking the project opens it (remembered)", async () => {
+describe("the shelf (the canvas toolbar's Shelf)", () => {
+  it("lists what left the canvas, every project's, grouped by project; tabs per shelf", async () => {
     const h = world();
-    card(h);
-    const toggle = screen.getByRole("button", { name: "Settled 2 · Snoozed 1 · Archived 1" });
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByText("Bump tokio")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "roll" }));
-    expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(localStorage.getItem("roll:agents:shelves")).toBe('["prj_1234567890abcdef"]'.replace("prj_1234567890abcdef", project().id));
-    // Settled first, most recently settled first.
-    const list = screen.getByRole("list", { name: "Conversations on the shelf" });
-    expect(within(list).getAllByRole("listitem").map((li) => li.textContent)).toEqual([expect.stringContaining("Document the queue"), expect.stringContaining("Bump tokio")]);
-    await userEvent.click(screen.getByRole("button", { name: "Archived 1", pressed: false }));
-    expect(screen.getByText("Spike: edge middleware")).toBeInTheDocument();
-    await userEvent.click(toggle);
-    expect(screen.queryByText("Spike: edge middleware")).not.toBeInTheDocument();
+    toolbar(h);
+    const trigger = screen.getByRole("button", { name: "Shelf: 5 settled, snoozed or archived" });
+    await userEvent.click(trigger);
+    const pop = await screen.findByRole("dialog", { name: "Shelf" });
+    // Settled first, by project, most recently settled first.
+    expect(within(within(pop).getByRole("listbox")).getAllByRole("group").map((g) => g.getAttribute("aria-label"))).toEqual(["roll", "web"]);
+    expect(options()).toEqual(["Document the queue", "Bump tokio", "Upgrade Next"]);
+    expect(within(pop).getByRole("button", { name: "Settled 3", pressed: true })).toBeInTheDocument();
+    await userEvent.click(within(pop).getByRole("button", { name: "Archived 1", pressed: false }));
+    expect(options()).toEqual(["Spike: edge middleware"]);
   });
 
-  it("opens a conversation in the side panel, transcript and all", async () => {
+  it("searches, walks with the arrows, restores with ⌘Enter (with the undo notice) and opens with Enter", async () => {
     const h = world();
-    setShelfOpen(project().id, true);
-    card(h);
-    await userEvent.click(screen.getByRole("button", { name: /^Bump tokio/ }));
-    expect(h.openThread).toHaveBeenCalledWith("thr_s1");
-  });
-
-  it("restores in one click, with T3's undo notice (Undo or ⌘Z)", async () => {
-    const h = world();
-    setShelfOpen(project().id, true);
-    card(h);
-    await userEvent.click(screen.getByRole("button", { name: "Un-settle Document the queue" }));
-    expect(sent(h).at(-1)).toEqual({ type: "thread.unsettle", thread: "thr_s2" });
+    toolbar(h);
+    await userEvent.click(screen.getByRole("button", { name: /^Shelf/ }));
+    const search = await screen.findByRole("combobox", { name: "Search the shelf" });
+    expect(search).toHaveFocus();
+    await userEvent.type(search, "queue");
+    expect(options()).toEqual(["Document the queue"]);
+    await userEvent.clear(search);
+    await userEvent.keyboard("{ArrowDown}");
+    expect(screen.getByRole("option", { name: "Bump tokio" })).toHaveAttribute("aria-selected", "true");
+    await userEvent.keyboard("{Meta>}{Enter}{/Meta}");
+    expect(sent(h).at(-1)).toEqual({ type: "thread.unsettle", thread: "thr_s1" });
     const notice = await screen.findByRole("status");
-    expect(notice).toHaveTextContent("Un-settled “Document the queue”");
-    await userEvent.click(within(notice).getByRole("button", { name: "Undo" }));
-    expect(sent(h).at(-1)).toEqual({ type: "thread.settle", thread: "thr_s2" });
+    expect(notice).toHaveTextContent("Un-settled “Bump tokio”");
+    // Enter opens the conversation in the side panel, and the shelf closes.
+    await userEvent.keyboard("{Enter}");
+    expect(h.openThread).toHaveBeenCalledWith("thr_s1");
+    expect(screen.queryByRole("dialog", { name: "Shelf" })).not.toBeInTheDocument();
+  });
 
-    await userEvent.click(screen.getByRole("button", { name: "Archived 1", pressed: false }));
+  it("restores from a row's button: unarchive, and a snooze woken early comes back with its own time", async () => {
+    const h = world();
+    toolbar(h);
+    await userEvent.click(screen.getByRole("button", { name: /^Shelf/ }));
+    await userEvent.click(await screen.findByRole("button", { name: "Archived 1" }));
     await userEvent.click(screen.getByRole("button", { name: "Unarchive Spike: edge middleware" }));
     expect(sent(h).at(-1)).toEqual({ type: "thread.unarchive", thread: "thr_a" });
     await screen.findByText("Unarchived “Spike: edge middleware”");
     await userEvent.keyboard("{Meta>}z{/Meta}");
     expect(sent(h).at(-1)).toEqual({ type: "thread.archive", thread: "thr_a" });
-
-    // A snooze woken early comes back with its own time.
-    await userEvent.click(screen.getByRole("button", { name: "Snoozed 1", pressed: false }));
+    await userEvent.click(screen.getByRole("button", { name: "Snoozed 1" }));
     await userEvent.click(screen.getByRole("button", { name: "Wake now Review retries" }));
     expect(sent(h).at(-1)).toEqual({ type: "thread.unsnooze", thread: "thr_z" });
     await userEvent.click(within(await screen.findByRole("status")).getByRole("button", { name: "Undo" }));
     expect(sent(h).at(-1)).toEqual({ type: "thread.snooze", thread: "thr_z", until: NOW + 3 * H });
   });
 
+  it("opens narrowed to a project from its ⋯ menu; the chip's × widens it; a focused project narrows it", async () => {
+    const h = world();
+    renderAgents(
+      <>
+        <ProjectNode project={project({ name: "roll" })} machine={machine()} />
+        <ShelfControl data={h.client.data} focused={null} phone={false} />
+      </>,
+      h,
+    );
+    // The card itself carries no shelf.
+    expect(screen.queryByText("Bump tokio")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Settled \d/ })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Project" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Settled and archived (4)" }));
+    await screen.findByRole("dialog", { name: "Shelf" });
+    expect(options()).toEqual(["Document the queue", "Bump tokio"]);
+    await userEvent.click(screen.getByRole("button", { name: "Show every project's shelf, not only roll" }));
+    expect(options()).toEqual(["Document the queue", "Bump tokio", "Upgrade Next"]);
+  });
+
+  it("opens from a link: ?shelf=<project> narrowed, an unknown project on every one", async () => {
+    window.history.replaceState(null, "", "/dashboard/agents?demo&shelf=prj_web");
+    try {
+      const h = world();
+      const { unmount } = toolbar(h);
+      await screen.findByRole("dialog", { name: "Shelf" });
+      expect(options()).toEqual(["Upgrade Next"]);
+      unmount();
+      resetShelves();
+      window.history.replaceState(null, "", "/dashboard/agents?shelf=prj_gone");
+      toolbar(world());
+      await screen.findByRole("dialog", { name: "Shelf" });
+      expect(options()).toHaveLength(3);
+    } finally {
+      window.history.replaceState(null, "", "/");
+    }
+  });
+
+  it("counts the focused project's on its trigger, and opens on it", async () => {
+    const h = world();
+    toolbar(h, WEB.id);
+    await userEvent.click(screen.getByRole("button", { name: "Shelf: 1 settled, snoozed or archived" }));
+    await screen.findByRole("dialog", { name: "Shelf" });
+    expect(options()).toEqual(["Upgrade Next"]);
+  });
+
   it("isn't there when nothing is shelved, and marks a cleaned-up worktree", async () => {
     const empty = agentsHarness({ entities: [mirrored("project", project({ name: "roll" }), 1), mirrored("thread", thread({ id: "thr_live" }), 2)] });
-    const { unmount } = card(empty);
-    expect(screen.queryByRole("button", { name: /Settled/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "roll" })).not.toBeInTheDocument();
+    const { unmount } = toolbar(empty);
+    expect(screen.queryByRole("button", { name: /^Shelf/ })).not.toBeInTheDocument();
     unmount();
     const cleaned = thread({
       id: "thr_c",
@@ -109,9 +160,18 @@ describe("a project's shelf on the canvas", () => {
       inbox: settledAt(NOW - D),
       worktree: { path: "/w/thr_c", branch: "roll/cleaned", base: "abc", removed_at: NOW - H },
     });
-    setShelfOpen(project().id, true);
-    card(world([cleaned]));
-    expect(screen.getByLabelText("Worktree cleaned up")).toBeInTheDocument();
+    openShelf();
+    toolbar(world([cleaned]));
+    expect(await screen.findByLabelText("Worktree cleaned up")).toBeInTheDocument();
+  });
+
+  it("shelfList: a tab with nothing falls to the first with something; search matches every word in title or project", () => {
+    const h = world();
+    const data = h.client.data;
+    expect(shelfList(data, NOW, { tab: "snoozed", project: WEB.id }).tab).toBe("settled");
+    expect(shelfList(data, NOW, { query: "WEB next" }).rows.map((r) => r.thread.id)).toEqual(["thr_w"]);
+    expect(shelfList(data, NOW, { query: "roll tokio" }).rows.map((r) => r.thread.id)).toEqual(["thr_s1"]);
+    expect(shelfList(data, NOW).counts).toEqual({ settled: 3, snoozed: 1, archived: 1 });
   });
 });
 

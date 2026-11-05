@@ -167,6 +167,13 @@ state, or draw a project's logo inline (only in an `<img>`).
   muted label and a `Segmented` (layout, density, grouping), then "Show" with `Switch` rows, a
   hint in each row's tooltip. The compact density hides `[data-detail]` inside cards (globals.css)
   and lays out with `COMPACT_GAPS`.
+- **Shelf popover:** "Shelf" (archive icon, a mono count) before Display; absent when nothing is
+  shelved. A 400px popover (the phone's width less 8px each side) scaling from the trigger: a
+  bare search row over a hairline, a full-width `Segmented` of the three shelves with counts,
+  then 32px option rows under 11px project headers (icon, name, count), the active row
+  `bg-fg/[0.07]` with its restore button in place of the time, and an 11px key hint footer (not on
+  phones). The list's height animates (`AnimatedHeight`) as tabs and searches change it.
+  Settled and archived conversations never sit on a card.
 - **Keyboard focus on the canvas:** a focused card gets the 2px accent outline offset by 2px,
   like any focus; the focus-a-project chip is a raised chip (`bg-panel-2`, highlight) in the
   views bar with the project's name and an ×.
