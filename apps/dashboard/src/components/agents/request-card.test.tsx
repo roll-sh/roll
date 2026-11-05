@@ -95,6 +95,14 @@ describe("RequestCard", () => {
     expect(screen.getByRole("checkbox", { name: /Unit tests/ })).toHaveFocus();
   });
 
+  it("never takes focus it didn't have: a choice made without the keyboard moves on and leaves focus alone", async () => {
+    render(<RequestCard request={question()} onRespond={vi.fn(async () => {})} />);
+    expect(document.activeElement).toBe(document.body);
+    fireEvent.click(screen.getByRole("radio", { name: /Postgres/ }));
+    expect(await screen.findByText("What should run after the fix?")).toBeInTheDocument();
+    expect(document.activeElement).toBe(document.body);
+  });
+
   it("in the conversation, leaves questions to the composer's panel", () => {
     render(<RequestCard request={question()} onRespond={async () => {}} hostedQuestions />);
     expect(screen.getByText("Asked 2 questions")).toBeInTheDocument();

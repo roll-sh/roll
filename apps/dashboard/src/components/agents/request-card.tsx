@@ -405,17 +405,14 @@ export function QuestionsPanel({ flow, context, children }: { flow: QuestionFlow
   const q = flow.question;
   const sel = flow.picked(q);
   // Moving on unmounts the option that had focus: give it to the new question's (keyboard users
-  // keep going with arrows and Enter), unless it went somewhere else on purpose.
+  // keep going with arrows and Enter). Only when an option had it: never on load, and never when
+  // focus went somewhere else on purpose (a blur with somewhere to go; an unmounted option's has none).
   const options = useRef<HTMLDivElement>(null);
-  const first = useRef(true);
+  const hadFocus = useRef(false);
   useLayoutEffect(() => {
-    if (first.current) {
-      first.current = false;
-      return;
-    }
     const el = options.current;
     const active = document.activeElement;
-    if (!el || (active && active !== document.body)) return;
+    if (!el || !hadFocus.current || (active && active !== document.body)) return;
     (el.querySelector<HTMLElement>('[aria-checked="true"]') ?? el.querySelector<HTMLElement>("button"))?.focus();
   }, [q.id]);
   return (
@@ -431,7 +428,16 @@ export function QuestionsPanel({ flow, context, children }: { flow: QuestionFlow
         )}
       </div>
       <p className="mt-1.5 text-[13.5px] leading-snug text-fg/85">{q.question}</p>
-      <div ref={options} role={q.multi ? "group" : "radiogroup"} aria-label={q.header} className="mt-1.5 -mx-1.5 flex flex-col">
+      <div
+        ref={options}
+        role={q.multi ? "group" : "radiogroup"}
+        aria-label={q.header}
+        onFocus={() => (hadFocus.current = true)}
+        onBlur={(e) => {
+          if (e.relatedTarget && !e.currentTarget.contains(e.relatedTarget as Node)) hadFocus.current = false;
+        }}
+        className="mt-1.5 -mx-1.5 flex flex-col"
+      >
         {q.options.map((o, k) => {
           const on = sel.includes(o.label);
           return (
@@ -441,7 +447,7 @@ export function QuestionsPanel({ flow, context, children }: { flow: QuestionFlow
               role={q.multi ? "checkbox" : "radio"}
               aria-checked={on}
               onClick={() => flow.pick(o.label)}
-              className={`flex items-start gap-2.5 rounded-md py-1.5 ps-1.5 pe-1.5 text-left transition-colors ${on ? "text-fg" : "text-fg/70 hover:bg-fg/[0.04] hover:text-fg"}`}
+              className={`flex items-start gap-2.5 rounded-md py-1.5 ps-1.5 pe-1.5 text-left transition-colors outline-hidden focus-visible:outline-2 focus-visible:outline-accent/70 ${on ? "text-fg" : "text-fg/70 hover:bg-fg/[0.04] hover:text-fg"}`}
             >
               <span
                 aria-hidden
