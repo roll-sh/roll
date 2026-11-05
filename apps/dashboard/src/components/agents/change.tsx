@@ -3,7 +3,7 @@
 import { Switch } from "./ui";
 import { ArrowUpRight, ClipboardList, GitPullRequest, X } from "lucide-react";
 import { useState } from "react";
-import type { ChangeStatus, Landing, Machine, Published, Thread, ThreadChange, WorkRef } from "@/lib/agents-api";
+import type { ChangeStatus, Landing, Machine, Project, Published, Thread, ThreadChange, WorkRef } from "@/lib/agents-api";
 import { parseWorkRef } from "@/lib/agents-services";
 import { btn, input, primary } from "../ui";
 import { useAgents } from "./use-agents";
@@ -93,15 +93,20 @@ export function landingNote(l: Landing): { tone: "ok" | "busy" | "quiet" | "bad"
   }
 }
 
-/** Publish the thread's work as a roll code change (and land it): the message, the land toggle, then what happened. */
-export function PublishForm({ thread, machine, onDone }: { thread: Thread; machine: Machine; onDone: () => void }) {
+/**
+ * Publish the thread's work as a roll code change (and land it): the message, the land toggle, then
+ * what happened. A thread in the folder of a repo with no commits yet publishes its first commit
+ * instead (onto the default branch, through the landing rules), so there's no toggle.
+ */
+export function PublishForm({ thread, project, machine, onDone }: { thread: Thread; project?: Project; machine: Machine; onDone: () => void }) {
   const { client, openThread } = useAgents();
   const [message, setMessage] = useState(thread.title);
   const [land, setLand] = useState(false);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<Published | null>(null);
   const [error, setError] = useState<string | null>(null);
-  if (!thread.worktree)
+  const first = !thread.worktree && !!project?.git && !project.git.head && thread.cwd === project.path;
+  if (!thread.worktree && !first)
     return (
       <div className="flex flex-wrap items-center gap-2 border-t border-line px-4 py-2.5 text-[12.5px]" data-nodrag role="group" aria-label="Publish">
         <p className="min-w-0 flex-1 basis-60 text-muted">A thread publishes from its own worktree. Fork this one into a worktree (its files come along), then publish the fork.</p>
@@ -172,7 +177,7 @@ export function PublishForm({ thread, machine, onDone }: { thread: Thread; machi
         setBusy(true);
         setError(null);
         try {
-          setDone(await client.run<{ type: "published" } & Published>(machine.id, { type: "thread.publish", thread: thread.id, message: message.trim(), land }, "published"));
+          setDone(await client.run<{ type: "published" } & Published>(machine.id, { type: "thread.publish", thread: thread.id, message: message.trim(), land: first ? !!project?.repo : land }, "published"));
         } catch (err) {
           setError(err instanceof Error ? err.message : String(err));
         } finally {
@@ -180,12 +185,19 @@ export function PublishForm({ thread, machine, onDone }: { thread: Thread; machi
         }
       }}
     >
+      {first && (
+        <p className="w-full text-[12.5px] text-muted">
+          {project?.repo ? `${project.repo.owner}/${project.repo.repo}` : project?.name} has no commits yet: publishing makes the thread&apos;s files its first commit.
+        </p>
+      )}
       <input value={message} onChange={(e) => setMessage(e.target.value)} aria-label="Commit message" className={`${input} min-w-0 flex-1 basis-48`} />
-      <label className="flex items-center gap-1.5 text-[12px] text-muted" title="Through the landing rules (the merge queue on a queue repo)">
-        <Switch checked={land} onCheckedChange={setLand} aria-label="and land" /> and land
-      </label>
+      {!first && (
+        <label className="flex items-center gap-1.5 text-[12px] text-muted" title="Through the landing rules (the merge queue on a queue repo)">
+          <Switch checked={land} onCheckedChange={setLand} aria-label="and land" /> and land
+        </label>
+      )}
       <button type="submit" disabled={busy || !message.trim()} className={primary}>
-        {busy ? <span className="shimmer">Publishing…</span> : "Publish"}
+        {busy ? <span className="shimmer">Publishing…</span> : first ? "Publish the first commit" : "Publish"}
       </button>
       {error && <p className="w-full text-[12px] text-danger">{error}</p>}
     </form>

@@ -1551,6 +1551,8 @@ export interface CodeGrant {
   url: string;
   token: string;
   write: boolean;
+  /** The one branch a write grant pushes (a thread's branch, or an empty repo's default branch). */
+  branch?: string;
   expires_at: Millis;
 }
 
@@ -2442,7 +2444,7 @@ export const relayFrameD: Decoder<RelayFrame> = tagged("type", {
     id: str,
     by: str,
     command: commandD,
-    grant: opt(obj<CodeGrant>({ repo: repoRefD, url: str, token: str, write: bool, expires_at: int })),
+    grant: opt(obj<CodeGrant>({ repo: repoRefD, url: str, token: str, write: bool, branch: optional(str), expires_at: int })),
   }),
   ping: obj<object>({}),
 } satisfies Record<RelayFrame["type"], Decoder<object>>);

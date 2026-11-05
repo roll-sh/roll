@@ -581,7 +581,7 @@ function TitleBar({
         </div>
       )}
       {inboxMenu.extra}
-      {panel === "publish" && machine && <PublishForm thread={thread} machine={machine} onDone={() => setPanel(null)} />}
+      {panel === "publish" && machine && <PublishForm thread={thread} project={project} machine={machine} onDone={() => setPanel(null)} />}
       {panel === "work" && !thread.work && <TakeWorkForm thread={thread} repo={project?.repo ? `${project.repo.owner}/${project.repo.repo}` : null} onDone={() => setPanel(null)} />}
     </div>
   );

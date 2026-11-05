@@ -26,7 +26,7 @@
 //!   item goes to `review` and is done when the change lands.
 
 use super::store::{self, LinkUpdate, MachineRow};
-use crate::model::{Change, ChangeState, CheckStatus, Owner, RepoRow, WorkState};
+use crate::model::{Change, ChangeState, CheckStatus, LandPolicy, Owner, RepoRow, WorkState};
 use crate::{Caller, Code, Error, Result, hash_token};
 use agent_proto::{ChangeStatus, CodeGrant, Command, EntityKind, Landing, LandingStatus, RepoRef, Reply, StreamEvent, ThreadChange, WorkRef};
 use axum::Router;
@@ -137,20 +137,22 @@ fn granted_repo(code: &Code, caller: &Caller, m: &MachineRow, asked: &RepoRef, p
     Ok(r)
 }
 
-pub(super) fn mint(code: &Code, m: &MachineRow, r: &RepoRow, asked: &RepoRef, push_ref: Option<&str>) -> Result<CodeGrant> {
+/// A grant for `r`; with `push`, it may push that one branch (`refs/heads/<push>`).
+pub(super) fn mint(code: &Code, m: &MachineRow, r: &RepoRow, asked: &RepoRef, push: Option<&str>) -> Result<CodeGrant> {
     let mut b = [0u8; 24];
     getrandom::fill(&mut b).expect("system randomness");
     let token = format!("{GRANT_PREFIX}{}", hex::encode(b));
     let expires_at = code_sql::now_ms() + GRANT_TTL.as_millis() as i64;
-    store::insert_grant(code.db.sql(), &hash_token(&token), &m.id, &r.id, push_ref, expires_at)?;
-    Ok(CodeGrant { repo: asked.clone(), url: code.clone_url(r), token, write: push_ref.is_some(), expires_at: expires_at.max(0) as u64 })
+    let push_ref = push.map(code_store::full_ref);
+    store::insert_grant(code.db.sql(), &hash_token(&token), &m.id, &r.id, push_ref.as_deref(), expires_at)?;
+    Ok(CodeGrant { repo: asked.clone(), url: code.clone_url(r), token, write: push.is_some(), branch: push.map(str::to_string), expires_at: expires_at.max(0) as u64 })
 }
 
 /// The repo a command works on and the grant for it, when it needs one. A clone's grant only
 /// fetches, as does a pull's (`project.pull`, and `project.update` turning auto-pull on, which
 /// pulls at once); a publish's pushes the thread's own branch (`refs/heads/<worktree branch>`)
 /// and nothing else: never the default branch, another branch or a tag (`git.rs` checks each ref).
-pub(super) fn grant_for(code: &Code, caller: &Caller, m: &MachineRow, command: &Command) -> Result<Option<(CodeGrant, RepoRow)>> {
+pub(super) async fn grant_for(code: &Code, caller: &Caller, m: &MachineRow, command: &Command) -> Result<Option<(CodeGrant, RepoRow)>> {
     let project_repo = |project: &agent_proto::ProjectId| -> Result<Option<RepoRef>> {
         Ok(match store::mirrored(code.db.sql(), &m.id, EntityKind::Project, project.as_str())? {
             Some(agent_proto::Entity::Project(agent_proto::Project { repo, .. })) => repo,
@@ -167,11 +169,30 @@ pub(super) fn grant_for(code: &Code, caller: &Caller, m: &MachineRow, command: &
         }
         Command::ThreadPublish { thread, .. } => {
             let Some(agent_proto::Entity::Thread(t)) = store::mirrored(code.db.sql(), &m.id, EntityKind::Thread, thread.as_str())? else { return Ok(None) };
-            // Only a thread in its own worktree publishes (the daemon refuses the rest).
-            let Some(w) = t.worktree else { return Ok(None) };
-            match store::mirrored(code.db.sql(), &m.id, EntityKind::Project, t.project.as_str())? {
-                Some(agent_proto::Entity::Project(agent_proto::Project { repo: Some(repo), .. })) => (repo, Some(w.branch)),
-                _ => return Ok(None),
+            let Some(agent_proto::Entity::Project(p)) = store::mirrored(code.db.sql(), &m.id, EntityKind::Project, t.project.as_str())? else { return Ok(None) };
+            let Some(repo) = p.repo else { return Ok(None) };
+            match t.worktree {
+                Some(w) => (repo, Some(w.branch)),
+                // A thread in the folder of a checkout with no commits yet publishes the repo's
+                // first commit (`first_commit`): onto its default branch while it has none, or as
+                // a change when nothing lands on it directly (a queue repo, required reviews).
+                None if t.cwd == p.path && p.git.as_ref().is_some_and(|g| g.head.is_none()) => {
+                    let r = granted_repo(code, caller, m, &repo, true)?;
+                    if code.head(&r)?.is_some() {
+                        return Err(Error::Invalid(format!(
+                            "{} has commits now: pull the project, then fork this thread into a worktree to publish it",
+                            r.full_name()
+                        )));
+                    }
+                    let branch = if r.land_policy == LandPolicy::Queue || code.direct_lands_need_review(&r).await? {
+                        FIRST_COMMIT_BRANCH.to_string()
+                    } else {
+                        r.default_branch.clone()
+                    };
+                    return Ok(Some((mint(code, m, &r, &repo, Some(&branch))?, r)));
+                }
+                // The daemon refuses the rest: only a thread in its own worktree publishes.
+                None => return Ok(None),
             }
         }
         _ => return Ok(None),
@@ -182,8 +203,7 @@ pub(super) fn grant_for(code: &Code, caller: &Caller, m: &MachineRow, command: &
         Some(b) if b == r.default_branch => {
             return Err(Error::Invalid(format!("the thread works on {}'s default branch {b}: only a branch of its own is published", r.full_name())));
         }
-        Some(b) => Some(code_store::full_ref(&b)),
-        None => None,
+        b => b,
     };
     Ok(Some((mint(code, m, &r, &asked, push_ref.as_deref())?, r)))
 }
@@ -246,6 +266,10 @@ async fn relink(code: &Code, owner_id: &str, machine_id: &str, thread: &str, upd
 pub(super) async fn published(code: &Code, api: Option<&ApiRouter>, headers: &HeaderMap, m: &MachineRow, command: &Command, r: &RepoRow, reply: Reply) -> Reply {
     let (Command::ThreadPublish { thread, land, .. }, Reply::Published(mut p)) = (command, reply.clone()) else { return reply };
     let (thread, land) = (thread.as_str(), *land);
+    if p.branch == r.default_branch {
+        first_commit(code, r, &mut p);
+        return Reply::Published(p);
+    }
     let change = match code.db.change_by_branch(&r.id, &p.branch) {
         Ok(c) => c,
         Err(e) => {
@@ -281,6 +305,24 @@ pub(super) async fn published(code: &Code, api: Option<&ApiRouter>, headers: &He
         }
     }
     Reply::Published(p)
+}
+
+/// The branch an empty repo's first commit goes on as a change, when nothing lands on the default
+/// branch directly (`grant_for`).
+const FIRST_COMMIT_BRANCH: &str = "roll/first-commit";
+
+/// An empty repo's first commit, pushed onto its default branch (`grant_for`): it landed as it was
+/// pushed (a push the landing rules turn into a change fails, so the daemon doesn't answer).
+fn first_commit(code: &Code, r: &RepoRow, p: &mut agent_proto::Published) {
+    let landed = || -> Result<bool> {
+        let Some(head) = code.head(r)? else { return Ok(false) };
+        Ok(code.store.derive_git(&r.id, &head)?.0.hex() == p.commit)
+    };
+    p.landing = Some(match landed() {
+        Ok(true) => Landing { status: LandingStatus::Landed, message: format!("started {} with it", r.default_branch), blockers: Vec::new() },
+        Ok(false) => Landing { status: LandingStatus::Failed, message: format!("the push didn't start {}", r.default_branch), blockers: Vec::new() },
+        Err(e) => Landing { status: LandingStatus::Failed, message: e.to_string(), blockers: Vec::new() },
+    });
 }
 
 /// The thread's work item is what its change does: linked on the sender's behalf (`PATCH
@@ -511,7 +553,7 @@ pub(super) async fn create_project(code: &Arc<Code>, api: Option<&ApiRouter>, ca
         Some(_) => return Err(Error::Invalid("name must be a string".into())),
     };
     let command = Command::ProjectAdd { path, name: label, clone: Some(RepoRef { owner: o.name.clone(), repo: name.to_string() }) };
-    let grant = grant_for(code, caller, m, &command)?.map(|(g, _)| g);
+    let grant = grant_for(code, caller, m, &command).await?.map(|(g, _)| g);
     Ok(code.machine_command(m, id.to_string(), super::api::sender(caller), command, grant).await)
 }
 

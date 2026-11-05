@@ -869,7 +869,9 @@ that change (checks, reviews, the merge queue, landing) shows on the thread. The
     That one ref is all roll code needs: pushing a branch opens or revises its change. The git
     adapter checks every ref of a push against the grant (`git.rs`, `receive`; an atomic push
     with a ref outside it pushes nothing). A thread without a worktree gets no grant, and one
-    whose branch is the repo's default branch is refused (400).
+    whose branch is the repo's default branch is refused (400). The one exception is **the first
+    commit** (below): a grant that names an empty repo's default branch, which it pushes only as a
+    create while that branch is still absent (`git.rs` checks again at push time).
   - The repo must be the machine's owner's. A grant never exceeds the command's sender: a clone
     needs read access, a publish needs `check_write` (`owns`), and nothing in it ever needs
     `manages`. A machine of an owner can't reach another owner's repos, public or not.
@@ -905,6 +907,23 @@ that change (checks, reviews, the merge queue, landing) shows on the thread. The
   around the rules; the answer is `Published.landing {status: landed | queued | blocked |
   conflict | failed, message, blockers}`, a result, never an error. A project that isn't a roll
   code repo pushes to `origin` as before (and refuses `land`).
+- **The first commit.** A repository with no commits has nothing to branch a worktree from, so its
+  threads work in the project folder (`thread.create`). Publishing one of them is the repo's first
+  commit, the way T3's local-mode commit and push works: the daemon commits the folder's files on
+  the folder's branch and pushes it as the branch the grant names (`CodeGrant.branch`), whatever
+  the clone called its unborn branch. Any other project pushes the folder's branch to `origin`.
+  The relay grants it only while the thread's folder has no commit (`Project.git.head` is null),
+  the thread works in it (`cwd` is the project's path), and the repo's default branch is absent; a
+  repo that has commits by then is a 400 ("… has commits now: pull the project, then fork this
+  thread into a worktree"). The grant names the default branch itself when a push could land
+  there directly: it lands as it is (the same commit id, so the folder's branch is the repo's) and
+  the answer's `landing` is `landed` whatever `land` said. When nothing lands on the default branch
+  directly (a `queue` repo, or a repo that requires reviews), it names `roll/first-commit`
+  instead: the push opens a change like any branch and `land` works as for any publish (queued, or
+  blocked until it's reviewed). The project's `git` is read again after it, and the thread's next
+  publish forks it into a worktree like any thread in a project folder. Another thread busy in the
+  same folder makes it a `conflict`. The dashboard says "<repo> has no commits yet" and offers
+  "Publish the first commit" (no land toggle: it lands when it can).
 - **The change on the thread.** `Thread.change {repo, number, status, url, detail}` and
   `Thread.work {id, repo, number, title}` are the relay's, not the daemon's: they are kept in
   `agent_links` and merged over every thread record the daemon sends (daemons leave them unset),

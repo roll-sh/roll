@@ -1149,6 +1149,7 @@ fn relay_frames() -> Vec<RelayFrame> {
                 url: "https://roll.sh/acme/roll.git".into(),
                 token: "rlg_0123456789abcdef0123456789abcdef0123456789abcdef".into(),
                 write: true,
+                branch: Some("roll/fix-the-flaky-queue-test".into()),
                 expires_at: T + 600_000,
             })),
         },

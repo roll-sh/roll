@@ -40,6 +40,7 @@
       "url": "https://roll.sh/acme/roll.git",
       "token": "rlg_0123456789abcdef0123456789abcdef0123456789abcdef",
       "write": true,
+      "branch": "roll/fix-the-flaky-queue-test",
       "expires_at": 1762000600000
     }
   },

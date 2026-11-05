@@ -51,6 +51,85 @@ async fn a_repository_with_no_commits_yet_starts_its_threads_in_the_project_fold
 }
 
 #[tokio::test]
+async fn publishing_in_a_repository_with_no_commits_makes_its_first_commit() {
+    use agent_host::Daemon;
+    let w = World::new(vec![FakeProvider::new("codex")]).await;
+    let thread_in = |project: &ProjectId| Command::ThreadCreate {
+        project: project.clone(),
+        provider: ProviderId::codex(),
+        model: None,
+        effort: None,
+        options: Default::default(),
+        runtime_mode: RuntimeMode::FullAccess,
+        interaction_mode: InteractionMode::Default,
+        worktree: true,
+        title: None,
+        prompt: Some("Write the app".into()),
+        attachments: Vec::new(),
+        orchestrator: false,
+    };
+
+    // An empty roll code repo, cloned: the relay's grant names the branch the first commit goes on
+    // (the repo's default branch), whatever the clone called its unborn branch.
+    let src = tempfile::tempdir().unwrap();
+    sh(src.path(), &["init", "-q", "--bare", "-b", "master", "app.git"]);
+    let bare = src.path().join("app.git");
+    let repo = RepoRef { owner: "acme".into(), repo: "app".into() };
+    let grant = |write: bool, branch: Option<&str>| {
+        Some(CodeGrant { repo: repo.clone(), url: bare.to_string_lossy().into(), token: "rlg_t".into(), write, branch: branch.map(Into::into), expires_at: u64::MAX })
+    };
+    let dest = tempfile::tempdir().unwrap();
+    let folder = dest.path().join("app");
+    let add = Command::ProjectAdd { path: folder.to_string_lossy().into(), name: None, clone: Some(repo.clone()) };
+    let Reply::Created { id: project } = w.host.run_granted("add".into(), "owner".into(), add, grant(false, None)).await else { panic!() };
+    let project = ProjectId(project);
+    let Reply::Created { id: thread } = w.run(thread_in(&project)).await else { panic!() };
+    let thread = ThreadId(thread);
+    let t = w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle && t.run_count == 1).await;
+    assert!(t.worktree.is_none());
+    std::fs::write(folder.join("app.txt"), "the app\n").unwrap();
+    let publish = |id: &str| (id.to_string(), Command::ThreadPublish { thread: thread.clone(), message: "Start the app".into(), land: false });
+
+    // A grant without a branch (the relay found commits there already) publishes nothing.
+    let (id, cmd) = publish("pub-1");
+    let refused = w.host.run_granted(id, "owner".into(), cmd, grant(true, None)).await;
+    assert!(is_err(&refused, ErrorCode::Invalid), "{refused:?}");
+    assert_eq!(sh(&folder, &["for-each-ref", "refs/heads/"]), "", "nothing was committed");
+
+    // The grant names where it goes (the repo's default branch, or a change's branch); the folder
+    // keeps its own branch.
+    let local = sh(&folder, &["symbolic-ref", "--short", "HEAD"]).trim().to_string();
+    let (id, cmd) = publish("pub-2");
+    let Reply::Published(p) = w.host.run_granted(id, "owner".into(), cmd, grant(true, Some("trunk"))).await else { panic!() };
+    assert_eq!(p.branch, "trunk");
+    assert_eq!(sh(&bare, &["rev-parse", "refs/heads/trunk"]).trim(), p.commit);
+    assert_eq!(sh(&folder, &["rev-parse", &local]).trim(), p.commit);
+    assert_eq!(sh(&folder, &["show", "--format=%s", "--no-patch", "HEAD"]).trim(), "Start the app");
+    assert_eq!(sh(&folder, &["ls-tree", "--name-only", "HEAD"]).trim(), "app.txt");
+    let s = w.state().await;
+    let Some(Entity::Project(p2)) = s.live.get(&(EntityKind::Project, project.0.clone())) else { panic!() };
+    assert_eq!(p2.git.as_ref().and_then(|g| g.head.clone()), Some(p.commit.clone()), "the canvas sees the commit");
+
+    // Now there are commits: the thread forks into a worktree to publish again.
+    let (id, cmd) = publish("pub-3");
+    let again = w.host.run_granted(id, "owner".into(), cmd, grant(true, Some("trunk"))).await;
+    assert!(is_err(&again, ErrorCode::Invalid), "{again:?}");
+
+    // Any other project: the folder's own branch, pushed to origin.
+    let plain = World::with_repo(vec![FakeProvider::new("codex")], false).await;
+    sh(&plain.repo, &["init", "-q", "-b", "main"]);
+    let origin = tempfile::tempdir().unwrap();
+    sh(origin.path(), &["init", "-q", "--bare", "o.git"]);
+    sh(&plain.repo, &["remote", "add", "origin", &origin.path().join("o.git").to_string_lossy()]);
+    let thread = plain.thread("codex", Some("Write the first file"), true).await;
+    plain.wait_thread(&thread, |t| t.status == ThreadStatus::Idle && t.run_count == 1).await;
+    std::fs::write(plain.repo.join("first.txt"), "1\n").unwrap();
+    let Reply::Published(p) = plain.run(Command::ThreadPublish { thread: thread.clone(), message: "First".into(), land: false }).await else { panic!() };
+    assert_eq!(p.branch, "main");
+    assert_eq!(sh(&origin.path().join("o.git"), &["rev-parse", "refs/heads/main"]).trim(), p.commit);
+}
+
+#[tokio::test]
 async fn worktree_threads_get_a_branch_and_delete_leaves_only_tombstones_and_the_branch() {
     let fake = FakeProvider::new("codex");
     let w = World::new(vec![fake.clone()]).await;
@@ -754,7 +833,7 @@ async fn a_failed_clone_runs_again_with_the_same_id_and_a_refusal_does_not() {
     let dest = tempfile::tempdir().unwrap();
     let target = dest.path().join("app");
     let repo = RepoRef { owner: "acme".into(), repo: "app".into() };
-    let grant = || CodeGrant { repo: repo.clone(), url: url.to_string_lossy().into(), token: "rlg_t".into(), write: false, expires_at: u64::MAX };
+    let grant = || CodeGrant { repo: repo.clone(), url: url.to_string_lossy().into(), token: "rlg_t".into(), write: false, branch: None, expires_at: u64::MAX };
     let add = Command::ProjectAdd { path: target.to_string_lossy().into(), name: None, clone: Some(repo.clone()) };
 
     let first = w.host.run_granted("clone-1".into(), "owner".into(), add.clone(), Some(grant())).await;
@@ -1295,7 +1374,7 @@ async fn keep_changes_holds_a_published_thread_until_its_change_ends() {
     sh(src.path(), &["clone", "-q", "--bare", ".", "app.git"]);
     let url = src.path().join("app.git").to_string_lossy().into_owned();
     let repo = RepoRef { owner: "acme".into(), repo: "app".into() };
-    let grant = |write| Some(CodeGrant { repo: repo.clone(), url: url.clone(), token: "rlg_t".into(), write, expires_at: u64::MAX });
+    let grant = |write| Some(CodeGrant { repo: repo.clone(), url: url.clone(), token: "rlg_t".into(), write, branch: None, expires_at: u64::MAX });
     let dest = tempfile::tempdir().unwrap();
     let add = Command::ProjectAdd { path: dest.path().join("app").to_string_lossy().into(), name: None, clone: Some(repo.clone()) };
     let Reply::Created { id: project } = w.host.run_granted("add".into(), "owner".into(), add, grant(false)).await else { panic!() };

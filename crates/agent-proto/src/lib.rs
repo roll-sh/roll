@@ -2709,6 +2709,10 @@ pub struct CodeGrant {
     pub token: String,
     /// It may push, not only fetch.
     pub write: bool,
+    /// The one branch a write grant pushes: a publish's thread branch, or the default branch of
+    /// an empty repository for its first commit (docs/code/agents.md, "The first commit").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     pub expires_at: Millis,
 }
 
@@ -2718,6 +2722,7 @@ impl std::fmt::Debug for CodeGrant {
             .field("repo", &self.repo)
             .field("url", &self.url)
             .field("write", &self.write)
+            .field("branch", &self.branch)
             .field("expires_at", &self.expires_at)
             .finish_non_exhaustive()
     }

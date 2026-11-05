@@ -91,6 +91,26 @@ describe("roll code on a thread", () => {
     expect(within(done).getAllByText(/it lands once its batch passes the checks/)).toHaveLength(1);
   });
 
+  it("a thread in a repo with no commits yet publishes its first commit, with no land toggle", async () => {
+    const empty = project({ repo: { owner: "acme", repo: "roll" }, git: { branch: "main", head: null, remote: null, dirty: true } });
+    const t = thread();
+    const reply = (c: Command): Reply =>
+      c.type === "thread.publish" ? { type: "published", branch: "main", commit: "4b825dc642cb", change: null, url: null, landing: { status: "landed", message: "started main with it", blockers: [] } } : { type: "ok" };
+    const h = agentsHarness({ reply, entities: [mirrored("project", empty, 1), mirrored("thread", t, 2)], follow: ["thr_1"] });
+    renderAgents(<Conversation thread={t} machine={machine()} />, h);
+    await userEvent.click(screen.getByRole("button", { name: "More" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Publish as a change" }));
+    const form = screen.getByRole("form", { name: "Publish" });
+    expect(form).toHaveTextContent("acme/roll has no commits yet");
+    expect(within(form).queryByRole("switch", { name: "and land" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Fork into a worktree" })).toBeNull();
+    await userEvent.click(within(form).getByRole("button", { name: "Publish the first commit" }));
+    const done = await screen.findByRole("status", { name: "Published" });
+    expect(h.command).toHaveBeenLastCalledWith("mch_1", expect.any(String), { type: "thread.publish", thread: "thr_1", message: "Fix the flaky queue test", land: true });
+    expect(done).toHaveTextContent("Landed.");
+    expect(done).toHaveTextContent("started main with it");
+  });
+
   it("a thread outside a worktree is offered a fork into one before publishing", async () => {
     const t = thread();
     const h = agentsHarness({ reply: () => ({ type: "created", id: "thr_fork" }), entities: [mirrored("project", inRepo, 1), mirrored("thread", t, 2)], follow: ["thr_1"] });

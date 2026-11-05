@@ -552,3 +552,76 @@ async fn roll_code_projects_with_auto_pull_follow_their_default_branch() {
         assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
     }
 }
+
+impl World {
+    /// A new repo with no commits (roll's own new-repo path lands a README; this one doesn't).
+    async fn empty_repo(&self, name: &str) {
+        let (s, v) = self.req("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": name }))).await;
+        assert_eq!(s, StatusCode::CREATED, "{v}");
+    }
+
+    /// `acme/<name>` cloned at `path` (under the clone directory) while it has no commits.
+    async fn clone_unborn(&self, name: &str, path: &str) -> (String, Project) {
+        let id = self.created(json!({ "type": "project.add", "path": path, "clone": { "owner": "acme", "repo": name } })).await;
+        let p = self.project(&id).await;
+        assert_eq!(p.git.as_ref().map(|g| g.head.is_none()), Some(true), "{p:?}");
+        (id, p)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_first_publish_of_an_empty_repo_starts_its_default_branch() {
+    let w = world().await;
+    w.empty_repo("blank").await;
+    let (project, p) = w.clone_unborn("blank", "").await;
+    let (other, _) = w.clone_unborn("blank", "work/blank-2").await;
+    let thread = w.created(json!({ "type": "thread.create", "project": project, "provider": "codex", "worktree": true, "title": "Start the app" })).await;
+    let t = w.thread(&thread).await;
+    assert!(t.worktree.is_none(), "no commit to make a worktree from: it works in the folder");
+    std::fs::write(Path::new(&p.path).join("app.txt"), "the app\n").unwrap();
+
+    // Publishing it is the repo's first commit, on its default branch: it lands as it's pushed.
+    let published = w.publish(&thread, "Start the app", false).await;
+    assert_eq!((published.branch.as_str(), published.change), ("main", None));
+    let landing = published.landing.expect("landing");
+    assert_eq!(landing.status, LandingStatus::Landed, "{landing:?}");
+    let (_, repo) = w.req("GET", "/v1/code/repos/acme/blank", None).await;
+    assert_eq!(repo["head_git"].as_str(), Some(published.commit.as_str()), "the same commit id: the folder's main is the repo's");
+    let (s, b) = w.a.raw("GET", "/v1/code/repos/acme/blank/blob/main/app.txt", None, Some(&w.owner)).await;
+    assert_eq!((s, b.as_slice()), (StatusCode::OK, b"the app\n".as_slice()));
+    let dir = Path::new(&p.path);
+    assert_eq!(git(dir, dir, &["symbolic-ref", "--short", "HEAD"]).trim(), "main");
+
+    // The other clone's thread is too late: the repo has a commit now, and the relay says so (a
+    // grant only pushes main while main is absent).
+    let late = w.created(json!({ "type": "thread.create", "project": other, "provider": "codex", "worktree": true, "title": "Me too" })).await;
+    w.thread(&late).await;
+    std::fs::write(w.clones.path().join("work/blank-2/other.txt"), "x\n").unwrap();
+    let (s, v) = w.cmd(json!({ "type": "thread.publish", "thread": late, "message": "Me too", "land": false })).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    assert!(v["error"].as_str().unwrap_or("").contains("has commits now"), "{v}");
+    let (_, repo) = w.req("GET", "/v1/code/repos/acme/blank", None).await;
+    assert_eq!(repo["head_git"].as_str(), Some(published.commit.as_str()));
+
+    // A repo where nothing lands on main directly (it requires reviews) takes its first commit as a
+    // change on a branch of its own, which the thread follows; landing it waits for the review.
+    w.empty_repo("reviewed").await;
+    let (s, v) = w.req("PATCH", "/v1/code/repos/acme/reviewed/review-settings", Some(json!({ "required_approvals": 1 }))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (project, p) = w.clone_unborn("reviewed", "").await;
+    let thread = w.created(json!({ "type": "thread.create", "project": project, "provider": "codex", "worktree": true, "title": "Start it" })).await;
+    w.thread(&thread).await;
+    std::fs::write(Path::new(&p.path).join("a.txt"), "a\n").unwrap();
+    let mut stream = Threads::open(&w).await;
+    let published = w.publish(&thread, "Start it", true).await;
+    assert_eq!(published.branch, "roll/first-commit");
+    let landing = published.landing.expect("landing");
+    assert_eq!(landing.status, LandingStatus::Blocked, "{landing:?}");
+    let n = published.change.expect("a change");
+    let (_, c) = w.req("GET", &format!("/v1/code/repos/acme/reviewed/changes/{n}"), None).await;
+    assert_eq!((c["state"].as_str(), c["branch"].as_str()), (Some("open"), Some("roll/first-commit")), "{c}");
+    let t = stream.until(&thread, "linked", |t| t.change.is_some()).await;
+    assert_eq!(t.change.map(|c| c.number), Some(n));
+    let (_, repo) = w.req("GET", "/v1/code/repos/acme/reviewed", None).await;
+    assert!(repo["head_git"].is_null(), "{repo}");
+}

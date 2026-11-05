@@ -607,7 +607,7 @@ async fn command(
         _ => {}
     }
     super::code::follow(&code);
-    let granted = super::code::grant_for(&code, &caller, &m, &req.command)?;
+    let granted = super::code::grant_for(&code, &caller, &m, &req.command).await?;
     let (grant, repo) = granted.map_or((None, None), |(g, r)| (Some(g), Some(r)));
     let reply = code.machine_command(&m, req.id, sender(&caller), req.command.clone(), grant).await;
     let reply = match repo {

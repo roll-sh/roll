@@ -564,20 +564,28 @@ impl Host {
 
     /// Commits and pushes the thread's branch: to its roll code repo with the relay's grant (the
     /// relay turns the push into a change and lands it), or to `origin` for any other project.
+    /// A thread in the project folder of a repository with no commits yet (see `thread_create`)
+    /// publishes its first commit there, on the folder's branch: pushed as the branch the relay's
+    /// grant names (the roll code repo's default branch, or a change's), or to `origin` as itself.
     pub(crate) async fn thread_publish(&self, thread: &ThreadId, message: &str, land: bool, grant: Option<CodeGrant>) -> Res<Reply> {
         let mut rt = self.lock(thread).await?;
         if rt.active.is_some() {
             return Err(Fail::Conflict("the thread is running: wait for it or interrupt it before publishing".into()));
         }
-        let Some(worktree) = rt.thread.worktree.clone() else {
+        let project = self.project(&rt.thread.project)?;
+        let folder = Path::new(&project.path);
+        let worktree = rt.thread.worktree.clone();
+        let first = worktree.is_none() && rt.thread.cwd == project.path && git::root(folder).await.is_some() && git::head(folder).await.map_err(Fail::git)?.is_none();
+        if worktree.is_none() && !first {
             return Err(Fail::Invalid("only a thread in its own worktree can be published".into()));
-        };
-        self.ensure_worktree(&mut rt).await?;
+        }
+        if worktree.is_some() {
+            self.ensure_worktree(&mut rt).await?;
+        }
         let message = message.trim();
         if message.is_empty() {
             return Err(Fail::Invalid("the commit message is empty".into()));
         }
-        let project = self.project(&rt.thread.project)?;
         let to = match &project.repo {
             Some(repo) => Some(grant.filter(|g| &g.repo == repo && g.write).ok_or_else(|| {
                 Fail::Invalid(format!("publishing to {}/{} needs push access granted by the relay", repo.owner, repo.repo))
@@ -586,10 +594,26 @@ impl Host {
             None => None,
         };
         let identity = self.git_identity();
-        let published = git::publish(Path::new(&worktree.path), &worktree.branch, message, to.as_ref(), identity.as_ref().map(|(n, e)| (n.as_str(), e.as_str())))
-            .await
-            .map_err(Fail::git)?;
-        if to.is_some() && !rt.private.change_open {
+        let identity = identity.as_ref().map(|(n, e)| (n.as_str(), e.as_str()));
+        let (published, change) = match &worktree {
+            Some(w) => (git::publish(Path::new(&w.path), &w.branch, message, to.as_ref(), identity).await.map_err(Fail::git)?, true),
+            None => {
+                if self.busy_in(&project).map_err(Fail::Internal)? {
+                    return Err(Fail::Conflict("another thread is working in the project folder: wait for it before publishing".into()));
+                }
+                let branch = git::current_branch(folder).await.map_err(Fail::git)?.ok_or_else(|| Fail::Invalid("the project folder isn't on a branch".into()))?;
+                let remote = match &to {
+                    Some(g) => g.branch.clone().ok_or_else(|| Fail::Invalid(format!("{}/{} has commits already: fork this thread into a worktree to publish it", g.repo.owner, g.repo.repo)))?,
+                    None => branch.clone(),
+                };
+                let published = git::publish_as(folder, &branch, &remote, message, to.as_ref(), identity).await.map_err(Fail::git);
+                // The folder has its first commit now, even if the push failed: the canvas shows it.
+                self.refresh_git(&project.id).await;
+                // Pushed as the folder's own branch, it landed as it was (the default branch).
+                (published?, remote != branch)
+            }
+        };
+        if to.is_some() && change && !rt.private.change_open {
             rt.private.change_open = true;
             self.save_private(&rt)?;
         }

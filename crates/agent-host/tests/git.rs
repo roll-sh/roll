@@ -262,6 +262,7 @@ fn grant(url: &str) -> agent_proto::CodeGrant {
         url: url.into(),
         token: "rlg_the_grant_secret".into(),
         write: true,
+        branch: None,
         expires_at: u64::MAX,
     }
 }

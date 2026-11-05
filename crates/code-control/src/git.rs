@@ -180,23 +180,29 @@ impl GitBackend for GitAdapter {
         let r = self.repo(repo)?;
         let mut out = ReceiveOutcome::default();
         // A machine's grant pushes the one ref it names (its thread's branch): create or update,
-        // never a delete, the default branch, another branch or a tag. Looked up again here.
+        // never a delete, another branch or a tag. Looked up again here. A grant names the default
+        // branch only for an empty repo's first commit, and pushes it only while it's still absent.
         if let Some(c) = req.credentials.as_ref().filter(|c| c.password.starts_with(crate::agents::GRANT_PREFIX)) {
             let g = crate::agents::grant(&self.code, &c.password).map_err(internal)?.ok_or(GitError::Unauthorized)?;
             if g.repo_id != r.id {
                 return Err(GitError::NotFound(repo.into()));
             }
-            let allowed = |u: &code_git::RefUpdate| !u.is_delete() && g.push_ref.as_deref() == Some(u.name.as_str());
+            let default = code_store::full_ref(&r.default_branch);
+            let empty = self.code.head(&r).map_err(internal)?.is_none();
+            let allowed = |u: &code_git::RefUpdate| {
+                !u.is_delete() && g.push_ref.as_deref() == Some(u.name.as_str()) && (u.name != default || (u.is_create() && empty))
+            };
             if req.updates.iter().any(|u| !allowed(u)) {
-                let why = match &g.push_ref {
+                let why = |u: &code_git::RefUpdate| match &g.push_ref {
+                    Some(name) if *name == u.name && u.name == default && !u.is_delete() => format!("{} has commits now: fetch first", r.default_branch),
                     Some(name) => format!("this machine's grant only pushes {name}"),
                     None => "this machine's grant only fetches".into(),
                 };
                 if req.atomic {
-                    out.refs = req.updates.iter().map(|u| rejected(&u.name, if allowed(u) { "atomic push failed".into() } else { why.clone() })).collect();
+                    out.refs = req.updates.iter().map(|u| rejected(&u.name, if allowed(u) { "atomic push failed".into() } else { why(u) })).collect();
                     return Ok(out);
                 }
-                out.refs.extend(req.updates.iter().filter(|u| !allowed(u)).map(|u| rejected(&u.name, why.clone())));
+                out.refs.extend(req.updates.iter().filter(|u| !allowed(u)).map(|u| rejected(&u.name, why(u))));
                 req.updates.retain(|u| allowed(u));
                 if req.updates.is_empty() {
                     return Ok(out);

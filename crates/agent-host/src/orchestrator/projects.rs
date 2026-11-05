@@ -145,10 +145,24 @@ impl Host {
     }
 
     /// Whether a thread working in the project's own checkout (not a worktree) is busy.
-    fn busy_in(&self, project: &Project) -> anyhow::Result<bool> {
+    pub(super) fn busy_in(&self, project: &Project) -> anyhow::Result<bool> {
         Ok(self.store.list(EntityKind::Thread)?.into_iter().any(|e| {
             matches!(e, Entity::Thread(t) if t.project == project.id && t.worktree.is_none() && t.status.is_busy())
         }))
+    }
+
+    /// Reads the project's checkout's git info again (after a commit roll made in it).
+    pub(super) async fn refresh_git(&self, id: &ProjectId) {
+        let _guard = self.projects.lock().await;
+        let Ok(mut p) = self.project(id) else { return };
+        let git = git::info(Path::new(&p.path)).await;
+        if p.git != git {
+            p.git = git;
+            p.updated_at = now();
+            if let Err(e) = self.put(vec![Entity::Project(p)]) {
+                tracing::warn!("project {id}: {e:?}");
+            }
+        }
     }
 
     /// Keeps a pull's result (and the checkout's git info) on the project. The same outcome again

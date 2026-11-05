@@ -674,6 +674,12 @@ fn parse_status(out: &[u8]) -> GitStatus {
 /// roll code repo of `to` with its token, or to `origin`. The commit is `identity`'s (the
 /// machine's settings) when given, else the repository's git config's, else roll's.
 pub async fn publish(dir: &Path, branch: &str, message: &str, to: Option<&CodeGrant>, identity: Option<(&str, &str)>) -> anyhow::Result<Published> {
+    publish_as(dir, branch, branch, message, to, identity).await
+}
+
+/// [`publish`], pushing the checkout's `branch` as `remote` (an empty repository's first commit
+/// goes where the grant says, whatever the clone called its unborn branch).
+pub async fn publish_as(dir: &Path, branch: &str, remote: &str, message: &str, to: Option<&CodeGrant>, identity: Option<(&str, &str)>) -> anyhow::Result<Published> {
     if current_branch(dir).await?.as_deref() != Some(branch) {
         bail!("the checkout isn't on {branch}");
     }
@@ -689,13 +695,13 @@ pub async fn publish(dir: &Path, branch: &str, message: &str, to: Option<&CodeGr
         commit.run().await?;
     }
     let commit = head(dir).await?.context("nothing to publish: the branch has no commits")?;
-    let refspec = format!("HEAD:refs/heads/{branch}");
+    let refspec = format!("HEAD:refs/heads/{remote}");
     let push = match to {
         Some(grant) => git(dir, &["push", "--progress", "--", &grant.url, &refspec]).bearer(&grant.token),
         None => git(dir, &["push", "--progress", "-u", "origin", &refspec]),
     };
     push.patient(NETWORK_IDLE).run().await.map_err(|e| anyhow::Error::new(Network(e)))?;
-    Ok(Published { branch: branch.to_string(), commit, change: None, url: None, landing: None })
+    Ok(Published { branch: remote.to_string(), commit, change: None, url: None, landing: None })
 }
 
 /// A clone or push that failed on the way (the network, the server, no progress for
