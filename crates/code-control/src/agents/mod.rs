@@ -354,7 +354,7 @@ impl Agents {
                     None
                 }
                 None => {
-                    let frame = RelayFrame::Command { id, by, command, grant: grant.map(Box::new) };
+                    let frame = RelayFrame::Command { id, by, command: Box::new(command), grant: grant.map(Box::new) };
                     pending.insert(key.clone(), Pending { frame: frame.clone(), waiters: vec![wtx] });
                     Some(frame)
                 }

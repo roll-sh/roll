@@ -1174,7 +1174,8 @@ async fn machine_settings_go_to_the_daemon_and_credentials_never_do() {
         tokio::spawn(async move { w.req("POST", &path, Some(body), &w.owner).await })
     };
     // The first command the daemon gets is the good one: nothing refused went out.
-    let Some(RelayFrame::Command { id: cid, command: Command::MachineConfigure { settings }, .. }) = d.recv().await else { panic!("no machine.configure") };
+    let Some(RelayFrame::Command { id: cid, command, .. }) = d.recv().await else { panic!("no machine.configure") };
+    let Command::MachineConfigure { settings } = *command else { panic!("not machine.configure: {command:?}") };
     assert_eq!(cid, "s3");
     assert_eq!((settings.branch_prefix.as_deref(), settings.pull_every), (Some("ada"), Some(300)));
     assert!(!settings.provider(&ProviderId::codex()).enabled);

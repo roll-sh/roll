@@ -9,7 +9,7 @@
 
 import { Minus, Plus } from "lucide-react";
 import { useMemo, type ReactNode } from "react";
-import type { ProviderInfo } from "@/lib/agents-api";
+import type { ModelOptions, ProviderInfo } from "@/lib/agents-api";
 import type { ProjectRef, Target } from "@/lib/automations-api";
 import type { Problems, Schema, Variable } from "@/lib/automations-ui";
 import { ModelPicker } from "../model-picker";
@@ -352,13 +352,23 @@ function ModelField({ value, onChange }: { value: Obj; onChange: (next: Obj) => 
   const providers = useProviders(target?.type === "machine" ? target.machine : null);
   const all = useProviders(null);
   const list = providers.length ? providers : all;
-  const chosen = { provider: (value.provider as string) ?? list[0]?.id ?? "", model: (value.model as string | null) ?? null, effort: (value.effort as string | null) ?? null };
+  const chosen = {
+    provider: (value.provider as string) ?? list[0]?.id ?? "",
+    model: (value.model as string | null) ?? null,
+    effort: (value.effort as string | null) ?? null,
+    options: (value.options as ModelOptions | null) ?? {},
+  };
   if (!list.length) return <p className="text-[12px] text-subtle">Connect a machine to pick a model; until then it uses the machine&apos;s default.</p>;
   return (
     <div className="inline-flex items-center gap-1 rounded-lg border border-line-2 bg-panel-2 px-1 py-0.5">
-      <ModelPicker providers={list} value={chosen} side="bottom" onChange={(next) => onChange({ ...value, provider: next.provider, model: next.model, effort: next.effort })} />
+      <ModelPicker
+        providers={list}
+        value={chosen}
+        side="bottom"
+        onChange={(next) => onChange({ ...value, provider: next.provider, model: next.model, effort: next.effort, options: Object.keys(next.options).length ? next.options : null })}
+      />
       {value.provider != null && (
-        <button type="button" onClick={() => onChange({ ...value, provider: null, model: null, effort: null })} className="h-6 rounded-md px-1.5 text-[11.5px] text-subtle hover:bg-fg/[0.06] hover:text-fg">
+        <button type="button" onClick={() => onChange({ ...value, provider: null, model: null, effort: null, options: null })} className="h-6 rounded-md px-1.5 text-[11.5px] text-subtle hover:bg-fg/[0.06] hover:text-fg">
           Use the project&apos;s default
         </button>
       )}

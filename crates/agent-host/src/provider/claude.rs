@@ -72,7 +72,7 @@ impl Claude {
 /// Forks are `--resume <source> --fork-session`, at a turn with `--resume-session-at`; rollbacks
 /// resume the conversation at the kept turn (`SessionConfig.resume_at`, [`RollbackStyle::ResumeAt`]).
 fn capabilities() -> Capabilities {
-    Capabilities { steer: true, fork: true, rollback: true, plan_mode: true, images: true, subagents: true, mode_switch: true, compact: true }
+    Capabilities { steer: true, fork: true, rollback: true, plan_mode: true, images: true, subagents: true, mode_switch: true }
 }
 
 /// Runtime and interaction modes as Claude permission modes (T3's
@@ -111,7 +111,12 @@ impl Provider for Claude {
         self.cfg.set(cfg);
     }
 
+    fn custom_model_options(&self, slug: &str, _listed: &[agent_proto::ModelInfo]) -> Vec<agent_proto::ModelOption> {
+        models::options_for(slug)
+    }
+
     async fn info(&self) -> ProviderInfo {
+        let (models, update_required) = models::models(None);
         let mut info = ProviderInfo {
             id: ProviderId::claude(),
             name: "Claude Code".into(),
@@ -119,7 +124,8 @@ impl Provider for Claude {
             version: None,
             auth: AuthStatus::Unknown,
             detail: None,
-            models: models::models(None),
+            models,
+            update_required,
             capabilities: capabilities(),
             checking: false,
         };
@@ -144,7 +150,7 @@ impl Provider for Claude {
         info.installed = true;
         let text = String::from_utf8_lossy(&out.stdout);
         info.version = text.split_whitespace().next().filter(|v| models::parse_version(v).is_some()).map(str::to_string);
-        info.models = models::models(info.version.as_deref());
+        (info.models, info.update_required) = models::models(info.version.as_deref());
         match tokio::time::timeout(PROBE_TIMEOUT, self.probe()).await {
             Ok(Ok(init)) => {
                 let base_url = self.cfg.get().env.iter().rev().find(|(k, _)| k == "ANTHROPIC_BASE_URL").map(|(_, v)| v.clone());
@@ -284,8 +290,8 @@ struct Launch {
     pre_args: Vec<String>,
     env: Vec<(String, String)>,
     cwd: PathBuf,
-    model: Option<String>,
-    effort: models::Effort,
+    /// The model, effort and options as the CLI takes them.
+    model: models::Compiled,
     mcp: Option<McpFile>,
     /// roll's own MCP tools never ask (T3 pre-approves its MCP tools the same way).
     allowed_tools: Vec<String>,
@@ -354,8 +360,7 @@ impl Launch {
             pre_args: claude.cfg.get().args,
             env,
             cwd: cfg.cwd.clone(),
-            model: cfg.model.clone(),
-            effort: models::effort(cfg.effort.as_deref()),
+            model: models::compile(cfg.model.as_deref(), cfg.effort.as_deref(), &cfg.options),
             mcp,
             allowed_tools: cfg.mcp.iter().map(|s| format!("mcp__{}__*", s.name)).collect(),
             instructions: cfg.instructions.clone().filter(|i| !i.trim().is_empty()),
@@ -375,14 +380,21 @@ impl Launch {
         }
         push(&["--setting-sources", "user,project,local", "--thinking", "adaptive", "--thinking-display", "summarized"]);
         let mut settings = json!({"showThinkingSummaries": true});
-        if self.effort.ultracode {
+        // T3's `compileClaudeModelSelection` settings.
+        if self.model.ultracode {
             settings["ultracode"] = json!(true);
         }
+        if let Some(fast) = self.model.fast_mode {
+            settings["fastMode"] = json!(fast);
+        }
+        if let Some(thinking) = self.model.thinking {
+            settings["alwaysThinkingEnabled"] = json!(thinking);
+        }
         push(&["--settings", &settings.to_string()]);
-        if let Some(model) = &self.model {
+        if let Some(model) = &self.model.model {
             push(&["--model", model]);
         }
-        if let Some(effort) = self.effort.cli {
+        if let Some(effort) = self.model.effort {
             push(&["--effort", effort]);
         }
         if let Some(mcp) = &self.mcp {
@@ -618,7 +630,7 @@ impl Shared {
     }
 
     async fn user_message(&self, input: &TurnInput, steer: bool) -> anyhow::Result<()> {
-        let text = models::prompt_text(&input.text, &self.launch.effort);
+        let text = models::prompt_text(&input.text, &self.launch.model);
         let content = if input.attachments.is_empty() {
             json!(text)
         } else {

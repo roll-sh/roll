@@ -90,7 +90,7 @@ export function offeredProviders(all: readonly ProviderInfo[], set: MachineSetti
     .filter((p) => providerSettings(set, p.id).enabled)
     .map((p) => {
       const custom = providerSettings(set, p.id).models.filter((m) => !p.models.some((k) => k.id === m.id));
-      const extra: ModelInfo[] = custom.map((m) => ({ id: m.id, name: m.name ?? m.id, default: false, efforts: [], custom: true }));
+      const extra: ModelInfo[] = custom.map((m) => ({ id: m.id, name: m.name ?? m.id, default: false, options: [], custom: true }));
       return extra.length ? { ...p, models: [...p.models, ...extra] } : p;
     });
 }

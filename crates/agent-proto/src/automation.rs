@@ -12,7 +12,7 @@
 //! JSON, described by its JSON Schema in the [`Catalog`]. The built-in kinds' configs are typed
 //! here ([`AgentStart`] and the rest) so both sides agree on them.
 
-use crate::{ApprovalAction, Decision, InteractionMode, MachineId, Millis, ProviderId, RuntimeMode, SendMode, ThreadId, is_false};
+use crate::{ApprovalAction, Decision, InteractionMode, MachineId, Millis, ModelOptions, ProviderId, RuntimeMode, SendMode, ThreadId, is_false};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -334,6 +334,9 @@ pub struct AgentDefaults {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// The model's other options (`Thread::options`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<ModelOptions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_mode: Option<RuntimeMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -421,6 +424,9 @@ pub struct AgentStart {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// The model's other options (`Thread::options`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<ModelOptions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_mode: Option<RuntimeMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

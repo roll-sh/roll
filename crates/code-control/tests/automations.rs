@@ -178,7 +178,7 @@ impl Fake {
                         match f {
                             RelayFrame::Ping => { let _ = out.send(DaemonFrame::Pong); }
                             RelayFrame::Command { id, command, .. } => {
-                                commands.lock().push((id.clone(), command.clone()));
+                                commands.lock().push((id.clone(), (*command).clone()));
                                 let n = commands.lock().len();
                                 let reply = answer(&out, &seq, &command, n);
                                 let _ = out.send(DaemonFrame::Reply { id, result: reply });

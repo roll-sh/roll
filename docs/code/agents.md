@@ -78,8 +78,6 @@ Machine            a daemon (hostname, os, providers and their auth state, onlin
   `mode: queue`) or steers the active run (`mode: steer`): providers that can steer natively get
   the input; others are interrupted and the run restarts with the new input appended. The queue
   drains only after a run completes: an interrupt (or a failure) holds it, as T3's Stop does.
-  Queued messages are edited, reordered and sent now (`message.edit`, `message.reorder`,
-  `message.promote`); "Turns" below has the rest.
 - **Handoffs.** A provider that joins a conversation it hasn't seen (a provider switch, a fork, a
   rollback it can't do natively) gets a portable summary of the runs it missed in front of the
   next prompt (T3's context handoff). Switching back to a provider resumes its native thread and
@@ -243,6 +241,56 @@ completed, native thread ref). The orchestrator owns ids and turns those events 
   `fs/*` and `terminal/*`, confined to the thread's directory; writes and terminals need the
   mode or an approval of the same kind in that turn.
 
+**Models and their options** follow T3 Code's model picker (`apps/web/src/components/chat/
+ProviderModelPicker.tsx`, `ModelPickerContent.tsx`, `ComposerModelEffort.tsx`) and its option
+descriptors (`ProviderOptionDescriptor`, `packages/contracts/src/model.ts`). Each `ModelInfo` in a
+provider's info carries `options`: a `select` (choices with labels, descriptions and a default) or
+a `boolean` (with a default), each with an optional `role`: `reasoning`, `speed` or
+`context_window`. The role says where a client shows an option, so a client never needs a
+provider's own ids. The reasoning option's value is a thread's `effort`. Every other picked option
+is in the thread's `options` (`{id: string | bool}`, at most 16, checked by
+`agent_proto::check_options`), and so are `thread.create`, `thread.configure`, `ThreadDefaults`,
+automations' `agent.start` and `delegate_task`. Nothing picked means the model's default. When
+`thread.configure` switches to a new model, the thread keeps the options that model takes
+(`ModelInfo::accepted`). A switch of provider clears them, as it clears the effort. A change of
+options, like a change of effort, starts the next turn in a new session.
+
+- **Claude** (`claude/models.rs`) follows T3's model manifest:
+  - Current and legacy models (`legacy: true`; the picker folds them under "Show more"), each
+    with a minimum Claude Code version. A current model the installed CLI is too old for goes in
+    `update_required` ("Update Claude Code to v2.1.293 or newer to use …").
+  - The profiles' reasoning levels and per-model defaults (Ultracode, Ultrathink), Fast Mode, the
+    200k/1M context window and the Haiku 4.5 thinking switch.
+  - A selection compiles as `compileClaudeModelSelection` does: the profile's `effortMap`, then
+    `--effort`; `fastMode` and `alwaysThinkingEnabled` in `--settings`; `[1m]` on the model for
+    the 1M window.
+  - A custom slug of a known family gets that family's options.
+- **Codex** (`codex.rs`, T3's `mapCodexModelCapabilities`) reads options from `model/list`:
+  - reasoning levels with the model's default;
+  - service tiers after "Standard" (`serviceTiers`, else the older `additionalSpeedTiers`);
+  - text-only models (`inputModalities`).
+
+  A picked tier goes on `turn/start` as `serviceTier`. A custom slug borrows the first model's
+  options.
+- **ACP agents** apply a thread's options to their own config options of the same id
+  (`acp/policy.rs`), when the option offers the value. Their probe stops at `initialize`, so they
+  describe no options before a session. T3 reads them from a session's workspace snapshot; roll
+  doesn't yet.
+
+**Provider logos.** The picker draws T3's provider logos (`components/agents/provider-logos.tsx`,
+generated from T3's path data) in the text's colour, like every mark on the agents surface. roll
+never uses orange, so Claude's mark doesn't use its brand colour. A provider without a mark shows
+its initial.
+
+**The same picker everywhere.** One `ModelPicker` serves:
+- the composer (a thread, and the launcher's new thread), with ⌘⇧M to open it and ⌘⇧E to step
+  the reasoning level;
+- the canvas's prompt bar (the orchestrator's goal, and "One agent");
+- automations' "Start an agent" step;
+- machine and project new-thread defaults.
+
+The orchestrator MCP's `orchestrator_capabilities` lists each model's `efforts` and `options`.
+
 **Context usage** comes from each protocol's own report, as in T3's adapters: Codex's
 `thread/tokenUsage/updated` (`last.totalTokens` against `modelContextWindow`, `total.totalTokens`
 processed); Claude's main-agent message usage (input, cache writes and reads, plus output, from
@@ -275,65 +323,6 @@ whether it works. An ACP agent on the PATH that doesn't answer `initialize` with
 not installed, with the reason as its detail, so nothing delegates to a hung agent until a refresh
 finds it answering. The dashboard shows a provider being checked as a quiet shimmering "Checking…",
 on the machine card and in machine settings. Code: `agent-host/src/orchestrator/probes.rs`.
-
-## Turns: queue, steer, compact, subagents, plans
-
-How a conversation moves while an agent works, as T3 Code does it (its orchestration-v2
-`CommandPolicy.ts`, `Orchestrator.ts` queue handling, the adapters' compaction and subagent
-mapping, and the web's `QueuedRunsControl.tsx`, `ContextWindowMeter.tsx`, `V2LifecycleRow.tsx`,
-`ProviderSubagentBar.tsx`, `ProposedPlanCard.tsx`, `proposedPlan.ts`).
-
-- **Queue and steer.** While a run goes, Enter steers it and ⌘/Ctrl+Enter queues (the owner's
-  "While a run is going" swaps the two, T3's `followUpBehavior`; with ⌘Enter to send, ⌘⇧Enter
-  is the opposite for one message). Queued messages sit on top of the composer (`queue.tsx`):
-  three, then "Show all N queued"; each can be sent now (`message.promote`: into the running turn,
-  T3's promote-to-steer; on a stopped thread, as the next run, after which the rest drains, T3's
-  `queued-run.start`), edited in the composer (`message.edit`; the row says "Editing in the
-  composer", the button "Update queued message", Escape gives the draft back; ⌥↑ edits the last
-  one), removed, or moved (drag a row, or ⌥↑/⌥↓ on it: `message.reorder`; T3 has reorder only in
-  its MCP tools). ⌘⇧Enter with nothing typed sends the first queued message into the turn. A
-  stopped or failed run holds the queue, and a restart keeps it held (the thread's `queued`
-  persists): the panel says "Queue paused" with Resume, the empty send button is "Resume thread",
-  and a new message starts at once with the queue resuming after it.
-- **Compaction.** Claude Code and Codex compact on their own as the context fills; both also
-  compact on request (`Capabilities.compact`). A message of exactly `/compact` runs as a
-  compaction, a run of its own (T3's `compactThread`): Codex `thread/compact/start` (the turn it
-  starts is adopted as ours), Claude `/compact` as the turn's input (its result text is no reply).
-  A compaction can't be steered: a steer sent to it queues, and Send now refuses. Every compaction
-  is a `NodeBody::Compaction` row (T3's `compaction` item: Claude's `status: compacting`,
-  `compact_result`, `compact_boundary` with `pre_tokens`/`post_tokens`; Codex's
-  `contextCompaction` item; ACP's `compaction_update`), with the context before and after: the
-  provider's counts where it gives them, else the thread's context when it started and the next
-  report after it. The transcript shows it as T3's separator ("Compacting context", "Context
-  compacted 182k → 41k tokens", "Context compaction failed · why"); the context meter drops and,
-  in the composer, opens on hover with "Compact context" and "Context compacts automatically when
-  needed"; `/compact` is in the slash menu. Not done: T3's per-provider auto-compact window
-  setting and idle compaction (both are T3 settings over Claude's SDK options).
-- **Subagents.** Claude's Agent (or Task) tool, Codex's collab agents and roll's delegated threads
-  are `subagent` nodes; Claude's `task_progress` fills `progress` while one runs, and the Agent
-  call's (Codex's collab call's) `model` is kept. In the transcript each is T3's row: an avatar
-  with a status dot, what it was asked, what it's doing now or its answer, a live timer and a
-  chevron; several started together sit under "N subagents · k running". A provider's subagent
-  opens its own transcript in place of the conversation (what it was asked, its steps and words,
-  its answer), with T3's bar instead of the composer (the agent and model, "Working 1m 5s" or
-  "Completed in 34s", "Runs on its own", Open parent; Escape goes back). A delegated thread opens
-  as the thread it is, and its composer says who delegated it with Open parent. Pinned cards,
-  which have no subagent view, open a provider's subagent inline under its row.
-- **Plans.** `interactionMode: plan` reaches Claude as `--permission-mode plan` and Codex as its
-  collaboration mode `plan` (ACP: an agent's `plan`/`architect` mode). The plan is T3's card:
-  "Plan", its title (the first heading), a menu to copy or download it, long ones folded; it stays
-  out of the "Worked for" fold. A plan is ready (`lib/agents-plan.ts` `readyPlan`) when the
-  newest run ended with one in plan mode (Codex, ACP) or Claude asks to leave plan mode with it
-  (its ExitPlanMode is an approval with `action: plan`; T3 denies that tool and captures the plan
-  instead, roll keeps it pending so Claude goes on in the same turn when accepted). Then the
-  composer says "Plan ready · title", the header pill says so, and the button is T3's split pill:
-  Implement (Claude: accept; otherwise switch the thread to build mode and send T3's
-  `PLEASE IMPLEMENT THIS PLAN:` prompt), "Implement in a new thread" (a thread in build mode on
-  the same project, provider, model and permissions, with its own worktree if this one has one,
-  started with that prompt and opened; a pending approval is cancelled first), or, once something
-  is typed, Refine (Claude: decline with the words; otherwise send them in plan mode). Shift+Tab,
-  the Build/Plan chip, and `/plan` and `/default` switch the mode. Todo lists stay quiet rows
-  ("Tasks 2/3 · current"). Not done: T3's "Save to workspace".
 
 ## Delegation (roll's orchestrator MCP)
 
@@ -1038,8 +1027,7 @@ The surface has three views:
   answer, with the files it changed in a card and copy, fork and roll back under it); approvals as
   rows in the work log; the composer under it (T3's: a message to a running agent steers it,
   ⌘/Ctrl queues it, the send button says which; the agent's questions sit on top of the composer
-  and what's typed is your own answer; queued messages, a ready plan, compaction and subagents
-  as in "Turns") with the machine, branch and cost in a strip below; the
+  and what's typed is your own answer) with the machine, branch and cost in a strip below; the
   thread's terminals in a resizable drawer under it all; the diff (of the thread or one run)
   beside the chat when the panel is wide enough, else sliding over it. Everything is managed from
   there: fork, roll

@@ -143,7 +143,8 @@ impl Host {
             for m in &set.models {
                 if !info.models.iter().any(|known| known.id == m.id) {
                     let name = m.name.clone().unwrap_or_else(|| m.id.clone());
-                    info.models.push(ModelInfo { id: m.id.clone(), name, default: false, efforts: Vec::new(), custom: true });
+                    let options = provider.custom_model_options(&m.id, &info.models);
+                    info.models.push(ModelInfo { custom: true, options, ..ModelInfo::new(m.id.clone(), name) });
                 }
             }
             offered.push(info);

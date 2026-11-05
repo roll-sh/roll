@@ -206,8 +206,8 @@ async fn the_link_speaks_the_protocol() {
     assert!(matches!(next(&mut ws).await, DaemonFrame::Hello { info, .. } if info.hostname == "renamed"));
 
     // Commands run at once and answer in the order they finish; a repeated id isn't run again.
-    send(&mut ws, &RelayFrame::Command { id: "c1".into(), by: "acme".into(), command: archive("slow"), grant: None }).await;
-    send(&mut ws, &RelayFrame::Command { id: "c2".into(), by: "agent:bot".into(), command: archive("fast"), grant: None }).await;
+    send(&mut ws, &RelayFrame::Command { id: "c1".into(), by: "acme".into(), command: Box::new(archive("slow")), grant: None }).await;
+    send(&mut ws, &RelayFrame::Command { id: "c2".into(), by: "agent:bot".into(), command: Box::new(archive("fast")), grant: None }).await;
     let order: Vec<(String, Reply)> = [next(&mut ws).await, next(&mut ws).await]
         .into_iter()
         .map(|f| match f {
@@ -216,7 +216,7 @@ async fn the_link_speaks_the_protocol() {
         })
         .collect();
     assert_eq!(order, [("c2".to_string(), Reply::Created { id: "agent:bot".into() }), ("c1".to_string(), Reply::Created { id: "acme".into() })]);
-    send(&mut ws, &RelayFrame::Command { id: "c1".into(), by: "acme".into(), command: archive("slow"), grant: None }).await;
+    send(&mut ws, &RelayFrame::Command { id: "c1".into(), by: "acme".into(), command: Box::new(archive("slow")), grant: None }).await;
     assert!(matches!(next(&mut ws).await, DaemonFrame::Reply { id, .. } if id == "c1"));
     assert_eq!(daemon.runs.load(Ordering::SeqCst), 2);
 
@@ -252,7 +252,7 @@ async fn replies_wait_for_their_records_during_a_replay() {
     let (_task, _events, _stop) = start(daemon.clone(), &url, "rlm_good");
     let mut ws = links.recv().await.unwrap();
     welcome(&mut ws, 0).await;
-    send(&mut ws, &RelayFrame::Command { id: "w1".into(), by: "acme".into(), command: archive("write"), grant: None }).await;
+    send(&mut ws, &RelayFrame::Command { id: "w1".into(), by: "acme".into(), command: Box::new(archive("write")), grant: None }).await;
     let mut sent = std::collections::BTreeSet::new();
     let written = loop {
         match next(&mut ws).await {
@@ -285,7 +285,7 @@ async fn unreadable_frames_are_skipped() {
         other => panic!("{other:?}"),
     }
     // Still the same link: commands and pings work.
-    send(&mut ws, &RelayFrame::Command { id: "c1".into(), by: "acme".into(), command: archive("fast"), grant: None }).await;
+    send(&mut ws, &RelayFrame::Command { id: "c1".into(), by: "acme".into(), command: Box::new(archive("fast")), grant: None }).await;
     assert!(matches!(next(&mut ws).await, DaemonFrame::Reply { id, .. } if id == "c1"));
     send(&mut ws, &RelayFrame::Ping).await;
     assert_eq!(next(&mut ws).await, DaemonFrame::Pong);
@@ -353,7 +353,7 @@ async fn a_stopping_daemon_sends_its_last_records_then_closes() {
     stop.send(()).unwrap();
     assert_eq!(seqs(&mut ws, 1).await.0, vec![1]);
     tokio::time::sleep(Duration::from_millis(50)).await;
-    send(&mut ws, &RelayFrame::Command { id: "late".into(), by: "acme".into(), command: archive("t"), grant: None }).await;
+    send(&mut ws, &RelayFrame::Command { id: "late".into(), by: "acme".into(), command: Box::new(archive("t")), grant: None }).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(!task.is_finished(), "open until the relay has the records");
     send(&mut ws, &RelayFrame::Ack { seq: 1 }).await;

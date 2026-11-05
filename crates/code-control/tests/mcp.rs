@@ -1147,6 +1147,7 @@ async fn agent_tools_drive_a_machine_like_their_routes() {
     tokio::spawn(async move {
         while let Some(f) = d.recv().await {
             if let RelayFrame::Command { id, by, command, .. } = f {
+                let command = *command;
                 let result = match &command {
                     Command::RunInterrupt { .. } => Reply::Error(ReplyError { code: ErrorCode::Conflict, message: "nothing to interrupt".into() }),
                     _ => Reply::Created { id: "thr_new".into() },
@@ -1248,6 +1249,7 @@ async fn agent_tools_work_in_roll_code_like_their_routes() {
     tokio::spawn(async move {
         while let Some(f) = d.recv().await {
             if let RelayFrame::Command { id, command, grant, .. } = f {
+                let command = *command;
                 let result = match &command {
                     Command::ThreadPublish { .. } => Reply::Published(Published { branch: "roll/fix-it".into(), commit: "abc".into(), change: None, url: None, landing: None }),
                     _ => Reply::Created { id: "prj_new".into() },

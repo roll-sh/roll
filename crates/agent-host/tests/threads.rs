@@ -82,6 +82,7 @@ async fn switching_providers_hands_over_what_the_new_one_has_not_seen() {
             provider: Some(ProviderId("nope".into())),
             model: None,
             effort: None,
+            options: Default::default(),
             runtime_mode: None,
             interaction_mode: None,
         })
@@ -93,6 +94,7 @@ async fn switching_providers_hands_over_what_the_new_one_has_not_seen() {
         provider: Some(ProviderId(p.into())),
         model: None,
         effort: None,
+        options: Default::default(),
         runtime_mode: None,
         interaction_mode: None,
     };
@@ -133,6 +135,7 @@ async fn mode_changes_switch_live_or_restart_with_resume() {
             provider: None,
             model: None,
             effort: None,
+            options: Default::default(),
             runtime_mode: Some(RuntimeMode::Ask),
             interaction_mode: Some(InteractionMode::Plan),
         })
@@ -289,6 +292,7 @@ async fn forks_hand_a_summary_over_when_a_native_fork_cant_be_had() {
         provider: Some(ProviderId("claude".into())),
         model: None,
         effort: None,
+        options: Default::default(),
         runtime_mode: None,
         interaction_mode: None,
     };
@@ -462,6 +466,7 @@ async fn rollback_without_a_kept_turn_ref_hands_the_later_runs_over() {
         provider: Some(ProviderId(provider.into())),
         model: None,
         effort: None,
+        options: Default::default(),
         runtime_mode: None,
         interaction_mode: None,
     };
@@ -540,6 +545,7 @@ async fn busy_threads_refuse_rollback_publish_archive_and_provider_switches() {
             provider: Some(ProviderId::claude()),
             model: None,
             effort: None,
+            options: Default::default(),
             runtime_mode: None,
             interaction_mode: None,
         },
@@ -616,6 +622,7 @@ async fn non_git_projects_run_without_checkpoints_or_diffs() {
             provider: ProviderId::codex(),
             model: None,
             effort: None,
+            options: Default::default(),
             runtime_mode: RuntimeMode::FullAccess,
             interaction_mode: InteractionMode::Default,
             worktree: true,
@@ -786,6 +793,7 @@ async fn the_context_window_follows_the_conversation() {
         provider: Some(ProviderId(p.into())),
         model: None,
         effort: None,
+        options: Default::default(),
         runtime_mode: None,
         interaction_mode: None,
     };
@@ -1000,4 +1008,65 @@ async fn threads_settle_by_themselves_after_days_without_activity_or_when_their_
     let three = idle(&w, "h").await;
     w.host.settle_round(now_ms() + DAY + 60_000).await;
     assert!(matches!(settle_of(&w.state().await, &three), Some(Settle::Settled { by: SettledBy::Inactivity, .. })));
+}
+
+#[tokio::test]
+async fn model_options_reach_the_session_and_follow_the_model() {
+    // The fake's `fake-1` has reasoning (low, high) and a Fast Mode switch; `fake-2` has none.
+    let fake = manual("codex", Capabilities { mode_switch: true, ..Capabilities::default() });
+    let w = World::new(vec![fake.clone()]).await;
+    let fast = |on: bool| ModelOptions::from([("fastMode".to_string(), OptionValue::Flag(on))]);
+    let configure = |thread: &ThreadId, model: Option<&str>, options: Option<ModelOptions>| Command::ThreadConfigure {
+        thread: thread.clone(),
+        title: None,
+        provider: None,
+        model: model.map(String::from),
+        effort: None,
+        options,
+        runtime_mode: None,
+        interaction_mode: None,
+    };
+    let reply = w
+        .run(Command::ThreadCreate {
+            project: w.project.clone(),
+            provider: ProviderId::codex(),
+            model: Some("fake-1".into()),
+            effort: Some("high".into()),
+            options: fast(true),
+            runtime_mode: RuntimeMode::FullAccess,
+            interaction_mode: InteractionMode::Default,
+            worktree: false,
+            title: None,
+            prompt: Some("go".into()),
+            attachments: Vec::new(),
+            orchestrator: false,
+        })
+        .await;
+    let Reply::Created { id } = reply else { panic!("{reply:?}") };
+    let thread = ThreadId(id);
+    let first = fake.session(0).await;
+    assert_eq!((first.config.effort.as_deref(), &first.config.options), (Some("high"), &fast(true)));
+    turn(&w, &first, &thread, &[]).await;
+    assert_eq!(w.wait_thread(&thread, |_| true).await.options, fast(true));
+
+    // Options from a client are checked.
+    let bad = ModelOptions::from([("effort".to_string(), OptionValue::Choice("high".into()))]);
+    assert!(is_err(&w.run(configure(&thread, None, Some(bad))).await, ErrorCode::Invalid));
+
+    // A model without Fast Mode drops it; picking it again with the option brings it back, and
+    // the session that already runs it goes on.
+    assert_eq!(w.run(configure(&thread, Some("fake-2"), None)).await, Reply::Ok);
+    assert!(w.wait_thread(&thread, |t| t.model.as_deref() == Some("fake-2")).await.options.is_empty());
+    assert_eq!(w.run(configure(&thread, Some("fake-1"), Some(fast(true)))).await, Reply::Ok);
+    assert!(matches!(w.send(&thread, "again", SendMode::Queue).await, Reply::Created { .. }));
+    turn(&w, &first, &thread, &[]).await;
+    assert_eq!(sends(&first.calls()), ["go", "again"]);
+
+    // Changing only an option starts the next turn in a session that has it.
+    assert_eq!(w.run(configure(&thread, None, Some(fast(false)))).await, Reply::Ok);
+    assert!(matches!(w.send(&thread, "slower", SendMode::Queue).await, Reply::Created { .. }));
+    let second = fake.session(1).await;
+    assert_eq!((second.config.model.as_deref(), &second.config.options), (Some("fake-1"), &fast(false)));
+    assert!(first.calls().contains(&Call::Close));
+    turn(&w, &second, &thread, &[]).await;
 }

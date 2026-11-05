@@ -9,7 +9,7 @@
  */
 
 import { useCallback, useEffect, useSyncExternalStore } from "react";
-import { SettingsConflict, type ProviderId, type SendMode, type ThreadDefaults } from "./agents-api";
+import { SettingsConflict, type ModelOptions, type ProviderId, type SendMode, type ThreadDefaults } from "./agents-api";
 import { MAX_FAVORITES, MAX_RECENT, modelKeys, modelPrefs, type ModelKey } from "./agents-models";
 import type { AgentsServices } from "./agents-services";
 
@@ -57,6 +57,7 @@ function parseDefaults(v: unknown): ThreadDefaults {
     provider: s(d.provider),
     model: s(d.model),
     effort: s(d.effort),
+    options: parseOptions(d.options),
     runtime_mode: RUNTIME.includes(d.runtime_mode as never) ? (d.runtime_mode as ThreadDefaults["runtime_mode"]) : undefined,
     interaction_mode: d.interaction_mode === "plan" || d.interaction_mode === "default" ? d.interaction_mode : undefined,
     worktree: typeof d.worktree === "boolean" ? d.worktree : undefined,
@@ -65,8 +66,20 @@ function parseDefaults(v: unknown): ThreadDefaults {
   if (!out.provider) {
     delete out.model;
     delete out.effort;
+    delete out.options;
   }
   return Object.fromEntries(Object.entries(out).filter(([, x]) => x !== undefined)) as ThreadDefaults;
+}
+
+/** A model's picked options from a saved document: strings and booleans by id, at most 16 (agent-proto `option_limits`). */
+function parseOptions(v: unknown): ModelOptions | undefined {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
+  const out = Object.fromEntries(
+    Object.entries(v as Record<string, unknown>)
+      .filter(([k, x]) => k && k !== "effort" && k.length <= 64 && (typeof x === "boolean" || (typeof x === "string" && x.length > 0 && x.length <= 256)))
+      .slice(0, 16),
+  ) as ModelOptions;
+  return Object.keys(out).length ? out : undefined;
 }
 
 /** The settings in a saved document, every bad or missing value its default. */
@@ -95,6 +108,7 @@ export function newThreadDefaults(layers: readonly (ThreadDefaults | undefined)[
     out.provider = pick.provider;
     if (pick.model) out.model = pick.model;
     if (pick.effort) out.effort = pick.effort;
+    if (pick.options && Object.keys(pick.options).length) out.options = pick.options;
   }
   for (const k of ["runtime_mode", "interaction_mode", "worktree"] as const) {
     const l = layers.find((x) => x?.[k] !== undefined);

@@ -1,6 +1,5 @@
 "use client";
 
-import { Bot } from "lucide-react";
 import type { DiffStat, ProviderInfo, RunStatus, ThreadStatus, Usage } from "@/lib/agents-api";
 
 /** 12.3k, 1.2M. */
@@ -68,10 +67,6 @@ export function providerName(providers: readonly ProviderInfo[], id: string) {
 export function modelName(providers: readonly ProviderInfo[], provider: string, model: string | null) {
   if (!model) return null;
   return providers.find((p) => p.id === provider)?.models.find((m) => m.id === model)?.name ?? model;
-}
-
-export function ProviderGlyph({ className = "size-3.5" }: { className?: string }) {
-  return <Bot className={className} />;
 }
 
 /**

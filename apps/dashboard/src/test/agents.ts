@@ -18,6 +18,7 @@ import type {
   Thread,
 } from "@/lib/agents-api";
 import { EMPTY_INBOX, NO_SETTINGS } from "@/lib/agents-api";
+import { reasoningLevels } from "@/lib/agents-model-options";
 
 export const T0 = 1_762_000_000_000;
 export const M1 = "mch_1";
@@ -31,9 +32,10 @@ export function provider(over: Partial<ProviderInfo> = {}): ProviderInfo {
     auth: "ready",
     detail: null,
     models: [
-      { id: "claude-opus-5-5", name: "Opus 5.5", default: true, efforts: ["low", "medium", "high", "max"] },
-      { id: "claude-sonnet-5", name: "Sonnet 5", default: false, efforts: [] },
+      { id: "claude-opus-5-5", name: "Opus 5.5", default: true, options: [reasoningLevels(["low", "medium", "high", "max"])] },
+      { id: "claude-sonnet-5", name: "Sonnet 5", default: false, options: [] },
     ],
+    update_required: [],
     capabilities: { steer: true, fork: true, rollback: false, plan_mode: true, images: true, subagents: true, mode_switch: true },
     ...over,
   };
@@ -91,6 +93,7 @@ export function thread(over: Partial<Thread> = {}): Thread {
     provider: "claude",
     model: "claude-opus-5-5",
     effort: "high",
+    options: {},
     runtime_mode: "auto_edit",
     interaction_mode: "default",
     cwd: "/Users/ada/roll",

@@ -11,8 +11,8 @@
 
 use super::{Item, Provider, ProviderConfig, ProviderEvent, RollbackStyle, Session, SessionConfig, TurnEnd, TurnInput};
 use agent_proto::{
-    Approval, ApprovalAction, AuthStatus, Capabilities, ChangeKind, ContextUsage, Decision, FileChange, InteractionMode, ModelInfo, NodeBody,
-    NodeStatus, ProviderId, ProviderInfo, RequestBody, Response, RuntimeMode, ToolCall, ToolKind, Usage,
+    Approval, ApprovalAction, AuthStatus, Capabilities, ChangeKind, ContextUsage, Decision, FileChange, InteractionMode, ModelInfo, ModelOption, NodeBody,
+    NodeStatus, OptionChoice, OptionRole, ProviderId, ProviderInfo, RequestBody, Response, RuntimeMode, ToolCall, ToolKind, Usage,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -49,7 +49,6 @@ fn demo_command() -> String {
 pub enum Call {
     Send(String),
     Steer(String),
-    Compact,
     Interrupt,
     Respond { request: String, response: Response },
     SetModes(RuntimeMode, InteractionMode),
@@ -174,7 +173,18 @@ impl Provider for FakeProvider {
             version: Some("0.0.0".into()),
             auth: AuthStatus::Ready,
             detail: None,
-            models: vec![ModelInfo { id: "fake-1".into(), name: "Fake 1".into(), default: true, efforts: Vec::new(), custom: false }],
+            models: vec![
+                ModelInfo {
+                    default: true,
+                    options: vec![
+                        ModelOption::reasoning(vec![OptionChoice::new("low", "Low"), OptionChoice::new("high", "High")], Some("low")),
+                        ModelOption::Boolean { id: "fastMode".into(), label: "Fast Mode".into(), description: None, default: false, role: Some(OptionRole::Speed) },
+                    ],
+                    ..ModelInfo::new("fake-1", "Fake 1")
+                },
+                ModelInfo::new("fake-2", "Fake 2"),
+            ],
+            update_required: Vec::new(),
             capabilities: self.capabilities,
             checking: false,
         }
@@ -428,25 +438,6 @@ impl Session for FakeSession {
         Ok(())
     }
 
-    /// Echo and Demo compact at once: a running then completed compaction that halves the
-    /// context. Manual only records it.
-    async fn compact(&self) -> anyhow::Result<()> {
-        self.record(Call::Compact);
-        self.inner.running.store(true, Ordering::SeqCst);
-        if self.inner.script != Script::Manual {
-            let id = self.next_item();
-            let item = |status, after| {
-                let body = NodeBody::Compaction { before_tokens: Some(DEMO_CONTEXT), after_tokens: after, error: None };
-                ProviderEvent::Item(Item { id: id.clone(), parent: None, status, body })
-            };
-            self.emit(item(NodeStatus::Running, None));
-            self.emit(item(NodeStatus::Completed, Some(DEMO_CONTEXT / 2)));
-            self.emit(ProviderEvent::Context(ContextUsage { used_tokens: DEMO_CONTEXT / 2, max_tokens: Some(200_000), total_processed_tokens: None }));
-            self.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
-        }
-        Ok(())
-    }
-
     async fn interrupt(&self) -> anyhow::Result<()> {
         self.record(Call::Interrupt);
         if self.inner.running.load(Ordering::SeqCst) {
@@ -500,6 +491,7 @@ mod tests {
             cwd: cwd.into(),
             model: None,
             effort: None,
+            options: Default::default(),
             runtime_mode: RuntimeMode::Ask,
             interaction_mode: InteractionMode::Default,
             resume: None,

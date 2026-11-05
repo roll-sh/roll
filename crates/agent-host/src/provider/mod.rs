@@ -16,8 +16,8 @@
 //! ([`SessionConfig::resume_at`]); [`Provider::rollback_style`] says which.
 
 use agent_proto::{
-    Attachment, Capabilities, ContextUsage, InteractionMode, NodeBody, NodeStatus, ProviderId, ProviderInfo, RequestBody,
-    Response, RuntimeMode, Usage,
+    Attachment, Capabilities, ContextUsage, InteractionMode, ModelInfo, ModelOption, ModelOptions, NodeBody, NodeStatus, ProviderId, ProviderInfo,
+    RequestBody, Response, RuntimeMode, Usage,
 };
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -66,6 +66,9 @@ pub struct SessionConfig {
     pub cwd: PathBuf,
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// The model's other options ([`agent_proto::Thread::options`]); an adapter applies those
+    /// the model takes and leaves the rest out.
+    pub options: ModelOptions,
     pub runtime_mode: RuntimeMode,
     pub interaction_mode: InteractionMode,
     /// The provider's own conversation id to resume (from an earlier `NativeThread` event).
@@ -131,21 +134,10 @@ pub struct McpServer {
     pub headers: Vec<(String, String)>,
 }
 
-/// The message that compacts a conversation instead of starting a turn with it (T3's
-/// `COMPACT_SLASH_COMMAND`), on a provider with `capabilities().compact`.
-pub const COMPACT: &str = "/compact";
-
 #[derive(Clone, Debug, Default)]
 pub struct TurnInput {
     pub text: String,
     pub attachments: Vec<Attachment>,
-}
-
-impl TurnInput {
-    /// Exactly `/compact` and nothing else: a compaction on a provider that can.
-    pub fn is_compact(&self) -> bool {
-        self.attachments.is_empty() && self.text.trim() == COMPACT
-    }
 }
 
 /// A unit of work as the provider names it. `id` and `parent` are the provider's item ids.
@@ -224,6 +216,14 @@ pub trait Provider: Send + Sync {
     /// (T3: "setup must not happen as a health-check side effect").
     async fn info(&self) -> ProviderInfo;
 
+    /// The options of one of the machine's custom models (`slug`), given the models the
+    /// provider listed. None by default; Claude gives a known family's, Codex its first model's
+    /// (T3's `providerModelsFromSettings` with the catalog).
+    fn custom_model_options(&self, slug: &str, listed: &[ModelInfo]) -> Vec<ModelOption> {
+        let _ = (slug, listed);
+        Vec::new()
+    }
+
     /// Use `cfg` (the daemon's config with the machine's settings over it) from the next process
     /// on. A session already running keeps what it started with.
     fn configure(&self, cfg: ProviderConfig) {
@@ -247,14 +247,6 @@ pub trait Session: Send + Sync {
 
     /// Stop the running turn; `TurnEnded(Interrupted)` follows.
     async fn interrupt(&self) -> anyhow::Result<()>;
-
-    /// Compact the conversation's context as a turn of its own (T3's `compactThread`): a
-    /// `NodeBody::Compaction` item and `TurnEnded` follow, as for `send`. Only called when
-    /// `capabilities().compact`. The default sends `/compact` as the turn's input, which is how
-    /// Claude Code takes it; Codex has a request of its own (`thread/compact/start`).
-    async fn compact(&self) -> anyhow::Result<()> {
-        self.send(TurnInput { text: COMPACT.into(), attachments: Vec::new() }).await
-    }
 
     /// Answer a request the session raised.
     async fn respond(&self, request: &str, response: &Response) -> anyhow::Result<()>;

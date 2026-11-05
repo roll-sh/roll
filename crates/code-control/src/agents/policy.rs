@@ -56,9 +56,6 @@ pub(crate) fn agent_may(command: &Command, current: Option<(RuntimeMode, Interac
         | Command::ThreadAutoSettle { .. }
         | Command::MessageSend { .. }
         | Command::MessageUnqueue { .. }
-        | Command::MessageEdit { .. }
-        | Command::MessageReorder { .. }
-        | Command::MessagePromote { .. }
         | Command::RunInterrupt { .. }
         | Command::ThreadPublish { .. }
         | Command::DiffGet { .. }
@@ -136,9 +133,6 @@ mod tests {
             (json!({ "type": "thread.change_ended", "thread": t, "landed": true }), None, false),
             (json!({ "type": "message.send", "thread": t, "text": "go" }), full, true),
             (json!({ "type": "message.unqueue", "thread": t, "message": "q1" }), None, true),
-            (json!({ "type": "message.edit", "thread": t, "message": "q1", "text": "x" }), None, true),
-            (json!({ "type": "message.reorder", "thread": t, "message": "q1" }), None, true),
-            (json!({ "type": "message.promote", "thread": t, "message": "q1" }), None, true),
             (json!({ "type": "run.interrupt", "thread": t }), None, true),
             (json!({ "type": "thread.publish", "thread": t, "message": "m", "land": true }), None, true),
             (json!({ "type": "request.respond", "request": "req_1", "response": { "type": "decision", "decision": "accept_for_session" } }), None, false),

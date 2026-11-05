@@ -354,9 +354,7 @@ impl Translator {
                 };
                 self.system(text, out);
             }
-            "compaction_update" if update["status"] == "completed" => {
-                self.note(NodeBody::Compaction { before_tokens: None, after_tokens: None, error: None }, out)
-            }
+            "compaction_update" if update["status"] == "completed" => self.system("Compacted the conversation".into(), out),
             _ => tracing::debug!(target: "agent_host::acp", kind, "ignored update"),
         }
     }
@@ -531,15 +529,15 @@ impl Translator {
     }
 
     fn system(&mut self, text: String, out: &mut Vec<Action>) {
-        self.note(NodeBody::System { text }, out);
-    }
-
-    /// A finished item of its own between segments: a notice, a compaction.
-    fn note(&mut self, body: NodeBody, out: &mut Vec<Action>) {
         let turn = self.turn.as_mut().expect("checked by the caller");
         close_segment(turn, out);
         turn.segments += 1;
-        let item = Item { id: format!("system:{}:{}", turn.n, turn.segments), parent: None, status: NodeStatus::Completed, body };
+        let item = Item {
+            id: format!("system:{}:{}", turn.n, turn.segments),
+            parent: None,
+            status: NodeStatus::Completed,
+            body: NodeBody::System { text },
+        };
         out.push(Action::Event(ProviderEvent::Item(item)));
     }
 
@@ -1065,7 +1063,7 @@ fn subagent(tool: &Tool, call: &ToolCall) -> Option<NodeBody> {
         .or_else(|| wire::text(&input["description"]))
         .unwrap_or_else(|| "subagent".into());
     let result = call.output.clone();
-    Some(NodeBody::Subagent { agent, prompt, child: None, result, progress: None, model: wire::text(&input["model"]) })
+    Some(NodeBody::Subagent { agent, prompt, child: None, result })
 }
 
 /// The command a tool runs (T3: `extractToolCallCommand`): `rawInput.command` (a string or an

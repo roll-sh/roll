@@ -25,6 +25,7 @@ import {
   obj,
   optional,
   str,
+  strOrBool,
   tagged,
   withDefault,
   type DecodeCtx,
@@ -150,6 +151,8 @@ export interface ThreadDefaults {
   provider?: ProviderId;
   model?: string;
   effort?: string;
+  /** The model's other options ({@link ModelInfo.options}). */
+  options?: ModelOptions;
   runtime_mode?: RuntimeMode;
   interaction_mode?: InteractionMode;
   /** New threads get their own worktree (`true`) or work in the checkout (`false`). */
@@ -240,6 +243,8 @@ export interface Thread {
   provider: ProviderId;
   model: string | null;
   effort: string | null;
+  /** The model's other options, by id (a speed, a context window, …). */
+  options: ModelOptions;
   runtime_mode: RuntimeMode;
   interaction_mode: InteractionMode;
   cwd: string;
@@ -381,23 +386,9 @@ export type NodeBody =
   | { type: "plan"; text: string }
   | { type: "todos"; items: Todo[] }
   | ({ type: "tool" } & ToolCall)
-  | SubagentBody
-  /** The provider compacted the context (T3's compaction row); the counts are the window before and after. */
-  | { type: "compaction"; before_tokens: number | null; after_tokens: number | null; error: string | null }
+  | { type: "subagent"; agent: string; prompt: string; child: ThreadId | null; result: string | null }
   | { type: "request"; request: RequestId }
   | { type: "system"; text: string };
-
-/** A subagent the provider started, or a delegated roll thread (`child` set). */
-export interface SubagentBody {
-  type: "subagent";
-  agent: string;
-  prompt: string;
-  child: ThreadId | null;
-  result: string | null;
-  /** What it's doing now, while it runs. */
-  progress?: string | null;
-  model?: string | null;
-}
 
 export interface Node {
   id: NodeId;
@@ -507,13 +498,49 @@ export type Entity =
 
 export type AuthStatus = "ready" | "missing" | "unknown";
 
+/** What an option is for, so it shows where it belongs (agent-proto `OptionRole`). */
+export type OptionRole = "reasoning" | "speed" | "context_window";
+
+export interface OptionChoice {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+/** One thing a model can be asked for (T3's `ProviderOptionDescriptor`; agent-proto `ModelOption`). */
+export type ModelOption =
+  | { type: "select"; id: string; label: string; description?: string; choices: OptionChoice[]; default?: string; role?: OptionRole }
+  | { type: "boolean"; id: string; label: string; description?: string; default: boolean; role?: OptionRole };
+
+export type OptionValue = string | boolean;
+
+/** A thread's picked options besides its effort, by option id. */
+export type ModelOptions = Record<string, OptionValue>;
+
+/** The reasoning option's id: its value is a thread's `effort`, never one of its `options`. */
+export const EFFORT_OPTION = "effort";
+
 export interface ModelInfo {
   id: string;
   name: string;
+  /** What a narrow place calls it ("Opus 5.5" for "Claude Opus 5.5"). */
+  short_name?: string;
   default: boolean;
-  efforts: string[];
+  /** Its reasoning levels (role `reasoning`, the thread's `effort`) and other options. */
+  options: ModelOption[];
+  /** An older model, folded under "Show more". */
+  legacy?: boolean;
+  /** `false`: it takes text only (unset: images too, as most models do). */
+  images?: boolean;
   /** One of the machine's custom models (its settings), not one the provider lists. */
   custom?: boolean;
+}
+
+/** A model the provider would offer after an update. */
+export interface UpdateRequired {
+  id: string;
+  name: string;
+  min_version: string;
 }
 
 export interface Capabilities {
@@ -524,8 +551,6 @@ export interface Capabilities {
   images: boolean;
   subagents: boolean;
   mode_switch: boolean;
-  /** `/compact` compacts the context (the context meter's Compact action). */
-  compact?: boolean;
 }
 
 export interface ProviderInfo {
@@ -536,6 +561,8 @@ export interface ProviderInfo {
   auth: AuthStatus;
   detail: string | null;
   models: ModelInfo[];
+  /** Models it would offer after an update ("Update Claude Code to v… to use …"). */
+  update_required: UpdateRequired[];
   capabilities: Capabilities;
   /**
    * The daemon is still probing it (it says hello without waiting). The rest is the last probe's,
@@ -723,6 +750,7 @@ export type Command =
       provider: ProviderId;
       model?: string;
       effort?: string;
+      options?: ModelOptions;
       runtime_mode?: RuntimeMode;
       interaction_mode?: InteractionMode;
       worktree?: boolean;
@@ -739,6 +767,8 @@ export type Command =
       provider?: ProviderId;
       model?: string;
       effort?: string;
+      /** Replaces the thread's options; a new model keeps those it takes unless this is set. */
+      options?: ModelOptions;
       runtime_mode?: RuntimeMode;
       interaction_mode?: InteractionMode;
     }
@@ -755,12 +785,6 @@ export type Command =
   | { type: "thread.change_ended"; thread: ThreadId; landed: boolean }
   | { type: "message.send"; thread: ThreadId; text: string; attachments?: Attachment[]; mode?: SendMode }
   | { type: "message.unqueue"; thread: ThreadId; message: string }
-  /** T3's queue edit: `attachments` replaces the images when given. */
-  | { type: "message.edit"; thread: ThreadId; message: string; text: string; attachments?: Attachment[] }
-  /** Move a queued message in front of `before` (last when unset). */
-  | { type: "message.reorder"; thread: ThreadId; message: string; before?: string }
-  /** T3's "Send now": steers the running run, or starts it on a held queue. */
-  | { type: "message.promote"; thread: ThreadId; message: string }
   | { type: "run.interrupt"; thread: ThreadId }
   | { type: "request.respond"; request: RequestId; response: RequestResponse }
   | { type: "checkpoint.rollback"; thread: ThreadId; checkpoint: CheckpointId }
@@ -1032,10 +1056,59 @@ const repoRefD: Decoder<RepoRef> = obj<RepoRef>({ owner: str, repo: str });
 const gitInfoD = obj<GitInfo>({ branch: opt(str), head: opt(str), remote: opt(str), dirty: bool });
 const runtimeModeD = literal("full_access", "auto_edit", "ask");
 const interactionModeD = literal("default", "plan");
+const optionValueD: Decoder<OptionValue> = strOrBool;
+const modelOptionsD = withDefault(map(optionValueD), () => ({}));
+const optionRoleD = optional(literal("reasoning", "speed", "context_window"));
+const optionChoiceD = obj<OptionChoice>({ id: str, label: str, description: optional(str) });
+const modelOptionD: Decoder<ModelOption> = tagged("type", {
+  select: obj<Omit<Extract<ModelOption, { type: "select" }>, "type">>({
+    id: str,
+    label: str,
+    description: optional(str),
+    choices: vec(optionChoiceD),
+    default: optional(str),
+    role: optionRoleD,
+  }),
+  boolean: obj<Omit<Extract<ModelOption, { type: "boolean" }>, "type">>({
+    id: str,
+    label: str,
+    description: optional(str),
+    default: withDefault(bool, () => false),
+    role: optionRoleD,
+  }),
+});
+const modelInfoWireD = obj<ModelInfo & { efforts: string[] }>({
+  id: str,
+  name: str,
+  short_name: optional(str),
+  default: withDefault(bool, () => false),
+  options: vec(modelOptionD),
+  efforts: vec(str),
+  legacy: optional(bool),
+  images: optional(bool),
+  custom: optional(bool),
+});
+/** Daemons from before option descriptors send a model's reasoning levels alone, as `efforts` (agent-proto reads them the same way). */
+const modelInfoD: Decoder<ModelInfo> = (v, p, ctx) => {
+  const { efforts, ...m } = modelInfoWireD(v, p, ctx);
+  if (efforts.length && !m.options.some((o) => o.role === "reasoning")) {
+    m.options = [{ type: "select", id: EFFORT_OPTION, label: "Reasoning", choices: efforts.map((e) => ({ id: e, label: effortLabel(e) })), role: "reasoning" }, ...m.options];
+  }
+  return m;
+};
+
+/** T3's names for reasoning levels (agent-proto `effort_label`). */
+export function effortLabel(effort: string): string {
+  if (effort === "xhigh") return "Extra High";
+  if (effort === "xlow") return "Extra Low";
+  return effort ? effort[0].toUpperCase() + effort.slice(1) : effort;
+}
+
 const threadDefaultsD = obj<ThreadDefaults>({
   provider: optional(str),
   model: optional(str),
   effort: optional(str),
+  options: optional(map(optionValueD)),
   runtime_mode: optional(runtimeModeD),
   interaction_mode: optional(interactionModeD),
   worktree: optional(bool),
@@ -1136,6 +1209,7 @@ const threadD = obj<Thread>({
   provider: str,
   model: opt(str),
   effort: opt(str),
+  options: modelOptionsD,
   runtime_mode: runtimeModeD,
   interaction_mode: interactionModeD,
   cwd: str,
@@ -1220,18 +1294,11 @@ const nodeBodyD: Decoder<NodeBody> = tagged("type", {
     items: array(obj<Todo>({ text: str, status: literal("pending", "in_progress", "completed") })),
   }),
   tool: obj<ToolCall>(toolFields),
-  subagent: obj<Omit<SubagentBody, "type">>({
+  subagent: obj<{ agent: string; prompt: string; child: ThreadId | null; result: string | null }>({
     agent: str,
     prompt: str,
     child: opt(str),
     result: opt(str),
-    progress: opt(str),
-    model: opt(str),
-  }),
-  compaction: obj<{ before_tokens: number | null; after_tokens: number | null; error: string | null }>({
-    before_tokens: opt(int),
-    after_tokens: opt(int),
-    error: opt(str),
   }),
   request: obj<{ request: RequestId }>({ request: str }),
   system: text,
@@ -1327,16 +1394,16 @@ const capabilitiesD = obj<Capabilities>({
   images: bool,
   subagents: bool,
   mode_switch: bool,
-  compact: withDefault(bool, () => false),
 });
-const providerInfoD = obj<ProviderInfo>({
+export const providerInfoD = obj<ProviderInfo>({
   id: str,
   name: str,
   installed: bool,
   version: opt(str),
   auth: literal("ready", "missing", "unknown"),
   detail: opt(str),
-  models: vec(obj<ModelInfo>({ id: str, name: str, default: withDefault(bool, () => false), efforts: vec(str), custom: optional(bool) })),
+  models: vec(modelInfoD),
+  update_required: vec(obj<UpdateRequired>({ id: str, name: str, min_version: str })),
   capabilities: capabilitiesD,
   checking: optional(bool),
 });
@@ -1424,6 +1491,7 @@ export const commandD: Decoder<Command> = tagged("type", {
       provider: str,
       model: optional(str),
       effort: optional(str),
+      options: optional(map(optionValueD)),
       runtime_mode: optional(runtimeModeD),
       interaction_mode: optional(interactionModeD),
       worktree: optional(bool),
@@ -1440,6 +1508,7 @@ export const commandD: Decoder<Command> = tagged("type", {
       provider: optional(str),
       model: optional(str),
       effort: optional(str),
+      options: optional(map(optionValueD)),
       runtime_mode: optional(runtimeModeD),
       interaction_mode: optional(interactionModeD),
     }),
@@ -1459,9 +1528,6 @@ export const commandD: Decoder<Command> = tagged("type", {
     obj({ thread: str, text: str, attachments: optional(array(attachmentD)), mode: optional(literal("queue", "steer")) }),
   ),
   "message.unqueue": cmd<"message.unqueue">(obj({ thread: str, message: str })),
-  "message.edit": cmd<"message.edit">(obj({ thread: str, message: str, text: str, attachments: optional(array(attachmentD)) })),
-  "message.reorder": cmd<"message.reorder">(obj({ thread: str, message: str, before: optional(str) })),
-  "message.promote": cmd<"message.promote">(obj({ thread: str, message: str })),
   "run.interrupt": cmd<"run.interrupt">(obj({ thread: str })),
   "request.respond": cmd<"request.respond">(obj({ request: str, response: responseD })),
   "checkpoint.rollback": cmd<"checkpoint.rollback">(obj({ thread: str, checkpoint: str })),

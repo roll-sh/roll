@@ -630,8 +630,7 @@ POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, com
        Agent tokens drive threads only (403 otherwise, docs/code/agents.md "Machines, login and
        tokens"): `thread.create` in `ask` or `auto_edit` (not `full_access`, the default),
        `thread.configure` only lowering the thread's modes, `thread.fork`, `thread.archive`,
-       `thread.unarchive`, `message.send`, `message.unqueue`, `message.edit`, `message.reorder`,
-       `message.promote`, `run.interrupt`, `thread.publish`,
+       `thread.unarchive`, `message.send`, `message.unqueue`, `run.interrupt`, `thread.publish`,
        `diff.get`, `git.status`, and `fs.list`/`fs.read` in a project. The rest (`terminal.*`,
        `fs.list` without a project, `request.respond`, `project.add`, `project.remove`,
        `project.update`, `project.pull`, `thread.delete`, `checkpoint.rollback`, `provider.refresh`,

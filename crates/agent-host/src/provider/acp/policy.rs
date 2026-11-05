@@ -177,6 +177,9 @@ pub enum OptionValue {
 pub struct Wanted<'a> {
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
+    /// The thread's other options: each goes to the agent's config option of the same id,
+    /// when that option takes the value (T3 hands the agent's own option ids to the picker).
+    pub options: &'a agent_proto::ModelOptions,
     pub runtime: RuntimeMode,
     pub interaction: InteractionMode,
     /// The session just opened: fx takes its permission mode only once written (T3 forces
@@ -221,6 +224,18 @@ pub fn settings(
         && (option.offers(effort) || option.values().is_empty())
     {
         set(&mut out, option, effort);
+    }
+    // Modes and the model have their own controls; the reasoning option is `effort`.
+    let reserved = |o: &ConfigOption| matches!(o.category.as_deref(), Some("model" | "mode" | "thought_level" | "collaboration_mode")) || o.id == "autopilot";
+    for (want_id, value) in want.options {
+        let Some(option) = config.iter().find(|o| &o.id == want_id && !reserved(o)) else { continue };
+        match (&option.value, value) {
+            (ConfigValue::Select { .. }, agent_proto::OptionValue::Choice(v)) if option.offers(v) => set(&mut out, option, v),
+            (ConfigValue::Boolean(current), agent_proto::OptionValue::Flag(b)) if current != b => {
+                out.push(Setting::Option { id: option.id.clone(), value: OptionValue::Bool(*b), optional: false })
+            }
+            _ => {}
+        }
     }
     // Kiro: Autopilot runs everything without asking; only full access may.
     let full = want.runtime == RuntimeMode::FullAccess;
@@ -307,7 +322,31 @@ mod tests {
     }
 
     fn want(runtime: RuntimeMode, interaction: InteractionMode) -> Wanted<'static> {
-        Wanted { model: None, effort: None, runtime, interaction, opening: false }
+        static NONE: std::sync::LazyLock<agent_proto::ModelOptions> = std::sync::LazyLock::new(Default::default);
+        Wanted { model: None, effort: None, options: &NONE, runtime, interaction, opening: false }
+    }
+
+    #[test]
+    fn options_go_to_the_agents_own_config_options() {
+        let agent = wire::config_options(&json!([
+            { "id": "verbosity", "type": "select", "currentValue": "low", "options": [{ "value": "low" }, { "value": "high" }] },
+            { "id": "web_search", "type": "boolean", "currentValue": false },
+            { "id": "mode", "category": "mode", "type": "select", "currentValue": "ask", "options": [{ "value": "ask" }, { "value": "yolo" }] },
+        ]));
+        let options = agent_proto::ModelOptions::from([
+            ("verbosity".into(), agent_proto::OptionValue::Choice("high".into())),
+            ("web_search".into(), agent_proto::OptionValue::Flag(true)),
+            // Not offered, not the agent's, and a mode (roll's runtime mode decides it): skipped.
+            ("unknown".into(), agent_proto::OptionValue::Flag(true)),
+            ("mode".into(), agent_proto::OptionValue::Choice("yolo".into())),
+        ]);
+        let s = settings(&agent, None, None, false, None, &Wanted { options: &options, ..want(RuntimeMode::Ask, InteractionMode::Default) });
+        assert_eq!(s, [
+            Setting::Option { id: "verbosity".into(), value: OptionValue::Id("high".into()), optional: false },
+            Setting::Option { id: "web_search".into(), value: OptionValue::Bool(true), optional: false },
+        ]);
+        let wrong = agent_proto::ModelOptions::from([("verbosity".into(), agent_proto::OptionValue::Choice("max".into()))]);
+        assert!(settings(&agent, None, None, false, None, &Wanted { options: &wrong, ..want(RuntimeMode::Ask, InteractionMode::Default) }).is_empty());
     }
 
     #[test]

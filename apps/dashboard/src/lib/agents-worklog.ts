@@ -47,19 +47,12 @@ export interface Turn {
   rest: TimelineItem[];
 }
 
-/**
- * Fold an ended run's work above its final message. Only work folds (T3 folds work entries): a
- * proposed plan and a compaction stay where they are, around the fold.
- */
+/** Fold an ended run's work above its final message. */
 export function foldTurn(items: TimelineItem[], run: Pick<Run, "status">): Turn {
   const last = items.at(-1);
   const final = last?.kind === "node" && last.t.node.body.type === "message" && last.t.node.body.text.trim() !== "";
   if (!ended(run) || !final || items.length < 2) return { fold: null, rest: items };
-  const stays = (i: TimelineItem) => i.kind === "node" && (i.t.node.body.type === "plan" || i.t.node.body.type === "compaction");
-  const before = items.slice(0, -1);
-  const fold = before.filter((i) => !stays(i));
-  if (fold.length === 0) return { fold: null, rest: items };
-  return { fold, rest: [...before.filter(stays), last] };
+  return { fold: items.slice(0, -1), rest: [last] };
 }
 
 /** T3's fold label: "Worked for 2m 13s", "You stopped after 12s". */

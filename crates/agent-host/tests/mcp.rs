@@ -42,6 +42,7 @@ async fn lead(w: &World, provider: &str, runtime_mode: RuntimeMode) -> ThreadId 
             provider: ProviderId(provider.into()),
             model: None,
             effort: None,
+            options: Default::default(),
             runtime_mode,
             interaction_mode: InteractionMode::Default,
             worktree: false,
@@ -281,15 +282,11 @@ async fn a_sync_task_returns_the_childs_answer_and_the_records_show_the_subagent
     let parent_run = parent_thread.active_run.clone().unwrap();
     assert_eq!((node.thread.clone(), node.run.clone(), node.parent.clone()), (parent.clone(), parent_run.clone(), None));
     assert!(node.completed_at.is_some());
-    // The node names the model the child runs.
-    let c_model = s.thread(&child).unwrap().model.clone();
     assert_eq!(node.body, NodeBody::Subagent {
         agent: "claude".into(),
         prompt: "Count the files".into(),
         child: Some(child.clone()),
         result: Some("echo: Count the files".into()),
-        progress: None,
-        model: c_model,
     });
     let c = s.thread(&child).unwrap();
     assert_eq!(c.lineage, Some(Lineage {
@@ -592,9 +589,17 @@ async fn limits_providers_models_modes_worktrees_and_follow_ups() {
         "runtime_mode_escalation_denied"
     );
     assert_eq!(mcp.refused("delegate_task", json!({ "task": "x", "mode": "later" })).await, "invalid_request");
+    // Options the model doesn't take, or with values it doesn't offer, are refused.
+    assert_eq!(mcp.refused("delegate_task", json!({ "task": "x", "model": "fake-1", "options": { "fastMode": "yes" } })).await, "option_unavailable");
+    assert_eq!(mcp.refused("delegate_task", json!({ "task": "x", "model": "fake-2", "options": { "fastMode": true } })).await, "option_unavailable");
+    assert_eq!(mcp.refused("delegate_task", json!({ "task": "x", "options": { "effort": "high" } })).await, "invalid_request");
+    // The capabilities list each model's options.
+    let caps = mcp.ok("orchestrator_capabilities", json!({})).await;
+    let fake1 = &caps["providers"][0]["models"][0];
+    assert_eq!((fake1["efforts"].clone(), fake1["options"][1]["id"].clone()), (json!(["low", "high"]), json!("fastMode")));
 
     let (_, asked) = mcp
-        .delegate(json!({ "task": "carefully", "runtime_mode": "ask", "interaction_mode": "plan", "model": "fake-1" }))
+        .delegate(json!({ "task": "carefully", "runtime_mode": "ask", "interaction_mode": "plan", "model": "fake-1", "options": { "fastMode": true } }))
         .await;
     let (task, isolated) = mcp.delegate(json!({ "task": "fix the parser", "worktree": true })).await;
     assert_eq!(mcp.refused("delegate_task", json!({ "task": "third" })).await, "too_many_tasks");
@@ -605,6 +610,7 @@ async fn limits_providers_models_modes_worktrees_and_follow_ups() {
         (a.runtime_mode, a.interaction_mode, a.model.as_deref()),
         (RuntimeMode::Ask, InteractionMode::Plan, Some("fake-1"))
     );
+    assert_eq!(a.options, ModelOptions::from([("fastMode".to_string(), OptionValue::Flag(true))]));
     let i = s.thread(&isolated).unwrap();
     assert_eq!(i.runtime_mode, RuntimeMode::AutoEdit, "inherited");
     let wt = i.worktree.clone().unwrap();
@@ -657,6 +663,7 @@ async fn an_orchestrator_is_told_to_plan_and_delegate_and_its_tasks_to_do_the_wo
             provider: ProviderId::codex(),
             model: None,
             effort: None,
+            options: Default::default(),
             runtime_mode: RuntimeMode::FullAccess,
             interaction_mode: InteractionMode::Default,
             worktree: false,

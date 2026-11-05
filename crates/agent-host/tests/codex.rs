@@ -16,7 +16,7 @@ use agent_host::provider::{
     ForkAt, ForkFrom, McpServer, Provider, ProviderConfig, ProviderEvent, Session, SessionConfig, TurnEnd, TurnInput,
 };
 use agent_proto::{
-    ApprovalAction, AuthStatus, ChangeKind, Decision, InteractionMode, NodeBody, NodeStatus, RequestBody, Response,
+    ApprovalAction, AuthStatus, ChangeKind, Decision, InteractionMode, ModelOption, NodeBody, NodeStatus, OptionRole, RequestBody, Response,
     RuntimeMode, ToolKind,
 };
 use serde_json::{Value, json};
@@ -161,6 +161,7 @@ fn session_config(cwd: &Path) -> SessionConfig {
         cwd: cwd.to_path_buf(),
         model: None,
         effort: None,
+        options: Default::default(),
         runtime_mode: RuntimeMode::FullAccess,
         interaction_mode: InteractionMode::Default,
         resume: None,
@@ -570,7 +571,7 @@ async fn subagent_v2() {
     assert_subagents(&events, 1);
     let sub = latest(&events).into_values().find(|i| matches!(i.body, NodeBody::Subagent { .. })).unwrap();
     assert_eq!(sub.status, NodeStatus::Completed);
-    assert_eq!(sub.body, NodeBody::Subagent { agent: "say_hello".into(), prompt: String::new(), child: None, result: Some("Hello.".into()), progress: None, model: None });
+    assert_eq!(sub.body, NodeBody::Subagent { agent: "say_hello".into(), prompt: String::new(), child: None, result: Some("Hello.".into()) });
 }
 
 #[tokio::test]
@@ -794,7 +795,24 @@ async fn info_reads_version_account_and_models() {
     let default = info.models.iter().find(|m| m.default).unwrap();
     assert_eq!(default.id, "gpt-6.1-sol");
     assert_eq!(default.name, "GPT-6.1-Sol");
-    assert_eq!(default.efforts, ["low", "medium", "high", "xhigh", "max", "ultra"]);
+    assert_eq!(default.efforts(), ["low", "medium", "high", "xhigh", "max", "ultra"]);
+    // Options as T3's `mapCodexModelCapabilities` builds them from `model/list`.
+    let Some(ModelOption::Select { label, default: effort_default, choices, .. }) = default.reasoning() else { panic!("no reasoning") };
+    assert_eq!((label.as_str(), effort_default.as_deref()), ("Reasoning", Some("low")));
+    assert_eq!(choices[3].label, "Extra High");
+    let Some(ModelOption::Select { choices, default: tier, role, .. }) = default.option("serviceTier") else { panic!("no service tier") };
+    assert_eq!(*role, Some(OptionRole::Speed));
+    assert_eq!(tier.as_deref(), Some("default"));
+    assert_eq!(choices.iter().map(|c| (c.id.as_str(), c.label.as_str())).collect::<Vec<_>>(), [("default", "Standard"), ("priority", "Fast")]);
+    assert_eq!(choices[1].description.as_deref(), Some("2x speed, increased usage"));
+    assert!(default.images);
+    // A model whose catalog defaults to the fast tier, and gpt-6-astra's medium (T3's override).
+    let Some(ModelOption::Select { default: tier, .. }) = info.models.iter().find(|m| m.id == "gpt-6-luna").unwrap().option("serviceTier") else { panic!() };
+    assert_eq!(tier.as_deref(), Some("priority"));
+    let Some(ModelOption::Select { default: effort_default, .. }) = info.models.iter().find(|m| m.id == "gpt-6-astra").unwrap().reasoning() else { panic!() };
+    assert_eq!(effort_default.as_deref(), Some("medium"));
+    // A custom slug borrows the first model's options.
+    assert_eq!(codex.custom_model_options("gpt-7-preview", &info.models), info.models[0].options);
     // Only reads: no thread, no turn, no login.
     let log = read_log(&dir.path().join("log.ndjson"));
     let methods: Vec<_> = log.iter().filter_map(|f| f["method"].as_str()).collect();
@@ -959,6 +977,7 @@ async fn mcp_servers_instructions_and_images_reach_codex() {
     let mut h = Harness::open_with(&synthetic(dir.path(), "config", &entries), |c| {
         c.model = Some("gpt-x".into());
         c.effort = Some("high".into());
+        c.options = agent_proto::ModelOptions::from([("serviceTier".into(), agent_proto::OptionValue::Choice("priority".into()))]);
         c.instructions = Some("Use roll's tools.".into());
         c.mcp = vec![McpServer { name: "roll".into(), url: "http://127.0.0.1:9/mcp".into(), headers: vec![("Authorization".into(), "Bearer t".into())] }];
     })
@@ -976,6 +995,8 @@ async fn mcp_servers_instructions_and_images_reach_codex() {
     let turn = sent(&log, "turn/start")[0];
     assert_eq!(turn["input"][1], json!({ "type": "image", "url": "data:image/png;base64,iVBO" }));
     assert_eq!(turn["effort"], "high");
+    // The picked service tier (T3's `serviceTier` on `turn/start`).
+    assert_eq!(turn["serviceTier"], "priority");
     assert_eq!(turn["collaborationMode"], json!({ "mode": "default", "settings": { "model": "gpt-x", "reasoning_effort": "high" } }));
     assert_eq!(turn["additionalContext"], json!({ "roll_instructions": { "kind": "application", "value": "Use roll's tools." } }));
 }
@@ -995,43 +1016,11 @@ async fn compaction_restores_instructions() {
     let mut h = Harness::open_with(&synthetic(dir.path(), "compact", &entries), |c| c.instructions = Some("Be brief.".into())).await;
     assert_eq!(h.turn("go").await, TurnEnd::Completed);
     let (events, log) = h.finish().await;
-    assert_eq!(latest(&events)["cc"].body, NodeBody::Compaction { before_tokens: None, after_tokens: None, error: None });
+    assert_eq!(latest(&events)["cc"].body, NodeBody::System { text: "Context compacted".into() });
     assert_eq!(
         sent(&log, "thread/inject_items")[0]["items"],
         json!([{ "type": "message", "role": "developer", "content": [{ "type": "input_text", "text": "<roll_instructions>Be brief.</roll_instructions>" }] }]),
     );
-}
-
-/// T3's `compactThread`: `thread/compact/start`, then the turn Codex starts for it is ours.
-#[tokio::test]
-async fn compacting_on_request_runs_as_a_turn_of_its_own() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut entries = opening();
-    entries.extend([
-        turn_completed("completed"),
-        expect(json!({ "id": 4, "method": "thread/compact/start", "params": { "threadId": "thr" } })),
-        emit(json!({ "id": 4, "result": {} })),
-        emit(json!({ "method": "turn/started", "params": { "threadId": "thr", "turn": { "id": "t2", "status": "inProgress" } } })),
-        emit(json!({ "method": "item/started", "params": { "threadId": "thr", "turnId": "t2", "item": { "type": "contextCompaction", "id": "cc" } } })),
-        emit(json!({ "method": "item/completed", "params": { "threadId": "thr", "turnId": "t2", "item": { "type": "contextCompaction", "id": "cc" } } })),
-        emit(json!({ "method": "thread/tokenUsage/updated", "params": { "threadId": "thr", "turnId": "t2", "tokenUsage": {
-            "last": { "totalTokens": 9000, "inputTokens": 8000, "cachedInputTokens": 0, "outputTokens": 1000, "reasoningOutputTokens": 0 },
-            "total": { "totalTokens": 90000, "inputTokens": 80000, "cachedInputTokens": 0, "outputTokens": 10000, "reasoningOutputTokens": 0 },
-            "modelContextWindow": 258000 } } })),
-        emit(json!({ "method": "turn/completed", "params": { "threadId": "thr", "turn": { "id": "t2", "status": "completed", "items": [] } } })),
-        exit_ok(),
-    ]);
-    let mut h = Harness::open(&synthetic(dir.path(), "compact_request", &entries)).await;
-    assert_eq!(h.turn("go").await, TurnEnd::Completed);
-    h.session.compact().await.expect("compact");
-    assert_eq!(h.turn_end().await, TurnEnd::Completed);
-    let (events, log) = h.finish().await;
-    assert_eq!(sent(&log, "thread/compact/start").len(), 1);
-    let cc: Vec<NodeStatus> = events.iter().filter_map(|e| if let ProviderEvent::Item(i) = e && i.id == "cc" { Some(i.status) } else { None }).collect();
-    assert_eq!(cc, [NodeStatus::Running, NodeStatus::Completed]);
-    assert_eq!(latest(&events)["cc"].body, NodeBody::Compaction { before_tokens: None, after_tokens: None, error: None });
-    assert!(events.iter().any(|e| matches!(e, ProviderEvent::Context(c) if c.used_tokens == 9000)), "the context drops to what's left");
-    assert!(events.contains(&ProviderEvent::TurnRef { id: "t2".into() }));
 }
 
 #[tokio::test]

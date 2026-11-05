@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { machine, project, provider } from "@/test/agents";
 import { filterGroups, goalsFirst, nestedItems, reduceStack, type PaletteAction, type PaletteGroup, type PaletteItem } from "./command-palette.logic";
-import { goalCommand } from "./orchestrate";
+import { goalChoice, goalCommand } from "./orchestrate";
 
 const act = (title: string, searchTerms: string[] = []): PaletteAction => ({ kind: "action", value: `action:${title}`, title, searchTerms, icon: null, run: () => {} });
 const thr = (title: string): PaletteAction => ({ ...act(title), value: `thread:${title}`, threadSearch: { title, activityAt: null } });
@@ -67,7 +67,7 @@ describe("the command palette's search", () => {
 });
 
 describe("a goal from outside a conversation", () => {
-  const m = machine({ info: { ...machine().info!, providers: [provider({ auth: "missing" }), provider({ id: "codex", name: "Codex", models: [{ id: "gpt-5.5-codex", name: "GPT-5.5 Codex", default: true, efforts: [] }] })] } });
+  const m = machine({ info: { ...machine().info!, providers: [provider({ auth: "missing" }), provider({ id: "codex", name: "Codex", models: [{ id: "gpt-5.5-codex", name: "GPT-5.5 Codex", default: true, options: [] }] })] } });
   const target = { project: { ...project(), machine: m.id }, machine: m };
 
   it("starts an orchestrator: full access, default mode, in the checkout, on a logged-in provider", () => {
@@ -103,5 +103,19 @@ describe("a goal from outside a conversation", () => {
     expect(goalCommand("orchestrate", " ", target)).toEqual({ error: "Say what should get done." });
     expect(goalCommand("orchestrate", "x", { ...target, machine: { ...m, online: false } })).toEqual({ error: "ada-mbp is offline." });
     expect(goalCommand("agent", "x", { ...target, machine: { ...m, info: { ...m.info!, providers: [] } } })).toEqual({ error: "No agent is installed on ada-mbp." });
+  });
+
+  it("runs on the model picked for it (the prompt bar's picker), else the defaults' with the options that model takes", () => {
+    const picked = { provider: "claude", model: "claude-opus-5-5", effort: "max", options: { fastMode: true } };
+    expect(goalCommand("orchestrate", "go", target, picked)).toMatchObject({ provider: "claude", model: "claude-opus-5-5", effort: "max", options: { fastMode: true }, orchestrator: true });
+    // A pick for a provider the machine doesn't have falls back to the defaults.
+    expect(goalCommand("orchestrate", "go", target, { ...picked, provider: "acp:gone" })).toMatchObject({ provider: "codex", model: "gpt-5.5-codex" });
+    const fast = { type: "boolean" as const, id: "fastMode", label: "Fast Mode", default: false, role: "speed" as const };
+    const mm = machine({ info: { ...m.info!, providers: [provider({ models: [{ id: "claude-opus-5-5", name: "Opus 5.5", default: true, options: [fast] }] })] } });
+    const p = { ...target.project, settings: { ...target.project.settings, defaults: { provider: "claude", model: "claude-opus-5-5", options: { fastMode: true, contextWindow: "1m" } } } };
+    const cmd = goalCommand("agent", "go", { project: p, machine: mm });
+    expect(cmd).toMatchObject({ provider: "claude", options: { fastMode: true } });
+    expect("options" in cmd && cmd.options).toEqual({ fastMode: true });
+    expect(goalChoice(p, mm)).toEqual({ provider: "claude", model: "claude-opus-5-5", effort: null, options: { fastMode: true } });
   });
 });

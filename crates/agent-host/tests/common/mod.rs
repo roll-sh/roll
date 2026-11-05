@@ -90,6 +90,7 @@ impl World {
                 provider: ProviderId(provider.into()),
                 model: None,
                 effort: None,
+                options: Default::default(),
                 runtime_mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Default,
                 worktree,

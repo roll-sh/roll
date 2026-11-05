@@ -275,6 +275,9 @@ pub struct ThreadDefaults {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// The model's other options ([`ModelInfo::options`]).
+    #[serde(default, skip_serializing_if = "ModelOptions::is_empty")]
+    pub options: ModelOptions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_mode: Option<RuntimeMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -386,6 +389,9 @@ pub struct Thread {
     /// Reasoning effort, where the provider has one (`low` … `max`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// The model's other options, by id ([`ModelInfo::options`]: a speed, a context window, …).
+    #[serde(default, skip_serializing_if = "ModelOptions::is_empty")]
+    pub options: ModelOptions,
     pub runtime_mode: RuntimeMode,
     pub interaction_mode: InteractionMode,
     /// Where the agent works: the project's directory or the thread's own worktree.
@@ -805,25 +811,6 @@ pub enum NodeBody {
         child: Option<ThreadId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<String>,
-        /// What it is doing now, while it runs, where the provider says (Claude's
-        /// `task_progress`; T3's subagent `progress`).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        progress: Option<String>,
-        /// The model it runs, where the provider says (the Agent tool's `model`, Codex's collab
-        /// call's `model`).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        model: Option<String>,
-    },
-    /// The provider compacted the conversation's context (T3's `compaction` turn item): running
-    /// while it summarises, then completed, failed (with `error`) or interrupted. The token
-    /// counts are the context window before and after, where known.
-    Compaction {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        before_tokens: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        after_tokens: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
     },
     /// An approval or question; the record is the `Request`.
     Request { request: RequestId },
@@ -1328,6 +1315,7 @@ impl MachineSettings {
         }
         self.defaults.model = text(self.defaults.model.take());
         self.defaults.effort = text(self.defaults.effort.take());
+        check_options(&self.defaults.options)?;
         Ok(self)
     }
 
@@ -1356,6 +1344,9 @@ pub struct ProviderInfo {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ModelInfo>,
+    /// Models it would offer after an update (T3's "Update Claude Code to v… to use …").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub update_required: Vec<UpdateRequired>,
     pub capabilities: Capabilities,
     /// The daemon is still probing it (it starts, and says hello, without waiting). The rest is
     /// what the last probe found, kept from before a restart; with no last probe, it is not
@@ -1374,18 +1365,260 @@ pub enum AuthStatus {
     Unknown,
 }
 
+/// A model a provider runs, with the options it takes (T3's `ServerProviderModel` and
+/// `ModelCapabilities.optionDescriptors`, `packages/contracts/src/{server,model}.ts`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ModelInfoWire")]
 pub struct ModelInfo {
     pub id: String,
     pub name: String,
+    /// What a narrow place (the picker's trigger) calls it ("Opus 5.5" for "Claude Opus 5.5").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_name: Option<String>,
     #[serde(default)]
     pub default: bool,
-    /// Reasoning efforts the model accepts, lowest first.
+    /// What the model can be asked for besides itself: its reasoning effort (a thread's
+    /// `effort`) and the rest (a thread's `options`: a speed, a context window, …). Whatever the
+    /// model doesn't list is left out when a session starts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub efforts: Vec<String>,
+    pub options: Vec<ModelOption>,
+    /// An older model, listed after the others (the picker folds them under "Show more").
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub legacy: bool,
+    /// Takes images with a prompt (most do; T3 reads Codex's `inputModalities`).
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub images: bool,
     /// One of the machine's custom models (its settings), not one the provider lists.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub custom: bool,
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
+/// `ModelInfo` as it arrives: daemons (and stored probes) from before option descriptors sent
+/// a model's reasoning levels alone, as `efforts`.
+#[derive(Deserialize)]
+struct ModelInfoWire {
+    id: String,
+    name: String,
+    #[serde(default)]
+    short_name: Option<String>,
+    #[serde(default)]
+    default: bool,
+    #[serde(default)]
+    options: Vec<ModelOption>,
+    #[serde(default)]
+    efforts: Vec<String>,
+    #[serde(default)]
+    legacy: bool,
+    #[serde(default = "yes")]
+    images: bool,
+    #[serde(default)]
+    custom: bool,
+}
+
+impl From<ModelInfoWire> for ModelInfo {
+    fn from(w: ModelInfoWire) -> Self {
+        let mut options = w.options;
+        if !w.efforts.is_empty() && !options.iter().any(|o| o.role() == Some(OptionRole::Reasoning)) {
+            options.insert(0, ModelOption::reasoning(w.efforts.iter().map(|e| OptionChoice::new(e, &effort_label(e))).collect(), None));
+        }
+        ModelInfo { id: w.id, name: w.name, short_name: w.short_name, default: w.default, options, legacy: w.legacy, images: w.images, custom: w.custom }
+    }
+}
+
+impl ModelInfo {
+    /// A model with no options.
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+        ModelInfo { id: id.into(), name: name.into(), short_name: None, default: false, options: Vec::new(), legacy: false, images: true, custom: false }
+    }
+
+    /// Its reasoning option, if it has one.
+    pub fn reasoning(&self) -> Option<&ModelOption> {
+        self.options.iter().find(|o| o.role() == Some(OptionRole::Reasoning))
+    }
+
+    /// The reasoning efforts it takes, lowest first.
+    pub fn efforts(&self) -> Vec<&str> {
+        match self.reasoning() {
+            Some(ModelOption::Select { choices, .. }) => choices.iter().map(|c| c.id.as_str()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The option `id`, if it has one.
+    pub fn option(&self, id: &str) -> Option<&ModelOption> {
+        self.options.iter().find(|o| o.id() == id)
+    }
+
+    /// The options of `wanted` this model takes, with values it offers (a model switch keeps
+    /// what still applies).
+    pub fn accepted(&self, wanted: &ModelOptions) -> ModelOptions {
+        wanted.iter().filter(|(id, v)| self.option(id).is_some_and(|o| o.role() != Some(OptionRole::Reasoning) && o.accepts(v))).map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+}
+
+/// T3's names for reasoning levels (`CodexProvider.ts`, `REASONING_EFFORT_LABELS`).
+pub fn effort_label(effort: &str) -> String {
+    match effort {
+        "xhigh" => "Extra High".into(),
+        "xlow" => "Extra Low".into(),
+        other => {
+            let mut c = other.chars();
+            c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+        }
+    }
+}
+
+/// One thing a model can be asked for (T3's `ProviderOptionDescriptor`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ModelOption {
+    /// One of a few values.
+    Select {
+        id: String,
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        choices: Vec<OptionChoice>,
+        /// What the model runs with when none is picked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<OptionRole>,
+    },
+    /// On or off.
+    Boolean {
+        id: String,
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(default)]
+        default: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<OptionRole>,
+    },
+}
+
+/// What an option is for, so a client shows it where it belongs without knowing each provider's
+/// ids: the reasoning levels in the picker's column (the value rides in a thread's `effort`), a
+/// speed as the picker's segmented control and a bolt on its trigger, a context window on the
+/// trigger after the model's name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OptionRole {
+    Reasoning,
+    Speed,
+    ContextWindow,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptionChoice {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl OptionChoice {
+    pub fn new(id: &str, label: &str) -> Self {
+        OptionChoice { id: id.into(), label: label.into(), description: None }
+    }
+
+    pub fn described(mut self, description: &str) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+}
+
+/// The reasoning option's id. Its value is a thread's `effort`, never one of its `options`.
+pub const EFFORT_OPTION: &str = "effort";
+
+impl ModelOption {
+    /// Reasoning levels (a thread's `effort`).
+    pub fn reasoning(choices: Vec<OptionChoice>, default: Option<&str>) -> Self {
+        ModelOption::Select {
+            id: EFFORT_OPTION.into(),
+            label: "Reasoning".into(),
+            description: None,
+            choices,
+            default: default.map(str::to_string),
+            role: Some(OptionRole::Reasoning),
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        match self {
+            ModelOption::Select { id, .. } | ModelOption::Boolean { id, .. } => id,
+        }
+    }
+
+    pub fn role(&self) -> Option<OptionRole> {
+        match self {
+            ModelOption::Select { role, .. } | ModelOption::Boolean { role, .. } => *role,
+        }
+    }
+
+    /// Whether `value` is one this option takes.
+    pub fn accepts(&self, value: &OptionValue) -> bool {
+        match (self, value) {
+            (ModelOption::Select { choices, .. }, OptionValue::Choice(v)) => choices.iter().any(|c| &c.id == v),
+            (ModelOption::Boolean { .. }, OptionValue::Flag(_)) => true,
+            _ => false,
+        }
+    }
+}
+
+/// A picked option: a select's choice or a boolean.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum OptionValue {
+    Flag(bool),
+    Choice(String),
+}
+
+/// A thread's picked options besides its effort, by option id (T3's `ModelSelection.options`).
+pub type ModelOptions = std::collections::BTreeMap<String, OptionValue>;
+
+/// The limits on a thread's options (they come from clients).
+pub mod option_limits {
+    pub const OPTIONS: usize = 16;
+    pub const ID: usize = 64;
+    pub const VALUE: usize = 256;
+}
+
+/// Checks options from a client: at most [`option_limits::OPTIONS`], short ids and values, and
+/// never the effort (it has a field of its own).
+pub fn check_options(options: &ModelOptions) -> Result<(), String> {
+    use option_limits as l;
+    if options.len() > l::OPTIONS {
+        return Err(format!("a thread takes at most {} model options", l::OPTIONS));
+    }
+    for (id, v) in options {
+        if id.is_empty() || id.len() > l::ID || id.chars().any(char::is_control) {
+            return Err(format!("model option ids are 1 to {} bytes", l::ID));
+        }
+        if id == EFFORT_OPTION {
+            return Err("the effort is set with `effort`, not as an option".into());
+        }
+        if let OptionValue::Choice(c) = v
+            && (c.is_empty() || c.len() > l::VALUE || c.chars().any(char::is_control))
+        {
+            return Err(format!("model option values are 1 to {} bytes", l::VALUE));
+        }
+    }
+    Ok(())
+}
+
+/// A model the provider has that the installed version can't run yet (T3's
+/// `ServerProviderUpdateRequiredModel`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateRequired {
+    pub id: String,
+    pub name: String,
+    pub min_version: String,
 }
 
 /// What a provider can do (T3's provider capabilities, trimmed). The UI hides what's missing
@@ -1404,10 +1637,6 @@ pub struct Capabilities {
     pub subagents: bool,
     /// The runtime mode can change without a new session.
     pub mode_switch: bool,
-    /// The conversation's context can be compacted on request (T3's `compact` slash command):
-    /// a `message.send` of exactly `/compact` runs as a compaction.
-    #[serde(default)]
-    pub compact: bool,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1457,6 +1686,9 @@ pub enum Command {
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
+        /// The model's other options ([`Thread::options`]).
+        #[serde(default, skip_serializing_if = "ModelOptions::is_empty")]
+        options: ModelOptions,
         #[serde(default)]
         runtime_mode: RuntimeMode,
         #[serde(default)]
@@ -1488,6 +1720,10 @@ pub enum Command {
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
+        /// Replaces the thread's options when set. A new model keeps those it takes, unless
+        /// this says otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<ModelOptions>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         runtime_mode: Option<RuntimeMode>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1549,31 +1785,6 @@ pub enum Command {
     /// Drop a queued message.
     #[serde(rename = "message.unqueue")]
     MessageUnqueue { thread: ThreadId, message: String },
-    /// Change a queued message's text (T3's `queued-run.edit`). `attachments` replaces its
-    /// images when set and keeps them when unset.
-    #[serde(rename = "message.edit")]
-    MessageEdit {
-        thread: ThreadId,
-        message: String,
-        text: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        attachments: Option<Vec<Attachment>>,
-    },
-    /// Move a queued message in front of `before`, or to the end when unset (T3's
-    /// `queued-run.reorder`).
-    #[serde(rename = "message.reorder")]
-    MessageReorder {
-        thread: ThreadId,
-        message: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        before: Option<String>,
-    },
-    /// Send a queued message now (T3's "Send now"): into the active run as a steer (T3's
-    /// `queued-message.promote-to-steer`), or, on a thread whose queue is held (it was stopped,
-    /// or the run failed), as the next run, after which the rest of the queue drains (T3's
-    /// `queued-run.start`).
-    #[serde(rename = "message.promote")]
-    MessagePromote { thread: ThreadId, message: String },
     #[serde(rename = "run.interrupt")]
     RunInterrupt { thread: ThreadId },
     #[serde(rename = "request.respond")]
@@ -1845,7 +2056,8 @@ pub enum RelayFrame {
         id: String,
         /// Who sent it: an owner name or `agent:<name>`.
         by: String,
-        command: Command,
+        /// Boxed: a command is far bigger than the other frames.
+        command: Box<Command>,
         /// Access to the roll code repo the command works on (cloning, publishing), minted for
         /// this command alone.
         #[serde(default, skip_serializing_if = "Option::is_none")]

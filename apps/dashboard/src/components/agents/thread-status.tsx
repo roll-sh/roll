@@ -56,10 +56,9 @@ export function runEnded(run: Run | undefined): boolean {
 /**
  * The one status worth saying about a thread, T3's order: what waits on you first, then what's
  * working, then what failed, a plan ready to carry out, and a finished run you haven't looked at.
- * `null` when there's nothing to say (idle and seen). `planReady`: the newest run ended with a plan
- * in plan mode (`readyPlan`, known where the thread's nodes are loaded).
+ * `null` when there's nothing to say (idle and seen).
  */
-export function threadPill(thread: Thread, pending: readonly Request[], lastRun: Run | undefined, planReady = false): ThreadPill | null {
+export function threadPill(thread: Thread, pending: readonly Request[], lastRun: Run | undefined): ThreadPill | null {
   const waiting = pending.filter((r) => r.status === "pending" && r.thread === thread.id);
   const approval = waiting.find((r) => r.body.type === "approval");
   if (approval && approval.body.type === "approval" && approval.body.action === "plan") return { label: "Plan ready", tone: "accent", pulse: false };
@@ -68,7 +67,6 @@ export function threadPill(thread: Thread, pending: readonly Request[], lastRun:
   if (thread.status === "running" || thread.status === "waiting") return { label: "Working", tone: "accent", pulse: true };
   if (thread.status === "starting") return { label: "Connecting", tone: "accent", pulse: true };
   if (thread.status === "error" || lastRun?.status === "failed") return { label: "Failed", tone: "danger", pulse: false };
-  if (planReady) return { label: "Plan ready", tone: "accent", pulse: false };
   if (lastRun?.status === "completed" && unseen(thread, lastRun)) return { label: "Completed", tone: "ok", pulse: false };
   return null;
 }

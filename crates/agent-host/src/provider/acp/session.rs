@@ -54,6 +54,7 @@ struct State {
     tr: Translator,
     model: Option<String>,
     effort: Option<String>,
+    options: agent_proto::ModelOptions,
     /// Sent in front of the first prompt (ACP has no system prompt).
     instructions: Option<String>,
 }
@@ -169,6 +170,7 @@ pub(super) async fn open(
             tr,
             model: cfg.model.clone(),
             effort: cfg.effort.clone(),
+            options: cfg.options.clone(),
             instructions: cfg.instructions.clone().filter(|i| !i.trim().is_empty()),
         }),
         queue,
@@ -275,6 +277,7 @@ impl Inner {
             let want = Wanted {
                 model: state.model.as_deref(),
                 effort: state.effort.as_deref(),
+                options: &state.options,
                 runtime: tr.runtime,
                 interaction: tr.interaction,
                 opening,

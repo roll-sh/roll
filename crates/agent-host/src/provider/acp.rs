@@ -88,9 +88,6 @@ impl Acp {
             subagents: false,
             // Modes go out with `session/set_config_option`/`set_mode`, and approvals are roll's.
             mode_switch: true,
-            // ACP has no compaction request; an agent's own `/compact` command still goes
-            // through as a message.
-            compact: false,
         }
     }
 }
@@ -124,6 +121,7 @@ impl Provider for Acp {
             auth: AuthStatus::Unknown,
             detail: None,
             models: Vec::new(),
+            update_required: Vec::new(),
             capabilities: Self::base_capabilities(true),
             checking: false,
         };
@@ -146,7 +144,7 @@ impl Provider for Acp {
                     info.models = models
                         .available
                         .into_iter()
-                        .map(|m| ModelInfo { default: models.current.as_deref() == Some(m.id.as_str()), id: m.id, name: m.name, efforts: Vec::new(), custom: false })
+                        .map(|m| ModelInfo { default: models.current.as_deref() == Some(m.id.as_str()), ..ModelInfo::new(m.id, m.name) })
                         .collect();
                 }
                 // Starting a session would prove a login, and might start one: roll doesn't

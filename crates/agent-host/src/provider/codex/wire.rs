@@ -440,10 +440,26 @@ pub struct Model {
     pub hidden: bool,
     pub is_default: bool,
     pub supported_reasoning_efforts: Vec<ReasoningEffortOption>,
+    pub default_reasoning_effort: Option<String>,
+    pub service_tiers: Vec<ServiceTier>,
+    /// Deprecated for `serviceTiers`, still sent by older app-servers.
+    pub additional_speed_tiers: Vec<String>,
+    pub default_service_tier: Option<String>,
+    /// Absent means text and images.
+    pub input_modalities: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ReasoningEffortOption {
     pub reasoning_effort: String,
+    pub description: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ServiceTier {
+    pub id: String,
+    pub name: String,
+    pub description: String,
 }

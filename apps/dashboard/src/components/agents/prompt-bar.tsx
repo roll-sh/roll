@@ -3,7 +3,8 @@
 import { ArrowUp, Bot, ChevronDown, Workflow } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { openPalette } from "@/lib/agents-palette";
-import { targetLabel, useGoalTargets, useLaunchGoal, type GoalKind } from "./orchestrate";
+import { ModelPicker, type ModelChoice } from "./model-picker";
+import { goalChoice, targetLabel, useGoalTargets, useLaunchGoal, type GoalKind } from "./orchestrate";
 import { useAgents } from "./use-agents";
 
 const KIND = "roll:agents:prompt-kind";
@@ -27,6 +28,11 @@ export function PromptBar() {
   const area = useRef<HTMLTextAreaElement>(null);
   const box = useRef<HTMLFormElement>(null);
   const open = focused || text.length > 0 || !!error;
+  // A model picked for goals here, until the target changes; else the project's defaults.
+  const [picked, setPicked] = useState<{ project: string; choice: ModelChoice } | null>(null);
+  const choice = target && picked?.project === target.project.id ? picked.choice : undefined;
+  const shownChoice = choice ?? (target ? goalChoice(target.project, target.machine) : undefined);
+  const setChoice = (c: ModelChoice) => target && setPicked({ project: target.project.id, choice: c });
 
   useEffect(() => {
     try {
@@ -56,7 +62,7 @@ export function PromptBar() {
     setBusy(true);
     setError(null);
     try {
-      await launch(kind, goal, target);
+      await launch(kind, goal, target, choice);
       setText("");
       area.current?.blur();
     } catch (e) {
@@ -76,7 +82,12 @@ export function PromptBar() {
         void submit();
       }}
       onFocus={() => setFocused(true)}
-      onBlur={(e) => !box.current?.contains(e.relatedTarget as Node) && setFocused(false)}
+      onBlur={(e) => {
+        const to = e.relatedTarget as HTMLElement | null;
+        // The model picker's popup is portaled out of the form; the bar stays open while it's in use.
+        if (box.current?.contains(to) || to?.closest("[data-model-picker], [data-option-menu]")) return;
+        setFocused(false);
+      }}
       className={`palette-glass absolute bottom-4 left-1/2 z-10 w-[min(640px,calc(100%-30rem))] min-w-72 -translate-x-1/2 overflow-hidden transition-[border-radius,box-shadow] duration-200 ease-out ${open ? "rounded-2xl" : "rounded-full"}`}
       data-nodrag
     >
@@ -143,6 +154,9 @@ export function PromptBar() {
             <span className="truncate">{where}</span>
             <ChevronDown className="size-3 shrink-0" />
           </button>
+          {target && shownChoice && (
+            <ModelPicker providers={(target.machine.info?.providers ?? []).filter((p) => p.installed)} value={shownChoice} onChange={setChoice} side="top" />
+          )}
           {error ? <span className="min-w-0 flex-1 truncate text-right text-[12px] text-danger">{error}</span> : <span className="flex-1" />}
           {busy && <span className="shimmer shrink-0 text-[12px] text-muted">Starting…</span>}
           <button

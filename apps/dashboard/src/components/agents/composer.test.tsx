@@ -105,7 +105,7 @@ describe("Composer", () => {
     // The logged-in provider is picked, not the first one.
     await userEvent.click(screen.getByRole("button", { name: /^Model: Opus 5.5/ }));
     await userEvent.click(await screen.findByRole("radio", { name: "Max" }));
-    expect(screen.getByRole("button", { name: "Model: Opus 5.5 · max" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Model: Opus 5.5 · Max" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("switch", { name: "Worktree" }));
     await userEvent.type(screen.getByRole("textbox", { name: "Message" }), "Add a --json flag{Enter}");
     await waitFor(() =>

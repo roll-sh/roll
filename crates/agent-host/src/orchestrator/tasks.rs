@@ -51,6 +51,7 @@ pub(crate) struct Delegation {
     pub provider: Option<ProviderId>,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub options: Option<ModelOptions>,
     pub runtime_mode: Option<RuntimeMode>,
     pub interaction_mode: Option<InteractionMode>,
     pub worktree: bool,
@@ -331,7 +332,7 @@ impl Host {
                     "id": p.id,
                     "name": p.name,
                     "available": self.available(p),
-                    "models": p.models.iter().map(|m| json!({ "id": m.id, "name": m.name, "default": m.default, "efforts": m.efforts })).collect::<Vec<_>>(),
+                    "models": p.models.iter().map(|m| json!({ "id": m.id, "name": m.name, "default": m.default, "efforts": m.efforts(), "options": m.options })).collect::<Vec<_>>(),
                 })
             })
             .collect();
@@ -340,6 +341,7 @@ impl Host {
             "provider": thread.provider,
             "model": thread.model,
             "effort": thread.effort,
+            "options": thread.options,
             "runtime_mode": thread.runtime_mode,
             "interaction_mode": thread.interaction_mode,
             "depth": depth,
@@ -471,6 +473,22 @@ impl Host {
             None => None,
         };
         let effort = d.effort.or_else(|| if same && model == parent.model { parent.effort.clone() } else { None });
+        // Options the model doesn't take are refused (the agent can read them in
+        // `orchestrator_capabilities`); the parent's go along to a subagent on its model.
+        let options = match d.options {
+            Some(o) => {
+                check_options(&o).map_err(TaskError::invalid)?;
+                let listed = info.models.iter().find(|m| Some(&m.id) == model.as_ref()).or_else(|| info.models.iter().find(|m| m.default));
+                if let Some(m) = listed
+                    && let Some((id, _)) = o.iter().find(|(id, v)| !m.option(id).is_some_and(|x| x.accepts(v)))
+                {
+                    return Err(TaskError::new("option_unavailable", format!("{} doesn't take the option {id} with that value", m.id)));
+                }
+                o
+            }
+            None if same && model == parent.model => parent.options.clone(),
+            None => ModelOptions::new(),
+        };
         let (runtime_mode, interaction_mode) =
             narrow((parent.runtime_mode, parent.interaction_mode), (d.runtime_mode, d.interaction_mode))?;
 
@@ -492,6 +510,7 @@ impl Host {
             provider: provider.clone(),
             model,
             effort,
+            options,
             runtime_mode,
             interaction_mode,
             cwd: worktree.as_ref().map_or(parent.cwd.clone(), |w| w.path.clone()),
@@ -529,7 +548,7 @@ impl Host {
             status: NodeStatus::Running,
             started_at: at,
             completed_at: None,
-            body: NodeBody::Subagent { agent: provider.0.clone(), prompt: d.task.clone(), child: Some(id.clone()), result: None, progress: None, model: thread.model.clone() },
+            body: NodeBody::Subagent { agent: provider.0.clone(), prompt: d.task.clone(), child: Some(id.clone()), result: None },
         };
         self.store.put_thread_state(&id, &Private::default())?;
         self.tasks

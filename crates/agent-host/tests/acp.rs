@@ -225,6 +225,7 @@ fn session_config(cwd: &Path, runtime: RuntimeMode) -> SessionConfig {
         cwd: cwd.to_path_buf(),
         model: None,
         effort: None,
+        options: Default::default(),
         runtime_mode: runtime,
         interaction_mode: InteractionMode::Default,
         resume: None,

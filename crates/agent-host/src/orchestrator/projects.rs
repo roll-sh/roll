@@ -258,6 +258,7 @@ fn checked(mut s: ProjectSettings) -> Res<ProjectSettings> {
     if long(&d.model) || long(&d.effort) || d.provider.as_ref().is_some_and(|p| p.0.len() > MAX_FIELD) {
         return Err(Fail::Invalid(format!("a default is at most {MAX_FIELD} bytes")));
     }
+    agent_proto::check_options(&d.options).map_err(Fail::Invalid)?;
     if s.auto_settle.after_days.is_some_and(|d| !(1..=AutoSettle::MAX_DAYS).contains(&d)) {
         return Err(Fail::Invalid(format!("auto-settle waits 1 to {} days", AutoSettle::MAX_DAYS)));
     }

@@ -41,6 +41,9 @@ struct State {
     /// The model the thread runs (`thread/start` said), for the collaboration mode.
     thread_model: Option<String>,
     effort: Option<String>,
+    /// `turn/start`'s `serviceTier` (T3's `getCodexServiceTierOptionValue`): a tier picked, or
+    /// `fast` for a `fastMode` switch; never the standard tier, which is no tier.
+    service_tier: Option<String>,
     runtime: RuntimeMode,
     interaction: InteractionMode,
     context: Option<Value>,
@@ -78,6 +81,7 @@ impl CodexSession {
                 model: cfg.model.clone(),
                 thread_model: thread.model,
                 effort: cfg.effort.clone(),
+                service_tier: service_tier(&cfg.options),
                 runtime: cfg.runtime_mode,
                 interaction: cfg.interaction_mode,
                 context,
@@ -201,6 +205,16 @@ fn codex_input(input: &TurnInput) -> anyhow::Result<Vec<Value>> {
     Ok(items)
 }
 
+/// T3's `getCodexServiceTierOptionValue`.
+fn service_tier(options: &agent_proto::ModelOptions) -> Option<String> {
+    use agent_proto::OptionValue;
+    match options.get(super::SERVICE_TIER) {
+        Some(OptionValue::Choice(t)) if t != super::STANDARD_TIER => Some(t.clone()),
+        Some(_) => None,
+        None => matches!(options.get("fastMode"), Some(OptionValue::Flag(true))).then(|| "fast".to_string()),
+    }
+}
+
 impl State {
     /// T3's `buildCodexTurnStartParams`.
     fn turn_params(&self, input: Vec<Value>) -> Value {
@@ -221,6 +235,9 @@ impl State {
         }
         if let Some(effort) = &self.effort {
             params["effort"] = json!(effort);
+        }
+        if let Some(tier) = &self.service_tier {
+            params["serviceTier"] = json!(tier);
         }
         if let Some(context) = &self.context {
             params["additionalContext"] = context.clone();
@@ -303,25 +320,6 @@ impl Session for CodexSession {
                 Err(e.into())
             }
         }
-    }
-
-    /// T3's `compactThread`: `thread/compact/start` answers at once, and the compaction runs as
-    /// a turn Codex starts itself (`turn/started`, a `contextCompaction` item, `turn/completed`),
-    /// which the translator adopts as ours because it's expecting one.
-    async fn compact(&self) -> anyhow::Result<()> {
-        let thread = {
-            let mut state = self.inner.state.lock().unwrap();
-            if state.tr.turn().is_some() {
-                bail!("a codex turn is already running");
-            }
-            state.tr.expect_turn();
-            state.tr.root().to_string()
-        };
-        if let Err(e) = self.inner.rpc.request("thread/compact/start", json!({ "threadId": thread })).await {
-            self.inner.state.lock().unwrap().tr.turn_started(None);
-            return Err(e.into());
-        }
-        Ok(())
     }
 
     async fn steer(&self, input: TurnInput) -> anyhow::Result<()> {

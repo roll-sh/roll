@@ -17,6 +17,7 @@ pub(crate) struct NewThread {
     pub provider: ProviderId,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub options: ModelOptions,
     pub runtime_mode: RuntimeMode,
     pub interaction_mode: InteractionMode,
     pub worktree: bool,
@@ -25,12 +26,24 @@ pub(crate) struct NewThread {
 }
 
 impl Host {
+    /// What the machine says about `model` of `provider`, if it lists it.
+    pub(crate) fn model_info(&self, provider: &ProviderId, model: Option<&str>) -> Option<ModelInfo> {
+        let info = self.info.borrow();
+        let p = info.providers.iter().find(|p| &p.id == provider)?;
+        match model {
+            Some(m) => p.models.iter().find(|x| x.id == m),
+            None => p.models.iter().find(|x| x.default).or(p.models.first()),
+        }
+        .cloned()
+    }
+
     pub(crate) async fn thread_create(
         &self,
         spec: NewThread,
         prompt: Option<String>,
         attachments: Vec<Attachment>,
     ) -> Res<Reply> {
+        check_options(&spec.options).map_err(Fail::Invalid)?;
         let project = self.project(&spec.project)?;
         self.offered(&spec.provider)?;
         let id = ThreadId::from_suffix(&suffix());
@@ -47,6 +60,7 @@ impl Host {
             provider: spec.provider,
             model: spec.model,
             effort: spec.effort,
+            options: spec.options,
             runtime_mode: spec.runtime_mode,
             interaction_mode: spec.interaction_mode,
             cwd: worktree.as_ref().map_or(project.path.clone(), |w| w.path.clone()),
@@ -111,9 +125,13 @@ impl Host {
         provider: Option<ProviderId>,
         model: Option<String>,
         effort: Option<String>,
+        options: Option<ModelOptions>,
         runtime_mode: Option<RuntimeMode>,
         interaction_mode: Option<InteractionMode>,
     ) -> Res<Reply> {
+        if let Some(o) = &options {
+            check_options(o).map_err(Fail::Invalid)?;
+        }
         let mut rt = self.lock(thread).await?;
         if let Some(title) = title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
             rt.thread.title = title;
@@ -131,13 +149,24 @@ impl Host {
             rt.thread.provider = provider;
             rt.thread.model = None;
             rt.thread.effort = None;
+            rt.thread.options.clear();
             rt.thread.context = self.conversation_context(&rt, u32::MAX)?;
         }
-        if model.is_some() {
-            rt.thread.model = model;
+        if let Some(model) = model
+            && rt.thread.model.as_ref() != Some(&model)
+        {
+            // A new model keeps the options it takes (the machine knows which, once probed).
+            self.probed(Some(&rt.thread.provider)).await;
+            if let Some(info) = self.model_info(&rt.thread.provider, Some(&model)) {
+                rt.thread.options = info.accepted(&rt.thread.options);
+            }
+            rt.thread.model = Some(model);
         }
         if effort.is_some() {
             rt.thread.effort = effort;
+        }
+        if let Some(options) = options {
+            rt.thread.options = options;
         }
         if let Some(mode) = runtime_mode {
             rt.thread.runtime_mode = mode;
@@ -210,6 +239,7 @@ impl Host {
             provider: s.provider.clone(),
             model: s.model.clone(),
             effort: s.effort.clone(),
+            options: s.options.clone(),
             runtime_mode: s.runtime_mode,
             interaction_mode: s.interaction_mode,
             cwd: worktree.as_ref().map_or(s.cwd.clone(), |w| w.path.clone()),

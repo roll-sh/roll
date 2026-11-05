@@ -61,6 +61,7 @@ impl Probes {
             auth: AuthStatus::Unknown,
             detail: None,
             models: Vec::new(),
+            update_required: Vec::new(),
             capabilities: provider.capabilities(),
             checking: false,
         });

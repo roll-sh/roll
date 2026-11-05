@@ -359,7 +359,7 @@ async fn session(daemon: &Arc<dyn Daemon>, mut ws: Ws, events: &mpsc::UnboundedS
                     Ok(In::Frame(RelayFrame::Command { id, by, command, grant })) => {
                         let (tx, daemon) = (reply_tx.clone(), daemon.clone());
                         tokio::spawn(async move {
-                            let result = daemon.run_granted(id.clone(), by, command, grant.map(|g| *g)).await;
+                            let result = daemon.run_granted(id.clone(), by, *command, grant.map(|g| *g)).await;
                             // Read once the command is done: its records are at or below it.
                             let upto = daemon.last_seq().await.unwrap_or_else(|e| {
                                 tracing::warn!("reading the newest seq: {e:#}");

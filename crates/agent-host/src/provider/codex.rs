@@ -19,7 +19,7 @@ mod translate;
 mod wire;
 
 use super::{ForkAt, ForkFrom, Provider, ProviderConfig, ProviderEvent, Session, SessionConfig};
-use agent_proto::{AuthStatus, Capabilities, ModelInfo, ProviderId, ProviderInfo};
+use agent_proto::{AuthStatus, Capabilities, ModelInfo, ModelOption, OptionChoice, OptionRole, ProviderId, ProviderInfo, effort_label};
 use anyhow::Context;
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -163,6 +163,63 @@ struct Probe {
     models: Vec<ModelInfo>,
 }
 
+/// The option id of a Codex model's service tier (`turn/start`'s `serviceTier`).
+pub(crate) const SERVICE_TIER: &str = "serviceTier";
+/// The service tier that asks for none (T3's `DEFAULT_SERVICE_TIER_ID`).
+pub(crate) const STANDARD_TIER: &str = "default";
+/// At most this many reasoning levels or tiers are kept from one model.
+const MAX_CHOICES: usize = 16;
+
+/// A model from `model/list` with its options, as T3's `mapCodexModelCapabilities`
+/// (`apps/server/src/provider/CodexProvider.ts`): the reasoning levels with the model's default,
+/// and its service tiers after "Standard" (or the older `additionalSpeedTiers`, `fast` named
+/// "Fast").
+fn model_info(m: wire::Model) -> ModelInfo {
+    let mut options = Vec::new();
+    let default_effort = if m.model.starts_with("gpt-6-astra") { Some("medium".to_string()) } else { m.default_reasoning_effort.clone() };
+    let levels: Vec<OptionChoice> = m
+        .supported_reasoning_efforts
+        .iter()
+        .take(MAX_CHOICES)
+        .map(|e| {
+            let c = OptionChoice::new(&e.reasoning_effort, &effort_label(&e.reasoning_effort));
+            if e.description.is_empty() { c } else { c.described(&e.description) }
+        })
+        .collect();
+    if !levels.is_empty() {
+        let default = default_effort.filter(|d| levels.iter().any(|l| &l.id == d));
+        options.push(ModelOption::reasoning(levels, default.as_deref()));
+    }
+    let tiers: Vec<wire::ServiceTier> = if m.service_tiers.is_empty() {
+        m.additional_speed_tiers.iter().map(|id| wire::ServiceTier { name: if id == "fast" { "Fast".into() } else { id.clone() }, id: id.clone(), description: String::new() }).collect()
+    } else {
+        m.service_tiers
+    };
+    if !tiers.is_empty() {
+        let mut choices = vec![OptionChoice::new(STANDARD_TIER, "Standard")];
+        choices.extend(tiers.iter().filter(|t| !t.id.is_empty() && t.id != STANDARD_TIER).take(MAX_CHOICES).map(|t| {
+            let c = OptionChoice::new(&t.id, if t.name.is_empty() { &t.id } else { &t.name });
+            let description = if t.id == "ultrafast" && t.description.is_empty() { "Even faster, more expensive" } else { t.description.as_str() };
+            if description.is_empty() { c } else { c.described(description) }
+        }));
+        let default = m.default_service_tier.filter(|d| choices.iter().any(|c| &c.id == d)).unwrap_or_else(|| STANDARD_TIER.into());
+        options.push(ModelOption::Select {
+            id: SERVICE_TIER.into(),
+            label: "Service Tier".into(),
+            description: None,
+            choices,
+            default: Some(default),
+            role: Some(OptionRole::Speed),
+        });
+    }
+    ModelInfo {
+        default: m.is_default,
+        options,
+        images: m.input_modalities.is_none_or(|i| i.iter().any(|x| x == "image")),
+        ..ModelInfo::new(m.model.clone(), if m.display_name.is_empty() { m.model } else { m.display_name })
+    }
+}
+
 impl Codex {
     /// T3's `probeCodexAppServerProvider`: a short-lived app-server that only reads (`account/read`
     /// without a token refresh, `model/list`).
@@ -180,13 +237,7 @@ impl Codex {
                         None => json!({}),
                     };
                     let page: wire::ModelList = serde_json::from_value(rpc.request("model/list", params).await?)?;
-                    models.extend(page.data.into_iter().filter(|m| !m.hidden).map(|m| ModelInfo {
-                        name: if m.display_name.is_empty() { m.model.clone() } else { m.display_name },
-                        id: m.model,
-                        default: m.is_default,
-                        efforts: m.supported_reasoning_efforts.into_iter().map(|e| e.reasoning_effort).collect(),
-                        custom: false,
-                    }));
+                    models.extend(page.data.into_iter().filter(|m| !m.hidden).map(model_info));
                     cursor = page.next_cursor.filter(|c| !c.is_empty());
                     if cursor.is_none() {
                         break;
@@ -235,13 +286,16 @@ impl Provider for Codex {
             subagents: true,
             // Modes travel with every `turn/start`.
             mode_switch: true,
-            // `thread/compact/start`.
-            compact: true,
         }
     }
 
     fn configure(&self, cfg: ProviderConfig) {
         self.cfg.set(cfg);
+    }
+
+    /// T3 gives a bare custom Codex slug the first listed model's options.
+    fn custom_model_options(&self, _slug: &str, listed: &[ModelInfo]) -> Vec<ModelOption> {
+        listed.first().map(|m| m.options.clone()).unwrap_or_default()
     }
 
     async fn info(&self) -> ProviderInfo {
@@ -253,6 +307,7 @@ impl Provider for Codex {
             auth: AuthStatus::Unknown,
             detail: None,
             models: Vec::new(),
+            update_required: Vec::new(),
             capabilities: self.capabilities(),
             checking: false,
         };

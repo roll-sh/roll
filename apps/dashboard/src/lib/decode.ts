@@ -37,6 +37,9 @@ export const str: Decoder<string> = (v, p) => (typeof v === "string" ? v : fail(
 
 export const bool: Decoder<boolean> = (v, p) => (typeof v === "boolean" ? v : fail(p, `expected a boolean, got ${kind(v)}`));
 
+/** A string or a boolean (a picked model option, agent-proto `OptionValue`). */
+export const strOrBool: Decoder<string | boolean> = (v, p) => (typeof v === "string" || typeof v === "boolean" ? v : fail(p, `expected a string or a boolean, got ${kind(v)}`));
+
 export const num: Decoder<number> = (v, p) =>
   typeof v === "number" && Number.isFinite(v) ? v : fail(p, `expected a number, got ${kind(v)}`);
 

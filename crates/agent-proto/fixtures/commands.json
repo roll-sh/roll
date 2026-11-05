@@ -64,6 +64,9 @@
     "provider": "codex",
     "model": "gpt-5.5-codex",
     "effort": "high",
+    "options": {
+      "serviceTier": "fast"
+    },
     "runtime_mode": "full_access",
     "interaction_mode": "plan",
     "worktree": true,
@@ -85,6 +88,9 @@
     "thread": "thr_a1b2c3d4e5f60718",
     "title": "Renamed",
     "provider": "acp:gemini",
+    "options": {
+      "thinking": false
+    },
     "runtime_mode": "ask"
   },
   {
@@ -144,35 +150,6 @@
   },
   {
     "type": "message.unqueue",
-    "thread": "thr_a1b2c3d4e5f60718",
-    "message": "q1"
-  },
-  {
-    "type": "message.edit",
-    "thread": "thr_a1b2c3d4e5f60718",
-    "message": "q1",
-    "text": "and the changelog"
-  },
-  {
-    "type": "message.edit",
-    "thread": "thr_a1b2c3d4e5f60718",
-    "message": "q1",
-    "text": "no images",
-    "attachments": []
-  },
-  {
-    "type": "message.reorder",
-    "thread": "thr_a1b2c3d4e5f60718",
-    "message": "q2",
-    "before": "q1"
-  },
-  {
-    "type": "message.reorder",
-    "thread": "thr_a1b2c3d4e5f60718",
-    "message": "q1"
-  },
-  {
-    "type": "message.promote",
     "thread": "thr_a1b2c3d4e5f60718",
     "message": "q1"
   },

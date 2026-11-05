@@ -278,6 +278,7 @@ impl StepKind for StartAgent {
             json!({ "type": "object", "required": ["prompt"], "properties": {
                 "target": target_schema(), "project": project_schema(),
                 "provider": s("codex, claude or acp:<name>"), "model": f("A model id", "roll-model"), "effort": s("low … max"),
+                "options": { "type": "object", "description": "The model's other options by id (a speed, a context window, …)" },
                 "runtime_mode": { "enum": ["full_access", "auto_edit", "ask"] }, "interaction_mode": { "enum": ["default", "plan"] },
                 "worktree": { "type": "boolean", "description": "Its own git worktree" }, "title": f("The thread's title", "template"), "prompt": f("What the agent is asked", "template-long"),
                 "orchestrator": { "type": "boolean", "description": "Plan and delegate to subagents" },
@@ -293,6 +294,9 @@ impl StepKind for StartAgent {
         }
         if let (Some(Target::ProjectMachine), Some(ProjectRef::Repo { .. })) = (&c.target, &c.project) {
             return Err("project_machine needs a project by id".into());
+        }
+        if let Some(o) = &c.options {
+            agent_proto::check_options(o)?;
         }
         Ok(())
     }
@@ -396,6 +400,8 @@ impl StartAgent {
             provider,
             model: c.model.clone().or(d.model.clone()).or(pd.model.clone()),
             effort: c.effort.clone().or(d.effort.clone()).or(pd.effort.clone()),
+            // Options go with the model they were picked for: the step's, else the defaults'.
+            options: c.options.clone().or(d.options.clone()).unwrap_or_else(|| pd.options.clone()),
             runtime_mode: c.runtime_mode.or(d.runtime_mode).or(pd.runtime_mode).unwrap_or_default(),
             interaction_mode: c.interaction_mode.or(d.interaction_mode).or(pd.interaction_mode).unwrap_or_default(),
             worktree: c.worktree.or(d.worktree).or(pd.worktree).unwrap_or(false),

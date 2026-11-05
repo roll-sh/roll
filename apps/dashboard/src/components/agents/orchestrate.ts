@@ -11,7 +11,8 @@ import { useCallback, useMemo } from "react";
 import type { Command, Machine, Project, ProviderInfo, Thread } from "@/lib/agents-api";
 import { reachable } from "@/lib/agents-api";
 import type { AgentsClient } from "@/lib/agents-client";
-import { resolveModel } from "./model-picker";
+import { acceptedOptions } from "@/lib/agents-model-options";
+import { resolveModel, type ModelChoice } from "./model-picker";
 import { defaultProject, LAST_PROJECT } from "./new-agent";
 import { useAgents } from "./use-agents";
 
@@ -36,25 +37,39 @@ export function goalProvider(project: Project, machine: Machine): ProviderInfo |
 }
 
 /**
- * The `thread.create` for `goal`, or why it can't start there. An orchestrator stays in the
- * checkout and in default mode (it plans, and gives each part its own worktree); one agent takes
- * the project's defaults like the composer does.
+ * What a goal there runs on unless picked otherwise: the project's new-thread defaults where the
+ * machine has their provider, else the first logged-in provider's default model.
  */
-export function goalCommand(kind: GoalKind, goal: string, { project, machine }: GoalTarget): ThreadCreate | { error: string } {
-  const prompt = goal.trim();
-  if (!prompt) return { error: "Say what should get done." };
-  if (!reachable(machine)) return { error: `${machine.name} is offline.` };
+export function goalChoice(project: Project, machine: Machine): ModelChoice | undefined {
   const provider = goalProvider(project, machine);
-  if (!provider) return { error: `No agent is installed on ${machine.name}.` };
+  if (!provider) return undefined;
   const d = project.settings?.defaults ?? {};
   const same = d.provider === provider.id;
   const model = resolveModel(provider, same ? d.model : null);
+  return { provider: provider.id, model: model?.id ?? null, effort: same ? (d.effort ?? null) : null, options: same ? acceptedOptions(model, d.options) : {} };
+}
+
+/**
+ * The `thread.create` for `goal`, or why it can't start there. An orchestrator stays in the
+ * checkout and in default mode (it plans, and gives each part its own worktree); one agent takes
+ * the project's defaults like the composer does. `choice` is a model picked for this goal (the
+ * prompt bar's picker); without one the project's defaults decide.
+ */
+export function goalCommand(kind: GoalKind, goal: string, { project, machine }: GoalTarget, choice?: ModelChoice): ThreadCreate | { error: string } {
+  const prompt = goal.trim();
+  if (!prompt) return { error: "Say what should get done." };
+  if (!reachable(machine)) return { error: `${machine.name} is offline.` };
+  const installed = (machine.info?.providers ?? []).filter((p) => p.installed);
+  const picked = choice && installed.some((p) => p.id === choice.provider) ? choice : goalChoice(project, machine);
+  if (!picked) return { error: `No agent is installed on ${machine.name}.` };
+  const d = project.settings?.defaults ?? {};
   return {
     type: "thread.create",
     project: project.id,
-    provider: provider.id,
-    ...(model ? { model: model.id } : {}),
-    ...(same && d.effort ? { effort: d.effort } : {}),
+    provider: picked.provider,
+    ...(picked.model ? { model: picked.model } : {}),
+    ...(picked.effort ? { effort: picked.effort } : {}),
+    ...(Object.keys(picked.options).length ? { options: picked.options } : {}),
     runtime_mode: d.runtime_mode ?? "full_access",
     interaction_mode: kind === "orchestrate" ? "default" : (d.interaction_mode ?? "default"),
     worktree: kind === "orchestrate" ? false : (d.worktree ?? !!project.repo),
@@ -114,8 +129,8 @@ export function useGoalTargets(): { target: GoalTarget | undefined; targets: Goa
 export function useLaunchGoal() {
   const { client, openThread } = useAgents();
   return useCallback(
-    async (kind: GoalKind, goal: string, target: GoalTarget) => {
-      const command = goalCommand(kind, goal, target);
+    async (kind: GoalKind, goal: string, target: GoalTarget, choice?: ModelChoice) => {
+      const command = goalCommand(kind, goal, target, choice);
       if ("error" in command) throw new Error(command.error);
       const r = await client.run<{ type: "created"; id: string }>(target.machine.id, command, "created");
       rememberProject(target.project.id);

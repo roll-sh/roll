@@ -20,20 +20,90 @@
             "models": [
               {
                 "id": "claude-opus-5-5",
-                "name": "Opus 5.5",
+                "name": "Claude Opus 5.5",
+                "short_name": "Opus 5.5",
                 "default": true,
-                "efforts": [
-                  "low",
-                  "medium",
-                  "high",
-                  "max"
+                "options": [
+                  {
+                    "type": "select",
+                    "id": "effort",
+                    "label": "Reasoning",
+                    "choices": [
+                      {
+                        "id": "low",
+                        "label": "Low"
+                      },
+                      {
+                        "id": "medium",
+                        "label": "Medium"
+                      },
+                      {
+                        "id": "high",
+                        "label": "High"
+                      },
+                      {
+                        "id": "ultracode",
+                        "label": "Ultracode",
+                        "description": "xhigh effort plus multi-agent workflow orchestration"
+                      }
+                    ],
+                    "default": "medium",
+                    "role": "reasoning"
+                  },
+                  {
+                    "type": "boolean",
+                    "id": "fastMode",
+                    "label": "Fast Mode",
+                    "default": false,
+                    "role": "speed"
+                  }
                 ]
               },
               {
-                "id": "claude-opus-5-5[1m]",
-                "name": "Opus 5.5 (1M)",
+                "id": "claude-sonnet-4-6",
+                "name": "Claude Sonnet 4.6",
+                "default": false,
+                "options": [
+                  {
+                    "type": "select",
+                    "id": "contextWindow",
+                    "label": "Context Window",
+                    "choices": [
+                      {
+                        "id": "200k",
+                        "label": "200k"
+                      },
+                      {
+                        "id": "1m",
+                        "label": "1M"
+                      }
+                    ],
+                    "default": "200k",
+                    "role": "context_window"
+                  },
+                  {
+                    "type": "boolean",
+                    "id": "thinking",
+                    "label": "Thinking",
+                    "description": "Thinks before answering",
+                    "default": true
+                  }
+                ],
+                "legacy": true,
+                "images": false
+              },
+              {
+                "id": "claude-opus-5-5-20261101",
+                "name": "Opus 5.5 (pinned)",
                 "default": false,
                 "custom": true
+              }
+            ],
+            "update_required": [
+              {
+                "id": "claude-haiku-5-5",
+                "name": "Claude Haiku 5.5",
+                "min_version": "2.1.293"
               }
             ],
             "capabilities": {
@@ -43,8 +113,7 @@
               "plan_mode": true,
               "images": true,
               "subagents": true,
-              "mode_switch": true,
-              "compact": true
+              "mode_switch": true
             }
           },
           {
@@ -61,8 +130,7 @@
               "plan_mode": true,
               "images": true,
               "subagents": true,
-              "mode_switch": false,
-              "compact": true
+              "mode_switch": false
             }
           },
           {
@@ -77,8 +145,7 @@
               "plan_mode": true,
               "images": true,
               "subagents": false,
-              "mode_switch": true,
-              "compact": false
+              "mode_switch": true
             },
             "checking": true
           }

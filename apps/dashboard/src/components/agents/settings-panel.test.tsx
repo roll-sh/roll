@@ -21,7 +21,7 @@ const configures = (h: AgentsHarness) =>
 
 /** A machine whose daemon reports settings, and answers `machine.configure` as a daemon does: its `hello` (the machine record) first, then the reply. */
 function configured(set: MachineSettings = {}, over: Partial<Machine> = {}, refuse?: string) {
-  const codex = provider({ id: "codex", name: "Codex", auth: "missing", models: [{ id: "gpt-5.5-codex", name: "GPT-5.5 Codex", default: true, efforts: [] }] });
+  const codex = provider({ id: "codex", name: "Codex", auth: "missing", models: [{ id: "gpt-5.5-codex", name: "GPT-5.5 Codex", default: true, options: [] }] });
   const m = machine({ info: { ...machine().info!, providers: [provider(), codex], settings: machineConfig(set) }, ...over });
   let cursor = 10;
   const h: AgentsHarness = agentsHarness({

@@ -28,7 +28,7 @@ describe("machine settings in the dashboard", () => {
     expect(customModelError("x", p, [{ id: "x" }])).toBe("That custom model is already saved.");
     expect(customModelError("m".repeat(257), p, [])).toMatch(/256 characters/);
     // A custom model the daemon already lists (custom: true) isn't "built in".
-    expect(customModelError("big", { models: [{ id: "big", name: "Big", default: false, efforts: [], custom: true }] }, [])).toBeNull();
+    expect(customModelError("big", { models: [{ id: "big", name: "Big", default: false, options: [], custom: true }] }, [])).toBeNull();
   });
 
   it("edits keep the wire's shape: unset, not empty; a provider with nothing set goes", () => {

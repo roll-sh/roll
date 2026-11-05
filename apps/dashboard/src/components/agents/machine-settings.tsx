@@ -26,7 +26,8 @@ import {
 } from "@/lib/agents-api";
 import { customModelError, envNameError, settingsError, withFields, withProvider } from "@/lib/machine-settings";
 import { setAgentsView } from "@/lib/agents-surface";
-import { ModelPicker, ProviderGlyph } from "./model-picker";
+import { ModelPicker } from "./model-picker";
+import { ProviderLogo } from "./provider-logo";
 import { SandboxPanel } from "./sandbox";
 import { field, Note, SaveState, SettingRow, SettingsPage, SettingsSection, TextField, useSearching, useShown, type Setting } from "./settings-ui";
 import { loginCommand } from "./shared";
@@ -469,7 +470,7 @@ function ProviderCard({ ctx, base, info }: { ctx: Ctx; base: ProviderBase; info:
   return (
     <div data-setting={S.provider(base).id} className="text-[13px]">
       <div className="flex items-center gap-3 px-3.5 py-3">
-        <ProviderGlyph provider={base} />
+        <ProviderLogo provider={base} className="size-5" />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             <h4 className="font-medium tracking-[-0.01em]">{base.name}</h4>
@@ -744,7 +745,7 @@ export function DefaultsRows({
     <>
       <SettingRow
         s={rows.model}
-        onReset={defaults.provider && !disabled ? () => patch({ provider: undefined, model: undefined, effort: undefined }) : null}
+        onReset={defaults.provider && !disabled ? () => patch({ provider: undefined, model: undefined, effort: undefined, options: undefined }) : null}
         control={
           installed.length > 0 ? (
             <span className="rounded-lg border border-line-2 bg-panel-2 px-1">
@@ -752,8 +753,8 @@ export function DefaultsRows({
                 providers={installed}
                 side="bottom"
                 disabled={disabled}
-                value={{ provider: defaults.provider ?? "", model: defaults.model ?? null, effort: defaults.effort ?? null }}
-                onChange={(c) => patch({ provider: c.provider, model: c.model ?? undefined, effort: c.effort ?? undefined })}
+                value={{ provider: defaults.provider ?? "", model: defaults.model ?? null, effort: defaults.effort ?? null, options: defaults.options ?? {} }}
+                onChange={(c) => patch({ provider: c.provider, model: c.model ?? undefined, effort: c.effort ?? undefined, options: Object.keys(c.options).length ? c.options : undefined })}
               />
             </span>
           ) : (

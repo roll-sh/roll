@@ -134,7 +134,8 @@ function shareProviders(share: Share): ProviderInfo[] {
     version: null,
     auth: "ready",
     detail: null,
-    models: [...ms].map((m) => ({ id: m, name: m, default: false, efforts: [] })),
+    models: [...ms].map((m) => ({ id: m, name: m, default: false, options: [] })),
+    update_required: [],
     capabilities: { steer: false, fork: false, rollback: false, plan_mode: false, images: false, subagents: false, mode_switch: false },
   }));
 }

@@ -13,12 +13,13 @@ import type {
   InteractionMode,
   MachineId,
   Millis,
+  ModelOptions,
   ProviderId,
   RuntimeMode,
   SendMode,
   ThreadId,
 } from "./agents-api";
-import { array, bool, decode, int, json, literal, map, nullable, obj, optional, str, tagged, withDefault, type Decoder } from "./decode";
+import { array, bool, decode, int, json, literal, map, nullable, obj, optional, str, strOrBool, tagged, withDefault, type Decoder } from "./decode";
 
 export type AutomationId = string;
 export type AutomationRunId = string;
@@ -108,6 +109,8 @@ export interface AgentDefaults {
   provider: ProviderId | null;
   model: string | null;
   effort: string | null;
+  /** The model's other options by id (agent-proto `ModelOptions`). */
+  options: ModelOptions | null;
   runtime_mode: RuntimeMode | null;
   interaction_mode: InteractionMode | null;
   worktree: boolean | null;
@@ -188,6 +191,8 @@ export interface AgentStartConfig {
   provider: ProviderId | null;
   model: string | null;
   effort: string | null;
+  /** The model's other options by id (agent-proto `ModelOptions`). */
+  options: ModelOptions | null;
   runtime_mode: RuntimeMode | null;
   interaction_mode: InteractionMode | null;
   worktree: boolean | null;
@@ -498,6 +503,7 @@ const agentFields = {
   provider: opt(str),
   model: opt(str),
   effort: opt(str),
+  options: opt(map(strOrBool)),
   runtime_mode: opt(runtimeModeD),
   interaction_mode: opt(interactionModeD),
   worktree: opt(bool),

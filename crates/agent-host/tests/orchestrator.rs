@@ -88,7 +88,7 @@ async fn items_become_a_node_tree_with_activity() {
         id: "task".into(),
         parent: None,
         status: NodeStatus::Running,
-        body: NodeBody::Subagent { agent: "explorer".into(), prompt: "look around".into(), child: None, result: None, progress: None, model: None },
+        body: NodeBody::Subagent { agent: "explorer".into(), prompt: "look around".into(), child: None, result: None },
     }));
     session.emit(tool("t1", Some("task"), NodeStatus::Running));
     let t = w.wait_thread(&thread, |t| t.activity.as_deref() == Some("Running cargo test")).await;
@@ -216,106 +216,6 @@ async fn interrupting_stops_the_run_and_holds_the_queue() {
     assert_eq!(w.run(Command::RunInterrupt { thread: thread.clone() }).await, Reply::Ok);
 }
 
-fn queued_texts(t: &Thread) -> Vec<&str> {
-    t.queued.iter().map(|m| m.text.as_str()).collect()
-}
-
-/// T3's queue controls: edit, reorder, remove, and "Send now" (promote to steer while a run is
-/// going; start the next run on a held queue, after which the rest drains).
-#[tokio::test]
-async fn queued_messages_are_edited_reordered_and_sent_now() {
-    let fake = manual("codex", true);
-    let w = World::new(vec![fake.clone()]).await;
-    let thread = w.thread("codex", Some("one"), false).await;
-    let session = fake.session(0).await;
-    let mut ids = Vec::new();
-    for text in ["two", "three", "four"] {
-        let Reply::Created { id } = w.send(&thread, text, SendMode::Queue).await else { panic!() };
-        ids.push(id);
-    }
-    let edit = |message: &str, text: &str| Command::MessageEdit { thread: thread.clone(), message: message.into(), text: text.into(), attachments: None };
-    assert_eq!(w.run(edit(&ids[0], "two, edited")).await, Reply::Ok);
-    let empty = w.run(edit(&ids[0], "  ")).await;
-    assert!(matches!(empty, Reply::Error(ReplyError { code: ErrorCode::Invalid, .. })), "{empty:?}");
-    let reorder = |message: &str, before: Option<&str>| Command::MessageReorder { thread: thread.clone(), message: message.into(), before: before.map(Into::into) };
-    assert_eq!(w.run(reorder(&ids[2], Some(&ids[0]))).await, Reply::Ok);
-    let t = w.wait_thread(&thread, |t| t.queued.first().is_some_and(|m| m.text == "four")).await;
-    assert_eq!(queued_texts(&t), ["four", "two, edited", "three"]);
-    assert_eq!(w.run(reorder(&ids[2], None)).await, Reply::Ok);
-    let t = w.wait_thread(&thread, |t| t.queued.last().is_some_and(|m| m.text == "four")).await;
-    assert_eq!(queued_texts(&t), ["two, edited", "three", "four"]);
-    let unknown = w.run(reorder(&ids[0], Some("msg_nope"))).await;
-    assert!(matches!(unknown, Reply::Error(ReplyError { code: ErrorCode::NotFound, .. })), "{unknown:?}");
-
-    // Send now, while the run goes: it steers the run and leaves the queue.
-    let promote = |message: &str| Command::MessagePromote { thread: thread.clone(), message: message.into() };
-    assert_eq!(w.run(promote(&ids[1])).await, Reply::Ok);
-    assert_eq!(session.wait_calls(|c| c.len() == 2).await[1], Call::Steer("three".into()));
-    let t = w.wait_thread(&thread, |t| t.queued.len() == 2).await;
-    assert_eq!(queued_texts(&t), ["two, edited", "four"]);
-    assert_eq!(w.state().await.runs(&thread)[0].steers, vec!["three"]);
-
-    // Stopped, the queue is held; Send now starts that message, and the rest drains after it.
-    assert_eq!(w.run(Command::RunInterrupt { thread: thread.clone() }).await, Reply::Ok);
-    w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle).await;
-    let Reply::Created { .. } = w.run(promote(&ids[2])).await else { panic!("a run starts") };
-    let t = w.wait_thread(&thread, |t| t.run_count == 2).await;
-    assert_eq!(queued_texts(&t), ["two, edited"]);
-    session.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
-    let t = w.wait_thread(&thread, |t| t.run_count == 3).await;
-    assert!(t.queued.is_empty());
-    assert_eq!(sends(&session.wait_calls(|c| sends(c).len() == 3).await), ["one", "four", "two, edited"]);
-}
-
-/// T3's `/compact`: a run whose provider compacts instead of taking a turn; steering it queues
-/// (a compaction can't be steered), and its row gets the context before and after from the
-/// thread's reports when the provider doesn't say (Codex).
-#[tokio::test]
-async fn compact_runs_as_a_compaction_and_steering_it_queues() {
-    let caps = Capabilities { steer: true, compact: true, ..Capabilities::default() };
-    let fake = FakeProvider::with("codex", caps, Script::Manual);
-    let w = World::new(vec![fake.clone()]).await;
-    let thread = w.thread("codex", Some("one"), false).await;
-    let session = fake.session(0).await;
-    session.emit(ProviderEvent::Context(ContextUsage { used_tokens: 180_000, max_tokens: Some(258_000), total_processed_tokens: None }));
-    session.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
-    w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle && t.context.is_some()).await;
-
-    let Reply::Created { .. } = w.send(&thread, " /compact ", SendMode::Queue).await else { panic!() };
-    assert_eq!(session.wait_calls(|c| c.len() == 2).await[1], Call::Compact);
-    w.wait_thread(&thread, |t| t.status == ThreadStatus::Running).await;
-    // Steering a compaction queues the message instead; Send now refuses and keeps its place.
-    let Reply::Created { id } = w.send(&thread, "then this", SendMode::Steer).await else { panic!("queued") };
-    let refused = w.run(Command::MessagePromote { thread: thread.clone(), message: id }).await;
-    assert!(matches!(refused, Reply::Error(ReplyError { code: ErrorCode::Conflict, .. })), "{refused:?}");
-    assert_eq!(w.wait_thread(&thread, |t| t.queued.len() == 1).await.queued[0].text, "then this");
-
-    let item = |status| ProviderEvent::Item(Item { id: "cc".into(), parent: None, status, body: NodeBody::Compaction { before_tokens: None, after_tokens: None, error: None } });
-    session.emit(item(NodeStatus::Running));
-    session.emit(item(NodeStatus::Completed));
-    session.emit(ProviderEvent::Context(ContextUsage { used_tokens: 30_000, max_tokens: Some(258_000), total_processed_tokens: None }));
-    session.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
-    // The queue drains after it: the steer went in as the next run.
-    let t = w.wait_thread(&thread, |t| t.run_count == 3).await;
-    assert_eq!(t.context.unwrap().used_tokens, 30_000);
-    assert_eq!(sends(&session.wait_calls(|c| sends(c).len() == 2).await), ["one", "then this"]);
-    let s = w.state().await;
-    let runs = s.runs(&thread);
-    assert_eq!((runs[1].prompt.as_str(), runs[1].status), (" /compact ", RunStatus::Completed));
-    let compaction = s.nodes(&thread).into_iter().find(|n| matches!(n.body, NodeBody::Compaction { .. })).unwrap();
-    assert_eq!(compaction.body, NodeBody::Compaction { before_tokens: Some(180_000), after_tokens: Some(30_000), error: None });
-    assert_eq!(compaction.run, runs[1].id);
-}
-
-/// On a provider that can't compact, `/compact` is an ordinary message.
-#[tokio::test]
-async fn compact_is_a_message_where_the_provider_cant() {
-    let fake = manual("acp:grok", false);
-    let w = World::new(vec![fake.clone()]).await;
-    w.thread("acp:grok", Some("/compact"), false).await;
-    assert_eq!(fake.session(0).await.wait_calls(|c| !c.is_empty()).await, [Call::Send("/compact".into())]);
-}
-
 #[tokio::test]
 async fn approvals_wait_and_are_answered_once() {
     let fake = manual("codex", false);
@@ -419,6 +319,7 @@ async fn command_ids_are_idempotent() {
         provider: ProviderId::codex(),
         model: None,
         effort: None,
+        options: Default::default(),
         runtime_mode: RuntimeMode::FullAccess,
         interaction_mode: InteractionMode::Default,
         worktree: false,
@@ -752,6 +653,7 @@ async fn accepting_a_plan_leaves_plan_mode() {
             provider: ProviderId::claude(),
             model: None,
             effort: None,
+            options: Default::default(),
             runtime_mode: RuntimeMode::AutoEdit,
             interaction_mode: InteractionMode::Plan,
             worktree: false,
@@ -1011,6 +913,7 @@ async fn a_checkout_an_agent_works_in_is_never_pulled_under_it() {
         provider: ProviderId::claude(),
         model: None,
         effort: None,
+        options: Default::default(),
         runtime_mode: RuntimeMode::FullAccess,
         interaction_mode: InteractionMode::Default,
         worktree: false,
@@ -1119,7 +1022,9 @@ async fn project_settings_are_checked_and_the_setup_script_runs_in_new_worktrees
     // Bad settings are refused, and nothing changes.
     let mut twice = settings.clone();
     twice.scripts.push(script("lint", "Again", "true", false));
-    for bad in [twice, ProjectSettings { scripts: vec![script("x y", "X", "true", false)], ..settings.clone() }, ProjectSettings {
+    let mut effort_option = settings.clone();
+    effort_option.defaults.options = ModelOptions::from([("effort".to_string(), OptionValue::Choice("high".into()))]);
+    for bad in [twice, effort_option, ProjectSettings { scripts: vec![script("x y", "X", "true", false)], ..settings.clone() }, ProjectSettings {
         scripts: vec![script("empty", "Empty", "  ", false)],
         ..settings.clone()
     }] {
@@ -1188,6 +1093,7 @@ async fn machine_settings_are_checked_stored_applied_and_reported_without_creden
         provider: ProviderId(provider.into()),
         model: Some("big-1".into()),
         effort: None,
+        options: Default::default(),
         runtime_mode: RuntimeMode::FullAccess,
         interaction_mode: InteractionMode::Default,
         worktree,

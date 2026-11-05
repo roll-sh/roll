@@ -221,6 +221,7 @@ pub(crate) struct Live {
     capabilities: Capabilities,
     model: Option<String>,
     effort: Option<String>,
+    options: ModelOptions,
     runtime: RuntimeMode,
     interaction: InteractionMode,
 }
@@ -530,6 +531,7 @@ impl Host {
                 provider,
                 model,
                 effort,
+                options,
                 runtime_mode,
                 interaction_mode,
                 worktree,
@@ -543,6 +545,7 @@ impl Host {
                     provider,
                     model,
                     effort,
+                    options,
                     runtime_mode,
                     interaction_mode,
                     worktree,
@@ -551,8 +554,8 @@ impl Host {
                 };
                 self.thread_create(spec, prompt, attachments).await
             }
-            Command::ThreadConfigure { thread, title, provider, model, effort, runtime_mode, interaction_mode } => {
-                self.thread_configure(&thread, title, provider, model, effort, runtime_mode, interaction_mode).await
+            Command::ThreadConfigure { thread, title, provider, model, effort, options, runtime_mode, interaction_mode } => {
+                self.thread_configure(&thread, title, provider, model, effort, options, runtime_mode, interaction_mode).await
             }
             Command::ThreadFork { thread, at, worktree } => self.thread_fork(&thread, at, worktree).await,
             Command::ThreadArchive { thread } => self.thread_archive(&thread, true).await,
@@ -572,13 +575,6 @@ impl Host {
                 self.message_send(&thread, text, attachments, mode).await
             }
             Command::MessageUnqueue { thread, message } => self.message_unqueue(&thread, &message).await,
-            Command::MessageEdit { thread, message, text, attachments } => {
-                self.message_edit(&thread, &message, text, attachments).await
-            }
-            Command::MessageReorder { thread, message, before } => {
-                self.message_reorder(&thread, &message, before.as_deref()).await
-            }
-            Command::MessagePromote { thread, message } => self.message_promote(&thread, &message).await,
             Command::RunInterrupt { thread } => {
                 // Like T3's Stop: the thread's delegated tasks stop with it.
                 let reply = self.run_interrupt(&thread).await;

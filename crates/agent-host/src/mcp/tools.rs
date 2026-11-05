@@ -51,7 +51,8 @@ pub(crate) fn list() -> Value {
                     "title": { "type": "string", "description": "A short title for its thread (default: from the task)." },
                     "provider": { "type": "string", "description": "A provider id from `orchestrator_capabilities` (default: yours)." },
                     "model": { "type": "string" },
-                    "effort": { "type": "string" },
+                    "effort": { "type": "string", "description": "One of the model's reasoning levels (`efforts` in `orchestrator_capabilities`)." },
+                    "options": { "type": "object", "additionalProperties": { "type": ["string", "boolean"] }, "description": "The model's other options by id, e.g. {\"fastMode\": true} (`options` in `orchestrator_capabilities`). Default: yours when on your model." },
                     "runtime_mode": { "type": "string", "enum": ["inherit", "full_access", "auto_edit", "ask"], "description": "Default inherit. Broader than yours is refused." },
                     "interaction_mode": { "type": "string", "enum": ["inherit", "default", "plan"], "description": "Default inherit. `default` under a `plan` parent is refused." },
                     "worktree": { "type": "boolean", "description": "Run in its own git worktree on a new branch, from your checkout's HEAD." },
@@ -142,6 +143,7 @@ struct DelegateArgs {
     provider: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+    options: Option<agent_proto::ModelOptions>,
     runtime_mode: Option<RuntimeArg>,
     interaction_mode: Option<InteractionArg>,
     #[serde(default)]
@@ -245,6 +247,7 @@ async fn delegate(host: &Arc<Host>, caller: &ThreadId, arguments: Value) -> Resu
         provider: a.provider.filter(|p| !p.is_empty()).map(ProviderId),
         model: a.model.filter(|m| !m.is_empty()),
         effort: a.effort.filter(|e| !e.is_empty()),
+        options: a.options,
         runtime_mode: match a.runtime_mode {
             None | Some(RuntimeArg::Inherit) => None,
             Some(RuntimeArg::FullAccess) => Some(RuntimeMode::FullAccess),
