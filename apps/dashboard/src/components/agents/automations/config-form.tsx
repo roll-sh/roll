@@ -8,7 +8,7 @@
  */
 
 import { Minus, Plus } from "lucide-react";
-import { useMemo, type ReactNode } from "react";
+import { createContext, useContext, useMemo, type ReactNode } from "react";
 import type { ModelOptions, ProviderInfo } from "@/lib/agents-api";
 import type { ProjectRef, Target } from "@/lib/automations-api";
 import type { Problems, Schema, Variable } from "@/lib/automations-ui";
@@ -34,8 +34,21 @@ export interface FormContext {
 
 type Obj = Record<string, unknown>;
 
+/**
+ * A schema's fields in the order to fill them: the required ones first, as the schema lists them
+ * (`properties` arrive alphabetical: the server's JSON keeps no order), then the rest.
+ */
+export function fieldOrder(schema: Schema): [string, Schema][] {
+  const req = schema.required ?? [];
+  const rank = (k: string) => (req.includes(k) ? req.indexOf(k) : req.length);
+  return Object.entries(schema.properties ?? {}).sort(([a], [b]) => rank(a) - rank(b));
+}
+
+/** Whether the field a `Label` titles must be filled. */
+const RequiredCtx = createContext(false);
+
 export function ConfigForm({ schema, value, onChange, ctx }: { schema: Schema; value: Obj; onChange: (next: Obj) => void; ctx: FormContext }) {
-  const props = Object.entries(schema.properties ?? {});
+  const props = fieldOrder(schema);
   const hasModel = props.some(([, s]) => s.format === "roll-model");
   const set = (k: string, v: unknown) => onChange({ ...value, [k]: v });
   if (!props.length) return <p className="text-[12px] text-subtle">Nothing to set up.</p>;
@@ -45,18 +58,19 @@ export function ConfigForm({ schema, value, onChange, ctx }: { schema: Schema; v
         if (hasModel && (k === "provider" || k === "effort")) return null;
         const at = `${ctx.at}.${k}`;
         return (
-          <FieldFor
-            key={k}
-            name={k}
-            schema={s}
-            required={!!schema.required?.includes(k)}
-            value={value[k]}
-            onChange={(v) => set(k, v)}
-            whole={value}
-            onWhole={onChange}
-            ctx={{ ...ctx, at }}
-            preview={ctx.preview?.[k]}
-          />
+          <RequiredCtx.Provider key={k} value={!!schema.required?.includes(k)}>
+            <FieldFor
+              name={k}
+              schema={s}
+              required={!!schema.required?.includes(k)}
+              value={value[k]}
+              onChange={(v) => set(k, v)}
+              whole={value}
+              onWhole={onChange}
+              ctx={{ ...ctx, at }}
+              preview={ctx.preview?.[k]}
+            />
+          </RequiredCtx.Provider>
         );
       })}
     </div>
@@ -64,12 +78,19 @@ export function ConfigForm({ schema, value, onChange, ctx }: { schema: Schema; v
 }
 
 function Label({ title, description, children, inline, htmlFor }: { title: string; description?: string; children: ReactNode; inline?: boolean; htmlFor?: string }) {
+  const required = useContext(RequiredCtx);
+  const mark = required && (
+    <span aria-hidden className="ml-1.5 text-[11px] font-normal text-subtle">
+      Required
+    </span>
+  );
   if (inline)
     return (
       <div className="flex items-center gap-3">
         <div className="min-w-0 flex-1">
           <label htmlFor={htmlFor} className="block text-[12.5px] font-[510] text-soft">
             {title}
+            {mark}
           </label>
           {description && <p className="mt-0.5 text-[11.5px] leading-snug text-subtle">{description}</p>}
         </div>
@@ -81,6 +102,7 @@ function Label({ title, description, children, inline, htmlFor }: { title: strin
       <div className="mb-1.5">
         <label htmlFor={htmlFor} className="block text-[12.5px] font-[510] text-soft">
           {title}
+          {mark}
         </label>
         {description && <p className="mt-0.5 text-[11.5px] leading-snug text-subtle">{description}</p>}
       </div>
@@ -113,7 +135,7 @@ function FieldFor({
   ctx: FormContext;
   preview?: unknown;
 }) {
-  const title = titleOf(name, s) + (required ? "" : "");
+  const title = titleOf(name, s);
   const error = ctx.problems[ctx.at];
   const tplProps = { variables: ctx.variables, sample: ctx.sample, error, preview: preview === undefined ? null : show(preview) };
   switch (s.format) {

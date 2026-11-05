@@ -48,6 +48,15 @@ function show(schema: Schema, initial: Record<string, unknown> = {}, entities: M
 
 // Several pickers open and load in each test: allow for a busy machine.
 describe("automation fields that name a thing", { timeout: 15_000 }, () => {
+  it("lists what must be filled first, marked, in the schema's order (the catalog's keys are alphabetical)", () => {
+    show(step("linear.create_issue"));
+    const labels = [...document.querySelectorAll("label")].map((l) => l.textContent);
+    expect(labels.slice(0, 2)).toEqual(["TeamRequired", "TitleRequired"]);
+    expect(labels.slice(2).every((l) => !l?.includes("Required"))).toBe(true);
+    // The mark isn't part of a field's name.
+    expect(screen.getByRole("button", { name: "Team" })).toBeInTheDocument();
+  });
+
   it("create an issue: a team from Linear, then that team's states", async () => {
     const { onValue, lookup } = show(step("linear.create_issue"));
     macClick(screen.getByRole("button", { name: "Team" }));
