@@ -248,7 +248,10 @@ export function EndpointEditor({
   const [problem, setProblem] = useState<string | null>(null);
   const box = useRef<HTMLFormElement>(null);
   useEscapeLayer(true, onCancel);
-  useEffect(() => box.current?.scrollIntoView?.({ block: "nearest", behavior: "smooth" }), []);
+  // Braces: Chromium's scrollIntoView answers a promise, and an effect may only return its cleanup.
+  useEffect(() => {
+    box.current?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
+  }, []);
 
   const chooseKind = (k: EndpointKind) => {
     setKind(k);
@@ -669,7 +672,7 @@ export function ProviderEndpointRow({ machine, provider, onNew }: { machine: Mac
           onChange={(v) => void choose(v)}
           options={[
             { value: "own", label: "Own login" },
-            ...list.filter((e) => !incompatible(provider.id, e.kind)).map((e) => ({ value: `e:${e.id}`, label: e.name, hint: KIND_SHORT[e.kind] })),
+            ...list.filter((e) => !incompatible(provider.id, e.kind)).map((e) => ({ value: `e:${e.id}`, label: e.name, hint: e.name === KIND_SHORT[e.kind] ? undefined : KIND_SHORT[e.kind] })),
             { value: "new", label: "New endpoint…", icon: <Plus className="size-3.5 text-subtle" /> },
           ]}
         />
