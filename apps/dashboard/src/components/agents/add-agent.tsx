@@ -48,7 +48,11 @@ export function RegistrySheet({ machine }: { machine: Machine }) {
   const [installing, setInstalling] = useState<string | null>(null);
   const [rowError, setRowError] = useState<{ id: string; message: string } | null>(null);
   const live = useRef(true);
-  useEffect(() => () => void (live.current = false), []);
+  // Set on every mount: React's development double mount runs the cleanup once in between.
+  useEffect(() => {
+    live.current = true;
+    return () => void (live.current = false);
+  }, []);
 
   const load = async () => {
     const r = await client.send(machine.id, { type: "registry.list" }).catch((e: unknown) => ({ type: "error", code: "internal", message: e instanceof Error ? e.message : String(e) }) as Reply);

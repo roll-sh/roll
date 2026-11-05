@@ -1,5 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Command, Machine, RegistryAgent, RegistryInstalled, Reply } from "@/lib/agents-api";
 import { setActiveClient } from "@/lib/agents-client";
@@ -23,7 +24,7 @@ const REGISTRY: RegistryAgent[] = [
  * A machine whose daemon answers the registry commands as a daemon does: installs reply after
  * `hello` says the provider is offered, and `release()` lets a held install finish.
  */
-function daemon(over: { registry?: RegistryInstalled[] | undefined; online?: boolean } = { registry: [] }) {
+function daemon(over: { registry?: RegistryInstalled[] | undefined; online?: boolean; strict?: boolean } = { registry: [] }) {
   let installed: RegistryInstalled[] = over.registry ?? [];
   const base = machine();
   const goose = provider({ id: "acp:goose", name: "goose", version: "1.57.0", auth: "unknown", models: [] });
@@ -56,7 +57,8 @@ function daemon(over: { registry?: RegistryInstalled[] | undefined; online?: boo
     }
     return { type: "ok" };
   });
-  renderAgents(<SettingsPanel target={`m:${m.id}`} onClose={vi.fn()} />, h);
+  const panel = <SettingsPanel target={`m:${m.id}`} onClose={vi.fn()} />;
+  renderAgents(over.strict ? <StrictMode>{panel}</StrictMode> : panel, h);
   return { h, release: () => (held as (() => void) | null)?.() };
 }
 
@@ -85,6 +87,14 @@ describe("adding an agent from the ACP registry", () => {
     // The daemon's hello: a provider card for it, with Remove in its details.
     const providers = screen.getByRole("region", { name: "Providers" });
     await waitFor(() => expect(within(providers).getByRole("button", { name: "goose details" })).toBeInTheDocument());
+  });
+
+  // React's development double mount (Next dev) ran the cleanup in between and every answer was
+  // dropped: the popover said "Looking at the registry…" for ever in the demo.
+  it("lists the registry under StrictMode too", async () => {
+    daemon({ registry: [], strict: true });
+    await userEvent.click(screen.getByRole("button", { name: "Add agent" }));
+    expect(await screen.findByRole("button", { name: "Install goose" })).toBeEnabled();
   });
 
   it("says why an install failed, inline", async () => {
