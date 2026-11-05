@@ -116,7 +116,8 @@ pub struct Store {
 #[derive(Clone, Copy)]
 struct Seen {
     at: u64,
-    written: u64,
+    /// Unset: not written by this process yet (the first use always is).
+    written: Option<u64>,
 }
 
 impl Store {

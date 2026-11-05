@@ -514,13 +514,19 @@ async fn the_config_file_reloads_and_a_bad_change_keeps_the_last_good_one() {
     let path = dir.path().join("gateway.toml");
     std::fs::write(&path, CONFIG).unwrap();
     let first = config::load(&path).unwrap();
-    let seen: Arc<Mutex<Vec<u16>>> = Arc::default();
+    // What the watcher reported: the port applied, or why a change was kept out.
+    let seen: Arc<Mutex<Vec<Result<u16, String>>>> = Arc::default();
     let task = {
         let seen = seen.clone();
         let path = path.clone();
-        tokio::spawn(config::watch(path, first.stamp, Duration::from_millis(40), move |l: config::Loaded| {
+        tokio::spawn(config::watch(path, first.stamp, Duration::from_millis(40), move |r: config::Reload| {
             let seen = seen.clone();
-            async move { seen.lock().unwrap().push(l.settings.port) }
+            async move {
+                seen.lock().unwrap().push(match r {
+                    config::Reload::Apply(l) => Ok(l.settings.port),
+                    config::Reload::Keep { why } => Err(why),
+                })
+            }
         }))
     };
     let wait_for = |n: usize| {
@@ -535,20 +541,35 @@ async fn the_config_file_reloads_and_a_bad_change_keeps_the_last_good_one() {
             panic!("no reload: {:?}", seen.lock().unwrap());
         }
     };
-    // Nothing changed: nothing applied.
+    // Nothing changed: nothing reported.
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(seen.lock().unwrap().is_empty());
 
     std::fs::write(&path, CONFIG.replace("18790", "18791")).unwrap();
     wait_for(1).await;
-    // A file that doesn't check is skipped: no call, and the next good change applies.
+    // A file that doesn't check, then no file: each kept out with why, and the next good
+    // change applies.
     std::fs::write(&path, CONFIG.replace("18790", "80")).unwrap();
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    std::fs::remove_file(&path).unwrap();
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    assert_eq!(*seen.lock().unwrap(), [18791]);
-    std::fs::write(&path, CONFIG.replace("18790", "18792")).unwrap();
     wait_for(2).await;
-    assert_eq!(*seen.lock().unwrap(), [18791, 18792]);
+    std::fs::remove_file(&path).unwrap();
+    wait_for(3).await;
+    std::fs::write(&path, CONFIG.replace("18790", "18792")).unwrap();
+    wait_for(4).await;
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen[0], Ok(18791));
+    assert!(seen[1].as_ref().is_err_and(|why| why.contains("1024")), "{:?}", seen[1]);
+    assert!(seen[2].as_ref().is_err_and(|why| why.contains("is gone")), "{:?}", seen[2]);
+    assert_eq!(seen[3], Ok(18792));
     task.abort();
+}
+
+#[test]
+fn the_client_commands_find_the_store_without_resolving_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gateway.toml");
+    std::fs::write(&path, CONFIG.replace("env:HOME", "env:ROLL_GATEWAY_TEST_UNSET")).unwrap();
+    assert!(config::load(&path).is_err());
+    assert_eq!(config::data_dir(&path).unwrap(), dir.path().join("state"));
+    std::fs::write(&path, "port = 9000\n").unwrap();
+    assert_eq!(config::data_dir(&path).unwrap(), dir.path());
 }

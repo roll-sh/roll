@@ -6198,6 +6198,7 @@ dependencies = [
  "code-control",
  "code-sql",
  "libc",
+ "model-gateway",
  "nosql-control",
  "nosql-engine",
  "nosql-proto",

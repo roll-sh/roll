@@ -18,6 +18,8 @@ roll-server-tests = ["dep:nosql-engine", "dep:nosql-server", "dep:nosql-storage"
 agent-host.workspace = true
 agent-proto.workspace = true
 libc.workspace = true
+# `roll gateway`: the standalone model gateway.
+model-gateway.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 bytes.workspace = true
