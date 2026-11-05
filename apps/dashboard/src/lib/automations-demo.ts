@@ -23,7 +23,7 @@ import {
   type TestResult,
 } from "./automations-api";
 import { ApiError } from "./code-api";
-import { BUILT_IN_STEPS, BUILT_IN_TRIGGERS, triggerSource, withBuiltIns } from "./automations-ui";
+import { BUILT_IN_STEPS, BUILT_IN_TRIGGERS, ev, triggerSource, withBuiltIns } from "./automations-ui";
 
 /** What the demo owner lends its automations. */
 export interface DemoHost {
@@ -69,8 +69,8 @@ const CATALOG: Catalog = withBuiltIns({
       title: "Linear",
       description: "Issues assigned to roll, comments that mention it, status changes.",
       events: [
-        { kind: "issue.assigned", title: "Issue assigned to roll", fields: ["issue.identifier", "issue.title", "issue.description", "issue.url", "issue.labels", "issue.team"] },
-        { kind: "comment.mention", title: "Mentioned in a comment", fields: ["issue.identifier", "issue.title", "comment.body", "comment.author"] },
+        ev("issue.assigned", "Issue assigned to roll", ["issue.identifier", "issue.title", "issue.description", "issue.url", "issue.labels", "issue.team"]),
+        ev("comment.mention", "Mentioned in a comment", ["issue.identifier", "issue.title", "comment.body", "comment.author"]),
       ],
       config: { type: "object", properties: { team: { type: "string", title: "Team", description: "Its key, e.g. ENG. Empty: every team." } } },
       needs_setup: true,
@@ -79,7 +79,7 @@ const CATALOG: Catalog = withBuiltIns({
       source: "slack",
       title: "Slack",
       description: "/roll, mentions of @roll, and messages in a channel.",
-      events: [{ kind: "command", title: "/roll command", fields: ["text", "user", "channel"] }],
+      events: [ev("command", "/roll command", ["text", "user", "channel"])],
       config: { type: "object", properties: { channel: { type: "string", title: "Channel" } } },
       needs_setup: true,
     },
@@ -144,6 +144,7 @@ export class DemoAutomations {
   }
 
   private must(id: string) {
+    this.seed();
     const a = this.automations.get(id);
     if (!a) throw new ApiError("no such automation", 404, null);
     return a;
@@ -289,7 +290,7 @@ export class DemoAutomations {
       const rid = nid("arn_demo");
       let clock = at + 400;
       const steps: StepRun[] = a.steps.map((s, i) => {
-        const len = s.kind === "agent.wait" ? 6 * MIN + ((at / 1000) % 9) * MIN : s.kind === "agent.start" ? 2400 : 900 + (i * 377) % 1400;
+        const len = s.kind === "agent.wait" ? 6 * MIN + (Math.floor(at / 1000) % 9) * MIN : s.kind === "agent.start" ? 2400 : 900 + (i * 377) % 1400;
         const failed = opts.failAt === i;
         const after = opts.failAt !== undefined && i > opts.failAt;
         const start = clock;

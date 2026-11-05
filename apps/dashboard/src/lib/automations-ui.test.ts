@@ -4,6 +4,7 @@ import { TEMPLATES } from "./automation-templates";
 import {
   blankSpec,
   cronText,
+  ev,
   insertVariable,
   lastRunOf,
   matchVariables,
@@ -111,7 +112,7 @@ describe("automations: validation", () => {
 describe("automations: the catalog and samples", () => {
   it("fills in the built-ins around the server's catalog, keeping its integrations", () => {
     const server: Catalog = {
-      triggers: [{ source: "linear", title: "Linear", description: "", events: [{ kind: "issue.created", title: "Issue created", fields: ["issue.title"] }], config: null, needs_setup: true }],
+      triggers: [{ source: "linear", title: "Linear", description: "", events: [ev("issue.created", "Issue created", ["issue.title"])], config: null, needs_setup: true }],
       steps: [{ kind: "notify", title: "Notify", description: "", config: { required: ["title"], type: "object" }, output: ["id"], integration: null }],
     };
     const c = withBuiltIns(server);
@@ -122,9 +123,9 @@ describe("automations: the catalog and samples", () => {
   });
 
   it("makes a sample event from the trigger's fields, or takes the server's", () => {
-    const ev = sampleEvent({ type: "code", events: ["work"], repos: ["acme/web"] }, catalog, 5);
-    expect(ev).toMatchObject({ source: "code", kind: "work", data: { repo: "acme/web", number: 42, labels: ["bug"] } });
-    const withSample = withBuiltIns({ triggers: [{ source: "manual", title: "", description: "", events: [{ kind: "run", title: "Run", fields: [], sample: { by: "ada" } } as never], config: null }], steps: [] });
+    const e = sampleEvent({ type: "code", events: ["work"], repos: ["acme/web"] }, catalog, 5);
+    expect(e).toMatchObject({ source: "code", kind: "work", data: { repo: "acme/web", number: 42, labels: ["bug"] } });
+    const withSample = withBuiltIns({ triggers: [{ source: "manual", title: "", description: "", events: [ev("run", "Run", [], { by: "ada" })], config: null }], steps: [] });
     expect(sampleEvent({ type: "manual" }, withSample).data).toEqual({ by: "ada" });
   });
 

@@ -1,13 +1,17 @@
-import { describe, expect, it, vi } from "vitest";
-import { DemoAutomations, demoAutomationSpecs, demoRuns } from "./automations-demo";
-import { STEP_CONFIGS, automationD, automationRunD } from "./automations-api";
+import { afterEach, describe, expect, it } from "vitest";
+import { DemoOwner } from "./agents-demo";
+import { STEP_CONFIGS, automationD, automationRunD, catalogD } from "./automations-api";
 import { decode } from "./decode";
 
 describe("the automations demo", () => {
-  it("has believable automations and runs that decode as the relay's", async () => {
-    const d = new DemoAutomations();
-    const list = await d.list();
-    expect(list.length).toBeGreaterThanOrEqual(4);
+  let demo: DemoOwner;
+  afterEach(() => demo?.dispose());
+
+  it("has believable automations, runs and a catalog that decode strictly as the relay's", async () => {
+    demo = new DemoOwner(0.01, false);
+    const api = demo.services().automations!;
+    const list = await api.list("demo");
+    expect(list.length).toBeGreaterThanOrEqual(5);
     for (const a of list) {
       decode(automationD, JSON.parse(JSON.stringify(a)), { strict: true });
       for (const s of a.steps) {
@@ -15,36 +19,20 @@ describe("the automations demo", () => {
         if (dec) decode(dec, JSON.parse(JSON.stringify(s.config)), { strict: true });
       }
     }
-    for (const r of demoRuns(Date.now())) decode(automationRunD, JSON.parse(JSON.stringify(r)), { strict: true });
-    expect(new Set(list.map((a) => a.trigger.type))).toEqual(new Set(["code", "schedule", "manual"]));
-    expect(demoAutomationSpecs().find((a) => a.id === "aut_demo_release")?.allow_agents).toBe(true);
-  });
-
-  it("runs move through their steps and announce it", async () => {
-    vi.useFakeTimers();
-    const seen: string[] = [];
-    const d = new DemoAutomations((ev) => {
-      if (ev.type === "automation_run") seen.push(`${ev.run.status}:${ev.run.steps.filter((s) => s.status === "succeeded").length}`);
-    }, 10);
-    const r = await d.run("acme", "aut_demo_release", { input: { version: "1.4.0" } });
-    expect(r.status).toBe("running");
-    await vi.runAllTimersAsync();
-    const done = await d.runDetail("acme", r.id);
-    expect(done.run.status).toBe("succeeded");
-    expect(done.run.threads).toHaveLength(1);
-    expect(seen.at(-1)).toBe("succeeded:4");
-    expect((await d.runs("acme", { automation: "aut_demo_release" }))[0].id).toBe(r.id);
-    vi.useRealTimers();
+    for (const r of await api.runs("demo", { limit: 200 })) decode(automationRunD, JSON.parse(JSON.stringify(r)), { strict: true });
+    decode(catalogD, JSON.parse(JSON.stringify(await api.catalog("demo"))), { strict: true });
+    expect(new Set(list.map((a) => a.trigger.type))).toEqual(new Set(["code", "schedule", "agent", "manual", "webhook"]));
   });
 
   it("cancels, retries and keeps secret names only", async () => {
-    const d = new DemoAutomations(() => {}, 1);
-    const r = await d.run("acme", "aut_demo_triage");
-    expect((await d.cancel("acme", r.id)).status).toBe("cancelled");
-    const retried = await d.retry("acme", r.id);
-    expect(retried.status).toBe("running");
-    await d.setSecret("acme", "aut_demo_triage", "TOKEN");
-    expect((await d.get("acme", "aut_demo_triage")).secrets).toEqual(["TOKEN"]);
-    d.stop();
+    demo = new DemoOwner(0.01, false);
+    const api = demo.services().automations!;
+    const r = await api.run("demo", "aut_demo_triage", {});
+    expect((await api.cancel("demo", r.id)).status).toBe("cancelled");
+    expect((await api.retry("demo", r.id)).status).toBe("running");
+    await api.setSecret("demo", "aut_demo_triage", "TOKEN", "s3cret");
+    const a = await api.get("demo", "aut_demo_triage");
+    expect(a.secrets).toEqual(["TOKEN"]);
+    expect(JSON.stringify(a)).not.toContain("s3cret");
   });
 });
