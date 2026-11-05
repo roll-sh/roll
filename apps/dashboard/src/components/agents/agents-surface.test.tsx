@@ -7,6 +7,7 @@ import { approval, machine, mirrored, project, run, thread } from "@/test/agents
 import { agentsHarness, fakeServices, renderAgents, type AgentsHarness } from "@/test/agents-render";
 import { MarkStateProvider } from "../mark-state";
 import { AgentsControl } from "./agents-control";
+import { AgentsPage } from "./agents-page";
 import { CanvasEngine } from "./canvas-engine";
 import { defaultProject, Launcher } from "./new-agent";
 
@@ -208,5 +209,25 @@ describe("the canvas under a trackpad", () => {
     wheel(inner, { deltaY: 50 });
     expect(e.view).toEqual(before);
     e.destroy();
+  });
+});
+
+describe("the agents page (/dashboard/agents)", () => {
+  it("follows #agents links as the popup does: where it opens, and one followed later", async () => {
+    const h = agentsHarness({ entities, follow: ["thr_1", "thr_2"] });
+    conn = { client: h.client, services: fakeServices(), error: null };
+    window.history.replaceState(null, "", "/dashboard/agents#agents/thr_2");
+    renderAgents(
+      <MarkStateProvider>
+        <AgentsPage />
+      </MarkStateProvider>,
+      h,
+    );
+    expect(await screen.findByRole("region", { name: "Thread Upgrade to Next 16.4" })).toBeInTheDocument();
+    act(() => {
+      window.location.hash = "#agents/settings/owner";
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
+    expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "owner" });
   });
 });

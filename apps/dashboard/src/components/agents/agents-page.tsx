@@ -10,7 +10,7 @@ import { deriveGraph, rolling, type GraphNode } from "@/lib/agents-graph";
 import type { Size } from "@/lib/agents-layout";
 import { closePalette, noteThreadOpen, openPalette, togglePalette } from "@/lib/agents-palette";
 import type { AgentsServices } from "@/lib/agents-services";
-import { isNewAgentKey, setAgentsView, useAgentsSurface, type AgentsView } from "@/lib/agents-surface";
+import { isNewAgentKey, setAgentsView, useAgentsSurface, viewFromHash, type AgentsView } from "@/lib/agents-surface";
 import { ALL, applyView, isPinned, pinKey, pinnedConversations, pinOf, viewStorageKey, type Pin as PinRec } from "@/lib/agents-views";
 import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
 import { useModelPrefsSync, useOwnerSettings } from "@/lib/owner-settings";
@@ -60,12 +60,24 @@ export function usePhone(): boolean {
  */
 export function AgentsPage({ demo = false, owner, focus, fresh = false }: { demo?: boolean; owner?: string; focus?: string; fresh?: boolean }) {
   const { client, services, error } = useAgentsConnection({ owner, demo });
-  // Where the window opens (`?new`, `?focus=t:thr_…`), before the first paint.
+  // Where the window opens (`?new`, `?focus=t:thr_…`, or a `#agents/…` link as the popup takes
+  // them), before the first paint.
   useLayoutEffect(() => {
+    const linked = viewFromHash(window.location.hash);
     if (fresh) setAgentsView({ kind: "new" });
     else if (focus?.startsWith("t:")) setAgentsView({ kind: "thread", thread: focus.slice(2) });
+    else if (linked) setAgentsView(linked);
     // Only where it opens; later views are the user's.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // A `#agents/…` link followed on this page (a notice's, a pasted one).
+  useEffect(() => {
+    const onHash = () => {
+      const v = viewFromHash(window.location.hash);
+      if (v) setAgentsView(v);
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
   }, []);
   const mac = typeof window !== "undefined" && desktop()?.window === "agents" && desktop()?.platform === "darwin";
   return (
