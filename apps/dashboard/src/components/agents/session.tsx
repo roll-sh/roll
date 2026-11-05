@@ -644,7 +644,7 @@ function Switcher({ thread, onRename }: { thread: Thread; onRename?: () => void 
   };
   if (readOnly && all.length <= 1) return <h2 className="truncate text-[13.5px] leading-tight font-semibold tracking-[-0.02em]">{thread.title}</h2>;
   return (
-    <div ref={box} className="relative flex min-w-0" data-nodrag>
+    <div ref={box} className="relative -ml-1 flex min-w-0" data-nodrag>
       <button
         onClick={toggle}
         onDoubleClick={() => {
@@ -654,7 +654,7 @@ function Switcher({ thread, onRename }: { thread: Thread; onRename?: () => void 
         aria-haspopup="listbox"
         aria-expanded={open}
         title="Switch conversation (double-click to rename)"
-        className="group -ml-1 flex max-w-full min-w-0 items-center gap-1 rounded-md px-1 text-left hover:bg-panel-2"
+        className="group flex max-w-full min-w-0 items-center gap-1 rounded-md px-1 text-left hover:bg-panel-2"
       >
         <h2 className="truncate text-[13.5px] leading-tight font-semibold tracking-[-0.02em]">{thread.title}</h2>
         <ChevronDown className="size-3.5 shrink-0 text-subtle group-hover:text-fg" />
