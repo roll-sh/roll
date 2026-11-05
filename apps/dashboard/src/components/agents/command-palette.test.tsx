@@ -66,6 +66,8 @@ describe("the agents' command palette", () => {
     expect(within(palette()).getByRole("option", { name: /Upgrade to Next 16.4/ })).toBeInTheDocument();
     await userEvent.type(screen.getByRole("combobox"), "upgr");
     expect(selected()).toHaveTextContent("Upgrade to Next 16.4");
+    // A conversation opens (the footer doesn't say Run).
+    expect(palette()).toHaveTextContent("EnterOpen");
     await userEvent.keyboard("{Enter}");
     expect(agentsSurface.get().view).toEqual({ kind: "thread", thread: "thr_2" });
     await waitFor(() => expect(agentsPalette.get().open).toBe(false));

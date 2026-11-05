@@ -520,7 +520,9 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
     }
   };
 
-  const enterLabel = view?.enterLabel ?? (findItem(shown, highlighted)?.kind === "submenu" ? "Open" : "Run");
+  const picked = findItem(shown, highlighted);
+  // A thread or a project opens; anything else runs.
+  const enterLabel = view?.enterLabel ?? (picked?.kind === "submenu" || /^(thread|project):/.test(picked?.value ?? "") ? "Open" : "Run");
   const empty = view?.build ? (query.trim() ? "Add a project to give agents a goal." : `Say what should get done. The orchestrator plans it and spins up agents${target ? ` in ${targetLabel(target, machineCount)}` : ""}.`) : query.startsWith(">") ? "No matching actions." : "Nothing matches.";
 
   return (
