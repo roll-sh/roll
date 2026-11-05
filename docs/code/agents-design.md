@@ -199,7 +199,14 @@ state, or draw a project's logo inline (only in an `<img>`).
   `ui/cn.ts`'s `glass` is the one definition for Base UI popups.
 - **Dialogs and the palette:** a `--scrim` (black 60%, 2–3px blur), then a sheet that is
   `rounded-2xl border-line-2 bg-sheet shadow-sheet`, with a 17px/590 title and a 12.5px muted
-  lead.
+  lead. `ui/dialog.tsx` (T3's Base UI dialog) is the one to use for new ones: centred a third
+  of the way down, it grows from the press or the focused control that opened it (scale 0.98 and
+  a fade, 200 ms; none with reduced motion), traps focus and gives it back, and closes on Escape,
+  a press outside or its ×. Work that takes a while inside one is a `Steps` list
+  (`project-actions.tsx`): a 16px ring per step (done: `ok` tick; now: an accent dot, the label
+  shimmering, its time in mono at the right; next: subtle; failed: `danger`).
+- **"Only roll" chips:** focusing a project puts a raised chip in the views bar ("Only" muted,
+  the name, an ×) and the same chip atop the sidebar's list.
 - **Empty and loading states:** loading shows the Horizon mark (40px, thinking) over a
   shimmering line. With no machines, the globe (`RollMark`) shows big over the `DotField` with
   both ways in. An empty view is one calm sentence with a text link back.

@@ -330,7 +330,7 @@ describe("moving around the canvas from the keyboard", () => {
     expect(card("Fix the flaky queue test")).toBeInTheDocument();
     const roll = screen.getByLabelText("Project roll").closest<HTMLElement>("[data-card]")!;
     await userEvent.click(within(roll).getByRole("button", { name: "Project" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Focus (F)" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Focus on this project only" }));
     expect(card("Dark mode")).toBeNull();
   });
 });

@@ -36,7 +36,7 @@ describe("a machine's projects without a card", () => {
     expect(screen.queryByRole("button", { name: /more project/ })).not.toBeInTheDocument();
   });
 
-  it("opens on a click into rows: the row starts an agent there (and closes it), the pin keeps it on the view, the gear opens its settings", async () => {
+  it("opens on a click into rows: the row starts an agent there (and closes it), the pin keeps it on the view, its ⋯ has the project's actions (settings)", async () => {
     const { startNew, keep } = setup(["prj_cli", "prj_docs"]);
     const line = screen.getByRole("button", { name: "2 more projects: cli, handbook" });
     await userEvent.click(line);
@@ -50,7 +50,8 @@ describe("a machine's projects without a card", () => {
     const again = await screen.findByRole("dialog", { name: "Projects on ada-mbp" });
     await userEvent.click(within(again).getAllByRole("button", { name: "Show on the canvas" })[1]);
     expect(keep).toHaveBeenCalledWith("prj_docs", true);
-    await userEvent.click(within(again).getAllByRole("button", { name: "Project settings" })[0]);
+    await userEvent.click(within(again).getByRole("button", { name: "More for cli" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Settings" }));
     expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "p:prj_cli" });
   });
 

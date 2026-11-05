@@ -1531,11 +1531,25 @@ The surface has three views:
   the arrows still pan.
 
   **Focusing a project** (`focusOn` in `lib/agents-views.ts`). With several projects the canvas is
-  busy, and most of the time one project is what's being worked on. F on a card (or "Focus" in a
-  project card's menu, or ⌘K "Focus a project…") fills the canvas with that card's project: the
-  project, its machine above it and everything under it, framed again. A chip in the views bar
-  names it; its × or Escape (before Escape closes anything else) shows every project again. It's
-  per device and on top of the view, so it never changes what a view picks.
+  busy, and most of the time one project is what's being worked on. F on a card (or "Focus on this
+  project only" in any of its menus, or ⌘K "Focus a project…") fills the canvas with that card's
+  project: the project, its machine above it and everything under it, framed again. The sidebar
+  lists only its group and the header counts only its work. An "Only roll" chip in the views bar
+  (and one atop the sidebar) names it; its × or Escape (before Escape closes anything else) shows
+  every project again. It's remembered per view on this device (`loadFocused`), on top of the
+  view, so it never changes what a view picks.
+
+  **A project's actions** (`projectActions` in `project-actions.tsx`) are one list wherever the
+  project shows: its card's ⋯, its row under a machine's folded projects, its group's header in
+  the sidebar, and ⌘K "Project: roll" (which starts with "Show on the canvas"). In order: New agent
+  here, New sandbox for this project, Focus on this project only, Pin to the canvas (on the canvas),
+  Pull (a notice says what it did), Open in roll code, Settings, Settled and archived (N), and on
+  the card Remove from roll. **New sandbox for this project** (a project with a roll code repo)
+  is a dialog: a size and a name, then its steps as they happen (rent, start, clone
+  `owner/repo`, each with its time), waiting up to 3 minutes for the sandbox's hello before
+  cloning with `project.add` and `clone`; then "Start an agent" there or "Open settings". A
+  failure stops on its step and says why; closing the dialog stops waiting, and the sandbox stays.
+  T3's "Add to another machine" (`AddProjectToMachineDialog.tsx`) is the clone half.
 
   **Display** (Linear's display options; `DisplayMenu` in `views.tsx`, `applyDisplay` in
   `lib/agents-views.ts`). Each view has its own, kept with it in the canvas document, in a

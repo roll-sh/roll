@@ -14,7 +14,7 @@ import { lastInputWasKeyboard } from "@/lib/input-modality";
 import type { AgentsServices } from "@/lib/agents-services";
 import { isNewAgentKey, setAgentsView, useAgentsSurface, viewFromHash, type AgentsView, type AutomationsView } from "@/lib/agents-surface";
 import { isBuilder } from "@/lib/automations-nav";
-import { ALL, applyDisplay, applyView, directionOf, focusOn, isPinned, keepProject, pinKey, pinnedConversations, pinOf, projectOf, viewStorageKey, withDirection, type Pin as PinRec } from "@/lib/agents-views";
+import { ALL, applyDisplay, applyView, directionOf, focusOn, isPinned, keepProject, loadFocused, pinKey, setFocused as setFocusedIn, pinnedConversations, pinOf, projectOf, viewStorageKey, withDirection, type Pin as PinRec } from "@/lib/agents-views";
 import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
 import { LINK_PARAMS, type IntegrationsLink } from "@/lib/integrations-api";
 import { useModelPrefsSync, useOwnerSettings } from "@/lib/owner-settings";
@@ -30,6 +30,7 @@ import { Launcher } from "./new-agent";
 import { PinnedConversation, PinnedDiff, PinnedTerminal } from "./pinned";
 import { MachineNode, ProjectNode, RequestNode, SubagentNode, ThreadNode } from "./nodes";
 import { CanvasProjectsProvider, type CanvasProjects } from "./machine-projects";
+import { ProjectDialogs } from "./project-actions";
 import { PromptBar } from "./prompt-bar";
 import { PendingRequest } from "./pending-request";
 import { SettingsPanel } from "./settings-panel";
@@ -286,16 +287,22 @@ export function AgentsSurface({
     [chrome, startNew],
   );
 
-  // One project filling the canvas (per device, until Escape or the chip's ×).
-  const [focused, setFocused] = useState<string | null>(null);
-  const focusProject = useCallback((project: string | null) => {
-    setFocused(project);
-    if (project) setAgentsView({ kind: "canvas" });
-  }, []);
-  const focusedGone = focused !== null && !data.projects.has(focused);
+  // "Focus on this project only": the canvas, the sidebar and the counts scoped to one project,
+  // remembered per view on this device, until Escape or the chip's ×.
+  const viewId = views.current.id;
+  const [focusedBy, setFocusedBy] = useState<Record<string, string>>(() => loadFocused(client.owner));
+  const focused = focusedBy[viewId] ?? null;
+  const focusProject = useCallback(
+    (project: string | null) => {
+      setFocusedBy((all) => setFocusedIn(client.owner, all, viewId, project));
+      if (project) setAgentsView({ kind: "canvas" });
+    },
+    [client.owner, viewId],
+  );
+  const focusedGone = focused !== null && data.projects.size > 0 && !data.projects.has(focused);
   useEffect(() => {
-    if (focusedGone) setFocused(null);
-  }, [focusedGone]);
+    if (focusedGone) focusProject(null);
+  }, [focusedGone, focusProject]);
   const prefs = useOwnerSettings(services?.settings, client.owner, data.settings?.revision ?? 0);
   // The model picker's favourites and recent models follow the owner (a share's replay has no services).
   useModelPrefsSync(prefs, services ? prefs.save : null);
@@ -395,7 +402,11 @@ export function AgentsSurface({
     [focus],
   );
 
-  const { busy: working, requests } = rolling(data);
+  const all = rolling(data);
+  // Focused on one project: its counts only.
+  const inFocus = (thread: string) => !focused || data.threads.get(thread)?.value.project === focused;
+  const working = focused ? all.busy.filter((t) => t.project === focused) : all.busy;
+  const requests = focused ? all.requests.filter((r) => inFocus(r.thread)) : all.requests;
   const toggleAutomations = useCallback(() => setAgentsView(shown.kind === "automations" ? { kind: "canvas" } : { kind: "automations" }), [shown.kind]);
   // A (no modifiers, not typing, nothing open over the canvas): the automations sheet, like the ⚡ button.
   useEffect(() => {
@@ -523,7 +534,7 @@ export function AgentsSurface({
             </span>
           </header>
           <div className="relative flex min-h-0 flex-1">
-            <ThreadsSidebar data={data} open={sidebar} setOpen={setSidebar} phone={phone} openThread={shown.kind === "thread" ? shown.thread : null} />
+            <ThreadsSidebar data={data} open={sidebar} setOpen={setSidebar} phone={phone} openThread={shown.kind === "thread" ? shown.thread : null} only={focused} onShowAll={() => focusProject(null)} />
             {/* The working area: an inset panel one step up from the chrome (Linear's inverted L). */}
             <div
               data-waiting={(phone && shown.kind === "canvas" && requests.length > 0) || undefined}
@@ -590,6 +601,7 @@ export function AgentsSurface({
           </div>
         </div>
         <Notices />
+        <ProjectDialogs />
         {adding && <AddMachineDialog onClose={() => setAdding(false)} onCreated={onSandbox} />}
         {shown.kind === "new" && <Launcher key={`${shown.project ?? ""}|${shown.machine ?? ""}|${shown.at?.x ?? ""},${shown.at?.y ?? ""}`} project={shown.project} machine={shown.machine} at={shown.at} onClose={close} />}
         <CommandPalette host={host} />

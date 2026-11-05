@@ -311,7 +311,7 @@ function Applying({ pending: { machine, profile, state }, onDone }: { pending: {
   );
 }
 
-function SizeOption({ size, checked, onChange }: { size: SandboxSize; checked: boolean; onChange: () => void }) {
+export function SizeOption({ size, checked, onChange }: { size: SandboxSize; checked: boolean; onChange: () => void }) {
   return (
     <label
       className={`flex min-w-0 cursor-pointer items-center gap-2.5 rounded-lg border px-3 py-2 text-[12.5px] transition-colors duration-150 has-focus-visible:outline-2 has-focus-visible:outline-accent/70 ${checked ? "border-accent/45 bg-accent/[0.06]" : "border-line hover:border-line-2 hover:bg-fg/[0.03]"}`}
