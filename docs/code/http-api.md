@@ -632,6 +632,35 @@ DELETE /v1/code/agents/{owner}/endpoints/{id} → 204
        owners; 404 deleting one that isn't there). Applying a profile to a machine is `endpoint.set`
        through …/commands, with the key sealed to that machine in the browser.
 
+GET /v1/code/agents/{owner}/gateway → GatewayPlan
+PUT /v1/code/agents/{owner}/gateway GatewayPlan → GatewayPlan
+DELETE /v1/code/agents/{owner}/gateway → 204
+       The owner's model gateway (docs/code/gateway.md): {host: MachineId, urls?: [{label, url}],
+       members?: [GatewayMember], new_sandboxes?, fallback?, acknowledged_at, updated_at}. No key, ever.
+       PUT: the host is one of the owner's machines (404 otherwise), `acknowledged_at` is when the owner
+       read the notice (0: 400), URLs are http(s) without credentials (400); members sent with it are
+       ignored (only joining and leaving change them), and another host while machines use the gateway is
+       a 409 ("remove the machines first"). DELETE is a 409 while machines use it. The host's gateway
+       itself is set up and removed with `gateway.*` commands. 404 when none is set up.
+POST /v1/code/agents/{owner}/gateway/members GatewayJoin {machine, url?, providers?} → GatewayPlan
+       Joins a machine: the relay sends `gateway.client.issue {name, machine, seal_key}` to the host
+       (the member's seal key from its last `hello`), then `endpoint.set` to the member with
+       {id: "roll-gateway", name: "roll gateway on <host>", kind: gateway, base_url: url, providers,
+       fallback: the plan's} and the host's sealed box as `key` unchanged, and records the member's
+       client id. `url` is one of the plan's (the first when unset); the host may join itself on a
+       loopback URL. `providers` unset: every provider the member reports. 400 a URL that isn't the
+       plan's; 404 no plan, or not one of the owner's live machines; 409 a member that never said a
+       seal key or has no providers, or a host that's gone. A failure of either daemon is recorded on
+       the member (`error`) and answered with its status (400 invalid, 409 not found or conflict, 503
+       offline or no answer, 422 otherwise); a member that refused the endpoint has its new key revoked
+       again. A sandbox joins on its own on its first `hello` while `new_sandboxes` is set.
+DELETE /v1/code/agents/{owner}/gateway/members/{machine} → GatewayPlan
+       `endpoint.remove {endpoint: "roll-gateway"}` to the member (best effort: it may be gone or
+       offline) and `gateway.client.revoke` to the host, then the plan without it. A host that doesn't
+       revoke keeps the member, with `error`, and answers its status. 404 not a member.
+       Every gateway route is Code::manages: 401 anonymous, 403 agent tokens, review apps and other
+       owners; machine tokens are 401.
+
 POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, command: Command} → Reply
        Forwarded to the machine's daemon; waits up to 30 s for its reply. `id` (1–128 characters) is
        the idempotency key, per sender: retrying with the same id never runs the command twice (the
@@ -643,6 +672,15 @@ POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, com
        `endpoint.set {endpoint, key?}` (owner only): 400 before it reaches the machine for a spec
        `EndpointSpec::check` refuses or a `key.sealed` that isn't a roll-seal-v1 box (the relay can't
        open one; it forwards it and keeps nothing). `endpoint.check` answers `endpoint_checked`.
+       `gateway.*` (owner only; docs/code/gateway.md): 400 before it reaches the machine for
+       `gateway.configure` settings `GatewaySettings::check` refuses (an unspecified listen address,
+       an unknown upstream in a route, a key header), a `gateway.key` `key.sealed` that isn't a
+       roll-seal-v1 box, or a `gateway.client.issue` `seal_key` that isn't 32 bytes of base64url.
+       Replies: `gateway.client.issue` → `gateway_client {client, sealed}` (the key sealed to
+       `seal_key` for the `roll-gateway` endpoint), `gateway.test` → `gateway_tested {checks}`,
+       `gateway.status` → `gateway_status`, `gateway.usage` → `gateway_usage`, `gateway.log` →
+       `gateway_log {entries}`, `gateway.log.body` → `gateway_log_body`; the rest `ok`. A machine
+       that hosts no gateway answers 404 for everything but `gateway.configure` and `gateway.remove`.
        Agent tokens drive threads only (403 otherwise, docs/code/agents.md "Machines, login and
        tokens"): `thread.create` in `ask` or `auto_edit` (not `full_access`, the default),
        `thread.configure` only lowering the thread's modes, `thread.fork`, `thread.archive`,
@@ -651,7 +689,7 @@ POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, com
        `diff.get`, `git.status`, and `fs.list`/`fs.read` in a project. The rest (`terminal.*`,
        `fs.write`, `fs.list` without a project, `request.respond`, `project.add`, `project.remove`,
        `project.update`, `project.pull`, `thread.delete`, `checkpoint.rollback`, `provider.refresh`,
-       `machine.configure`) needs Code::manages.
+       `machine.configure`, `endpoint.*`, `gateway.*`) needs Code::manages.
        `machine.configure {settings: MachineSettings}` replaces the machine's settings whole
        (docs/code/agents.md, "Machine settings"); the reply comes after the daemon's `hello` with them
        (Machine.info.settings). Settings that would carry a credential or an address (a variable named

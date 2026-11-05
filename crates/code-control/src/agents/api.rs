@@ -51,6 +51,9 @@ pub fn routes() -> Router<Arc<Code>> {
         .route("/v1/code/agents/{owner}/settings", get(super::docs::get_settings).put(super::docs::put_settings))
         .route("/v1/code/agents/{owner}/endpoints", get(super::endpoints::list_profiles))
         .route("/v1/code/agents/{owner}/endpoints/{id}", put(super::endpoints::put_profile).delete(super::endpoints::delete_profile))
+        .route("/v1/code/agents/{owner}/gateway", get(super::gateway::get_plan).put(super::gateway::put_plan).delete(super::gateway::delete_plan))
+        .route("/v1/code/agents/{owner}/gateway/members", post(super::gateway::join))
+        .route("/v1/code/agents/{owner}/gateway/members/{machine}", delete(super::gateway::leave))
         .route("/v1/code/agents/{owner}/threads/{thread}/shares", post(share::create))
         .route("/v1/code/agents/{owner}/shares", get(share::list))
         .route("/v1/code/agents/{owner}/shares/{id}", delete(share::revoke))
@@ -589,6 +592,17 @@ async fn command(
                 sealed.check().map_err(Error::Invalid)?;
             }
         }
+        // The gateway's settings hold no secret; an upstream's key arrives sealed to the host, and
+        // a client key leaves it sealed to the machine named by `seal_key` (docs/code/gateway.md).
+        agent_proto::Command::GatewayConfigure { settings } => {
+            (**settings).clone().check().map_err(Error::Invalid)?;
+        }
+        agent_proto::Command::GatewayKey { key: agent_proto::KeyChange::Set { sealed }, .. } => {
+            sealed.check().map_err(Error::Invalid)?;
+        }
+        agent_proto::Command::GatewayClientIssue { seal_key, .. } => {
+            check_seal_key(seal_key)?;
+        }
         _ => {}
     }
     super::code::follow(&code);
@@ -602,6 +616,16 @@ async fn command(
     Ok(reply_response(reply))
 }
 
+/// A machine's seal key as `hello` says it: 32 bytes, base64url without padding.
+fn check_seal_key(key: &str) -> Result<()> {
+    use base64::Engine;
+    let ok = key.len() == 43 && base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(key).is_ok_and(|b| b.len() == 32);
+    if !ok {
+        return Err(Error::Invalid("seal_key is a machine's seal key (32 bytes, base64url)".into()));
+    }
+    Ok(())
+}
+
 /// Who a command is from, for the daemon: the owner's name, `agent:<name>`, or `admin`.
 pub(super) fn sender(caller: &Caller) -> String {
     match caller.agent() {
@@ -611,7 +635,7 @@ pub(super) fn sender(caller: &Caller) -> String {
 }
 
 /// One of the owner's live machines, else a 404.
-fn live_machine(code: &Code, o: &Owner, machine: &str) -> Result<store::MachineRow> {
+pub(super) fn live_machine(code: &Code, o: &Owner, machine: &str) -> Result<store::MachineRow> {
     match store::machine(code.db.sql(), machine)? {
         Some(m) if m.owner_id == o.id && !m.revoked => Ok(m),
         _ => Err(Error::NotFound(format!("machine {machine}"))),

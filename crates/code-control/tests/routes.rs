@@ -582,6 +582,16 @@ async fn agents_routes_follow_the_auth_matrix() {
         json!({ "type": "endpoint.set", "endpoint": { "id": "gw", "name": "Gateway", "kind": "openai", "base_url": "https://gw.example/v1" } }),
         json!({ "type": "endpoint.remove", "endpoint": "gw" }),
         json!({ "type": "endpoint.check", "endpoint": "gw" }),
+        json!({ "type": "gateway.configure", "settings": { "enabled": true } }),
+        json!({ "type": "gateway.key", "upstream": "anthropic", "key": { "type": "clear" } }),
+        json!({ "type": "gateway.client.issue", "name": "laptop", "seal_key": "A".repeat(43) }),
+        json!({ "type": "gateway.client.revoke", "client": "gwc_1" }),
+        json!({ "type": "gateway.test" }),
+        json!({ "type": "gateway.remove" }),
+        json!({ "type": "gateway.status" }),
+        json!({ "type": "gateway.usage", "from": 0, "to": 1 }),
+        json!({ "type": "gateway.log", "limit": 10 }),
+        json!({ "type": "gateway.log.body", "seq": 1 }),
         json!({ "type": "checkpoint.rollback", "thread": "thr_1", "checkpoint": "chk_1" }),
     ];
     for c in agents_drive {
@@ -632,6 +642,49 @@ async fn agents_routes_follow_the_auth_matrix() {
     for who_token in [Some(ADMIN), acme, agent, other, None] {
         assert_eq!(call(a, "DELETE", "/v1/code/agents/connect", None, who_token).await, denied, "{who_token:?}");
     }
+}
+
+/// The model gateway's routes (`agents/gateway.rs`): all the owner's (Code::manages), not its
+/// agents'; 403 for agents, review apps and other owners, 401 for anonymous callers and bad tokens.
+/// The owner gets a 404 for a gateway that isn't set up, after the check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agents_gateway_routes_follow_the_auth_matrix() {
+    let w = world().await;
+    let a = &w.a;
+    let (s, m) = a.req("POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "studio" })), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED, "{m}");
+    let host = m["machine"]["id"].as_str().unwrap().to_string();
+    let base = "/v1/code/agents/acme/gateway";
+    let plan = json!({ "host": host, "urls": [{ "label": "LAN", "url": "http://gw.lan:8790" }], "acknowledged_at": 1 });
+    let join = json!({ "machine": host });
+    let routes = [
+        ("GET", base.to_string(), None),
+        ("PUT", base.to_string(), Some(&plan)),
+        ("DELETE", base.to_string(), None),
+        ("POST", format!("{base}/members"), Some(&join)),
+        ("DELETE", format!("{base}/members/{host}"), None),
+    ];
+    let (acme, agent, other, app_in) = (Some(w.acme.as_str()), Some(w.agent.as_str()), Some(w.other.as_str()), Some(w.app_in.as_str()));
+    for (who, token, want) in [("agent", agent, FORBIDDEN), ("review app", app_in, FORBIDDEN), ("another owner", other, FORBIDDEN), ("anonymous", None, UNAUTHORIZED)] {
+        for (m, p, body) in &routes {
+            assert_eq!(call(a, m, p, *body, token).await, want, "{who}: {m} {p}");
+        }
+    }
+    for bad in ["rlc_0000", "rla_0000", "hunter2", w.revoked.as_str()] {
+        for (m, p, body) in &routes {
+            assert_eq!(call(a, m, p, *body, Some(bad)).await, UNAUTHORIZED, "{bad}: {m} {p}");
+        }
+    }
+    // The owner: nothing set up is a 404; then the plan, a join (the host has no link: 409, it
+    // never said its seal key), a member that isn't one, and the plan removed.
+    for (m, p, body) in routes.iter().filter(|(m, ..)| *m != "PUT") {
+        assert_eq!(call(a, m, p, *body, acme).await, NOT_FOUND, "owner: {m} {p}");
+    }
+    assert_eq!(call(a, "PUT", base, Some(&plan), acme).await, OK);
+    assert_eq!(call(a, "GET", base, None, acme).await, OK);
+    assert_eq!(call(a, "POST", &format!("{base}/members"), Some(&join), acme).await, StatusCode::CONFLICT);
+    assert_eq!(call(a, "DELETE", &format!("{base}/members/{host}"), None, acme).await, NOT_FOUND);
+    assert_eq!(call(a, "DELETE", base, None, Some(ADMIN)).await, StatusCode::NO_CONTENT);
 }
 
 /// The sandbox routes (`agents/sandbox/api.rs`): all of them are the owner's (Code::manages), not
