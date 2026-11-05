@@ -92,8 +92,10 @@ describe("a machine's providers on its card", () => {
     const many = withProviders(names.map((name, i) => provider({ id: `p${i}`, name, auth: name === "Cursor" ? "missing" : "ready" })));
     renderAgents(<MachineNode machine={many} />, agentsHarness({ machines: [many] }));
     const list = screen.getByRole("list", { name: "Providers" });
-    expect(within(list).getAllByRole("listitem").map((li) => li.textContent?.trim())).toEqual(["Claude Code", "Codex", "OpenCode", "Cursor", "+2"]);
-    await userEvent.click(within(list).getByRole("button", { name: "2 more providers: Pi, Gemini CLI" }));
+    expect(within(list).getAllByRole("listitem").map((li) => li.textContent?.trim())).toEqual(["Claude Code", "Codex", "Cursor", "+3"]);
+    // One line: the count never wraps alone.
+    expect(list).toHaveClass("flex-nowrap");
+    await userEvent.click(within(list).getByRole("button", { name: "3 more providers: OpenCode, Pi, Gemini CLI" }));
     expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "m:mch_1" });
     // Four or fewer: all of them.
     const few = withProviders(names.slice(0, 4).map((name, i) => provider({ id: `p${i}`, name })), { id: "mch_2" });

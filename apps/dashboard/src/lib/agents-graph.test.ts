@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { collapseUnused, deriveGraph, keyOf, projectStats, rolling } from "./agents-graph";
-import { arrange, bounds, centreAcross, dropIndex, fitView, mergeOrder, moveTo, nextCard, ROOTS, sideBySide, tidyLayout, withOrder, zoomAt, type LayoutOptions, type Point, type Rect, type Size } from "./agents-layout";
+import { arrange, bounds, centreAcross, dropIndex, fitReadable, fitView, mergeOrder, moveTo, nextCard, ROOTS, sideBySide, tidyLayout, withOrder, zoomAt, type LayoutOptions, type Point, type Rect, type Size } from "./agents-layout";
 import { applyEvents, emptyData, follow } from "./agents-store";
 import { approval, ev, machine, node, project, run, terminal, thread } from "@/test/agents";
 import { EMPTY_INBOX, type Thread } from "./agents-api";
@@ -358,6 +358,20 @@ describe("sandboxes and phones on the canvas", () => {
     expect(deriveGraph(d).nodes.get(keyOf.machine("mch_s"))?.busy).toBe(true);
     d = applyEvents(d, [{ type: "machine", cursor: 2, machine: sb("running") }]);
     expect(deriveGraph(d).nodes.get(keyOf.machine("mch_s"))?.busy).toBe(false);
+  });
+
+  it("a desktop fit goes a little under readable when that shows everything above the prompt bar", () => {
+    // The demo at 1440×900: 1224 tall, 740 left above the bar. At 0.6 the last machine sat behind it.
+    const r = { x: 0, y: 0, w: 1600, h: 1224 };
+    const v = fitReadable(r, 1300, 740, 64, 0.6, 0.5);
+    expect(v.k).toBeGreaterThanOrEqual(0.5);
+    expect(v.k).toBeLessThan(0.6);
+    expect(v.y + r.h * v.k).toBeLessThanOrEqual(740 - 32 + 0.5);
+    // What fits at readable keeps its padding; far too tall stays readable, from the top.
+    expect(fitReadable({ x: 0, y: 0, w: 800, h: 600 }, 1300, 740, 64, 0.6, 0.5)).toEqual(fitView({ x: 0, y: 0, w: 800, h: 600 }, 1300, 740, 64, 1, 0.6));
+    const tall = fitReadable({ x: 0, y: 0, w: 800, h: 4000 }, 1300, 740, 64, 0.6, 0.5);
+    expect(tall.k).toBe(0.6);
+    expect(tall.y).toBe(64);
   });
 
   it("a phone's fit stays readable and starts at the machines (top left)", () => {

@@ -377,6 +377,20 @@ export function fitView(r: Rect, vw: number, vh: number, pad = 48, maxK = 1, min
   };
 }
 
+/**
+ * The first fit of a canvas: readable cards (`readable`) beat seeing everything, but when a little
+ * less (down to `floor`, with half the padding) shows everything, that wins: nothing is left
+ * behind the prompt bar at the bottom for want of a few pixels. Too much for that: readable,
+ * framed from the top (`fitView`'s rule).
+ */
+export function fitReadable(r: Rect, vw: number, vh: number, pad: number, readable: number, floor: number): View {
+  const v = fitView(r, vw, vh, pad, 1, readable);
+  const fits = (view: View, p: number) => r.w * view.k <= vw - p * 2 + 0.5 && r.h * view.k <= vh - p * 2 + 0.5;
+  if (fits(v, pad)) return v;
+  const tight = fitView(r, vw, vh, pad / 2, 1, floor);
+  return fits(tight, pad / 2) ? tight : v;
+}
+
 /** Zoom to `k` keeping the world point under screen point (sx, sy) where it is. */
 export function zoomAt(v: View, k: number, sx: number, sy: number): View {
   const nk = clampZoom(k);

@@ -25,6 +25,7 @@ import { MoreProjects } from "./machine-projects";
 import { useProjectActions } from "./project-actions";
 import { openMachineSettings, ProviderSetup } from "./provider-setup";
 import { canRunAgents, notReadyReason, readiness } from "@/lib/agents-setup";
+import { cn } from "./ui/cn";
 
 /**
  * The frame every canvas card shares: flat panel, hairline border, the whole card a drag handle.
@@ -166,8 +167,8 @@ export function MachineNode({ machine }: { machine: Machine }) {
   const state = machineState(machine);
   // Shown too while the daemon is still probing them (it says hello without waiting).
   const listed = info?.providers.filter((p) => p.installed || p.checking) ?? [];
-  // A few chips, the rest one "+3" (to the Providers settings); a login to do or a probe going always shows.
-  const chips = listed.length > 4 ? listed.filter((p, i) => i < 3 || p.auth === "missing" || p.checking) : listed;
+  // Two chips, the rest one "+4" (to the Providers settings: three names truncated on a card); a login to do or a probe going always shows.
+  const chips = listed.length > 4 ? listed.filter((p, i) => i < 2 || p.auth === "missing" || p.checking) : listed;
   const more = listed.filter((p) => !chips.includes(p));
   // Can't run an agent yet (no provider installed, or none logged in): the next step comes first.
   const ready = readiness(machine);
@@ -232,9 +233,10 @@ export function MachineNode({ machine }: { machine: Machine }) {
           <ProviderSetup machine={machine} />
         ) : (
           listed.length > 0 && (
-            <ul className="flex flex-wrap gap-1" aria-label="Providers">
+            // Wrapping, the "+3" went alone onto a line of its own: one line, names give way first.
+            <ul className={cn("flex gap-1", more.length > 0 ? "flex-nowrap" : "flex-wrap")} aria-label="Providers">
               {chips.map((p) => (
-                <li key={p.id}>
+                <li key={p.id} className="flex min-w-0">
                   {p.checking ? (
                     <span className="inline-flex items-center gap-1.5 rounded-md border border-line px-1.5 py-0.5 text-[11px] text-subtle" title={`Checking ${p.name}…`}>
                       <span className="size-1 rounded-full bg-subtle" aria-hidden />
@@ -253,17 +255,17 @@ export function MachineNode({ machine }: { machine: Machine }) {
                     </button>
                   ) : (
                     <span
-                      className="inline-flex items-center gap-1.5 rounded-md border border-line px-1.5 py-0.5 text-[11px] text-muted"
-                      title={[p.version, p.auth === "ready" ? "logged in" : p.detail].filter(Boolean).join(" · ") || undefined}
+                      className="inline-flex min-w-0 items-center gap-1.5 rounded-md border border-line px-1.5 py-0.5 text-[11px] text-muted"
+                      title={[p.name, p.version, p.auth === "ready" ? "logged in" : p.detail].filter(Boolean).join(" · ") || undefined}
                     >
-                      <span className={`size-1 rounded-full ${p.auth === "ready" ? "bg-ok" : "bg-subtle"}`} aria-label={p.auth === "ready" ? "Logged in" : "Unknown"} />
-                      {p.name}
+                      <span className={`size-1 shrink-0 rounded-full ${p.auth === "ready" ? "bg-ok" : "bg-subtle"}`} aria-label={p.auth === "ready" ? "Logged in" : "Unknown"} />
+                      <span className="truncate">{p.name}</span>
                     </span>
                   )}
                 </li>
               ))}
               {more.length > 0 && (
-                <li>
+                <li className="shrink-0">
                   <button
                     type="button"
                     data-nodrag

@@ -20,6 +20,7 @@ import {
   centreAcross,
   COMPACT_GAPS,
   dropIndex,
+  fitReadable,
   fitView,
   loadOrder,
   nextCard,
@@ -217,7 +218,7 @@ export const AgentsCanvas = forwardRef<
         const top = container.current?.closest("[data-waiting]") ? PHONE_TOP_BAR : 0;
         const v = fitView(r, w, h - top, 24, 1, all ? 0 : 0.55, anchor);
         e.setView({ ...v, y: v.y + top }, animate);
-      } else e.setView(fitView(r, w, h, 64, 1, all ? 0 : READABLE), animate);
+      } else e.setView(all ? fitView(r, w, h, 64, 1, 0) : fitReadable(r, w, h, 64, READABLE, SNUG), animate);
     },
     [positions, sizeOf, arranged, coveredBelow],
   );
@@ -747,6 +748,8 @@ function LaunchGhost({ source, from, to, over }: { source: string; from: Point; 
 }
 /** The smallest zoom an automatic fit goes to on a desktop: cards stay legible. */
 const READABLE = 0.6;
+/** What a fit may go down to when that shows everything clear of the prompt bar. */
+const SNUG = 0.5;
 /** Keys that pan or zoom the canvas (with no card focused). */
 const VIEW_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "+", "=", "-", "0", "1"]);
 /** Room for a phone's zoom bar when it sits at the top (while a request waits at the bottom). */
