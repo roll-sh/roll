@@ -14,6 +14,7 @@ export const KIND_LABEL: Record<EndpointKind, string> = {
   anthropic: "Anthropic-compatible",
   openai: "OpenAI-compatible",
   custom: "Custom variables",
+  gateway: "roll gateway",
 };
 
 /** What a kind's base URL looks like, for the field's placeholder. */
@@ -22,6 +23,7 @@ export const KIND_URL: Record<EndpointKind, string> = {
   anthropic: "https://gateway.example.com",
   openai: "https://gateway.example.com/v1",
   custom: "https://api.example.com",
+  gateway: "http://gateway-host:8790",
 };
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -66,6 +68,7 @@ export function checkEndpoint(spec: EndpointSpec): { spec: EndpointSpec } | { er
   if (url_env) out.url_env = url_env;
   if (key_env) out.key_env = key_env;
   if (key_ref) out.key_ref = key_ref;
+  if (spec.fallback) out.fallback = true;
   return { spec: out };
 }
 
@@ -137,6 +140,7 @@ export function demoModels(kind: EndpointKind): EndpointModel[] {
   if (kind === "cliproxy") return [...claude, ...openai, ...gemini];
   if (kind === "anthropic") return claude;
   if (kind === "openai") return openai;
+  if (kind === "gateway") return [...claude, ...openai, { id: "fast" }];
   return [];
 }
 

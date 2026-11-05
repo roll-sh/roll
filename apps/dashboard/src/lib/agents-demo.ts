@@ -53,6 +53,7 @@ import { DemoAutomations } from "./automations-demo";
 import { memoryCanvas, memoryEndpoints, memorySettings, type AgentsServices, type RepoChoice } from "./agents-services";
 import { offeredProviders, settingsError } from "./machine-settings";
 import { checkEndpoint, demoModels, incompatible, setEndpoint, withEndpoints } from "./agents-endpoints";
+import { DemoGateway } from "./agents-gateway-demo";
 import { PLAN_IMPLEMENTATION_PREFIX, planTitle } from "./agents-plan";
 import { ApiError } from "./code-api";
 import { memoryLinear, type LinearStatus, type LinearTeam } from "./linear-api";
@@ -384,6 +385,10 @@ const MBP = "mch_demo_ada";
 /** The demo daemons' seal key (a test key's public half): the demo never opens what is sealed to it. */
 const DEMO_SEAL_KEY = "KMIZzg7UJuV-Nxs3gUarEXCHzKlAkKSSSCaXrdLz4zg";
 const BOX = "mch_demo_box";
+/** The demo owner's always-on server: it runs roll's model gateway for the other machines. */
+const SRV = "mch_demo_srv";
+/** A local Docker sandbox on ai-server: it has no login of its own and uses the gateway. */
+const DOCK = "mch_demo_dock";
 /** The demo owner's CLIProxyAPI: set on ada-mbp for Gemini CLI, and kept as a profile (the default for new sandboxes). */
 const DEMO_CLIPROXY: EndpointSpec = { id: "cliproxy", name: "CLIProxyAPI", kind: "cliproxy", base_url: "http://100.64.0.7:8317", providers: ["acp:gemini"] };
 
@@ -805,6 +810,24 @@ export class DemoOwner implements AgentsTransport {
   private linear = memoryLinear(demoLinear(), DEMO_TEAMS);
   /** Every provider each demo machine has, on or off (its info lists the ones on). */
   private allProviders = new Map<MachineId, ProviderInfo[]>();
+  /** The demo's model gateway on ai-server (`agents-gateway-demo.ts`): the host's commands and the plan routes. */
+  private gateway = new DemoGateway({
+    machines: () => (this.start(), this.machines),
+    setInfo: (mid, info, emit = true) => {
+      const m = this.machines.get(mid);
+      if (!m?.info?.settings) return;
+      const { gateway: _g, ...settings } = m.info.settings;
+      const next = { ...m, info: { ...m.info, settings: info ? { ...settings, gateway: info } : settings } };
+      this.machines.set(mid, next);
+      if (emit) this.emit({ type: "machine", cursor: ++this.cursor, machine: next });
+    },
+    command: (machine, c) => this.command(machine, `gw_${Date.now()}`, c),
+    work: () =>
+      [...this.records.values()]
+        .filter((r) => r.entity.kind === "thread")
+        .map((r) => ({ machine: r.machine, project: (r.entity as unknown as Thread).project, thread: (r.entity as unknown as Thread).id })),
+    after: (ms, fn) => this.after(ms, fn),
+  });
   /** The demo's automations and their runs (`automations-demo.ts`): runs start threads here. */
   private automations = new DemoAutomations({
     emit: (ev) => this.emit(ev),
@@ -972,6 +995,7 @@ export class DemoOwner implements AgentsTransport {
     const m = this.machines.get(machine);
     if (m && !m.online && reachable(m)) await this.wake(machine);
     if (!this.machines.get(machine)?.online) return { type: "error", code: "machine_offline", message: "the machine isn't connected" };
+    if (isGateway(command)) return this.gateway.handle(machine, command);
     try {
       return this.handle(machine, command);
     } catch (e) {
@@ -1188,6 +1212,7 @@ export class DemoOwner implements AgentsTransport {
       integrations: owner.integrations,
       linear: owner.linear,
       endpoints: owner.endpoints,
+      gateway: owner.gateway.api(),
     };
   }
 
@@ -1241,7 +1266,48 @@ export class DemoOwner implements AgentsTransport {
       updated_at: t0,
       last_active_at: t0,
     });
-    this.cursor = 2;
+    // An always-on server that runs the model gateway; the laptop's Claude Code and Codex and the
+    // sandbox's Codex send their requests through it (docs/code/gateway.md).
+    this.machines.set(SRV, {
+      id: SRV,
+      name: "ai-server",
+      online: true,
+      info: { hostname: "ai-server", os: "linux", arch: "x86_64", version: "0.1.0", home: "/home/ada", seal_key: DEMO_SEAL_KEY, ...this.catalog(SRV, "/home/ada", [claude(), codex()]) },
+      sandbox: null,
+      appearance: { color: "teal", kind: "server" },
+      created_at: t0,
+      last_seen: now(),
+    });
+    this.machines.set(DOCK, {
+      id: DOCK,
+      name: "ai-sandbox",
+      online: true,
+      info: { hostname: "ai-sandbox", os: "linux", arch: "x86_64", version: "0.1.0", home: "/home/roll", seal_key: DEMO_SEAL_KEY, ...this.catalog(DOCK, "/home/roll", [claude("missing"), codex("missing")]) },
+      sandbox: { backend: "docker", size: "standard", status: "running", hourly_cents: 0 },
+      appearance: {},
+      created_at: t0,
+      last_seen: now(),
+    });
+    this.sandboxes.set("sbx_demo_dock", {
+      id: "sbx_demo_dock",
+      name: "ai-sandbox",
+      machine: DOCK,
+      backend: "docker",
+      size: DEMO_SIZES[0],
+      status: "running",
+      desired: "running",
+      stopped_reason: null,
+      error: null,
+      created_at: t0 - 86_400_000,
+      updated_at: t0,
+      last_active_at: t0,
+    });
+    this.gateway.seed(SRV, [{ machine: SRV }, { machine: MBP, providers: ["claude", "codex"] }, { machine: DOCK }]);
+    for (const mid of [SRV, MBP, DOCK]) {
+      const ep = this.gateway.endpointFor(mid);
+      if (ep) this.layEndpoints(mid, setEndpoint(this.machines.get(mid)?.info?.settings?.endpoints ?? [], ep), false);
+    }
+    this.cursor = 4;
     this.nap();
 
     const project = (pid: string, name: string, path: string, branch: string, dirty: boolean, repo: string | null, over: Partial<Project> = {}): Project => ({
@@ -2205,7 +2271,8 @@ export class DemoOwner implements AgentsTransport {
         const fileEnv = Object.fromEntries((m.info.settings?.providers ?? []).map((p) => [p.id, p.env]));
         const config = demoConfig(m.info.home, all, c.settings, fileEnv);
         const endpoints = m.info.settings?.endpoints ?? [];
-        const next = { ...m, info: { ...m.info, providers: withEndpoints(config.providers, endpoints), settings: config.settings && { ...config.settings, endpoints } } };
+        const gateway = m.info.settings?.gateway;
+        const next = { ...m, info: { ...m.info, providers: withEndpoints(config.providers, endpoints), settings: config.settings && { ...config.settings, endpoints, ...(gateway ? { gateway } : {}) } } };
         this.machines.set(machine, next);
         this.emit({ type: "machine", cursor: ++this.cursor, machine: next });
         return { type: "ok" };
@@ -2240,6 +2307,18 @@ export class DemoOwner implements AgentsTransport {
         this.layEndpoints(machine, list.filter((e) => e.id !== c.endpoint));
         return { type: "ok" };
       }
+      case "gateway.configure":
+      case "gateway.key":
+      case "gateway.client.issue":
+      case "gateway.client.revoke":
+      case "gateway.test":
+      case "gateway.remove":
+      case "gateway.status":
+      case "gateway.usage":
+      case "gateway.log":
+      case "gateway.log.body":
+        // `command` hands these to the demo gateway before they get here.
+        return { type: "error", code: "internal", message: "the demo's gateway answers gateway commands" };
       case "endpoint.check": {
         const e = this.machines.get(machine)?.info?.settings?.endpoints?.find((x) => x.id === c.endpoint);
         if (!e) return notFound("endpoint");
@@ -2262,6 +2341,8 @@ export class DemoOwner implements AgentsTransport {
 }
 
 const notFound = (what: string): Reply => ({ type: "error", code: "not_found", message: `no such ${what}` });
+
+const isGateway = (c: Command): c is Extract<Command, { type: `gateway.${string}` }> => c.type.startsWith("gateway.");
 
 /** An SVG as a `data:` URL, as the daemon sends a project's logo. */
 const svgUrl = (svg: string) => `data:image/svg+xml;base64,${btoa(svg)}`;

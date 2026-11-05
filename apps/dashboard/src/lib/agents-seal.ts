@@ -8,6 +8,10 @@
  * - a random 12-byte nonce, and `roll-endpoint:<endpoint id>` as the associated data, so the box
  *   opens only on that daemon and only for that endpoint.
  *
+ * The model gateway's upstream keys (docs/code/gateway.md) are the same box with
+ * `roll-gateway-upstream:<upstream id>` as the associated data (agent-proto `upstream_key_context`),
+ * so an endpoint's box never opens as an upstream's key, nor one upstream's as another's.
+ *
  * WebCrypto only (X25519 is in every current browser); nothing here keeps the key.
  */
 import type { SealedSecret } from "./agents-api";
@@ -44,7 +48,16 @@ export interface SealFixed {
 }
 
 /** Seals `key` to the daemon whose public key is `sealKey` (base64url), for `endpoint`. */
-export async function sealKey(sealKey: string, endpoint: string, key: string, fixed?: SealFixed): Promise<SealedSecret> {
+export function sealKey(sealKey: string, endpoint: string, key: string, fixed?: SealFixed): Promise<SealedSecret> {
+  return seal(sealKey, `roll-endpoint:${endpoint}`, key, fixed);
+}
+
+/** Seals an upstream's key to the gateway's daemon (`gateway.key`), for that upstream only. */
+export function sealUpstreamKey(sealKey: string, upstream: string, key: string, fixed?: SealFixed): Promise<SealedSecret> {
+  return seal(sealKey, `roll-gateway-upstream:${upstream}`, key, fixed);
+}
+
+async function seal(sealKey: string, context: string, key: string, fixed?: SealFixed): Promise<SealedSecret> {
   const subtle = crypto.subtle;
   const daemon = fromB64url(sealKey);
   if (daemon.length !== 32) throw new Error("the machine's seal key isn't an X25519 key");
@@ -58,7 +71,7 @@ export async function sealKey(sealKey: string, endpoint: string, key: string, fi
   const ikm = await subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
   const aes = await subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt, info: INFO }, ikm, { name: "AES-GCM", length: 256 }, false, ["encrypt"]);
   const nonce = fixed?.nonce ?? crypto.getRandomValues(new Uint8Array(12));
-  const aad = new TextEncoder().encode(`roll-endpoint:${endpoint}`);
+  const aad = new TextEncoder().encode(context);
   const ct = new Uint8Array(await subtle.encrypt({ name: "AES-GCM", iv: nonce, additionalData: aad }, aes, new TextEncoder().encode(key)));
   return { v: 1, epk: b64url(epk), nonce: b64url(nonce), ct: b64url(ct) };
 }

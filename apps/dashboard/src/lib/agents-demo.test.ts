@@ -21,7 +21,7 @@ describe("agents demo", () => {
     const client = new AgentsClient("demo", demo, (fn) => queueMicrotask(fn));
     const release = client.hold();
     client.follow("test", ["thr_demo_flaky"]);
-    await until("two machines", () => client.data.machines.size === 2);
+    await until("the machines", () => client.data.machines.size === 4);
     expect(client.data.projects.size).toBe(3);
     await until("busy threads", () => busyThreads(client.data).length >= 2);
 
@@ -124,7 +124,7 @@ describe("agents demo", () => {
     const services = demo.services();
     const list = await services.sandboxes.list("demo");
     expect(list.sizes[0]).toMatchObject({ name: "standard", hourly_cents: 3 });
-    expect(list.sandboxes.map((s) => s.machine)).toEqual(["mch_demo_box"]);
+    expect(list.sandboxes.map((s) => s.machine)).toEqual(["mch_demo_box", "mch_demo_dock"]);
 
     const { sandbox, machine } = await services.sandboxes.create("demo", { name: "scratch", env: { ANTHROPIC_API_KEY: "sk-test" } });
     expect(sandbox.status).toBe("creating");
@@ -155,7 +155,7 @@ describe("agents demo", () => {
     demo = new DemoOwner(0.01, false);
     const client = new AgentsClient("demo", demo, (fn) => queueMicrotask(fn));
     const release = client.hold();
-    await until("the machines", () => client.data.machines.size === 2);
+    await until("the machines", () => client.data.machines.size === 4);
     const goal = "Add dark mode to the settings page";
     const { id } = await client.run<{ type: "created"; id: string }>(
       "mch_demo_ada",

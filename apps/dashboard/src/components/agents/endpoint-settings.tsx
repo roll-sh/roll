@@ -24,7 +24,7 @@ import { useAgents, useAgentsSnapshot } from "./use-agents";
 
 const KINDS: EndpointKind[] = ["cliproxy", "anthropic", "openai", "custom"];
 /** The segmented control's words (the full ones are its tooltips). */
-const KIND_SHORT: Record<EndpointKind, string> = { cliproxy: "CLIProxyAPI", anthropic: "Anthropic", openai: "OpenAI", custom: "Custom" };
+const KIND_SHORT: Record<EndpointKind, string> = { cliproxy: "CLIProxyAPI", anthropic: "Anthropic", openai: "OpenAI", custom: "Custom", gateway: "roll gateway" };
 
 const TERMS = ["endpoint", "cliproxy", "cliproxyapi", "proxy", "gateway", "base url", "api key", "key", "token", "1password", "op://", "anthropic", "openai", "litellm", "openrouter"];
 
@@ -66,6 +66,7 @@ export function specOf(e: EndpointSpec, providers: readonly ProviderId[] | undef
   if (e.url_env) out.url_env = e.url_env;
   if (e.key_env) out.key_env = e.key_env;
   if (e.key_ref) out.key_ref = e.key_ref;
+  if (e.fallback) out.fallback = true;
   return out;
 }
 
@@ -423,6 +424,8 @@ function kindHint(kind: EndpointKind): string {
       return "OPENAI_BASE_URL (include /v1) and OPENAI_API_KEY. Not for Claude Code.";
     case "custom":
       return "The URL and the key go in the variables you name.";
+    case "gateway":
+      return "roll's model gateway on another of your computers: set from Gateway settings.";
   }
 }
 

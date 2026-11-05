@@ -81,7 +81,7 @@ describe("endpoints in the demo", () => {
     const release = client.hold();
     await new Promise<void>((r) => {
       const t = setInterval(() => {
-        if (client.data.machines.size === 2) {
+        if (client.data.machines.size === 4) {
           clearInterval(t);
           r();
         }
