@@ -1107,7 +1107,8 @@ The surface has three views:
   card, without opening the conversation (`pending-request.tsx`): the thread's name (it opens the
   conversation), the last three steps that led to it in the work log's rows (the earlier ones a
   click away), then the request itself: an approval with Approve and Decline (a note back to the
-  agent) and the rest under "More options", a plan with Implement and Refine, questions one at a
+  agent) and the rest under "More options", a plan with the plan itself (folded to its first lines, "Show the whole plan") above Implement
+  and Refine, questions one at a
   time as T3's user-input panel (radio or check rows, 1–9 pick, one choice moves on after 200 ms,
   your own words in a line, Previous / Next question / Submit). A phone's canvas shows the oldest
   the same way. The canvas grows one of two ways, chosen per view

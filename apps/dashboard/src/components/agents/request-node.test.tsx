@@ -51,6 +51,20 @@ describe("RequestNode: answering on the canvas", () => {
     expect(h.openThread).not.toHaveBeenCalled();
   });
 
+  it("shows the plan it asks to implement, folded, above Implement", async () => {
+    const plan = approval({ node: "nod_req", body: { ...(approval().body as Extract<ReturnType<typeof approval>["body"], { type: "approval" }>), action: "plan", title: "Carry out the plan", command: null, decisions: ["accept", "decline"] } });
+    const text = ["# CSV export for invoices", "", ...Array.from({ length: 12 }, (_, i) => `${i + 1}. Step ${i + 1}`)].join("\n");
+    const h = waiting(plan);
+    h.client.enqueue({ type: "entity", ...mirrored("node", node({ type: "plan", text }, { id: "nod_plan", ordinal: 5, status: "completed" }), 30) });
+    renderAgents(<RequestNode request={plan} />, h);
+    const shown = screen.getByRole("region", { name: "Plan: CSV export for invoices" });
+    expect(within(shown).getByText("Step 1")).toBeInTheDocument();
+    expect(within(shown).queryByText("Step 12")).toBeNull();
+    await userEvent.click(within(shown).getByRole("button", { name: "Show the whole plan" }));
+    expect(within(shown).getByText("Step 12")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Implement" })).toBeInTheDocument();
+  });
+
   it("answers questions right on the card, without opening the conversation", async () => {
     const q = question({ node: "nod_req" });
     const h = waiting(q);
