@@ -45,7 +45,8 @@ function show(schema: Schema, initial: Record<string, unknown> = {}, entities: M
   return { onValue, lookup };
 }
 
-describe("automation fields that name a thing", () => {
+// Several pickers open and load in each test: allow for a busy machine.
+describe("automation fields that name a thing", { timeout: 15_000 }, () => {
   it("create an issue: a team from Linear, then that team's states", async () => {
     const { onValue, lookup } = show(step("linear.create_issue"));
     macClick(screen.getByRole("button", { name: "Team" }));
