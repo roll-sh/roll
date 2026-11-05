@@ -1377,7 +1377,8 @@ The surface has three views:
   start in a worktree.
 - **Phones.** Below 640 px the popup is the whole screen; a conversation's actions fold into its
   menu and the diff or a terminal takes the transcript's place; the oldest waiting request sits at
-  the bottom of the canvas, answerable with one tap; fitting the canvas keeps cards readable (at
+  the bottom of the canvas, answerable with one tap (it folds to one line; the zoom bar moves to the
+  top while it shows); a tapped card shows its tools at a finger's size; fitting the canvas keeps cards readable (at
   least 55 %) and starts on the first machine (centred on it when the top left wouldn't show it);
   the canvas grows top-down unless the owner turned it on a phone.
 - **Remembered on every device.** How the owner arranged the canvas is kept by roll

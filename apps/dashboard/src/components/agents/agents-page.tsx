@@ -1,7 +1,7 @@
 "use client";
 
 import { DotField, HorizonMark, RollMark } from "@roll/brand";
-import { Archive, ArrowLeft, MoreHorizontal, PanelRightClose, Pin, PinOff, Plus, Search, Server, Settings, Share2, X, Zap } from "lucide-react";
+import { Archive, ArrowLeft, ChevronDown, ChevronUp, MoreHorizontal, PanelRightClose, Pin, PinOff, Plus, Search, Server, Settings, Share2, X, Zap } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { isBusy } from "@/lib/agents-api";
@@ -490,7 +490,10 @@ export function AgentsSurface({
           <div className="relative flex min-h-0 flex-1">
             <ThreadsSidebar data={data} open={sidebar} setOpen={setSidebar} phone={phone} openThread={shown.kind === "thread" ? shown.thread : null} />
             {/* The working area: an inset panel one step up from the chrome (Linear's inverted L). */}
-            <div className={`relative min-h-0 min-w-0 flex-1 overflow-hidden bg-canvas ${phone ? "" : "mx-2 mb-2 rounded-xl border border-line"}`}>
+            <div
+              data-waiting={(phone && shown.kind === "canvas" && requests.length > 0) || undefined}
+              className={`relative min-h-0 min-w-0 flex-1 overflow-hidden bg-canvas ${phone ? "" : "mx-2 mb-2 rounded-xl border border-line"}`}
+            >
               {data.machines.size === 0 && snap.conn !== "connecting" && shown.kind !== "automations" ? (
                 <Empty demo={demo} onCreated={onSandbox} />
               ) : (
@@ -925,10 +928,29 @@ function defaultSize(n: GraphNode): Size {
 function PhoneWaiting({ client }: { client: AgentsClient }) {
   const data = client.data;
   const { requests } = rolling(data);
+  const [folded, setFolded] = useState(false);
   const q = requests[0];
   const t = data.threads.get(q.thread);
+  // Folds to one line over the prompt bar, so the canvas under it can be read and moved (its zoom
+  // bar moves to the top while this shows: `data-waiting`).
+  if (folded)
+    return (
+      <button
+        onClick={() => setFolded(false)}
+        aria-label={`${requests.length} waiting for you: show`}
+        className="rise flex h-11 w-full items-center gap-2 rounded-full border border-outline bg-raised px-4 text-left text-[13px] shadow-pop"
+      >
+        <span className="size-1.5 shrink-0 rounded-full bg-accent" aria-hidden />
+        <span className="min-w-0 flex-1 truncate">{t?.value.title ?? "Waiting for you"}</span>
+        {requests.length > 1 && <span className="shrink-0 font-mono text-[12px] text-accent">+{requests.length - 1}</span>}
+        <ChevronUp className="size-4 shrink-0 text-muted" />
+      </button>
+    );
   return (
-    <div className="rise max-h-[55dvh] overflow-y-auto rounded-2xl border border-outline bg-raised px-3.5 py-3 shadow-pop" aria-label="Waiting for you">
+    <div className="rise relative max-h-[55dvh] overflow-y-auto rounded-2xl border border-outline bg-raised px-3.5 py-3 shadow-pop" aria-label="Waiting for you" data-phone-waiting>
+      <button onClick={() => setFolded(true)} aria-label="Fold" title="Fold" className="absolute top-1.5 right-1.5 grid size-9 place-items-center rounded-full text-muted hover:text-fg">
+        <ChevronDown className="size-4" />
+      </button>
       <PendingRequest
         request={q}
         data={data}

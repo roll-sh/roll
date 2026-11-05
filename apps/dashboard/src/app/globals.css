@@ -693,3 +693,19 @@ body {
   app-region: no-drag;
   -webkit-app-region: no-drag;
 }
+
+/* A card's floating tools on a touch screen (no hover): they show on the card that was tapped
+   (focused) or is open beside the canvas, so they don't cover every card at once, and the canvas
+   scaling the cards (about 13px tools at a phone's fitted zoom) is undone by its `--zoom`
+   (canvas-engine.ts), so they stay a finger's size, growing from the card's top-right corner. */
+@media (hover: none) {
+  [data-touch-tools] {
+    scale: max(1, calc(1.5 / var(--zoom, 1)));
+    transform-origin: 100% 100%;
+  }
+  [data-card]:is(:focus, :focus-within, [data-selected]) [data-touch-tools] {
+    opacity: 1;
+    pointer-events: auto;
+    translate: 0;
+  }
+}

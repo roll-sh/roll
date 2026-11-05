@@ -208,6 +208,20 @@ describe("the canvas's direction", () => {
   };
   afterEach(() => vi.restoreAllMocks());
 
+  it("a phone's waiting request folds to one line, and the zoom bar moves to the top while it shows", async () => {
+    asPhone();
+    setup();
+    // Plain selectors: the canvas is a big tree for role queries.
+    const $ = (sel: string) => document.querySelector<HTMLElement>(sel);
+    await waitFor(() => expect($('[data-phone-waiting]')).not.toBeNull());
+    expect($("[data-waiting]")?.contains(canvas())).toBe(true);
+    expect($('[aria-label="Zoom out (−)"]')?.parentElement?.className).toContain("[[data-waiting]_&]:top-3");
+    await userEvent.click($('[data-phone-waiting] [aria-label="Fold"]')!);
+    expect($('[data-phone-waiting]')).toBeNull();
+    await userEvent.click($('[aria-label="1 waiting for you: show"]')!);
+    expect($('[data-phone-waiting]')).not.toBeNull();
+  });
+
   it("grows right on a wide screen; the toolbar turns a view top-down, saved with that view in roll", async () => {
     const { services } = setup();
     expect(canvas()).toHaveAttribute("data-direction", "horizontal");

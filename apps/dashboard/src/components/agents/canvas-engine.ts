@@ -73,6 +73,8 @@ export class CanvasEngine {
   private destroyed = false;
 
   view: View = { x: 0, y: 0, k: 1 };
+  /** The `--zoom` last written on the world. */
+  private zoomShown = Number.NaN;
   private viewFrom: View | null = null;
   private viewTo: View | null = null;
   private viewT0 = 0;
@@ -473,6 +475,11 @@ export class CanvasEngine {
       this.opts.onView?.(this.view);
     }
     this.world.style.transform = `translate3d(${this.view.x}px, ${this.view.y}px, 0) scale(${this.view.k})`;
+    // The scale for CSS too (`--zoom`): a touch screen's card tools keep a finger's size with it.
+    if (this.view.k !== this.zoomShown) {
+      this.zoomShown = this.view.k;
+      this.world.style.setProperty("--zoom", String(this.view.k));
+    }
 
     // Cards ease to their targets.
     for (const [k, target] of this.tgt) {

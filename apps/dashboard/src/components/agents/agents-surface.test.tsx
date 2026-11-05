@@ -253,6 +253,15 @@ describe("the canvas under a trackpad", () => {
     e.destroy();
   });
 
+  it("tells CSS its zoom (--zoom on the world), so a touch screen's card tools keep a finger's size", async () => {
+    const { e, container } = engine();
+    const world = container.querySelector("div")!;
+    wheel(container, { deltaY: -10, ctrlKey: true });
+    await waitFor(() => expect(world.style.getPropertyValue("--zoom")).toBe(String(e.view.k)));
+    expect(e.view.k).toBeGreaterThan(1);
+    e.destroy();
+  });
+
   it("Safari's pinch gestures zoom too, and scrollable content keeps its wheel", () => {
     const { e, container } = engine();
     container.dispatchEvent(Object.assign(new Event("gesturestart", { cancelable: true }), { scale: 1 }));

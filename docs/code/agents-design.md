@@ -105,7 +105,8 @@ punch out the edge ports. `refreshColors()` reruns on a theme change (the canvas
   name in 13.5px at weight 590, then the status. Body text is 12–13px. Meta is 11px, with
   `font-mono tabular-nums` for numbers.
 - **Tools:** `HoverActions` is a floating glass toolbar over the card's top-right corner. It
-  appears on hover, on focus, and always on touch. It takes no room in the card, so names never
+  appears on hover and on focus; on a touch screen on the card that was tapped (or is open), counter-
+  scaled by the canvas's `--zoom` so it stays a finger's size (about 36px). It takes no room in the card, so names never
   truncate.
 
 ## Identity

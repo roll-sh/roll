@@ -622,7 +622,8 @@ export const AgentsCanvas = forwardRef<
       </div>
       {overlay}
       {ghost && <LaunchGhost {...ghost} />}
-      <div className="chrome-in absolute right-3 bottom-3 flex items-center gap-0.5 rounded-[10px] border border-line-2 p-0.5 text-muted shadow-pop inset-shadow-highlight glass">
+      {/* At the top while a phone's waiting request sits at the bottom (`data-waiting` above), so both can be reached. */}
+      <div className="chrome-in absolute right-3 bottom-3 flex items-center gap-0.5 rounded-[10px] border border-line-2 p-0.5 text-muted shadow-pop inset-shadow-highlight glass [[data-waiting]_&]:top-3 [[data-waiting]_&]:bottom-auto">
         <ToolButton label="Zoom out (−)" onClick={() => engine.current?.zoomBy(0.8)}>
           <Minus className="size-3.5" />
         </ToolButton>
