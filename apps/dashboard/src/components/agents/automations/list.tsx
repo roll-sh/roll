@@ -295,14 +295,21 @@ function Row({ automation: x, runs, now, list }: { automation: Automation; runs:
           </span>
         </span>
         {/* The last run and its history; hover and focus put the actions in the same place. */}
-        <span className="grid shrink-0 items-center justify-items-end" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
-          <span className="flex items-center gap-3 [grid-area:1/1] group-focus-within/row:invisible group-hover/row:invisible [@media(hover:none)]:visible!">
+        {/* Narrow lists and touch keep only ⋯ (beside the switch), so the row's text keeps its room. */}
+        <span className="grid shrink-0 items-center justify-items-end">
+          <span className="flex items-center gap-3 [grid-area:1/1] @md:group-focus-within/row:invisible @md:group-hover/row:invisible [@media(hover:none)]:visible!">
             <LastRun live={live} last={last} now={now} />
             <span className="hidden @md:flex">
               <RunBars runs={recent} now={now} />
             </span>
           </span>
-          <span className="invisible flex items-center gap-0.5 text-muted [grid-area:1/1] group-focus-within/row:visible group-hover/row:visible [@media(hover:none)]:hidden" aria-label={`Actions for ${x.name}`} role="group">
+          <span
+            className="invisible hidden items-center gap-0.5 text-muted [grid-area:1/1] group-focus-within/row:visible group-hover/row:visible @md:flex [@media(hover:none)]:hidden!"
+            aria-label={`Actions for ${x.name}`}
+            role="group"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => e.stopPropagation()}
+          >
             <RowAction label="Run now" onClick={() => void actions.runNow()} disabled={actions.busy === "run"}>
               <Play />
             </RowAction>
@@ -320,7 +327,7 @@ function Row({ automation: x, runs, now, list }: { automation: Automation; runs:
         </span>
         <span className="flex shrink-0 items-center gap-1" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
           <Switch size="sm" checked={x.enabled} disabled={actions.busy === "toggle"} onCheckedChange={(on) => void actions.setEnabled(on)} aria-label={`${x.enabled ? "Pause" : "Turn on"} ${x.name}`} />
-          <span className="hidden [@media(hover:none)]:inline-flex">
+          <span className="inline-flex @md:hidden [@media(hover:none)]:inline-flex!">
             <Menu label={`Actions for ${x.name}`} trigger={<MoreHorizontal className="size-4" />} items={more} />
           </span>
         </span>

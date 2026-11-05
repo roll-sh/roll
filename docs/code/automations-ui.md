@@ -35,8 +35,11 @@ Code: `apps/dashboard/src/components/agents/automations/` (views), `lib/automati
   - The builder can fill the working area (T3's "Maximize panel"; per device). Its vertical flow is
     about 600px wide, the sheet's width, like Zapier's narrow editor; maximizing gives the
     conditions and long templates room.
-- On a phone the sheet covers the canvas, as conversations do, with the same stack; Back on the list
-  returns to the canvas.
+- **Phone.** The sheet is full height over the canvas (which pauses under it), as conversations
+  are, with the same stack and motion. There's no Close: Back leads out at every level, and Back on
+  the list returns to the canvas. Headers keep their tools as icons, the list's search gets its own
+  line, rows drop the place and integration marks and keep ⋯ instead of hover actions, and a
+  conversation opened from a run fills the sheet with Back to the run.
 
 ## The list
 
@@ -49,7 +52,7 @@ Code: `apps/dashboard/src/components/agents/automations/` (views), `lib/automati
 | Left | The trigger's icon on a tile (an integration's own mark for its triggers), with a dot that breathes on its corner while a run goes on. |
 | Last run | Its state's dot, the state in words when there's room, and how long ago in mono (`4m`); "Running" shimmering while one goes on. |
 | History | Its last 12 runs as 3px bars, oldest first (GitHub Actions' run history): done grey, failed red, going on the accent breathing, cancelled and skipped faint; empty slots stay as faint tracks so rows line up. Each bar's title says what and when. Dropped on narrow lists. |
-| Actions | On hover and keyboard focus, Run now, Pause/Turn on, Duplicate, Edit and ⋯ (Delete with a confirm) take the last run's and history's place, in the row, with no floating bar and no room reserved for them. On touch, ⋯ beside the switch has them all. |
+| Actions | On hover and keyboard focus, Run now, Pause/Turn on, Duplicate, Edit and ⋯ (Delete with a confirm) take the last run's and history's place, in the row, with no floating bar and no room reserved for them. On touch and on lists narrower than about 450px (a phone), ⋯ beside the switch has them all, so the name keeps its room and a tap on the row always opens it. |
 | End | T3's switch (on is the accent). |
 | Paused | The row dims to 64% and line 2 reads "Paused" (T3). |
 | Keys | Tab to a row, Enter opens it, ↑/↓ move between rows. |

@@ -1,6 +1,6 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setActiveClient } from "@/lib/agents-client";
 import { agentsSurface, resetAgentsSurface, setAgentsView } from "@/lib/agents-surface";
 import { mirrored, project, thread } from "@/test/agents";
@@ -118,6 +118,24 @@ describe("the automations sheet", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Thread Upgrade to Next 16.4" }));
     expect(view()).toEqual({ kind: "thread", thread: "thr_2" });
+  });
+
+  it("on a phone covers the canvas with the same stack, and Back on the list returns to the canvas", async () => {
+    const mm = window.matchMedia;
+    vi.spyOn(window, "matchMedia").mockImplementation((q: string) => ({ ...mm(q), matches: q.includes("max-width: 640px") }));
+    setup();
+    await userEvent.click(screen.getByRole("button", { name: "More" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Automations" }));
+    const aside = sheet()!;
+    expect(aside).toHaveClass("absolute", "inset-0");
+    // No Close on a phone: Back is the way out, at every level.
+    expect(within(aside).queryByRole("button", { name: "Close automations (Esc)" })).toBeNull();
+    await userEvent.click(await within(aside).findByRole("button", { name: "Morning triage" }));
+    await userEvent.click(within(sheet()!).getByRole("button", { name: "Back to automations (Esc)" }));
+    expect(view()).toEqual({ kind: "automations" });
+    await userEvent.click(within(sheet()!).getByRole("button", { name: "Back to the canvas" }));
+    expect(view()).toEqual({ kind: "canvas" });
+    vi.restoreAllMocks();
   });
 
   it("maximizes the builder over the canvas and remembers it, only for the builder", async () => {
