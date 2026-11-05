@@ -29,10 +29,17 @@ the durable action queue, bindings, triggers, steps, routes). GitHub's side reus
   Slack sends the user to `GET /v1/code/chat/slack/oauth`. The state names the owner, and
   `oauth.v2.access` names the workspace (never the redirect's query). The bot token is sealed with
   `ROLL_SECRET_KEY` to the install, and it is never returned, logged or `Debug`-printed.
-  Org-level installs are refused.
+  Org-level installs are refused. Besides what the bot does, roll asks for `channels:read`,
+  `groups:read`, `users:read` and `usergroups:read` so the dashboard's pickers can list the
+  workspace's channels, people and user groups (`GET /v1/code/agents/{owner}/lookup/slack/…`,
+  docs/code/http-api.md, "Lookups"). A workspace installed before roll asked for them keeps its
+  old grant: its pickers say "Reconnect Slack" until someone installs it again (Add another, the
+  same workspace), and ids can still be typed.
 - **Discord.** The bot install (`bot applications.commands`). The guild comes from the OAuth token
   exchange's answer; a `guild_id` in the redirect is ignored. One bot token for the server lives in
-  its config, and `/roll` is registered in the guild.
+  its config, and `/roll` is registered in the guild. The pickers list a server's channels and
+  roles as the bot; listing members needs the application's Server Members Intent (Developer
+  Portal, Bot), and only servers the owner installed it in are ever looked up.
 - **One owner per workspace or server** (`UNIQUE (platform, team_id)`). Everything that comes from
   the workspace is that owner's. Another owner installing it gets a conflict.
 - **Who may drive roll** is the install's: the installer (Slack's `authed_user`; Discord doesn't

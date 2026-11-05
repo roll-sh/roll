@@ -4,14 +4,15 @@
  * Chat ops in the owner's agents settings: one card each for Slack, Discord and GitHub
  * (`lib/integrations-api.ts`, `code-control/src/chatops/`). Slack and Discord say whether the
  * server can connect them, list the connected workspaces or servers, and edit who may drive roll
- * from each (the installer, member ids, or anyone there); GitHub lists the owner's repos mirrored
+ * from each (the installer, people picked from the workspace or server through the owner's
+ * lookups, `lib/lookup-api.ts`, or typed ids, or anyone there); GitHub lists the owner's repos mirrored
  * to GitHub. Coming back from a platform's install page
  * (`/dashboard/agents?settings=integrations&integration=slack&connected=Acme`) opens the settings
  * here, scrolled to this section, with the result in a notice.
  */
 
 import { CircleAlert, CircleCheck, ExternalLink, Plus, TriangleAlert, X } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { setAgentsView } from "@/lib/agents-surface";
 import {
   isMemberId,
@@ -26,9 +27,12 @@ import {
   type IntegrationsApi,
   type IntegrationsLink,
 } from "@/lib/integrations-api";
+import { problemText } from "@/lib/lookup-api";
 import { DiscordMark, GitHubMark, SlackMark, type Glyph } from "./brand-icons";
-import { field, SettingRow, SettingsSection, type Setting } from "./settings-ui";
+import { SettingRow, SettingsSection, type Setting } from "./settings-ui";
 import { cn, Switch } from "./ui";
+import { Picker, type PickerSource } from "./ui/picker";
+import { AgentsContext } from "./use-agents";
 
 export const INTEGRATION_SETTINGS = {
   slack: {
@@ -56,14 +60,16 @@ export const INTEGRATION_SETTINGS = {
 
 const IDS = Object.values(INTEGRATION_SETTINGS).map((s) => s.id);
 
-const CHAT: Record<ChatPlatform, { name: string; unit: string; units: string; env: string[]; icon: Glyph; memberHint: string }> = {
+/** `people`: the lookup kind (`slack/users`, `discord/members`) members are picked from. */
+const CHAT: Record<ChatPlatform, { name: string; unit: string; units: string; env: string[]; icon: Glyph; memberHint: string; people: string }> = {
   slack: {
     name: "Slack",
     unit: "workspace",
     units: "workspaces",
     env: ["ROLL_SLACK_CLIENT_ID", "ROLL_SLACK_CLIENT_SECRET", "ROLL_SLACK_SIGNING_SECRET"],
     icon: SlackMark,
-    memberHint: "Slack user id (U…)",
+    memberHint: "Search people, or type a Slack user id (U…)",
+    people: "users",
   },
   discord: {
     name: "Discord",
@@ -71,7 +77,8 @@ const CHAT: Record<ChatPlatform, { name: string; unit: string; units: string; en
     units: "servers",
     env: ["ROLL_DISCORD_APPLICATION_ID", "ROLL_DISCORD_PUBLIC_KEY", "ROLL_DISCORD_BOT_TOKEN", "ROLL_DISCORD_CLIENT_SECRET"],
     icon: DiscordMark,
-    memberHint: "Discord user id",
+    memberHint: "Search members, or type a Discord user id",
+    people: "members",
   },
 };
 
@@ -302,6 +309,26 @@ export function ChatCard({
   );
 }
 
+/**
+ * The people of a workspace or server, from the owner's lookups (`slack/users`, `discord/members`
+ * under the install's team): their names and pictures in the members picker. Unset outside the
+ * agents surface (no lookups): ids are typed.
+ */
+function useInstallPeople(platform: ChatPlatform, owner: string, install: ChatInstall): PickerSource | undefined {
+  const lookup = useContext(AgentsContext)?.services?.lookup;
+  const kind = CHAT[platform].people;
+  return useMemo(() => {
+    if (!lookup) return undefined;
+    return {
+      key: `${owner}/${platform}/${kind}/${install.team_id}`,
+      load: async ({ q, cursor, ids }) => {
+        const page = await lookup.list(owner, platform, kind, { q, cursor, ids, parent: install.team_id });
+        return { items: page.items, next: page.next, problem: page.problem ? { text: problemText(page.problem, platform).text } : null };
+      },
+    };
+  }, [lookup, owner, platform, kind, install.team_id]);
+}
+
 /** One workspace or server: who may drive roll from it, and disconnecting it. */
 function InstallEditor({
   platform,
@@ -321,8 +348,8 @@ function InstallEditor({
   const c = CHAT[platform];
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [draft, setDraft] = useState("");
   const [asking, setAsking] = useState(false);
+  const people = useInstallPeople(platform, owner, install);
 
   const save = async (patch: InstallPatch) => {
     setBusy(true);
@@ -338,15 +365,13 @@ function InstallEditor({
     }
   };
 
-  const add = async (e: FormEvent) => {
-    e.preventDefault();
-    const ids = draft.split(/[\s,]+/).filter(Boolean);
-    if (!ids.length) return;
+  /** The picker's list: a typed id is checked before it's sent. */
+  const setMembers = async (next: string[]) => {
+    const ids = [...new Set(next.map((m) => m.trim()).filter(Boolean))];
     const bad = ids.find((m) => !isMemberId(m));
     if (bad) return setError(`${bad} isn't a ${c.name} user id: letters and digits only.`);
-    const members = [...new Set([...install.members, ...ids])];
-    if (members.length > MAX_MEMBERS) return setError(`At most ${MAX_MEMBERS} members.`);
-    if (await save({ members })) setDraft("");
+    if (ids.length > MAX_MEMBERS) return setError(`At most ${MAX_MEMBERS} members.`);
+    await save({ members: ids });
   };
 
   const disconnect = async () => {
@@ -395,36 +420,21 @@ function InstallEditor({
           <code className="font-mono text-[11.5px] text-muted">{install.installer}</code> installed it, and always can.
         </p>
       )}
-      <ul className="mt-1.5 flex flex-wrap gap-1.5" aria-label="Members">
-        {install.members.map((m) => (
-          <li key={m} className="flex h-6 items-center gap-1 rounded-md border border-line-2 bg-raised pr-0.5 pl-2 font-mono text-[11.5px] text-muted">
-            {m}
-            <button
-              type="button"
-              aria-label={`Remove ${m}`}
-              disabled={busy}
-              onClick={() => void save({ members: install.members.filter((x) => x !== m) })}
-              className="grid size-5 place-items-center rounded text-subtle hover:bg-fg/[0.06] hover:text-fg"
-            >
-              <X className="size-3" strokeWidth={1.5} />
-            </button>
-          </li>
-        ))}
-      </ul>
-      <form onSubmit={(e) => void add(e)} className="mt-1.5 flex items-center gap-1.5">
-        <input
-          aria-label="Add a member"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder={c.memberHint}
-          spellCheck={false}
+      <div className="mt-1.5 max-w-md">
+        <Picker
+          label="Members"
+          multiple
+          value={install.members}
+          onChange={(v) => void setMembers(v)}
+          source={people}
+          custom
+          mono
           disabled={busy}
-          className={cn(field, "h-7 w-52 max-w-full font-mono text-[12px]")}
+          placeholder={`Add people from ${install.team_name}`}
+          searchPlaceholder={c.memberHint}
+          recents={`${owner}/${platform}/${c.people}/${install.team_id}`}
         />
-        <button type="submit" disabled={busy || !draft.trim()} className={quiet}>
-          Add
-        </button>
-      </form>
+      </div>
 
       <div className="mt-3 flex items-start gap-2.5">
         <Switch size="sm" checked={install.anyone} disabled={busy} onCheckedChange={(on) => void save({ anyone: on })} aria-label={who} className="mt-px" />

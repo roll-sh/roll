@@ -9,6 +9,7 @@ import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mirrored } from "@/lib/agents-api";
 import type { Schema } from "@/lib/automations-ui";
+import chatopsCatalog from "@/lib/chatops-catalog.json";
 import linearCatalog from "@/lib/linear-catalog.json";
 import { memoryLookup } from "@/lib/lookup-api";
 import { DEMO_LOOKUPS } from "@/lib/lookup-demo";
@@ -96,5 +97,56 @@ describe("automation fields that name a thing", { timeout: 15_000 }, () => {
     macClick(within(await screen.findByRole("listbox", { name: "Thread" })).getByRole("option", { name: /Fix the SSO loop/ }));
     expect(onValue).toHaveBeenLastCalledWith(expect.objectContaining({ thread: "thr_7" }));
     expect(screen.getByRole("button", { name: "Thread" })).toHaveTextContent("Fix the SSO loop");
+  });
+});
+
+describe("Slack and Discord fields name their things", () => {
+  const chat = (kind: string) => chatopsCatalog.steps.find((s) => s.kind === kind)!.config as unknown as Schema;
+
+  it("a Slack DM picks a person of the workspace; a notice goes to a channel or a person", async () => {
+    const { onValue, lookup } = show(chat("slack.dm"));
+    macClick(screen.getByRole("button", { name: "Workspace" }));
+    macClick(await within(await screen.findByRole("listbox", { name: "Workspace" })).findByRole("option", { name: /Acme/ }));
+    expect(onValue).toHaveBeenLastCalledWith(expect.objectContaining({ team: "T04ACME" }));
+    macClick(screen.getByRole("button", { name: "Person" }));
+    macClick(await within(await screen.findByRole("listbox", { name: "Person" })).findByRole("option", { name: /Grace Hopper/ }));
+    expect(onValue).toHaveBeenLastCalledWith(expect.objectContaining({ team: "T04ACME", user: "U03GRACE" }));
+    expect(lookup.calls.at(-1)).toContain("/lookup/slack/users?parent=T04ACME");
+    expect(screen.getByRole("button", { name: "Person" })).toHaveTextContent("Grace Hopper");
+  });
+
+  it("a Slack notice's To lists channels and people under their headings", async () => {
+    const { onValue } = show(chat("slack.notify"));
+    macClick(screen.getByRole("button", { name: "To" }));
+    const to = await screen.findByRole("listbox", { name: "To" });
+    await waitFor(() => expect(within(to).getByText("People")).toBeInTheDocument());
+    expect(within(to).getByText("Channels")).toBeInTheDocument();
+    macClick(within(to).getByRole("option", { name: /deploys/ }));
+    expect(onValue).toHaveBeenLastCalledWith(expect.objectContaining({ to: "C02DEPLOYS" }));
+  });
+
+  it("a Slack post's channel takes a variable, and a channel saved by name shows as itself", async () => {
+    const { onValue } = show(chat("slack.post"), { channel: "incidents" });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Channel" })).toHaveTextContent("incidents"));
+    macClick(screen.getByRole("button", { name: "Channel" }));
+    macClick(await screen.findByRole("option", { name: "Use a variable" }));
+    macClick(await screen.findByRole("option", { name: /issue\.team\.id/ }));
+    expect(onValue).toHaveBeenLastCalledWith(expect.objectContaining({ channel: "{{ event.data.issue.team.id }}" }));
+  });
+
+  it("a Discord trigger's channels are chips from the picked server", async () => {
+    const trigger = chatopsCatalog.triggers.find((t) => t.source === "discord")!.config as unknown as Schema;
+    const { onValue, lookup } = show(trigger, { guild: "1100000000000000001" });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Server" })).toHaveTextContent("Acme Discord"));
+    macClick(screen.getByRole("button", { name: "Channels" }));
+    const channels = await screen.findByRole("listbox", { name: "Channels" });
+    expect(await within(channels).findByText("Work")).toBeInTheDocument();
+    macClick(within(channels).getByRole("option", { name: /deploys/ }));
+    expect(onValue).toHaveBeenLastCalledWith(expect.objectContaining({ guild: "1100000000000000001", channels: ["1100000000000000011"] }));
+    expect(lookup.calls.some((c) => c.includes("/lookup/discord/channels") && c.includes("parent=1100000000000000001"))).toBe(true);
+    // The list stays open for more; Escape closes it.
+    expect(screen.getByRole("listbox", { name: "Channels" })).toBeInTheDocument();
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("listbox", { name: "Channels" })).toBeNull());
   });
 });

@@ -1,6 +1,8 @@
 /**
  * The demo owner's lookups (`memoryLookup`): what the pickers show in `?demo`. Linear matches the
- * demo's connected Acme workspace (`DEMO_TEAMS` in agents-demo.ts).
+ * demo's connected Acme workspace (`DEMO_TEAMS` in agents-demo.ts), Slack its "Acme" workspace
+ * (`demoIntegrations`: installed by Ada, Grace a member). Discord isn't set up in the demo, so its
+ * lookups say so there; its rows are for tests.
  */
 
 import { memoryLookup, type LookupItem, type LookupRows } from "./lookup-api";
@@ -68,7 +70,59 @@ const ISSUES: LookupItem[] = [
   { id: "iss_ops_3", key: "OPS-3", hint: "OPS-3", label: "Rotate the staging certificates", icon: "completed", color: "#5e6ad2" },
 ];
 
+// ── Slack: the "Acme" workspace ──
+
+const SLACK_WORKSPACES: LookupItem[] = [{ id: "T04ACME", key: "chi_demo1", label: "Acme", hint: "T04ACME", icon: "team" }];
+
+const SLACK_CHANNELS: LookupItem[] = [
+  { id: "C01GENERAL", key: "general", label: "general", hint: "48 members", icon: "channel" },
+  { id: "C02DEPLOYS", key: "deploys", label: "deploys", hint: "12 members", icon: "channel" },
+  { id: "C03INCIDENTS", key: "incidents", label: "incidents", hint: "21 members", icon: "channel" },
+  { id: "G04ONCALL", key: "oncall", label: "oncall", hint: "5 members", icon: "private" },
+  { id: "C05RANDOM", key: "random", label: "random", hint: "not a member", icon: "channel" },
+];
+
+const SLACK_USERS: LookupItem[] = [
+  { id: "U02ADA", key: "ada", label: "Ada Lovelace", hint: "@ada", icon: "user" },
+  { id: "U03GRACE", key: "grace", label: "Grace Hopper", hint: "@grace", icon: "user" },
+  { id: "U04ALAN", key: "alan", label: "Alan Turing", hint: "@alan", icon: "user" },
+  { id: "U05LINUS", key: "linus", label: "Linus Torvalds", hint: "@linus", icon: "user" },
+  { id: "U06MARGARET", key: "margaret", label: "Margaret Hamilton", hint: "@margaret", icon: "user" },
+];
+
+const SLACK_GROUPS: LookupItem[] = [
+  { id: "S01ONCALL", key: "oncall", label: "On call", hint: "@oncall", icon: "group" },
+  { id: "S02WEB", key: "web-team", label: "Web team", hint: "@web-team", icon: "group" },
+];
+
+// ── Discord: a server for tests ──
+
+const DISCORD_CHANNELS: LookupItem[] = [
+  { id: "1100000000000000010", key: "welcome", label: "welcome", icon: "channel" },
+  { id: "1100000000000000011", key: "deploys", label: "deploys", group: "Work", icon: "channel" },
+  { id: "1100000000000000012", key: "ideas", label: "ideas", hint: "forum", group: "Work", icon: "channel" },
+];
+
+const DISCORD_ROLES: LookupItem[] = [
+  { id: "1100000000000000021", key: "Maintainers", label: "Maintainers", color: "#4c8dff", icon: "role" },
+  { id: "1100000000000000022", key: "Triage", label: "Triage", color: "#2ecc71", icon: "role" },
+];
+
+const DISCORD_MEMBERS: LookupItem[] = [
+  { id: "1100000000000000042", key: "ada", label: "Ada", hint: "@ada", icon: "user" },
+  { id: "1100000000000000043", key: "grace", label: "Grace", hint: "@grace", icon: "user" },
+];
+
 export const DEMO_LOOKUPS: LookupRows = {
+  "slack/workspaces": SLACK_WORKSPACES,
+  "slack/channels": SLACK_CHANNELS,
+  "slack/users": SLACK_USERS,
+  "slack/usergroups": SLACK_GROUPS,
+  "slack/targets": [...SLACK_CHANNELS.map((c) => ({ ...c, group: "Channels" })), ...SLACK_USERS.map((u) => ({ ...u, group: "People" }))],
+  "discord/guilds": [{ id: "1100000000000000001", key: "chi_demo2", label: "Acme Discord", hint: "1100000000000000001", icon: "team" }],
+  "discord/channels": DISCORD_CHANNELS,
+  "discord/roles": DISCORD_ROLES,
+  "discord/members": DISCORD_MEMBERS,
   "linear/teams": TEAMS,
   "linear/states": (team) => (team ? TEAMS.filter((t) => t.id === team) : TEAMS).flatMap(statesOf),
   "linear/users": USERS,
@@ -95,4 +149,4 @@ export const DEMO_LOOKUPS: LookupRows = {
   ],
 };
 
-export const demoLookup = () => memoryLookup(DEMO_LOOKUPS);
+export const demoLookup = () => memoryLookup(DEMO_LOOKUPS, { discord: { code: "not_connected", message: "Discord isn't set up on this server" } });

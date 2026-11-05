@@ -923,11 +923,12 @@ GET    /v1/code/agents/{owner}/lookup/{source}/{kind}?q=&parent=&cursor=&ids=&li
        Item {id, label, key?, hint?, group?, avatar? (https), color? (#rrggbb), icon?}
          id is what a field stores; key another value naming the same thing (a team's key, a
          label's name), so values saved before pickers still show their row. icon names a kind
-         (user, agent, channel, private, group, a Linear state's type).
+         (user, agent, channel, private, group, team, role, a Linear state's type).
        Problem {code: "not_connected" | "reconnect", message} | {code: "rate_limited", retry_after}
              | {code: "unavailable", message}  — a 200: the picker says it and takes a typed value.
-       q ≤ 100 chars (filtered on the platform's side); parent: the rows' owner (a team for its
-       states); ids: up to 50 stored values to resolve instead of listing; limit 1–100 (50).
+       q ≤ 100 chars (filtered on the platform's side, or here for a whole list); parent: the
+       rows' owner (a team for its states, a Slack workspace or Discord server); ids: up to 50
+       stored values to resolve instead of listing; limit 1–100 (50).
        Cached per owner for 30 s; a rate limit holds the source off for the owner until its retry
        time (the cached page is still served with the problem). 400 a bad query or a kind that
        needs `parent`; 404 an unknown source or kind.
@@ -937,10 +938,32 @@ GET    /v1/code/agents/{owner}/lookup/{source}/{kind}?q=&parent=&cursor=&ids=&li
                  labels (parent: the team's and the workspace's; groups aren't rows), projects,
                  cycles (parent required; not past), issues (q: a title, or an identifier ENG-12;
                  ids: ids or identifiers)
+         slack:  through the install's sealed bot token. parent: a workspace's team id or install
+                 id (one the owner installed, else 404); none: the owner's only workspace, or every
+                 workspace's rows grouped by its name. Slack can't search, so a workspace's whole
+                 list (≤ 2000 rows, 200 a call with Slack's cursor) is read once per 30 s and
+                 searched, paged (cursor: an offset) and resolved here. A row's key is its name or
+                 handle (`#general`, `@ada` resolve).
+                 workspaces (the owner's installs: id the team id, key the install id),
+                 channels (public, and private ones the bot is in; not archived; hint the member
+                 count or "not a member"; icon channel/private), users (hint @handle, avatar
+                 image_48; bots and deactivated people only resolve stored ids), usergroups (hint
+                 @handle), targets (channels then people, grouped "Channels"/"People": a field
+                 that takes either). A grant without channels:read, groups:read, users:read or
+                 usergroups:read (installed before roll asked for them) is `reconnect`.
+         discord: as roll's bot, only in servers the owner installed it in. parent: a guild id or
+                 install id (else 404); none: the owner's only server, or every server's rows
+                 grouped by its name. guilds (the owner's installs), channels (text, announcement,
+                 forum; group: the category; read whole and searched here), roles (colour from
+                 the role's; @everyone isn't one; a bot's own role only resolves), members (q: a
+                 username or nickname prefix, searched at Discord; none: by user id, cursor the
+                 last id; ids looked up one by one; bots left out; avatar from Discord's CDN;
+                 needs the Server Members Intent, else `unavailable`).
 POST   /v1/code/agents/{owner}/lookup/{source}/{kind} {name, parent?, color?} → Item
        Make one where roll can (linear/labels: a team's when parent names one, else the workspace's).
-       The owner's cached pages of the source are dropped. 400 no name (≤ 80 chars); 422 not
-       connected or a kind roll doesn't make.
+       The owner's cached pages of the source are dropped (connecting, updating or removing a
+       Slack or Discord install drops that platform's too). 400 no name (≤ 80 chars); 422 not
+       connected or a kind roll doesn't make (nothing of Slack's or Discord's).
 ```
 
 ## Chat ops
