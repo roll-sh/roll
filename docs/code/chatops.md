@@ -73,7 +73,7 @@ What an action becomes:
 - **An answer.** A request card's button, select or modal becomes `request.respond` with the
   decision or answers.
 
-Answers and steers act as the automation that made the binding, through roll's API (`api_as`: a
+Answers and steers act as the automation that made the binding, through roll's API (`Code::automation_api`: a
 call token like steps' own, docs/code/automations.md "Steps act through the API"). So the agent
 policy and cluster routing are the API's. An automation that runs as an agent can steer but can't
 answer approvals, because `request.respond` is the owner's. Command ids come from the action's key,

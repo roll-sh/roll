@@ -198,6 +198,9 @@ Besides the traits (above):
 - Register in `automations::register_integrations` (one line per integration), called when the
   engine starts on a node.
 
+Slack, Discord and GitHub are integrations of this kind: docs/code/chatops.md
+(`crates/code-control/src/chatops/`).
+
 ## Surfaces
 
 - Routes: docs/code/http-api.md, "Automations"; the auth matrix in `routes.rs`.
@@ -212,4 +215,3 @@ Besides the traits (above):
   and `lib/automations-demo.ts` (the demo's automations and runs, in memory).
 
 Tests: docs/code/test-coverage.md, "Automations".
-Slack, Discord and GitHub are integrations of this kind: docs/code/chatops.md (`crates/code-control/src/chatops/`).

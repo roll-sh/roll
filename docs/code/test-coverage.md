@@ -245,6 +245,7 @@ thing but not do it, 404 one who can't see it (docs/code/http-api.md).
 | `PUT /v1/code/agents/{owner}/automations/{id}/secrets/{name}` / `DELETE /v1/code/agents/{owner}/automations/{id}/secrets/{name}` | 204, 400 name or value, 403, 404, 422 (no ROLL_SECRET_KEY, over 20); never returned | `automations.rs::webhooks_retry_and_secrets_stay_sealed`, `routes.rs::automation_routes_follow_the_auth_matrix` |
 | `POST /v1/code/agents/{owner}/automations/{id}/webhook/secret` | 200 a new secret once (the old one refused), 404 not a webhook | `automations.rs::inbound_webhooks_are_signed_and_idempotent`, `routes.rs::automation_routes_follow_the_auth_matrix` |
 | `POST /v1/code/agents/{owner}/automations/{id}/webhook` | no token; 202 `{event, duplicate}` (roll's signature with a 5-minute window, or GitHub's), 401 bad or stale signature, 404, 409 disabled | `automations.rs::inbound_webhooks_are_signed_and_idempotent`, `routes.rs::automation_routes_follow_the_auth_matrix` |
+
 ### Chat ops (`chatops/api.rs`, docs/code/chatops.md)
 
 | Route | Statuses | Tests |

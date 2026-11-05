@@ -533,6 +533,8 @@ async fn automation_commands_drive_the_routes() {
     assert!(run(a(&["delete", "Hello"])).await.status.success());
     let out = run(a(&["list"])).await;
     assert!(!String::from_utf8_lossy(&out.stdout).contains("Hello"));
+}
+
 /// Chat ops end to end (docs/code/chatops.md, "The key flow"): the real daemon runs the fake
 /// provider's turn, which asks to run a command; `slack.status` posts the thread's status and the
 /// approval as buttons to a mock Slack; a signed click on Approve answers it through
@@ -587,13 +589,10 @@ async fn a_slack_button_answers_the_fake_providers_approval() {
     assert_eq!(r.status(), 303);
     assert!(r.headers()["location"].to_str().unwrap().contains("connected=Acme"), "{:?}", r.headers());
     let owner_id = code.db.owner("acme").unwrap().unwrap().id;
-    code.db
-        .sql()
-        .execute(
-            "INSERT INTO automations (id, owner_id, spec, enabled, source, revision, cursor, created_at, updated_at, created_by) VALUES ('aut_e2e', ?, '{}', 1, 'slack', 1, 0, 0, 0, 'test')",
-            [owner_id.as_str()],
-        )
-        .unwrap();
+    let spec = json!({ "name": "/roll in Slack", "trigger": { "type": "integration", "source": "slack", "events": ["command"] }, "steps": [{ "id": "say", "kind": "notify", "config": { "title": "heard" } }] });
+    let (s, v) = e.req("POST", "/v1/code/agents/acme/automations", Some(spec)).await;
+    assert_eq!(s, 201, "{v}");
+    let automation = v["automation"]["id"].as_str().unwrap().to_string();
 
     // A machine with the fake provider, and a thread whose turn waits on an approval.
     e.login("box").await;
@@ -630,7 +629,7 @@ async fn a_slack_button_answers_the_fake_providers_approval() {
     let step = |state: Value| {
         let s: Step = serde_json::from_value(json!({ "id": "status", "kind": "slack.status", "config": { "machine": machine, "thread": thread } })).unwrap();
         let ctx = json!({ "event": { "source": "slack", "kind": "command", "data": { "team": "T1", "channel": "C1", "thread_ts": null } }, "steps": {} });
-        StepContext::new(code.clone(), OwnerRef { id: owner_id.clone(), name: "acme".into() }, AutomationId("aut_e2e".into()), "e2e".into(), None, AutomationRunId("arn_e2e".into()), s, 1, ctx, state, code_sql::now_ms())
+        StepContext::new(code.clone(), OwnerRef { id: owner_id.clone(), name: "acme".into() }, AutomationId(automation.clone()), "e2e".into(), None, AutomationRunId("arn_e2e".into()), s, 1, ctx, state, code_sql::now_ms())
     };
     let kind = code.automations.registry.step("slack.status").unwrap();
     let mut ctx = step(Value::Null);

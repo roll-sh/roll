@@ -19,7 +19,7 @@
 //! - **Bindings.** `chat_threads` ties a chat thread to an agent thread: the `slack.status` /
 //!   `discord.status` steps and `*.notify` make them. `chat_requests` ties a posted request
 //!   card to the agent's request. Answers and steers act through roll's API as the automation
-//!   that made the binding ([`api_as`]), so the agent policy, grants and cluster routing are the
+//!   that made the binding (`Code::automation_api`), so the agent policy, grants and cluster routing are the
 //!   API's own.
 //! - **GitHub** ([`github`]): issues, `@roll` comments, review requests and failing checks of
 //!   connected repos come in from the App's durable delivery inbox; steps comment, label, open
@@ -34,14 +34,12 @@ pub mod slack;
 
 use crate::{Code, Result, new_id};
 use agent_proto::automation::AutomationId;
-use axum::body::Body as AxumBody;
-use axum::http::{Method, Request, StatusCode, header};
+use axum::http::Method;
 use code_sql::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
-use tower::ServiceExt;
 
 pub use code_chat::discord::DiscordConfig;
 pub use code_chat::slack::SlackConfig;
@@ -191,12 +189,18 @@ pub fn enable_from_env(code: &Arc<Code>) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-/// Register the triggers and steps (with the automations registry), whether or not a platform
-/// is configured: the catalog says what needs setting up.
-pub fn register(code: &Arc<Code>) {
+/// Chat ops' tables, whether or not a platform is configured (steps and the GitHub trigger read
+/// them).
+pub(crate) fn ensure_schema(code: &Code) {
     if let Err(e) = code.db.sql().ensure_schema(SCHEMA) {
         tracing::warn!(error = %e, "chat ops' tables");
     }
+}
+
+/// Register the triggers and steps with the automations registry (from
+/// `automations::register_integrations`, when the engine starts), whether or not a platform is
+/// configured: the catalog says what needs setting up.
+pub fn register(code: &Arc<Code>) {
     let r = &code.automations.registry;
     slack::register(code, r);
     discord::register(code, r);
@@ -570,91 +574,22 @@ pub(crate) fn set_card(code: &Code, id: &str, ts: Option<&str>, state: Option<&s
 
 // ── acting as the automation ──
 
-/// What the API answered.
-#[derive(Clone, Debug)]
-pub(crate) struct Answer {
-    pub status: StatusCode,
-    pub body: Value,
-}
-
-impl Answer {
-    pub fn ok(&self) -> bool {
-        self.status.is_success()
-    }
-
-    pub fn error(&self) -> String {
-        self.body["error"].as_str().map(str::to_string).unwrap_or_else(|| format!("the API answered {}", self.status))
-    }
-
-    pub fn transient(&self) -> bool {
-        self.status.is_server_error() || matches!(self.status, StatusCode::TOO_MANY_REQUESTS | StatusCode::REQUEST_TIMEOUT)
-    }
-}
-
-/// Call roll's API as `automation` of `owner_id` (or as `agent:<run_as>`), with a token made for
-/// this one call (docs/code/automations.md, "Steps act through the API"), routed like any
-/// request. What a chat answer or steer does is what the automation could do.
-pub(crate) async fn api_as(code: &Arc<Code>, owner_id: &str, automation: &str, run_as: Option<&str>, method: Method, path: &str, body: Option<Value>) -> Answer {
-    use crate::agents::automations::store;
-    let name = match run_as {
-        Some(a) => format!("agent:{a}"),
-        None => format!("automation:{automation}"),
-    };
-    let token = format!("{}{}", crate::agents::automations::TOKEN_PREFIX, random_hex(32));
-    let hash = crate::hash_token(&token);
-    if let Err(e) = store::insert_token(code.db.sql(), &hash, owner_id, automation, &name, code_sql::now_ms() + 10 * 60_000) {
-        return Answer { status: StatusCode::SERVICE_UNAVAILABLE, body: json!({ "error": format!("recording a call token: {e}") }) };
-    }
-    let router = crate::api::router(code.clone());
-    let mut b = Request::builder().method(method).uri(path).header(header::AUTHORIZATION, format!("Bearer {token}"));
-    let req = match body {
-        Some(v) => {
-            b = b.header(header::CONTENT_TYPE, "application/json");
-            b.body(AxumBody::from(v.to_string()))
-        }
-        None => b.body(AxumBody::empty()),
-    };
-    let answer = match req {
-        Ok(req) => match router.oneshot(req).await {
-            Ok(resp) => {
-                let status = resp.status();
-                let bytes = axum::body::to_bytes(resp.into_body(), 16 << 20).await.unwrap_or_default();
-                Answer { status, body: serde_json::from_slice(&bytes).unwrap_or(Value::Null) }
-            }
-            Err(e) => match e {},
-        },
-        Err(e) => Answer { status: StatusCode::BAD_REQUEST, body: json!({ "error": e.to_string() }) },
-    };
-    if let Err(e) = store::delete_token(code.db.sql(), &hash) {
-        tracing::warn!(error = %e, "dropping a chat call token (it expires by itself)");
-    }
-    answer
-}
-
 /// Send a daemon command for a binding (as its automation), with an id made from `key` so a
 /// retried action sends the same command once.
 pub(crate) async fn command(code: &Arc<Code>, b: &Binding, key: &str, cmd: Value) -> std::result::Result<Value, (bool, String)> {
     let Some(owner) = code.db.owner_by_id(&b.owner_id).map_err(|e| (true, e.to_string()))? else { return Err((false, "the owner is gone".into())) };
     let id = format!("chat_{}", &crate::hash_token(key)[..32]);
     let path = format!("/v1/code/agents/{}/machines/{}/commands", owner.name, b.machine_id);
-    let a = api_as(code, &b.owner_id, &b.automation_id, b.run_as.as_deref(), Method::POST, &path, Some(json!({ "id": id, "command": cmd }))).await;
+    let me = crate::agents::automations::OwnerRef { id: owner.id.clone(), name: owner.name.clone() };
+    let automation = AutomationId(b.automation_id.clone());
+    let a = code.automation_api(&me, &automation, b.run_as.as_deref(), Method::POST, &path, Some(json!({ "id": id, "command": cmd }))).await;
     if a.ok() { Ok(a.body) } else { Err((a.transient(), a.error())) }
 }
 
 /// Whether any of the owner's enabled automations listens for this source and kind, so chatter
 /// nobody listens for (every message of a busy channel) never fills the inbox.
 pub(crate) fn anyone_listens(code: &Code, owner_id: &str, source: &str, kind: &str) -> bool {
-    code.db
-        .sql()
-        .query_row(
-            "SELECT 1 FROM automation_listens WHERE owner_id = ? AND source = ? AND (kind = ? OR kind = '*') LIMIT 1",
-            params![owner_id, source, kind],
-            |r| r.get::<_, i64>(0),
-        )
-        .optional()
-        .ok()
-        .flatten()
-        .is_some()
+    code.db.sql().read(|c| crate::agents::automations::registry::listens(c, owner_id, source, kind)).unwrap_or(false)
 }
 
 // ── the action queue ──

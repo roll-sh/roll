@@ -528,7 +528,7 @@ impl Code {
             automations: agents::automations::Automations::default(),
             chat: std::sync::OnceLock::new(),
         });
-        chatops::register(&code);
+        chatops::ensure_schema(&code);
         code.clean_worktrees();
         code.clean_indexes();
         if let Some(cfg) = code.config.cluster.clone() {

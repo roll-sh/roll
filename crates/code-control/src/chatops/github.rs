@@ -205,9 +205,7 @@ fn describe(code: &Code, hub: &Hub, r: &RepoRow, link: &Link, event: &Event) -> 
             let branch = e.branches.iter().find(|b| b.name == r.default_branch).or(e.branches.first()).map(|b| b.name.clone());
             let on_default = e.branches.iter().any(|b| b.name == r.default_branch);
             // A status names branches, not pull requests: only the repo's own branches.
-            if branch.is_none() {
-                return None;
-            }
+            branch.as_ref()?;
             let data = with(
                 base,
                 json!({
@@ -251,17 +249,17 @@ fn names(r: &RepoRow, name: &str) -> bool {
 
 impl TriggerSource for GitHubTrigger {
     fn info(&self) -> TriggerInfo {
-        let ev = |kind: &str, title: &str, fields: &[&str]| EventInfo { kind: kind.into(), title: title.into(), fields: fields.iter().map(|f| f.to_string()).collect() };
+        let ev = |kind: &str, title: &str, fields: &[&str], sample: Value| EventInfo { kind: kind.into(), title: title.into(), fields: fields.iter().map(|f| f.to_string()).collect(), sample };
         TriggerInfo {
             source: SOURCE.into(),
             title: "GitHub".into(),
             description: "Issues, @roll comments, review requests and failing checks on the owner's GitHub-connected repos.".into(),
             events: vec![
-                ev("issue.opened", "An issue is opened", &["repo", "number", "title", "body", "labels", "author", "trusted_author"]),
-                ev("issue.labeled", "An issue is labelled", &["repo", "number", "title", "label", "labels"]),
-                ev("comment.mention", "@roll in a comment", &["repo", "number", "is_pr", "prompt", "body", "author", "change.number"]),
-                ev("review.requested", "A review is requested", &["repo", "number", "title", "reviewer", "head_ref"]),
-                ev("check.failed", "A check fails", &["repo", "check", "branch", "on_default", "sha", "pr", "url"]),
+                ev("issue.opened", "An issue is opened", &["repo", "number", "title", "body", "labels", "author", "trusted_author"], json!({ "repo": "acme/app", "repo_name": "app", "github": "acme/app", "number": 12, "title": "Login 500s on Safari", "body": "Steps: …", "url": "https://github.com/acme/app/issues/12", "labels": ["bug"], "label": null, "author": "ada", "author_association": "MEMBER", "trusted_author": true })),
+                ev("issue.labeled", "An issue is labelled", &["repo", "number", "title", "label", "labels"], json!({ "repo": "acme/app", "repo_name": "app", "github": "acme/app", "number": 12, "title": "Login 500s on Safari", "body": "Steps: …", "url": "https://github.com/acme/app/issues/12", "labels": ["bug", "roll"], "label": "roll", "author": "ada", "author_association": "MEMBER", "trusted_author": true, "sender": "ada" })),
+                ev("comment.mention", "@roll in a comment", &["repo", "number", "is_pr", "prompt", "body", "author", "change.number"], json!({ "repo": "acme/app", "repo_name": "app", "github": "acme/app", "number": 12, "title": "Login 500s on Safari", "is_pr": false, "url": "https://github.com/acme/app/issues/12#issuecomment-1", "issue_url": "https://github.com/acme/app/issues/12", "body": "@roll fix this and open a PR", "prompt": "fix this and open a PR", "author": "ada", "author_association": "MEMBER", "labels": ["bug"], "change": null })),
+                ev("review.requested", "A review is requested", &["repo", "number", "title", "reviewer", "head_ref"], json!({ "repo": "acme/app", "repo_name": "app", "github": "acme/app", "number": 7, "title": "Cache sessions", "body": "", "url": "https://github.com/acme/app/pull/7", "reviewer": "roll-reviewers", "author": "ada", "head_ref": "cache-sessions", "head_sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e", "base_ref": "main" })),
+                ev("check.failed", "A check fails", &["repo", "check", "branch", "on_default", "sha", "pr", "url"], json!({ "repo": "acme/app", "repo_name": "app", "github": "acme/app", "check": "ci / test", "conclusion": "failure", "sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e", "branch": "main", "on_default": true, "url": "https://github.com/acme/app/actions/runs/1", "pull_requests": [], "pr": null, "via": "check_run" })),
             ],
             config: json!({
                 "type": "object",

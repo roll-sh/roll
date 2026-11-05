@@ -1687,14 +1687,13 @@ async fn connected_with_automation() -> (App, GitHub, tempfile::TempDir, std::pa
     let (s, body) = a.req("POST", "/v1/code/repos", Some(connect), admin).await;
     assert_eq!(s, StatusCode::CREATED, "{body}");
     until("import", || async { a.req("GET", "/v1/code/repos/acme/app", None, admin).await.1["import"]["state"] == "done" }).await;
-    let owner = a.code.db.owner("acme").unwrap().unwrap().id;
-    let db = a.code.db.sql();
-    db.execute(
-        "INSERT INTO automations (id, owner_id, spec, enabled, source, revision, cursor, created_at, updated_at, created_by) VALUES ('aut_gh', ?, '{}', 1, 'github', 1, 0, 0, 0, 'test')",
-        [owner.as_str()],
-    )
-    .unwrap();
-    db.execute("INSERT INTO automation_listens (automation_id, owner_id, source, kind, repo_id) VALUES ('aut_gh', ?, 'github', '*', '*')", [owner.as_str()]).unwrap();
+    let spec = json!({
+        "name": "hear GitHub",
+        "trigger": { "type": "integration", "source": "github" },
+        "steps": [{ "id": "say", "kind": "notify", "config": { "title": "heard {{event.kind}}" } }],
+    });
+    let (s, v) = a.req("POST", "/v1/code/agents/acme/automations", Some(spec), admin).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
     (a, g, tmp, w, main_sha)
 }
 

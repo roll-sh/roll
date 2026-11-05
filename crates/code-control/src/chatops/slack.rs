@@ -55,16 +55,16 @@ struct TriggerConfig {
 
 impl TriggerSource for SlackTrigger {
     fn info(&self) -> TriggerInfo {
-        let ev = |kind: &str, title: &str, fields: &[&str]| EventInfo { kind: kind.into(), title: title.into(), fields: fields.iter().map(|f| f.to_string()).collect() };
+        let ev = |kind: &str, title: &str, fields: &[&str], sample: Value| EventInfo { kind: kind.into(), title: title.into(), fields: fields.iter().map(|f| f.to_string()).collect(), sample };
         TriggerInfo {
             source: SOURCE.into(),
             title: "Slack".into(),
             description: "/roll, a mention of the roll bot, a message in a watched channel, or a reaction on a message.".into(),
             events: vec![
-                ev("command", "/roll <prompt>", &["prompt", "user", "user_name", "channel", "team"]),
-                ev("mention", "The roll bot is mentioned", &["prompt", "text", "user", "channel", "thread_ts", "team"]),
-                ev("message", "A message in a watched channel", &["text", "user", "channel", "thread_ts", "in_thread", "team"]),
-                ev("reaction", "A reaction on a message", &["reaction", "text", "user", "author", "channel", "thread_ts", "team"]),
+                ev("command", "/roll <prompt>", &["prompt", "user", "user_name", "channel", "team"], json!({ "team": "T0123", "channel": "C0123", "user": "U0123", "user_name": "ada", "text": "fix the flaky login test", "prompt": "fix the flaky login test", "thread_ts": null })),
+                ev("mention", "The roll bot is mentioned", &["prompt", "text", "user", "channel", "thread_ts", "team"], json!({ "team": "T0123", "channel": "C0123", "user": "U0123", "text": "<@U0BOT> why is checkout slow?", "prompt": "why is checkout slow?", "ts": "1700000000.000100", "thread_ts": "1700000000.000100" })),
+                ev("message", "A message in a watched channel", &["text", "user", "channel", "thread_ts", "in_thread", "team"], json!({ "team": "T0123", "channel": "C0INCIDENTS", "user": "U0123", "text": "deploy failed: migration 42 timed out", "ts": "1700000000.000200", "thread_ts": "1700000000.000200", "in_thread": false })),
+                ev("reaction", "A reaction on a message", &["reaction", "text", "user", "author", "channel", "thread_ts", "team"], json!({ "team": "T0123", "channel": "C0123", "user": "U0123", "reaction": "robot_face", "ts": "1700000000.000300", "text": "the login page 500s on Safari", "author": "U0456", "thread_ts": "1700000000.000300" })),
             ],
             config: json!({
                 "type": "object",
@@ -621,10 +621,11 @@ impl StepKind for SlackStep {
                 } else {
                     to
                 };
-                if !text.trim().is_empty() && super::first_time(&code, &format!("notify-text:{}", ctx.idempotency_key())).unwrap_or(true) {
-                    if let Err(e) = client.post_message(&token, &Message { channel: channel.clone(), text: text.clone(), blocks: None, thread_ts: None }).await {
-                        ctx.log(LogLevel::Warn, format!("the notice's text: {e}"));
-                    }
+                if !text.trim().is_empty()
+                    && super::first_time(&code, &format!("notify-text:{}", ctx.idempotency_key())).unwrap_or(true)
+                    && let Err(e) = client.post_message(&token, &Message { channel: channel.clone(), text: text.clone(), blocks: None, thread_ts: None }).await
+                {
+                    ctx.log(LogLevel::Warn, format!("the notice's text: {e}"));
                 }
                 let f = Follow { machine, thread, channel, thread_ts: None, ts: None, once: true };
                 follow::step(ctx, &SlackSurface { client, token }, &install, &f).await

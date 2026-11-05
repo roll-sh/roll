@@ -910,6 +910,8 @@ async fn automation_routes_follow_the_auth_matrix() {
     assert_eq!(call(a, "POST", base, Some(&hook), Some(ADMIN)).await, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(call(a, "DELETE", &format!("{base}/{id}"), None, Some(&w.agent)).await, FORBIDDEN);
     assert_eq!(call(a, "DELETE", &format!("{base}/{id}"), None, Some(&w.acme)).await, StatusCode::NO_CONTENT);
+}
+
 /// Chat ops (docs/code/chatops.md): the owner manages its integrations; its agents, other owners
 /// and review apps can't, and anonymous callers are 401. The platforms' endpoints look at no
 /// caller: they answer 404 while the platform isn't configured, and check the platform's

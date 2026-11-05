@@ -41,7 +41,9 @@ use std::time::Duration;
 
 /// Register every integration's triggers and steps (called once, when the engine starts on this
 /// node). Integrations: add one line here.
-pub(crate) fn register_integrations(_code: &std::sync::Arc<Code>) {}
+pub(crate) fn register_integrations(code: &std::sync::Arc<Code>) {
+    crate::chatops::register(code);
+}
 
 /// Call tokens (one API call of a step, as its automation) start with this.
 pub const TOKEN_PREFIX: &str = "rlr_";

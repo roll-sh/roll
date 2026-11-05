@@ -54,7 +54,9 @@ impl TriggerSource for DiscordTrigger {
             source: SOURCE.into(),
             title: "Discord".into(),
             description: "/roll in a Discord server.".into(),
-            events: vec![EventInfo { kind: "command".into(), title: "/roll <prompt>".into(), fields: ["prompt", "user", "user_name", "channel", "guild"].iter().map(|s| s.to_string()).collect() }],
+            events: vec![EventInfo { kind: "command".into(), title: "/roll <prompt>".into(), fields: ["prompt", "user", "user_name", "channel", "guild"].iter().map(|s| s.to_string()).collect(),
+                sample: json!({ "guild": "1100000000000000001", "channel": "1100000000000000002", "user": "1100000000000000003", "user_name": "ada", "prompt": "fix the build", "text": "fix the build" }),
+            }],
             config: json!({
                 "type": "object",
                 "properties": {

@@ -178,17 +178,17 @@ impl World {
         v["slack"]["installs"].as_array().unwrap().iter().find(|i| i["team_id"] == team).unwrap()["id"].as_str().unwrap().to_string()
     }
 
-    /// An automation that listens to `source` (all kinds): what the engine's save would write.
-    fn automation(&self, source: &str) -> AutomationId {
-        let id = AutomationId(format!("aut_{source}test"));
-        let db = self.a.code.db.sql();
-        db.execute(
-            "INSERT INTO automations (id, owner_id, spec, enabled, source, revision, cursor, created_at, updated_at, created_by) VALUES (?, ?, '{}', 1, ?, 1, 0, 0, 0, 'test')",
-            code_sql::params![id.as_str(), self.owner_id, source],
-        )
-        .unwrap();
-        db.execute("INSERT INTO automation_listens (automation_id, owner_id, source, kind, repo_id) VALUES (?, ?, ?, '*', '*')", code_sql::params![id.as_str(), self.owner_id, source]).unwrap();
-        id
+    /// An automation listening to every event of `source`, saved through the API (which starts
+    /// the engine, and with it registers chat ops' triggers and steps).
+    async fn automation(&self, source: &str) -> AutomationId {
+        let spec = json!({
+            "name": format!("hear {source}"),
+            "trigger": { "type": "integration", "source": source },
+            "steps": [{ "id": "say", "kind": "notify", "config": { "title": "heard {{event.kind}}" } }],
+        });
+        let (s, v) = self.a.req("POST", "/v1/code/agents/acme/automations", Some(spec), Some(&self.owner)).await;
+        assert_eq!(s, StatusCode::CREATED, "{v}");
+        AutomationId(v["automation"]["id"].as_str().unwrap().to_string())
     }
 
     fn events(&self) -> Vec<(String, String, Value)> {
@@ -337,7 +337,7 @@ async fn roll_commands_reach_the_inbox_only_from_allowed_people() {
     let (s, v) = send(&w.a, cmd("UADA", "fix the login test", "tr1")).await;
     assert_eq!(s, StatusCode::OK);
     assert!(v["text"].as_str().unwrap().contains("No automation"), "{v}");
-    w.automation("slack");
+    w.automation("slack").await;
 
     // A stranger to the install.
     let (_, v) = send(&w.a, cmd("UEVE", "rm -rf", "tr2")).await;
@@ -377,7 +377,7 @@ async fn roll_commands_reach_the_inbox_only_from_allowed_people() {
 async fn slack_status_buttons_answer_requests_and_replies_steer() {
     let w = world().await;
     w.install("T1").await;
-    let automation = w.automation("slack");
+    let automation = w.automation("slack").await;
     let url = w.a.serve().await;
     let (s, m) = w.a.req("POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "build-box" })), Some(&w.owner)).await;
     assert_eq!(s, StatusCode::CREATED);
@@ -563,7 +563,7 @@ async fn discord_interactions_are_verified_and_reach_the_inbox() {
     assert!(v["data"]["content"].as_str().unwrap().contains("Only people"), "{v}");
     let id = install["id"].as_str().unwrap();
     w.a.req("PATCH", &format!("/v1/code/agents/acme/integrations/discord/{id}"), Some(json!({ "members": ["42"] })), Some(&w.owner)).await;
-    w.automation("discord");
+    w.automation("discord").await;
     let (_, v) = send(&w.a, req(&command("i2", "42"), &ts, None)).await;
     assert_eq!(v["data"]["content"], "Sent to roll.");
     send(&w.a, req(&command("i2", "42"), &ts, None)).await;
