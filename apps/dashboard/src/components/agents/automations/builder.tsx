@@ -854,6 +854,8 @@ export function useStepSummary(s: Step, schema: Schema): string {
 function Advanced({ step: s, onChange, variables, problems, index, sample }: { step: Step; onChange: (s: Step) => void; variables: readonly Variable[]; problems: Problems; index: number; sample: (p: string) => string | undefined }) {
   const [open, setOpen] = useState(s.when.length > 0 || !!s.retry || s.timeout_s !== null || s.on_error === "continue" || !!problems[`steps.${index}.id`]);
   const idErr = problems[`steps.${index}.id`];
+  // The wait between tries outlives one try (typing 10 passes through 1, which has no retry).
+  const [backoff, setBackoff] = useState(s.retry?.backoff_s ?? 30);
   return (
     <div className="rounded-lg border border-line">
       <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="flex h-9 w-full items-center gap-2 px-3 text-left text-[12.5px] text-muted hover:text-fg">
@@ -893,12 +895,16 @@ function Advanced({ step: s, onChange, variables, problems, index, sample }: { s
             </div>
             <label>
               <span className="mb-1.5 block text-[12px] font-[510] text-soft">Tries</span>
-              <NumberField min={1} max={10} aria-label="Tries" value={s.retry?.attempts ?? 1} onChange={(n) => n !== null && onChange({ ...s, retry: n <= 1 ? null : { attempts: n, backoff_s: s.retry?.backoff_s ?? 30 } })} className={cn(fieldClass, "w-16 font-mono text-[12.5px]")} />
+              <NumberField min={1} max={10} aria-label="Tries" value={s.retry?.attempts ?? 1} onChange={(n) => n !== null && onChange({ ...s, retry: n <= 1 ? null : { attempts: n, backoff_s: s.retry?.backoff_s ?? backoff } })} className={cn(fieldClass, "w-16 font-mono text-[12.5px]")} />
             </label>
             {s.retry && (
               <label>
                 <span className="mb-1.5 block text-[12px] font-[510] text-soft">Wait between (s)</span>
-                <NumberField min={1} aria-label="Backoff seconds" value={s.retry.backoff_s} onChange={(n) => n !== null && onChange({ ...s, retry: { ...s.retry!, backoff_s: n } })} className={cn(fieldClass, "w-20 font-mono text-[12.5px]")} />
+                <NumberField min={1} aria-label="Backoff seconds" value={s.retry.backoff_s} onChange={(n) => {
+                  if (n === null) return;
+                  setBackoff(n);
+                  onChange({ ...s, retry: { ...s.retry!, backoff_s: n } });
+                }} className={cn(fieldClass, "w-20 font-mono text-[12.5px]")} />
               </label>
             )}
             <label>

@@ -150,6 +150,24 @@ describe("Automation builder", () => {
     expect(screen.getByRole("button", { name: /Name, conditions, retries/ })).toHaveAttribute("aria-expanded", "true");
   });
 
+  it("keeps a step's wait between tries while its tries are retyped (10 passes through 1, which has none)", async () => {
+    renderAgents(<AutomationPanel view={{ kind: "automations", open: "new" }} />, harness(fakeApi()));
+    await userEvent.click(screen.getByRole("button", { name: "Add a step" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: /Notify me/ }));
+    const card = screen.getByRole("region", { name: "Step 1: Notify me" });
+    await userEvent.click(within(card).getByRole("button", { name: /Name, conditions, retries/ }));
+    const tries = within(card).getByRole("spinbutton", { name: "Tries" });
+    await userEvent.clear(tries);
+    await userEvent.type(tries, "3");
+    const wait = within(card).getByRole("spinbutton", { name: "Backoff seconds" });
+    await userEvent.clear(wait);
+    await userEvent.type(wait, "120");
+    await userEvent.clear(tries);
+    await userEvent.type(tries, "10");
+    expect(within(card).getByRole("spinbutton", { name: "Tries" })).toHaveValue(10);
+    expect(within(card).getByRole("spinbutton", { name: "Backoff seconds" })).toHaveValue(120);
+  });
+
   it("says what's wrong inline and doesn't save until it's fixed", async () => {
     const api = fakeApi();
     renderAgents(<AutomationPanel view={{ kind: "automations", open: "new" }} />, harness(api));
