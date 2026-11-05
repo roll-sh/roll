@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Machine, Terminal as TerminalRec } from "@/lib/agents-api";
 import { Card } from "./nodes";
 import { resolveColor } from "@roll/brand";
+import { TerminalKeys, withCtrl } from "./terminal-keys";
 import { useAgents } from "./use-agents";
 
 function decode(b64: string): Uint8Array {
@@ -75,11 +76,16 @@ function themeOf(el: HTMLElement) {
  * the screen (the canvas card's is fixed; a conversation's fills its panel).
  */
 export function TerminalView({ terminal, machine, className = "", bare = false }: { terminal: TerminalRec; machine: Machine | undefined; className?: string; bare?: boolean }) {
-  const { client } = useAgents();
+  const { client, phone } = useAgents();
   const host = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
   const mid = machine?.id;
   const exited = terminal.status === "exited";
+  // A phone's key row writes through the same batching as typing; a held Ctrl applies to what's typed next.
+  const send = useRef<(data: string) => void>(() => {});
+  const [ctrl, setCtrl] = useState(false);
+  const ctrlHeld = useRef(false);
+  ctrlHeld.current = ctrl;
 
   useEffect(() => {
     const el = host.current;
@@ -126,9 +132,17 @@ export function TerminalView({ terminal, machine, className = "", bare = false }
         pending = "";
         if (data) client.run(mid, { type: "terminal.input", terminal: terminal.id, data: encode(data) }).catch((e: Error) => setError(e.message));
       };
-      const onData = term.onData((d) => {
+      send.current = (d) => {
         pending += d;
         timer ??= setTimeout(flush, 12);
+      };
+      const onData = term.onData((d) => {
+        const held = ctrlHeld.current;
+        if (held) {
+          ctrlHeld.current = false;
+          setCtrl(false);
+        }
+        send.current(held ? withCtrl(d) : d);
       });
 
       let last = { cols: term.cols, rows: term.rows };
@@ -173,6 +187,7 @@ export function TerminalView({ terminal, machine, className = "", bare = false }
       </div>
       )}
       <div ref={host} data-nodrag data-scroll className={`cursor-text overflow-hidden bg-bg px-2 py-1.5 ${className}`} />
+      {phone && !exited && <TerminalKeys send={(d) => send.current(d)} ctrl={ctrl} setCtrl={setCtrl} />}
       {error && <p className="border-t border-line px-3 py-1.5 text-[12px] text-danger">{error}</p>}
     </>
   );
