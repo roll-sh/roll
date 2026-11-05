@@ -71,6 +71,7 @@ describe("roll code on a thread", () => {
     const done = await screen.findByRole("status", { name: "Published" });
     expect(h.command).toHaveBeenLastCalledWith("mch_1", expect.any(String), { type: "thread.publish", thread: "thr_1", message: "Fix the flaky queue test", land: true });
     expect(within(done).getByRole("link", { name: /change #42/ })).toHaveAttribute("href", "https://roll.sh/acme/roll/changes/42");
+    expect(within(done).getByRole("link", { name: /change #42/ })).toHaveAttribute("target", "_blank");
     expect(within(done).getByText(/Not landed yet/)).not.toHaveClass("text-danger");
     expect(within(done).getByRole("list", { name: "Blockers" })).toHaveTextContent("check `test` hasn't passed");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();

@@ -163,7 +163,7 @@ export function PublishForm({ thread, project, machine, onDone }: { thread: Thre
           Published <span className="font-mono text-muted">{done.branch}</span>
           <span className="font-mono text-[11px] text-subtle">{done.commit.slice(0, 8)}</span>
           {done.url && done.change !== null && (
-            <a href={done.url} className="inline-flex items-center gap-0.5 text-accent hover:underline">
+            <a href={done.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-0.5 text-accent hover:underline">
               change #{done.change} <ArrowUpRight className="size-3" />
             </a>
           )}
