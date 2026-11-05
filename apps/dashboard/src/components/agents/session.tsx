@@ -1,8 +1,6 @@
 "use client";
 
 import {
-  Archive,
-  ArchiveRestore,
   Check,
   ChevronDown,
   ChevronRight,
@@ -29,7 +27,7 @@ import { ChangeChip, PublishForm, TakeWorkForm, WorkChip } from "./change";
 import { useEscapeLayer } from "./escape-layers";
 import { Composer } from "./composer";
 import { Menu } from "./menu";
-import { useInboxMenu } from "./threads-sidebar";
+import { deleteConfirm, ShelfStrip, useInboxMenu } from "./threads-sidebar";
 import { toFileDiff } from "./request-card";
 import { ShareButton } from "./share";
 import { Stat, StatusDot, usageLine } from "./shared";
@@ -206,9 +204,10 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
                 {subagent ? (
                   <SubagentBar node={subagent.node} now={now} onParent={() => setSub(null)} />
                 ) : thread.archived_at ? (
-                  <p className="py-3 text-center text-[12.5px] text-subtle">Archived. Unarchive it from the menu to keep going.</p>
+                  <ShelfStrip thread={thread} />
                 ) : (
                   <>
+                    <ShelfStrip thread={thread} />
                     {parent && <DelegatedBy parent={parent} onOpen={() => openThread(parent.id)} />}
                     <Composer key={thread.id} mode={{ kind: "thread", thread, machine }} autoFocus={!phone} />
                   </>
@@ -538,19 +537,9 @@ function TitleBar({
                 !!services && !thread.work && { label: "Take a work item", icon: <ClipboardList />, onSelect: () => setPanel("work") },
                 ...inboxMenu.items,
                 {
-                  label: thread.archived_at ? "Unarchive" : "Archive",
-                  icon: thread.archived_at ? <ArchiveRestore /> : <Archive />,
-                  disabled: !online || busy,
-                  onSelect: () =>
-                    act(async () => {
-                      await client.run(mid!, { type: thread.archived_at ? "thread.unarchive" : "thread.archive", thread: thread.id });
-                      if (!thread.archived_at) close();
-                    }),
-                },
-                {
                   label: "Delete",
-                  // The owner's "Confirm before deleting a thread".
-                  confirm: prefs.confirm_delete ? "Delete this thread?" : undefined,
+                  // The owner's "Confirm before deleting a thread" (T3's text, and what roll keeps).
+                  confirm: prefs.confirm_delete ? deleteConfirm(thread) : undefined,
                   icon: <Trash2 />,
                   danger: true,
                   disabled: !online,

@@ -1,8 +1,23 @@
 "use client";
 
-import { ArrowDownToLine, Bug, Check, CircleAlert, FlaskConical, Hammer, ListChecks, Pause, Play, Plus, Settings2, Trash2 } from "lucide-react";
+import { ArrowDownToLine, Bug, Check, CircleAlert, Eraser, FlaskConical, Hammer, ListChecks, Pause, Play, Plus, Settings2, Trash2 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
-import { type IdentityColor, type Machine, type Project, type ProjectIcon as ProjectIconSetting, type ProjectScript, type ProjectSettings, type PullResult, reachable, type ScriptIcon, type ThreadDefaults } from "@/lib/agents-api";
+import {
+  type AutoSettle,
+  type Cleanup,
+  type CleanupReport,
+  type IdentityColor,
+  type KeptReason,
+  type Machine,
+  type Project,
+  type ProjectIcon as ProjectIconSetting,
+  type ProjectScript,
+  type ProjectSettings,
+  type PullResult,
+  reachable,
+  type ScriptIcon,
+  type ThreadDefaults,
+} from "@/lib/agents-api";
 import { checkProjectIcon, projectColor } from "@/lib/agents-identity";
 import { ColorPicker, ProjectIcon } from "./identity";
 import { btn, primary } from "../ui";
@@ -56,7 +71,62 @@ const P = {
     section: "Scripts",
     description: "Commands for this checkout or a thread's worktree. A setup script runs in each new worktree, beside the agent.",
   },
+  autoSettle: {
+    id: "project.auto-settle",
+    title: "Settle inactive threads",
+    section: "Settling and cleanup",
+    description: "After this long without a message or a run, a thread moves to the settled shelf. A new message brings it back.",
+    terms: ["auto-settle", "auto settle", "inbox", "shelf", "inactive", "days"],
+  },
+  onLand: { id: "project.settle-on-land", title: "Settle when its change lands", section: "Settling and cleanup", description: "A closed change always settles its thread.", terms: ["merged", "pr", "landed"] },
+  keepChanges: {
+    id: "project.keep-changes",
+    title: "Keep threads with an open change",
+    section: "Settling and cleanup",
+    description: "A thread published to roll code doesn't settle for inactivity until its change lands or closes.",
+    terms: ["pull request", "pr", "keep"],
+  },
+  cleanup: {
+    id: "project.cleanup",
+    title: "Remove settled worktrees",
+    section: "Settling and cleanup",
+    description: "The worktree of a thread settled or archived this long ago is removed. Its branch and checkpoints stay, and its next message puts it back.",
+    terms: ["worktree", "cleanup", "clean up", "disk", "storage", "delete"],
+  },
+  cleanupKeep: {
+    id: "project.cleanup-keep",
+    title: "Keep a worktree that has",
+    section: "Settling and cleanup",
+    description: "A worktree with uncommitted changes always stays. Ignored files are things like .env, build output and node_modules.",
+    terms: ["uncommitted", "ignored", "local files"],
+  },
 } satisfies Record<string, Setting>;
+
+const SETTLE_DAYS = [1, 2, 3, 5, 7, 14, 30, 90];
+const CLEANUP_DAYS = [0, 1, 3, 7, 14, 30, 90];
+const days = (n: number) => (n === 0 ? "Right away" : n === 1 ? "After 1 day" : `After ${n} days`);
+const dayOptions = (all: number[], current: number | null) =>
+  [{ value: "never", label: "Never" }, ...[...new Set([...all, ...(current === null ? [] : [current])])].sort((a, b) => a - b).map((n) => ({ value: String(n), label: days(n) }))];
+
+const KEPT_REASON: Record<KeptReason, string> = {
+  local_changes: "local changes",
+  busy: "still working",
+  terminal: "a terminal running in it",
+  other_branch: "another branch checked out",
+  shared: "another thread works in it",
+  not_managed: "not a worktree roll made",
+  failed: "git refused",
+};
+
+/** What "Clean up now" did, in a line: "Removed 2 worktrees · kept 1 (local changes)". */
+export function cleanupText(r: CleanupReport): string {
+  const plural = (n: number) => `${n} worktree${n === 1 ? "" : "s"}`;
+  if (r.removed.length === 0 && r.kept.length === 0) return "Nothing to clean up: no settled or archived thread has a worktree.";
+  const why = [...new Set(r.kept.map((k) => KEPT_REASON[k.reason]))].join(", ");
+  const kept = r.kept.length ? `kept ${r.kept.length} (${why})` : "";
+  const removed = r.removed.length ? `Removed ${plural(r.removed.length)}` : "";
+  return [removed, kept].filter(Boolean).join(" · ").replace(/^kept/, "Kept");
+}
 
 /** What the last pull did, in one quiet line; `null` when there is nothing to say. */
 export function pullText(pull: PullResult | null, now = Date.now()): { text: string; tone: "ok" | "skip" | "fail" } | null {
@@ -203,11 +273,16 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
   const [scripts, setScripts] = useState<ProjectScript[]>(project.settings.scripts);
   const [color, setColor] = useState<IdentityColor | undefined>(project.settings.color);
   const [icon, setIcon] = useState<ProjectIconSetting>(project.settings.icon ?? { kind: "auto" });
+  const [autoSettle, setAutoSettle] = useState<AutoSettle>(project.settings.auto_settle);
+  const [cleanup, setCleanup] = useState<Cleanup>(project.settings.cleanup ?? {});
+  const [cleaned, setCleaned] = useState<CleanupReport | null>(null);
   const iconChecked = checkProjectIcon(icon);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const saved = useMemo(() => new Set(project.settings.scripts.map((s) => s.id)), [project.settings.scripts]);
 
+  const cleanupDays = cleanup.worktree_after_days ?? null;
+  const keep = cleanup.keep ?? "uncommitted_changes";
   const settings: ProjectSettings = {
     ...project.settings,
     auto_pull: autoPull,
@@ -215,6 +290,9 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
     scripts,
     color,
     icon: "icon" in iconChecked && iconChecked.icon.kind !== "auto" ? iconChecked.icon : undefined,
+    auto_settle: { after_days: autoSettle.after_days, on_land: autoSettle.on_land, keep_changes: autoSettle.keep_changes || undefined },
+    // Off and kept as the default leaves no trace, as the daemon writes it.
+    cleanup: cleanupDays === null && keep === "uncommitted_changes" ? undefined : { worktree_after_days: cleanupDays ?? undefined, keep: keep === "uncommitted_changes" ? undefined : keep },
   };
   const changed = name.trim() !== project.name || canon(settings) !== canon(project.settings);
   const scriptsOk = scripts.every((s) => s.name.trim() && s.command.trim());
@@ -292,6 +370,70 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
 
       <SettingsSection title="New threads" ids={[P.model.id, P.permissions.id, P.mode.id, P.workspace.id]}>
         <DefaultsRows rows={P} defaults={defaults} providers={providers} disabled={false} onChange={setDefaults} />
+      </SettingsSection>
+
+      <SettingsSection title="Settling and cleanup" ids={[P.autoSettle.id, P.onLand.id, P.keepChanges.id, P.cleanup.id, P.cleanupKeep.id]}>
+        <SettingRow
+          s={P.autoSettle}
+          control={
+            <Select
+              label="Settle inactive threads"
+              className="w-36"
+              value={autoSettle.after_days === null ? "never" : String(autoSettle.after_days)}
+              onChange={(v) => setAutoSettle((a) => ({ ...a, after_days: v === "never" ? null : Number(v) }))}
+              options={dayOptions(SETTLE_DAYS, autoSettle.after_days)}
+            />
+          }
+        />
+        <SettingRow s={P.onLand} control={<Switch checked={autoSettle.on_land} onCheckedChange={(on) => setAutoSettle((a) => ({ ...a, on_land: on }))} aria-label={P.onLand.title} />} />
+        <SettingRow s={P.keepChanges} control={<Switch checked={!!autoSettle.keep_changes} onCheckedChange={(on) => setAutoSettle((a) => ({ ...a, keep_changes: on }))} aria-label={P.keepChanges.title} />} />
+        <SettingRow
+          s={P.cleanup}
+          control={
+            <>
+              <button
+                type="button"
+                disabled={!online || busy !== null}
+                title="Remove the worktrees of this project's settled and archived threads now, with the same checks"
+                onClick={() =>
+                  act("cleanup", async () => setCleaned(await client.run<{ type: "cleaned" } & CleanupReport>(machine!.id, { type: "project.cleanup", project: project.id }, "cleaned")))
+                }
+                className={`${btn} shrink-0 whitespace-nowrap`}
+              >
+                <Eraser className="size-3.5" />
+                {busy === "cleanup" ? <span className="shimmer">Cleaning up…</span> : "Clean up now"}
+              </button>
+              <Select
+                label="Remove settled worktrees"
+                className="w-36"
+                value={cleanupDays === null ? "never" : String(cleanupDays)}
+                onChange={(v) => setCleanup((c) => ({ ...c, worktree_after_days: v === "never" ? null : Number(v) }))}
+                options={dayOptions(CLEANUP_DAYS, cleanupDays)}
+              />
+            </>
+          }
+        >
+          {cleaned && (
+            <p className="mt-2 text-[12px] text-muted" role="status">
+              {cleanupText(cleaned)}
+            </p>
+          )}
+        </SettingRow>
+        <SettingRow
+          s={P.cleanupKeep}
+          control={
+            <Select
+              label="Keep a worktree that has"
+              className="w-44"
+              value={keep}
+              onChange={(v) => setCleanup((c) => ({ ...c, keep: v }))}
+              options={[
+                { value: "uncommitted_changes", label: "Uncommitted changes" },
+                { value: "any_local_files", label: "Any local files" },
+              ]}
+            />
+          }
+        />
       </SettingsSection>
 
       <SettingsSection title="Scripts" ids={[P.scripts.id]}>

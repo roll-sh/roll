@@ -893,7 +893,7 @@ export type Command =
       type: "project.update";
       project: ProjectId;
       name?: string;
-      settings?: { auto_pull: boolean; defaults?: ThreadDefaults; scripts?: ProjectScript[]; auto_settle?: AutoSettle; color?: IdentityColor; icon?: ProjectIcon };
+      settings?: { auto_pull: boolean; defaults?: ThreadDefaults; scripts?: ProjectScript[]; auto_settle?: AutoSettle; cleanup?: Cleanup; color?: IdentityColor; icon?: ProjectIcon };
     }
   | { type: "project.pull"; project: ProjectId }
   | { type: "project.cleanup"; project: ProjectId }

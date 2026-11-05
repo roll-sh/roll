@@ -2,20 +2,24 @@
 
 /**
  * The threads sidebar left of the canvas (docs/code/agents.md, "Settling"), T3 Code's sidebar:
- * each project's threads, active first with their status, then the snoozed and settled shelves
- * (collapsed, remembered). A row opens its conversation in the side panel; its menu and the
- * conversation's settle, un-settle, snooze and wake. ⌘⇧S settles the open thread and opens the
- * next (T3's settle and advance), ⌘B shows or hides the sidebar. The rules are
+ * each project's threads, active first with their status, then the snoozed, settled and archived
+ * shelves (collapsed, remembered; T3 keeps its archive in settings, roll beside each project). A
+ * row opens its conversation in the side panel; its menu and the conversation's settle, un-settle,
+ * snooze, wake, archive, unarchive and delete. Each action shows T3's undo notice
+ * (`showThreadUndoNotice.ts`: one at a time, Undo or ⌘Z). ⌘⇧S settles the open thread and opens
+ * the next (T3's settle and advance), ⌘B shows or hides the sidebar. The rules are
  * `lib/agents-inbox.ts`; the daemon keeps the state.
  */
 
-import { AlarmClock, AlarmClockOff, Check, ChevronDown, ChevronRight, MoreHorizontal, PanelLeft, PanelLeftClose, Plus, Undo2, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { Machine, MachineId, Thread } from "@/lib/agents-api";
+import { AlarmClock, AlarmClockOff, Archive, ArchiveRestore, Check, ChevronDown, Eraser, ChevronRight, MoreHorizontal, PanelLeft, PanelLeftClose, Plus, Trash2, Undo2, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import type { Command, Machine, MachineId, Thread } from "@/lib/agents-api";
 import {
   cantPark,
   inbox,
   nextAfter,
+  restoreOf,
+  shelfOf,
   rowStatusLabel,
   SETTLED_FIRST,
   SETTLED_PAGE,
@@ -32,11 +36,12 @@ import { runsOf, type AgentsData } from "@/lib/agents-store";
 import { agentsSurface, setAgentsView } from "@/lib/agents-surface";
 import type { MenuItem as MenuEntry } from "./menu";
 import { Menu, MenuItem, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuShortcut, MenuSub, MenuSubPopup, MenuSubTrigger, MenuTrigger, Segmented } from "./ui";
-import { useAgents } from "./use-agents";
+import { useAgents, usePrefs } from "./use-agents";
 import { MachineIcon, ProjectIcon } from "./identity";
 
 const OPEN_KEY = "roll:agents:sidebar";
-const SHELF_KEY = (shelf: "snoozed" | "settled") => `roll:agents:sidebar:${shelf}-expanded`;
+type Parked = "snoozed" | "settled" | "archived";
+const SHELF_KEY = (shelf: Parked) => `roll:agents:sidebar:${shelf}-expanded`;
 const COLLAPSED_KEY = "roll:agents:sidebar:collapsed";
 
 function stored(key: string): string | null {
@@ -95,23 +100,90 @@ interface Toast {
   error?: boolean;
 }
 
-/** Settle, un-settle, snooze and wake a thread, with T3's undo toast; `toast` renders it. */
-export function useInboxActions() {
-  const { client, readOnly } = useAgents();
-  const [toast, setToast] = useState<Toast | null>(null);
+// One notice at a time for the whole page (T3's undo notice): an action anywhere (the sidebar, a
+// project's shelf on the canvas, the conversation's menu, ⌘K) replaces the last one.
+let toastNow: (Toast & { key: number }) | null = null;
+let toastKey = 0;
+const toastSubs = new Set<() => void>();
+export function showInboxToast(toast: Toast | null) {
+  toastNow = toast && { ...toast, key: ++toastKey };
+  for (const f of toastSubs) f();
+}
+const subscribeToast = (f: () => void) => {
+  toastSubs.add(f);
+  return () => {
+    toastSubs.delete(f);
+  };
+};
+
+/** The undo notice: 5 s (T3's), longer for an error; Undo or ⌘Z undoes it. Rendered once, by the sidebar. */
+export function InboxToast() {
+  const toast = useSyncExternalStore(subscribeToast, () => toastNow, () => null);
   useEffect(() => {
     if (!toast) return;
-    const t = setTimeout(() => setToast(null), toast.error ? 6000 : 4500);
+    const t = setTimeout(() => toastNow?.key === toast.key && showInboxToast(null), toast.error ? 6000 : 5000);
     return () => clearTimeout(t);
   }, [toast]);
+  useEffect(() => {
+    if (!toast?.undo) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey || e.key.toLowerCase() !== "z" || e.defaultPrevented) return;
+      // Text fields keep their own undo.
+      const el = e.target as HTMLElement | null;
+      if (el?.closest?.("input, textarea, [contenteditable=true], .xterm")) return;
+      e.preventDefault();
+      toast.undo?.();
+      showInboxToast(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [toast]);
+  if (!toast) return null;
+  return (
+    <div
+      key={toast.key}
+      role="status"
+      className="rise fixed bottom-[calc(max(1rem,env(safe-area-inset-bottom))+4.75rem)] left-1/2 z-[70] flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-3 rounded-lg border border-outline px-3 py-2 text-[12.5px] shadow-pop inset-shadow-highlight glass"
+    >
+      <span className={`min-w-0 truncate ${toast.error ? "text-danger" : "text-fg"}`}>{toast.text}</span>
+      {toast.undo && (
+        <button
+          type="button"
+          title="Undo (⌘Z)"
+          className="shrink-0 font-medium text-accent hover:underline"
+          onClick={() => {
+            toast.undo?.();
+            showInboxToast(null);
+          }}
+        >
+          Undo
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** A title short enough for a notice. */
+const quoted = (title: string) => `“${title.length > 40 ? `${title.slice(0, 39)}…` : title}”`;
+
+/** T3's delete confirmation, and what roll keeps. */
+export const deleteConfirm = (t: Thread) =>
+  `Delete ${quoted(t.title)}? Its conversation is cleared for good.${t.worktree ? " Its branch stays, and so does its worktree if it has uncommitted changes." : ""}`;
+
+/**
+ * Settle, un-settle, snooze, wake, archive, unarchive, restore and delete a thread, each with T3's
+ * undo notice where there's something to undo.
+ */
+export function useInboxActions() {
+  const { client, readOnly } = useAgents();
 
   const send = useCallback(
-    async (machine: MachineId, command: Parameters<typeof client.run>[1]) => {
+    async (machine: MachineId, command: Command) => {
       try {
         await client.run(machine, command);
         return true;
       } catch (e) {
-        setToast({ text: e instanceof Error ? e.message : String(e), error: true });
+        showInboxToast({ text: e instanceof Error ? e.message : String(e), error: true });
         return false;
       }
     },
@@ -130,7 +202,7 @@ export function useInboxActions() {
       const next = open ? nextAfter(inbox(client.data, Date.now()), t.id) : null;
       if (!(await send(m, { type: "thread.settle", thread: t.id }))) return;
       if (open) setAgentsView(next ? { kind: "thread", thread: next } : { kind: "canvas" });
-      setToast({ text: "Settled", undo: () => void send(m, { type: "thread.unsettle", thread: t.id }) });
+      showInboxToast({ text: `Settled ${quoted(t.title)}`, undo: () => void send(m, { type: "thread.unsettle", thread: t.id }) });
     },
     [client, machineOf, readOnly, send],
   );
@@ -146,7 +218,7 @@ export function useInboxActions() {
       const m = machineOf(t);
       if (!m || readOnly) return;
       if (await send(m, { type: "thread.snooze", thread: t.id, until })) {
-        setToast({ text: `Snoozed until ${new Date(until).toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" })}`, undo: () => void send(m, { type: "thread.unsnooze", thread: t.id }) });
+        showInboxToast({ text: `Snoozed until ${new Date(until).toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" })}`, undo: () => void send(m, { type: "thread.unsnooze", thread: t.id }) });
       }
     },
     [machineOf, readOnly, send],
@@ -166,24 +238,52 @@ export function useInboxActions() {
     [machineOf, readOnly, send],
   );
 
-  const toastEl = toast && (
-    <div role="status" className="rise fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-1/2 z-[70] flex -translate-x-1/2 items-center gap-3 rounded-lg border border-outline px-3 py-2 text-[12.5px] shadow-pop inset-shadow-highlight glass">
-      <span className={toast.error ? "text-danger" : "text-fg"}>{toast.text}</span>
-      {toast.undo && (
-        <button
-          type="button"
-          className="font-medium text-accent hover:underline"
-          onClick={() => {
-            toast.undo?.();
-            setToast(null);
-          }}
-        >
-          Undo
-        </button>
-      )}
-    </div>
+  /** Archive (T3's, with its undo); the open conversation goes back to the canvas. */
+  const archive = useCallback(
+    async (t: Thread) => {
+      const m = machineOf(t);
+      if (!m || readOnly) return;
+      if (!(await send(m, { type: "thread.archive", thread: t.id }))) return;
+      const view = agentsSurface.get().view;
+      if (view.kind === "thread" && view.thread === t.id) setAgentsView({ kind: "canvas" });
+      showInboxToast({ text: `Archived ${quoted(t.title)}`, undo: () => void send(m, { type: "thread.unarchive", thread: t.id }) });
+    },
+    [machineOf, readOnly, send],
   );
-  return { settle, unsettle, snooze, wake, autoSettle, toast: toastEl, readOnly: !!readOnly };
+  /**
+   * Back off its shelf in one click (un-settle, wake or unarchive), with an undo that puts it back
+   * (a snooze only while its time is still ahead).
+   */
+  const restore = useCallback(
+    async (t: Thread) => {
+      const m = machineOf(t);
+      const r = restoreOf(shelfOf(t, Date.now()));
+      if (!m || readOnly || !r) return;
+      if (!(await send(m, { type: r.command, thread: t.id }))) return;
+      const until = t.inbox.snooze?.until;
+      const undo =
+        r.undo === "thread.snooze"
+          ? until && until > Date.now()
+            ? () => void send(m, { type: "thread.snooze", thread: t.id, until })
+            : undefined
+          : () => void send(m, { type: r.undo as "thread.settle" | "thread.archive", thread: t.id });
+      showInboxToast({ text: `${r.done} ${quoted(t.title)}`, undo });
+    },
+    [machineOf, readOnly, send],
+  );
+  /** Delete for good (the caller confirms, T3's dialog); nothing to undo. */
+  const remove = useCallback(
+    async (t: Thread) => {
+      const m = machineOf(t);
+      if (!m || readOnly) return;
+      if (!(await send(m, { type: "thread.delete", thread: t.id }))) return;
+      const view = agentsSurface.get().view;
+      if (view.kind === "thread" && view.thread === t.id) setAgentsView({ kind: "canvas" });
+      showInboxToast({ text: `Deleted ${quoted(t.title)}` });
+    },
+    [machineOf, readOnly, send],
+  );
+  return useMemo(() => ({ settle, unsettle, snooze, wake, autoSettle, archive, restore, remove, readOnly: !!readOnly }), [settle, unsettle, snooze, wake, autoSettle, archive, restore, remove, readOnly]);
 }
 
 /**
@@ -203,14 +303,61 @@ export function useInboxMenu(thread: Thread): { items: MenuEntry[]; extra: React
     snoozed
       ? { label: "Wake now", icon: <AlarmClockOff />, onSelect: () => void actions.wake(thread) }
       : { label: "Snooze…", icon: <AlarmClock />, disabled: !!cantPark(thread, "snooze"), onSelect: () => setSnoozing(true) },
+    thread.archived_at !== null
+      ? { label: "Unarchive", icon: <ArchiveRestore />, onSelect: () => void actions.restore(thread) }
+      : { label: "Archive", icon: <Archive />, disabled: thread.status === "running" || thread.status === "starting", onSelect: () => void actions.archive(thread) },
   ];
-  const extra = (
-    <>
-      {snoozing && <SnoozeDialog presets onClose={() => setSnoozing(false)} onSnooze={(until) => void actions.snooze(thread, until)} />}
-      {actions.toast}
-    </>
-  );
+  const extra = snoozing && <SnoozeDialog presets onClose={() => setSnoozing(false)} onSnooze={(until) => void actions.snooze(thread, until)} />;
   return { items, extra };
+}
+
+/**
+ * T3's status line above the composer for a thread off the inbox ("Settled 3d ago" with
+ * Un-settle, `useThreadLifecycle.tsx`), for a snoozed or archived one too, and roll's note when
+ * cleanup removed its worktree (the next message puts it back). `null` for an ordinary thread.
+ */
+export function ShelfStrip({ thread, now = Date.now() }: { thread: Thread; now?: number }) {
+  const actions = useInboxActions();
+  const shelf = shelfOf(thread, now);
+  const r = restoreOf(shelf);
+  const cleaned = thread.worktree?.removed_at ? thread.worktree : null;
+  if (!r && !cleaned) return null;
+  const by = thread.inbox.settle?.state === "settled" ? thread.inbox.settle.by : null;
+  const text =
+    shelf === "archived"
+      ? `Archived ${shortAgo(thread.archived_at!, now)} ago`
+      : shelf === "snoozed"
+        ? `Snoozed until ${new Date(thread.inbox.snooze!.until).toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" })}`
+        : shelf === "settled"
+          ? `Settled ${shortAgo(thread.inbox.settle!.at, now)} ago${by === "inactivity" ? " after a quiet spell" : by === "landed" ? " when its change landed" : by === "closed" ? " when its change closed" : ""}`
+          : null;
+  const icon = shelf === "archived" ? <Archive /> : shelf === "snoozed" ? <AlarmClock /> : <Check />;
+  return (
+    <div role="status" aria-label="Where this thread is" className="mb-2 space-y-1 text-[12px] text-subtle">
+      {text && r && (
+        <div className="flex items-center gap-2 rounded-lg border border-line bg-panel/60 py-1.5 pr-1.5 pl-2.5 [&>svg]:size-3.5 [&>svg]:shrink-0">
+          {icon}
+          <span className="min-w-0 flex-1 truncate">
+            {text}
+            {shelf !== "archived" && <span className="text-subtle/80"> · a message brings it back</span>}
+          </span>
+          {!actions.readOnly && (
+            <button type="button" onClick={() => void actions.restore(thread)} className="shrink-0 rounded-md px-2 py-0.5 font-medium text-fg transition hover:bg-panel-2">
+              {r.label}
+            </button>
+          )}
+        </div>
+      )}
+      {cleaned && (
+        <p className="flex items-center gap-1.5 px-1" title={cleaned.path}>
+          <Eraser className="size-3 shrink-0" strokeWidth={1.5} />
+          <span className="min-w-0 truncate">
+            Worktree cleaned up · <span className="font-mono">{cleaned.branch}</span> keeps its commits; your next message puts it back
+          </span>
+        </p>
+      )}
+    </div>
+  );
 }
 
 // ── the sidebar ──
@@ -281,9 +428,12 @@ export function ThreadsSidebar({ data, open, setOpen, phone, openThread }: { dat
       store(COLLAPSED_KEY, JSON.stringify([...next]));
       return next;
     });
-  const [shelves, setShelves] = useState({ snoozed: false, settled: false });
-  useEffect(() => setShelves({ snoozed: stored(SHELF_KEY("snoozed")) === "1", settled: stored(SHELF_KEY("settled")) === "1" }), []);
-  const toggleShelf = (shelf: "snoozed" | "settled") =>
+  const [shelves, setShelves] = useState<Record<Parked, boolean>>({ snoozed: false, settled: false, archived: false });
+  useEffect(
+    () => setShelves({ snoozed: stored(SHELF_KEY("snoozed")) === "1", settled: stored(SHELF_KEY("settled")) === "1", archived: stored(SHELF_KEY("archived")) === "1" }),
+    [],
+  );
+  const toggleShelf = (shelf: Parked) =>
     setShelves((s) => {
       store(SHELF_KEY(shelf), s[shelf] ? "0" : "1");
       return { ...s, [shelf]: !s[shelf] };
@@ -297,7 +447,7 @@ export function ThreadsSidebar({ data, open, setOpen, phone, openThread }: { dat
 
   return (
     <>
-      {actions.toast}
+      <InboxToast />
       {open && (
         <aside
           aria-label="Threads"
@@ -361,8 +511,8 @@ function ProjectGroup({
   machine: Machine | undefined;
   collapsed: boolean;
   onToggle: () => void;
-  shelves: { snoozed: boolean; settled: boolean };
-  onShelf: (shelf: "snoozed" | "settled") => void;
+  shelves: Record<Parked, boolean>;
+  onShelf: (shelf: Parked) => void;
   openThread: string | null;
   onPick: (thread: string) => void;
   onNew?: () => void;
@@ -396,7 +546,7 @@ function ProjectGroup({
       {!collapsed && (
         <div role="group" className="mt-0.5 space-y-px">
           {group.active.map(row)}
-          {group.active.length === 0 && group.snoozed.length + group.settled.length === 0 && <p className="py-1 pl-8 text-[12px] text-subtle">No threads</p>}
+          {group.active.length === 0 && group.snoozed.length + group.settled.length + group.archived.length === 0 && <p className="py-1 pl-8 text-[12px] text-subtle">No threads</p>}
           {group.snoozed.length > 0 && (
             <>
               <ShelfHeader label="Snoozed" count={group.snoozed.length} open={shelves.snoozed} onToggle={() => onShelf("snoozed")} />
@@ -412,6 +562,12 @@ function ProjectGroup({
                   Show {Math.min(hidden, SETTLED_PAGE)} more
                 </button>
               )}
+            </>
+          )}
+          {group.archived.length > 0 && (
+            <>
+              <ShelfHeader label="Archived" count={group.archived.length} open={shelves.archived} onToggle={() => onShelf("archived")} />
+              {(shelves.archived ? group.archived : group.archived.filter(isOpen)).map(row)}
             </>
           )}
         </div>
@@ -454,11 +610,13 @@ function ThreadRow({ row, selected, onPick, now, actions }: { row: InboxRow; sel
       shortAgo(row.at, now)
     );
   const quick =
-    row.shelf === "settled"
-      ? { label: "Un-settle thread", icon: <Undo2 className="size-3.5" strokeWidth={1.5} />, run: () => actions.unsettle(t), disabled: false }
-      : row.shelf === "snoozed"
-        ? { label: "Wake thread now", icon: <AlarmClockOff className="size-3.5" strokeWidth={1.5} />, run: () => actions.wake(t), disabled: false }
-        : { label: "Settle thread", icon: <Check className="size-3.5" strokeWidth={1.5} />, run: () => actions.settle(t), disabled: !!cantPark(t, "settle") };
+    row.shelf === "archived"
+      ? { label: "Unarchive thread", icon: <ArchiveRestore className="size-3.5" strokeWidth={1.5} />, run: () => actions.restore(t), disabled: false }
+      : row.shelf === "settled"
+        ? { label: "Un-settle thread", icon: <Undo2 className="size-3.5" strokeWidth={1.5} />, run: () => actions.unsettle(t), disabled: false }
+        : row.shelf === "snoozed"
+          ? { label: "Wake thread now", icon: <AlarmClockOff className="size-3.5" strokeWidth={1.5} />, run: () => actions.wake(t), disabled: false }
+          : { label: "Settle thread", icon: <Check className="size-3.5" strokeWidth={1.5} />, run: () => actions.settle(t), disabled: !!cantPark(t, "settle") };
   return (
     <div
       role="treeitem"
@@ -519,6 +677,38 @@ function RowMenu({
 }) {
   const settleBlocked = cantPark(thread, "settle");
   const snoozeBlocked = cantPark(thread, "snooze");
+  const [deleting, setDeleting] = useState(false);
+  const prefs = usePrefs();
+  const del = () => {
+    if (prefs.confirm_delete && !deleting) return setDeleting(true);
+    setOpen(false);
+    void actions.remove(thread);
+  };
+  if (row.shelf === "archived")
+    return (
+      <Menu open={open} onOpenChange={(o) => (setOpen(o), o || setDeleting(false))}>
+        <MenuTrigger
+          aria-label="Thread actions"
+          title="Thread actions"
+          className={`grid size-6 place-items-center rounded-md text-subtle transition hover:bg-panel hover:text-fg ${open ? "bg-panel text-fg" : ""}`}
+        >
+          <MoreHorizontal className="size-3.5" strokeWidth={1.5} />
+        </MenuTrigger>
+        <MenuPopup align="end" className="w-64">
+          <MenuItem onClick={onPick}>Open</MenuItem>
+          <MenuItem onClick={() => void actions.restore(thread)}>
+            <ArchiveRestore />
+            Unarchive
+          </MenuItem>
+          <MenuSeparator />
+          <MenuItem closeOnClick={false} className="text-danger" onClick={del}>
+            <Trash2 />
+            {deleting ? "Delete for good?" : "Delete…"}
+          </MenuItem>
+          {deleting && <p className="px-2 pb-1.5 text-[11.5px] leading-snug text-subtle">{deleteConfirm(thread)}</p>}
+        </MenuPopup>
+      </Menu>
+    );
   return (
     <Menu open={open} onOpenChange={setOpen}>
       <MenuTrigger
@@ -570,6 +760,10 @@ function RowMenu({
             </MenuSubPopup>
           </MenuSub>
         )}
+        <MenuItem disabled={thread.status === "running" || thread.status === "starting"} onClick={() => void actions.archive(thread)}>
+          <Archive />
+          Archive
+        </MenuItem>
         <MenuSeparator />
         <MenuSub>
           <MenuSubTrigger>Auto-settle behavior</MenuSubTrigger>

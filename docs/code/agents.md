@@ -805,6 +805,24 @@ Code: `agent-host/src/orchestrator/settle.rs`; the threads sidebar is
   tomorrow, next week, or a custom time or duration) and wake. ⌘⇧S settles the open thread and
   opens the next one in the sidebar's order (wrapping, skipping settled and snoozed ones; the
   canvas when there's none), T3's settle and advance; on a settled thread it un-settles it.
+- **A project's shelf on the canvas** (`components/agents/project-shelf.tsx`). What left the canvas
+  stays with its project: the card's last line counts it ("Settled 10 · Snoozed 1 · Archived 2"),
+  and clicking the project's name (or that line) opens the shelf on the card, a tab per shelf, ten
+  rows and 25 more per "Show more". Focusing the project (F, ⌘K "Focus a project…" or "Settled
+  and archived in…") opens it too; which shelves are open is remembered per device
+  (`lib/agents-shelf.ts`). A row opens the conversation in the side panel with its transcript,
+  diffs and checkpoints as they were; its button restores it (un-settle, wake or unarchive). The
+  conversation itself says where it is above the composer, T3's "Settled 2d ago" line with
+  Un-settle (Wake, Unarchive), and that its worktree was cleaned up and comes back with the next
+  message.
+- **Archive** is T3's: a thread leaves the inbox and the canvas, its session and terminals close;
+  unarchive brings it back as it was. T3 lists archived threads in settings; roll keeps them on an
+  "Archived" shelf per project in the sidebar and on the project's card, and ⌘K finds them.
+  Delete asks first (the owner's "Confirm before deleting a thread", T3's text plus what roll
+  keeps: the branch, and a worktree with uncommitted changes).
+- **Undo** (T3's `showThreadUndoNotice.ts`): settling, snoozing, archiving and restoring show one
+  notice at a time for 5 seconds, from wherever they were done (the sidebar, a card's shelf, the
+  conversation's menu, ⌘K); Undo or ⌘Z (outside a text field) puts the thread back.
 
 ## Machine settings
 

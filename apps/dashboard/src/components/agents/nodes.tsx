@@ -20,6 +20,8 @@ import { orchestration, OrchestratorChip, StatusPill, threadDone, threadPill } f
 import { MachineIcon, ProjectIcon, tint as tintStyle } from "./identity";
 import { machineColor, projectColor } from "@/lib/agents-identity";
 import { useAgents } from "./use-agents";
+import { ProjectShelf, useProjectShelf } from "./project-shelf";
+import { setShelfOpen, useShelfOpen } from "@/lib/agents-shelf";
 
 /**
  * The frame every canvas card shares: flat panel, hairline border, the whole card a drag handle.
@@ -289,11 +291,26 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
   // An asleep sandbox counts: what's sent to it wakes it.
   const online = reachable(machine);
   const stats = projectStats(client.data, project.id);
+  // Its settled, snoozed and archived conversations: clicking the project opens them here.
+  const shelf = useProjectShelf(project.id);
+  const shelfOpen = useShelfOpen(project.id);
   return (
     <Card width={256} tint={projectColor(project)} label={`Project ${project.name}`}>
       <TintedHeader>
         <ProjectIcon project={project} className="size-6" />
-        <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold tracking-[-0.015em]">{project.name}</span>
+        {shelf ? (
+          <button
+            type="button"
+            data-nodrag
+            onClick={() => setShelfOpen(project.id, !shelfOpen)}
+            title={shelfOpen ? "Hide its settled and archived conversations" : "Show its settled and archived conversations"}
+            className="min-w-0 flex-1 truncate text-left text-[13.5px] font-semibold tracking-[-0.015em] hover:underline hover:decoration-line-2 hover:underline-offset-4"
+          >
+            {project.name}
+          </button>
+        ) : (
+          <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold tracking-[-0.015em]">{project.name}</span>
+        )}
         <HoverActions>
           {startNew && (
             <Tool label="New agent here (or drag onto the canvas)" launch={`p:${project.id}`} disabled={!online} onClick={() => startNew(project.id)}>
@@ -345,6 +362,7 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
       </div>
       {stats.threads > 0 && <StatsRows stats={stats} providers={providersFor(client.data, machine?.id)} />}
       {project.settings.auto_pull && project.pull && <PullLine pull={project.pull} className="mx-3 mb-3 -mt-1" />}
+      {shelf && <ProjectShelf project={project.id} group={shelf} />}
       {!stats.threads && startNew && online && (
         <div className="px-3 pb-3">
           <button data-nodrag onClick={() => startNew(project.id)} className={`${primary} w-full justify-center`}>

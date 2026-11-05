@@ -37,6 +37,7 @@ import { closeTopLayer } from "./escape-layers";
 import { CloseTerminal, TerminalNode } from "./terminal";
 import { threadDone } from "./thread-status";
 import { SidebarToggle, ThreadsSidebar, useSidebarOpen } from "./threads-sidebar";
+import { setShelfOpen } from "@/lib/agents-shelf";
 import { AgentsContext, useAgents, useAgentsSnapshot, useHold, useMarkDriver, type AgentsCtx } from "./use-agents";
 import { useAgentsConnection } from "./use-connection";
 import { PinTools, useCanvasViews, ViewsBar, type CanvasViews } from "./views";
@@ -263,6 +264,8 @@ export function AgentsSurface({
   const focusProject = useCallback((project: string | null) => {
     setFocused(project);
     if (project) setAgentsView({ kind: "canvas" });
+    // Its settled and archived conversations open on its card (docs/code/agents.md, "Settling").
+    if (project) setShelfOpen(project, true);
   }, []);
   const focusedGone = focused !== null && !data.projects.has(focused);
   useEffect(() => {

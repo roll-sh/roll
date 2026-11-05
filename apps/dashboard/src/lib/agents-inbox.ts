@@ -9,10 +9,11 @@
 import type { MachineId, Project, Run, Thread, ThreadId } from "./agents-api";
 import type { AgentsData } from "./agents-store";
 
-export type Shelf = "active" | "snoozed" | "settled";
+export type Shelf = "active" | "snoozed" | "settled" | "archived";
 
-/** Snoozed first, then settled, else active (T3's section order). */
+/** Archived, else snoozed, then settled, else active (T3's section order). */
 export function shelfOf(t: Thread, now: number): Shelf {
+  if (t.archived_at !== null) return "archived";
   if (t.inbox.snooze && t.inbox.snooze.until > now) return "snoozed";
   if (t.inbox.settle?.state === "settled") return "settled";
   return "active";
@@ -52,7 +53,7 @@ export interface InboxRow {
   thread: Thread;
   shelf: Shelf;
   status: RowStatus | null;
-  /** The time the row shows: when it came back, settled, or wakes. */
+  /** The time the row shows: when it came back, settled, wakes, or was archived. */
   at: number;
 }
 
@@ -62,17 +63,19 @@ export interface ProjectInbox {
   active: InboxRow[];
   snoozed: InboxRow[];
   settled: InboxRow[];
+  /** T3 keeps its archive in settings; roll shows each project's here and on its card. */
+  archived: InboxRow[];
 }
 
 /**
  * Each project's threads on their shelves: active newest first, snoozed soonest to wake first,
- * settled most recently settled first. Archived threads and delegated subagents (their results
- * are in their parent's transcript) aren't listed.
+ * settled most recently settled first, archived most recently archived first. Delegated subagents
+ * (their results are in their parent's transcript) aren't listed.
  */
 export function inbox(data: AgentsData, now: number): ProjectInbox[] {
   const byProject = new Map<string, ProjectInbox>();
   const projects = [...data.projects.values()].sort((a, b) => a.value.name.localeCompare(b.value.name) || a.value.id.localeCompare(b.value.id));
-  for (const r of projects) byProject.set(r.value.id, { project: r.value, machine: r.machine, active: [], snoozed: [], settled: [] });
+  for (const r of projects) byProject.set(r.value.id, { project: r.value, machine: r.machine, active: [], snoozed: [], settled: [], archived: [] });
   const runsBy = new Map<ThreadId, Run[]>();
   for (const r of data.runs.values()) {
     const list = runsBy.get(r.value.thread);
@@ -82,11 +85,12 @@ export function inbox(data: AgentsData, now: number): ProjectInbox[] {
   for (const r of data.threads.values()) {
     const t = r.value;
     const group = byProject.get(t.project);
-    if (!group || t.archived_at !== null || t.lineage?.relation === "subagent") continue;
+    if (!group || t.lineage?.relation === "subagent") continue;
     const runs = runsBy.get(t.id) ?? [];
     const lastEnded = runs.reduce<number | null>((m, run) => (run.completed_at === null ? m : Math.max(m ?? 0, run.completed_at)), null);
     const shelf = shelfOf(t, now);
-    const at = shelf === "snoozed" ? t.inbox.snooze!.until : shelf === "settled" ? t.inbox.settle!.at : returnedAt(t, runs);
+    const at =
+      shelf === "archived" ? t.archived_at! : shelf === "snoozed" ? t.inbox.snooze!.until : shelf === "settled" ? t.inbox.settle!.at : returnedAt(t, runs);
     group[shelf].push({ thread: t, shelf, status: rowStatus(t, lastEnded), at });
   }
   const byId = (a: InboxRow, b: InboxRow) => a.thread.id.localeCompare(b.thread.id);
@@ -94,13 +98,35 @@ export function inbox(data: AgentsData, now: number): ProjectInbox[] {
     g.active.sort((a, b) => b.at - a.at || byId(a, b));
     g.snoozed.sort((a, b) => a.at - b.at || byId(a, b));
     g.settled.sort((a, b) => b.at - a.at || byId(a, b));
+    g.archived.sort((a, b) => b.at - a.at || byId(a, b));
   }
   return [...byProject.values()];
 }
 
-/** Every listed thread in the sidebar's order: per project, active, then snoozed, then settled. */
+/** Every listed thread in the sidebar's order: per project, active, snoozed, settled, then archived. */
 export function inboxOrder(groups: readonly ProjectInbox[]): InboxRow[] {
-  return groups.flatMap((g) => [...g.active, ...g.snoozed, ...g.settled]);
+  return groups.flatMap((g) => [...g.active, ...g.snoozed, ...g.settled, ...g.archived]);
+}
+
+/** One project's shelves (the canvas card's shelf), or `null` for a project that isn't there. */
+export function projectInbox(data: AgentsData, project: string, now: number): ProjectInbox | null {
+  return inbox(data, now).find((g) => g.project.id === project) ?? null;
+}
+
+/** What restoring a shelved thread does, and its undo (T3's undo notices): un-settle, wake or unarchive. */
+export type Restore = { command: "thread.unsettle" | "thread.unsnooze" | "thread.unarchive"; undo: "thread.settle" | "thread.snooze" | "thread.archive"; label: string; done: string };
+
+export function restoreOf(shelf: Shelf): Restore | null {
+  switch (shelf) {
+    case "settled":
+      return { command: "thread.unsettle", undo: "thread.settle", label: "Un-settle", done: "Un-settled" };
+    case "snoozed":
+      return { command: "thread.unsnooze", undo: "thread.snooze", label: "Wake now", done: "Woken" };
+    case "archived":
+      return { command: "thread.unarchive", undo: "thread.archive", label: "Unarchive", done: "Unarchived" };
+    case "active":
+      return null;
+  }
 }
 
 /**

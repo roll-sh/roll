@@ -144,6 +144,44 @@ describe("ProjectSettingsForm", () => {
     expect(screen.getAllByRole("textbox", { name: "Script name" })).toHaveLength(1);
   });
 
+  it("settles and cleans up as T3's settings do, and Clean up now says what it did", async () => {
+    const reply = (c: Command): Reply =>
+      c.type === "project.cleanup"
+        ? { type: "cleaned", removed: ["thr_1", "thr_2"], kept: [{ thread: "thr_3", reason: "local_changes" }, { thread: "thr_4", reason: "terminal" }] }
+        : { type: "ok" };
+    const h = agentsHarness({ reply });
+    renderAgents(<ProjectSettingsForm project={withSettings()} machine={machine()} />, h);
+    expect(screen.getByRole("combobox", { name: "Settle inactive threads" })).toHaveTextContent("After 3 days");
+    expect(screen.getByRole("combobox", { name: "Remove settled worktrees" })).toHaveTextContent("Never");
+    await pick("Settle inactive threads", "After 7 days");
+    await userEvent.click(screen.getByRole("switch", { name: "Keep threads with an open change" }));
+    await userEvent.click(screen.getByRole("switch", { name: "Settle when its change lands" }));
+    await pick("Remove settled worktrees", "Right away");
+    await pick("Keep a worktree that has", "Any local files");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(updates(h)).toHaveLength(1));
+    expect(updates(h)[0].settings).toMatchObject({
+      auto_settle: { after_days: 7, on_land: false, keep_changes: true },
+      cleanup: { worktree_after_days: 0, keep: "any_local_files" },
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Clean up now" }));
+    await waitFor(() => expect(h.command.mock.calls.map((c) => c[2])).toContainEqual({ type: "project.cleanup", project: "prj_1" }));
+    expect(await screen.findByText("Removed 2 worktrees · kept 2 (local changes, a terminal running in it)")).toBeInTheDocument();
+  });
+
+  it("a project whose cleanup is off and default saves none, and never settling is a choice", async () => {
+    const h = agentsHarness();
+    renderAgents(<ProjectSettingsForm project={withSettings({ cleanup: { worktree_after_days: 14 } })} machine={machine()} />, h);
+    expect(screen.getByRole("combobox", { name: "Remove settled worktrees" })).toHaveTextContent("After 14 days");
+    await pick("Remove settled worktrees", "Never");
+    await pick("Settle inactive threads", "Never");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(updates(h)).toHaveLength(1));
+    expect(updates(h)[0].settings?.cleanup).toBeUndefined();
+    expect(updates(h)[0].settings?.auto_settle?.after_days).toBeNull();
+  });
+
   it("pulls on demand, shows the last pull, and says why a save failed", async () => {
     const reply = (c: Command): Reply =>
       c.type === "project.pull"

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EMPTY_INBOX, type Thread } from "./agents-api";
-import { inbox, inboxOrder, nextAfter, rowStatus, shelfOf, shortAgo, snoozeFor, snoozeLeft, snoozePresets } from "./agents-inbox";
+import { inbox, inboxOrder, nextAfter, projectInbox, restoreOf, rowStatus, shelfOf, shortAgo, snoozeFor, snoozeLeft, snoozePresets } from "./agents-inbox";
 import { applyEvents, emptyData } from "./agents-store";
 import { ev, machine, project, run, thread } from "@/test/agents";
 
@@ -38,9 +38,12 @@ describe("the threads sidebar", () => {
     // Settled: most recently settled first.
     expect(roll.settled.map((r) => r.thread.id)).toEqual(["thr_s2", "thr_s1"]);
     expect(roll.settled[0].at).toBe(NOW - D);
-    // Archived threads and delegated subagents aren't listed.
+    // Archived threads have a shelf of their own; delegated subagents aren't listed.
     expect(web.active.map((r) => r.thread.id)).toEqual(["thr_web"]);
-    expect(inboxOrder(groups).map((r) => r.thread.id)).toEqual(["thr_old", "thr_new", "thr_z", "thr_s2", "thr_s1", "thr_web"]);
+    expect(web.archived.map((r) => [r.thread.id, r.at])).toEqual([["thr_arch", NOW]]);
+    expect(inboxOrder(groups).map((r) => r.thread.id)).toEqual(["thr_old", "thr_new", "thr_z", "thr_s2", "thr_s1", "thr_web", "thr_arch"]);
+    // Settle and advance never lands on a shelved thread.
+    expect(nextAfter(groups, "thr_web")).toBe("thr_old");
   });
 
   it("a snooze that's due reads as active until the daemon wakes it; un-settled by hand is active", () => {
@@ -49,6 +52,21 @@ describe("the threads sidebar", () => {
     expect(shelfOf(t, NOW)).toBe("active");
     expect(shelfOf(thread({ inbox: box({ settle: { state: "active", at: NOW } }) }), NOW)).toBe("active");
     expect(shelfOf(thread({ inbox: { ...settled(NOW), snooze: { until: NOW + H, at: NOW } } }), NOW)).toBe("snoozed");
+  });
+
+  it("an archived thread is on the archived shelf whatever else it is; each shelf restores its own way", () => {
+    expect(shelfOf(thread({ archived_at: NOW, inbox: settled(NOW) }), NOW)).toBe("archived");
+    expect(restoreOf("settled")).toMatchObject({ command: "thread.unsettle", undo: "thread.settle", label: "Un-settle" });
+    expect(restoreOf("snoozed")).toMatchObject({ command: "thread.unsnooze", undo: "thread.snooze", label: "Wake now" });
+    expect(restoreOf("archived")).toMatchObject({ command: "thread.unarchive", undo: "thread.archive", label: "Unarchive" });
+    expect(restoreOf("active")).toBeNull();
+  });
+
+  it("one project's shelves for its card", () => {
+    const roll = projectInbox(data(), "prj_a", NOW)!;
+    expect([roll.settled.length, roll.snoozed.length, roll.archived.length]).toEqual([2, 1, 0]);
+    expect(projectInbox(data(), "prj_b", NOW)!.archived.map((r) => r.thread.id)).toEqual(["thr_arch"]);
+    expect(projectInbox(data(), "prj_gone", NOW)).toBeNull();
   });
 
   it("settle and advance goes to the next active row, wrapping, never to a shelf", () => {

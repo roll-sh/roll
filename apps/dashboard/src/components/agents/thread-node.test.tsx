@@ -190,7 +190,8 @@ describe("Conversation", () => {
     await userEvent.click(screen.getByRole("button", { name: "More" }));
     await userEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
     expect(h.command).not.toHaveBeenCalled();
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete this thread?" }));
+    // T3's confirmation: what goes for good.
+    await userEvent.click(await screen.findByRole("menuitem", { name: /^Delete “Fix the flaky queue test”\? Its conversation is cleared for good\./ }));
     expect(h.command.mock.calls.at(-1)?.[2]).toEqual({ type: "thread.delete", thread: "thr_1" });
     await vi_wait();
     expect(h.close).toHaveBeenCalled();

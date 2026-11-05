@@ -18,10 +18,10 @@ const waiting = thread({ id: "thr_2", title: "Upgrade to Next 16.4", status: "wa
 const entities = [mirrored("project", project(), 1), mirrored("thread", busy, 2), mirrored("thread", waiting, 3), mirrored("run", run(), 4), mirrored("request", approval({ thread: "thr_2" }), 5)];
 
 /** The agents open over a page, with a client whose `thread.create` makes the thread. */
-function setup() {
+function setup(extra: typeof entities = []) {
   let h: AgentsHarness | null = null;
   h = agentsHarness({
-    entities,
+    entities: [...entities, ...extra],
     follow: ["thr_1", "thr_2"],
     reply: (c: Command) => {
       if (c.type !== "thread.create") return { type: "ok" };
@@ -117,6 +117,30 @@ describe("the agents' command palette", () => {
     await waitFor(() => expect(creates(h)).toHaveLength(1));
     expect(creates(h)[0]).not.toHaveProperty("orchestrator");
     expect(creates(h)[0]).toMatchObject({ prompt: "Bump the lockfile and run the tests", runtime_mode: "full_access" });
+  });
+
+  it("finds archived and settled conversations, and opens a project's shelf on the canvas", async () => {
+    const DAY = 86_400_000;
+    setup([
+      mirrored("thread", thread({ id: "thr_a", title: "Spike: edge middleware", archived_at: Date.now() - DAY }), 6),
+      mirrored("thread", thread({ id: "thr_s", title: "Bump tokio", inbox: { ...busy.inbox, settle: { state: "settled", at: Date.now() - DAY, by: "user" } } }), 7),
+    ]);
+    await userEvent.keyboard("{Meta>}k{/Meta}");
+    await userEvent.type(screen.getByRole("combobox"), "edge midd");
+    expect(selected()).toHaveTextContent("Spike: edge middleware");
+    expect(selected()).toHaveTextContent("Archived");
+    await userEvent.keyboard("{Enter}");
+    expect(agentsSurface.get().view).toEqual({ kind: "thread", thread: "thr_a" });
+    await waitFor(() => expect(agentsPalette.get().open).toBe(false));
+
+    await userEvent.click(screen.getByRole("button", { name: "Command palette" }));
+    await userEvent.type(within(palette()).getByRole("combobox"), "settled and archived");
+    expect(selected()).toHaveTextContent("Settled and archived in…");
+    await userEvent.keyboard("{Enter}");
+    expect(within(palette()).getByRole("option", { name: /Settled 1 · Archived 1/ })).toBeInTheDocument();
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(JSON.parse(localStorage.getItem("roll:agents:shelves") ?? "[]")).toContain(project().id));
+    expect(agentsSurface.get().view).toEqual({ kind: "canvas" });
   });
 
   it("switches the canvas's view, and settles the open conversation", async () => {

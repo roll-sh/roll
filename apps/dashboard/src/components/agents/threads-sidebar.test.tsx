@@ -129,6 +129,35 @@ describe("the threads sidebar", () => {
     await userEvent.click(within(row("Old work")).getByRole("button", { name: "Un-settle thread" }));
     await waitFor(() => expect(sent(h)).toEqual(expect.arrayContaining([{ type: "thread.unsnooze", thread: "thr_z" }, { type: "thread.unsettle", thread: "thr_s" }])));
   });
+
+  it("keeps each project's archived threads on a shelf of their own: unarchive, or delete after T3's confirmation", async () => {
+    const h = world([thread({ id: "thr_x", title: "Spike: edge", archived_at: NOW - D, worktree: { path: "/w/thr_x", branch: "roll/spike", base: "abc", removed_at: null } })]);
+    sidebar(h);
+    expect(screen.queryByText("Spike: edge")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /Archived/ }));
+    expect(localStorage.getItem("roll:agents:sidebar:archived-expanded")).toBe("1");
+    expect(row("Spike: edge")).toHaveTextContent("1d");
+    await userEvent.click(within(row("Spike: edge")).getByRole("button", { name: "Unarchive thread" }));
+    await waitFor(() => expect(sent(h).at(-1)).toEqual({ type: "thread.unarchive", thread: "thr_x" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Unarchived “Spike: edge”");
+
+    await userEvent.click(within(row("Spike: edge")).getByRole("button", { name: "Thread actions" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete…" }));
+    expect(sent(h).some((c) => c.type === "thread.delete")).toBe(false);
+    expect(screen.getByText(/Delete “Spike: edge”\? Its conversation is cleared for good\. Its branch stays, and so does its worktree if it has uncommitted changes\./)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("menuitem", { name: "Delete for good?" }));
+    await waitFor(() => expect(sent(h).at(-1)).toEqual({ type: "thread.delete", thread: "thr_x" }));
+  });
+
+  it("archives from a row's menu, with T3's undo notice", async () => {
+    const h = world();
+    sidebar(h);
+    await userEvent.click(within(row("Add a flag")).getByRole("button", { name: "Thread actions" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Archive" }));
+    await waitFor(() => expect(sent(h).at(-1)).toEqual({ type: "thread.archive", thread: "thr_b" }));
+    await userEvent.click(within(await screen.findByRole("status")).getByRole("button", { name: "Undo" }));
+    expect(sent(h).at(-1)).toEqual({ type: "thread.unarchive", thread: "thr_b" });
+  });
 });
 
 describe("the conversation's menu", () => {

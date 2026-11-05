@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  AlarmClockOff,
   Archive,
   ArchiveRestore,
   ArrowDown,
@@ -56,6 +57,11 @@ import { NewProject } from "./project-new";
 import { StatusDot } from "./shared";
 import { MachineIcon, ProjectIcon } from "./identity";
 import { useAgents } from "./use-agents";
+import { useInboxActions } from "./threads-sidebar";
+import { inbox, shelfOf, type Shelf } from "@/lib/agents-inbox";
+import { setShelfOpen } from "@/lib/agents-shelf";
+
+const SHELF_NAME: Record<Exclude<Shelf, "active">, string> = { settled: "Settled", snoozed: "Snoozed", archived: "Archived" };
 
 const ICON = "size-4 text-subtle";
 
@@ -101,6 +107,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
   const machineCount = data.machines.size;
   const [now] = useState(() => Date.now());
   const auto = useAutomations();
+  const inboxActions = useInboxActions();
 
   const [stack, dispatch] = useReducer(reduceStack, undefined, () => ({ query: intent.kind === "search" ? (intent.query ?? "") : "", views: [] }));
   const [error, setError] = useState<string | null>(null);
@@ -181,7 +188,15 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
     const projectRecord = data.projects.get(t.project)?.value;
     const project = projectRecord?.name;
     const branch = t.worktree?.branch;
-    const parts = [project, machineCount > 1 ? machineName(machine) : null, branch ? `#${branch.replace(/^roll\//, "")}` : null, t.id === openThreadId ? "Open" : null].filter(Boolean);
+    // A conversation off the canvas says which shelf it's on (its project's card lists it there).
+    const shelf = shelfOf(t, now);
+    const parts = [
+      shelf === "active" ? null : SHELF_NAME[shelf],
+      project,
+      machineCount > 1 ? machineName(machine) : null,
+      branch ? `#${branch.replace(/^roll\//, "")}` : null,
+      t.id === openThreadId ? "Open" : null,
+    ].filter(Boolean);
     const opens = threadOpens()[t.id] ?? null;
     return {
       kind: "action",
@@ -215,6 +230,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
   const groups = useMemo((): { root: PaletteGroup[]; threads: PaletteItem[]; projects: PaletteItem[]; machines: PaletteItem[] } => {
     const { requests } = rolling(data);
     const live = [...data.threads.values()].filter((r) => r.value.archived_at === null);
+    const shelved = inbox(data, now).filter((g) => g.settled.length + g.snoozed.length + g.archived.length > 0);
     const projectsView = (label: string, run: (p: (typeof projects)[number]) => void): PaletteView => ({
       label,
       placeholder: "Which project?",
@@ -233,11 +249,46 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
         kind: "action",
         value: "action:settle",
         title: open.inbox.settle?.state === "settled" ? `Unsettle “${open.title}”` : `Settle “${open.title}”`,
-        searchTerms: ["done", "inbox", "resolve"],
+        searchTerms: ["done", "inbox", "resolve", "restore"],
         icon: <CircleCheck className={ICON} />,
-        run: () => client.run(at, { type: open.inbox.settle?.state === "settled" ? "thread.unsettle" : "thread.settle", thread: open.id }),
+        // Through the sidebar's actions: T3's undo notice, and settle and advance.
+        run: () => (open.inbox.settle?.state === "settled" ? inboxActions.restore(open) : inboxActions.settle(open)),
       },
-      !!open && { kind: "action", value: "action:archive", title: open.archived_at === null ? `Archive “${open.title}”` : `Unarchive “${open.title}”`, searchTerms: ["settle", "hide", "done"], icon: open.archived_at === null ? <Archive className={ICON} /> : <ArchiveRestore className={ICON} />, run: () => client.run(at, { type: open.archived_at === null ? "thread.archive" : "thread.unarchive", thread: open.id }) },
+      !!open && open.inbox.snooze !== null && { kind: "action", value: "action:wake", title: `Wake “${open.title}”`, searchTerms: ["snooze", "unsnooze", "restore"], icon: <AlarmClockOff className={ICON} />, run: () => inboxActions.restore(open) },
+      !!open && {
+        kind: "action",
+        value: "action:archive",
+        title: open.archived_at === null ? `Archive “${open.title}”` : `Unarchive “${open.title}”`,
+        searchTerms: ["settle", "hide", "done", "restore"],
+        icon: open.archived_at === null ? <Archive className={ICON} /> : <ArchiveRestore className={ICON} />,
+        run: () => (open.archived_at === null ? inboxActions.archive(open) : inboxActions.restore(open)),
+      },
+      shelved.length > 0 && {
+        kind: "submenu",
+        value: "action:shelf",
+        title: "Settled and archived in…",
+        searchTerms: ["settled", "archived", "snoozed", "shelf", "restore", "unarchive", "unsettle", "old conversations"],
+        icon: <Archive className={ICON} />,
+        view: {
+          label: "Settled and archived in",
+          placeholder: "Which project?",
+          groups: [
+            {
+              value: "projects",
+              label: "Projects",
+              items: shelved.map((g) => ({
+                kind: "action" as const,
+                value: `shelf:${g.project.id}`,
+                title: g.project.name,
+                description: (["settled", "snoozed", "archived"] as const).filter((s) => g[s].length).map((s) => `${SHELF_NAME[s]} ${g[s].length}`).join(" · "),
+                icon: <ProjectIcon project={g.project} className="size-4" />,
+                // The project fills the canvas with its shelf open on its card.
+                run: () => (setAgentsView({ kind: "canvas" }), host.focusProject(g.project.id), setShelfOpen(g.project.id, true)),
+              })),
+            },
+          ],
+        },
+      },
       addProject,
       { kind: "action", value: "action:add-machine", title: "Add machine", searchTerms: ["connect", "computer", "sandbox", "rent"], icon: <Server className={ICON} />, run: host.addMachine },
       !!auto.store && { kind: "action", value: "action:automations", title: "Automations", searchTerms: ["workflow", "trigger", "schedule", "cron", "webhook", "zap", "rules"], icon: <Zap className={ICON} />, run: () => setAgentsView({ kind: "automations" }) },
@@ -326,7 +377,8 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
     if (recent.length) root.push({ value: "recent", label: "Recent", items: recent });
     return {
       root,
-      threads: live.map((r) => threadRow(r.value, r.machine, query)),
+      // Archived ones too: searching is how an old conversation is found.
+      threads: [...data.threads.values()].map((r) => threadRow(r.value, r.machine, query)),
       projects: projects.map((p) => ({
         kind: "action" as const,
         value: `project:${p.id}`,
@@ -349,7 +401,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
     };
     // Rebuilt when the records change; `query` only tags thread picks.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, projects, machines, openRecord, host, targets, query, auto.automations, auto.store]);
+  }, [data, projects, machines, openRecord, host, targets, query, auto.automations, auto.store, inboxActions]);
 
   const shown: PaletteGroup[] = useMemo(() => {
     if (view?.panel) return [];
