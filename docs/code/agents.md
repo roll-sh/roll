@@ -269,7 +269,9 @@ waiting. `provider.refresh` says `checking` at once and replies once its probes 
 newer probe supersedes an older one still running. A command that reads a provider's status
 (delegation: `orchestrator_capabilities`, `delegate_task`) waits for that probe, at most 45 s, and
 then goes on with what's known. Starting a session never waits: the provider's own start says
-whether it works. The dashboard shows a provider being checked as a quiet shimmering "Checking…",
+whether it works. An ACP agent on the PATH that doesn't answer `initialize` within 20 s reports
+not installed, with the reason as its detail, so nothing delegates to a hung agent until a refresh
+finds it answering. The dashboard shows a provider being checked as a quiet shimmering "Checking…",
 on the machine card and in machine settings. Code: `agent-host/src/orchestrator/probes.rs`.
 
 ## Delegation (roll's orchestrator MCP)

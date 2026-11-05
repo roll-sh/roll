@@ -153,7 +153,12 @@ impl Provider for Acp {
                     info.detail = Some(format!("Signs in with: {}", names.join(", ")));
                 }
             }
-            Err(e) => info.detail = Some(format!("couldn't start {}: {e:#}", binary.display())),
+            // An agent that doesn't answer isn't usable: nothing picks it (delegation, the
+            // composer) until a refresh finds it answering.
+            Err(e) => {
+                info.installed = false;
+                info.detail = Some(format!("couldn't start {}: {e:#}", binary.display()));
+            }
         }
         info
     }

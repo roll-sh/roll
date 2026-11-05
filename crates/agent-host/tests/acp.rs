@@ -1158,6 +1158,19 @@ async fn info_probes_without_side_effects() {
     assert!(missing.detail.unwrap().contains("not installed"));
 }
 
+/// An agent on the PATH that never answers `initialize` isn't offered: nothing delegates to a hung
+/// agent until a refresh finds it answering.
+#[tokio::test]
+async fn info_marks_an_agent_that_never_answers_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = vec![expect("request", "initialize", json!({ "protocolVersion": 2 })), json!({ "type": "runtime_exit", "status": "hang" })];
+    let path = synthetic(dir.path(), "silent", &t);
+    let log = dir.path().join("log.ndjson");
+    let info = Acp::new("grok".into(), fake_config(Path::new(&path), &log)).with_probe_timeout(Duration::from_millis(300)).info().await;
+    assert!(!info.installed);
+    assert!(info.detail.unwrap().contains("no answer to initialize"), "says why");
+}
+
 #[test]
 fn known_agents_cover_t3s() {
     let names: Vec<_> = known_agents().into_iter().map(|a| a.name).collect();
