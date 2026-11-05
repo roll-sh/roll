@@ -6,7 +6,8 @@
 use crate::auth::{AppAuth, InstallationToken, parse_timestamp, unix_now};
 use crate::config::percent_encode;
 use crate::model::{
-    Branch, CheckRun, CheckRunRequest, Comment, Installation, Issue, Label, PullRequest, Repository,
+    Branch, CheckRun, CheckRunRequest, Comment, Environment, Installation, Issue, Label, Milestone,
+    Person, PullRequest, RepoLabel, Repository, Team, Workflow,
 };
 use crate::{AppConfig, Error, Result};
 use parking_lot::Mutex;
@@ -105,6 +106,27 @@ struct Raw {
     body: bytes::Bytes,
     next: Option<String>,
 }
+
+/// How one request behaves beyond the defaults.
+#[derive(Clone, Copy, Debug, Default)]
+struct How {
+    /// Fail with [`Error::RateLimited`] at once instead of waiting out a limit (a person waits).
+    impatient: bool,
+    /// Refuse a response body longer than this.
+    max_body: Option<usize>,
+}
+
+/// One page of a list, for a picker: its rows and the next page's number.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListPage<T> {
+    pub items: Vec<T>,
+    pub next: Option<u32>,
+}
+
+/// The most one picker page reads from GitHub.
+pub const PAGE_BYTES: usize = 2 << 20;
+/// The furthest page a picker asks for.
+pub const MAX_PAGE: u32 = 1000;
 
 pub struct GitHub {
     config: AppConfig,
@@ -667,6 +689,204 @@ impl GitHub {
         self.send_json(Who::Installation(installation), Method::POST, &path, &json!({ "body": body })).await
     }
 
+    // ── pickers ──
+    //
+    // One page at a time (`page` from 1, `per_page` at most 100), each body read up to
+    // [`PAGE_BYTES`], and a rate limit is an error at once: a person is waiting.
+
+    pub async fn branches_page(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        page: u32,
+        per_page: u8,
+    ) -> Result<ListPage<Branch>> {
+        let path = repo_path(owner, repo, "/branches?");
+        self.page(installation, &path, None, page, per_page).await
+    }
+
+    pub async fn labels_page(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        page: u32,
+        per_page: u8,
+    ) -> Result<ListPage<RepoLabel>> {
+        let path = repo_path(owner, repo, "/labels?");
+        self.page(installation, &path, None, page, per_page).await
+    }
+
+    /// Make a label; `color` is `rrggbb` (GitHub picks one when `None`).
+    pub async fn create_label(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        name: &str,
+        color: Option<&str>,
+    ) -> Result<RepoLabel> {
+        let mut body = json!({ "name": name });
+        if let Some(c) = color {
+            body["color"] = json!(c.trim_start_matches('#'));
+        }
+        let path = repo_path(owner, repo, "/labels");
+        let how = How {
+            impatient: true,
+            max_body: Some(PAGE_BYTES),
+        };
+        let raw = self
+            .execute_with(Who::Installation(installation), Method::POST, &path, Some(&body), how)
+            .await?;
+        decode(&raw.body)
+    }
+
+    /// Who issues and pull requests can be assigned to.
+    pub async fn assignees_page(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        page: u32,
+        per_page: u8,
+    ) -> Result<ListPage<Person>> {
+        let path = repo_path(owner, repo, "/assignees?");
+        self.page(installation, &path, None, page, per_page).await
+    }
+
+    /// The repo's collaborators (who can be asked for a review).
+    pub async fn collaborators_page(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        page: u32,
+        per_page: u8,
+    ) -> Result<ListPage<Person>> {
+        let path = repo_path(owner, repo, "/collaborators?");
+        self.page(installation, &path, None, page, per_page).await
+    }
+
+    /// An organization's teams (needs the organization's Members permission).
+    pub async fn org_teams_page(
+        &self,
+        installation: u64,
+        org: &str,
+        page: u32,
+        per_page: u8,
+    ) -> Result<ListPage<Team>> {
+        let path = format!("/orgs/{}/teams?", percent_encode(org));
+        self.page(installation, &path, None, page, per_page).await
+    }
+
+    /// Open milestones, the next due first.
+    pub async fn milestones_page(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        page: u32,
+        per_page: u8,
+    ) -> Result<ListPage<Milestone>> {
+        let path = repo_path(owner, repo, "/milestones?state=open&sort=due_on&direction=asc&");
+        self.page(installation, &path, None, page, per_page).await
+    }
+
+    pub async fn workflows_page(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        page: u32,
+        per_page: u8,
+    ) -> Result<ListPage<Workflow>> {
+        let path = repo_path(owner, repo, "/actions/workflows?");
+        self.page(installation, &path, Some("workflows"), page, per_page)
+            .await
+    }
+
+    pub async fn environments_page(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        page: u32,
+        per_page: u8,
+    ) -> Result<ListPage<Environment>> {
+        let path = repo_path(owner, repo, "/environments?");
+        self.page(installation, &path, Some("environments"), page, per_page)
+            .await
+    }
+
+    /// Open issues and pull requests, the latest updated first.
+    pub async fn open_issues_page(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        page: u32,
+        per_page: u8,
+    ) -> Result<ListPage<Issue>> {
+        let path = repo_path(owner, repo, "/issues?state=open&sort=updated&direction=desc&");
+        self.page(installation, &path, None, page, per_page).await
+    }
+
+    /// One issue or pull request by number, as a picker reads it (bounded, impatient).
+    pub async fn issue_for_picker(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Issue> {
+        let path = repo_path(owner, repo, &format!("/issues/{number}"));
+        let how = How {
+            impatient: true,
+            max_body: Some(PAGE_BYTES),
+        };
+        let raw = self
+            .execute_with(Who::Installation(installation), Method::GET, &path, None, how)
+            .await?;
+        decode(&raw.body)
+    }
+
+    /// Page `page` of a list whose `path` ends in `?` or `&`. `key`: the array's field when the
+    /// page is an object (`{"total_count": n, "workflows": [...]}`; the count is never used).
+    async fn page<T: DeserializeOwned>(
+        &self,
+        installation: u64,
+        path: &str,
+        key: Option<&str>,
+        page: u32,
+        per_page: u8,
+    ) -> Result<ListPage<T>> {
+        let page = page.clamp(1, MAX_PAGE);
+        let url = format!("{path}per_page={}&page={page}", per_page.clamp(1, 100));
+        let how = How {
+            impatient: true,
+            max_body: Some(PAGE_BYTES),
+        };
+        let raw = self
+            .execute_with(Who::Installation(installation), Method::GET, &url, None, how)
+            .await?;
+        let items: Vec<T> = match key {
+            None => decode(&raw.body)?,
+            Some(key) => {
+                let mut v: Value = decode(&raw.body)?;
+                serde_json::from_value(v[key].take())
+                    .map_err(|e| Error::Decode(format!("{key}: {e}")))?
+            }
+        };
+        // Only GitHub's own next page of this list, never past the cap.
+        let next = raw
+            .next
+            .as_deref()
+            .and_then(page_number)
+            .filter(|n| *n > page && *n <= MAX_PAGE);
+        Ok(ListPage { items, next })
+    }
+
     // ── GraphQL ──
 
     /// A GraphQL request as the installation: its `data`, or the errors GitHub reported.
@@ -789,6 +1009,18 @@ impl GitHub {
         path: &str,
         body: Option<&Value>,
     ) -> Result<Raw> {
+        self.execute_with(who, method, path, body, How::default())
+            .await
+    }
+
+    async fn execute_with(
+        &self,
+        who: Who,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+        how: How,
+    ) -> Result<Raw> {
         let url = if path.starts_with("http://") || path.starts_with("https://") {
             path.to_owned()
         } else {
@@ -796,7 +1028,7 @@ impl GitHub {
         };
         let mut attempt = 0;
         loop {
-            self.wait_for_budget(who).await?;
+            self.wait_for_budget(who, how.impatient).await?;
             let token = match who {
                 Who::App => self.auth.jwt()?,
                 Who::Installation(id) => self.installation_token(id).await?.token,
@@ -815,7 +1047,10 @@ impl GitHub {
             let status = res.status();
             let headers = res.headers().clone();
             self.record(who, &headers);
-            let bytes = res.bytes().await?;
+            let bytes = match how.max_body {
+                None => res.bytes().await?,
+                Some(cap) => read_capped(res, cap).await?,
+            };
             if status.is_success() {
                 return Ok(Raw {
                     next: next_link(&headers),
@@ -836,8 +1071,8 @@ impl GitHub {
                 StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS => {
                     if let Some(wait) = self.rate_limit_wait(&headers, &message, status) {
                         let reset = unix_now() + wait.as_secs();
-                        if !retry || wait > self.opts.max_backoff {
-                            return Err(Error::RateLimited { reset });
+                        if !retry || how.impatient || wait > self.opts.max_backoff {
+                            return Err(Error::RateLimited { reset: reset.max(unix_now() + 1) });
                         }
                         debug!(?wait, %status, "github rate limited; waiting");
                         tokio::time::sleep(wait).await;
@@ -887,8 +1122,9 @@ impl GitHub {
         None
     }
 
-    /// Don't spend a request we know will be refused: wait out a short reset, or fail fast.
-    async fn wait_for_budget(&self, who: Who) -> Result<()> {
+    /// Don't spend a request we know will be refused: wait out a short reset (unless
+    /// `impatient`), or fail fast.
+    async fn wait_for_budget(&self, who: Who, impatient: bool) -> Result<()> {
         let Some(rate) = self.rates.lock().get(&who).copied() else {
             return Ok(());
         };
@@ -900,7 +1136,7 @@ impl GitHub {
             return Ok(());
         }
         let wait = Duration::from_secs(reset - now);
-        if wait > self.opts.max_backoff {
+        if impatient || wait > self.opts.max_backoff {
             return Err(Error::RateLimited { reset });
         }
         tokio::time::sleep(wait).await;
@@ -952,6 +1188,31 @@ fn encode_ref(name: &str) -> String {
         .join("/")
 }
 
+/// A response's body, refused past `cap` bytes (whatever its `content-length` says: the buffer
+/// grows with the bytes that arrived).
+async fn read_capped(mut res: reqwest::Response, cap: usize) -> Result<bytes::Bytes> {
+    if res.content_length().is_some_and(|n| n > cap as u64) {
+        return Err(Error::Decode(format!("response over {cap} bytes")));
+    }
+    let mut out = Vec::new();
+    while let Some(chunk) = res.chunk().await? {
+        if out.len() + chunk.len() > cap {
+            return Err(Error::Decode(format!("response over {cap} bytes")));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out.into())
+}
+
+/// The `page` parameter of a list URL (a `Link` header's next).
+pub fn page_number(url: &str) -> Option<u32> {
+    let (_, query) = url.split_once('?')?;
+    query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("page="))
+        .and_then(|n| n.parse().ok())
+}
+
 /// The `rel="next"` URL of a `Link` header.
 pub fn next_link(headers: &HeaderMap) -> Option<String> {
     let link = headers.get(LINK)?.to_str().ok()?;
@@ -997,6 +1258,15 @@ mod tests {
     #[test]
     fn ref_encoding() {
         assert_eq!(encode_ref("feature/a b"), "feature/a%20b");
+    }
+
+    #[test]
+    fn page_numbers_come_from_the_page_parameter_only() {
+        assert_eq!(page_number("https://x/repos/a/b/labels?per_page=100&page=3"), Some(3));
+        assert_eq!(page_number("https://x/repos/a/b/labels?page=2&per_page=100"), Some(2));
+        assert_eq!(page_number("https://x/repos/a/b/labels?per_page=100"), None);
+        assert_eq!(page_number("https://x/labels"), None);
+        assert_eq!(page_number("https://x/labels?page=x"), None);
     }
 }
 

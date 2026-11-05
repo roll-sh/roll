@@ -324,3 +324,71 @@ pub struct CheckRun {
     #[serde(default)]
     pub external_id: Option<String>,
 }
+
+// ── what pickers list ──
+
+/// A person in a repo's lists (assignees, collaborators).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Person {
+    pub login: String,
+    #[serde(default)]
+    pub id: u64,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    /// `User`, `Bot` or `Organization`.
+    #[serde(rename = "type", default)]
+    pub kind: Option<String>,
+}
+
+/// A repo's label as its labels list has it.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RepoLabel {
+    pub name: String,
+    /// `rrggbb`, without `#`.
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// An organization's team.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Team {
+    pub id: u64,
+    pub slug: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Milestone {
+    pub number: u64,
+    pub title: String,
+    /// `open` or `closed`.
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub due_on: Option<String>,
+    #[serde(default)]
+    pub open_issues: Option<u64>,
+}
+
+/// A GitHub Actions workflow.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Workflow {
+    pub id: u64,
+    pub name: String,
+    /// `.github/workflows/ci.yml`.
+    pub path: String,
+    /// `active`, `disabled_manually`…
+    #[serde(default)]
+    pub state: Option<String>,
+}
+
+/// A deployment environment.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Environment {
+    pub id: u64,
+    pub name: String,
+}
