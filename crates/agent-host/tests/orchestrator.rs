@@ -1397,8 +1397,9 @@ async fn machine_settings_are_checked_stored_applied_and_reported_without_creden
     let mut events = host.subscribe();
     assert_eq!(run(&host, configure(settings.clone())).await, Reply::Ok);
     // `hello` went out again with them before the reply.
-    let sent = std::iter::from_fn(|| events.try_recv().ok()).find_map(|o| if let Outbound::Info(i) = o { Some(i) } else { None }).expect("hello again");
-    assert_eq!(sent.settings.as_ref().unwrap().set, settings);
+    // (A start-up probe's `hello` may come first, with the old settings.)
+    let sent: Vec<MachineInfo> = std::iter::from_fn(|| events.try_recv().ok()).filter_map(|o| if let Outbound::Info(i) = o { Some(i) } else { None }).collect();
+    assert!(sent.iter().any(|i| i.settings.as_ref().unwrap().set == settings), "hello again with them: {sent:?}");
     let info = host.info().await;
     assert_eq!(ids(&info), ["claude"], "a provider turned off isn't offered");
     let big = info.providers[0].models.iter().find(|m| m.id == "big-1").expect("the custom model is listed");
