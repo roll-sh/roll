@@ -42,13 +42,17 @@ Code: `apps/dashboard/src/components/agents/automations/` (views), `lib/automati
 
 | Part | What and why |
 | --- | --- |
-| Bar | A segmented control: Automations (count), Runs (an accent count while some run), Templates. Then a quiet filter field and the white "New automation". |
-| Row | Two lines at 52px (T3's `ScheduledTaskRow` and Linear's list rows). Line 1 is the name at 13.5/510. Line 2 is the trigger in words plus "next in 3 h" (`Weekdays at 09:00 · Budapest · next in 10 h`). |
-| Left | The trigger's icon on a tile. On narrow lists a 6px last-run dot sits on its corner; when the column has room the dot moves into the last-run column instead. |
-| Columns | The last run (dot, state, `4m`), then seven days of runs as 4px tracks filled from the bottom (failed days red, Linear-quiet), then the count. Container queries drop columns as the side panel narrows the list. |
-| End | T3's switch (on is the accent), then ⋯ (Run now, Duplicate, Delete with a confirm), which shows on hover, on focus and always on touch. |
+| Header | The sheet's header: the ⚡ tile, "Automations", the white "New", Close. |
+| Bar | A segmented control: Automations (count), Runs (an accent count while some run), Templates. Then Search (every word, across the name, the trigger in words and the steps' kinds) and Filter. On a phone Search gets its own line. |
+| Filter | Linear's quick filters, one value each, with counts and only values that occur: Status (On, Paused, Last run failed, Running now), Trigger (By hand, Schedule, roll code, Slack…), Project (the projects its steps work in). Active ones are chips over the list with × and Clear. Search and filters stay while you go into an automation and back; they reset when the sheet closes. Logic: `lib/automations-list.ts`. |
+| Row | Two lines at 52px (T3's `ScheduledTaskRow` and Linear's list rows). Line 1 is the name at 13.5/510, where it works (project and machine icons) and the marks of the integrations its steps use besides its trigger (Slack, Linear, GitHub); the marks drop below about 450px. Line 2 is the trigger in words plus the next run (`Weekdays at 09:00 · Budapest · next in 10 h`). |
+| Left | The trigger's icon on a tile (an integration's own mark for its triggers), with a dot that breathes on its corner while a run goes on. |
+| Last run | Its state's dot, the state in words when there's room, and how long ago in mono (`4m`); "Running" shimmering while one goes on. |
+| History | Its last 12 runs as 3px bars, oldest first (GitHub Actions' run history): done grey, failed red, going on the accent breathing, cancelled and skipped faint; empty slots stay as faint tracks so rows line up. Each bar's title says what and when. Dropped on narrow lists. |
+| Actions | On hover and keyboard focus, Run now, Pause/Turn on, Duplicate, Edit and ⋯ (Delete with a confirm) take the last run's and history's place, in the row, with no floating bar and no room reserved for them. On touch, ⋯ beside the switch has them all. |
+| End | T3's switch (on is the accent). |
 | Paused | The row dims to 64% and line 2 reads "Paused" (T3). |
-| Selected | A 2px accent bar on the left and the selected fill. |
+| Keys | Tab to a row, Enter opens it, ↑/↓ move between rows. |
 
 Live state comes from `automation_run` events, not from `last_run`, which is only as fresh as the
 last list (auto-core's note): `lastRunOf` takes the newest run the store has.

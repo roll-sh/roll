@@ -31,7 +31,7 @@ describe("Automations list", () => {
     const row = await screen.findByRole("button", { name: "Morning triage" });
     expect(within(row).getByText("Weekdays at 09:00 UTC")).toBeInTheDocument();
     expect(within(row).getByText("Failed")).toBeInTheDocument();
-    expect(within(row).getByLabelText("1 runs in 7 days, 1 failed")).toBeInTheDocument();
+    expect(within(row).getByRole("img", { name: "Last 1 run, 1 failed" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Fix a broken main" })).toHaveTextContent("When a work item changes in acme/roll");
 
     await userEvent.click(within(row).getByRole("switch", { name: "Pause Morning triage" }));
@@ -40,6 +40,55 @@ describe("Automations list", () => {
 
     await userEvent.click(row);
     expect(agentsSurface.get().view).toEqual({ kind: "automations", list: undefined, open: "aut_1" });
+  });
+
+  it("searches and filters (status, trigger), shows them as chips, and acts on a row from its hover actions", async () => {
+    const hook = automation({ id: "aut_3", name: "Deploy hook", enabled: false, trigger: { type: "webhook" } as never, steps: [{ id: "post", kind: "slack.post", config: {}, when: [], retry: null, timeout_s: null }] });
+    const api = fakeApi([automation(), automation({ id: "aut_2", name: "Fix a broken main", trigger: { type: "code", events: ["work"], repos: ["acme/roll"] } }), hook], [automationRun({ status: "running" })]);
+    renderAgents(<AutomationsView view={{ kind: "automations" }} phone={false} />, harness(api));
+    // The filter popover makes the page inert while it shows: read the rows behind it.
+    const rows = () => within(screen.getByRole("list", { name: "Your automations", hidden: true })).getAllByRole("button", { name: /^(Morning triage|Fix a broken main|Deploy hook)$/, hidden: true }).map((r) => r.getAttribute("aria-label"));
+    await screen.findByRole("button", { name: "Morning triage" });
+    // A run going on breathes on its row; Slack is marked as what the hook's steps use.
+    expect(within(screen.getByRole("button", { name: "Deploy hook" })).getByRole("img", { name: "Uses Slack" })).toBeInTheDocument();
+
+    await userEvent.type(screen.getByRole("textbox", { name: "Search automations" }), "slack");
+    expect(rows()).toEqual(["Deploy hook"]);
+    await userEvent.click(screen.getByRole("button", { name: "Clear the search" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "Filter" }));
+    const popup = await screen.findByRole("dialog", { name: "Filter automations" });
+    await userEvent.click(within(within(popup).getByRole("group", { name: "Status" })).getByRole("button", { name: /Running now/ }));
+    expect(rows()).toEqual(["Morning triage"]);
+    await userEvent.click(within(within(popup).getByRole("group", { name: "Status" })).getByRole("button", { name: /^On/ }));
+    await userEvent.click(within(within(popup).getByRole("group", { name: "Trigger" })).getByRole("button", { name: /roll code/ }));
+    await userEvent.keyboard("{Escape}");
+    expect(rows()).toEqual(["Fix a broken main"]);
+    const chips = screen.getByLabelText("Filters");
+    expect(chips).toHaveTextContent("Status On");
+    expect(chips).toHaveTextContent("Trigger roll code");
+    await userEvent.click(within(chips).getByRole("button", { name: "Remove the filter roll code" }));
+    expect(rows()).toEqual(["Fix a broken main", "Morning triage"]);
+    await userEvent.click(within(chips).getByRole("button", { name: "Clear" }));
+    expect(rows()).toHaveLength(3);
+
+    // ↓ moves from row to row.
+    screen.getByRole("button", { name: "Fix a broken main" }).focus();
+    await userEvent.keyboard("{ArrowDown}");
+    expect(screen.getByRole("button", { name: "Morning triage" })).toHaveFocus();
+    await userEvent.keyboard("{ArrowUp}");
+    expect(screen.getByRole("button", { name: "Fix a broken main" })).toHaveFocus();
+
+    const actions = screen.getByRole("group", { name: "Actions for Fix a broken main" });
+    await userEvent.click(within(actions).getByRole("button", { name: "Run now" }));
+    expect(api.run).toHaveBeenCalledWith("acme", "aut_2", { input: null });
+    await waitFor(() => expect(agentsSurface.get().view).toEqual({ kind: "automations", list: undefined, open: "aut_2", tab: "runs", run: "arn_now" }));
+    await userEvent.click(within(actions).getByRole("button", { name: "Duplicate" }));
+    expect(api.create).toHaveBeenCalledWith("acme", expect.objectContaining({ name: "Fix a broken main (copy)", enabled: false }));
+    await userEvent.click(within(actions).getByRole("button", { name: "Edit" }));
+    expect(agentsSurface.get().view).toEqual({ kind: "automations", list: undefined, open: "aut_2", tab: "edit" });
+    await userEvent.click(within(actions).getByRole("button", { name: "Pause" }));
+    expect(api.disable).toHaveBeenCalledWith("acme", "aut_2");
   });
 
   it("with none yet, is a gallery of templates that open in the builder", async () => {

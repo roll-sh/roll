@@ -17,7 +17,7 @@ import { backOf, isBuilder, levelKey, levelOf, step, type Trail } from "@/lib/au
 import { Conversation, IconButton } from "../session";
 import { useAgents } from "../use-agents";
 import { AutomationPanel } from "./automation-panel";
-import { AutomationsView as List } from "./automations-view";
+import { forgetListState, AutomationsView as List } from "./automations-view";
 import { Overview } from "./overview";
 import { RunDetail, RunHistory } from "./runs";
 import { useAutomations } from "./shared";
@@ -95,6 +95,7 @@ export function AutomationsSheet({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [highlightKey, onHighlight]);
   useEffect(() => () => onHighlight([]), [onHighlight]);
+  useEffect(() => forgetListState, []);
 
   const page =
     level.kind === "thread" ? (
