@@ -123,7 +123,13 @@ Machine            a daemon (hostname, os, providers and their auth state, onlin
   the newest kept run's turn ref (`SessionConfig.resume_at`, `--resume --resume-session-at`).
   That works from the refs kept in the thread's private state, after a daemon restart too, and
   every session resumes there (the thread's `heads`, T3's `nativeConversationHeadRef`) until a
-  turn goes past it. A kept run with no ref moves the cut back to an earlier one, and the runs
+  turn goes past it. Pi rolls back the same way, but its session can't resume part-way: the
+  session resumes, then `fork`s at the first user message after the kept turn's leaf, which
+  copies everything before it into a new session file (keeping entry ids), and that file is the
+  conversation's native thread from then on. (T3 forks in the live process; roll's refs survive
+  restarts, which T3's `thread_rollback_after_stop` scenario needs.) Kept runs' refs still name
+  the old file, so a later native fork or rollback to one of them falls back to a summary. A
+  kept run with no ref moves the cut back to an earlier one, and the runs
   after the cut are handed over at the next run. A native fork rolled back to before its own
   first run copies the parent's conversation at the fork point again (T3 resumes the copy at its
   fork-head message id instead, which it reads from Claude's transcript; copying again yields
@@ -266,6 +272,22 @@ completed, native thread ref). The orchestrator owns ids and turns those events 
   database for usage limits; roll never reads OpenCode's private files, so OpenCode shows none.
   Not done: T3's reconnect and backfill (a broken event stream ends the session; the next message
   resumes it) and skills (`$name` mentions).
+- **Pi** (`pi.rs`, T3's Pi driver): `pi --mode rpc` with JSON lines on stdio, one process per
+  session in its own process group (Pi 0.80.5 or newer). The native thread is the session file
+  (`get_state`'s `sessionFile`); a resume is `switch_session` to it. A turn is a `prompt` (Pi
+  acks it without an id); steering is the same `prompt` with `streamingBehavior: "steer"`; an
+  interrupt is `clear_queue` then `abort`; `/compact [instructions]` is Pi's `compact`, and
+  prompts wait while Pi compacts (it refuses them). A turn ends when `get_state` shows Pi idle
+  after `agent_settled`; its ref is the session leaf it left (`get_entries`). Pi has no
+  approvals and no MCP client, so roll writes its own extension (`pi/extension.ts`, loaded with
+  `--extension`): a `tool_call` hook keeps the runtime modes (reads never ask, `auto_edit` lets
+  `edit` and `write` through, anything else asks as an `extension_ui_request` confirm), it
+  speaks streamable HTTP to roll's MCP servers, and it joins roll's instructions to the system
+  prompt. Servers, headers, mode and instructions reach it in the environment only. Changing
+  modes restarts the session (the hook keeps one mode per process). Models come from
+  `get_available_models` (`provider/id`, plus "Pi default", which keeps Pi's own), with T3's
+  thinking levels as the reasoning option (`set_thinking_level`). Pi lists only models it has
+  credentials for: none means "log in", with `pi auth check` explaining an unusable default.
 
 **Models and their options** follow T3 Code's model picker (`apps/web/src/components/chat/
 ProviderModelPicker.tsx`, `ModelPickerContent.tsx`, `ComposerModelEffort.tsx`) and its option
@@ -323,7 +345,9 @@ processed); Claude's main-agent message usage (input, cache writes and reads, pl
 `message_start`, `message_delta` and the assistant snapshot; `<synthetic>` messages and reports
 without input are skipped), with the window from T3's model manifest (`claude/models.rs`) and
 `compact_metadata.post_tokens` after a compaction; ACP's `usage_update` (`used`, and `size`
-unless it is 0).
+unless it is 0); Pi's `get_session_stats` at each turn's end (`contextUsage.tokens` against its
+`contextWindow`, the compaction's estimate while Pi has no count) and the running message's
+`usage.totalTokens` while it streams.
 
 **Auth is the user's own.** The daemon runs the provider CLIs installed on the machine with the
 logins already there, exactly as T3 Code and Conductor do; roll never reads, copies, pools or
@@ -384,7 +408,8 @@ mapping, and the web's `QueuedRunsControl.tsx`, `ContextWindowMeter.tsx`, `V2Lif
 - **Compaction.** Claude Code and Codex compact on their own as the context fills; both also
   compact on request (`Capabilities.compact`). A message of exactly `/compact` runs as a
   compaction, a run of its own (T3's `compactThread`): Codex `thread/compact/start` (the turn it
-  starts is adopted as ours), Claude `/compact` as the turn's input (its result text is no reply).
+  starts is adopted as ours), Claude `/compact` as the turn's input (its result text is no reply),
+  Pi its `compact` command (`/compact <instructions>` passes them on).
   A compaction can't be steered: a steer sent to it queues, and Send now refuses. Every compaction
   is a `NodeBody::Compaction` row (T3's `compaction` item: Claude's `status: compacting`,
   `compact_result`, `compact_boundary` with `pre_tokens`/`post_tokens`; Codex's

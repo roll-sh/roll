@@ -14,6 +14,9 @@
 //! [providers.opencode]                   # OpenCode 2 (`opencode serve`); 1.x runs as `acp:opencode`
 //! binary = "/opt/opencode/bin/opencode"
 //!
+//! [providers.pi]                         # Pi (`pi --mode rpc`); args are Pi's launch arguments
+//! args = ["--provider", "openrouter", "--model", "deepseek/deepseek-v4-flash"]
+//!
 //! [[acp]]                                # an ACP agent, provider id `acp:gemini`
 //! name = "gemini"
 //! binary = "gemini"

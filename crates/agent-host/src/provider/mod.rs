@@ -28,6 +28,7 @@ pub mod claude;
 pub mod codex;
 pub mod fake;
 pub mod opencode;
+pub mod pi;
 
 /// A provider's entry in the daemon config. Every adapter is built from one:
 /// `codex::Codex::new(cfg)`, `claude::Claude::new(cfg)`, `opencode::OpenCode::new(cfg)`,

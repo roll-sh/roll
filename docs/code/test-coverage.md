@@ -1509,6 +1509,32 @@ waits until earlier recorded events went out) and checks Basic auth and the serv
 | `info()`: version, the catalog (variants as reasoning with T3's defaults, legacy releases, images), a model's `settings` never read or shown; no models → run `opencode auth login`; 1.x left to the ACP agent | `agent-host/tests/opencode.rs::status_lists_models_and_never_their_settings`, `agent-host/tests/opencode.rs::status_without_models_asks_for_a_login`, `agent-host/tests/opencode.rs::opencode_1x_is_left_to_the_acp_agent`, `agent-host/src/provider/opencode.rs::catalog_follows_t3`, `agent-host/src/provider/opencode/wire.rs::model_entries_never_keep_settings` |
 | Slugs (`provider/model`, split at the first `/`), versions, query encoding | `agent-host/src/provider/opencode/wire.rs::slugs_split_at_the_first_slash`, `agent-host/src/provider/opencode.rs::versions_parse`, `agent-host/src/provider/opencode/http.rs::queries_are_encoded` |
 
+### Pi (`agent-host/tests/pi.rs`, transcripts in `agent-host/tests/fixtures/pi/`)
+
+T3 Code's eight Pi replay fixtures (MIT, recorded from Pi 1.0.0; normalised where roll differs,
+listed in the test's module doc) and transcripts written in the tests. The test binary is the
+fake `pi`: it checks launch arguments and every record the adapter writes, across processes.
+
+| Feature | Tests |
+| --- | --- |
+| `pi --mode rpc <launch args> --extension <roll's>`, `get_state` (the session file is the native thread), the models' windows, the tree, `set_model`; a turn as `prompt`, streamed text and reasoning, per-turn usage and cost; the turn ends when `get_state` says Pi is idle after `agent_settled`; its ref is the leaf `get_entries` shows since the last one; context from `get_session_stats` | `agent-host/tests/pi.rs::simple`, `agent-host/tests/pi.rs::multi_turn`, `agent-host/src/provider/pi/items.rs::text_streams_and_completes_with_pis_final_content`, `agent-host/src/provider/pi/session.rs::stats_give_the_context` |
+| Records split on LF only (U+2028 survives), oversized ones dropped, non-JSON skipped; id-less acks matched in order | `agent-host/src/provider/pi/rpc.rs::records_split_on_lf_and_oversized_ones_are_dropped`, `agent-host/src/provider/pi/rpc.rs::errors_are_summarised`, `agent-host/tests/pi.rs::message_steering` |
+| Steering: the same `prompt` with `streamingBehavior: "steer"` | `agent-host/tests/pi.rs::message_steering` |
+| Interrupt: `clear_queue` then `abort`; the aborted tool interrupted; the turn's ref still read | `agent-host/tests/pi.rs::turn_interrupt_mid_tool`, `agent-host/tests/pi.rs::thread_rollback_after_stop` |
+| Resume: a new process, `switch_session` to the session file | `agent-host/tests/pi.rs::provider_thread_resume` |
+| `/compact [instructions]` and `Session::compact` → `compact`; compaction rows (failed, completed with token counts); one idle probe after it | `agent-host/tests/pi.rs::pi_compaction`, `agent-host/src/provider/pi/session.rs::compact_commands_parse_like_t3s` |
+| Prompts sent while Pi compacts wait for `compaction_end`; a prompt Pi refuses for racing a compaction is sent again after it | `agent-host/tests/pi.rs::prompts_wait_out_a_compaction` |
+| Rollback by resuming at a kept turn's ref (`RollbackStyle::ResumeAt`): `fork` at the next user message makes a new session file, the new native thread; across a process restart too | `agent-host/tests/pi.rs::thread_rollback`, `agent-host/tests/pi.rs::thread_rollback_after_stop`, `agent-host/src/provider/pi/tree.rs::cuts_at_the_next_user_message_on_the_branch`, `agent-host/src/provider/pi/tree.rs::malformed_listings_are_refused` |
+| Native fork: a bare, offline `pi --fork <source>` in the fork's directory, `fork` at the turn, then the session switches to the copy; a fork point by count is refused | `agent-host/tests/pi.rs::a_fork_copies_the_session_up_to_the_turn` |
+| Approvals from roll's extension (`confirm` "Allow <tool>?" with the input): commands, file changes, tools; accept, accept for the session (the same ask answered without asking), decline, cancel; a timed-out ask withdrawn; notices in a turn, none outside one | `agent-host/tests/pi.rs::approvals_from_the_extension`, `agent-host/tests/pi.rs::simple`, `agent-host/src/provider/pi/session.rs::approvals_read_roll_extensions_asks` |
+| Questions (`select`, `input`, `editor`) answered with `value`, an empty choice, one left open withdrawn at the turn's end | `agent-host/tests/pi.rs::questions_from_extensions` |
+| MCP servers (with their headers), the runtime mode and instructions reach the extension in the environment only; the extension written once as embedded, the token nowhere on disk | `agent-host/tests/pi.rs::mcp_servers_and_instructions_reach_the_extension_through_the_environment_only`, `agent-host/src/provider/pi/extension.rs::the_extension_is_written_once`, `agent-host/src/provider/pi/extension.rs::the_environment_carries_mode_servers_and_instructions` |
+| Items: commands (cumulative output snapshots as deltas, exit codes), file writes with diffs, MCP tools with their structured output and parents | `agent-host/tests/pi.rs::turn_interrupt_mid_tool`, `agent-host/src/provider/pi/items.rs::commands_stream_cumulative_snapshots_as_deltas`, `agent-host/src/provider/pi/items.rs::writes_and_mcp_tools_are_mapped` |
+| Failures: a refused prompt, a model error | `agent-host/tests/pi.rs::failures_end_the_turn` |
+| Agent work outside a turn stops the session | `agent-host/tests/pi.rs::work_outside_a_turn_stops_the_session` |
+| Launch arguments checked like T3's (roll's own refused, `--provider` needs `--model`, `--flag=value` split); launches built like T3's | `agent-host/tests/pi.rs::reserved_launch_arguments_are_refused`, `agent-host/src/provider/pi/catalog.rs::launch_arguments_are_checked`, `agent-host/src/provider/pi/catalog.rs::launches_are_built_like_t3s` |
+| `info()`: `pi --version` (0.80.5+), a `--no-session --offline` process listing models with T3's thinking levels and the "Pi default" model; no models → log in; an unavailable default model explained by `pi auth check`; too old; not installed | `agent-host/tests/pi.rs::status_lists_pis_models_with_their_thinking_levels`, `agent-host/tests/pi.rs::status_says_how_to_log_in`, `agent-host/tests/pi.rs::reserved_launch_arguments_are_refused`, `agent-host/src/provider/pi/catalog.rs::thinking_levels_follow_the_models_map`, `agent-host/src/provider/pi/catalog.rs::models_are_listed_with_the_active_ones_default_level`, `agent-host/src/provider/pi/catalog.rs::versions_compare` |
+
 ## Measurements
 
 | What | Test | Result |
