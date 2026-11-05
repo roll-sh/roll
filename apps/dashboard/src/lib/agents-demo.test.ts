@@ -22,7 +22,8 @@ describe("agents demo", () => {
     const release = client.hold();
     client.follow("test", ["thr_demo_flaky"]);
     await until("two machines", () => client.data.machines.size === 2);
-    expect(client.data.projects.size).toBe(3);
+    // roll, web and infra, plus four with no thread yet (their machines list them).
+    expect(client.data.projects.size).toBe(7);
     await until("busy threads", () => busyThreads(client.data).length >= 2);
 
     // The flaky-test thread streams, delegates to a subagent, then asks before running tests.

@@ -1,6 +1,6 @@
 "use client";
 
-import { Archive, ArrowUpRight, CircleAlert, Focus, FolderGit2, FolderPlus, GitBranch, GitFork, GitPullRequest, LogIn, MoreHorizontal, Plus, RefreshCw, Settings2, SquareTerminal, Trash2 } from "lucide-react";
+import { Archive, ArrowUpRight, CircleAlert, Focus, FolderGit2, FolderPlus, GitBranch, GitFork, GitPullRequest, LogIn, MoreHorizontal, PinOff, Plus, RefreshCw, Settings2, SquareTerminal, Trash2 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { coming, isRunning, machineState, reachable, type IdentityColor, type Machine, type Node, type Project, type ProviderInfo, type Request, type Run, type Thread } from "@/lib/agents-api";
 import { projectStats, type ProjectStats } from "@/lib/agents-graph";
@@ -22,6 +22,7 @@ import { machineColor, projectColor } from "@/lib/agents-identity";
 import { useAgents } from "./use-agents";
 import { openShelf } from "@/lib/agents-shelf";
 import { shelfOf } from "@/lib/agents-inbox";
+import { MoreProjects, useCanvasProjects } from "./machine-projects";
 
 /**
  * The frame every canvas card shares: flat panel, hairline border, the whole card a drag handle.
@@ -270,6 +271,7 @@ export function MachineNode({ machine }: { machine: Machine }) {
             </ul>
           )
         )}
+        <MoreProjects machine={machine} onAdd={() => setAdding(true)} />
         {adding ? (
           <div data-nodrag>
             <NewProject machine={machine} onClose={() => setAdding(false)} onAdded={(id) => focus(`p:${id}`)} />
@@ -299,6 +301,7 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
   const stats = projectStats(client.data, project.id);
   // Its settled, snoozed and archived conversations: on the toolbar's shelf, not on the card.
   const shelved = useShelvedCount(project.id);
+  const canvas = useCanvasProjects();
   return (
     <Card width={256} tint={projectColor(project)} label={`Project ${project.name}`}>
       <TintedHeader>
@@ -325,6 +328,7 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
               { label: "Settings", icon: <Settings2 />, onSelect: () => setAgentsView({ kind: "settings", target: `p:${project.id}` }) },
               !!focusProject && { label: "Focus (F)", icon: <Focus />, onSelect: () => focusProject?.(project.id) },
               shelved > 0 && { label: `Settled and archived (${shelved})`, icon: <Archive />, onSelect: () => openShelf(project.id) },
+              !!canvas.keep && canvas.kept(project.id) && { label: "Unpin from the canvas", icon: <PinOff />, onSelect: () => canvas.keep?.(project.id, false) },
               {
                 label: "Remove from roll",
                 confirm: "Remove? (the folder stays)",

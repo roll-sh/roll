@@ -1312,6 +1312,11 @@ export class DemoOwner implements AgentsTransport {
       MBP,
     );
     this.put("project", project("prj_demo_infra", "infra", "/home/roll/infra", "main", false, "infra", { settings: { ...NO_SETTINGS, color: "teal", icon: { kind: "emoji", emoji: "🧰" } } }), BOX);
+    // Projects with no thread yet: no card of their own; their machine lists them ("3 more projects").
+    this.put("project", project("prj_demo_docs", "handbook", "/Users/ada/handbook", "main", false, "handbook"), MBP);
+    this.put("project", project("prj_demo_design", "brand", "/Users/ada/brand", "main", false, null, { settings: { ...NO_SETTINGS, color: "violet" } }), MBP);
+    this.put("project", project("prj_demo_dotfiles", "dotfiles", "/Users/ada/.dotfiles", "main", true, null), MBP);
+    this.put("project", project("prj_demo_tf", "terraform", "/home/roll/terraform", "main", false, null, { settings: { ...NO_SETTINGS, icon: { kind: "emoji", emoji: "🌍" } } }), BOX);
 
     const base = (tid: string, pid: string, title: string, provider: string, model: string, over: Partial<Thread> = {}): Omit<Thread, never> => ({
       id: tid,

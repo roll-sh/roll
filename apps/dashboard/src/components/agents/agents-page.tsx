@@ -6,14 +6,14 @@ import Link from "next/link";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { isBusy } from "@/lib/agents-api";
 import { setActiveClient, type AgentsClient } from "@/lib/agents-client";
-import { deriveGraph, rolling, type GraphNode } from "@/lib/agents-graph";
+import { collapseUnused, deriveGraph, rolling, type GraphNode } from "@/lib/agents-graph";
 import { runsOf } from "@/lib/agents-store";
 import type { Direction, Size } from "@/lib/agents-layout";
 import { closePalette, noteThreadOpen, openPalette, togglePalette } from "@/lib/agents-palette";
 import { lastInputWasKeyboard } from "@/lib/input-modality";
 import type { AgentsServices } from "@/lib/agents-services";
 import { isNewAgentKey, setAgentsView, useAgentsSurface, viewFromHash, type AgentsView } from "@/lib/agents-surface";
-import { ALL, applyDisplay, applyView, directionOf, focusOn, isPinned, pinKey, pinnedConversations, pinOf, projectOf, viewStorageKey, withDirection, type Pin as PinRec } from "@/lib/agents-views";
+import { ALL, applyDisplay, applyView, directionOf, focusOn, isPinned, keepProject, pinKey, pinnedConversations, pinOf, projectOf, viewStorageKey, withDirection, type Pin as PinRec } from "@/lib/agents-views";
 import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
 import { LINK_PARAMS, type IntegrationsLink } from "@/lib/integrations-api";
 import { useModelPrefsSync, useOwnerSettings } from "@/lib/owner-settings";
@@ -29,6 +29,7 @@ import { Menu } from "./menu";
 import { Launcher } from "./new-agent";
 import { PinnedConversation, PinnedDiff, PinnedTerminal } from "./pinned";
 import { MachineNode, ProjectNode, RequestNode, SubagentNode, ThreadNode } from "./nodes";
+import { CanvasProjectsProvider, type CanvasProjects } from "./machine-projects";
 import { PromptBar } from "./prompt-bar";
 import { PendingRequest } from "./pending-request";
 import { SettingsPanel } from "./settings-panel";
@@ -678,7 +679,7 @@ function CanvasView({
   onLaunch?: (source: string, at: { x: number; y: number }) => void;
   keepClear?: React.RefObject<HTMLElement | null>;
 }) {
-  const { client, owner } = useAgents();
+  const { client, owner, readOnly } = useAgents();
   const view = views.current;
   const filter = views.filter;
   // A pinned conversation answers its thread's requests itself.
@@ -701,7 +702,24 @@ function CanvasView({
       name: (k) => data.projects.get(k.slice(2))?.value.name ?? k,
     });
   }, [whole, data, filter, view.pins, display]);
-  const graph = useMemo(() => (focused ? focusOn(viewed, `p:${focused}`) : viewed), [viewed, focused]);
+  const narrowed = useMemo(() => (focused ? focusOn(viewed, `p:${focused}`) : viewed), [viewed, focused]);
+  // Projects with nothing on the canvas fold into their machine's "3 more projects", unless pinned
+  // onto the view, focused, or named by its filter.
+  const collapsed = useMemo(() => {
+    if (display.projects === "all") return { graph: narrowed, unused: new Map<string, readonly string[]>() };
+    const keep = new Set([...(display.keep ?? []), ...(filter.projects ?? []), ...(focused ? [focused] : [])]);
+    return collapseUnused(narrowed, (p) => keep.has(p));
+  }, [narrowed, display.projects, display.keep, filter.projects, focused]);
+  const graph = collapsed.graph;
+  const { setDisplay } = views;
+  const projects: CanvasProjects = useMemo(
+    () => ({
+      unused: collapsed.unused,
+      kept: (p) => !!display.keep?.includes(p),
+      keep: readOnly ? undefined : (p, on) => setDisplay(keepProject(display, p, on)),
+    }),
+    [collapsed.unused, display, readOnly, setDisplay],
+  );
   // F on a card focuses its project (again: everything); Escape lets go first.
   useEffect(() => {
     if (!visible) return;
@@ -762,6 +780,13 @@ function CanvasView({
     const k = pendingFocus.current;
     if (!k || !visible) return;
     if (!graph.nodes.has(k)) {
+      // A project without a card: its machine, which lists it.
+      const p = k.startsWith("p:") ? data.projects.get(k.slice(2)) : undefined;
+      if (p && collapsed.unused.get(p.machine)?.includes(p.value.id)) {
+        pendingFocus.current = null;
+        for (const ms of [60, 420]) setTimeout(() => canvasRef.current?.focus(`m:${p.machine}`), ms);
+        return;
+      }
       // Not in this view: All has everything.
       if (view.id !== ALL && whole.nodes.has(k)) views.select(ALL);
       return;
@@ -830,25 +855,27 @@ function CanvasView({
     <div className="flex h-full min-h-0 flex-col">
       <ViewsBar views={views} data={data} active={visible} phone={phone} focused={focused ? { id: focused, name: data.projects.get(focused)?.value.name ?? "project", clear: () => onFocus(null) } : undefined} />
       <div className="relative min-h-0 flex-1">
-        <AgentsCanvas
-          ref={canvasRef}
-          graph={graph}
-          storageKey={viewStorageKey(owner, view.id)}
-          order={view.order}
-          onOrder={views.setOrder}
-          fitKey={`${JSON.stringify(filter)}|${focused ?? ""}|${display.group ?? ""}|${display.hide?.join() ?? ""}|${display.density ?? ""}`}
-          direction={direction}
-          onDirection={onDirection}
-          density={display.density}
-          onOpen={onOpen}
-          render={render}
-          defaultSize={sizeOf}
-          active={visible}
-          selected={selected}
-          onLaunch={onLaunch}
-          keepClear={keepClear}
-          overlay={empty && <EmptyView name={view.id === ALL ? null : view.name} waitingOnly={filter.status?.length === 1 && filter.status[0] === "waiting"} onAll={() => (view.id === ALL ? views.setFilter({}) : views.select(ALL))} />}
-        />
+        <CanvasProjectsProvider value={projects}>
+          <AgentsCanvas
+            ref={canvasRef}
+            graph={graph}
+            storageKey={viewStorageKey(owner, view.id)}
+            order={view.order}
+            onOrder={views.setOrder}
+            fitKey={`${JSON.stringify(filter)}|${focused ?? ""}|${display.group ?? ""}|${display.hide?.join() ?? ""}|${display.density ?? ""}|${display.projects ?? ""}`}
+            direction={direction}
+            onDirection={onDirection}
+            density={display.density}
+            onOpen={onOpen}
+            render={render}
+            defaultSize={sizeOf}
+            active={visible}
+            selected={selected}
+            onLaunch={onLaunch}
+            keepClear={keepClear}
+            overlay={empty && <EmptyView name={view.id === ALL ? null : view.name} waitingOnly={filter.status?.length === 1 && filter.status[0] === "waiting"} onAll={() => (view.id === ALL ? views.setFilter({}) : views.select(ALL))} />}
+          />
+        </CanvasProjectsProvider>
       </div>
     </div>
   );

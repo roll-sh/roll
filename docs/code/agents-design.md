@@ -174,6 +174,12 @@ state, or draw a project's logo inline (only in an `<img>`).
   `bg-fg/[0.07]` with its restore button in place of the time, and an 11px key hint footer (not on
   phones). The list's height animates (`AnimatedHeight`) as tabs and searches change it.
   Settled and archived conversations never sit on a card.
+- **A machine's folded projects:** one 11.5px subtle line at the foot of the machine card (up to
+  three 14px tiles overlapping by 4px, each on a 1px `bg-panel` rim, the count, a chevron),
+  `fg/4%` on hover. It opens a 300px popover to the card's right (`openOnHover`, 250 ms in,
+  180 ms out): an 11px header, 2-line rows (20px tile, the name at 12.5px, the path or repo in
+  10.5px mono), the row's tools (+, pin, gear) fading in on hover or focus (always on touch),
+  "Add a project" under a hairline. No empty project cards on the canvas.
 - **Keyboard focus on the canvas:** a focused card gets the 2px accent outline offset by 2px,
   like any focus; the focus-a-project chip is a raised chip (`bg-panel-2`, highlight) in the
   views bar with the project's name and an ×.

@@ -1511,8 +1511,21 @@ The surface has three views:
     One machine is the common case, and then its card is a level that carries nothing.
   - **Show:** idle threads (not working, not waiting, nothing unseen; an idle thread stays while
     a fork under it works, or while a card of it is pinned) and terminals. Leaving idle threads
-    off makes the canvas the work in flight, the thing an owner checks most.
-  - "Reset to default" when anything differs.
+    off makes the canvas the work in flight, the thing an owner checks most. **Projects without
+    threads** (off by default) gives every project a card again.
+  - "Reset to default" when anything differs (projects pinned onto the view stay pinned).
+
+  **Projects without a card** (`collapseUnused` in `lib/agents-graph.ts`, `machine-projects.tsx`).
+  A project with nothing on the canvas in this view (no thread, terminal or pin, after the
+  filters and the display) isn't drawn. Its machine says so in one line, "3 more projects" (or
+  "3 projects" when none of its projects has a card) with their tiles stacked, which opens on
+  hover (250 ms) or a click into a list beside the card, scaling from the line: a row starts an
+  agent there, its pin keeps the project's card on this view (`Display.keep`, unpinned from the
+  card's ⋯ menu), its gear opens the project's settings, and "Add a project" is at the foot. A
+  project gets its card back with its first thread; projects focused or named by the view's
+  filter always keep theirs, and so do projects grouped as the anchors. Focusing a folded project
+  (a deep link, a palette pick) frames its machine. Linear folds empty groups the same way; T3's
+  sidebar shows every project but only those with threads take room.
 
   One canvas engine (canvas 2D + `requestAnimationFrame`, paused offscreen) draws edges,
   pulses and the dot field; cards are DOM, positioned by the same world transform. Navigation is

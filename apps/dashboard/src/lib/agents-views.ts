@@ -61,7 +61,17 @@ export interface Display {
   group?: "project";
   /** What's left off the canvas: threads with nothing going on, terminals. */
   hide?: Hideable[];
+  /**
+   * `all`: every project gets a card. When absent a project with nothing on the canvas isn't
+   * drawn; its machine lists it ("3 more projects", `collapseUnused`).
+   */
+  projects?: "all";
+  /** Projects pinned onto this view: they keep their card with nothing under it. */
+  keep?: string[];
 }
+
+/** How many projects a view can pin. */
+export const MAX_KEPT = 64;
 
 /** What the display can leave off: `idle` threads (not working, not waiting, nothing unseen), `terminals`. */
 export type Hideable = "idle" | "terminals";
@@ -198,11 +208,25 @@ export function parseDisplay(v: unknown): Display {
   if (v.group === "project") out.group = "project";
   const hide = strings(v.hide, HIDEABLE.length).filter((h): h is Hideable => (HIDEABLE as readonly string[]).includes(h));
   if (hide.length) out.hide = hide;
+  if (v.projects === "all") out.projects = "all";
+  const keep = strings(v.keep, MAX_KEPT, 64);
+  if (keep.length) out.keep = keep;
   return out;
 }
 
-/** Whether a display is all defaults on every screen. */
-export const isDefaultDisplay = (d: Display) => Object.keys(parseDisplay(d)).length === 0;
+/** Whether a display is all defaults on every screen (pinned projects aren't a display choice). */
+export const isDefaultDisplay = (d: Display) => Object.keys(parseDisplay(d)).every((k) => k === "keep");
+
+/** The display back to its defaults, keeping the projects pinned onto the view. */
+export const defaultDisplay = (d: Display): Display => (d.keep?.length ? { keep: d.keep } : {});
+
+/** Pin a project onto the view (it keeps its card with no threads), or unpin it. */
+export function keepProject(d: Display, project: string, on: boolean): Display {
+  const rest = (d.keep ?? []).filter((p) => p !== project);
+  const keep = on ? [...rest, project].slice(-MAX_KEPT) : rest;
+  const { keep: _, ...out } = d;
+  return keep.length ? { ...out, keep } : out;
+}
 
 /**
  * The graph as a display shows it: grouped by project (machine cards gone, projects the roots in

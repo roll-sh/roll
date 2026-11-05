@@ -10,6 +10,7 @@ import {
   directionOf,
   HIDEABLE,
   isDefaultDisplay,
+  defaultDisplay,
   withDirection,
   type Hideable,
   countView,
@@ -489,9 +490,13 @@ function DisplayMenu({ display, phone, onChange }: { display: Display; phone: bo
               />
             </label>
           ))}
+          <label className="flex h-8 cursor-pointer items-center gap-2" title="Projects with no thread on the canvas get a card too (otherwise their machine lists them)">
+            <span className="min-w-0 flex-1 truncate text-fg">Projects without threads</span>
+            <Switch size="sm" aria-label="Projects without threads" checked={display.projects === "all"} onCheckedChange={(on) => set({ projects: on ? "all" : undefined })} />
+          </label>
         </div>
         {changed && (
-          <button type="button" onClick={() => onChange({})} className="self-start text-[12px] text-subtle transition-colors hover:text-fg">
+          <button type="button" onClick={() => onChange(defaultDisplay(display))} className="self-start text-[12px] text-subtle transition-colors hover:text-fg">
             Reset to default
           </button>
         )}

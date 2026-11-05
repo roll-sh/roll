@@ -221,6 +221,40 @@ export function shelved(t: Thread): boolean {
   return t.inbox.settle?.state === "settled" || t.inbox.snooze !== null;
 }
 
+export interface Collapsed {
+  graph: Graph;
+  /** Per machine id, the projects it lists instead of drawing them (name order). */
+  unused: ReadonlyMap<MachineId, readonly ProjectId[]>;
+}
+
+/**
+ * The canvas without the projects that have nothing on it (docs/code/agents.md, "Canvas"): a
+ * project card under a machine with no card under it (no thread, terminal or pin in this view,
+ * after the display's filters) isn't drawn; its machine lists it instead. `keep` says which stay
+ * anyway (pinned, focused, named by the view's filter). Projects as the anchors (grouped by
+ * project) aren't under a machine, so they always stay.
+ */
+export function collapseUnused(graph: Graph, keep: (project: ProjectId) => boolean): Collapsed {
+  const drop = new Set<string>();
+  const unused = new Map<MachineId, ProjectId[]>();
+  for (const n of graph.nodes.values()) {
+    if (n.kind !== "project" || n.children.length > 0 || keep(n.id)) continue;
+    const parent = n.parent ? graph.nodes.get(n.parent) : undefined;
+    if (parent?.kind !== "machine") continue;
+    drop.add(n.key);
+    const list = unused.get(parent.id);
+    if (list) list.push(n.id);
+    else unused.set(parent.id, [n.id]);
+  }
+  if (!drop.size) return { graph, unused };
+  const nodes = new Map<string, GraphNode>();
+  for (const n of graph.nodes.values()) {
+    if (drop.has(n.key)) continue;
+    nodes.set(n.key, n.children.some((c) => drop.has(c)) ? { ...n, children: n.children.filter((c) => !drop.has(c)) } : n);
+  }
+  return { graph: { roots: graph.roots, nodes, edges: graph.edges.filter((e) => !drop.has(e.to)) }, unused };
+}
+
 /** Everything the "rolling" popover lists: busy threads and the requests waiting on someone. */
 export interface Rolling {
   busy: Thread[];
