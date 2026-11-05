@@ -510,6 +510,76 @@ not installed, with the reason as its detail, so nothing delegates to a hung age
 finds it answering. The dashboard shows a provider being checked as a quiet shimmering "Checking…",
 on the machine card and in machine settings. Code: `agent-host/src/orchestrator/probes.rs`.
 
+### The ACP registry
+
+T3 Code adds agents from the ACP registry (`cdn.agentclientprotocol.com/registry/v1/latest/registry.json`)
+as provider instances from its settings (`packages/provider-acp-registry`, `AcpRegistrySupport.ts`;
+`AddProviderInstanceDialog.tsx`, `AcpRegistrySearchStep.tsx`). roll does it per machine: a
+machine's settings have "Add agent" beside "Check again", and the daemon does all the work. Code:
+`agent-host/src/registry.rs` (`registry/{index,archive,packages}.rs`),
+`agent-host/src/orchestrator/registry.rs`, `components/agents/add-agent.tsx`, `lib/agents-registry.ts`.
+
+- **Fetching is the daemon's**, never the relay's (it only forwards the commands, which are the
+  owner's). The URL is fixed; only the daemon's own `config.toml` can point it elsewhere
+  (`[registry] url`; plain HTTP is accepted there, and then for that origin's archives too, for a
+  local copy and the tests). The index is read with a 30 s timeout, at most 1 MiB, redirects only on
+  the same host, and parsed with T3's bounds: at most 512 agents, ids `^[a-z0-9][a-z0-9._-]*$`,
+  versions that can't be `.` or `..` (they name folders), HTTPS URLs without credentials, packages
+  pinned to an exact version. An entry that breaks a bound is dropped; the rest stay.
+- **`registry.list`** (a query) answers `Reply::Registry { agents, fetched_at, error }`. It reuses a
+  fetch for 5 minutes (T3's search); the daemon keeps the last copy at `<home>/acp/registry.json`
+  (written to a temporary file, then renamed) and falls back to it when the registry can't be
+  reached, with `error` saying why. Each `RegistryAgent` says which distributions suit this machine
+  (`kinds`: a binary only for its OS and architecture, Windows on ARM taking x86-64 like T3; `npx`;
+  `uvx`), whether it's `installable` (a binary, or npm/uv on the PATH), what vouches for it
+  (`integrity`: `sha256` listed, `registry` for an exact package version, `none`), the version the
+  daemon `installed`, and the provider that is it already (`offered`): `acp:<id>`, a known agent's
+  own name (`github-copilot-cli` → `acp:copilot`, `factory-droid` → `acp:droid`, `grok-build` →
+  `acp:grok`, `qwen-code` → `acp:qwen`, `amp-acp` → `acp:amp`, `antigravity-acp` →
+  `acp:antigravity`) or a native driver (`opencode`, `opencode-v2` → `opencode`; `pi-acp` → `pi`)
+  that is installed. The dashboard shows those as "On this machine" and never installs them twice.
+- **Never at probe time.** Only `registry.install` installs; a probe stays `initialize` only (T3's
+  registry probe opens a throwaway session; roll's doesn't, as for every ACP agent).
+- **`registry.install {agent}`** fetches the registry (an install always does; the kept copy when
+  it can't), then uses the first of: the binary for this machine, npx with the machine's own `npm`,
+  uvx with its own `uv` (T3's order). One install per agent at a time.
+  - A binary is streamed to a temporary folder beside its destination with its SHA-256, at most
+    1 GiB and 20 minutes; a listed hash must match. It's unpacked in Rust (no system `tar` or
+    `unzip`) by its suffix: `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`, `.zip` (stored or deflated), else
+    it is the executable. Only regular files and folders: a symlink, hardlink, device or FIFO, an
+    absolute path, a `..`, or an entry listed twice refuses the archive; at most 20,000 entries and
+    2 GiB unpacked; files are created new. `cmd` is a relative path (no drive, no `..`), must be a
+    regular file inside the folder, and is made executable. The folder is renamed into
+    `<home>/acp/tools/<id>/<version>/<target>/` only when all of that holds.
+  - A package goes into `<home>/acp/tools/<id>/<version>/npm` (`npm install --global` with
+    `npm_config_prefix` there) or `…/python` (`uv tool install` with `UV_TOOL_DIR`/`UV_TOOL_BIN_DIR`
+    there): never global. The command is found as T3 finds it (the package's `bin`, the agent's id,
+    the package's name).
+  - A failure (a hash that doesn't match, a download that fails, an unsafe archive) leaves nothing:
+    no files, no entry, no provider. Other versions of the agent are removed after a successful one.
+  - `<home>/acp/installed.json` records it (id, the registry's name and version, the command, its
+    arguments and the registry's variables, when), and the provider `acp:<id>` is added to the
+    running daemon (`Host::add_provider`: configured, probed in the background, `hello` at once with
+    `checking`). It replies once all of that is done. The next start offers it too
+    (`registry::acp_providers`: `config.toml`'s `[[acp]]` first, then installed agents, then known
+    agents on the PATH; a configured `[[acp]]` of the same name wins). `MachineConfig.registry`
+    lists the installed agents, so their cards in the settings get "Remove" (unset: a daemon that
+    can't install, and the panel is read-only).
+  - The relay waits 30 s for a reply; a longer install answers `timeout`, and the dashboard sends
+    the same command id again: the daemon runs a command id once, so the retry waits for the same
+    install and gets its reply.
+- **`registry.remove {agent}`** is refused while a thread on it runs; its idle sessions close, the
+  provider goes, then its entry and its folder.
+- **Credentials: never.** The registry's variables are configuration (`AUGMENT_DISABLE_AUTO_UPDATE`);
+  any name `is_credential_env` flags is dropped when the index is parsed and when `installed.json`
+  is read. An installed agent signs in as any ACP agent does, in a terminal or through an endpoint.
+- **The dashboard** (`add-agent.tsx`): a popover from "Add agent" (glass, scaling from its trigger)
+  with T3's search and rows: the registry's icon (only from `https://cdn.agentclientprotocol.com/`,
+  recoloured to the text's colour with T3's SVG filter; the registry's mark otherwise), name, one
+  line of description, version, "About", and Install / Installing… / Installed / Update / On this
+  machine / Needs npm / Needs uv / Not for this machine. Errors show under their row. The demo's
+  daemons list a dozen real agents and install one after a short "Installing…".
+
 ## Turns: queue, steer, compact, subagents, plans
 
 How a conversation moves while an agent works, as T3 Code does it (its orchestration-v2
@@ -1078,6 +1148,9 @@ next to `providers`, which they change; a lagged link sends `hello` again, so no
   per provider; paths absolute or `~/…`; a branch prefix git takes; auto-pull at least daily;
   subagents at most 8 deep, 1 to 32 tasks per thread; a git name and email both or neither.
 - Changing them is the owner's (`Code::manages`); agent tokens can't (agents/policy.rs).
+- **Agents from the ACP registry** are added and removed from the Providers section ("Add agent",
+  and "Remove" on an installed agent's card): `registry.list`, `registry.install` and
+  `registry.remove`, under "The ACP registry" in "Providers".
 
 ## Endpoints
 

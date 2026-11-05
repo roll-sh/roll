@@ -31,6 +31,7 @@ import {
 import { customModelError, envNameError, parseAutoCompact, settingsError, withFields, withProvider } from "@/lib/machine-settings";
 import { setAgentsView } from "@/lib/agents-surface";
 import { ENDPOINT_SETTINGS, MachineEndpoints, ProviderEndpointRow, providerEndpointSetting, type EndpointEdit } from "./endpoint-settings";
+import { AddAgent, RegistryRemoveRow } from "./add-agent";
 import { endpointOf } from "@/lib/agents-endpoints";
 import { ModelPicker } from "./model-picker";
 import { CustomModelEditor } from "./custom-model-editor";
@@ -470,9 +471,12 @@ function Providers({ ctx }: { ctx: Ctx }) {
       title="Providers"
       ids={ids}
       action={
-        <button type="button" disabled={!reachable(ctx.machine) || checking} onClick={refresh} className="flex h-6 items-center gap-1 rounded-md px-1.5 text-[11.5px] text-subtle hover:bg-fg/[0.06] hover:text-fg disabled:opacity-50" title="Check providers again (after a login)">
-          <RefreshCw className={cn("size-3", checking && "animate-spin motion-reduce:animate-none")} /> Check again
-        </button>
+        <span className="flex items-center gap-0.5">
+          <AddAgent machine={ctx.machine} />
+          <button type="button" disabled={!reachable(ctx.machine) || checking} onClick={refresh} className="flex h-6 items-center gap-1 rounded-md px-1.5 text-[11.5px] text-subtle hover:bg-fg/[0.06] hover:text-fg disabled:opacity-50" title="Check providers again (after a login)">
+            <RefreshCw className={cn("size-3", checking && "animate-spin motion-reduce:animate-none")} /> Check again
+          </button>
+        </span>
       }
     >
       {providers.map((p) => (
@@ -592,6 +596,7 @@ function ProviderCard({ ctx, base, info }: { ctx: Ctx; base: ProviderBase; info:
             <ModelsEditor base={base} info={info} models={p.models} disabled={!ctx.editable} onChange={(models) => ctx.save(withProvider(ctx.set, base.id, { models }))} />
           </SettingRow>
           {compacts(base) && <CompactionRows ctx={ctx} base={base} />}
+          <RegistryRemoveRow machine={ctx.machine} base={base} />
         </div>
       )}
     </div>
