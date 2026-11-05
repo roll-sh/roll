@@ -39,12 +39,29 @@ export const agentsPalette = {
   get: () => state,
 };
 
+/** What had focus when the palette opened: it gets focus back when the palette closes. */
+let opener: HTMLElement | null = null;
+
 export function openPalette(intent: PaletteIntent = { kind: "search" }) {
+  if (!state.open && typeof document !== "undefined") {
+    const a = document.activeElement;
+    opener = a instanceof HTMLElement && a !== document.body ? a : null;
+  }
   set({ open: true, intent, session: state.session + 1 });
 }
 
 export function closePalette() {
-  if (state.open) set({ ...state, open: false });
+  if (!state.open) return;
+  set({ ...state, open: false });
+  // Back where the keyboard was (Linear's palette does), unless what was picked took focus
+  // itself (a conversation's composer).
+  const back = opener;
+  opener = null;
+  if (back)
+    setTimeout(() => {
+      const a = document.activeElement;
+      if (back.isConnected && (!a || a === document.body)) back.focus({ preventScroll: true });
+    }, 0);
 }
 
 /** ⌘K: open on a search, or close. */

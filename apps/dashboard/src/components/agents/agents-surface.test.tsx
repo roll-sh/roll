@@ -1,4 +1,4 @@
-import { act, screen, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { agentsSurface, resetAgentsSurface, setAgentsView } from "@/lib/agents-surface";
@@ -95,6 +95,20 @@ describe("the agents in the header", () => {
     expect(agentsSurface.get().view).toMatchObject({ kind: "thread" });
     await userEvent.keyboard("{Escape}");
     expect(agentsSurface.get().view).toEqual({ kind: "canvas" });
+  });
+
+  it("gives focus back when something closes: the conversation's card, and what had it before ⌘K", async () => {
+    setup();
+    await userEvent.click(screen.getByRole("button", { name: /Agents: 1 running/ }));
+    const thread = (agentsSurface.get().view as { thread: string }).thread;
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(document.activeElement).toBe(document.querySelector(`[data-card][data-key="t:${thread}"]`)));
+    const display = screen.getByRole("button", { name: /Display/ });
+    display.focus();
+    await userEvent.keyboard("{Control>}k{/Control}");
+    expect(await screen.findByRole("dialog", { name: /command|palette|search/i })).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(display).toHaveFocus());
   });
 
   it("opens a conversation whose record comes after the reply (a fork), and leaves one that's deleted", async () => {

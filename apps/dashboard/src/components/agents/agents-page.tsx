@@ -203,6 +203,33 @@ export function AgentsSurface({
     setAgentsView({ kind: "thread", thread });
   }, []);
   const close = useCallback(() => setAgentsView({ kind: "canvas" }), []);
+
+  // Focus comes back to the canvas when a conversation, settings or the launcher closes (it was
+  // lost with the panel): the card of what was open, else what had focus on the canvas before.
+  const lastCanvasFocus = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const on = (e: FocusEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && root.current?.contains(t) && !t.closest("[data-panel], [role=dialog]:not([data-surface])")) lastCanvasFocus.current = t;
+    };
+    document.addEventListener("focusin", on);
+    return () => document.removeEventListener("focusin", on);
+  }, []);
+  const wasShown = useRef<AgentsView>(shown);
+  useEffect(() => {
+    const before = wasShown.current;
+    wasShown.current = shown;
+    if (shown.kind !== "canvas" || before.kind === "canvas") return;
+    const key = before.kind === "thread" ? `t:${before.thread}` : before.kind === "settings" && before.target !== "owner" ? before.target : null;
+    const t = setTimeout(() => {
+      const a = document.activeElement;
+      if (a && a !== document.body && a.isConnected) return;
+      const card = key ? root.current?.querySelector<HTMLElement>(`[data-card][data-key="${CSS.escape(key)}"]`) : null;
+      const back = card ?? (lastCanvasFocus.current?.isConnected ? lastCanvasFocus.current : null);
+      back?.focus({ preventScroll: true });
+    }, 0);
+    return () => clearTimeout(t);
+  }, [shown]);
   const startNew = useCallback((project?: string, opts?: { machine?: string; at?: { x: number; y: number } }) => {
     const r = root.current?.getBoundingClientRect();
     const at = opts?.at && r ? { x: Math.round(opts.at.x - r.left), y: Math.round(opts.at.y - r.top) } : undefined;
