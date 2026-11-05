@@ -1,5 +1,6 @@
 "use client";
 
+import { Switch } from "./ui";
 import { ArrowUpRight, ClipboardList, GitPullRequest, X } from "lucide-react";
 import { useState } from "react";
 import type { ChangeStatus, Landing, Machine, Published, Thread, ThreadChange, WorkRef } from "@/lib/agents-api";
@@ -70,6 +71,13 @@ export function WorkChip({ work, onRelease, className = "" }: { work: WorkRef; o
 }
 
 /** How a `land: true` went, said calmly: a blocked or conflicting land is a result, not an error. */
+/** Whether the landing's own message only says again what its note says ("Queued: it lands once…"). */
+function repeats(message: string, note: string): boolean {
+  const plain = (t: string) => t.toLowerCase().replace(/^[^:]{1,24}:\s*/, "").replace(/[.\s]+$/, "").trim();
+  const [a, b] = [plain(message), plain(note)];
+  return !!a && !!b && (a.includes(b) || b.includes(a));
+}
+
 export function landingNote(l: Landing): { tone: "ok" | "busy" | "quiet" | "bad"; text: string } {
   switch (l.status) {
     case "landed":
@@ -141,7 +149,7 @@ export function PublishForm({ thread, machine, onDone }: { thread: Thread; machi
         {done.landing && note && (
           <div className={`rounded-lg border px-2.5 py-1.5 text-[12px] ${note.tone === "ok" ? "border-ok/30" : note.tone === "busy" ? "border-accent/30" : note.tone === "bad" ? "border-danger/30" : "border-line"}`}>
             <p className={note.tone === "bad" ? "text-danger" : "text-fg"}>{note.text}</p>
-            {done.landing.message && <p className="mt-0.5 text-muted">{done.landing.message}</p>}
+            {done.landing.message && !repeats(done.landing.message, note.text) && <p className="mt-0.5 text-muted">{done.landing.message}</p>}
             {done.landing.blockers.length > 0 && (
               <ul className="mt-1 list-disc space-y-0.5 pl-4 text-muted" aria-label="Blockers">
                 {done.landing.blockers.map((b) => (
@@ -174,7 +182,7 @@ export function PublishForm({ thread, machine, onDone }: { thread: Thread; machi
     >
       <input value={message} onChange={(e) => setMessage(e.target.value)} aria-label="Commit message" className={`${input} min-w-0 flex-1 basis-48`} />
       <label className="flex items-center gap-1.5 text-[12px] text-muted" title="Through the landing rules (the merge queue on a queue repo)">
-        <input type="checkbox" checked={land} onChange={(e) => setLand(e.target.checked)} className="accent-[var(--accent)]" /> and land
+        <Switch checked={land} onCheckedChange={setLand} aria-label="and land" /> and land
       </label>
       <button type="submit" disabled={busy || !message.trim()} className={primary}>
         {busy ? <span className="shimmer">Publishing…</span> : "Publish"}
