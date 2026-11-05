@@ -1036,9 +1036,20 @@ async fn antigravity_read_repair() {
     assert_eq!(read.output, None);
 }
 
+/// Writes a script to `path` and makes it executable, without the test process ever holding it
+/// open for writing: a child another test thread forks inherits that descriptor until it execs,
+/// and running the script then fails "Text file busy". `cp` (its own process) makes the file.
+fn write_executable(path: &Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let src = path.with_extension("src");
+    std::fs::write(&src, text).unwrap();
+    let status = std::process::Command::new("cp").arg(&src).arg(path).status().unwrap();
+    assert!(status.success(), "cp {} {}", src.display(), path.display());
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 /// An Antigravity install: the fake as `agy_acp_server.par`, `localharness_external` beside it.
 fn agy_install(dir: &Path, harness: bool) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let install = dir.join("agy");
     std::fs::create_dir_all(&install).unwrap();
     let mut files = vec![("agy_acp_server.par", "#!/bin/sh\nexec /bin/sh \"$@\"\n")];
@@ -1046,8 +1057,7 @@ fn agy_install(dir: &Path, harness: bool) -> PathBuf {
         files.push(("localharness_external", "#!/bin/sh\nexit 0\n"));
     }
     for (name, text) in files {
-        std::fs::write(install.join(name), text).unwrap();
-        std::fs::set_permissions(install.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable(&install.join(name), text);
     }
     install.join("agy_acp_server.par")
 }
@@ -1165,7 +1175,6 @@ async fn cursor_turn() {
 /// Cursor's status is its own: `cursor-agent status --format json` (as 2026.11.05 prints it).
 #[tokio::test]
 async fn cursor_status_is_its_own() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("log.ndjson");
     let t = vec![
@@ -1178,8 +1187,7 @@ async fn cursor_status_is_its_own() {
         // `status --format json` answers; anything else is the fake ACP agent.
         let bin = dir.path().join("cursor-agent");
         let script = format!("#!/bin/sh\nif [ \"$1\" = status ]; then printf '%s' '{json}'; exit 0; fi\nexec /bin/sh \"$@\"\n");
-        std::fs::write(&bin, script).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable(&bin, &script);
         ProviderConfig { binary: Some(bin), ..fake_config(Path::new(&path), &log) }
     };
     let ok = status(r#"{ "status": "authenticated", "isAuthenticated": true, "userInfo": { "email": "a@b.c" } }"#);
