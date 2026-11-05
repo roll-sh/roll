@@ -32,7 +32,7 @@ const KINDS = [
  * A quiet pill until it's focused or holds something; then T3's composer shape: the text, a line
  * for what went wrong, and a toolbar. Centred over the canvas when it's wide; across it, above the
  * zoom controls, when it's narrow (a side panel open, a small window, a phone), with `above`
- * (the phone's "Waiting for you") stacked over it. `ref` is the whole dock, for the canvas to keep
+ * (the phone's "Waiting for you", which sends the zoom controls to the top) stacked over it. `ref` is the whole dock, for the canvas to keep
  * its cards clear of.
  */
 export function PromptBar({ ref, above }: { ref?: Ref<HTMLDivElement>; above?: ReactNode }) {
@@ -187,7 +187,7 @@ export function PromptBar({ ref, above }: { ref?: Ref<HTMLDivElement>; above?: R
           e.preventDefault();
           area.current?.focus();
         }}
-        className={`palette-glass pointer-events-auto mb-[max(3.5rem,calc(env(safe-area-inset-bottom)+3rem))] w-full cursor-text overflow-hidden transition-[border-radius] ${EASE} @min-[55rem]/bar:mb-4 @min-[55rem]/bar:w-[min(640px,calc(100%-25rem))] ${open ? "rounded-2xl" : "rounded-[22px]"}`}
+        className={`palette-glass pointer-events-auto w-full ${above ? "mb-[max(0.75rem,env(safe-area-inset-bottom))]" : "mb-[max(3.5rem,calc(env(safe-area-inset-bottom)+3rem))]"} cursor-text overflow-hidden transition-[border-radius] ${EASE} @min-[55rem]/bar:mb-4 @min-[55rem]/bar:w-[min(640px,calc(100%-25rem))] ${open ? "rounded-2xl" : "rounded-[22px]"}`}
       >
         {/* The same line open or closed: the text and caret never move. */}
         <div className="flex items-start gap-2.5 pr-3 pl-4">
