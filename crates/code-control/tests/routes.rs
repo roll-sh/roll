@@ -950,3 +950,57 @@ async fn chatops_routes_follow_the_auth_matrix() {
         assert_eq!(call(a, "GET", p, None, None).await, NOT_FOUND, "{p}: no such platform here");
     }
 }
+
+/// Linear's routes: the owner's are Code::manages (they hold the workspace's credentials); the
+/// OAuth callback and the webhooks take no token (the state and the signature are the
+/// credentials), so every caller gets the same answer.
+#[tokio::test]
+async fn linear_routes_follow_the_auth_matrix() {
+    let w = world().await;
+    let a = &w.a;
+    let (s, m) = a.req("POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "box" })), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED, "{m}");
+    let machine = m["token"].as_str().unwrap().to_string();
+    let base = "/v1/code/agents/acme/linear";
+    // Not connected, no OAuth app and no ROLL_SECRET_KEY on this server.
+    let routes = [
+        ("GET", base.to_string(), OK),
+        ("DELETE", base.to_string(), NOT_FOUND),
+        ("POST", format!("{base}/oauth"), StatusCode::UNPROCESSABLE_ENTITY),
+        ("PUT", format!("{base}/key"), StatusCode::BAD_REQUEST),
+        ("PUT", format!("{base}/settings"), NOT_FOUND),
+        ("PUT", format!("{base}/webhook/secret"), StatusCode::BAD_REQUEST),
+        ("GET", format!("{base}/teams"), NOT_FOUND),
+    ];
+    let body = json!({ "name": "s" });
+    for (who, token) in [("admin", Some(ADMIN)), ("owner", Some(w.acme.as_str()))] {
+        for (m, p, want) in &routes {
+            assert_eq!(call(a, m, p, Some(&body), token).await, *want, "{who}: {m} {p}");
+        }
+    }
+    let denied = StatusCode::UNAUTHORIZED;
+    for (who, token, want) in [
+        ("agent", Some(w.agent.as_str()), FORBIDDEN),
+        ("review app", Some(w.app_in.as_str()), FORBIDDEN),
+        ("another owner", Some(w.other.as_str()), FORBIDDEN),
+        ("anonymous", None, denied),
+        ("revoked", Some(w.revoked.as_str()), denied),
+        ("machine", Some(machine.as_str()), denied),
+        ("garbage", Some("hunter2"), denied),
+    ] {
+        for (m, p, _) in &routes {
+            assert_eq!(call(a, m, p, Some(&body), token).await, want, "{who}: {m} {p}");
+        }
+    }
+    assert_eq!(call(a, "GET", "/v1/code/agents/nobody/linear", None, Some(ADMIN)).await, NOT_FOUND);
+    let open = [
+        ("GET", "/v1/code/linear/oauth/callback".to_string(), StatusCode::BAD_REQUEST),
+        ("POST", "/v1/code/linear/webhook".to_string(), NOT_FOUND),
+        ("POST", "/v1/code/linear/webhook/lwh_nope".to_string(), NOT_FOUND),
+    ];
+    for token in [None, Some(ADMIN), Some(w.acme.as_str()), Some(w.agent.as_str()), Some("hunter2")] {
+        for (m, p, want) in &open {
+            assert_eq!(call(a, m, p, Some(&json!({})), token).await, *want, "{token:?}: {m} {p}");
+        }
+    }
+}

@@ -43,6 +43,7 @@ use std::time::Duration;
 /// node). Integrations: add one line here.
 pub(crate) fn register_integrations(code: &std::sync::Arc<Code>) {
     crate::chatops::register(code);
+    crate::agents::linear::register(code);
 }
 
 /// Call tokens (one API call of a step, as its automation) start with this.

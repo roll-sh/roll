@@ -67,7 +67,7 @@ fn every_route_tool_and_event_has_tests_in_the_map() {
     let mut missing = Vec::new();
 
     let mut all = BTreeSet::new();
-    for f in ["crates/code-control/src/api.rs", "crates/code-control/src/review/api.rs", "crates/code-control/src/ai/api.rs", "crates/code-control/src/agents/api.rs", "crates/code-control/src/agents/sandbox/api.rs", "crates/code-control/src/chatops/api.rs", "crates/code-control/src/agents/automations/api.rs", "crates/code-control/src/mcp.rs", "crates/code-git/src/server.rs"] {
+    for f in ["crates/code-control/src/api.rs", "crates/code-control/src/review/api.rs", "crates/code-control/src/ai/api.rs", "crates/code-control/src/agents/api.rs", "crates/code-control/src/agents/sandbox/api.rs", "crates/code-control/src/chatops/api.rs", "crates/code-control/src/agents/automations/api.rs", "crates/code-control/src/agents/linear/api.rs", "crates/code-control/src/mcp.rs", "crates/code-git/src/server.rs"] {
         all.extend(routes(&read(f)));
     }
     assert!(all.len() > 100, "found only {} routes: is the parser still right?", all.len());

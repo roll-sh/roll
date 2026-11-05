@@ -1,0 +1,1050 @@
+{
+  "steps": [
+    {
+      "config": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "action: what it does (Ran)",
+            "format": "template",
+            "title": "Action",
+            "type": "string"
+          },
+          "body": {
+            "description": "Markdown (thought, response, elicitation, error)",
+            "format": "template-long",
+            "title": "Body",
+            "type": "string"
+          },
+          "ephemeral": {
+            "type": "boolean"
+          },
+          "options": {
+            "description": "elicitation: choices",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "parameter": {
+            "description": "action: on what (cargo test)",
+            "format": "template",
+            "title": "Parameter",
+            "type": "string"
+          },
+          "result": {
+            "description": "action: what came of it",
+            "format": "template",
+            "title": "Result",
+            "type": "string"
+          },
+          "session": {
+            "description": "Agent session id; default: the event's",
+            "format": "template",
+            "title": "Session",
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "thought",
+              "action",
+              "response",
+              "elicitation",
+              "error"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "description": "Show a thought, action, response, question (elicitation) or error on the agent session",
+      "integration": "linear",
+      "kind": "linear.activity",
+      "output": [
+        "id"
+      ],
+      "title": "Post a Linear agent activity"
+    },
+    {
+      "config": {
+        "additionalProperties": false,
+        "properties": {
+          "actions": {
+            "description": "Tool calls as actions (default on)",
+            "type": "boolean"
+          },
+          "machine": {
+            "type": "string"
+          },
+          "plan": {
+            "description": "The agent's todos as the session's plan (default on)",
+            "type": "boolean"
+          },
+          "respond": {
+            "description": "The final message as the response (default on)",
+            "type": "boolean"
+          },
+          "session": {
+            "description": "Agent session id; default: the event's",
+            "format": "template",
+            "title": "Session",
+            "type": "string"
+          },
+          "thoughts": {
+            "description": "Reasoning and interim messages as thoughts (default on)",
+            "type": "boolean"
+          },
+          "thread": {
+            "description": "Default: an earlier step's, else the issue's",
+            "format": "roll-thread",
+            "title": "Thread",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "description": "Stream a roll thread's progress to the Linear agent session as activities, ask its questions and approvals there, and pass the replies on (they answer, steer or stop it). Done when the thread is",
+      "integration": "linear",
+      "kind": "linear.agent_session",
+      "output": [
+        "outcome",
+        "thread",
+        "machine",
+        "session",
+        "message",
+        "change_url"
+      ],
+      "title": "Show the agent in Linear"
+    },
+    {
+      "config": {
+        "additionalProperties": false,
+        "properties": {
+          "icon_url": {
+            "description": "A png or jpg icon",
+            "format": "template",
+            "title": "Icon URL",
+            "type": "string"
+          },
+          "issue": {
+            "description": "Issue id or identifier; default: the event's issue",
+            "format": "template",
+            "title": "Issue",
+            "type": "string"
+          },
+          "session": {
+            "description": "Also on this agent session (default: the event's)",
+            "format": "template",
+            "title": "Session",
+            "type": "string"
+          },
+          "subtitle": {
+            "description": "A line under it",
+            "format": "template",
+            "title": "Subtitle",
+            "type": "string"
+          },
+          "title": {
+            "description": "Its title (default: the URL)",
+            "format": "template",
+            "title": "Title",
+            "type": "string"
+          },
+          "url": {
+            "description": "The link (e.g. {{steps.publish.url}})",
+            "format": "template",
+            "title": "URL",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "description": "Attach a link (the roll change, a PR, a preview) to the issue, and show it on the agent session",
+      "integration": "linear",
+      "kind": "linear.attach",
+      "output": [
+        "id",
+        "url"
+      ],
+      "title": "Link to a Linear issue"
+    },
+    {
+      "config": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "description": "Markdown (a template)",
+            "format": "template-long",
+            "title": "Body",
+            "type": "string"
+          },
+          "issue": {
+            "description": "Issue id or identifier (ENG-12); default: the event's issue",
+            "format": "template",
+            "title": "Issue",
+            "type": "string"
+          },
+          "parent": {
+            "description": "Reply under this comment id",
+            "format": "template",
+            "title": "Parent",
+            "type": "string"
+          }
+        },
+        "required": [
+          "body"
+        ],
+        "type": "object"
+      },
+      "description": "Post a markdown comment on the issue (the event's, unless `issue` says) as roll",
+      "integration": "linear",
+      "kind": "linear.comment",
+      "output": [
+        "id",
+        "url"
+      ],
+      "title": "Comment on a Linear issue"
+    },
+    {
+      "config": {
+        "additionalProperties": false,
+        "properties": {
+          "assignee": {
+            "description": "A name, email or id",
+            "format": "template",
+            "title": "Assignee",
+            "type": "string"
+          },
+          "delegate": {
+            "description": "roll: the agent takes it",
+            "format": "template",
+            "title": "Delegate",
+            "type": "string"
+          },
+          "description": {
+            "description": "Markdown",
+            "format": "template-long",
+            "title": "Description",
+            "type": "string"
+          },
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "parent": {
+            "description": "Parent issue id or identifier",
+            "format": "template",
+            "title": "Parent",
+            "type": "string"
+          },
+          "priority": {
+            "type": [
+              "integer",
+              "string"
+            ]
+          },
+          "project": {
+            "description": "A project id",
+            "format": "template",
+            "title": "Project",
+            "type": "string"
+          },
+          "state": {
+            "description": "A state's name, type or id",
+            "format": "template",
+            "title": "State",
+            "type": "string"
+          },
+          "team": {
+            "description": "Team key (ENG), name or id",
+            "format": "template",
+            "title": "Team",
+            "type": "string"
+          },
+          "title": {
+            "description": "Title (a template)",
+            "format": "template",
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "team",
+          "title"
+        ],
+        "type": "object"
+      },
+      "description": "Open an issue in a team, optionally delegated to roll",
+      "integration": "linear",
+      "kind": "linear.create_issue",
+      "output": [
+        "id",
+        "identifier",
+        "url"
+      ],
+      "title": "Create a Linear issue"
+    },
+    {
+      "config": {
+        "additionalProperties": false,
+        "properties": {
+          "add_labels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "assignee": {
+            "description": "roll, none, or a name, email or id",
+            "format": "template",
+            "title": "Assignee",
+            "type": "string"
+          },
+          "delegate": {
+            "description": "roll (the agent works on it), or none",
+            "format": "template",
+            "title": "Delegate",
+            "type": "string"
+          },
+          "description": {
+            "description": "A new description (markdown)",
+            "format": "template-long",
+            "title": "Description",
+            "type": "string"
+          },
+          "issue": {
+            "description": "Issue id or identifier; default: the event's issue",
+            "format": "template",
+            "title": "Issue",
+            "type": "string"
+          },
+          "labels": {
+            "description": "Replace the labels (names)",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "priority": {
+            "description": "0–4 or none, urgent, high, medium, low",
+            "type": [
+              "integer",
+              "string"
+            ]
+          },
+          "remove_labels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "state": {
+            "description": "A state's name (In Progress), type (started) or id",
+            "format": "template",
+            "title": "State",
+            "type": "string"
+          },
+          "title": {
+            "description": "A new title",
+            "format": "template",
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "description": "Change the issue's state, assignee, delegate, labels, priority, title or description",
+      "integration": "linear",
+      "kind": "linear.update_issue",
+      "output": [
+        "id",
+        "identifier",
+        "url",
+        "state"
+      ],
+      "title": "Update a Linear issue"
+    }
+  ],
+  "triggers": [
+    {
+      "config": {
+        "additionalProperties": false,
+        "properties": {
+          "assignees": {
+            "description": "roll, none, or a name, email or id",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "include_attached": {
+            "description": "Session replies a running automation already takes",
+            "type": "boolean"
+          },
+          "include_roll": {
+            "description": "Also events roll caused itself",
+            "type": "boolean"
+          },
+          "label_added": {
+            "description": "An update added one of these labels",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "labels": {
+            "description": "The issue has one of these labels",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "matches": {
+            "description": "Words in the title, description or comment (case-insensitive)",
+            "type": "string"
+          },
+          "mentions_roll": {
+            "description": "Comments: only those that mention roll",
+            "type": "boolean"
+          },
+          "priorities": {
+            "description": "0–4 or none, urgent, high, medium, low",
+            "items": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "type": "array"
+          },
+          "projects": {
+            "description": "Project names or ids",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "state_changed_to": {
+            "description": "An update moved it into one of these states",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "states": {
+            "description": "The issue's state (name or type: triage, backlog, unstarted, started, completed, canceled)",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "teams": {
+            "description": "Team keys (ENG), names or ids",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "description": "Issues, comments, and roll assigned or mentioned as an agent in the owner's Linear workspace",
+      "events": [
+        {
+          "fields": [
+            "issue.identifier",
+            "issue.title",
+            "issue.team.key",
+            "issue.state.name",
+            "issue.state.type",
+            "issue.labels",
+            "issue.assignee.name",
+            "issue.priority",
+            "issue.project.name",
+            "repo",
+            "thread.thread",
+            "actor.name"
+          ],
+          "kind": "issue.created",
+          "sample": {
+            "actor": {
+              "id": "user-ada",
+              "name": "Ada Lovelace",
+              "type": "user"
+            },
+            "by_roll": false,
+            "issue": {
+              "assignee": {
+                "email": "ada@acme.dev",
+                "id": "user-ada",
+                "name": "Ada Lovelace"
+              },
+              "creator_id": "user-ada",
+              "delegate": null,
+              "description": "Signing in with Okta loops back to the login page.",
+              "id": "9cfb4d1e-1b5c-4c4a-9d55-3f0f3b8a2f10",
+              "identifier": "ENG-12",
+              "labels": [
+                {
+                  "id": "label-bug",
+                  "name": "Bug"
+                }
+              ],
+              "number": 12,
+              "priority": 2,
+              "priority_label": "High",
+              "project": {
+                "id": "project-auth",
+                "name": "Auth"
+              },
+              "state": {
+                "id": "state-todo",
+                "name": "Todo",
+                "type": "unstarted"
+              },
+              "team": {
+                "id": "team-eng",
+                "key": "ENG",
+                "name": "Engineering"
+              },
+              "title": "Login fails with SSO",
+              "url": "https://linear.app/acme/issue/ENG-12"
+            },
+            "repo": "app",
+            "roll_user": "user-roll",
+            "thread": null,
+            "workspace": {
+              "id": "org-acme",
+              "name": "Acme",
+              "url_key": "acme"
+            }
+          },
+          "title": "Issue created"
+        },
+        {
+          "fields": [
+            "issue.identifier",
+            "issue.title",
+            "issue.team.key",
+            "issue.state.name",
+            "issue.state.type",
+            "issue.labels",
+            "issue.assignee.name",
+            "issue.priority",
+            "issue.project.name",
+            "repo",
+            "thread.thread",
+            "changes.fields",
+            "changes.state.to",
+            "changes.labels_added",
+            "changes.assignee.to",
+            "changes.priority.to",
+            "actor.name"
+          ],
+          "kind": "issue.updated",
+          "sample": {
+            "actor": {
+              "id": "user-ada",
+              "name": "Ada Lovelace",
+              "type": "user"
+            },
+            "by_roll": false,
+            "changes": {
+              "fields": [
+                "stateId",
+                "labelIds"
+              ],
+              "labels_added": [
+                "roll"
+              ],
+              "labels_removed": [],
+              "state": {
+                "from": "state-backlog",
+                "to": "Todo",
+                "to_type": "unstarted"
+              }
+            },
+            "issue": {
+              "assignee": {
+                "email": "ada@acme.dev",
+                "id": "user-ada",
+                "name": "Ada Lovelace"
+              },
+              "creator_id": "user-ada",
+              "delegate": null,
+              "description": "Signing in with Okta loops back to the login page.",
+              "id": "9cfb4d1e-1b5c-4c4a-9d55-3f0f3b8a2f10",
+              "identifier": "ENG-12",
+              "labels": [
+                {
+                  "id": "label-bug",
+                  "name": "Bug"
+                }
+              ],
+              "number": 12,
+              "priority": 2,
+              "priority_label": "High",
+              "project": {
+                "id": "project-auth",
+                "name": "Auth"
+              },
+              "state": {
+                "id": "state-todo",
+                "name": "Todo",
+                "type": "unstarted"
+              },
+              "team": {
+                "id": "team-eng",
+                "key": "ENG",
+                "name": "Engineering"
+              },
+              "title": "Login fails with SSO",
+              "url": "https://linear.app/acme/issue/ENG-12"
+            },
+            "repo": "app",
+            "roll_user": "user-roll",
+            "thread": null,
+            "workspace": {
+              "id": "org-acme",
+              "name": "Acme",
+              "url_key": "acme"
+            }
+          },
+          "title": "Issue updated"
+        },
+        {
+          "fields": [
+            "issue.identifier",
+            "issue.title",
+            "issue.team.key",
+            "issue.state.name",
+            "issue.state.type",
+            "issue.labels",
+            "issue.assignee.name",
+            "issue.priority",
+            "issue.project.name",
+            "repo",
+            "thread.thread"
+          ],
+          "kind": "issue.removed",
+          "sample": {
+            "actor": {
+              "id": "user-ada",
+              "name": "Ada Lovelace",
+              "type": "user"
+            },
+            "by_roll": false,
+            "issue": {
+              "assignee": {
+                "email": "ada@acme.dev",
+                "id": "user-ada",
+                "name": "Ada Lovelace"
+              },
+              "creator_id": "user-ada",
+              "delegate": null,
+              "description": "Signing in with Okta loops back to the login page.",
+              "id": "9cfb4d1e-1b5c-4c4a-9d55-3f0f3b8a2f10",
+              "identifier": "ENG-12",
+              "labels": [
+                {
+                  "id": "label-bug",
+                  "name": "Bug"
+                }
+              ],
+              "number": 12,
+              "priority": 2,
+              "priority_label": "High",
+              "project": {
+                "id": "project-auth",
+                "name": "Auth"
+              },
+              "state": {
+                "id": "state-todo",
+                "name": "Todo",
+                "type": "unstarted"
+              },
+              "team": {
+                "id": "team-eng",
+                "key": "ENG",
+                "name": "Engineering"
+              },
+              "title": "Login fails with SSO",
+              "url": "https://linear.app/acme/issue/ENG-12"
+            },
+            "repo": "app",
+            "roll_user": "user-roll",
+            "thread": null,
+            "workspace": {
+              "id": "org-acme",
+              "name": "Acme",
+              "url_key": "acme"
+            }
+          },
+          "title": "Issue removed"
+        },
+        {
+          "fields": [
+            "issue.identifier",
+            "issue.title",
+            "issue.team.key",
+            "issue.state.name",
+            "issue.state.type",
+            "issue.labels",
+            "issue.assignee.name",
+            "issue.priority",
+            "issue.project.name",
+            "repo",
+            "thread.thread",
+            "comment.body",
+            "comment.user.name",
+            "mentions_roll"
+          ],
+          "kind": "comment.created",
+          "sample": {
+            "actor": {
+              "id": "user-ada",
+              "name": "Ada Lovelace",
+              "type": "user"
+            },
+            "by_roll": false,
+            "comment": {
+              "body": "@roll can you take this?",
+              "id": "comment-1",
+              "parent_id": null,
+              "url": "https://linear.app/acme/issue/ENG-12#comment-1",
+              "user": {
+                "id": "user-ada",
+                "name": "Ada Lovelace"
+              }
+            },
+            "in_session": false,
+            "issue": {
+              "assignee": {
+                "email": "ada@acme.dev",
+                "id": "user-ada",
+                "name": "Ada Lovelace"
+              },
+              "creator_id": "user-ada",
+              "delegate": null,
+              "description": "Signing in with Okta loops back to the login page.",
+              "id": "9cfb4d1e-1b5c-4c4a-9d55-3f0f3b8a2f10",
+              "identifier": "ENG-12",
+              "labels": [
+                {
+                  "id": "label-bug",
+                  "name": "Bug"
+                }
+              ],
+              "number": 12,
+              "priority": 2,
+              "priority_label": "High",
+              "project": {
+                "id": "project-auth",
+                "name": "Auth"
+              },
+              "state": {
+                "id": "state-todo",
+                "name": "Todo",
+                "type": "unstarted"
+              },
+              "team": {
+                "id": "team-eng",
+                "key": "ENG",
+                "name": "Engineering"
+              },
+              "title": "Login fails with SSO",
+              "url": "https://linear.app/acme/issue/ENG-12"
+            },
+            "mentions_roll": true,
+            "repo": "app",
+            "roll_user": "user-roll",
+            "thread": null,
+            "workspace": {
+              "id": "org-acme",
+              "name": "Acme",
+              "url_key": "acme"
+            }
+          },
+          "title": "Comment created"
+        },
+        {
+          "fields": [
+            "issue.identifier",
+            "issue.title",
+            "issue.team.key",
+            "issue.state.name",
+            "issue.state.type",
+            "issue.labels",
+            "issue.assignee.name",
+            "issue.priority",
+            "issue.project.name",
+            "repo",
+            "thread.thread",
+            "comment.body",
+            "mentions_roll"
+          ],
+          "kind": "comment.updated",
+          "sample": {
+            "actor": {
+              "id": "user-ada",
+              "name": "Ada Lovelace",
+              "type": "user"
+            },
+            "by_roll": false,
+            "comment": {
+              "body": "@roll can you take this?",
+              "id": "comment-1",
+              "parent_id": null,
+              "url": "https://linear.app/acme/issue/ENG-12#comment-1",
+              "user": {
+                "id": "user-ada",
+                "name": "Ada Lovelace"
+              }
+            },
+            "in_session": false,
+            "issue": {
+              "assignee": {
+                "email": "ada@acme.dev",
+                "id": "user-ada",
+                "name": "Ada Lovelace"
+              },
+              "creator_id": "user-ada",
+              "delegate": null,
+              "description": "Signing in with Okta loops back to the login page.",
+              "id": "9cfb4d1e-1b5c-4c4a-9d55-3f0f3b8a2f10",
+              "identifier": "ENG-12",
+              "labels": [
+                {
+                  "id": "label-bug",
+                  "name": "Bug"
+                }
+              ],
+              "number": 12,
+              "priority": 2,
+              "priority_label": "High",
+              "project": {
+                "id": "project-auth",
+                "name": "Auth"
+              },
+              "state": {
+                "id": "state-todo",
+                "name": "Todo",
+                "type": "unstarted"
+              },
+              "team": {
+                "id": "team-eng",
+                "key": "ENG",
+                "name": "Engineering"
+              },
+              "title": "Login fails with SSO",
+              "url": "https://linear.app/acme/issue/ENG-12"
+            },
+            "mentions_roll": true,
+            "repo": "app",
+            "roll_user": "user-roll",
+            "thread": null,
+            "workspace": {
+              "id": "org-acme",
+              "name": "Acme",
+              "url_key": "acme"
+            }
+          },
+          "title": "Comment edited"
+        },
+        {
+          "fields": [
+            "issue.identifier",
+            "issue.title",
+            "issue.team.key",
+            "issue.state.name",
+            "issue.state.type",
+            "issue.labels",
+            "issue.assignee.name",
+            "issue.priority",
+            "issue.project.name",
+            "repo",
+            "thread.thread",
+            "session.id",
+            "prompt",
+            "prompt_context",
+            "user.name"
+          ],
+          "kind": "agent_session.created",
+          "sample": {
+            "actor": {
+              "id": "user-ada",
+              "name": "Ada Lovelace",
+              "type": "user"
+            },
+            "attached": false,
+            "by_roll": false,
+            "comment": {
+              "body": "@roll please fix this",
+              "id": "comment-1"
+            },
+            "issue": {
+              "assignee": {
+                "email": "ada@acme.dev",
+                "id": "user-ada",
+                "name": "Ada Lovelace"
+              },
+              "creator_id": "user-ada",
+              "delegate": null,
+              "description": "Signing in with Okta loops back to the login page.",
+              "id": "9cfb4d1e-1b5c-4c4a-9d55-3f0f3b8a2f10",
+              "identifier": "ENG-12",
+              "labels": [
+                {
+                  "id": "label-bug",
+                  "name": "Bug"
+                }
+              ],
+              "number": 12,
+              "priority": 2,
+              "priority_label": "High",
+              "project": {
+                "id": "project-auth",
+                "name": "Auth"
+              },
+              "state": {
+                "id": "state-todo",
+                "name": "Todo",
+                "type": "unstarted"
+              },
+              "team": {
+                "id": "team-eng",
+                "key": "ENG",
+                "name": "Engineering"
+              },
+              "title": "Login fails with SSO",
+              "url": "https://linear.app/acme/issue/ENG-12"
+            },
+            "prompt": "@roll please fix this",
+            "prompt_context": "<issue identifier=\"ENG-12\"><title>Login fails with SSO</title></issue>",
+            "repo": "app",
+            "roll_user": "user-roll",
+            "session": {
+              "id": "session-1",
+              "status": "pending",
+              "url": "https://linear.app/acme/agent/session-1"
+            },
+            "thread": null,
+            "user": {
+              "id": "user-ada",
+              "name": "Ada Lovelace"
+            },
+            "workspace": {
+              "id": "org-acme",
+              "name": "Acme",
+              "url_key": "acme"
+            }
+          },
+          "title": "roll assigned or mentioned"
+        },
+        {
+          "fields": [
+            "issue.identifier",
+            "issue.title",
+            "issue.team.key",
+            "issue.state.name",
+            "issue.state.type",
+            "issue.labels",
+            "issue.assignee.name",
+            "issue.priority",
+            "issue.project.name",
+            "repo",
+            "thread.thread",
+            "session.id",
+            "prompt",
+            "signal",
+            "user.name",
+            "attached"
+          ],
+          "kind": "agent_session.prompted",
+          "sample": {
+            "actor": {
+              "id": "user-ada",
+              "name": "Ada Lovelace",
+              "type": "user"
+            },
+            "attached": false,
+            "by_roll": false,
+            "comment": {
+              "body": "@roll please fix this",
+              "id": "comment-1"
+            },
+            "issue": {
+              "assignee": {
+                "email": "ada@acme.dev",
+                "id": "user-ada",
+                "name": "Ada Lovelace"
+              },
+              "creator_id": "user-ada",
+              "delegate": null,
+              "description": "Signing in with Okta loops back to the login page.",
+              "id": "9cfb4d1e-1b5c-4c4a-9d55-3f0f3b8a2f10",
+              "identifier": "ENG-12",
+              "labels": [
+                {
+                  "id": "label-bug",
+                  "name": "Bug"
+                }
+              ],
+              "number": 12,
+              "priority": 2,
+              "priority_label": "High",
+              "project": {
+                "id": "project-auth",
+                "name": "Auth"
+              },
+              "state": {
+                "id": "state-todo",
+                "name": "Todo",
+                "type": "unstarted"
+              },
+              "team": {
+                "id": "team-eng",
+                "key": "ENG",
+                "name": "Engineering"
+              },
+              "title": "Login fails with SSO",
+              "url": "https://linear.app/acme/issue/ENG-12"
+            },
+            "prompt": "Use the new SSO client",
+            "prompt_context": "<issue identifier=\"ENG-12\"><title>Login fails with SSO</title></issue>",
+            "repo": "app",
+            "roll_user": "user-roll",
+            "session": {
+              "id": "session-1",
+              "status": "pending",
+              "url": "https://linear.app/acme/agent/session-1"
+            },
+            "signal": null,
+            "thread": null,
+            "user": {
+              "id": "user-ada",
+              "name": "Ada Lovelace"
+            },
+            "workspace": {
+              "id": "org-acme",
+              "name": "Acme",
+              "url_key": "acme"
+            }
+          },
+          "title": "A reply to roll in its session"
+        }
+      ],
+      "source": "linear",
+      "title": "Linear"
+    }
+  ]
+}

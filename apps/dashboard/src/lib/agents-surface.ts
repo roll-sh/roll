@@ -97,7 +97,9 @@ export function useAgentsSurface(): AgentsSurface {
  * any dashboard page.
  */
 export function viewFromHash(hash: string): AgentsView | null {
-  const m = /^#agents(?:\/(.+))?$/.exec(hash);
+  // A query after the view (`#agents/settings/owner?linear=connected`: a redirect that appended
+  // one to a path with a hash) is the page's, not the view's.
+  const m = /^#agents(?:\/([^?&]+))?(?:[?&].*)?$/.exec(hash);
   if (!m) return null;
   const rest = m[1] ? decodeURIComponent(m[1]) : "";
   if (!rest) return { kind: "canvas" };

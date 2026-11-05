@@ -215,3 +215,101 @@ Slack, Discord and GitHub are integrations of this kind: docs/code/chatops.md
   and `lib/automations-demo.ts` (the demo's automations and runs, in memory).
 
 Tests: docs/code/test-coverage.md, "Automations".
+
+
+## Linear
+
+Code: `crates/code-control/src/agents/linear/` (connection and tokens `client.rs`, `store.rs`;
+webhooks `webhook.rs`; the trigger `trigger.rs`; steps `steps.rs`; the agent-session bridge
+`session.rs`; the built-in automation `templates.rs`; routes `api.rs`, docs/code/http-api.md
+"Linear"). Dashboard: the Linear card in the owner settings (`components/agents/linear-settings.tsx`,
+`lib/linear-api.ts`) and the template gallery (`lib/linear-templates.ts`, listed in `TEMPLATES` in `lib/automation-templates.ts`). Tests: `tests/linear.rs`
+against a mock of Linear's GraphQL and OAuth endpoints (docs/code/test-coverage.md, "Linear").
+
+### What Linear offers (researched 2026-11-04)
+
+- **GraphQL** at `https://api.linear.app/graphql` ([docs](https://linear.app/developers/graphql)). A
+  personal API key goes in `Authorization` as is; an OAuth token as `Bearer`. Errors come in `errors`
+  with HTTP 200 too; a rate limit is HTTP 429 with `Retry-After` and `extensions.code: RATELIMITED`
+  ([rate limiting](https://linear.app/developers/rate-limiting)). Creates take a client `id`, so
+  roll makes them idempotent with an id derived from the step's idempotency key.
+- **OAuth 2.0** ([docs](https://linear.app/developers/oauth-2-0-authentication),
+  [actor](https://linear.app/developers/oauth-actor-authorization)): authorize at
+  `https://linear.app/oauth/authorize` (comma-separated `scope`, `state`, PKCE, `prompt=consent`,
+  `actor=app` so the app acts as its own user), tokens at `POST https://api.linear.app/oauth/token`
+  (form-encoded only). Access tokens last 24 hours and come with a refresh token (every app since
+  2026-04-01); a refresh returns both again, and the same refresh may be replayed for 30 minutes.
+  Revoke at `POST /oauth/revoke`.
+- **Webhooks** ([docs](https://linear.app/developers/webhooks)): `Linear-Signature` is hex
+  HMAC-SHA256 of the raw body under the signing secret; the body's `webhookTimestamp` (ms, inside
+  what's signed) should be within a minute. Headers `Linear-Delivery`, `Linear-Event`. A delivery
+  must be answered within 5 s, and is retried after 1 min, 1 h and 6 h. An OAuth app's webhook is
+  configured once on the app (one signing secret) and created in every workspace that installs it;
+  `organizationId` says which. `webhookCreate` (admins) makes one with an API key.
+- **Agents** ([agents](https://linear.app/developers/agents),
+  [interaction](https://linear.app/developers/agent-interaction),
+  [signals](https://linear.app/developers/agent-signals),
+  [best practices](https://linear.app/developers/agent-best-practices)): an `actor=app` install with
+  `app:assignable` / `app:mentionable` makes the app a user that can be delegated issues and
+  mentioned. Each delegation or mention opens an **agent session**: an `AgentSessionEvent` webhook,
+  `created` (with `agentSession` (its issue and comment) and `promptContext`), then `prompted` for each
+  reply (`agentActivity`, its `signal`, e.g. `stop`). The agent answers with **activities**
+  (`agentActivityCreate`): `thought`, `action` (`action`, `parameter`, `result`), `elicitation`,
+  `response`, `error`; thoughts and actions may be `ephemeral`; an elicitation may carry the `select`
+  signal with options. An activity is due within 10 s of `created` or the session shows as
+  unresponsive. `agentSessionUpdate` sets the session's `plan` and external links (the thread, the
+  PR). `OAuthApp revoked` ends an install.
+
+### Design
+
+- **Connecting** an owner's workspace: roll's OAuth app (`ROLL_LINEAR_CLIENT_ID`,
+  `ROLL_LINEAR_CLIENT_SECRET`, and `ROLL_LINEAR_WEBHOOK_SECRET`, the app's signing secret; the app's
+  webhook URL is `{api}/v1/code/linear/webhook`, its redirect `{api}/v1/code/linear/oauth/callback`,
+  or `ROLL_LINEAR_REDIRECT_URI`), installed with `actor=app` and the agent scopes; or a personal API
+  key, for which roll makes the workspace's webhook (`/v1/code/linear/webhook/{hook}`, its own
+  secret), or takes a hand-made one's secret. Tokens, keys and secrets are sealed with
+  `ROLL_SECRET_KEY` (bound to the owner), never returned or logged. One owner per workspace.
+- **Tokens** are refreshed when they expire within five minutes, or once when Linear refuses them;
+  refreshes take turns per owner on a node and are stored by compare-and-swap on `token_rev`, so two
+  nodes refreshing at once keep a working token. A refused refresh token marks the connection
+  `reauth` (the card says connect again).
+- **Webhooks** are checked (signature, the one-minute window), then one write records the events in
+  the inbox with Linear's ids as keys (`linear:issue.created:<issue>`,
+  `linear:issue.updated:<issue>:<updatedAt>`, `linear:comment.created:<comment>`,
+  `linear:agent_session.created:<session>`, `linear:agent_session.prompted:<activity>`), a session's
+  bookkeeping and the delivery's log line. Within the window a replay is the same event, so nothing
+  runs twice; past it, it's refused. Nothing calls out before the 200. A session no enabled automation
+  listens for gets an `error` activity at once (after the commit) saying so.
+- **Events** carry the issue in one shape (`issue.{identifier, title, team, state, labels, assignee,
+  delegate, priority, project}`), `changes` for updates (from `updatedFrom`: the state moved to,
+  labels added and removed, the assignee, the priority), `repo` (the owner's team → repo setting),
+  `thread` (the roll thread already working on the issue), `by_roll`, and for sessions `session`,
+  `prompt`, `prompt_context`, `user`, `signal` and `attached` (a run showing the session took the
+  reply).
+- **The trigger** (`integration` with source `linear`) narrows events by `teams`, `projects`,
+  `labels`, `label_added`, `states`, `state_changed_to`, `assignees` (`roll`, `none`), `priorities`,
+  `matches` and `mentions_roll`; events roll caused and replies a run already took are left out
+  unless `include_roll` / `include_attached`. Sessions need an OAuth (agent) connection.
+- **Steps**: `linear.comment`, `linear.update_issue` (state by name or type, assignee, delegate,
+  labels, priority, title, description), `linear.attach` (a link on the issue and the session),
+  `linear.create_issue`, `linear.activity`, and `linear.agent_session`.
+- **`linear.agent_session`** shows one thread in one session. It takes the session for its run
+  (`linear_sessions.bridge_run`; a run that still holds it is woken instead, and gets the reply),
+  follows the thread (`follow_thread`), links the thread on the session, then on each wake: passes
+  replies on in order (`stop` interrupts; a reply to an elicitation answers its request with
+  `request.respond`: approve, decline (any other words decline and tell the agent why), an option,
+  or text; anything else steers the agent or starts its next run), and shows the thread's mirrored
+  records past its cursor: tools as actions (ephemeral while running), reasoning and interim
+  messages as thoughts, todos as the session's plan, approvals and questions as elicitations
+  (`select` options), the last message (and the change's link) as the response, or an error. It
+  ends when the thread is idle after the run it waited for, letting the session go with a
+  compare-and-swap that fails while a reply hasn't been passed on. A reply after that is a new
+  event (`attached: false`) whose run resumes the same thread.
+- **The Linear agent** (`templates.rs`, also in the dashboard's gallery) is installed once when roll
+  is connected as an agent (not again after the owner turns it off or deletes it): on
+  `agent_session.created` and unattended `agent_session.prompted`, a thought at once, the issue to
+  `started`, `agent.start` in a worktree of the team's repo on any online machine (skipped when the
+  issue's thread goes on), `linear.agent_session`, `agent.publish`, and `linear.attach` of the
+  change. The owner edits its target (a machine, a sandbox), provider and prompt like any automation.
+  Follow-up comments outside the session steer the thread with the "Steer from Linear comments"
+  template (`agent.message` to `event.data.thread`).

@@ -10,6 +10,7 @@
 
 pub mod api;
 pub mod automations;
+pub mod linear;
 pub mod docs;
 mod code;
 mod link;

@@ -54,6 +54,7 @@ pub fn routes() -> Router<Arc<Code>> {
         .route("/v1/code/agents/{owner}/shares/{id}", delete(share::revoke))
         .merge(super::sandbox::api::routes())
         .merge(super::automations::api::routes())
+        .merge(super::linear::api::routes())
 }
 
 // ── who may do what ──

@@ -40,6 +40,7 @@ import {
   type AutomationRun,
   type Notice,
 } from "./automations-api";
+import { createLinearApi } from "./linear-api";
 import { ROLL_API } from "./roll-api";
 
 /** Milliseconds since the Unix epoch. */
@@ -1629,6 +1630,8 @@ export function createAgentsApi(
     automations: createAutomationsApi(call),
     /** `/v1/code/agents/{owner}/integrations…` (`integrations-api.ts`): Slack, Discord and GitHub. */
     integrations: createIntegrationsApi(call),
+    /** `/v1/code/agents/{owner}/linear…` (`linear-api.ts`). */
+    linear: createLinearApi(call),
     /** The fetch this client uses (the event stream follows it too). */
     fetch: doFetch,
     state: async (owner: string, threads: readonly string[] = []) =>

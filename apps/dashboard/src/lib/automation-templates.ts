@@ -8,6 +8,7 @@
 
 import type { AutomationSpec, Step, Trigger } from "./automations-api";
 import { localZone } from "./automations-ui";
+import { linearTemplates } from "./linear-templates";
 
 /** What a template can point at. */
 export interface TemplateContext {
@@ -358,4 +359,17 @@ export const TEMPLATES: AutomationTemplate[] = [
       ]),
   },
   ...CHATOPS_TEMPLATES,
+  // Linear's (`linear-templates.ts`): they work in the team's repo (the Linear card's settings) on
+  // any machine that has it, so they don't need the owner's machines picked.
+  ...linearTemplates.map(
+    (t): AutomationTemplate => ({
+      id: t.id,
+      title: t.title,
+      description: t.description,
+      trigger: "linear",
+      steps: t.spec.steps.map((s) => s.kind),
+      integration: "linear",
+      build: () => structuredClone(t.spec),
+    }),
+  ),
 ];

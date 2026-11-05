@@ -423,6 +423,8 @@ pub struct Code {
     pub automations: agents::automations::Automations,
     /// Chat ops' platforms (Slack, Discord), once [`chatops::enable`] ran.
     pub(crate) chat: std::sync::OnceLock<Arc<chatops::Chat>>,
+    /// Linear: roll's app config and the integration's state here.
+    pub linear: agents::linear::Linear,
 }
 
 /// The databases a [`Code`] runs on: code-store's, code-control's, and the cluster's tables
@@ -527,6 +529,7 @@ impl Code {
             sandboxes,
             automations: agents::automations::Automations::default(),
             chat: std::sync::OnceLock::new(),
+            linear: agents::linear::Linear::default(),
         });
         chatops::ensure_schema(&code);
         code.clean_worktrees();

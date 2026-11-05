@@ -46,6 +46,7 @@ import { DemoAutomations } from "./automations-demo";
 import { memoryCanvas, memorySettings, type AgentsServices, type RepoChoice } from "./agents-services";
 import { offeredProviders, settingsError } from "./machine-settings";
 import { ApiError } from "./code-api";
+import { memoryLinear, type LinearStatus, type LinearTeam } from "./linear-api";
 import type { Sandbox, SandboxSize } from "./sandboxes-api";
 import { isMemberId, MAX_MEMBERS, type ChatInstall, type ChatPlatform, type Integrations, type IntegrationsApi } from "./integrations-api";
 
@@ -116,6 +117,41 @@ const DEMO_REPOS: RepoChoice[] = [
   { owner: "acme", name: "web", full_name: "acme/web", description: "The marketing site", visibility: "private", updated_at: 1_761_900_000 },
   { owner: "acme", name: "infra", full_name: "acme/infra", description: null, visibility: "private", updated_at: 1_761_800_000 },
   { owner: "acme", name: "docs", full_name: "acme/docs", description: "Guides and the API reference", visibility: "public", updated_at: 1_761_700_000 },
+];
+
+/** The demo owner's Linear workspace: roll installed as its agent, deliveries coming in. */
+function demoLinear(at = Date.now()): LinearStatus {
+  const min = 60_000;
+  return {
+    connected: true,
+    app: { oauth: true, webhook: true, webhook_url: "https://roll.example/v1/code/linear/webhook", redirect_uri: "https://roll.example/v1/code/linear/oauth/callback", secret_key: true },
+    connection: {
+      kind: "oauth",
+      workspace: { id: "org_acme", name: "Acme", url_key: "acme", url: "https://linear.app/acme" },
+      user: { id: "usr_roll", name: "roll" },
+      agent: true,
+      scopes: ["read", "write", "issues:create", "comments:create", "app:assignable", "app:mentionable"],
+      status: "ok",
+      error: null,
+      expires_at: null,
+      created_at: at - 9 * 24 * 60 * min,
+      created_by: "demo",
+      settings: { repos: { ENG: "roll", WEB: "web" }, default_repo: "roll" },
+      webhook: { mode: "app", url: "https://roll.example/v1/code/linear/webhook", status: "ok", secret_hint: null, last_delivery_at: at - 2 * min, rejected_at: null, rejected_why: null },
+    },
+    deliveries: [
+      { id: "ldl_demo4", at: at - 2 * min, delivery: "dlv_4", type: "AgentSessionEvent", action: "created", summary: "ENG-142 Speed up the lander's conflict check: Ada assigned roll", result: "recorded", events: 1 },
+      { id: "ldl_demo3", at: at - 14 * min, delivery: "dlv_3", type: "Comment", action: "create", summary: "ENG-139: Grace commented", result: "recorded", events: 1 },
+      { id: "ldl_demo2", at: at - 15 * min, delivery: "dlv_2", type: "Comment", action: "create", summary: "ENG-139: Grace commented", result: "duplicate", events: 0 },
+      { id: "ldl_demo1", at: at - 52 * min, delivery: "dlv_1", type: "Issue", action: "update", summary: "WEB-31 Pricing page copy: moved to In Progress", result: "ignored", events: 0 },
+    ],
+  };
+}
+
+const DEMO_TEAMS: LinearTeam[] = [
+  { id: "team_eng", key: "ENG", name: "Engineering" },
+  { id: "team_web", key: "WEB", name: "Web" },
+  { id: "team_ops", key: "OPS", name: "Operations" },
 ];
 
 /**
@@ -575,6 +611,8 @@ export class DemoOwner implements AgentsTransport {
   private settings = memorySettings();
   /** The demo owner's Slack, Discord and GitHub, the same. */
   private integrations = demoIntegrations();
+  /** The demo owner's Linear workspace (connected). */
+  private linear = memoryLinear(demoLinear(), DEMO_TEAMS);
   /** Every provider each demo machine has, on or off (its info lists the ones on). */
   private allProviders = new Map<MachineId, ProviderInfo[]>();
   /** The demo's automations and their runs (`automations-demo.ts`): runs start threads here. */
@@ -946,6 +984,7 @@ export class DemoOwner implements AgentsTransport {
       canvas: owner.canvas,
       settings: owner.settings,
       integrations: owner.integrations,
+      linear: owner.linear,
     };
   }
 

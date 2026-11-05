@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Automation, AutomationRun, AutomationSpec, Catalog } from "./automations-api";
 import { TEMPLATES } from "./automation-templates";
 import { withChatops } from "./chatops-catalog";
+import { LINEAR_CATALOG } from "./linear-templates";
 import {
   blankSpec,
   cronText,
@@ -132,8 +133,9 @@ describe("automations: the catalog and samples", () => {
 
   it("builds every template into a spec that validates", () => {
     const ctx = { machines: [{ id: "mch_1", name: "mbp", online: true, sandbox: false }], projects: [{ id: "prj_1", name: "app", machine: "mch_1", repo: "acme/app" }] };
-    // Integrations' templates against the catalog with their entries (as a server that has them).
-    const withIntegrations = withChatops(catalog);
+    // Integrations' templates against the catalog with their entries (as a server that has them;
+    // Linear's as its registry writes them).
+    const withIntegrations = withChatops(withBuiltIns(LINEAR_CATALOG));
     for (const t of TEMPLATES) {
       const spec = t.build(ctx);
       expect(validate(spec, t.integration ? withIntegrations : catalog), t.id).toEqual({});

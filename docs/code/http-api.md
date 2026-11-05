@@ -839,6 +839,54 @@ POST   /v1/code/agents/{owner}/automations/{id}/webhook  (no token: the signatur
        automation or not a webhook trigger, 409 disabled, 413 too big.
 ```
 
+### Linear
+
+The owner's Linear workspace (docs/code/automations.md, "Linear"): connected by installing roll's
+OAuth app as an agent (`actor=app`; needs `ROLL_LINEAR_CLIENT_ID`/`ROLL_LINEAR_CLIENT_SECRET` on the
+server) or with a personal API key, and `ROLL_SECRET_KEY` either way (tokens are sealed, never
+returned). The owner routes are Code::manages (401 anonymous, 403 agent tokens and other owners, 404 no
+such owner). Times are milliseconds.
+
+```
+GET    /v1/code/agents/{owner}/linear → LinearStatus
+       {connected, app: {oauth, webhook, webhook_url, redirect_uri, secret_key},
+        connection: null | {kind: "oauth"|"api_key", workspace: {id, name, url_key, url}, user: {id, name},
+          agent /* roll can be assigned and mentioned */, scopes, status: "ok"|"reauth", error, expires_at,
+          created_at, created_by, settings: {repos: {TEAM: repo}, default_repo?},
+          webhook: {mode: "app"|"workspace"|"manual", url, status: "ok"|"waiting"|"failing"|"needs_secret",
+                    secret_hint, last_delivery_at, rejected_at, rejected_why}},
+        deliveries: [{id, at, delivery, type, action, summary, result: "recorded"|"duplicate"|"ignored", events}]
+          /* newest first, 20 (50 are kept) */}
+DELETE /v1/code/agents/{owner}/linear → 204 /* revokes roll's OAuth token, or removes the webhook roll made
+       for an API key (best effort), and forgets the connection; 404 not connected */
+POST   /v1/code/agents/{owner}/linear/oauth {return_to?} → {url}
+       Linear's authorize URL (scopes read,write,issues:create,comments:create,app:assignable,app:mentionable,
+       actor=app, PKCE S256, a state good for 15 minutes and once). `return_to`: a dashboard path (default
+       /dashboard). 400 not a path; 422 no OAuth app on the server, or no ROLL_SECRET_KEY.
+GET    /v1/code/linear/oauth/callback?code&state[&error]  (no token: the state is the credential)
+       → 303 to {web_url}{return_to}?linear=connected, or ?linear=error&reason=… (a used or expired state,
+       Linear refused, the workspace is another owner's). Installs the "Linear agent" automation once.
+PUT    /v1/code/agents/{owner}/linear/key {key} → LinearStatus
+       Checks the key with Linear, then makes a webhook for Issues and Comments with a fresh signing secret
+       (webhook.mode "workspace"); a key that may not (not an admin's) leaves mode "manual": make one in
+       Linear to webhook.url and send its signing secret to …/webhook/secret. 400 a malformed key or one
+       Linear refuses; 409 the workspace is another owner's; 422 no ROLL_SECRET_KEY.
+PUT    /v1/code/agents/{owner}/linear/settings {repos?: {TEAM: "repo" | "owner/repo"}, default_repo?} → LinearStatus
+       Which roll code repo a team's issues are in (events carry it as event.data.repo); replaces the
+       settings whole (what's left out is cleared). 400 bad names; 404 not connected.
+PUT    /v1/code/agents/{owner}/linear/webhook/secret {secret} → LinearStatus
+       A hand-made webhook's signing secret (sealed; only its last four characters show). 400 malformed;
+       404 not connected; 409 an OAuth connection (the app's secret is the server's).
+GET    /v1/code/agents/{owner}/linear/teams → {teams: [{id, key, name}]} /* from Linear; 404 not connected,
+       422 the connection needs connecting again, 503 Linear is unreachable or rate limiting */
+POST   /v1/code/linear/webhook          (no token: the signature is the credential) roll's app's deliveries
+POST   /v1/code/linear/webhook/{hook}   a connection's own webhook (API keys)
+       → 200 {recorded, duplicates, ignored} — `Linear-Signature` is hex HMAC-SHA256 of the body under the
+       signing secret; the body's webhookTimestamp must be within 60 s. 401 a bad or old signature (noted
+       on the connection: webhook.status "failing"); 404 no such hook or no app webhook secret on the
+       server; 400 not JSON or over 1 MiB. A workspace no owner has is 200 with `ignored`.
+```
+
 ## Chat ops
 
 Slack, Discord and GitHub for the agents (docs/code/chatops.md). The owner's integrations are under

@@ -26,6 +26,7 @@ import {
 import { ApiError, codeApi, type Repo } from "./code-api";
 import type { AutomationsApi } from "./automations-api";
 import type { IntegrationsApi } from "./integrations-api";
+import type { LinearApi } from "./linear-api";
 import { sandboxesApi, type SandboxesApi } from "./sandboxes-api";
 
 /** A repo to clone onto a machine (only what the picker shows). */
@@ -66,6 +67,8 @@ export interface AgentsServices {
   automations?: AutomationsApi;
   /** The owner's Slack, Discord and GitHub connections (chat ops; `integrations-api.ts`). */
   integrations: IntegrationsApi;
+  /** The owner's Linear workspace (`linear-api.ts`). */
+  linear: LinearApi;
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -154,6 +157,7 @@ export function httpServices(
     settings: httpSettings(api),
     automations: api.automations,
     integrations: api.integrations,
+    linear: api.linear,
   };
 }
 

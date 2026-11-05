@@ -15,7 +15,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PATHS=(crates/agent-proto crates/agent-host crates/code-control/src/agents crates/code-control/tests/agents.rs crates/code-control/tests/agents_code.rs crates/code-control/tests/automations.rs
+PATHS=(crates/agent-proto crates/agent-host crates/code-control/src/agents crates/code-control/tests/agents.rs crates/code-control/tests/agents_code.rs crates/code-control/tests/automations.rs crates/code-control/tests/linear.rs
        crates/code-control/tests/common crates/code-control/tests/mcp.rs crates/code-control/tests/routes.rs
        crates/roll-cli/src/agent.rs crates/roll-cli/tests/agent.rs crates/roll-cli/Cargo.toml crates/rolld/src
        apps/dashboard/src apps/dashboard/public/install.sh apps/desktop/src apps/desktop/test apps/dashboard/package.json apps/dashboard/next.config.ts
@@ -50,7 +50,7 @@ cargo test -p agent-proto
 cargo test -p agent-host
 # The relay: its own tests, the agents rows of the auth matrix, the MCP agent tools, the coverage map.
 cargo test -p code-control --lib -- agents cluster::
-cargo test -p code-control --test agents --test agents_code --test automations --test coverage_map
+cargo test -p code-control --test agents --test agents_code --test automations --test linear --test coverage_map
 cargo test -p code-control --test routes agents
 cargo test -p code-control --test mcp agent
 cargo test -p roll-cli --test agent

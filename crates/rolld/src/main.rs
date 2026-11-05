@@ -677,6 +677,13 @@ async fn start_code(
         info!(backend = b, "roll code: sandboxes on");
     }
     code.start_sandboxes();
+    // Linear: roll's OAuth app (ROLL_LINEAR_CLIENT_ID, ROLL_LINEAR_CLIENT_SECRET,
+    // ROLL_LINEAR_WEBHOOK_SECRET; docs/code/automations.md "Linear"). API keys work without it.
+    let linear = code_control::agents::linear::LinearConfig::from_env();
+    if linear.oauth().is_some() {
+        info!(webhook = linear.webhook_secret.is_some(), "roll code: Linear app configured");
+    }
+    code.configure_linear(linear);
     code.start_automations();
     match &code.config.review.hosted {
         Some(h) => info!(provider = %h.provider, "roll code: hosted reviewer configured"),

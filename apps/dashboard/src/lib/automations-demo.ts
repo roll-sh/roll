@@ -24,6 +24,7 @@ import {
   type TestResult,
 } from "./automations-api";
 import { ApiError } from "./code-api";
+import { LINEAR_CATALOG } from "./linear-templates";
 import { BUILT_IN_STEPS, BUILT_IN_TRIGGERS, ev, triggerSource, withBuiltIns } from "./automations-ui";
 
 /** What the demo owner lends its automations. */
@@ -61,34 +62,12 @@ const agentStart = (over: Record<string, unknown>) => ({
   ...over,
 });
 
-/** The demo catalog: the built-ins, plus integrations (the demo has Slack and GitHub connected, as its
- * integration cards say; Linear and Discord aren't). */
+/** The demo catalog: the built-ins, plus integrations (the demo has Linear, Slack and GitHub
+ * connected, as its integration cards say; Discord isn't). Linear's entries are the server's
+ * (`linear-catalog.json`). */
 const CATALOG: Catalog = withChatops(withBuiltIns({
-  triggers: [
-    ...BUILT_IN_TRIGGERS,
-    {
-      source: "linear",
-      title: "Linear",
-      description: "Issues assigned to roll, comments that mention it, status changes.",
-      events: [
-        ev("issue.assigned", "Issue assigned to roll", ["issue.identifier", "issue.title", "issue.description", "issue.url", "issue.labels", "issue.team"]),
-        ev("comment.mention", "Mentioned in a comment", ["issue.identifier", "issue.title", "comment.body", "comment.author"]),
-      ],
-      config: { type: "object", properties: { team: { type: "string", title: "Team", description: "Its key, e.g. ENG. Empty: every team." } } },
-      needs_setup: true,
-    },
-  ],
-  steps: [
-    {
-      kind: "linear.comment",
-      title: "Comment on the issue",
-      description: "A comment in Linear, as roll.",
-      config: { type: "object", required: ["body"], properties: { issue: { type: "string", title: "Issue", format: "template" }, body: { type: "string", title: "Comment", format: "template-long" } } },
-      output: ["comment", "url"],
-      integration: "linear",
-      needs_setup: true,
-    },
-  ],
+  triggers: [...BUILT_IN_TRIGGERS, ...LINEAR_CATALOG.triggers],
+  steps: [...LINEAR_CATALOG.steps],
 }), (i) => i === "slack" || i === "github");
 
 export class DemoAutomations {

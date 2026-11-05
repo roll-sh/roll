@@ -129,7 +129,9 @@ function Popup({ client, services, error, demo }: Pick<ReturnType<typeof useAgen
   useEffect(() => {
     const { hash, pathname, search } = window.location;
     const want = open ? hashFor(view) : "";
-    if (open ? hash === want : !viewFromHash(hash)) return;
+    const shown = viewFromHash(hash);
+    // Already showing it; a query after the view (`?linear=connected`) stays for whoever reads it.
+    if (open ? shown !== null && hashFor(shown) === want : !shown) return;
     window.history.replaceState(window.history.state, "", pathname + search + want);
   }, [open, view]);
 

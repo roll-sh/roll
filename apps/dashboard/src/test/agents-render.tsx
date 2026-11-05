@@ -6,6 +6,7 @@ import type { Command, Machine, MachineId, Mirrored, Reply } from "@/lib/agents-
 import { AgentsClient, type AgentsTransport } from "@/lib/agents-client";
 import { memoryCanvas, memorySettings, type AgentsServices } from "@/lib/agents-services";
 import { NO_INTEGRATIONS } from "@/lib/integrations-api";
+import { DISCONNECTED, memoryLinear } from "@/lib/linear-api";
 import type { SandboxSize } from "@/lib/sandboxes-api";
 import { AgentsContext, type AgentsCtx } from "@/components/agents/use-agents";
 import { machine as machineFixture, M1 } from "./agents";
@@ -90,6 +91,7 @@ export function fakeServices(
       remove: vi.fn(async () => {}),
       ...integrations,
     },
+    linear: memoryLinear(DISCONNECTED),
     ...rest,
   };
 }
