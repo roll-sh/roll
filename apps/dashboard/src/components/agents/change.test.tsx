@@ -114,6 +114,10 @@ describe("roll code on a thread", () => {
     expect(within(view).queryByRole("button", { name: "Publish as a roll code change" })).toBeNull();
     await userEvent.click(within(view).getByRole("button", { name: "More" }));
     expect(await screen.findByRole("menuitem", { name: "Publish as a change" })).toBeInTheDocument();
+    // Sharing works from a phone too.
+    await userEvent.keyboard("{Escape}");
+    await userEvent.click(within(view).getByRole("button", { name: "Share" }));
+    expect(screen.getByRole("dialog", { name: "Share this thread" })).toBeInTheDocument();
   });
 
   it("a fresh fork with no runs isn't stuck loading", () => {

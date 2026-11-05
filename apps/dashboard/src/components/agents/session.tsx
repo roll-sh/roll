@@ -525,7 +525,8 @@ function TitleBar({
                 <SquareTerminal className="size-4" />
               </IconButton>
             )}
-            {!demo && !phone && <ShareButton thread={thread} />}
+            {/* On a phone too: its popover is a sheet across the screen there. */}
+            {!demo && <ShareButton thread={thread} />}
             <Menu
               label="More"
               trigger={<MoreHorizontal className="size-4" />}

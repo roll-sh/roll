@@ -5,6 +5,7 @@ import { withChatops } from "./chatops-catalog";
 import { LINEAR_CATALOG } from "./linear-templates";
 import {
   blankSpec,
+  cronShape,
   cronText,
   ev,
   insertVariable,
@@ -138,7 +139,9 @@ describe("automations: the catalog and samples", () => {
     const withIntegrations = withChatops(withBuiltIns(LINEAR_CATALOG));
     for (const t of TEMPLATES) {
       const spec = t.build(ctx);
-      expect(validate(spec, t.integration ? withIntegrations : catalog), t.id).toEqual({});
+      // Only what the owner alone knows is left to fill (the Slack DM template's member id).
+      const left = t.id === "slack-agent-needs-me" ? { "steps.0.config.to": expect.any(String) } : {};
+      expect(validate(spec, t.integration ? withIntegrations : catalog), t.id).toEqual(left);
       expect(spec.steps.map((s) => s.kind), t.id).toEqual(t.steps);
     }
   });
@@ -194,5 +197,18 @@ describe("automations: links", () => {
     expect(hashFor({ kind: "automations", open: "aut_1", tab: "runs", run: "arn_9" })).toBe("#agents/automations/aut_1/runs/arn_9");
     // Threads keep their links.
     expect(viewFromHash("#agents/thr_1")).toEqual({ kind: "thread", thread: "thr_1" });
+  });
+});
+
+describe("cron patterns", () => {
+  it("refuse a value outside its field, as the server does, and say which", () => {
+    expect(cronShape("0 9 * * 1-5")).toBeNull();
+    expect(cronShape("*/15 0-23 1,15 1-12 0-7")).toBeNull();
+    expect(cronShape("30 0 9 * * MON#2")).toBeNull();
+    expect(cronShape("0 25 * * *")).toBe("The hour is 0 to 23: 25 isn't one.");
+    expect(cronShape("60 * * * *")).toBe("The minute is 0 to 59: 60 isn't one.");
+    expect(cronShape("0 0 0 * *")).toBe("The day of the month is 1 to 31: 0 isn't one.");
+    expect(cronShape("0 0 1 13 *")).toBe("The month is 1 to 12: 13 isn't one.");
+    expect(cronShape("61 0 9 * * *")).toBe("The second is 0 to 59: 61 isn't one.");
   });
 });

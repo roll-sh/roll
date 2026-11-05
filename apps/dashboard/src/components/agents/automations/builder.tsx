@@ -81,6 +81,7 @@ export function Builder({
   const [open, setOpen] = useState<string | null>(() => (draft.steps.length === 1 || !draft.steps.length ? (draft.steps[0]?.id ?? null) : null));
   const sample = useMemo(() => sampler(test?.data), [test?.data]);
   const setSteps = (steps: Step[]) => onChange({ ...draft, steps });
+  const keys = useStepKeys(draft.steps.map((x) => x.id));
   const insert = (at: number, kind: string) => {
     const s = newStep(kind, catalog, draft.steps.map((x) => x.id));
     const steps = [...draft.steps];
@@ -101,7 +102,7 @@ export function Builder({
       <Connector />
       <FiltersCard filters={draft.filters} onChange={(filters) => onChange({ ...draft, filters })} variables={variablesAt(draft, catalog, -1)} problems={problems} verdicts={test?.result?.filters ?? null} sample={sample} />
       {draft.steps.map((s, i) => (
-        <div key={s.id + i}>
+        <div key={keys[i]}>
           <Connector onAdd={(kind) => insert(i, kind)} catalog={catalog} label={`Add a step before ${s.name || s.id}`} />
           <StepCard
             step={s}
@@ -911,4 +912,25 @@ function Advanced({ step: s, onChange, variables, problems, index, sample }: { s
       )}
     </div>
   );
+}
+
+let stepKeys = 0;
+
+/**
+ * Keys for the step cards that follow a step, not its id: typing in its id field renames it in
+ * place (the card, and its open "Advanced", stay), moving it carries its key along, a new one gets
+ * a new key.
+ */
+function useStepKeys(ids: string[]): string[] {
+  const [memo, setMemo] = useState(() => ({ ids, keys: ids.map(() => `step${stepKeys++}`) }));
+  if (memo.ids.length === ids.length && memo.ids.every((x, i) => x === ids[i])) return memo.keys;
+  const renamed = memo.ids.length === ids.length;
+  const keys = ids.map((id, i) => {
+    const j = memo.ids.indexOf(id);
+    if (j >= 0) return memo.keys[j];
+    if (renamed && !ids.includes(memo.ids[i])) return memo.keys[i];
+    return `step${stepKeys++}`;
+  });
+  setMemo({ ids, keys });
+  return keys;
 }

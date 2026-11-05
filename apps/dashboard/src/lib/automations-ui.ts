@@ -334,8 +334,26 @@ export function cronShape(cron: string): string | null {
   const f = cron.trim().split(/\s+/).filter(Boolean);
   if (f.length !== 5 && f.length !== 6) return "A cron expression has 5 fields (minute hour day month weekday).";
   if (!f.every((x) => /^[\d*/,\-A-Za-z?LW#]+$/.test(x))) return "Each field is numbers, *, ranges (1-5), lists (1,3) or steps (*/15).";
+  // Each value in its field's range (the server's croner refuses the rest); six fields lead with seconds.
+  const ranges = (f.length === 6 ? [CRON_SECONDS] : []).concat(CRON_FIELDS);
+  for (const [i, x] of f.entries()) {
+    const [name, lo, hi] = ranges[i];
+    for (const m of x.matchAll(/(?:^|[,-])(\d+)/g)) {
+      const n = Number(m[1]);
+      if (n < lo || n > hi) return `The ${name} is ${lo} to ${hi}: ${n} isn't one.`;
+    }
+  }
   return null;
 }
+
+const CRON_SECONDS: [string, number, number] = ["second", 0, 59];
+const CRON_FIELDS: [string, number, number][] = [
+  ["minute", 0, 59],
+  ["hour", 0, 23],
+  ["day of the month", 1, 31],
+  ["month", 1, 12],
+  ["weekday", 0, 7],
+];
 
 export function everyText(s: number): string {
   if (s % 86_400 === 0) return s === 86_400 ? "Every day" : `Every ${s / 86_400} days`;

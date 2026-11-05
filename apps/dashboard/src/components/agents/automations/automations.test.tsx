@@ -156,6 +156,20 @@ describe("Automation builder", () => {
     expect(agentsSurface.get().view).toEqual({ kind: "automations", open: "aut_new" });
   });
 
+  it("renames a step in place: its card and its open section stay while its id is typed", async () => {
+    renderAgents(<AutomationPanel view={{ kind: "automations", open: "new" }} onClose={() => {}} />, harness(fakeApi()));
+    await userEvent.click(screen.getByRole("button", { name: "Add a step" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: /Notify me/ }));
+    const card = screen.getByRole("region", { name: "Step 1: Notify me" });
+    await userEvent.click(within(card).getByRole("button", { name: /Name, conditions, retries/ }));
+    const id = within(card).getByRole("textbox", { name: "Step id" });
+    await userEvent.clear(id);
+    await userEvent.type(id, "tell_me");
+    expect(screen.getByRole("textbox", { name: "Step id" })).toHaveValue("tell_me");
+    expect(screen.getByRole("textbox", { name: "Step id" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: /Name, conditions, retries/ })).toHaveAttribute("aria-expanded", "true");
+  });
+
   it("says what's wrong inline and doesn't save until it's fixed", async () => {
     const api = fakeApi();
     renderAgents(<AutomationPanel view={{ kind: "automations", open: "new" }} onClose={() => {}} />, harness(api));
