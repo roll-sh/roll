@@ -22,7 +22,7 @@ import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import { Bot, Braces, Check, ChevronDown, Circle, CircleCheck, CircleDashed, CircleDot, CircleX, FolderGit2, GitBranch, GitPullRequest, Hash, Lock, Milestone, Plus, Server, Shield, Tag, TriangleAlert, Users, Workflow, X } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Combobox, ComboboxItem, ComboboxList, ComboboxSearchInput } from "./combobox";
-import { cn, glass, popupMotion } from "./cn";
+import { cn, popupMotion } from "./cn";
 
 export interface PickerOption {
   id: string;
@@ -394,8 +394,10 @@ export function Picker(props: PickerProps) {
             data-picker-popup
             aria-label={label}
             initialFocus={search}
-            className={cn("flex max-h-[min(24rem,var(--available-height))] w-[max(18rem,var(--anchor-width))] max-w-[min(26rem,var(--available-width))] flex-col rounded-lg text-fg outline-none", glass, popupMotion)}
+            className={cn("rounded-lg text-fg outline-none", popupMotion)}
           >
+            {/* Solid, not glass: a list of names must read over a busy form (glass lets the fields behind show through where a browser doesn't blur). */}
+            <div className={cn("flex max-h-[min(24rem,var(--available-height))] w-[max(18rem,var(--anchor-width))] max-w-[min(26rem,var(--available-width))] flex-col rounded-lg border border-outline bg-popover shadow-pop inset-shadow-highlight")}>
             <Combobox<string>
               inline
               open
@@ -466,6 +468,7 @@ export function Picker(props: PickerProps) {
                 </div>
               )}
             </Combobox>
+            </div>
           </PopoverPrimitive.Popup>
         </PopoverPrimitive.Positioner>
       </PopoverPrimitive.Portal>

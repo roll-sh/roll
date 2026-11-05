@@ -281,7 +281,7 @@ thread or machine — is the shared picker, `Picker` in `components/agents/ui/pi
   with its picture, colour or kind icon; a list is chips (each with its ×) and an "Add" at the end.
   A value nobody listed yet is looked up by id; one that resolves to nothing shows as itself, in
   mono. A variable shows as its `{{ path }}` in the accent.
-- **The list is T3's combobox** on the glass popup: search at the top (the platform filters it),
+- **The list is T3's combobox** on a solid popover (the popover fill, hairline and pop shadow, not glass: rows of names must read over a busy form): search at the top (the platform filters it),
   recents first (per device), then the field's own rows (`roll`, `No one`), then the platform's,
   grouped (a state's team). ↑↓ and Enter, Esc closes; picking several keeps it open, with a
   "N picked · Done" footer.
