@@ -10,7 +10,7 @@
  * here, scrolled to this section, with the result in a notice.
  */
 
-import { CircleAlert, CircleCheck, ExternalLink, GitPullRequest, Hash, MessagesSquare, Plus, TriangleAlert, X } from "lucide-react";
+import { CircleAlert, CircleCheck, ExternalLink, Plus, TriangleAlert, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { setAgentsView } from "@/lib/agents-surface";
 import {
@@ -26,6 +26,7 @@ import {
   type IntegrationsApi,
   type IntegrationsLink,
 } from "@/lib/integrations-api";
+import { DiscordMark, GitHubMark, SlackMark, type Glyph } from "./brand-icons";
 import { field, SettingRow, SettingsSection, type Setting } from "./settings-ui";
 import { cn, Switch } from "./ui";
 
@@ -55,13 +56,13 @@ export const INTEGRATION_SETTINGS = {
 
 const IDS = Object.values(INTEGRATION_SETTINGS).map((s) => s.id);
 
-const CHAT: Record<ChatPlatform, { name: string; unit: string; units: string; env: string[]; icon: typeof Hash; memberHint: string }> = {
+const CHAT: Record<ChatPlatform, { name: string; unit: string; units: string; env: string[]; icon: Glyph; memberHint: string }> = {
   slack: {
     name: "Slack",
     unit: "workspace",
     units: "workspaces",
     env: ["ROLL_SLACK_CLIENT_ID", "ROLL_SLACK_CLIENT_SECRET", "ROLL_SLACK_SIGNING_SECRET"],
-    icon: Hash,
+    icon: SlackMark,
     memberHint: "Slack user id (U…)",
   },
   discord: {
@@ -69,7 +70,7 @@ const CHAT: Record<ChatPlatform, { name: string; unit: string; units: string; en
     unit: "server",
     units: "servers",
     env: ["ROLL_DISCORD_APPLICATION_ID", "ROLL_DISCORD_PUBLIC_KEY", "ROLL_DISCORD_BOT_TOKEN", "ROLL_DISCORD_CLIENT_SECRET"],
-    icon: MessagesSquare,
+    icon: DiscordMark,
     memberHint: "Discord user id",
   },
 };
@@ -467,7 +468,7 @@ export function GitHubCard({ github }: { github: GitHubIntegration | null }) {
   return (
     <SettingRow
       s={INTEGRATION_SETTINGS.github}
-      note={<GitPullRequest className="size-3.5 text-subtle" strokeWidth={1.5} aria-hidden />}
+      note={<GitHubMark className="size-3.5 text-subtle" />}
       control={
         !github ? (
           <Checking />

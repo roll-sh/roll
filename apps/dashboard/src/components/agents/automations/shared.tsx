@@ -34,6 +34,7 @@ import type { RunState, StepState } from "@/lib/automations-api";
 import { automationsFor, useAutomationsState, type AutomationsState, type AutomationsStore } from "@/lib/automations-store";
 import { runLabel, runTone, withBuiltIns, type Tone } from "@/lib/automations-ui";
 import { cn, Select } from "../ui";
+import { integrationOf, type Glyph } from "../brand-icons";
 import { useAgents } from "../use-agents";
 
 /** The owner's automations store, or `null` where there are none (a share's replay, old tests). */
@@ -60,7 +61,7 @@ const triggerIcons: Record<string, LucideIcon> = {
   agent: Bot,
 };
 
-export const triggerIcon = (source: string): LucideIcon => triggerIcons[source] ?? Plug;
+export const triggerIcon = (source: string): Glyph => triggerIcons[source] ?? integrationOf(source)?.Mark ?? Plug;
 
 const stepIcons: Record<string, LucideIcon> = {
   "agent.start": Play,
@@ -75,12 +76,12 @@ const stepIcons: Record<string, LucideIcon> = {
   delay: Clock,
 };
 
-export const stepIcon = (kind: string): LucideIcon => stepIcons[kind] ?? (kind.endsWith(".comment") || kind.endsWith(".post") ? MessageSquareReply : Plug);
+export const stepIcon = (kind: string): Glyph => stepIcons[kind] ?? integrationOf(kind)?.Mark ?? (kind.endsWith(".comment") || kind.endsWith(".post") ? MessageSquareReply : Plug);
 
 export { Zap as AutomationIcon };
 
 /** An icon on a raised square, as the canvas cards lead with (design spec: IconTile). */
-export function Tile({ icon: Icon, className, tone }: { icon: LucideIcon; className?: string; tone?: Tone }) {
+export function Tile({ icon: Icon, className, tone }: { icon: Glyph; className?: string; tone?: Tone }) {
   return (
     <span
       className={cn(

@@ -15,6 +15,7 @@ import { TEMPLATES, type AutomationTemplate, type TemplateContext } from "@/lib/
 import { setAgentsView, type AutomationsView as View } from "@/lib/agents-surface";
 import { duration, lastRunOf, runLabel, specOf, took, triggerSummary, weekOf } from "@/lib/automations-ui";
 import { Menu } from "../menu";
+import { integrationOf } from "../brand-icons";
 import { ago } from "../shared";
 import { cn, Segmented, Switch } from "../ui";
 import { useAgents } from "../use-agents";
@@ -404,7 +405,7 @@ function TemplateCard({ template: t, selected, needsSetup }: { template: Automat
       <span className="mt-3 block text-[13.5px] font-[590] tracking-[-0.015em]">{t.title}</span>
       <span className="mt-1 line-clamp-2 block text-[12.5px] leading-snug text-muted">{t.description}</span>
       <span className="mt-auto flex items-center gap-1.5 pt-3 text-[11px] text-subtle">
-        <span className="rounded-[5px] border border-line-2 px-1.5 leading-[18px]">{t.integration ? t.integration[0].toUpperCase() + t.integration.slice(1) : (triggerWord[t.trigger] ?? t.trigger)}</span>
+        <span className="rounded-[5px] border border-line-2 px-1.5 leading-[18px]">{t.integration ? (integrationOf(t.integration)?.name ?? t.integration[0].toUpperCase() + t.integration.slice(1)) : (triggerWord[t.trigger] ?? t.trigger)}</span>
         {needsSetup && <span className="rounded-[5px] border border-line-2 px-1.5 leading-[18px]">Connect first</span>}
         <span className="ml-auto flex items-center gap-1 text-muted opacity-0 transition-opacity duration-150 group-hover/tpl:opacity-100 group-focus-visible/tpl:opacity-100 [@media(hover:none)]:opacity-100">
           Use <ArrowRight className="size-3" />
