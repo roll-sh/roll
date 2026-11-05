@@ -98,6 +98,35 @@ describe("automation fields that name a thing", { timeout: 15_000 }, () => {
     expect(onValue).toHaveBeenLastCalledWith(expect.objectContaining({ thread: "thr_7" }));
     expect(screen.getByRole("button", { name: "Thread" })).toHaveTextContent("Fix the SSO loop");
   });
+
+  it("a GitHub label step: a connected repo, then its issue, labels made on the spot", async () => {
+    const schema = chatopsCatalog.steps.find((s) => s.kind === "github.label")!.config as unknown as Schema;
+    const { onValue, lookup } = show(schema, { number: 128 });
+    // A number saved before pickers shows its title (no repo yet: every connected repo's).
+    await waitFor(() => expect(screen.getByRole("button", { name: "Issue or pull request" })).toHaveTextContent("Login 500s on Safari"));
+    macClick(screen.getByRole("button", { name: "Repo" }));
+    macClick(await within(await screen.findByRole("listbox", { name: "Repo" })).findByRole("option", { name: /acme\/web/ }));
+    expect(onValue).toHaveBeenLastCalledWith(expect.objectContaining({ repo: "acme/web" }));
+    macClick(screen.getByRole("button", { name: "Issue or pull request" }));
+    const issues = await screen.findByRole("listbox", { name: "Issue or pull request" });
+    macClick(await within(issues).findByRole("option", { name: /Dark mode for settings/ }));
+    expect(lookup.calls.some((c) => c.includes("/github/issues") && c.includes("parent=acme%2Fweb"))).toBe(true);
+    expect(onValue).toHaveBeenLastCalledWith(expect.objectContaining({ repo: "acme/web", number: "42" }));
+    // Labels to add: the repo's, and a new one made in that repo.
+    macClick(screen.getByRole("button", { name: "Add labels" }));
+    const labels = await screen.findByRole("listbox", { name: "Add labels" });
+    const enhancement = await within(labels).findByRole("option", { name: /enhancement/ });
+    expect(within(labels).queryByRole("option", { name: /^roll/ })).toBeNull();
+    macClick(enhancement);
+    expect(onValue).toHaveBeenLastCalledWith(expect.objectContaining({ add: ["enhancement"] }));
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    macClick(screen.getByRole("button", { name: "Add to Add labels" }));
+    fireEvent.change(await screen.findByRole("combobox", { name: "Search add labels" }), { target: { value: "needs qa" } });
+    macClick(await screen.findByRole("option", { name: /Create new “needs qa”/ }));
+    await waitFor(() => expect(onValue).toHaveBeenLastCalledWith(expect.objectContaining({ add: ["enhancement", lookup.made[0].id] })));
+    expect(lookup.made[0]).toMatchObject({ label: "needs qa" });
+    expect(await lookup.list("acme", "github", "labels", { parent: "acme/web", q: "needs" })).toMatchObject({ items: [{ label: "needs qa" }] });
+  });
 });
 
 describe("Slack and Discord fields name their things", () => {

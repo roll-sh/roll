@@ -2,7 +2,7 @@
  * The demo owner's lookups (`memoryLookup`): what the pickers show in `?demo`. Linear matches the
  * demo's connected Acme workspace (`DEMO_TEAMS` in agents-demo.ts), Slack its "Acme" workspace
  * (`demoIntegrations`: installed by Ada, Grace a member). Discord isn't set up in the demo, so its
- * lookups say so there; its rows are for tests.
+ * lookups say so there; its rows are for tests. GitHub has the demo's connected repos.
  */
 
 import { memoryLookup, type LookupItem, type LookupRows } from "./lookup-api";
@@ -113,7 +113,7 @@ const DISCORD_MEMBERS: LookupItem[] = [
   { id: "1100000000000000043", key: "grace", label: "Grace", hint: "@grace", icon: "user" },
 ];
 
-export const DEMO_LOOKUPS: LookupRows = {
+const CHAT_LOOKUPS: LookupRows = {
   "slack/workspaces": SLACK_WORKSPACES,
   "slack/channels": SLACK_CHANNELS,
   "slack/users": SLACK_USERS,
@@ -123,6 +123,91 @@ export const DEMO_LOOKUPS: LookupRows = {
   "discord/channels": DISCORD_CHANNELS,
   "discord/roles": DISCORD_ROLES,
   "discord/members": DISCORD_MEMBERS,
+};
+
+// GitHub: the demo's connected repos (`demoIntegrations` in agents-demo.ts), named as the GitHub
+// steps take them (acme/roll, roll) or by GitHub's name (acme-inc/roll).
+const GITHUB_REPOS: LookupItem[] = [
+  { id: "acme/roll", label: "acme/roll", key: "roll", hint: "acme-inc/roll", icon: "repo" },
+  { id: "acme/web", label: "acme/web", key: "web", hint: "acme-inc/web", icon: "repo" },
+];
+
+const ghRepo = (parent: string | undefined): string | undefined =>
+  GITHUB_REPOS.find((r) => parent && [r.id, r.key, r.hint].some((n) => n?.toLowerCase() === parent.toLowerCase()))?.key;
+
+/** Per repo; no parent: every connected repo's, under its name (as the server answers). */
+const perRepo =
+  (rows: Record<string, LookupItem[]>) =>
+  (parent: string | undefined): LookupItem[] => {
+    const one = ghRepo(parent);
+    if (one) return rows[one] ?? [];
+    const seen = new Set<string>();
+    return GITHUB_REPOS.flatMap((r) => (rows[r.key!] ?? []).filter((i) => !seen.has(i.id) && seen.add(i.id)).map((i) => ({ ...i, group: r.id })));
+  };
+
+const GH_LABELS: LookupItem[] = [
+  { id: "bug", label: "bug", color: "#d73a4a", hint: "Something isn't working" },
+  { id: "enhancement", label: "enhancement", color: "#a2eeef", hint: "New feature or request" },
+  { id: "documentation", label: "documentation", color: "#0075ca" },
+  { id: "good first issue", label: "good first issue", color: "#7057ff" },
+  { id: "roll", label: "roll", color: "#4c8dff", hint: "For roll's agents" },
+];
+
+const GH_PEOPLE: LookupItem[] = [
+  { id: "ada", label: "ada", icon: "user" },
+  { id: "grace", label: "grace", icon: "user" },
+  { id: "alan", label: "alan", icon: "user" },
+  { id: "dependabot", label: "dependabot", hint: "bot", icon: "user" },
+];
+
+const GH_TEAMS: LookupItem[] = [
+  { id: "acme-inc/core", label: "Core", key: "core", hint: "@acme-inc/core", icon: "team" },
+  { id: "acme-inc/web", label: "Web platform", key: "web", hint: "@acme-inc/web", icon: "team" },
+];
+
+const GITHUB_LOOKUPS: LookupRows = {
+  "github/repos": GITHUB_REPOS,
+  "github/branches": perRepo({
+    roll: [
+      { id: "main", label: "main", hint: "default", icon: "branch" },
+      { id: "feature/agents", label: "feature/agents", icon: "branch" },
+      { id: "release/2026.11", label: "release/2026.11", hint: "protected", icon: "branch" },
+    ],
+    web: [
+      { id: "main", label: "main", hint: "default", icon: "branch" },
+      { id: "redesign", label: "redesign", icon: "branch" },
+    ],
+  }),
+  "github/labels": perRepo({ roll: GH_LABELS, web: GH_LABELS.filter((l) => l.id !== "roll") }),
+  "github/users": GH_PEOPLE,
+  "github/reviewers": [...GH_PEOPLE.filter((p) => !p.hint).map((p) => ({ ...p, group: "People" })), ...GH_TEAMS.map((t) => ({ ...t, group: "Teams" }))],
+  "github/teams": GH_TEAMS,
+  "github/milestones": [
+    { id: "1", key: "v1.0", label: "v1.0", hint: "due 2026-12-01", icon: "milestone" },
+    { id: "2", key: "Later", label: "Later", hint: "4 open", icon: "milestone" },
+  ],
+  "github/workflows": [
+    { id: "ci.yml", key: "161335", label: "CI", hint: ".github/workflows/ci.yml", icon: "workflow" },
+    { id: "release.yml", key: "161336", label: "Release", hint: ".github/workflows/release.yml", icon: "workflow" },
+  ],
+  "github/environments": [
+    { id: "production", label: "production", icon: "environment" },
+    { id: "staging", label: "staging", icon: "environment" },
+    { id: "preview", label: "preview", icon: "environment" },
+  ],
+  "github/issues": perRepo({
+    roll: [
+      { id: "128", key: "#128", hint: "#128", label: "Login 500s on Safari" },
+      { id: "131", key: "#131", hint: "#131", label: "Cache sessions", icon: "pull" },
+      { id: "133", key: "#133", hint: "#133", label: "Flaky checkout test on CI" },
+    ],
+    web: [{ id: "42", key: "#42", hint: "#42", label: "Dark mode for settings" }],
+  }),
+};
+
+export const DEMO_LOOKUPS: LookupRows = {
+  ...CHAT_LOOKUPS,
+  ...GITHUB_LOOKUPS,
   "linear/teams": TEAMS,
   "linear/states": (team) => (team ? TEAMS.filter((t) => t.id === team) : TEAMS).flatMap(statesOf),
   "linear/users": USERS,
