@@ -728,8 +728,8 @@ there), with roll's own palette. Types: `agent-proto/src/identity.rs`; the dashb
   ("Machine": Colour, Kind) and change while it's offline.
 - **Never state.** Colour tells things apart; the accent still means busy, green done, red failed.
   A card's border keeps its state; identity is the icon tile, a flat tint behind a machine's or
-  project's header, the project's tile on a thread's card, and the edge into a card (busy edges
-  stay accent). No stripes down a card's side.
+  project's header, the project's tile and left edge on a thread's card, and the edge into a card
+  (busy edges stay accent).
 
 ## Settling
 

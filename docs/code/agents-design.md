@@ -143,7 +143,7 @@ project's colour never reads as running. Green and rose are softer than `--ok` a
 | A project's tile (logo, monogram, emoji) | the logo as found (rounded 25%); else letters in the colour on the colour at 18% (T3's tile) |
 | A machine's tile | its kind's lucide icon in the colour, on the colour at 16% |
 | Machine and project cards | the 24px tile, and a flat 6% tint behind the header, over a hairline |
-| Thread and subagent cards | the project's 14px tile in the meta line; no stripe or coloured side (the user: it read as generated decoration) |
+| Thread and subagent cards | the project's 14px tile in the meta line, and the card's left edge in the colour: 3px, the whole height, round with the card's corners (over the 1px border, not a bar floating inside it) |
 | Edges | the child's colour at 42% (busy edges stay the accent at 50%) |
 | Sidebar, ⌘K, launcher, breadcrumb, settings titles, automations list | the same tiles at 14–16px |
 
@@ -240,8 +240,9 @@ switched off under `prefers-reduced-motion`, and the engine draws a static, stat
   `inset-shadow-highlight`, `glass`). **Don't** hard-code a hex, an rgb or a shadow in a
   component.
 - **Do** put the accent only on focus, active, running and waiting, and a project's or machine's
-  colour only on its tile, header tint and edges. **Don't** add side stripes, accent bars or a
-  second outline around a card. **Don't** tint whole cards, and **don't**
+  colour only on its tile, header tint, a thread card's left edge and the canvas edges. **Don't**
+  float a short bar inside a card, stop a coloured edge short of the corners, or put a second
+  outline around a card. **Don't** tint whole cards, and **don't**
   use orange or decorative gradients.
 - **Do** float tools over cards. **Don't** reserve invisible room for hover buttons.
 - **Do** let layers separate things. **Don't** add a border-r or border-b where a panel edge

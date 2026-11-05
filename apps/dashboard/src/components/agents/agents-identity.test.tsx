@@ -42,7 +42,7 @@ describe("MachineIcon", () => {
 });
 
 describe("cards carry their identity", () => {
-  it("a project's card is tinted with its colour and leads with its icon; its threads carry its tile, no stripe", () => {
+  it("a project's card is tinted with its colour and leads with its icon; its threads carry its tile and its colour down their left edge", () => {
     const p = project({ logo: LOGO, settings: { ...NO_SETTINGS, color: "rose" } });
     const h = agentsHarness({ entities: [mirrored("project", p, 2), mirrored("thread", thread(), 3)] });
     const { container, unmount } = renderAgents(<ProjectNode project={p} machine={machine()} />, h);
@@ -52,8 +52,7 @@ describe("cards carry their identity", () => {
     const card = renderAgents(<ThreadNode thread={thread()} machine={machine()} />, h).container;
     expect(card.querySelector("[data-drag]")).toHaveAttribute("data-tint", "rose");
     expect(card.querySelector('[data-identity="logo"]')).not.toBeNull();
-    // Identity is the tile and the edges; a coloured bar down the card's side read as decoration.
-    expect(card.querySelector("[data-stripe]")).toBeNull();
+    expect(card.querySelector("[data-edge]")).not.toBeNull();
   });
 });
 
