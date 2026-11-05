@@ -294,6 +294,25 @@ describe("the agents page (/dashboard/agents)", () => {
     expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "owner" });
   });
 
+  it("writes where it is into the URL there too, so a reload comes back to it (A11)", async () => {
+    const h = agentsHarness({ entities, follow: ["thr_1", "thr_2"] });
+    conn = { client: h.client, services: fakeServices(), error: null };
+    window.history.replaceState(null, "", "/dashboard/agents#agents/automations/new");
+    renderAgents(
+      <MarkStateProvider>
+        <AgentsPage />
+      </MarkStateProvider>,
+      h,
+    );
+    await screen.findByLabelText("Agents canvas");
+    // An automation was just created: its page takes the builder's place.
+    act(() => setAgentsView({ kind: "automations", open: "aut_1" }));
+    await waitFor(() => expect(window.location.hash).toBe("#agents/automations/aut_1"));
+    act(() => setAgentsView({ kind: "thread", thread: "thr_2" }));
+    await waitFor(() => expect(window.location.hash).toBe("#agents/thr_2"));
+    expect(window.location.pathname).toBe("/dashboard/agents");
+  });
+
   it("follows #agents links as the popup does: where it opens, and one followed later", async () => {
     const h = agentsHarness({ entities, follow: ["thr_1", "thr_2"] });
     conn = { client: h.client, services: fakeServices(), error: null };

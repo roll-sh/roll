@@ -13,7 +13,7 @@ import { closePalette, noteThreadOpen, openPalette, togglePalette } from "@/lib/
 import { useKeyboard } from "@/lib/keyboard-inset";
 import { lastInputWasKeyboard } from "@/lib/input-modality";
 import type { AgentsServices } from "@/lib/agents-services";
-import { isNewAgentKey, newAgentHint, setAgentsView, useAgentsSurface, viewFromHash, type AgentsView, type AutomationsView } from "@/lib/agents-surface";
+import { hashFor, isNewAgentKey, newAgentHint, setAgentsView, useAgentsSurface, viewFromHash, type AgentsView, type AutomationsView } from "@/lib/agents-surface";
 import { isBuilder } from "@/lib/automations-nav";
 import { ALL, applyDisplay, applyView, directionOf, focusOn, isPinned, keepProject, loadFocused, pinKey, setFocused as setFocusedIn, pinnedConversations, pinOf, projectOf, viewStorageKey, withDirection, type Pin as PinRec } from "@/lib/agents-views";
 import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
@@ -110,6 +110,16 @@ export function AgentsPage({
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
+  // The URL says what's open, as the popup's does: a reload or a copied link comes back to it
+  // (after Create, an automation's own page, not `…/new`).
+  const { view: shownView } = useAgentsSurface();
+  useEffect(() => {
+    const { hash, pathname, search } = window.location;
+    const want = hashFor(shownView);
+    const shown = viewFromHash(hash);
+    if (shown !== null && hashFor(shown) === want) return;
+    window.history.replaceState(window.history.state, "", pathname + search + want);
+  }, [shownView]);
   const mac = typeof window !== "undefined" && desktop()?.window === "agents" && desktop()?.platform === "darwin";
   return (
     <div className="h-dvh bg-bg text-fg" data-agents data-desktop={mac ? "agents-mac" : undefined}>
