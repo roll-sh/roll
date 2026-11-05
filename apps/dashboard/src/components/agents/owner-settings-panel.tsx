@@ -19,7 +19,7 @@ import { INTEGRATION_SETTINGS, IntegrationsSection } from "./integrations";
 import { LINEAR_SETTINGS, LinearSettingsSection } from "./linear-settings";
 import { DefaultsRows } from "./machine-settings";
 import { SaveState, SettingRow, SettingsPage, SettingsSection, useSearching, type Setting } from "./settings-ui";
-import { MachineIcon } from "./shared";
+import { MachineIcon } from "./identity";
 import { Segmented, Select, Switch } from "./ui";
 import { useAgents } from "./use-agents";
 
@@ -183,7 +183,7 @@ export function OwnerSettingsPanel({ onClose }: { onClose: () => void }) {
           <SettingRow
             key={m.id}
             s={{ id: `machine.${m.id}`, title: m.name, section: "Machines", description: m.info ? `${m.info.providers.map((p) => p.name).join(", ") || "No providers"}` : "Never connected" }}
-            note={<MachineIcon machine={m} className="size-3 text-subtle" />}
+            note={<MachineIcon machine={m} className="size-3" />}
             control={
               <button
                 type="button"

@@ -2,7 +2,9 @@
 
 import { ArrowDownToLine, Bug, Check, CircleAlert, FlaskConical, Hammer, ListChecks, Pause, Play, Plus, Settings2, Trash2 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
-import { type Machine, type Project, type ProjectScript, type ProjectSettings, type PullResult, reachable, type ScriptIcon, type ThreadDefaults } from "@/lib/agents-api";
+import { type IdentityColor, type Machine, type Project, type ProjectIcon as ProjectIconSetting, type ProjectScript, type ProjectSettings, type PullResult, reachable, type ScriptIcon, type ThreadDefaults } from "@/lib/agents-api";
+import { checkProjectIcon, projectColor } from "@/lib/agents-identity";
+import { ColorPicker, ProjectIcon } from "./identity";
 import { btn, primary } from "../ui";
 import { DefaultsRows } from "./machine-settings";
 import { field, SettingRow, SettingsSection, type Setting } from "./settings-ui";
@@ -29,6 +31,20 @@ export const SCRIPT_ICONS: { id: ScriptIcon; label: string; icon: ReactNode }[] 
 /** The project's rows (T3's project scope of the same settings). */
 const P = {
   name: { id: "project.name", title: "Name", section: "Project", description: "How the project is called on the canvas." },
+  color: {
+    id: "project.color",
+    title: "Colour",
+    section: "Project",
+    description: "Its cards, edges and rows carry it everywhere. Auto is made from its repo or name, so it's the same on every device and machine.",
+    terms: ["color", "colour", "tint", "identity"],
+  },
+  icon: {
+    id: "project.icon",
+    title: "Icon",
+    section: "Project",
+    description: "Its own logo when roll finds one in the repo (a favicon, an app icon or a logo), else its monogram.",
+    terms: ["logo", "favicon", "monogram", "emoji", "picture", "identity"],
+  },
   autoPull: { id: "project.auto-pull", title: "Pull merged changes automatically", section: "Pull merged changes" },
   model: { id: "project.model", title: "Model", section: "New threads", description: "What a new agent in this project starts with. Default: the machine's, then yours." },
   permissions: { id: "project.permissions", title: "Permissions", section: "New threads" },
@@ -75,6 +91,95 @@ export function PullLine({ pull, className = "" }: { pull: PullResult | null; cl
 
 const newScriptId = () => `s${Math.random().toString(36).slice(2, 9)}`;
 
+const ICON_KINDS: { value: ProjectIconSetting["kind"]; label: string }[] = [
+  { value: "auto", label: "Logo, else monogram" },
+  { value: "monogram", label: "Monogram" },
+  { value: "emoji", label: "Emoji" },
+  { value: "file", label: "A picture in the project" },
+];
+
+/** The icon: a live preview, how it's made, and the letters, emoji or path for it. */
+function IconEditor({
+  project,
+  settings,
+  icon,
+  onChange,
+  error,
+}: {
+  project: Project;
+  settings: ProjectSettings;
+  icon: ProjectIconSetting;
+  onChange: (icon: ProjectIconSetting) => void;
+  error: string | null;
+}) {
+  const pick = (kind: ProjectIconSetting["kind"]) =>
+    onChange(
+      kind === "auto"
+        ? { kind }
+        : kind === "monogram"
+          ? { kind, text: icon.kind === "monogram" ? icon.text : undefined }
+          : kind === "emoji"
+            ? { kind, emoji: icon.kind === "emoji" ? icon.emoji : "" }
+            : { kind, path: icon.kind === "file" ? icon.path : (project.logo?.path ?? "") },
+    );
+  // The preview shows what the panel holds; a `file` logo shows once the daemon has read it.
+  const preview = { ...project, settings: { ...settings, icon: icon.kind === "file" ? undefined : icon } };
+  const found = project.logo && (icon.kind === "auto" || icon.kind === "file") ? project.logo.path : null;
+  return (
+    <div className="mt-2.5 flex items-start gap-3">
+      <span className="grid size-11 shrink-0 place-items-center rounded-xl border border-line-2 bg-panel-2 inset-shadow-highlight">
+        <ProjectIcon project={preview} className="size-7" />
+      </span>
+      <div className="min-w-0 flex-1 space-y-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Select label="How the icon is made" className="w-52 min-w-0" value={icon.kind} onChange={pick} options={ICON_KINDS} />
+          {icon.kind === "monogram" && (
+            <input
+              aria-label="Monogram letters"
+              placeholder="Letters (from the name)"
+              value={icon.text ?? ""}
+              maxLength={6}
+              onChange={(e) => onChange({ kind: "monogram", text: e.target.value || undefined })}
+              className={`${field} w-44 font-mono uppercase`}
+              spellCheck={false}
+            />
+          )}
+          {icon.kind === "emoji" && (
+            <input aria-label="Emoji" placeholder="🦀" value={icon.emoji} onChange={(e) => onChange({ kind: "emoji", emoji: e.target.value })} className={`${field} w-20 text-center`} />
+          )}
+          {icon.kind === "file" && (
+            <input
+              aria-label="Picture path"
+              placeholder="public/logo.svg"
+              value={icon.path}
+              onChange={(e) => onChange({ kind: "file", path: e.target.value })}
+              className={`${field} min-w-0 flex-1 font-mono text-[12px]`}
+              spellCheck={false}
+            />
+          )}
+        </div>
+        {error ? (
+          <p role="alert" className="text-[12px] text-danger">
+            {error[0].toUpperCase() + error.slice(1)}.
+          </p>
+        ) : (
+          <p className="text-[11.5px] text-subtle">
+            {found ? (
+              <>
+                Using <code className="font-mono text-muted">{found}</code> from the project.
+              </>
+            ) : icon.kind === "auto" ? (
+              "No logo found in the project: it shows its monogram."
+            ) : icon.kind === "file" ? (
+              "Saved, the machine reads it from the project (SVG, PNG, ICO, GIF, WebP or JPEG)."
+            ) : null}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /** JSON with sorted keys and no unset fields: equal settings compare equal. */
 const canon = (v: unknown) =>
   JSON.stringify(v, (_k, x: unknown) =>
@@ -96,11 +201,21 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
   const [autoPull, setAutoPull] = useState(project.settings.auto_pull);
   const [defaults, setDefaults] = useState<ThreadDefaults>(project.settings.defaults);
   const [scripts, setScripts] = useState<ProjectScript[]>(project.settings.scripts);
+  const [color, setColor] = useState<IdentityColor | undefined>(project.settings.color);
+  const [icon, setIcon] = useState<ProjectIconSetting>(project.settings.icon ?? { kind: "auto" });
+  const iconChecked = checkProjectIcon(icon);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const saved = useMemo(() => new Set(project.settings.scripts.map((s) => s.id)), [project.settings.scripts]);
 
-  const settings: ProjectSettings = { ...project.settings, auto_pull: autoPull, defaults, scripts };
+  const settings: ProjectSettings = {
+    ...project.settings,
+    auto_pull: autoPull,
+    defaults,
+    scripts,
+    color,
+    icon: "icon" in iconChecked && iconChecked.icon.kind !== "auto" ? iconChecked.icon : undefined,
+  };
   const changed = name.trim() !== project.name || canon(settings) !== canon(project.settings);
   const scriptsOk = scripts.every((s) => s.name.trim() && s.command.trim());
   const branch = project.git?.branch && project.git.branch !== "HEAD" ? project.git.branch : "the default branch";
@@ -133,11 +248,19 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
         if (changed && scriptsOk && online) void save();
       }}
     >
-      <SettingsSection title="Name" ids={[P.name.id]}>
+      <SettingsSection title="Project" ids={[P.name.id, P.color.id, P.icon.id]}>
         <SettingRow
           s={P.name}
           control={<input id={`project-name-${project.id}`} aria-label="Name" value={name} onChange={(e) => setName(e.target.value)} className={`${field} w-56`} spellCheck={false} />}
         />
+        <SettingRow s={P.color}>
+          <div className="mt-2.5">
+            <ColorPicker value={color} auto={projectColor({ ...project, settings: { ...project.settings, color: undefined } })} onChange={setColor} />
+          </div>
+        </SettingRow>
+        <SettingRow s={P.icon}>
+          <IconEditor project={project} settings={settings} icon={icon} onChange={setIcon} error={"error" in iconChecked ? iconChecked.error : null} />
+        </SettingRow>
       </SettingsSection>
 
       <SettingsSection title="Pull merged changes" ids={[P.autoPull.id]}>
@@ -228,7 +351,7 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
       </SettingsSection>
 
       <div className="flex items-center gap-1.5">
-        <button type="submit" disabled={!changed || !scriptsOk || !online || busy !== null || !name.trim()} className={primary}>
+        <button type="submit" disabled={!changed || !scriptsOk || !online || busy !== null || !name.trim() || "error" in iconChecked} className={primary}>
           {busy === "save" ? <span className="shimmer">Saving…</span> : "Save"}
         </button>
         {onDone && (

@@ -533,6 +533,51 @@ it or replaces its settings whole, and replies once the record is stored. Code:
 - **Auto-settle** (`auto_settle`): when the project's threads settle by themselves ("Settling").
 - Shares leave a project's settings and last pull out (a command can hold anything).
 
+## Identity
+
+Projects, machines and sandboxes are recognisable at a glance, the same everywhere they show: canvas
+cards and edges, the threads sidebar, ⌘K rows, the launcher, the conversation's breadcrumb, settings
+and the automations list. T3 Code's project icons (`ProjectFavicon.tsx`, `ProjectMonogram.tsx`,
+`projectIdentity.ts`, `ProjectFaviconResolver.ts`, `ProjectIcon*` in `packages/contracts/src/project.ts`
+there), with roll's own palette. Types: `agent-proto/src/identity.rs`; the dashboard's are
+`lib/agents-identity.ts` and `components/agents/identity.tsx`; the look is in agents-design.md,
+"Identity".
+
+- **A colour each** (`IdentityColor`: slate, violet, purple, pink, rose, teal, cyan, green). T3's
+  palette has orange, amber and yellow, which roll never uses, and blue, which on roll means busy:
+  none of those is in it. Unset, a project's colour is T3's hash of its repo (`owner/repo`), else
+  its name, so the same repo checked out on a laptop and in a sandbox (two projects) looks like one
+  on every device; a machine's is the hash of its id, so a rename keeps it.
+- **A project's icon** (`ProjectSettings.icon`): `auto` (its own logo, else its monogram on its
+  colour), `monogram` (with letters of its own: 1 to 3), `emoji`, or `file` (a picture in the
+  project, T3's `faviconPath`). `ProjectIcon::check` holds the rules (mirrored in
+  `checkProjectIcon`); `project.update` refuses what it refuses. A colour and an icon are project
+  settings, kept by the daemon, so every device agrees.
+- **A project's logo** (`Project.logo {path, url}`) is found by its daemon (`agent-host/src/logo.rs`,
+  T3's resolver): the `file` icon's picture, else the first of T3's well-known favicon, app icon
+  and logo paths (less `.icns`, which browsers can't show), else the icon `index.html` or a root
+  route links to. It rides in the project record as a `data:` URL rather than behind a command:
+  logos are small once bounded, every client and share needs them, and a record already syncs to
+  every device and survives the machine going offline. Bounds: each candidate is resolved inside
+  the project (a symlink out of it is never read) and must be a regular file; at most 1 MiB of a
+  source file and 2 MiB of a picture are read; an SVG goes as found, anything else is decoded with
+  limits and re-encoded as a PNG of at most 64 px; a URL over 48 KiB is skipped for the next
+  candidate. AVIF isn't decoded. It's looked for when the project is added, when its icon setting
+  changes, after a pull that moved it, and on each auto-pull round (hourly when auto-pull is off),
+  with a cache by path, size and mtime; the record is rewritten only when the logo changed.
+  Clients show it only in an `<img>` (an SVG's scripts never run) and accept only
+  `data:image/png` or `data:image/svg+xml` URLs.
+- **A machine's colour and kind** (`Machine.appearance {color?, kind?}`; laptop, desktop, server,
+  cloud, container) belong to the relay with its name (`PATCH …/machines/{machine}` `{name?, color?,
+  kind?}`, `null` clears one), not to its daemon: an offline laptop or a sleeping sandbox has no
+  daemon to ask, and the canvas shows it anyway. Unset, its kind comes from its OS (a sandbox is
+  cloud, a Mac a laptop, Windows a desktop, the rest servers). They're in the machine's settings
+  ("Machine": Colour, Kind) and change while it's offline.
+- **Never state.** Colour tells things apart; the accent still means busy, green done, red failed.
+  A card's border keeps its state; identity is the icon tile, a flat tint behind a machine's or
+  project's header, a stripe inside a thread's left edge, and the edge into a card (busy edges stay
+  accent).
+
 ## Settling
 
 Threads settle like T3 Code's (`ThreadSettlementService.ts`, the settle and snooze commands of
@@ -671,6 +716,8 @@ dashboard or desktop app already decides, or features roll doesn't have.
 | Diffs & PRs (layout, whitespace, colours, open in app), source control writing style, review guides | not applicable yet (roll code's review is its own) | — |
 | Browser, devices, SnapShots, scheduled tasks, environments, sharing, labs, maintenance, update checks | not applicable (no browser or device tools; sharing is `shares`; the CLI updates itself) | — |
 | Rename, remove, sandbox size/start/stop/delete, provider logins | in the machine's panel (still on its card) | machine |
+| Project icon (`projectIcon`: lucide, emoji, monogram) and `faviconPath` | colour, and icon: logo, monogram, emoji or a picture in the project ("Identity"); no lucide icons (the logo or monogram reads better at 14px) | project |
+| — (roll's own) | a machine's colour and kind ("Identity") | machine (on the relay) |
 
 **Search** is T3's `settingsSearch.ts` (`lib/settings-search.ts`): every word of the query in a
 row's title, section or search terms (accents and case ignored), the title ranked first; matching
@@ -822,7 +869,7 @@ The surface has three views:
   subagent (and the edge into it) and a booting sandbox carry a calm accent pulse (`--accent`,
   1.6 s loop, off with reduced motion); the machine and project above them, and anything waiting
   on you, keep still. Cards stay small: a thread's card is T3's thread row as a card
-  (`thread-status.tsx`): the project's monogram and name and the machine it runs on, T3's status
+  (`thread-status.tsx`): the project's icon and name and the machine it runs on ("Identity"), T3's status
   pill (pending approval, awaiting input, plan ready, working, connecting, failed, completed), the
   title and what it's doing, the PR and work item it's attached to, its worktree and running
   terminals, and what it cost; a run that finished since it was last opened turns its border

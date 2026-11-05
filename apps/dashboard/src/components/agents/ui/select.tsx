@@ -80,9 +80,10 @@ export function SelectPopup({
   );
 }
 
-export function SelectItem({ className, children, hint, ...props }: SelectPrimitive.Item.Props & { hint?: ReactNode }) {
+export function SelectItem({ className, children, hint, icon, ...props }: SelectPrimitive.Item.Props & { hint?: ReactNode; icon?: ReactNode }) {
   return (
     <SelectPrimitive.Item className={mergeClass(cn(itemRow, "data-selected:bg-fg/[0.06]"), className)} {...props}>
+      {icon}
       <SelectPrimitive.ItemText className="min-w-0 flex-1 truncate">{children}</SelectPrimitive.ItemText>
       {hint && <span className="shrink-0 text-[11.5px] text-subtle">{hint}</span>}
       <SelectPrimitive.ItemIndicator className="flex shrink-0">
@@ -100,6 +101,8 @@ export interface SelectOption<V extends string = string> {
   value: V;
   label: string;
   hint?: ReactNode;
+  /** Before the label in the list (a project's or machine's identity). */
+  icon?: ReactNode;
   disabled?: boolean;
 }
 
@@ -143,7 +146,7 @@ export function Select<V extends string>({
       </SelectTrigger>
       <SelectPopup className={popupClassName}>
         {options.map((o) => (
-          <SelectItem key={o.value} value={o.value} disabled={o.disabled} hint={o.hint}>
+          <SelectItem key={o.value} value={o.value} disabled={o.disabled} hint={o.hint} icon={o.icon}>
             {o.label}
           </SelectItem>
         ))}

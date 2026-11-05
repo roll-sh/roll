@@ -11,7 +11,7 @@
 
 import { AlarmClock, AlarmClockOff, Check, ChevronDown, ChevronRight, MoreHorizontal, PanelLeft, PanelLeftClose, Plus, Undo2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { MachineId, Thread } from "@/lib/agents-api";
+import type { Machine, MachineId, Thread } from "@/lib/agents-api";
 import {
   cantPark,
   inbox,
@@ -33,6 +33,7 @@ import { agentsSurface, setAgentsView } from "@/lib/agents-surface";
 import type { MenuItem as MenuEntry } from "./menu";
 import { Menu, MenuItem, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuShortcut, MenuSub, MenuSubPopup, MenuSubTrigger, MenuTrigger, Segmented } from "./ui";
 import { useAgents } from "./use-agents";
+import { MachineIcon, ProjectIcon } from "./identity";
 
 const OPEN_KEY = "roll:agents:sidebar";
 const SHELF_KEY = (shelf: "snoozed" | "settled") => `roll:agents:sidebar:${shelf}-expanded`;
@@ -322,7 +323,7 @@ export function ThreadsSidebar({ data, open, setOpen, phone, openThread }: { dat
               <ProjectGroup
                 key={g.project.id}
                 group={g}
-                machine={data.machines.get(g.machine)?.value.name}
+                machine={data.machines.get(g.machine)?.value}
                 collapsed={collapsed.has(g.project.id)}
                 onToggle={() => toggleProject(g.project.id)}
                 shelves={shelves}
@@ -357,7 +358,7 @@ function ProjectGroup({
   actions,
 }: {
   group: ProjectInbox;
-  machine: string | undefined;
+  machine: Machine | undefined;
   collapsed: boolean;
   onToggle: () => void;
   shelves: { snoozed: boolean; settled: boolean };
@@ -376,9 +377,14 @@ function ProjectGroup({
     <section className="mt-2" role="treeitem" aria-expanded={!collapsed} aria-label={group.project.name}>
       <div className="group/p flex h-7 items-center gap-1.5 rounded-md pr-1 pl-1.5 text-subtle">
         <button type="button" onClick={onToggle} className="flex min-w-0 flex-1 items-center gap-1.5 text-left hover:text-fg" aria-label={`${collapsed ? "Show" : "Hide"} ${group.project.name}`}>
-          <Monogram name={group.project.name} />
+          <ProjectIcon project={group.project} className="size-4" />
           <span className="truncate text-[12px] font-medium text-muted">{group.project.name}</span>
-          {machine && <span className="truncate text-[11px] text-subtle">{machine}</span>}
+          {machine && (
+            <span className="flex min-w-0 items-center gap-1 text-[11px] text-subtle" title={`On ${machine.name}`}>
+              <MachineIcon machine={machine} className="size-3" />
+              <span className="truncate">{machine.name}</span>
+            </span>
+          )}
           {collapsed ? <ChevronRight className="size-3 shrink-0" /> : <ChevronDown className="size-3 shrink-0 opacity-0 group-hover/p:opacity-100" />}
         </button>
         {onNew && (
@@ -421,15 +427,6 @@ function ShelfHeader({ label, count, open, onToggle }: { label: string; count: n
       <span className="font-medium">{label}</span>
       <span className="font-mono text-[10.5px]">{count}</span>
     </button>
-  );
-}
-
-/** T3's project monogram: the first letter on a quiet square. */
-function Monogram({ name }: { name: string }) {
-  return (
-    <span aria-hidden className="grid size-4 shrink-0 place-items-center rounded-[4px] border border-line-2 bg-panel text-[9.5px] font-semibold text-muted uppercase">
-      {name.trim().charAt(0) || "·"}
-    </span>
   );
 }
 

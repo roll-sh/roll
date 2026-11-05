@@ -30,10 +30,11 @@ import { Menu } from "./menu";
 import { useInboxMenu } from "./threads-sidebar";
 import { toFileDiff } from "./request-card";
 import { ShareButton } from "./share";
-import { MachineIcon, Stat, StatusDot, usageLine } from "./shared";
+import { Stat, StatusDot, usageLine } from "./shared";
+import { MachineIcon, ProjectIcon } from "./identity";
 import { TerminalView } from "./terminal";
 import { Select } from "./ui";
-import { orchestration, OrchestratorChip, ProjectMonogram, StatusPill, threadPill } from "./thread-status";
+import { orchestration, OrchestratorChip, StatusPill, threadPill } from "./thread-status";
 import { EmptyTranscript, RunView, type TranscriptActions } from "./transcript";
 import { useAgents, usePrefs } from "./use-agents";
 
@@ -353,7 +354,7 @@ function ContextStrip({ thread, machine, runs }: { thread: Thread; machine: Mach
     <div className="flex min-w-0 items-center gap-3 overflow-hidden px-2 pt-2 text-[11.5px] whitespace-nowrap text-subtle">
       {machine && (
         <span className="flex min-w-0 items-center gap-1" title={`On ${machine.name}`}>
-          <MachineIcon machine={machine} className="size-3 shrink-0" />
+          <MachineIcon machine={machine} className="size-3" />
           <span className="truncate">{machine.name}</span>
         </span>
       )}
@@ -435,7 +436,7 @@ function TitleBar({
         {/* T3's breadcrumb: the project, then the conversation (its switcher), then its status. */}
         {project && (
           <span className="flex max-w-40 min-w-0 shrink items-center gap-1.5 pl-1 text-[13px] text-muted @max-[26rem]/header:hidden" title={project.name}>
-            <ProjectMonogram name={project.name} className="size-3.5" />
+            <ProjectIcon project={project} className="size-3.5" />
             <span className="truncate">{project.name}</span>
             <ChevronRight className="size-3.5 shrink-0 text-faint" aria-hidden />
           </span>

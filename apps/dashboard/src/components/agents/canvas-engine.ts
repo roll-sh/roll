@@ -39,6 +39,8 @@ export interface SceneEdge {
   dashed: boolean;
   /** `right` when absent. */
   route?: EdgeRoute;
+  /** A colour token (`--id-teal`): the project's or machine's colour it's drawn in when it isn't busy. */
+  tint?: string;
 }
 
 export interface EngineOptions {
@@ -93,6 +95,8 @@ export class CanvasEngine {
   private accent: RGB = [76, 141, 255];
   /** The canvas itself: what a port's centre is punched out with. */
   private ground: RGB = [13, 14, 16];
+  /** Identity tokens resolved once per theme (`refreshColors` clears them). */
+  private tints = new Map<string, RGB>();
   /** Dots are fainter on a light canvas (dark ink on white reads stronger). */
   private dotAlpha = 0.16;
 
@@ -195,6 +199,15 @@ export class CanvasEngine {
     this.kick();
   }
 
+  private tint(token: string): RGB {
+    let rgb = this.tints.get(token);
+    if (!rgb) {
+      rgb = resolveColor(cssVar(this.container, token, "#2e3035"));
+      this.tints.set(token, rgb);
+    }
+    return rgb;
+  }
+
   /** Re-read the theme's colours (call after a light/dark switch). */
   refreshColors() {
     // Opaque tokens (resolveColor drops alpha): --dot, --edge, --canvas; docs/code/agents-design.md.
@@ -203,6 +216,7 @@ export class CanvasEngine {
     this.line = resolveColor(cssVar(c, "--edge", "#2e3035"));
     this.accent = resolveColor(cssVar(c, "--accent", "#4c8dff"));
     this.ground = resolveColor(cssVar(c, "--canvas", "#0d0e10"));
+    this.tints.clear();
     const lum = (0.2126 * this.ground[0] + 0.7152 * this.ground[1] + 0.0722 * this.ground[2]) / 255;
     this.dotAlpha = lum > 0.5 ? 0.26 : 0.24;
     this.kick();
@@ -558,7 +572,8 @@ export class CanvasEngine {
       const path = edgePath(e.route ?? "right", { ...a, ...sa }, { ...b, ...sb }, scr, k);
       const p0 = path.start;
       const p3 = path.end;
-      const stroke = e.busy ? rgba(this.accent, 0.5) : rgba(this.line, 1);
+      // Busy is the accent; otherwise the edge carries its project's (or machine's) colour, quietly.
+      const stroke = e.busy ? rgba(this.accent, 0.5) : e.tint ? rgba(this.tint(e.tint), 0.42) : rgba(this.line, 1);
       ctx.setLineDash(e.dashed ? [3, 4] : []);
       ctx.lineWidth = 1.25;
       ctx.strokeStyle = stroke;

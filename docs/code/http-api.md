@@ -564,7 +564,12 @@ POST /v1/code/agents/{owner}/login/deny {user_code} → 204
 GET    /v1/code/agents/{owner}/machines → [Machine]   oldest first; owner's tokens (agents too), else 404
 POST   /v1/code/agents/{owner}/machines {name?} → 201 {machine: Machine, token /* rlm_…, shown once */}
        ("Add machine", sandboxes); 422 past 200 machines
-PATCH  /v1/code/agents/{owner}/machines/{machine} {name} → Machine
+PATCH  /v1/code/agents/{owner}/machines/{machine} {name?, color?, kind?} → Machine
+       renames it or changes how it shows (Machine.appearance): at least one key, each one there
+       changes that field; `color` is an IdentityColor (slate | violet | purple | pink | rose |
+       teal | cyan | green), `kind` a MachineKind (laptop | desktop | server | cloud | container),
+       `null` clears either (the dashboard then makes a colour from the id, a kind from the OS);
+       none of the three, an empty name or an unknown colour or kind → 400
 DELETE /v1/code/agents/{owner}/machines/{machine} → 204: the token stops working, the live link closes now
        (close code 4401), the machine's mirrored records are dropped, and streams get machine_removed.
        POST, PATCH and DELETE need Code::manages: 401 anonymous, 403 agent tokens and other owners.

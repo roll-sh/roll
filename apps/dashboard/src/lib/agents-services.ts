@@ -15,6 +15,7 @@ import {
   type AgentsApi,
   type Machine,
   type MachineId,
+  type MachineStyle,
   type NewRepoProject,
   type Reply,
   type SavedCanvas,
@@ -44,9 +45,11 @@ export interface OwnerDoc {
 
 export interface AgentsServices {
   sandboxes: Pick<SandboxesApi, "list" | "create" | "start" | "stop" | "remove" | "usage">;
-  /** Renaming and removing (revoking) a machine: the owner's, from its settings. */
+  /** Renaming, colouring and removing (revoking) a machine: the owner's, from its settings. */
   machines: {
     rename(owner: string, machine: MachineId, name: string): Promise<Machine>;
+    /** Its colour and kind, kept by the relay with its name (`null` clears one). */
+    style(owner: string, machine: MachineId, style: MachineStyle): Promise<Machine>;
     remove(owner: string, machine: MachineId): Promise<void>;
   };
   /** The owner's roll code repos, most recently updated first. */
@@ -152,7 +155,7 @@ export function httpServices(
     createProject: api.createProject,
     takeWork: api.takeWork,
     releaseWork: api.releaseWork,
-    machines: { rename: api.renameMachine, remove: api.removeMachine },
+    machines: { rename: api.renameMachine, style: api.styleMachine, remove: api.removeMachine },
     canvas: httpCanvas(api),
     settings: httpSettings(api),
     automations: api.automations,

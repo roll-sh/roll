@@ -190,6 +190,11 @@
             "auto_settle": {
               "after_days": null,
               "on_land": false
+            },
+            "color": "teal",
+            "icon": {
+              "kind": "file",
+              "path": "public/logo.svg"
             }
           },
           "pull": {
@@ -201,6 +206,10 @@
               "to": "f35f34cf",
               "commits": 3
             }
+          },
+          "logo": {
+            "path": "public/logo.svg",
+            "url": "data:image/svg+xml;base64,PHN2Zy8+"
           },
           "created_at": 1762000000000,
           "updated_at": 1762000000000

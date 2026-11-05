@@ -41,7 +41,7 @@ pub fn routes() -> Router<Arc<Code>> {
         .route("/v1/code/agents/{owner}/login/deny", post(deny))
         .route("/v1/code/agents/{owner}/login/{user_code}", get(pending_login))
         .route("/v1/code/agents/{owner}/machines", get(list_machines).post(add_machine))
-        .route("/v1/code/agents/{owner}/machines/{machine}", patch(rename_machine).delete(revoke_machine))
+        .route("/v1/code/agents/{owner}/machines/{machine}", patch(update_machine).delete(revoke_machine))
         .route("/v1/code/agents/{owner}/machines/{machine}/commands", post(command))
         .route("/v1/code/agents/{owner}/machines/{machine}/projects", post(create_project))
         .route("/v1/code/agents/{owner}/threads/{thread}/work", post(take_work).delete(drop_work))
@@ -102,6 +102,24 @@ pub(crate) fn machine_name(v: Option<&Value>, default: &str) -> Result<String> {
         return Err(Error::Invalid("name can't be empty".into()));
     }
     Ok(name)
+}
+
+/// A `PATCH …/machines/{machine}` body: each key that is there changes that field.
+fn machine_patch(b: &Value) -> Result<store::MachinePatch> {
+    let o = b.as_object().ok_or_else(|| Error::Invalid("the body is an object".into()))?;
+    if !["name", "color", "kind"].iter().any(|k| o.contains_key(*k)) {
+        return Err(Error::Invalid("say what to change: name, color or kind".into()));
+    }
+    fn field<T: serde::de::DeserializeOwned>(o: &serde_json::Map<String, Value>, k: &str) -> Result<Option<Option<T>>> {
+        o.get(k)
+            .map(|v| serde_json::from_value(v.clone()).map_err(|_| Error::Invalid(format!("{k} {v} isn't one roll knows"))))
+            .transpose()
+    }
+    Ok(store::MachinePatch {
+        name: o.get("name").map(|v| machine_name(Some(v).filter(|v| !v.is_null()), "")).transpose()?,
+        color: field(o, "color")?,
+        kind: field(o, "kind")?,
+    })
 }
 
 pub(super) fn random_hex(bytes: usize) -> String {
@@ -244,12 +262,14 @@ async fn add_machine(State(code): S, caller: Caller, Path(owner): Path<String>, 
     }
 }
 
-async fn rename_machine(State(code): S, caller: Caller, Path((owner, machine)): Path<(String, String)>, Body(b): Body) -> Result<Json<agent_proto::Machine>> {
+/// Rename a machine or change its colour and kind: `{name?, color?, kind?}`, at least one; a
+/// `null` colour or kind clears it (back to the one made from its id and OS).
+async fn update_machine(State(code): S, caller: Caller, Path((owner, machine)): Path<(String, String)>, Body(b): Body) -> Result<Json<agent_proto::Machine>> {
     let o = manageable(&code, &caller, &owner)?;
-    let name = machine_name(Some(b.get("name").unwrap_or(&Value::Null)).filter(|v| !v.is_null()), "")?;
+    let patch = machine_patch(&b)?;
     let hub = code.agents.hub(&o.id);
     let _order = hub.order.lock().await;
-    let m = store::rename_machine(code.db.sql(), &o.id, &machine, &name)?.ok_or_else(|| Error::NotFound(format!("machine {machine}")))?;
+    let m = store::update_machine(code.db.sql(), &o.id, &machine, &patch)?.ok_or_else(|| Error::NotFound(format!("machine {machine}")))?;
     code.publish_machine(&m);
     Ok(Json(code.machine_json(&m)))
 }

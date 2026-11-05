@@ -2,10 +2,9 @@
 
 /**
  * A thread's status as T3 Code shows it on its rows (T3's `Sidebar.logic.ts`
- * `resolveThreadStatusPill` and `ThreadStatusIndicators.tsx`, MIT), and the project's monogram
- * (T3's `ProjectMonogram.tsx` / `projectIdentity.ts`). In roll's colours: what needs you and what
- * runs are accent, done is green, failed is red; the monogram is monochrome (T3 tints it from a
- * palette with orange in it).
+ * `resolveThreadStatusPill` and `ThreadStatusIndicators.tsx`, MIT). In roll's colours: what needs
+ * you and what runs are accent, done is green, failed is red. A project's monogram and colour are
+ * in `identity.tsx`.
  */
 
 import { Workflow } from "lucide-react";
@@ -95,42 +94,6 @@ export function StatusPill({ pill, className = "" }: { pill: ThreadPill; classNa
     <span role="img" aria-label={pill.label} title={pill.label} className={`inline-flex shrink-0 items-center gap-1 text-[10.5px] font-medium ${toneText[pill.tone]} ${className}`}>
       <span aria-hidden className={`size-1.5 rounded-full ${toneDot[pill.tone]} ${pill.pulse ? "pulse-dot" : ""}`} />
       <span aria-hidden>{pill.label}</span>
-    </span>
-  );
-}
-
-/** T3's monogram: the first letter and the first digit (or the last word's first letter), two at most. */
-export function monogram(name: string): string {
-  const words = name.normalize("NFKC").trim().match(/[\p{L}\p{N}]+/gu) ?? [];
-  const first = words[0];
-  if (!first) return "PR";
-  const glyphs = Array.from(first);
-  const a = glyphs[0] ?? "P";
-  const b = glyphs.slice(1).find((g) => /\p{N}/u.test(g)) ?? (words.length > 1 ? Array.from(words.at(-1) ?? "")[0] : glyphs.at(-1)) ?? a;
-  return Array.from(`${a}${b}`.toUpperCase()).slice(0, 2).join("");
-}
-
-/** A project's tile: its monogram in a rounded square (T3's `ProjectMonogram`), monochrome. */
-export function ProjectMonogram({ name, className = "size-4" }: { name: string; className?: string }) {
-  const text = monogram(name);
-  return (
-    <span aria-hidden className={`inline-flex shrink-0 items-center justify-center ${className}`}>
-      <svg viewBox="0 0 16 16" className="size-full overflow-hidden rounded-[25%] text-muted select-none" style={{ backgroundColor: "color-mix(in srgb, currentColor 16%, transparent)" }}>
-        <text
-          x="8"
-          y="10.8"
-          textAnchor="middle"
-          fill="currentColor"
-          className="font-mono"
-          fontSize="8.25"
-          fontWeight="700"
-          textLength={Array.from(text).length === 1 ? 6 : 12}
-          lengthAdjust="spacingAndGlyphs"
-          textRendering="geometricPrecision"
-        >
-          {text}
-        </text>
-      </svg>
     </span>
   );
 }

@@ -83,7 +83,7 @@ describe("ConnectAgents", () => {
   });
 
   it("builds the CLI lines", () => {
-    const m = { machine: { id: "mch_1", name: "b", online: false, info: null, sandbox: null, created_at: 0, last_seen: null }, token: "rlm_0123456789" };
+    const m = { machine: { id: "mch_1", name: "b", online: false, info: null, sandbox: null, appearance: {}, created_at: 0, last_seen: null }, token: "rlm_0123456789" };
     expect(tokenLogin(m, false, "https://api.roll.sh/")).toBe("roll agent login --api https://api.roll.sh --machine-token rlm_0123456789\nroll agent up");
     expect(tokenLogin(m, true, "http://127.0.0.1:7070")).toBe("roll agent login --machine-token rlm_0123…\nroll agent up");
     expect(apiFlag("/api")).toBe("");

@@ -2,7 +2,7 @@
 //! and each owner's cursor. Every read-then-write is one `write` closure that only touches the
 //! database; ids, tokens and codes are made before it (closures may re-run on Postgres).
 
-use agent_proto::{DeviceLogin, Entity, LoginPoll, MachineId, MachineInfo, Mirrored, Scope, Stamped};
+use agent_proto::{DeviceLogin, Entity, IdentityColor, LoginPoll, MachineAppearance, MachineId, MachineInfo, MachineKind, Mirrored, Scope, Stamped};
 use code_sql::{Conn, OptionalExtension, Row, params};
 use std::collections::HashMap;
 
@@ -25,7 +25,9 @@ CREATE TABLE IF NOT EXISTS agent_machines (
     -- The machine's mirrored records and their size (characters of JSON), against the quota;
     -- counted again from agent_entities at every hello.
     records INTEGER NOT NULL DEFAULT 0,
-    size INTEGER NOT NULL DEFAULT 0
+    size INTEGER NOT NULL DEFAULT 0,
+    -- MachineAppearance JSON (its colour and kind, as its owner set them); NULL: unset.
+    appearance TEXT
 );
 CREATE INDEX IF NOT EXISTS agent_machines_owner ON agent_machines (owner_id, cursor);
 CREATE TABLE IF NOT EXISTS agent_logins (
@@ -125,9 +127,11 @@ pub struct MachineRow {
     pub cursor: u64,
     /// Set for a roll-hosted sandbox (`sandbox::store` keeps it in step).
     pub sandbox: Option<agent_proto::SandboxInfo>,
+    /// Its colour and kind, as its owner set them.
+    pub appearance: MachineAppearance,
 }
 
-const MACHINE_COLS: &str = "id, owner_id, name, info, created_at, last_seen, revoked_at, seq, cursor, sandbox";
+const MACHINE_COLS: &str = "id, owner_id, name, info, created_at, last_seen, revoked_at, seq, cursor, sandbox, appearance";
 
 fn machine_row(r: &Row<'_>) -> code_sql::Result<MachineRow> {
     Ok(MachineRow {
@@ -141,6 +145,7 @@ fn machine_row(r: &Row<'_>) -> code_sql::Result<MachineRow> {
         seq: r.get::<_, i64>(7)?.max(0) as u64,
         cursor: r.get::<_, i64>(8)?.max(0) as u64,
         sandbox: r.get::<_, Option<String>>(9)?.and_then(|s| serde_json::from_str(&s).ok()),
+        appearance: r.get::<_, Option<String>>(10)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
     })
 }
 
@@ -199,7 +204,7 @@ pub(crate) fn insert_machine(c: &Conn<'_>, id: &str, owner_id: &str, name: &str,
         "INSERT INTO agent_machines (id, owner_id, name, token_hash, created_at, cursor) VALUES (?, ?, ?, ?, ?, ?)",
         params![id, owner_id, name, token_hash, now, cursor as i64],
     )?;
-    let row = MachineRow { id: id.into(), owner_id: owner_id.into(), name: name.into(), info: None, created_at: now, last_seen: None, revoked: false, seq: 0, cursor, sandbox: None };
+    let row = MachineRow { id: id.into(), owner_id: owner_id.into(), name: name.into(), info: None, created_at: now, last_seen: None, revoked: false, seq: 0, cursor, sandbox: None, appearance: MachineAppearance::default() };
     Ok(Some(row))
 }
 
@@ -208,14 +213,37 @@ pub fn add_machine(db: &code_sql::Db, id: &str, owner_id: &str, name: &str, toke
     db.write(|c| insert_machine(c, id, owner_id, name, token_hash, now))
 }
 
-/// Rename a machine: its new cursor, or `None` if the owner has no such live machine.
-pub fn rename_machine(db: &code_sql::Db, owner_id: &str, id: &str, name: &str) -> code_sql::Result<Option<MachineRow>> {
+/// A change to a machine's record by its owner: each field `None` leaves it as it is; inside
+/// `color` and `kind`, `Some(None)` clears it.
+#[derive(Clone, Debug, Default)]
+pub struct MachinePatch {
+    pub name: Option<String>,
+    pub color: Option<Option<IdentityColor>>,
+    pub kind: Option<Option<MachineKind>>,
+}
+
+/// Rename a machine or change how it shows, under one new cursor: the machine as it is now, or
+/// `None` if the owner has no such live machine.
+pub fn update_machine(db: &code_sql::Db, owner_id: &str, id: &str, patch: &MachinePatch) -> code_sql::Result<Option<MachineRow>> {
     db.write(|c| {
-        if !live(c, owner_id, id)? {
+        let Some(mut m) = machine_on(c, id)?.filter(|m| m.owner_id == owner_id && !m.revoked) else {
             return Ok(None);
+        };
+        if let Some(name) = &patch.name {
+            m.name = name.clone();
         }
+        if let Some(color) = patch.color {
+            m.appearance.color = color;
+        }
+        if let Some(kind) = patch.kind {
+            m.appearance.kind = kind;
+        }
+        let appearance = (!m.appearance.is_empty()).then(|| serde_json::to_string(&m.appearance).unwrap_or_default());
         let cursor = take_cursors(c, owner_id, 1)?;
-        c.execute("UPDATE agent_machines SET name = ?, cursor = ? WHERE id = ?", params![name, cursor as i64, id])?;
+        c.execute(
+            "UPDATE agent_machines SET name = ?, appearance = ?, cursor = ? WHERE id = ?",
+            params![m.name, appearance, cursor as i64, id],
+        )?;
         c.query_row(&format!("SELECT {MACHINE_COLS} FROM agent_machines WHERE id = ?"), [id], machine_row).optional()
     })
 }

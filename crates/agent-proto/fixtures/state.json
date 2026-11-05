@@ -150,6 +150,10 @@
           "status": "running",
           "hourly_cents": 3
         },
+        "appearance": {
+          "color": "violet",
+          "kind": "cloud"
+        },
         "created_at": 1762000000000,
         "last_seen": 1762000000000
       },
@@ -301,6 +305,10 @@
           "status": "stopped",
           "hourly_cents": 3,
           "stopped_reason": "idle"
+        },
+        "appearance": {
+          "color": "violet",
+          "kind": "cloud"
         },
         "created_at": 1762000000000,
         "last_seen": 1762000000000
@@ -454,6 +462,10 @@
           "hourly_cents": 3,
           "stopped_reason": "owner"
         },
+        "appearance": {
+          "color": "violet",
+          "kind": "cloud"
+        },
         "created_at": 1762000000000,
         "last_seen": 1762000000000
       },
@@ -605,6 +617,10 @@
           "status": "starting",
           "hourly_cents": 3
         },
+        "appearance": {
+          "color": "violet",
+          "kind": "cloud"
+        },
         "created_at": 1762000000000,
         "last_seen": 1762000000000
       }
@@ -657,6 +673,11 @@
             "auto_settle": {
               "after_days": null,
               "on_land": false
+            },
+            "color": "teal",
+            "icon": {
+              "kind": "file",
+              "path": "public/logo.svg"
             }
           },
           "pull": {
@@ -668,6 +689,10 @@
               "to": "f35f34cf",
               "commits": 3
             }
+          },
+          "logo": {
+            "path": "public/logo.svg",
+            "url": "data:image/svg+xml;base64,PHN2Zy8+"
           },
           "created_at": 1762000000000,
           "updated_at": 1762000000000

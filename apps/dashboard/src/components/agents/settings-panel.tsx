@@ -1,7 +1,7 @@
 "use client";
 
-import { Folder } from "lucide-react";
 import type { Machine, Project } from "@/lib/agents-api";
+import { ProjectIcon } from "./identity";
 import { MachineSettingsPanel } from "./machine-settings";
 import { OwnerSettingsPanel } from "./owner-settings-panel";
 import { ProjectSettingsForm } from "./project-settings";
@@ -30,7 +30,7 @@ export function SettingsPanel({ target, onClose }: { target: string; onClose: ()
     if (!r) return <Gone onClose={onClose} />;
     const machine = data.machines.get(r.machine)?.value;
     return (
-      <SettingsPage icon={<Folder className="size-4 text-muted" />} title={r.value.name} subtitle="Project settings" onClose={onClose} items={[]} search={false}>
+      <SettingsPage icon={<ProjectIcon project={r.value} className="size-4" />} title={r.value.name} subtitle="Project settings" onClose={onClose} items={[]} search={false}>
         <ProjectOverview project={r.value} machine={machine} />
         <ProjectSettingsForm project={r.value} machine={machine} />
       </SettingsPage>

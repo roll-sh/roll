@@ -29,7 +29,9 @@ import { setAgentsView } from "@/lib/agents-surface";
 import { ModelPicker, ProviderGlyph } from "./model-picker";
 import { SandboxPanel } from "./sandbox";
 import { field, Note, SaveState, SettingRow, SettingsPage, SettingsSection, TextField, useSearching, useShown, type Setting } from "./settings-ui";
-import { loginCommand, MachineIcon } from "./shared";
+import { loginCommand } from "./shared";
+import { ColorPicker, KindPicker, MachineIcon } from "./identity";
+import { machineColor, machineKind } from "@/lib/agents-identity";
 import { cn, Segmented, Select, Switch } from "./ui";
 import { useAgents } from "./use-agents";
 
@@ -42,6 +44,14 @@ const HOME_VAR: Record<string, string> = { codex: "CODEX_HOME", claude: "CLAUDE_
 
 const S = {
   name: { id: "machine.name", title: "Name", section: "Machine", description: "How the machine is called on the canvas and in roll.", terms: ["rename"] },
+  color: {
+    id: "machine.color",
+    title: "Colour",
+    section: "Machine",
+    description: "Its card, edges and icon carry it everywhere. Auto is made from the machine, the same on every device.",
+    terms: ["color", "colour", "tint", "identity"],
+  },
+  kind: { id: "machine.kind", title: "Kind", section: "Machine", description: "Its icon. Auto: a sandbox is cloud, a Mac a laptop, Windows a desktop, the rest servers.", terms: ["icon", "laptop", "desktop", "server", "cloud", "container", "identity"] },
   system: { id: "machine.system", title: "System", section: "Machine", terms: ["status", "online", "os", "version", "roll agent", "daemon", "config.toml"] },
   remove: {
     id: "machine.remove",
@@ -94,6 +104,8 @@ function items(config: MachineConfig | null, sandbox: boolean): Setting[] {
   const providers = config?.providers ?? [];
   return [
     S.name,
+    S.color,
+    S.kind,
     S.system,
     ...(sandbox ? [S.sandbox] : [S.remove]),
     S.credentials,
@@ -110,6 +122,34 @@ function items(config: MachineConfig | null, sandbox: boolean): Setting[] {
     S.maxDepth,
     S.maxChildren,
   ];
+}
+
+/**
+ * Its colour and kind: the relay keeps them with its name, so they change while it's offline or
+ * asleep too, and every device shows them at once.
+ */
+function AppearanceRows({ machine, onError }: { machine: Machine; onError: (e: string | null) => void }) {
+  const { services, owner } = useAgents();
+  const style = async (s: Parameters<NonNullable<typeof services>["machines"]["style"]>[2]) => {
+    if (!services) return;
+    onError(null);
+    await services.machines.style(owner, machine.id, s).catch((e: unknown) => onError(e instanceof Error ? e.message : String(e)));
+  };
+  const auto = { ...machine, appearance: {} };
+  return (
+    <>
+      <SettingRow s={S.color}>
+        <div className="mt-2.5">
+          <ColorPicker value={machine.appearance.color} auto={machineColor(auto)} onChange={(c) => style({ color: c ?? null })} />
+        </div>
+      </SettingRow>
+      <SettingRow s={S.kind}>
+        <div className="mt-2.5">
+          <KindPicker value={machine.appearance.kind} auto={machineKind(auto)} color={machineColor(machine)} onChange={(k) => style({ kind: k ?? null })} />
+        </div>
+      </SettingRow>
+    </>
+  );
 }
 
 const PULL_EVERY = [60, 300, 900, 3600, 0];
@@ -159,9 +199,9 @@ export function MachineSettingsPanel({ machine, onClose }: { machine: Machine; o
   const all = useMemo(() => items(config, !!machine.sandbox), [config, machine.sandbox]);
   const ctx: Ctx = { machine, config, set, editable, save };
   return (
-    <SettingsPage icon={<MachineIcon machine={machine} className="size-4 text-muted" />} title={machine.name} subtitle="Machine settings" onClose={onClose} items={all}>
+    <SettingsPage icon={<MachineIcon machine={machine} tile className="size-5" />} title={machine.name} subtitle="Machine settings" onClose={onClose} items={all}>
       <SaveState saving={saving} error={error} offline={offline} />
-      <SettingsSection title="Machine" ids={[S.name.id, S.system.id, S.remove.id]}>
+      <SettingsSection title="Machine" ids={[S.name.id, S.color.id, S.kind.id, S.system.id, S.remove.id]}>
         <SettingRow
           s={S.name}
           control={
@@ -177,6 +217,7 @@ export function MachineSettingsPanel({ machine, onClose }: { machine: Machine; o
             />
           }
         />
+        <AppearanceRows machine={machine} onError={setError} />
         <SystemRow machine={machine} config={config} />
         {!machine.sandbox && <RemoveRow machine={machine} onError={setError} onRemoved={onClose} />}
       </SettingsSection>

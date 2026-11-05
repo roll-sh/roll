@@ -1,7 +1,7 @@
 "use client";
 
-import { Bot, Cloud, Laptop, Server } from "lucide-react";
-import type { DiffStat, Machine, ProviderInfo, RunStatus, ThreadStatus, Usage } from "@/lib/agents-api";
+import { Bot } from "lucide-react";
+import type { DiffStat, ProviderInfo, RunStatus, ThreadStatus, Usage } from "@/lib/agents-api";
 
 /** 12.3k, 1.2M. */
 export function compact(n: number) {
@@ -59,12 +59,6 @@ export function StatusDot({ status, className = "" }: { status: ThreadStatus | "
             ? "bg-subtle/60"
             : "bg-subtle";
   return <span aria-hidden className={`inline-block size-1.5 shrink-0 rounded-full ${cls} ${className}`} />;
-}
-
-export function MachineIcon({ machine, className = "size-4" }: { machine: Machine; className?: string }) {
-  if (machine.sandbox) return <Cloud className={className} />;
-  const os = machine.info?.os ?? "";
-  return os === "macos" || os === "windows" ? <Laptop className={className} /> : <Server className={className} />;
 }
 
 export function providerName(providers: readonly ProviderInfo[], id: string) {

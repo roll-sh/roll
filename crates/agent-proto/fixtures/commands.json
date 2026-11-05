@@ -24,6 +24,37 @@
     }
   },
   {
+    "type": "project.update",
+    "project": "prj_1234567890abcdef",
+    "settings": {
+      "auto_pull": false,
+      "auto_settle": {
+        "after_days": 3,
+        "on_land": true
+      },
+      "color": "rose",
+      "icon": {
+        "kind": "emoji",
+        "emoji": "🦀"
+      }
+    }
+  },
+  {
+    "type": "project.update",
+    "project": "prj_1234567890abcdef",
+    "settings": {
+      "auto_pull": false,
+      "auto_settle": {
+        "after_days": 3,
+        "on_land": true
+      },
+      "icon": {
+        "kind": "monogram",
+        "text": "RO"
+      }
+    }
+  },
+  {
     "type": "project.pull",
     "project": "prj_1234567890abcdef"
   },

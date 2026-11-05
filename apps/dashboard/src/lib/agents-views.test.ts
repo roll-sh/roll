@@ -226,7 +226,7 @@ describe("what a view shows", () => {
     expect(v.nodes.has("x:trm_1")).toBe(false);
     expect(v.nodes.get("p:prj_1")!.children).toContain("px:trm_1");
     expect(v.nodes.has("pc:thr_gone")).toBe(false);
-    expect(v.edges).toContainEqual({ from: "t:thr_3", to: "pc:thr_3", busy: false, dashed: false });
+    expect(v.edges).toContainEqual(expect.objectContaining({ from: "t:thr_3", to: "pc:thr_3", busy: false, dashed: false }));
 
     // Laid out with their own sizes: no two cards overlap.
     const size = (k: string): Size => {

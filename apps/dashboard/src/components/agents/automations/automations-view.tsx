@@ -14,6 +14,8 @@ import type { Automation, AutomationRun, RunState } from "@/lib/automations-api"
 import { TEMPLATES, type AutomationTemplate, type TemplateContext } from "@/lib/automation-templates";
 import { setAgentsView, type AutomationsView as View } from "@/lib/agents-surface";
 import { duration, lastRunOf, runLabel, specOf, took, triggerSummary, weekOf } from "@/lib/automations-ui";
+import { automationPlaces } from "@/lib/agents-identity";
+import { MachineIcon, ProjectIcon } from "../identity";
 import { Menu } from "../menu";
 import { integrationOf } from "../brand-icons";
 import { ago } from "../shared";
@@ -152,6 +154,35 @@ function List({ automations, runs, selected }: { automations: Automation[]; runs
   );
 }
 
+/** The projects and machines an automation works in, as the canvas shows them (a quiet stack after its name). */
+function Places({ automation }: { automation: Automation }) {
+  const { client } = useAgents();
+  const data = client.data;
+  const { projects, machines } = useMemo(
+    () =>
+      automationPlaces(
+        automation,
+        [...data.projects.values()].map((r) => ({ ...r.value, machine: r.machine })),
+        [...data.machines.values()].map((r) => r.value),
+      ),
+    [automation, data.projects, data.machines],
+  );
+  if (!projects.length && !machines.length) return null;
+  const names = [...projects.map((p) => p.name), ...machines.map((m) => m.name)];
+  const shown = 3;
+  return (
+    <span role="img" aria-label={`In ${names.join(", ")}`} title={names.join(" · ")} className="flex shrink-0 items-center gap-1">
+      {projects.slice(0, shown).map((p) => (
+        <ProjectIcon key={p.id} project={p} className="size-3.5" />
+      ))}
+      {machines.slice(0, Math.max(0, shown - projects.length)).map((m) => (
+        <MachineIcon key={m.id} machine={m} className="size-3.5" />
+      ))}
+      {names.length > shown && <span className="font-mono text-[10.5px] text-subtle tabular-nums">+{names.length - shown}</span>}
+    </span>
+  );
+}
+
 function Row({ automation: x, runs, selected, now }: { automation: Automation; runs: ReadonlyMap<string, AutomationRun>; selected: boolean; now: number }) {
   const { store, catalog } = useAutomations();
   const [busy, setBusy] = useState(false);
@@ -224,7 +255,10 @@ function Row({ automation: x, runs, selected, now }: { automation: Automation; r
           {last && <RunDot status={last.status} className="absolute -top-0.5 -right-0.5 ring-2 ring-panel @2xl:hidden" />}
         </span>
         <span className={cn("min-w-0 flex-1 transition-opacity", !x.enabled && "opacity-64")}>
-          <span className="block truncate text-[13.5px] font-[510] tracking-[-0.01em]">{x.name}</span>
+          <span className="flex min-w-0 items-center gap-2">
+            <span className="truncate text-[13.5px] font-[510] tracking-[-0.01em]">{x.name}</span>
+            <Places automation={x} />
+          </span>
           <span className="mt-px block truncate text-[12px] text-subtle">
             {when}
             {error && <span className="ml-2 text-danger">{error}</span>}

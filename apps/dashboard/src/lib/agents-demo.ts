@@ -5,6 +5,8 @@
  * screenshots and the marketing page; never talks to the network.
  */
 
+import { avatarSvg } from "@roll/brand/geometry";
+import { checkProjectIcon } from "./agents-identity";
 import type {
   PullOutcome,
   PullResult,
@@ -882,7 +884,7 @@ export class DemoOwner implements AgentsTransport {
           const name = req.name?.trim() || `sandbox-${owner.sandboxes.size + 1}`;
           const s: Sandbox = { id: sid, name, machine: mid, backend: "agent37", size, status: "creating", desired: "running", stopped_reason: null, error: null, created_at: now(), updated_at: now(), last_active_at: now() };
           owner.sandboxes.set(sid, s);
-          owner.machines.set(mid, { id: mid, name, online: false, info: null, sandbox: null, created_at: now(), last_seen: null });
+          owner.machines.set(mid, { id: mid, name, online: false, info: null, sandbox: null, appearance: {}, created_at: now(), last_seen: null });
           owner.sandboxMachine(s, {});
           const keys = new Set(Object.keys(req.env ?? {}));
           // It boots for a few seconds, then connects like any machine.
@@ -976,6 +978,17 @@ export class DemoOwner implements AgentsTransport {
           owner.emit({ type: "machine", cursor: ++owner.cursor, machine: next });
           return next;
         },
+        async style(_o, mid, style) {
+          const m = owner.machines.get(mid);
+          if (!m) throw new ApiError("no such machine", 404, null);
+          const appearance = { ...m.appearance };
+          if (style.color !== undefined) appearance.color = style.color ?? undefined;
+          if (style.kind !== undefined) appearance.kind = style.kind ?? undefined;
+          const next = { ...m, appearance };
+          owner.machines.set(mid, next);
+          owner.emit({ type: "machine", cursor: ++owner.cursor, machine: next });
+          return next;
+        },
         async remove(_o, mid) {
           if (!owner.machines.delete(mid)) throw new ApiError("no such machine", 404, null);
           owner.emit({ type: "machine_removed", cursor: ++owner.cursor, machine: mid });
@@ -1007,6 +1020,8 @@ export class DemoOwner implements AgentsTransport {
       online: true,
       info: { hostname: "ada-mbp", os: "macos", arch: "aarch64", version: "0.1.0", home: "/Users/ada", ...this.catalog(MBP, "/Users/ada", [claude(), codex(), gemini], { claude: ["ANTHROPIC_API_KEY"] }) },
       sandbox: null,
+      // Picked in its settings (the rest of the demo shows colours made from the record).
+      appearance: { color: "slate" },
       created_at: t0,
       last_seen: now(),
     });
@@ -1016,6 +1031,7 @@ export class DemoOwner implements AgentsTransport {
       online: true,
       info: { hostname: "build-box", os: "linux", arch: "x86_64", version: "0.1.0", home: "/home/roll", ...this.catalog(BOX, "/home/roll", [codex(), claude("missing")]) },
       sandbox: { backend: "agent37", size: "standard", status: "running", hourly_cents: 3 },
+      appearance: {},
       created_at: t0,
       last_seen: now(),
     });
@@ -1044,6 +1060,7 @@ export class DemoOwner implements AgentsTransport {
       git: { branch, head: "f35f34cf", remote: repo ? `https://roll.sh/acme/${repo}.git` : null, dirty },
       settings: { ...NO_SETTINGS },
       pull: null,
+      logo: null,
       created_at: t0,
       updated_at: t0,
       ...over,
@@ -1060,6 +1077,8 @@ export class DemoOwner implements AgentsTransport {
           ],
           auto_settle: DEFAULT_AUTO_SETTLE,
         },
+        // What the daemon finds in the roll repo: its favicon (the Horizon on its tile).
+        logo: { path: "public/favicon.svg", url: svgUrl(avatarSvg({ size: 64 })) },
         pull: {
           at: t0 - 6 * 60_000,
           outcome: { status: "skipped", reason: "local_changes", message: "the checkout has uncommitted changes" },
@@ -1075,7 +1094,7 @@ export class DemoOwner implements AgentsTransport {
       }),
       MBP,
     );
-    this.put("project", project("prj_demo_infra", "infra", "/home/roll/infra", "main", false, "infra"), BOX);
+    this.put("project", project("prj_demo_infra", "infra", "/home/roll/infra", "main", false, "infra", { settings: { ...NO_SETTINGS, color: "teal", icon: { kind: "emoji", emoji: "🧰" } } }), BOX);
 
     const base = (tid: string, pid: string, title: string, provider: string, model: string, over: Partial<Thread> = {}): Omit<Thread, never> => ({
       id: tid,
@@ -1747,6 +1766,7 @@ export class DemoOwner implements AgentsTransport {
             git: { branch: "main", head: "f35f34cf", remote: null, dirty: false },
             settings: { ...NO_SETTINGS },
             pull: null,
+            logo: null,
             created_at: now(),
             updated_at: now(),
           },
@@ -1760,7 +1780,13 @@ export class DemoOwner implements AgentsTransport {
       case "project.update": {
         const p = this.get<Project>("project", c.project);
         if (!p) return notFound("project");
-        const settings = c.settings ? { auto_pull: c.settings.auto_pull, defaults: c.settings.defaults ?? {}, scripts: c.settings.scripts ?? [], auto_settle: c.settings.auto_settle ?? DEFAULT_AUTO_SETTLE } : p.settings;
+        // The icon checked as the daemon does; a `file` icon keeps the logo it has (the demo has no files to read).
+        const checked = c.settings?.icon ? checkProjectIcon(c.settings.icon) : null;
+        if (checked && "error" in checked) return { type: "error", code: "invalid", message: checked.error };
+        const icon = checked && checked.icon.kind !== "auto" ? checked.icon : undefined;
+        const settings = c.settings
+          ? { auto_pull: c.settings.auto_pull, defaults: c.settings.defaults ?? {}, scripts: c.settings.scripts ?? [], auto_settle: c.settings.auto_settle ?? DEFAULT_AUTO_SETTLE, color: c.settings.color, icon }
+          : p.settings;
         const next = { ...p, name: c.name?.trim() || p.name, settings, updated_at: now() };
         this.put("project", next, machine);
         if (settings.auto_pull && !p.settings.auto_pull) this.after(600, () => this.demoPull(c.project, machine));
@@ -1829,6 +1855,9 @@ export class DemoOwner implements AgentsTransport {
 }
 
 const notFound = (what: string): Reply => ({ type: "error", code: "not_found", message: `no such ${what}` });
+
+/** An SVG as a `data:` URL, as the daemon sends a project's logo. */
+const svgUrl = (svg: string) => `data:image/svg+xml;base64,${btoa(svg)}`;
 
 const slug = (s: string) =>
   s

@@ -147,6 +147,7 @@ export function shareMachine(share: Share): Machine {
     online: false,
     info: { hostname: share.machine.name, os: share.machine.os ?? "", arch: "", version: "", home: "~", providers: shareProviders(share), settings: null },
     sandbox: null,
+    appearance: {},
     created_at: share.created_at,
     last_seen: null,
   };

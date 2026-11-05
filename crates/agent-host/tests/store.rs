@@ -12,6 +12,7 @@ fn project(id: &str, name: &str) -> Entity {
         git: None,
         settings: ProjectSettings::default(),
         pull: None,
+        logo: None,
         created_at: 1,
         updated_at: 1,
     })

@@ -50,6 +50,10 @@ impl Host {
             }
             let was_on = p.settings.auto_pull;
             if let Some(settings) = settings {
+                // A new icon may name another picture.
+                if settings.icon != p.settings.icon {
+                    p.logo = self.find_logo(&p.path, &settings.icon).await;
+                }
                 p.settings = settings;
             }
             p.updated_at = now();
@@ -89,7 +93,55 @@ impl Host {
         } else {
             git::fast_forward(Path::new(&project.path), grant).await
         };
-        self.record_pull(id, outcome).await
+        let pulled = matches!(outcome, PullOutcome::Pulled { .. });
+        let result = self.record_pull(id, outcome).await?;
+        // New commits may bring a new logo.
+        if pulled && let Err(e) = self.refresh_logo(id).await {
+            tracing::warn!("logo of {id}: {e:?}");
+        }
+        Ok(result)
+    }
+
+    /// A project's logo as its files say now (`logo.rs`), off the async threads.
+    pub(crate) async fn find_logo(&self, path: &str, icon: &ProjectIcon) -> Option<ProjectLogo> {
+        let logos = self.logos.clone();
+        let (path, icon) = (std::path::PathBuf::from(path), icon.clone());
+        tokio::task::spawn_blocking(move || logos.resolve(&path, &icon)).await.ok().flatten()
+    }
+
+    /// Looks for the project's logo again and records it only if it changed.
+    pub(crate) async fn refresh_logo(&self, id: &ProjectId) -> Res<()> {
+        let p = self.project(id)?;
+        let logo = self.find_logo(&p.path, &p.settings.icon).await;
+        if logo == p.logo {
+            return Ok(());
+        }
+        let _guard = self.projects.lock().await;
+        let mut now_p = self.project(id)?;
+        // A `project.update` that changed the icon meanwhile found the logo for it.
+        if now_p.settings.icon != p.settings.icon || now_p.logo == logo {
+            return Ok(());
+        }
+        now_p.logo = logo;
+        now_p.updated_at = now();
+        self.put(vec![Entity::Project(now_p)])?;
+        Ok(())
+    }
+
+    /// Every project's logo, again (at startup and on auto-pull's loop). Unchanged files are
+    /// only looked at, never read again (`logo.rs` remembers them by fingerprint).
+    async fn refresh_logos(&self) {
+        let projects = match self.store.list(EntityKind::Project) {
+            Ok(p) => p,
+            Err(e) => return tracing::warn!("logos: listing projects: {e:#}"),
+        };
+        for entity in projects {
+            if let Entity::Project(p) = entity
+                && let Err(e) = self.refresh_logo(&p.id).await
+            {
+                tracing::warn!("logo of {}: {e:?}", p.id);
+            }
+        }
     }
 
     /// Whether a thread working in the project's own checkout (not a worktree) is busy.
@@ -149,12 +201,15 @@ impl Host {
 }
 
 /// Auto-pull for the projects that fetch on their own: a round now, then one every `every`.
+/// Each round looks for every project's logo again too (hourly while auto-pull is off).
 pub(crate) fn spawn_puller(host: Weak<Host>) {
     tokio::spawn(async move {
         loop {
             let Some(h) = host.upgrade() else { return };
             // The machine's settings may change the pace (or turn it off) at any time.
             let every = h.pull_every();
+            // Logos first, since a round of pulls may take a while. The first round is the startup's.
+            h.refresh_logos().await;
             if every.is_some() {
                 h.pull_round().await;
             }
@@ -206,5 +261,6 @@ fn checked(mut s: ProjectSettings) -> Res<ProjectSettings> {
     if s.auto_settle.after_days.is_some_and(|d| !(1..=AutoSettle::MAX_DAYS).contains(&d)) {
         return Err(Fail::Invalid(format!("auto-settle waits 1 to {} days", AutoSettle::MAX_DAYS)));
     }
+    s.icon = s.icon.check().map_err(Fail::Invalid)?;
     Ok(s)
 }

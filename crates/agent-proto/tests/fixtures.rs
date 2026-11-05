@@ -61,8 +61,11 @@ fn project() -> Project {
                 ProjectScript { id: "test".into(), name: "Test".into(), command: "cargo test".into(), icon: ScriptIcon::Test, on_worktree: false },
             ],
             auto_settle: AutoSettle { after_days: None, on_land: false },
+            color: Some(IdentityColor::Teal),
+            icon: ProjectIcon::File { path: "public/logo.svg".into() },
         },
         pull: Some(PullResult { at: T, outcome: PullOutcome::Pulled { branch: "main".into(), from: "8ea39e4d".into(), to: "f35f34cf".into(), commits: 3 } }),
+        logo: Some(ProjectLogo { path: "public/logo.svg".into(), url: "data:image/svg+xml;base64,PHN2Zy8+".into() }),
         created_at: T,
         updated_at: T,
     }
@@ -354,6 +357,16 @@ fn commands() -> Vec<Command> {
             project: prj(),
             name: Some("roll".into()),
             settings: Some(ProjectSettings { auto_pull: true, ..ProjectSettings::default() }),
+        },
+        Command::ProjectUpdate {
+            project: prj(),
+            name: None,
+            settings: Some(ProjectSettings { color: Some(IdentityColor::Rose), icon: ProjectIcon::Emoji { emoji: "🦀".into() }, ..ProjectSettings::default() }),
+        },
+        Command::ProjectUpdate {
+            project: prj(),
+            name: None,
+            settings: Some(ProjectSettings { icon: ProjectIcon::Monogram { text: Some("RO".into()) }, ..ProjectSettings::default() }),
         },
         Command::ProjectPull { project: prj() },
         Command::ThreadCreate {
@@ -679,6 +692,7 @@ fn machine() -> Machine {
         online: true,
         info: Some(info()),
         sandbox: Some(SandboxInfo { backend: "agent37".into(), size: "2cpu-4gb".into(), status: SandboxStatus::Running, hourly_cents: 3, stopped_reason: None }),
+        appearance: MachineAppearance { color: Some(IdentityColor::Violet), kind: Some(MachineKind::Cloud) },
         created_at: T,
         last_seen: Some(T),
     }

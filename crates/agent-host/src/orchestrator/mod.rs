@@ -77,6 +77,8 @@ pub struct Host {
     configuring: AsyncMutex<()>,
     /// Woken when the settings change (auto-pull's pace).
     settings_changed: Arc<tokio::sync::Notify>,
+    /// Finds projects' logos (`projects.rs`, `logo.rs`).
+    logos: Arc<crate::logo::Logos>,
 }
 
 /// Why a command failed; becomes `Reply::Error`.
@@ -273,6 +275,7 @@ impl Host {
             settings: std::sync::Mutex::new(settings),
             configuring: AsyncMutex::new(()),
             settings_changed: Arc::new(tokio::sync::Notify::new()),
+            logos: Arc::default(),
         });
         host.configure_providers();
         // Hello goes out with what's known; each provider's status follows as its probe answers.
@@ -634,6 +637,7 @@ impl Host {
                 if clone.is_some() && p.repo != clone {
                     p.repo = clone;
                     p.git = crate::git::info(&path).await;
+                    p.logo = self.find_logo(&p.path, &p.settings.icon).await;
                     p.updated_at = now();
                     let id = p.id.0.clone();
                     self.put(vec![Entity::Project(p)])?;
@@ -648,6 +652,7 @@ impl Host {
             .filter(|n| !n.is_empty())
             .or_else(|| path.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_else(|| path_str.clone());
+        let logo = self.find_logo(&path_str, &ProjectIcon::Auto).await;
         let project = Project {
             id: ProjectId::from_suffix(&suffix()),
             name,
@@ -656,6 +661,7 @@ impl Host {
             git: crate::git::info(&path).await,
             settings: ProjectSettings::default(),
             pull: None,
+            logo,
             created_at: at,
             updated_at: at,
         };

@@ -79,6 +79,7 @@ export function fakeServices(
     releaseWork: vi.fn(async () => {}),
     machines: {
       rename: vi.fn(async (_o: string, id: MachineId, name: string) => ({ ...machineFixture(), id, name })),
+      style: vi.fn(async (_o: string, id: MachineId) => ({ ...machineFixture(), id })),
       remove: vi.fn(async () => {}),
       ...machines,
     },

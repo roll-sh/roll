@@ -11,6 +11,7 @@ import {
   deviceLoginD,
   entityD,
   loginPollD,
+  machineD,
   machineLoginD,
   machineState,
   pendingLoginD,
@@ -241,7 +242,7 @@ describe("agents api", () => {
 });
 
 describe("machineState", () => {
-  const m = (online: boolean, sandbox: Machine["sandbox"]): Machine => ({ id: "mch_1", name: "box", online, info: null, sandbox, created_at: 0, last_seen: null });
+  const m = (online: boolean, sandbox: Machine["sandbox"]): Machine => ({ id: "mch_1", name: "box", online, info: null, sandbox, appearance: {}, created_at: 0, last_seen: null });
   const sb = (status: SandboxStatus, stopped_reason?: "idle" | "owner") => ({ backend: "agent37", size: "standard", status, hourly_cents: 3, ...(stopped_reason ? { stopped_reason } : {}) });
 
   it("never calls a sandbox that wakes on its own offline", () => {
@@ -259,5 +260,25 @@ describe("machineState", () => {
     expect([reachable(m(false, null)), reachable(m(false, sb("deleting"))), reachable(undefined)]).toEqual([false, false, false]);
     expect(["waking", "booting", "connecting"].every((s) => coming(s as MachineState))).toBe(true);
     expect(coming("asleep")).toBe(false);
+  });
+});
+
+describe("identity on the wire", () => {
+  const p = { kind: "project", id: "prj_1", name: "roll", path: "/r", created_at: 0, updated_at: 0 };
+  it("a colour or icon from a newer daemon shows the default instead of dropping the record", () => {
+    const e = decode(entityD, { ...p, settings: { auto_pull: false, color: "chartreuse", icon: { kind: "lucide", name: "rocket" } } });
+    expect(e.kind === "project" && [e.settings.color, e.settings.icon]).toEqual([undefined, undefined]);
+    const m = decode(machineD, { id: "mch_1", name: "b", online: true, created_at: 0, appearance: { color: "teal", kind: "toaster" } });
+    expect(m.appearance).toEqual({ color: "teal", kind: undefined });
+  });
+  it("a logo is only ever a data:image URL", () => {
+    const logo = (url: string) => {
+      const e = decode(entityD, { ...p, logo: { path: "x.svg", url } });
+      return e.kind === "project" ? e.logo : undefined;
+    };
+    expect(logo("data:image/png;base64,iVBORw0KGgo=")).toEqual({ path: "x.svg", url: "data:image/png;base64,iVBORw0KGgo=" });
+    expect(logo("https://evil.example/x.svg")).toBeNull();
+    expect(logo("javascript:alert(1)")).toBeNull();
+    expect(logo("data:text/html;base64,PGgxPg==")).toBeNull();
   });
 });

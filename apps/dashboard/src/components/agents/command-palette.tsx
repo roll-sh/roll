@@ -53,7 +53,8 @@ import {
 import { targetLabel, useGoalTargets, useLaunchGoal, type GoalKind, type GoalTarget } from "./orchestrate";
 import { useAutomations } from "./automations/shared";
 import { NewProject } from "./project-new";
-import { MachineIcon, StatusDot } from "./shared";
+import { StatusDot } from "./shared";
+import { MachineIcon, ProjectIcon } from "./identity";
 import { useAgents } from "./use-agents";
 
 const ICON = "size-4 text-subtle";
@@ -177,7 +178,8 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
   const addProjectFirst: PaletteSubmenuLike = { ...addProject, value: "goal:add-project", title: "Add a project first", description: "Agents work in a project on one of your machines" };
 
   const threadRow = (t: Thread, machine: string, query: string): PaletteAction => {
-    const project = data.projects.get(t.project)?.value.name;
+    const projectRecord = data.projects.get(t.project)?.value;
+    const project = projectRecord?.name;
     const branch = t.worktree?.branch;
     const parts = [project, machineCount > 1 ? machineName(machine) : null, branch ? `#${branch.replace(/^roll\//, "")}` : null, t.id === openThreadId ? "Open" : null].filter(Boolean);
     const opens = threadOpens()[t.id] ?? null;
@@ -186,7 +188,8 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
       value: `thread:${t.id}`,
       title: t.title,
       description: isBusy(t.status) && t.activity ? <span className={t.status === "waiting" ? "text-accent" : "shimmer"}>{t.activity}</span> : parts.join(" · "),
-      icon: t.orchestrator ? <Workflow className={ICON} /> : <MessageSquare className={ICON} />,
+      // The project's logo or monogram, so a thread reads as its project's at a glance; an orchestrator keeps its mark.
+      icon: t.orchestrator ? <Workflow className={ICON} /> : projectRecord ? <ProjectIcon project={projectRecord} className="size-4" /> : <MessageSquare className={ICON} />,
       leading: <StatusDot status={t.status} />,
       trailing: t.change ? <span className="shrink-0 font-mono text-[11px] text-subtle">#{t.change.number}</span> : undefined,
       timestamp: shortAgo(Math.max(t.updated_at, opens?.openedAt ?? 0), now),
@@ -215,7 +218,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
     const projectsView = (label: string, run: (p: (typeof projects)[number]) => void): PaletteView => ({
       label,
       placeholder: "Which project?",
-      groups: [{ value: "projects", label: "Projects", items: projects.map((p) => ({ kind: "action" as const, value: `${label}:${p.id}`, title: p.name, description: machineCount > 1 ? machineName(p.machine) : p.path, icon: <Folder className={ICON} />, run: () => run(p) })) }],
+      groups: [{ value: "projects", label: "Projects", items: projects.map((p) => ({ kind: "action" as const, value: `${label}:${p.id}`, title: p.name, description: machineCount > 1 ? machineName(p.machine) : p.path, icon: <ProjectIcon project={p} className="size-4" />, run: () => run(p) })) }],
     });
     const open = openRecord?.value ?? null;
     const at = openRecord?.machine ?? "";
@@ -330,7 +333,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
         title: p.name,
         searchTerms: [p.path, p.repo ? `${p.repo.owner}/${p.repo.repo}` : "", machineCount > 1 ? machineName(p.machine) : ""].filter(Boolean),
         description: [machineCount > 1 ? machineName(p.machine) : null, p.path].filter(Boolean).join(" · "),
-        icon: <Folder className={ICON} />,
+        icon: <ProjectIcon project={p} className="size-4" />,
         run: () => focus(`p:${p.id}`),
       })),
       machines: machines.map((m) => ({

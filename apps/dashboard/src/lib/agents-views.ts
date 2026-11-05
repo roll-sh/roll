@@ -493,7 +493,7 @@ export function applyView(graph: Graph, data: AgentsData, view: Pick<ViewLike, "
     }
     const tk = keyOf.thread(p.id);
     const t = nodes.get(tk)!;
-    nodes.set(key, { key, kind: "pin", id: p.id, machine: t.machine, parent: tk, children: [], busy: false, relation: null });
+    nodes.set(key, { key, kind: "pin", id: p.id, machine: t.machine, parent: tk, children: [], busy: false, relation: null, tint: t.tint });
     firsts.set(tk, [...(firsts.get(tk) ?? []), key]);
   }
   for (const [tk, list] of firsts) {
@@ -503,7 +503,7 @@ export function applyView(graph: Graph, data: AgentsData, view: Pick<ViewLike, "
 
   const roots = graph.roots.filter((r) => nodes.has(r));
   const edges = [];
-  for (const n of nodes.values()) if (n.parent && nodes.has(n.parent)) edges.push({ from: n.parent, to: n.key, busy: n.busy, dashed: n.relation === "fork" });
+  for (const n of nodes.values()) if (n.parent && nodes.has(n.parent)) edges.push({ from: n.parent, to: n.key, busy: n.busy, dashed: n.relation === "fork", tint: n.tint });
   return { roots, nodes, edges };
 }
 

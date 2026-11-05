@@ -2,7 +2,7 @@ import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ThreadNode } from "./nodes";
-import { monogram, threadPill } from "./thread-status";
+import { threadPill } from "./thread-status";
 import { Conversation } from "./session";
 import { approval, M1, machine, mirrored, node, project, question, run, terminal, thread } from "@/test/agents";
 import { agentsHarness, renderAgents } from "@/test/agents-render";
@@ -98,13 +98,6 @@ describe("threadPill", () => {
     expect(threadPill(t, [], run({ status: "completed", completed_at: 10 }))).toMatchObject({ label: "Completed", tone: "ok" });
     // Somebody else's request says nothing about this thread.
     expect(threadPill(t, [approval({ thread: "thr_9" })], undefined)).toBeNull();
-  });
-
-  it("makes T3's monogram: the first letter and a digit or the last word's first letter", () => {
-    expect(monogram("roll")).toBe("RL");
-    expect(monogram("roll web")).toBe("RW");
-    expect(monogram("web3 app")).toBe("W3");
-    expect(monogram("  ")).toBe("PR");
   });
 });
 

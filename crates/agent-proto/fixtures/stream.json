@@ -221,6 +221,10 @@
         "status": "running",
         "hourly_cents": 3
       },
+      "appearance": {
+        "color": "violet",
+        "kind": "cloud"
+      },
       "created_at": 1762000000000,
       "last_seen": 1762000000000
     }

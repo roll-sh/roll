@@ -60,6 +60,8 @@ id! {
 }
 
 pub mod automation;
+pub mod identity;
+pub use identity::{IdentityColor, MachineAppearance, MachineKind, ProjectIcon, ProjectLogo};
 
 /// A provider instance on a machine: `codex`, `claude`, or `acp:<name>` (an ACP agent from the
 /// daemon's config, e.g. `acp:gemini`).
@@ -195,6 +197,9 @@ pub struct Project {
     /// What the last pull did (auto-pull or `project.pull`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull: Option<PullResult>,
+    /// The project's own logo, as its daemon found it (docs/code/agents.md, "Identity").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo: Option<ProjectLogo>,
     pub created_at: Millis,
     pub updated_at: Millis,
 }
@@ -219,6 +224,12 @@ pub struct ProjectSettings {
     /// When the daemon settles the project's threads by itself.
     #[serde(default)]
     pub auto_settle: AutoSettle,
+    /// Its colour (unset: one made from its repo or name, the same on every device).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<IdentityColor>,
+    /// Its logo, monogram or emoji.
+    #[serde(default, skip_serializing_if = "ProjectIcon::is_auto")]
+    pub icon: ProjectIcon,
 }
 
 /// When threads settle by themselves (T3's `sidebarAutoSettleAfterDays` and
@@ -1837,6 +1848,9 @@ pub struct Machine {
     /// Set for roll-hosted sandboxes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<SandboxInfo>,
+    /// Its colour and kind, as its owner set them (the relay's, like its name).
+    #[serde(default, skip_serializing_if = "MachineAppearance::is_empty")]
+    pub appearance: MachineAppearance,
     pub created_at: Millis,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen: Option<Millis>,

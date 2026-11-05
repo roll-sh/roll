@@ -7,6 +7,7 @@
 
 import { isBusy, isRunning, type MachineId, type Node, type ProjectId, type ProviderId, type Request, type Thread, type ThreadChange } from "./agents-api";
 import { pendingRequests, runsOf, type AgentsData } from "./agents-store";
+import { colorToken, machineColor, projectColor } from "./agents-identity";
 
 /** `pin`: a card pinned onto a canvas view (`lib/agents-views.ts` adds them; `deriveGraph` never does). */
 export type GraphKind = "machine" | "project" | "thread" | "subagent" | "request" | "terminal" | "pin";
@@ -24,6 +25,11 @@ export interface GraphNode {
   busy: boolean;
   /** Why the edge into it exists (forks draw dashed). */
   relation: "fork" | "subagent" | null;
+  /**
+   * The colour token of what it belongs to (its project's, else its machine's; docs/code/agents-design.md,
+   * "Identity"): the edge into it is drawn in it. Set by `deriveGraph`.
+   */
+  tint?: string;
 }
 
 export interface GraphEdge {
@@ -31,6 +37,8 @@ export interface GraphEdge {
   to: string;
   busy: boolean;
   dashed: boolean;
+  /** The colour token it's drawn in when it isn't busy (its child's `tint`). */
+  tint?: string;
 }
 
 export interface Graph {
@@ -173,6 +181,23 @@ export function deriveGraph(data: AgentsData, opts: GraphOptions = {}): Graph {
     add({ key: keyOf.terminal(t.id), kind: "terminal", id: t.id, machine: r.machine, parent, busy: false, relation: null });
   }
 
+  // Each card's identity: a project's colour for it and everything under it, a machine's for the
+  // machine and what hangs off it directly. Parents come first in the map, so one pass does it.
+  for (const n of nodes.values()) {
+    if (n.kind === "machine") {
+      const m = data.machines.get(n.id)?.value;
+      if (m) n.tint = colorToken(machineColor(m));
+    } else if (n.kind === "project") {
+      const p = data.projects.get(n.id)?.value;
+      if (p) n.tint = colorToken(projectColor(p));
+    } else if (n.kind === "thread") {
+      const p = data.projects.get(data.threads.get(n.id)?.value.project ?? "")?.value;
+      n.tint = p ? colorToken(projectColor(p)) : n.parent ? nodes.get(n.parent)?.tint : undefined;
+    } else if (n.parent) {
+      n.tint = nodes.get(n.parent)?.tint;
+    }
+  }
+
   // Children in insertion order (already sorted per kind).
   const roots: string[] = [];
   for (const n of nodes.values()) {
@@ -183,7 +208,7 @@ export function deriveGraph(data: AgentsData, opts: GraphOptions = {}): Graph {
   const edges: GraphEdge[] = [];
   for (const n of nodes.values()) {
     if (!n.parent) continue;
-    edges.push({ from: n.parent, to: n.key, busy: n.busy, dashed: n.relation === "fork" });
+    edges.push({ from: n.parent, to: n.key, busy: n.busy, dashed: n.relation === "fork", tint: n.tint });
   }
   return { roots, nodes, edges };
 }

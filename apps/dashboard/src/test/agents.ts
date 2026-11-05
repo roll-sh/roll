@@ -72,6 +72,7 @@ export function machine(over: Partial<Machine> = {}): Machine {
     online: true,
     info: { hostname: "ada-mbp", os: "macos", arch: "aarch64", version: "0.1.0", home: "/Users/ada", providers: [provider()], settings: null },
     sandbox: null,
+    appearance: {},
     created_at: T0,
     last_seen: T0,
     ...over,
@@ -79,7 +80,7 @@ export function machine(over: Partial<Machine> = {}): Machine {
 }
 
 export function project(over: Partial<Project> = {}): Project {
-  return { id: "prj_1", name: "roll", path: "/Users/ada/roll", repo: null, git: null, settings: { ...NO_SETTINGS }, pull: null, created_at: T0, updated_at: T0, ...over };
+  return { id: "prj_1", name: "roll", path: "/Users/ada/roll", repo: null, git: null, settings: { ...NO_SETTINGS }, pull: null, logo: null, created_at: T0, updated_at: T0, ...over };
 }
 
 export function thread(over: Partial<Thread> = {}): Thread {

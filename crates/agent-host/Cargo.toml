@@ -15,6 +15,8 @@ base64.workspace = true
 diffy.workspace = true
 futures-util.workspace = true
 hex.workspace = true
+# Project logos (`logo.rs`): rasters shrunk to a small PNG.
+image = { workspace = true, features = ["ico"] }
 libc.workspace = true
 rand.workspace = true
 rusqlite.workspace = true

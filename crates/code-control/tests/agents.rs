@@ -4,7 +4,7 @@
 
 mod common;
 
-use agent_proto::{Command, DaemonFrame, Entity, MachineConfig, MachineInfo, ProviderId, RelayFrame, Reply, SettingsBase, Stamped, StreamEvent};
+use agent_proto::{Command, DaemonFrame, Entity, IdentityColor, MachineConfig, MachineInfo, ProviderId, RelayFrame, Reply, SettingsBase, Stamped, StreamEvent};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::daemon::{Daemon, dial, info};
@@ -303,6 +303,36 @@ async fn machines_are_managed_by_the_owner_and_revoking_closes_the_link() {
     assert!(err.to_string().contains("401"), "{err}");
     assert_eq!(w.req("GET", "/v1/code/agents/acme/machines", None, &w.owner).await.1, json!([]));
     assert_eq!(w.req("DELETE", &format!("/v1/code/agents/acme/machines/{id}"), None, &w.owner).await.0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_machine_keeps_the_colour_and_kind_its_owner_picks() {
+    let w = world().await;
+    let (id, _minted) = w.machine("box").await;
+    let path = format!("/v1/code/agents/acme/machines/{id}");
+    let mut ev = Events::open(&w.a, "/v1/code/agents/acme/events", &w.owner, None).await;
+    let (s, m) = w.req("PATCH", &path, Some(json!({ "color": "teal", "kind": "laptop" })), &w.owner).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!((m["name"].as_str(), &m["appearance"]), (Some("box"), &json!({ "color": "teal", "kind": "laptop" })));
+    // Streamed, listed and in the snapshot.
+    let e = ev.next().await;
+    assert!(matches!(&e.data, StreamEvent::Machine { machine, .. } if machine.appearance.color == Some(IdentityColor::Teal)), "{e:?}");
+    assert_eq!(w.req("GET", "/v1/code/agents/acme/machines", None, &w.owner).await.1[0]["appearance"], json!({ "color": "teal", "kind": "laptop" }));
+    let (_, state) = w.req("GET", "/v1/code/agents/acme/state", None, &w.owner).await;
+    assert_eq!(state["machines"][0]["appearance"]["kind"], "laptop");
+    // One key at a time; the rest stays. A name and a colour at once.
+    let (_, m) = w.req("PATCH", &path, Some(json!({ "name": "build box", "color": "violet" })), &w.owner).await;
+    assert_eq!((m["name"].as_str(), &m["appearance"]), (Some("build box"), &json!({ "color": "violet", "kind": "laptop" })));
+    // `null` clears: back to the colour from its id and the kind from its OS.
+    let (_, m) = w.req("PATCH", &path, Some(json!({ "kind": null })), &w.owner).await;
+    assert_eq!(m["appearance"], json!({ "color": "violet" }));
+    let (_, m) = w.req("PATCH", &path, Some(json!({ "color": null })), &w.owner).await;
+    assert!(m.get("appearance").is_none(), "{m}");
+    // What roll doesn't know is refused, and so is a body that changes nothing.
+    for bad in [json!({ "color": "orange" }), json!({ "kind": "toaster" }), json!({ "color": 3 }), json!({}), json!({ "colour": "teal" }), json!([]), json!({ "name": "" })] {
+        assert_eq!(w.req("PATCH", &path, Some(bad.clone()), &w.owner).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    assert_eq!(w.req("PATCH", &path, Some(json!({ "color": "teal" })), &w.agent).await.0, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

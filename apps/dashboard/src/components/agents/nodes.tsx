@@ -1,8 +1,8 @@
 "use client";
 
-import { ArrowUpRight, CircleAlert, Focus, Folder, FolderGit2, FolderPlus, GitBranch, GitFork, GitPullRequest, LogIn, MoreHorizontal, Plus, RefreshCw, Settings2, SquareTerminal, Trash2 } from "lucide-react";
+import { ArrowUpRight, CircleAlert, Focus, FolderGit2, FolderPlus, GitBranch, GitFork, GitPullRequest, LogIn, MoreHorizontal, Plus, RefreshCw, Settings2, SquareTerminal, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
-import { coming, isRunning, machineState, reachable, type Machine, type Node, type Project, type ProviderInfo, type Request, type Run, type Thread } from "@/lib/agents-api";
+import { coming, isRunning, machineState, reachable, type IdentityColor, type Machine, type Node, type Project, type ProviderInfo, type Request, type Run, type Thread } from "@/lib/agents-api";
 import { projectStats, type ProjectStats } from "@/lib/agents-graph";
 import { providersFor } from "@/lib/agents-store";
 import { setAgentsView } from "@/lib/agents-surface";
@@ -15,14 +15,23 @@ import { NewProject } from "./project-new";
 import { PullLine } from "./project-settings";
 import { PendingRequest } from "./pending-request";
 import { SandboxPanel } from "./sandbox";
-import { ago, loginCommand, MachineIcon, modelName, providerName, shortPath, Stat, StatusDot, threadStatusLabel, usageLine } from "./shared";
-import { orchestration, OrchestratorChip, ProjectMonogram, StatusPill, threadDone, threadPill } from "./thread-status";
+import { ago, loginCommand, modelName, providerName, shortPath, Stat, StatusDot, threadStatusLabel, usageLine } from "./shared";
+import { orchestration, OrchestratorChip, StatusPill, threadDone, threadPill } from "./thread-status";
+import { MachineIcon, ProjectIcon, tint as tintStyle } from "./identity";
+import { machineColor, projectColor } from "@/lib/agents-identity";
 import { useAgents } from "./use-agents";
 
-/** The frame every canvas card shares: flat panel, hairline border, the whole card a drag handle. */
+/**
+ * The frame every canvas card shares: flat panel, hairline border, the whole card a drag handle.
+ * `tint` is the colour of the project or machine it belongs to (docs/code/agents-design.md,
+ * "Identity"): its children use it through `--tint`; `stripe` draws it as a short bar on the inside
+ * of the left edge (thread cards). The tone keeps the border, so state always reads over identity.
+ */
 export function Card({
   width,
   tone,
+  tint,
+  stripe = false,
   children,
   className = "",
   onClick,
@@ -30,6 +39,8 @@ export function Card({
 }: {
   width: number;
   tone?: "busy" | "error" | "muted" | "done";
+  tint?: IdentityColor;
+  stripe?: boolean;
   children: ReactNode;
   className?: string;
   onClick?: () => void;
@@ -54,19 +65,24 @@ export function Card({
             }
           : undefined
       }
-      style={{ width }}
+      data-tint={tint}
+      style={{ width, ...(tint ? tintStyle(tint) : null) }}
       className={`group/card relative rounded-xl border bg-panel text-[13px] shadow-card inset-shadow-highlight transition-[border-color,box-shadow,opacity] duration-150 ease-out ${border} ${tone === "muted" ? "opacity-60" : ""} ${
         onClick ? "cursor-pointer hover:shadow-card-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent/70" : "cursor-default"
       } ${onClick && !tone ? "hover:border-line-3" : ""} ${className}`}
     >
+      {tint && stripe && <span aria-hidden data-stripe className="pointer-events-none absolute top-3 bottom-3 left-0 w-[3px] rounded-r-full bg-(--tint)/85" />}
       {children}
     </div>
   );
 }
 
-/** The small tile a machine or project card leads with: its icon on a raised square. */
-function IconTile({ children }: { children: ReactNode }) {
-  return <span className="grid size-6 shrink-0 place-items-center rounded-md border border-line bg-panel-2 text-muted inset-shadow-highlight [&>svg]:size-3.5">{children}</span>;
+/**
+ * The header of a machine's or project's card: its colour at 6% behind it, flat (no gradient),
+ * fading nothing; the body below stays the plain panel.
+ */
+function TintedHeader({ children }: { children: ReactNode }) {
+  return <div className="flex items-center gap-2.5 rounded-t-[11px] border-b border-line bg-(--tint)/[0.06] px-3 py-2.5">{children}</div>;
 }
 
 /**
@@ -154,11 +170,9 @@ export function MachineNode({ machine }: { machine: Machine }) {
       focus(`x:${r.id}`);
     });
   return (
-    <Card width={272} tone={state === "offline" ? "muted" : undefined} label={`Machine ${machine.name}`}>
-      <div className="flex items-center gap-2.5 px-3 pt-3">
-        <IconTile>
-          <MachineIcon machine={machine} />
-        </IconTile>
+    <Card width={272} tone={state === "offline" ? "muted" : undefined} tint={machineColor(machine)} label={`Machine ${machine.name}`}>
+      <TintedHeader>
+        <MachineIcon machine={machine} tile className="size-6" />
         <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold tracking-[-0.015em]">{machine.name}</span>
         <span className="flex shrink-0 items-center gap-1.5 text-[11px] text-subtle">
           <StatusDot status={machine.online ? "online" : "offline"} />
@@ -187,7 +201,7 @@ export function MachineNode({ machine }: { machine: Machine }) {
             <Settings2 />
           </Tool>
         </HoverActions>
-      </div>
+      </TintedHeader>
       <div className="space-y-2.5 px-3 pt-2.5 pb-3">
         {os && <p className="truncate font-mono text-[11px] text-subtle">{os}</p>}
         {!machine.online && !sandbox && (
@@ -271,11 +285,9 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
   const online = reachable(machine);
   const stats = projectStats(client.data, project.id);
   return (
-    <Card width={256} label={`Project ${project.name}`}>
-      <div className="flex items-center gap-2.5 px-3 pt-3">
-        <IconTile>
-          <Folder />
-        </IconTile>
+    <Card width={256} tint={projectColor(project)} label={`Project ${project.name}`}>
+      <TintedHeader>
+        <ProjectIcon project={project} className="size-6" />
         <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold tracking-[-0.015em]">{project.name}</span>
         <HoverActions>
           {startNew && (
@@ -308,8 +320,8 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
             ]}
           />
         </HoverActions>
-      </div>
-      <div className="flex items-center gap-2 px-3 pt-2 pb-3 font-mono text-[11px] text-subtle">
+      </TintedHeader>
+      <div className="flex items-center gap-2 px-3 pt-2.5 pb-3 font-mono text-[11px] text-subtle">
         {project.git?.branch && (
           <span className="flex shrink-0 items-center gap-1" title={project.git.dirty ? "Uncommitted changes" : undefined}>
             <GitBranch className="size-3" />
@@ -410,14 +422,14 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
   const quiet = !thread.error && !running && thread.status !== "waiting";
   const tone = thread.status === "error" ? "error" : running ? "busy" : thread.archived_at ? "muted" : done ? "done" : undefined;
   return (
-    <Card width={296} tone={tone} onClick={() => openThread(thread.id)} label={`Thread ${thread.title}`}>
+    <Card width={296} tone={tone} tint={project ? projectColor(project) : undefined} stripe onClick={() => openThread(thread.id)} label={`Thread ${thread.title}`}>
       <div className="px-3.5 pt-3 pb-3">
         <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-subtle">
-          {project && <ProjectMonogram name={project.name} className="size-3.5" />}
+          {project && <ProjectIcon project={project} className="size-3.5" />}
           {project && <span className="min-w-0 truncate text-muted">{project.name}</span>}
           {machine && (
             <span className="flex min-w-0 shrink items-center gap-1" title={`On ${machine.name}`} aria-label={`On ${machine.name}`}>
-              <MachineIcon machine={machine} className="size-3 shrink-0" />
+              <MachineIcon machine={machine} className="size-3" />
               <span className="truncate">{machine.name}</span>
             </span>
           )}
@@ -508,12 +520,13 @@ function latestRun(runs: Iterable<{ value: Run }>, thread: string) {
 // ── provider subagent ──
 
 export function SubagentNode({ node }: { node: Node }) {
-  const { openThread } = useAgents();
+  const { openThread, client } = useAgents();
   if (node.body.type !== "subagent") return null;
   const b = node.body;
   const running = node.status === "running";
+  const project = client.data.projects.get(client.data.threads.get(node.thread)?.value.project ?? "")?.value;
   return (
-    <Card width={240} tone={running ? "busy" : undefined} onClick={() => openThread(node.thread)} label={`Subagent ${b.agent}`}>
+    <Card width={240} tone={running ? "busy" : undefined} tint={project ? projectColor(project) : undefined} stripe onClick={() => openThread(node.thread)} label={`Subagent ${b.agent}`}>
       <div className="px-3 py-2.5">
         <p className="flex items-center gap-1.5 text-[12px] font-medium">
           <StatusDot status={running ? "running" : node.status === "failed" ? "error" : "idle"} />

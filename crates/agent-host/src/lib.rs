@@ -12,6 +12,7 @@ pub mod config;
 pub mod fs;
 pub mod mcp;
 pub mod git;
+pub mod logo;
 pub mod orchestrator;
 pub mod provider;
 pub mod relay;

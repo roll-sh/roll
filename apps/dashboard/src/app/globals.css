@@ -151,6 +151,38 @@
   }
 }
 
+/*
+ * Identity (docs/code/agents-design.md, "Identity"): the categorical colours projects and machines
+ * carry, so they're recognisable at a glance. One hue each at the same lightness and a calm chroma:
+ * light enough on the dark ladder, dark enough on white. None is blue (the accent: busy), orange,
+ * amber or yellow; green and rose sit soft, away from `--ok` and `--danger`. Used through `--tint`
+ * (`components/agents/identity.tsx`): letters and glyphs in the colour, tiles at 16-18%, a card's
+ * header at 6%, edges at 55%. On :root, because popups portal to <body>.
+ */
+:root {
+  --id-slate: oklch(0.74 0.03 255);
+  --id-violet: oklch(0.74 0.12 296);
+  --id-purple: oklch(0.74 0.13 322);
+  --id-pink: oklch(0.75 0.12 350);
+  --id-rose: oklch(0.73 0.12 12);
+  --id-teal: oklch(0.76 0.1 180);
+  --id-cyan: oklch(0.76 0.1 218);
+  --id-green: oklch(0.76 0.11 148);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --id-slate: oklch(0.52 0.03 255);
+    --id-violet: oklch(0.52 0.15 296);
+    --id-purple: oklch(0.52 0.16 322);
+    --id-pink: oklch(0.55 0.16 350);
+    --id-rose: oklch(0.54 0.15 12);
+    --id-teal: oklch(0.54 0.09 180);
+    --id-cyan: oklch(0.54 0.1 218);
+    --id-green: oklch(0.54 0.11 148);
+  }
+}
+
 /* Popovers, menus and dialogs: the panel a little see-through over a blur (T3's dropdown-glass). */
 @utility glass {
   background: color-mix(in srgb, var(--popover) 88%, transparent);

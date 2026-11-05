@@ -1,12 +1,12 @@
 "use client";
 
-import { Folder, Server, X } from "lucide-react";
+import { FolderPlus, Server, X } from "lucide-react";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Machine, Project } from "@/lib/agents-api";
 import { AddMachinePaths } from "./add-machine";
 import { Composer } from "./composer";
 import { NewProject } from "./project-new";
-import { MachineIcon } from "./shared";
+import { MachineIcon, ProjectIcon } from "./identity";
 import { Select } from "./ui";
 import { useAgents } from "./use-agents";
 
@@ -102,7 +102,7 @@ export function Launcher({ project: wanted, machine: wantedMachine, at, onClose 
               <Select
                 label="Machine"
                 variant="ghost"
-                icon={machine ? <MachineIcon machine={machine} className="size-3.5 text-subtle" /> : <Server className="size-3.5" />}
+                icon={machine ? <MachineIcon machine={machine} className="size-3.5" /> : <Server className="size-3.5" />}
                 value={machine?.id ?? null}
                 onChange={(id) => {
                   setMachineId(id);
@@ -110,13 +110,13 @@ export function Launcher({ project: wanted, machine: wantedMachine, at, onClose 
                   if (first) choose(first);
                   setAdding(!first && !!machines.find((m) => m.id === id)?.online);
                 }}
-                options={machines.map((m) => ({ value: m.id, label: m.name, hint: m.online ? undefined : "offline" }))}
+                options={machines.map((m) => ({ value: m.id, label: m.name, hint: m.online ? undefined : "offline", icon: <MachineIcon machine={m} className="size-3.5" /> }))}
               />
               <span aria-hidden>/</span>
               <Select
                 label="Project"
                 variant="ghost"
-                icon={<Folder className="size-3.5 text-subtle" />}
+                icon={inProject && !adding ? <ProjectIcon project={inProject} className="size-3.5" /> : <FolderPlus className="size-3.5 text-subtle" />}
                 placeholder="No project yet"
                 value={adding ? ADD : (inProject?.id ?? null)}
                 onChange={(id) => {
@@ -125,7 +125,7 @@ export function Launcher({ project: wanted, machine: wantedMachine, at, onClose 
                   const p = projects.find((x) => x.id === id);
                   if (p) choose(p);
                 }}
-                options={[...here.map((p) => ({ value: p.id, label: p.name })), ...(machine?.online ? [{ value: ADD, label: "Add a project…" }] : [])]}
+                options={[...here.map((p) => ({ value: p.id, label: p.name, icon: <ProjectIcon project={p} className="size-3.5" /> })), ...(machine?.online ? [{ value: ADD, label: "Add a project…", icon: <FolderPlus className="size-3.5 text-subtle" /> }] : [])]}
               />
             </>
           )}

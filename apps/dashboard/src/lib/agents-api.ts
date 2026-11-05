@@ -27,6 +27,7 @@ import {
   str,
   tagged,
   withDefault,
+  type DecodeCtx,
   type Decoder,
 } from "./decode";
 import { createIntegrationsApi } from "./integrations-api";
@@ -82,8 +83,40 @@ export interface Project {
   settings: ProjectSettings;
   /** What the last pull did (auto-pull or `project.pull`). */
   pull: PullResult | null;
+  /** The project's own logo, as its daemon found it (docs/code/agents.md, "Identity"). */
+  logo: ProjectLogo | null;
   created_at: Millis;
   updated_at: Millis;
+}
+
+/**
+ * A categorical colour for a project or a machine (`--id-<name>` tokens in globals.css). None is
+ * blue (the accent means busy), orange, amber or yellow. `lib/agents-identity.ts` has the rest.
+ */
+export type IdentityColor = "slate" | "violet" | "purple" | "pink" | "rose" | "teal" | "cyan" | "green";
+export const IDENTITY_COLORS: readonly IdentityColor[] = ["slate", "violet", "purple", "pink", "rose", "teal", "cyan", "green"];
+
+/** How a project shows itself: its logo (else the monogram), the monogram, an emoji, or a picture in the project. */
+export type ProjectIcon = { kind: "auto" } | { kind: "monogram"; text?: string } | { kind: "emoji"; emoji: string } | { kind: "file"; path: string };
+
+/** A project's logo: where it is in the project, and the picture as a `data:image/…` URL (shown only in an `<img>`). */
+export interface ProjectLogo {
+  path: string;
+  url: string;
+}
+
+export type MachineKind = "laptop" | "desktop" | "server" | "cloud" | "container";
+
+/** `PATCH …/machines/{machine}`: a colour or kind to set, `null` to clear one, absent to keep it. */
+export interface MachineStyle {
+  color?: IdentityColor | null;
+  kind?: MachineKind | null;
+}
+
+/** A machine's colour and kind as its owner set them on the relay (unset: from its id and OS). */
+export interface MachineAppearance {
+  color?: IdentityColor;
+  kind?: MachineKind;
 }
 
 /** A project's settings (T3's per-project settings); `project.update` replaces them whole. */
@@ -96,6 +129,10 @@ export interface ProjectSettings {
   scripts: ProjectScript[];
   /** When the daemon settles the project's threads by itself. */
   auto_settle: AutoSettle;
+  /** Its colour (unset: made from its repo or name, the same on every device). */
+  color?: IdentityColor;
+  /** Its logo, monogram or emoji (unset: `auto`). */
+  icon?: ProjectIcon;
 }
 
 /** T3's auto-settle settings, per project. */
@@ -615,6 +652,8 @@ export interface Machine {
   online: boolean;
   info: MachineInfo | null;
   sandbox: SandboxInfo | null;
+  /** Its colour and kind, as its owner set them. */
+  appearance: MachineAppearance;
   created_at: Millis;
   last_seen: Millis | null;
 }
@@ -659,7 +698,7 @@ export type Command =
       type: "project.update";
       project: ProjectId;
       name?: string;
-      settings?: { auto_pull: boolean; defaults?: ThreadDefaults; scripts?: ProjectScript[]; auto_settle?: AutoSettle };
+      settings?: { auto_pull: boolean; defaults?: ThreadDefaults; scripts?: ProjectScript[]; auto_settle?: AutoSettle; color?: IdentityColor; icon?: ProjectIcon };
     }
   | { type: "project.pull"; project: ProjectId }
   | {
@@ -990,17 +1029,48 @@ const autoSettleD = obj<AutoSettle>({
   after_days: withDefault(nullable(int), () => DEFAULT_AUTO_SETTLE.after_days),
   on_land: withDefault(bool, () => true),
 });
+// Identity is decoded leniently: a colour or icon kind from a newer daemon shows the default
+// rather than dropping the record. A logo is only ever a `data:image/…` URL.
+const identityColorD: Decoder<IdentityColor | undefined> = Object.assign(
+  (v: unknown) => (typeof v === "string" && (IDENTITY_COLORS as readonly string[]).includes(v) ? (v as IdentityColor) : undefined),
+  { missing: () => undefined },
+);
+const projectIconD: Decoder<ProjectIcon | undefined> = Object.assign(
+  (v: unknown, p: string, ctx: DecodeCtx) => {
+    const kind = typeof v === "object" && v !== null ? (v as { kind?: unknown }).kind : undefined;
+    if (kind !== "auto" && kind !== "monogram" && kind !== "emoji" && kind !== "file") return undefined;
+    return tagged("kind", {
+      auto: obj<object>({}),
+      monogram: obj<{ text?: string }>({ text: optional(str) }),
+      emoji: obj<{ emoji: string }>({ emoji: str }),
+      file: obj<{ path: string }>({ path: str }),
+    })(v, p, ctx) as ProjectIcon;
+  },
+  { missing: () => undefined },
+);
+const projectLogoD: Decoder<ProjectLogo | null> = Object.assign(
+  (v: unknown, p: string, ctx: DecodeCtx) => {
+    if (v === null || v === undefined) return null;
+    const logo = obj<ProjectLogo>({ path: str, url: str })(v, p, ctx);
+    return /^data:image\/(png|svg\+xml);base64,[A-Za-z0-9+/=]+$/.test(logo.url) ? logo : null;
+  },
+  { missing: () => null },
+);
 const settingsFields = {
   auto_pull: withDefault(bool, () => false),
   defaults: optional(threadDefaultsD),
   scripts: optional(array(projectScriptD)),
   auto_settle: optional(autoSettleD),
+  color: identityColorD,
+  icon: projectIconD,
 };
 const projectSettingsD = obj<ProjectSettings>({
   auto_pull: settingsFields.auto_pull,
   defaults: withDefault(threadDefaultsD, () => ({})),
   scripts: vec(projectScriptD),
   auto_settle: withDefault(autoSettleD, () => ({ ...DEFAULT_AUTO_SETTLE })),
+  color: identityColorD,
+  icon: projectIconD,
 });
 const pullOutcomeD: Decoder<PullOutcome> = tagged("status", {
   pulled: obj<{ branch: string; from: string; to: string; commits: number }>({ branch: str, from: str, to: str, commits: int }),
@@ -1020,6 +1090,7 @@ const projectD = obj<Project>({
   git: opt(gitInfoD),
   settings: withDefault(projectSettingsD, () => ({ ...NO_SETTINGS })),
   pull: opt(pullResultD),
+  logo: projectLogoD,
   created_at: int,
   updated_at: int,
 });
@@ -1295,6 +1366,16 @@ export const machineD = obj<Machine>({
       hourly_cents: int,
       stopped_reason: optional(literal("idle", "owner")),
     }),
+  ),
+  appearance: withDefault(
+    obj<MachineAppearance>({
+      color: identityColorD,
+      kind: Object.assign(
+        (v: unknown) => (typeof v === "string" && ["laptop", "desktop", "server", "cloud", "container"].includes(v) ? (v as MachineKind) : undefined),
+        { missing: () => undefined },
+      ),
+    }),
+    () => ({}),
   ),
   created_at: int,
   last_seen: opt(int),
@@ -1660,6 +1741,9 @@ export function createAgentsApi(
     },
     renameMachine: async (owner: string, machine: MachineId, name: string) =>
       decode(machineD, await call("PATCH", `${ag(owner)}/machines/${enc(machine)}`, { name })),
+    /** A machine's colour and kind (`null` clears one: it goes back to the one made from its id and OS). */
+    styleMachine: async (owner: string, machine: MachineId, style: MachineStyle) =>
+      decode(machineD, await call("PATCH", `${ag(owner)}/machines/${enc(machine)}`, style)),
     removeMachine: async (owner: string, machine: MachineId) => {
       await call("DELETE", `${ag(owner)}/machines/${enc(machine)}`);
     },

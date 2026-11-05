@@ -936,6 +936,55 @@ async fn a_checkout_an_agent_works_in_is_never_pulled_under_it() {
 }
 
 #[tokio::test]
+async fn a_project_carries_its_logo_and_its_icon_setting_picks_another() {
+    let (home, dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    std::fs::create_dir_all(root.join("public")).unwrap();
+    std::fs::write(root.join("public/favicon.svg"), "<svg xmlns='http://www.w3.org/2000/svg'/>").unwrap();
+    let host = open(home.path(), vec![FakeProvider::new("codex")]).await;
+    let Reply::Created { id } = run(&host, Command::ProjectAdd { path: root.to_string_lossy().into(), name: None, clone: None }).await else {
+        panic!("project.add failed")
+    };
+    let project = ProjectId(id);
+    let record = |s: &common::Records| match s.live.get(&(EntityKind::Project, project.0.clone())) {
+        Some(Entity::Project(p)) => p.clone(),
+        other => panic!("no project record: {other:?}"),
+    };
+    let logo = record(&state(&host).await).logo.expect("the favicon as the project's logo");
+    assert_eq!(logo.path, "public/favicon.svg");
+    assert!(logo.url.starts_with("data:image/svg+xml;base64,"));
+
+    // A picture of its own: read, shrunk and sent as a PNG.
+    std::fs::create_dir_all(root.join("assets")).unwrap();
+    image::RgbaImage::from_pixel(200, 200, image::Rgba([20, 160, 140, 255])).save(root.join("assets/logo.png")).unwrap();
+    let settings = |icon| ProjectSettings { color: Some(IdentityColor::Teal), icon, ..ProjectSettings::default() };
+    let update = |s| Command::ProjectUpdate { project: project.clone(), name: None, settings: Some(s) };
+    assert_eq!(run(&host, update(settings(ProjectIcon::File { path: "./assets/logo.png".into() }))).await, Reply::Ok);
+    let p = record(&state(&host).await);
+    assert_eq!(p.settings.icon, ProjectIcon::File { path: "assets/logo.png".into() });
+    assert_eq!(p.settings.color, Some(IdentityColor::Teal));
+    let logo = p.logo.unwrap();
+    assert_eq!(logo.path, "assets/logo.png");
+    assert!(logo.url.starts_with("data:image/png;base64,") && logo.url.len() <= ProjectLogo::MAX_URL);
+
+    // Back to automatic: the favicon again.
+    assert_eq!(run(&host, update(settings(ProjectIcon::Auto))).await, Reply::Ok);
+    assert_eq!(record(&state(&host).await).logo.unwrap().path, "public/favicon.svg");
+
+    // Icons that aren't one are refused, and nothing changes.
+    for bad in [
+        ProjectIcon::File { path: "../outside.png".into() },
+        ProjectIcon::File { path: "notes.txt".into() },
+        ProjectIcon::Monogram { text: Some("TOO LONG".into()) },
+        ProjectIcon::Emoji { emoji: "abc".into() },
+    ] {
+        let refused = run(&host, update(settings(bad))).await;
+        assert!(matches!(refused, Reply::Error(ReplyError { code: ErrorCode::Invalid, .. })), "{refused:?}");
+    }
+    assert_eq!(record(&state(&host).await).settings.icon, ProjectIcon::Auto);
+}
+
+#[tokio::test]
 async fn project_settings_are_checked_and_the_setup_script_runs_in_new_worktrees() {
     let w = World::new(vec![FakeProvider::new("codex")]).await;
     let script = |id: &str, name: &str, command: &str, on_worktree: bool| ProjectScript {
@@ -953,6 +1002,7 @@ async fn project_settings_are_checked_and_the_setup_script_runs_in_new_worktrees
             script("lint", "Lint", "printf '%s' \"$ROLL_PROJECT_ROOT\" > lint.out", false),
         ],
         auto_settle: AutoSettle { after_days: Some(7), on_land: false },
+        ..ProjectSettings::default()
     };
     let update = |name: Option<&str>, settings: Option<ProjectSettings>| Command::ProjectUpdate {
         project: w.project.clone(),

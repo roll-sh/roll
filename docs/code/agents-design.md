@@ -20,9 +20,10 @@ because Base UI popups portal to `<body>`.
    sheet a step up again. *(Linear's app)*
 3. **Depth only where things float.** Cards, sheets, popovers and the composer have shadows.
    Chrome and the canvas don't. *(T3 Code, Linear)*
-4. **Colour means state.** The accent `#4c8dff` is for focus, active, running and waiting.
-   Green means done, red means failed. Everything else is neutral. Never orange, and never a
-   decorative gradient.
+4. **Colour means state; identity tells things apart.** The accent `#4c8dff` is for focus,
+   active, running and waiting. Green means done, red means failed. The only other colours are a
+   project's or machine's own ("Identity"), and they never take a state's place. Never orange, and
+   never a decorative gradient.
 5. **Motion is fast and purposeful.** It comes from where the thing comes from, is never
    bouncy, and is static under reduced motion.
 
@@ -106,6 +107,47 @@ punch out the edge ports. `refreshColors()` reruns on a theme change (the canvas
   appears on hover, on focus, and always on touch. It takes no room in the card, so names never
   truncate.
 
+## Identity
+
+The user said the canvas was "too black": every project, machine and sandbox now carries a colour
+and a face, so you can tell them apart at a glance, calmly. The rules are in agents.md, "Identity";
+the components are `ProjectIcon`, `Monogram`, `MachineIcon`, `ColorPicker` and `KindPicker` in
+`components/agents/identity.tsx`.
+
+**Palette.** Eight categorical tokens, `--id-<name>` in globals.css (on `:root`, because popups
+portal), one hue each at one lightness and a calm chroma, after Linear's restrained project
+colours:
+
+| Token | Dark | Light | Hue |
+|---|---|---|---|
+| `--id-slate` | `oklch(0.74 0.03 255)` | `oklch(0.52 0.03 255)` | neutral |
+| `--id-violet` | `oklch(0.74 0.12 296)` | `oklch(0.52 0.15 296)` | 296 |
+| `--id-purple` | `oklch(0.74 0.13 322)` | `oklch(0.52 0.16 322)` | 322 |
+| `--id-pink` | `oklch(0.75 0.12 350)` | `oklch(0.55 0.16 350)` | 350 |
+| `--id-rose` | `oklch(0.73 0.12 12)` | `oklch(0.54 0.15 12)` | 12 |
+| `--id-teal` | `oklch(0.76 0.10 180)` | `oklch(0.54 0.09 180)` | 180 |
+| `--id-cyan` | `oklch(0.76 0.10 218)` | `oklch(0.54 0.10 218)` | 218 |
+| `--id-green` | `oklch(0.76 0.11 148)` | `oklch(0.54 0.11 148)` | 148 |
+
+No orange, amber or yellow (hues 35–115), and nothing within 30° of the accent's 259, so a
+project's colour never reads as running. Green and rose are softer than `--ok` and `--danger`.
+`agents-identity.test.ts` reads globals.css and fails on any of that.
+
+**Where it shows.** Components set `--tint` (`tint(color)`) and use `text-(--tint)` and
+`bg-(--tint)/N`:
+
+| Where | How |
+|---|---|
+| A project's tile (logo, monogram, emoji) | the logo as found (rounded 25%); else letters in the colour on the colour at 18% (T3's tile) |
+| A machine's tile | its kind's lucide icon in the colour, on the colour at 16% |
+| Machine and project cards | the 24px tile, and a flat 6% tint behind the header, over a hairline |
+| Thread and subagent cards | the project's 14px tile in the meta line, and a 3px stripe inside the left edge at 85% |
+| Edges | the child's colour at 42% (busy edges stay the accent at 50%) |
+| Sidebar, ⌘K, launcher, breadcrumb, settings titles, automations list | the same tiles at 14–16px |
+
+**Don't** tint a whole card or its border (the border is its state's), use an identity colour for
+state, or draw a project's logo inline (only in an `<img>`).
+
 ## Chrome
 
 - **Header (48px):** flush on the base, with no rule under it. It holds the sidebar toggle, the
@@ -188,8 +230,9 @@ switched off under `prefers-reduced-motion`, and the engine draws a static, stat
 - **Do** use the tokens (`bg-canvas`, `bg-sheet`, `bg-panel`, `border-line-2`, `shadow-pop`,
   `inset-shadow-highlight`, `glass`). **Don't** hard-code a hex, an rgb or a shadow in a
   component.
-- **Do** put the accent only on focus, active, running and waiting. **Don't** tint whole cards,
-  and **don't** use orange or decorative gradients.
+- **Do** put the accent only on focus, active, running and waiting, and a project's or machine's
+  colour only on its tile, header tint, stripe and edges. **Don't** tint whole cards, and **don't**
+  use orange or decorative gradients.
 - **Do** float tools over cards. **Don't** reserve invisible room for hover buttons.
 - **Do** let layers separate things. **Don't** add a border-r or border-b where a panel edge
   already does it.
