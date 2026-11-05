@@ -16,6 +16,7 @@
 
 use super::antigravity;
 use super::client::Client;
+use super::cursor;
 use super::policy::{self, OptionValue, Setting, Wanted};
 use super::rpc::{Inbound, Process, Rpc, RpcError};
 use super::translate::{Action, Quirks, Translator, rpc_id_string};
@@ -25,6 +26,7 @@ use agent_proto::{InteractionMode, Response, RuntimeMode};
 use anyhow::{Context, bail};
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -58,6 +60,8 @@ struct State {
     options: agent_proto::ModelOptions,
     /// Sent in front of the first prompt (ACP has no system prompt).
     instructions: Option<String>,
+    /// Cursor's skills, whose `$name` mentions go out as its `/name`.
+    skills: BTreeSet<String>,
 }
 
 /// `initialize`: v2 fields with v1's alongside, so either generation can answer (T3:
@@ -74,6 +78,10 @@ pub fn initialize_params(expected: Flavor) -> Value {
         && let (Some(caps), Value::Object(agy)) = (capabilities.as_object_mut(), antigravity::client_capabilities())
     {
         caps.extend(agy);
+    }
+    // Cursor lists a model's parameters as options of their own only when asked to.
+    if expected == Flavor::Cursor {
+        capabilities["_meta"] = cursor::client_meta();
     }
     json!({
         "protocolVersion": 2,
@@ -220,9 +228,18 @@ pub(super) async fn open(
     // What the agent offers, as it set the session up (before roll's choices are written): the
     // models and options the picker shows from now on (`catalog.rs`).
     let models = super::catalog::models(&tr.config, tr.models.as_ref());
+    // Cursor's parameters as T3 shows them.
+    let models = if flavor == Flavor::Cursor { cursor::catalog(models) } else { models };
     if !models.is_empty() {
         let _ = queue.send(ProviderEvent::Catalog { models });
     }
+    let skills = match flavor {
+        Flavor::Cursor => {
+            let (cwd, home) = (tr.cwd().to_path_buf(), home(&cfg.env));
+            tokio::task::spawn_blocking(move || cursor::skill_names(&cwd, home.as_deref())).await.unwrap_or_default()
+        }
+        _ => BTreeSet::new(),
+    };
     let client = Arc::new(Client::new(tr.cwd().to_path_buf(), cfg.env.clone()));
     let inner = Arc::new(Inner {
         rpc,
@@ -235,6 +252,7 @@ pub(super) async fn open(
             effort: cfg.effort.clone(),
             options: cfg.options.clone(),
             instructions,
+            skills,
         }),
         queue,
         closing: AtomicBool::new(false),
@@ -250,6 +268,11 @@ pub(super) async fn open(
 
 fn agent_name(init: &Initialize) -> &str {
     if init.name.is_empty() { "the agent" } else { &init.name }
+}
+
+/// The home directory the agent sees: the session's `HOME`, else the daemon's.
+fn home(env: &[(String, String)]) -> Option<std::path::PathBuf> {
+    env.iter().rev().find(|(k, _)| k == "HOME").map(|(_, v)| v.into()).or_else(|| std::env::var_os("HOME").map(Into::into))
 }
 
 /// Move queued events to the session's channel, in order, until `Exited`.
@@ -337,8 +360,14 @@ impl Inner {
         let (session, generation, settings) = {
             let state = self.state.lock().unwrap();
             let tr = &state.tr;
+            // Cursor's own id for T3's `auto`.
+            let offered: Vec<&str> = policy::model_option(&tr.config).map(|o| o.values().iter().map(|c| c.id.as_str()).collect()).unwrap_or_default();
+            let model = match self.init.flavor {
+                Flavor::Cursor => state.model.as_deref().map(|m| cursor::model(m, &offered)),
+                _ => state.model.as_deref(),
+            };
             let want = Wanted {
-                model: state.model.as_deref(),
+                model,
                 effort: state.effort.as_deref(),
                 options: &state.options,
                 runtime: tr.runtime,
@@ -449,6 +478,7 @@ impl Session for AcpSession {
         if state.tr.turn_active() {
             bail!("a turn is already running");
         }
+        let input = TurnInput { text: cursor::rewrite_mentions(&input.text, &state.skills), ..input };
         let prompt = inner.prompt(&input, state.instructions.as_deref())?;
         state.instructions = None;
         let params = json!({ "sessionId": state.tr.session(), "prompt": prompt });
@@ -540,5 +570,10 @@ mod tests {
         assert_eq!(p["clientCapabilities"]["fs"], json!({ "readTextFile": true, "writeTextFile": false }));
         assert_eq!(p["clientCapabilities"]["terminal"], false);
         assert_eq!(p["clientInfo"]["name"], "roll");
+        // Cursor is asked for its parameterized model picker.
+        let p = initialize_params(Flavor::Cursor);
+        assert_eq!(p["clientCapabilities"]["_meta"], json!({ "parameterizedModelPicker": true }));
+        assert_eq!(p["clientCapabilities"]["terminal"], true);
+        assert!(initialize_params(Flavor::Generic)["clientCapabilities"].get("_meta").is_none());
     }
 }

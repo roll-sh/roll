@@ -18,8 +18,8 @@
 use agent_host::provider::acp::{Acp, installed_agents, known_agents};
 use agent_host::provider::{McpServer, Provider, ProviderConfig, ProviderEvent, Session, SessionConfig, TurnEnd, TurnInput};
 use agent_proto::{
-    ApprovalAction, AuthStatus, Decision, InteractionMode, NodeBody, NodeStatus, RequestBody, Response, RuntimeMode,
-    TodoStatus, ToolKind,
+    ApprovalAction, AuthStatus, Decision, InteractionMode, ModelOption, NodeBody, NodeStatus, OptionRole, RequestBody, Response,
+    RuntimeMode, TodoStatus, ToolKind,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -1097,6 +1097,100 @@ async fn antigravity_info_never_starts_it() {
     assert!(!missing.installed && missing.detail.unwrap().contains("ACP registry"));
     let known = known_agents().into_iter().find(|a| a.name == "antigravity").unwrap();
     assert_eq!(known.config.binary.as_deref(), Some(Path::new("agy_acp_server.par")));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Cursor (its real `initialize`; the rest from its ACP server's source)
+// ---------------------------------------------------------------------------------------------
+
+/// `cursor-agent acp`: asked for its parameterized picker, a model's parameters become T3's
+/// options (effort as the thread's effort, `context` the window, `fast` the speed, `true`/`false`
+/// selects as switches, `auto` as its `default`); `$review` goes out as `/review` for a SKILL.md
+/// skill; `updateTodos` and `createPlan` show as todos and a plan; `task` is a subagent with
+/// its model and end; `cursor/ask_question` is a question answered with option ids.
+#[tokio::test]
+async fn cursor_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let skill = dir.path().join(".cursor/skills/review");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(skill.join("SKILL.md"), "---\nname: Review\ndescription: Reviews a diff\n---\n").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let home_dir = home.path().display().to_string();
+    let mut h = Harness::open_as("cursor", dir, "cursor_turn", RuntimeMode::FullAccess, |cfg| {
+        cfg.model = Some("auto".into());
+        cfg.effort = Some("high".into());
+        cfg.options = agent_proto::ModelOptions::from([
+            ("fast".into(), agent_proto::OptionValue::Flag(true)),
+            ("context".into(), agent_proto::OptionValue::Choice("200k".into())),
+            ("thinking".into(), agent_proto::OptionValue::Flag(false)),
+        ]);
+        cfg.env = vec![("HOME".into(), home_dir)];
+    })
+    .await;
+    h.send("$review the diff, then $nothing").await;
+    let (id, item, body) = h.request().await;
+    assert_eq!(item, None);
+    let RequestBody::Questions { questions } = body else { panic!("{body:?}") };
+    assert_eq!((questions[0].header.as_str(), questions[0].question.as_str()), ("Review", "How deep?"));
+    let answers = [("depth".to_string(), "Thorough".to_string())].into();
+    h.session.respond(&id, &Response::Answers { answers }).await.unwrap();
+    assert_eq!(h.turn_end().await, TurnEnd::Completed);
+    let ws = h.ws();
+    let (events, _) = h.finish().await;
+    golden("cursor_turn", &events, &ws);
+
+    // The catalog, as T3 shows Cursor's parameters.
+    let catalog = events.iter().find_map(|e| if let ProviderEvent::Catalog { models } = e { Some(models) } else { None }).unwrap();
+    assert_eq!(catalog.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["default", "composer-2", "claude-opus-4-8"]);
+    let options = &catalog[1].options;
+    assert_eq!(options.iter().map(|o| o.id()).collect::<Vec<_>>(), ["effort", "context", "fast", "thinking"]);
+    assert_eq!(options.iter().map(|o| o.role()).collect::<Vec<_>>(), [Some(OptionRole::Reasoning), Some(OptionRole::ContextWindow), Some(OptionRole::Speed), None]);
+    assert!(matches!(options[2], ModelOption::Boolean { default: false, .. }) && matches!(options[3], ModelOption::Boolean { .. }));
+
+    let all = latest(&events);
+    // Todos merged by id; the plan an item of its own; no tool rows for either.
+    let NodeBody::Todos { items: todos } = &all["plan:1"].body else { panic!() };
+    assert_eq!(todos.iter().map(|t| (t.text.as_str(), t.status)).collect::<Vec<_>>(), [("Read the diff", TodoStatus::Completed), ("Write the review", TodoStatus::Pending)]);
+    assert_eq!(all["plan:1:toolu_plan_1"].body, NodeBody::Plan { text: "# Review\n\n1. Read\n2. Write".into() });
+    assert!(!all.contains_key("toolu_todos_1") && !all.contains_key("toolu_plan_1"));
+    let task = &all["toolu_task_1"];
+    assert_eq!(task.status, NodeStatus::Completed);
+    let NodeBody::Subagent { agent, prompt, model, result, .. } = &task.body else { panic!("{task:?}") };
+    assert_eq!((agent.as_str(), prompt.as_str(), model.as_deref(), result.as_deref()), ("explore", "List the crates", Some("composer-2"), Some("Found 3 crates.")));
+    // The child's session isn't this one's; the window is its `context` option's.
+    assert_eq!(messages(&events), ["Reviewed."]);
+    assert!(events.iter().any(|e| matches!(e, ProviderEvent::Context(c) if c.used_tokens == 5000 && c.max_tokens == Some(200_000))));
+}
+
+/// Cursor's status is its own: `cursor-agent status --format json` (as 2026.11.05 prints it).
+#[tokio::test]
+async fn cursor_status_is_its_own() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("log.ndjson");
+    let t = vec![
+        expect("request", "initialize", json!({ "protocolVersion": 2, "clientCapabilities": { "_meta": { "parameterizedModelPicker": true } } })),
+        emit("response", "initialize", serde_json::from_str::<Value>(include_str!("fixtures/acp/cursor-initialize.json")).unwrap()),
+        exit_ok(),
+    ];
+    let path = synthetic(dir.path(), "status", &t);
+    let status = |json: &str| {
+        // `status --format json` answers; anything else is the fake ACP agent.
+        let bin = dir.path().join("cursor-agent");
+        let script = format!("#!/bin/sh\nif [ \"$1\" = status ]; then printf '%s' '{json}'; exit 0; fi\nexec /bin/sh \"$@\"\n");
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ProviderConfig { binary: Some(bin), ..fake_config(Path::new(&path), &log) }
+    };
+    let ok = status(r#"{ "status": "authenticated", "isAuthenticated": true, "userInfo": { "email": "a@b.c" } }"#);
+    let info = Acp::new("cursor".into(), ok).info().await;
+    assert!(info.installed);
+    assert_eq!((info.name.as_str(), info.auth, info.detail.as_deref()), ("Cursor", AuthStatus::Ready, Some("Logged in as a@b.c")));
+    assert!(info.capabilities.subagents && info.capabilities.plan_mode);
+    let out = status(r#"{ "status": "unauthenticated", "isAuthenticated": false, "message": "Not logged in" }"#);
+    let info = Acp::new("cursor".into(), out).info().await;
+    assert_eq!(info.auth, AuthStatus::Missing);
+    assert!(info.detail.unwrap().contains("cursor-agent login"));
 }
 
 // ---------------------------------------------------------------------------------------------

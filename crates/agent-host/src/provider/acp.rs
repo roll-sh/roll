@@ -4,8 +4,8 @@
 //! Behaviour follows T3 Code (MIT): `packages/effect-acp` (the protocol client: v2 negotiation
 //! with a v1 fallback, v2 shapes normalized onto v1's), `packages/provider-acp` (the session
 //! runtime, update projection, client policy and terminals), `packages/provider-acp-registry`
-//! (which agents exist and how each starts) and the Grok, Kiro, fx and Antigravity flavors for
-//! their quirks. One process serves one session.
+//! (which agents exist and how each starts) and the Grok, Kiro, fx, Antigravity and Cursor
+//! flavors for their quirks. One process serves one session.
 //!
 //! - `rpc`: the process and the JSON-RPC connection.
 //! - `wire`: the slice of ACP's schema the adapter reads, parsed tolerantly.
@@ -13,11 +13,12 @@
 //! - `policy`: what roll answers itself, and runtime/plan modes → the agent's settings.
 //! - `client`: `fs/*` and `terminal/*`, confined to the workspace.
 //! - `session`: opening a session and the `Session` methods.
-//! - `antigravity`: Google Antigravity's quirks.
+//! - `antigravity`, `cursor`: Google Antigravity's and Cursor's quirks.
 
 mod antigravity;
 mod catalog;
 mod client;
+mod cursor;
 mod policy;
 mod rpc;
 mod session;
@@ -38,6 +39,10 @@ use wire::Flavor;
 const START_TIMEOUT: Duration = Duration::from_secs(120);
 /// T3's ACP status probe timeout.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long Cursor's own status check may take (it asks Cursor's API), and how much of what it
+/// prints is read.
+const STATUS_TIMEOUT: Duration = Duration::from_secs(15);
+const STATUS_MAX: u64 = 64 << 10;
 
 pub struct Acp {
     name: String,
@@ -76,9 +81,13 @@ impl Acp {
     /// The flavor the agent is started as, before it says what it is (its client capabilities
     /// and launch depend on it).
     fn flavor(&self) -> Flavor {
-        match antigravity::expected(&self.name, &self.binary()) {
-            true => Flavor::Antigravity,
-            false => Flavor::Generic,
+        let binary = self.binary();
+        if antigravity::expected(&self.name, &binary) {
+            Flavor::Antigravity
+        } else if cursor::expected(&self.name, &binary) {
+            Flavor::Cursor
+        } else {
+            Flavor::Generic
         }
     }
 
@@ -131,8 +140,27 @@ impl Acp {
             // Antigravity has no plan mode (its own `/plan` command is a message), and reports
             // the subagents it starts.
             Flavor::Antigravity => Capabilities { plan_mode: false, subagents: true, ..Self::base_capabilities(images) },
+            // Cursor reports the subagents its `task` tool starts.
+            Flavor::Cursor => Capabilities { subagents: true, ..Self::base_capabilities(images) },
             _ => Self::base_capabilities(images),
         }
+    }
+
+    /// Cursor's own status check (`cursor-agent status --format json`): it reads its own login
+    /// and prints what it found; roll reads only that. Bounded in time and size.
+    async fn cursor_status(&self, binary: &Path) -> Option<(AuthStatus, Option<String>)> {
+        use tokio::io::AsyncReadExt;
+        let cfg = self.cfg.get();
+        let mut cmd = tokio::process::Command::new(binary);
+        cmd.args(cursor::STATUS_ARGS).envs(cfg.env.iter().map(|(k, v)| (k, v))).stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).kill_on_drop(true);
+        let mut child = cmd.spawn().ok()?;
+        let mut out = Vec::new();
+        let mut stdout = child.stdout.take()?.take(STATUS_MAX);
+        let read = tokio::time::timeout(STATUS_TIMEOUT, stdout.read_to_end(&mut out)).await;
+        let _ = child.kill().await;
+        read.ok()?.ok()?;
+        Some(cursor::auth(&String::from_utf8_lossy(&out)))
     }
 
     /// Antigravity's status without starting it: the server unpacks about 1 GB each launch
@@ -224,6 +252,13 @@ impl Provider for Acp {
                         let names: Vec<&str> = init.auth_methods.iter().map(|m| m.name.as_str()).collect();
                         info.detail = Some(format!("Signs in with: {}", names.join(", ")));
                     }
+                    // Cursor says itself whether it's logged in.
+                    if (init.flavor == Flavor::Cursor || self.flavor() == Flavor::Cursor)
+                        && let Some((auth, detail)) = self.cursor_status(&binary).await
+                        && auth != AuthStatus::Unknown
+                    {
+                        (info.auth, info.detail) = (auth, detail);
+                    }
                 }
                 // An agent that doesn't answer isn't usable: nothing picks it (delegation, the
                 // composer) until a refresh finds it answering.
@@ -233,8 +268,10 @@ impl Provider for Acp {
                 }
             }
         }
-        // What the last session said, if one has started since the daemon did.
+        // What the last session said, if one has started since the daemon did and the agent
+        // didn't say itself.
         if info.installed
+            && info.auth == AuthStatus::Unknown
             && let Some(auth) = *self.auth.lock().unwrap()
         {
             info.auth = auth;

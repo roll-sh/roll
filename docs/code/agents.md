@@ -306,6 +306,40 @@ completed, native thread ref). The orchestrator owns ids and turns those events 
     - Edit hunks rebuilt from the file before an edit.
     - Attachments other than images (audio, PDFs, video).
     - Reading subagents' work.
+  - **Cursor** (`acp:cursor`, `acp/cursor.rs`). T3 runs Cursor through its SDK with an API key.
+    roll never holds that key, so it keeps `cursor-agent acp` and ports what needs no credential
+    from T3's `packages/provider-cursor` (`CursorSdkCatalog.ts`, `sdkModel.ts`, `status.ts`,
+    `skills.ts` and `adapter.ts`). The ACP shapes come from cursor-agent 2026.11.05 itself: its
+    real `initialize` answer is a fixture, and the rest was read from its ACP server's source. No
+    session was ever opened with the real agent.
+    - It's known as Cursor by its name (`cursor`, or a binary named `cursor-agent`) before
+      `initialize`. After it, its `cursor_login` method says so, since it sends no `agentInfo`.
+    - It's asked for its parameterized model picker
+      (`clientCapabilities._meta.parameterizedModelPicker`), so a model's parameters arrive as
+      config options rather than every combination as a model.
+    - The live catalog maps them as T3 does (`buildCursorCapabilitiesFromSdkModel`): effort or
+      reasoning first, then context, fast, thinking and the rest. A `"true"`/`"false"` select is
+      a switch, which goes back as `"true"`/`"false"`. `context` is the context window and `fast`
+      is the speed. A `thought_level` switch, such as thinking, is never the effort. `auto` is
+      written as its `default` (unverified: what its model list calls Auto). A `usage_update`
+      without a size takes the window from the `context` value (`200k`, `1m`).
+    - `$name` in a message goes out as Cursor's `/name` for the SKILL.md skills under
+      `{cwd,~}/{.cursor,.agents,.codex,.claude}/skills` and `~/.cursor/skills-cursor`. The scan
+      uses T3's bounds and reads only directory names and a skill's `metadata.surfaces`.
+    - Its own tools carry `rawInput._toolName`. `updateTodos` and `createPlan` aren't shown as
+      tools: `cursor/update_todos` (merged by id) is the turn's todos, and `cursor/create_plan`
+      is a plan item, answered `accepted`. `task` is a subagent (`subagentType`, `prompt`); its
+      model comes from `cursor/task` or `subagent_spawned`, and its end from
+      `subagent_state_update`. The child session's own updates aren't followed.
+      `cursor/ask_question` is a question answered with option ids (declined is `skipped`).
+      Other `cursor/*` requests get -32601.
+    - Status is its own: `cursor-agent status --format json`, which reads its own login and
+      prints `status` (`authenticated`, `unauthenticated`, …). roll reads only that and the
+      account's email. The format was checked in the CLI's source; the command was never run here
+      with a login.
+    - Not ported, by the credential rule: T3's API-key catalog (`/v1/models`, `/v1/me`), its
+      account, usage and usage-limit readers, the keychain and `~/.cursor/auth.json`. So there
+      are no usage limits.
 - **OpenCode** (`opencode.rs`, a port of T3's v2 OpenCode driver): OpenCode 2's own server,
   `opencode serve`, over HTTP and server-sent events (`GET /api/event`). One server per provider
   serves every session (each request names its directory); roll starts it with a password it keeps

@@ -144,8 +144,14 @@ pub fn mode_option(config: &[ConfigOption]) -> Option<&ConfigOption> {
 }
 
 pub fn effort_option(config: &[ConfigOption]) -> Option<&ConfigOption> {
+    // A `"true"`/`"false"` select is a switch, never a level (Cursor's `thinking`).
+    let switch = |o: &ConfigOption| {
+        let values = o.values();
+        values.len() == 2 && values.iter().all(|c| matches!(c.id.as_str(), "true" | "false"))
+    };
     config.iter().find(|o| {
         matches!(o.value, ConfigValue::Select { .. })
+            && !switch(o)
             && (matches!(o.id.as_str(), "effort" | "effortLevel" | "reasoning_effort" | "thought_level")
                 || o.category.as_deref() == Some("thought_level"))
     })
@@ -228,12 +234,18 @@ pub fn settings(
     {
         set(&mut out, option, effort);
     }
-    // Modes and the model have their own controls; the reasoning option is `effort`.
-    let reserved = |o: &ConfigOption| matches!(o.category.as_deref(), Some("model" | "mode" | "thought_level" | "collaboration_mode")) || o.id == "autopilot";
+    // Modes and the model have their own controls; the reasoning option is `effort` (another
+    // `thought_level` option, like Cursor's thinking switch, is an option of its own).
+    let effort = effort_option(config).map(|o| o.id.as_str());
+    let reserved = |o: &ConfigOption| {
+        matches!(o.category.as_deref(), Some("model" | "mode" | "collaboration_mode")) || o.id == "autopilot" || Some(o.id.as_str()) == effort
+    };
     for (want_id, value) in want.options {
         let Some(option) = config.iter().find(|o| &o.id == want_id && !reserved(o)) else { continue };
         match (&option.value, value) {
             (ConfigValue::Select { .. }, agent_proto::OptionValue::Choice(v)) if option.offers(v) => set(&mut out, option, v),
+            // A switch the agent lists as a `"true"`/`"false"` select (Cursor).
+            (ConfigValue::Select { .. }, agent_proto::OptionValue::Flag(b)) if option.offers(&b.to_string()) => set(&mut out, option, &b.to_string()),
             (ConfigValue::Boolean(current), agent_proto::OptionValue::Flag(b)) if current != b => {
                 out.push(Setting::Option { id: option.id.clone(), value: OptionValue::Bool(*b), optional: false })
             }
@@ -328,6 +340,27 @@ mod tests {
     fn want(runtime: RuntimeMode, interaction: InteractionMode) -> Wanted<'static> {
         static NONE: std::sync::LazyLock<agent_proto::ModelOptions> = std::sync::LazyLock::new(Default::default);
         Wanted { model: None, effort: None, options: &NONE, runtime, interaction, opening: false, permission_mode: None }
+    }
+
+    /// Cursor's parameters: a `"true"`/`"false"` select takes a switch's value, and a switch in
+    /// `thought_level` is an option of its own, never the effort.
+    #[test]
+    fn switches_listed_as_selects() {
+        let cursor = wire::config_options(&json!([
+            { "id": "thinking", "category": "thought_level", "type": "select", "currentValue": "false", "options": [{ "value": "false", "name": "Off" }, { "value": "true", "name": "On" }] },
+            { "id": "effort", "category": "thought_level", "type": "select", "currentValue": "medium", "options": [{ "value": "medium" }, { "value": "high" }] },
+            { "id": "fast", "category": "model_config", "type": "select", "currentValue": "false", "options": [{ "value": "false" }, { "value": "true" }] },
+        ]));
+        assert_eq!(effort_option(&cursor).map(|o| o.id.as_str()), Some("effort"));
+        let options = agent_proto::ModelOptions::from([
+            ("thinking".into(), agent_proto::OptionValue::Flag(true)),
+            ("fast".into(), agent_proto::OptionValue::Flag(false)),
+        ]);
+        let s = settings(&cursor, None, None, false, None, &Wanted { effort: Some("high"), options: &options, ..want(RuntimeMode::Ask, InteractionMode::Default) });
+        assert_eq!(s, [
+            Setting::Option { id: "effort".into(), value: OptionValue::Id("high".into()), optional: false },
+            Setting::Option { id: "thinking".into(), value: OptionValue::Id("true".into()), optional: false },
+        ]);
     }
 
     /// Antigravity's modes follow the runtime mode (T3's `antigravityPermissionMode`).

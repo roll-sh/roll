@@ -9,6 +9,7 @@
 //! Antigravity's quirks are in `antigravity.rs`; the hooks here are marked with its name.
 
 use super::antigravity;
+use super::cursor;
 use super::policy::{self, Disposition, Grants, Kind};
 use super::wire::{self, ConfigOption, Flavor, Generation, Models, Modes, PermissionOption};
 use crate::provider::{Item, ProviderEvent, TurnEnd};
@@ -71,6 +72,8 @@ enum PendingKind {
     GrokQuestions { questions: Vec<(String, String)> },
     /// Antigravity's question as a permission request: one of its options, by id and label.
     Choice { question: String, options: Vec<(String, String)> },
+    /// Cursor's `cursor/ask_question`: each question's option ids by label.
+    CursorQuestions { options: Vec<(String, Vec<(String, String)>)> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,6 +111,7 @@ struct Tool {
     content: Vec<Value>,
     locations: Vec<String>,
     agy: antigravity::ToolExtra,
+    cursor: cursor::ToolExtra,
 }
 
 #[derive(Debug)]
@@ -147,6 +151,8 @@ pub struct Translator {
     cost: Option<f64>,
     /// Antigravity's `client_view_file` repair.
     reads: antigravity::Reads,
+    /// Cursor's todo list and the tools it shows some other way.
+    cursor: cursor::State,
     /// History replayed by `session/load`: content is dropped, settings are kept.
     pub loading: bool,
 }
@@ -172,6 +178,7 @@ impl Translator {
             grants: Grants::default(),
             cost: None,
             reads: antigravity::Reads::default(),
+            cursor: cursor::State::default(),
             loading: false,
         };
         if let Some(config) = setup.config {
@@ -243,6 +250,7 @@ impl Translator {
     pub fn start_turn(&mut self, tag: u64) {
         self.turns += 1;
         self.reads.reset();
+        self.cursor.hidden.clear();
         self.turn = Some(Turn {
             n: self.turns,
             prompt: tag,
@@ -340,7 +348,24 @@ impl Translator {
                 let update = self.reads.repair(antigravity::sanitize_update(update));
                 self.on_tool(&update, out)
             }
+            // Cursor: `updateTodos` and `createPlan` show as the todos and the plan.
+            "tool_call" | "tool_call_update" if self.quirks.flavor == Flavor::Cursor => {
+                let id = wire::text(&update["toolCallId"]).unwrap_or_default();
+                if cursor::tool_name(update).is_some_and(cursor::hidden) {
+                    self.cursor.hidden.insert(id);
+                } else if !self.cursor.hidden.contains(&id) {
+                    self.on_tool(update, out)
+                }
+            }
             "tool_call" | "tool_call_update" => self.on_tool(update, out),
+            // Cursor: the subagent a `task` tool started, by the tool's id.
+            "subagent_spawned" | "subagent_state_update" if self.quirks.flavor == Flavor::Cursor => {
+                let Some((id, extra)) = cursor::subagent_update(update) else { return };
+                let Some(tool) = self.turn.as_mut().and_then(|t| t.tools.get_mut(&id)) else { return };
+                tool.cursor.model = extra.model.or(tool.cursor.model.take());
+                tool.cursor.ended = extra.ended.or(tool.cursor.ended);
+                self.on_tool(&json!({ "toolCallId": id }), out);
+            }
             "tool_call_content_chunk" => {
                 let mut merged = json!({ "toolCallId": update["toolCallId"] });
                 if let Some(tool) = update["toolCallId"].as_str().and_then(|id| self.turn.as_ref()?.tools.get(id)) {
@@ -461,6 +486,7 @@ impl Translator {
                 content: Vec::new(),
                 locations: Vec::new(),
                 agy: antigravity::ToolExtra::default(),
+                cursor: cursor::ToolExtra::default(),
             };
             turn.tools.insert(id.clone(), tool);
         }
@@ -472,7 +498,11 @@ impl Translator {
         if let Some(title) = wire::text(&update["title"]) {
             tool.title = Some(title);
         }
-        if let Some(name) = wire::text(&update["name"]).or_else(|| wire::text(&update["_meta"]["claudeCode"]["toolName"])) {
+        if let Some(name) = wire::text(&update["name"])
+            .or_else(|| wire::text(&update["_meta"]["claudeCode"]["toolName"]))
+            // Cursor names its own tools in their input.
+            .or_else(|| wire::text(&update["rawInput"]["_toolName"]))
+        {
             tool.name = Some(name);
         }
         if let Some(input) = update.get("rawInput").filter(|v| !v.is_null()) {
@@ -514,7 +544,17 @@ impl Translator {
         tool.item.body = if let Some((body, status)) = native {
             tool.item.status = status;
             body
-        } else if let Some(body) = subagent(tool, &call) {
+        } else if let Some(mut body) = subagent(tool, &call) {
+            // Cursor says the subagent's model, and how it ended (a background one outlives
+            // its tool).
+            if let NodeBody::Subagent { model, .. } = &mut body
+                && model.is_none()
+            {
+                model.clone_from(&tool.cursor.model);
+            }
+            if let Some(ended) = tool.cursor.ended {
+                tool.item.status = ended;
+            }
             body
         } else {
             if let Some(output) = &call.output
@@ -585,6 +625,13 @@ impl Translator {
         // The session's context window (T3's `UsageUpdated`: a size of 0 is an unknown window).
         let tokens = |k: &str| update[k].as_f64().filter(|n| n.is_finite()).map_or(0, |n| n.max(0.0).round() as u64);
         let size = tokens("size");
+        // Cursor: the window its `context` option names when it reports none.
+        let size = match size {
+            0 if self.quirks.flavor == Flavor::Cursor => {
+                self.config.iter().find(|o| o.id == "context").and_then(|o| o.current()).and_then(cursor::context_tokens).unwrap_or(0)
+            }
+            size => size,
+        };
         let context = ContextUsage { used_tokens: tokens("used"), max_tokens: (size > 0).then_some(size), total_processed_tokens: None, ..Default::default() };
         out.push(Action::Event(ProviderEvent::Context(context)));
         let cost = &update["cost"];
@@ -731,9 +778,49 @@ impl Translator {
                 let params = if params["params"].is_object() { &params["params"] } else { params };
                 self.on_grok_questions(id, params, &mut out);
             }
+            _ if self.quirks.flavor == Flavor::Cursor => match cursor::extension(method, params) {
+                Some(ext) => self.on_cursor(id, ext, &mut out),
+                None => out.push(Action::ReplyError { id, code: -32601, message: format!("{method} is not supported") }),
+            },
             _ => out.push(Action::ReplyError { id, code: -32601, message: format!("{method} is not supported") }),
         }
         out
+    }
+
+    /// Cursor's own requests (`cursor.rs`): todos, a subagent's model, questions and a plan.
+    fn on_cursor(&mut self, rpc_id: Value, ext: cursor::Extension, out: &mut Vec<Action>) {
+        if self.turn.is_none() {
+            let result = match ext {
+                cursor::Extension::Ask(_) => cursor::unanswered(true),
+                other => cursor::acknowledged(&other),
+            };
+            return out.push(Action::Reply { id: rpc_id, result });
+        }
+        let result = cursor::acknowledged(&ext);
+        match ext {
+            cursor::Extension::Todos { todos, merge } => {
+                let items = self.cursor.todos.apply(todos, merge);
+                self.set_plan(NodeBody::Todos { items }, out);
+            }
+            cursor::Extension::Task { tool, model } => {
+                if let Some(t) = self.turn.as_mut().and_then(|t| t.tools.get_mut(&tool)) {
+                    t.cursor.model = model.or(t.cursor.model.take());
+                    self.on_tool(&json!({ "toolCallId": tool }), out);
+                }
+            }
+            cursor::Extension::Plan { tool, text } => {
+                // Its own item: the turn's todos keep theirs.
+                let turn = self.turn.as_mut().expect("checked above");
+                close_segment(turn, out);
+                let id = format!("plan:{}:{}", turn.n, tool.unwrap_or_else(|| "cursor".into()));
+                out.push(Action::Event(ProviderEvent::Item(Item { id, parent: None, status: NodeStatus::Completed, body: NodeBody::Plan { text } })));
+            }
+            cursor::Extension::Ask(ask) => {
+                let item = ask.tool.clone().filter(|id| self.turn.as_ref().is_some_and(|t| t.tools.contains_key(id)));
+                return self.ask(rpc_id, PendingKind::CursorQuestions { options: ask.options }, item, RequestBody::Questions { questions: ask.questions }, out);
+            }
+        }
+        out.push(Action::Reply { id: rpc_id, result });
     }
 
     fn ask(&mut self, rpc_id: Value, kind: PendingKind, item: Option<String>, body: RequestBody, out: &mut Vec<Action>) {
@@ -986,6 +1073,11 @@ impl Translator {
                 json!({ "outcome": { "outcome": "cancelled" } })
             }
             (PendingKind::Choice { .. }, Response::Decision { .. }) => bail!("a question takes one of its answers"),
+            (PendingKind::CursorQuestions { options }, Response::Answers { answers }) => {
+                let answers: BTreeMap<String, String> = answers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                cursor::answered(options, &answers).map_err(|e| anyhow!(e))?
+            }
+            (PendingKind::CursorQuestions { .. }, Response::Decision { decision, .. }) => cursor::unanswered(*decision == Decision::Cancel),
         };
         let pending = self.pending.remove(request).expect("looked up above");
         Ok((pending.rpc_id, result))
@@ -1005,6 +1097,7 @@ fn cancelled(kind: &PendingKind) -> Value {
         PendingKind::Form { wrapped: true, .. } => json!({ "action": { "action": "cancel" } }),
         PendingKind::Form { wrapped: false, .. } => json!({ "action": "cancel" }),
         PendingKind::GrokQuestions { .. } => json!({ "outcome": "cancelled" }),
+        PendingKind::CursorQuestions { .. } => cursor::unanswered(true),
     }
 }
 
@@ -1157,6 +1250,7 @@ fn subagent(tool: &Tool, call: &ToolCall) -> Option<NodeBody> {
     }
     let prompt = wire::text(&input["prompt"])?;
     let agent = wire::text(&input["subagent_type"])
+        .or_else(|| wire::text(&input["subagentType"]))
         .or_else(|| wire::text(&input["description"]))
         .unwrap_or_else(|| "subagent".into());
     let result = call.output.clone();
