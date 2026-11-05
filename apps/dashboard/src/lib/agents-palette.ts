@@ -5,6 +5,7 @@
  * server, `OrchestrationV2ThreadOpens`; roll keeps it per device).
  */
 
+import { lastInputWasKeyboard } from "./input-modality";
 import { useSyncExternalStore } from "react";
 import { recordThreadOpen, type ThreadOpenStats } from "./palette-search";
 
@@ -60,7 +61,7 @@ export function closePalette() {
   if (back)
     setTimeout(() => {
       const a = document.activeElement;
-      if (back.isConnected && (!a || a === document.body)) back.focus({ preventScroll: true });
+      if (back.isConnected && (!a || a === document.body) && lastInputWasKeyboard()) back.focus({ preventScroll: true });
     }, 0);
 }
 

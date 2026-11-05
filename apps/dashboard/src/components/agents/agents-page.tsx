@@ -10,6 +10,7 @@ import { deriveGraph, rolling, type GraphNode } from "@/lib/agents-graph";
 import { runsOf } from "@/lib/agents-store";
 import type { Direction, Size } from "@/lib/agents-layout";
 import { closePalette, noteThreadOpen, openPalette, togglePalette } from "@/lib/agents-palette";
+import { lastInputWasKeyboard } from "@/lib/input-modality";
 import type { AgentsServices } from "@/lib/agents-services";
 import { isNewAgentKey, setAgentsView, useAgentsSurface, viewFromHash, type AgentsView } from "@/lib/agents-surface";
 import { ALL, applyDisplay, applyView, directionOf, focusOn, isPinned, pinKey, pinnedConversations, pinOf, projectOf, viewStorageKey, withDirection, type Pin as PinRec } from "@/lib/agents-views";
@@ -207,8 +208,9 @@ export function AgentsSurface({
   }, []);
   const close = useCallback(() => setAgentsView({ kind: "canvas" }), []);
 
-  // Focus comes back to the canvas when a conversation, settings or the launcher closes (it was
-  // lost with the panel): the card of what was open, else what had focus on the canvas before.
+  // Focus comes back to the canvas when a conversation, settings or the launcher closes from the
+  // keyboard (it was lost with the panel): the card of what was open, else what had focus on the
+  // canvas before. Not after a click (`lib/input-modality.ts`).
   const lastCanvasFocus = useRef<HTMLElement | null>(null);
   useEffect(() => {
     const on = (e: FocusEvent) => {
@@ -226,7 +228,7 @@ export function AgentsSurface({
     const key = before.kind === "thread" ? `t:${before.thread}` : before.kind === "settings" && before.target !== "owner" ? before.target : null;
     const t = setTimeout(() => {
       const a = document.activeElement;
-      if (a && a !== document.body && a.isConnected) return;
+      if ((a && a !== document.body && a.isConnected) || !lastInputWasKeyboard()) return;
       const card = key ? root.current?.querySelector<HTMLElement>(`[data-card][data-key="${CSS.escape(key)}"]`) : null;
       const back = card ?? (lastCanvasFocus.current?.isConnected ? lastCanvasFocus.current : null);
       back?.focus({ preventScroll: true });

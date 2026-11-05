@@ -743,6 +743,13 @@ function CardSlot({ node, engine, selected, children }: { node: GraphNode; engin
       data-kind={node.kind}
       data-selected={selected || undefined}
       tabIndex={-1}
+      onPointerDown={(e) => {
+        // A tap shows this card's tools on a touch screen (globals.css, `data-tapped`): not
+        // focus, which Safari doesn't move on a tap or a click.
+        if (e.pointerType !== "touch") return;
+        for (const t of document.querySelectorAll("[data-card][data-tapped]")) if (t !== e.currentTarget) t.removeAttribute("data-tapped");
+        e.currentTarget.setAttribute("data-tapped", "");
+      }}
       className="absolute top-0 left-0 rounded-xl outline-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent/70"
       style={{ transform: "translate3d(-99999px,0,0)" }}
     >
