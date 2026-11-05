@@ -13,7 +13,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import type { Automation, AutomationRun, RunState } from "@/lib/automations-api";
 import { TEMPLATES, type AutomationTemplate, type TemplateContext } from "@/lib/automation-templates";
 import { setAgentsView, type AutomationsView as View } from "@/lib/agents-surface";
-import { duration, took } from "@/lib/automations-ui";
+import { duration, runLabel, took } from "@/lib/automations-ui";
 import { automationPlaces } from "@/lib/agents-identity";
 import { MachineIcon, ProjectIcon } from "../identity";
 import { integrationOf } from "../brand-icons";
@@ -23,7 +23,7 @@ import { useAgents } from "../use-agents";
 import type { ListFilter as Filter } from "@/lib/automations-list";
 import { AutomationList, FilterButton } from "./list";
 import { SheetHeader } from "./sheet";
-import { PrimaryButton, QuietButton, RunStatus, stepIcon, Tile, triggerIcon, useAutomations } from "./shared";
+import { PrimaryButton, QuietButton, RunDot, RunStatus, stepIcon, Tile, triggerIcon, useAutomations } from "./shared";
 
 export function AutomationsView({ view, phone }: { view: View; phone: boolean }) {
   const a = useAutomations();
@@ -213,8 +213,12 @@ export function RunRows({ runs, selected, showName, onOpen, now }: { runs: Autom
               aria-current={r.id === selected || undefined}
               className={cn("group/run flex min-h-11 w-full items-center gap-3 px-3.5 py-2 text-left outline-none transition-colors duration-150 hover:bg-fg/[0.03] focus-visible:bg-fg/[0.04]", r.id === selected && "bg-fg/[0.05]")}
             >
-              <span className="w-[92px] shrink-0">
+              {/* Narrow (a phone): the status's dot and no duration, so the run's name has room. */}
+              <span className="hidden w-[92px] shrink-0 @md:block">
                 <RunStatus status={r.status} />
+              </span>
+              <span className="grid size-4 shrink-0 place-items-center @md:hidden" role="img" aria-label={runLabel[r.status]} title={runLabel[r.status]}>
+                <RunDot status={r.status} />
               </span>
               <span className="min-w-0 flex-1">
                 {showName && <span className="block truncate text-[13px] font-[510] tracking-[-0.01em]">{r.name}</span>}
@@ -226,8 +230,8 @@ export function RunRows({ runs, selected, showName, onOpen, now }: { runs: Autom
                   return <Icon key={s.id} className={cn("size-3", s.status === "succeeded" ? "text-muted" : s.status === "failed" ? "text-danger" : s.status === "running" || s.status === "waiting" ? "text-accent" : "text-faint")} strokeWidth={1.75} />;
                 })}
               </span>
-              <span className="w-14 shrink-0 text-right font-mono text-[11px] text-subtle tabular-nums">{ms === null ? "" : duration(ms)}</span>
-              <span className="w-16 shrink-0 text-right text-[11.5px] text-subtle tabular-nums" title={new Date(r.created_at).toLocaleString()}>
+              <span className="hidden w-14 shrink-0 text-right font-mono text-[11px] text-subtle tabular-nums @md:block">{ms === null ? "" : duration(ms)}</span>
+              <span className="w-12 shrink-0 text-right text-[11.5px] text-subtle tabular-nums @md:w-16" title={new Date(r.created_at).toLocaleString()}>
                 {ago(r.created_at, now).replace(" ago", "")}
               </span>
               <ChevronRight className="size-3.5 shrink-0 text-faint transition-colors group-hover/run:text-muted" />
