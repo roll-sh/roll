@@ -246,10 +246,9 @@ function Row({ automation: x, runs, selected, now }: { automation: Automation; r
         aria-current={selected || undefined}
         className={cn(
           "group/row relative flex min-h-[52px] cursor-pointer items-center gap-3 px-3.5 py-2 outline-none transition-colors duration-150 hover:bg-fg/[0.03] focus-visible:bg-fg/[0.04]",
-          selected && "bg-fg/[0.05] hover:bg-fg/[0.05]",
+          selected && "bg-fg/[0.06] hover:bg-fg/[0.06]",
         )}
       >
-        {selected && <span className="absolute inset-y-2 left-0 w-[2px] rounded-full bg-accent" aria-hidden />}
         <span className={cn("relative transition-opacity", !x.enabled && "opacity-60")}>
           <Tile icon={triggerIcon(source)} />
           {last && <RunDot status={last.status} className="absolute -top-0.5 -right-0.5 ring-2 ring-panel @2xl:hidden" />}
