@@ -76,6 +76,16 @@ describe("Picker", () => {
     await waitFor(() => expect(screen.queryByRole("listbox", { name: "Team" })).toBeNull());
   });
 
+  it("takes the first row with Enter right after opening, before any arrow (T3)", async () => {
+    const onValue = vi.fn();
+    render(<Held label="Team" options={TEAMS} initial={null} onValue={onValue} />);
+    macClick(screen.getByRole("button", { name: "Team" }));
+    await listbox();
+    screen.getByRole("combobox", { name: "Search team" }).focus();
+    await userEvent.keyboard("{Enter}");
+    expect(onValue).toHaveBeenCalledWith(TEAMS[0].id);
+  });
+
   it("holds several as chips: toggles stay open, chips and Backspace remove", async () => {
     const onValue = vi.fn();
     render(<Held label="Team" options={TEAMS} initial={["ENG"]} onValue={onValue} />);
@@ -158,7 +168,8 @@ describe("LookupPicker", () => {
   it("searches on the server and makes a new label", async () => {
     const api = memoryLookup(DEMO_LOOKUPS);
     const onChange = vi.fn();
-    show(api, <LookupPicker label="Labels" multiple from={{ source: "linear", kind: "labels" }} parent="team_eng" create noun="label" value={[]} onChange={onChange} />);
+    // The noun comes from the kind ("labels": "Create label …").
+    show(api, <LookupPicker label="Labels" multiple from={{ source: "linear", kind: "labels" }} parent="team_eng" create value={[]} onChange={onChange} />);
     macClick(screen.getByRole("button", { name: "Labels" }));
     typeIn(await screen.findByRole("combobox", { name: "Search labels" }), "Needs QA");
     const create = await screen.findByRole("option", { name: /Create label “Needs QA”/ });

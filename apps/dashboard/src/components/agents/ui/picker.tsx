@@ -19,7 +19,7 @@
  */
 
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
-import { Bot, Braces, Check, ChevronDown, Circle, CircleCheck, CircleDashed, CircleDot, CircleX, FolderGit2, GitBranch, GitPullRequest, Hash, Lock, Milestone, Plus, Server, Shield, Tag, TriangleAlert, Users, Workflow, X } from "lucide-react";
+import { Bot, Braces, Check, ChevronDown, Circle, CircleCheck, CircleDashed, CircleDot, CircleX, FolderGit2, GitBranch, GitPullRequest, Hash, Lock, Milestone, Plus, Server, Shield, Tag, TextCursorInput, TriangleAlert, Users, Workflow, X } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Combobox, ComboboxItem, ComboboxList, ComboboxSearchInput } from "./combobox";
 import { cn, popupMotion } from "./cn";
@@ -326,11 +326,15 @@ export function Picker(props: PickerProps) {
   };
 
   const onSearchKey = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter" && !e.nativeEvent.isComposing && highlighted.current && rows.some((r) => r.key === highlighted.current)) {
-      (e as typeof e & { preventBaseUIHandler?: () => void }).preventBaseUIHandler?.();
-      e.preventDefault();
-      void choose(highlighted.current);
-      return;
+    if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+      // Nothing highlighted yet (just opened, nothing typed): Enter takes the first row, as T3's.
+      const key = highlighted.current && rows.some((r) => r.key === highlighted.current) ? highlighted.current : rows.find((r) => r.kind !== "none" && r.kind !== "more")?.key;
+      if (key) {
+        (e as typeof e & { preventBaseUIHandler?: () => void }).preventBaseUIHandler?.();
+        e.preventDefault();
+        void choose(key);
+        return;
+      }
     }
     if (e.key === "Backspace" && !query) {
       if (mode === "variables") {
@@ -501,7 +505,7 @@ function RowView({ row, picked, multiple, noun, creating, mono }: { row: Row; pi
     case "custom":
       return (
         <ComboboxItem value={row.key} className="w-full text-muted data-highlighted:text-fg">
-          <span className="grid size-4 place-items-center text-subtle">↵</span>
+          <TextCursorInput aria-hidden className="size-3.5" />
           <span className="min-w-0 flex-1 truncate">
             Use <span className="font-mono text-[12px] text-fg">{row.text}</span>
           </span>

@@ -132,7 +132,7 @@ describe("automation fields that name a thing", { timeout: 15_000 }, () => {
     fireEvent.keyDown(document.activeElement!, { key: "Escape" });
     macClick(screen.getByRole("button", { name: "Add to Add labels" }));
     fireEvent.change(await screen.findByRole("combobox", { name: "Search add labels" }), { target: { value: "needs qa" } });
-    macClick(await screen.findByRole("option", { name: /Create new “needs qa”/ }));
+    macClick(await screen.findByRole("option", { name: /Create label “needs qa”/ }));
     await waitFor(() => expect(onValue).toHaveBeenLastCalledWith(expect.objectContaining({ add: ["enhancement", lookup.made[0].id] })));
     expect(lookup.made[0]).toMatchObject({ label: "needs qa" });
     expect(await lookup.list("acme", "github", "labels", { parent: "acme/web", q: "needs" })).toMatchObject({ items: [{ label: "needs qa" }] });

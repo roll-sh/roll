@@ -54,5 +54,7 @@ export function LookupPicker({ from, parent, create, ...rest }: LookupPickerProp
   const source = useLookupSource(from.source, from.kind, parent);
   const api = services?.lookup;
   const onCreate = create && api ? async (name: string) => option(await api.create(owner, from.source, from.kind, { name, parent: parent ?? undefined })) : undefined;
-  return <Picker {...(rest as PickerProps)} source={source} onCreate={onCreate} recents={rest.recents ?? `${owner}/${from.source}/${from.kind}/${parent ?? ""}`} />;
+  // "Create label …": the kind, one of them.
+  const noun = rest.noun ?? from.kind.replace(/s$/, "");
+  return <Picker {...(rest as PickerProps)} source={source} onCreate={onCreate} noun={noun} recents={rest.recents ?? `${owner}/${from.source}/${from.kind}/${parent ?? ""}`} />;
 }
