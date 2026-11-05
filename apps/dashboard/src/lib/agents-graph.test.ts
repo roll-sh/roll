@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { deriveGraph, keyOf, projectStats, rolling } from "./agents-graph";
-import { arrange, bounds, centreAcross, dropIndex, fitView, mergeOrder, moveTo, ROOTS, sideBySide, tidyLayout, withOrder, zoomAt, type LayoutOptions, type Point, type Size } from "./agents-layout";
+import { arrange, bounds, centreAcross, dropIndex, fitView, mergeOrder, moveTo, nextCard, ROOTS, sideBySide, tidyLayout, withOrder, zoomAt, type LayoutOptions, type Point, type Rect, type Size } from "./agents-layout";
 import { applyEvents, emptyData, follow } from "./agents-store";
 import { approval, ev, machine, node, project, run, terminal, thread } from "@/test/agents";
 import { EMPTY_INBOX, type Thread } from "./agents-api";
@@ -257,6 +257,44 @@ describe("agents layout", () => {
     const p = tidyLayout({ roots: ["m"], nodes: new Map([["m", { children: ["a", "b", "c"] }], ["a", { children: [] }], ["b", { children: [] }], ["c", { children: [] }]]) }, () => s, { direction: "vertical" });
     const centre = (k: string) => centreAcross(p.get(k)!, s, true);
     expect(moveTo(["a", "b", "c"], "a", dropIndex(["a", "b", "c"], "a", centre("b") + 1, centre))).toEqual(["b", "a", "c"]);
+  });
+
+  it("moves between cards with the arrows along the tree, either way it grows", () => {
+    // m → p1 (t1 → r1, t2), p2 (t3)
+    const t = {
+      roots: ["m"],
+      nodes: new Map([
+        ["m", { children: ["p1", "p2"] }],
+        ["p1", { children: ["t1", "t2"] }],
+        ["p2", { children: ["t3"] }],
+        ["t1", { children: ["r1"] }],
+        ["t2", { children: [] }],
+        ["t3", { children: [] }],
+        ["r1", { children: [] }],
+      ]),
+    };
+    const sz = (k: string) => (k.startsWith("r") ? { w: 352, h: 150 } : k.startsWith("t") ? { w: 296, h: 96 } : { w: 256, h: 64 });
+    const rectsOf = (p: Map<string, Point>) => new Map<string, Rect>([...p].map(([k, q]) => [k, { ...q, ...sz(k) }]));
+    // Left to right: ← parent, → child, ↑ / ↓ along the column (across parents).
+    const h = rectsOf(tidyLayout(t, sz));
+    expect(nextCard(h, "t1", "left")).toBe("p1");
+    expect(nextCard(h, "t1", "right")).toBe("r1");
+    expect(nextCard(h, "t1", "down")).toBe("t2");
+    expect(nextCard(h, "t2", "down")).toBe("t3");
+    expect(nextCard(h, "t3", "up")).toBe("t2");
+    expect(nextCard(h, "p1", "left")).toBe("m");
+    expect(nextCard(h, "m", "left")).toBeNull();
+    // The board: ↑ / ↓ walk a project's column (a thread, its request, the next thread), ← / → go to the next column.
+    const v = rectsOf(tidyLayout(t, sz, { direction: "vertical", spreads: (k) => k === "m" }));
+    expect(nextCard(v, "m", "down")).toBe("p1");
+    expect(nextCard(v, "p1", "down")).toBe("t1");
+    expect(nextCard(v, "t1", "down")).toBe("r1");
+    expect(nextCard(v, "r1", "down")).toBe("t2");
+    expect(nextCard(v, "t2", "up")).toBe("r1");
+    expect(nextCard(v, "p1", "right")).toBe("p2");
+    expect(nextCard(v, "t1", "right")).toBe("t3");
+    expect(nextCard(v, "p1", "up")).toBe("m");
+    expect(nextCard(v, "gone", "up")).toBeNull();
   });
 
   it("keeps the user's order among siblings; new work keeps its default place", () => {

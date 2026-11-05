@@ -11,7 +11,7 @@ import type { Direction, Size } from "@/lib/agents-layout";
 import { closePalette, noteThreadOpen, openPalette, togglePalette } from "@/lib/agents-palette";
 import type { AgentsServices } from "@/lib/agents-services";
 import { isNewAgentKey, setAgentsView, useAgentsSurface, viewFromHash, type AgentsView } from "@/lib/agents-surface";
-import { ALL, applyView, directionOf, isPinned, pinKey, pinnedConversations, pinOf, viewStorageKey, withDirection, type Pin as PinRec } from "@/lib/agents-views";
+import { ALL, applyView, directionOf, focusOn, isPinned, pinKey, pinnedConversations, pinOf, projectOf, viewStorageKey, withDirection, type Pin as PinRec } from "@/lib/agents-views";
 import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
 import { LINK_PARAMS, type IntegrationsLink } from "@/lib/integrations-api";
 import { useModelPrefsSync, useOwnerSettings } from "@/lib/owner-settings";
@@ -228,12 +228,22 @@ export function AgentsSurface({
     [chrome, startNew],
   );
 
+  // One project filling the canvas (per device, until Escape or the chip's ×).
+  const [focused, setFocused] = useState<string | null>(null);
+  const focusProject = useCallback((project: string | null) => {
+    setFocused(project);
+    if (project) setAgentsView({ kind: "canvas" });
+  }, []);
+  const focusedGone = focused !== null && !data.projects.has(focused);
+  useEffect(() => {
+    if (focusedGone) setFocused(null);
+  }, [focusedGone]);
   const prefs = useOwnerSettings(services?.settings, client.owner, data.settings?.revision ?? 0);
   // The model picker's favourites and recent models follow the owner (a share's replay has no services).
   useModelPrefsSync(prefs, services ? prefs.save : null);
   const ctx: AgentsCtx = useMemo(
-    () => ({ client, owner: client.owner, demo, openThread, close, startNew, focus, services, sandboxes, phone, prefs }),
-    [client, demo, openThread, close, startNew, focus, services, sandboxes, phone, prefs],
+    () => ({ client, owner: client.owner, demo, openThread, close, startNew, focus, focusProject, services, sandboxes, phone, prefs }),
+    [client, demo, openThread, close, startNew, focus, focusProject, services, sandboxes, phone, prefs],
   );
 
   // ⌘N / ⌘⇧O (T3's `chat.new`): the launcher, except in a terminal.
@@ -335,8 +345,10 @@ export function AgentsSurface({
       selectView: views.select,
       direction,
       setDirection,
+      focused,
+      focusProject,
     }),
-    [showArchived, archived, views.views, views.current.id, views.select, direction, setDirection],
+    [showArchived, archived, views.views, views.current.id, views.select, direction, setDirection, focused, focusProject],
   );
   const end = (
     <>
@@ -445,6 +457,8 @@ export function AgentsSurface({
                       views={views}
                       direction={direction}
                       onDirection={setDirection}
+                      focused={focused}
+                      onFocus={focusProject}
                       pendingFocus={pendingFocus}
                       visible={shown.kind !== "new" && shown.kind !== "automations"}
                       selected={selected}
@@ -588,6 +602,8 @@ function CanvasView({
   views,
   direction,
   onDirection,
+  focused,
+  onFocus,
   pendingFocus,
   visible,
   selected,
@@ -600,6 +616,9 @@ function CanvasView({
   views: CanvasViews;
   direction: Direction;
   onDirection: (d: Direction) => void;
+  /** The project filling the canvas, if one does. */
+  focused: string | null;
+  onFocus: (project: string | null) => void;
   pendingFocus: React.RefObject<string | null>;
   visible: boolean;
   selected?: string;
@@ -612,7 +631,41 @@ function CanvasView({
   // A pinned conversation answers its thread's requests itself.
   const expanded = useMemo(() => pinnedConversations(view), [view]);
   const whole = useMemo(() => deriveGraph(data, { showArchived, expanded }), [data, showArchived, expanded]);
-  const graph = useMemo(() => applyView(whole, data, { filter, pins: view.pins }, Date.now()), [whole, data, filter, view.pins]);
+  const viewed = useMemo(() => applyView(whole, data, { filter, pins: view.pins }, Date.now()), [whole, data, filter, view.pins]);
+  const graph = useMemo(() => (focused ? focusOn(viewed, `p:${focused}`) : viewed), [viewed, focused]);
+  // F on a card focuses its project (again: everything); Escape lets go first.
+  useEffect(() => {
+    if (!visible) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
+      const el = e.target as HTMLElement | null;
+      // Only on the canvas: the side panel, fields and popups keep their keys.
+      if (el?.closest?.("input, textarea, [contenteditable], .xterm, [data-panel], [role=dialog]:not([data-surface]), [role=menu], [role=listbox]")) return;
+      if (e.key === "Escape" && focused) {
+        e.preventDefault();
+        e.stopPropagation();
+        onFocus(null);
+        return;
+      }
+      if (e.key !== "f") return;
+      const key = el?.closest<HTMLElement>("[data-card]")?.dataset.key;
+      const project = key ? projectOf(viewed, key) : null;
+      if (!project && !focused) return;
+      e.preventDefault();
+      onFocus(focused ? null : project!.slice(2));
+      // Keep the card focused once the canvas has redrawn.
+      if (key) setTimeout(() => (document.querySelector<HTMLElement>(`[data-card][data-key="${CSS.escape(key)}"] [data-drag][tabindex='0']`) ?? document.querySelector<HTMLElement>(`[data-card][data-key="${CSS.escape(key)}"]`))?.focus({ preventScroll: true }), 0);
+    };
+    // Capture: before Escape closes the popup.
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [visible, focused, viewed, onFocus]);
+  // Enter on a machine or project card opens its settings beside the canvas.
+  const onOpen = useCallback((key: string) => {
+    if (!key.startsWith("m:") && !key.startsWith("p:")) return false;
+    setAgentsView({ kind: "settings", target: key });
+    return true;
+  }, []);
   // Pinned conversations and diffs need their thread's detail.
   const followed = view.pins
     .filter((p) => p.kind !== "terminal")
@@ -706,7 +759,7 @@ function CanvasView({
   const empty = graph.nodes.size === 0 && whole.nodes.size > 0;
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <ViewsBar views={views} data={data} active={visible} phone={phone} />
+      <ViewsBar views={views} data={data} active={visible} phone={phone} focused={focused ? { name: data.projects.get(focused)?.value.name ?? "project", clear: () => onFocus(null) } : undefined} />
       <div className="relative min-h-0 flex-1">
         <AgentsCanvas
           ref={canvasRef}
@@ -714,9 +767,10 @@ function CanvasView({
           storageKey={viewStorageKey(owner, view.id)}
           order={view.order}
           onOrder={views.setOrder}
-          fitKey={JSON.stringify(filter)}
+          fitKey={`${JSON.stringify(filter)}|${focused ?? ""}`}
           direction={direction}
           onDirection={onDirection}
+          onOpen={onOpen}
           render={render}
           defaultSize={sizeOf}
           active={visible}

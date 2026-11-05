@@ -15,6 +15,7 @@ import {
   CircleCheck,
   Folder,
   FolderPlus,
+  Focus,
   LayoutGrid,
   GitFork,
   Maximize,
@@ -71,6 +72,9 @@ export interface PaletteHost {
   /** Which way the shown view's tree grows, and switching it (saved with the view). */
   direction: Direction;
   setDirection: (d: Direction) => void;
+  /** The project filling the canvas, and focusing one (`null`: everything again). */
+  focused: string | null;
+  focusProject: (project: string | null) => void;
 }
 
 /**
@@ -265,6 +269,8 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
           ],
         },
       },
+      projects.length > 1 && { kind: "submenu", value: "action:focus-project", title: "Focus a project…", searchTerms: ["zoom", "only", "isolate", "solo", "canvas"], icon: <Focus className={ICON} />, shortcut: "F", view: projectsView("Focus a project", (p) => host.focusProject(p.id)) },
+      !!host.focused && { kind: "action", value: "action:unfocus", title: "Show every project", searchTerms: ["focus", "unfocus", "all", "everything"], icon: <Focus className={ICON} />, shortcut: "Esc", run: () => host.focusProject(null) },
       projects.length > 0 && { kind: "submenu", value: "action:project-settings", title: "Project settings", searchTerms: ["auto-pull", "defaults", "scripts", "configure"], icon: <Settings2 className={ICON} />, view: projectsView("Project settings", (p) => setAgentsView({ kind: "settings", target: `p:${p.id}` })) },
       machines.length > 0 && {
         kind: "submenu",

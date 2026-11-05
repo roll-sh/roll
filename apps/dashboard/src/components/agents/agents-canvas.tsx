@@ -21,6 +21,7 @@ import {
   dropIndex,
   fitView,
   loadOrder,
+  nextCard,
   loadView,
   moveTo,
   ROOTS,
@@ -30,9 +31,11 @@ import {
   tidyLayout,
   toWorld,
   withOrder,
+  type Arrow,
   type Direction,
   type Order,
   type Point,
+  type Rect,
   type Size,
   type View,
 } from "@/lib/agents-layout";
@@ -71,6 +74,8 @@ export const AgentsCanvas = forwardRef<
     direction?: Direction;
     /** With it, the toolbar switches the direction. */
     onDirection?: (direction: Direction) => void;
+    /** Enter on a focused card: open it, saying whether it did (else Enter goes into the card). */
+    onOpen?: (key: string) => boolean;
     render: (node: GraphNode) => ReactNode;
     defaultSize: (node: GraphNode) => Size;
     onEscape?: () => void;
@@ -85,7 +90,7 @@ export const AgentsCanvas = forwardRef<
      */
     onLaunch?: (source: string, at: Point) => void;
   }
->(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, fitKey, direction = "horizontal", onDirection, render, defaultSize, onEscape, overlay, active = true, selected, onLaunch }, ref) {
+>(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, fitKey, direction = "horizontal", onDirection, onOpen, render, defaultSize, onEscape, overlay, active = true, selected, onLaunch }, ref) {
   const reduced = useReducedMotion();
   const container = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -440,6 +445,56 @@ export const AgentsCanvas = forwardRef<
 
   const tidy = () => setOrder({});
 
+  // ── moving between cards from the keyboard ──
+
+  const slotOf = useCallback((key: string) => world.current?.querySelector<HTMLElement>(`[data-card][data-key="${CSS.escape(key)}"]`) ?? null, []);
+  /** The card a focused element is the card itself of (not a control inside it). */
+  const cardAt = useCallback((el: HTMLElement | null) => {
+    const slot = el?.closest<HTMLElement>("[data-card]");
+    return slot && world.current?.contains(slot) && (el === slot || el === focusTarget(slot)) ? slot : null;
+  }, []);
+  const goTo = useCallback(
+    (key: string, answer = false) => {
+      const slot = slotOf(key);
+      if (!slot) return;
+      (answer ? (slot.querySelector<HTMLElement>(ANSWER) ?? focusTarget(slot)) : focusTarget(slot)).focus({ preventScroll: true });
+      reveal(key);
+    },
+    [slotOf, reveal],
+  );
+  /** Space: the request waiting on this card, else the next one waiting anywhere (in reading order, round again). */
+  const requestFrom = useCallback(
+    (key: string): string | null => {
+      const own = graph.nodes.get(key)?.children.find((c) => graph.nodes.get(c)?.kind === "request");
+      if (own) return own;
+      const reading: string[] = [];
+      const walk = (k: string) => {
+        reading.push(k);
+        for (const c of arranged.nodes.get(k)?.children ?? []) walk(c);
+      };
+      arranged.roots.forEach(walk);
+      const requests = reading.filter((k) => graph.nodes.get(k)?.kind === "request" && k !== key);
+      const at = reading.indexOf(key);
+      return requests.find((k) => reading.indexOf(k) > at) ?? requests[0] ?? null;
+    },
+    [graph, arranged],
+  );
+  useEffect(() => {
+    if (!active) return;
+    // Before the card's own Space (which would open it) and the engine's space-to-pan.
+    const onSpace = (ev: KeyboardEvent) => {
+      if (ev.key !== " " || ev.metaKey || ev.ctrlKey || ev.altKey || ev.shiftKey) return;
+      const slot = cardAt(ev.target as HTMLElement | null);
+      const to = slot && requestFrom(slot.dataset.key!);
+      if (!to) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      goTo(to, true);
+    };
+    window.addEventListener("keydown", onSpace, true);
+    return () => window.removeEventListener("keydown", onSpace, true);
+  }, [active, cardAt, requestFrom, goTo]);
+
   // Keyboard, when nothing editable has focus.
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
@@ -457,6 +512,25 @@ export const AgentsCanvas = forwardRef<
         return;
       }
       if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.closest("[role=dialog]:not([data-surface]), [role=menu], [role=listbox], .xterm"))) return;
+      // On a card: the arrows go to the next card that way, Enter opens it.
+      const slot = cardAt(el);
+      if (slot && !ev.shiftKey) {
+        const key = slot.dataset.key!;
+        const arrow = ARROWS[ev.key];
+        if (arrow) {
+          ev.preventDefault();
+          const rects = new Map<string, Rect>();
+          for (const [k, p] of positions) rects.set(k, { ...p, ...sizeOf(k) });
+          const to = nextCard(rects, key, arrow);
+          if (to) goTo(to);
+          return;
+        }
+        if (ev.key === "Enter" && el === slot) {
+          ev.preventDefault();
+          if (!onOpen?.(key)) slot.querySelector<HTMLElement>(FOCUSABLE)?.focus();
+          return;
+        }
+      }
       const step = 80;
       switch (ev.key) {
         case "+":
@@ -500,7 +574,7 @@ export const AgentsCanvas = forwardRef<
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [fit, onEscape, active, nudge, direction, onDirection, across, siblingsOf]);
+  }, [fit, onEscape, active, nudge, direction, onDirection, across, siblingsOf, cardAt, positions, sizeOf, goTo, onOpen]);
 
   const arrangedByUser = Object.keys(order).length > 0;
 
@@ -561,6 +635,16 @@ export const AgentsCanvas = forwardRef<
     </div>
   );
 });
+
+const ARROWS: Partial<Record<string, Arrow>> = { ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down" };
+/** What a card's answer is: a question's options, else its primary button (Approve, Implement). */
+const ANSWER = "[role=radio], [role=checkbox], [data-answer]:not([disabled])";
+const FOCUSABLE = "button:not([disabled]), [href], input, textarea, select, [tabindex='0']";
+
+/** What takes focus for a card: its own clickable frame (a thread's), else its slot. */
+function focusTarget(slot: HTMLElement): HTMLElement {
+  return slot.querySelector<HTMLElement>("[data-drag][tabindex='0']") ?? slot;
+}
 
 /** Whether a point (client coordinates) is on a card. */
 function overCard(x: number, y: number): boolean {
@@ -629,7 +713,16 @@ function CardSlot({ node, engine, selected, children }: { node: GraphNode; engin
     return () => e.unregister(node.key, d);
   }, [engine, node.key]);
   return (
-    <div ref={el} data-card data-key={node.key} data-kind={node.kind} data-selected={selected || undefined} className="absolute top-0 left-0" style={{ transform: "translate3d(-99999px,0,0)" }}>
+    <div
+      ref={el}
+      data-card
+      data-key={node.key}
+      data-kind={node.kind}
+      data-selected={selected || undefined}
+      tabIndex={-1}
+      className="absolute top-0 left-0 rounded-xl outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent/70"
+      style={{ transform: "translate3d(-99999px,0,0)" }}
+    >
       <div className="rise">{children}</div>
     </div>
   );

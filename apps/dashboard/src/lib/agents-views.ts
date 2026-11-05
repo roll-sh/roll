@@ -507,6 +507,33 @@ export function applyView(graph: Graph, data: AgentsData, view: Pick<ViewLike, "
   return { roots, nodes, edges };
 }
 
+/**
+ * The graph narrowed to one card, everything under it and what it hangs off: "focus a project"
+ * (the project, its machine above it, its threads and their satellites and pins). A key that
+ * isn't on the graph leaves it whole.
+ */
+export function focusOn(graph: Graph, key: string): Graph {
+  if (!graph.nodes.has(key)) return graph;
+  const keep = new Set<string>();
+  for (let k: string | null = graph.nodes.get(key)!.parent; k && !keep.has(k); k = graph.nodes.get(k)?.parent ?? null) keep.add(k);
+  const down = [key];
+  while (down.length) {
+    const k = down.pop()!;
+    if (keep.has(k) && k !== key) continue;
+    keep.add(k);
+    down.push(...(graph.nodes.get(k)?.children ?? []));
+  }
+  const nodes = new Map<string, GraphNode>();
+  for (const n of graph.nodes.values()) if (keep.has(n.key)) nodes.set(n.key, { ...n, children: n.children.filter((c) => keep.has(c)) });
+  return { roots: graph.roots.filter((r) => keep.has(r)), nodes, edges: graph.edges.filter((e) => keep.has(e.from) && keep.has(e.to)) };
+}
+
+/** The project a card belongs to (`p:…`): itself, or the project above it. */
+export function projectOf(graph: Graph, key: string): string | null {
+  for (let k: string | null = key; k; k = graph.nodes.get(k)?.parent ?? null) if (graph.nodes.get(k)?.kind === "project") return k;
+  return null;
+}
+
 // ── remembered on this device ──
 
 const DOC_KEY = (owner: string) => `roll:agents:canvas:${owner}`;

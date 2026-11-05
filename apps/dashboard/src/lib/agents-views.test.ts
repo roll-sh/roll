@@ -12,12 +12,14 @@ import {
   deleteView,
   directionOf,
   encodeDoc,
+  focusOn,
   MAX_PINS,
   MAX_VIEWS,
   moveView,
   parseDoc,
   pin,
   PIN_MIN,
+  projectOf,
   renameView,
   resizePin,
   setViewDisplay,
@@ -250,5 +252,22 @@ describe("what a view shows", () => {
     const v = applyView(graph, d, { filter: {}, pins: [{ kind: "conversation", id: "thr_2", w: 520, h: 600 }] }, NOW);
     expect(v.nodes.has("r:req_2")).toBe(false);
     expect(v.nodes.get("t:thr_2")!.children).toEqual(["pc:thr_2"]);
+  });
+});
+
+describe("focusing one project", () => {
+  it("keeps the project, its machine above it and everything under it; nothing else", () => {
+    const g = deriveGraph(sample());
+    const f = focusOn(g, "p:prj_1");
+    expect(f.roots).toEqual(["m:mch_1"]);
+    expect(keys(f)).toEqual(["m:mch_1", "p:prj_1", "r:req_2", "t:thr_1", "t:thr_2", "t:thr_3", "x:trm_1"]);
+    expect(f.nodes.get("m:mch_1")!.children).toEqual(["p:prj_1"]);
+    expect(f.edges.every((e) => f.nodes.has(e.from) && f.nodes.has(e.to))).toBe(true);
+    // What a card belongs to.
+    expect(projectOf(g, "r:req_2")).toBe("p:prj_1");
+    expect(projectOf(g, "p:prj_2")).toBe("p:prj_2");
+    expect(projectOf(g, "m:mch_1")).toBeNull();
+    // A project that's gone leaves the canvas whole.
+    expect(focusOn(g, "p:gone")).toBe(g);
   });
 });

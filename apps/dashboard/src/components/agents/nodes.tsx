@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowUpRight, CircleAlert, Folder, FolderGit2, FolderPlus, GitBranch, GitFork, GitPullRequest, LogIn, MoreHorizontal, Plus, RefreshCw, Settings2, SquareTerminal, Trash2 } from "lucide-react";
+import { ArrowUpRight, CircleAlert, Focus, Folder, FolderGit2, FolderPlus, GitBranch, GitFork, GitPullRequest, LogIn, MoreHorizontal, Plus, RefreshCw, Settings2, SquareTerminal, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { coming, isRunning, machineState, reachable, type Machine, type Node, type Project, type ProviderInfo, type Request, type Run, type Thread } from "@/lib/agents-api";
 import { projectStats, type ProjectStats } from "@/lib/agents-graph";
@@ -266,7 +266,7 @@ export function MachineNode({ machine }: { machine: Machine }) {
 
 export function ProjectNode({ project, machine }: { project: Project; machine: Machine | undefined }) {
   const { client, busy, error, run } = useRun();
-  const { startNew, demo } = useAgents();
+  const { startNew, demo, focusProject } = useAgents();
   // An asleep sandbox counts: what's sent to it wakes it.
   const online = reachable(machine);
   const stats = projectStats(client.data, project.id);
@@ -296,6 +296,7 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
             trigger={<MoreHorizontal className="size-3.5" />}
             items={[
               { label: "Settings", icon: <Settings2 />, onSelect: () => setAgentsView({ kind: "settings", target: `p:${project.id}` }) },
+              !!focusProject && { label: "Focus (F)", icon: <Focus />, onSelect: () => focusProject?.(project.id) },
               {
                 label: "Remove from roll",
                 confirm: "Remove? (the folder stays)",

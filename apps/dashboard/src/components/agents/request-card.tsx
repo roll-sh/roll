@@ -264,7 +264,7 @@ function ApprovalForm({ approval, onRespond, context, compact }: { approval: App
         ) : (
           <div className="flex items-center gap-1">
             {has("accept") && (
-              <button type="button" disabled={busy} onClick={() => void decide("accept")} className={pill}>
+              <button type="button" data-answer disabled={busy} onClick={() => void decide("accept")} className={pill}>
                 {busy ? <span className="shimmer">Sending…</span> : decisionLabel("accept", plan)}
               </button>
             )}

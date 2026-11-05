@@ -281,6 +281,48 @@ export function dropIndex(siblings: readonly string[], key: string, at: number, 
   return i;
 }
 
+export type Arrow = "left" | "right" | "up" | "down";
+
+/**
+ * Where an arrow key moves from the card `from` (keyboard navigation between cards): the nearest
+ * card that way. Cards in line with it (overlapping it across the arrow) come first, nearest
+ * edge first, and of those as near, the first in reading order; with none in line, the nearest
+ * by edge and offset. It follows the tree in either direction: growing right, ← is the parent, → a child,
+ * ↑ / ↓ the cards above and below in the column; in the top-down board ↑ / ↓ walk a project's
+ * column and ← / → go to the next column.
+ */
+export function nextCard(rects: ReadonlyMap<string, Rect>, from: string, arrow: Arrow): string | null {
+  const a = rects.get(from);
+  if (!a) return null;
+  const sideways = arrow === "left" || arrow === "right";
+  const sign = arrow === "right" || arrow === "down" ? 1 : -1;
+  // Along the arrow and across it, as [start, end] ranges.
+  const along = (r: Rect): [number, number] => (sideways ? [r.x, r.x + r.w] : [r.y, r.y + r.h]);
+  const across = (r: Rect): [number, number] => (sideways ? [r.y, r.y + r.h] : [r.x, r.x + r.w]);
+  const [a0, a1] = along(a);
+  const [c0, c1] = across(a);
+  let best: string | null = null;
+  let bestScore = Infinity;
+  let bestStart = Infinity;
+  for (const [k, b] of rects) {
+    if (k === from) continue;
+    const [b0, b1] = along(b);
+    // Its centre has to be further that way than this card's.
+    if (sign * ((b0 + b1) / 2 - (a0 + a1) / 2) <= 0) continue;
+    const gap = Math.max(0, sign > 0 ? b0 - a1 : a0 - b1);
+    const [d0, d1] = across(b);
+    const off = Math.max(0, d0 - c1, c0 - d1);
+    const score = (off > 0 ? 1e6 + off * 2 : 0) + gap;
+    // As near: the first in reading order (a parent's first child).
+    if (score < bestScore - 0.5 || (Math.abs(score - bestScore) <= 0.5 && d0 < bestStart)) {
+      bestScore = score;
+      bestStart = d0;
+      best = k;
+    }
+  }
+  return best;
+}
+
 export function bounds(pos: ReadonlyMap<string, Point>, size: (key: string) => Size, only?: Iterable<string>): Rect | null {
   let x0 = Infinity;
   let y0 = Infinity;

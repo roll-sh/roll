@@ -38,6 +38,8 @@ export interface AgentsCtx {
   startNew?: (project?: string, opts?: { machine?: string; at?: { x: number; y: number } }) => void;
   /** Show the canvas on a node (`m:mch_…`, `x:trm_…`, …); a thread's key opens its conversation. */
   focus: (key: string) => void;
+  /** Fill the canvas with one project (`null`: everything again); unset where there's no canvas. */
+  focusProject?: (project: string | null) => void;
   /** A shared thread's replay (`/agents/s/<id>`): nothing can be sent, only looked at. */
   readOnly?: boolean;
   /** What time it is on the canvas (a replay's clock), for "working for 12 s". Default: now. */

@@ -1,6 +1,6 @@
 "use client";
 
-import { Bookmark, ChevronDown, Pencil, Pin as PinIcon, PinOff, Plus, Search, SlidersHorizontal, Trash2, X, ArrowLeft, ArrowRight, FileDiff as DiffIcon } from "lucide-react";
+import { Bookmark, ChevronDown, Focus as FocusIcon, Pencil, Pin as PinIcon, PinOff, Plus, Search, SlidersHorizontal, Trash2, X, ArrowLeft, ArrowRight, FileDiff as DiffIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentsServices } from "@/lib/agents-services";
 import type { AgentsData } from "@/lib/agents-store";
@@ -184,7 +184,20 @@ const typing = (el: Element | null) => !!el && ((el as HTMLElement).isContentEdi
  * while typing): ⌥1…⌥9 show a view, [ and ] the previous and next, / filters, ⌥S saves the
  * filter as a view.
  */
-export function ViewsBar({ views: v, data, active, phone }: { views: CanvasViews; data: AgentsData; active: boolean; phone: boolean }) {
+export function ViewsBar({
+  views: v,
+  data,
+  active,
+  phone,
+  focused,
+}: {
+  views: CanvasViews;
+  data: AgentsData;
+  active: boolean;
+  phone: boolean;
+  /** The project filling the canvas: a chip that lets go of it. */
+  focused?: { name: string; clear: () => void };
+}) {
   const [editor, setEditor] = useState<null | { mode: "new" | "edit" }>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [dragging, setDragging] = useState<string | null>(null);
@@ -314,6 +327,15 @@ export function ViewsBar({ views: v, data, active, phone }: { views: CanvasViews
         )}
       </div>
       <div className="flex shrink-0 items-center gap-1">
+        {focused && (
+          <span className="fade-in flex h-7 max-w-44 items-center gap-1.5 rounded-md border border-line-2 bg-panel-2 pr-0.5 pl-2 text-[12px] text-fg inset-shadow-highlight" role="status">
+            <FocusIcon className="size-3.5 shrink-0 text-muted" strokeWidth={1.75} aria-hidden />
+            <span className="truncate">{focused.name}</span>
+            <button onClick={focused.clear} title="Show every project (Esc)" aria-label={`Stop focusing ${focused.name}`} className="grid size-6 shrink-0 place-items-center rounded text-subtle hover:bg-fg/[0.06] hover:text-fg">
+              <X className="size-3" />
+            </button>
+          </span>
+        )}
         {!phone && (
           <label className="flex h-7 w-56 items-center gap-1.5 rounded-md border border-line bg-fg/[0.03] px-2 text-subtle inset-shadow-highlight transition-colors duration-150 hover:border-line-2 focus-within:border-accent/50 focus-within:text-fg">
             <Search className="size-3.5 shrink-0" strokeWidth={1.75} />

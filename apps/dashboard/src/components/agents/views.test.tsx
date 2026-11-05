@@ -2,7 +2,7 @@ import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setActiveClient } from "@/lib/agents-client";
-import { resetAgentsSurface } from "@/lib/agents-surface";
+import { agentsSurface, resetAgentsSurface } from "@/lib/agents-surface";
 import { ALL, loadCurrentView, loadDoc, saveCurrentView, saveDoc, addView, parseDoc } from "@/lib/agents-views";
 import { approval, mirrored, node, project, run, thread } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents } from "@/test/agents-render";
@@ -230,5 +230,76 @@ describe("the canvas's direction", () => {
     await userEvent.click(screen.getByRole("button", { name: "Top-down (⇧D)" }));
     expect(canvas()).toHaveAttribute("data-direction", "horizontal");
     await waitFor(() => expect(lastSaved(services)).toMatchObject({ display: { direction: "horizontal", phoneDirection: "horizontal" } }));
+  });
+});
+
+describe("moving around the canvas from the keyboard", () => {
+  const web = [mirrored("project", project({ id: "prj_2", name: "web", path: "/Users/ada/web" }), 8), mirrored("thread", thread({ id: "thr_3", project: "prj_2", title: "Dark mode" }), 9)];
+  const cardKey = () => (document.activeElement as HTMLElement | null)?.closest<HTMLElement>("[data-card]")?.dataset.key;
+  function start() {
+    const h = agentsHarness({ entities: [...entities, ...web], follow: ["thr_1", "thr_2"] });
+    renderAgents(<AgentsSurface client={h.client} services={fakeServices()} demo={false} chrome="popup" />, h);
+  }
+
+  it("arrows go from card to card along the tree, Enter opens, Space goes to what's waiting", async () => {
+    start();
+    card("Fix the flaky queue test")!.focus();
+    await userEvent.keyboard("{ArrowLeft}");
+    expect(cardKey()).toBe("p:prj_1");
+    await userEvent.keyboard("{ArrowLeft}");
+    expect(cardKey()).toMatch(/^m:/);
+    await userEvent.keyboard("{ArrowRight}");
+    expect(cardKey()).toBe("p:prj_1");
+    await userEvent.keyboard("{ArrowDown}");
+    expect(cardKey()).toBe("p:prj_2");
+    // Enter on a project opens its settings beside the canvas.
+    await userEvent.keyboard("{Enter}");
+    expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "p:prj_2" });
+    resetAgentsSurface();
+    // Space on a card goes to the request waiting (its answer focused), wherever it is.
+    card("Dark mode")!.focus();
+    await userEvent.keyboard(" ");
+    expect(cardKey()).toBe("r:req_1");
+    expect(document.activeElement).toHaveTextContent("Approve");
+    // Nothing opened on the way.
+    expect(agentsSurface.get().view).toEqual({ kind: "canvas" });
+  });
+
+  it("F fills the canvas with a card's project; the chip or Escape shows everything again", async () => {
+    start();
+    card("Fix the flaky queue test")!.focus();
+    await userEvent.keyboard("f");
+    expect(card("Dark mode")).toBeNull();
+    expect(card("Upgrade to Next 16.4")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("roll");
+    await userEvent.keyboard("{Escape}");
+    expect(card("Dark mode")).toBeInTheDocument();
+    // Still the canvas: Escape let go of the project first.
+    expect(screen.getByLabelText("Agents canvas")).toBeInTheDocument();
+    card("Dark mode")!.focus();
+    await userEvent.keyboard("f");
+    expect(card("Fix the flaky queue test")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Stop focusing web" }));
+    expect(card("Fix the flaky queue test")).toBeInTheDocument();
+  });
+
+  it("from the project's menu and ⌘K too", async () => {
+    start();
+    await userEvent.keyboard("{Meta>}k{/Meta}");
+    await userEvent.type(screen.getByRole("combobox"), "focus a project");
+    await userEvent.keyboard("{Enter}");
+    await userEvent.type(screen.getByRole("combobox"), "web");
+    await userEvent.keyboard("{Enter}");
+    expect(card("Fix the flaky queue test")).toBeNull();
+    expect(card("Dark mode")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("combobox")).toBeNull());
+    await userEvent.keyboard("{Meta>}k{/Meta}");
+    await userEvent.type(await screen.findByRole("combobox"), "show every project");
+    await userEvent.keyboard("{Enter}");
+    expect(card("Fix the flaky queue test")).toBeInTheDocument();
+    const roll = screen.getByLabelText("Project roll").closest<HTMLElement>("[data-card]")!;
+    await userEvent.click(within(roll).getByRole("button", { name: "Project" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Focus (F)" }));
+    expect(card("Dark mode")).toBeNull();
   });
 });

@@ -856,7 +856,29 @@ The surface has three views:
   card moves it among its siblings along the axis they're laid out on (they make room as it
   passes; ⌥↑/⌥↓ do the same from the keyboard, ⌥←/⌥→ for siblings side by side); that order is
   remembered per owner and synced through roll, new work keeps its default place (newest first),
-  and the view is remembered per device. One canvas engine (canvas 2D + `requestAnimationFrame`, paused offscreen) draws edges,
+  and the view is remembered per device.
+
+  **Working from the keyboard** (`nextCard` in `lib/agents-layout.ts`). The canvas is where an
+  owner triages many agents, and Linear and T3 both move by keyboard faster than by pointer, so
+  every card can be reached and answered without the mouse. A card takes focus from Tab or a
+  click; then the arrows go to the nearest card that way, in line first and the first in reading
+  order of those as near. That follows the tree either way it grows: left to right, ← is the
+  parent, → a child and ↑/↓ the next card in the column (across parents); top-down, ↑/↓ walk a
+  project's column and ←/→ go to the next column. Enter opens what's focused (a thread's
+  conversation, a machine's or project's settings; on a request or a pinned card it goes into the
+  card). Space goes to the request waiting on that card, else the next one waiting anywhere in
+  reading order, with its answer focused (a question's options, or Approve / Implement), so a run
+  of approvals is Space, Enter, Space, Enter, without opening a conversation. With nothing focused
+  the arrows still pan.
+
+  **Focusing a project** (`focusOn` in `lib/agents-views.ts`). With several projects the canvas is
+  busy, and most of the time one project is what's being worked on. F on a card (or "Focus" in a
+  project card's menu, or ⌘K "Focus a project…") fills the canvas with that card's project: the
+  project, its machine above it and everything under it, framed again. A chip in the views bar
+  names it; its × or Escape (before Escape closes anything else) shows every project again. It's
+  per device and on top of the view, so it never changes what a view picks.
+
+  One canvas engine (canvas 2D + `requestAnimationFrame`, paused offscreen) draws edges,
   pulses and the dot field; cards are DOM, positioned by the same world transform. Navigation is
   Figma's: scrolling pans (two fingers on a trackpad, any direction; shift turns a mouse wheel
   sideways), pinching zooms about the fingers (ctrl+wheel in Chromium, Firefox and Electron,
