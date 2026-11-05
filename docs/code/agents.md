@@ -78,6 +78,8 @@ Machine            a daemon (hostname, os, providers and their auth state, onlin
   `mode: queue`) or steers the active run (`mode: steer`): providers that can steer natively get
   the input; others are interrupted and the run restarts with the new input appended. The queue
   drains only after a run completes: an interrupt (or a failure) holds it, as T3's Stop does.
+  Queued messages are edited, reordered and sent now (`message.edit`, `message.reorder`,
+  `message.promote`); "Turns" below has the rest.
 - **Handoffs.** A provider that joins a conversation it hasn't seen (a provider switch, a fork, a
   rollback it can't do natively) gets a portable summary of the runs it missed in front of the
   next prompt (T3's context handoff). Switching back to a provider resumes its native thread and
@@ -273,6 +275,65 @@ whether it works. An ACP agent on the PATH that doesn't answer `initialize` with
 not installed, with the reason as its detail, so nothing delegates to a hung agent until a refresh
 finds it answering. The dashboard shows a provider being checked as a quiet shimmering "Checking…",
 on the machine card and in machine settings. Code: `agent-host/src/orchestrator/probes.rs`.
+
+## Turns: queue, steer, compact, subagents, plans
+
+How a conversation moves while an agent works, as T3 Code does it (its orchestration-v2
+`CommandPolicy.ts`, `Orchestrator.ts` queue handling, the adapters' compaction and subagent
+mapping, and the web's `QueuedRunsControl.tsx`, `ContextWindowMeter.tsx`, `V2LifecycleRow.tsx`,
+`ProviderSubagentBar.tsx`, `ProposedPlanCard.tsx`, `proposedPlan.ts`).
+
+- **Queue and steer.** While a run goes, Enter steers it and ⌘/Ctrl+Enter queues (the owner's
+  "While a run is going" swaps the two, T3's `followUpBehavior`; with ⌘Enter to send, ⌘⇧Enter
+  is the opposite for one message). Queued messages sit on top of the composer (`queue.tsx`):
+  three, then "Show all N queued"; each can be sent now (`message.promote`: into the running turn,
+  T3's promote-to-steer; on a stopped thread, as the next run, after which the rest drains, T3's
+  `queued-run.start`), edited in the composer (`message.edit`; the row says "Editing in the
+  composer", the button "Update queued message", Escape gives the draft back; ⌥↑ edits the last
+  one), removed, or moved (drag a row, or ⌥↑/⌥↓ on it: `message.reorder`; T3 has reorder only in
+  its MCP tools). ⌘⇧Enter with nothing typed sends the first queued message into the turn. A
+  stopped or failed run holds the queue, and a restart keeps it held (the thread's `queued`
+  persists): the panel says "Queue paused" with Resume, the empty send button is "Resume thread",
+  and a new message starts at once with the queue resuming after it.
+- **Compaction.** Claude Code and Codex compact on their own as the context fills; both also
+  compact on request (`Capabilities.compact`). A message of exactly `/compact` runs as a
+  compaction, a run of its own (T3's `compactThread`): Codex `thread/compact/start` (the turn it
+  starts is adopted as ours), Claude `/compact` as the turn's input (its result text is no reply).
+  A compaction can't be steered: a steer sent to it queues, and Send now refuses. Every compaction
+  is a `NodeBody::Compaction` row (T3's `compaction` item: Claude's `status: compacting`,
+  `compact_result`, `compact_boundary` with `pre_tokens`/`post_tokens`; Codex's
+  `contextCompaction` item; ACP's `compaction_update`), with the context before and after: the
+  provider's counts where it gives them, else the thread's context when it started and the next
+  report after it. The transcript shows it as T3's separator ("Compacting context", "Context
+  compacted 182k → 41k tokens", "Context compaction failed · why"); the context meter drops and,
+  in the composer, opens on hover with "Compact context" and "Context compacts automatically when
+  needed"; `/compact` is in the slash menu. Not done: T3's per-provider auto-compact window
+  setting and idle compaction (both are T3 settings over Claude's SDK options).
+- **Subagents.** Claude's Agent (or Task) tool, Codex's collab agents and roll's delegated threads
+  are `subagent` nodes; Claude's `task_progress` fills `progress` while one runs, and the Agent
+  call's (Codex's collab call's) `model` is kept. In the transcript each is T3's row: an avatar
+  with a status dot, what it was asked, what it's doing now or its answer, a live timer and a
+  chevron; several started together sit under "N subagents · k running". A provider's subagent
+  opens its own transcript in place of the conversation (what it was asked, its steps and words,
+  its answer), with T3's bar instead of the composer (the agent and model, "Working 1m 5s" or
+  "Completed in 34s", "Runs on its own", Open parent; Escape goes back). A delegated thread opens
+  as the thread it is, and its composer says who delegated it with Open parent. Pinned cards,
+  which have no subagent view, open a provider's subagent inline under its row.
+- **Plans.** `interactionMode: plan` reaches Claude as `--permission-mode plan` and Codex as its
+  collaboration mode `plan` (ACP: an agent's `plan`/`architect` mode). The plan is T3's card:
+  "Plan", its title (the first heading), a menu to copy or download it, long ones folded; it stays
+  out of the "Worked for" fold. A plan is ready (`lib/agents-plan.ts` `readyPlan`) when the
+  newest run ended with one in plan mode (Codex, ACP) or Claude asks to leave plan mode with it
+  (its ExitPlanMode is an approval with `action: plan`; T3 denies that tool and captures the plan
+  instead, roll keeps it pending so Claude goes on in the same turn when accepted). Then the
+  composer says "Plan ready · title", the header pill says so, and the button is T3's split pill:
+  Implement (Claude: accept; otherwise switch the thread to build mode and send T3's
+  `PLEASE IMPLEMENT THIS PLAN:` prompt), "Implement in a new thread" (a thread in build mode on
+  the same project, provider, model and permissions, with its own worktree if this one has one,
+  started with that prompt and opened; a pending approval is cancelled first), or, once something
+  is typed, Refine (Claude: decline with the words; otherwise send them in plan mode). Shift+Tab,
+  the Build/Plan chip, and `/plan` and `/default` switch the mode. Todo lists stay quiet rows
+  ("Tasks 2/3 · current"). Not done: T3's "Save to workspace".
 
 ## Delegation (roll's orchestrator MCP)
 
@@ -977,7 +1038,8 @@ The surface has three views:
   answer, with the files it changed in a card and copy, fork and roll back under it); approvals as
   rows in the work log; the composer under it (T3's: a message to a running agent steers it,
   ⌘/Ctrl queues it, the send button says which; the agent's questions sit on top of the composer
-  and what's typed is your own answer) with the machine, branch and cost in a strip below; the
+  and what's typed is your own answer; queued messages, a ready plan, compaction and subagents
+  as in "Turns") with the machine, branch and cost in a strip below; the
   thread's terminals in a resizable drawer under it all; the diff (of the thread or one run)
   beside the chat when the panel is wide enough, else sliding over it. Everything is managed from
   there: fork, roll
