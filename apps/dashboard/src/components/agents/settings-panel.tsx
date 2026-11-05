@@ -1,5 +1,6 @@
 "use client";
 
+import { closeTopLayer } from "./escape-layers";
 import type { Machine, Project } from "@/lib/agents-api";
 import { ProjectIcon } from "./identity";
 import { MachineSettingsPanel } from "./machine-settings";
@@ -30,7 +31,8 @@ export function SettingsPanel({ target, onClose }: { target: string; onClose: ()
     if (!r) return <Gone onClose={onClose} />;
     const machine = data.machines.get(r.machine)?.value;
     return (
-      <SettingsPage icon={<ProjectIcon project={r.value} className="size-4" />} title={r.value.name} subtitle="Project settings" onClose={onClose} items={[]} search={false}>
+      // The × asks what's open inside first (unsaved project settings hold it: `escape-layers.ts`).
+      <SettingsPage icon={<ProjectIcon project={r.value} className="size-4" />} title={r.value.name} subtitle="Project settings" onClose={() => closeTopLayer() || onClose()} items={[]} search={false}>
         <ProjectOverview project={r.value} machine={machine} />
         <ProjectSettingsForm project={r.value} machine={machine} />
       </SettingsPage>

@@ -25,6 +25,7 @@ import { DefaultsRows } from "./machine-settings";
 import { field, SettingRow, SettingsSection, type Setting } from "./settings-ui";
 import { ago } from "./shared";
 import { Select, Switch } from "./ui";
+import { useEscapeLayer } from "./escape-layers";
 import { useAgents } from "./use-agents";
 
 /**
@@ -295,6 +296,10 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
     cleanup: cleanupDays === null && keep === "uncommitted_changes" ? undefined : { worktree_after_days: cleanupDays ?? undefined, keep: keep === "uncommitted_changes" ? undefined : keep },
   };
   const changed = name.trim() !== project.name || canon(settings) !== canon(project.settings);
+  // Closing with something unsaved (Escape, the panel's ×) is refused once and says why, so a
+  // change is never dropped without a word; Discard or Save, then close.
+  const [held, setHeld] = useState(false);
+  useEscapeLayer(changed, () => setHeld(true));
   const scriptsOk = scripts.every((s) => s.name.trim() && s.command.trim());
   const branch = project.git?.branch && project.git.branch !== "HEAD" ? project.git.branch : "the default branch";
 
@@ -509,7 +514,11 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
         aria-label={changed ? "Unsaved changes" : undefined}
         className={`flex items-center gap-1.5 ${changed ? "sticky bottom-0 z-10 -mx-1 border-t border-line bg-sheet px-1 py-3" : ""}`}
       >
-        {changed && <span className="mr-auto text-[12.5px] text-muted">Unsaved changes</span>}
+        {changed && (
+          <span role={held ? "alert" : undefined} className={`mr-auto text-[12.5px] ${held ? "text-fg" : "text-muted"}`}>
+            {held ? "Save or discard your changes first" : "Unsaved changes"}
+          </span>
+        )}
         {changed && !onDone && (
           <button type="button" onClick={discard} className={btn}>
             Discard

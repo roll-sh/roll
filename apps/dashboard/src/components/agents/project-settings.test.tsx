@@ -225,6 +225,20 @@ describe("project settings on the canvas", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("won't close over an unsaved change without saying so: once refused, then Discard and it closes", async () => {
+    const p = withSettings({});
+    const h = agentsHarness({ entities: [mirrored("project", p, 1)] });
+    const onClose = vi.fn();
+    renderAgents(<SettingsPanel target={`p:${p.id}`} onClose={onClose} />, h);
+    await userEvent.click(screen.getByRole("switch", { name: "Pull merged changes automatically" }));
+    await userEvent.click(screen.getByRole("button", { name: "Close (Esc)" }));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent("Save or discard your changes first");
+    await userEvent.click(screen.getByRole("button", { name: "Discard" }));
+    await userEvent.click(screen.getByRole("button", { name: "Close (Esc)" }));
+    expect(onClose).toHaveBeenCalled();
+  });
+
   it("are offered while adding a project: on for a clone, off for a folder", async () => {
     const reply = (c: Command): Reply => (c.type === "fs.list" ? { type: "entries", entries: [] } : c.type === "project.add" ? { type: "created", id: "prj_new" } : { type: "ok" });
     const repos = [{ owner: "acme", name: "roll", full_name: "acme/roll", description: null, visibility: "public" as const, updated_at: 1 }];
