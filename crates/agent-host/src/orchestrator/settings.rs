@@ -124,9 +124,21 @@ impl Host {
     pub(crate) async fn machine_info(&self) -> MachineInfo {
         let settings = self.machine_settings();
         let all = self.providers();
+        // A known agent's own provider (`acp:grok`) that isn't installed, once the registry
+        // installed that agent here (`acp:grok-build`): the installed one stands for it, so it
+        // isn't listed twice.
+        let covered: std::collections::HashSet<ProviderId> = self
+            .registry
+            .installed()
+            .iter()
+            .flat_map(|i| crate::registry::same_as(&i.id).into_iter().filter(move |p| *p != i.provider_id()))
+            .collect();
         let mut offered = Vec::with_capacity(all.len());
         let mut providers = Vec::with_capacity(all.len());
         for (id, provider) in &all {
+            if covered.contains(id) && !self.probes.info(provider.as_ref()).installed {
+                continue;
+            }
             let file = self.base_config(id);
             let mut env: Vec<String> = file.env.iter().map(|(k, _)| k.clone()).collect();
             env.sort();

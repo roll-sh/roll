@@ -170,6 +170,8 @@ pub struct FakeProvider {
     auth: Mutex<AuthStatus>,
     /// `info` lists no models (an ACP agent, which says them only in a session).
     unlisted: std::sync::atomic::AtomicBool,
+    /// `info` says it isn't installed (a known agent whose binary isn't on this machine).
+    missing: std::sync::atomic::AtomicBool,
     /// The provider [`Script::Orchestrate`] sessions started from now on delegate to.
     delegate_to: Mutex<Option<String>>,
     /// What each native conversation of [`Script::Orchestrate`] delegated and heard back.
@@ -217,6 +219,7 @@ impl FakeProvider {
             held: tokio::sync::watch::Sender::new(false),
             auth: Mutex::new(AuthStatus::Ready),
             unlisted: std::sync::atomic::AtomicBool::new(false),
+            missing: std::sync::atomic::AtomicBool::new(false),
             delegate_to: Mutex::new(None),
             orchestrations: Mutex::new(HashMap::new()),
         })
@@ -231,6 +234,11 @@ impl FakeProvider {
     /// From now on `info` lists no models, as an ACP agent's probe can't.
     pub fn unlist_models(&self) {
         self.unlisted.store(true, Ordering::SeqCst);
+    }
+
+    /// From now on `info` says it isn't installed.
+    pub fn set_missing(&self) {
+        self.missing.store(true, Ordering::SeqCst);
     }
 
     /// What the next probe says about the login (logged out with `Missing`).
@@ -315,7 +323,7 @@ impl Provider for FakeProvider {
         let mut info = ProviderInfo {
             id: self.id.clone(),
             name: format!("Fake {}", self.id.0),
-            installed: true,
+            installed: !self.missing.load(Ordering::SeqCst),
             version: Some("0.0.0".into()),
             auth: *self.auth.lock().unwrap(),
             detail: None,

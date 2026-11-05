@@ -572,6 +572,9 @@ machine's settings have "Add agent" beside "Check again", and the daemon does al
   `acp:grok`, `qwen-code` → `acp:qwen`, `amp-acp` → `acp:amp`, `antigravity-acp` →
   `acp:antigravity`) or a native driver (`opencode`, `opencode-v2` → `opencode`; `pi-acp` → `pi`)
   that is installed. The dashboard shows those as "On this machine" and never installs them twice.
+  The other way round, an agent installed from the registry stands for its known name while that
+  one isn't installed: `hello` leaves out `acp:grok` once `grok-build` is installed, so the
+  machine lists Grok once (back when the registry's copy is removed).
 - **Never at probe time.** Only `registry.install` installs; a probe stays `initialize` only (T3's
   registry probe opens a throwaway session; roll's doesn't, as for every ACP agent).
 - **`registry.install {agent}`** fetches the registry (an install always does; the kept copy when

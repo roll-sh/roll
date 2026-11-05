@@ -112,6 +112,8 @@ async fn env() -> Env {
               "distribution": { "npx": { "package": "@github/copilot@1.0.105", "args": ["--acp"] } } },
             { "id": "elsewhere", "name": "Elsewhere", "version": "1.0.0",
               "distribution": { "binary": { "plan9-mips": { "archive": "https://example.com/a.tar.gz", "cmd": "a" } } } },
+            { "id": "grok-build", "name": "Grok Build", "version": "1.0.0",
+              "distribution": { "binary": binary("tiny.tar.gz", "./bin/tiny-agent", Some(sha(&tiny))) } },
             { "id": "Broken", "name": "Dropped: not a registry id", "version": "1.0.0", "distribution": {} }
         ]
     });
@@ -176,6 +178,28 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Installing a known agent from the registry (`grok-build`, roll's `acp:grok`): while `acp:grok`
+/// isn't installed, the installed one stands for it, so the machine lists Grok once.
+#[tokio::test]
+async fn an_installed_agent_stands_for_the_known_one_it_is() {
+    let env = env().await;
+    // roll's own Grok, not installed here.
+    let known = FakeProvider::with("acp:grok", Capabilities::default(), Script::Echo);
+    known.set_missing();
+    let host = Host::open(env.config(), vec![known as Arc<dyn Provider>]).await.unwrap();
+    let grok = ProviderId("acp:grok".into());
+    let before = wait_info(&host, "grok's probe", |i| i.providers.iter().any(|p| p.id == grok && !p.checking)).await;
+    assert!(before.providers.iter().any(|p| p.id == grok && !p.installed), "{:?}", before.providers);
+    assert_eq!(common::run(&host, Command::RegistryInstall { agent: "grok-build".into() }).await, Reply::Ok);
+    let info = host.info().await;
+    assert!(info.providers.iter().any(|p| p.id.0 == "acp:grok-build"), "{:?}", info.providers);
+    assert!(!info.providers.iter().any(|p| p.id == grok), "listed once: {:?}", info.providers);
+    assert!(!info.settings.unwrap().providers.iter().any(|p| p.id == grok), "nor in its settings");
+    // Removed again: the known one is back.
+    assert_eq!(common::run(&host, Command::RegistryRemove { agent: "grok-build".into() }).await, Reply::Ok);
+    assert!(host.info().await.providers.iter().any(|p| p.id == grok));
+}
+
 #[tokio::test]
 async fn lists_installs_and_removes_an_agent_without_a_restart() {
     let env = env().await;
@@ -184,7 +208,7 @@ async fn lists_installs_and_removes_an_agent_without_a_restart() {
     let listed = list(&host).await;
     assert!(listed.error.is_none() && listed.fetched_at > 0, "{listed:?}");
     let ids: Vec<&str> = listed.agents.iter().map(|a| a.id.as_str()).collect();
-    assert_eq!(ids, ["tiny", "zippy", "badhash", "github-copilot-cli", "elsewhere"], "the bad entry is dropped");
+    assert_eq!(ids, ["tiny", "zippy", "badhash", "github-copilot-cli", "elsewhere", "grok-build"], "the bad entry is dropped");
     let tiny = &listed.agents[0];
     assert_eq!((tiny.kinds.as_slice(), tiny.installable, tiny.integrity), (&[RegistryKind::Binary][..], true, RegistryIntegrity::Sha256));
     assert_eq!((tiny.installed.as_deref(), tiny.offered.as_ref()), (None, None));
@@ -281,13 +305,13 @@ async fn the_list_is_reused_for_a_while_and_kept_for_when_the_registry_is_down()
     // Down: a daemon started now falls back to the copy, and says why.
     *env.served.registry.lock().unwrap() = None;
     let offline = Registry::new(&config).index(Some(LIST_MAX_AGE)).await;
-    assert_eq!(offline.index.as_ref().map(|i| i.agents.len()), Some(5));
+    assert_eq!(offline.index.as_ref().map(|i| i.agents.len()), Some(6));
     assert!(offline.error.as_deref().is_some_and(|e| e.contains("503")), "{:?}", offline.error);
     assert!(offline.fetched_at > 0);
     // The daemon still installs from the copy.
     let host = env.host().await;
     let listed = list(&host).await;
-    assert!(listed.error.is_some() && listed.agents.len() == 5);
+    assert!(listed.error.is_some() && listed.agents.len() == 6);
     assert_eq!(common::run(&host, Command::RegistryInstall { agent: "zippy".into() }).await, Reply::Ok);
 
     // With no copy either, the list is empty and says why.
