@@ -1135,7 +1135,7 @@ Code: `agent-host/src/orchestrator/settle.rs`; the threads sidebar is
 - **The shelf** (`components/agents/project-shelf.tsx`, `lib/agents-shelf.ts`). What left the
   canvas stays off it: no project card carries a list. "Shelf" in the canvas toolbar, beside
   Display, counts what's settled, snoozed and archived (the focused project's while one fills the
-  canvas; no control when nothing is) and opens a popover with every one of them, grouped by
+  canvas; no control when nothing is) and opens (or ⇧S) a popover with every one of them, grouped by
   project, a tab per shelf, 40 rows and then 60 more per "Show more". The search matches every word
   in the title or the project's name; ↑/↓ walk the rows, Enter opens the conversation in the side
   panel with its transcript, diffs and checkpoints as they were, and ⌘Enter (or a row's button)
@@ -1622,6 +1622,12 @@ The surface has three views:
     off makes the canvas the work in flight, the thing an owner checks most. **Projects without
     threads** (off by default) gives every project a card again.
   - "Reset to default" when anything differs (projects pinned onto the view stay pinned).
+
+  **A machine's card stays short.** Its system line (OS, architecture, roll version) and a
+  sandbox's use this month are details: compact density hides them, and the sandbox's size keeps
+  the month's use in its tooltip. More than four providers show three chips and "+N" (their names
+  in its tooltip; a click opens the machine's Providers settings); one waiting for a login or
+  still being probed always keeps its chip.
 
   **Projects without a card** (`collapseUnused` in `lib/agents-graph.ts`, `machine-projects.tsx`).
   A project with nothing on the canvas in this view (no thread, terminal or pin, after the

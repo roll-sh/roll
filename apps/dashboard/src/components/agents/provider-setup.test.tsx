@@ -85,3 +85,19 @@ describe("a machine with no provider", () => {
     expect(screen.queryByRole("textbox", { name: "Message" })).not.toBeInTheDocument();
   });
 });
+
+describe("a machine's providers on its card", () => {
+  it("a few chips, the rest one +N that opens its providers; one to log in always shows", async () => {
+    const names = ["Claude Code", "Codex", "OpenCode", "Pi", "Gemini CLI", "Cursor"];
+    const many = withProviders(names.map((name, i) => provider({ id: `p${i}`, name, auth: name === "Cursor" ? "missing" : "ready" })));
+    renderAgents(<MachineNode machine={many} />, agentsHarness({ machines: [many] }));
+    const list = screen.getByRole("list", { name: "Providers" });
+    expect(within(list).getAllByRole("listitem").map((li) => li.textContent?.trim())).toEqual(["Claude Code", "Codex", "OpenCode", "Cursor", "+2"]);
+    await userEvent.click(within(list).getByRole("button", { name: "2 more providers: Pi, Gemini CLI" }));
+    expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "m:mch_1" });
+    // Four or fewer: all of them.
+    const few = withProviders(names.slice(0, 4).map((name, i) => provider({ id: `p${i}`, name })), { id: "mch_2" });
+    renderAgents(<MachineNode machine={few} />, agentsHarness({ machines: [few] }));
+    expect(within(screen.getAllByRole("list", { name: "Providers" })[1]).getAllByRole("listitem")).toHaveLength(4);
+  });
+});

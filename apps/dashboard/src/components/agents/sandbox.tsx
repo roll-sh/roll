@@ -124,7 +124,7 @@ export function SandboxPanel({ machine }: { machine: Machine }) {
       <div className="flex items-center gap-2 text-[12px]">
         <span className={`size-1.5 shrink-0 rounded-full ${moving ? "bg-accent" : status === "running" ? "bg-ok" : status === "failed" ? "bg-danger" : "bg-subtle"}`} aria-hidden />
         {/* Running is the machine's "online": then the line is what's rented. */}
-        <span className={`min-w-0 truncate ${moving || busy ? "shimmer" : ""} ${status === "running" && !busy ? "font-mono text-[11px] text-muted" : ""}`} title={size ? `${size.name}: ${size.cpu} vCPU, ${size.memory_gb} GB, ${size.disk_gb} GB disk` : undefined}>
+        <span className={`min-w-0 truncate ${moving || busy ? "shimmer" : ""} ${status === "running" && !busy ? "font-mono text-[11px] text-muted" : ""}`} title={[size && `${size.name}: ${size.cpu} vCPU, ${size.memory_gb} GB, ${size.disk_gb} GB disk`, used && `${used.running_hours.toFixed(1)} h this month, ${dollars(used.price_usd)}`].filter(Boolean).join(" · ") || undefined}>
           {busy === "start"
             ? "Starting…"
             : busy === "stop"
@@ -157,7 +157,8 @@ export function SandboxPanel({ machine }: { machine: Machine }) {
         )}
       </div>
       {used && (
-        <p className="text-[11.5px] text-subtle">
+        // This month's use: a detail (compact density hides it; the size's tooltip keeps it).
+        <p data-detail className="text-[11.5px] text-subtle">
           <span className="font-mono text-muted">{used.running_hours.toFixed(1)} h</span> this month · <span className="font-mono text-muted">{dollars(used.price_usd)}</span>
         </p>
       )}

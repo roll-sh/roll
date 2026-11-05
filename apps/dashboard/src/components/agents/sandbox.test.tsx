@@ -50,7 +50,7 @@ describe("a sandbox machine on the canvas", () => {
     renderAgents(<MachineNode machine={sandboxMachine("running")} />, h);
     const panel = screen.getByRole("group", { name: "Sandbox" });
     expect(within(panel).getByText("$0.03/h")).toBeInTheDocument();
-    expect(within(panel).getByText("2 vCPU · 4 GB")).toHaveAttribute("title", "standard: 2 vCPU, 4 GB, 20 GB disk");
+    expect(within(panel).getByText("2 vCPU · 4 GB")).toHaveAttribute("title", "standard: 2 vCPU, 4 GB, 20 GB disk · 12.5 h this month, $0.38");
     expect(within(panel).getByText("12.5 h")).toBeInTheDocument();
     expect(within(panel).getByText("$0.38")).toBeInTheDocument();
   });

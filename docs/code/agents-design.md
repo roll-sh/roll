@@ -104,6 +104,9 @@ punch out the edge ports. `refreshColors()` reruns on a theme change (the canvas
 - **Header:** an `IconTile` (24px, `bg-panel-2`, a hairline, the highlight, a 14px icon), then the
   name in 13.5px at weight 590, then the status. Body text is 12–13px. Meta is 11px, with
   `font-mono tabular-nums` for numbers.
+- **Machine cards:** the system line and a sandbox's month are `data-detail`; providers show at
+  most three chips and a mono "+N" chip (any needing a login always shows); then the folded
+  projects line and, when an agent can't run there, the setup panel.
 - **Tools:** `HoverActions` is a floating glass toolbar over the card's top-right corner. It
   appears on hover and on focus; on a touch screen on the card that was tapped (or is open), counter-
   scaled by the canvas's `--zoom` so it stays a finger's size (about 36px). It takes no room in the card, so names never

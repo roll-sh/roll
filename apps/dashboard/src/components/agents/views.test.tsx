@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setActiveClient } from "@/lib/agents-client";
 import { agentsSurface, resetAgentsSurface } from "@/lib/agents-surface";
+import { resetShelves } from "@/lib/agents-shelf";
 import { ALL, loadCurrentView, loadDoc, saveCurrentView, saveDoc, addView, parseDoc } from "@/lib/agents-views";
 import { approval, mirrored, node, project, run, terminal, thread } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents } from "@/test/agents-render";
@@ -271,6 +272,16 @@ describe("moving around the canvas from the keyboard", () => {
     const h = agentsHarness({ entities: [...entities, ...web], follow: ["thr_1", "thr_2"] });
     renderAgents(<AgentsSurface client={h.client} services={fakeServices()} demo={false} chrome="popup" />, h);
   }
+
+  it("⇧S opens the shelf (Escape closes it)", async () => {
+    start();
+    await userEvent.keyboard("{Shift>}S{/Shift}");
+    const shelf = await screen.findByRole("dialog", { name: "Shelf" });
+    expect(within(shelf).getByRole("combobox", { name: "Search the shelf" })).toHaveFocus();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Shelf" })).not.toBeInTheDocument());
+    resetShelves();
+  });
 
   it("arrows go from card to card along the tree, Enter opens, Space goes to what's waiting", async () => {
     start();

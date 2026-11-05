@@ -53,7 +53,7 @@ export function ShelfControl({ data, focused, phone }: { data: AgentsData; focus
           <button
             type="button"
             aria-label={`Shelf: ${scoped} settled, snoozed or archived`}
-            title="Settled, snoozed and archived conversations"
+            title="Settled, snoozed and archived conversations (⇧S)"
             className="flex h-7 items-center gap-1 rounded-md px-2 text-[12px] text-subtle transition-colors duration-150 hover:bg-fg/[0.05] hover:text-fg data-popup-open:bg-fg/[0.07] data-popup-open:text-fg"
           />
         }

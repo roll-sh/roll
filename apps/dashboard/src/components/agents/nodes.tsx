@@ -166,6 +166,9 @@ export function MachineNode({ machine }: { machine: Machine }) {
   const state = machineState(machine);
   // Shown too while the daemon is still probing them (it says hello without waiting).
   const listed = info?.providers.filter((p) => p.installed || p.checking) ?? [];
+  // A few chips, the rest one "+3" (to the Providers settings); a login to do or a probe going always shows.
+  const chips = listed.length > 4 ? listed.filter((p, i) => i < 3 || p.auth === "missing" || p.checking) : listed;
+  const more = listed.filter((p) => !chips.includes(p));
   // Can't run an agent yet (no provider installed, or none logged in): the next step comes first.
   const ready = readiness(machine);
   const setup = machine.online && (ready.state === "none" || ready.state === "login");
@@ -213,7 +216,11 @@ export function MachineNode({ machine }: { machine: Machine }) {
         </HoverActions>
       </TintedHeader>
       <div className="space-y-2.5 px-3 pt-2.5 pb-3">
-        {os && <p className="truncate font-mono text-[11px] text-subtle">{os}</p>}
+        {os && (
+          <p data-detail className="truncate font-mono text-[11px] text-subtle">
+            {os}
+          </p>
+        )}
         {!machine.online && !sandbox && (
           <p className="text-[11.5px] text-subtle">
             {machine.last_seen ? `Last seen ${ago(machine.last_seen)}.` : "Not connected yet."} Start it with <code className="font-mono text-muted">roll agent up</code>.
@@ -226,7 +233,7 @@ export function MachineNode({ machine }: { machine: Machine }) {
         ) : (
           listed.length > 0 && (
             <ul className="flex flex-wrap gap-1" aria-label="Providers">
-              {listed.map((p) => (
+              {chips.map((p) => (
                 <li key={p.id}>
                   {p.checking ? (
                     <span className="inline-flex items-center gap-1.5 rounded-md border border-line px-1.5 py-0.5 text-[11px] text-subtle" title={`Checking ${p.name}…`}>
@@ -255,6 +262,20 @@ export function MachineNode({ machine }: { machine: Machine }) {
                   )}
                 </li>
               ))}
+              {more.length > 0 && (
+                <li>
+                  <button
+                    type="button"
+                    data-nodrag
+                    onClick={() => openMachineSettings(machine.id, "Providers")}
+                    title={more.map((p) => p.name).join(", ")}
+                    aria-label={`${more.length} more providers: ${more.map((p) => p.name).join(", ")}`}
+                    className="inline-flex items-center rounded-md border border-line px-1.5 py-0.5 font-mono text-[11px] text-subtle transition-colors hover:border-line-2 hover:text-fg"
+                  >
+                    +{more.length}
+                  </button>
+                </li>
+              )}
             </ul>
           )
         )}

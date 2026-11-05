@@ -49,6 +49,7 @@ import {
 import type { Order } from "@/lib/agents-layout";
 import { Menu } from "./menu";
 import { ShelfControl } from "./project-shelf";
+import { openShelf } from "@/lib/agents-shelf";
 import { Popover, PopoverPopup, PopoverTrigger, Segmented, Switch } from "./ui";
 
 /** How long edits wait before they go to roll (typing a filter, resizing a card). */
@@ -230,12 +231,14 @@ export function ViewsBar({
       else if (e.key === "[" && i > 0) select(views[i - 1].id);
       else if (e.key === "]" && i < views.length - 1) select(views[i + 1].id);
       else if (e.key === "/") field.current?.focus();
+      // The shelf: settled, snoozed and archived conversations (the focused project's, if one fills the canvas).
+      else if (e.shiftKey && e.code === "KeyS") openShelf(focused?.id ?? null);
       else return;
       e.preventDefault();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [active, views, select, v.current.id]);
+  }, [active, views, select, v.current.id, focused?.id]);
 
   // The shown tab stays in view in a bar that scrolls.
   useEffect(() => {
