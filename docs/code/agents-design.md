@@ -89,14 +89,15 @@ punch out the edge ports. `refreshColors()` reruns on a theme change (the canvas
   of a project's top, and for a listed card a trunk 14px inside its parent's left edge that turns
   (an 8px radius) into the card's left side. Busy edges use the accent at 50% with one
   travelling dot. Forks are dashed.
-- **Busy ring:** 1px of accent at 8–25% alpha, breathing over 1.6s, 3–5px outside the card.
+- **Busy:** the card's own border breathes between accent at 40% and 18% over 1.6s (still under
+  reduced motion). No ring or second outline around the card: a doubled border reads as decoration.
 
 ## Cards (`Card` in nodes.tsx)
 
 - **Frame:** `rounded-xl border border-line-2 bg-panel shadow-card inset-shadow-highlight`.
   Clickable cards get `border-line-3` and `shadow-card-hover` on hover. Focus is a 2px accent
   outline offset by 2px.
-- **Tones (border):** busy `accent/40` (plus the engine's ring), done `ok/40` (T3's green for a
+- **Tones (border):** busy `accent/40`, breathing, done `ok/40` (T3's green for a
   finished run you haven't opened), error `danger/45`, muted at 60% opacity.
 - **Selected** (its conversation or settings are open): an accent hairline plus a 3px accent
   halo at 16% (`[data-card][data-selected]` in globals.css).
@@ -141,7 +142,7 @@ project's colour never reads as running. Green and rose are softer than `--ok` a
 | A project's tile (logo, monogram, emoji) | the logo as found (rounded 25%); else letters in the colour on the colour at 18% (T3's tile) |
 | A machine's tile | its kind's lucide icon in the colour, on the colour at 16% |
 | Machine and project cards | the 24px tile, and a flat 6% tint behind the header, over a hairline |
-| Thread and subagent cards | the project's 14px tile in the meta line, and a 3px stripe inside the left edge at 85% |
+| Thread and subagent cards | the project's 14px tile in the meta line; no stripe or coloured side (the user: it read as generated decoration) |
 | Edges | the child's colour at 42% (busy edges stay the accent at 50%) |
 | Sidebar, ⌘K, launcher, breadcrumb, settings titles, automations list | the same tiles at 14–16px |
 
@@ -227,7 +228,7 @@ Text levels: `--fg` `#f7f8f8`, `--soft` `#d0d6e0` (secondary body), `--muted` `#
 | palette and dialogs | scale 0.98 plus fade, 200ms on the drawer curve, with the scrim fading in over 200ms |
 | hover and colour | 150ms; buttons press to scale 0.97 |
 | cards | ease to their layout slot (spring-like, 0.22 per frame); new cards grow from their parent |
-| state loops | the busy ring and pulse dots breathe over 1.6s; shimmer runs 1.8s; no flashing |
+| state loops | the busy border and pulse dots breathe over 1.6s; shimmer runs 1.8s; no flashing |
 
 The drawer curve `cubic-bezier(0.32,0.72,0,1)` is T3's `--ease-drawer`. Every keyframe class is
 switched off under `prefers-reduced-motion`, and the engine draws a static, state-correct frame.
@@ -238,7 +239,8 @@ switched off under `prefers-reduced-motion`, and the engine draws a static, stat
   `inset-shadow-highlight`, `glass`). **Don't** hard-code a hex, an rgb or a shadow in a
   component.
 - **Do** put the accent only on focus, active, running and waiting, and a project's or machine's
-  colour only on its tile, header tint, stripe and edges. **Don't** tint whole cards, and **don't**
+  colour only on its tile, header tint and edges. **Don't** add side stripes, accent bars or a
+  second outline around a card. **Don't** tint whole cards, and **don't**
   use orange or decorative gradients.
 - **Do** float tools over cards. **Don't** reserve invisible room for hover buttons.
 - **Do** let layers separate things. **Don't** add a border-r or border-b where a panel edge

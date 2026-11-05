@@ -581,6 +581,23 @@ body {
   animation: chrome-in 0.3s cubic-bezier(0.32, 0.72, 0, 1) 0.05s both;
 }
 
+/* A busy card's border breathes with the accent (1.6 s, calm); the open card keeps its own. */
+@keyframes busy-border {
+  50% {
+    border-color: color-mix(in oklab, var(--accent) 18%, transparent);
+  }
+}
+
+[data-card]:not([data-selected]) [data-drag][data-tone="busy"] {
+  animation: busy-border 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-card] [data-drag][data-tone="busy"] {
+    animation: none;
+  }
+}
+
 /* The card whose conversation or settings are open beside the canvas: an accent hairline and halo. */
 [data-card][data-selected] [data-drag] {
   border-color: color-mix(in oklab, var(--accent) 70%, transparent);

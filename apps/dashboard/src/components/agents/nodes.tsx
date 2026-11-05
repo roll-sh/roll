@@ -26,14 +26,13 @@ import { setShelfOpen, useShelfOpen } from "@/lib/agents-shelf";
 /**
  * The frame every canvas card shares: flat panel, hairline border, the whole card a drag handle.
  * `tint` is the colour of the project or machine it belongs to (docs/code/agents-design.md,
- * "Identity"): its children use it through `--tint`; `stripe` draws it as a short bar on the inside
- * of the left edge (thread cards). The tone keeps the border, so state always reads over identity.
+ * "Identity"): its children use it through `--tint`. The tone keeps the border, so state always
+ * reads over identity; a busy border breathes (globals.css).
  */
 export function Card({
   width,
   tone,
   tint,
-  stripe = false,
   children,
   className = "",
   onClick,
@@ -42,7 +41,6 @@ export function Card({
   width: number;
   tone?: "busy" | "error" | "muted" | "done";
   tint?: IdentityColor;
-  stripe?: boolean;
   children: ReactNode;
   className?: string;
   onClick?: () => void;
@@ -73,7 +71,6 @@ export function Card({
         onClick ? "cursor-pointer hover:shadow-card-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent/70" : "cursor-default"
       } ${onClick && !tone ? "hover:border-line-3" : ""} ${className}`}
     >
-      {tint && stripe && <span aria-hidden data-stripe className="pointer-events-none absolute top-3 bottom-3 left-0 w-[3px] rounded-r-full bg-(--tint)/85" />}
       {children}
     </div>
   );
@@ -446,7 +443,7 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
   const quiet = !thread.error && !running && thread.status !== "waiting";
   const tone = thread.status === "error" ? "error" : running ? "busy" : thread.archived_at ? "muted" : done ? "done" : undefined;
   return (
-    <Card width={296} tone={tone} tint={project ? projectColor(project) : undefined} stripe onClick={() => openThread(thread.id)} label={`Thread ${thread.title}`}>
+    <Card width={296} tone={tone} tint={project ? projectColor(project) : undefined} onClick={() => openThread(thread.id)} label={`Thread ${thread.title}`}>
       <div className="px-3.5 pt-3 pb-3">
         <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-subtle">
           {project && <ProjectIcon project={project} className="size-3.5" />}
@@ -550,7 +547,7 @@ export function SubagentNode({ node }: { node: Node }) {
   const running = node.status === "running";
   const project = client.data.projects.get(client.data.threads.get(node.thread)?.value.project ?? "")?.value;
   return (
-    <Card width={240} tone={running ? "busy" : undefined} tint={project ? projectColor(project) : undefined} stripe onClick={() => openThread(node.thread)} label={`Subagent ${b.agent}`}>
+    <Card width={240} tone={running ? "busy" : undefined} tint={project ? projectColor(project) : undefined} onClick={() => openThread(node.thread)} label={`Subagent ${b.agent}`}>
       <div className="px-3 py-2.5">
         <p className="flex items-center gap-1.5 text-[12px] font-medium">
           <StatusDot status={running ? "running" : node.status === "failed" ? "error" : "idle"} />

@@ -1,7 +1,6 @@
 /**
  * The agents canvas engine: one canvas 2D + `requestAnimationFrame` loop that draws the dot field,
- * the edges, the pulses along busy edges and the breathing ring around busy nodes, and moves the
- * DOM cards with the same world transform. Framework-agnostic like `RollMarkEngine`
+ * the edges and the pulses along busy edges, and moves the DOM cards with the same world transform. Framework-agnostic like `RollMarkEngine`
  * (packages/brand/src/engine.ts), and it follows the brand engines' rules: colours resolved
  * through `resolveColor` (call `refreshColors` when the theme changes), paused offscreen, a
  * static but state-correct frame under reduced motion, ease-out motion, no flashing.
@@ -53,7 +52,7 @@ export interface EngineOptions {
   onBackground?: () => void;
 }
 
-/** A loop of the accent pulse along an edge and the ring's breath. */
+/** A loop of the accent pulse along an edge. */
 const PULSE_S = 1.6;
 const DOT_SPACING = 28;
 
@@ -604,22 +603,6 @@ export class CanvasEngine {
           ctx.fill();
         }
       }
-    }
-
-    // A calm breathing ring around busy nodes.
-    const breath = reduced ? 0.5 : 0.5 + 0.5 * Math.sin((t / PULSE_S) * Math.PI * 2);
-    for (const [key, m] of this.meta) {
-      if (!m.busy) continue;
-      const p = this.cur.get(key);
-      const sz = this.size.get(key);
-      if (!p || !sz) continue;
-      const q = scr(p);
-      const pad = 3 + breath * 2.5;
-      ctx.strokeStyle = rgba(this.accent, 0.08 + breath * 0.17);
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.roundRect(q.x - pad, q.y - pad, sz.w * k + pad * 2, sz.h * k + pad * 2, 12 * k + pad);
-      ctx.stroke();
     }
   }
 }
