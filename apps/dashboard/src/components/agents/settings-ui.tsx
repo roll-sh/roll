@@ -43,6 +43,12 @@ export interface SettingsElsewhere {
 /** The search a page opened from another page's results starts with. */
 let carried = "";
 
+/** Opens a settings page (`owner`, `m:<id>`, `p:<id>`), searched for `query` when given. */
+export function openSettings(target: string, query = "") {
+  carried = query;
+  setAgentsView({ kind: "settings", target });
+}
+
 export function SettingsPage({
   icon,
   title,
@@ -139,10 +145,7 @@ export function SettingsPage({
                   <button
                     key={o.target}
                     type="button"
-                    onClick={() => {
-                      carried = query;
-                      setAgentsView({ kind: "settings", target: o.target });
-                    }}
+                    onClick={() => openSettings(o.target, query)}
                     className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-fg/[0.03] focus-visible:bg-fg/[0.04] focus-visible:outline-none"
                   >
                     <span className="min-w-0 flex-1">

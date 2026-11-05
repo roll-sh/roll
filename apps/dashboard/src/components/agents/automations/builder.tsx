@@ -45,7 +45,7 @@ import {
   type Schema,
   type Variable,
 } from "@/lib/automations-ui";
-import { field as fieldClass } from "../settings-ui";
+import { field as fieldClass, openSettings } from "../settings-ui";
 import { cn, Menu, MenuGroup, MenuGroupLabel, MenuItem, MenuPopup, MenuSeparator, MenuTrigger, Segmented, Select } from "../ui";
 import { LookupPicker } from "../lookup-picker";
 import { useAgents } from "../use-agents";
@@ -522,7 +522,13 @@ function TriggerBody({
           {info?.needs_setup && (
             <p className="flex items-center gap-2 rounded-lg border border-line-2 bg-fg/[0.02] px-3 py-2 text-[12px] text-muted">
               <TriangleAlert className="size-3.5 shrink-0 text-subtle" />
-              Connect {info.title} in Settings before this can run.
+              <span>
+                Connect {info.title} in{" "}
+                <button type="button" onClick={() => openSettings("owner", info.title)} className="text-fg underline-offset-2 hover:underline">
+                  Agents settings
+                </button>{" "}
+                before this can run.
+              </span>
             </p>
           )}
           {info && info.events.length > 0 && (
@@ -807,7 +813,13 @@ function StepCard({
           {info?.needs_setup && (
             <p className="flex items-center gap-2 rounded-lg border border-line-2 bg-fg/[0.02] px-3 py-2 text-[12px] text-muted">
               <TriangleAlert className="size-3.5 shrink-0 text-subtle" />
-              Connect {info.integration ?? "the integration"} in Settings before this step can run.
+              <span>
+                Connect {info.integration ?? "the integration"} in{" "}
+                <button type="button" onClick={() => openSettings("owner", info.integration ?? "")} className="text-fg underline-offset-2 hover:underline">
+                  Agents settings
+                </button>{" "}
+                before this step can run.
+              </span>
             </p>
           )}
           {head && <p className="text-[11.5px] text-danger">{head}</p>}

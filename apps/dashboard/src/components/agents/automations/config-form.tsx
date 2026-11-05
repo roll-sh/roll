@@ -216,7 +216,7 @@ function FieldFor({
             options={[{ value: "__none", label: "Don't sign" }, ...ctx.secrets.map((n) => ({ value: n, label: n }))]}
            
           />
-          {!ctx.secrets.length && <p className="mt-1 text-[11.5px] text-subtle">Add a secret in Settings to sign requests.</p>}
+          {!ctx.secrets.length && <p className="mt-1 text-[11.5px] text-subtle">Add a secret in this automation&apos;s Settings tab (once it&apos;s created) to sign requests.</p>}
         </Label>
       );
   }

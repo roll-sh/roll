@@ -104,6 +104,21 @@ describe("Automations list", () => {
 });
 
 describe("Automation builder", () => {
+  it("links a step whose integration isn't connected to the settings that connect it, searched for it", async () => {
+    const api = fakeApi();
+    api.catalog = vi.fn(async () => ({
+      triggers: [],
+      steps: [{ kind: "linear.comment", title: "Comment on a Linear issue", description: "", config: { type: "object", properties: {} }, output: [], integration: "Linear", needs_setup: true }],
+    }));
+    renderAgents(<AutomationPanel view={{ kind: "automations", open: "new" }} />, harness(api));
+    await userEvent.click(screen.getByRole("button", { name: "Add a step" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: /Comment on a Linear issue/ }));
+    const card = screen.getByRole("region", { name: /Step 1: Comment on a Linear issue/ });
+    expect(card).toHaveTextContent("Connect Linear in Agents settings before this step can run.");
+    macClick(within(card).getByRole("button", { name: "Agents settings" }));
+    expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "owner" });
+  });
+
   it("builds one from nothing: a step from the catalog, its form, a variable from {{, a test, then Create", async () => {
     const api = fakeApi();
     renderAgents(<AutomationPanel view={{ kind: "automations", open: "new" }} />, harness(api));
