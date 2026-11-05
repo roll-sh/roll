@@ -29,7 +29,7 @@ import {
   Zap,
   type LucideIcon,
 } from "lucide-react";
-import { useMemo, type ComponentProps, type ReactNode } from "react";
+import { useMemo, useState, type ComponentProps, type ReactNode } from "react";
 import type { RunState, StepState } from "@/lib/automations-api";
 import { automationsFor, useAutomationsState, type AutomationsState, type AutomationsStore } from "@/lib/automations-store";
 import { runLabel, runTone, withBuiltIns, type Tone } from "@/lib/automations-ui";
@@ -244,5 +244,60 @@ export function SizedSelect<V extends string>({ width, ...props }: ComponentProp
     <span className={cn("inline-block min-w-0 [&>button]:min-w-0", width)}>
       <Select<V> {...props} />
     </span>
+  );
+}
+
+/**
+ * A number typed freely: what's typed stays as typed (clearing it to type another number never
+ * snaps to the minimum), and only a number within `min`..`max` reaches `onChange`; an empty field
+ * is `null` when `optional`. Out of range, it's marked invalid and, on leaving it, shows the last
+ * number it took again.
+ */
+export function NumberField({
+  value,
+  onChange,
+  min,
+  max,
+  integer = true,
+  optional = false,
+  className,
+  ...props
+}: Omit<ComponentProps<"input">, "value" | "onChange" | "min" | "max" | "type"> & {
+  value: number | null;
+  onChange: (value: number | null) => void;
+  min?: number;
+  max?: number;
+  integer?: boolean;
+  optional?: boolean;
+}) {
+  const shown = value === null ? "" : String(value);
+  const [text, setText] = useState<string | null>(null);
+  const parse = (t: string): number | null | undefined => {
+    if (t.trim() === "") return optional ? null : undefined;
+    const n = Number(t);
+    if (!Number.isFinite(n) || (integer && !Number.isInteger(n)) || (min !== undefined && n < min) || (max !== undefined && n > max)) return undefined;
+    return n;
+  };
+  const bad = text !== null && parse(text) === undefined;
+  return (
+    <input
+      {...props}
+      type="number"
+      inputMode={integer ? "numeric" : "decimal"}
+      min={min}
+      max={max}
+      value={text ?? shown}
+      aria-invalid={bad || undefined}
+      onChange={(e) => {
+        setText(e.target.value);
+        const n = parse(e.target.value);
+        if (n !== undefined && n !== value) onChange(n);
+      }}
+      onBlur={(e) => {
+        setText(null);
+        props.onBlur?.(e);
+      }}
+      className={cn(className, bad && "border-danger/50")}
+    />
   );
 }

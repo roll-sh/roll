@@ -50,7 +50,7 @@ import { cn, Menu, MenuGroup, MenuGroupLabel, MenuItem, MenuPopup, MenuSeparator
 import { LookupPicker } from "../lookup-picker";
 import { useAgents } from "../use-agents";
 import { AddButton, Chips, ConfigForm } from "./config-form";
-import { stepIcon, Tile, triggerIcon, SizedSelect } from "./shared";
+import { NumberField, stepIcon, Tile, triggerIcon, SizedSelect } from "./shared";
 
 export interface BuilderTest {
   result: TestResult | null;
@@ -461,7 +461,7 @@ function TriggerBody({
             {preset === "hourly" && (
               <label className="flex items-center gap-2 text-[12.5px] text-muted">
                 at minute
-                <input type="number" min={0} max={59} aria-label="Minute" value={Number(p.time.split(":")[1])} onChange={(e) => onChange({ ...t, cron: `${Math.max(0, Math.min(59, Number(e.target.value) || 0))} * * * *` })} className={cn(fieldClass, "w-16 font-mono text-[12.5px]")} />
+                <NumberField min={0} max={59} aria-label="Minute" value={Number(p.time.split(":")[1])} onChange={(n) => n !== null && onChange({ ...t, cron: `${n} * * * *` })} className={cn(fieldClass, "w-16 font-mono text-[12.5px]")} />
               </label>
             )}
             {preset === "custom" && <input aria-label="Cron" value={t.cron} onChange={(e) => onChange({ ...t, cron: e.target.value })} placeholder="*/30 9-17 * * 1-5" className={cn(fieldClass, "w-52 font-mono text-[12.5px]", err && "border-danger/50")} />}
@@ -477,7 +477,7 @@ function TriggerBody({
         <div className="space-y-2">
           <div className="flex items-center gap-2">
             <span className="text-[12.5px] text-muted">Every</span>
-            <input type="number" min={1} aria-label="How many" value={Math.max(1, Math.round(t.every_s / unit))} onChange={(e) => onChange({ ...t, every_s: Math.max(1, Number(e.target.value) || 1) * unit })} className={cn(fieldClass, "w-20 font-mono text-[12.5px]")} />
+            <NumberField min={1} aria-label="How many" value={Math.max(1, Math.round(t.every_s / unit))} onChange={(n) => n !== null && onChange({ ...t, every_s: n * unit })} className={cn(fieldClass, "w-20 font-mono text-[12.5px]")} />
             <Segmented
               label="Unit"
               value={String(unit)}
@@ -893,20 +893,17 @@ function Advanced({ step: s, onChange, variables, problems, index, sample }: { s
             </div>
             <label>
               <span className="mb-1.5 block text-[12px] font-[510] text-soft">Tries</span>
-              <input type="number" min={1} max={10} aria-label="Tries" value={s.retry?.attempts ?? 1} onChange={(e) => {
-                const n = Math.max(1, Math.min(10, Number(e.target.value) || 1));
-                onChange({ ...s, retry: n <= 1 ? null : { attempts: n, backoff_s: s.retry?.backoff_s ?? 30 } });
-              }} className={cn(fieldClass, "w-16 font-mono text-[12.5px]")} />
+              <NumberField min={1} max={10} aria-label="Tries" value={s.retry?.attempts ?? 1} onChange={(n) => n !== null && onChange({ ...s, retry: n <= 1 ? null : { attempts: n, backoff_s: s.retry?.backoff_s ?? 30 } })} className={cn(fieldClass, "w-16 font-mono text-[12.5px]")} />
             </label>
             {s.retry && (
               <label>
                 <span className="mb-1.5 block text-[12px] font-[510] text-soft">Wait between (s)</span>
-                <input type="number" min={1} aria-label="Backoff seconds" value={s.retry.backoff_s} onChange={(e) => onChange({ ...s, retry: { ...s.retry!, backoff_s: Math.max(1, Number(e.target.value) || 1) } })} className={cn(fieldClass, "w-20 font-mono text-[12.5px]")} />
+                <NumberField min={1} aria-label="Backoff seconds" value={s.retry.backoff_s} onChange={(n) => n !== null && onChange({ ...s, retry: { ...s.retry!, backoff_s: n } })} className={cn(fieldClass, "w-20 font-mono text-[12.5px]")} />
               </label>
             )}
             <label>
               <span className="mb-1.5 block text-[12px] font-[510] text-soft">Time limit (s)</span>
-              <input type="number" min={1} aria-label="Time limit seconds" value={s.timeout_s ?? ""} placeholder="Default" onChange={(e) => onChange({ ...s, timeout_s: e.target.value === "" ? null : Math.max(1, Number(e.target.value)) })} className={cn(fieldClass, "w-24 font-mono text-[12.5px]")} />
+              <NumberField optional min={1} aria-label="Time limit seconds" value={s.timeout_s ?? null} placeholder="Default" onChange={(n) => onChange({ ...s, timeout_s: n })} className={cn(fieldClass, "w-24 font-mono text-[12.5px]")} />
             </label>
           </div>
         </div>

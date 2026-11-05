@@ -23,7 +23,7 @@ import { useTemplateContext } from "./automations-view";
 import { Builder } from "./builder";
 import { ConfigForm } from "./config-form";
 import { SheetHeader } from "./sheet";
-import { PrimaryButton, QuietButton, Tile, triggerIcon, useAutomations, SizedSelect } from "./shared";
+import { NumberField, PrimaryButton, QuietButton, Tile, triggerIcon, useAutomations, SizedSelect } from "./shared";
 
 /** Drafts by automation id (`new:<template>` for new ones), kept while the page is open. */
 const drafts = new Map<string, AutomationSpec>();
@@ -514,7 +514,7 @@ function SettingsTab({ draft, setDraft, automation }: { draft: AutomationSpec; s
           description={draft.rate_limit ? undefined : "100 runs an hour unless you say otherwise."}
           control={
             <span className="flex items-center gap-2 text-[12.5px] text-muted">
-              <input type="number" min={1} aria-label="Runs at most" value={draft.rate_limit?.max ?? ""} placeholder="100" onChange={(e) => setDraft({ ...draft, rate_limit: e.target.value === "" ? null : { max: Math.max(1, Number(e.target.value)), per_s: draft.rate_limit?.per_s ?? 3600 } })} className={cn(fieldClass, "w-20 font-mono text-[12.5px]")} />
+              <NumberField optional min={1} aria-label="Runs at most" value={draft.rate_limit?.max ?? null} placeholder="100" onChange={(n) => setDraft({ ...draft, rate_limit: n === null ? null : { max: n, per_s: draft.rate_limit?.per_s ?? 3600 } })} className={cn(fieldClass, "w-20 font-mono text-[12.5px]")} />
               runs per
               <Segmented
                 label="Per"

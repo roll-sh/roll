@@ -18,7 +18,7 @@ import { field as fieldClass } from "../settings-ui";
 import { cn, Segmented, Switch } from "../ui";
 import { Picker, type PickerOption } from "../ui/picker";
 import { useAgents } from "../use-agents";
-import { SizedSelect } from "./shared";
+import { NumberField, SizedSelect } from "./shared";
 import { TemplateInput } from "./template-input";
 
 export interface FormContext {
@@ -221,14 +221,15 @@ function FieldFor({
   if (s.type === "integer" || s.type === "number")
     return (
       <Label title={title} description={s.description}>
-        <input
-          type="number"
+        <NumberField
+          optional
+          integer={s.type === "integer"}
           aria-label={title}
-          value={typeof value === "number" ? value : ""}
+          value={typeof value === "number" ? value : null}
           min={s.minimum}
           max={s.maximum}
           placeholder={s.default !== undefined ? String(s.default) : "Not set"}
-          onChange={(e) => onChange(e.target.value === "" ? null : s.type === "integer" ? Math.round(Number(e.target.value)) : Number(e.target.value))}
+          onChange={onChange}
           className={cn(fieldClass, "w-40 font-mono text-[12.5px] tabular-nums", error && "border-danger/50")}
         />
         {error && <p className="mt-1 text-[11.5px] text-danger">{error}</p>}
