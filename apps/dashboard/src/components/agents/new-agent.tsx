@@ -141,7 +141,7 @@ export function Launcher({ project: wanted, machine: wantedMachine, at, onClose 
           <Composer
             key={inProject.id}
             mode={{ kind: "new", project: inProject, machine }}
-            onSubmit={(c) => start(machine, { type: "thread.create", project: inProject.id, ...c })}
+            onSubmit={(c, opts) => start(machine, { type: "thread.create", project: inProject.id, ...c }, undefined, opts?.open !== false)}
           />
         ) : (
           <Offline machine={machine} onAdd={() => setAdding(true)} />

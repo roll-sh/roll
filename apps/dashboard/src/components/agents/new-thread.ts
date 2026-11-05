@@ -145,16 +145,17 @@ export function usableIn(machines: ReadonlyMap<string, Machine>) {
 /**
  * Start a thread: send `command` (under `id` when given: the same id never starts a second thread,
  * the daemon replays its reply), remember its project, and open it beside the canvas once its
- * record is in. Rejects with what went wrong.
+ * record is in, unless `open` is false (several models at once open only the first, once all
+ * started). Answers the thread's id; rejects with what went wrong.
  */
 export function useStartThread() {
   const { client, openThread } = useAgents();
   return useCallback(
-    async (machine: Machine, command: ThreadCreate, id = commandId()) => {
+    async (machine: Machine, command: ThreadCreate, id = commandId(), open = true) => {
       const r = expectOk<{ type: "created"; id: string }>(await client.send(machine.id, command, id), "created");
       rememberProject(command.project);
       await recordOf(client, r.id);
-      openThread(r.id);
+      if (open) openThread(r.id);
       return r.id;
     },
     [client, openThread],

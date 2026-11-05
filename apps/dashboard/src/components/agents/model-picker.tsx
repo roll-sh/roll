@@ -20,7 +20,9 @@
  * ⌘/Ctrl+Shift+↑/↓ to switch providers, Escape to close. Picking a model with reasoning levels
  * moves to them; picking a level (or a model without options) closes it. With `shortcuts` (the
  * composer's picker), ⌘/Ctrl+Shift+M opens it and ⌘/Ctrl+Shift+E steps through the levels
- * (T3's `modelPicker.toggle` and `composer.effort`).
+ * (T3's `modelPicker.toggle` and `composer.effort`). With `multi` (a new thread's composer),
+ * Shift-click or Shift+Enter adds a model to the ones a prompt starts, one thread each (T3's
+ * multi-model fan-out); the trigger then names the first two and how many more.
  */
 
 import { Check, ChevronDown, ChevronRight, Clock, PencilLine, ShieldCheck, ShieldOff, Star, Zap } from "lucide-react";
@@ -53,6 +55,30 @@ import {
 export function resolveModel(info: ProviderInfo | undefined, model: string | null | undefined): ModelInfo | undefined {
   const models = info?.models ?? [];
   return models.find((m) => m.id === model) ?? models.find((m) => m.default) ?? models[0];
+}
+
+/**
+ * Several models at once (T3's `draftFanoutSelections`): `selected` is null while one model is
+ * picked; `onToggle` adds or removes one (Shift-click, Shift+Enter).
+ */
+export interface MultiPick {
+  selected: readonly ModelChoice[] | null;
+  onToggle: (choice: ModelChoice) => void;
+  /** A plain pick while several are picked: that one alone again (T3). */
+  onSingle: (choice: ModelChoice) => void;
+}
+
+/** The same provider and model (options and effort aside). */
+export const sameModel = (a: Pick<ModelChoice, "provider" | "model">, b: Pick<ModelChoice, "provider" | "model">) => a.provider === b.provider && a.model === b.model;
+
+/** T3's multi-model trigger label: the first two names, then how many more ("Choose models" for none). */
+export function modelsLabel(choices: readonly ModelChoice[], providers: readonly ProviderInfo[]): string {
+  const names = choices.map((c) => {
+    const m = resolveModel(providers.find((p) => p.id === c.provider), c.model);
+    return m?.short_name ?? m?.name ?? c.model ?? c.provider;
+  });
+  if (names.length === 0) return "Choose models";
+  return names.length <= 2 ? names.join(", ") : `${names.slice(0, 2).join(", ")}, ${names.length - 2} more`;
 }
 
 export interface ModelChoice {
@@ -125,6 +151,7 @@ export function ModelPicker({
   side = "top",
   disabled = false,
   shortcuts = false,
+  multi,
 }: {
   providers: readonly ProviderInfo[];
   value: ModelChoice;
@@ -133,11 +160,14 @@ export function ModelPicker({
   disabled?: boolean;
   /** ⌘/Ctrl+Shift+M opens it, ⌘/Ctrl+Shift+E steps the reasoning level: one picker on the page (the composer's). */
   shortcuts?: boolean;
+  /** Several models at once (a new thread's composer). */
+  multi?: MultiPick;
 }) {
   const [open, setOpen] = useState(false);
   const info = providers.find((p) => p.id === value.provider);
   const current = resolveModel(info, value.model);
-  const label = current?.short_name ?? current?.name ?? info?.name ?? "Choose model";
+  const many = multi?.selected && multi.selected.length > 1 ? multi.selected : null;
+  const label = many ? modelsLabel(many, providers) : (current?.short_name ?? current?.name ?? info?.name ?? "Choose model");
   const t = traits(current, value.effort, value.options);
   const latest = useRef({ value, current, onChange, disabled });
   latest.current = { value, current, onChange, disabled };
@@ -170,14 +200,27 @@ export function ModelPicker({
           <button
             type="button"
             className={triggerClass}
-            aria-label={`Model: ${label}${t.detail ? ` · ${t.detail}` : ""}`}
-            title={[info?.name, current?.name ?? label, t.detail, shortcuts ? `${isMac() ? "⌘⇧M" : "Ctrl+Shift+M"}` : null].filter(Boolean).join(" · ")}
+            aria-label={many ? `Models: ${label}` : `Model: ${label}${t.detail ? ` · ${t.detail}` : ""}`}
+            title={
+              many
+                ? `One thread each: ${modelsLabel(many.slice(0, 1), providers)}${many.slice(1).map((c) => `, ${modelsLabel([c], providers)}`).join("")}`
+                : [info?.name, current?.name ?? label, t.detail, shortcuts ? `${isMac() ? "⌘⇧M" : "Ctrl+Shift+M"}` : null].filter(Boolean).join(" · ")
+            }
           />
         }
       >
-        {info && <ProviderLogo provider={info} className="size-3.5" />}
+        {many ? (
+          <span className="flex shrink-0 -space-x-1" aria-hidden>
+            {[...new Set(many.map((c) => c.provider))].slice(0, 3).map((id) => {
+              const p = providers.find((x) => x.id === id);
+              return p ? <ProviderLogo key={id} provider={p} className="size-3.5 rounded-full bg-panel" /> : null;
+            })}
+          </span>
+        ) : (
+          info && <ProviderLogo provider={info} className="size-3.5" />
+        )}
         <span className="max-w-48 min-w-0 truncate">{label}</span>
-        {(t.effort || t.fast || t.context) && (
+        {!many && (t.effort || t.fast || t.context) && (
           <span className="flex shrink-0 items-center gap-1 text-muted group-hover/model-trigger:text-fg group-data-popup-open/model-trigger:text-fg">
             {t.effort && <span className="max-w-24 truncate">{t.effort}</span>}
             {t.fast && <Zap aria-hidden className="size-3 fill-current" />}
@@ -187,13 +230,29 @@ export function ModelPicker({
         <ChevronDown className="size-3 shrink-0 text-subtle" aria-hidden />
       </PopoverTrigger>
       <PopoverPopup side={side} align="start" sideOffset={6} aria-label="Choose a model" className="overflow-hidden">
-        {open && <PickerContent providers={providers} value={value} onChange={onChange} onClose={() => setOpen(false)} />}
+        {open && <PickerContent providers={providers} value={value} onChange={onChange} onClose={() => setOpen(false)} multi={multi} />}
       </PopoverPopup>
     </Popover>
   );
 }
 
-function PickerContent({ providers, value, onChange, onClose }: { providers: readonly ProviderInfo[]; value: ModelChoice; onChange: (next: ModelChoice) => void; onClose: () => void }) {
+function PickerContent({
+  providers,
+  value,
+  onChange,
+  onClose,
+  multi,
+}: {
+  providers: readonly ProviderInfo[];
+  value: ModelChoice;
+  onChange: (next: ModelChoice) => void;
+  onClose: () => void;
+  multi?: MultiPick;
+}) {
+  // Shift held on the click or Enter that picks: add the model instead (T3's additive pick).
+  const additive = useRef(false);
+  // A click on the active row that the list already handled (Base UI reports it too).
+  const handled = useRef(false);
   const prefs = useModelPrefs();
   const favorites = useMemo(() => new Set(prefs.favorites), [prefs.favorites]);
   // Every model of every provider on offer, in the machine's order.
@@ -242,7 +301,7 @@ function PickerContent({ providers, value, onChange, onClose }: { providers: rea
 
   const focusColumn = () =>
     requestAnimationFrame(() => (column.current?.querySelector<HTMLElement>('[role="radio"][aria-checked="true"]') ?? column.current?.querySelector<HTMLElement>("[data-option-row]"))?.focus());
-  const pick = (key: ModelKey) => {
+  const pick = (key: ModelKey, add = false) => {
     if (key.startsWith("legacy:")) {
       const p = key.slice("legacy:".length);
       setExpanded((s) => {
@@ -257,6 +316,15 @@ function PickerContent({ providers, value, onChange, onClose }: { providers: rea
     const p = m && providerOf(m.provider);
     if (!m || !p || unavailable(p)) return;
     modelPrefs.used(key);
+    const same = p.id === value.provider && m.model === active?.id;
+    const choice: ModelChoice = same ? { ...value, model: m.model } : { provider: p.id, model: m.model, effort: null, options: {} };
+    if (add && multi) return multi.onToggle(choice);
+    if (multi?.selected && multi.selected.length > 1) {
+      multi.onSingle(choice);
+      if (m.info.options.length) focusColumn();
+      else onClose();
+      return;
+    }
     if (key !== activeKey) {
       const sameProvider = p.id === value.provider;
       onChange({
@@ -315,7 +383,7 @@ function PickerContent({ providers, value, onChange, onClose }: { providers: rea
     if (e.key === "Enter" && highlighted.current) {
       (e as typeof e & { preventBaseUIHandler?: () => void }).preventBaseUIHandler?.();
       e.preventDefault();
-      pick(highlighted.current);
+      pick(highlighted.current, e.shiftKey);
     }
   };
 
@@ -353,11 +421,36 @@ function PickerContent({ providers, value, onChange, onClose }: { providers: rea
             autoHighlight
             value={activeKey}
             onItemHighlighted={(k) => (highlighted.current = typeof k === "string" ? k : null)}
-            onValueChange={(k) => typeof k === "string" && pick(k)}
+            onValueChange={(k) => {
+              const add = additive.current;
+              additive.current = false;
+              if (handled.current) {
+                handled.current = false;
+                return;
+              }
+              if (typeof k === "string") pick(k, add);
+            }}
           >
             <div className={cn("flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-fg/[0.02]", !searching && "border-l border-line")}>
               <ComboboxSearchInput ref={search} autoFocus placeholder="Search models..." aria-label="Search models" value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={onSearchKey} />
-              <ComboboxList aria-label="Models">
+              <ComboboxList
+                aria-label="Models"
+                onPointerDownCapture={(e) => {
+                  additive.current = e.shiftKey;
+                  handled.current = false;
+                }}
+                onClickCapture={(e) => {
+                  // Base UI doesn't pick the model already picked: with several picked, a click on
+                  // it still toggles it (Shift) or makes it the one model.
+                  const row = (e.target as HTMLElement).closest<HTMLElement>("[data-model-key]");
+                  if (multi?.selected && multi.selected.length > 1 && row?.dataset.modelKey && row.dataset.modelKey === activeKey) {
+                    e.preventDefault();
+                    additive.current = false;
+                    handled.current = true;
+                    pick(row.dataset.modelKey, e.shiftKey);
+                  }
+                }}
+              >
                 {shown.map((m) => {
                   const p = providerOf(m.provider)!;
                   const jump = jumps.indexOf(m.key);
@@ -368,7 +461,7 @@ function PickerContent({ providers, value, onChange, onClose }: { providers: rea
                       info={byKey.get(m.key)!.info}
                       provider={p}
                       favorite={favorites.has(m.key)}
-                      selected={m.key === activeKey}
+                      selected={multi?.selected && multi.selected.length > 1 ? multi.selected.some((c) => modelKey(c.provider, c.model ?? "") === m.key) : m.key === activeKey}
                       starOnHover={tab === "favorites" && !searching}
                       jump={jump >= 0 ? jumpLabel(jump) : null}
                     />
@@ -416,6 +509,12 @@ function PickerContent({ providers, value, onChange, onClose }: { providers: rea
         <div className="flex items-center gap-2 border-t border-line bg-fg/[0.03] px-3 py-2" data-model-picker-footer>
           <SpeedControl option={speed} value={optionValue(speed, value.options)} onChange={(v) => setOption(speed.id, v)} />
         </div>
+      )}
+      {multi && (
+        <p className="border-t border-line px-3 py-1.5 text-[11px] text-subtle max-sm:hidden [@media(hover:none)]:hidden" data-model-picker-multi>
+          {multi.selected && multi.selected.length > 1 ? `${multi.selected.length} models: one thread each, in its own worktree. ` : ""}
+          <kbd className="font-sans">⇧</kbd>-click or <kbd className="font-sans">⇧ Enter</kbd> to add a model
+        </p>
       )}
     </div>
   );
@@ -511,7 +610,14 @@ function ModelRow({
   const label = favorite ? "Remove from favorites" : "Add to favorites";
   const why = unavailable(provider);
   return (
-    <ComboboxItem value={model.key} disabled={!!why} className="group relative w-full min-w-0 data-disabled:cursor-not-allowed data-disabled:opacity-60" aria-selected={selected} title={why ? `${provider.name}: ${why}` : undefined}>
+    <ComboboxItem
+      value={model.key}
+      disabled={!!why}
+      data-model-key={model.key}
+      className="group relative w-full min-w-0 data-disabled:cursor-not-allowed data-disabled:opacity-60"
+      aria-selected={selected}
+      title={why ? `${provider.name}: ${why}` : undefined}
+    >
       <ProviderLogo provider={provider} className="size-4" />
       <span className="flex min-w-0 flex-1 items-center gap-1.5">
         <span className="min-w-0 truncate leading-snug" title={model.name}>

@@ -235,3 +235,95 @@ describe("drag to launch on the canvas", () => {
     expect(onLaunch).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("several models at once (T3's multi-model fan-out)", () => {
+  const git = project({ git: { branch: "main", head: "f35f34cf", remote: null, dirty: false } });
+  const numbered = () => {
+    let n = 0;
+    return (c: { type: string; model?: string }) => {
+      if (c.type !== "thread.create") return { type: "ok" as const };
+      if (c.model === "claude-sonnet-5" && failSonnet) return { type: "error" as const, code: "provider" as const, message: "Sonnet 5 is busy" };
+      return { type: "created" as const, id: `thr_${++n}` };
+    };
+  };
+  let failSonnet = false;
+  const shiftClick = async (name: RegExp) => {
+    const row = await screen.findByRole("option", { name });
+    // One session, so Shift stays held for the click.
+    const user = userEvent.setup();
+    await user.keyboard("{Shift>}");
+    await user.click(row);
+    await user.keyboard("{/Shift}");
+  };
+
+  it("Shift-click adds a model; Enter starts one thread per model from one prompt, each in its own worktree, and opens the first", async () => {
+    failSonnet = false;
+    const h = agentsHarness({ entities: [mirrored("project", git, 1)], reply: numbered() });
+    renderAgents(<Launcher onClose={vi.fn()} />, h);
+    await userEvent.click(screen.getByRole("button", { name: /^Model: Opus 5\.5/ }));
+    expect(await screen.findByText(/to add a model/)).toBeInTheDocument();
+    await shiftClick(/^Sonnet 5/);
+    // The picker stays open, both rows checked; the trigger names them.
+    expect(screen.getByRole("button", { name: "Models: Opus 5.5, Sonnet 5" })).toBeInTheDocument();
+    expect(screen.getByText(/2 models: one thread each, in its own worktree/)).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    const worktree = screen.getByRole("switch", { name: "Worktree" });
+    expect(worktree).toBeChecked();
+    expect(worktree).toHaveAttribute("aria-disabled", "true");
+    await userEvent.type(screen.getByRole("textbox", { name: "Message" }), "Speed up the queue tests");
+    await userEvent.click(screen.getByRole("button", { name: "Start 2 threads" }));
+    await waitFor(() => expect(h.openThread).toHaveBeenCalledWith("thr_1"));
+    expect(commands(h).filter((c) => c.type === "thread.create")).toEqual([
+      { type: "thread.create", project: "prj_1", provider: "claude", model: "claude-opus-5-5", runtime_mode: "full_access", interaction_mode: "default", worktree: true, prompt: "Speed up the queue tests" },
+      { type: "thread.create", project: "prj_1", provider: "claude", model: "claude-sonnet-5", runtime_mode: "full_access", interaction_mode: "default", worktree: true, prompt: "Speed up the queue tests" },
+    ]);
+    expect(h.openThread).toHaveBeenCalledTimes(1);
+  });
+
+  it("Shift-clicking one back off, or a plain pick, is one model again", async () => {
+    const h = agentsHarness({ entities: [mirrored("project", git, 1)], reply: numbered() });
+    renderAgents(<Launcher onClose={vi.fn()} />, h);
+    await userEvent.click(screen.getByRole("button", { name: /^Model: Opus 5\.5/ }));
+    await shiftClick(/^Sonnet 5/);
+    await shiftClick(/^Opus 5\.5/);
+    expect(screen.getByRole("button", { name: /^Model: Sonnet 5/ })).toBeInTheDocument();
+    await shiftClick(/^Opus 5\.5/);
+    expect(screen.getByRole("button", { name: "Models: Sonnet 5, Opus 5.5" })).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("option", { name: /^Sonnet 5/ }));
+    expect(screen.getByRole("button", { name: /^Model: Sonnet 5/ })).toBeInTheDocument();
+  });
+
+  it("Shift+Enter adds the highlighted model from the search", async () => {
+    const h = agentsHarness({ entities: [mirrored("project", git, 1)], reply: numbered() });
+    renderAgents(<Launcher onClose={vi.fn()} />, h);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /^Model: Opus 5\.5/ }));
+    await user.type(await screen.findByRole("combobox", { name: "Search models" }), "sonnet");
+    await user.keyboard("{Shift>}{Enter}{/Shift}");
+    expect(screen.getByRole("button", { name: "Models: Opus 5.5, Sonnet 5" })).toBeInTheDocument();
+  });
+
+  it("models that couldn't start stay picked with the prompt, and it says why", async () => {
+    failSonnet = true;
+    const h = agentsHarness({ entities: [mirrored("project", git, 1)], reply: numbered() });
+    renderAgents(<Launcher onClose={vi.fn()} />, h);
+    await userEvent.click(screen.getByRole("button", { name: /^Model: Opus 5\.5/ }));
+    await shiftClick(/^Sonnet 5/);
+    await userEvent.keyboard("{Escape}");
+    await userEvent.type(screen.getByRole("textbox", { name: "Message" }), "Try both");
+    await userEvent.click(screen.getByRole("button", { name: "Start 2 threads" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Started 1 of 2 threads. Couldn't start Sonnet 5: Sonnet 5 is busy");
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("Try both");
+    expect(screen.getByRole("button", { name: /^Model: Sonnet 5/ })).toBeInTheDocument();
+    expect(h.openThread).not.toHaveBeenCalled();
+    failSonnet = false;
+  });
+
+  it("isn't offered outside a git project (each model needs a worktree)", async () => {
+    const h = agentsHarness({ entities: [mirrored("project", project(), 1)], reply: created });
+    renderAgents(<Launcher onClose={vi.fn()} />, h);
+    await userEvent.click(screen.getByRole("button", { name: /^Model: Opus 5\.5/ }));
+    await screen.findByRole("option", { name: /^Sonnet 5/ });
+    expect(screen.queryByText(/to add a model/)).toBeNull();
+  });
+});

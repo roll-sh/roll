@@ -336,6 +336,19 @@ options, like a change of effort, starts the next turn in a new session.
   models once a session starts: start a thread with its default model, and they show here
   after."
 
+**Several models at once** (T3's multi-model fan-out, `useMultipleModelSend.ts`): in a new
+thread's composer on a git project, Shift-click (or Shift+Enter) in the picker adds a model to the
+ones a prompt starts, and again removes it; a plain pick, or one left, is one model again. The
+trigger names the first two and how many more ("Opus 5.5, GPT-5.5 Codex, 1 more"; its tooltip all
+of them), the picked rows are checked, and the picker's foot says "⇧-click or ⇧ Enter to add a
+model". The worktree switch is on and locked ("Each model starts in its own worktree."), and the
+send button reads "Start 3 threads": one `thread.create` per model with the same prompt,
+permissions and plan mode, each in a worktree of its own. When all started, the first opens and
+the rest are on the canvas beside it, siblings under the project; models that couldn't start stay
+picked with the prompt, and the composer says which and why ("Started 2 of 3 threads. Couldn't
+start …"). Outside a git project it isn't offered (T3 refuses it there too). The threads aren't
+linked to each other, as in T3.
+
 **Provider logos.** The picker draws T3's provider logos (`components/agents/provider-logos.tsx`,
 generated from T3's path data) in the text's colour, like every mark on the agents surface. roll
 never uses orange, so Claude's mark doesn't use its brand colour. A provider without a mark shows

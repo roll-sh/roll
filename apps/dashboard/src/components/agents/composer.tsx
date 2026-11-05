@@ -21,7 +21,7 @@ import { readyPlan } from "@/lib/agents-plan";
 import { ContextMeter } from "./context-meter";
 import { compactsOnReturn, formatContextTokens } from "@/lib/agents-context";
 import { runsOf } from "@/lib/agents-store";
-import { DEFAULT_RUNTIME_MODE, ModelPicker, PermissionsMenu, resolveModel, type ModelChoice } from "./model-picker";
+import { DEFAULT_RUNTIME_MODE, ModelPicker, modelsLabel, PermissionsMenu, resolveModel, sameModel, type ModelChoice } from "./model-picker";
 import { ImplementButton, PlanBanner, usePlanActions } from "./plan";
 import { QueuedMessages } from "./queue";
 import { pickByDigit, pill, QuestionsPanel, quiet, useQuestionFlow } from "./request-card";
@@ -131,12 +131,15 @@ export function Composer({
   autoFocus = true,
 }: {
   mode: ComposerMode;
-  /** New-thread mode: create it. */
-  onSubmit?: (fields: NewThreadFields) => Promise<unknown>;
+  /**
+   * New-thread mode: create it, and open it unless `open` is false (several models at once: the
+   * composer opens the first once they all started). Answers the new thread's id.
+   */
+  onSubmit?: (fields: NewThreadFields, opts?: { open?: boolean }) => Promise<unknown>;
   onCancel?: () => void;
   autoFocus?: boolean;
 }) {
-  const { client } = useAgents();
+  const { client, openThread } = useAgents();
   const prefs = usePrefs();
   const providers = useMemo(() => (mode.machine?.info?.providers ?? []).filter((p) => p.installed), [mode.machine]);
   const thread = mode.kind === "thread" ? mode.thread : null;
@@ -156,6 +159,11 @@ export function Composer({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  // Several models at once, one thread each in its own worktree (T3's multi-model fan-out on a
+  // new draft in a git project): null while one model is picked.
+  const [fanout, setFanout] = useState<ModelChoice[] | null>(null);
+  const canFanOut = mode.kind === "new" && !!mode.project.git;
+  const fanning = canFanOut && (fanout?.length ?? 0) > 1;
   const area = useRef<HTMLTextAreaElement>(null);
   const files = useRef<HTMLInputElement>(null);
   const held = useModifierHeld();
@@ -256,6 +264,22 @@ export function Composer({
     if (Object.keys(patch).length) configure(patch);
   };
 
+  // T3's `onToggleModel`: from the model picked, add or remove one; one left is one model again.
+  const toggleModel = (c: ModelChoice) => {
+    const current: ModelChoice = { provider, model: modelInfo?.id ?? model, effort, options };
+    const from = fanout ?? [current];
+    const next = from.some((x) => sameModel(x, c)) ? from.filter((x) => !sameModel(x, c)) : [...from, c];
+    if (next.length > 1) return setFanout(next);
+    setFanout(null);
+    if (next[0]) pick(next[0]);
+  };
+  // A plain pick is one model again; changing the shown model's options keeps the set.
+  const choose = (c: ModelChoice) => {
+    if (fanout?.some((x) => sameModel(x, c))) setFanout(fanout.map((x) => (sameModel(x, c) ? c : x)));
+    else setFanout(null);
+    pick(c);
+  };
+
   const addFiles = async (list: FileList | File[]) => {
     setError(null);
     for (const f of Array.from(list)) {
@@ -295,6 +319,10 @@ export function Composer({
     setBusy(true);
     setError(null);
     try {
+      if (mode.kind === "new" && fanning && fanout) {
+        await startMany(fanout, prompt);
+        return;
+      }
       if (mode.kind === "new") {
         await onSubmit?.({
           provider,
@@ -333,6 +361,52 @@ export function Composer({
     } finally {
       setBusy(false);
     }
+  };
+
+  /**
+   * One thread per model from one prompt, each in its own worktree (T3's `useMultipleModelSend`).
+   * All started: open the first. Some failed: those stay picked with the prompt, and it says why.
+   */
+  const startMany = async (models: readonly ModelChoice[], prompt: string) => {
+    if (mode.kind !== "new" || !mode.project.git) throw new Error("Multiple models need a new thread in a Git project. Each gets its own worktree.");
+    const started: string[] = [];
+    const failed: { choice: ModelChoice; why: string }[] = [];
+    for (const c of models) {
+      const m = resolveModel(providers.find((p) => p.id === c.provider), c.model);
+      try {
+        const id = await onSubmit?.(
+          {
+            provider: c.provider,
+            ...(m ? { model: m.id } : {}),
+            ...(c.effort ? { effort: c.effort } : {}),
+            ...(Object.keys(c.options).length ? { options: c.options } : {}),
+            runtime_mode: runtime,
+            interaction_mode: plan,
+            worktree: true,
+            prompt,
+            ...(attachments.length ? { attachments } : {}),
+          },
+          { open: false },
+        );
+        if (typeof id === "string") started.push(id);
+      } catch (e) {
+        failed.push({ choice: c, why: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    if (failed.length === 0) {
+      setText("");
+      setAttachments([]);
+      setFanout(null);
+      if (started[0]) openThread(started[0]);
+      return;
+    }
+    if (failed.length > 1) setFanout(failed.map((f) => f.choice));
+    else {
+      setFanout(null);
+      pick(failed[0].choice);
+    }
+    const why = failed.map((f) => `${modelsLabel([f.choice], providers)}: ${f.why}`).join("; ");
+    setError(started.length ? `Started ${started.length} of ${models.length} threads. Couldn't start ${why}` : `Couldn't start ${why}`);
   };
 
   /** Run something with the button busy and its error shown. */
@@ -652,7 +726,19 @@ export function Composer({
               <ModelPicker
                 providers={mode.machine?.info?.providers ?? providers}
                 value={{ provider, model: modelInfo?.id ?? model, effort, options }}
-                onChange={pick}
+                onChange={choose}
+                multi={
+                  canFanOut
+                    ? {
+                        selected: fanout,
+                        onToggle: toggleModel,
+                        onSingle: (c) => {
+                          setFanout(null);
+                          pick(c);
+                        },
+                      }
+                    : undefined
+                }
                 side={mode.kind === "new" ? "bottom" : "top"}
                 shortcuts
               />
@@ -678,8 +764,11 @@ export function Composer({
                 </button>
               )}
               {mode.kind === "new" && (
-                <label className="inline-flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg px-2 text-[12px] font-medium text-soft hover:bg-fg/[0.06]" title="Work in its own git worktree on a new branch">
-                  <Switch size="sm" checked={worktree} onCheckedChange={setWorktree} aria-label="Worktree" />
+                <label
+                  className="inline-flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg px-2 text-[12px] font-medium text-soft hover:bg-fg/[0.06]"
+                  title={fanning ? "Each model starts in its own worktree." : "Work in its own git worktree on a new branch"}
+                >
+                  <Switch size="sm" checked={worktree || fanning} disabled={fanning} onCheckedChange={setWorktree} aria-label="Worktree" />
                   Worktree
                 </label>
               )}
@@ -764,7 +853,9 @@ export function Composer({
                 type="button"
                 onClick={(e) => void submit(e.metaKey || e.ctrlKey)}
                 disabled={busy || !machineOnline || (!hasText && !queueHeld) || (mode.kind === "new" && (!provider || !!loggedOut))}
-                aria-label={running ? (queuing ? "Queue message" : "Steer message") : mode.kind === "new" ? "Start thread" : queueHeld && !hasText ? "Resume thread" : "Send"}
+                aria-label={
+                  running ? (queuing ? "Queue message" : "Steer message") : mode.kind === "new" ? (fanning ? `Start ${fanout!.length} threads` : "Start thread") : queueHeld && !hasText ? "Resume thread" : "Send"
+                }
                 title={running ? (approvalWaiting ? "Send to redirect the agent" : `Click to ${queuing ? "queue" : "steer"}, ${MOD}-click to ${queuing ? "steer" : "queue"}`) : queueHeld && !hasText ? "Send the queued messages" : undefined}
                 className="grid size-8 shrink-0 place-items-center rounded-full bg-accent text-white shadow-xs transition-[transform,background-color,opacity] duration-150 enabled:hover:scale-105 enabled:active:scale-[0.97] disabled:bg-fg/[0.12] disabled:text-subtle motion-reduce:transition-none"
               >
