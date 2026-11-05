@@ -45,6 +45,7 @@ import { ColorPicker, KindPicker, MachineIcon } from "./identity";
 import { machineColor, machineKind } from "@/lib/agents-identity";
 import { cn, Segmented, Select, Switch } from "./ui";
 import { useAgents } from "./use-agents";
+import { useEscapeLayer } from "./escape-layers";
 
 const OS_NAMES: Record<string, string> = { macos: "macOS", linux: "Linux", windows: "Windows" };
 
@@ -417,6 +418,7 @@ function ConfigPath({ path }: { path: string }) {
 function RemoveRow({ machine, onError, onRemoved }: { machine: Machine; onError: (e: string | null) => void; onRemoved: () => void }) {
   const { services, owner } = useAgents();
   const [asking, setAsking] = useState(false);
+  useEscapeLayer(asking, () => setAsking(false));
   const [busy, setBusy] = useState(false);
   const remove = async () => {
     if (!services) return;

@@ -18,6 +18,7 @@ import { cn, Select } from "../ui";
 import { useAgents } from "../use-agents";
 import { GatewayNotice } from "./notice";
 import { dangerBtn, iconBtn, message, Problem, smallBtn } from "./shared";
+import { useEscapeLayer } from "../escape-layers";
 
 export function MembersList({
   plan,
@@ -46,6 +47,7 @@ export function MembersList({
   const [busy, setBusy] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [asking, setAsking] = useState<string | null>(null);
+  useEscapeLayer(asking !== null, () => setAsking(null));
   const hostName = host?.name ?? "the gateway's computer";
   const picked = pick ? byId.get(pick) : undefined;
   const choices = picked ? urlChoices(plan, port, picked.id) : [];

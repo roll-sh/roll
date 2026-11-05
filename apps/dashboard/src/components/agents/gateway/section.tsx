@@ -26,6 +26,7 @@ import { dangerBtn, iconBtn, message, Problem, RunState, smallBtn, useGatewayPla
 import { UpstreamEditor, UpstreamItem } from "./upstreams";
 import { UsageCharts } from "./usage";
 import { Addresses, GatewaySetup, type Address } from "./wizard";
+import { useEscapeLayer } from "../escape-layers";
 
 const TERMS = ["gateway", "model gateway", "proxy", "cliproxy", "litellm", "upstream", "api key", "failover", "route", "alias", "usage", "cost", "log", "anthropic", "openai", "bedrock", "vertex", "azure", "openrouter"];
 
@@ -101,6 +102,7 @@ function GatewayRows({ g, onSetup }: { g: ReturnType<typeof useGatewayPlan>; onS
   const [editing, setEditing] = useState<{ at: number | "new"; key?: boolean } | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [asking, setAsking] = useState(false);
+  useEscapeLayer(asking, () => setAsking(false));
   const [removing, setRemoving] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   const visible = useVisible(box);

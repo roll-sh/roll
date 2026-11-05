@@ -15,6 +15,7 @@ import { field, Note, SaveState, SettingRow, SettingsSection, type Setting } fro
 import { ago } from "./shared";
 import { cn } from "./ui";
 import { useAgents } from "./use-agents";
+import { useEscapeLayer } from "./escape-layers";
 
 const S = {
   connect: {
@@ -430,6 +431,7 @@ function Deliveries({ deliveries }: { deliveries: LinearStatus["deliveries"] }) 
 
 function Disconnect({ name, busy, onDisconnect }: { name: string; busy: boolean; onDisconnect: () => Promise<boolean> }) {
   const [asking, setAsking] = useState(false);
+  useEscapeLayer(asking, () => setAsking(false));
   return (
     <SettingRow
       s={S.disconnect}

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Command, EndpointInfo, EndpointProfile, Machine, MachineSettings, Reply } from "@/lib/agents-api";
@@ -13,6 +13,7 @@ import { macClick } from "@/test/mac-click";
 import { MarkStateProvider } from "../mark-state";
 import { AgentsControl } from "./agents-control";
 import { Composer } from "./composer";
+import { closeTopLayer } from "./escape-layers";
 import { SettingsPanel } from "./settings-panel";
 
 let conn: { client: AgentsHarness["client"] | null; services: ReturnType<typeof fakeServices> | null; error: string | null } = { client: null, services: null, error: null };
@@ -296,6 +297,18 @@ describe("a machine's settings", () => {
     await userEvent.click(screen.getByRole("button", { name: "Remove ada-mbp" }));
     await waitFor(() => expect(services.machines.remove).toHaveBeenCalledWith("acme", "mch_1"));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("closes a confirmation with Escape before the panel (the surface's Escape peels the top layer)", async () => {
+    const onClose = vi.fn();
+    const h = agentsHarness({ machines: [machine({ info: { ...machine().info!, settings: machineConfig() } })], ctx: { services: fakeServices() } });
+    renderAgents(<SettingsPanel target="m:mch_1" onClose={onClose} />, h);
+    macClick(screen.getByRole("button", { name: "Remove" }));
+    expect(screen.getByRole("button", { name: "Remove ada-mbp" })).toBeInTheDocument();
+    act(() => expect(closeTopLayer()).toBe(true));
+    expect(screen.queryByRole("button", { name: "Remove ada-mbp" })).toBeNull();
+    expect(closeTopLayer()).toBe(false);
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
 

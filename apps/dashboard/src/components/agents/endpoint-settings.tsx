@@ -529,6 +529,7 @@ function EndpointItem({
   const { client } = useAgents();
   const [check, setCheck] = useState<EndpointCheck | "busy" | null>(null);
   const [asking, setAsking] = useState(false);
+  useEscapeLayer(asking, () => setAsking(false));
   const [busy, setBusy] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const act = async (what: string, fn: () => Promise<unknown>) => {
@@ -709,6 +710,7 @@ export function EndpointProfilesSection() {
   const [problem, setProblem] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [asking, setAsking] = useState<string | null>(null);
+  useEscapeLayer(asking !== null, () => setAsking(null));
   const [applying, setApplying] = useState<EndpointProfile | null>(null);
   const load = async () => {
     if (!api) return;

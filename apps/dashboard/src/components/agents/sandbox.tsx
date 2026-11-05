@@ -7,6 +7,7 @@ import type { AgentsData } from "@/lib/agents-store";
 import type { AgentsServices } from "@/lib/agents-services";
 import { canStart, canStop, formatHourly, type Sandbox, type SandboxList, type SandboxUsageRow } from "@/lib/sandboxes-api";
 import { useAgents } from "./use-agents";
+import { useEscapeLayer } from "./escape-layers";
 
 /** The owner's sandboxes as the canvas sees them: by machine, with this month's usage. */
 export interface SandboxesState {
@@ -98,6 +99,7 @@ export function SandboxPanel({ machine }: { machine: Machine }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState(false);
+  useEscapeLayer(confirm, () => setConfirm(false));
   const status = info.status;
   const used = sb ? sandboxes?.usage.get(sb.id) : undefined;
   const moving = status === "creating" || status === "starting" || status === "deleting";

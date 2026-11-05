@@ -33,6 +33,7 @@ import { SettingRow, SettingsSection, type Setting } from "./settings-ui";
 import { cn, Switch } from "./ui";
 import { Picker, type PickerSource } from "./ui/picker";
 import { AgentsContext } from "./use-agents";
+import { useEscapeLayer } from "./escape-layers";
 
 export const INTEGRATION_SETTINGS = {
   slack: {
@@ -349,6 +350,7 @@ function InstallEditor({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [asking, setAsking] = useState(false);
+  useEscapeLayer(asking, () => setAsking(false));
   const people = useInstallPeople(platform, owner, install);
 
   const save = async (patch: InstallPatch) => {

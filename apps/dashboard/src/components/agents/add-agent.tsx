@@ -17,6 +17,7 @@ import { ago } from "./shared";
 import { SettingRow, type Setting } from "./settings-ui";
 import { cn, Popover, PopoverPopup, PopoverTrigger } from "./ui";
 import { useAgents } from "./use-agents";
+import { useEscapeLayer } from "./escape-layers";
 
 const trigger = "flex h-6 items-center gap-1 rounded-md px-1.5 text-[11.5px] text-subtle hover:bg-fg/[0.06] hover:text-fg disabled:opacity-50";
 
@@ -225,6 +226,7 @@ export function RegistryRemoveRow({ machine, base }: { machine: Machine; base: P
   const { client } = useAgents();
   const installed = installedFor(machine, base.id);
   const [asking, setAsking] = useState(false);
+  useEscapeLayer(asking, () => setAsking(false));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   if (!installed) return null;

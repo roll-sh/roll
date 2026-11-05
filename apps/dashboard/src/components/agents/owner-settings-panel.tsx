@@ -27,6 +27,7 @@ import { SaveState, SettingRow, SettingsPage, SettingsSection, useSearching, typ
 import { MachineIcon } from "./identity";
 import { Segmented, Select, Switch } from "./ui";
 import { useAgents } from "./use-agents";
+import { useEscapeLayer } from "./escape-layers";
 
 const S = {
   notify: {
@@ -239,6 +240,7 @@ export function OwnerSettingsPanel({ onClose, elsewhere }: { onClose: () => void
 /** T3's "Restore defaults", asked once more. */
 function Restore({ disabled, onRestore }: { disabled: boolean; onRestore: () => Promise<void> }) {
   const [asking, setAsking] = useState(false);
+  useEscapeLayer(asking, () => setAsking(false));
   if (useSearching()) return null;
   return (
     <div className="flex items-center gap-2 px-0.5">
