@@ -60,6 +60,8 @@ interface Ctx {
   requests: ReadonlyMap<string, Request>;
   actions: TranscriptActions;
   now: number;
+  /** The run is a compaction the daemon started (`run.idle_compaction`). */
+  idle?: boolean;
 }
 
 /** One run: what the user sent, then the agent's work, then how it ended. */
@@ -87,11 +89,12 @@ export function RunView({
   const items = timelineItems(tree);
   const turn = foldTurn(items, run);
   const [folded, setFolded] = useState(true);
-  const ctx: Ctx = { requests, actions, now };
+  const ctx: Ctx = { requests, actions, now, idle: run.idle_compaction };
   const files = changedFiles(tree);
   return (
     <section className={`group/run flex flex-col gap-3 ${run.status === "rolled_back" ? "opacity-45" : ""}`} aria-label={`Run ${run.ordinal}`}>
-      <UserMessage run={run} />
+      {/* Nobody typed an idle compaction: its row says what happened (T3). */}
+      {!run.idle_compaction && <UserMessage run={run} />}
       {turn.fold && (
         <div className="border-b border-line pt-1 pb-2">
           <button
@@ -277,7 +280,7 @@ function Items({ items, ctx, live }: { items: TimelineItem[]; ctx: Ctx; live: bo
         ) : row.item.kind === "work" ? (
           <WorkGroup key={row.item.id} entries={row.item.entries} />
         ) : (
-          <NodeView key={row.item.t.node.id} t={row.item.t} requests={ctx.requests} actions={ctx.actions} live={live} now={ctx.now} />
+          <NodeView key={row.item.t.node.id} t={row.item.t} requests={ctx.requests} actions={ctx.actions} live={live} now={ctx.now} idle={ctx.idle} />
         ),
       )}
     </>
@@ -341,7 +344,22 @@ function ChangedFiles({ files, onOpen }: { files: FileChange[]; onOpen?: () => v
   );
 }
 
-export function NodeView({ t, requests, actions, live, now }: { t: NodeTree; requests: ReadonlyMap<string, Request>; actions: TranscriptActions; live: boolean; now: number }) {
+export function NodeView({
+  t,
+  requests,
+  actions,
+  live,
+  now,
+  idle,
+}: {
+  t: NodeTree;
+  requests: ReadonlyMap<string, Request>;
+  actions: TranscriptActions;
+  live: boolean;
+  now: number;
+  /** In an idle compaction's run. */
+  idle?: boolean;
+}) {
   const n = t.node;
   const b = n.body;
   const running = n.status === "running";
@@ -395,7 +413,7 @@ export function NodeView({ t, requests, actions, live, now }: { t: NodeTree; req
     case "subagent":
       return <InlineSubagent t={t} requests={requests} actions={actions} live={live} now={now} />;
     case "compaction":
-      return <CompactionRow node={n} />;
+      return <CompactionRow node={n} idle={idle} />;
     case "request": {
       const q = requests.get(b.request);
       if (!q) return null;
@@ -434,13 +452,24 @@ function InlineSubagent({ t, requests, actions, live, now }: { t: NodeTree; requ
 /**
  * The provider compacted the context (T3's `ContextCompactionTimelineRow`): a quiet separator,
  * "Compacting context" while it runs, then "Context compacted 182k → 41k tokens", or why it failed.
+ * An idle compaction (`idle`) says so, in T3's words.
  */
-export function CompactionRow({ node }: { node: Node }) {
+export function CompactionRow({ node, idle = false }: { node: Node; idle?: boolean }) {
   if (node.body.type !== "compaction") return null;
   const b = node.body;
   const failed = node.status === "failed";
   const running = node.status === "running";
-  const label = failed ? "Context compaction failed" : node.status === "interrupted" ? "Context compaction stopped" : running ? "Compacting context" : "Context compacted";
+  const label = failed
+    ? "Context compaction failed"
+    : node.status === "interrupted"
+      ? "Context compaction stopped"
+      : running
+        ? idle
+          ? "Compacting before the cache expires…"
+          : "Compacting context"
+        : idle
+          ? "Context automatically compacted before cache expiry"
+          : "Context compacted";
   const counts = !running && !failed && b.before_tokens != null && b.after_tokens != null;
   return (
     <div role="separator" aria-label={label} className="flex items-center gap-3 py-1 text-[12px]">

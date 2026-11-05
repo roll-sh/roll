@@ -263,6 +263,10 @@ export interface ContextUsage {
   max_tokens: number | null;
   /** Every token the conversation's model calls processed (Codex reports it). */
   total_processed_tokens: number | null;
+  /** How long the prompt cache lives after the last request (Claude: 1 h on subscriptions, 5 min on API keys; T3's `promptCacheTtlMs`). */
+  cache_ttl_ms?: number | null;
+  /** Where the provider compacts by itself, when a setting moved it below the window (T3's `autoCompactThreshold`). */
+  auto_compact_at?: number | null;
 }
 
 export interface Thread {
@@ -374,6 +378,8 @@ export interface Run {
   prompt: string;
   attachments: Attachment[];
   steers: string[];
+  /** The daemon compacted the idle conversation before its prompt cache expired (T3's idle compaction). */
+  idle_compaction?: boolean;
   requested_at: Millis;
   started_at: Millis | null;
   completed_at: Millis | null;
@@ -756,6 +762,26 @@ export interface MachineSettings {
   /** Who publishing commits as (both or neither). */
   git_name?: string;
   git_email?: string;
+  /** When to compact idle threads, for providers that don't say (unset: on return). */
+  idle_compaction?: IdleCompaction;
+}
+
+/** When to compact a big idle conversation (T3's `idleCompaction`). */
+export type IdleCompaction = "on_return" | "before_cache_expires" | "off";
+export const IDLE_COMPACTION_LABELS: Record<IdleCompaction, string> = {
+  on_return: "When you return",
+  before_cache_expires: "Before the cache expires (beta)",
+  off: "Never",
+};
+/** Below this a cold read is cheap: no idle compaction (T3's `COMPACTION_SUGGESTION_MIN_TOKENS`). */
+export const IDLE_COMPACTION_MIN_TOKENS = 200_000;
+/** T3's "Auto-compact after" range. */
+export const AUTO_COMPACT_MIN = 100_000;
+export const AUTO_COMPACT_MAX = 1_000_000;
+
+/** When a provider's idle threads compact: its own setting, else the machine's, else on return. */
+export function idleCompactionOf(set: MachineSettings | undefined, provider: ProviderId): IdleCompaction {
+  return set?.providers?.[provider]?.idle_compaction ?? set?.idle_compaction ?? "on_return";
 }
 
 /** One provider's settings on a machine (unset `enabled`: on). */
@@ -767,6 +793,10 @@ export interface ProviderSettings {
   /** Over `config.toml`'s; never a credential (`isCredentialEnv`). */
   env?: Record<string, string>;
   models?: CustomModel[];
+  /** Compact after this many tokens (T3's "Auto-compact after"; Claude). */
+  auto_compact_window?: number;
+  /** Over the machine's `idle_compaction`. */
+  idle_compaction?: IdleCompaction;
 }
 
 export interface CustomModel {
@@ -776,9 +806,12 @@ export interface CustomModel {
 }
 
 /** A provider's settings with the defaults filled in. */
-export function providerSettings(set: MachineSettings, id: ProviderId): Required<Omit<ProviderSettings, "binary">> & { binary?: string } {
+export function providerSettings(
+  set: MachineSettings,
+  id: ProviderId,
+): Required<Omit<ProviderSettings, "binary" | "auto_compact_window" | "idle_compaction">> & Pick<ProviderSettings, "binary" | "auto_compact_window" | "idle_compaction"> {
   const p = set.providers?.[id] ?? {};
-  return { enabled: p.enabled ?? true, binary: p.binary, args: p.args ?? [], env: p.env ?? {}, models: p.models ?? [] };
+  return { enabled: p.enabled ?? true, binary: p.binary, args: p.args ?? [], env: p.env ?? {}, models: p.models ?? [], auto_compact_window: p.auto_compact_window, idle_compaction: p.idle_compaction };
 }
 
 /**
@@ -1343,7 +1376,7 @@ const usageFields = {
 };
 const usageD = withDefault(obj<Usage>(usageFields), () => ({ ...ZERO_USAGE }));
 
-const contextD = obj<ContextUsage>({ used_tokens: int, max_tokens: opt(int), total_processed_tokens: opt(int) });
+const contextD = obj<ContextUsage>({ used_tokens: int, max_tokens: opt(int), total_processed_tokens: opt(int), cache_ttl_ms: opt(int), auto_compact_at: opt(int) });
 
 export const ZERO_USAGE: Usage = { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null };
 
@@ -1411,6 +1444,7 @@ const runD = obj<Run>({
   prompt: str,
   attachments: vec(attachmentD),
   steers: vec(str),
+  idle_compaction: withDefault(bool, () => false),
   requested_at: int,
   started_at: opt(int),
   completed_at: opt(int),
@@ -1561,12 +1595,15 @@ export const providerInfoD = obj<ProviderInfo>({
   capabilities: capabilitiesD,
   checking: optional(bool),
 });
+const idleCompactionD = literal("on_return", "before_cache_expires", "off");
 const providerSettingsD = obj<ProviderSettings>({
   enabled: optional(bool),
   binary: optional(str),
   args: optional(array(str)),
   env: optional(map(str)),
   models: optional(array(obj<CustomModel>({ id: str, name: optional(str) }))),
+  auto_compact_window: optional(int),
+  idle_compaction: optional(idleCompactionD),
 });
 const machineSettingsD = obj<MachineSettings>({
   providers: optional(map(providerSettingsD)),
@@ -1579,6 +1616,7 @@ const machineSettingsD = obj<MachineSettings>({
   max_children: optional(int),
   git_name: optional(str),
   git_email: optional(str),
+  idle_compaction: optional(idleCompactionD),
 });
 const endpointKindD = literal("anthropic", "openai", "cliproxy", "custom");
 const endpointSpecFields = {

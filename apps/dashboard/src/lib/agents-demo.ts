@@ -1288,7 +1288,10 @@ export class DemoOwner implements AgentsTransport {
     const tomorrow = new Date(now() + DAY);
     tomorrow.setHours(9, 0, 0, 0);
     shelved("thr_demo_e2e", "prj_demo_web", "Review the flaky e2e retries", "codex", "gpt-5.5", 3 * 3_600_000, { snooze: { until: tomorrow.getTime(), at: now() - 3 * 3_600_000 } });
-    shelved("thr_demo_keys", "prj_demo_infra", "Rotate the staging keys", "claude", "claude-opus-5-5", 2 * DAY, { visited_at: now() - 2 * DAY, woke_at: now() - 20 * 60_000 });
+    // Big, and idle for longer than its prompt cache lives: its composer offers T3's "Compact and send".
+    shelved("thr_demo_keys", "prj_demo_infra", "Rotate the staging keys", "claude", "claude-opus-5-5", 2 * DAY, { visited_at: now() - 2 * DAY, woke_at: now() - 20 * 60_000 }, {
+      context: { used_tokens: 312_400, max_tokens: 1_000_000, total_processed_tokens: null, cache_ttl_ms: 3_600_000, auto_compact_at: 467_000 },
+    });
 
     if (this.keepAlive) this.idle();
     this.after(400, () => this.begin("thr_demo_flaky", "The queue test fails one time in ten. Find out why and fix it.", flakyScript));

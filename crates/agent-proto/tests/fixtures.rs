@@ -106,7 +106,7 @@ fn thread() -> Thread {
         plan_ready: true,
         activity: Some("Waiting to run `cargo test`".into()),
         usage: Usage { input_tokens: 12_000, output_tokens: 3_400, cached_tokens: 9_000, cost_usd: Some(0.42) },
-        context: Some(ContextUsage { used_tokens: 124_000, max_tokens: Some(200_000), total_processed_tokens: Some(410_000) }),
+        context: Some(ContextUsage { used_tokens: 124_000, max_tokens: Some(200_000), total_processed_tokens: Some(410_000), cache_ttl_ms: Some(3_600_000), auto_compact_at: Some(117_000) }),
         error: None,
         change: Some(Box::new(ThreadChange {
             repo: "acme/roll".into(),
@@ -171,13 +171,14 @@ fn run_rec() -> Run {
         prompt: "The queue test fails one time in ten. Find out why.".into(),
         attachments: vec![Attachment { name: "trace.png".into(), mime: "image/png".into(), data: "iVBORw0KGgo=".into() }],
         steers: vec!["it only fails on Postgres".into()],
+        idle_compaction: false,
         requested_at: T,
         started_at: Some(T + 20),
         completed_at: None,
         checkpoint: None,
         stat: None,
         usage: Usage::default(),
-        context: Some(ContextUsage { used_tokens: 18_500, max_tokens: None, total_processed_tokens: None }),
+        context: Some(ContextUsage { used_tokens: 18_500, max_tokens: None, total_processed_tokens: None, ..Default::default() }),
         error: None,
     }
 }
@@ -614,6 +615,8 @@ fn settings() -> MachineSettings {
             args: vec!["--verbose".into()],
             env: [("CLAUDE_CONFIG_DIR".to_string(), "/Users/ada/.claude-work".to_string())].into(),
             models: vec![CustomModel { id: "claude-opus-5-5[1m]".into(), name: Some("Opus 5.5 (1M)".into()) }],
+            auto_compact_window: Some(300_000),
+            idle_compaction: Some(IdleCompaction::BeforeCacheExpires),
         },
     );
     MachineSettings {
@@ -627,6 +630,7 @@ fn settings() -> MachineSettings {
         max_children: None,
         git_name: Some("Ada Lovelace".into()),
         git_email: Some(concat!("ada", "@", "example.com").into()),
+        idle_compaction: Some(IdleCompaction::Off),
     }
 }
 
@@ -1061,7 +1065,7 @@ fn records_from_before_context_usage_parse() {
 
 #[test]
 fn context_percent_needs_a_window() {
-    let c = |used, max| ContextUsage { used_tokens: used, max_tokens: max, total_processed_tokens: None };
+    let c = |used, max| ContextUsage { used_tokens: used, max_tokens: max, total_processed_tokens: None, ..Default::default() };
     assert_eq!(c(50_000, Some(200_000)).used_percent(), Some(25.0));
     assert_eq!(c(250_000, Some(200_000)).used_percent(), Some(100.0));
     assert_eq!(c(50_000, None).used_percent(), None);

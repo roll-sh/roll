@@ -779,7 +779,7 @@ async fn the_context_window_follows_the_conversation() {
     let codex = manual("codex", Capabilities { rollback: true, ..Capabilities::default() });
     let claude = FakeProvider::new("claude");
     let w = World::new(vec![codex.clone(), claude.clone()]).await;
-    let ctx = |used| ContextUsage { used_tokens: used, max_tokens: Some(258_400), total_processed_tokens: Some(used * 2) };
+    let ctx = |used| ContextUsage { used_tokens: used, max_tokens: Some(258_400), total_processed_tokens: Some(used * 2), ..Default::default() };
     let thread = w.thread("codex", Some("one"), false).await;
     let session = codex.session(0).await;
     w.wait_thread(&thread, |t| t.status == ThreadStatus::Running).await;

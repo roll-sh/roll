@@ -145,6 +145,7 @@ exec "$0" fake_codex --exact --nocapture -q 3>&1 1>/dev/null"#;
         binary: Some("/bin/sh".into()),
         args: vec!["-c".into(), script.into(), exe.display().to_string()],
         env: vec![(TRANSCRIPT.into(), transcript.display().to_string()), (LOG.into(), log.display().to_string())],
+        ..Default::default()
     }
 }
 

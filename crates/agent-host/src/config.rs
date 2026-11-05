@@ -134,7 +134,7 @@ struct RawAcp {
 
 impl From<RawProvider> for ProviderConfig {
     fn from(raw: RawProvider) -> Self {
-        ProviderConfig { binary: raw.binary, args: raw.args, env: raw.env.into_iter().collect() }
+        ProviderConfig { binary: raw.binary, args: raw.args, env: raw.env.into_iter().collect(), ..Default::default() }
     }
 }
 
@@ -187,6 +187,7 @@ impl Config {
                     binary: Some(raw.binary),
                     args: raw.args,
                     env: raw.env.into_iter().collect(),
+                    ..Default::default()
                 },
             });
         }

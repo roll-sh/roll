@@ -19,6 +19,7 @@
 mod cleanup;
 mod endpoints;
 mod handoff;
+mod idle;
 mod instructions;
 mod probes;
 mod projects;
@@ -85,6 +86,8 @@ pub struct Host {
     seal: crate::endpoints::SealKey,
     /// The endpoints set from roll, with their keys (`endpoints.rs`).
     endpoints: std::sync::Mutex<Vec<crate::endpoints::Live>>,
+    /// Each thread's idle compaction timer (`idle.rs`).
+    idle_timers: std::sync::Mutex<HashMap<ThreadId, tokio::task::AbortHandle>>,
 }
 
 /// Why a command failed; becomes `Reply::Error`.
@@ -294,6 +297,7 @@ impl Host {
             logos: Arc::default(),
             seal,
             endpoints: std::sync::Mutex::new(endpoints),
+            idle_timers: std::sync::Mutex::new(HashMap::new()),
         });
         host.configure_providers();
         // Hello goes out with what's known; each provider's status follows as its probe answers.

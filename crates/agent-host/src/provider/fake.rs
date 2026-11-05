@@ -452,7 +452,7 @@ impl FakeSession {
         self.emit(self.message(&id, &answer, NodeStatus::Completed));
         self.emit(ProviderEvent::Usage(Usage { input_tokens: said.len() as u64, output_tokens: answer.len() as u64, cached_tokens: 0, cost_usd: None }));
         let used = DEMO_CONTEXT + 1_000 * self.inner.turns.fetch_add(1, Ordering::SeqCst) as u64;
-        self.emit(ProviderEvent::Context(ContextUsage { used_tokens: used, max_tokens: Some(200_000), total_processed_tokens: None }));
+        self.emit(ProviderEvent::Context(ContextUsage { used_tokens: used, max_tokens: Some(200_000), total_processed_tokens: None, ..Default::default() }));
         self.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
     }
 }
@@ -496,7 +496,7 @@ impl Session for FakeSession {
             };
             self.emit(item(NodeStatus::Running, None));
             self.emit(item(NodeStatus::Completed, Some(DEMO_CONTEXT / 2)));
-            self.emit(ProviderEvent::Context(ContextUsage { used_tokens: DEMO_CONTEXT / 2, max_tokens: Some(200_000), total_processed_tokens: None }));
+            self.emit(ProviderEvent::Context(ContextUsage { used_tokens: DEMO_CONTEXT / 2, max_tokens: Some(200_000), total_processed_tokens: None, ..Default::default() }));
             self.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
         }
         Ok(())

@@ -210,6 +210,7 @@ fn fake_config(transcript: &Path, log: &Path) -> ProviderConfig {
         binary: Some("/bin/sh".into()),
         args: vec!["-c".into(), script.into(), exe.display().to_string()],
         env: vec![(TRANSCRIPT.into(), transcript.display().to_string()), (LOG.into(), log.display().to_string())],
+        ..Default::default()
     }
 }
 

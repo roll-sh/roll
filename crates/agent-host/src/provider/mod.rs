@@ -38,6 +38,9 @@ pub struct ProviderConfig {
     pub args: Vec<String>,
     /// Extra environment (API keys, `ANTHROPIC_BASE_URL`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`).
     pub env: Vec<(String, String)>,
+    /// Compact once the conversation holds this many tokens (machine settings; Claude's
+    /// `autoCompactWindow`). Unset: the provider's default.
+    pub auto_compact_window: Option<u64>,
 }
 
 /// A provider's config that the machine's settings can change while the daemon runs: an adapter

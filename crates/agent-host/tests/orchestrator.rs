@@ -277,7 +277,7 @@ async fn compact_runs_as_a_compaction_and_steering_it_queues() {
     let w = World::new(vec![fake.clone()]).await;
     let thread = w.thread("codex", Some("one"), false).await;
     let session = fake.session(0).await;
-    session.emit(ProviderEvent::Context(ContextUsage { used_tokens: 180_000, max_tokens: Some(258_000), total_processed_tokens: None }));
+    session.emit(ProviderEvent::Context(ContextUsage { used_tokens: 180_000, max_tokens: Some(258_000), total_processed_tokens: None, ..Default::default() }));
     session.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
     w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle && t.context.is_some()).await;
 
@@ -293,7 +293,7 @@ async fn compact_runs_as_a_compaction_and_steering_it_queues() {
     let item = |status| ProviderEvent::Item(Item { id: "cc".into(), parent: None, status, body: NodeBody::Compaction { before_tokens: None, after_tokens: None, error: None } });
     session.emit(item(NodeStatus::Running));
     session.emit(item(NodeStatus::Completed));
-    session.emit(ProviderEvent::Context(ContextUsage { used_tokens: 30_000, max_tokens: Some(258_000), total_processed_tokens: None }));
+    session.emit(ProviderEvent::Context(ContextUsage { used_tokens: 30_000, max_tokens: Some(258_000), total_processed_tokens: None, ..Default::default() }));
     session.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
     // The queue drains after it: the steer went in as the next run.
     let t = w.wait_thread(&thread, |t| t.run_count == 3).await;
@@ -305,6 +305,49 @@ async fn compact_runs_as_a_compaction_and_steering_it_queues() {
     let compaction = s.nodes(&thread).into_iter().find(|n| matches!(n.body, NodeBody::Compaction { .. })).unwrap();
     assert_eq!(compaction.body, NodeBody::Compaction { before_tokens: Some(180_000), after_tokens: Some(30_000), error: None });
     assert_eq!(compaction.run, runs[1].id);
+}
+
+/// T3's idle compaction before the prompt cache expires: with the machine set to
+/// `before_cache_expires`, a big conversation whose run reported a cache lifetime compacts by
+/// itself two minutes before it runs out, as a run marked `idle_compaction`; once, not again after
+/// that compaction. With the default (on return) nothing happens by itself.
+#[tokio::test]
+async fn an_idle_conversation_compacts_before_its_prompt_cache_expires() {
+    let caps = Capabilities { compact: true, ..Capabilities::default() };
+    let fake = FakeProvider::with("claude", caps, Script::Manual);
+    let w = World::new(vec![fake.clone()]).await;
+    // The cache lifetime puts the window's start 1.5 s after the run (it opens two minutes early).
+    let context = ContextUsage { used_tokens: 250_000, max_tokens: Some(1_000_000), cache_ttl_ms: Some(120_000 + 1_500), ..Default::default() };
+
+    // On return (the default): the daemon leaves it alone.
+    let quiet = w.thread("claude", Some("one"), false).await;
+    let session = fake.session(0).await;
+    session.emit(ProviderEvent::Context(context));
+    session.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
+    w.wait_thread(&quiet, |t| t.status == ThreadStatus::Idle).await;
+
+    let settings = MachineSettings { idle_compaction: Some(IdleCompaction::BeforeCacheExpires), ..MachineSettings::default() };
+    assert_eq!(w.run(Command::MachineConfigure { settings: Box::new(settings) }).await, Reply::Ok);
+    let thread = w.thread("claude", Some("refactor the store"), false).await;
+    let session = fake.session(1).await;
+    session.emit(ProviderEvent::Context(context));
+    session.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle).await;
+    assert_eq!(session.wait_calls(|c| c.contains(&Call::Compact)).await.last(), Some(&Call::Compact));
+    let t = w.wait_thread(&thread, |t| t.run_count == 2).await;
+    let runs = w.state().await.runs(&thread);
+    assert!(runs[1].idle_compaction && !runs[0].idle_compaction);
+    assert_eq!(runs[1].prompt, "/compact");
+    session.emit(ProviderEvent::Context(ContextUsage { used_tokens: 40_000, ..context }));
+    session.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle && t.run_count == 2).await;
+    assert_eq!(t.provider, ProviderId::claude());
+
+    // A compaction is never compacted again, and the quiet thread stayed quiet.
+    tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+    assert_eq!(w.state().await.runs(&thread).len(), 2);
+    assert_eq!(w.state().await.runs(&quiet).len(), 1);
+    assert!(!fake.session(0).await.calls().contains(&Call::Compact));
 }
 
 /// On a provider that can't compact, `/compact` is an ordinary message.

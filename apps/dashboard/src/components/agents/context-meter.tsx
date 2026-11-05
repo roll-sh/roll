@@ -2,7 +2,7 @@
 
 import { Minimize2 } from "lucide-react";
 import type { ContextUsage } from "@/lib/agents-api";
-import { formatContextTokens, readContext, type ContextReading } from "@/lib/agents-context";
+import { compactionNote, formatContextTokens, readContext, type ContextReading } from "@/lib/agents-context";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui";
 
 const R = 9.75;
@@ -46,7 +46,7 @@ export function ContextMeter({
         </PopoverTrigger>
         <PopoverPopup side="top" align={align} className="w-64 flex-col px-3 py-2.5 text-[11.5px] text-muted">
           <Details c={c} />
-          <span className="mt-2 block text-subtle">Context compacts automatically when needed.</span>
+          <span className="mt-2 block text-subtle">{compactionNote(context)}</span>
           <button
             type="button"
             onClick={compact.onCompact}
@@ -71,6 +71,7 @@ export function ContextMeter({
         }`}
       >
         <Details c={c} />
+        {context.auto_compact_at != null && <span className="mt-1.5 block text-subtle">{compactionNote(context)}</span>}
       </span>
     </span>
   );

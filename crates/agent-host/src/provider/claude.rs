@@ -191,11 +191,14 @@ impl Provider for Claude {
         };
         let mode = permission_mode(cfg.runtime_mode, cfg.interaction_mode);
         let cwd = cfg.cwd.to_string_lossy().into_owned();
+        let launch = Launch::new(self, &cfg)?;
+        let mut tr = Translator::new(cwd, permission_mode(cfg.runtime_mode, InteractionMode::Default));
+        tr.set_auto_compact_window(launch.auto_compact_window);
         let shared = Arc::new(Shared {
-            launch: Launch::new(self, &cfg)?,
+            launch,
             events: tx,
             state: Mutex::new(State {
-                tr: Translator::new(cwd, permission_mode(cfg.runtime_mode, InteractionMode::Default)),
+                tr,
                 runtime: cfg.runtime_mode,
                 interaction: cfg.interaction_mode,
             }),
@@ -303,6 +306,8 @@ struct Launch {
     cwd: PathBuf,
     /// The model, effort and options as the CLI takes them.
     model: models::Compiled,
+    /// `autoCompactWindow` in the settings (T3's "Auto-compact after").
+    auto_compact_window: Option<u64>,
     mcp: Option<McpFile>,
     /// roll's own MCP tools never ask (T3 pre-approves its MCP tools the same way).
     allowed_tools: Vec<String>,
@@ -372,6 +377,7 @@ impl Launch {
             env,
             cwd: cfg.cwd.clone(),
             model: models::compile(cfg.model.as_deref(), cfg.effort.as_deref(), &cfg.options),
+            auto_compact_window: claude.cfg.get().auto_compact_window,
             mcp,
             allowed_tools: cfg.mcp.iter().map(|s| format!("mcp__{}__*", s.name)).collect(),
             instructions: cfg.instructions.clone().filter(|i| !i.trim().is_empty()),
@@ -400,6 +406,10 @@ impl Launch {
         }
         if let Some(thinking) = self.model.thinking {
             settings["alwaysThinkingEnabled"] = json!(thinking);
+        }
+        // T3's `autoCompactWindow` (ClaudeAdapterV2's query settings).
+        if let Some(window) = self.auto_compact_window {
+            settings["autoCompactWindow"] = json!(window);
         }
         push(&["--settings", &settings.to_string()]);
         if let Some(model) = &self.model.model {

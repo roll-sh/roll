@@ -102,6 +102,34 @@ describe("a machine's settings", () => {
     expect(configures(h)).toHaveLength(4);
   });
 
+  it("sets Claude's auto-compact window and when idle threads compact, over the machine's default (T3's Claude settings)", async () => {
+    const { h } = configured();
+    // The machine's default, for providers that keep a prompt cache.
+    await userEvent.click(screen.getByRole("combobox", { name: "Compact idle threads" }));
+    await userEvent.click(await screen.findByRole("option", { name: "Before the cache expires (beta)" }));
+    await waitFor(() => expect(configures(h)[0]).toEqual({ idle_compaction: "before_cache_expires" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "Claude Code details" }));
+    const window = screen.getByRole("textbox", { name: "Claude Code auto-compact after" });
+    expect(window).toHaveAttribute("placeholder", "e.g. 300000");
+    await userEvent.type(window, "50000{Enter}");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Compact after 100,000 to 1,000,000 tokens. Leave empty to use Claude's default.");
+    expect(configures(h)).toHaveLength(1);
+    await userEvent.clear(window);
+    await userEvent.type(window, "300,000{Enter}");
+    await waitFor(() => expect(configures(h)[1]?.providers?.claude).toEqual({ auto_compact_window: 300_000 }));
+
+    // Claude's own choice, with "Use default" saying what the machine's is.
+    const idle = screen.getByRole("combobox", { name: "Claude Code: compact idle threads" });
+    expect(idle).toHaveTextContent("Use default (Before the cache expires (beta))");
+    await userEvent.click(idle);
+    await userEvent.click(await screen.findByRole("option", { name: "Never" }));
+    await waitFor(() => expect(configures(h)[2]?.providers?.claude).toEqual({ auto_compact_window: 300_000, idle_compaction: "off" }));
+    // Codex has neither: its compaction isn't Claude's knob.
+    await userEvent.click(screen.getByRole("button", { name: "Codex details" }));
+    expect(screen.queryByRole("textbox", { name: "Codex auto-compact after" })).toBeNull();
+  });
+
   it("never sends a credential: the panel says to set it in config.toml on the machine", async () => {
     const { h } = configured();
     await userEvent.click(screen.getByRole("button", { name: "Claude Code details" }));

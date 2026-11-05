@@ -125,7 +125,9 @@
     "context": {
       "used_tokens": 124000,
       "max_tokens": 200000,
-      "total_processed_tokens": 410000
+      "total_processed_tokens": 410000,
+      "cache_ttl_ms": 3600000,
+      "auto_compact_at": 117000
     },
     "change": {
       "repo": "acme/roll",
@@ -182,7 +184,9 @@
     "context": {
       "used_tokens": 124000,
       "max_tokens": 200000,
-      "total_processed_tokens": 410000
+      "total_processed_tokens": 410000,
+      "cache_ttl_ms": 3600000,
+      "auto_compact_at": 117000
     },
     "created_at": 1762000000000,
     "updated_at": 1762000000000,
@@ -231,7 +235,9 @@
     "context": {
       "used_tokens": 124000,
       "max_tokens": 200000,
-      "total_processed_tokens": 410000
+      "total_processed_tokens": 410000,
+      "cache_ttl_ms": 3600000,
+      "auto_compact_at": 117000
     },
     "created_at": 1762000000000,
     "updated_at": 1762000000000,
@@ -268,6 +274,7 @@
     "steers": [
       "it only fails on Postgres"
     ],
+    "idle_compaction": false,
     "requested_at": 1762000000000,
     "started_at": 1762000000020,
     "usage": {

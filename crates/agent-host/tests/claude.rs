@@ -62,6 +62,7 @@ fn main() {
         ("forks_natively_at_a_prior_turn", forks_natively_at_a_prior_turn),
         ("rolls_back_inside_a_native_fork", rolls_back_inside_a_native_fork),
         ("launch_flags_follow_the_session_config", launch_flags_follow_the_session_config),
+        ("auto_compact_window_and_cache_lifetime", auto_compact_window_and_cache_lifetime),
         ("info_reports_version_login_and_models", info_reports_version_login_and_models),
         ("info_without_the_cli", info_without_the_cli),
     ];
@@ -759,6 +760,36 @@ fn rolls_back_inside_a_native_fork() {
     });
 }
 
+/// T3's "Auto-compact after": `autoCompactWindow` in the CLI's settings, and the meter's threshold
+/// 33,000 below it (only under the model's window). The real CLI's usage says which prompt cache
+/// the requests wrote (1-hour entries here, a subscription): the lifetime idle compaction keys off.
+fn auto_compact_window_and_cache_lifetime() {
+    block_on(async {
+        let mut o = opts(RuntimeMode::Ask).model("claude-haiku-5-5").effort("low");
+        o.auto_compact_window = Some(150_000);
+        let mut r = Replay::start("recorded/basic", o).await;
+        r.send_text("Reply with exactly: ok").await;
+        r.turn().await;
+        r.close().await;
+        let args = r.launches().remove(0);
+        assert!(has_flags(&args, &["--settings", r#"{"autoCompactWindow":150000,"showThinkingSummaries":true}"#]), "{args:?}");
+        let contexts: Vec<agent_proto::ContextUsage> = r.events.iter().filter_map(|e| if let ProviderEvent::Context(c) = e { Some(*c) } else { None }).collect();
+        assert!(!contexts.is_empty());
+        for c in contexts {
+            assert_eq!((c.cache_ttl_ms, c.auto_compact_at, c.max_tokens), (Some(3_600_000), Some(117_000), Some(1_000_000)), "{c:?}");
+        }
+
+        // A window at or over the model's never applies, so the meter says nothing about it.
+        let mut o = opts(RuntimeMode::Ask).model("claude-haiku-5-5").effort("low");
+        o.auto_compact_window = Some(1_000_000);
+        let mut r = Replay::start("recorded/basic", o).await;
+        r.send_text("Reply with exactly: ok").await;
+        r.turn().await;
+        r.close().await;
+        assert!(r.events.iter().any(|e| matches!(e, ProviderEvent::Context(c) if c.auto_compact_at.is_none())));
+    });
+}
+
 fn launch_flags_follow_the_session_config() {
     block_on(async {
         let mut o = opts(RuntimeMode::AutoEdit).model("claude-opus-5-5").effort("ultracode");
@@ -807,6 +838,7 @@ fn info_reports_version_login_and_models() {
                 ("ROLL_FAKE_VERSION".into(), "2.1.290 (Claude Code)".into()),
                 ("ANTHROPIC_BASE_URL".into(), "https://api.anthropic.com".into()),
             ],
+            ..Default::default()
         });
         let info = claude.info().await;
         assert!(info.installed);
@@ -829,6 +861,7 @@ fn info_reports_version_login_and_models() {
                 ("ROLL_FAKE_ACCOUNT".into(), json!({"tokenSource": "none", "apiKeySource": "none"}).to_string()),
                 ("ANTHROPIC_BASE_URL".into(), "https://api.anthropic.com".into()),
             ],
+            ..Default::default()
         });
         let info = signed_out.info().await;
         assert_eq!(info.auth, AuthStatus::Missing);
@@ -837,7 +870,7 @@ fn info_reports_version_login_and_models() {
 
 fn info_without_the_cli() {
     block_on(async {
-        let claude = Claude::new(ProviderConfig { binary: Some("/nonexistent/claude".into()), args: vec![], env: vec![] });
+        let claude = Claude::new(ProviderConfig { binary: Some("/nonexistent/claude".into()), args: vec![], env: vec![], ..Default::default() });
         let info = claude.info().await;
         assert!(!info.installed);
         assert_eq!(info.auth, AuthStatus::Unknown);
@@ -870,6 +903,8 @@ struct Opts {
     mcp: Vec<McpServer>,
     env: Vec<(String, String)>,
     exit_now: bool,
+    /// The machine's "Auto-compact after" (`ProviderConfig::auto_compact_window`).
+    auto_compact_window: Option<u64>,
 }
 
 impl Opts {
@@ -935,7 +970,7 @@ impl Replay {
         if o.exit_now {
             env.push(("ROLL_FAKE_EXIT".into(), "now".into()));
         }
-        let claude = Claude::new(ProviderConfig { binary: Some(std::env::current_exe().unwrap()), args: vec![], env });
+        let claude = Claude::new(ProviderConfig { binary: Some(std::env::current_exe().unwrap()), args: vec![], env, auto_compact_window: o.auto_compact_window });
         let cfg = SessionConfig {
             cwd: cwd.clone(),
             model: o.model,

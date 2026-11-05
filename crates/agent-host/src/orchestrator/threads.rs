@@ -654,6 +654,7 @@ mod tests {
             prompt: String::new(),
             attachments: Vec::new(),
             steers: Vec::new(),
+            idle_compaction: false,
             requested_at: 0,
             started_at: None,
             completed_at: None,

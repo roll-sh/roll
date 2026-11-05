@@ -5,7 +5,7 @@
  * the settings as the wire has them (unset rather than empty, providers with nothing set dropped).
  */
 
-import { isCredentialEnv, providerSettings, type MachineSettings, type ModelInfo, type ProviderId, type ProviderInfo, type ProviderSettings } from "./agents-api";
+import { AUTO_COMPACT_MAX, AUTO_COMPACT_MIN, isCredentialEnv, providerSettings, type MachineSettings, type ModelInfo, type ProviderId, type ProviderInfo, type ProviderSettings } from "./agents-api";
 
 /** agent-proto's `settings_limits`. */
 export const LIMITS = { envVars: 64, envName: 128, envValue: 4096, args: 64, arg: 4096, path: 4096, models: 100, modelId: 256, name: 256, branchPrefix: 64, pullEvery: 86_400, maxDepth: 8, maxChildren: 32 } as const;
@@ -15,6 +15,19 @@ export function envNameError(name: string): string | null {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || name.length > LIMITS.envName) return `${name || "That"} isn't a variable name (letters, digits and _, not starting with a digit)`;
   if (isCredentialEnv(name)) return `${name} may hold a credential or an address, and roll never relays those: set it in the daemon's config.toml on the machine`;
   return null;
+}
+
+/**
+ * T3's "Auto-compact after" field: empty is the provider's default; otherwise a whole number of
+ * tokens from 100,000 to 1,000,000 (T3's pattern `^(?:|[1-9]\d{5}|1000000)$`, with separators
+ * allowed). The value, or why not.
+ */
+export function parseAutoCompact(text: string): { ok: true; value: number | undefined } | { ok: false; error: string } {
+  const t = text.replace(/[,_\s]/g, "");
+  if (!t) return { ok: true, value: undefined };
+  const n = /^\d+$/.test(t) ? Number(t) : NaN;
+  if (!Number.isInteger(n) || n < AUTO_COMPACT_MIN || n > AUTO_COMPACT_MAX) return { ok: false, error: "Compact after 100,000 to 1,000,000 tokens. Leave empty to use Claude's default." };
+  return { ok: true, value: n };
 }
 
 /** T3's custom-model checks: why `slug` can't be added to `provider`'s models, or `null`. */
@@ -39,6 +52,7 @@ export function settingsError(set: MachineSettings): string | null {
       if (e) return e;
     }
     if ((p.models?.length ?? 0) > LIMITS.models) return `${id} takes at most ${LIMITS.models} custom models`;
+    if (p.auto_compact_window !== undefined && (p.auto_compact_window < AUTO_COMPACT_MIN || p.auto_compact_window > AUTO_COMPACT_MAX)) return `${id} compacts after 100,000 to 1,000,000 tokens`;
   }
   for (const [what, v] of [
     ["The worktree folder", set.worktree_dir],

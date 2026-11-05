@@ -139,6 +139,7 @@ fn context_usage(usage: &wire::ThreadTokenUsage) -> ContextUsage {
         used_tokens: used,
         max_tokens: usage.model_context_window.filter(|w| *w > 0),
         total_processed_tokens: Some(usage.total.total_tokens).filter(|t| *t > 0),
+        ..Default::default()
     }
 }
 
@@ -1456,7 +1457,7 @@ mod tests {
         };
         let context = |ev: Vec<ProviderEvent>| ev.into_iter().find_map(|e| if let ProviderEvent::Context(c) = e { Some(c) } else { None });
         let c = context(events(t.on_notification("thread/tokenUsage/updated", report(46_397, 23_417, Some(258_400))))).unwrap();
-        assert_eq!(c, ContextUsage { used_tokens: 23_417, max_tokens: Some(258_400), total_processed_tokens: Some(46_397) });
+        assert_eq!(c, ContextUsage { used_tokens: 23_417, max_tokens: Some(258_400), total_processed_tokens: Some(46_397), ..Default::default() });
         // An unknown window stays unknown; another thread's report isn't this conversation's.
         let c = context(events(t.on_notification("thread/tokenUsage/updated", report(50_000, 20, None)))).unwrap();
         assert_eq!(c.max_tokens, None);

@@ -748,6 +748,16 @@ pub struct ContextUsage {
     /// (Codex's `total.totalTokens`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_processed_tokens: Option<u64>,
+    /// How long the provider keeps the conversation's prompt cache after its last request
+    /// (Claude: an hour when the request wrote 1-hour cache entries, as on subscriptions, five
+    /// minutes when it wrote 5-minute ones; T3's `promptCacheTtlMs`). Unset when the provider
+    /// doesn't say, or the request was served from the cache whole. Idle compaction keys off it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_ttl_ms: Option<u64>,
+    /// Where the provider compacts by itself, when a setting moved it below the model's window
+    /// (Claude's `autoCompactWindow` less the 33,000 it keeps free; T3's `autoCompactThreshold`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_compact_at: Option<u64>,
 }
 
 impl ContextUsage {
@@ -775,6 +785,11 @@ pub struct Run {
     /// Inputs that steered the run while it was going.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steers: Vec<String>,
+    /// The daemon started it, not a person: a compaction of the idle conversation just before its
+    /// prompt cache expired (T3's `idleCompaction: beforeCacheExpires`, "Context automatically
+    /// compacted before cache expiry").
+    #[serde(default)]
+    pub idle_compaction: bool,
     pub requested_at: Millis,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<Millis>,
@@ -1235,6 +1250,10 @@ pub struct MachineSettings {
     pub git_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_email: Option<String>,
+    /// When to compact idle threads on the machine, for providers that don't say (unset: on
+    /// return). T3's Providers > Advanced default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_compaction: Option<IdleCompaction>,
 }
 
 /// One provider's settings on a machine (T3's provider instance settings).
@@ -1258,13 +1277,49 @@ pub struct ProviderSettings {
     /// Models to offer besides the ones the provider lists (T3's custom models).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<CustomModel>,
+    /// Compact once the conversation holds this many tokens (T3's "Auto-compact after", Claude's
+    /// `autoCompactWindow` setting): [`settings_limits::AUTO_COMPACT_MIN`] to
+    /// [`settings_limits::AUTO_COMPACT_MAX`]. Unset: the provider's own default. Claude only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_compact_window: Option<u64>,
+    /// When to compact this provider's idle threads, over the machine's
+    /// [`MachineSettings::idle_compaction`] (T3's per-instance override).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_compaction: Option<IdleCompaction>,
 }
 
 impl Default for ProviderSettings {
     fn default() -> Self {
-        ProviderSettings { enabled: true, binary: None, args: Vec::new(), env: Default::default(), models: Vec::new() }
+        ProviderSettings {
+            enabled: true,
+            binary: None,
+            args: Vec::new(),
+            env: Default::default(),
+            models: Vec::new(),
+            auto_compact_window: None,
+            idle_compaction: None,
+        }
     }
 }
+
+/// When to compact a big idle conversation (T3's `idleCompaction`): only conversations over
+/// [`IDLE_COMPACTION_MIN_TOKENS`] whose provider reports a prompt cache (Claude), since compacting
+/// after the cache expired pays for an uncached read of all of it anyway.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdleCompaction {
+    /// When you come back to it: the composer's button becomes "Compact and send", which
+    /// compacts first, then sends (T3's default).
+    #[default]
+    OnReturn,
+    /// Just before its prompt cache expires, by the daemon on its own (T3's beta).
+    BeforeCacheExpires,
+    Off,
+}
+
+/// Below this the context is cheap to read again cold, so compacting mostly loses it (T3's
+/// `COMPACTION_SUGGESTION_MIN_TOKENS`, Claude Code's own idle default).
+pub const IDLE_COMPACTION_MIN_TOKENS: u64 = 200_000;
 
 fn is_yes(b: &bool) -> bool {
     *b
@@ -1311,6 +1366,9 @@ pub mod settings_limits {
     pub const PULL_EVERY: u64 = 86_400;
     pub const MAX_DEPTH: u32 = 8;
     pub const MAX_CHILDREN: u32 = 32;
+    /// T3's "Auto-compact after": 100,000 to 1,000,000 tokens.
+    pub const AUTO_COMPACT_MIN: u64 = 100_000;
+    pub const AUTO_COMPACT_MAX: u64 = 1_000_000;
 }
 
 impl MachineSettings {
@@ -1358,6 +1416,9 @@ impl MachineSettings {
                 if v.len() > l::ENV_VALUE || v.contains('\0') {
                     return Err(format!("{k} can be at most {} bytes", l::ENV_VALUE));
                 }
+            }
+            if p.auto_compact_window.is_some_and(|w| !(l::AUTO_COMPACT_MIN..=l::AUTO_COMPACT_MAX).contains(&w)) {
+                return Err(format!("{} compacts after {} to {} tokens", id.0, l::AUTO_COMPACT_MIN, l::AUTO_COMPACT_MAX));
             }
             if p.models.len() > l::MODELS {
                 return Err(format!("{} takes at most {} custom models", id.0, l::MODELS));
@@ -1418,6 +1479,11 @@ impl MachineSettings {
     /// The settings for a provider (the defaults when there are none).
     pub fn provider(&self, id: &ProviderId) -> ProviderSettings {
         self.providers.get(id).cloned().unwrap_or_default()
+    }
+
+    /// When a provider's idle threads compact: its own setting, else the machine's, else on return.
+    pub fn idle_compaction(&self, id: &ProviderId) -> IdleCompaction {
+        self.providers.get(id).and_then(|p| p.idle_compaction).or(self.idle_compaction).unwrap_or_default()
     }
 }
 

@@ -358,8 +358,28 @@ mapping, and the web's `QueuedRunsControl.tsx`, `ContextWindowMeter.tsx`, `V2Lif
   report after it. The transcript shows it as T3's separator ("Compacting context", "Context
   compacted 182k → 41k tokens", "Context compaction failed · why"); the context meter drops and,
   in the composer, opens on hover with "Compact context" and "Context compacts automatically when
-  needed"; `/compact` is in the slash menu. Not done: T3's per-provider auto-compact window
-  setting and idle compaction (both are T3 settings over Claude's SDK options).
+  needed"; `/compact` is in the slash menu.
+- **Auto-compact and idle compaction** (T3's Claude instance settings and `IdleCompaction*`;
+  machine settings, "Machine settings"). Codex has neither knob in T3, so neither does roll.
+  - *Auto-compact after* (Claude's `autoCompactWindow`, 100,000 to 1,000,000 tokens, empty for
+    Claude's default) goes into the CLI's `--settings`. Claude compacts 33,000 tokens short of it
+    and caps it at the model's window, so the context report carries `auto_compact_at` only below
+    the window, and the meter says "Compacts automatically at about 267,000 tokens."
+  - The context report also carries the prompt cache's lifetime, `cache_ttl_ms`, from the
+    request's `cache_creation` (an hour for 1-hour entries, as on subscriptions; five minutes for
+    5-minute ones, as on API keys; unknown when the request was served whole from the cache).
+  - *Compact idle threads*: on the machine (default "When you return"), and per provider over it
+    ("Use default"), for conversations over 200,000 tokens. **When you return** (the default):
+    once a conversation has been idle since its last run for longer than its cache lives (Claude
+    without a reported lifetime: 70 minutes), the composer's button reads "Compact and send"
+    ("Summarize 312k tokens of history, then send"): it sends `/compact`, then the message, queued
+    behind it. **Before the cache expires** (beta): the daemon (`orchestrator/idle.rs`) keeps a
+    timer per thread from each completed run and, two minutes before the cache expires, compacts
+    the thread by itself if nothing changed (the same newest run, idle, nothing waiting or queued,
+    not settled, snoozed or archived, still the run's provider, which compacts); the run is marked
+    `idle_compaction`, shows no message of the person's, and its row reads "Context automatically
+    compacted before cache expiry". A compaction is never compacted again. Timers live in memory,
+    as in T3: a restart drops them. **Never** does neither.
 - **Subagents.** Claude's Agent (or Task) tool, Codex's collab agents and roll's delegated threads
   are `subagent` nodes; Claude's `task_progress` fills `progress` while one runs, and the Agent
   call's (Codex's collab call's) `model` is kept. In the transcript each is T3's row: an avatar
@@ -914,6 +934,7 @@ dashboard or desktop app already decides, or features roll doesn't have.
 | Providers: enabled, display name, binary path, home path (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`), launch args, environment | on/off, binary, extra arguments, environment (home paths are variables); names are the daemon's | machine |
 | Provider secrets (API keys, `secretProviders`, sensitive env) | endpoints: keys sealed to the daemon from roll, or a 1Password reference read on the machine ("Endpoints"); `config.toml` stays the machine's own | machine (sealed) |
 | Custom models (`customModels`), hidden models, model order | custom models; hiding and ordering: not applicable (the picker sorts favourites first) | machine |
+| Claude's "Auto-compact after" (`autoCompactWindow`), idle compaction (`idleCompaction`, per instance over Providers > Advanced) | `auto_compact_window`, `idle_compaction` on the provider (Claude), over the machine's `idle_compaction` | machine |
 | Favourite models (`favorites`) and roll's recent models | `favorite_models`, `recent_models` (localStorage is the cache; `agents-models.ts`) | owner |
 | Default model (`defaultModelSelection`), permissions (`defaultRuntimeMode`), workspace (`defaultThreadEnvMode`), plan mode | new-thread defaults: project, then machine, then owner (`newThreadDefaults`) | project, machine, owner |
 | Worktrees: `worktreesDirectory`, `branchNamePrefix` | worktree folder, branch prefix | machine |

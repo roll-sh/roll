@@ -106,6 +106,29 @@ describe("compaction (T3's /compact and its row)", () => {
     expect(sent(h).at(-1)).toEqual({ type: "message.send", thread: "thr_1", text: "/compact", mode: "queue" });
   });
 
+  it("Compact and send: back to a big conversation whose cache expired, the message waits behind a compaction (T3's on return)", async () => {
+    const hourAgo = Date.now() - 61 * 60_000;
+    const big = thread({ provider: "claude", run_count: 1, context: { used_tokens: 312_000, max_tokens: 1_000_000, total_processed_tokens: null, cache_ttl_ms: 3_600_000 } });
+    const h = agentsHarness({ machines: [m], entities: [mirrored("thread", big, 1), mirrored("run", run({ status: "completed", completed_at: hourAgo }), 2)] });
+    renderAgents(<Composer mode={{ kind: "thread", thread: big, machine: m }} />, h);
+    await userEvent.type(screen.getByRole("textbox", { name: "Message" }), "Now rotate prod too");
+    const button = screen.getByRole("button", { name: "Compact and send" });
+    expect(button).toHaveAttribute("title", "Summarize 312k tokens of history, then send");
+    await userEvent.click(button);
+    expect(sent(h).slice(-2)).toEqual([
+      { type: "message.send", thread: "thr_1", text: "/compact" },
+      { type: "message.send", thread: "thr_1", text: "Now rotate prod too", mode: "queue" },
+    ]);
+  });
+
+  it("an idle compaction the daemon started has no message of the person's, and says why it ran", () => {
+    const idle = run({ id: "run_2", ordinal: 2, prompt: "/compact", idle_compaction: true, status: "completed" });
+    const h = agentsHarness({ machines: [m], entities: [mirrored("thread", thread({ run_count: 2 }), 1), mirrored("run", idle, 2), mirrored("node", node({ type: "compaction", before_tokens: 312_000, after_tokens: 48_000, error: null }, { run: "run_2", status: "completed" }), 3)], follow: ["thr_1"] });
+    renderAgents(<Conversation thread={thread({ run_count: 2 })} machine={m} />, h);
+    expect(screen.getByRole("separator", { name: "Context automatically compacted before cache expiry" })).toHaveTextContent(/312k\s*48k tokens/);
+    expect(screen.queryByText("/compact")).toBeNull();
+  });
+
   it("shows running, compacted with the counts, and failed with why", () => {
     const at = (status: "running" | "completed" | "failed", body: object) => node({ type: "compaction", before_tokens: null, after_tokens: null, error: null, ...body }, { status });
     const { rerender } = renderAgents(<CompactionRow node={at("running", {})} />, agentsHarness());

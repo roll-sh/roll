@@ -3,7 +3,8 @@
  * (`apps/web/src/lib/contextWindow.ts`, `ContextWindowMeter.tsx`, MIT): a percentage only when
  * the window is known, tokens otherwise; "nearly full" past 90 %.
  */
-import type { ContextUsage } from "./agents-api";
+import type { ContextUsage, IdleCompaction } from "./agents-api";
+import { IDLE_COMPACTION_MIN_TOKENS } from "./agents-api";
 
 export interface ContextReading {
   used: number;
@@ -39,6 +40,40 @@ export function readContext(c: ContextUsage): ContextReading {
     aria: percentLabel === null ? `Context window ${formatContextTokens(used)} tokens used` : `Context window ${percentLabel} used`,
     processed: c.total_processed_tokens != null && c.total_processed_tokens > 0 ? c.total_processed_tokens : null,
   };
+}
+
+/**
+ * What the meter says about compacting (T3's `formatContextWindowCompactionMessage`): where the
+ * provider compacts by itself when a setting moved it, else that it compacts when it needs to.
+ */
+export function compactionNote(c: ContextUsage): string {
+  return c.auto_compact_at != null && c.auto_compact_at > 0
+    ? `Compacts automatically at about ${c.auto_compact_at.toLocaleString("en-US")} tokens.`
+    : "Context compacts automatically when needed.";
+}
+
+/** T3's `CLAUDE_RESUME_COMPACTION_FALLBACK_MS`: the cache lifetime to assume when none was reported. */
+export const RESUME_COMPACTION_FALLBACK_MS = 70 * 60_000;
+
+/**
+ * Whether the next message should compact first (T3's `shouldOfferResumeCompaction`, idle
+ * compaction "When you return"): a big conversation on Claude (or a provider that reports its
+ * prompt cache) that can compact, idle since its last run for longer than the cache lives.
+ */
+export function compactsOnReturn(i: {
+  provider: string;
+  context: ContextUsage | null | undefined;
+  /** When its last run ended. */
+  idleSince: number | null | undefined;
+  now: number;
+  mode: IdleCompaction;
+  canCompact: boolean;
+}): boolean {
+  const c = i.context;
+  if (i.mode !== "on_return" || !i.canCompact || !c || i.idleSince == null) return false;
+  if (i.provider !== "claude" && c.cache_ttl_ms == null) return false;
+  if (c.used_tokens < IDLE_COMPACTION_MIN_TOKENS) return false;
+  return i.now - i.idleSince >= (c.cache_ttl_ms ?? RESUME_COMPACTION_FALLBACK_MS);
 }
 
 /** T3's `formatContextWindowTokens`: 999, 1.5k, 45k, 1.2M. */

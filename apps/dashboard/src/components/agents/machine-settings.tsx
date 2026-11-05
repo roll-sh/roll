@@ -13,6 +13,8 @@
 import { ChevronRight, Copy, KeyRound, Lock, LogIn, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import {
+  IDLE_COMPACTION_LABELS,
+  type IdleCompaction,
   type Machine,
   type MachineConfig,
   type MachineSettings,
@@ -24,7 +26,7 @@ import {
   type RuntimeMode,
   type ThreadDefaults,
 } from "@/lib/agents-api";
-import { customModelError, envNameError, settingsError, withFields, withProvider } from "@/lib/machine-settings";
+import { customModelError, envNameError, parseAutoCompact, settingsError, withFields, withProvider } from "@/lib/machine-settings";
 import { setAgentsView } from "@/lib/agents-surface";
 import { ModelPicker } from "./model-picker";
 import { ProviderLogo } from "./provider-logo";
@@ -86,6 +88,27 @@ const S = {
     terms: ["variables", "env", ...(HOME_VAR[p.id] ? [HOME_VAR[p.id]] : []), p.id, ...p.env],
   }),
   models: (p: ProviderBase): Setting => ({ id: `p.${p.id}.models`, title: "Custom models", section: p.name, description: "Offered beside the models it lists, by slug.", terms: ["model", "slug", "add", p.id] }),
+  autoCompact: (p: ProviderBase): Setting => ({
+    id: `p.${p.id}.autocompact`,
+    title: "Auto-compact after",
+    section: p.name,
+    description: "Compact after 100,000 to 1,000,000 tokens. Leave empty to use Claude's default.",
+    terms: ["compact", "context", "window", "tokens", "autoCompactWindow", p.id],
+  }),
+  idleCompaction: (p: ProviderBase): Setting => ({
+    id: `p.${p.id}.idle`,
+    title: "Compact idle threads",
+    section: p.name,
+    description: "When to compact an idle thread over 200,000 tokens: after you return, just before its prompt cache expires, or never. Overrides the machine's default.",
+    terms: ["compact", "idle", "cache", "return", p.id],
+  }),
+  idle: {
+    id: "providers.idle",
+    title: "Compact idle threads",
+    section: "Providers",
+    description: "When to compact an idle thread over 200,000 tokens, for providers that keep a prompt cache (Claude): when you come back to it, just before its cache expires, or never.",
+    terms: ["compact", "idle", "cache", "return", "context"],
+  },
   model: { id: "new.model", title: "Model", section: "New threads", description: "After the project's defaults; unset, your own defaults apply.", terms: ["provider", "default model", "effort"] },
   permissions: { id: "new.permissions", title: "Permissions", section: "New threads", terms: ["runtime mode", "full access", "auto edit", "ask", "approvals"] },
   mode: { id: "new.mode", title: "Plan first", section: "New threads", terms: ["interaction mode", "plan mode"] },
@@ -99,7 +122,9 @@ const S = {
   maxChildren: { id: "delegation.children", title: "Tasks per thread", section: "Delegation", description: "Unfinished delegated tasks one thread may have.", terms: ["subagents", "parallel", "concurrent", "delegate"] },
 } satisfies Record<string, Setting | ((p: ProviderBase) => Setting)>;
 
-const providerRows = (p: ProviderBase) => [S.provider(p), S.binary(p), S.args(p), S.env(p), S.models(p)];
+/** Claude's own knobs: T3's Claude instance config has "Auto-compact after" and idle compaction. */
+const compacts = (p: ProviderBase) => p.id === "claude";
+const providerRows = (p: ProviderBase) => [S.provider(p), S.binary(p), S.args(p), S.env(p), S.models(p), ...(compacts(p) ? [S.autoCompact(p), S.idleCompaction(p)] : [])];
 
 function items(config: MachineConfig | null, sandbox: boolean): Setting[] {
   const providers = config?.providers ?? [];
@@ -110,6 +135,7 @@ function items(config: MachineConfig | null, sandbox: boolean): Setting[] {
     S.system,
     ...(sandbox ? [S.sandbox] : [S.remove]),
     S.credentials,
+    S.idle,
     ...providers.flatMap(providerRows),
     S.model,
     S.permissions,
@@ -409,7 +435,7 @@ function Providers({ ctx }: { ctx: Ctx }) {
   const { client } = useAgents();
   const [checking, setChecking] = useState(false);
   const providers = ctx.config?.providers ?? (ctx.machine.info?.providers ?? []).map((p) => ({ id: p.id, name: p.name, binary: null, args: 0, env: [] }));
-  const ids = [S.credentials.id, ...providers.flatMap((p) => providerRows(p).map((r) => r.id))];
+  const ids = [S.credentials.id, S.idle.id, ...providers.flatMap((p) => providerRows(p).map((r) => r.id))];
   const refresh = async () => {
     setChecking(true);
     try {
@@ -431,6 +457,20 @@ function Providers({ ctx }: { ctx: Ctx }) {
       {providers.map((p) => (
         <ProviderCard key={p.id} ctx={ctx} base={p} info={ctx.machine.info?.providers.find((i) => i.id === p.id)} />
       ))}
+      <SettingRow
+        s={S.idle}
+        onReset={ctx.set.idle_compaction !== undefined && ctx.editable ? () => ctx.save(withFields(ctx.set, { idle_compaction: undefined })) : null}
+        control={
+          <Select<IdleCompaction>
+            label="Compact idle threads"
+            className="w-56"
+            disabled={!ctx.editable}
+            value={ctx.set.idle_compaction ?? "on_return"}
+            onChange={(v) => void ctx.save(withFields(ctx.set, { idle_compaction: v }))}
+            options={IDLE_CHOICES}
+          />
+        }
+      />
       <SettingRow s={S.credentials} note={<KeyRound className="size-3 text-subtle" aria-hidden />}>
         {ctx.config && <ConfigPath path={ctx.config.config_path} />}
       </SettingRow>
@@ -451,7 +491,7 @@ function ProviderCard({ ctx, base, info }: { ctx: Ctx; base: ProviderBase; info:
   const p = providerSettings(ctx.set, base.id);
   const [open, setOpen] = useState(false);
   const searching = useSearching();
-  const detailsShown = useShown([S.binary(base).id, S.args(base).id, S.env(base).id, S.models(base).id]);
+  const detailsShown = useShown(providerRows(base).slice(1).map((r) => r.id));
   const headShown = useShown([S.provider(base).id]);
   const expanded = searching ? detailsShown : open;
   const [busy, setBusy] = useState(false);
@@ -466,7 +506,8 @@ function ProviderCard({ ctx, base, info }: { ctx: Ctx; base: ProviderBase; info:
       setBusy(false);
     }
   };
-  const changed = p.binary !== undefined || p.args.length > 0 || Object.keys(p.env).length > 0 || p.models.length > 0;
+  const changed =
+    p.binary !== undefined || p.args.length > 0 || Object.keys(p.env).length > 0 || p.models.length > 0 || p.auto_compact_window !== undefined || p.idle_compaction !== undefined;
   return (
     <div data-setting={S.provider(base).id} className="text-[13px]">
       <div className="flex items-center gap-3 px-3.5 py-3">
@@ -525,9 +566,63 @@ function ProviderCard({ ctx, base, info }: { ctx: Ctx; base: ProviderBase; info:
           <SettingRow s={S.models(base)}>
             <ModelsEditor base={base} info={info} models={p.models} disabled={!ctx.editable} onChange={(models) => ctx.save(withProvider(ctx.set, base.id, { models }))} />
           </SettingRow>
+          {compacts(base) && <CompactionRows ctx={ctx} base={base} />}
         </div>
       )}
     </div>
+  );
+}
+
+const IDLE_CHOICES = (["on_return", "before_cache_expires", "off"] as const).map((v) => ({ value: v, label: IDLE_COMPACTION_LABELS[v] }));
+const USE_DEFAULT = "default";
+
+/** Claude's compaction knobs (T3's Claude instance: "Auto-compact after", idle compaction with "Use default"). */
+function CompactionRows({ ctx, base }: { ctx: Ctx; base: ProviderBase }) {
+  const p = providerSettings(ctx.set, base.id);
+  const [error, setError] = useState<string | null>(null);
+  const machineDefault = IDLE_COMPACTION_LABELS[ctx.set.idle_compaction ?? "on_return"];
+  return (
+    <>
+      <SettingRow
+        s={S.autoCompact(base)}
+        onReset={p.auto_compact_window !== undefined && ctx.editable ? () => ctx.save(withProvider(ctx.set, base.id, { auto_compact_window: undefined })) : null}
+        control={
+          <TextField
+            label={`${base.name} auto-compact after`}
+            mono
+            className="w-36"
+            value={p.auto_compact_window !== undefined ? String(p.auto_compact_window) : ""}
+            placeholder="e.g. 300000"
+            disabled={!ctx.editable}
+            onSave={(v) => {
+              const parsed = parseAutoCompact(v);
+              if (!parsed.ok) return setError(parsed.error);
+              setError(null);
+              return ctx.save(withProvider(ctx.set, base.id, { auto_compact_window: parsed.value }));
+            }}
+          />
+        }
+      >
+        {error && (
+          <p role="alert" className="mt-1.5 text-[12px] text-danger">
+            {error}
+          </p>
+        )}
+      </SettingRow>
+      <SettingRow
+        s={S.idleCompaction(base)}
+        control={
+          <Select
+            label={`${base.name}: compact idle threads`}
+            className="w-56"
+            disabled={!ctx.editable}
+            value={p.idle_compaction ?? USE_DEFAULT}
+            onChange={(v) => void ctx.save(withProvider(ctx.set, base.id, { idle_compaction: v === USE_DEFAULT ? undefined : (v as IdleCompaction) }))}
+            options={[{ value: USE_DEFAULT, label: `Use default (${machineDefault})` }, ...IDLE_CHOICES]}
+          />
+        }
+      />
+    </>
   );
 }
 

@@ -528,6 +528,7 @@ mod tests {
             binary: None,
             args: vec!["--own".into()],
             env: vec![("ANTHROPIC_BASE_URL".into(), "https://old".into()), ("KEEP".into(), "1".into())],
+            ..Default::default()
         };
         let used = EndpointUse { env: vec![("ANTHROPIC_BASE_URL".into(), "http://new".into())], args: vec!["-c".into(), "x=1".into()] }.apply(cfg);
         assert_eq!(used.args, ["-c", "x=1", "--own"]);

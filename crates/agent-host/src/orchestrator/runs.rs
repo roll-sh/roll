@@ -309,6 +309,11 @@ impl Host {
     /// Starts a run for `input` on an idle thread. A run that fails to start is recorded as
     /// failed and the error returned.
     pub(crate) async fn start_run(&self, rt: &mut Rt, input: TurnInput) -> Res<RunId> {
+        self.start_run_as(rt, input, false).await
+    }
+
+    /// [`Host::start_run`]; `idle_compaction`: the daemon compacts the idle thread (`idle.rs`).
+    pub(crate) async fn start_run_as(&self, rt: &mut Rt, input: TurnInput, idle_compaction: bool) -> Res<RunId> {
         debug_assert!(rt.active.is_none());
         let at = now();
         let thread = &mut rt.thread;
@@ -323,6 +328,7 @@ impl Host {
             prompt: input.text.clone(),
             attachments: input.attachments.clone(),
             steers: Vec::new(),
+            idle_compaction,
             requested_at: at,
             started_at: None,
             completed_at: None,
@@ -1021,6 +1027,9 @@ impl Host {
         self.put(batch)?;
         self.save_private(rt)?;
         rt.idle_since = Some(at);
+        if next.is_none() {
+            self.schedule_idle_compaction(&rt.thread, &active.run);
+        }
         if let Some(next) = next {
             let input = TurnInput { text: next.text, attachments: next.attachments };
             // A failure is on the new run's record; nobody is waiting for this reply.

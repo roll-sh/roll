@@ -16,9 +16,11 @@ import type {
   SendMode,
   Thread,
 } from "@/lib/agents-api";
-import { coming, machineState, reachable } from "@/lib/agents-api";
+import { coming, idleCompactionOf, machineState, reachable } from "@/lib/agents-api";
 import { readyPlan } from "@/lib/agents-plan";
 import { ContextMeter } from "./context-meter";
+import { compactsOnReturn, formatContextTokens } from "@/lib/agents-context";
+import { runsOf } from "@/lib/agents-store";
 import { DEFAULT_RUNTIME_MODE, ModelPicker, PermissionsMenu, resolveModel, type ModelChoice } from "./model-picker";
 import { ImplementButton, PlanBanner, usePlanActions } from "./plan";
 import { QueuedMessages } from "./queue";
@@ -310,6 +312,14 @@ export function Composer({
       } else {
         // A compaction can't steer a run: it waits behind it.
         const m: SendMode = queues(mod) || prompt === "/compact" ? "queue" : "steer";
+        // Compact and send: the compaction runs first, and the message waits behind it.
+        if (compactFirst && prompt !== "/compact") {
+          await client.run(mode.machine!.id, { type: "message.send", thread: mode.thread.id, text: "/compact" });
+          await client.run(mode.machine!.id, { type: "message.send", thread: mode.thread.id, text: prompt, ...(attachments.length ? { attachments } : {}), mode: "queue" });
+          setText("");
+          setAttachments([]);
+          return;
+        }
         await client.run(mode.machine!.id, {
           type: "message.send",
           thread: mode.thread.id,
@@ -372,6 +382,22 @@ export function Composer({
       stash.current = EMPTY_DRAFT;
     }
   }, [editing, thread]);
+
+  // T3's idle compaction "When you return": back to a big conversation whose prompt cache has
+  // expired, the button compacts first, then sends ("Compact and send").
+  const lastEnded = thread && !running ? runsOf(client.data, thread.id).at(-1)?.completed_at : null;
+  const compactFirst =
+    !!thread &&
+    !running &&
+    !editing &&
+    compactsOnReturn({
+      provider: thread.provider,
+      context: thread.context,
+      idleSince: lastEnded,
+      now: Date.now(),
+      mode: idleCompactionOf(mode.machine?.info?.settings?.set, thread.provider),
+      canCompact: !!caps?.compact,
+    });
 
   const compactAction =
     thread && caps?.compact
@@ -713,6 +739,16 @@ export function Composer({
               ) : (
                 <ImplementButton busy={busy} disabled={busy || !machineOnline} onImplement={() => void act(planActions.implement)} onNewThread={() => void act(planActions.implementInNewThread)} />
               )
+            ) : compactFirst && hasText && thread?.context ? (
+              <button
+                type="button"
+                onClick={() => void submit()}
+                disabled={busy || !machineOnline}
+                className={pill}
+                title={`Summarize ${formatContextTokens(thread.context.used_tokens)} tokens of history, then send`}
+              >
+                {busy ? <span className="shimmer">Compacting…</span> : "Compact and send"}
+              </button>
             ) : running && !hasText ? (
               <button
                 type="button"

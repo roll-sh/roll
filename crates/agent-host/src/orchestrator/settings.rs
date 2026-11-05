@@ -205,6 +205,7 @@ fn merged(mut file: ProviderConfig, set: &ProviderSettings) -> ProviderConfig {
     file.args.extend(set.args.iter().cloned());
     file.env.retain(|(k, _)| !set.env.contains_key(k));
     file.env.extend(set.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+    file.auto_compact_window = set.auto_compact_window;
     file
 }
 
@@ -218,6 +219,7 @@ mod tests {
             binary: Some("/usr/bin/claude".into()),
             args: vec!["--file".into()],
             env: vec![("ANTHROPIC_API_KEY".into(), "sk-file".into()), ("CLAUDE_CONFIG_DIR".into(), "/a".into())],
+            ..Default::default()
         };
         assert_eq!(merged(file.clone(), &ProviderSettings::default()), file);
         let set = ProviderSettings {

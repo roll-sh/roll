@@ -259,7 +259,9 @@
               "id": "claude-opus-5-5[1m]",
               "name": "Opus 5.5 (1M)"
             }
-          ]
+          ],
+          "auto_compact_window": 300000,
+          "idle_compaction": "before_cache_expires"
         },
         "codex": {
           "enabled": false
@@ -275,7 +277,8 @@
       "pull_every": 300,
       "max_depth": 2,
       "git_name": "Ada Lovelace",
-      "git_email": "ada@example.com"
+      "git_email": "ada@example.com",
+      "idle_compaction": "off"
     }
   },
   {

@@ -39,6 +39,34 @@ fn credentials_and_addresses_never_go_through_roll() {
     assert!(is_credential_env("CLAUDE_CODE_MAX_OUTPUT_TOKENS"));
 }
 
+/// T3's "Auto-compact after" (100,000 to 1,000,000 tokens) and idle compaction: a provider's own
+/// setting over the machine's, over on return.
+#[test]
+fn auto_compact_and_idle_compaction() {
+    let with = |window: Option<u64>| {
+        let mut s = MachineSettings::default();
+        s.providers.insert(ProviderId::claude(), ProviderSettings { auto_compact_window: window, ..ProviderSettings::default() });
+        s
+    };
+    for ok in [100_000, 300_000, 1_000_000] {
+        assert_eq!(with(Some(ok)).check().unwrap().provider(&ProviderId::claude()).auto_compact_window, Some(ok));
+    }
+    for bad in [0, 99_999, 1_000_001] {
+        assert!(with(Some(bad)).check().unwrap_err().contains("100000 to 1000000"), "{bad}");
+    }
+    // Unset is the provider's default, and a provider with nothing else set isn't kept.
+    assert!(with(None).check().unwrap().providers.is_empty());
+
+    let mut s = MachineSettings::default();
+    assert_eq!(s.idle_compaction(&ProviderId::claude()), IdleCompaction::OnReturn);
+    s.idle_compaction = Some(IdleCompaction::Off);
+    assert_eq!(s.idle_compaction(&ProviderId::claude()), IdleCompaction::Off);
+    s.providers.insert(ProviderId::claude(), ProviderSettings { idle_compaction: Some(IdleCompaction::BeforeCacheExpires), ..ProviderSettings::default() });
+    assert_eq!(s.idle_compaction(&ProviderId::claude()), IdleCompaction::BeforeCacheExpires);
+    assert_eq!(s.idle_compaction(&ProviderId::codex()), IdleCompaction::Off);
+    assert_eq!(serde_json::to_value(IdleCompaction::BeforeCacheExpires).unwrap(), "before_cache_expires");
+}
+
 #[test]
 fn env_names_must_be_names() {
     for bad in ["", "1X", "A-B", "A B", "Ä"] {

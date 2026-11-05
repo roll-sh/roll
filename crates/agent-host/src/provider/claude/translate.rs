@@ -26,6 +26,9 @@ const OUTPUT_CAP: usize = 64 * 1024;
 /// Diffs bigger than this are left off a file change.
 const DIFF_CAP: usize = 1024 * 1024;
 const USAGE_LIMIT: &str = "Claude usage limit reached. Send the message again once the limit resets.";
+/// What Claude keeps free below its auto-compact window (T3: 2.1.305 reports a 150,000 window as a
+/// 117,000 threshold).
+const AUTO_COMPACT_RESERVE: u64 = 33_000;
 const CONTEXT_FULL: &str = "Claude stopped: the prompt exceeds the model's context window. Run /compact or start a new thread.";
 
 pub(super) struct Translator {
@@ -53,6 +56,8 @@ pub(super) struct Translator {
     last_total_cost: Option<f64>,
     /// The permission mode to switch to when the user approves a plan.
     after_plan: &'static str,
+    /// The session's `autoCompactWindow`, for where the meter says Claude compacts.
+    auto_compact_window: Option<u64>,
     /// Turns started so far (names the running turn for the interrupt fallback).
     turns: u64,
     seq: u64,
@@ -78,6 +83,9 @@ struct MessageUsage {
     cache_creation: u64,
     cache_read: u64,
     output: u64,
+    /// What the request wrote to the prompt cache, by lifetime (`cache_creation`).
+    cache_1h: u64,
+    cache_5m: u64,
 }
 
 impl MessageUsage {
@@ -88,6 +96,23 @@ impl MessageUsage {
         self.cache_creation = n("cache_creation_input_tokens").unwrap_or(self.cache_creation);
         self.cache_read = n("cache_read_input_tokens").unwrap_or(self.cache_read);
         self.output = n("output_tokens").unwrap_or(self.output);
+        if let Some(created) = usage.get("cache_creation").filter(|c| c.is_object()) {
+            let n = |k: &str| created.get(k).and_then(Value::as_u64).unwrap_or(0);
+            self.cache_1h = n("ephemeral_1h_input_tokens");
+            self.cache_5m = n("ephemeral_5m_input_tokens");
+        }
+    }
+
+    /// How long the prompt cache lives after this request (T3's `claudePromptCacheTtlMs`): by the
+    /// entries it wrote; unknown when it wrote none (served whole from the cache).
+    fn cache_ttl_ms(&self) -> Option<u64> {
+        if self.cache_1h > 0 {
+            Some(60 * 60_000)
+        } else if self.cache_5m > 0 {
+            Some(5 * 60_000)
+        } else {
+            None
+        }
     }
 
     fn of(usage: &Value) -> Self {
@@ -127,6 +152,7 @@ impl Translator {
             context: None,
             last_total_cost: None,
             after_plan,
+            auto_compact_window: None,
             turns: 0,
             seq: 0,
         }
@@ -134,6 +160,11 @@ impl Translator {
 
     pub fn set_after_plan(&mut self, mode: &'static str) {
         self.after_plan = mode;
+    }
+
+    /// The session runs with `autoCompactWindow` set (T3's `claudeAutoCompactThreshold`).
+    pub fn set_auto_compact_window(&mut self, window: Option<u64>) {
+        self.auto_compact_window = window;
     }
 
     /// The conversation id is known (the one the session was started with, or a newer one).
@@ -231,7 +262,8 @@ impl Translator {
             // What's left after the compaction is the context now.
             self.message_usage = None;
             if let Some(post) = after {
-                events.extend(self.emit_context(post));
+                // After a compaction nothing is cached yet: the cache lifetime is unknown.
+                events.extend(self.emit_context(post, None));
             }
         } else if str_at(msg, "status") == Some("compacting") {
             if self.compacting.is_none() {
@@ -862,11 +894,17 @@ impl Translator {
             self.message_model = Some(model.to_string());
         }
         let used = u.input_total() + u.output;
-        self.emit_context(used)
+        let ttl = u.cache_ttl_ms();
+        self.emit_context(used, ttl)
     }
 
-    fn emit_context(&mut self, used: u64) -> Option<ProviderEvent> {
-        let context = ContextUsage { used_tokens: used, max_tokens: self.window(), total_processed_tokens: None };
+    fn emit_context(&mut self, used: u64, cache_ttl_ms: Option<u64>) -> Option<ProviderEvent> {
+        let max_tokens = self.window();
+        // Claude compacts 33,000 short of the window, and caps the window at the model's
+        // (T3's `CLAUDE_AUTO_COMPACT_RESERVE_TOKENS`, from Claude Code's getContextUsage).
+        let auto_compact_at =
+            self.auto_compact_window.filter(|w| max_tokens.is_none_or(|max| *w < max)).map(|w| w.saturating_sub(AUTO_COMPACT_RESERVE));
+        let context = ContextUsage { used_tokens: used, max_tokens, total_processed_tokens: None, cache_ttl_ms, auto_compact_at };
         (self.context.replace(context) != Some(context)).then_some(ProviderEvent::Context(context))
     }
 

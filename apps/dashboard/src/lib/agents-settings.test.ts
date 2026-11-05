@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isCredentialEnv } from "./agents-api";
-import { customModelError, envNameError, offeredProviders, settingsError, withFields, withProvider } from "./machine-settings";
+import { customModelError, envNameError, offeredProviders, parseAutoCompact, settingsError, withFields, withProvider } from "./machine-settings";
 import { memorySettings } from "./agents-services";
 import { DEFAULT_OWNER_SETTINGS, newThreadDefaults, parseOwnerSettings } from "./owner-settings";
 import { notices, seen } from "./agents-notify";
@@ -19,6 +19,14 @@ describe("machine settings in the dashboard", () => {
     expect(settingsError({ branch_prefix: "a..b" })).toMatch(/branch name/);
     expect(settingsError({ git_name: "Ada" })).toMatch(/both/);
     expect(settingsError({ branch_prefix: "ada/wip", worktree_dir: "~/wt", providers: { codex: { binary: "/opt/codex" } } })).toBeNull();
+  });
+
+  it("T3's auto-compact window: empty is the default, 100,000 to 1,000,000 otherwise", () => {
+    expect(parseAutoCompact("")).toEqual({ ok: true, value: undefined });
+    expect(parseAutoCompact(" 300,000 ")).toEqual({ ok: true, value: 300_000 });
+    expect(parseAutoCompact("1000000")).toEqual({ ok: true, value: 1_000_000 });
+    for (const bad of ["99999", "1000001", "3e5", "abc", "-200000", "250000.5"]) expect(parseAutoCompact(bad).ok, bad).toBe(false);
+    expect(settingsError({ providers: { claude: { auto_compact_window: 5 } } })).toBe("claude compacts after 100,000 to 1,000,000 tokens");
   });
 
   it("T3's custom-model rules", () => {
