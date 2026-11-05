@@ -708,6 +708,10 @@ pub struct QueuedMessage {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
     pub at: Millis,
+    /// Results of these delegated tasks waiting behind the active run (a wake, [`Run::delivers`]
+    /// once it runs); empty for a person's message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivers: Vec<NodeId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Default, Serialize, Deserialize)]
@@ -792,6 +796,11 @@ pub struct Run {
     /// compacted before cache expiry").
     #[serde(default)]
     pub idle_compaction: bool,
+    /// The daemon started it, not a person: it carries the results of these delegated tasks to
+    /// the thread that delegated them (T3's `delegated_task` notification, "Delegated task
+    /// finished"); `prompt` is what the agent was told. Empty for a person's run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivers: Vec<NodeId>,
     pub requested_at: Millis,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<Millis>,

@@ -752,6 +752,10 @@ server (`docs/orchestration-v2/orchestrator-mcp-server.md` there), ported in
   behind the active run, and results that finish meanwhile join that message (16 KB of results
   inline, then a pointer to `task_status`). A result the parent reads first is taken out of the
   queued wake. A parent whose queue is held (it was stopped) keeps the wake queued.
+  The wake's run (or queued message) says which tasks it delivers (`Run.delivers`,
+  `QueuedMessage.delivers`), so the conversation, the card and the queue show "Delegated task
+  finished · <titles>" with the results under it, never as the user's words, and a queued wake
+  can't be edited in the composer (T3's `delegated_task` notification).
 - **Stopping.** `task_cancel` interrupts the child and everything it delegated; `run.interrupt`
   on a thread does the same for every task it delegated (T3's Stop). Cancelled tasks report
   `cancelled` and wake nobody; deleting a thread stops its tasks first.

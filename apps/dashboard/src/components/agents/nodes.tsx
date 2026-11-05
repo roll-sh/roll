@@ -6,6 +6,7 @@ import { coming, isRunning, machineState, reachable, type IdentityColor, type Ma
 import { projectStats, type ProjectStats } from "@/lib/agents-graph";
 import { providersFor } from "@/lib/agents-store";
 import { setAgentsView } from "@/lib/agents-surface";
+import { deliveredLabel } from "@/lib/agents-worklog";
 import { primary } from "../ui";
 import { AutomationChip, useThreadOrigin } from "./automations/chip";
 import { ChangeChip, changeStatusLabel, WorkChip } from "./change";
@@ -493,6 +494,8 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
             <span className="shimmer">{thread.activity ?? threadStatusLabel[thread.status]}</span>
           ) : thread.status === "waiting" ? (
             (thread.activity ?? threadStatusLabel.waiting)
+          ) : lastRun?.delivers?.length ? (
+            deliveredLabel(lastRun)
           ) : lastRun ? (
             lastRun.prompt
           ) : (

@@ -110,6 +110,14 @@
         "id": "q1",
         "text": "then run clippy",
         "at": 1762000000000
+      },
+      {
+        "id": "q2",
+        "text": "Delegated task nod_0000000000000002 (Tests) [completed]:\nAll green.",
+        "at": 1762000000000,
+        "delivers": [
+          "nod_0000000000000002"
+        ]
       }
     ],
     "run_count": 3,

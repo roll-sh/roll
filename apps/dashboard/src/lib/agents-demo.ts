@@ -9,6 +9,7 @@ import { avatarSvg } from "@roll/brand/geometry";
 import { checkProjectIcon } from "./agents-identity";
 import type {
   EndpointInfo,
+  NodeId,
   EndpointSpec,
   PullOutcome,
   PullResult,
@@ -801,6 +802,12 @@ const now = () => Date.now();
 let seq = 0;
 const id = (prefix: string) => `${prefix}demo${(++seq).toString(36).padStart(6, "0")}`;
 
+
+/** A delegated task's result waiting to wake its orchestrator. */
+interface Wake {
+  text: string;
+  task: NodeId;
+}
 export class DemoOwner implements AgentsTransport {
   private cursor = 0;
   private machines = new Map<MachineId, Machine>();
@@ -813,7 +820,7 @@ export class DemoOwner implements AgentsTransport {
   /** Delegated threads still working: the orchestrator they report to and its task node. */
   private tasks = new Map<ThreadId, { parent: ThreadId; node: Node; title: string }>();
   /** Results waiting for a busy orchestrator's turn to end (the daemon's queued wake). */
-  private wakes = new Map<ThreadId, string[]>();
+  private wakes = new Map<ThreadId, Wake[]>();
   private timers = new Set<ReturnType<typeof setTimeout>>();
   private started = false;
   /** The demo's canvas arrangement: kept for as long as the page is open. */
@@ -1513,7 +1520,7 @@ export class DemoOwner implements AgentsTransport {
   }
 
   /** Start a run on an idle thread. */
-  private begin(tid: ThreadId, prompt: string, script: Step[], attachments: Run["attachments"] = []) {
+  private begin(tid: ThreadId, prompt: string, script: Step[], attachments: Run["attachments"] = [], delivers: NodeId[] = []) {
     const t = this.thread(tid);
     if (!t) return;
     const ordinal = t.run_count + 1;
@@ -1522,7 +1529,7 @@ export class DemoOwner implements AgentsTransport {
     this.sims.set(tid, sim);
     this.put(
       "run",
-      { id: rid, thread: tid, ordinal, provider: t.provider, model: t.model, status: "running", prompt, attachments, steers: [], requested_at: now(), started_at: now(), completed_at: null, checkpoint: null, stat: null, usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null }, context: null, error: null },
+      { id: rid, thread: tid, ordinal, provider: t.provider, model: t.model, status: "running", prompt, attachments, steers: [], ...(delivers.length ? { delivers } : {}), requested_at: now(), started_at: now(), completed_at: null, checkpoint: null, stat: null, usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null }, context: null, error: null },
       this.machineOf(tid),
     );
     // Any new run is activity: off the settled shelf.
@@ -1758,15 +1765,24 @@ export class DemoOwner implements AgentsTransport {
       .sort((a, b) => b.ordinal - a.ordinal)[0];
     const result = answer?.body.type === "message" ? answer.body.text : "Done.";
     this.putNode({ ...task.node, status: "completed", completed_at: now(), body: { ...(task.node.body as Extract<NodeBody, { type: "subagent" }>), result } });
-    const wake = `Delegated task ${task.node.id} (${task.title}) [completed]:\n${result}`;
+    const wake: Wake = { text: `Delegated task ${task.node.id} (${task.title}) [completed]:\n${result}`, task: task.node.id };
     if (this.sims.has(task.parent)) this.wakes.set(task.parent, [...(this.wakes.get(task.parent) ?? []), wake]);
     else this.wakeOrchestrator(task.parent, [wake]);
   }
 
-  private wakeOrchestrator(parent: ThreadId, results: string[]) {
-    const titles = results.map((r) => /\((.*?)\) \[/.exec(r)?.[1] ?? "A task");
+  private wakeOrchestrator(parent: ThreadId, results: Wake[]) {
+    const titles = results.map((r) => /\((.*?)\) \[/.exec(r.text)?.[1] ?? "A task");
     const left = [...this.tasks.values()].filter((t) => t.parent === parent).length;
-    this.after(400, () => this.begin(parent, results.join("\n\n"), reviewScript(titles, left)));
+    // Like the daemon: the run says whose results it delivers (`Run.delivers`).
+    this.after(400, () =>
+      this.begin(
+        parent,
+        results.map((r) => r.text).join("\n\n"),
+        reviewScript(titles, left),
+        [],
+        results.map((r) => r.task),
+      ),
+    );
   }
 
   private finish(sim: Sim) {

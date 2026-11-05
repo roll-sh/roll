@@ -9,6 +9,7 @@
 //! ([`IdleCompaction::BeforeCacheExpires`]); the default, on return, is the composer's "Compact and
 //! send". Like T3, the timers live in memory: a restart drops them.
 
+use super::runs::StartedBy;
 use super::{Host, now};
 use crate::provider::{COMPACT, TurnInput};
 use agent_proto::*;
@@ -87,7 +88,7 @@ impl Host {
             return;
         }
         let input = TurnInput { text: COMPACT.into(), attachments: Vec::new() };
-        if let Err(e) = self.start_run_as(&mut rt, input, true).await {
+        if let Err(e) = self.start_run_as(&mut rt, input, StartedBy::IdleCompaction).await {
             tracing::warn!("idle compaction of {id}: {e:?}");
         }
     }
@@ -139,7 +140,7 @@ mod tests {
         no(&Thread { archived_at: Some(1), ..t.clone() }, &r);
         no(&Thread { run_count: 2, ..t.clone() }, &r);
         no(&Thread { provider: ProviderId::codex(), ..t.clone() }, &r);
-        no(&Thread { queued: vec![QueuedMessage { id: "q".into(), text: "x".into(), attachments: vec![], at: 0 }], ..t.clone() }, &r);
+        no(&Thread { queued: vec![QueuedMessage { id: "q".into(), text: "x".into(), attachments: vec![], at: 0, delivers: vec![] }], ..t.clone() }, &r);
         let mut settled = t.clone();
         settled.inbox.settle = Some(Settle::Settled { at: 1, by: SettledBy::User });
         no(&settled, &r);

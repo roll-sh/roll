@@ -24,6 +24,7 @@
 //!   or cancelling a task stops the task and everything it delegated, and their results wake
 //!   nobody.
 
+use super::runs::StartedBy;
 use super::{Fail, Host, Private, Res, Rt, now, suffix};
 use crate::provider::TurnInput;
 use agent_proto::*;
@@ -834,19 +835,24 @@ impl Host {
             prt.thread.queued.remove(i);
             self.tasks.state.lock().unwrap().wakes.remove(&parent);
         } else {
-            prt.thread.queued[i].text = self.wake_text(&children).await;
+            let (text, tasks) = self.wake_text(&children).await;
+            prt.thread.queued[i].text = text;
+            prt.thread.queued[i].delivers = tasks;
         }
         self.put_thread(prt)
     }
 
     /// T3's `delegatedCompletionWakeDetail`: each task's label and result, inlined while the
-    /// results fit in [`WAKE_INLINE`] bytes, otherwise a pointer to `task_status`.
-    async fn wake_text(&self, children: &[ThreadId]) -> String {
+    /// results fit in [`WAKE_INLINE`] bytes, otherwise a pointer to `task_status`; and the tasks
+    /// it carries ([`Run::delivers`]).
+    async fn wake_text(&self, children: &[ThreadId]) -> (String, Vec<NodeId>) {
         let mut remaining = WAKE_INLINE;
         let mut parts = Vec::new();
+        let mut tasks = Vec::new();
         for child in children {
             let Ok(snap) = self.snapshot(child).await else { continue };
             let v = snap.view;
+            tasks.push(v.task_id.clone());
             let label = format!("Delegated task {} ({}) [{}]", v.task_id, v.title, v.status.as_str());
             parts.push(match v.result {
                 Some(result) if label.len() + 2 + result.len() <= remaining => {
@@ -856,7 +862,7 @@ impl Host {
                 _ => format!("{label}. Use task_status with task_id {} to read the result.", v.task_id),
             });
         }
-        parts.join("\n\n")
+        (parts.join("\n\n"), tasks)
     }
 
     /// Brings a child's task up to date: the parent's `subagent` node, and the wake for a result
@@ -934,15 +940,15 @@ impl Host {
         if queued {
             return self.rewrite_wake(prt).await;
         }
-        let text = self.wake_text(std::slice::from_ref(child)).await;
+        let (text, tasks) = self.wake_text(std::slice::from_ref(child)).await;
         // An idle parent with a held queue (it was stopped) waits for its user, like the queue.
         if prt.active.is_none() && prt.thread.queued.is_empty() {
-            if let Err(Fail::Internal(e)) = self.start_run(prt, TurnInput { text, attachments: Vec::new() }).await {
+            if let Err(Fail::Internal(e)) = self.start_run_as(prt, TurnInput { text, attachments: Vec::new() }, StartedBy::Delivery(tasks)).await {
                 return Err(e);
             }
             return Ok(());
         }
-        let message = QueuedMessage { id: format!("msg_{}", suffix()), text, attachments: Vec::new(), at: now() };
+        let message = QueuedMessage { id: format!("msg_{}", suffix()), text, attachments: Vec::new(), at: now(), delivers: tasks };
         self.tasks
             .state
             .lock()

@@ -244,6 +244,8 @@ export interface QueuedMessage {
   text: string;
   attachments: Attachment[];
   at: Millis;
+  /** Delegated tasks' results waiting behind the active run (a wake); empty for a person's message. */
+  delivers?: NodeId[];
 }
 
 export interface Usage {
@@ -380,6 +382,11 @@ export interface Run {
   steers: string[];
   /** The daemon compacted the idle conversation before its prompt cache expired (T3's idle compaction). */
   idle_compaction?: boolean;
+  /**
+   * The daemon started it with these delegated tasks' results, waking the thread that delegated
+   * them (T3's "Delegated task finished"); `prompt` is what the agent was told. Empty for a person's run.
+   */
+  delivers?: NodeId[];
   requested_at: Millis;
   started_at: Millis | null;
   completed_at: Millis | null;
@@ -1481,7 +1488,7 @@ const threadD = obj<Thread>({
   lineage: opt(obj<Lineage>({ parent: str, relation: literal("fork", "subagent"), root: str, from_run: opt(str) })),
   orchestrator: withDefault(bool, () => false),
   active_run: opt(str),
-  queued: vec(obj<QueuedMessage>({ id: str, text: str, attachments: vec(attachmentD), at: int })),
+  queued: vec(obj<QueuedMessage>({ id: str, text: str, attachments: vec(attachmentD), at: int, delivers: withDefault(vec(str), () => []) })),
   run_count: int,
   pending_requests: int,
   plan_ready: withDefault(bool, () => false),
@@ -1530,6 +1537,7 @@ const runD = obj<Run>({
   attachments: vec(attachmentD),
   steers: vec(str),
   idle_compaction: withDefault(bool, () => false),
+  delivers: withDefault(vec(str), () => []),
   requested_at: int,
   started_at: opt(int),
   completed_at: opt(int),

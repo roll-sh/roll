@@ -11,6 +11,7 @@
 import { ArrowUp, GripVertical, ListPlus, Pencil, X } from "lucide-react";
 import { useState } from "react";
 import type { QueuedMessage } from "@/lib/agents-api";
+import { deliveredLabel } from "@/lib/agents-worklog";
 
 const SHOWN = 3;
 
@@ -74,63 +75,70 @@ export function QueuedMessages({
           drop(null);
         }}
       >
-        {shown.map((q) => (
-          <li
-            key={q.id}
-            draggable
-            tabIndex={0}
-            aria-label={`Queued: ${q.text}`}
-            onDragStart={(e) => {
-              e.dataTransfer.effectAllowed = "move";
-              setDragging(q.id);
-            }}
-            onDragEnd={() => setDragging(null)}
-            onDragOver={(e) => dragging && e.preventDefault()}
-            onDrop={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              drop(q);
-            }}
-            onKeyDown={(e) => {
-              if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+        {shown.map((q) => {
+          // A wake (delegated tasks' results) is said as what it is, and isn't the user's to edit.
+          const wake = !!q.delivers?.length;
+          const text = wake ? deliveredLabel({ prompt: q.text, delivers: q.delivers }) : q.text;
+          return (
+            <li
+              key={q.id}
+              draggable
+              tabIndex={0}
+              aria-label={`Queued: ${text}`}
+              onDragStart={(e) => {
+                e.dataTransfer.effectAllowed = "move";
+                setDragging(q.id);
+              }}
+              onDragEnd={() => setDragging(null)}
+              onDragOver={(e) => dragging && e.preventDefault()}
+              onDrop={(e) => {
                 e.preventDefault();
-                const before = stepTarget(queued, q.id, e.key === "ArrowUp" ? -1 : 1);
-                if (before !== undefined) actions.move(q, before);
-              } else if (e.key === "Delete" || e.key === "Backspace") {
-                e.preventDefault();
-                actions.remove(q);
-              } else if (e.key === "Enter") {
-                e.preventDefault();
-                actions.edit(q);
-              }
-            }}
-            className={`group/q flex h-7 items-center gap-1.5 rounded-md border border-dashed px-1 text-[12.5px] outline-none transition-[opacity,background-color] duration-150 starting:opacity-0 hover:bg-fg/[0.04] focus-visible:ring-1 focus-visible:ring-accent/50 ${
-              dragging === q.id ? "opacity-40" : ""
-            } ${editing === q.id ? "border-accent/50" : "border-line-2"}`}
-          >
-            <GripVertical className="size-3 shrink-0 cursor-grab text-faint opacity-0 transition-opacity group-hover/q:opacity-100 [@media(hover:none)]:hidden" aria-hidden />
-            <ListPlus className="size-3.5 shrink-0 text-subtle" aria-hidden />
-            {editing === q.id ? (
-              <span className="min-w-0 flex-1 truncate text-accent">Editing in the composer</span>
-            ) : (
-              <span className="min-w-0 flex-1 truncate text-soft">
-                {q.text || `${q.attachments.length} image${q.attachments.length === 1 ? "" : "s"}`}
-                {q.text && q.attachments.length > 0 && <span className="text-subtle"> · {q.attachments.length} image{q.attachments.length === 1 ? "" : "s"}</span>}
+                e.stopPropagation();
+                drop(q);
+              }}
+              onKeyDown={(e) => {
+                if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+                  e.preventDefault();
+                  const before = stepTarget(queued, q.id, e.key === "ArrowUp" ? -1 : 1);
+                  if (before !== undefined) actions.move(q, before);
+                } else if (e.key === "Delete" || e.key === "Backspace") {
+                  e.preventDefault();
+                  actions.remove(q);
+                } else if (e.key === "Enter" && !wake) {
+                  e.preventDefault();
+                  actions.edit(q);
+                }
+              }}
+              className={`group/q flex h-7 items-center gap-1.5 rounded-md border border-dashed px-1 text-[12.5px] outline-none transition-[opacity,background-color] duration-150 starting:opacity-0 hover:bg-fg/[0.04] focus-visible:ring-1 focus-visible:ring-accent/50 ${
+                dragging === q.id ? "opacity-40" : ""
+              } ${editing === q.id ? "border-accent/50" : "border-line-2"}`}
+            >
+              <GripVertical className="size-3 shrink-0 cursor-grab text-faint opacity-0 transition-opacity group-hover/q:opacity-100 [@media(hover:none)]:hidden" aria-hidden />
+              <ListPlus className="size-3.5 shrink-0 text-subtle" aria-hidden />
+              {editing === q.id ? (
+                <span className="min-w-0 flex-1 truncate text-accent">Editing in the composer</span>
+              ) : (
+                <span className="min-w-0 flex-1 truncate text-soft">
+                  {text || `${q.attachments.length} image${q.attachments.length === 1 ? "" : "s"}`}
+                  {q.text && q.attachments.length > 0 && <span className="text-subtle"> · {q.attachments.length} image{q.attachments.length === 1 ? "" : "s"}</span>}
+                </span>
+              )}
+              <span className="flex shrink-0 items-center opacity-0 transition-opacity duration-150 group-hover/q:opacity-100 group-focus-within/q:opacity-100 [@media(hover:none)]:opacity-100">
+                <RowButton label={running ? "Send now: into the current turn" : "Send now"} onClick={() => actions.sendNow(q)}>
+                  <ArrowUp className="size-3.5" />
+                </RowButton>
+                {!wake && (
+                  <RowButton label="Edit in the composer" onClick={() => actions.edit(q)}>
+                    <Pencil className="size-3" />
+                  </RowButton>
+                )}
+                <RowButton label="Remove from queue" onClick={() => actions.remove(q)}>
+                  <X className="size-3.5" />
+                </RowButton>
               </span>
-            )}
-            <span className="flex shrink-0 items-center opacity-0 transition-opacity duration-150 group-hover/q:opacity-100 group-focus-within/q:opacity-100 [@media(hover:none)]:opacity-100">
-              <RowButton label={running ? "Send now: into the current turn" : "Send now"} onClick={() => actions.sendNow(q)}>
-                <ArrowUp className="size-3.5" />
-              </RowButton>
-              <RowButton label="Edit in the composer" onClick={() => actions.edit(q)}>
-                <Pencil className="size-3" />
-              </RowButton>
-              <RowButton label="Remove from queue" onClick={() => actions.remove(q)}>
-                <X className="size-3.5" />
-              </RowButton>
-            </span>
-          </li>
-        ))}
+            </li>
+          );
+        })}
       </ul>
       {queued.length > SHOWN && (
         <button type="button" onClick={() => setAll((a) => !a)} className="mt-0.5 h-6 rounded-md px-1.5 text-[12px] text-muted transition-colors hover:text-fg">

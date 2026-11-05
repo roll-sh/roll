@@ -193,3 +193,20 @@ export function stepsBefore(tree: readonly NodeTree[], node: string, n: number):
   walk(tree);
   return { steps: before.slice(-n), total: before.length };
 }
+
+/** The tasks a delivering run carries, titled and with how they ended as the daemon's wake says it. */
+export function delegatedTasks(run: Pick<Run, "prompt" | "delivers">): { id: string; title: string; status: string }[] {
+  return (run.delivers ?? []).map((id) => {
+    const head = `Delegated task ${id} (`;
+    const at = run.prompt.indexOf(head);
+    const said = at < 0 ? null : /^(.*?)\) \[(\w+)\]/.exec(run.prompt.slice(at + head.length));
+    return { id, title: said?.[1] || "A task", status: said?.[2] ?? "completed" };
+  });
+}
+
+/** "Delegated task finished · Tests", "2 delegated tasks finished · Build, Docs failed": what a delivering run is called. */
+export function deliveredLabel(run: Pick<Run, "prompt" | "delivers">): string {
+  const tasks = delegatedTasks(run);
+  const head = tasks.length === 1 ? "Delegated task finished" : `${tasks.length} delegated tasks finished`;
+  return `${head} · ${tasks.map((t) => (t.status === "completed" ? t.title : `${t.title} ${t.status}`)).join(", ")}`;
+}

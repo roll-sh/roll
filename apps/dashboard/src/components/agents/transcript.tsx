@@ -18,6 +18,7 @@ import {
   CircleCheck,
   CircleDashed,
   Copy,
+  CornerDownRight,
   FileDiff as DiffIcon,
   ListChecks,
   ListTodo,
@@ -32,7 +33,7 @@ import { useEscapeLayer } from "./escape-layers";
 import type { Checkpoint, FileChange, Node, Request, RequestResponse, Run } from "@/lib/agents-api";
 import { formatContextTokens } from "@/lib/agents-context";
 import type { NodeTree } from "@/lib/agents-store";
-import { ended, foldLabel, foldTurn, timelineItems, type TimelineItem } from "@/lib/agents-worklog";
+import { delegatedTasks, deliveredLabel, ended, foldLabel, foldTurn, timelineItems, type TimelineItem } from "@/lib/agents-worklog";
 import { Markdown } from "../code/markdown";
 import { Collapse } from "./animated-height";
 import { PlanCard } from "./plan";
@@ -99,8 +100,8 @@ export function RunView({
   const files = changedFiles(tree);
   return (
     <section className={`group/run flex flex-col gap-3 ${run.status === "rolled_back" ? "opacity-45" : ""}`} aria-label={`Run ${run.ordinal}`}>
-      {/* Nobody typed an idle compaction: its row says what happened (T3). */}
-      {!run.idle_compaction && <UserMessage run={run} editFrom={run.status !== "rolled_back" ? actions.editFrom : undefined} />}
+      {/* Nobody typed an idle compaction or a delegated task's result: their rows say what happened (T3). */}
+      {run.delivers?.length ? <Delivered run={run} /> : !run.idle_compaction && <UserMessage run={run} editFrom={run.status !== "rolled_back" ? actions.editFrom : undefined} />}
       {turn.fold && (
         <div className="border-b border-line pt-1 pb-2">
           <button
@@ -293,6 +294,33 @@ function UserMessage({ run, editFrom }: { run: Run; editFrom?: (run: Run) => Pro
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * A run the daemon started with delegated tasks' results (`run.delivers`): T3's "Delegated task
+ * finished" notification, not a message from the user. Each task's title and how it ended, from
+ * the wake the agent was given (`delegatedTasks`); the whole of it on demand.
+ */
+function Delivered({ run }: { run: Run }) {
+  const [open, setOpen] = useState(false);
+  const tasks = delegatedTasks(run);
+  const failed = tasks.filter((t) => t.status !== "completed").length;
+  return (
+    <div className="pb-1">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex max-w-full items-center gap-2 rounded-md px-1 text-left text-[13px] text-muted transition-colors hover:text-fg"
+      >
+        <CornerDownRight className={`size-3.5 shrink-0 ${failed ? "text-danger" : "text-accent"}`} strokeWidth={1.5} aria-hidden />
+        <span className="truncate">{deliveredLabel(run)}</span>
+        <ChevronRight className={`size-3.5 shrink-0 transition-transform duration-200 motion-reduce:transition-none ${open ? "rotate-90" : ""}`} />
+      </button>
+      <Collapse open={open}>
+        <p className="mt-2 ml-6 border-l border-line pl-3 text-[13px] leading-relaxed whitespace-pre-wrap text-muted">{run.prompt}</p>
+      </Collapse>
     </div>
   );
 }
