@@ -268,6 +268,27 @@ switched off under `prefers-reduced-motion`, and the engine draws a static, stat
   focus buttons on click, so `relatedTarget` is null while a popup's own buttons are used. Never
   decide from `relatedTarget` alone.
 
+## Pickers
+
+Nobody types an id, a key or a handle that roll can look up (the user's ask, wave 9). Every field
+that names a thing — a Linear team, state or person, a Slack channel, a GitHub label, a roll
+thread or machine — is the shared picker, `Picker` in `components/agents/ui/picker.tsx`
+(`LookupPicker` in `lookup-picker.tsx` for an integration's things):
+
+- **The trigger is the field.** A hairline box like every field showing the picked thing by name
+  with its picture, colour or kind icon; a list is chips (each with its ×) and an "Add" at the end.
+  A value nobody listed yet is looked up by id; one that resolves to nothing shows as itself, in
+  mono. A variable shows as its `{{ path }}` in the accent.
+- **The list is T3's combobox** on the glass popup: search at the top (the platform filters it),
+  recents first (per device), then the field's own rows (`roll`, `No one`), then the platform's,
+  grouped (a state's team). ↑↓ and Enter, Esc closes; picking several keeps it open, with a
+  "N picked · Done" footer.
+- **Fallbacks are rows, not modes:** "Use “…”" for a typed value, "Create label “…”" where the
+  platform lets roll make one, "Use a variable" in automation steps, "Load more" for the next page.
+- **Problems are a quiet footer** (a warning icon, the reason, "Connect" or "Reconnect" linking to
+  the owner's settings). The field still takes a typed value.
+- The selected row is a quiet fill and a check (a box for lists); no accent bars or rings.
+
 ## Automations
 
 The Automations view follows this system and adds a few pieces of its own: the list in the working

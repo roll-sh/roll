@@ -11,6 +11,7 @@
 pub mod api;
 pub mod automations;
 pub mod linear;
+pub mod lookup;
 pub mod docs;
 pub mod endpoints;
 mod code;
@@ -75,6 +76,8 @@ pub struct Agents {
     pull_ms: AtomicU64,
     /// The head each project was last asked to pull to, and when, by (machine, project).
     pulls: Mutex<HashMap<(String, String), (String, std::time::Instant)>>,
+    /// Integration lookups served lately and sources cooling off a rate limit (`lookup.rs`).
+    pub(crate) lookups: lookup::Cache,
 }
 
 struct LinkHandle {

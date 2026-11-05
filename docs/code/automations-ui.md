@@ -113,7 +113,9 @@ last list (auto-core's note): `lastRunOf` takes the newest run the store has.
     | `format` | Picker |
     | --- | --- |
     | `template` / `template-long` | One-line or multi-line template field |
-    | `roll-thread` | Mono template field; empty means the run's latest thread |
+    | `roll-thread` | The owner's threads by title, grouped by project (the shared picker); a typed id or a variable too; empty means the run's latest thread |
+    | `roll-machine` | The owner's machines and sandboxes; empty means the step's default |
+    | `lookup` | The shared picker (`ui/picker.tsx`) over `lookup: {source, kind, parent?, extras?, extras_group?, create?}`: the integration's things from `GET …/lookup/{source}/{kind}` (one, or chips for an array), `parent` read from that sibling field when it holds one value (a create-issue step's states are its team's), `extras` first (`roll`, `No one`, the kinds of state), "Create label …" with `create`. Every lookup field also takes a typed value, and step fields a variable ("Use a variable"); the stored value stays the id, shown by name |
     | `roll-target` | A machine (T3 select with online, asleep or offline), a new sandbox (size, keep it), any online, or the project's machine |
     | `roll-project` | By project or by repository (cloned if missing) |
     | `roll-model` | The composer's model picker, from the target machine's providers (all machines' when the target isn't one machine); it writes `provider` and `effort` too, and those fields are hidden |

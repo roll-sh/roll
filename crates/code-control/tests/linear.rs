@@ -59,6 +59,8 @@ mod mock {
         /// An API key that may not make webhooks.
         pub no_admin: bool,
         pub ids: HashSet<String>,
+        /// Answer every GraphQL call with a 429 (Retry-After: 30).
+        pub rate_limited: bool,
     }
 
     pub type Shared = Arc<Mutex<State_>>;
@@ -113,6 +115,10 @@ mod mock {
         let op = op_of(b["query"].as_str().unwrap_or_default());
         let v = b["variables"].clone();
         let mut st = s.lock();
+        if st.rate_limited {
+            st.calls.push((op.clone(), v.clone(), auth.clone()));
+            return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "30")], Json(json!({ "errors": [{ "message": "slow down" }] }))).into_response();
+        }
         let key = auth == super::KEY;
         let ok = key || auth.strip_prefix("Bearer ").is_some_and(|t| st.access.iter().any(|a| a == t));
         if !ok {
@@ -141,6 +147,38 @@ mod mock {
                 "state": { "id": "st-todo", "name": "Todo", "type": "unstarted" }, "labels": { "nodes": [] }, "assignee": null,
             } }),
             "RollStates" => json!({ "workflowStates": { "nodes": states() } }),
+            // The pickers' lookups (lookup/linear.rs): one page each, users in two.
+            "RollLookupTeams" => json!({ "teams": { "nodes": [{ "id": "team-1", "key": "ENG", "name": "Engineering", "color": "#5E6AD2" }, { "id": "team-2", "key": "OPS", "name": "Operations", "color": null }], "pageInfo": { "hasNextPage": false, "endCursor": null } } }),
+            "RollLookupStates" => {
+                let team = json!({ "id": "team-1", "key": "ENG", "name": "Engineering" });
+                let nodes: Vec<Value> = states().as_array().unwrap().iter().map(|s| { let mut s = s.clone(); s["team"] = team.clone(); s["color"] = json!("#f2c94c"); s }).collect();
+                json!({ "workflowStates": { "nodes": nodes, "pageInfo": { "hasNextPage": false, "endCursor": null } } })
+            }
+            "RollLookupUsers" => {
+                if v["after"].is_null() {
+                    json!({ "users": { "nodes": [
+                        { "id": "user-ada", "name": "Ada Lovelace", "displayName": "ada", "email": "ada@acme.dev", "avatarUrl": "https://public.linear.app/ada.png" },
+                        { "id": "user-bob", "name": "Bob", "displayName": "bob", "email": "bob@acme.dev", "avatarUrl": "http://insecure/bob.png" },
+                    ], "pageInfo": { "hasNextPage": true, "endCursor": "c1" } } })
+                } else {
+                    json!({ "users": { "nodes": [{ "id": "user-cy", "name": "Cy", "displayName": "cy", "email": "cy@acme.dev", "avatarUrl": null }], "pageInfo": { "hasNextPage": false, "endCursor": "c2" } } })
+                }
+            }
+            "RollLookupLabels" => json!({ "issueLabels": { "nodes": [
+                { "id": "lab-type", "name": "Type", "color": "#000000", "isGroup": true, "parent": null, "team": null },
+                { "id": "lab-bug", "name": "Bug", "color": "#eb5757", "isGroup": false, "parent": { "name": "Type" }, "team": null },
+                { "id": "lab-infra", "name": "Infra", "color": "#26b5ce", "isGroup": false, "parent": null, "team": { "key": "ENG", "name": "Engineering" } },
+            ], "pageInfo": { "hasNextPage": false, "endCursor": null } } }),
+            "RollLookupProjects" => json!({ "projects": { "nodes": [{ "id": "prj-1", "name": "Auth", "color": "#bb87fc", "state": "started" }], "pageInfo": { "hasNextPage": false } } }),
+            "RollLookupCycles" => json!({ "cycles": { "nodes": [
+                { "id": "cyc-42", "number": 42.0, "name": null, "startsAt": "2026-11-17T00:00:00.000Z", "endsAt": "2026-11-30T00:00:00.000Z", "isActive": false },
+                { "id": "cyc-41", "number": 41.0, "name": null, "startsAt": "2026-11-03T00:00:00.000Z", "endsAt": "2026-11-16T00:00:00.000Z", "isActive": true },
+            ], "pageInfo": { "hasNextPage": false } } }),
+            "RollLookupIssues" => json!({ "issues": { "nodes": [{ "id": "issue-1", "identifier": "ENG-12", "title": "Fix login", "state": { "name": "Todo", "type": "unstarted", "color": "#e2e2e2" }, "team": { "key": "ENG" } }], "pageInfo": { "hasNextPage": false } } }),
+            "RollLookupLabelCreate" => json!({ "issueLabelCreate": { "success": true, "issueLabel": {
+                "id": "lab-new", "name": input["name"], "color": input["color"], "isGroup": false, "parent": null,
+                "team": if input["teamId"].is_string() { json!({ "key": "ENG", "name": "Engineering" }) } else { Value::Null },
+            } } }),
             "RollLabels" => {
                 let n = v["name"].as_str().unwrap_or_default();
                 json!({ "issueLabels": { "nodes": [{ "id": format!("lab-{}", n.to_lowercase()), "name": n, "team": null }] } })
@@ -1022,4 +1060,103 @@ async fn the_dashboard_has_linear_s_catalog() {
     }
     let kept = std::fs::read_to_string(&path).unwrap_or_default();
     assert!(kept == now, "{} is out of date: run ROLL_FIXTURES=write cargo test -p code-control --test linear the_dashboard_has_linear_s_catalog", path.display());
+}
+
+/// The pickers' lookups (`GET/POST /v1/code/agents/{owner}/lookup/linear/{kind}`, lookup/linear.rs):
+/// rows through the owner's connection with Linear's filters and cursors, never its key; pages
+/// served again from the cache until a write through roll (a new label) drops them; stored values
+/// resolved; and the problems said quietly (not connected, a rate limit that holds Linear off).
+#[tokio::test]
+async fn pickers_look_up_linear_through_the_owners_connection() {
+    let w = world().await;
+    let base = "/v1/code/agents/acme/lookup/linear";
+    let (s, v) = w.req("GET", &format!("{base}/teams"), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["items"], json!([]));
+    assert_eq!(v["problem"]["code"], "not_connected", "{v}");
+    let (s, _) = w.a.req("GET", &format!("{base}/teams"), None, Some(&w.agent)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "lookups are for who manages the owner");
+    let (s, v) = w.req("PUT", "/v1/code/agents/acme/linear/key", Some(json!({ "key": KEY }))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+
+    // Teams, with their key and colour; the second look is the cache's.
+    let (s, v) = w.req("GET", &format!("{base}/teams?q=en"), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["items"][0], json!({ "id": "team-1", "label": "Engineering", "key": "ENG", "hint": "ENG", "color": "#5e6ad2" }));
+    assert!(v.get("next").is_none() && v.get("problem").is_none(), "{v}");
+    assert!(!v.to_string().contains(KEY), "the key never leaves the server");
+    let sent = w.mock.ops("RollLookupTeams");
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["filter"], json!({ "or": [{ "name": { "containsIgnoreCase": "en" } }, { "key": { "containsIgnoreCase": "en" } }] }));
+    assert_eq!(sent[0]["first"], 50);
+    let _ = w.req("GET", &format!("{base}/teams?q=en"), None).await;
+    assert_eq!(w.mock.ops("RollLookupTeams").len(), 1, "served from the cache");
+    // A field's stored values (a key from before pickers, an id) resolve.
+    let _ = w.req("GET", &format!("{base}/teams?ids=ENG,team-2"), None).await;
+    assert_eq!(w.mock.ops("RollLookupTeams")[1]["filter"], json!({ "or": [{ "id": { "in": ["ENG", "team-2"] } }, { "key": { "in": ["ENG", "team-2"] } }] }));
+
+    // A team's states, grouped under it; a state's type is its icon.
+    let (_, v) = w.req("GET", &format!("{base}/states?parent=team-1"), None).await;
+    assert_eq!(v["items"][1], json!({ "id": "st-todo", "label": "Todo", "hint": "ENG", "group": "Engineering", "color": "#f2c94c", "icon": "unstarted" }));
+    assert_eq!(w.mock.ops("RollLookupStates")[0]["filter"], json!({ "team": { "id": { "eq": "team-1" } } }));
+
+    // Users page with Linear's cursor; only https pictures go on.
+    let (_, v) = w.req("GET", &format!("{base}/users?limit=2"), None).await;
+    assert_eq!(v["next"], "c1");
+    assert_eq!(v["items"][0]["avatar"], "https://public.linear.app/ada.png");
+    assert_eq!(v["items"][0]["hint"], "ada@acme.dev");
+    assert!(v["items"][1].get("avatar").is_none(), "{v}");
+    assert_eq!(w.mock.ops("RollLookupUsers")[0]["filter"], json!({ "active": { "eq": true } }));
+    let (_, v) = w.req("GET", &format!("{base}/users?limit=2&cursor=c1"), None).await;
+    assert_eq!(v["items"][0]["id"], "user-cy");
+    assert_eq!(w.mock.ops("RollLookupUsers")[1]["after"], "c1");
+
+    // Labels: a group isn't a row, its labels say it; a team's labels with the workspace's.
+    let (_, v) = w.req("GET", &format!("{base}/labels?parent=team-1"), None).await;
+    let labels: Vec<&str> = v["items"].as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap()).collect();
+    assert_eq!(labels, ["Type / Bug", "Infra"]);
+    assert_eq!(w.mock.ops("RollLookupLabels")[0]["filter"], json!({ "or": [{ "team": { "id": { "eq": "team-1" } } }, { "team": { "null": true } }] }));
+    // Making one drops the cached labels.
+    let (s, v) = w.req("POST", &format!("{base}/labels"), Some(json!({ "name": "Needs QA", "parent": "team-1", "color": "#4c8dff" }))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v, json!({ "id": "lab-new", "label": "Needs QA", "key": "Needs QA", "hint": "ENG", "color": "#4c8dff" }));
+    assert_eq!(w.mock.ops("RollLookupLabelCreate")[0]["input"], json!({ "name": "Needs QA", "teamId": "team-1", "color": "#4c8dff" }));
+    let _ = w.req("GET", &format!("{base}/labels?parent=team-1"), None).await;
+    assert_eq!(w.mock.ops("RollLookupLabels").len(), 2, "the new label shows at once");
+    let (s, _) = w.req("POST", &format!("{base}/teams"), Some(json!({ "name": "New team" }))).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "roll only makes labels");
+
+    // Cycles need their team; the current one says so; in order.
+    let (s, _) = w.req("GET", &format!("{base}/cycles"), None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (_, v) = w.req("GET", &format!("{base}/cycles?parent=team-1"), None).await;
+    assert_eq!(v["items"][0]["label"], "Cycle 41");
+    assert!(v["items"][0]["hint"].as_str().unwrap().starts_with("Current · 2026-11-03"), "{v}");
+    // Issues by identifier or title.
+    let (_, v) = w.req("GET", &format!("{base}/issues?q=ENG-12"), None).await;
+    assert_eq!(v["items"][0], json!({ "id": "issue-1", "label": "Fix login", "key": "ENG-12", "hint": "ENG-12", "color": "#e2e2e2", "icon": "unstarted" }));
+    assert_eq!(w.mock.ops("RollLookupIssues")[0]["filter"], json!({ "team": { "key": { "eqIgnoreCase": "ENG" } }, "number": { "eq": 12 } }));
+    let (s, _) = w.req("GET", &format!("{base}/projects"), None).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = w.req("GET", &format!("{base}/milestones"), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = w.req("GET", "/v1/code/agents/acme/lookup/jira/teams", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // A rate limit: said quietly, the cached page still shown, and Linear left alone until then.
+    w.mock.s.lock().rate_limited = true;
+    let calls = w.mock.s.lock().calls.len();
+    let (s, v) = w.req("GET", &format!("{base}/projects?q=au"), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["problem"], json!({ "code": "rate_limited", "retry_after": 30 }));
+    assert_eq!(w.mock.s.lock().calls.len(), calls + 1);
+    let (_, v) = w.req("GET", &format!("{base}/users?limit=2&q=x"), None).await;
+    assert_eq!(v["problem"]["code"], "rate_limited");
+    assert_eq!(w.mock.s.lock().calls.len(), calls + 1, "nothing goes to Linear while it said to wait");
+
+    // Disconnecting forgets what was cached.
+    let (s, _) = w.req("DELETE", "/v1/code/agents/acme/linear", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (_, v) = w.req("GET", &format!("{base}/teams?q=en"), None).await;
+    assert_eq!(v["problem"]["code"], "not_connected", "{v}");
 }

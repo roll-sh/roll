@@ -30,6 +30,7 @@ import { checkEndpoint, ENDPOINT_LIMITS } from "./agents-endpoints";
 import type { AutomationsApi } from "./automations-api";
 import type { IntegrationsApi } from "./integrations-api";
 import type { LinearApi } from "./linear-api";
+import type { LookupApi } from "./lookup-api";
 import { sandboxesApi, type SandboxesApi } from "./sandboxes-api";
 
 /** A repo to clone onto a machine (only what the picker shows). */
@@ -76,6 +77,8 @@ export interface AgentsServices {
   linear: LinearApi;
   /** The owner's endpoint profiles, kept by roll without a key (docs/code/agents.md, "Endpoints"). */
   endpoints: EndpointProfiles;
+  /** The rows pickers show for an integration's things (`lookup-api.ts`): the server looks them up with the owner's token. */
+  lookup: LookupApi;
 }
 
 /** An owner's endpoint profiles: oldest first; `save` replaces by id, and its `sandbox_default` takes it off the others. */
@@ -203,6 +206,7 @@ export function httpServices(
     automations: api.automations,
     integrations: api.integrations,
     linear: api.linear,
+    lookup: api.lookup,
     endpoints: { list: api.endpoints, save: api.saveEndpoint, remove: api.removeEndpoint },
   };
 }

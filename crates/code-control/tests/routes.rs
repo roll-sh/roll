@@ -980,6 +980,9 @@ async fn linear_routes_follow_the_auth_matrix() {
         ("PUT", format!("{base}/settings"), NOT_FOUND),
         ("PUT", format!("{base}/webhook/secret"), StatusCode::BAD_REQUEST),
         ("GET", format!("{base}/teams"), NOT_FOUND),
+        // The pickers' lookups: not connected is a quiet 200 to list, a 422 to make one.
+        ("GET", "/v1/code/agents/acme/lookup/linear/teams".to_string(), OK),
+        ("POST", "/v1/code/agents/acme/lookup/linear/labels".to_string(), StatusCode::UNPROCESSABLE_ENTITY),
     ];
     let body = json!({ "name": "s" });
     for (who, token) in [("admin", Some(ADMIN)), ("owner", Some(w.acme.as_str()))] {

@@ -57,6 +57,7 @@ pub fn routes() -> Router<Arc<Code>> {
         .merge(super::sandbox::api::routes())
         .merge(super::automations::api::routes())
         .merge(super::linear::api::routes())
+        .merge(super::lookup::routes())
 }
 
 // ── who may do what ──

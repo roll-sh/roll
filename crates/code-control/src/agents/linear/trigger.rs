@@ -104,7 +104,8 @@ impl Config {
             }
         }
         if !self.label_added.is_empty() {
-            let added: Vec<&str> = d["changes"]["labels_added"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+            let ids = d["changes"]["labels_added_ids"].as_array().into_iter().flatten();
+            let added: Vec<&str> = d["changes"]["labels_added"].as_array().into_iter().flatten().chain(ids).filter_map(Value::as_str).collect();
             if !any_eq(&self.label_added, &added) {
                 return false;
             }
@@ -154,23 +155,29 @@ pub struct LinearTrigger {
     pub code: Weak<Code>,
 }
 
-fn list(desc: &str) -> Value {
-    json!({ "type": "array", "items": { "type": "string" }, "description": desc })
-}
+/// The kinds of workflow state, which match a state of that kind in any team.
+pub const STATE_TYPES: &[(&str, &str)] =
+    &[("triage", "Triage"), ("backlog", "Backlog"), ("unstarted", "Unstarted"), ("started", "Started"), ("completed", "Completed"), ("canceled", "Canceled")];
+
+/// Linear's priorities, as `priority_of` reads them.
+pub const PRIORITIES: &[(&str, &str)] = &[("0", "No priority"), ("1", "Urgent"), ("2", "High"), ("3", "Medium"), ("4", "Low")];
 
 pub fn config_schema() -> Value {
+    use crate::agents::lookup::Pick;
+    let states = Pick { parent: Some("teams"), extras: STATE_TYPES, extras_group: Some("Any team"), ..Pick::from(SOURCE, "states") };
+    let labels = Pick { parent: Some("teams"), ..Pick::from(SOURCE, "labels") };
     json!({
         "type": "object",
         "additionalProperties": false,
         "properties": {
-            "teams": list("Team keys (ENG), names or ids"),
-            "projects": list("Project names or ids"),
-            "labels": list("The issue has one of these labels"),
-            "label_added": list("An update added one of these labels"),
-            "states": list("The issue's state (name or type: triage, backlog, unstarted, started, completed, canceled)"),
-            "state_changed_to": list("An update moved it into one of these states"),
-            "assignees": list("roll, none, or a name, email or id"),
-            "priorities": { "type": "array", "items": { "type": ["integer", "string"] }, "description": "0–4 or none, urgent, high, medium, low" },
+            "teams": Pick::from(SOURCE, "teams").many("Teams", "Only issues of these teams"),
+            "projects": Pick::from(SOURCE, "projects").many("Projects", "Only issues in these projects"),
+            "labels": labels.many("Labels", "The issue has one of these labels"),
+            "label_added": labels.many("Label added", "An update added one of these labels"),
+            "states": states.many("States", "The issue is in one of these states (a kind of state matches it in any team)"),
+            "state_changed_to": states.many("State changed to", "An update moved it into one of these states"),
+            "assignees": Pick { extras: &[("roll", "roll"), ("none", "No one")], ..Pick::from(SOURCE, "users") }.many("Assignees", "Assigned to one of these (roll: roll is assigned or delegated)"),
+            "priorities": Pick { extras: PRIORITIES, ..Pick::default() }.many("Priorities", "The issue has one of these priorities"),
             "matches": { "type": "string", "description": "Words in the title, description or comment (case-insensitive)" },
             "mentions_roll": { "type": "boolean", "description": "Comments: only those that mention roll" },
             "include_roll": { "type": "boolean", "description": "Also events roll caused itself" },

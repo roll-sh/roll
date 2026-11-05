@@ -290,6 +290,7 @@ async fn install(code: &Arc<Code>, st: &store::OAuthState, auth_code: &str) -> s
         Ok(()) => {}
         Err(store::Taken) => return Err(format!("{} is connected to another roll owner", w.org_name)),
     }
+    code.lookups_changed(&st.owner_id, super::SOURCE);
     super::templates::install_defaults(code, &st.owner_id, &st.created_by).await;
     Ok(())
 }
@@ -351,6 +352,7 @@ async fn put_key(State(code): S, caller: Caller, Path(owner): Path<String>, Body
         }
         return Err(Error::Conflict(format!("{} is connected to another roll owner", w.org_name)));
     }
+    code.lookups_changed(&o.id, super::SOURCE);
     let c = store::connection(code.db.sql(), &o.id)?;
     Ok(Json(status_json(&code, &o.id, c.as_ref())?))
 }
@@ -421,6 +423,7 @@ async fn disconnect(State(code): S, caller: Caller, Path(owner): Path<String>) -
         }
     }
     store::delete_connection(code.db.sql(), &o.id)?;
+    code.lookups_changed(&o.id, super::SOURCE);
     Ok(StatusCode::NO_CONTENT)
 }
 

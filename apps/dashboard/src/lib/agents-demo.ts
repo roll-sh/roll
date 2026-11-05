@@ -59,6 +59,7 @@ import { checkEndpoint, demoModels, incompatible, setEndpoint, withEndpoints } f
 import { PLAN_IMPLEMENTATION_PREFIX, planTitle } from "./agents-plan";
 import { ApiError } from "./code-api";
 import { memoryLinear, type LinearStatus, type LinearTeam } from "./linear-api";
+import { demoLookup } from "./lookup-demo";
 import type { Sandbox, SandboxSize } from "./sandboxes-api";
 import { isMemberId, MAX_MEMBERS, type ChatInstall, type ChatPlatform, type Integrations, type IntegrationsApi } from "./integrations-api";
 import { reasoningLevels } from "@/lib/agents-model-options";
@@ -833,6 +834,8 @@ export class DemoOwner implements AgentsTransport {
   private integrations = demoIntegrations();
   /** The demo owner's Linear workspace (connected). */
   private linear = memoryLinear(demoLinear(), DEMO_TEAMS);
+  /** What the demo's pickers list (`lookup-demo.ts`). */
+  private lookup = demoLookup();
   /** Every provider each demo machine has, on or off (its info lists the ones on). */
   private allProviders = new Map<MachineId, ProviderInfo[]>();
   /** The demo's automations and their runs (`automations-demo.ts`): runs start threads here. */
@@ -1219,6 +1222,7 @@ export class DemoOwner implements AgentsTransport {
       settings: owner.settings,
       integrations: owner.integrations,
       linear: owner.linear,
+      lookup: owner.lookup,
       endpoints: owner.endpoints,
     };
   }

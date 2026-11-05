@@ -43,6 +43,7 @@ import {
   type Notice,
 } from "./automations-api";
 import { createLinearApi } from "./linear-api";
+import { createLookupApi } from "./lookup-api";
 import { ROLL_API } from "./roll-api";
 
 /** Milliseconds since the Unix epoch. */
@@ -2179,6 +2180,8 @@ export function createAgentsApi(
     integrations: createIntegrationsApi(call),
     /** `/v1/code/agents/{owner}/linear…` (`linear-api.ts`). */
     linear: createLinearApi(call),
+    /** `/v1/code/agents/{owner}/lookup…` (`lookup-api.ts`): integration rows for pickers. */
+    lookup: createLookupApi(call),
     /** The fetch this client uses (the event stream follows it too). */
     fetch: doFetch,
     state: async (owner: string, threads: readonly string[] = []) =>

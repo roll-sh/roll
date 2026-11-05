@@ -909,6 +909,38 @@ POST   /v1/code/linear/webhook/{hook}   a connection's own webhook (API keys)
        server; 400 not JSON or over 1 MiB. A workspace no owner has is 200 with `ignored`.
 ```
 
+### Lookups
+
+What a picker shows for an integration's things, so nobody types an id
+(`crates/code-control/src/agents/lookup/`, `apps/dashboard/src/lib/lookup-api.ts`). The server
+calls the integration with the owner's stored token; only ids, names, colours and https pictures
+come back. `Code::manages` (the owner or an admin; agents and review apps get 403), routed like the
+rest of `/v1/code/agents/{owner}`.
+
+```
+GET    /v1/code/agents/{owner}/lookup/{source}/{kind}?q=&parent=&cursor=&ids=&limit=
+       → {items: [Item], next?: cursor, problem?: Problem}
+       Item {id, label, key?, hint?, group?, avatar? (https), color? (#rrggbb), icon?}
+         id is what a field stores; key another value naming the same thing (a team's key, a
+         label's name), so values saved before pickers still show their row. icon names a kind
+         (user, agent, channel, private, group, a Linear state's type).
+       Problem {code: "not_connected" | "reconnect", message} | {code: "rate_limited", retry_after}
+             | {code: "unavailable", message}  — a 200: the picker says it and takes a typed value.
+       q ≤ 100 chars (filtered on the platform's side); parent: the rows' owner (a team for its
+       states); ids: up to 50 stored values to resolve instead of listing; limit 1–100 (50).
+       Cached per owner for 30 s; a rate limit holds the source off for the owner until its retry
+       time (the cached page is still served with the problem). 400 a bad query or a kind that
+       needs `parent`; 404 an unknown source or kind.
+         linear: teams, states (parent: team id or key; none: every team's, grouped), users,
+                 labels (parent: the team's and the workspace's; groups aren't rows), projects,
+                 cycles (parent required; not past), issues (q: a title, or an identifier ENG-12;
+                 ids: ids or identifiers)
+POST   /v1/code/agents/{owner}/lookup/{source}/{kind} {name, parent?, color?} → Item
+       Make one where roll can (linear/labels: a team's when parent names one, else the workspace's).
+       The owner's cached pages of the source are dropped. 400 no name (≤ 80 chars); 422 not
+       connected or a kind roll doesn't make.
+```
+
 ## Chat ops
 
 Slack, Discord and GitHub for the agents (docs/code/chatops.md). The owner's integrations are under
