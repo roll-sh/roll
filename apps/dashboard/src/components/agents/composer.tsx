@@ -83,6 +83,8 @@ function useModifierHeld(): boolean {
 }
 
 const NO_QUESTIONS: Question[] = [];
+/** How long a touch holds the send button for the other of queue and steer. */
+const HOLD_MS = 450;
 const EMPTY_DRAFT = { text: "", attachments: [] as Attachment[] };
 
 /** One of the composer's slash commands (T3's `/plan`, `/default`, and the providers' `/compact`). */
@@ -556,6 +558,24 @@ export function Composer({
   const setValue = question ? flow.setCustom : setText;
   const hasText = !!text.trim() || attachments.length > 0;
   const queuing = queues(held);
+  // A touch screen has no ⌘: holding the send button while the agent works does what ⌘-click
+  // does (queue instead of steer, or the other way round); the click that ends the hold is spent.
+  const hold = useRef<{ timer: number; fired: boolean } | null>(null);
+  const holdStart = (e: React.PointerEvent) => {
+    if (e.pointerType !== "touch" || !running || approvalWaiting) return;
+    const h = { fired: false, timer: 0 };
+    h.timer = window.setTimeout(() => {
+      h.fired = true;
+      void submit(true);
+    }, HOLD_MS);
+    hold.current = h;
+  };
+  const holdEnd = () => {
+    if (hold.current && !hold.current.fired) {
+      clearTimeout(hold.current.timer);
+      hold.current = null;
+    }
+  };
 
   return (
     <div
@@ -866,12 +886,31 @@ export function Composer({
             ) : (
               <button
                 type="button"
-                onClick={(e) => void submit(e.metaKey || e.ctrlKey)}
+                onClick={(e) => {
+                  if (hold.current?.fired) {
+                    hold.current = null;
+                    return;
+                  }
+                  void submit(e.metaKey || e.ctrlKey);
+                }}
+                onPointerDown={holdStart}
+                onPointerUp={holdEnd}
+                onPointerCancel={holdEnd}
+                onPointerLeave={holdEnd}
+                onContextMenu={(e) => running && e.preventDefault()}
                 disabled={busy || !machineOnline || (!hasText && !queueHeld) || (mode.kind === "new" && (!provider || !!loggedOut))}
                 aria-label={
                   running ? (queuing ? "Queue message" : "Steer message") : mode.kind === "new" ? (fanning ? `Start ${fanout!.length} threads` : "Start thread") : queueHeld && !hasText ? "Resume thread" : "Send"
                 }
-                title={running ? (approvalWaiting ? "Send to redirect the agent" : `Click to ${queuing ? "queue" : "steer"}, ${MOD}-click to ${queuing ? "steer" : "queue"}`) : queueHeld && !hasText ? "Send the queued messages" : undefined}
+                title={
+                  running
+                    ? approvalWaiting
+                      ? "Send to redirect the agent"
+                      : `Click to ${queuing ? "queue" : "steer"}, ${MOD}-click or hold to ${queuing ? "steer" : "queue"}`
+                    : queueHeld && !hasText
+                      ? "Send the queued messages"
+                      : undefined
+                }
                 className="grid size-8 shrink-0 place-items-center rounded-full bg-accent text-white shadow-xs transition-[transform,background-color,opacity] duration-150 enabled:hover:scale-105 enabled:active:scale-[0.97] disabled:bg-fg/[0.12] disabled:text-subtle motion-reduce:transition-none"
               >
                 {busy ? (

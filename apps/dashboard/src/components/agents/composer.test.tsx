@@ -40,6 +40,32 @@ describe("Composer", () => {
     await waitFor(() => expect(commands(h).at(-1)).toMatchObject({ text: "also docs", mode: "queue" }));
   });
 
+  it("on a touch screen, holding the send button queues instead of steering (no ⌘ there); a tap steers", async () => {
+    const h = agentsHarness();
+    renderAgents(<Composer mode={{ kind: "thread", thread: thread({ status: "running", active_run: "run_1" }), machine: machine() }} />, h);
+    const box = screen.getByRole("textbox", { name: "Message" });
+    await userEvent.type(box, "then run clippy");
+    const send = screen.getByRole("button", { name: "Steer message" });
+    expect(send).toHaveAttribute("title", expect.stringMatching(/or hold to queue$/));
+    vi.useFakeTimers();
+    try {
+      fireEvent.pointerDown(send, { pointerType: "touch" });
+      vi.advanceTimersByTime(500);
+      fireEvent.pointerUp(send, { pointerType: "touch" });
+      fireEvent.click(send);
+    } finally {
+      vi.useRealTimers();
+    }
+    await waitFor(() => expect(commands(h)).toEqual([expect.objectContaining({ type: "message.send", text: "then run clippy", mode: "queue" })]));
+    // A short tap is a click: it steers.
+    await userEvent.type(box, "only Postgres");
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Steer message" }), { pointerType: "touch" });
+    fireEvent.pointerUp(screen.getByRole("button", { name: "Steer message" }), { pointerType: "touch" });
+    fireEvent.click(screen.getByRole("button", { name: "Steer message" }));
+    await waitFor(() => expect(commands(h).at(-1)).toMatchObject({ text: "only Postgres", mode: "steer" }));
+    expect(commands(h)).toHaveLength(2);
+  });
+
   it("redirects (steers) while an approval waits, even with ⌘/Ctrl", async () => {
     const t = thread({ status: "waiting", active_run: "run_1", pending_requests: 1 });
     const h = agentsHarness({ entities: [mirrored("thread", t, 1), mirrored("request", approval(), 2)] });
