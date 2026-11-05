@@ -278,6 +278,11 @@ impl Health {
         s.probe_until = None;
     }
 
+    /// Until when `upstream` is cooling down after a 429 (`None`: it isn't).
+    pub fn cooling_until(&self, upstream: &str, now: u64) -> Option<u64> {
+        self.states.lock().unwrap().get(upstream).and_then(|s| s.cooling_until).filter(|&t| now < t)
+    }
+
     /// Keeps `session` on `upstream`.
     pub fn bind(&self, session: &str, upstream: &str, now: u64) {
         let mut map = self.affinity.lock().unwrap();

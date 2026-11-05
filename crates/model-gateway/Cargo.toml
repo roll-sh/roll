@@ -32,3 +32,5 @@ zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Tests only: a service account's RSA key for the Vertex token flow.
+rsa = { workspace = true, features = ["pem"] }

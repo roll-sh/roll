@@ -107,6 +107,9 @@ pub(crate) struct Inner {
     recorder: Mutex<Option<(std::sync::mpsc::SyncSender<Job>, std::thread::JoinHandle<()>)>>,
     retention: Arc<AtomicU16>,
     pub(crate) vertex_token_uri: Mutex<Option<String>>,
+    /// (to an answer's headers, between two reads of a stream): [`net::FIRST_BYTE_TIMEOUT`] and
+    /// [`net::IDLE_TIMEOUT`] but in tests.
+    pub(crate) timeouts: Mutex<(Duration, Duration)>,
 }
 
 impl Gateway {
@@ -149,6 +152,7 @@ impl Gateway {
             recorder: Mutex::new(Some((tx, thread))),
             retention,
             vertex_token_uri: Mutex::new(None),
+            timeouts: Mutex::new((net::FIRST_BYTE_TIMEOUT, net::IDLE_TIMEOUT)),
         };
         Ok(Gateway { inner: Arc::new(inner) })
     }
@@ -313,20 +317,19 @@ impl Gateway {
             drop(tx);
             tokio::task::spawn_blocking(move || thread.join()).await?.map_err(|_| anyhow::anyhow!("the gateway's recorder panicked"))?;
         }
-        for name in ["gateway.db", "gateway.db-wal", "gateway.db-shm"] {
-            match std::fs::remove_file(self.inner.dir.join(name)) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
-        Ok(())
+        store::remove(&self.inner.dir.join("gateway.db"))
     }
 
     /// Tests only: Vertex tokens come from `uri` (a mock) instead of Google's token endpoint.
     #[doc(hidden)]
     pub fn set_vertex_token_uri_for_tests(&self, uri: Option<String>) {
         *self.inner.vertex_token_uri.lock().unwrap() = uri;
+    }
+
+    /// Tests only: shorter waits for an upstream's answer and between a stream's reads.
+    #[doc(hidden)]
+    pub fn set_timeouts_for_tests(&self, first_byte: Duration, idle: Duration) {
+        *self.inner.timeouts.lock().unwrap() = (first_byte, idle);
     }
 
     /// Queues a finished request for the store (written off the async path).

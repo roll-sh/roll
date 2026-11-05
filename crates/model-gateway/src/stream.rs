@@ -70,6 +70,9 @@ impl SseFrames {
                 if self.line_empty {
                     // A blank line: the event ends here (a `\n` after this `\r` goes with the
                     // next event's bytes, which a client reads as nothing).
+                    if i + 1 > MAX_EVENT {
+                        return Err(FrameError::TooLarge);
+                    }
                     let raw = self.buf.split_to(i + 1).freeze();
                     i = 0;
                     out.push(RawEvent { event: parse(&raw), raw });

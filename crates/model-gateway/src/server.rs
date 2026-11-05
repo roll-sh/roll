@@ -49,6 +49,7 @@
 //! The proxy helper owns this module.
 
 use crate::route::{self, Target, Unavailable};
+use crate::store::{BODY_CAP, keep_body};
 use crate::stream::{self, BedrockFrames, Early, RawEvent, SseFrames};
 use crate::upstream::{Ctx, Forward, Framing, Upstream};
 use crate::wire::{self, StreamTranslator, UsageTap};
@@ -74,8 +75,6 @@ pub const MAX_RESPONSE: usize = 32 << 20;
 pub const MAX_IN_FLIGHT: usize = 256;
 /// An upstream error's body kept to answer with.
 const MAX_ERROR_BODY: usize = 64 << 10;
-/// Each body kept in the request log (when `log_bodies` is on).
-pub const LOG_BODY: usize = 64 << 10;
 /// Model lists are asked again after this.
 const LIST_TTL: u64 = 600_000;
 /// A model list that failed is asked again after this.
@@ -112,9 +111,16 @@ pub fn error_chain(e: &reqwest::Error) -> String {
 }
 
 /// A response's body, refused past `cap` bytes (whatever its `content-length` says).
-pub async fn read_capped(mut resp: reqwest::Response, cap: usize) -> Result<Vec<u8>, String> {
+pub async fn read_capped(resp: reqwest::Response, cap: usize) -> Result<Vec<u8>, String> {
+    read_capped_idle(resp, cap, crate::net::IDLE_TIMEOUT).await
+}
+
+/// [`read_capped`], failing when no bytes come for `idle`.
+pub async fn read_capped_idle(mut resp: reqwest::Response, cap: usize, idle: Duration) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| error_chain(&e))? {
+    loop {
+        let next = tokio::time::timeout(idle, resp.chunk()).await.map_err(|_| format!("the answer stopped for {} ms", idle.as_millis()))?;
+        let Some(chunk) = next.map_err(|e| error_chain(&e))? else { break };
         if out.len() + chunk.len() > cap {
             return Err(format!("the answer is over {cap} bytes"));
         }
@@ -430,9 +436,10 @@ async fn read_body(body: Body, format: WireFormat) -> Result<(Bytes, Value), Box
     Ok((bytes, value))
 }
 
-/// The first 64 KiB of a body, as text.
+/// A body for the request log: one byte past [`BODY_CAP`] at most, so the store can tell a
+/// cut body from one that fit.
 fn clip(b: &[u8]) -> String {
-    String::from_utf8_lossy(&b[..b.len().min(LOG_BODY)]).into_owned()
+    String::from_utf8_lossy(&b[..b.len().min(BODY_CAP + 1)]).into_owned()
 }
 
 /// A request on its way: what the record needs, and what each attempt needs.
@@ -558,12 +565,17 @@ async fn proxy(mut req: Req, permit: OwnedSemaphorePermit) -> Response {
         Err(Unavailable::Open) => return req.fail(503, &format!("every upstream for {} is failing; the gateway tries them again shortly", req.model)),
     };
     let mut permit = Some(permit);
-    let mut barred: Vec<UpstreamSpec> = Vec::new();
+    // A provider that answered 429 (now, or still cooling from before) is barred whole: never
+    // another key of it while it asks to wait.
+    let now = now_ms();
+    let mut barred: Vec<(UpstreamSpec, u64)> =
+        live.upstreams.values().filter_map(|u| gw.inner.health.cooling_until(&u.spec.id, now).map(|until| (u.spec.clone(), until))).collect();
+    let mut waited: Option<u64> = None;
     let mut last: Option<Failure> = None;
     for t in order {
         let Some(up) = live.upstreams.get(&t.upstream).cloned() else { continue };
-        // After a 429, never another upstream of the same provider (another key of it).
-        if barred.iter().any(|b| route::same_provider(b, &up.spec)) {
+        if let Some(until) = barred.iter().filter(|(b, _)| route::same_provider(b, &up.spec)).map(|(_, u)| *u).min() {
+            waited = Some(waited.map_or(until, |w| w.min(until)));
             continue;
         }
         if !gw.inner.health.admit(&t.upstream, now_ms()) {
@@ -573,13 +585,20 @@ async fn proxy(mut req: Req, permit: OwnedSemaphorePermit) -> Response {
             Step::Done(r) => return r,
             Step::Next(f) => {
                 if f.rate_limited {
-                    barred.push(up.spec.clone());
+                    let until = gw.inner.health.cooling_until(&t.upstream, now_ms()).unwrap_or_else(now_ms);
+                    barred.push((up.spec.clone(), until));
                 }
                 last = Some(f);
             }
         }
     }
     let Some(f) = last else {
+        if let Some(until) = waited {
+            let secs = until.saturating_sub(now_ms()).div_ceil(1000).max(1);
+            let mut r = req.fail(429, &format!("the provider for {} asked to wait (rate limited); try again in {secs} s", req.model));
+            r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from(secs));
+            return r;
+        }
         return req.fail(503, &format!("no upstream for {} can take a request now", req.model));
     };
     if f.status == 0 {
@@ -662,10 +681,11 @@ async fn attempt(req: &mut Req, up: &Arc<Upstream>, t: &Target, permit: &mut Opt
         }
     };
     let (request, framing) = sent;
-    let resp = match tokio::time::timeout(crate::net::FIRST_BYTE_TIMEOUT, request.send()).await {
+    let (first_byte_timeout, idle) = *gw.inner.timeouts.lock().unwrap();
+    let resp = match tokio::time::timeout(first_byte_timeout, request.send()).await {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => return failed(req, &gw, t, at, &mut tried, 0, format!("{}: {}", up.spec.name, error_chain(&e))),
-        Err(_) => return failed(req, &gw, t, at, &mut tried, 0, format!("{}: no answer in {} s", up.spec.name, crate::net::FIRST_BYTE_TIMEOUT.as_secs())),
+        Err(_) => return failed(req, &gw, t, at, &mut tried, 0, format!("{}: no answer in {} ms", up.spec.name, first_byte_timeout.as_millis())),
     };
     let status = resp.status().as_u16();
     let headers_ms = started.elapsed().as_millis() as u32;
@@ -709,7 +729,7 @@ async fn attempt(req: &mut Req, up: &Arc<Upstream>, t: &Target, permit: &mut Opt
         return Step::Done(r);
     }
     if !req.stream {
-        let body = match read_capped(resp, MAX_RESPONSE).await {
+        let body = match read_capped_idle(resp, MAX_RESPONSE, idle).await {
             Ok(b) => b,
             Err(e) => return failed(req, &gw, t, at, &mut tried, 0, format!("{}: {e}", up.spec.name)),
         };
@@ -733,7 +753,7 @@ async fn attempt(req: &mut Req, up: &Arc<Upstream>, t: &Target, permit: &mut Opt
         return Step::Done((StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], out).into_response());
     }
     // A stream: read until its first event, which decides whether this upstream serves.
-    let mut reader = Reader::new(resp, framing);
+    let mut reader = Reader::new(resp, framing, idle);
     let mut mode = if pass { Mode::Pass(UsageTap::new(upfmt)) } else { Mode::Translate(Box::new(StreamTranslator::new(upfmt, req.format, &req.model))) };
     let mut first: Vec<Bytes> = Vec::new();
     loop {
@@ -819,6 +839,8 @@ fn placeholder(req: &Req) -> Req {
 /// An upstream's stream, event by event.
 struct Reader {
     resp: reqwest::Response,
+    /// The longest wait for the next chunk.
+    idle: Duration,
     frames: Frames,
     queue: std::collections::VecDeque<RawEvent>,
     done: bool,
@@ -830,12 +852,12 @@ enum Frames {
 }
 
 impl Reader {
-    fn new(resp: reqwest::Response, framing: Framing) -> Reader {
+    fn new(resp: reqwest::Response, framing: Framing, idle: Duration) -> Reader {
         let frames = match framing {
             Framing::Http => Frames::Sse(SseFrames::new()),
             Framing::EventStream => Frames::Bedrock(BedrockFrames::new()),
         };
-        Reader { resp, frames, queue: Default::default(), done: false }
+        Reader { resp, idle, frames, queue: Default::default(), done: false }
     }
 
     /// The next event (`None`: the stream ended).
@@ -847,7 +869,8 @@ impl Reader {
             if self.done {
                 return Ok(None);
             }
-            match self.resp.chunk().await {
+            let chunk = tokio::time::timeout(self.idle, self.resp.chunk()).await.map_err(|_| format!("the stream stopped for {} s", self.idle.as_secs()))?;
+            match chunk {
                 Ok(Some(c)) => {
                     let events = match &mut self.frames {
                         Frames::Sse(f) => f.feed(&c),
@@ -962,12 +985,12 @@ async fn pump(
     req.record(200, mode.usage(), error, Some(first_byte), &logged);
 }
 
-/// Sends `chunks` to the client (keeping the first [`LOG_BODY`] bytes when `log`); `false`:
+/// Sends `chunks` to the client (keeping the start for the request log when `log`); `false`:
 /// the client is gone.
 async fn send_all(tx: &tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>, chunks: Vec<Bytes>, log: bool, logged: &mut Vec<u8>) -> bool {
     for b in chunks {
-        if log && logged.len() < LOG_BODY {
-            logged.extend_from_slice(&b[..b.len().min(LOG_BODY - logged.len())]);
+        if log {
+            keep_body(logged, &b);
         }
         if tx.send(Ok(b)).await.is_err() {
             return false;
