@@ -205,9 +205,26 @@ describe("Conversation", () => {
     const list = screen.getByRole("listbox", { name: "Conversations" });
     const options = within(list).getAllByRole("option");
     expect(options).toHaveLength(2);
-    expect(within(list).getByRole("option", { selected: true })).toHaveTextContent("Fix the flaky queue test");
+    // The first is highlighted for the keyboard; the open one is marked.
+    expect(within(list).getByRole("option", { selected: true })).toBe(options[0]);
+    expect(options.find((o) => o.getAttribute("aria-current"))).toHaveTextContent("Fix the flaky queue test");
     await userEvent.click(within(list).getByRole("option", { name: /Bump the deps/ }));
     expect(h.openThread).toHaveBeenCalledWith("thr_9");
+  });
+
+  it("finds any conversation from the title by typing, and opens it from the keyboard (no cap on how many)", async () => {
+    const many = Array.from({ length: 30 }, (_, i) => mirrored("thread", thread({ id: `thr_m${i}`, title: `Chore ${i}`, updated_at: 100 + i }), 20 + i));
+    const h = agentsHarness({ entities: [...entities, ...many], follow: ["thr_1"] });
+    renderAgents(<Conversation thread={busy} machine={machine()} />, h);
+    await userEvent.click(screen.getByRole("button", { name: /Fix the flaky queue test/ }));
+    expect(within(screen.getByRole("listbox", { name: "Conversations" })).getAllByRole("option")).toHaveLength(31);
+    const find = screen.getByRole("combobox", { name: "Find a conversation" });
+    expect(find).toHaveFocus();
+    await userEvent.type(find, "chore 2");
+    // "Chore 2" and "Chore 20"…"Chore 29": the second with ↓, Enter opens it.
+    await userEvent.keyboard("{ArrowDown}{Enter}");
+    expect(h.openThread).toHaveBeenCalledWith(expect.stringMatching(/^thr_m2\d$/));
+    expect(screen.queryByRole("listbox", { name: "Conversations" })).toBeNull();
   });
 
   it("opens the thread's terminal in a drawer under the conversation (T3's), with tabs, a new one and hide", async () => {

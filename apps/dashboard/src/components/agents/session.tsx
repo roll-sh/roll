@@ -574,11 +574,17 @@ function TitleBar({
   );
 }
 
-/** The title, and under it every other conversation, the ones that need you first. */
+/**
+ * The title, and under it every other conversation, the ones that need you first: type to find
+ * one (its title or project), ↑↓ and Enter to open it, Esc to close. All of them, scrolling.
+ */
 function Switcher({ thread, onRename }: { thread: Thread; onRename?: () => void }) {
   const { client, openThread, readOnly } = useAgents();
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
   const box = useRef<HTMLDivElement>(null);
+  const list = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
     const onDown = (e: PointerEvent) => !box.current?.contains(e.target as Node) && setOpen(false);
@@ -595,20 +601,43 @@ function Switcher({ thread, onRename }: { thread: Thread; onRename?: () => void 
     };
   }, [open]);
   const data = client.data;
-  const others = useMemo(() => {
+  const all = useMemo(() => {
     const rank = (t: Thread) => (t.pending_requests > 0 ? 0 : isBusy(t.status) ? 1 : 2);
     return [...data.threads.values()]
       .map((r) => r.value)
       .filter((t) => t.archived_at === null || t.id === thread.id)
-      .sort((a, b) => rank(a) - rank(b) || b.updated_at - a.updated_at)
-      .slice(0, 14);
+      .sort((a, b) => rank(a) - rank(b) || b.updated_at - a.updated_at);
   }, [data.threads, thread.id]);
-  if (readOnly && others.length <= 1) return <h2 className="truncate text-[13.5px] leading-tight font-semibold tracking-[-0.02em]">{thread.title}</h2>;
+  const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const others = words.length
+    ? all.filter((t) => {
+        const hay = `${t.title} ${data.projects.get(t.project)?.value.name ?? ""}`.toLowerCase();
+        return words.every((w) => hay.includes(w));
+      })
+    : all;
+  const at = Math.min(active, Math.max(others.length - 1, 0));
+  useEffect(() => {
+    list.current?.querySelector(`[data-index="${at}"]`)?.scrollIntoView?.({ block: "nearest" });
+  }, [at, open]);
+  const pick = (t: Thread | undefined) => {
+    if (!t) return;
+    setOpen(false);
+    if (t.id !== thread.id) openThread(t.id);
+  };
+  const toggle = () => {
+    setOpen((o) => !o);
+    setQuery("");
+    setActive(0);
+  };
+  if (readOnly && all.length <= 1) return <h2 className="truncate text-[13.5px] leading-tight font-semibold tracking-[-0.02em]">{thread.title}</h2>;
   return (
     <div ref={box} className="relative flex min-w-0" data-nodrag>
       <button
-        onClick={() => setOpen((o) => !o)}
-        onDoubleClick={onRename}
+        onClick={toggle}
+        onDoubleClick={() => {
+          setOpen(false);
+          onRename?.();
+        }}
         aria-haspopup="listbox"
         aria-expanded={open}
         title="Switch conversation (double-click to rename)"
@@ -618,36 +647,66 @@ function Switcher({ thread, onRename }: { thread: Thread; onRename?: () => void 
         <ChevronDown className="size-3.5 shrink-0 text-subtle group-hover:text-fg" />
       </button>
       {open && (
-        <div role="listbox" aria-label="Conversations" className="pop absolute top-full left-0 z-50 mt-1.5 w-[min(380px,calc(100vw-1.5rem))] rounded-lg border border-line bg-panel p-1">
-          {others.map((t) => {
-            const p = data.projects.get(t.project)?.value;
-            return (
-              <button
-                key={t.id}
-                role="option"
-                aria-selected={t.id === thread.id}
-                onClick={() => {
-                  setOpen(false);
-                  if (t.id !== thread.id) openThread(t.id);
-                }}
-                className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left hover:bg-panel-2"
-              >
-                <StatusDot status={t.status} className="shrink-0" />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[12.5px]">{t.title}</span>
-                  <span className="block truncate text-[11px] text-subtle">
-                    {p?.name}
-                    {isBusy(t.status) && t.activity ? ` · ${t.activity}` : ""}
+        <div className="pop absolute top-full left-0 z-50 mt-1.5 flex w-[min(380px,calc(100vw-1.5rem))] flex-col rounded-lg border border-line bg-panel p-1">
+          <input
+            autoFocus
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setActive(0);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                e.preventDefault();
+                const n = others.length;
+                if (n) setActive((at + (e.key === "ArrowDown" ? 1 : n - 1)) % n);
+              } else if (e.key === "Enter") {
+                e.preventDefault();
+                pick(others[at]);
+              }
+            }}
+            role="combobox"
+            aria-label="Find a conversation"
+            aria-expanded
+            aria-controls="switcher-list"
+            aria-activedescendant={others[at] ? `switcher-${others[at].id}` : undefined}
+            placeholder="Find a conversation…"
+            className="mb-1 h-8 rounded-md bg-panel-2 px-2 text-[12.5px] outline-hidden placeholder:text-subtle"
+          />
+          <div ref={list} id="switcher-list" role="listbox" aria-label="Conversations" className="max-h-[min(60vh,420px)] overflow-y-auto" data-scroll>
+            {others.length === 0 && <p className="px-2 py-2 text-[12px] text-subtle">No conversation matches.</p>}
+            {others.map((t, i) => {
+              const p = data.projects.get(t.project)?.value;
+              return (
+                <button
+                  key={t.id}
+                  id={`switcher-${t.id}`}
+                  data-index={i}
+                  role="option"
+                  tabIndex={-1}
+                  aria-selected={i === at}
+                  aria-current={t.id === thread.id || undefined}
+                  onMouseMove={() => i !== at && setActive(i)}
+                  onClick={() => pick(t)}
+                  className={`flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left ${i === at ? "bg-panel-2" : ""}`}
+                >
+                  <StatusDot status={t.status} className="shrink-0" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[12.5px]">{t.title}</span>
+                    <span className="block truncate text-[11px] text-subtle">
+                      {p?.name}
+                      {isBusy(t.status) && t.activity ? ` · ${t.activity}` : ""}
+                    </span>
                   </span>
-                </span>
-                {t.pending_requests > 0 ? (
-                  <span className="rounded-full bg-accent px-1.5 font-mono text-[10.5px] font-semibold text-white tabular-nums">{t.pending_requests}</span>
-                ) : t.id === thread.id ? (
-                  <Check className="size-3.5 text-subtle" />
-                ) : null}
-              </button>
-            );
-          })}
+                  {t.pending_requests > 0 ? (
+                    <span className="rounded-full bg-accent px-1.5 font-mono text-[10.5px] font-semibold text-white tabular-nums">{t.pending_requests}</span>
+                  ) : t.id === thread.id ? (
+                    <Check className="size-3.5 text-subtle" />
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>
