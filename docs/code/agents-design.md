@@ -193,6 +193,13 @@ switched off under `prefers-reduced-motion`, and the engine draws a static, stat
 - **Do** use the Horizon mark in the header (`HorizonMark`). **Don't** put the globe in a bar.
 - **Do** honour reduced motion. **Don't** animate anything that isn't changing state.
 
+## Automations
+
+The Automations view follows this system and adds a few pieces of its own: the list in the working
+area with the open automation in the side panel, the builder's flow of cards, template fields,
+the run timeline, notice toasts and the canvas chip. They're in docs/code/automations-ui.md, with
+the Linear, Zapier, n8n, GitHub Actions, Vercel, Raycast and T3 references each one comes from.
+
 ## References
 
 Researched on 2026-11-04 from public pages only. The screenshots are in

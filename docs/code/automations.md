@@ -10,6 +10,7 @@ anything over HTTP; tell the owner.
 Code: `crates/code-control/src/agents/automations/`. Wire types: `agent_proto::automation`
 (`crates/agent-proto/src/automation.rs`), mirrored in `apps/dashboard/src/lib/automations-api.ts`; both
 parse `crates/agent-proto/fixtures/automation*.json`. Routes: docs/code/http-api.md, "Automations".
+The dashboard's Automations view (list, builder, runs, notices): docs/code/automations-ui.md.
 
 ## Shape
 
