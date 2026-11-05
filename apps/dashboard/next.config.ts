@@ -13,6 +13,9 @@ const devOrigins = (process.env.ROLL_DEV_ORIGINS ?? "")
 const nextConfig: NextConfig = {
   cacheComponents: true,
   partialPrefetching: true,
+  // The dev tools' "N" badge and its pill sat on the canvas's prompt bar (bottom left), looking
+  // like part of it. Errors still open the overlay.
+  devIndicators: false,
   ...(devOrigins.length > 0 ? { allowedDevOrigins: devOrigins } : {}),
   turbopack: {
     rules: {

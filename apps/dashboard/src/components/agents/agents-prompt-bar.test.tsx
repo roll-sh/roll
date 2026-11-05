@@ -172,6 +172,86 @@ describe("the prompt bar", () => {
   });
 });
 
+describe("the prompt bar's open and close", () => {
+  const isOpen = () => screen.getByRole("form", { name: "Ask agents" }).hasAttribute("data-open");
+  const withMachines = () => {
+    const h = harness();
+    // Codex too, so the picker's rail has another provider to click.
+    act(() => h.client.enqueue({ type: "machine", cursor: 30, machine: machine({ info: { ...machine().info!, providers: [provider(), codex] } }) }));
+    return h;
+  };
+
+  it("stays open while its picker is used where a click doesn't focus a button (Safari, Firefox on macOS)", async () => {
+    renderAgents(
+      <>
+        <PromptBar />
+        <div data-testid="canvas" />
+      </>,
+      withMachines(),
+    );
+    await userEvent.click(goal());
+    await userEvent.click(screen.getByRole("button", { name: /^Model:/ }));
+    const search = await screen.findByRole("combobox", { name: "Search models" });
+    const rail = screen.getByRole("toolbar", { name: "Providers" });
+    const codexTab = within(rail).getByRole("button", { name: /Codex/ });
+    // Safari: the search blurs to nothing (the button it's going to doesn't take focus), and the
+    // press and click reach the button without focusing it.
+    fireEvent.focusOut(search, { relatedTarget: null });
+    expect(isOpen()).toBe(true);
+    fireEvent.pointerDown(codexTab);
+    expect(isOpen()).toBe(true);
+    fireEvent.mouseDown(codexTab);
+    fireEvent.click(codexTab);
+    expect(isOpen()).toBe(true);
+    expect(screen.getByRole("toolbar", { name: "Providers" })).toBeInTheDocument();
+    expect(within(screen.getByRole("toolbar", { name: "Providers" })).getByRole("button", { name: /Codex/ })).toHaveAttribute("aria-pressed", "true");
+    // A press on the picker's own background is the picker's: the text doesn't take focus from it.
+    const before = document.activeElement;
+    fireEvent.mouseDown(rail);
+    expect(document.activeElement).toBe(before);
+  });
+
+  it("closes on a press outside it (the canvas), on Escape, and when focus moves to a real element elsewhere; a blur alone never closes it", async () => {
+    renderAgents(
+      <>
+        <PromptBar />
+        <div data-testid="canvas" />
+        <button type="button">Elsewhere</button>
+      </>,
+      harness(),
+    );
+    await userEvent.click(goal());
+    expect(isOpen()).toBe(true);
+    fireEvent.focusOut(goal(), { relatedTarget: null });
+    expect(isOpen()).toBe(true);
+    fireEvent.pointerDown(screen.getByTestId("canvas"));
+    expect(isOpen()).toBe(false);
+
+    await userEvent.click(goal());
+    await userEvent.keyboard("{Escape}");
+    expect(isOpen()).toBe(false);
+
+    await userEvent.click(goal());
+    act(() => screen.getByRole("button", { name: "Elsewhere" }).focus());
+    expect(isOpen()).toBe(false);
+    // Something typed keeps it open wherever focus goes.
+    await userEvent.type(goal(), "half a goal");
+    fireEvent.pointerDown(screen.getByTestId("canvas"));
+    expect(isOpen()).toBe(true);
+  });
+
+  it("a press on the bar itself (not a control) focuses the text once", async () => {
+    renderAgents(<PromptBar />, harness());
+    const form = screen.getByRole("form", { name: "Ask agents" });
+    const focused = vi.fn();
+    goal().addEventListener("focus", focused);
+    fireEvent.mouseDown(form);
+    expect(document.activeElement).toBe(goal());
+    expect(focused).toHaveBeenCalledTimes(1);
+    expect(isOpen()).toBe(true);
+  });
+});
+
 describe("the prompt bar on the page", () => {
   it("stays, with its draft, while a conversation is open beside the canvas", async () => {
     const h = harness();

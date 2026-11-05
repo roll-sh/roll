@@ -230,6 +230,7 @@ Text levels: `--fg` `#f7f8f8`, `--soft` `#d0d6e0` (secondary body), `--muted` `#
 | hover and colour | 150ms; buttons press to scale 0.97 |
 | cards | ease to their layout slot (spring-like, 0.22 per frame); new cards grow from their parent |
 | state loops | the busy border and pulse dots breathe over 1.6s; shimmer runs 1.8s; no flashing |
+| a pill that opens into a composer (the canvas's prompt bar) | one structure in both states: the text line never moves; the rest grows from nothing (grid rows 0fr → 1fr) while the radius eases from a pill to 16px, 240ms on `--ease-out-soft`; its contents fade and rise 4px, 60ms behind; closing is the same backwards |
 
 The drawer curve `cubic-bezier(0.32,0.72,0,1)` is T3's `--ease-drawer`. Every keyframe class is
 switched off under `prefers-reduced-motion`, and the engine draws a static, state-correct frame.
@@ -249,6 +250,10 @@ switched off under `prefers-reduced-motion`, and the engine draws a static, stat
   already does it.
 - **Do** use the Horizon mark in the header (`HorizonMark`). **Don't** put the globe in a bar.
 - **Do** honour reduced motion. **Don't** animate anything that isn't changing state.
+- **Do** close something on a press outside it and its popups, on Escape, or when focus moves to
+  a real element elsewhere. **Don't** close it on a blur alone: Safari and Firefox on macOS don't
+  focus buttons on click, so `relatedTarget` is null while a popup's own buttons are used. Never
+  decide from `relatedTarget` alone.
 
 ## Automations
 

@@ -1460,7 +1460,11 @@ The surface has three views:
   cancelled (Esc). The bar stays while a conversation is open beside the canvas: centred over a
   wide canvas, across a narrow one above the zoom controls, and on a phone under "Waiting for you".
   Fitting, focusing and revealing cards keep them above it. Keyboard: Enter starts, Shift+Enter is
-  a new line, arrows switch Orchestrate and One agent, Esc leaves.
+  a new line, arrows switch Orchestrate and One agent, Esc leaves. It opens on focus or a press
+  and closes on a press outside it and its popups, Esc, or focus moving to something else, never
+  on a blur alone (Safari and Firefox on macOS don't focus a clicked button, so using its pickers
+  there used to close it). The pill and the open bar are one shape: the text stays put while the
+  toolbar grows in under it (docs/code/agents-design.md, "Motion").
 
 - **Getting started.** An owner with no machines sees the globe (`RollMark`) and the two ways in
   side by side, the same as "Add machine" on the canvas: connect your computer (install,

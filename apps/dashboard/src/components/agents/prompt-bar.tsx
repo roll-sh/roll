@@ -12,6 +12,10 @@ import { Select, type SelectOption } from "./ui";
 import { useAgents, useAgentsSnapshot, usePrefs } from "./use-agents";
 
 const ADD = "+";
+/** Its popups (portaled out of the form): the model picker, a picker's option menu, the project list. */
+const OWN_POPUPS = "[data-base-ui-portal], [data-model-picker], [data-option-menu], [role=listbox]";
+/** The open and close: T3's ease-out, height and radius together. */
+const EASE = "duration-[240ms] ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none";
 const KINDS = [
   ["orchestrate", "Orchestrate", Workflow, "An orchestrator plans it and spins up agents"],
   ["agent", "One agent", Bot, "One agent with this as its prompt"],
@@ -40,7 +44,7 @@ export function PromptBar({ ref, above }: { ref?: Ref<HTMLDivElement>; above?: R
   const launch = useLaunchGoal();
   const [draft, setDraft] = useState<GoalDraft>(emptyGoalDraft);
   const [loaded, setLoaded] = useState(false);
-  const [focused, setFocused] = useState(false);
+  const [engaged, setEngaged] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const area = useRef<HTMLTextAreaElement>(null);
@@ -74,7 +78,7 @@ export function PromptBar({ ref, above }: { ref?: Ref<HTMLDivElement>; above?: R
   const target = pinned ?? fallback;
   const defaults = target ? newThreadSettings(target.project, target.machine, prefs.defaults) : undefined;
   const choice = target && defaults?.provider ? choiceOn(target.machine, draft.choice ?? undefined, defaults) : undefined;
-  const open = focused || draft.text.length > 0 || draft.picked || !!error || busy;
+  const open = engaged || draft.text.length > 0 || draft.picked || !!error || busy;
 
   const edit = (patch: Partial<Omit<GoalDraft, "id">>) => {
     setError(null);
@@ -84,6 +88,36 @@ export function PromptBar({ ref, above }: { ref?: Ref<HTMLDivElement>; above?: R
   const pin = () => {
     if (!pinned && target) setDraft((d) => ({ ...d, project: target.project.id }));
   };
+  const engage = () => {
+    setEngaged(true);
+    pin();
+  };
+  const leave = () => {
+    setEngaged(false);
+    // Nothing drafted: back to following the default.
+    setDraft((d) => (!d.text && !d.picked && d.project ? { ...d, project: null } : d));
+  };
+
+  // Engaged from focus or a press inside it, until a press outside it and its popups, Escape, or
+  // focus moving to a real element elsewhere. Never from a blur alone: Safari and Firefox on macOS
+  // don't focus a button they click, so while its pickers are used a blur has no relatedTarget.
+  const leaveRef = useRef(leave);
+  leaveRef.current = leave;
+  useEffect(() => {
+    if (!engaged) return;
+    const outside = (t: EventTarget | null) => {
+      const el = t instanceof Element ? t : t instanceof Node ? t.parentElement : null;
+      return !!el && !box.current?.contains(el) && !el.closest(OWN_POPUPS);
+    };
+    const onPress = (e: PointerEvent) => outside(e.target) && leaveRef.current();
+    const onFocus = (e: FocusEvent) => outside(e.target) && leaveRef.current();
+    document.addEventListener("pointerdown", onPress, true);
+    document.addEventListener("focusin", onFocus);
+    return () => {
+      document.removeEventListener("pointerdown", onPress, true);
+      document.removeEventListener("focusin", onFocus);
+    };
+  }, [engaged]);
 
   // Grows with the text, up to six lines.
   useEffect(() => {
@@ -106,6 +140,7 @@ export function PromptBar({ ref, above }: { ref?: Ref<HTMLDivElement>; above?: R
       if (waiting.current !== token) return;
       // Only what was sent goes: anything typed meanwhile stays.
       setDraft((d) => (d.id === sent.id ? sentGoalDraft(d) : d));
+      leave();
       area.current?.blur();
     } catch (e) {
       if (waiting.current !== token) return;
@@ -136,26 +171,31 @@ export function PromptBar({ ref, above }: { ref?: Ref<HTMLDivElement>; above?: R
       <form
         ref={box}
         aria-label="Ask agents"
+        data-open={open || undefined}
         onSubmit={(e) => {
           e.preventDefault();
           void submit();
         }}
-        onFocus={() => {
-          setFocused(true);
-          pin();
+        onFocus={engage}
+        onMouseDown={(e) => {
+          engage();
+          // A press on the bar itself (not a control) puts the caret in the text, once: no blur
+          // and refocus as the toolbar comes in.
+          // (React brings presses in its portaled popups here too: those are theirs.)
+          const el = e.target as HTMLElement;
+          if (!box.current?.contains(el) || el === area.current || el.closest("button, a, input, textarea, [role=combobox], [role=radio], [role=option]")) return;
+          e.preventDefault();
+          area.current?.focus();
         }}
-        onBlur={(e) => {
-          const to = e.relatedTarget as HTMLElement | null;
-          // The pickers' popups are portaled out of the form; the bar stays open while they're in use.
-          if (box.current?.contains(to) || to?.closest('[data-model-picker], [data-option-menu], [role="listbox"]')) return;
-          setFocused(false);
-          // Nothing drafted: back to following the default.
-          setDraft((d) => (!d.text && !d.picked && d.project ? { ...d, project: null } : d));
-        }}
-        className={`palette-glass pointer-events-auto mb-[max(3.5rem,calc(env(safe-area-inset-bottom)+3rem))] w-full overflow-hidden transition-[border-radius,box-shadow] duration-200 ease-out @min-[55rem]/bar:mb-4 @min-[55rem]/bar:w-[min(640px,calc(100%-25rem))] ${open ? "rounded-2xl" : "rounded-full"}`}
+        className={`palette-glass pointer-events-auto mb-[max(3.5rem,calc(env(safe-area-inset-bottom)+3rem))] w-full cursor-text overflow-hidden transition-[border-radius] ${EASE} @min-[55rem]/bar:mb-4 @min-[55rem]/bar:w-[min(640px,calc(100%-25rem))] ${open ? "rounded-2xl" : "rounded-[22px]"}`}
       >
-        <div className={`flex items-start gap-2 ${open ? "px-3.5 pt-3" : "px-4"}`}>
-          {!open && <Workflow className="mt-3 size-4 shrink-0 text-accent" aria-hidden />}
+        {/* The same line open or closed: the text and caret never move. */}
+        <div className="flex items-start gap-2.5 pr-3 pl-4">
+          <span className="relative mt-[13px] size-4 shrink-0" aria-hidden>
+            {KINDS.map(([k, , Icon]) => (
+              <Icon key={k} className={`absolute inset-0 size-4 transition-opacity duration-200 motion-reduce:transition-none ${k === "orchestrate" ? "text-accent" : "text-muted"} ${draft.kind === k ? "opacity-100" : "opacity-0"}`} />
+            ))}
+          </span>
           <textarea
             ref={area}
             rows={1}
@@ -169,113 +209,121 @@ export function PromptBar({ ref, above }: { ref?: Ref<HTMLDivElement>; above?: R
               } else if (e.key === "Escape") {
                 e.preventDefault();
                 e.stopPropagation();
-                if (busy) cancel();
-                else area.current?.blur();
+                if (busy) return cancel();
+                leave();
+                area.current?.blur();
               }
             }}
             placeholder={draft.kind === "orchestrate" ? "What should the agents get done?" : "What should a new agent do?"}
             aria-label={draft.kind === "orchestrate" ? "A goal for agents" : "A prompt for a new agent"}
-            className={`min-w-0 flex-1 resize-none bg-transparent text-[13.5px] leading-[1.45] text-fg outline-none placeholder:text-subtle ${open ? "min-h-[44px] py-0.5" : "h-10 py-2.5"}`}
+            className="min-w-0 flex-1 resize-none bg-transparent py-[11px] text-[13.5px] leading-5 text-fg outline-none placeholder:text-subtle"
           />
-          {!open && (
-            <kbd className="mt-2.5 shrink-0 rounded bg-fg/[0.08] px-1.5 py-0.5 font-sans text-[11px] text-muted max-sm:hidden" title="The command palette">
-              ⌘K
-            </kbd>
-          )}
+          <kbd
+            className={`mt-[11px] shrink-0 rounded bg-fg/[0.08] px-1.5 py-0.5 font-sans text-[11px] text-muted transition-opacity duration-150 motion-reduce:transition-none max-sm:hidden ${open ? "opacity-0" : "opacity-100"}`}
+            title="The command palette"
+            aria-hidden={open}
+          >
+            ⌘K
+          </kbd>
         </div>
-        {open && error && (
-          <p role="alert" className="mx-3.5 mt-1.5 flex items-start gap-2 rounded-lg bg-danger/[0.08] px-2.5 py-1.5 text-[12px] leading-[1.45] text-danger">
-            <span className="min-w-0 flex-1 break-words">{error}</span>
-            <button type="button" onClick={() => setError(null)} aria-label="Dismiss" className="mt-px shrink-0 rounded opacity-70 hover:opacity-100">
-              <X className="size-3.5" />
-            </button>
-          </p>
-        )}
-        {open && (
-          <div className="palette-view flex flex-wrap items-center gap-1.5 px-2.5 pt-1.5 pb-2.5">
-            <div
-              role="radiogroup"
-              aria-label="Who does it"
-              className="flex shrink-0 rounded-lg bg-fg/[0.05] p-0.5 text-[12px]"
-              onKeyDown={(e) => {
-                if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
-                e.preventDefault();
-                const next: GoalKind = draft.kind === "orchestrate" ? "agent" : "orchestrate";
-                edit({ kind: next });
-                box.current?.querySelector<HTMLElement>(`[data-kind="${next}"]`)?.focus();
-              }}
-            >
-              {KINDS.map(([k, label, Icon, title]) => (
-                <button
-                  key={k}
-                  type="button"
-                  role="radio"
-                  data-kind={k}
-                  aria-checked={draft.kind === k}
-                  tabIndex={draft.kind === k ? 0 : -1}
-                  onClick={() => {
-                    edit({ kind: k });
-                    area.current?.focus();
+        {/* Grows from nothing (grid rows 0fr → 1fr), the toolbar rising in just after; inert closed. */}
+        <div className={`grid transition-[grid-template-rows] ${EASE} ${open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"}`} inert={!open} aria-hidden={!open}>
+          <div className="min-h-0 overflow-hidden">
+            <div className={`transition-[opacity,translate] duration-200 ease-out motion-reduce:transition-none ${open ? "translate-y-0 opacity-100 delay-[60ms]" : "translate-y-1 opacity-0"}`}>
+              {error && (
+                <p role="alert" className="mx-3.5 mt-0.5 flex cursor-auto items-start gap-2 rounded-lg bg-danger/[0.08] px-2.5 py-1.5 text-[12px] leading-[1.45] text-danger">
+                  <span className="min-w-0 flex-1 break-words">{error}</span>
+                  <button type="button" onClick={() => setError(null)} aria-label="Dismiss" className="mt-px shrink-0 rounded opacity-70 hover:opacity-100">
+                    <X className="size-3.5" />
+                  </button>
+                </p>
+              )}
+              <div className="flex flex-wrap items-center gap-1.5 px-2.5 pt-2 pb-2.5">
+                <div
+                  role="radiogroup"
+                  aria-label="Who does it"
+                  className="flex shrink-0 cursor-auto rounded-lg bg-fg/[0.05] p-0.5 text-[12px]"
+                  onKeyDown={(e) => {
+                    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+                    e.preventDefault();
+                    const next: GoalKind = draft.kind === "orchestrate" ? "agent" : "orchestrate";
+                    edit({ kind: next });
+                    box.current?.querySelector<HTMLElement>(`[data-kind="${next}"]`)?.focus();
                   }}
-                  className={`flex items-center gap-1.5 rounded-md px-2 py-1 whitespace-nowrap transition-colors ${draft.kind === k ? "bg-fg/[0.1] text-fg" : "text-muted hover:text-fg"}`}
-                  title={title}
                 >
-                  <Icon className={`size-3.5 ${draft.kind === k && k === "orchestrate" ? "text-accent" : ""}`} />
-                  {/* A phone keeps the icons; the name is still what it's called. */}
-                  <span className="@max-[30rem]/bar:sr-only">{label}</span>
+                  {KINDS.map(([k, label, Icon, title]) => (
+                    <button
+                      key={k}
+                      type="button"
+                      role="radio"
+                      data-kind={k}
+                      aria-checked={draft.kind === k}
+                      tabIndex={draft.kind === k ? 0 : -1}
+                      onClick={() => {
+                        edit({ kind: k });
+                        area.current?.focus();
+                      }}
+                      className={`flex items-center gap-1.5 rounded-md px-2 py-1 whitespace-nowrap transition-colors ${draft.kind === k ? "bg-fg/[0.1] text-fg" : "text-muted hover:text-fg"}`}
+                      title={title}
+                    >
+                      <Icon className={`size-3.5 ${draft.kind === k && k === "orchestrate" ? "text-accent" : ""}`} />
+                      {/* A phone keeps the icons; the name is still what it's called. */}
+                      <span className="@max-[30rem]/bar:sr-only">{label}</span>
+                    </button>
+                  ))}
+                </div>
+                {target ? (
+                  <Select
+                    label="Project"
+                    variant="ghost"
+                    side="top"
+                    title="Where it starts"
+                    className={`h-7 max-w-[14rem] min-w-0 rounded-md px-2 text-[12px] @max-[30rem]/bar:max-w-[9rem] ${offline ? "text-danger" : "text-muted hover:text-fg"}`}
+                    icon={<ProjectIcon project={target.project} className="size-3.5" />}
+                    value={target.project.id}
+                    onChange={(id) => {
+                      if (id === ADD) return openPalette({ kind: "add-project" });
+                      edit({ project: id, picked: true });
+                      area.current?.focus();
+                    }}
+                    options={options}
+                  />
+                ) : (
+                  <button type="button" onClick={() => openPalette({ kind: "add-project" })} className="flex h-7 items-center gap-1 rounded-md px-2 text-[12px] text-muted hover:bg-fg/[0.06] hover:text-fg">
+                    <FolderPlus className="size-3.5" />
+                    Add a project
+                  </button>
+                )}
+                {target && choice && (
+                  <ModelPicker
+                    providers={installedProviders(target.machine)}
+                    value={choice}
+                    onChange={(c: ModelChoice) => edit({ choice: c })}
+                    side="top"
+                  />
+                )}
+                <span className="flex-1" />
+                {busy && (
+                  <span className="flex shrink-0 items-center gap-2 text-[12px]">
+                    <span className="shimmer text-muted">Starting…</span>
+                    <button type="button" onClick={cancel} className="rounded-md px-1.5 py-0.5 text-muted hover:bg-fg/[0.06] hover:text-fg" title="Stop waiting (Esc). Sending it again never starts it twice.">
+                      Cancel
+                    </button>
+                  </span>
+                )}
+                <button
+                  type="submit"
+                  disabled={!draft.text.trim() || busy}
+                  aria-label={draft.kind === "orchestrate" ? "Orchestrate" : "Start the agent"}
+                  title={draft.kind === "orchestrate" ? "Orchestrate (Enter)" : "Start the agent (Enter)"}
+                  className="grid size-7 shrink-0 place-items-center rounded-full bg-fg text-bg transition hover:opacity-85 disabled:opacity-30"
+                >
+                  <ArrowUp className="size-4" strokeWidth={2} />
                 </button>
-              ))}
+              </div>
             </div>
-            {target ? (
-              <Select
-                label="Project"
-                variant="ghost"
-                side="top"
-                title="Where it starts"
-                className={`h-7 max-w-[14rem] min-w-0 rounded-md @max-[30rem]/bar:max-w-[9rem] px-2 text-[12px] ${offline ? "text-danger" : "text-muted hover:text-fg"}`}
-                icon={<ProjectIcon project={target.project} className="size-3.5" />}
-                value={target.project.id}
-                onChange={(id) => {
-                  if (id === ADD) return openPalette({ kind: "add-project" });
-                  edit({ project: id, picked: true });
-                  area.current?.focus();
-                }}
-                options={options}
-              />
-            ) : (
-              <button type="button" onClick={() => openPalette({ kind: "add-project" })} className="flex h-7 items-center gap-1 rounded-md px-2 text-[12px] text-muted hover:bg-fg/[0.06] hover:text-fg">
-                <FolderPlus className="size-3.5" />
-                Add a project
-              </button>
-            )}
-            {target && choice && (
-              <ModelPicker
-                providers={installedProviders(target.machine)}
-                value={choice}
-                onChange={(c: ModelChoice) => edit({ choice: c })}
-                side="top"
-              />
-            )}
-            <span className="flex-1" />
-            {busy && (
-              <span className="flex shrink-0 items-center gap-2 text-[12px]">
-                <span className="shimmer text-muted">Starting…</span>
-                <button type="button" onClick={cancel} className="rounded-md px-1.5 py-0.5 text-muted hover:bg-fg/[0.06] hover:text-fg" title="Stop waiting (Esc). Sending it again never starts it twice.">
-                  Cancel
-                </button>
-              </span>
-            )}
-            <button
-              type="submit"
-              disabled={!draft.text.trim() || busy}
-              aria-label={draft.kind === "orchestrate" ? "Orchestrate" : "Start the agent"}
-              title={draft.kind === "orchestrate" ? "Orchestrate (Enter)" : "Start the agent (Enter)"}
-              className="grid size-7 shrink-0 place-items-center rounded-full bg-fg text-bg transition hover:opacity-85 disabled:opacity-30"
-            >
-              <ArrowUp className="size-4" strokeWidth={2} />
-            </button>
           </div>
-        )}
+        </div>
       </form>
     </div>
   );
