@@ -32,20 +32,22 @@ afterEach(() => {
 });
 
 describe("the automations sheet", () => {
-  it("slides in beside the canvas from ⚡ or A, the canvas stays live, and ⚡, Escape or A close it", async () => {
+  it("slides in beside the canvas from ⚡, and the canvas stays live: a card opens its conversation in the one right sheet", async () => {
     setup();
     await userEvent.click(screen.getByRole("button", { name: "Automations (A)" }));
     const aside = sheet()!;
     expect(aside).toHaveClass("panel-in");
     expect(await within(aside).findByRole("button", { name: "Morning triage" })).toBeInTheDocument();
-    // The canvas is still there and still works: a card opens its conversation (the one right sheet).
     expect(screen.getByRole("form", { name: "Ask agents" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Thread Upgrade to Next 16.4" }));
     expect(view()).toEqual({ kind: "thread", thread: "thr_2" });
     expect(sheet()).toBeNull();
     expect(screen.getAllByRole("complementary")).toHaveLength(1);
+  });
 
-    await userEvent.click(screen.getByRole("button", { name: "Automations (A)" }));
+  it("⚡ closes it and it slides out; A opens and closes it, Escape closes it from the list", async () => {
+    setup();
+    act(() => setAgentsView({ kind: "automations" }));
     await userEvent.click(screen.getByRole("button", { name: "Close automations (A)" }));
     expect(view()).toEqual({ kind: "canvas" });
     // It slides out, then it's gone.
