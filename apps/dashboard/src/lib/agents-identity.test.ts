@@ -133,3 +133,10 @@ describe("canvas edges", () => {
     expect(g.nodes.get("m:mch_1")?.tint).toBe("--id-violet");
   });
 });
+
+describe("the page itself (globals.css)", () => {
+  it("never pulls to refresh or bounces: overscroll is off on html and body", () => {
+    const css = readFileSync(join(process.cwd(), "src/app/globals.css"), "utf8");
+    expect(css).toMatch(/html,\s*body\s*\{\s*overscroll-behavior:\s*none;/);
+  });
+});

@@ -202,6 +202,13 @@ body {
   color: var(--fg);
 }
 
+/* The dashboard is an app: pulling down past the top must not reload it (Safari's and Chrome's
+   pull-to-refresh) or bounce the whole page. Inner scrollers keep `overscroll-contain`. */
+html,
+body {
+  overscroll-behavior: none;
+}
+
 ::selection {
   background: color-mix(in srgb, var(--accent) 35%, transparent);
 }
