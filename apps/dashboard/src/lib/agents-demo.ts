@@ -9,6 +9,7 @@ import { avatarSvg } from "@roll/brand/geometry";
 import { checkProjectIcon } from "./agents-identity";
 import type {
   EndpointInfo,
+  EndpointSpec,
   PullOutcome,
   PullResult,
   Approval,
@@ -48,7 +49,7 @@ import type {
 import { DEFAULT_AUTO_SETTLE, EMPTY_INBOX, NO_SETTINGS, reachable } from "./agents-api";
 import type { AgentsTransport } from "./agents-client";
 import { DemoAutomations } from "./automations-demo";
-import { memoryCanvas, memorySettings, type AgentsServices, type RepoChoice } from "./agents-services";
+import { memoryCanvas, memoryEndpoints, memorySettings, type AgentsServices, type RepoChoice } from "./agents-services";
 import { offeredProviders, settingsError } from "./machine-settings";
 import { checkEndpoint, demoModels, incompatible, setEndpoint, withEndpoints } from "./agents-endpoints";
 import { PLAN_IMPLEMENTATION_PREFIX, planTitle } from "./agents-plan";
@@ -299,6 +300,8 @@ const MBP = "mch_demo_ada";
 /** The demo daemons' seal key (a test key's public half): the demo never opens what is sealed to it. */
 const DEMO_SEAL_KEY = "KMIZzg7UJuV-Nxs3gUarEXCHzKlAkKSSSCaXrdLz4zg";
 const BOX = "mch_demo_box";
+/** The demo owner's CLIProxyAPI: set on ada-mbp for Gemini CLI, and kept as a profile (the default for new sandboxes). */
+const DEMO_CLIPROXY: EndpointSpec = { id: "cliproxy", name: "CLIProxyAPI", kind: "cliproxy", base_url: "http://100.64.0.7:8317", providers: ["acp:gemini"] };
 
 const DIFF_QUEUE = `@@ -88,13 +88,17 @@ impl Queue {
      pub async fn claim(&self, repo: &RepoId) -> Result<Option<Claim>> {
@@ -710,6 +713,8 @@ export class DemoOwner implements AgentsTransport {
   private canvas = memoryCanvas();
   /** The demo owner's agents settings, the same. */
   private settings = memorySettings();
+  /** The demo owner's endpoint profiles (never a key), the same. */
+  private endpoints = memoryEndpoints([{ ...DEMO_CLIPROXY, providers: ["claude", "codex", "acp:gemini"], sandbox_default: true, updated_at: Date.now() - 86_400_000 }]);
   /** The demo owner's Slack, Discord and GitHub, the same. */
   private integrations = demoIntegrations();
   /** The demo owner's Linear workspace (connected). */
@@ -1098,6 +1103,7 @@ export class DemoOwner implements AgentsTransport {
       settings: owner.settings,
       integrations: owner.integrations,
       linear: owner.linear,
+      endpoints: owner.endpoints,
     };
   }
 
@@ -1126,7 +1132,7 @@ export class DemoOwner implements AgentsTransport {
       last_seen: now(),
     });
     // Gemini CLI on ada-mbp goes through the owner's CLIProxyAPI ("Endpoints").
-    this.layEndpoints(MBP, [{ id: "cliproxy", name: "CLIProxyAPI", kind: "cliproxy", base_url: "http://100.64.0.7:8317", providers: ["acp:gemini"], key: "sealed", models: demoModels("cliproxy"), checked_at: t0 }], false);
+    this.layEndpoints(MBP, [{ ...DEMO_CLIPROXY, key: "sealed", models: demoModels("cliproxy"), checked_at: t0 }], false);
     this.machines.set(BOX, {
       id: BOX,
       name: "build-box",

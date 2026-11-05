@@ -13,7 +13,8 @@ export const LIMITS = { envVars: 64, envName: 128, envValue: 4096, args: 64, arg
 /** Why `name` can't be an environment variable set from roll, or `null`. */
 export function envNameError(name: string): string | null {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || name.length > LIMITS.envName) return `${name || "That"} isn't a variable name (letters, digits and _, not starting with a digit)`;
-  if (isCredentialEnv(name)) return `${name} may hold a credential or an address, and roll never relays those: set it in the daemon's config.toml on the machine`;
+  if (isCredentialEnv(name))
+    return `${name} may hold a credential or an address, and roll never relays those in the clear: add an endpoint under Endpoints (its key is sealed to the machine), or set it in the daemon's config.toml on the machine`;
   return null;
 }
 

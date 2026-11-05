@@ -22,6 +22,8 @@ import { reasoningLevels } from "@/lib/agents-model-options";
 
 export const T0 = 1_762_000_000_000;
 export const M1 = "mch_1";
+/** A daemon's seal key (agent-host's test key, the public half): keys are sealed to it in tests. */
+export const SEAL_KEY = "KMIZzg7UJuV-Nxs3gUarEXCHzKlAkKSSSCaXrdLz4zg";
 
 export function provider(over: Partial<ProviderInfo> = {}): ProviderInfo {
   return {

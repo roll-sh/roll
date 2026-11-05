@@ -1,12 +1,13 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Command, Machine, MachineSettings, Reply } from "@/lib/agents-api";
+import type { Command, EndpointInfo, EndpointProfile, Machine, MachineSettings, Reply } from "@/lib/agents-api";
 import { setActiveClient } from "@/lib/agents-client";
+import { setEndpoint } from "@/lib/agents-endpoints";
 import { agentsSurface, resetAgentsSurface, viewFromHash, hashFor } from "@/lib/agents-surface";
 import { modelPrefs } from "@/lib/agents-models";
 import { DEFAULT_OWNER_SETTINGS, parseOwnerSettings } from "@/lib/owner-settings";
-import { machine, machineConfig, project, provider, thread } from "@/test/agents";
+import { machine, machineConfig, project, provider, SEAL_KEY, T0, thread } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents, type AgentsHarness } from "@/test/agents-render";
 import { MarkStateProvider } from "../mark-state";
 import { AgentsControl } from "./agents-control";
@@ -401,3 +402,287 @@ describe("what the settings change", () => {
 function projectFixture() {
   return project({ repo: null });
 }
+
+// ── endpoints (docs/code/agents.md, "Endpoints") ──
+
+const KEY = "sk-live-do-not-show-9f3a";
+const PROXY: EndpointInfo = {
+  id: "cliproxy",
+  name: "CLIProxyAPI",
+  kind: "cliproxy",
+  base_url: "http://proxy.local:8317",
+  providers: ["claude"],
+  key: "sealed",
+  models: [{ id: "gemini-2.5-pro" }, { id: "gpt-5.5" }],
+  checked_at: Date.now() - 3_600_000,
+};
+
+const sentOf = <T extends Command["type"]>(h: AgentsHarness, type: T) =>
+  h.command.mock.calls.map((c) => c[2]).filter((c): c is Extract<Command, { type: T }> => c.type === type);
+
+/** A machine with a seal key whose daemon keeps endpoints as `endpoint.set`/`remove` say, and says `hello` again. */
+function withEndpoints(endpoints: EndpointInfo[] = [], over: Partial<Machine> = {}, refuse?: string) {
+  const codex = provider({ id: "codex", name: "Codex", models: [] });
+  let m = machine({ info: { ...machine().info!, seal_key: SEAL_KEY, providers: [provider(), codex], settings: machineConfig({}, { endpoints }) }, ...over });
+  let cursor = 10;
+  const hello = (list: EndpointInfo[]) => {
+    m = { ...m, info: { ...m.info!, settings: { ...m.info!.settings!, endpoints: list } } };
+    h.client.enqueue({ type: "machine", cursor: ++cursor, machine: m });
+  };
+  const h: AgentsHarness = agentsHarness({
+    machines: [m],
+    reply: (c: Command): Reply => {
+      const list = m.info?.settings?.endpoints ?? [];
+      if (c.type === "endpoint.set") {
+        if (refuse) return { type: "error", code: "invalid", message: refuse };
+        const old = list.find((e) => e.id === c.endpoint.id);
+        const key = c.endpoint.key_ref ? "reference" : c.key?.type === "set" ? "sealed" : c.key?.type === "clear" ? "none" : (old?.key ?? "none");
+        hello(setEndpoint(list, { ...c.endpoint, key, models: old?.models ?? [] }));
+        return { type: "ok" };
+      }
+      if (c.type === "endpoint.remove") {
+        hello(list.filter((e) => e.id !== c.endpoint));
+        return { type: "ok" };
+      }
+      if (c.type === "endpoint.check") return { type: "endpoint_checked", ok: true, models: 42, ms: 180 };
+      return { type: "ok" };
+    },
+    ctx: { services: fakeServices() },
+  });
+  renderAgents(<SettingsPanel target={`m:${m.id}`} onClose={vi.fn()} />, h);
+  return { h };
+}
+
+const endpointsRegion = () => screen.getByRole("region", { name: "Endpoints" });
+
+describe("a machine's endpoints", () => {
+  it("adds one with its key sealed to the machine, and the typed key is nowhere afterwards", async () => {
+    const { h } = withEndpoints();
+    expect(within(endpointsRegion()).getByText(/No endpoints/)).toBeInTheDocument();
+    await userEvent.click(within(endpointsRegion()).getByRole("button", { name: "Add endpoint" }));
+    const form = within(endpointsRegion()).getByRole("form", { name: "New endpoint" });
+    expect(within(form).getByRole("textbox", { name: "Base URL" })).toHaveAttribute("placeholder", "http://127.0.0.1:8317");
+    await userEvent.type(within(form).getByRole("textbox", { name: "Endpoint name" }), "Team proxy");
+    await userEvent.type(within(form).getByRole("textbox", { name: "Base URL" }), "http://proxy.local:8317/");
+    await userEvent.click(within(form).getByRole("checkbox", { name: /Claude Code/ }));
+    const key = within(form).getByLabelText("Key");
+    expect(key).toHaveAttribute("type", "password");
+    expect(key).toHaveAttribute("autocomplete", "off");
+    await userEvent.type(key, KEY);
+    await userEvent.click(within(form).getByRole("button", { name: "Add endpoint" }));
+
+    await waitFor(() => expect(sentOf(h, "endpoint.set")).toHaveLength(1));
+    const [set] = sentOf(h, "endpoint.set");
+    expect(set.endpoint).toEqual({ id: "team-proxy", name: "Team proxy", kind: "cliproxy", base_url: "http://proxy.local:8317", providers: ["claude"] });
+    expect(set.key).toEqual({ type: "set", sealed: { v: 1, epk: expect.stringMatching(/^[\w-]{43}$/), nonce: expect.any(String), ct: expect.any(String) } });
+    // Only the box went out; the editor closed and the key is gone from the page.
+    expect(JSON.stringify(h.command.mock.calls)).not.toContain(KEY);
+    await waitFor(() => expect(within(endpointsRegion()).queryByRole("form")).toBeNull());
+    expect(document.body.innerHTML).not.toContain(KEY);
+    const item = within(endpointsRegion()).getByRole("group", { name: "Endpoint Team proxy" });
+    expect(within(item).getByText("Key set (never shown)")).toBeInTheDocument();
+    expect(within(item).getByText("CLIProxyAPI")).toBeInTheDocument();
+    expect(within(item).getByText("http://proxy.local:8317")).toBeInTheDocument();
+  });
+
+  it("checks one, replaces and removes its key, and removes it after asking", async () => {
+    const { h } = withEndpoints([PROXY]);
+    const item = () => within(endpointsRegion()).getByRole("group", { name: "Endpoint CLIProxyAPI" });
+    expect(within(item()).getByText("Claude Code · 2 models · checked 1 h ago")).toBeInTheDocument();
+    expect(within(item()).getByText("Key set (never shown)")).toBeInTheDocument();
+
+    await userEvent.click(within(item()).getByRole("button", { name: "Check CLIProxyAPI" }));
+    expect(sentOf(h, "endpoint.check")).toEqual([{ type: "endpoint.check", endpoint: "cliproxy" }]);
+    expect(await within(item()).findByText("42 models · 180 ms")).toBeInTheDocument();
+
+    await userEvent.click(within(item()).getByRole("button", { name: "Replace CLIProxyAPI's key" }));
+    const form = within(endpointsRegion()).getByRole("form", { name: "Edit CLIProxyAPI" });
+    await userEvent.type(within(form).getByLabelText("Key"), "sk-rotated-1");
+    await userEvent.click(within(form).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(sentOf(h, "endpoint.set")).toHaveLength(1));
+    expect(sentOf(h, "endpoint.set")[0]).toMatchObject({ endpoint: { id: "cliproxy", name: "CLIProxyAPI", kind: "cliproxy", base_url: "http://proxy.local:8317", providers: ["claude"] }, key: { type: "set" } });
+    expect(JSON.stringify(h.command.mock.calls)).not.toContain("sk-rotated-1");
+
+    await userEvent.click(within(item()).getByRole("button", { name: "Remove CLIProxyAPI's key" }));
+    await waitFor(() => expect(sentOf(h, "endpoint.set")[1]?.key).toEqual({ type: "clear" }));
+    expect(await within(item()).findByText("No key")).toBeInTheDocument();
+
+    await userEvent.click(within(item()).getByRole("button", { name: "Remove CLIProxyAPI" }));
+    expect(sentOf(h, "endpoint.remove")).toEqual([]);
+    expect(within(item()).getByText(/Its providers go back to their own login/)).toBeInTheDocument();
+    await userEvent.click(within(item()).getByRole("button", { name: "Remove CLIProxyAPI" }));
+    await waitFor(() => expect(sentOf(h, "endpoint.remove")).toEqual([{ type: "endpoint.remove", endpoint: "cliproxy" }]));
+    expect(await within(endpointsRegion()).findByText(/No endpoints/)).toBeInTheDocument();
+  });
+
+  it("switches a provider between its own login and an endpoint from its card, keeping the key", async () => {
+    const { h } = withEndpoints([PROXY]);
+    const providers = screen.getByRole("region", { name: "Providers" });
+    expect(within(providers).getByText("via CLIProxyAPI")).toBeInTheDocument();
+    await userEvent.click(within(providers).getByRole("button", { name: "Codex details" }));
+    const codex = within(providers).getByRole("combobox", { name: "Codex endpoint" });
+    expect(codex).toHaveTextContent("Own login");
+    await userEvent.click(codex);
+    await userEvent.click(await screen.findByRole("option", { name: /CLIProxyAPI/ }));
+    await waitFor(() => expect(sentOf(h, "endpoint.set")).toHaveLength(1));
+    expect(sentOf(h, "endpoint.set")[0]).toEqual({ type: "endpoint.set", endpoint: { id: "cliproxy", name: "CLIProxyAPI", kind: "cliproxy", base_url: "http://proxy.local:8317", providers: ["claude", "codex"] }, key: { type: "keep" } });
+
+    await userEvent.click(within(providers).getByRole("button", { name: "Claude Code details" }));
+    await userEvent.click(within(providers).getByRole("combobox", { name: "Claude Code endpoint" }));
+    await userEvent.click(await screen.findByRole("option", { name: "Own login" }));
+    await waitFor(() => expect(sentOf(h, "endpoint.set")[1]).toMatchObject({ endpoint: { id: "cliproxy", providers: ["codex"] }, key: { type: "keep" } }));
+
+    // New endpoint… opens the editor with the provider ticked.
+    await userEvent.click(within(providers).getByRole("combobox", { name: "Codex endpoint" }));
+    await userEvent.click(await screen.findByRole("option", { name: /New endpoint/ }));
+    const form = within(endpointsRegion()).getByRole("form", { name: "New endpoint" });
+    expect(within(form).getByRole("checkbox", { name: /Codex/ })).toBeChecked();
+    expect(within(form).getByRole("checkbox", { name: /Claude Code/ })).not.toBeChecked();
+    expect(sentOf(h, "endpoint.set")).toHaveLength(2);
+  });
+
+  it("disables a provider that can't speak the kind, says why, and shows what the daemon refuses", async () => {
+    const { h } = withEndpoints([], {}, "Codex speaks the OpenAI API: use an endpoint it speaks or CLIProxyAPI");
+    await userEvent.click(within(endpointsRegion()).getByRole("button", { name: "Add endpoint" }));
+    const form = within(endpointsRegion()).getByRole("form", { name: "New endpoint" });
+    await userEvent.click(within(within(form).getByRole("group", { name: "Endpoint kind" })).getByRole("button", { name: "OpenAI" }));
+    expect(within(form).getByRole("checkbox", { name: /Claude Code/ })).toBeDisabled();
+    expect(within(form).getByText("Claude Code speaks the Anthropic API")).toBeInTheDocument();
+    expect(within(form).getByRole("checkbox", { name: /Codex/ })).toBeEnabled();
+    // Checked before sending, in the daemon's words.
+    await userEvent.type(within(form).getByRole("textbox", { name: "Endpoint name" }), "gw");
+    await userEvent.type(within(form).getByRole("textbox", { name: "Base URL" }), "https://user:pw@gw.example.com/v1");
+    await userEvent.click(within(form).getByRole("button", { name: "Add endpoint" }));
+    expect(within(form).getByRole("alert")).toHaveTextContent("put the key in the key field, not in the URL");
+    expect(sentOf(h, "endpoint.set")).toEqual([]);
+    await userEvent.clear(within(form).getByRole("textbox", { name: "Base URL" }));
+    await userEvent.type(within(form).getByRole("textbox", { name: "Base URL" }), "https://gw.example.com/v1");
+    await userEvent.click(within(form).getByRole("button", { name: "Add endpoint" }));
+    expect(await within(form).findByText(/Codex speaks the OpenAI API/)).toBeInTheDocument();
+  });
+
+  it("takes a 1Password reference instead of a key", async () => {
+    const { h } = withEndpoints();
+    await userEvent.click(within(endpointsRegion()).getByRole("button", { name: "Add endpoint" }));
+    const form = within(endpointsRegion()).getByRole("form", { name: "New endpoint" });
+    await userEvent.type(within(form).getByRole("textbox", { name: "Endpoint name" }), "Team");
+    await userEvent.type(within(form).getByRole("textbox", { name: "Base URL" }), "https://gw.example.com");
+    await userEvent.click(within(form).getByRole("switch", { name: "Key from 1Password" }));
+    expect(within(form).queryByLabelText("Key")).toBeNull();
+    await userEvent.type(within(form).getByRole("textbox", { name: "1Password reference" }), "op://Work/gw/credential");
+    await userEvent.click(within(form).getByRole("button", { name: "Add endpoint" }));
+    await waitFor(() =>
+      expect(sentOf(h, "endpoint.set")[0]).toEqual({ type: "endpoint.set", endpoint: { id: "team", name: "Team", kind: "cliproxy", base_url: "https://gw.example.com", key_ref: "op://Work/gw/credential" }, key: { type: "keep" } }),
+    );
+  });
+
+  it("an old daemon's endpoints are read-only, and say to update roll", () => {
+    withEndpoints([PROXY], { info: { ...machine().info!, seal_key: undefined, providers: [provider()], settings: machineConfig({}, { endpoints: [PROXY] }) } });
+    expect(within(endpointsRegion()).getByText("Update roll on this machine to set endpoints from roll.")).toBeInTheDocument();
+    expect(within(endpointsRegion()).getByRole("button", { name: "Add endpoint" })).toBeDisabled();
+    expect(within(endpointsRegion()).getByRole("button", { name: "Check CLIProxyAPI" })).toBeDisabled();
+    expect(within(endpointsRegion()).getByRole("button", { name: "Remove CLIProxyAPI's key" })).toBeDisabled();
+  });
+
+  it("an offline computer's are read-only until it's back; an asleep sandbox's stay editable (it wakes)", async () => {
+    const { h } = withEndpoints([PROXY], { online: false });
+    expect(within(endpointsRegion()).getByText(/Commands need ada-mbp online/)).toBeInTheDocument();
+    expect(within(endpointsRegion()).getByRole("button", { name: "Add endpoint" })).toBeDisabled();
+    h.client.enqueue({
+      type: "machine",
+      cursor: 99,
+      machine: { ...h.client.data.machines.get("mch_1")!.value, sandbox: { backend: "docker", size: "standard", status: "stopped", hourly_cents: 3, stopped_reason: "idle" } },
+    });
+    await waitFor(() => expect(within(endpointsRegion()).getByRole("button", { name: "Add endpoint" })).toBeEnabled());
+  });
+});
+
+describe("the owner's endpoint profiles", () => {
+  const machines = () => [
+    machine({ info: { ...machine().info!, seal_key: SEAL_KEY, providers: [provider(), provider({ id: "codex", name: "Codex" })], settings: machineConfig() } }),
+    machine({
+      id: "mch_2",
+      name: "build-box",
+      info: { ...machine().info!, hostname: "build-box", seal_key: SEAL_KEY, providers: [provider({ id: "codex", name: "Codex" })], settings: machineConfig({}, { providers: [{ id: "codex", name: "Codex", binary: null, args: 0, env: [] }] }) },
+    }),
+    machine({ id: "mch_3", name: "old-box", info: { ...machine().info!, hostname: "old-box", settings: machineConfig() } }),
+    machine({ id: "mch_4", name: "laptop", online: false, info: { ...machine().info!, hostname: "laptop", seal_key: SEAL_KEY, settings: machineConfig() } }),
+  ];
+
+  function profiles(seed: EndpointProfile[] = []) {
+    const services = fakeServices({ endpoints: { seed } });
+    const h = agentsHarness({ machines: machines(), ctx: { services } });
+    renderAgents(<SettingsPanel target="owner" onClose={vi.fn()} />, h);
+    return { h, services };
+  }
+
+  it("adds, edits and removes profiles, never with a key, and marks one the default for new sandboxes", async () => {
+    const { services } = profiles();
+    expect(await within(endpointsRegion()).findByText(/No profiles yet/)).toBeInTheDocument();
+    await userEvent.click(within(endpointsRegion()).getByRole("button", { name: "Add profile" }));
+    const form = within(endpointsRegion()).getByRole("form", { name: "New profile" });
+    expect(within(form).queryByLabelText("Key")).toBeNull();
+    await userEvent.type(within(form).getByRole("textbox", { name: "Endpoint name" }), "CLIProxyAPI");
+    await userEvent.type(within(form).getByRole("textbox", { name: "Base URL" }), "http://proxy.local:8317");
+    await userEvent.click(within(form).getByRole("checkbox", { name: /Claude Code/ }));
+    await userEvent.click(within(form).getByRole("checkbox", { name: /Codex/ }));
+    await userEvent.click(within(form).getByRole("button", { name: "Add profile" }));
+    await waitFor(() => expect(services.endpoints.save).toHaveBeenCalledWith("acme", { id: "cliproxyapi", name: "CLIProxyAPI", kind: "cliproxy", base_url: "http://proxy.local:8317", providers: ["claude", "codex"] }));
+    const row = await within(endpointsRegion()).findByRole("group", { name: "Profile CLIProxyAPI" });
+    expect(within(row).getByText("Claude Code, Codex · Key typed when applied")).toBeInTheDocument();
+
+    await userEvent.click(within(row).getByRole("switch", { name: "CLIProxyAPI: default for new sandboxes" }));
+    await waitFor(() => expect(services.endpoints.save).toHaveBeenLastCalledWith("acme", expect.objectContaining({ id: "cliproxyapi", sandbox_default: true })));
+    await waitFor(() => expect(within(endpointsRegion()).getByRole("switch", { name: "CLIProxyAPI: default for new sandboxes" })).toBeChecked());
+
+    await userEvent.click(within(endpointsRegion()).getByRole("button", { name: "Edit CLIProxyAPI" }));
+    const edit = within(endpointsRegion()).getByRole("form", { name: "Edit CLIProxyAPI" });
+    await userEvent.clear(within(edit).getByRole("textbox", { name: "Endpoint name" }));
+    await userEvent.type(within(edit).getByRole("textbox", { name: "Endpoint name" }), "Team proxy");
+    await userEvent.click(within(edit).getByRole("button", { name: "Save" }));
+    // The same id; still the sandbox default.
+    await waitFor(() => expect(services.endpoints.save).toHaveBeenLastCalledWith("acme", expect.objectContaining({ id: "cliproxyapi", name: "Team proxy", sandbox_default: true })));
+    expect(await within(endpointsRegion()).findByRole("group", { name: "Profile Team proxy" })).toBeInTheDocument();
+
+    await userEvent.click(within(endpointsRegion()).getByRole("button", { name: "Remove Team proxy" }));
+    expect(services.endpoints.remove).not.toHaveBeenCalled();
+    await userEvent.click(within(endpointsRegion()).getByRole("button", { name: "Remove Team proxy" }));
+    await waitFor(() => expect(services.endpoints.remove).toHaveBeenCalledWith("acme", "cliproxyapi"));
+    expect(await within(endpointsRegion()).findByText(/No profiles yet/)).toBeInTheDocument();
+  });
+
+  it("applies one to two machines with the key typed once and sealed to each separately", async () => {
+    const { h } = profiles([{ id: "cliproxyapi", name: "CLIProxyAPI", kind: "cliproxy", base_url: "http://proxy.local:8317", providers: ["claude", "codex"], updated_at: T0 }]);
+    const row = await within(endpointsRegion()).findByRole("group", { name: "Profile CLIProxyAPI" });
+    await userEvent.click(within(row).getByRole("button", { name: "Apply to machines…" }));
+    const dialog = screen.getByRole("dialog", { name: "Apply CLIProxyAPI" });
+    const list = within(dialog).getByRole("list", { name: "Machines" });
+    expect(within(list).getByRole("checkbox", { name: "ada-mbp" })).toBeChecked();
+    expect(within(list).getByRole("checkbox", { name: "build-box" })).toBeChecked();
+    expect(within(list).getByRole("checkbox", { name: "old-box" })).toBeDisabled();
+    expect(within(list).getByText("Needs a newer roll")).toBeInTheDocument();
+    expect(within(list).getByRole("checkbox", { name: "laptop" })).toBeDisabled();
+    expect(within(list).getByText("Offline")).toBeInTheDocument();
+    const key = within(dialog).getByLabelText("Key");
+    expect(key).toHaveAttribute("type", "password");
+    expect(key).toHaveAttribute("autocomplete", "off");
+    await userEvent.type(key, KEY);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Apply to 2 machines" }));
+    await waitFor(() => expect(within(dialog).getAllByText("Applied")).toHaveLength(2));
+
+    const sets = h.command.mock.calls.filter((c) => c[2].type === "endpoint.set");
+    expect(sets.map((c) => c[0]).sort()).toEqual(["mch_1", "mch_2"]);
+    const byMachine = Object.fromEntries(sets.map((c) => [c[0], c[2] as Extract<Command, { type: "endpoint.set" }>]));
+    // The same id everywhere, with each machine's own providers.
+    expect(byMachine.mch_1.endpoint).toEqual({ id: "cliproxyapi", name: "CLIProxyAPI", kind: "cliproxy", base_url: "http://proxy.local:8317", providers: ["claude", "codex"] });
+    expect(byMachine.mch_2.endpoint).toEqual({ id: "cliproxyapi", name: "CLIProxyAPI", kind: "cliproxy", base_url: "http://proxy.local:8317", providers: ["codex"] });
+    const epks = [byMachine.mch_1.key, byMachine.mch_2.key].map((k) => (k?.type === "set" ? k.sealed.epk : null));
+    expect(epks[0]).toBeTruthy();
+    expect(epks[1]).toBeTruthy();
+    expect(epks[0]).not.toBe(epks[1]);
+    expect(JSON.stringify(h.command.mock.calls)).not.toContain(KEY);
+    expect(document.body.innerHTML).not.toContain(KEY);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Done" }));
+    expect(screen.queryByRole("dialog", { name: "Apply CLIProxyAPI" })).toBeNull();
+  });
+});

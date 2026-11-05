@@ -4,7 +4,8 @@
  * The owner's agents settings in the side panel (`{ kind: "settings", target: "owner" }`,
  * `#agents/settings/owner`, ⌘,): what follows the user to every device, T3 Code's client settings
  * that roll has a use for (`SettingsPanels.tsx` there: General, Chat, Threads, Keybindings), the
- * way to each machine's own settings, the owner's Slack, Discord and GitHub (`integrations.tsx`),
+ * way to each machine's own settings, the owner's endpoint profiles (`endpoint-settings.tsx`), the
+ * owner's Slack, Discord and GitHub (`integrations.tsx`),
  * and its Linear workspace (`linear-settings.tsx`). Saved by roll per owner
  * (`AgentsServices.settings`), so other devices change too; each change saves at once, as in T3.
  */
@@ -17,6 +18,7 @@ import { desktop } from "@/lib/desktop";
 import { DEFAULT_OWNER_SETTINGS, RESTORABLE, type NotifyMode, type OwnerSettings } from "@/lib/owner-settings";
 import { INTEGRATION_SETTINGS, IntegrationsSection } from "./integrations";
 import { LINEAR_SETTINGS, LinearSettingsSection } from "./linear-settings";
+import { ENDPOINT_SETTINGS, EndpointProfilesSection } from "./endpoint-settings";
 import { DefaultsRows } from "./machine-settings";
 import { SaveState, SettingRow, SettingsPage, SettingsSection, useSearching, type Setting } from "./settings-ui";
 import { MachineIcon } from "./identity";
@@ -102,6 +104,7 @@ export function OwnerSettingsPanel({ onClose }: { onClose: () => void }) {
       S.mode,
       S.workspace,
       ...machines.map((m) => ({ id: `machine.${m.id}`, title: m.name, section: "Machines", terms: ["machine settings", "providers", m.info?.os ?? "", m.sandbox ? "sandbox" : "computer"] })),
+      ...(services ? [ENDPOINT_SETTINGS.owner] : []),
       ...(services ? Object.values(INTEGRATION_SETTINGS) : []),
       ...(services ? LINEAR_SETTINGS : []),
       S.keyboard,
@@ -197,6 +200,11 @@ export function OwnerSettingsPanel({ onClose }: { onClose: () => void }) {
           />
         ))}
       </SettingsSection>
+      {services && (
+        <SettingsSection title="Endpoints" ids={[ENDPOINT_SETTINGS.owner.id]}>
+          <EndpointProfilesSection />
+        </SettingsSection>
+      )}
       {services && <IntegrationsSection owner={owner} api={services.integrations} />}
       <LinearSettingsSection />
       <SettingsSection title="Keyboard" ids={[S.keyboard.id]}>

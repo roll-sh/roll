@@ -7,7 +7,8 @@
  * binary, arguments, environment, custom models), what new threads start with, worktrees, the git
  * identity commits are published with, projects and delegation. Every change sends
  * `machine.configure` with the settings whole; what the daemon says back (its `hello`) is the
- * truth. Credentials never go through here: they stay in the machine's `config.toml`.
+ * truth. Credentials never go through `machine.configure`: a key is set with an endpoint, sealed
+ * to the machine in the browser (`endpoint-settings.tsx`), or stays in the machine's `config.toml`.
  */
 
 import { ChevronRight, Copy, KeyRound, Lock, LogIn, Plus, RefreshCw, Trash2, X } from "lucide-react";
@@ -28,6 +29,8 @@ import {
 } from "@/lib/agents-api";
 import { customModelError, envNameError, parseAutoCompact, settingsError, withFields, withProvider } from "@/lib/machine-settings";
 import { setAgentsView } from "@/lib/agents-surface";
+import { ENDPOINT_SETTINGS, MachineEndpoints, ProviderEndpointRow, providerEndpointSetting, type EndpointEdit } from "./endpoint-settings";
+import { endpointOf } from "@/lib/agents-endpoints";
 import { ModelPicker } from "./model-picker";
 import { ProviderLogo } from "./provider-logo";
 import { SandboxPanel } from "./sandbox";
@@ -68,7 +71,7 @@ const S = {
     id: "providers.credentials",
     title: "API keys and base URLs",
     section: "Providers",
-    description: "roll never relays a credential. Set keys and base URLs in the daemon's config.toml on the machine, or give a sandbox its keys when you rent it.",
+    description: "roll never relays a credential in the clear. Add an endpoint under Endpoints below (its key is sealed to this machine in your browser), or set keys and base URLs in the daemon's config.toml on the machine.",
     terms: ["key", "token", "secret", "credential", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "base url", "config.toml", "proxy"],
   },
   provider: (p: ProviderBase): Setting => ({ id: `p.${p.id}`, title: p.name, section: "Providers", description: "Offered for new threads, delegation and switching.", terms: ["enable", "disable", "turn off", "turn on", "login", "log in", p.id] }),
@@ -124,7 +127,15 @@ const S = {
 
 /** Claude's own knobs: T3's Claude instance config has "Auto-compact after" and idle compaction. */
 const compacts = (p: ProviderBase) => p.id === "claude";
-const providerRows = (p: ProviderBase) => [S.provider(p), S.binary(p), S.args(p), S.env(p), S.models(p), ...(compacts(p) ? [S.autoCompact(p), S.idleCompaction(p)] : [])];
+const providerRows = (p: ProviderBase) => [
+  S.provider(p),
+  providerEndpointSetting(p),
+  S.binary(p),
+  S.args(p),
+  S.env(p),
+  S.models(p),
+  ...(compacts(p) ? [S.autoCompact(p), S.idleCompaction(p)] : []),
+];
 
 function items(config: MachineConfig | null, sandbox: boolean): Setting[] {
   const providers = config?.providers ?? [];
@@ -137,6 +148,7 @@ function items(config: MachineConfig | null, sandbox: boolean): Setting[] {
     S.credentials,
     S.idle,
     ...providers.flatMap(providerRows),
+    ENDPOINT_SETTINGS.machine,
     S.model,
     S.permissions,
     S.mode,
@@ -195,6 +207,7 @@ export function MachineSettingsPanel({ machine, onClose }: { machine: Machine; o
   const editable = online && !!config;
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [endpointEdit, setEndpointEdit] = useState<EndpointEdit | null>(null);
 
   /** Send the settings whole; `false` when refused (the error says why). */
   const save = async (next: MachineSettings): Promise<boolean> => {
@@ -224,7 +237,7 @@ export function MachineSettingsPanel({ machine, onClose }: { machine: Machine; o
         : "Not connected yet."
       : null;
   const all = useMemo(() => items(config, !!machine.sandbox), [config, machine.sandbox]);
-  const ctx: Ctx = { machine, config, set, editable, save };
+  const ctx: Ctx = { machine, config, set, editable, save, editEndpoint: setEndpointEdit };
   return (
     <SettingsPage icon={<MachineIcon machine={machine} tile className="size-5" />} title={machine.name} subtitle="Machine settings" onClose={onClose} items={all}>
       <SaveState saving={saving} error={error} offline={offline} />
@@ -258,6 +271,9 @@ export function MachineSettingsPanel({ machine, onClose }: { machine: Machine; o
         </SettingsSection>
       )}
       <Providers ctx={ctx} />
+      <SettingsSection title="Endpoints" ids={[ENDPOINT_SETTINGS.machine.id]}>
+        <MachineEndpoints machine={machine} editing={endpointEdit} onEdit={setEndpointEdit} />
+      </SettingsSection>
       <NewThreads ctx={ctx} />
       <SettingsSection title="Worktrees" ids={[S.worktreeDir.id, S.branchPrefix.id]}>
         <SettingRow
@@ -347,6 +363,8 @@ interface Ctx {
   set: MachineSettings;
   editable: boolean;
   save: (next: MachineSettings) => Promise<boolean>;
+  /** Open the Endpoints section's editor (New endpoint… from a provider's card). */
+  editEndpoint: (e: EndpointEdit | null) => void;
 }
 
 function SystemRow({ machine, config }: { machine: Machine; config: MachineConfig | null }) {
@@ -508,6 +526,7 @@ function ProviderCard({ ctx, base, info }: { ctx: Ctx; base: ProviderBase; info:
   };
   const changed =
     p.binary !== undefined || p.args.length > 0 || Object.keys(p.env).length > 0 || p.models.length > 0 || p.auto_compact_window !== undefined || p.idle_compaction !== undefined;
+  const via = endpointOf(ctx.machine.info, base.id);
   return (
     <div data-setting={S.provider(base).id} className="text-[13px]">
       <div className="flex items-center gap-3 px-3.5 py-3">
@@ -516,6 +535,7 @@ function ProviderCard({ ctx, base, info }: { ctx: Ctx; base: ProviderBase; info:
           <div className="flex items-center gap-1.5">
             <h4 className="font-medium tracking-[-0.01em]">{base.name}</h4>
             {changed && <Note>customized</Note>}
+            {via && <Note title={`Its requests go to the endpoint ${via.name}`}>via {via.name}</Note>}
           </div>
           <p className="truncate text-[12px] text-subtle">{p.enabled && info?.checking ? <span className="shimmer">Checking…</span> : providerStatus(p.enabled, info)}</p>
         </div>
@@ -537,6 +557,7 @@ function ProviderCard({ ctx, base, info }: { ctx: Ctx; base: ProviderBase; info:
       </div>
       {expanded && (
         <div className="mx-3.5 mb-3 divide-y divide-line overflow-hidden rounded-lg border border-line-2 bg-panel-2">
+          <ProviderEndpointRow machine={ctx.machine} provider={base} onNew={() => ctx.editEndpoint({ provider: base.id })} />
           <SettingRow
             s={S.binary(base)}
             onReset={p.binary !== undefined && ctx.editable ? () => ctx.save(withProvider(ctx.set, base.id, { binary: undefined })) : null}

@@ -13,6 +13,7 @@ import {
   MAX_SETTINGS,
   SettingsConflict,
   type AgentsApi,
+  type EndpointProfile,
   type Machine,
   type MachineId,
   type MachineStyle,
@@ -25,6 +26,7 @@ import {
   type WorkItemRef,
 } from "./agents-api";
 import { ApiError, codeApi, type Repo } from "./code-api";
+import { checkEndpoint, ENDPOINT_LIMITS } from "./agents-endpoints";
 import type { AutomationsApi } from "./automations-api";
 import type { IntegrationsApi } from "./integrations-api";
 import type { LinearApi } from "./linear-api";
@@ -72,6 +74,46 @@ export interface AgentsServices {
   integrations: IntegrationsApi;
   /** The owner's Linear workspace (`linear-api.ts`). */
   linear: LinearApi;
+  /** The owner's endpoint profiles, kept by roll without a key (docs/code/agents.md, "Endpoints"). */
+  endpoints: EndpointProfiles;
+}
+
+/** An owner's endpoint profiles: oldest first; `save` replaces by id, and its `sandbox_default` takes it off the others. */
+export interface EndpointProfiles {
+  list(owner: string): Promise<EndpointProfile[]>;
+  save(owner: string, profile: Omit<EndpointProfile, "updated_at">): Promise<EndpointProfile>;
+  remove(owner: string, id: string): Promise<void>;
+}
+
+/**
+ * Profiles in memory (the demo, tests), with the relay's rules: the spec checked as the daemon
+ * checks it, nothing but the spec and `sandbox_default` kept (a key sent along is dropped), one
+ * sandbox default, at most 32.
+ */
+export function memoryEndpoints(seed: EndpointProfile[] = []): EndpointProfiles {
+  const saved = new Map<string, EndpointProfile[]>();
+  const of = (owner: string) => saved.get(owner) ?? (saved.set(owner, seed.map((p) => ({ ...p }))), saved.get(owner)!);
+  return {
+    list: async (owner) => of(owner).map((p) => ({ ...p })),
+    save: async (owner, profile) => {
+      const checked = checkEndpoint(profile);
+      if ("error" in checked) throw new ApiError(checked.error, 422, null);
+      const list = of(owner);
+      const at = list.findIndex((p) => p.id === checked.spec.id);
+      if (at < 0 && list.length >= ENDPOINT_LIMITS.endpoints) throw new ApiError(`an owner keeps at most ${ENDPOINT_LIMITS.endpoints} endpoints`, 422, null);
+      const next: EndpointProfile = { ...checked.spec, ...(profile.sandbox_default ? { sandbox_default: true } : {}), updated_at: Date.now() };
+      if (next.sandbox_default) for (const p of list) delete p.sandbox_default;
+      if (at >= 0) list.splice(at, 1);
+      list.push(next);
+      return { ...next };
+    },
+    remove: async (owner, id) => {
+      const list = of(owner);
+      const at = list.findIndex((p) => p.id === id);
+      if (at < 0) throw new ApiError(`endpoint ${id}`, 404, null);
+      list.splice(at, 1);
+    },
+  };
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -161,6 +203,7 @@ export function httpServices(
     automations: api.automations,
     integrations: api.integrations,
     linear: api.linear,
+    endpoints: { list: api.endpoints, save: api.saveEndpoint, remove: api.removeEndpoint },
   };
 }
 

@@ -2,9 +2,9 @@
 import { render } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { vi, type Mock } from "vitest";
-import type { Command, Machine, MachineId, Mirrored, Reply } from "@/lib/agents-api";
+import type { Command, EndpointProfile, Machine, MachineId, Mirrored, Reply } from "@/lib/agents-api";
 import { AgentsClient, type AgentsTransport } from "@/lib/agents-client";
-import { memoryCanvas, memorySettings, type AgentsServices } from "@/lib/agents-services";
+import { memoryCanvas, memoryEndpoints, memorySettings, type AgentsServices } from "@/lib/agents-services";
 import { NO_INTEGRATIONS } from "@/lib/integrations-api";
 import { DISCONNECTED, memoryLinear } from "@/lib/linear-api";
 import type { SandboxSize } from "@/lib/sandboxes-api";
@@ -52,17 +52,21 @@ export function renderAgents(ui: ReactElement, h: AgentsHarness) {
  * them), behind mocks.
  */
 export function fakeServices(
-  over: Omit<Partial<AgentsServices>, "sandboxes" | "canvas" | "settings" | "machines" | "integrations"> & {
+  over: Omit<Partial<AgentsServices>, "sandboxes" | "canvas" | "settings" | "machines" | "integrations" | "endpoints"> & {
     sandboxes?: Partial<AgentsServices["sandboxes"]>;
     canvas?: Partial<AgentsServices["canvas"]>;
     settings?: Partial<AgentsServices["settings"]>;
     machines?: Partial<AgentsServices["machines"]>;
     integrations?: Partial<AgentsServices["integrations"]>;
+    /** Profiles to start with (kept in memory with the relay's rules), or calls to replace. */
+    endpoints?: Partial<AgentsServices["endpoints"]> & { seed?: EndpointProfile[] };
   } = {},
 ): AgentsServices {
-  const { sandboxes, canvas, settings, machines, integrations, ...rest } = over;
+  const { sandboxes, canvas, settings, machines, integrations, endpoints, ...rest } = over;
   const kept = memoryCanvas();
   const prefs = memorySettings();
+  const { seed, ...endpointCalls } = endpoints ?? {};
+  const profiles = memoryEndpoints(seed);
   return {
     sandboxes: {
       list: vi.fn(async () => ({ sandboxes: [], sizes: [SIZE], max: 5, backend: "docker" })),
@@ -93,6 +97,7 @@ export function fakeServices(
       ...integrations,
     },
     linear: memoryLinear(DISCONNECTED),
+    endpoints: { list: vi.fn(profiles.list), save: vi.fn(profiles.save), remove: vi.fn(profiles.remove), ...endpointCalls },
     ...rest,
   };
 }
