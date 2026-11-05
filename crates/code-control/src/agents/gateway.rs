@@ -274,8 +274,8 @@ pub(super) async fn leave(State(code): State<Arc<Code>>, caller: Caller, Path((o
 }
 
 /// A sandbox said `hello`: with `new_sandboxes`, it joins the owner's gateway (in the background;
-/// the link never waits on it). Machines that aren't sandboxes, the host itself and members are
-/// left alone.
+/// the link never waits on it). Machines that aren't sandboxes, the host itself and machines that
+/// joined are left alone; a join that failed is tried again at the sandbox's next `hello`.
 pub(crate) fn sandbox_hello(code: &Arc<Code>, machine: &MachineRow) {
     if machine.sandbox.is_none() {
         return;
@@ -285,7 +285,7 @@ pub(crate) fn sandbox_hello(code: &Arc<Code>, machine: &MachineRow) {
         Ok(None) => return,
         Err(e) => return tracing::warn!(machine = %machine.id, error = %e, "reading the owner's gateway"),
     };
-    if !p.new_sandboxes || p.host.0 == machine.id || p.member(&MachineId(machine.id.clone())).is_some() {
+    if !p.new_sandboxes || p.host.0 == machine.id || p.member(&MachineId(machine.id.clone())).is_some_and(|m| m.client.is_some()) {
         return;
     }
     let (code, id, owner_id) = (code.clone(), machine.id.clone(), machine.owner_id.clone());

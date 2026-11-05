@@ -999,6 +999,10 @@ the owner's own, set on the owner's own machines, and a sandbox is one owner's m
     the Anthropic variables; Codex gets a model provider of roll's (below); other agents get all
     three families (`OPENAI_BASE_URL` = `<base>/v1`, `GOOGLE_GEMINI_BASE_URL`, `GEMINI_API_KEY`).
   - `custom`: the base URL in `url_env` and the key in `key_env`, whichever are named.
+  - `gateway`: roll's model gateway on another of the owner's machines (docs/code/gateway.md), set by
+    the relay when a machine joins it (id `roll-gateway`): `cliproxy`'s variables without Gemini's,
+    plus `x-roll-thread`/`x-roll-project` headers per session, and with `fallback` a `<base>/health`
+    check before a process starts (down: the provider starts on its own login).
   - Codex: `-c model_provider="roll_<id>"` and `-c model_providers.roll_<id>.{name,base_url,
     wire_api="responses",requires_openai_auth=false,env_key="ROLL_ENDPOINT_KEY"}` before
     `app-server`, the key in `ROLL_ENDPOINT_KEY` (never in an argument: arguments show in `ps`).

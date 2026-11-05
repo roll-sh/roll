@@ -120,9 +120,10 @@ A member machine has an ordinary endpoint (agents.md, "Endpoints"):
 - **Attribution.** For usage by thread and project, the member's daemon adds `x-roll-thread` and
   `x-roll-project` headers (ids only):
   - Claude Code through `ANTHROPIC_CUSTOM_HEADERS`;
-  - Codex through its model provider's `http_headers`.
+  - Codex through its model provider's `env_http_headers` (a fixed `-c` override naming
+    `ROLL_GATEWAY_THREAD` and `ROLL_GATEWAY_PROJECT`, which each session's process gets).
 
-  The gateway reads them and never forwards them.
+  Only where the process is the thread's own. The gateway reads them and never forwards them.
 - **Fallback.** With `fallback` on, the member's daemon checks `<base>/health` (2 s, cached 30 s)
   before starting a provider's process. If the gateway doesn't answer, the provider starts without
   the endpoint, on its own login or keys, and its status says so. A running session keeps what it
