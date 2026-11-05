@@ -12,7 +12,7 @@ import type { Direction, Size } from "@/lib/agents-layout";
 import { closePalette, noteThreadOpen, openPalette, togglePalette } from "@/lib/agents-palette";
 import { lastInputWasKeyboard } from "@/lib/input-modality";
 import type { AgentsServices } from "@/lib/agents-services";
-import { isNewAgentKey, setAgentsView, useAgentsSurface, viewFromHash, type AgentsView } from "@/lib/agents-surface";
+import { isNewAgentKey, setAgentsView, useAgentsSurface, viewFromHash, type AgentsView, type AutomationsView } from "@/lib/agents-surface";
 import { isBuilder } from "@/lib/automations-nav";
 import { ALL, applyDisplay, applyView, directionOf, focusOn, isPinned, keepProject, pinKey, pinnedConversations, pinOf, projectOf, viewStorageKey, withDirection, type Pin as PinRec } from "@/lib/agents-views";
 import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
@@ -183,12 +183,16 @@ export function AgentsSurface({
   // The automations sheet: what it highlights on the canvas (a run's threads), Back for Escape,
   // the builder maximized, and the sheet kept a beat after it closes so it can slide out.
   const [highlighted, setHighlighted] = useState<readonly string[]>([]);
+  const runInSheet = useRef<{ view: AutomationsView; keys: readonly string[] } | null>(null);
   const sheetBack = useRef<(() => void) | null>(null);
   const [maximized, setMaximized] = useMaximized();
   const sheet = useLeaving(shown.kind === "automations" ? shown : null, useReducedMotion() ? 0 : SHEET_OUT_MS);
   const sheetView = sheet.leaving && shown.kind !== "canvas" ? null : sheet.value;
   const wide = !phone && maximized && !!sheetView && !sheet.leaving && isBuilder(sheetView);
   const firstHighlight = highlighted[0];
+  useEffect(() => {
+    runInSheet.current = shown.kind === "automations" && shown.run && highlighted.length ? { view: shown, keys: highlighted } : null;
+  }, [shown, highlighted]);
   useEffect(() => {
     if (!firstHighlight || selected) return;
     const t = setTimeout(() => canvas.current?.reveal(firstHighlight), 280);
@@ -216,10 +220,14 @@ export function AgentsSurface({
   }, [client, data.threads, shown]);
   useEffect(() => () => client.unfollow("surface"), [client]);
 
+  // A run in the automations sheet and the cards it highlights: one of those cards opens its
+  // conversation in the sheet, over the run (Back returns to it), not in place of the sheet.
   const openThread = useCallback((thread: string) => {
     // How often and how lately, for the command palette's ranking.
     noteThreadOpen(thread);
-    setAgentsView({ kind: "thread", thread });
+    const inSheet = runInSheet.current;
+    if (inSheet?.keys.includes(`t:${thread}`)) setAgentsView({ ...inSheet.view, thread });
+    else setAgentsView({ kind: "thread", thread });
   }, []);
   const close = useCallback(() => setAgentsView({ kind: "canvas" }), []);
 

@@ -106,6 +106,20 @@ describe("the automations sheet", () => {
     expect(view()).toEqual({ kind: "automations", open: "aut_1" });
   });
 
+  it("a run's highlighted card on the canvas opens its conversation in the sheet; any other card replaces the sheet", async () => {
+    setup();
+    act(() => setAgentsView({ kind: "automations", open: "aut_1", tab: "runs", run: "arn_1" }));
+    await waitFor(() => expect(card("t:thr_1")).toHaveAttribute("data-selected"));
+    await userEvent.click(screen.getByRole("button", { name: "Thread Fix the flaky queue test" }));
+    expect(view()).toEqual({ kind: "automations", open: "aut_1", tab: "runs", run: "arn_1", thread: "thr_1" });
+    expect(screen.getAllByRole("complementary")).toHaveLength(1);
+    await userEvent.keyboard("{Escape}");
+    expect(view()).toEqual({ kind: "automations", open: "aut_1", tab: "runs", run: "arn_1" });
+
+    await userEvent.click(screen.getByRole("button", { name: "Thread Upgrade to Next 16.4" }));
+    expect(view()).toEqual({ kind: "thread", thread: "thr_2" });
+  });
+
   it("maximizes the builder over the canvas and remembers it, only for the builder", async () => {
     setup();
     act(() => setAgentsView({ kind: "automations", open: "aut_1", tab: "edit" }));

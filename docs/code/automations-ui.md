@@ -194,8 +194,10 @@ last list (auto-core's note): `lastRunOf` takes the newest run the store has.
     - The log shows lines at `+0.7s` offsets, errors in red, at most 384px high.
     - Then the output as `steps.<id>` JSON, and "Trying again in 30s" while retrying.
   - **Threads a step started** are chips under it (title · machine), and their cards are
-    highlighted on the canvas while the run shows. A click opens the conversation as the sheet's
-    next page (Back returns to the run) and reveals its card.
+    highlighted on the canvas (the open card's accent edge) and the first is revealed while the run
+    shows. A chip, or one of those cards on the canvas, opens the conversation as the sheet's next
+    page (Back and Escape return to the run). Any other card replaces the sheet with its
+    conversation, as always: one right sheet.
 - **Live.** `automation_run` events carry whole runs, and the store keeps the newer cursor, so a
   run's detail moves while you watch.
 
