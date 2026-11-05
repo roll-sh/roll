@@ -88,6 +88,7 @@ describe("automation fields that name a thing", { timeout: 15_000 }, () => {
     const people = await screen.findByRole("listbox", { name: "Assignees" });
     expect(within(people).getAllByRole("option")[0]).toHaveTextContent("roll");
     await waitFor(() => expect(within(people).getByRole("option", { name: /Grace Hopper/ })).toBeInTheDocument());
+    expect(within(people).getAllByRole("option").filter((o) => /^roll/.test(o.textContent ?? ""))).toHaveLength(1);
   });
 
   it("a thread is one of the owner's threads, by title", async () => {

@@ -38,7 +38,7 @@ const USERS: LookupItem[] = [
   { id: "usr_grace", label: "Grace Hopper", key: "[EMAIL]", hint: "[EMAIL]", icon: "user" },
   { id: "usr_alan", label: "Alan Turing", key: "[EMAIL]", hint: "[EMAIL]", icon: "user" },
   { id: "usr_linus", label: "Linus Torvalds", key: "[EMAIL]", hint: "[EMAIL]", icon: "user" },
-  { id: "usr_roll", label: "roll", key: "[EMAIL]", hint: "Agent", icon: "agent" },
+  // roll itself is each users field's own `roll` row (the server leaves the app user out).
 ];
 
 const LABELS: LookupItem[] = [

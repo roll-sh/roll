@@ -8,6 +8,7 @@
 use super::{Failure, Item, New, Page, Problem, Query, s};
 use crate::Code;
 use crate::agents::linear::client::LinearError;
+use crate::agents::linear::store::{self, Kind};
 use serde_json::{Value, json};
 
 pub const KINDS: &[&str] = &["teams", "states", "users", "labels", "projects", "cycles", "issues"];
@@ -137,6 +138,15 @@ pub async fn list(code: &Code, owner: &str, kind: &str, q: &Query) -> Result<Pag
     }
     if kind == "cycles" {
         p.items.sort_by_key(|i| i.key.as_deref().and_then(|k| k.parse::<i64>().ok()).unwrap_or(0));
+    }
+    if kind == "users" && ids.is_empty() {
+        // Installed as an app, roll is a user of the workspace; every users field already offers
+        // it as its own `roll` row, so it isn't listed twice. A stored id still resolves.
+        if let Ok(Some(c)) = store::connection(code.db.sql(), owner)
+            && c.kind == Kind::OAuth
+        {
+            p.items.retain(|i| i.id != c.user_id);
+        }
     }
     Ok(p)
 }

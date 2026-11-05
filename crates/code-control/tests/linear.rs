@@ -161,7 +161,10 @@ mod mock {
                         { "id": "user-bob", "name": "Bob", "displayName": "bob", "email": "bob@acme.dev", "avatarUrl": "http://insecure/bob.png" },
                     ], "pageInfo": { "hasNextPage": true, "endCursor": "c1" } } })
                 } else {
-                    json!({ "users": { "nodes": [{ "id": "user-cy", "name": "Cy", "displayName": "cy", "email": "cy@acme.dev", "avatarUrl": null }], "pageInfo": { "hasNextPage": false, "endCursor": "c2" } } })
+                    json!({ "users": { "nodes": [
+                        { "id": "user-cy", "name": "Cy", "displayName": "cy", "email": "cy@acme.dev", "avatarUrl": null },
+                        { "id": "app-user", "name": "roll", "displayName": "roll", "email": "cy@acme.dev", "avatarUrl": null },
+                    ], "pageInfo": { "hasNextPage": false, "endCursor": "c2" } } })
                 }
             }
             "RollLookupLabels" => json!({ "issueLabels": { "nodes": [
@@ -1066,6 +1069,25 @@ async fn the_dashboard_has_linear_s_catalog() {
 /// rows through the owner's connection with Linear's filters and cursors, never its key; pages
 /// served again from the cache until a write through roll (a new label) drops them; stored values
 /// resolved; and the problems said quietly (not connected, a rate limit that holds Linear off).
+#[tokio::test]
+async fn roll_is_one_row_in_a_users_picker_when_installed_as_an_app() {
+    // Installed as an app, roll is a user of the workspace; the field's own `roll` row stands for
+    // it, so the users list leaves it out (with a key, the key's user is a person: kept).
+    let w = world().await;
+    let base = "/v1/code/agents/acme/lookup/linear";
+    let (s, v) = w.req("PUT", "/v1/code/agents/acme/linear/key", Some(json!({ "key": KEY }))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (_, v) = w.req("GET", &format!("{base}/users?cursor=c1"), None).await;
+    let ids: Vec<&str> = v["items"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["user-cy", "app-user"], "{v}");
+    let (s, _) = w.req("DELETE", "/v1/code/agents/acme/linear", None).await;
+    assert!(s.is_success(), "{s}");
+    w.install().await;
+    let (_, v) = w.req("GET", &format!("{base}/users?cursor=c1"), None).await;
+    let ids: Vec<&str> = v["items"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["user-cy"], "{v}");
+}
+
 #[tokio::test]
 async fn pickers_look_up_linear_through_the_owners_connection() {
     let w = world().await;
