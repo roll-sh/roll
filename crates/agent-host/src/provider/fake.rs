@@ -49,6 +49,7 @@ fn demo_command() -> String {
 pub enum Call {
     Send(String),
     Steer(String),
+    Compact,
     Interrupt,
     Respond { request: String, response: Response },
     SetModes(RuntimeMode, InteractionMode),
@@ -435,6 +436,25 @@ impl Session for FakeSession {
 
     async fn steer(&self, input: TurnInput) -> anyhow::Result<()> {
         self.record(Call::Steer(input.text));
+        Ok(())
+    }
+
+    /// Echo and Demo compact at once: a running then completed compaction that halves the
+    /// context. Manual only records it.
+    async fn compact(&self) -> anyhow::Result<()> {
+        self.record(Call::Compact);
+        self.inner.running.store(true, Ordering::SeqCst);
+        if self.inner.script != Script::Manual {
+            let id = self.next_item();
+            let item = |status, after| {
+                let body = NodeBody::Compaction { before_tokens: Some(DEMO_CONTEXT), after_tokens: after, error: None };
+                ProviderEvent::Item(Item { id: id.clone(), parent: None, status, body })
+            };
+            self.emit(item(NodeStatus::Running, None));
+            self.emit(item(NodeStatus::Completed, Some(DEMO_CONTEXT / 2)));
+            self.emit(ProviderEvent::Context(ContextUsage { used_tokens: DEMO_CONTEXT / 2, max_tokens: Some(200_000), total_processed_tokens: None }));
+            self.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
+        }
         Ok(())
     }
 

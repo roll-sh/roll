@@ -286,6 +286,8 @@ impl Provider for Codex {
             subagents: true,
             // Modes travel with every `turn/start`.
             mode_switch: true,
+            // `thread/compact/start`.
+            compact: true,
         }
     }
 

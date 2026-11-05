@@ -322,6 +322,25 @@ impl Session for CodexSession {
         }
     }
 
+    /// T3's `compactThread`: `thread/compact/start` answers at once, and the compaction runs as
+    /// a turn Codex starts itself (`turn/started`, a `contextCompaction` item, `turn/completed`),
+    /// which the translator adopts as ours because it's expecting one.
+    async fn compact(&self) -> anyhow::Result<()> {
+        let thread = {
+            let mut state = self.inner.state.lock().unwrap();
+            if state.tr.turn().is_some() {
+                bail!("a codex turn is already running");
+            }
+            state.tr.expect_turn();
+            state.tr.root().to_string()
+        };
+        if let Err(e) = self.inner.rpc.request("thread/compact/start", json!({ "threadId": thread })).await {
+            self.inner.state.lock().unwrap().tr.turn_started(None);
+            return Err(e.into());
+        }
+        Ok(())
+    }
+
     async fn steer(&self, input: TurnInput) -> anyhow::Result<()> {
         let input = codex_input(&input)?;
         let params = {

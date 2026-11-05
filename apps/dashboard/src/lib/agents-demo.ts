@@ -48,6 +48,7 @@ import type { AgentsTransport } from "./agents-client";
 import { DemoAutomations } from "./automations-demo";
 import { memoryCanvas, memorySettings, type AgentsServices, type RepoChoice } from "./agents-services";
 import { offeredProviders, settingsError } from "./machine-settings";
+import { PLAN_IMPLEMENTATION_PREFIX, planTitle } from "./agents-plan";
 import { ApiError } from "./code-api";
 import { memoryLinear, type LinearStatus, type LinearTeam } from "./linear-api";
 import type { Sandbox, SandboxSize } from "./sandboxes-api";
@@ -103,7 +104,7 @@ const claude = (auth: ProviderInfo["auth"] = "ready"): ProviderInfo => ({
     { id: "claude-haiku-4-5", name: "Claude Haiku 4.5", short_name: "Haiku 4.5", default: false, legacy: true, options: [{ type: "boolean", id: "thinking", label: "Thinking", default: true }] },
   ],
   update_required: [{ id: "claude-haiku-5-5", name: "Claude Haiku 5.5", min_version: "2.1.293" }],
-  capabilities: { steer: true, fork: true, rollback: false, plan_mode: true, images: true, subagents: true, mode_switch: true },
+  capabilities: { steer: true, fork: true, rollback: false, plan_mode: true, images: true, subagents: true, mode_switch: true, compact: true },
 });
 
 /** Codex's service tiers, as `model/list` reports them. */
@@ -132,7 +133,7 @@ const codex = (auth: ProviderInfo["auth"] = "ready"): ProviderInfo => ({
     { id: "gpt-5.5-mini", name: "GPT-5.5 Mini", default: false, options: [reasoningLevels(["low", "medium", "high"], "low")], images: false },
   ],
   update_required: [],
-  capabilities: { steer: true, fork: true, rollback: true, plan_mode: true, images: true, subagents: true, mode_switch: false },
+  capabilities: { steer: true, fork: true, rollback: true, plan_mode: true, images: true, subagents: true, mode_switch: false, compact: true },
 });
 
 const gemini: ProviderInfo = {
@@ -372,10 +373,12 @@ type Step =
   | { plan: string }
   | { todos: Todo[] }
   | { tool: { name: string; kind: "command" | "edit" | "read" | "search" | "web" | "mcp" | "other"; title: string; input?: unknown; output?: string; files?: FileChange[]; exit?: number; ms?: number } }
-  | { sub: { agent: string; prompt: string; steps: Step[]; result: string } }
+  | { sub: { agent: string; prompt: string; steps: Step[]; result: string; model?: string } }
   | { ask: Pick<Approval, "action" | "title" | "decisions"> & Partial<Approval> }
   | { questions: Question[] }
   | { wait: number }
+  /** The provider compacts the context (T3's compaction row): to `after` tokens, a quarter of it by default. */
+  | { compact: { after?: number } }
   /** Hand tasks to subagents through roll's orchestrator MCP: each is a thread of its own under this one. */
   | { delegate: DemoTask[] };
 
@@ -500,6 +503,7 @@ const flakyScript: Step[] = [
         { tool: { name: "Read", kind: "read", title: "crates/code-control/src/lander.rs", ms: 800 } },
       ],
       result: "3 callers; all treat None as \"someone else holds it\" and retry after 250 ms.",
+      model: "claude-haiku-5-5",
     },
   },
   { tool: { name: "Bash", kind: "command", title: "cargo test -p code-control claim -- --test-threads 16", input: { command: "cargo test -p code-control claim -- --test-threads 16" }, output: "running 4 tests\ntest queue::two_nodes_claim_once ... FAILED\n\nfailures:\n  left: 2\n right: 1\n\ntest result: FAILED. 3 passed; 1 failed\n", exit: 101, ms: 2200 } },
@@ -569,6 +573,34 @@ const ciScript: Step[] = [
   { tool: { name: "apply_patch", kind: "edit", title: "roll.toml", files: [fc("roll.toml", "add", '@@ -0,0 +1,4 @@\n+[checks.test]\n+image = "node:22"\n+run = "pnpm install && pnpm test"\n+required = true\n')], ms: 900 } },
   { say: "Added `roll.toml` with a required `test` check. The GitHub workflow stays for now." },
 ];
+
+/** A plan a Codex run ended with in plan mode: no approval, the composer offers Implement (T3). */
+const BILLING_PLAN =
+  "# Export invoices as CSV\n\n1. Add `GET /v1/billing/invoices.csv` in `crates/billing/src/http.rs`, streaming rows from the `invoices` table (one owner, a date range).\n2. Reuse `InvoiceRow` for the columns: number, date, amount, currency, status.\n3. Add an **Export CSV** button beside the invoice list in `apps/dashboard/src/components/billing/invoices.tsx`.\n4. Test the route in `crates/billing/tests/http.rs` (empty range, one invoice, 10 000 invoices streamed).\n\nNothing changes until you say so.";
+
+/** T3's "Implement": the plan comes back as a message in build mode, and the agent carries it out. */
+function implementScript(plan: string): Step[] {
+  const title = planTitle(plan) ?? "the plan";
+  return [
+    { think: `Carrying out "${title}" step by step.` },
+    { todos: [{ text: "Add the route", status: "in_progress" }, { text: "Add the button", status: "pending" }, { text: "Test it", status: "pending" }] },
+    { tool: { name: "apply_patch", kind: "edit", title: "crates/billing/src/http.rs", files: [fc("crates/billing/src/http.rs", "modify", "@@ -40,3 +40,9 @@\n     .route(\"/v1/billing/invoices\", get(list))\n+    .route(\"/v1/billing/invoices.csv\", get(export_csv))\n")], ms: 900 } },
+    { todos: [{ text: "Add the route", status: "completed" }, { text: "Add the button", status: "in_progress" }, { text: "Test it", status: "pending" }] },
+    { tool: { name: "apply_patch", kind: "edit", title: "apps/dashboard/src/components/billing/invoices.tsx", files: [fc("apps/dashboard/src/components/billing/invoices.tsx", "modify", "@@ -12,2 +12,3 @@\n       <h2>Invoices</h2>\n+      <a href={csvUrl}>Export CSV</a>\n")], ms: 800 } },
+    { tool: { name: "shell", kind: "command", title: "cargo test -p billing invoices_csv", output: "running 3 tests\ntest invoices_csv_empty_range ... ok\ntest invoices_csv_one ... ok\ntest invoices_csv_streams_10k ... ok\n\ntest result: ok. 3 passed; 0 failed\n", exit: 0, ms: 1800 } },
+    { todos: [{ text: "Add the route", status: "completed" }, { text: "Add the button", status: "completed" }, { text: "Test it", status: "completed" }] },
+    { say: `Done: ${title.toLowerCase()}. The route streams rows, the button sits beside the invoice list, and three tests cover it.` },
+  ];
+}
+
+/** In plan mode a follow-up refines the plan (T3's "Refine"): a new plan, still nothing changed. */
+function refineScript(note: string): Step[] {
+  return [
+    { think: `Revising the plan: "${note.slice(0, 80)}".` },
+    { plan: `${BILLING_PLAN.replace("\n\nNothing changes until you say so.", "")}\n5. ${note.trim().replace(/\.$/, "")}.\n\nNothing changes until you say so.` },
+    { say: "Updated the plan." },
+  ];
+}
 
 const nextScript: Step[] = [
   { say: "Upgrading Next.js. One decision first." },
@@ -646,6 +678,8 @@ interface Sim {
   run: string;
   stopped: boolean;
   answer?: (r: RequestResponse) => void;
+  /** A `/compact` run: steering it queues instead (T3). */
+  compacting?: boolean;
 }
 
 const now = () => Date.now();
@@ -1208,6 +1242,7 @@ export class DemoOwner implements AgentsTransport {
     this.put("thread", base("thr_demo_flaky", "prj_demo_roll", "Fix the flaky queue test", "claude", "claude-opus-5-5", { created_at: t0 + 9000 }), MBP);
     this.put("thread", base("thr_demo_next", "prj_demo_web", "Upgrade to Next 16.4", "claude", "claude-opus-5-5", { created_at: t0 + 8000 }), MBP);
     this.put("thread", base("thr_demo_ci", "prj_demo_infra", "Move CI to roll checks", "codex", "gpt-5.5-codex", { created_at: t0 + 7000, interaction_mode: "plan", cwd: "/home/roll/infra" }), BOX);
+    this.plannedRun(base("thr_demo_billing", "prj_demo_web", "Plan the CSV invoice export", "codex", "gpt-5.5-codex", { created_at: t0 + 6000, interaction_mode: "plan" }));
     this.put("thread", base("thr_demo_old", "prj_demo_web", "Spike: edge middleware", "codex", "gpt-5.5", { created_at: t0, archived_at: t0 + 100 }), MBP);
 
     // The inbox: settled threads (by hand, after days without activity, a landed change),
@@ -1248,7 +1283,7 @@ export class DemoOwner implements AgentsTransport {
     this.after(7000, () => {
       if (this.sims.size < 2) {
         const idle = [...this.records.values()]
-          .filter((m) => m.entity.kind === "thread" && m.entity.status === "idle" && m.entity.archived_at === null && !m.entity.inbox.settle && !m.entity.inbox.snooze && this.machines.get(m.machine)?.online)
+          .filter((m) => m.entity.kind === "thread" && m.entity.status === "idle" && m.entity.interaction_mode !== "plan" && m.entity.archived_at === null && !m.entity.inbox.settle && !m.entity.inbox.snooze && this.machines.get(m.machine)?.online)
           .map((m) => m.entity.id);
         const tid = idle[turn % Math.max(1, idle.length)];
         const run = autoRuns[turn % autoRuns.length];
@@ -1260,6 +1295,33 @@ export class DemoOwner implements AgentsTransport {
 
   private after(ms: number, fn: () => void) {
     void this.sleep(ms).then(fn);
+  }
+
+  /**
+   * A thread in plan mode whose run ended with a plan (Codex: no approval), after Codex compacted
+   * the context on its own mid-run: the composer shows "Plan ready" with Implement, and the
+   * transcript the compaction row.
+   */
+  private plannedRun(thread: Thread) {
+    const at = now() - 25 * 60_000;
+    const tid = thread.id;
+    const rid = "run_demo_billing1";
+    this.put("thread", { ...thread, updated_at: at + 140_000 }, MBP);
+    const usage = { input_tokens: 412_000, output_tokens: 9_400, cached_tokens: 301_000, cost_usd: null };
+    const context: ContextUsage = { used_tokens: 61_900, max_tokens: CODEX_WINDOW, total_processed_tokens: 503_400 };
+    this.put("run", { id: rid, thread: tid, ordinal: 1, provider: "codex", model: "gpt-5.5-codex", status: "completed", prompt: "Plan a CSV export for invoices: the API route, a button in the dashboard, and tests.", attachments: [], steers: [], requested_at: at, started_at: at, completed_at: at + 140_000, checkpoint: null, stat: null, usage, context, error: null }, MBP);
+    let o = 0;
+    const node = (body: NodeBody, ms: number) => this.putNode({ id: id("nod_"), thread: tid, run: rid, parent: null, ordinal: ++o, status: "completed", started_at: at + ms, completed_at: at + ms + 4000, body });
+    const read = (path: string, ms: number) => node({ type: "tool", name: "shell", kind: "read", title: `sed -n 1,400p ${path}`, input: null, output: "…", exit_code: 0, files: [] }, ms);
+    node({ type: "reasoning", text: "Find where invoices are listed and how the billing routes stream rows." }, 2000);
+    read("crates/billing/src/http.rs", 8000);
+    read("crates/billing/src/invoices.rs", 16_000);
+    read("apps/dashboard/src/components/billing/invoices.tsx", 30_000);
+    node({ type: "compaction", before_tokens: 238_600, after_tokens: 52_300, error: null }, 52_000);
+    read("crates/billing/tests/http.rs", 90_000);
+    node({ type: "plan", text: BILLING_PLAN }, 120_000);
+    node({ type: "message", text: "That's the plan. Say **Implement** to carry it out, or tell me what to change." }, 136_000);
+    this.patchThread(tid, { run_count: 1, usage, context, activity: null, updated_at: at + 140_000 });
   }
 
   private completedRun(tid: ThreadId, ordinal: number, prompt: string, answer: string, files: FileChange[], at: number) {
@@ -1283,6 +1345,20 @@ export class DemoOwner implements AgentsTransport {
 
   // ── running a script ──
 
+  /** A message starts a run: `/compact` compacts where the provider can (T3), anything else gets a reply. */
+  private sendMessage(tid: ThreadId, text: string, attachments: Run["attachments"] = []) {
+    const t = this.thread(tid);
+    if (!t) return;
+    const caps = this.allProviders.get(this.machineOf(tid))?.find((p) => p.id === t.provider)?.capabilities;
+    if (text.trim() === "/compact" && !attachments.length && caps?.compact) {
+      this.begin(tid, text, [{ compact: {} }]);
+      const sim = this.sims.get(tid);
+      if (sim) sim.compacting = true;
+      return;
+    }
+    this.begin(tid, text, this.reply(text, t.interaction_mode), attachments);
+  }
+
   /** Start a run on an idle thread. */
   private begin(tid: ThreadId, prompt: string, script: Step[], attachments: Run["attachments"] = []) {
     const t = this.thread(tid);
@@ -1304,29 +1380,40 @@ export class DemoOwner implements AgentsTransport {
   private async play(sim: Sim, steps: Step[], ctx: { ordinal: number; files: FileChange[] }, parent: string | null = null): Promise<void> {
     for (const step of steps) {
       if (sim.stopped) return;
+      // A subagent says what it's doing (Claude's `task_progress`).
+      if (parent !== null) this.progress(parent, step);
       await this.step(sim, step, ctx, parent);
-      // Subagents work in their own context; the thread's grows with its own steps.
-      if (parent === null && !sim.stopped) this.growContext(sim);
+      // Subagents work in their own context; the thread's grows with its own steps, and past
+      // 92 % of the window the provider compacts it (Claude and Codex do).
+      if (parent === null && !sim.stopped && !("compact" in step) && this.growContext(sim)) await this.step(sim, { compact: {} }, ctx, null);
       await this.sleep(350);
     }
   }
 
+  private progress(parent: string, step: Step) {
+    const n = this.get<Node>("node", parent);
+    if (n?.body.type !== "subagent" || !("tool" in step)) return;
+    const t = step.tool;
+    const line = t.kind === "read" ? `Reading ${t.title}` : t.kind === "search" ? `Searching ${t.title}` : t.kind === "command" ? `Running ${t.title}` : t.title;
+    this.putNode({ ...n, body: { ...n.body, progress: line } });
+  }
+
   /**
    * Each model call carries the whole conversation, so the context grows a few thousand tokens a
-   * step (the first call starts with the system prompt and tools); past 92 % the provider compacts
-   * it down to what's left, as Claude and Codex do.
+   * step (the first call starts with the system prompt and tools). Says whether it passed 92 % of
+   * the window, where the provider compacts it.
    */
-  private growContext(sim: Sim) {
+  private growContext(sim: Sim): boolean {
     const t = this.thread(sim.thread);
-    if (!t) return;
+    if (!t) return false;
     const max = contextWindow(t.model);
     const before = t.context?.used_tokens ?? (t.provider === "claude" ? 21_400 : 13_800);
-    let used = before + 1_500 + Math.floor(Math.random() * 6_000);
-    if (max !== null && used > max * 0.92) used = Math.round(max * 0.24);
+    const used = before + 1_500 + Math.floor(Math.random() * 6_000);
     const processed = t.provider === "codex" ? (t.context?.total_processed_tokens ?? 0) + used : null;
     const context: ContextUsage = { used_tokens: used, max_tokens: max, total_processed_tokens: processed };
     this.patchRun(sim.run, { context });
     this.patchThread(sim.thread, { context });
+    return max !== null && used > max * 0.92;
   }
 
   private node(sim: Sim, ctx: { ordinal: number }, body: NodeBody, parent: string | null, status: Node["status"] = "running"): Node {
@@ -1391,9 +1478,25 @@ export class DemoOwner implements AgentsTransport {
     }
     if ("sub" in step) {
       if (!parent) activity(`Delegating to ${step.sub.agent}`);
-      const n = this.node(sim, ctx, { type: "subagent", agent: step.sub.agent, prompt: step.sub.prompt, child: null, result: null }, parent);
+      const body = { type: "subagent" as const, agent: step.sub.agent, prompt: step.sub.prompt, child: null, result: null, model: step.sub.model ?? null };
+      const n = this.node(sim, ctx, body, parent);
       await this.play(sim, step.sub.steps, ctx, n.id);
-      this.done(n, { type: "subagent", agent: step.sub.agent, prompt: step.sub.prompt, child: null, result: step.sub.result });
+      this.done(n, { ...body, result: step.sub.result, progress: null });
+      return;
+    }
+    if ("compact" in step) {
+      // T3's compaction row: running, then the window before → after; the meter drops.
+      activity("Compacting context");
+      const t = this.thread(sim.thread)!;
+      const before = t.context?.used_tokens ?? null;
+      const n = this.node(sim, ctx, { type: "compaction", before_tokens: before, after_tokens: null, error: null }, null);
+      await this.sleep(1600);
+      if (sim.stopped) return;
+      const after = step.compact.after ?? Math.round((before ?? 40_000) * 0.24);
+      const context: ContextUsage = { used_tokens: after, max_tokens: t.context?.max_tokens ?? contextWindow(t.model), total_processed_tokens: t.context?.total_processed_tokens ?? null };
+      this.patchRun(sim.run, { context });
+      this.patchThread(sim.thread, { context });
+      this.done(n, { type: "compaction", before_tokens: before, after_tokens: after, error: null });
       return;
     }
     if ("ask" in step || "questions" in step) {
@@ -1540,7 +1643,7 @@ export class DemoOwner implements AgentsTransport {
     if (woken) {
       this.wakes.delete(sim.thread);
       this.wakeOrchestrator(sim.thread, woken);
-    } else if (next) this.after(500, () => this.begin(sim.thread, next.text, this.reply(next.text), next.attachments));
+    } else if (next) this.after(500, () => this.sendMessage(sim.thread, next.text, next.attachments));
   }
 
   private filesOf(run: string): FileChange[] {
@@ -1569,7 +1672,11 @@ export class DemoOwner implements AgentsTransport {
     this.patchThread(sim.thread, { status: "idle", active_run: null, activity: null, pending_requests: 0 });
   }
 
-  private reply(prompt: string): Step[] {
+  private reply(prompt: string, mode: Thread["interaction_mode"] = "default"): Step[] {
+    // T3's "Implement": the plan comes back as the message, in build mode.
+    if (prompt.startsWith(PLAN_IMPLEMENTATION_PREFIX)) return implementScript(prompt.slice(PLAN_IMPLEMENTATION_PREFIX.length));
+    // In plan mode a follow-up refines the plan (T3's "Refine").
+    if (mode === "plan") return refineScript(prompt);
     const canned = followUps.default[prompt.length % followUps.default.length];
     return [
       { think: `The user asked: "${prompt.slice(0, 80)}". Look at the code first.` },
@@ -1590,21 +1697,57 @@ export class DemoOwner implements AgentsTransport {
         if (t.inbox.settle || t.inbox.snooze) this.patchInbox(c.thread, { settle: null, snooze: null });
         const busy = t.status !== "idle" && t.status !== "error";
         if (!busy) {
-          this.begin(c.thread, c.text, this.reply(c.text), c.attachments ?? []);
+          this.sendMessage(c.thread, c.text, c.attachments ?? []);
           return { type: "ok" };
         }
-        if (c.mode === "steer") {
+        // A compaction can't be steered: the message waits behind it (T3).
+        if (c.mode === "steer" && !this.sims.get(c.thread)?.compacting) {
           const r = t.active_run && this.get<Run>("run", t.active_run);
           if (r) this.patchRun(r.id, { steers: [...r.steers, c.text] });
           return { type: "ok" };
         }
-        this.patchThread(c.thread, { queued: [...t.queued, { id: id("q_"), text: c.text, attachments: c.attachments ?? [], at: now() }] });
-        return { type: "ok" };
+        const q = { id: id("q_"), text: c.text, attachments: c.attachments ?? [], at: now() };
+        this.patchThread(c.thread, { queued: [...t.queued, q] });
+        return { type: "created", id: q.id };
       }
       case "message.unqueue": {
         const t = this.thread(c.thread);
         if (!t) return notFound("thread");
         this.patchThread(c.thread, { queued: t.queued.filter((q) => q.id !== c.message) });
+        return { type: "ok" };
+      }
+      case "message.edit": {
+        const t = this.thread(c.thread);
+        const q = t?.queued.find((m) => m.id === c.message);
+        if (!t || !q) return notFound("queued message");
+        if (!c.text.trim() && !(c.attachments ?? q.attachments).length) return { type: "error", code: "invalid", message: "the message is empty; remove it from the queue instead" };
+        this.patchThread(c.thread, { queued: t.queued.map((m) => (m.id === c.message ? { ...m, text: c.text, attachments: c.attachments ?? m.attachments } : m)) });
+        return { type: "ok" };
+      }
+      case "message.reorder": {
+        const t = this.thread(c.thread);
+        const q = t?.queued.find((m) => m.id === c.message);
+        if (!t || !q || (c.before && !t.queued.some((m) => m.id === c.before))) return notFound("queued message");
+        if (c.before === c.message) return { type: "ok" };
+        const rest = t.queued.filter((m) => m.id !== c.message);
+        const at = c.before ? rest.findIndex((m) => m.id === c.before) : rest.length;
+        this.patchThread(c.thread, { queued: [...rest.slice(0, at), q, ...rest.slice(at)] });
+        return { type: "ok" };
+      }
+      case "message.promote": {
+        const t = this.thread(c.thread);
+        const q = t?.queued.find((m) => m.id === c.message);
+        if (!t || !q) return notFound("queued message");
+        const sim = this.sims.get(c.thread);
+        if (sim?.compacting) return { type: "error", code: "conflict", message: "the conversation is being compacted; the message goes once that's done" };
+        this.patchThread(c.thread, { queued: t.queued.filter((m) => m.id !== c.message) });
+        if (!sim) {
+          // A held queue: this one runs now, and the rest drains after it.
+          this.sendMessage(c.thread, q.text, q.attachments);
+          return { type: "ok" };
+        }
+        const r = t.active_run && this.get<Run>("run", t.active_run);
+        if (r) this.patchRun(r.id, { steers: [...r.steers, q.text] });
         return { type: "ok" };
       }
       case "run.interrupt": {
@@ -1674,7 +1817,7 @@ export class DemoOwner implements AgentsTransport {
           machine,
         );
         const providers = (this.machines.get(machine)?.info?.providers ?? []).filter((p) => p.installed).map((p) => p.id);
-        if (c.prompt) this.after(300, () => this.begin(tid, c.prompt!, c.orchestrator ? orchestratorScript(c.prompt!, providers) : this.reply(c.prompt!), c.attachments ?? []));
+        if (c.prompt) this.after(300, () => this.begin(tid, c.prompt!, c.orchestrator ? orchestratorScript(c.prompt!, providers) : this.reply(c.prompt!, c.interaction_mode), c.attachments ?? []));
         return { type: "created", id: tid };
       }
       case "thread.configure": {

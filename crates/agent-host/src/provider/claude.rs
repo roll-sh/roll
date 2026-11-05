@@ -72,7 +72,7 @@ impl Claude {
 /// Forks are `--resume <source> --fork-session`, at a turn with `--resume-session-at`; rollbacks
 /// resume the conversation at the kept turn (`SessionConfig.resume_at`, [`RollbackStyle::ResumeAt`]).
 fn capabilities() -> Capabilities {
-    Capabilities { steer: true, fork: true, rollback: true, plan_mode: true, images: true, subagents: true, mode_switch: true }
+    Capabilities { steer: true, fork: true, rollback: true, plan_mode: true, images: true, subagents: true, mode_switch: true, compact: true }
 }
 
 /// Runtime and interaction modes as Claude permission modes (T3's

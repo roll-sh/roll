@@ -449,12 +449,10 @@ impl Translator {
                 self.upsert(&w.id, thread, turn, status, NodeBody::Tool(tool), out);
             }
             ThreadItem::ContextCompaction(c) => {
-                let (status, text) = if completed {
-                    (NodeStatus::Completed, "Context compacted")
-                } else {
-                    (NodeStatus::Running, "Compacting context")
-                };
-                self.upsert(&c.id, thread, turn, status, NodeBody::System { text: text.into() }, out);
+                // T3's compaction row; the orchestrator fills in the context before and after.
+                let status = if completed { NodeStatus::Completed } else { NodeStatus::Running };
+                let body = NodeBody::Compaction { before_tokens: None, after_tokens: None, error: None };
+                self.upsert(&c.id, thread, turn, status, body, out);
                 if completed && thread == self.root && !self.context.is_empty() {
                     out.push(Action::Request { method: "thread/inject_items".into(), params: self.inject_params() });
                 }
@@ -463,7 +461,7 @@ impl Translator {
                 if completed && c.tool == "spawnAgent" {
                     let prompt = c.prompt.clone().unwrap_or_default();
                     for child in &c.receiver_thread_ids {
-                        self.add_subagent(&format!("{}:{child}", c.id), child, thread, turn, "codex", &prompt, out);
+                        self.add_subagent(&format!("{}:{child}", c.id), child, (thread, turn), "codex", &prompt, c.model.clone(), out);
                     }
                 }
                 for (child, state) in &c.agents_states {
@@ -474,7 +472,7 @@ impl Translator {
                 "started" => {
                     let agent = a.agent_path.rsplit('/').find(|s| !s.is_empty()).unwrap_or("subagent").to_string();
                     let id = format!("{}:{}", a.id, a.agent_thread_id);
-                    self.add_subagent(&id, &a.agent_thread_id, thread, turn, &agent, "", out);
+                    self.add_subagent(&id, &a.agent_thread_id, (thread, turn), &agent, "", None, out);
                 }
                 "completed" | "interrupted" => self.set_subagent_state(&a.agent_thread_id, &a.kind, None, out),
                 _ => {}
@@ -490,13 +488,15 @@ impl Translator {
         }
     }
 
+    /// `at` is the (thread, turn) the spawn happened in.
     #[allow(clippy::too_many_arguments)]
-    fn add_subagent(&mut self, id: &str, child: &str, thread: &str, turn: &str, agent: &str, prompt: &str, out: &mut Vec<Action>) {
+    fn add_subagent(&mut self, id: &str, child: &str, at: (&str, &str), agent: &str, prompt: &str, model: Option<String>, out: &mut Vec<Action>) {
         if self.subagents.contains_key(child) {
             return;
         }
-        let body = NodeBody::Subagent { agent: agent.to_string(), prompt: prompt.to_string(), child: None, result: None };
-        self.upsert(id, thread, turn, NodeStatus::Running, body, out);
+        let model = model.filter(|m| !m.is_empty());
+        let body = NodeBody::Subagent { agent: agent.to_string(), prompt: prompt.to_string(), child: None, result: None, progress: None, model };
+        self.upsert(id, at.0, at.1, NodeStatus::Running, body, out);
         self.subagents.insert(child.to_string(), Subagent { item: id.to_string() });
     }
 

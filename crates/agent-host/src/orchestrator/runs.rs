@@ -42,6 +42,9 @@ pub(crate) struct Active {
     /// Steering input waiting for the interrupted turn to end (T3's steering restart).
     restart_with: Option<TurnInput>,
     interrupting: bool,
+    /// The run is a compaction (`/compact` on a provider that can): it can't be steered, so
+    /// messages sent to steer it queue behind it instead (T3's `CommandPolicy`).
+    compacting: bool,
     /// The run waits on its user, but the provider turn that asked is gone (the daemon stopped
     /// while it waited: a sandbox going to sleep, a restart). Its requests are answered by a new
     /// turn on the resumed conversation ([`Host::resume_parked`]).
@@ -68,6 +71,7 @@ impl Active {
             thread_usage_before,
             restart_with: None,
             interrupting: false,
+            compacting: false,
             parked: false,
             preapproved: None,
         }
@@ -138,7 +142,9 @@ impl Active {
                 ToolKind::Web => format!("Browsing {}", tool.title),
                 ToolKind::Mcp | ToolKind::Other => tool.title.clone(),
             },
+            NodeBody::Subagent { agent, progress: Some(progress), .. } => format!("{agent}: {progress}"),
             NodeBody::Subagent { agent, .. } => format!("Delegating to {agent}"),
+            NodeBody::Compaction { .. } => "Compacting context".into(),
             NodeBody::Request { .. } => "Waiting".into(),
             NodeBody::System { text } => text.clone(),
         };
@@ -199,19 +205,11 @@ impl Host {
             let run = self.start_run(&mut rt, input).await?;
             return Ok(Reply::Created { id: run.0 });
         }
+        // A compaction can't be steered: what would steer it waits behind it (T3).
+        let compacting = rt.active.as_ref().is_some_and(|a| a.compacting);
         match mode {
-            SendMode::Queue => {
-                let message = QueuedMessage {
-                    id: format!("msg_{}", suffix()),
-                    text: input.text,
-                    attachments: input.attachments,
-                    at: now(),
-                };
-                let id = message.id.clone();
-                rt.thread.queued.push(message);
-                self.put_thread(&mut rt)?;
-                Ok(Reply::Created { id })
-            }
+            SendMode::Queue => self.enqueue(&mut rt, input),
+            SendMode::Steer if compacting => self.enqueue(&mut rt, input),
             SendMode::Steer => {
                 self.steer(&mut rt, input).await?;
                 Ok(Reply::Ok)
@@ -219,13 +217,87 @@ impl Host {
         }
     }
 
+    fn enqueue(&self, rt: &mut Rt, input: TurnInput) -> Res<Reply> {
+        let message = QueuedMessage { id: format!("msg_{}", suffix()), text: input.text, attachments: input.attachments, at: now() };
+        let id = message.id.clone();
+        rt.thread.queued.push(message);
+        self.put_thread(rt)?;
+        Ok(Reply::Created { id })
+    }
+
+    fn queued_at(rt: &Rt, message: &str) -> Res<usize> {
+        rt.thread.queued.iter().position(|m| m.id == message).ok_or_else(|| Fail::NotFound(format!("no queued message {message}")))
+    }
+
     pub(crate) async fn message_unqueue(&self, thread: &ThreadId, message: &str) -> Res<Reply> {
         let mut rt = self.lock(thread).await?;
-        let Some(i) = rt.thread.queued.iter().position(|m| m.id == message) else {
-            return Err(Fail::NotFound(format!("no queued message {message}")));
-        };
+        let i = Self::queued_at(&rt, message)?;
         rt.thread.queued.remove(i);
         self.put_thread(&mut rt)?;
+        Ok(Reply::Ok)
+    }
+
+    /// T3's `queued-run.edit`: new text, and new images when `attachments` is set.
+    pub(crate) async fn message_edit(&self, thread: &ThreadId, message: &str, text: String, attachments: Option<Vec<Attachment>>) -> Res<Reply> {
+        let mut rt = self.lock(thread).await?;
+        let i = Self::queued_at(&rt, message)?;
+        let queued = &mut rt.thread.queued[i];
+        let images = attachments.as_ref().unwrap_or(&queued.attachments);
+        if text.trim().is_empty() && images.is_empty() {
+            return Err(Fail::Invalid("the message is empty; remove it from the queue instead".into()));
+        }
+        queued.text = text;
+        if let Some(attachments) = attachments {
+            queued.attachments = attachments;
+        }
+        self.put_thread(&mut rt)?;
+        Ok(Reply::Ok)
+    }
+
+    /// T3's `queued-run.reorder`: in front of `before`, or last.
+    pub(crate) async fn message_reorder(&self, thread: &ThreadId, message: &str, before: Option<&str>) -> Res<Reply> {
+        let mut rt = self.lock(thread).await?;
+        let from = Self::queued_at(&rt, message)?;
+        if let Some(before) = before {
+            Self::queued_at(&rt, before)?;
+        }
+        if before == Some(message) {
+            return Ok(Reply::Ok);
+        }
+        let moved = rt.thread.queued.remove(from);
+        let to = match before {
+            Some(before) => Self::queued_at(&rt, before)?,
+            None => rt.thread.queued.len(),
+        };
+        rt.thread.queued.insert(to, moved);
+        self.put_thread(&mut rt)?;
+        Ok(Reply::Ok)
+    }
+
+    /// T3's "Send now": a queued message steers the active run (`promote-to-steer`), or starts
+    /// the next run on a thread whose queue is held (`queued-run.start`; the rest drains after
+    /// it). A compaction can't be steered, so the message keeps its place.
+    pub(crate) async fn message_promote(&self, thread: &ThreadId, message: &str) -> Res<Reply> {
+        let mut rt = self.lock(thread).await?;
+        let i = Self::queued_at(&rt, message)?;
+        if rt.active.as_ref().is_some_and(|a| a.compacting) {
+            return Err(Fail::Conflict("the conversation is being compacted; the message goes once that's done".into()));
+        }
+        let queued = rt.thread.queued.remove(i);
+        let input = TurnInput { text: queued.text.clone(), attachments: queued.attachments.clone() };
+        if rt.active.is_none() {
+            self.put_thread(&mut rt)?;
+            let run = self.start_run(&mut rt, input).await?;
+            return Ok(Reply::Created { id: run.0 });
+        }
+        self.put_thread(&mut rt)?;
+        if let Err(fail) = self.steer(&mut rt, input).await {
+            // Not sent: back in its place.
+            let at = i.min(rt.thread.queued.len());
+            rt.thread.queued.insert(at, queued);
+            self.put_thread(&mut rt)?;
+            return Err(fail);
+        }
         Ok(Reply::Ok)
     }
 
@@ -286,10 +358,20 @@ impl Host {
         self.put(batch)?;
         self.save_private(rt)?;
 
+        let mut compacted_unseen = false;
         let sent = async {
             self.ensure_session(rt).await?;
-            let text = handoff::prepend(self.handoff_for(rt)?, &input.text);
+            let handoff = self.handoff_for(rt)?;
             let live = rt.live.as_ref().expect("ensure_session started one");
+            if input.is_compact() && live.capabilities.compact {
+                // T3's `/compact`: the provider compacts its conversation as a turn of its own.
+                // Runs it hasn't seen stay unseen; the next message hands them over.
+                compacted_unseen = handoff.is_some();
+                let session = live.session.clone();
+                rt.active.as_mut().expect("started above").compacting = true;
+                return session.compact().await.map_err(|e| Fail::Provider(format!("{e:#}")));
+            }
+            let text = handoff::prepend(handoff, &input.text);
             live.session
                 .send(TurnInput { text, attachments: input.attachments })
                 .await
@@ -304,8 +386,10 @@ impl Host {
             self.finish_run(rt, RunStatus::Failed, Some(message)).await?;
             return Err(fail);
         }
-        let provider = rt.thread.provider.0.clone();
-        rt.private.seen.insert(provider, ordinal);
+        if !compacted_unseen {
+            let provider = rt.thread.provider.0.clone();
+            rt.private.seen.insert(provider, ordinal);
+        }
         *rt.private.turns.entry(ordinal).or_default() += 1;
         self.save_private(rt)?;
         let active = rt.active.as_mut().expect("started above");
@@ -326,6 +410,8 @@ impl Host {
             .runs_of(&rt.thread.id)?
             .into_iter()
             .filter(|r| r.ordinal > seen.unwrap_or(0) && r.status.is_terminal() && r.status != RunStatus::RolledBack)
+            // A compaction says nothing another provider needs.
+            .filter(|r| !(r.attachments.is_empty() && r.prompt.trim() == crate::provider::COMPACT))
             .collect();
         let preamble = if seen.is_none() { rt.private.preamble.as_deref() } else { None };
         if unseen.is_empty() && preamble.is_none() {
@@ -634,6 +720,15 @@ impl Host {
                     Some(active) if active.run.context != Some(context) => {
                         active.run.context = Some(context);
                         active.run_dirty = true;
+                        // The first report after a compaction is what it left.
+                        for node in active.nodes.values_mut() {
+                            if let NodeBody::Compaction { after_tokens: after @ None, .. } = &mut node.body
+                                && node.status == NodeStatus::Completed
+                            {
+                                *after = Some(context.used_tokens);
+                                active.dirty.insert(node.id.clone());
+                            }
+                        }
                     }
                     Some(_) => {}
                     // Between runs (an ACP agent reporting its session): the thread alone.
@@ -711,6 +806,17 @@ impl Host {
         let status_changed = node.status != item.status;
         if parent.is_some() {
             node.parent = parent;
+        }
+        // Counts a compaction's provider doesn't say (Codex's item has none): the context as it
+        // was when it started, and what the next report says is left (`Context`).
+        if let NodeBody::Compaction { before_tokens, after_tokens, .. } = &mut body {
+            if let NodeBody::Compaction { before_tokens: was_before, after_tokens: was_after, .. } = &node.body {
+                *before_tokens = before_tokens.or(*was_before);
+                *after_tokens = after_tokens.or(*was_after);
+            }
+            if is_new && before_tokens.is_none() {
+                *before_tokens = rt.thread.context.map(|c| c.used_tokens);
+            }
         }
         node.status = item.status;
         node.body = body;

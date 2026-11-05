@@ -386,9 +386,23 @@ export type NodeBody =
   | { type: "plan"; text: string }
   | { type: "todos"; items: Todo[] }
   | ({ type: "tool" } & ToolCall)
-  | { type: "subagent"; agent: string; prompt: string; child: ThreadId | null; result: string | null }
+  | SubagentBody
+  /** The provider compacted the context (T3's compaction row); the counts are the window before and after. */
+  | { type: "compaction"; before_tokens: number | null; after_tokens: number | null; error: string | null }
   | { type: "request"; request: RequestId }
   | { type: "system"; text: string };
+
+/** A subagent the provider started, or a delegated roll thread (`child` set). */
+export interface SubagentBody {
+  type: "subagent";
+  agent: string;
+  prompt: string;
+  child: ThreadId | null;
+  result: string | null;
+  /** What it's doing now, while it runs. */
+  progress?: string | null;
+  model?: string | null;
+}
 
 export interface Node {
   id: NodeId;
@@ -551,6 +565,8 @@ export interface Capabilities {
   images: boolean;
   subagents: boolean;
   mode_switch: boolean;
+  /** `/compact` compacts the context (the context meter's Compact action). */
+  compact?: boolean;
 }
 
 export interface ProviderInfo {
@@ -785,6 +801,12 @@ export type Command =
   | { type: "thread.change_ended"; thread: ThreadId; landed: boolean }
   | { type: "message.send"; thread: ThreadId; text: string; attachments?: Attachment[]; mode?: SendMode }
   | { type: "message.unqueue"; thread: ThreadId; message: string }
+  /** T3's queue edit: `attachments` replaces the images when given. */
+  | { type: "message.edit"; thread: ThreadId; message: string; text: string; attachments?: Attachment[] }
+  /** Move a queued message in front of `before` (last when unset). */
+  | { type: "message.reorder"; thread: ThreadId; message: string; before?: string }
+  /** T3's "Send now": steers the running run, or starts it on a held queue. */
+  | { type: "message.promote"; thread: ThreadId; message: string }
   | { type: "run.interrupt"; thread: ThreadId }
   | { type: "request.respond"; request: RequestId; response: RequestResponse }
   | { type: "checkpoint.rollback"; thread: ThreadId; checkpoint: CheckpointId }
@@ -1294,11 +1316,18 @@ const nodeBodyD: Decoder<NodeBody> = tagged("type", {
     items: array(obj<Todo>({ text: str, status: literal("pending", "in_progress", "completed") })),
   }),
   tool: obj<ToolCall>(toolFields),
-  subagent: obj<{ agent: string; prompt: string; child: ThreadId | null; result: string | null }>({
+  subagent: obj<Omit<SubagentBody, "type">>({
     agent: str,
     prompt: str,
     child: opt(str),
     result: opt(str),
+    progress: opt(str),
+    model: opt(str),
+  }),
+  compaction: obj<{ before_tokens: number | null; after_tokens: number | null; error: string | null }>({
+    before_tokens: opt(int),
+    after_tokens: opt(int),
+    error: opt(str),
   }),
   request: obj<{ request: RequestId }>({ request: str }),
   system: text,
@@ -1394,6 +1423,7 @@ const capabilitiesD = obj<Capabilities>({
   images: bool,
   subagents: bool,
   mode_switch: bool,
+  compact: withDefault(bool, () => false),
 });
 export const providerInfoD = obj<ProviderInfo>({
   id: str,
@@ -1528,6 +1558,9 @@ export const commandD: Decoder<Command> = tagged("type", {
     obj({ thread: str, text: str, attachments: optional(array(attachmentD)), mode: optional(literal("queue", "steer")) }),
   ),
   "message.unqueue": cmd<"message.unqueue">(obj({ thread: str, message: str })),
+  "message.edit": cmd<"message.edit">(obj({ thread: str, message: str, text: str, attachments: optional(array(attachmentD)) })),
+  "message.reorder": cmd<"message.reorder">(obj({ thread: str, message: str, before: optional(str) })),
+  "message.promote": cmd<"message.promote">(obj({ thread: str, message: str })),
   "run.interrupt": cmd<"run.interrupt">(obj({ thread: str })),
   "request.respond": cmd<"request.respond">(obj({ request: str, response: responseD })),
   "checkpoint.rollback": cmd<"checkpoint.rollback">(obj({ thread: str, checkpoint: str })),

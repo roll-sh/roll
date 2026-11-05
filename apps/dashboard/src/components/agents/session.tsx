@@ -8,7 +8,7 @@ import {
   ChevronRight,
   ClipboardList,
   FileDiff as DiffIcon,
-  ListPlus,
+  ArrowUpLeft,
   GitBranch,
   MoreHorizontal,
   Pencil,
@@ -22,6 +22,7 @@ import {
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { coming, isBusy, machineState, reachable, type Checkpoint, type Diff, type Machine, type Request, type Run, type Terminal, type Thread } from "@/lib/agents-api";
 import { checkpointsOf, nodeTree, runsOf } from "@/lib/agents-store";
+import { readyPlan } from "@/lib/agents-plan";
 import { DiffViewer } from "../code/diff";
 import { input } from "../ui";
 import { ChangeChip, PublishForm, TakeWorkForm, WorkChip } from "./change";
@@ -35,7 +36,8 @@ import { MachineIcon, ProjectIcon } from "./identity";
 import { TerminalView } from "./terminal";
 import { Select } from "./ui";
 import { orchestration, OrchestratorChip, StatusPill, threadPill } from "./thread-status";
-import { EmptyTranscript, RunView, type TranscriptActions } from "./transcript";
+import { EmptyTranscript, RunView, SubagentTranscript, type TranscriptActions } from "./transcript";
+import { findTree, SubagentBar } from "./subagents";
 import { useAgents, usePrefs } from "./use-agents";
 
 /** What sits beside the transcript: a diff (of one run, or `null` for the whole thread) or a terminal. */
@@ -70,8 +72,32 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
   const now = clock ?? wall;
 
   const [side, setSide] = useState<Side>(null);
-  // Another conversation starts with nothing beside it.
+  // Another conversation starts with nothing beside it, and on its own transcript.
   useEffect(() => setSide(null), [thread.id]);
+  // A provider subagent's own transcript, in place of the conversation (T3 opens it as a thread).
+  const [sub, setSub] = useState<string | null>(null);
+  useEffect(() => setSub(null), [thread.id]);
+  const subagent = useMemo(() => {
+    if (!sub) return null;
+    for (const r of runs) {
+      const t = findTree(nodeTree(data, thread.id, r.id), sub);
+      if (t) return t;
+    }
+    return null;
+  }, [sub, runs, data, thread.id]);
+  // Escape goes back to the conversation before it closes it.
+  useEffect(() => {
+    if (!sub) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      setSub(null);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [sub]);
+  // A delegated thread names the thread that delegated it (T3's "Open parent").
+  const parent = thread.lineage?.relation === "subagent" ? data.threads.get(thread.lineage.parent)?.value : undefined;
   const terminals = [...data.terminals.values()].filter((r) => r.value.thread === thread.id).map((r) => r.value);
   const sideTerminal = side?.kind === "terminal" ? terminals.find((t) => t.id === side.id) : undefined;
   // The drawer closes when its terminal goes away, not while a just-opened one is on its way.
@@ -93,7 +119,7 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
   };
   const mid = machine?.id;
   const actions: TranscriptActions = readOnly
-    ? { openThread }
+    ? { openThread, openSubagent: setSub }
     : {
         respond: (request, response) => client.run(mid!, { type: "request.respond", request, response }),
         showDiff: (r) => setSide({ kind: "diff", run: r }),
@@ -104,6 +130,8 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
             openThread(res.id);
           }),
         openThread,
+        openSubagent: setSub,
+        hostsPlan: true,
       };
 
   // Stick to the bottom while new work arrives, unless the reader scrolled up.
@@ -116,7 +144,7 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
   });
   useEffect(() => {
     stick.current = true;
-  }, [thread.id]);
+  }, [thread.id, sub]);
   const onScroll = () => {
     const el = scroller.current!;
     const end = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
@@ -141,6 +169,8 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
                   <EmptyTranscript>
                     <span className="shimmer">Loading the conversation…</span>
                   </EmptyTranscript>
+                ) : subagent ? (
+                  <SubagentTranscript t={subagent} requests={requests} actions={actions} now={now} />
                 ) : runs.length === 0 ? (
                   <EmptyTranscript>{readOnly ? "No runs yet." : "Send a message to start the conversation."}</EmptyTranscript>
                 ) : (
@@ -169,29 +199,17 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
           {!readOnly && (
             <div className="shrink-0 px-3 pt-1 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6 sm:pb-4">
               <div className="mx-auto w-full max-w-[46rem]">
-                {thread.queued.length > 0 && (
-                  <ul className="mx-[1.375rem] -mb-4 space-y-0.5 rounded-t-2xl border border-b-0 border-outline bg-raised px-2 pt-2 pb-5" aria-label="Queued messages">
-                    {thread.queued.map((q) => (
-                      <li key={q.id} className="flex h-7 items-center gap-2 rounded-md px-1.5 text-[12.5px] transition-opacity duration-150 starting:opacity-0 hover:bg-fg/[0.05]">
-                        <ListPlus className="size-3.5 shrink-0 text-subtle" aria-label="Queued" />
-                        <span className="min-w-0 flex-1 truncate text-soft">{q.text}</span>
-                        <button
-                          onClick={() => run(() => client.run(mid!, { type: "message.unqueue", thread: thread.id, message: q.id }))}
-                          aria-label="Remove from queue"
-                          className="grid size-5 place-items-center rounded text-subtle hover:text-fg"
-                        >
-                          <X className="size-3.5" />
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                {thread.archived_at ? (
+                {subagent ? (
+                  <SubagentBar node={subagent.node} now={now} onParent={() => setSub(null)} />
+                ) : thread.archived_at ? (
                   <p className="py-3 text-center text-[12.5px] text-subtle">Archived. Unarchive it from the menu to keep going.</p>
                 ) : (
-                  <Composer key={thread.id} mode={{ kind: "thread", thread, machine }} autoFocus={!phone} />
+                  <>
+                    {parent && <DelegatedBy parent={parent} onOpen={() => openThread(parent.id)} />}
+                    <Composer key={thread.id} mode={{ kind: "thread", thread, machine }} autoFocus={!phone} />
+                  </>
                 )}
-                <ContextStrip thread={thread} machine={machine} runs={runs} />
+                {!subagent && <ContextStrip thread={thread} machine={machine} runs={runs} />}
                 {error && (
                   <p className="mt-2 text-[12px] text-danger" role="alert">
                     {error}
@@ -216,6 +234,14 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
               onHide={() => setSide(null)}
             />
           )}
+          {readOnly && subagent && (
+            // A share's replay has no composer: the subagent's bar still leads back.
+            <div className="shrink-0 px-3 pt-1 pb-3 sm:px-6">
+              <div className="mx-auto w-full max-w-[46rem]">
+                <SubagentBar node={subagent.node} now={now} onParent={() => setSub(null)} />
+              </div>
+            </div>
+          )}
           {readOnly && error && <p className="px-6 pb-3 text-[12px] text-danger">{error}</p>}
         </div>
         {side?.kind === "diff" && !readOnly && (
@@ -237,6 +263,19 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
 }
 
 const DRAWER_HEIGHT = "roll:agents:terminal-height";
+
+/** Above a delegated thread's composer: who delegated it, and the way back (T3's "Open parent"). */
+function DelegatedBy({ parent, onOpen }: { parent: Thread; onOpen: () => void }) {
+  return (
+    <p className="flex min-w-0 items-center gap-1.5 px-3 pb-1.5 text-[12px] text-subtle">
+      <span className="shrink-0">Delegated by</span>
+      <span className="min-w-0 truncate text-muted">{parent.title}</span>
+      <button type="button" onClick={onOpen} className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-muted transition-colors hover:bg-fg/[0.06] hover:text-fg">
+        <ArrowUpLeft className="size-3.5" /> Open parent
+      </button>
+    </p>
+  );
+}
 
 /** An element's width, following it as it resizes (0 until measured). */
 function useWidth(ref: React.RefObject<HTMLElement | null>): number {
@@ -406,7 +445,7 @@ function TitleBar({
   const lastRun = runs.at(-1);
   const busy = isBusy(thread.status);
   const pending = [...data.requests.values()].map((r) => r.value).filter((r) => r.thread === thread.id && r.status === "pending");
-  const pill = threadPill(thread, pending, lastRun);
+  const pill = threadPill(thread, pending, lastRun, !!readyPlan(data, thread));
   const orchestrated = thread.orchestrator ? orchestration(thread, [...data.threads.values()].map((r) => r.value)) : null;
   // Settle, snooze (docs/code/agents.md, "Settling").
   const inboxMenu = useInboxMenu(thread);
