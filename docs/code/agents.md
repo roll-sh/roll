@@ -838,11 +838,25 @@ The surface has three views:
   agent) and the rest under "More options", a plan with Implement and Refine, questions one at a
   time as T3's user-input panel (radio or check rows, 1–9 pick, one choice moves on after 200 ms,
   your own words in a line, Previous / Next question / Submit). A phone's canvas shows the oldest
-  the same way. The layout is a tidy tree in columns
-  (one per depth, as wide as its widest card), so cards never overlap. Dragging a card moves it
-  among its siblings (they make room as it passes; ⌥↑/⌥↓ do the same from the keyboard); that
-  order is remembered per owner and synced through roll, new work keeps its default place
-  (newest first), and the view is remembered per device. One canvas engine (canvas 2D + `requestAnimationFrame`, paused offscreen) draws edges,
+  the same way. The canvas grows one of two ways, chosen per view
+  (`lib/agents-layout.ts`), and cards never overlap either way:
+  - **Left to right** (the default on a wide screen): a tidy tree in columns, one per depth, as
+    wide as its widest card; machines on the left, then projects, threads and their satellites.
+  - **Top-down** (the default on a phone): a board, like Linear's. The machines sit in a row on
+    top, each spreading its projects side by side under it in a row as tall as its tallest card;
+    everything in a project is a list down that project's column, indented, each thread's
+    requests, subagents and forks under it before the next thread. A plain top-down tree would put
+    a project's threads side by side, and a busy project would run off a phone's screen sideways;
+    as a column a narrow screen reads it top to bottom, and a wide one reads a column per project.
+    Edges route for it: a machine's into the top of each project, a listed card's down a trunk
+    inside its parent's left edge and into its left side (`canvas-engine.ts`, `EdgeRoute`).
+  The toolbar's direction button, ⇧D and ⌘K ("Lay out top-down", "Lay out left to right") switch
+  it. It's kept with the view in the owner's canvas document (`display`), a phone's choice apart
+  from a wide screen's, so turning the laptop's canvas around doesn't turn the phone's. Dragging a
+  card moves it among its siblings along the axis they're laid out on (they make room as it
+  passes; ⌥↑/⌥↓ do the same from the keyboard, ⌥←/⌥→ for siblings side by side); that order is
+  remembered per owner and synced through roll, new work keeps its default place (newest first),
+  and the view is remembered per device. One canvas engine (canvas 2D + `requestAnimationFrame`, paused offscreen) draws edges,
   pulses and the dot field; cards are DOM, positioned by the same world transform. Navigation is
   Figma's: scrolling pans (two fingers on a trackpad, any direction; shift turns a mouse wheel
   sideways), pinching zooms about the fingers (ctrl+wheel in Chromium, Firefox and Electron,
@@ -963,14 +977,17 @@ The surface has three views:
 - **Phones.** Below 640 px the popup is the whole screen; a conversation's actions fold into its
   menu and the diff or a terminal takes the transcript's place; the oldest waiting request sits at
   the bottom of the canvas, answerable with one tap; fitting the canvas keeps cards readable (at
-  least 55 %) and starts at the machines.
+  least 55 %) and starts on the first machine (centred on it when the top left wouldn't show it);
+  the canvas grows top-down unless the owner turned it on a phone.
 - **Remembered on every device.** How the owner arranged the canvas is kept by roll
   (`GET`/`PUT /v1/code/agents/{owner}/canvas`; `agents/docs.rs`), so the laptop, the phone and
   the desktop app show the same arrangement. The document is the canvas's own (at most 64 KiB of
   JSON) and opaque to roll; the dashboard reaches it through `AgentsServices.canvas`. It is
-  `{ order, pins?, views? }`: `order` and `pins` are All's, `views` the owner's views
-  (`{ id, name, filter, order?, pins? }`, at most 16). A document from before views (`{ order }`)
-  still parses and shows the built-in views; `views: []` means the owner deleted them all. Saves
+  `{ order, pins?, display?, views? }`: `order`, `pins` and `display` are All's, `views` the
+  owner's views (`{ id, name, filter, order?, pins?, display? }`, at most 16). `display` is how a
+  view is shown (`direction`, `phoneDirection`; absent means the default). A document from before
+  views (`{ order }`) still parses and shows the built-in views, one without `display` the
+  defaults; `views: []` means the owner deleted them all. Saves
   wait 350 ms (typing a filter, resizing a card is one save) and stay under the limit by
   dropping the least recently made arrangements first. A save names
   the revision it was made over: over a stale one it's refused with what is there now (409,

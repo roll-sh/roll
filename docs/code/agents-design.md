@@ -83,8 +83,11 @@ punch out the edge ports. `refreshColors()` reruns on a theme change (the canvas
 
 - **Dot field:** a 28px grid, readable at rest. The pointer swells it, a click ripples it, and
   it sweeps while anything runs. Keep it: the user likes it.
-- **Edges:** 1.25px beziers from a parent's right edge to a child's left, with a ring port at
-  each end. Busy edges use the accent at 50% with one travelling dot. Forks are dashed.
+- **Edges:** 1.25px, with a ring port at each end. Left to right, beziers from a parent's right
+  edge to a child's left. Top-down, a bezier from the middle of a machine's bottom to the middle
+  of a project's top, and for a listed card a trunk 14px inside its parent's left edge that turns
+  (an 8px radius) into the card's left side. Busy edges use the accent at 50% with one
+  travelling dot. Forks are dashed.
 - **Busy ring:** 1px of accent at 8–25% alpha, breathing over 1.6s, 3–5px outside the card.
 
 ## Cards (`Card` in nodes.tsx)

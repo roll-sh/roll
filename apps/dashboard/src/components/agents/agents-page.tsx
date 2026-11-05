@@ -7,11 +7,11 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import { isBusy } from "@/lib/agents-api";
 import { setActiveClient, type AgentsClient } from "@/lib/agents-client";
 import { deriveGraph, rolling, type GraphNode } from "@/lib/agents-graph";
-import type { Size } from "@/lib/agents-layout";
+import type { Direction, Size } from "@/lib/agents-layout";
 import { closePalette, noteThreadOpen, openPalette, togglePalette } from "@/lib/agents-palette";
 import type { AgentsServices } from "@/lib/agents-services";
 import { isNewAgentKey, setAgentsView, useAgentsSurface, viewFromHash, type AgentsView } from "@/lib/agents-surface";
-import { ALL, applyView, isPinned, pinKey, pinnedConversations, pinOf, viewStorageKey, type Pin as PinRec } from "@/lib/agents-views";
+import { ALL, applyView, directionOf, isPinned, pinKey, pinnedConversations, pinOf, viewStorageKey, withDirection, type Pin as PinRec } from "@/lib/agents-views";
 import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
 import { LINK_PARAMS, type IntegrationsLink } from "@/lib/integrations-api";
 import { useModelPrefsSync, useOwnerSettings } from "@/lib/owner-settings";
@@ -319,6 +319,10 @@ export function AgentsSurface({
   // Waiting on you isn't running: those show as the waiting count.
   const running = working.filter((t) => t.status !== "waiting").length;
   const archived = [...data.threads.values()].filter((r) => r.value.archived_at !== null).length;
+  const display = views.current.display;
+  const direction = directionOf(display, phone);
+  const { setDisplay } = views;
+  const setDirection = useCallback((d: Direction) => setDisplay(withDirection(display, phone, d)), [setDisplay, display, phone]);
   const host: PaletteHost = useMemo(
     () => ({
       addMachine: () => setAdding(true),
@@ -329,8 +333,10 @@ export function AgentsSurface({
       views: views.views,
       view: views.current.id,
       selectView: views.select,
+      direction,
+      setDirection,
     }),
-    [showArchived, archived, views.views, views.current.id, views.select],
+    [showArchived, archived, views.views, views.current.id, views.select, direction, setDirection],
   );
   const end = (
     <>
@@ -437,6 +443,8 @@ export function AgentsSurface({
                       data={data}
                       showArchived={showArchived}
                       views={views}
+                      direction={direction}
+                      onDirection={setDirection}
                       pendingFocus={pendingFocus}
                       visible={shown.kind !== "new" && shown.kind !== "automations"}
                       selected={selected}
@@ -578,6 +586,8 @@ function CanvasView({
   data,
   showArchived,
   views,
+  direction,
+  onDirection,
   pendingFocus,
   visible,
   selected,
@@ -588,6 +598,8 @@ function CanvasView({
   data: AgentsClient["data"];
   showArchived: boolean;
   views: CanvasViews;
+  direction: Direction;
+  onDirection: (d: Direction) => void;
   pendingFocus: React.RefObject<string | null>;
   visible: boolean;
   selected?: string;
@@ -703,6 +715,8 @@ function CanvasView({
           order={view.order}
           onOrder={views.setOrder}
           fitKey={JSON.stringify(filter)}
+          direction={direction}
+          onDirection={onDirection}
           render={render}
           defaultSize={sizeOf}
           active={visible}

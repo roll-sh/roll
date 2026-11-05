@@ -1,6 +1,6 @@
 "use client";
 
-import { ListRestart, Maximize, Minus, Plus } from "lucide-react";
+import { ArrowDownFromLine, ArrowRightFromLine, ListRestart, Maximize, Minus, Plus } from "lucide-react";
 import {
   forwardRef,
   useCallback,
@@ -17,6 +17,7 @@ import type { Graph, GraphNode } from "@/lib/agents-graph";
 import {
   arrange,
   bounds,
+  centreAcross,
   dropIndex,
   fitView,
   loadOrder,
@@ -25,15 +26,17 @@ import {
   ROOTS,
   saveOrder,
   saveView,
+  sideBySide,
   tidyLayout,
   toWorld,
   withOrder,
+  type Direction,
   type Order,
   type Point,
   type Size,
   type View,
 } from "@/lib/agents-layout";
-import { CanvasEngine, type SceneMeta } from "./canvas-engine";
+import { CanvasEngine, type SceneEdge, type SceneMeta } from "./canvas-engine";
 
 export interface CanvasHandle {
   /** Pan (and zoom) so a node is in view; `zoom` sets the scale. */
@@ -45,12 +48,13 @@ export interface CanvasHandle {
 
 /**
  * The canvas: the engine's canvas underneath, the cards in a world layer on top, placed by the
- * tidy layout in the order the user dragged cards into (a card moves among its siblings, so
- * nothing ever overlaps). The order is the caller's (`order`, `onOrder`: a canvas view's, synced
- * through roll), else kept here under `storageKey`; the view (pan and zoom) is remembered per
- * device under `storageKey`, and a new `storageKey` (another canvas view) goes back to how that
- * one was framed, or fits it. Keyboard: + / − zoom, 0 is 100 %, 1 fits, arrows pan, ⌥↑ / ⌥↓ move the
- * focused card among its siblings, Escape calls `onEscape`.
+ * tidy layout, growing to the right or down (`direction`), in the order the user dragged cards
+ * into (a card moves among its siblings, so nothing ever overlaps). The order is the caller's
+ * (`order`, `onOrder`: a canvas view's, synced through roll), else kept here under `storageKey`;
+ * the view (pan and zoom) is remembered per device under `storageKey`, and a new `storageKey`
+ * (another canvas view) goes back to how that one was framed, or fits it. Keyboard: + / − zoom, 0
+ * is 100 %, 1 fits, arrows pan, ⌥↑ / ⌥↓ move the focused card among its siblings (⌥← / ⌥→ where
+ * they sit side by side), ⇧D switches the direction, Escape calls `onEscape`.
  */
 export const AgentsCanvas = forwardRef<
   CanvasHandle,
@@ -63,6 +67,10 @@ export const AgentsCanvas = forwardRef<
     onOrder?: (order: Order) => void;
     /** When it changes (the view's filter did), fit what's shown again. */
     fitKey?: string;
+    /** Which way the tree grows (`horizontal` when absent). */
+    direction?: Direction;
+    /** With it, the toolbar switches the direction. */
+    onDirection?: (direction: Direction) => void;
     render: (node: GraphNode) => ReactNode;
     defaultSize: (node: GraphNode) => Size;
     onEscape?: () => void;
@@ -77,7 +85,7 @@ export const AgentsCanvas = forwardRef<
      */
     onLaunch?: (source: string, at: Point) => void;
   }
->(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, fitKey, render, defaultSize, onEscape, overlay, active = true, selected, onLaunch }, ref) {
+>(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, fitKey, direction = "horizontal", onDirection, render, defaultSize, onEscape, overlay, active = true, selected, onLaunch }, ref) {
   const reduced = useReducedMotion();
   const container = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -144,7 +152,14 @@ export const AgentsCanvas = forwardRef<
   );
 
   const arranged = useMemo(() => arrange(graph, preview ? withOrder(order, preview.parent, preview.list) : order), [graph, order, preview]);
-  const positions = useMemo(() => tidyLayout(arranged, (k) => (graph.nodes.has(k) ? sizeOf(k) : { w: 0, h: 0 })), [arranged, graph, sizeOf]);
+  // Growing down, a machine spreads its projects side by side; everything under a project is a
+  // list down its column.
+  const spreads = useCallback((k: string) => graph.nodes.get(k)?.kind === "machine", [graph]);
+  const across = useCallback((parent: string) => sideBySide(direction, parent, spreads), [direction, spreads]);
+  const positions = useMemo(
+    () => tidyLayout(arranged, (k) => (graph.nodes.has(k) ? sizeOf(k) : { w: 0, h: 0 }), { direction, spreads }),
+    [arranged, graph, sizeOf, direction, spreads],
+  );
 
   useEffect(() => {
     const e = engine.current;
@@ -155,11 +170,13 @@ export const AgentsCanvas = forwardRef<
       meta.set(n.key, { busy: n.busy, parent: n.parent });
       sz.set(n.key, sizeOf(n.key));
     }
-    e.setScene(positions, meta, graph.edges, sz);
-  }, [positions, graph, sizeOf]);
+    const edges: SceneEdge[] = graph.edges.map((x) => ({ ...x, route: direction === "horizontal" ? "right" : across(x.from) ? "down" : "list" }));
+    e.setScene(positions, meta, edges, sz);
+  }, [positions, graph, sizeOf, direction, across]);
 
   // `all`: everything, however small (the Fit button, `1`). Otherwise readable cards beat seeing
-  // everything: never below READABLE (a phone, 0.55), framed from the top.
+  // everything: never below READABLE (a phone, 0.55), framed from the top; a phone starts on the
+  // first machine, wherever the direction puts it.
   const fit = useCallback(
     (animate = true, all = false) => {
       const e = engine.current;
@@ -167,9 +184,11 @@ export const AgentsCanvas = forwardRef<
       const r = bounds(positions, sizeOf);
       const { w, h } = e.viewport;
       if (!r || !w || !h) return;
-      e.setView(w < 640 ? fitView(r, w, h, 24, 1, all ? 0 : 0.55) : fitView(r, w, h, 64, 1, all ? 0 : READABLE), animate);
+      const first = arranged.roots.find((k) => positions.has(k));
+      const anchor = first ? bounds(positions, sizeOf, [first]) ?? undefined : undefined;
+      e.setView(w < 640 ? fitView(r, w, h, 24, 1, all ? 0 : 0.55, anchor) : fitView(r, w, h, 64, 1, all ? 0 : READABLE), animate);
     },
-    [positions, sizeOf],
+    [positions, sizeOf, arranged],
   );
 
   // Fit once, when the first layout with measured cards is in; then keep everything in view as
@@ -193,6 +212,14 @@ export const AgentsCanvas = forwardRef<
     fitFor.current = fitKey;
     following.current = true;
   }, [fitKey]);
+  // The tree turned: everything moves, so frame it again (the cards ease there with the view).
+  const shownDirection = useRef(direction);
+  useEffect(() => {
+    if (shownDirection.current === direction) return;
+    shownDirection.current = direction;
+    following.current = true;
+    fit(true);
+  }, [direction, fit]);
   // The stream re-renders constantly; only a change in the overall extent refits.
   const extent = useMemo(() => {
     const r = bounds(positions, sizeOf);
@@ -302,6 +329,8 @@ export const AgentsCanvas = forwardRef<
     parent: string;
     list: string[];
     centres: Map<string, number>;
+    /** The siblings sit side by side (measured on x), else one under another (on y). */
+    across: boolean;
   } | null>(null);
   // Dragging a launch handle out of a card: where it started, and the ghost line drawn meanwhile.
   const launch = useRef<{ source: string; id: number; start: Point; from: Point; moved: boolean } | null>(null);
@@ -338,8 +367,8 @@ export const AgentsCanvas = forwardRef<
     const r = container.current!.getBoundingClientRect();
     const { parent, list } = siblingsOf(key);
     // Where the siblings are as the drag starts: the gap moves, what it's measured against doesn't.
-    const centres = new Map(list.map((k) => [k, (positions.get(k)?.y ?? 0) + sizeOf(k).h / 2]));
-    drag.current = { key, id: ev.pointerId, start: toWorld(e.view, ev.clientX - r.left, ev.clientY - r.top), from, moved: false, el: card!, parent, list, centres };
+    const centres = new Map(list.map((k) => [k, centreAcross(positions.get(k) ?? { x: 0, y: 0 }, sizeOf(k), across(parent))]));
+    drag.current = { key, id: ev.pointerId, start: toWorld(e.view, ev.clientX - r.left, ev.clientY - r.top), from, moved: false, el: card!, parent, list, centres, across: across(parent) };
   };
   const onPointerMove = (ev: React.PointerEvent) => {
     const l = launch.current;
@@ -366,7 +395,7 @@ export const AgentsCanvas = forwardRef<
     const at = { x: d.from.x + dx, y: d.from.y + dy };
     e.setDrag(d.key, at);
     if (d.list.length < 2) return;
-    const list = moveTo(d.list, d.key, dropIndex(d.list, d.key, at.y + sizeOf(d.key).h / 2, (k) => d.centres.get(k) ?? 0));
+    const list = moveTo(d.list, d.key, dropIndex(d.list, d.key, centreAcross(at, sizeOf(d.key), d.across), (k) => d.centres.get(k) ?? 0));
     setPreview((cur) => (cur && cur.parent === d.parent && cur.list.join() === list.join() ? cur : { parent: d.parent, list }));
   };
   const onPointerUp = (ev: React.PointerEvent) => {
@@ -398,7 +427,7 @@ export const AgentsCanvas = forwardRef<
     setTimeout(() => window.removeEventListener("click", swallow, { capture: true }), 0);
   };
 
-  /** ⌥↑ / ⌥↓ on a focused card. */
+  /** ⌥↑ / ⌥↓ (⌥← / ⌥→ for siblings side by side) on a focused card. */
   const nudge = useCallback(
     (key: string, by: number) => {
       const { parent, list } = siblingsOf(key);
@@ -419,9 +448,11 @@ export const AgentsCanvas = forwardRef<
       if (!e || !active || ev.metaKey || ev.ctrlKey) return;
       if (ev.altKey) {
         const key = el?.closest<HTMLElement>("[data-card]")?.dataset.key;
-        if (key && (ev.key === "ArrowUp" || ev.key === "ArrowDown")) {
+        // Along the axis its siblings are laid out on.
+        const [back, on] = key && across(siblingsOf(key).parent) ? ["ArrowLeft", "ArrowRight"] : ["ArrowUp", "ArrowDown"];
+        if (key && (ev.key === back || ev.key === on)) {
           ev.preventDefault();
-          nudge(key, ev.key === "ArrowUp" ? -1 : 1);
+          nudge(key, ev.key === back ? -1 : 1);
         }
         return;
       }
@@ -455,6 +486,10 @@ export const AgentsCanvas = forwardRef<
         case "ArrowDown":
           e.panBy(0, -step, true);
           break;
+        case "D":
+          if (!onDirection) return;
+          onDirection(direction === "vertical" ? "horizontal" : "vertical");
+          break;
         case "Escape":
           onEscape?.();
           return;
@@ -465,7 +500,7 @@ export const AgentsCanvas = forwardRef<
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [fit, onEscape, active, nudge]);
+  }, [fit, onEscape, active, nudge, direction, onDirection, across, siblingsOf]);
 
   const arrangedByUser = Object.keys(order).length > 0;
 
@@ -479,6 +514,7 @@ export const AgentsCanvas = forwardRef<
       onPointerCancel={onPointerUp}
       aria-label="Agents canvas"
       role="application"
+      data-direction={direction}
     >
       <canvas ref={canvas} aria-hidden className="pointer-events-none absolute inset-0" />
       <div ref={world} className="absolute top-0 left-0 origin-top-left" style={{ willChange: "transform" }}>
@@ -507,6 +543,15 @@ export const AgentsCanvas = forwardRef<
         <ToolButton label="Fit everything (1)" onClick={() => fit(true, true)}>
           <Maximize className="size-3.5" />
         </ToolButton>
+        {onDirection && (
+          <ToolButton
+            label="Top-down (⇧D)"
+            onClick={() => onDirection(direction === "vertical" ? "horizontal" : "vertical")}
+            pressed={direction === "vertical"}
+          >
+            {direction === "vertical" ? <ArrowDownFromLine className="size-3.5" /> : <ArrowRightFromLine className="size-3.5" />}
+          </ToolButton>
+        )}
         {arrangedByUser && (
           <ToolButton label="Back to the default order" onClick={tidy}>
             <ListRestart className="size-3.5" />
@@ -565,9 +610,9 @@ function overlaps(r: { x: number; y: number; w: number; h: number }, v: View, vi
   return x0 < viewport.w && y0 < viewport.h && x0 + r.w * v.k > 0 && y0 + r.h * v.k > 0;
 }
 
-function ToolButton({ label, onClick, children }: { label: string; onClick: () => void; children: ReactNode }) {
+function ToolButton({ label, onClick, pressed, children }: { label: string; onClick: () => void; pressed?: boolean; children: ReactNode }) {
   return (
-    <button onClick={onClick} title={label} aria-label={label} className="grid size-7 place-items-center rounded-md transition-colors duration-150 hover:bg-panel-2 hover:text-fg [&>svg]:stroke-[1.75]">
+    <button onClick={onClick} title={label} aria-label={label} aria-pressed={pressed} className="grid size-7 place-items-center rounded-md transition-colors duration-150 hover:bg-panel-2 hover:text-fg aria-pressed:bg-fg/[0.07] aria-pressed:text-fg [&>svg]:stroke-[1.75]">
       {children}
     </button>
   );

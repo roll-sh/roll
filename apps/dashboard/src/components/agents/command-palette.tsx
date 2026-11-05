@@ -4,6 +4,8 @@ import {
   Archive,
   ArchiveRestore,
   ArrowDown,
+  ArrowDownFromLine,
+  ArrowRightFromLine,
   ArrowUp,
   Bell,
   Bot,
@@ -29,6 +31,7 @@ import {
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { isBusy, reachable, type Machine, type Thread } from "@/lib/agents-api";
+import type { Direction } from "@/lib/agents-layout";
 import { rolling } from "@/lib/agents-graph";
 import { agentsPalette, closePalette, noteThreadOpen, threadOpens, usePalette, type PaletteIntent } from "@/lib/agents-palette";
 import { setAgentsView, useAgentsSurface } from "@/lib/agents-surface";
@@ -65,6 +68,9 @@ export interface PaletteHost {
   views: readonly { id: string; name: string }[];
   view: string;
   selectView: (id: string) => void;
+  /** Which way the shown view's tree grows, and switching it (saved with the view). */
+  direction: Direction;
+  setDirection: (d: Direction) => void;
 }
 
 /**
@@ -295,6 +301,9 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
         },
       },
       { kind: "action", value: "action:fit", title: "Fit the canvas", searchTerms: ["zoom", "view", "overview", "all"], icon: <Maximize className={ICON} />, shortcut: "1", run: () => (setAgentsView({ kind: "canvas" }), host.fit()) },
+      host.direction === "vertical"
+        ? { kind: "action", value: "action:direction", title: "Lay out left to right", searchTerms: ["horizontal", "direction", "layout", "sideways", "tree"], icon: <ArrowRightFromLine className={ICON} />, shortcut: "⇧D", run: () => (setAgentsView({ kind: "canvas" }), host.setDirection("horizontal")) }
+        : { kind: "action", value: "action:direction", title: "Lay out top-down", searchTerms: ["vertical", "direction", "layout", "downwards", "tree"], icon: <ArrowDownFromLine className={ICON} />, shortcut: "⇧D", run: () => (setAgentsView({ kind: "canvas" }), host.setDirection("vertical")) },
     ];
     const opens = threadOpens();
     const used = (r: (typeof live)[number]) => Math.max(r.value.updated_at, opens[r.value.id]?.openedAt ?? 0);

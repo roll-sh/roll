@@ -25,6 +25,7 @@ import {
   resizePin,
   saveCurrentView,
   saveDoc,
+  setViewDisplay,
   setViewFilter,
   setViewOrder,
   STATUS_FILTERS,
@@ -33,6 +34,7 @@ import {
   viewById,
   viewsOf,
   type CanvasDoc,
+  type Display,
   type Pin,
   type PinKind,
   type ViewFilter,
@@ -58,6 +60,8 @@ export interface CanvasViews {
   saveAs: (name: string, filter: ViewFilter) => void;
   update: (fn: (d: CanvasDoc) => CanvasDoc) => void;
   setOrder: (order: Order) => void;
+  /** The shown view's display options (direction…), saved with it. */
+  setDisplay: (display: Display) => void;
   togglePin: (kind: PinKind, id: string, exists?: (p: Pin) => boolean) => void;
   resize: (p: Pin, w: number, h: number) => void;
 }
@@ -149,7 +153,8 @@ export function useCanvasViews(canvas: AgentsServices["canvas"] | undefined, own
       const vid = newViewId();
       let made = false;
       update((d) => {
-        const next = addView(d, name, f, vid);
+        // What's on screen keeps looking the same as a view.
+        const next = addView(d, name, f, vid, viewById(d, id).display);
         made = next !== d;
         return next;
       });
@@ -160,6 +165,7 @@ export function useCanvasViews(canvas: AgentsServices["canvas"] | undefined, own
     [update, select, id],
   );
   const setOrder = useCallback((o: Order) => update((d) => setViewOrder(d, id, o)), [id, update]);
+  const setDisplay = useCallback((display: Display) => update((d) => setViewDisplay(d, id, display)), [id, update]);
   const togglePin = useCallback(
     (kind: PinKind, target: string, exists?: (p: Pin) => boolean) =>
       update((d) => (isPinned(viewById(d, id), kind, target) ? unpin(d, id, kind, target) : pin(d, id, kind, target, exists))),
@@ -167,7 +173,7 @@ export function useCanvasViews(canvas: AgentsServices["canvas"] | undefined, own
   );
   const resize = useCallback((p: Pin, w: number, h: number) => update((d) => resizePin(d, id, p.kind, p.id, w, h)), [id, update]);
   const views = useMemo(() => viewsOf(doc), [doc]);
-  return { doc, views, current, filter, select, setFilter, saveAs, update, setOrder, togglePin, resize };
+  return { doc, views, current, filter, select, setFilter, saveAs, update, setOrder, setDisplay, togglePin, resize };
 }
 
 const typing = (el: Element | null) => !!el && ((el as HTMLElement).isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || !!el.closest(".xterm"));

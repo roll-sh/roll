@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { deriveGraph, keyOf, projectStats, rolling } from "./agents-graph";
-import { arrange, bounds, dropIndex, fitView, mergeOrder, moveTo, ROOTS, tidyLayout, withOrder, zoomAt } from "./agents-layout";
+import { arrange, bounds, centreAcross, dropIndex, fitView, mergeOrder, moveTo, ROOTS, sideBySide, tidyLayout, withOrder, zoomAt, type LayoutOptions, type Point, type Size } from "./agents-layout";
 import { applyEvents, emptyData, follow } from "./agents-store";
 import { approval, ev, machine, node, project, run, terminal, thread } from "@/test/agents";
 import { EMPTY_INBOX, type Thread } from "./agents-api";
@@ -122,7 +122,7 @@ describe("agents layout", () => {
   const size = (k: string) => (k === "a2" ? { w: 300, h: 200 } : { w: 100, h: 40 });
 
   it("lays out a tidy tree to the right, parents centred on their children", () => {
-    const p = tidyLayout(tree, size, { gapX: 50, gapY: 10, rootGap: 30 });
+    const p = tidyLayout(tree, size, { depthGap: 50, siblingGap: 10, rootGap: 30 });
     expect(p.get("a1")).toEqual({ x: 150, y: 0 });
     expect(p.get("a2")).toEqual({ x: 150, y: 50 });
     expect(p.get("a2x")).toEqual({ x: 500, y: 50 + 80 });
@@ -145,7 +145,7 @@ describe("agents layout", () => {
       ]),
     };
     const sz = (k: string) => (k === "wide" ? { w: 400, h: 40 } : { w: 100, h: 40 });
-    const p = tidyLayout(t, sz, { gapX: 50, gapY: 10 });
+    const p = tidyLayout(t, sz, { depthGap: 50, siblingGap: 10 });
     expect(p.get("n1")!.x).toBe(p.get("w1")!.x);
     expect(p.get("w1")!.x).toBe(p.get("wide")!.x + 400 + 50);
     const keys = [...p.keys()];
@@ -158,6 +158,107 @@ describe("agents layout", () => {
       }
   });
 
+  it("grows down too: depths are rows, siblings side by side, parents centred over their children", () => {
+    const p = tidyLayout(tree, size, { direction: "vertical", depthGap: 50, siblingGap: 10, rootGap: 30 });
+    expect(p.get("a1")).toEqual({ x: 0, y: 90 });
+    expect(p.get("a2")).toEqual({ x: 110, y: 90 });
+    // Row 1 is as tall as its tallest card (a2, 200).
+    expect(p.get("a2x")).toEqual({ x: 210, y: 90 + 200 + 50 });
+    // a's subtree is 100 + 10 + 300 = 410 wide; a sits over its middle.
+    expect(p.get("a")).toEqual({ x: 155, y: 0 });
+    expect(p.get("b")).toEqual({ x: 440, y: 0 });
+  });
+
+  it("grows down as a board: machines spread their projects across, a project lists its work down its column", () => {
+    const t = {
+      roots: ["m"],
+      nodes: new Map([
+        ["m", { children: ["p1", "p2"] }],
+        ["p1", { children: ["t1", "t2"] }],
+        ["p2", { children: [] }],
+        ["t1", { children: ["r1"] }],
+        ["t2", { children: [] }],
+        ["r1", { children: [] }],
+      ]),
+    };
+    const sz = (k: string) => (k === "r1" ? { w: 160, h: 60 } : k === "p2" ? { w: 100, h: 70 } : { w: 100, h: 40 });
+    const spreads = (k: string) => k === "m";
+    const p = tidyLayout(t, sz, { direction: "vertical", spreads, depthGap: 50, siblingGap: 20, indent: 30, listGap: 10 });
+    // p1's column: r1 is indented twice, 30 + 30 + 160 = 220 wide; p2 100; the row 220 + 20 + 100 = 340, m over its middle.
+    expect(p.get("m")).toEqual({ x: 120, y: 0 });
+    // The projects' row is as tall as its tallest card (p2, 70); both start on it.
+    expect(p.get("p1")).toEqual({ x: 0, y: 90 });
+    expect(p.get("p2")).toEqual({ x: 240, y: 90 });
+    // p1's work lists below the row, indented, each thread's satellites before the next thread.
+    expect(p.get("t1")).toEqual({ x: 30, y: 90 + 70 + 10 });
+    expect(p.get("r1")).toEqual({ x: 60, y: 170 + 40 + 10 });
+    expect(p.get("t2")).toEqual({ x: 30, y: 220 + 60 + 10 });
+    // Siblings that spread sit side by side; listed ones one under another.
+    expect(sideBySide("vertical", ROOTS, spreads)).toBe(true);
+    expect(sideBySide("vertical", "m", spreads)).toBe(true);
+    expect(sideBySide("vertical", "p1", spreads)).toBe(false);
+    expect(sideBySide("horizontal", "m", spreads)).toBe(false);
+  });
+
+  it("never overlaps cards of any size, either way, whatever the order", () => {
+    // A machine with projects, threads of all sizes, satellites and a pinned card.
+    const nodes = new Map<string, { children: string[] }>();
+    const sizes = new Map<string, Size>();
+    const add = (k: string, s: Size, kids: string[] = []) => {
+      nodes.set(k, { children: kids });
+      sizes.set(k, s);
+    };
+    add("m1", { w: 272, h: 120 }, ["p1", "p2", "x1"]);
+    add("m2", { w: 272, h: 180 }, ["p3"]);
+    add("p1", { w: 256, h: 64 }, ["t1", "t2", "t3"]);
+    add("p2", { w: 256, h: 110 }, []);
+    add("p3", { w: 256, h: 64 }, ["t4"]);
+    add("x1", { w: 620, h: 380 });
+    add("t1", { w: 296, h: 96 }, ["pc1", "r1", "s1"]);
+    add("t2", { w: 296, h: 140 }, ["t2f"]);
+    add("t3", { w: 296, h: 96 });
+    add("t4", { w: 296, h: 120 }, ["r2"]);
+    add("t2f", { w: 296, h: 96 });
+    add("pc1", { w: 520, h: 600 });
+    add("r1", { w: 352, h: 150 });
+    add("r2", { w: 352, h: 210 });
+    add("s1", { w: 240, h: 72 });
+    const sz = (k: string) => sizes.get(k)!;
+    const orders = [{}, withOrder(withOrder({}, ROOTS, ["m2", "m1"]), "t1", ["s1", "r1", "pc1"])];
+    const layouts: LayoutOptions[] = [{ direction: "horizontal" }, { direction: "vertical" }, { direction: "vertical", spreads: (k) => k.startsWith("m") }];
+    for (const opts of layouts)
+      for (const order of orders) {
+        const direction = opts.spreads ? "board" : opts.direction;
+        const p = tidyLayout(arrange({ roots: ["m1", "m2"], nodes }, order), sz, opts);
+        expect(p.size).toBe(nodes.size);
+        const keys = [...p.keys()];
+        for (const a of keys)
+          for (const b of keys) {
+            if (a >= b) continue;
+            const [pa, pb, sa, sb] = [p.get(a)!, p.get(b)!, sz(a), sz(b)];
+            const apart = pa.x + sa.w <= pb.x || pb.x + sb.w <= pa.x || pa.y + sa.h <= pb.y || pb.y + sb.h <= pa.y;
+            expect(apart, `${direction}: ${a} and ${b} overlap`).toBe(true);
+          }
+        // Children are past their parent in the direction the tree grows.
+        for (const [k, n] of nodes)
+          for (const c of n.children) {
+            if (direction !== "horizontal") expect(p.get(c)!.y).toBeGreaterThan(p.get(k)!.y + sz(k).h);
+            else expect(p.get(c)!.x).toBeGreaterThan(p.get(k)!.x + sz(k).w);
+          }
+      }
+  });
+
+  it("measures siblings along the axis they're laid out on, so dragging works either way", () => {
+    const at: Point = { x: 100, y: 40 };
+    const s: Size = { w: 200, h: 80 };
+    expect(centreAcross(at, s, false)).toBe(80);
+    expect(centreAcross(at, s, true)).toBe(200);
+    // Dragged sideways past b in a top-down tree, a drops after it.
+    const p = tidyLayout({ roots: ["m"], nodes: new Map([["m", { children: ["a", "b", "c"] }], ["a", { children: [] }], ["b", { children: [] }], ["c", { children: [] }]]) }, () => s, { direction: "vertical" });
+    const centre = (k: string) => centreAcross(p.get(k)!, s, true);
+    expect(moveTo(["a", "b", "c"], "a", dropIndex(["a", "b", "c"], "a", centre("b") + 1, centre))).toEqual(["b", "a", "c"]);
+  });
+
   it("keeps the user's order among siblings; new work keeps its default place", () => {
     // The user put c above a; b and the new n were never moved.
     expect(mergeOrder(["n", "a", "b", "c"], ["c", "b", "a"])).toEqual(["n", "c", "b", "a"]);
@@ -167,7 +268,7 @@ describe("agents layout", () => {
     const t = arrange(tree, o);
     expect(t.roots).toEqual(["b", "a"]);
     expect(t.nodes.get("a")!.children).toEqual(["a2", "a1"]);
-    const p = tidyLayout(t, size, { gapX: 50, gapY: 10, rootGap: 30 });
+    const p = tidyLayout(t, size, { depthGap: 50, siblingGap: 10, rootGap: 30 });
     expect(p.get("b")!.y).toBeLessThan(p.get("a")!.y);
     expect(p.get("a2")!.y).toBeLessThan(p.get("a1")!.y);
   });
@@ -212,5 +313,21 @@ describe("sandboxes and phones on the canvas", () => {
     expect(phone.x).toBe(24);
     // What fits vertically stays centred.
     expect(phone.y + (wide.h / 2) * phone.k).toBeCloseTo(350);
+  });
+
+  it("a phone's fit starts on the first machine, wherever the direction puts it", () => {
+    // Top-down: the machine sits centred over a wide row of work.
+    const r = { x: 0, y: 0, w: 3000, h: 1600 };
+    const machine = { x: 1364, y: 0, w: 272, h: 120 };
+    const v = fitView(r, 390, 700, 24, 1, 0.55, machine);
+    expect(v.k).toBe(0.55);
+    // The machine is centred on screen, and the top shows.
+    expect((machine.x + machine.w / 2) * v.k + v.x).toBeCloseTo(195);
+    expect(v.y).toBe(24);
+    // Already on screen from the start: nothing moves.
+    expect(fitView(r, 390, 700, 24, 1, 0.55, { x: 0, y: 0, w: 272, h: 120 }).x).toBe(24);
+    // Never past the far end.
+    const end = fitView(r, 390, 700, 24, 1, 0.55, { x: 2900, y: 0, w: 100, h: 100 });
+    expect(end.x).toBeCloseTo(390 - 24 - 3000 * 0.55);
   });
 });

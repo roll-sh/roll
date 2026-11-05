@@ -10,6 +10,7 @@ import {
   countView,
   DEFAULT_VIEWS,
   deleteView,
+  directionOf,
   encodeDoc,
   MAX_PINS,
   MAX_VIEWS,
@@ -19,11 +20,13 @@ import {
   PIN_MIN,
   renameView,
   resizePin,
+  setViewDisplay,
   setViewFilter,
   setViewOrder,
   unpin,
   viewById,
   viewsOf,
+  withDirection,
   type CanvasDoc,
 } from "./agents-views";
 import { approval, ev, machine, project, run, T0, terminal, thread } from "@/test/agents";
@@ -80,7 +83,31 @@ describe("the canvas document", () => {
         { id: "v_c", name: "   " },
       ],
     });
-    expect(messy.views).toEqual([{ id: "v_a", name: "A", filter: { status: ["running"], machines: ["mch_1"] }, order: {}, pins: [{ kind: "diff", id: "thr_1", w: PIN_MIN.diff.w, h: 1200 }] }]);
+    expect(messy.views).toEqual([{ id: "v_a", name: "A", filter: { status: ["running"], machines: ["mch_1"] }, order: {}, pins: [{ kind: "diff", id: "thr_1", w: PIN_MIN.diff.w, h: 1200 }], display: {} }]);
+  });
+
+  it("keeps each view's direction, a phone's apart from a wide screen's; old documents show the defaults", () => {
+    // Before display options: across on a wide screen, down on a phone.
+    const old = parseDoc({ order: {}, views: [{ id: "v_a", name: "A", filter: {} }] });
+    expect(old.display).toEqual({});
+    expect(directionOf(viewById(old, "v_a").display, false)).toBe("horizontal");
+    expect(directionOf(viewById(old, "v_a").display, true)).toBe("vertical");
+    // Turned top-down on the laptop: the phone keeps its own.
+    let doc = setViewDisplay(old, ALL, withDirection(old.display, false, "vertical"));
+    expect(directionOf(viewById(doc, ALL).display, false)).toBe("vertical");
+    doc = setViewDisplay(doc, "v_a", withDirection(viewById(doc, "v_a").display, true, "horizontal"));
+    expect(viewById(doc, "v_a").display).toEqual({ phoneDirection: "horizontal" });
+    expect(directionOf(viewById(doc, "v_a").display, false)).toBe("horizontal");
+    // Synced: it survives the trip through roll; nothing is written while it's the default.
+    const saved = JSON.parse(JSON.stringify(encodeDoc(doc)));
+    expect(saved.display).toEqual({ direction: "vertical" });
+    expect(saved.views[0].display).toEqual({ phoneDirection: "horizontal" });
+    expect(encodeDoc(old)).not.toHaveProperty("display");
+    expect(parseDoc(saved)).toEqual(doc);
+    // Unknown values show the default.
+    expect(parseDoc({ display: { direction: "diagonal", phoneDirection: 3 } }).display).toEqual({});
+    // A view saved from what's on screen keeps how it looked.
+    expect(viewById(addView(doc, "Down", {}, "v_d", doc.display), "v_d").display).toEqual({ direction: "vertical" });
   });
 
   it("creates, renames, reorders and deletes views; All stays first and can't be removed", () => {

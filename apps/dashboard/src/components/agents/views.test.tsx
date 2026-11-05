@@ -1,6 +1,6 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setActiveClient } from "@/lib/agents-client";
 import { resetAgentsSurface } from "@/lib/agents-surface";
 import { ALL, loadCurrentView, loadDoc, saveCurrentView, saveDoc, addView, parseDoc } from "@/lib/agents-views";
@@ -180,5 +180,55 @@ describe("kept by roll and on this device", () => {
     saveCurrentView("o", "v_m");
     expect(loadCurrentView("o")).toBe("v_m");
     expect(parseDoc(JSON.parse(localStorage.getItem("roll:agents:canvas:o")!))).toEqual(loadDoc("o"));
+  });
+});
+
+describe("the canvas's direction", () => {
+  const canvas = () => screen.getByLabelText("Agents canvas");
+  const asPhone = () => {
+    const mm = window.matchMedia;
+    vi.spyOn(window, "matchMedia").mockImplementation((q: string) => ({ ...mm(q), matches: q.includes("max-width: 640px") }));
+  };
+  afterEach(() => vi.restoreAllMocks());
+
+  it("grows right on a wide screen; the toolbar turns a view top-down, saved with that view in roll", async () => {
+    const { services } = setup();
+    expect(canvas()).toHaveAttribute("data-direction", "horizontal");
+    await userEvent.click(screen.getByRole("button", { name: "Top-down (⇧D)" }));
+    expect(canvas()).toHaveAttribute("data-direction", "vertical");
+    await waitFor(() => expect(lastSaved(services)).toMatchObject({ display: { direction: "vertical" } }));
+    // Each view has its own.
+    await userEvent.click(tab(/Running/));
+    expect(canvas()).toHaveAttribute("data-direction", "horizontal");
+    await userEvent.keyboard("{Shift>}D{/Shift}");
+    expect(canvas()).toHaveAttribute("data-direction", "vertical");
+    await waitFor(() => expect(lastSaved(services)).toMatchObject({ views: [{ id: "v_waiting" }, { id: "v_running", display: { direction: "vertical" } }] }));
+    await userEvent.click(tab("All"));
+    expect(canvas()).toHaveAttribute("data-direction", "vertical");
+  });
+
+  it("from ⌘K too", async () => {
+    setup();
+    await userEvent.keyboard("{Meta>}k{/Meta}");
+    await userEvent.type(screen.getByRole("combobox"), "top-down");
+    await userEvent.keyboard("{Enter}");
+    expect(canvas()).toHaveAttribute("data-direction", "vertical");
+    await waitFor(() => expect(screen.queryByRole("combobox")).toBeNull());
+    await userEvent.keyboard("{Meta>}k{/Meta}");
+    await userEvent.type(await screen.findByRole("combobox"), "left to right");
+    await userEvent.keyboard("{Enter}");
+    expect(canvas()).toHaveAttribute("data-direction", "horizontal");
+  });
+
+  it("a phone reads top-down by default, and its choice is its own", async () => {
+    asPhone();
+    const services = fakeServices();
+    // The laptop chose left to right; the phone still starts top-down.
+    await services.canvas.save("acme", { order: {}, display: { direction: "horizontal" } });
+    setup(services);
+    await waitFor(() => expect(canvas()).toHaveAttribute("data-direction", "vertical"));
+    await userEvent.click(screen.getByRole("button", { name: "Top-down (⇧D)" }));
+    expect(canvas()).toHaveAttribute("data-direction", "horizontal");
+    await waitFor(() => expect(lastSaved(services)).toMatchObject({ display: { direction: "horizontal", phoneDirection: "horizontal" } }));
   });
 });

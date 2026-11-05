@@ -1,21 +1,22 @@
 /**
  * Canvas views (docs/code/agents.md, "Canvas"): the canvas as a workspace the owner composes.
  * "All" is the whole canvas; every other view is a named filter over it (machines, projects,
- * thread status, providers, a text match) with its own sibling order and its own pinned cards (a
- * conversation, a diff or a terminal shown big on the canvas beside its thread). All of it is the
- * owner's canvas document, kept by roll (`AgentsServices.canvas`):
+ * thread status, providers, a text match) with its own sibling order, its own pinned cards (a
+ * conversation, a diff or a terminal shown big on the canvas beside its thread) and its own display
+ * options (which way the tree grows). All of it is the owner's canvas document, kept by roll
+ * (`AgentsServices.canvas`):
  *
- *     { order, pins?, views? }      views: [{ id, name, filter, order?, pins? }]
+ *     { order, pins?, display?, views? }      views: [{ id, name, filter, order?, pins?, display? }]
  *
- * `order` is All's, as it always was; a document from before views (`{ order }`) still parses, and
- * a document without `views` shows the built-in ones. Which view is showing and how it's framed
+ * `order`, `pins` and `display` are All's; a document from before views (`{ order }`) still parses,
+ * a document without `views` shows the built-in ones, and one without `display` shows the defaults. Which view is showing and how it's framed
  * are per device (`loadCurrentView`, the canvas's own view memory). Pure apart from the
  * localStorage helpers.
  */
 
 import { isRunning, MAX_CANVAS, type Thread } from "./agents-api";
 import { keyOf, type Graph, type GraphNode } from "./agents-graph";
-import { parseOrder, withOrder, type Order } from "./agents-layout";
+import { DIRECTIONS, parseOrder, withOrder, type Direction, type Order } from "./agents-layout";
 import type { AgentsData } from "./agents-store";
 
 export type StatusFilter = "running" | "waiting" | "error" | "recent";
@@ -45,6 +46,17 @@ export interface Pin {
   h: number;
 }
 
+/**
+ * How a view is shown (Linear's display options), kept with the view so every device agrees.
+ * Absent fields are the defaults.
+ */
+export interface Display {
+  /** On a wide screen; `horizontal` when absent. */
+  direction?: Direction;
+  /** On a phone, chosen apart (a narrow screen reads top-down); `vertical` when absent. */
+  phoneDirection?: Direction;
+}
+
 export interface SavedView {
   /** `v_…`. */
   id: string;
@@ -52,6 +64,7 @@ export interface SavedView {
   filter: ViewFilter;
   order: Order;
   pins: Pin[];
+  display: Display;
 }
 
 export interface CanvasDoc {
@@ -59,6 +72,8 @@ export interface CanvasDoc {
   order: Order;
   /** All's pins. */
   pins: Pin[];
+  /** All's display. */
+  display: Display;
   views: SavedView[];
 }
 
@@ -72,6 +87,7 @@ export interface ViewLike {
   filter: ViewFilter;
   order: Order;
   pins: readonly Pin[];
+  display: Display;
 }
 
 // ── bounds (the document stays well under the relay's 64 KiB) ──
@@ -105,14 +121,14 @@ export const clampPinSize = (kind: PinKind, w: number, h: number) => ({
 
 /** The built-in views a canvas starts with (until the owner changes the list). Stable ids, so every device agrees before the first save. */
 export const DEFAULT_VIEWS: readonly SavedView[] = [
-  { id: "v_waiting", name: "Waiting on me", filter: { status: ["waiting"] }, order: {}, pins: [] },
-  { id: "v_running", name: "Running", filter: { status: ["running"] }, order: {}, pins: [] },
+  { id: "v_waiting", name: "Waiting on me", filter: { status: ["waiting"] }, order: {}, pins: [], display: {} },
+  { id: "v_running", name: "Running", filter: { status: ["running"] }, order: {}, pins: [], display: {} },
 ];
 
-export const emptyDoc = (): CanvasDoc => ({ order: {}, pins: [], views: DEFAULT_VIEWS.map(copyView) });
+export const emptyDoc = (): CanvasDoc => ({ order: {}, pins: [], display: {}, views: DEFAULT_VIEWS.map(copyView) });
 
 function copyView(v: SavedView): SavedView {
-  return { ...v, filter: copyFilter(v.filter), order: { ...v.order }, pins: v.pins.map((p) => ({ ...p })) };
+  return { ...v, filter: copyFilter(v.filter), order: { ...v.order }, pins: v.pins.map((p) => ({ ...p })), display: { ...v.display } };
 }
 
 function copyFilter(f: ViewFilter): ViewFilter {
@@ -158,6 +174,29 @@ export function parsePins(v: unknown): Pin[] {
   return out;
 }
 
+// ── display ──
+
+const isDirection = (v: unknown): v is Direction => (DIRECTIONS as readonly unknown[]).includes(v);
+
+/** Display options from a document: unknown values are dropped (they show the default). */
+export function parseDisplay(v: unknown): Display {
+  if (!isObject(v)) return {};
+  const out: Display = {};
+  if (isDirection(v.direction)) out.direction = v.direction;
+  if (isDirection(v.phoneDirection)) out.phoneDirection = v.phoneDirection;
+  return out;
+}
+
+/** Which way a view's tree grows on this screen: the owner's choice for it, else across on a wide screen and down on a phone. */
+export function directionOf(display: Display, phone: boolean): Direction {
+  return phone ? (display.phoneDirection ?? "vertical") : (display.direction ?? "horizontal");
+}
+
+/** The display with this screen's direction set (a phone's is kept apart from a wide screen's). */
+export function withDirection(display: Display, phone: boolean, direction: Direction): Display {
+  return phone ? { ...display, phoneDirection: direction } : { ...display, direction };
+}
+
 const cleanName = (s: string) => s.replace(/\s+/g, " ").trim().slice(0, MAX_NAME);
 
 /** The canvas document from roll (or this device). An old `{ order }` document parses; without `views`, the built-in views show. */
@@ -171,13 +210,14 @@ export function parseDoc(v: unknown): CanvasDoc {
       const name = typeof x.name === "string" ? cleanName(x.name) : "";
       if (!name) continue;
       ids.add(x.id);
-      views.push({ id: x.id, name, filter: parseFilter(x.filter), order: parseOrder(x.order), pins: parsePins(x.pins) });
+      views.push({ id: x.id, name, filter: parseFilter(x.filter), order: parseOrder(x.order), pins: parsePins(x.pins), display: parseDisplay(x.display) });
       if (views.length === MAX_VIEWS) break;
     }
   }
   return {
     order: parseOrder(v.order),
     pins: parsePins(v.pins),
+    display: parseDisplay(v.display),
     views: Array.isArray(v.views) ? views : DEFAULT_VIEWS.map(copyView),
   };
 }
@@ -195,10 +235,14 @@ export function encodeDoc(doc: CanvasDoc, budget = DOC_BUDGET): Record<string, u
   const build = () => {
     const out: Record<string, unknown> = { order };
     if (doc.pins.length) out.pins = doc.pins.slice(0, MAX_PINS);
+    const display = parseDisplay(doc.display);
+    if (Object.keys(display).length) out.display = display;
     out.views = views.map((v) => {
       const o: Record<string, unknown> = { id: v.id, name: v.name, filter: copyFilter(v.filter) };
       if (Object.keys(v.order).length) o.order = v.order;
       if (v.pins.length) o.pins = v.pins.slice(0, MAX_PINS);
+      const display = parseDisplay(v.display);
+      if (Object.keys(display).length) o.display = display;
       return o;
     });
     return out;
@@ -227,7 +271,7 @@ export function encodeDoc(doc: CanvasDoc, budget = DOC_BUDGET): Record<string, u
 // ── views ──
 
 export function allView(doc: CanvasDoc): ViewLike {
-  return { id: ALL, name: "All", filter: {}, order: doc.order, pins: doc.pins };
+  return { id: ALL, name: "All", filter: {}, order: doc.order, pins: doc.pins, display: doc.display };
 }
 
 /** Every view in the bar's order, All first. */
@@ -245,11 +289,21 @@ export function newViewId(rand: () => number = Math.random): string {
   return `v_${s}`;
 }
 
-/** The doc with a new view at the end (none past `MAX_VIEWS`: the doc comes back as it was). */
-export function addView(doc: CanvasDoc, name: string, filter: ViewFilter, id = newViewId()): CanvasDoc {
+/**
+ * The doc with a new view at the end (none past `MAX_VIEWS`: the doc comes back as it was). It
+ * keeps the display it was made from, so saving what's on screen keeps it looking the same.
+ */
+export function addView(doc: CanvasDoc, name: string, filter: ViewFilter, id = newViewId(), display: Display = {}): CanvasDoc {
   const n = cleanName(name);
   if (!n || doc.views.length >= MAX_VIEWS || doc.views.some((v) => v.id === id)) return doc;
-  return { ...doc, views: [...doc.views, { id, name: n, filter: copyFilter(parseFilter(filter)), order: {}, pins: [] }] };
+  return { ...doc, views: [...doc.views, { id, name: n, filter: copyFilter(parseFilter(filter)), order: {}, pins: [], display: parseDisplay(display) }] };
+}
+
+/** A view's (or All's) display set to `display`. */
+export function setViewDisplay(doc: CanvasDoc, id: string, display: Display): CanvasDoc {
+  const d = parseDisplay(display);
+  if (id === ALL) return { ...doc, display: d };
+  return { ...doc, views: doc.views.map((v) => (v.id === id ? { ...v, display: d } : v)) };
 }
 
 export function renameView(doc: CanvasDoc, id: string, name: string): CanvasDoc {

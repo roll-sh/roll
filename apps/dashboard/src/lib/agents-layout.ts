@@ -1,8 +1,9 @@
 /**
  * Placing the canvas graph: a tidy tree that grows to the right (machines on the left, then
- * projects, threads, and their satellites), with nodes of any size; the order the user dragged
- * cards into among their siblings; and the view math (pan, zoom about a point, zoom to fit).
- * Pure apart from the localStorage helpers.
+ * projects, threads, and their satellites) or down (machines on top), with nodes of any size; the
+ * order the user dragged cards into among their siblings; moving between cards from the keyboard;
+ * and the view math (pan, zoom about a point, zoom to fit). Pure apart from the localStorage
+ * helpers.
  */
 
 export interface Point {
@@ -24,29 +25,69 @@ export interface View {
   k: number;
 }
 
+/**
+ * Which way the tree grows: `horizontal` puts the machines on the left and work to their right
+ * (depths are columns, siblings stack down); `vertical` puts the machines on top and work below
+ * (depths are rows, siblings sit side by side).
+ */
+export type Direction = "horizontal" | "vertical";
+
+export const DIRECTIONS: readonly Direction[] = ["horizontal", "vertical"];
+
 export interface TreeLike {
   roots: readonly string[];
   nodes: ReadonlyMap<string, { children: readonly string[] }>;
 }
 
 export interface LayoutOptions {
-  /** Between a node and its children. */
-  gapX?: number;
+  direction?: Direction;
+  /**
+   * Growing down: whether a node spreads its children side by side (a machine's projects) rather
+   * than listing them down its column, indented (a project's threads, a thread's requests). The
+   * roots always spread. Absent: everything spreads (a plain top-down tree).
+   */
+  spreads?: (key: string) => boolean;
+  /** Between a node and its children (along the direction). */
+  depthGap?: number;
   /** Between siblings. */
-  gapY?: number;
+  siblingGap?: number;
   /** Between root trees. */
   rootGap?: number;
+  /** Growing down: how far a listed child is indented from its parent. */
+  indent?: number;
+  /** Growing down: between a parent and the first child it lists, and between listed children. */
+  listGap?: number;
 }
 
+export type Gaps = Required<Omit<LayoutOptions, "direction" | "spreads">>;
+
+/** The gaps a direction lays out with by default (the canvas's comfortable density). */
+export const GAPS: Readonly<Record<Direction, Gaps>> = {
+  horizontal: { depthGap: 72, siblingGap: 20, rootGap: 64, indent: 0, listGap: 0 },
+  vertical: { depthGap: 56, siblingGap: 32, rootGap: 72, indent: 28, listGap: 14 },
+};
+
 /**
- * Top-left corners for every node reachable from the roots. Each subtree takes the height of
- * its children stacked (or its own, if taller) and its root sits centred on them. Depths are
- * columns as wide as their widest card, so cards line up and no two ever overlap.
+ * Top-left corners for every node reachable from the roots, so that no two cards ever overlap.
+ *
+ * Growing right, it's a tidy tree: each subtree takes the height of its children stacked (or its
+ * own, if taller) and its root sits centred on them; depths are columns as wide as their widest
+ * card, so cards line up.
+ *
+ * Growing down, it's a board: what spreads (the roots, a machine's projects) sits side by side in
+ * rows as tall as their tallest card, its parent centred over them; everything else lists its
+ * children down its column, indented, each child's own subtree before the next (a project's
+ * threads, each with its requests and subagents under it), so a narrow screen reads it top to
+ * bottom like Linear's board, a column per project.
  */
 export function tidyLayout(tree: TreeLike, size: (key: string) => Size, opts: LayoutOptions = {}): Map<string, Point> {
-  const gapX = opts.gapX ?? 72;
-  const gapY = opts.gapY ?? 20;
-  const rootGap = opts.rootGap ?? 64;
+  return opts.direction === "vertical" ? boardLayout(tree, size, opts) : treeLayout(tree, size, opts);
+}
+
+function treeLayout(tree: TreeLike, size: (key: string) => Size, opts: LayoutOptions): Map<string, Point> {
+  const depthGap = opts.depthGap ?? GAPS.horizontal.depthGap;
+  const siblingGap = opts.siblingGap ?? GAPS.horizontal.siblingGap;
+  const rootGap = opts.rootGap ?? GAPS.horizontal.rootGap;
   const span = new Map<string, number>();
   const childBlock = new Map<string, number>();
   const depth = new Map<string, number>();
@@ -61,7 +102,7 @@ export function tidyLayout(tree: TreeLike, size: (key: string) => Size, opts: La
     colW[d] = Math.max(colW[d] ?? 0, w);
     const kids = (tree.nodes.get(key)?.children ?? []).filter((c) => !depth.has(c));
     let block = 0;
-    kids.forEach((c, i) => (block += measure(c, d + 1) + (i ? gapY : 0)));
+    kids.forEach((c, i) => (block += measure(c, d + 1) + (i ? siblingGap : 0)));
     const s = Math.max(h, block);
     childBlock.set(key, block);
     span.set(key, s);
@@ -69,7 +110,7 @@ export function tidyLayout(tree: TreeLike, size: (key: string) => Size, opts: La
   };
   for (const r of tree.roots) measure(r, 0);
   const colX = [0];
-  for (let d = 1; d < colW.length; d++) colX[d] = colX[d - 1] + (colW[d - 1] ?? 0) + gapX;
+  for (let d = 1; d < colW.length; d++) colX[d] = colX[d - 1] + (colW[d - 1] ?? 0) + depthGap;
 
   const out = new Map<string, Point>();
   const place = (key: string, top: number) => {
@@ -81,7 +122,7 @@ export function tidyLayout(tree: TreeLike, size: (key: string) => Size, opts: La
     for (const c of tree.nodes.get(key)?.children ?? []) {
       if (depth.get(c) !== d + 1 || out.has(c)) continue;
       place(c, y);
-      y += span.get(c)! + gapY;
+      y += span.get(c)! + siblingGap;
     }
   };
 
@@ -92,6 +133,101 @@ export function tidyLayout(tree: TreeLike, size: (key: string) => Size, opts: La
     top += span.get(r)! + rootGap;
   }
   return out;
+}
+
+function boardLayout(tree: TreeLike, size: (key: string) => Size, opts: LayoutOptions): Map<string, Point> {
+  const g = GAPS.vertical;
+  const depthGap = opts.depthGap ?? g.depthGap;
+  const siblingGap = opts.siblingGap ?? g.siblingGap;
+  const rootGap = opts.rootGap ?? g.rootGap;
+  const indent = opts.indent ?? g.indent;
+  const listGap = opts.listGap ?? g.listGap;
+  const spreads = opts.spreads ?? (() => true);
+
+  // Each node once, children after their parent (a key reached twice keeps its first place).
+  const kids = new Map<string, string[]>();
+  const depth = new Map<string, number>();
+  // On a row: a root, or a child of something on a row that spreads. Rows line up: each is as
+  // tall as its tallest card, and what hangs off a row starts below all of it.
+  const onRow = new Set<string>();
+  const rowH: number[] = [];
+  const visit = (key: string, d: number, row: boolean) => {
+    depth.set(key, d);
+    if (row) {
+      onRow.add(key);
+      rowH[d] = Math.max(rowH[d] ?? 0, size(key).h);
+    }
+    const mine: string[] = [];
+    for (const c of tree.nodes.get(key)?.children ?? []) if (!depth.has(c)) mine.push(c), depth.set(c, d + 1);
+    kids.set(key, mine);
+    const spread = spreads(key);
+    for (const c of mine) visit(c, d + 1, row && spread);
+  };
+  const roots: string[] = [];
+  for (const r of tree.roots) if (!depth.has(r)) roots.push(r), visit(r, 0, true);
+  const head = (key: string) => (onRow.has(key) ? rowH[depth.get(key)!] : size(key).h);
+
+  // The room each subtree takes.
+  const box = new Map<string, Size>();
+  const measure = (key: string): Size => {
+    const s = size(key);
+    const mine = kids.get(key)!;
+    const child = mine.map(measure);
+    let b: Size;
+    if (!mine.length) b = { w: s.w, h: head(key) };
+    else if (spreads(key)) {
+      const row = child.reduce((sum, c, i) => sum + c.w + (i ? siblingGap : 0), 0);
+      b = { w: Math.max(s.w, row), h: head(key) + depthGap + Math.max(...child.map((c) => c.h)) };
+    } else {
+      const col = child.reduce((sum, c, i) => sum + c.h + (i ? listGap : 0), 0);
+      b = { w: Math.max(s.w, indent + Math.max(...child.map((c) => c.w))), h: head(key) + listGap + col };
+    }
+    box.set(key, b);
+    return b;
+  };
+  roots.forEach(measure);
+
+  const out = new Map<string, Point>();
+  const place = (key: string, x: number, y: number) => {
+    const s = size(key);
+    const b = box.get(key)!;
+    const mine = kids.get(key)!;
+    if (spreads(key)) {
+      out.set(key, { x: x + (b.w - s.w) / 2, y });
+      const row = mine.reduce((sum, c, i) => sum + box.get(c)!.w + (i ? siblingGap : 0), 0);
+      let cx = x + (b.w - row) / 2;
+      for (const c of mine) {
+        place(c, cx, y + head(key) + depthGap);
+        cx += box.get(c)!.w + siblingGap;
+      }
+    } else {
+      out.set(key, { x, y });
+      let cy = y + head(key) + listGap;
+      for (const c of mine) {
+        place(c, x + indent, cy);
+        cy += box.get(c)!.h + listGap;
+      }
+    }
+  };
+  let x = 0;
+  for (const r of roots) {
+    place(r, x, 0);
+    x += box.get(r)!.w + rootGap;
+  }
+  return out;
+}
+
+/**
+ * Whether `parent`'s children sit side by side (left to right) on the canvas rather than one under
+ * another: growing down, the roots' (`ROOTS`) and those of whatever spreads.
+ */
+export function sideBySide(direction: Direction, parent: string, spreads: (key: string) => boolean = () => true): boolean {
+  return direction === "vertical" && (parent === ROOTS || spreads(parent));
+}
+
+/** Where a card is among its siblings: its centre on the axis they're laid out along. */
+export function centreAcross(p: Point, s: Size, across: boolean): number {
+  return across ? p.x + s.w / 2 : p.y + s.h / 2;
 }
 
 // ── the user's arrangement ──
@@ -135,10 +271,13 @@ export function moveTo(list: readonly string[], key: string, index: number): str
   return rest;
 }
 
-/** Where a sibling dragged with its centre at `y` drops: after every other sibling whose centre is above it. */
-export function dropIndex(siblings: readonly string[], key: string, y: number, centre: (key: string) => number): number {
+/**
+ * Where a sibling dragged with its centre at `at` (on the axis siblings are laid out along) drops:
+ * after every other sibling whose centre comes before it.
+ */
+export function dropIndex(siblings: readonly string[], key: string, at: number, centre: (key: string) => number): number {
   let i = 0;
-  for (const s of siblings) if (s !== key && centre(s) < y) i++;
+  for (const s of siblings) if (s !== key && centre(s) < at) i++;
   return i;
 }
 
@@ -167,13 +306,27 @@ export const clampZoom = (k: number) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, k)
 /**
  * The view that shows `r` whole, at most `maxK`. With `minK` (a phone, where everything at once
  * would be unreadable) it never zooms out past that; what doesn't fit then starts at the top left,
- * where the machines are.
+ * or, given an `anchor` (the first machine) that the top left wouldn't show, centred on it.
  */
-export function fitView(r: Rect, vw: number, vh: number, pad = 48, maxK = 1, minK = 0): View {
+export function fitView(r: Rect, vw: number, vh: number, pad = 48, maxK = 1, minK = 0, anchor?: Rect): View {
   const k = clampZoom(Math.max(minK, Math.min(maxK, (vw - pad * 2) / Math.max(1, r.w), (vh - pad * 2) / Math.max(1, r.h))));
-  const x = r.w * k > vw - pad * 2 ? pad - r.x * k : vw / 2 - (r.x + r.w / 2) * k;
-  const y = r.h * k > vh - pad * 2 ? pad - r.y * k : vh / 2 - (r.y + r.h / 2) * k;
-  return { k, x, y };
+  // On one axis: centred if it fits; else from the start, moved on just enough to show the anchor.
+  const axis = (start: number, extent: number, view: number, a?: { start: number; extent: number }) => {
+    if (extent * k <= view - pad * 2) return view / 2 - (start + extent / 2) * k;
+    const first = pad - start * k;
+    if (!a) return first;
+    const last = view - pad - (start + extent) * k;
+    // From the start if that shows the anchor whole; else the anchor centred (its start, if it's
+    // bigger than the view), never past either end.
+    if ((a.start + a.extent) * k + first <= view - pad) return first;
+    const centred = a.extent * k > view - pad * 2 ? pad - a.start * k : view / 2 - (a.start + a.extent / 2) * k;
+    return Math.max(last, Math.min(first, centred));
+  };
+  return {
+    k,
+    x: axis(r.x, r.w, vw, anchor && { start: anchor.x, extent: anchor.w }),
+    y: axis(r.y, r.h, vh, anchor && { start: anchor.y, extent: anchor.h }),
+  };
 }
 
 /** Zoom to `k` keeping the world point under screen point (sx, sy) where it is. */

@@ -14,7 +14,7 @@
  */
 
 import { resolveColor } from "@roll/brand";
-import { clampZoom, zoomAt, type Point, type Size, type View } from "@/lib/agents-layout";
+import { clampZoom, zoomAt, type Point, type Rect, type Size, type View } from "@/lib/agents-layout";
 
 type RGB = [number, number, number];
 
@@ -24,11 +24,21 @@ export interface SceneMeta {
   parent: string | null;
 }
 
+/**
+ * How an edge runs: `right` from a parent's right edge into its child's left (the tree growing
+ * right); `down` from the middle of a parent's bottom into the middle of its child's top (children
+ * side by side under it); `list` down a trunk inside the parent's left edge and into the child's
+ * left (children listed under it, indented).
+ */
+export type EdgeRoute = "right" | "down" | "list";
+
 export interface SceneEdge {
   from: string;
   to: string;
   busy: boolean;
   dashed: boolean;
+  /** `right` when absent. */
+  route?: EdgeRoute;
 }
 
 export interface EngineOptions {
@@ -536,26 +546,24 @@ export class CanvasEngine {
     const scr = (p: Point) => ({ x: p.x * k + vx, y: p.y * k + vy });
     const phase = (t / PULSE_S) % 1;
 
-    // Edges: parent's right edge to child's left edge.
+    // Edges, routed as the layout placed the child (`EdgeRoute`).
     ctx.lineCap = "round";
+    ctx.lineJoin = "round";
     for (const e of this.edges) {
       const a = this.cur.get(e.from);
       const b = this.cur.get(e.to);
       const sa = this.size.get(e.from);
       const sb = this.size.get(e.to);
       if (!a || !b || !sa || !sb) continue;
-      const p0 = scr({ x: a.x + sa.w, y: a.y + Math.min(sa.h / 2, 28) });
-      const p3 = scr({ x: b.x, y: b.y + Math.min(sb.h / 2, 28) });
-      const dx = Math.max(24 * k, (p3.x - p0.x) / 2);
-      const p1 = { x: p0.x + dx, y: p0.y };
-      const p2 = { x: p3.x - dx, y: p3.y };
+      const path = edgePath(e.route ?? "right", { ...a, ...sa }, { ...b, ...sb }, scr, k);
+      const p0 = path.start;
+      const p3 = path.end;
       const stroke = e.busy ? rgba(this.accent, 0.5) : rgba(this.line, 1);
       ctx.setLineDash(e.dashed ? [3, 4] : []);
       ctx.lineWidth = 1.25;
       ctx.strokeStyle = stroke;
       ctx.beginPath();
-      ctx.moveTo(p0.x, p0.y);
-      ctx.bezierCurveTo(p1.x, p1.y, p2.x, p2.y, p3.x, p3.y);
+      path.trace(ctx);
       ctx.stroke();
       ctx.setLineDash([]);
       // Ports: a small ring where the edge leaves its parent and meets its child.
@@ -574,7 +582,7 @@ export class CanvasEngine {
         for (let i = 0; i < 4; i++) {
           const u = phase - i * 0.035;
           if (u < 0) continue;
-          const q = bez(p0, p1, p2, p3, easeInOut(u));
+          const q = path.at(easeInOut(u));
           ctx.fillStyle = rgba(this.accent, (1 - i / 4) * 0.9);
           ctx.beginPath();
           ctx.arc(q.x, q.y, Math.max(1.2, 2.4 * Math.min(1, k)) * (1 - i * 0.18), 0, Math.PI * 2);
@@ -599,6 +607,70 @@ export class CanvasEngine {
       ctx.stroke();
     }
   }
+}
+
+/** An edge on screen: where it starts and ends, how to draw it, and the point `u` (0–1) along it. */
+export interface EdgePath {
+  start: Point;
+  end: Point;
+  trace: (ctx: Pick<CanvasRenderingContext2D, "moveTo" | "lineTo" | "bezierCurveTo" | "arcTo">) => void;
+  at: (u: number) => Point;
+}
+
+/** An edge between two cards (world rects) on screen (`scr` maps world to screen, `k` the zoom). */
+export function edgePath(route: EdgeRoute, a: Rect, b: Rect, scr: (p: Point) => Point, k: number): EdgePath {
+  if (route === "list") return edgeList(scr({ x: a.x + (b.x - a.x) / 2, y: a.y + a.h }), scr({ x: b.x, y: b.y + Math.min(b.h / 2, 22) }), k);
+  const [p0, p1, p2, p3] =
+    route === "down"
+      ? edgeDown(scr({ x: a.x + a.w / 2, y: a.y + a.h }), scr({ x: b.x + b.w / 2, y: b.y }), k)
+      : edgeRight(scr({ x: a.x + a.w, y: a.y + Math.min(a.h / 2, 28) }), scr({ x: b.x, y: b.y + Math.min(b.h / 2, 28) }), k);
+  return {
+    start: p0,
+    end: p3,
+    trace: (ctx) => {
+      ctx.moveTo(p0.x, p0.y);
+      ctx.bezierCurveTo(p1.x, p1.y, p2.x, p2.y, p3.x, p3.y);
+    },
+    at: (u) => bez(p0, p1, p2, p3, u),
+  };
+}
+
+/**
+ * A listed child's edge (screen space): straight down the trunk from `p0` (under the parent,
+ * inside its left edge), a rounded corner, then right into the child at `p3`.
+ */
+export function edgeList(p0: Point, p3: Point, k: number): EdgePath {
+  const corner = { x: p0.x, y: p3.y };
+  const down = Math.max(0, corner.y - p0.y);
+  const across = Math.max(0, p3.x - corner.x);
+  const r = Math.min(8 * k, down, across);
+  const total = down + across || 1;
+  return {
+    start: p0,
+    end: p3,
+    trace: (ctx) => {
+      ctx.moveTo(p0.x, p0.y);
+      if (r > 0.5) ctx.arcTo(corner.x, corner.y, p3.x, p3.y, r);
+      else ctx.lineTo(corner.x, corner.y);
+      ctx.lineTo(p3.x, p3.y);
+    },
+    at: (u) => {
+      const d = Math.min(1, Math.max(0, u)) * total;
+      return d <= down ? { x: p0.x, y: p0.y + d } : { x: corner.x + (d - down), y: corner.y };
+    },
+  };
+}
+
+/** A bezier leaving `p0` to the right and arriving at `p3` from the left (screen space). */
+export function edgeRight(p0: Point, p3: Point, k: number): [Point, Point, Point, Point] {
+  const dx = Math.max(24 * k, (p3.x - p0.x) / 2);
+  return [p0, { x: p0.x + dx, y: p0.y }, { x: p3.x - dx, y: p3.y }, p3];
+}
+
+/** A bezier leaving `p0` downwards and arriving at `p3` from above (screen space). */
+export function edgeDown(p0: Point, p3: Point, k: number): [Point, Point, Point, Point] {
+  const dy = Math.max(24 * k, (p3.y - p0.y) / 2);
+  return [p0, { x: p0.x, y: p0.y + dy }, { x: p3.x, y: p3.y - dy }, p3];
 }
 
 const easeInOut = (u: number) => (u < 0.5 ? 2 * u * u : 1 - (-2 * u + 2) ** 2 / 2);
