@@ -213,6 +213,8 @@ async fn the_daemon_hosts_the_gateway_with_sealed_keys() {
     assert!(checks.len() == 1 && checks[0].ok, "{checks:?}");
 
     // Kept across a restart: settings, the sealed key and the client.
+    // A clean stop (SIGTERM) stops the gateway too.
+    host.shutdown().await;
     drop(host);
     let host = open(home.path(), vec![FakeProvider::new("claude")]).await;
     wait_gateway(&host, "listened again", |g| matches!(g.run, GatewayRun::Running { .. }) && g.keys[0].key == KeyState::Sealed).await;

@@ -438,6 +438,7 @@ impl Host {
         if let Err(e) = self.put(exited) {
             tracing::warn!("recording terminals as exited: {e:#}");
         }
+        self.stop_gateway().await;
     }
 
     /// Writes records and broadcasts them once they are durable.

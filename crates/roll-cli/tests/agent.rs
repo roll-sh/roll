@@ -890,7 +890,7 @@ async fn the_fake_provider_talks_through_the_gateway_its_daemon_hosts() {
     let (s, r) = e.req("POST", "/v1/code/agents/acme/gateway/members", Some(json!({ "machine": machine, "providers": ["fake"] }))).await;
     assert_eq!(s.as_u16(), 200, "{r}");
     assert!(r["members"][0]["client"].as_str().is_some_and(|c| c.starts_with("gwc_")), "{r}");
-    let joined = info(Box::new(|i| i["settings"]["endpoints"].as_array().is_some_and(|l| l.iter().any(|ep| ep["spec"]["id"] == "roll-gateway" && ep["key"] == "sealed"))), "joined").await;
+    let joined = info(Box::new(|i| i["settings"]["endpoints"].as_array().is_some_and(|l| l.iter().any(|ep| ep["id"] == "roll-gateway" && ep["key"] == "sealed"))), "joined").await;
     let fake = joined["providers"].as_array().unwrap().iter().find(|p| p["id"] == "fake").unwrap().clone();
     assert_eq!(fake["detail"], "via roll gateway on studio", "{fake}");
 

@@ -216,6 +216,15 @@ impl Host {
         gw.log_body(seq)?.map(Reply::GatewayLogBody).ok_or_else(|| Fail::NotFound(format!("no bodies kept for request {seq}")))
     }
 
+    /// The daemon is stopping: the gateway stops listening (requests in flight finish).
+    pub(crate) async fn stop_gateway(&self) {
+        let Some(h) = self.hosted() else { return };
+        if let Some(w) = &h.watcher {
+            w.abort();
+        }
+        h.gateway.stop().await;
+    }
+
     // ── the member side ──
 
     /// Whether `live`'s variables are left off a provider's processes: a gateway endpoint with
