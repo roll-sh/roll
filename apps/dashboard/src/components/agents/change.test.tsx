@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { Command, Reply, Thread } from "@/lib/agents-api";
-import { ChangeChip, changeTone, landingNote } from "./change";
+import { ChangeChip, changeTone, landingNote, PublishForm } from "./change";
 import { ThreadNode } from "./nodes";
 import { hunks } from "./request-card";
 import { Conversation } from "./session";
@@ -109,6 +109,19 @@ describe("roll code on a thread", () => {
     expect(h.command).toHaveBeenLastCalledWith("mch_1", expect.any(String), { type: "thread.publish", thread: "thr_1", message: "Fix the flaky queue test", land: true });
     expect(done).toHaveTextContent("Landed.");
     expect(done).toHaveTextContent("started main with it");
+  });
+
+  it("a first commit's result stays on screen once the project has its commit (it isn't offered a fork)", async () => {
+    const empty = project({ repo: { owner: "acme", repo: "roll" }, git: { branch: "main", head: null, remote: null, dirty: true } });
+    const committed = { ...empty, git: { ...empty.git!, head: "4b825dc642cb", dirty: false } };
+    const t = thread();
+    const reply = (): Reply => ({ type: "published", branch: "main", commit: "4b825dc642cb", change: null, url: null, landing: { status: "landed", message: "started main with it", blockers: [] } });
+    const h = agentsHarness({ reply });
+    const view = renderAgents(<PublishForm thread={t} project={empty} machine={machine()} onDone={vi.fn()} />, h);
+    await userEvent.click(screen.getByRole("button", { name: "Publish the first commit" }));
+    view.rerender(<PublishForm thread={t} project={committed} machine={machine()} onDone={vi.fn()} />);
+    expect(await screen.findByRole("status", { name: "Published" })).toHaveTextContent("Landed.");
+    expect(screen.queryByRole("button", { name: "Fork into a worktree" })).toBeNull();
   });
 
   it("a thread outside a worktree is offered a fork into one before publishing", async () => {

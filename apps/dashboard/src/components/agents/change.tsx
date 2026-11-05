@@ -2,7 +2,7 @@
 
 import { Switch } from "./ui";
 import { ArrowUpRight, ClipboardList, GitPullRequest, X } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { ChangeStatus, Landing, Machine, Project, Published, Thread, ThreadChange, WorkRef } from "@/lib/agents-api";
 import { parseWorkRef } from "@/lib/agents-services";
 import { btn, input, primary } from "../ui";
@@ -122,7 +122,10 @@ export function PublishForm({ thread, project, machine, onDone }: { thread: Thre
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<Published | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const first = firstCommit(thread, project);
+  // The commit refreshes the project (it has a head now) before or after the reply: what this
+  // publish is stays as it was when it was sent.
+  const sent = useRef<boolean | null>(null);
+  const first = sent.current ?? firstCommit(thread, project);
   if (!thread.worktree && !first)
     return (
       <div className="flex flex-wrap items-center gap-2 border-t border-line px-4 py-2.5 text-[12.5px]" data-nodrag role="group" aria-label="Publish">
@@ -191,6 +194,7 @@ export function PublishForm({ thread, project, machine, onDone }: { thread: Thre
       className="flex flex-wrap items-center gap-2 border-t border-line px-4 py-2.5"
       onSubmit={async (e) => {
         e.preventDefault();
+        sent.current = first;
         setBusy(true);
         setError(null);
         try {
