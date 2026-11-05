@@ -24,6 +24,7 @@ import { formatHourly } from "@/lib/sandboxes-api";
 import { btn, input, primary } from "../ui";
 import { SizeOption } from "./add-machine";
 import { useCanvasProjects, type CanvasProjects } from "./machine-projects";
+import { AddProjectDialog } from "./project-new";
 import type { MenuItem } from "./menu";
 import { showInboxToast } from "./threads-sidebar";
 import { Dialog } from "./ui/dialog";
@@ -99,18 +100,19 @@ export function useProjectActions(project: Project, opts: { remove?: () => void 
 export function ProjectDialogs() {
   const dialog = useProjectDialog();
   const { client } = useAgents();
-  // Kept while it animates shut.
+  // Kept while it animates shut; each opening starts fresh (its own key).
   const last = useRef(dialog);
+  const opened = useRef(0);
+  if (dialog && dialog !== last.current) opened.current++;
   if (dialog) last.current = dialog;
   const shown = dialog ?? last.current;
   if (!shown) return null;
-  // Adding a project is the next unit's dialog.
-  if (shown.kind === "add") return null;
+  if (shown.kind === "add") return <AddProjectDialog key={opened.current} open={!!dialog} machine={shown.machine} onClose={closeProjectDialog} />;
   const project = client.data.projects.get(shown.project)?.value;
   if (!project) return null;
   return (
-    <Dialog open={!!dialog} onClose={closeProjectDialog} title={`New sandbox for ${project.name}`} lead={`A machine roll hosts for you, with ${project.repo ? `${project.repo.owner}/${project.repo.repo}` : project.name} cloned and ready for an agent.`}>
-      <SandboxForProject key={shown.project} project={project} />
+    <Dialog key={opened.current} open={!!dialog} onClose={closeProjectDialog} title={`New sandbox for ${project.name}`} lead={`A machine roll hosts for you, with ${project.repo ? `${project.repo.owner}/${project.repo.repo}` : project.name} cloned and ready for an agent.`}>
+      <SandboxForProject project={project} />
     </Dialog>
   );
 }

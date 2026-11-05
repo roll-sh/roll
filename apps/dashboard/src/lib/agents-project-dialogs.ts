@@ -34,6 +34,9 @@ export function useProjectDialog(): ProjectDialog | null {
 export const openProjectDialog = (d: ProjectDialog) => set(d);
 export const closeProjectDialog = () => current && set(null);
 
+/** What's open now (outside React). */
+export const currentProjectDialog = () => current;
+
 /** Tests start with none open. */
 export function resetProjectDialogs() {
   current = null;

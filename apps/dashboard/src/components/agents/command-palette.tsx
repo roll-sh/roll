@@ -54,7 +54,7 @@ import {
 import { targetLabel, type Target as GoalTarget } from "./new-thread";
 import { useGoalTargets, useLaunchGoal, type GoalKind } from "./orchestrate";
 import { useAutomations } from "./automations/shared";
-import { NewProject } from "./project-new";
+import { openProjectDialog } from "@/lib/agents-project-dialogs";
 import { StatusDot } from "./shared";
 import { MachineIcon, ProjectIcon } from "./identity";
 import { useAgents } from "./use-agents";
@@ -156,35 +156,17 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
 
   // ── projects and machines ──
 
-  const addProjectView = (m: Machine): PaletteView => ({
-    label: `Add project on ${m.name}`,
-    placeholder: "",
-    panel: (close) => (
-      <div className="p-3">
-        <NewProject
-          machine={m}
-          onClose={() => dispatch({ type: "back" })}
-          onAdded={(id) => {
-            close();
-            focus(`p:${id}`);
-          }}
-        />
-      </div>
-    ),
-  });
+  // Adding a project is the one dialog (project-new.tsx); it picks the machine when there's a choice.
   const online = machines.filter((m) => reachable(m));
-  const addProject: PaletteItem =
-    online.length === 1
-      ? { kind: "submenu", value: "action:add-project", title: "Add project", searchTerms: ["folder", "clone", "repo", "new repository"], icon: <FolderPlus className={ICON} />, view: addProjectView(online[0]) }
-      : {
-          kind: "submenu",
-          value: "action:add-project",
-          title: "Add project…",
-          searchTerms: ["folder", "clone", "repo", "new repository"],
-          icon: <FolderPlus className={ICON} />,
-          disabled: online.length === 0,
-          view: { label: "Add project on", placeholder: "Which machine?", groups: [{ value: "machines", label: "Machines", items: online.map((m) => ({ kind: "submenu" as const, value: `add-project:${m.id}`, title: m.name, icon: <MachineIcon machine={m} className={ICON} />, view: addProjectView(m) })) }] },
-        };
+  const addProject: PaletteAction = {
+    kind: "action",
+    value: "action:add-project",
+    title: "Add project…",
+    searchTerms: ["folder", "clone", "repo", "new repository"],
+    icon: <FolderPlus className={ICON} />,
+    disabled: online.length === 0,
+    run: () => openProjectDialog({ kind: "add", machine: online.length === 1 ? online[0].id : null }),
+  };
   const addProjectFirst: PaletteSubmenuLike = { ...addProject, value: "goal:add-project", title: "Add a project first", description: "Agents work in a project on one of your machines" };
 
   const threadRow = (t: Thread, machine: string, query: string): PaletteAction => {
@@ -473,7 +455,11 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
     else if (intent.kind === "new-in") {
       const item = groups.root[0].items.find((i) => i.value === "action:new-in");
       if (item?.kind === "submenu") dispatch({ type: "reset", view: item.view });
-    } else if (intent.kind === "add-project" && addProject.kind === "submenu" && !addProject.disabled) dispatch({ type: "reset", view: addProject.view });
+    } else if (intent.kind === "add-project" && !addProject.disabled) {
+      // The palette steps aside for the dialog.
+      closePalette();
+      void addProject.run();
+    }
     // Once, where it opens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

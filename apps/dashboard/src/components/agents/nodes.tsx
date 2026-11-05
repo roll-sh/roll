@@ -12,7 +12,7 @@ import { AutomationChip, useThreadOrigin } from "./automations/chip";
 import { ChangeChip, changeStatusLabel, WorkChip } from "./change";
 import { ContextMeter } from "./context-meter";
 import { Menu } from "./menu";
-import { NewProject } from "./project-new";
+import { openProjectDialog } from "@/lib/agents-project-dialogs";
 import { PullLine } from "./project-settings";
 import { PendingRequest } from "./pending-request";
 import { SandboxPanel } from "./sandbox";
@@ -154,7 +154,8 @@ const OS_NAMES: Record<string, string> = { macos: "macOS", linux: "Linux", windo
 export function MachineNode({ machine }: { machine: Machine }) {
   const { client, busy, error, run } = useRun();
   const { focus, startNew } = useAgents();
-  const [adding, setAdding] = useState(false);
+  // Adding a project is one dialog everywhere (project-new.tsx), never a form growing the card.
+  const add = () => openProjectDialog({ kind: "add", machine: machine.id });
   const info = machine.info;
   const sandbox = machine.sandbox;
   const projects = [...client.data.projects.values()].filter((r) => r.machine === machine.id).length;
@@ -195,7 +196,7 @@ export function MachineNode({ machine }: { machine: Machine }) {
           )}
           {machine.online && (
             <>
-              <Tool label="Add a project" onClick={() => setAdding(true)}>
+              <Tool label="Add a project" onClick={add}>
                 <FolderPlus />
               </Tool>
               <Tool label="Open a terminal" disabled={busy !== null} onClick={openTerminal}>
@@ -271,19 +272,11 @@ export function MachineNode({ machine }: { machine: Machine }) {
             </ul>
           )
         )}
-        <MoreProjects machine={machine} onAdd={() => setAdding(true)} />
-        {adding ? (
-          <div data-nodrag>
-            <NewProject machine={machine} onClose={() => setAdding(false)} onAdded={(id) => focus(`p:${id}`)} />
-          </div>
-        ) : (
-          machine.online &&
-          projects === 0 &&
-          !loginFirst && (
-            <button data-nodrag onClick={() => setAdding(true)} className={`${primary} w-full justify-center`}>
-              <FolderPlus className="size-3.5" /> Add a project
-            </button>
-          )
+        <MoreProjects machine={machine} onAdd={add} />
+        {machine.online && projects === 0 && !loginFirst && (
+          <button data-nodrag onClick={add} className={`${primary} w-full justify-center`}>
+            <FolderPlus className="size-3.5" /> Add a project
+          </button>
         )}
         {error && <p className="text-[12px] text-danger">{error}</p>}
       </div>

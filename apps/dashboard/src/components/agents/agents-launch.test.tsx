@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { currentProjectDialog, resetProjectDialogs } from "@/lib/agents-project-dialogs";
 import type { Graph, GraphNode } from "@/lib/agents-graph";
 import { setActiveClient } from "@/lib/agents-client";
 import { agentsSurface, resetAgentsSurface } from "@/lib/agents-surface";
@@ -39,7 +40,10 @@ beforeEach(() => {
   resetAgentsSurface();
   window.history.replaceState(null, "", "/dashboard");
 });
-afterEach(() => setActiveClient(null));
+afterEach(() => {
+  setActiveClient(null);
+  resetProjectDialogs();
+});
 
 describe("the launcher", () => {
   it("Enter starts the thread with the project's defaults, and it opens beside the canvas", async () => {
@@ -89,7 +93,9 @@ describe("the launcher", () => {
     expect(screen.getByRole("combobox", { name: "Project" })).toHaveTextContent("web");
     await userEvent.click(screen.getByRole("combobox", { name: "Project" }));
     await userEvent.click(await screen.findByRole("option", { name: "Add a project…" }));
-    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull();
+    // The add-project dialog, on the launcher's machine (no form inside the launcher).
+    expect(currentProjectDialog()).toEqual({ kind: "add", machine: "mch_1" });
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeInTheDocument();
     expect(onClose).not.toHaveBeenCalled();
     screen.getByRole("dialog", { name: "New agent" }).focus();
     await userEvent.keyboard("{Escape}");

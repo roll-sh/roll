@@ -2210,13 +2210,16 @@ export class DemoOwner implements AgentsTransport {
       }
       case "project.add": {
         const pid = id("prj_");
-        const name = c.name ?? c.path.split("/").filter(Boolean).pop() ?? "project";
+        // A clone with no path goes where the daemon puts it (`~/roll/<owner>/<repo>`), named after the repo.
+        const home = this.machines.get(machine)?.info?.home ?? "/Users/ada";
+        const path = c.path || (c.clone ? `${home}/roll/${c.clone.owner}/${c.clone.repo}` : c.path);
+        const name = c.name ?? c.clone?.repo ?? path.split("/").filter(Boolean).pop() ?? "project";
         this.put(
           "project",
           {
             id: pid,
             name,
-            path: c.path,
+            path,
             repo: c.clone ?? null,
             git: { branch: "main", head: "f35f34cf", remote: null, dirty: false },
             settings: { ...NO_SETTINGS },

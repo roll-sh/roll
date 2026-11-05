@@ -1582,6 +1582,18 @@ The surface has three views:
   failure stops on its step and says why; closing the dialog stops waiting, and the sandbox stays.
   T3's "Add to another machine" (`AddProjectToMachineDialog.tsx`) is the clone half.
 
+  **Adding a project** (`AddProjectDialog` in `project-new.tsx`) is one dialog wherever it starts:
+  a machine card's + (and its "Add a project" when it has none), the foot of its folded
+  projects, ⌘K "Add project…", the launcher's project picker and its "No project yet", the
+  prompt bar's chip. Nothing grows inside a card. It picks the machine when several are online,
+  then three ways: a folder (browsed with `fs.list`; folders that are projects say so and go to
+  them; the home folder itself isn't a project), a clone of one of the owner's roll code repos
+  (searchable; one already on the machine goes to its project), or a new roll code repo (its
+  name checked as it's typed). A clone or a create shows its steps with their time (the daemon
+  answers `project.add` when the clone is done; there is no finer progress on the wire). It ends
+  on the project: Start an agent there, Open settings, or Add another. Pull merged changes is
+  offered on the way, on for a clone and off for a folder.
+
   **Display** (Linear's display options; `DisplayMenu` in `views.tsx`, `applyDisplay` in
   `lib/agents-views.ts`). Each view has its own, kept with it in the canvas document, in a
   popover beside the filters:
@@ -1604,7 +1616,7 @@ The surface has three views:
   "3 projects" when none of its projects has a card) with their tiles stacked, which opens on
   hover (250 ms) or a click into a list beside the card, scaling from the line: a row starts an
   agent there, its pin keeps the project's card on this view (`Display.keep`, unpinned from the
-  card's ⋯ menu), its gear opens the project's settings, and "Add a project" is at the foot. A
+  card's ⋯ menu), its ⋯ has the project's actions, and "Add a project" (the dialog) is at the foot. A
   project gets its card back with its first thread; projects focused or named by the view's
   filter always keep theirs, and so do projects grouped as the anchors. Focusing a folded project
   (a deep link, a palette pick) frames its machine. Linear folds empty groups the same way; T3's
@@ -1703,8 +1715,8 @@ The surface has three views:
   Agents window, or the search button in their bar. It comes before the dashboard's own ⌘K ("Ask
   roll"), which stays on every page while the agents are closed (⌘J opens them, then ⌘K); a
   terminal keeps Ctrl+K. Before typing: actions ("Orchestrate…", new agent, new agent in a
-  project, what's waiting, stop, fork or archive the open conversation, add a project right in
-  the palette, add a machine, project and machine settings, archived conversations, fit the
+  project, what's waiting, stop, fork or archive the open conversation, add a project (the
+  add-project dialog), add a machine, project and machine settings, archived conversations, fit the
   canvas) and recent conversations. Typing searches all of that, every submenu's options ("New
   agent in web"), conversations, projects and machines, ranked like T3 (word starts, joined
   words, typos only when nothing matches, recent use and what was picked for a query, kept per

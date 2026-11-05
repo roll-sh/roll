@@ -35,7 +35,6 @@ function openedFrom(): { x: number; y: number } | null {
 export function Dialog({
   open,
   onClose,
-  label,
   title,
   lead,
   children,
@@ -44,8 +43,6 @@ export function Dialog({
 }: {
   open: boolean;
   onClose: () => void;
-  /** Its accessible name, when it differs from `title`. */
-  label?: string;
   title: ReactNode;
   lead?: ReactNode;
   children: ReactNode;
@@ -71,7 +68,12 @@ export function Dialog({
         <Primitive.Viewport className="fixed inset-0 z-[125] grid grid-rows-[1fr_auto_3fr] justify-items-center overflow-y-auto p-3 sm:p-4">
           <Primitive.Popup
             ref={popup}
-            aria-label={label}
+            // A field that asked for focus keeps it; else the sheet itself (no ring on × first thing).
+            initialFocus={() => {
+              const el = popup.current;
+              const active = document.activeElement;
+              return el && active instanceof HTMLElement && el.contains(active) && active !== el ? active : el;
+            }}
             className={cn(
               "row-start-2 flex max-h-[calc(100dvh-1.5rem)] w-[min(520px,100%)] min-w-0 flex-col rounded-2xl border border-line-2 bg-sheet text-fg shadow-sheet inset-shadow-highlight outline-none transition-[scale,opacity] duration-200 ease-out data-ending-style:scale-98 data-ending-style:opacity-0 data-starting-style:scale-98 data-starting-style:opacity-0 motion-reduce:transition-none [-webkit-app-region:no-drag]",
               className,

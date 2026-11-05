@@ -207,6 +207,13 @@ state, or draw a project's logo inline (only in an `<img>`).
   shimmering, its time in mono at the right; next: subtle; failed: `danger`).
 - **"Only roll" chips:** focusing a project puts a raised chip in the views bar ("Only" muted,
   the name, an ×) and the same chip atop the sidebar's list.
+- **Add a project:** the 520px dialog: "On" and a machine `Select` (several online), a
+  full-width `Segmented` (Folder, Clone a repo, New repo), lists in a 192px inset well
+  (`bg-bg`, hairline, 8px radius; rows 28–32px, a project's own folder or repo marked "project"
+  / "On ada-mbp" in subtle 11px), the primary action under it, then Pull merged changes under a
+  hairline. Working: the `Steps` list in place of the list. Done: the project as a raised row
+  (32px tile, name at 14px/590, machine and path in mono, an `ok` tick), then Start an agent
+  (primary, focused), Open settings, and a quiet "Add another" at the right.
 - **Empty and loading states:** loading shows the Horizon mark (40px, thinking) over a
   shimmering line. With no machines, the globe (`RollMark`) shows big over the `DotField` with
   both ways in. An empty view is one calm sentence with a text link back.

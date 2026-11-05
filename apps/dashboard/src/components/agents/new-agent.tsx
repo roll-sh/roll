@@ -5,7 +5,7 @@ import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Machine, Project } from "@/lib/agents-api";
 import { AddMachinePaths } from "./add-machine";
 import { Composer } from "./composer";
-import { NewProject } from "./project-new";
+import { openProjectDialog } from "@/lib/agents-project-dialogs";
 import { MachineIcon, ProjectIcon } from "./identity";
 import { Select } from "./ui";
 import { defaultProject, lastProject, rememberProject, usableIn, useStartThread } from "./new-thread";
@@ -41,7 +41,8 @@ export function Launcher({ project: wanted, machine: wantedMachine, at, onClose 
   const machine = machines.find((m) => m.id === (machineId ?? project?.machine)) ?? machines.find((m) => m.online) ?? machines[0];
   const here = projects.filter((p) => p.machine === machine?.id).sort((a, b) => a.name.localeCompare(b.name));
   const inProject = project && project.machine === machine?.id ? project : here[0];
-  const [adding, setAdding] = useState<boolean>(() => !!machine?.online && !inProject);
+  // Adding a project is the one dialog (project-new.tsx); its "Start an agent" comes back here.
+  const addProject = () => machine && openProjectDialog({ kind: "add", machine: machine.id });
 
   const choose = (p: Project) => {
     setPicked(p.id);
@@ -90,7 +91,6 @@ export function Launcher({ project: wanted, machine: wantedMachine, at, onClose 
                   setMachineId(id);
                   const first = projects.find((p) => p.machine === id);
                   if (first) choose(first);
-                  setAdding(!first && !!machines.find((m) => m.id === id)?.online);
                 }}
                 options={machines.map((m) => ({ value: m.id, label: m.name, hint: m.online ? undefined : "offline", icon: <MachineIcon machine={m} className="size-3.5" /> }))}
               />
@@ -98,12 +98,11 @@ export function Launcher({ project: wanted, machine: wantedMachine, at, onClose 
               <Select
                 label="Project"
                 variant="ghost"
-                icon={inProject && !adding ? <ProjectIcon project={inProject} className="size-3.5" /> : <FolderPlus className="size-3.5 text-subtle" />}
+                icon={inProject ? <ProjectIcon project={inProject} className="size-3.5" /> : <FolderPlus className="size-3.5 text-subtle" />}
                 placeholder="No project yet"
-                value={adding ? ADD : (inProject?.id ?? null)}
+                value={inProject?.id ?? null}
                 onChange={(id) => {
-                  if (id === ADD) return setAdding(true);
-                  setAdding(false);
+                  if (id === ADD) return void addProject();
                   const p = projects.find((x) => x.id === id);
                   if (p) choose(p);
                 }}
@@ -126,17 +125,6 @@ export function Launcher({ project: wanted, machine: wantedMachine, at, onClose 
               }}
             />
           </div>
-        ) : adding && machine ? (
-          <div className="rounded-xl border border-line bg-bg p-3">
-            <NewProject
-              machine={machine}
-              onClose={() => setAdding(false)}
-              onAdded={(id) => {
-                setAdding(false);
-                setPicked(id);
-              }}
-            />
-          </div>
         ) : inProject && machine ? (
           <Composer
             key={inProject.id}
@@ -144,9 +132,9 @@ export function Launcher({ project: wanted, machine: wantedMachine, at, onClose 
             onSubmit={(c, opts) => start(machine, { type: "thread.create", project: inProject.id, ...c }, undefined, opts?.open !== false)}
           />
         ) : (
-          <Offline machine={machine} onAdd={() => setAdding(true)} />
+          <Offline machine={machine} onAdd={addProject} />
         )}
-        {inProject && machine && !adding && (
+        {inProject && machine && (
           <p className="flex flex-wrap gap-x-3 px-2 pt-2 text-[11px] text-subtle">
             <span>
               <Kbd>Enter</Kbd> starts it

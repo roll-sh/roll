@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { agentsSurface, resetAgentsSurface } from "@/lib/agents-surface";
@@ -6,7 +6,8 @@ import type { Command, Project, Reply } from "@/lib/agents-api";
 import { NO_SETTINGS } from "@/lib/agents-api";
 import { Composer } from "./composer";
 import { ProjectNode } from "./nodes";
-import { NewProject } from "./project-new";
+import { openProjectDialog, resetProjectDialogs } from "@/lib/agents-project-dialogs";
+import { ProjectDialogs } from "./project-actions";
 import { ProjectSettingsForm, pullText } from "./project-settings";
 import { SettingsPanel } from "./settings-panel";
 import { machine, mirrored, project, provider, T0 } from "@/test/agents";
@@ -243,25 +244,29 @@ describe("project settings on the canvas", () => {
     const reply = (c: Command): Reply => (c.type === "fs.list" ? { type: "entries", entries: [] } : c.type === "project.add" ? { type: "created", id: "prj_new" } : { type: "ok" });
     const repos = [{ owner: "acme", name: "roll", full_name: "acme/roll", description: null, visibility: "public" as const, updated_at: 1 }];
     const h = agentsHarness({ reply, ctx: { services: fakeServices({ repos: vi.fn(async () => repos) }) } });
-    const onAdded = vi.fn();
-    renderAgents(<NewProject machine={machine()} onClose={vi.fn()} onAdded={onAdded} />, h);
-    const offer = screen.getByRole("switch", { name: /Pull merged changes/ });
+    renderAgents(<ProjectDialogs />, h);
+    act(() => openProjectDialog({ kind: "add", machine: "mch_1" }));
+    const offer = await screen.findByRole("switch", { name: /Pull merged changes/ });
     expect(offer).not.toBeChecked();
-    await userEvent.click(screen.getByRole("tab", { name: "Clone a repo" }));
+    await userEvent.click(screen.getByRole("button", { name: "Clone a repo" }));
     expect(offer).toBeChecked();
     await userEvent.click(within(await screen.findByRole("list", { name: "Repos" })).getByRole("button", { name: /^roll/ }));
-    await waitFor(() => expect(onAdded).toHaveBeenCalledWith("prj_new"));
-    expect(updates(h)).toEqual([{ type: "project.update", project: "prj_new", settings: { auto_pull: true, defaults: {}, scripts: [], auto_settle: { after_days: 3, on_land: true } } }]);
+    await waitFor(() => expect(updates(h)).toEqual([{ type: "project.update", project: "prj_new", settings: { auto_pull: true, defaults: {}, scripts: [], auto_settle: { after_days: 3, on_land: true } } }]));
+    resetProjectDialogs();
   });
 
   it("an add with the offer turned off sends no settings", async () => {
     const reply = (c: Command): Reply => (c.type === "fs.list" ? { type: "entries", entries: [] } : { type: "created", id: "prj_new" });
     const h = agentsHarness({ reply, ctx: { services: fakeServices() } });
-    const onAdded = vi.fn();
-    renderAgents(<NewProject machine={machine()} onClose={vi.fn()} onAdded={onAdded} />, h);
-    await userEvent.click(screen.getByRole("button", { name: "Add this folder" }));
-    await waitFor(() => expect(onAdded).toHaveBeenCalledWith("prj_new"));
+    renderAgents(<ProjectDialogs />, h);
+    act(() => openProjectDialog({ kind: "add", machine: "mch_1" }));
+    await userEvent.click(await screen.findByRole("textbox", { name: "Directory" }));
+    await userEvent.clear(screen.getByRole("textbox", { name: "Directory" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Directory" }), "/Users/ada/roll{Enter}");
+    await userEvent.click(await screen.findByRole("button", { name: "Add roll" }));
+    await waitFor(() => expect(h.command.mock.calls.some(([, , c]) => c.type === "project.add")).toBe(true));
     expect(updates(h)).toEqual([]);
+    resetProjectDialogs();
   });
 
   it("new threads start from the project's defaults", async () => {
