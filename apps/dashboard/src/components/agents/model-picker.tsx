@@ -153,6 +153,7 @@ export function ModelPicker({
   disabled = false,
   shortcuts = false,
   multi,
+  finalFocus,
 }: {
   providers: readonly ProviderInfo[];
   value: ModelChoice;
@@ -163,6 +164,8 @@ export function ModelPicker({
   shortcuts?: boolean;
   /** Several models at once (a new thread's composer). */
   multi?: MultiPick;
+  /** Where focus goes when it closes (Base UI's; the trigger by default). */
+  finalFocus?: FinalFocus;
 }) {
   const [open, setOpen] = useState(false);
   const info = providers.find((p) => p.id === value.provider);
@@ -230,7 +233,7 @@ export function ModelPicker({
         )}
         <ChevronDown className="size-3 shrink-0 text-subtle" aria-hidden />
       </PopoverTrigger>
-      <PopoverPopup side={side} align="start" sideOffset={6} aria-label="Choose a model" className="overflow-hidden">
+      <PopoverPopup side={side} align="start" sideOffset={6} aria-label="Choose a model" className="overflow-hidden" finalFocus={finalFocus}>
         {open && <PickerContent providers={providers} value={value} onChange={onChange} onClose={() => setOpen(false)} multi={multi} />}
       </PopoverPopup>
     </Popover>
@@ -833,7 +836,20 @@ export const runtimeModes: { id: RuntimeMode; label: string; hint: string; icon:
 export const DEFAULT_RUNTIME_MODE: RuntimeMode = "full_access";
 
 /** Permissions change rarely: a chip naming the mode, the choice one menu deeper (T3's `PermissionsMenu`). */
-export function PermissionsMenu({ value, onChange, side = "top" }: { value: RuntimeMode; onChange: (mode: RuntimeMode) => void; side?: "top" | "bottom" }) {
+/** Where a picker's focus goes when it closes: the composer's text after a pick (T3's `scheduleComposerFocus`). */
+export type FinalFocus = (closeType: string) => boolean | HTMLElement | null | void;
+
+export function PermissionsMenu({
+  value,
+  onChange,
+  side = "top",
+  finalFocus,
+}: {
+  value: RuntimeMode;
+  onChange: (mode: RuntimeMode) => void;
+  side?: "top" | "bottom";
+  finalFocus?: FinalFocus;
+}) {
   const current = runtimeModes.find((r) => r.id === value) ?? runtimeModes[0];
   const Icon = current.icon;
   return (
@@ -852,10 +868,10 @@ export function PermissionsMenu({ value, onChange, side = "top" }: { value: Runt
         {current.label}
         <ChevronDown aria-hidden className="size-3 text-subtle" />
       </MenuTrigger>
-      <MenuPopup side={side} align="start" className="w-72">
+      <MenuPopup side={side} align="start" className="w-72" finalFocus={finalFocus}>
         <MenuRadioGroup value={value} onValueChange={(v) => onChange(v as RuntimeMode)}>
           {runtimeModes.map((r) => (
-            <MenuRadioItem key={r.id} value={r.id} className="items-start py-1.5">
+            <MenuRadioItem key={r.id} value={r.id} closeOnClick className="items-start py-1.5">
               <span className="flex items-start gap-2">
                 <r.icon aria-hidden className="mt-0.5 size-3.5 text-muted" />
                 <span>

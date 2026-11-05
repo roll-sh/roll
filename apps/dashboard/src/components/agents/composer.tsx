@@ -1,7 +1,7 @@
 "use client";
 
 import { Bot, Check, CornerUpRight, ListPlus, Paperclip, PencilRuler, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   Attachment,
   Command,
@@ -21,7 +21,7 @@ import { readyPlan } from "@/lib/agents-plan";
 import { ContextMeter } from "./context-meter";
 import { compactsOnReturn, formatContextTokens } from "@/lib/agents-context";
 import { runsOf } from "@/lib/agents-store";
-import { DEFAULT_RUNTIME_MODE, ModelPicker, modelsLabel, PermissionsMenu, resolveModel, sameModel, type ModelChoice } from "./model-picker";
+import { DEFAULT_RUNTIME_MODE, ModelPicker, modelsLabel, PermissionsMenu, resolveModel, sameModel, type FinalFocus, type ModelChoice } from "./model-picker";
 import { ImplementButton, PlanBanner, usePlanActions } from "./plan";
 import { QueuedMessages } from "./queue";
 import { pickByDigit, pill, QuestionsPanel, quiet, useQuestionFlow } from "./request-card";
@@ -165,6 +165,14 @@ export function Composer({
   const canFanOut = mode.kind === "new" && !!mode.project.git;
   const fanning = canFanOut && (fanout?.length ?? 0) > 1;
   const area = useRef<HTMLTextAreaElement>(null);
+  // A pick in a toolbar picker sends focus back to the text, so typing goes on (T3's
+  // `scheduleComposerFocus`); closing one without a pick (Escape) leaves it on the picker.
+  const picked = useRef(false);
+  const backToText = useCallback<FinalFocus>(() => {
+    if (!picked.current) return true;
+    picked.current = false;
+    return area.current ?? true;
+  }, []);
   const files = useRef<HTMLInputElement>(null);
   const held = useModifierHeld();
   // A queued message being edited here (T3's "Edit in the composer"), and the draft it pushed aside.
@@ -726,13 +734,18 @@ export function Composer({
               <ModelPicker
                 providers={mode.machine?.info?.providers ?? providers}
                 value={{ provider, model: modelInfo?.id ?? model, effort, options }}
-                onChange={choose}
+                onChange={(c) => {
+                  picked.current = true;
+                  choose(c);
+                }}
+                finalFocus={backToText}
                 multi={
                   canFanOut
                     ? {
                         selected: fanout,
                         onToggle: toggleModel,
                         onSingle: (c) => {
+                          picked.current = true;
                           setFanout(null);
                           pick(c);
                         },
@@ -745,7 +758,9 @@ export function Composer({
               <PermissionsMenu
                 value={runtime}
                 side={mode.kind === "new" ? "bottom" : "top"}
+                finalFocus={backToText}
                 onChange={(id) => {
+                  picked.current = true;
                   setRuntime(id);
                   configure({ runtime_mode: id });
                 }}

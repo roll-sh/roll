@@ -15,7 +15,7 @@ export const SelectGroup = SelectPrimitive.Group;
 
 const triggers = {
   /** A form field: a hairline box. */
-  default: "min-h-8 w-full min-w-36 rounded-lg border border-line-2 bg-bg px-2.5 text-[13px] text-fg hover:border-subtle focus-visible:border-subtle",
+  default: "min-h-8 w-full min-w-36 rounded-lg border border-line-2 bg-panel-2 px-2.5 text-[13px] text-fg hover:border-line-3 focus-visible:border-line-3 data-popup-open:border-line-3",
   /** A chip in a toolbar (the composer's): no box until hovered. */
   ghost: "h-7 gap-1 rounded-md border border-transparent px-1.5 text-[12px] text-muted hover:bg-fg/[0.06] hover:text-fg data-popup-open:bg-fg/[0.06] data-popup-open:text-fg",
 } as const;

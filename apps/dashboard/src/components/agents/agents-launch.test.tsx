@@ -95,6 +95,28 @@ describe("the launcher", () => {
     await userEvent.keyboard("{Escape}");
     expect(onClose).toHaveBeenCalled();
   });
+
+  it("after a pick in the permissions or model menu, typing goes on in the message (T3's composer focus)", async () => {
+    const h = agentsHarness({ entities: [mirrored("project", project(), 1)], reply: created });
+    renderAgents(<Launcher onClose={vi.fn()} />, h);
+    const message = screen.getByRole("textbox", { name: "Message" });
+    await userEvent.click(screen.getByRole("button", { name: /^Permissions:/ }));
+    await userEvent.click(await screen.findByRole("menuitemradio", { name: /^Ask/ }));
+    await waitFor(() => expect(message).toHaveFocus());
+    await userEvent.keyboard("Tidy the README");
+    expect(message).toHaveValue("Tidy the README");
+    expect(screen.getByRole("button", { name: "Permissions: Ask" })).toBeInTheDocument();
+    // Escape closes a menu back onto its trigger: nothing was picked.
+    await userEvent.click(screen.getByRole("button", { name: "Permissions: Ask" }));
+    await screen.findByRole("menuitemradio", { name: /^Ask/ });
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Permissions: Ask" })).toHaveFocus());
+    // The model picker too.
+    await userEvent.click(screen.getByRole("button", { name: /^Model:/ }));
+    const popup = await screen.findByRole("dialog", { name: "Choose a model" });
+    await userEvent.click(within(popup).getAllByRole("option")[1]);
+    await waitFor(() => expect(message).toHaveFocus());
+  });
 });
 
 describe("launching from the surface", () => {

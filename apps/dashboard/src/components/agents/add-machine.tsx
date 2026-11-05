@@ -7,10 +7,11 @@ import type { EndpointProfile, Machine } from "@/lib/agents-api";
 import { NewSandboxGatewayNotice } from "./gateway/machine";
 import { KIND_LABEL } from "@/lib/agents-endpoints";
 import { formatHourly, type SandboxSize } from "@/lib/sandboxes-api";
-import { CopyButton, input, primary, useCopy } from "../ui";
+import { CopyButton, primary, useCopy } from "../ui";
 import { useAutomationsStore } from "./automations/shared";
 import { apiFlag, useInstallLine } from "./connect";
 import { applyWhenReady, type PendingApply } from "./endpoint-settings";
+import { field } from "./settings-ui";
 import { Select } from "./ui";
 import { useAgents } from "./use-agents";
 
@@ -197,7 +198,7 @@ function RentSandbox({ onCreated, dialog }: { onCreated?: (m: Machine) => void; 
             <SizeOption key={s.name} size={s} checked={s.name === chosen?.name} onChange={() => setSize(s.name)} />
           ))}
         </fieldset>
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name (optional)" aria-label="Sandbox name" className={`${input} w-full`} />
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name (optional)" aria-label="Sandbox name" className={`${field} w-full`} />
         {showKeys ? (
           <div className="space-y-1.5" role="group" aria-label="Provider API keys">
             {PROVIDER_KEYS.map((k) => (
@@ -209,7 +210,7 @@ function RentSandbox({ onCreated, dialog }: { onCreated?: (m: Machine) => void; 
                 onChange={(e) => setKeys((all) => ({ ...all, [k.name]: e.target.value }))}
                 placeholder={`${k.label} (${k.for})`}
                 aria-label={k.label}
-                className={`${input} w-full font-mono text-[12px] placeholder-shown:font-sans placeholder-shown:text-[12.5px]`}
+                className={`${field} w-full font-mono text-[12px] placeholder-shown:font-sans placeholder-shown:text-[12.5px]`}
               />
             ))}
             <p className="text-[11.5px] text-subtle">Sent to the sandbox only; roll never shows them again.</p>
@@ -241,7 +242,7 @@ function RentSandbox({ onCreated, dialog }: { onCreated?: (m: Machine) => void; 
                 placeholder={`Key for ${profile.name} (optional)`}
                 aria-label="Endpoint key"
                 data-1p-ignore
-                className={`${input} w-full font-mono text-[12px] placeholder-shown:font-sans placeholder-shown:text-[12.5px]`}
+                className={`${field} w-full font-mono text-[12px] placeholder-shown:font-sans placeholder-shown:text-[12.5px]`}
               />
             )}
             {profile && <p className="text-[11.5px] text-subtle">Set once the sandbox connects{profile.key_ref ? ", its key read from 1Password there" : ", the key sealed to it in your browser"}.</p>}
