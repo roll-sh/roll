@@ -1,7 +1,9 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CHATOPS_TEMPLATES, TEMPLATES, type TemplateContext } from "./automation-templates";
 import { automationSpecD, STEP_CONFIGS, STEP_KINDS, type BuiltInStepKind } from "./automations-api";
-import { withBuiltIns, validate } from "./automations-ui";
+import { BUILT_IN_STEPS, withBuiltIns, validate } from "./automations-ui";
 import { CHATOPS_CATALOG, withChatops } from "./chatops-catalog";
 import { decode } from "./decode";
 
@@ -79,5 +81,35 @@ describe("chat ops' automation templates", () => {
     expect(fix.trigger).toMatchObject({ source: "github", events: ["check.failed"], config: { branches: ["main"] } });
     expect(fix.concurrency).toBe("queue");
     expect(fix.steps.find((s) => s.kind === "agent.publish")!.config).toMatchObject({ land: true });
+  });
+});
+
+describe("step outputs", () => {
+  /** Each built-in step's output, as the server declares it (`info(step_kinds::X, …, &[…])` in steps.rs). */
+  const serverOutputs = (): Record<string, string[]> => {
+    const root = join(__dirname, "../../../..");
+    const kinds = Object.fromEntries([...readFileSync(join(root, "crates/agent-proto/src/automation.rs"), "utf8").matchAll(/pub const ([A-Z_]+): &str = "([^"]+)";/g)].map((m) => [m[1], m[2]]));
+    const src = readFileSync(join(root, "crates/code-control/src/agents/automations/steps.rs"), "utf8");
+    const out: Record<string, string[]> = {};
+    for (const m of src.matchAll(/info\(\s*step_kinds::([A-Z_]+),[\s\S]*?&\[([^\]]*)\],?\s*\)/g)) out[kinds[m[1]]] = [...m[2].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
+    return out;
+  };
+
+  it("the dashboard's built-in steps say what the server's steps put out", () => {
+    const server = serverOutputs();
+    expect(Object.keys(server).sort()).toEqual([...STEP_KINDS].sort());
+    for (const kind of STEP_KINDS) expect(BUILT_IN_STEPS[kind].output, kind).toEqual(server[kind]);
+  });
+
+  it("templates only read outputs their earlier steps have", () => {
+    const outputs: Record<string, string[]> = { ...Object.fromEntries(STEP_KINDS.map((k) => [k, BUILT_IN_STEPS[k].output])), ...Object.fromEntries(CHATOPS_CATALOG.steps.map((s) => [s.kind, s.output])) };
+    for (const t of TEMPLATES) {
+      const spec = t.build(ctx);
+      const kindOf = Object.fromEntries(spec.steps.map((s) => [s.id, s.kind]));
+      for (const [, id, field] of JSON.stringify(spec).matchAll(/steps\.([a-z_0-9]+)\.([a-z_0-9]+)/g)) {
+        const known = outputs[kindOf[id]];
+        if (known) expect(known, `${t.id}: steps.${id}.${field}`).toContain(field);
+      }
+    }
   });
 });

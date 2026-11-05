@@ -60,7 +60,7 @@ export const BUILT_IN_STEPS: Record<(typeof STEP_KINDS)[number], { title: string
   "agent.start": {
     title: "Start an agent",
     description: "A new thread on a machine, a sandbox, or wherever the project is.",
-    output: ["thread", "machine", "project", "branch"],
+    output: ["machine", "project", "thread", "sandbox"],
     config: {
       type: "object",
       required: ["prompt"],
@@ -82,7 +82,7 @@ export const BUILT_IN_STEPS: Record<(typeof STEP_KINDS)[number], { title: string
   "agent.wait": {
     title: "Wait for the agent",
     description: "Until it's done, fails, waits on you or is settled.",
-    output: ["status", "thread", "summary"],
+    output: ["outcome", "thread", "run", "status", "error", "message"],
     config: {
       type: "object",
       properties: {
@@ -96,7 +96,7 @@ export const BUILT_IN_STEPS: Record<(typeof STEP_KINDS)[number], { title: string
   "agent.message": {
     title: "Message the agent",
     description: "Send it a follow-up, queued or steering the turn it's on.",
-    output: ["run"],
+    output: ["thread", "run"],
     config: {
       type: "object",
       required: ["text"],
@@ -110,7 +110,7 @@ export const BUILT_IN_STEPS: Record<(typeof STEP_KINDS)[number], { title: string
   "agent.respond": {
     title: "Answer its requests",
     description: "Approve or decline what it asks, by rule.",
-    output: ["answered"],
+    output: ["answered", "left"],
     config: {
       type: "object",
       properties: {
@@ -139,7 +139,7 @@ export const BUILT_IN_STEPS: Record<(typeof STEP_KINDS)[number], { title: string
   "agent.publish": {
     title: "Publish as a change",
     description: "Its work as a roll code change, queued to land if you like.",
-    output: ["change", "url", "queued"],
+    output: ["branch", "commit", "change", "url", "landing"],
     config: {
       type: "object",
       properties: {
@@ -152,7 +152,7 @@ export const BUILT_IN_STEPS: Record<(typeof STEP_KINDS)[number], { title: string
   "agent.script": {
     title: "Run a project script",
     description: "One of the project's scripts, in the thread's worktree or the project.",
-    output: ["exit", "output"],
+    output: ["terminal", "machine"],
     config: {
       type: "object",
       required: ["script"],
@@ -167,13 +167,13 @@ export const BUILT_IN_STEPS: Record<(typeof STEP_KINDS)[number], { title: string
   "agent.settle": {
     title: "Settle the thread",
     description: "Off the canvas into the settled shelf, archived, or back.",
-    output: [],
+    output: ["thread", "action"],
     config: { type: "object", properties: { thread, action: { type: "string", title: "Action", enum: ["settle", "archive", "unsettle"], enumTitles: ["Settle", "Archive", "Unsettle"] } } },
   },
   webhook: {
     title: "Call a webhook",
     description: "An HTTP request anywhere public, signed if you like.",
-    output: ["status", "body", "json"],
+    output: ["status", "headers", "body"],
     config: {
       type: "object",
       required: ["url"],

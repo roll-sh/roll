@@ -212,7 +212,7 @@ export const TEMPLATES: AutomationTemplate[] = [
             }),
           ),
           step("wait", "agent.wait", { thread: "{{ steps.start.thread }}", until: ["done", "failed", "waiting"], timeout_s: 7200, on_timeout: "continue" }),
-          step("tell", "notify", { title: "{{ automation.name }}: {{ steps.wait.status }}", body: "{{ steps.wait.summary | truncate:200 }}", level: "info", link: null }),
+          step("tell", "notify", { title: "{{ automation.name }}: {{ steps.wait.outcome }}", body: "{{ steps.wait.message | truncate:200 }}", level: "info", link: null }),
         ],
       );
     },
@@ -245,7 +245,7 @@ export const TEMPLATES: AutomationTemplate[] = [
             }),
           ),
           step("wait", "agent.wait", { thread: "{{ steps.triage.thread }}", until: ["done", "failed"], timeout_s: 3600, on_timeout: "continue" }),
-          step("tell", "notify", { title: "Triage is done", body: "{{ steps.wait.summary | truncate:280 }}", level: "success", link: null }),
+          step("tell", "notify", { title: "Triage is done", body: "{{ steps.wait.message | truncate:280 }}", level: "success", link: null }),
         ],
         { concurrency: "skip" },
       );

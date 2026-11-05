@@ -170,7 +170,7 @@ export class DemoAutomations {
           steps: [
             step("triage", "agent.start", agentStart({ target: { type: "project_machine" }, project: roll ? { type: "id", id: roll.id } : null, provider: "codex", model: "gpt-5.5-codex", effort: "medium", runtime_mode: "auto_edit", worktree: false, title: "Triage", prompt: "Read the work items opened since the last triage. Label, prioritise, close duplicates. Summarise what needs a person." })),
             step("wait", "agent.wait", { thread: "{{ steps.triage.thread }}", until: ["done", "failed"], timeout_s: 3600, on_timeout: "continue" }),
-            step("tell", "notify", { title: "Triage is done", body: "{{ steps.wait.summary | truncate:280 }}", level: "success", link: null }),
+            step("tell", "notify", { title: "Triage is done", body: "{{ steps.wait.message | truncate:280 }}", level: "success", link: null }),
           ],
           concurrency: "skip",
         },
@@ -202,7 +202,7 @@ export class DemoAutomations {
           steps: [
             step("start", "agent.start", agentStart({ target: mbp ? { type: "machine", machine: mbp.id } : { type: "any_online" }, project: roll ? { type: "id", id: roll.id } : null, prompt: '{{ event.data.input.prompt | default:"Pick an open work item and fix it." }}' })),
             step("wait", "agent.wait", { thread: "{{ steps.start.thread }}", until: ["done", "failed", "waiting"], timeout_s: 7200, on_timeout: "continue" }),
-            step("tell", "notify", { title: "{{ automation.name }}: {{ steps.wait.status }}", body: "{{ steps.wait.summary | truncate:200 }}", level: "info", link: null }),
+            step("tell", "notify", { title: "{{ automation.name }}: {{ steps.wait.outcome }}", body: "{{ steps.wait.message | truncate:200 }}", level: "info", link: null }),
           ],
           allow_agents: true,
         },
@@ -346,7 +346,7 @@ export class DemoAutomations {
     const w = r.steps.find((s) => s.status === "waiting");
     if (!w) return;
     const said = summary ?? (status === "done" ? "The agent finished; its work is in its worktree, ready to review." : "The agent stopped with an error.");
-    this.patchStep(rid, w.id, { status: "succeeded", finished_at: Date.now(), output: { status, thread: r.threads.at(-1)?.thread ?? null, summary: said } }, { status: "running" });
+    this.patchStep(rid, w.id, { status: "succeeded", finished_at: Date.now(), output: { outcome: status, thread: r.threads.at(-1)?.thread ?? null, run: null, status: "idle", error: status === "failed" ? said : null, message: said } }, { status: "running" });
     this.log(rid, w.id, `The thread is ${status}`);
     this.host.after(600, () => void this.advance(rid));
   }
@@ -650,13 +650,13 @@ function demoEventData(a: Automation, summary: string): unknown {
 function demoOutput(s: Step, thread?: string): unknown {
   switch (s.kind) {
     case "agent.start":
-      return { thread: thread ?? "thr_demo_json", machine: "mch_demo_ada", project: "prj_demo_roll", branch: "roll/fix" };
+      return { thread: thread ?? "thr_demo_json", machine: "mch_demo_ada", project: "prj_demo_roll", sandbox: null };
     case "agent.wait":
-      return { status: "done", thread: thread ?? "thr_demo_json", summary: "Done: the change is small and has a test." };
+      return { outcome: "done", thread: thread ?? "thr_demo_json", run: null, status: "idle", error: null, message: "Done: the change is small and has a test." };
     case "agent.publish":
-      return { change: 88, url: "https://roll.sh/acme/roll/changes/88", queued: true };
+      return { branch: "roll/fix", commit: "4f2c9e1", change: 88, url: "https://roll.sh/acme/roll/changes/88", landing: { status: "queued" } };
     case "agent.respond":
-      return { answered: 1 };
+      return { answered: 1, left: 0 };
     case "notify":
       return { id: "ntc_demo" };
     default:
