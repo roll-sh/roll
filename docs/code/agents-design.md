@@ -297,6 +297,8 @@ thread or machine — is the shared picker, `Picker` in `components/agents/ui/pi
 - **Problems are a quiet footer** (a warning icon, the reason, "Connect" or "Reconnect" linking to
   the owner's settings). The field still takes a typed value.
 - The selected row is a quiet fill and a check (a box for lists); no accent bars or rings.
+- roll code's pages use the same picker (review requests, required checks, work-item labels),
+  with their rows from the code API.
 
 ## Automations
 
