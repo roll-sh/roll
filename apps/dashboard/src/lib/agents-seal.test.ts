@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SealedSecret } from "./agents-api";
-import { b64url, canSeal, fromB64url, sealKey, sealUpstreamKey } from "./agents-seal";
+import { b64url, fromB64url, sealKey, sealUpstreamKey } from "./agents-seal";
 
 // The daemon of `crates/agent-host/src/endpoints.rs`'s `opens_the_dashboards_box` (a test key).
 const D = new Uint8Array([48, 209, 102, 111, 243, 150, 16, 2, 48, 117, 176, 150, 131, 15, 197, 238, 20, 27, 151, 104, 214, 63, 157, 222, 129, 143, 37, 102, 10, 254, 206, 122]);
@@ -26,8 +26,23 @@ async function open(sealed: SealedSecret, endpoint: string, context = `roll-endp
 }
 
 describe("sealing endpoint keys (roll-seal-v1)", () => {
-  it("can seal here", async () => {
-    expect(await canSeal()).toBe(true);
+  it("seals without WebCrypto (a page over plain http has no crypto.subtle)", async () => {
+    const subtle = Object.getOwnPropertyDescriptor(Crypto.prototype, "subtle");
+    Object.defineProperty(Crypto.prototype, "subtle", { get: () => undefined, configurable: true });
+    let sealed: SealedSecret;
+    try {
+      expect(crypto.subtle).toBeUndefined();
+      sealed = await sealKey(PUB, "gw", "sk-over-http");
+    } finally {
+      Object.defineProperty(Crypto.prototype, "subtle", subtle!);
+    }
+    expect(await open(sealed, "gw")).toBe("sk-over-http");
+  });
+
+  it("seals, byte for byte, the box the daemon's test opens (a fixed ephemeral key and nonce)", async () => {
+    // `crates/agent-host/src/endpoints.rs`'s `opens_the_dashboards_box`, its second box.
+    const fixed = { ephemeral: Uint8Array.from({ length: 32 }, (_, i) => i + 1), nonce: fromB64url("AAECAwQFBgcICQoL") };
+    expect(await sealKey(PUB, "cliproxy", "sk-test-123", fixed)).toEqual({ v: 1, epk: "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw", nonce: "AAECAwQFBgcICQoL", ct: "w3RVbnNeH9p-sAeRCazhVaXWz4la-gDXQZOD" });
   });
 
   it("opens the vector the daemon's test opens", async () => {

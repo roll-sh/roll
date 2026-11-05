@@ -483,6 +483,14 @@ mod tests {
             ct: "dsu-tM5kWenDNMkLzXdVKQ5AytEyazIrW93S".into(),
         };
         assert_eq!(daemon.open("cliproxy", &sealed).unwrap().expose(), "sk-test-123");
+        // Sealed by the dashboard's pure-JS box (agents-seal.test.ts pins it, from a fixed key).
+        let sealed = SealedSecret {
+            v: 1,
+            epk: "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw".into(),
+            nonce: "AAECAwQFBgcICQoL".into(),
+            ct: "w3RVbnNeH9p-sAeRCazhVaXWz4la-gDXQZOD".into(),
+        };
+        assert_eq!(daemon.open("cliproxy", &sealed).unwrap().expose(), "sk-test-123");
     }
 
     #[test]

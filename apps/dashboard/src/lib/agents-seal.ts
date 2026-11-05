@@ -12,8 +12,15 @@
  * `roll-gateway-upstream:<upstream id>` as the associated data (agent-proto `upstream_key_context`),
  * so an endpoint's box never opens as an upstream's key, nor one upstream's as another's.
  *
- * WebCrypto only (X25519 is in every current browser); nothing here keeps the key.
+ * In audited pure JS (`@noble/curves`, `@noble/hashes`, `@noble/ciphers`), not WebCrypto: a page
+ * served over plain http (a dashboard reached over a tailnet by its name) has no `crypto.subtle`,
+ * and older Safari has no X25519 in it. Only the randomness is the browser's
+ * (`crypto.getRandomValues`, there in every context). Nothing here keeps the key.
  */
+import { gcm } from "@noble/ciphers/aes";
+import { x25519 } from "@noble/curves/ed25519";
+import { hkdf } from "@noble/hashes/hkdf";
+import { sha256 } from "@noble/hashes/sha2";
 import type { SealedSecret } from "./agents-api";
 
 const INFO = new TextEncoder().encode("roll-seal-v1");
@@ -31,20 +38,10 @@ export function fromB64url(s: string): Uint8Array<ArrayBuffer> {
   return out;
 }
 
-/** Whether this browser can seal (X25519 in WebCrypto). */
-export async function canSeal(): Promise<boolean> {
-  try {
-    await crypto.subtle.generateKey({ name: "X25519" }, false, ["deriveBits"]);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** For tests: a fixed ephemeral key pair and nonce instead of fresh ones. */
+/** For tests: a fixed ephemeral private key and nonce instead of fresh ones. */
 export interface SealFixed {
-  ephemeral: CryptoKeyPair;
-  nonce: Uint8Array<ArrayBuffer>;
+  ephemeral: Uint8Array;
+  nonce: Uint8Array;
 }
 
 /** Seals `key` to the daemon whose public key is `sealKey` (base64url), for `endpoint`. */
@@ -58,20 +55,19 @@ export function sealUpstreamKey(sealKey: string, upstream: string, key: string, 
 }
 
 async function seal(sealKey: string, context: string, key: string, fixed?: SealFixed): Promise<SealedSecret> {
-  const subtle = crypto.subtle;
   const daemon = fromB64url(sealKey);
   if (daemon.length !== 32) throw new Error("the machine's seal key isn't an X25519 key");
-  const peer = await subtle.importKey("raw", daemon, { name: "X25519" }, false, []);
-  const eph = fixed?.ephemeral ?? ((await subtle.generateKey({ name: "X25519" }, true, ["deriveBits"])) as CryptoKeyPair);
-  const epk = new Uint8Array(await subtle.exportKey("raw", eph.publicKey));
-  const shared = await subtle.deriveBits({ name: "X25519", public: peer }, eph.privateKey, 256);
+  const eph = fixed?.ephemeral ?? crypto.getRandomValues(new Uint8Array(32));
+  const epk = x25519.getPublicKey(eph);
+  const shared = x25519.getSharedSecret(eph, daemon);
+  // The daemon refuses an all-zero secret (a low-order key): so does this side.
+  if (shared.every((b) => b === 0)) throw new Error("the machine's seal key isn't an X25519 key");
   const salt = new Uint8Array(64);
   salt.set(epk, 0);
   salt.set(daemon, 32);
-  const ikm = await subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
-  const aes = await subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt, info: INFO }, ikm, { name: "AES-GCM", length: 256 }, false, ["encrypt"]);
+  const aes = hkdf(sha256, shared, salt, INFO, 32);
   const nonce = fixed?.nonce ?? crypto.getRandomValues(new Uint8Array(12));
   const aad = new TextEncoder().encode(context);
-  const ct = new Uint8Array(await subtle.encrypt({ name: "AES-GCM", iv: nonce, additionalData: aad }, aes, new TextEncoder().encode(key)));
+  const ct = gcm(aes, nonce, aad).encrypt(new TextEncoder().encode(key));
   return { v: 1, epk: b64url(epk), nonce: b64url(nonce), ct: b64url(ct) };
 }

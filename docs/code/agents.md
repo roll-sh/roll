@@ -1255,7 +1255,8 @@ the owner's own, set on the owner's own machines, and a sandbox is one owner's m
   shares. A running session keeps what it started with.
 - **Sealing** (`roll-seal-v1`): the daemon makes an X25519 key pair once (`agent.db`'s `settings`,
   `seal_key`) and says the public half in `hello` (`MachineInfo.seal_key`). The browser seals the
-  key with WebCrypto: a fresh X25519 pair, HKDF-SHA256 over the shared secret (salt `epk ‖
+  key in audited pure JS (`@noble/*`; a page over plain http, such as a dashboard reached over a
+  tailnet by name, has no `crypto.subtle`, and older Safari has no X25519 there): a fresh X25519 pair, HKDF-SHA256 over the shared secret (salt `epk ‖
   seal_key`, info `roll-seal-v1`) to an AES-256-GCM key, a random nonce, and `roll-endpoint:<id>`
   as associated data, so a box opens only on that daemon and only for that endpoint (`SealedSecret`).
   `endpoint.set {endpoint, key}` carries it (`key`: `keep`, `clear`, or `set {sealed}`). The relay
