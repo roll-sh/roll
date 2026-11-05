@@ -3,23 +3,28 @@
 /**
  * Runs: an automation's history and one run's detail, live. The detail is T3's work log turned
  * into a timeline (GitHub Actions' steps, n8n's input/output): each step's state, timing and
- * attempt, its log lines and output when opened, the threads it started (open them beside the
- * canvas), and Retry or Cancel. `automation_run` events move it while you watch.
+ * attempt, its log lines and output when opened, the threads it started (their cards highlighted
+ * on the canvas; a click opens the conversation in the sheet, with Back to the run), and Retry or
+ * Cancel. `automation_run` events move it while you watch. Both are levels of the automations sheet.
  */
 
-import { ArrowLeft, ChevronRight, CircleAlert, CircleStop, MessageSquare, RotateCcw } from "lucide-react";
+import { ChevronRight, CircleAlert, CircleStop, MessageSquare, RotateCcw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { isRunFinal, type AutomationEvent, type AutomationRun, type StepRun } from "@/lib/automations-api";
 import { canCancel, canRetry, duration, stepInfo, stepLabel, took } from "@/lib/automations-ui";
-import { setAgentsView } from "@/lib/agents-surface";
+import { setAgentsView, type AutomationsView } from "@/lib/agents-surface";
+import { ago } from "../shared";
 import { cn } from "../ui";
 import { useAgents } from "../use-agents";
 import { RunRows } from "./automations-view";
-import { QuietButton, RunStatus, StepGlyph, stepIcon, useAutomations } from "./shared";
+import { SheetHeader } from "./sheet";
+import { QuietButton, RunStatus, StepGlyph, stepIcon, Tile, triggerIcon, useAutomations } from "./shared";
+import { triggerSource } from "@/lib/automations-ui";
 
 /** One automation's runs, newest first. */
-export function RunHistory({ automation }: { automation: string }) {
-  const { runs, store } = useAutomations();
+export function RunHistory({ automation, list }: { automation: string; list?: AutomationsView["list"] }) {
+  const { runs, store, automations } = useAutomations();
+  const x = automations.get(automation);
   const [now] = useState(() => Date.now());
   const [loaded, setLoaded] = useState(false);
   const [end, setEnd] = useState(false);
@@ -30,16 +35,24 @@ export function RunHistory({ automation }: { automation: string }) {
     setLoaded(true);
     void store.more(automation, undefined).then((p) => p.length < 50 && setEnd(true), () => setEnd(true));
   }, [store, automation, loaded]);
-  if (!mine.length) return <p className="py-16 text-center text-[13px] text-subtle">No runs yet. Press Run, or wait for its trigger.</p>;
   return (
-    <div className="@container">
-      <RunRows runs={mine} showName={false} now={now} onOpen={(r) => setAgentsView({ kind: "automations", open: automation, tab: "runs", run: r.id })} />
-      {!end && mine.length >= 50 && (
-        <div className="mt-3 flex justify-center">
-          <QuietButton onClick={() => void store?.more(automation, mine.at(-1)?.id).then((p) => p.length < 50 && setEnd(true))}>Older runs</QuietButton>
-        </div>
-      )}
-    </div>
+    <>
+      <SheetHeader icon={x && <Tile icon={triggerIcon(triggerSource(x.trigger))} />} title={x?.name ?? "Runs"} subtitle={`${mine.length} run${mine.length === 1 ? "" : "s"}`} />
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 pt-3 pb-8 @container" data-scroll>
+        {!mine.length ? (
+          <p className="py-16 text-center text-[13px] text-subtle">No runs yet. Press Run, or wait for its trigger.</p>
+        ) : (
+          <>
+            <RunRows runs={mine} showName={false} now={now} onOpen={(r) => setAgentsView({ kind: "automations", list, open: automation, tab: "runs", run: r.id })} />
+            {!end && mine.length >= 50 && (
+              <div className="mt-3 flex justify-center">
+                <QuietButton onClick={() => void store?.more(automation, mine.at(-1)?.id).then((p) => p.length < 50 && setEnd(true))}>Older runs</QuietButton>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </>
   );
 }
 
@@ -54,7 +67,8 @@ function useNow(on: boolean): number {
   return now;
 }
 
-export function RunDetail({ run: id, onBack }: { run: string; onBack: () => void }) {
+/** One run; `onThread` opens a conversation it started (in the sheet; beside the canvas by default). */
+export function RunDetail({ run: id, onThread }: { run: string; onThread?: (thread: string) => void }) {
   const { runs, store, catalog } = useAutomations();
   const { client, openThread } = useAgents();
   const [fetched, setFetched] = useState<{ run: AutomationRun; event: AutomationEvent } | null>(null);
@@ -80,7 +94,13 @@ export function RunDetail({ run: id, onBack }: { run: string; onBack: () => void
   const now = useNow(!!run && !isRunFinal(run.status));
   const [opened, setOpened] = useState<Set<string>>(new Set());
   const [showEvent, setShowEvent] = useState(false);
-  if (!run) return <p className="py-16 text-center text-[13px] text-subtle">{error ?? <span className="shimmer">Loading the run…</span>}</p>;
+  if (!run)
+    return (
+      <>
+        <SheetHeader title="Run" />
+        <p className="py-16 text-center text-[13px] text-subtle">{error ?? <span className="shimmer">Loading the run…</span>}</p>
+      </>
+    );
   const total = took(run.started_at ?? run.created_at, run.finished_at, now);
   const act = async (what: "retry" | "cancel") => {
     if (!store) return;
@@ -101,15 +121,14 @@ export function RunDetail({ run: id, onBack }: { run: string; onBack: () => void
     else n.add(s.id);
     return n;
   });
-  // The conversation opens beside the canvas, and the surface reveals its card there.
-  const openOnCanvas = (thread: string) => openThread(thread);
+  const openOnCanvas = onThread ?? openThread;
   return (
-    <div className="fade-in" aria-label={`Run ${run.id}`}>
-      <div className="mb-4 flex items-center gap-2">
-        <button type="button" onClick={onBack} className="inline-flex h-7 items-center gap-1 rounded-md pr-2 pl-1 text-[12.5px] text-muted transition-colors hover:bg-fg/[0.05] hover:text-fg">
-          <ArrowLeft className="size-3.5" /> Runs
-        </button>
-        <span className="ml-auto flex items-center gap-1.5">
+    <>
+    <SheetHeader
+      title={run.name}
+      subtitle={`Run · ${ago(run.created_at, now)}`}
+      tools={
+        <span className="flex items-center gap-1.5">
           {canCancel(run) && (
             <QuietButton onClick={() => void act("cancel")} disabled={!!acting}>
               <CircleStop /> {acting === "cancel" ? "Cancelling…" : "Cancel"}
@@ -121,7 +140,9 @@ export function RunDetail({ run: id, onBack }: { run: string; onBack: () => void
             </QuietButton>
           )}
         </span>
-      </div>
+      }
+    />
+    <div className="min-h-0 flex-1 overflow-y-auto px-4 pt-4 pb-8" data-scroll aria-label={`Run ${run.id}`}>
       <div className="rounded-xl border border-line-2 bg-panel p-3.5 shadow-card inset-shadow-highlight">
         <div className="flex items-center gap-2">
           <RunStatus status={run.status} className="text-[12.5px] font-medium" />
@@ -181,7 +202,7 @@ export function RunDetail({ run: id, onBack }: { run: string; onBack: () => void
                         type="button"
                         onClick={() => openOnCanvas(t.thread)}
                         className="inline-flex h-6 max-w-full items-center gap-1.5 rounded-md border border-line-2 bg-fg/[0.03] px-2 text-[11.5px] text-soft inset-shadow-highlight transition-colors hover:border-line-3 hover:text-fg"
-                        title="Open the conversation beside the canvas"
+                        title="Open the conversation"
                       >
                         <MessageSquare className="size-3 shrink-0 text-subtle" />
                         <span className="truncate">{rec?.title ?? t.thread}</span>
@@ -221,6 +242,7 @@ export function RunDetail({ run: id, onBack }: { run: string; onBack: () => void
         })}
       </ol>
     </div>
+    </>
   );
 }
 

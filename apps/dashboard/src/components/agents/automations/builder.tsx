@@ -820,7 +820,7 @@ function StepCard({
   );
 }
 
-function useStepSummary(s: Step, schema: Schema): string {
+export function useStepSummary(s: Step, schema: Schema): string {
   const { client } = useAgents();
   const c = (s.config ?? {}) as Record<string, unknown>;
   const parts: string[] = [];

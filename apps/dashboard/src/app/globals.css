@@ -564,6 +564,41 @@ body {
   animation: panel-in 0.24s cubic-bezier(0.32, 0.72, 0, 1) both;
 }
 
+/* The automations sheet sliding back out to the right when it closes (180 ms, then it unmounts). */
+@keyframes panel-out {
+  to {
+    opacity: 0;
+    transform: translateX(28px);
+  }
+}
+
+.panel-out {
+  animation: panel-out 0.18s cubic-bezier(0.4, 0, 1, 1) both;
+}
+
+/* A page of the automations sheet's stack: deeper slides in from the right, back from the left. */
+@keyframes stack-push {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+
+@keyframes stack-pop {
+  from {
+    opacity: 0;
+    transform: translateX(-24px);
+  }
+}
+
+.stack-push {
+  animation: stack-push 0.22s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+.stack-pop {
+  animation: stack-pop 0.22s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
 /* The agents threads sidebar slides in from the left edge. */
 @keyframes sidebar-in {
   from {
@@ -635,6 +670,9 @@ body {
   .pop,
   .sheet-in,
   .panel-in,
+  .panel-out,
+  .stack-push,
+  .stack-pop,
   .sidebar-in,
   .fade-in,
   .chrome-in,

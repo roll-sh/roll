@@ -238,6 +238,8 @@ Text levels: `--fg` `#f7f8f8`, `--soft` `#d0d6e0` (secondary body), `--muted` `#
 | popup opening | `.sheet-in`: translateY 10px, scale 0.985 → 1, fade, 260ms, `--ease-drawer` |
 | chrome settling | `.chrome-in`: translateY −4px, fade, 300ms on the drawer curve, 50ms after the sheet |
 | side panel and sidebar | `.panel-in` / `.sidebar-in`: translateX ±28px, fade, 240ms on the drawer curve |
+| automations sheet closing | `.panel-out`: back out 28px to the right with a fade, 180ms ease-in, then it unmounts |
+| a page in the automations sheet | `.stack-push` (deeper, from 24px right) / `.stack-pop` (back, from 24px left), fade, 220ms on the drawer curve; a tab on the same level doesn't move |
 | popovers and menus | scale 0.98 → 1 plus fade, 150ms, `--ease-out-soft` `(0.23,1,0.32,1)`, from the trigger |
 | palette and dialogs | scale 0.98 plus fade, 200ms on the drawer curve, with the scrim fading in over 200ms |
 | hover and colour | 150ms; buttons press to scale 0.97 |
@@ -291,10 +293,15 @@ thread or machine — is the shared picker, `Picker` in `components/agents/ui/pi
 
 ## Automations
 
-The Automations view follows this system and adds a few pieces of its own: the list in the working
-area with the open automation in the side panel, the builder's flow of cards, template fields,
-the run timeline, notice toasts and the canvas chip. They're in docs/code/automations-ui.md, with
-the Linear, Zapier, n8n, GitHub Actions, Vercel, Raycast and T3 references each one comes from.
+Automations live in one right sheet beside the canvas, the conversation's frame (`SidePanel`: the
+same width, resize handle and slide), so the canvas stays live and interactive next to them. Inside
+it is a stack (list → overview → builder or runs → run → conversation): each page has the same
+56px header (Back with where it goes, the page's tile, title and subtitle, its tools, then Maximize
+on the builder and Close), and pages push and pop sideways. A conversation opened from a run is a
+page of the sheet, never a second sheet. The builder can fill the working area (T3's "Maximize
+panel"). The rest (the builder's flow of cards, template fields, the run timeline, notice toasts,
+the canvas chip) is in docs/code/automations-ui.md, with the Linear, Zapier, n8n, GitHub Actions,
+Vercel, Raycast and T3 references each one comes from.
 
 ## References
 

@@ -1,14 +1,14 @@
 "use client";
 
 /**
- * The Automations view: in place of the canvas, inside the same inset panel (docs/code/
- * automations-ui.md). Three lists under one bar: the automations (two-line rows: trigger, name,
- * when it runs, its last run, seven days of runs, the switch), every run, and the templates; the
- * empty state is the templates gallery. Opening one puts it in the side panel.
+ * The automations list, the root of the automations sheet (docs/code/automations-ui.md). Three
+ * lists under one bar: the automations (two-line rows: trigger, name, when it runs, its last run,
+ * seven days of runs, the switch), every run, and the templates; the empty state is the templates
+ * gallery. Opening one goes a level into the sheet (sheet.tsx).
  */
 
 import { DotField } from "@roll/brand";
-import { ArrowRight, ChevronRight, Copy, MoreHorizontal, Play, Plus, Search, Trash2, X } from "lucide-react";
+import { ArrowRight, ChevronRight, Copy, MoreHorizontal, Play, Plus, Search, Trash2, X, Zap } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import type { Automation, AutomationRun, RunState } from "@/lib/automations-api";
 import { TEMPLATES, type AutomationTemplate, type TemplateContext } from "@/lib/automation-templates";
@@ -21,6 +21,7 @@ import { integrationOf } from "../brand-icons";
 import { ago } from "../shared";
 import { cn, Segmented, Switch } from "../ui";
 import { useAgents } from "../use-agents";
+import { SheetHeader } from "./sheet";
 import { inTime, PrimaryButton, QuietButton, RunDot, RunStatus, shortAgo, stepIcon, Tile, triggerIcon, useAutomations, WeekStrip } from "./shared";
 
 export function AutomationsView({ view, phone }: { view: View; phone: boolean }) {
@@ -32,10 +33,26 @@ export function AutomationsView({ view, phone }: { view: View; phone: boolean })
   const shown = query.trim() ? automations.filter((x) => `${x.name} ${x.description ?? ""} ${triggerSummary(x.trigger, a.catalog)}`.toLowerCase().includes(query.trim().toLowerCase())) : automations;
   const empty = a.loaded && !a.error && automations.length === 0;
 
-  if (!a.store) return <Center title="Automations aren't on this server yet" body="Update roll to set up triggers that run your agents." />;
+  if (!a.store)
+    return (
+      <>
+        <SheetHeader title="Automations" />
+        <Center title="Automations aren't on this server yet" body="Update roll to set up triggers that run your agents." />
+      </>
+    );
   return (
-    <div className="flex h-full min-h-0 flex-col @container" aria-label="Automations">
-      <div className="flex h-11 shrink-0 items-center gap-2 px-3 max-sm:px-2">
+    <>
+      <SheetHeader
+        icon={<Tile icon={Zap} />}
+        title="Automations"
+        tools={
+          <PrimaryButton onClick={() => go({ open: "new", list: view.list })} title="New automation">
+            <Plus strokeWidth={2} />
+            <span className="max-sm:sr-only">New</span>
+          </PrimaryButton>
+        }
+      />
+      <div className="flex h-11 shrink-0 items-center gap-2 px-3 @container" aria-label="Automations">
         <Segmented
           label="Show"
           value={list}
@@ -46,25 +63,19 @@ export function AutomationsView({ view, phone }: { view: View; phone: boolean })
             { value: "templates", label: "Templates" },
           ]}
         />
-        <span className="ml-auto flex items-center gap-1.5">
-          {list === "automations" && automations.length > 0 && !phone && (
-            <label className="flex h-7 w-52 items-center gap-2 rounded-md border border-line bg-fg/[0.03] px-2 text-[12.5px] inset-shadow-highlight transition-colors focus-within:border-line-3 max-lg:w-40">
-              <Search className="size-3.5 shrink-0 text-subtle" aria-hidden />
-              <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Filter" aria-label="Filter automations" className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-subtle" />
-              {query && (
-                <button type="button" onClick={() => setQuery("")} aria-label="Clear the filter" className="text-subtle hover:text-fg">
-                  <X className="size-3" />
-                </button>
-              )}
-            </label>
-          )}
-          <PrimaryButton onClick={() => go({ open: "new", list: view.list })} title="New automation">
-            <Plus strokeWidth={2} />
-            <span className="max-sm:sr-only">New automation</span>
-          </PrimaryButton>
-        </span>
+        {list === "automations" && automations.length > 0 && !phone && (
+          <label className="ml-auto flex h-7 min-w-0 flex-1 basis-32 items-center gap-2 rounded-md border border-line bg-fg/[0.03] px-2 text-[12.5px] inset-shadow-highlight transition-colors focus-within:border-line-3 sm:max-w-56">
+            <Search className="size-3.5 shrink-0 text-subtle" aria-hidden />
+            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Filter" aria-label="Filter automations" className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-subtle" />
+            {query && (
+              <button type="button" onClick={() => setQuery("")} aria-label="Clear the filter" className="text-subtle hover:text-fg">
+                <X className="size-3" />
+              </button>
+            )}
+          </label>
+        )}
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto" data-scroll>
+      <div className="min-h-0 flex-1 overflow-y-auto @container" data-scroll>
         {!a.loaded ? (
           <Loading />
         ) : a.error && !automations.length ? (
@@ -82,7 +93,7 @@ export function AutomationsView({ view, phone }: { view: View; phone: boolean })
         ) : (
           <Section>
             {shown.length ? (
-              <List automations={shown} runs={a.runs} selected={view.open} />
+              <List automations={shown} runs={a.runs} selected={view.open} list={view.list} />
             ) : (
               <p className="py-16 text-center text-[13px] text-subtle">
                 Nothing matches “{query}”.{" "}
@@ -100,7 +111,7 @@ export function AutomationsView({ view, phone }: { view: View; phone: boolean })
           </Section>
         )}
       </div>
-    </div>
+    </>
   );
 }
 
@@ -111,7 +122,7 @@ function Count({ n, accent }: { n: number; accent?: boolean }) {
 }
 
 function Section({ children }: { children: ReactNode }) {
-  return <div className="mx-auto w-full max-w-[1040px] px-5 pt-3 pb-10 max-sm:px-2">{children}</div>;
+  return <div className="w-full px-3 pt-1 pb-8 max-sm:px-2">{children}</div>;
 }
 
 function Loading() {
@@ -143,22 +154,22 @@ function Center({ title, body, action }: { title: string; body: string; action?:
 
 // ── the list ──
 
-function List({ automations, runs, selected }: { automations: Automation[]; runs: ReadonlyMap<string, AutomationRun>; selected?: string }) {
+function List({ automations, runs, selected, list }: { automations: Automation[]; runs: ReadonlyMap<string, AutomationRun>; selected?: string; list?: View["list"] }) {
   const [now] = useState(() => Date.now());
   return (
     <ul className="overflow-hidden rounded-xl border border-line-2 bg-panel shadow-card inset-shadow-highlight" aria-label="Your automations">
       {automations.map((x) => (
-        <Row key={x.id} automation={x} runs={runs} selected={x.id === selected} now={now} />
+        <Row key={x.id} automation={x} runs={runs} selected={x.id === selected} now={now} list={list} />
       ))}
     </ul>
   );
 }
 
-/** The projects and machines an automation works in, as the canvas shows them (a quiet stack after its name). */
-function Places({ automation }: { automation: Automation }) {
+/** The projects and machines an automation works in, as the canvas shows them. */
+export function usePlaces(automation: Automation) {
   const { client } = useAgents();
   const data = client.data;
-  const { projects, machines } = useMemo(
+  return useMemo(
     () =>
       automationPlaces(
         automation,
@@ -167,6 +178,11 @@ function Places({ automation }: { automation: Automation }) {
       ),
     [automation, data.projects, data.machines],
   );
+}
+
+/** Where it works, as a quiet stack of project and machine icons after its name. */
+export function Places({ automation }: { automation: Automation }) {
+  const { projects, machines } = usePlaces(automation);
   if (!projects.length && !machines.length) return null;
   const names = [...projects.map((p) => p.name), ...machines.map((m) => m.name)];
   const shown = 3;
@@ -183,14 +199,14 @@ function Places({ automation }: { automation: Automation }) {
   );
 }
 
-function Row({ automation: x, runs, selected, now }: { automation: Automation; runs: ReadonlyMap<string, AutomationRun>; selected: boolean; now: number }) {
+function Row({ automation: x, runs, selected, now, list }: { automation: Automation; runs: ReadonlyMap<string, AutomationRun>; selected: boolean; now: number; list?: View["list"] }) {
   const { store, catalog } = useAutomations();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const last = lastRunOf(x, runs.values());
   const week = useMemo(() => weekOf(runs.values(), x.id, now), [runs, x.id, now]);
   const source = x.trigger.type === "integration" ? x.trigger.source : x.trigger.type;
-  const open = () => setAgentsView({ kind: "automations", open: x.id });
+  const open = () => setAgentsView({ kind: "automations", list, open: x.id });
   const act = async (fn: () => Promise<unknown>) => {
     setError(null);
     try {

@@ -1592,6 +1592,13 @@ The surface has three views:
   place), so they never overlap; the header drags them among their siblings, the corner resizes
   them (arrows on the focused corner too). They always show on their view whatever its filter,
   at most 12 per view, sizes remembered per view.
+- **Automations.** ⚡ in the header, A on the canvas, or ⌘K "Automations" slides the automations
+  sheet in beside the canvas, in the conversation's frame (one right sheet: opening a conversation
+  from the canvas replaces it). It is a stack, kept in the URL (`#agents/automations/<id>/runs/<run>/<thread>`,
+  lib/automations-nav.ts): the list, an automation's overview, its builder (which can maximize over
+  the canvas) or runs, one run (its threads' cards highlighted on the canvas), and a conversation
+  that run started, with Back to the run. Back and Escape go up one level, from the list Escape,
+  ⚡ and A close it. docs/code/automations-ui.md has the details.
 - **A conversation.** Clicking a thread opens it in a panel docked beside the canvas (resizable, remembered; on a phone it covers the canvas), its card selected on the canvas. A machine's or project's settings open in the same panel (`#agents/settings/<key>`, from its card), and so do the owner's (`#agents/settings/owner`, the header's gear or ⌘,; "Machine settings", "Owner settings"). Finished subagents (a done provider subagent, a delegated thread that's done) leave the canvas; their results stay in the parent's transcript. The conversation is T3's chat
   view (`session.tsx`, `transcript.tsx`, `work-log.tsx`, `composer.tsx`; the grouping is
   `lib/agents-worklog.ts`): a header that is a breadcrumb (the project, the title, T3's status

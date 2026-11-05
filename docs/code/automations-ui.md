@@ -11,23 +11,32 @@ Code: `apps/dashboard/src/components/agents/automations/` (views), `lib/automati
 
 ## Where it lives
 
-- **Entry points.** The ⚡ button in the agents header (it toggles back to the canvas), "Automations",
-  "New automation" and "Run automation…" in ⌘K, the automation chip on a thread's canvas card, a
-  notice's "View the run", and links:
-  `#agents/automations`, `…/runs`, `…/templates`, `…/new[/<template>]`, `…/<id>`,
-  `…/<id>/runs[/<run>]`, `…/<id>/settings`.
-- **List in the working area, detail in the side panel.** The list replaces the canvas inside the
-  same inset panel (Linear's inverted L), and the open automation is the floating sheet beside it,
-  the way a conversation sits beside the canvas.
-  - It keeps one model for the whole surface: whatever you open slides in on the right, and Escape
-    closes it (first the panel, then the list).
-  - The list stays visible while you edit, so you can switch between automations without going
-    back, and its live status keeps moving.
-  - The builder is a vertical flow about 600px wide, which is the sheet's width. Zapier's editor
-    is a narrow column for the same reason; a full-width canvas (n8n) suits branching graphs, and
-    automations here are linear.
-  - The canvas stays mounted underneath, so coming back finds it where it was.
-- On a phone the panel covers the list, as conversations do.
+- **Entry points.** The ⚡ button in the agents header and A on the canvas (both toggle the sheet),
+  "Automations", "New automation" and "Run automation…" in ⌘K, the automation chip on a thread's
+  canvas card, a notice's "View the run", and links:
+  `#agents/automations`, `…/runs`, `…/templates`, `…/new[/<template>]`, `…/<id>` (its overview),
+  `…/<id>/edit`, `…/<id>/settings`, `…/<id>/runs[/<run>[/<thread>]]`.
+- **A sheet beside the canvas, not a page.** Automations open in the right sheet the conversation
+  uses (`SidePanel`: the same width, resize handle and slide in; it slides back out when it closes),
+  so the canvas stays live and interactive next to them and a run's threads can be pointed at on
+  it. A short list never floats in an empty page. One right sheet: a card clicked on the canvas
+  replaces the sheet with its conversation.
+- **The sheet.** A stack (`sheet.tsx`, `lib/automations-nav.ts`):
+  - **List** (Automations / Runs / Templates tabs) → **overview** of one automation (what starts it,
+    the next run, the steps in words, where it works, recent runs; the switch, Run, Edit, ⋯) →
+    its **builder** (Build and Settings tabs) or **all its runs** → one **run** (live steps; its
+    threads' cards highlighted on the canvas) → a **conversation** that run started.
+  - Every page has the same header: Back, labelled with where it goes, then the page's tile, title,
+    subtitle and tools, then Maximize (the builder only) and Close.
+  - Back and Escape go up a level: to where you came from (the trail), else the level's parent (a
+    deep link). From the list Escape closes the sheet; ⚡ and A close it from anywhere.
+  - A page deeper slides in from the right, one you go back to from the left; a tab on the same
+    level doesn't move. A new automation, once created, is replaced by its overview.
+  - The builder can fill the working area (T3's "Maximize panel"; per device). Its vertical flow is
+    about 600px wide, the sheet's width, like Zapier's narrow editor; maximizing gives the
+    conditions and long templates room.
+- On a phone the sheet covers the canvas, as conversations do, with the same stack; Back on the list
+  returns to the canvas.
 
 ## The list
 
@@ -180,8 +189,9 @@ last list (auto-core's note): `lastRunOf` takes the newest run the store has.
   - **Running, waiting and failed steps open themselves.**
     - The log shows lines at `+0.7s` offsets, errors in red, at most 384px high.
     - Then the output as `steps.<id>` JSON, and "Trying again in 30s" while retrying.
-  - **Threads a step started** are chips under it (title · machine). A click opens the
-    conversation in the side panel and reveals its card on the canvas.
+  - **Threads a step started** are chips under it (title · machine), and their cards are
+    highlighted on the canvas while the run shows. A click opens the conversation as the sheet's
+    next page (Back returns to the run) and reveals its card.
 - **Live.** `automation_run` events carry whole runs, and the store keeps the newer cursor, so a
   run's detail moves while you watch.
 

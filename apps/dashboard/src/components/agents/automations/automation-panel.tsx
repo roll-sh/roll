@@ -1,11 +1,11 @@
 "use client";
 
 /**
- * One automation in the side panel (`#agents/automations/<id>`): its name, switch and Run in the
- * header, then Build (the builder, with Test), Runs (its history and a run's live detail) and
- * Settings (concurrency, limits, who it runs as, defaults, secrets). A new one (`…/new`, maybe
- * from a template) is the same panel with Create. Edits are a draft until saved; a draft is kept
- * while the page is open, so closing the panel loses nothing.
+ * One automation's builder, a level of the automations sheet (`#agents/automations/<id>/edit`):
+ * its name, switch and Run in the header, then Build (the builder, with Test) and Settings
+ * (concurrency, limits, who it runs as, defaults, secrets). A new one (`…/new`, maybe from a
+ * template) is the same page with Create, and opens its overview once created. Edits are a draft
+ * until saved; a draft is kept while the page is open, so going back or closing loses nothing.
  */
 
 import { Copy, FlaskConical, Link2, MoreHorizontal, Play, Plus, Trash2, X } from "lucide-react";
@@ -17,13 +17,12 @@ import { blankSpec, sameSpec, sampleEvent, specOf, triggerSource, triggerSummary
 import { ApiError } from "@/lib/code-api";
 import { LookupPicker } from "../lookup-picker";
 import { Menu } from "../menu";
-import { IconButton } from "../session";
 import { field as fieldClass } from "../settings-ui";
 import { cn, Popover, PopoverPopup, PopoverTrigger, Segmented, Select, Switch } from "../ui";
 import { useTemplateContext } from "./automations-view";
 import { Builder } from "./builder";
 import { ConfigForm } from "./config-form";
-import { RunDetail, RunHistory } from "./runs";
+import { SheetHeader } from "./sheet";
 import { PrimaryButton, QuietButton, Tile, triggerIcon, useAutomations, SizedSelect } from "./shared";
 
 /** Drafts by automation id (`new:<template>` for new ones), kept while the page is open. */
@@ -37,8 +36,8 @@ export function forgetDrafts() {
   revealed.clear();
 }
 
-export function AutomationPanel({ view, onClose }: { view: AutomationsView & { open: string }; onClose: () => void }) {
-  const { automations, runs, store, catalog, loaded } = useAutomations();
+export function AutomationPanel({ view }: { view: AutomationsView & { open: string } }) {
+  const { automations, store, catalog, loaded } = useAutomations();
   const isNew = view.open === "new";
   const automation = isNew ? null : (automations.get(view.open) ?? null);
   const ctx = useTemplateContext();
@@ -114,6 +113,7 @@ export function AutomationPanel({ view, onClose }: { view: AutomationsView & { o
       seenRevision.current = saved.automation.revision;
       if (saved.webhook_secret) revealed.set(saved.automation.id, saved.webhook_secret);
       setStale(false);
+      // The new one's overview takes the builder's place (lib/automations-nav.ts).
       if (!automation) setAgentsView({ kind: "automations", list: view.list, open: saved.automation.id });
       else setDraftState(specOf(saved.automation));
     } catch (e) {
@@ -137,18 +137,16 @@ export function AutomationPanel({ view, onClose }: { view: AutomationsView & { o
     setStale(false);
     setError(null);
   };
-  const close = () => {
-    if (automation) revealed.delete(automation.id);
-    onClose();
-  };
+  // A webhook secret just made shows until you leave the builder.
+  const automationId = automation?.id;
+  useEffect(() => () => void (automationId && revealed.delete(automationId)), [automationId]);
 
-  const tab = view.tab ?? "build";
-  const setTab = (t: "build" | "runs" | "settings") => setAgentsView({ kind: "automations", list: view.list, open: view.open, template: view.template, tab: t === "build" ? undefined : t });
-  const runCount = automation ? [...runs.values()].filter((r) => r.automation === automation.id).length : 0;
+  const tab = view.tab === "settings" && !isNew ? "settings" : "build";
+  const setTab = (t: "build" | "settings") => setAgentsView({ kind: "automations", list: view.list, open: view.open, tab: t === "build" ? "edit" : "settings" });
 
   if (!isNew && !automation)
     return (
-      <PanelFrame onClose={close} title={loaded ? "Not here any more" : "Loading…"} subtitle={loaded ? "It was deleted" : ""} icon={null}>
+      <PanelFrame title={loaded ? "Not here any more" : "Loading…"} subtitle={loaded ? "It was deleted" : ""} icon={null}>
         <p className="p-6 text-[13px] text-muted">{loaded ? "Pick another automation from the list." : <span className="shimmer">Loading…</span>}</p>
       </PanelFrame>
     );
@@ -156,7 +154,6 @@ export function AutomationPanel({ view, onClose }: { view: AutomationsView & { o
   const source = triggerSource(draft.trigger);
   return (
     <PanelFrame
-      onClose={close}
       icon={<Tile icon={triggerIcon(source)} tone={draft.enabled ? "accent" : undefined} />}
       title={
         <input
@@ -187,7 +184,7 @@ export function AutomationPanel({ view, onClose }: { view: AutomationsView & { o
             />
             <span className="max-sm:hidden">{(automation ? automation.enabled : draft.enabled) ? "On" : "Paused"}</span>
           </span>
-          {automation && <RunButton automation={automation} manual={draft.trigger.type === "manual"} />}
+          {automation && <RunButton automation={automation} manual={draft.trigger.type === "manual"} list={view.list} />}
           {automation && (
             <Menu
               label="More"
@@ -200,7 +197,7 @@ export function AutomationPanel({ view, onClose }: { view: AutomationsView & { o
                     if (!store) return;
                     const saved = await store.api.create(store.owner, { ...draft, name: `${draft.name} (copy)`, enabled: false });
                     store.put(saved.automation);
-                    setAgentsView({ kind: "automations", open: saved.automation.id });
+                    setAgentsView({ kind: "automations", list: view.list, open: saved.automation.id });
                   },
                 },
                 { label: "Copy link", icon: <Link2 />, onSelect: () => void navigator.clipboard?.writeText(`${window.location.origin}${window.location.pathname}${window.location.search}#agents/automations/${automation.id}`) },
@@ -231,7 +228,6 @@ export function AutomationPanel({ view, onClose }: { view: AutomationsView & { o
             onChange={setTab}
             options={[
               { value: "build", label: "Build" },
-              { value: "runs", label: <>Runs{runCount > 0 && <span className="ml-1 font-mono text-[10.5px] text-subtle tabular-nums">{runCount}</span>}</> },
               { value: "settings", label: "Settings" },
             ]}
           />
@@ -246,9 +242,7 @@ export function AutomationPanel({ view, onClose }: { view: AutomationsView & { o
             </button>
           </p>
         )}
-        {tab === "runs" && automation ? (
-          view.run ? <RunDetail run={view.run} onBack={() => setAgentsView({ kind: "automations", list: view.list, open: view.open, tab: "runs" })} /> : <RunHistory automation={automation.id} />
-        ) : tab === "settings" && automation ? (
+        {tab === "settings" && automation ? (
           <SettingsTab draft={draft} setDraft={setDraft} automation={automation} />
         ) : (
           <>
@@ -293,63 +287,51 @@ export function AutomationPanel({ view, onClose }: { view: AutomationsView & { o
           </>
         )}
       </div>
-      {tab !== "runs" && (
-        <footer className="flex shrink-0 items-center gap-2 border-t border-line px-4 py-2.5">
-          <span className="min-w-0 flex-1 truncate text-[12px]">
-            {error ? (
-              <span className="text-danger" role="alert">
-                {error}
-              </span>
-            ) : tried && count > 0 ? (
-              <span className="text-danger">
-                {count} thing{count === 1 ? "" : "s"} to fix
-              </span>
-            ) : saving ? (
-              <span className="shimmer text-subtle">Saving…</span>
-            ) : dirty && !isNew ? (
-              <span className="text-muted">Unsaved changes</span>
-            ) : !isNew ? (
-              <span className="text-subtle">Saved · revision {automation?.revision}</span>
-            ) : (
-              <span className="text-subtle">{draft.enabled ? "It turns on when you create it." : "It stays paused when you create it."}</span>
-            )}
-          </span>
-          {tab === "build" && (
-            <QuietButton onClick={() => void runTest()} disabled={test?.busy} title="Try it with a sample event: nothing runs">
-              <FlaskConical /> {test?.busy ? "Testing…" : "Test"}
-            </QuietButton>
+      <footer className="flex shrink-0 items-center gap-2 border-t border-line px-4 py-2.5">
+        <span className="min-w-0 flex-1 truncate text-[12px]">
+          {error ? (
+            <span className="text-danger" role="alert">
+              {error}
+            </span>
+          ) : tried && count > 0 ? (
+            <span className="text-danger">
+              {count} thing{count === 1 ? "" : "s"} to fix
+            </span>
+          ) : saving ? (
+            <span className="shimmer text-subtle">Saving…</span>
+          ) : dirty && !isNew ? (
+            <span className="text-muted">Unsaved changes</span>
+          ) : !isNew ? (
+            <span className="text-subtle">Saved · revision {automation?.revision}</span>
+          ) : (
+            <span className="text-subtle">{draft.enabled ? "It turns on when you create it." : "It stays paused when you create it."}</span>
           )}
-          {(isNew ? !sameSpec(draft, base) : dirty) && <QuietButton onClick={discard}>{isNew ? "Start over" : "Discard"}</QuietButton>}
-          <PrimaryButton onClick={() => void save()} disabled={saving || (!dirty && !isNew)}>
-            {isNew ? "Create" : "Save"}
-          </PrimaryButton>
-        </footer>
-      )}
+        </span>
+        {tab === "build" && (
+          <QuietButton onClick={() => void runTest()} disabled={test?.busy} title="Try it with a sample event: nothing runs">
+            <FlaskConical /> {test?.busy ? "Testing…" : "Test"}
+          </QuietButton>
+        )}
+        {(isNew ? !sameSpec(draft, base) : dirty) && <QuietButton onClick={discard}>{isNew ? "Start over" : "Discard"}</QuietButton>}
+        <PrimaryButton onClick={() => void save()} disabled={saving || (!dirty && !isNew)}>
+          {isNew ? "Create" : "Save"}
+        </PrimaryButton>
+      </footer>
     </PanelFrame>
   );
 }
 
-function PanelFrame({ icon, title, subtitle, tools, onClose, children }: { icon: ReactNode; title: ReactNode; subtitle: string; tools?: ReactNode; onClose: () => void; children: ReactNode }) {
+function PanelFrame({ icon, title, subtitle, tools, children }: { icon: ReactNode; title: ReactNode; subtitle: string; tools?: ReactNode; children: ReactNode }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex h-14 shrink-0 items-center gap-2.5 border-b border-line px-3">
-        {icon}
-        <div className="min-w-0 flex-1 leading-tight">
-          {typeof title === "string" ? <p className="truncate text-[14px] font-[590] tracking-[-0.02em]">{title}</p> : title}
-          <p className="truncate text-[11.5px] text-subtle">{subtitle}</p>
-        </div>
-        {tools}
-        <IconButton label="Close (Esc)" onClick={onClose}>
-          <X className="size-4" />
-        </IconButton>
-      </div>
+      <SheetHeader icon={icon} title={title} subtitle={subtitle} tools={tools} />
       {children}
     </div>
   );
 }
 
 /** Run now; for a manual automation, with what to pass in (GitHub's "Run workflow" popover). */
-function RunButton({ automation, manual }: { automation: Automation; manual: boolean }) {
+export function RunButton({ automation, manual, list }: { automation: Automation; manual: boolean; list?: AutomationsView["list"] }) {
   const { store } = useAutomations();
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
@@ -373,7 +355,7 @@ function RunButton({ automation, manual }: { automation: Automation; manual: boo
       store.putRun(r);
       setOpen(false);
       setText("");
-      setAgentsView({ kind: "automations", open: automation.id, tab: "runs", run: r.id });
+      setAgentsView({ kind: "automations", list, open: automation.id, tab: "runs", run: r.id });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

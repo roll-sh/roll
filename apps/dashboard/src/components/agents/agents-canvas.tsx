@@ -87,6 +87,8 @@ export const AgentsCanvas = forwardRef<
     active?: boolean;
     /** The card whose conversation or settings are open beside it. */
     selected?: string;
+    /** More cards marked the same way (a run's threads while the automations sheet shows it). */
+    highlighted?: readonly string[];
     /**
      * A card's launch handle (`data-launch="p:…"`, `m:…`, `t:…`) dragged out and dropped on empty
      * canvas, with where (client coordinates). A plain click on the handle stays a click.
@@ -98,7 +100,7 @@ export const AgentsCanvas = forwardRef<
      */
     keepClear?: React.RefObject<HTMLElement | null>;
   }
->(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, fitKey, direction = "horizontal", onDirection, density, onOpen, render, defaultSize, onEscape, overlay, active = true, selected, onLaunch, keepClear }, ref) {
+>(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, fitKey, direction = "horizontal", onDirection, density, onOpen, render, defaultSize, onEscape, overlay, active = true, selected, highlighted, onLaunch, keepClear }, ref) {
   const reduced = useReducedMotion();
   const container = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -651,7 +653,7 @@ export const AgentsCanvas = forwardRef<
       <canvas ref={canvas} aria-hidden className="pointer-events-none absolute inset-0" />
       <div ref={world} className="absolute top-0 left-0 origin-top-left" style={{ willChange: "transform" }}>
         {[...graph.nodes.values()].map((n) => (
-          <CardSlot key={n.key} node={n} engine={engine} selected={n.key === selected}>
+          <CardSlot key={n.key} node={n} engine={engine} selected={n.key === selected || !!highlighted?.includes(n.key)}>
             {render(n)}
           </CardSlot>
         ))}

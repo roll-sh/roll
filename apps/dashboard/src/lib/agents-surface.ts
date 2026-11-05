@@ -13,9 +13,10 @@ import { openAgentsWindow } from "./desktop";
  * project's settings in the side panel (`target` is its canvas key, `m:…` or `p:…`), or the
  * launcher over the canvas: preset to a project or a machine, and opened where something was
  * dropped (`at`, in the surface's coordinates) when it was dragged out of a card. Or the owner's
- * automations in place of the canvas (`list`: the automations, every run, or the templates), with
- * one open in the side panel (`open`: its id, or `new` from a `template`) on its builder, its runs
- * (`run`: one of them) or its settings.
+ * automations in the sheet beside the canvas, a stack (lib/automations-nav.ts): the list (`list`:
+ * the automations, every run, or the templates), one automation (`open`: its id) on its overview,
+ * its builder (`tab` `edit` or `settings`; `open: "new"` from a `template` is always the builder),
+ * its runs or one run (`run`), and a conversation that run started (`thread`).
  */
 export type AgentsView =
   | { kind: "canvas" }
@@ -28,9 +29,10 @@ export interface AutomationsView {
   kind: "automations";
   list?: "runs" | "templates";
   open?: string;
-  tab?: "runs" | "settings";
+  tab?: "edit" | "runs" | "settings";
   run?: string;
   template?: string;
+  thread?: string;
 }
 
 export interface AgentsSurface {
@@ -58,7 +60,7 @@ export const sameView = (a: AgentsView, b: AgentsView) => {
   }
   if (a.kind === "automations") {
     const c = b as AutomationsView;
-    return a.list === c.list && a.open === c.open && a.tab === c.tab && a.run === c.run && a.template === c.template;
+    return a.list === c.list && a.open === c.open && a.tab === c.tab && a.run === c.run && a.template === c.template && a.thread === c.thread;
   }
   return true;
 };
@@ -93,8 +95,8 @@ export function useAgentsSurface(): AgentsSurface {
 
 /**
  * `#agents`, `#agents/new`, `#agents/thr_…`, `#agents/settings/m:…`, `#agents/automations[/runs |
- * /templates | /new[/<template>] | /<id>[/runs[/<run>] | /settings]]`: a link that opens the popup on
- * any dashboard page.
+ * /templates | /new[/<template>] | /<id>[/edit | /settings | /runs[/<run>[/<thread>]]]]`: a link that
+ * opens the popup on any dashboard page.
  */
 export function viewFromHash(hash: string): AgentsView | null {
   // A query after the view (`#agents/settings/owner?linear=connected`: a redirect that appended
@@ -115,8 +117,8 @@ function automationsFromPath(p: string[]): AutomationsView {
   if (p[0] === "runs" || p[0] === "templates") return p.length === 1 ? { ...v, list: p[0] } : v;
   if (p[0] === "new") return p[1] ? { ...v, open: "new", template: p[1] } : { ...v, open: "new" };
   const open = { ...v, open: p[0] };
-  if (p[1] === "settings") return { ...open, tab: "settings" };
-  if (p[1] === "runs") return p[2] ? { ...open, tab: "runs", run: p[2] } : { ...open, tab: "runs" };
+  if (p[1] === "edit" || p[1] === "settings") return { ...open, tab: p[1] };
+  if (p[1] === "runs") return p[2] ? { ...open, tab: "runs", run: p[2], ...(p[3] ? { thread: p[3] } : {}) } : { ...open, tab: "runs" };
   return open;
 }
 
@@ -135,8 +137,8 @@ export function hashFor(view: AgentsView): string {
       if (!view.open) return view.list ? `#agents/automations/${view.list}` : "#agents/automations";
       if (view.open === "new") return view.template ? `#agents/automations/new/${e(view.template)}` : "#agents/automations/new";
       const base = `#agents/automations/${e(view.open)}`;
-      if (view.tab === "settings") return `${base}/settings`;
-      if (view.tab === "runs") return view.run ? `${base}/runs/${e(view.run)}` : `${base}/runs`;
+      if (view.tab === "edit" || view.tab === "settings") return `${base}/${view.tab}`;
+      if (view.tab === "runs") return view.run ? `${base}/runs/${e(view.run)}${view.thread ? `/${e(view.thread)}` : ""}` : `${base}/runs`;
       return base;
     }
   }
