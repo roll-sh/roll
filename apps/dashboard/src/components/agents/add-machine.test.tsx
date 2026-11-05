@@ -36,6 +36,18 @@ describe("AddMachinePaths", () => {
     expect(within(rent).getByRole("radio", { name: /large.*4 vCPU.*\$0\.06\/h/ })).toBeInTheDocument();
     expect(within(rent).getByRole("button", { name: "Rent for $0.03/h" })).toBeEnabled();
     expect(within(rent).getByText("0 of 3 in use")).toBeInTheDocument();
+    // The whole spec, on its own line under the name (one line cut the disk off).
+    const spec = within(rent).getByText(/4 vCPU · 8 GB · 40 GB disk/);
+    expect(spec.className).not.toContain("truncate");
+    // The two ways in are as tall as what they hold, not stretched to each other.
+    expect(computer.parentElement!.className).toContain("items-start");
+  });
+
+  it("asks for keys in the UI's type; only a typed key is mono", async () => {
+    const h = agentsHarness({ ctx: { services: fakeServices(), sandboxes: state() } });
+    renderAgents(<AddMachinePaths />, h);
+    await userEvent.click(screen.getByRole("button", { name: /Add provider API keys/ }));
+    for (const key of screen.getAllByPlaceholderText(/API key/)) expect(key.className).toMatch(/placeholder-shown:font-sans.*|font-mono.*placeholder-shown:font-sans/);
   });
 
   it("rents the chosen size with only the keys given, and the machine is on the canvas at once", async () => {

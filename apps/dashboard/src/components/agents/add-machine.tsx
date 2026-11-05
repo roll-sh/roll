@@ -38,7 +38,7 @@ export function sandboxEnv(keys: Record<string, string>): Record<string, string>
  */
 export function AddMachinePaths({ onCreated, dialog = false }: { onCreated?: (m: Machine) => void; dialog?: boolean }) {
   return (
-    <div className="grid gap-3 text-left sm:grid-cols-2">
+    <div className="grid items-start gap-3 text-left sm:grid-cols-2">
       <ConnectComputer />
       <RentSandbox onCreated={onCreated} dialog={dialog} />
     </div>
@@ -208,7 +208,7 @@ function RentSandbox({ onCreated, dialog }: { onCreated?: (m: Machine) => void; 
                 onChange={(e) => setKeys((all) => ({ ...all, [k.name]: e.target.value }))}
                 placeholder={`${k.label} (${k.for})`}
                 aria-label={k.label}
-                className={`${input} w-full font-mono text-[12px]`}
+                className={`${input} w-full font-mono text-[12px] placeholder-shown:font-sans placeholder-shown:text-[12.5px]`}
               />
             ))}
             <p className="text-[11.5px] text-subtle">Sent to the sandbox only; roll never shows them again.</p>
@@ -240,7 +240,7 @@ function RentSandbox({ onCreated, dialog }: { onCreated?: (m: Machine) => void; 
                 placeholder={`Key for ${profile.name} (optional)`}
                 aria-label="Endpoint key"
                 data-1p-ignore
-                className={`${input} w-full font-mono text-[12px]`}
+                className={`${input} w-full font-mono text-[12px] placeholder-shown:font-sans placeholder-shown:text-[12.5px]`}
               />
             )}
             {profile && <p className="text-[11.5px] text-subtle">Set once the sandbox connects{profile.key_ref ? ", its key read from 1Password there" : ", the key sealed to it in your browser"}.</p>}
@@ -320,11 +320,14 @@ function SizeOption({ size, checked, onChange }: { size: SandboxSize; checked: b
       <span aria-hidden className={`grid size-3.5 shrink-0 place-items-center rounded-full border transition-colors duration-150 ${checked ? "border-accent bg-accent" : "border-line-3"}`}>
         <span className={`size-1.5 rounded-full bg-white transition-transform duration-150 ${checked ? "scale-100" : "scale-0"}`} />
       </span>
-      <span className="font-[510]">{size.name}</span>
-      <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-subtle">
-        {size.cpu} vCPU · {size.memory_gb} GB · {size.disk_gb} GB disk
+      {/* The name, and the whole spec under it: one line cut the disk off ("20 GB di…"). */}
+      <span className="min-w-0 flex-1">
+        <span className="block font-[510]">{size.name}</span>
+        <span className="block font-mono text-[11px] text-subtle">
+          {size.cpu} vCPU · {size.memory_gb} GB · {size.disk_gb} GB disk
+        </span>
       </span>
-      <span className="font-mono text-[11.5px]">{formatHourly(size.hourly_cents)}</span>
+      <span className="shrink-0 font-mono text-[11.5px]">{formatHourly(size.hourly_cents)}</span>
     </label>
   );
 }
